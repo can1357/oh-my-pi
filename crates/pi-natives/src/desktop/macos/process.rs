@@ -3,15 +3,18 @@
 //! silent drop as success.
 
 use std::{
+	collections::HashMap,
 	ffi::{CStr, OsStr},
 	fs::File,
 	io::{Read, Seek, SeekFrom},
 	mem,
 	os::unix::ffi::OsStrExt,
 	path::{Path, PathBuf},
+	sync::LazyLock,
 };
 
 use objc2_app_kit::NSRunningApplication;
+use parking_lot::Mutex;
 
 /// `proc_pidinfo` flavor for file-backed regions only
 /// (`PROC_PIDREGIONPATHINFO2`, private in `<sys/proc_info_private.h>`); skips
@@ -206,6 +209,16 @@ pub(super) enum RemoteScreen {
 	HidReports,
 }
 
+/// Remote-screen linkage of the executables processes run, keyed by pid and
+/// executable path so a reused pid is read afresh.
+type LinkageCache = Mutex<HashMap<(libc::pid_t, PathBuf), Option<RemoteScreen>>>;
+
+/// Every input event classifies its target, so each process's executable is
+/// read once.
+static LINKAGE: LazyLock<LinkageCache> = LazyLock::new(LinkageCache::default);
+/// Processes whose linkage is kept before the cache starts over.
+const MAX_CACHED_LINKAGES: usize = 64;
+
 /// Whether `pid` shows a remote screen. Such a client forwards a key event's
 /// key code and ignores its Unicode text.
 pub(super) fn remote_screen(pid: libc::pid_t) -> Option<RemoteScreen> {
@@ -213,7 +226,9 @@ pub(super) fn remote_screen(pid: libc::pid_t) -> Option<RemoteScreen> {
 		.and_then(|app| app.bundleIdentifier())
 		.map(|bundle| bundle.to_string());
 	classify_remote_screen(bundle.as_deref(), || {
-		linked_dylibs(&mut File::open(executable_path(pid)?).ok()?)
+		cached_linkage(&LINKAGE, pid, executable_path(pid)?, |executable| {
+			linked_dylibs(&mut File::open(executable).ok()?)
+		})
 	})
 }
 
@@ -222,13 +237,35 @@ pub(super) fn remote_screen(pid: libc::pid_t) -> Option<RemoteScreen> {
 /// application is judged by the Apple screen-sharing framework it links.
 fn classify_remote_screen(
 	bundle: Option<&str>,
-	linked_dylibs: impl FnOnce() -> Option<Vec<Vec<u8>>>,
+	linkage: impl FnOnce() -> Option<RemoteScreen>,
 ) -> Option<RemoteScreen> {
 	match bundle {
 		Some("com.apple.ScreenSharing") => Some(RemoteScreen::KeyEvents),
 		Some("com.apple.ScreenContinuity") => Some(RemoteScreen::HidReports),
-		_ => remote_screen_linkage(&linked_dylibs()?),
+		_ => linkage(),
 	}
+}
+
+/// The linkage `cache` holds for `pid` running `executable`, otherwise the
+/// one `linked_dylibs` reads. An executable that cannot be read is not kept,
+/// so the next event reads it again.
+fn cached_linkage(
+	cache: &LinkageCache,
+	pid: libc::pid_t,
+	executable: PathBuf,
+	linked_dylibs: impl FnOnce(&Path) -> Option<Vec<Vec<u8>>>,
+) -> Option<RemoteScreen> {
+	let key = (pid, executable);
+	if let Some(&linkage) = cache.lock().get(&key) {
+		return linkage;
+	}
+	let linkage = remote_screen_linkage(&linked_dylibs(&key.1)?);
+	let mut cache = cache.lock();
+	if cache.len() >= MAX_CACHED_LINKAGES {
+		cache.clear();
+	}
+	cache.insert(key, linkage);
+	linkage
 }
 
 fn remote_screen_linkage(dylibs: &[Vec<u8>]) -> Option<RemoteScreen> {
@@ -483,9 +520,42 @@ mod tests {
 		);
 		assert_eq!(classify_remote_screen(Some("com.example.Viewer"), unreadable), None);
 		assert_eq!(
-			classify_remote_screen(Some("com.example.Viewer"), || Some(vec![KIT.as_bytes().to_vec()])),
+			classify_remote_screen(Some("com.example.Viewer"), || Some(RemoteScreen::HidReports)),
 			Some(RemoteScreen::HidReports)
 		);
+	}
+
+	#[test]
+	fn each_process_executable_is_read_once() {
+		let cache = LinkageCache::default();
+		let reads = std::cell::Cell::new(0);
+		let read = |_: &Path| {
+			reads.set(reads.get() + 1);
+			Some(vec![KIT.as_bytes().to_vec()])
+		};
+		let viewer = PathBuf::from("/Applications/Viewer.app/Contents/MacOS/Viewer");
+		assert_eq!(cached_linkage(&cache, 7, viewer.clone(), read), Some(RemoteScreen::HidReports));
+		let again = cached_linkage(&cache, 7, viewer.clone(), |_| panic!("read again"));
+		assert_eq!(again, Some(RemoteScreen::HidReports));
+		// A reused pid running another executable is read afresh.
+		let other = cached_linkage(&cache, 7, PathBuf::from("/bin/ls"), |_| {
+			Some(vec![APPKIT.as_bytes().to_vec()])
+		});
+		assert_eq!(other, None);
+		// An executable that cannot be read is read again on the next event.
+		assert_eq!(cached_linkage(&cache, 8, viewer.clone(), |_| None), None);
+		assert_eq!(cached_linkage(&cache, 8, viewer, read), Some(RemoteScreen::HidReports));
+		assert_eq!(reads.get(), 2);
+	}
+
+	#[test]
+	fn linkage_cache_starts_over_when_full() {
+		let cache = LinkageCache::default();
+		let executable = PathBuf::from("/Applications/Viewer.app/Contents/MacOS/Viewer");
+		for pid in 0..=MAX_CACHED_LINKAGES as libc::pid_t {
+			cached_linkage(&cache, pid, executable.clone(), |_| Some(Vec::new()));
+		}
+		assert_eq!(cache.lock().len(), 1);
 	}
 
 	#[test]

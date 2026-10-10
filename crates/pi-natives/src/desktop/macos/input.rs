@@ -96,8 +96,7 @@ impl MacInput {
 	) -> CoreResult<()> {
 		match target {
 			Target::Desktop | Target::Display(_) => {
-				let keys = typed_keys(text, local_strokes(), None)?;
-				type_keys(&self.source, &keys, KEY_GAP, || Ok(()), post_global)
+				type_keys(&self.source, &unicode_keys(text), KEY_GAP, || Ok(()), post_global)
 			},
 			Target::Window(id) => {
 				let window = capture.window(id)?;
@@ -112,12 +111,7 @@ impl MacInput {
 				}
 				// The whole text is mapped before anything is posted, so a
 				// character a remote screen cannot receive refuses cleanly.
-				let keys = if remote.is_some() {
-					let keymap = Keymap::current()?;
-					typed_keys(text, |character| keymap.as_ref()?.stroke(character), remote)?
-				} else {
-					typed_keys(text, local_strokes(), None)?
-				};
+				let keys = keys_for(text, remote, layout_strokes)?;
 				let gap = key_gap(remote);
 				match mode {
 					DeliveryMode::Background => {
@@ -130,14 +124,10 @@ impl MacInput {
 								));
 							}
 						}
-						with_background_keyboard(&self.source, pid, wid, &window, || {
-							type_keys(
-								&self.source,
-								&keys,
-								gap,
-								|| Ok(()),
-								|event| skylight::post_keyboard(pid, event),
-							)
+						with_background_keyboard(&self.source, pid, wid, &window, |guard| {
+							type_keys(&self.source, &keys, gap, guard, |event| {
+								skylight::post_keyboard(pid, event)
+							})
 						})
 					},
 					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
@@ -185,20 +175,23 @@ impl MacInput {
 				let (pid, wid) = window_identity(&window)?;
 				let remote = process::remote_screen(pid);
 				let gap = key_gap(remote);
+				let chord = chord_keys(keys, remote, layout_strokes)?;
 				match mode {
 					DeliveryMode::Background => {
 						if remote == Some(RemoteScreen::KeyEvents)
-							&& keys.iter().copied().any(KeyName::is_modifier)
+							&& chord.iter().any(|key| key.name.is_modifier())
 						{
 							return Err(keyboard_modifiers_refusal(&window, "press this shortcut"));
 						}
-						with_background_keyboard(&self.source, pid, wid, &window, || {
-							key_chord(&self.source, keys, gap, |event| skylight::post_keyboard(pid, event))
+						with_background_keyboard(&self.source, pid, wid, &window, |guard| {
+							press_chord(&self.source, &chord, gap, |event| {
+								post_guarded(event, guard, |event| skylight::post_keyboard(pid, event))
+							})
 						})
 					},
 					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
 						control::wait(first_key_settle(activated))?;
-						key_chord(&self.source, keys, gap, |event| post_takeover_key(pid, wid, event))
+						press_chord(&self.source, &chord, gap, |event| post_takeover_key(pid, wid, event))
 					}),
 				}
 			},
@@ -215,9 +208,6 @@ impl MacInput {
 		mode: DeliveryMode,
 		capture: &MacCapture,
 	) -> CoreResult<()> {
-		for &key in keys {
-			key_code(key)?;
-		}
 		match target {
 			Target::Desktop | Target::Display(_) => {
 				with_held_keys(&self.source, keys, KEY_GAP, post_global, || control::wait(duration))
@@ -227,28 +217,31 @@ impl MacInput {
 				let (pid, wid) = window_identity(&window)?;
 				let remote = process::remote_screen(pid);
 				let gap = key_gap(remote);
+				let held = chord_keys(keys, remote, layout_strokes)?;
 				match mode {
 					DeliveryMode::Background => {
 						if remote == Some(RemoteScreen::KeyEvents)
-							&& keys.iter().copied().any(KeyName::is_modifier)
+							&& held.iter().any(|key| key.name.is_modifier())
 						{
 							return Err(keyboard_modifiers_refusal(&window, "hold these keys"));
 						}
-						with_background_keyboard(&self.source, pid, wid, &window, || {
-							with_held_keys(
+						with_background_keyboard(&self.source, pid, wid, &window, |guard| {
+							hold_presses(
 								&self.source,
-								keys,
+								&held,
 								gap,
-								|event| skylight::post_keyboard(pid, event),
+								|event| {
+									post_guarded(event, guard, |event| skylight::post_keyboard(pid, event))
+								},
 								|| control::wait(duration),
 							)
 						})
 					},
 					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
 						control::wait(first_key_settle(activated))?;
-						with_held_keys(
+						hold_presses(
 							&self.source,
-							keys,
+							&held,
 							gap,
 							|event| post_takeover_key(pid, wid, event),
 							|| control::wait(duration),
@@ -260,11 +253,10 @@ impl MacInput {
 	}
 }
 
-/// Strokes for typing into a local application. Without a keyboard layout
-/// the text goes out as event text, which local applications read.
-fn local_strokes() -> impl Fn(char) -> Option<Keystroke> {
-	let keymap = Keymap::current().ok().flatten();
-	move |character| keymap.as_ref()?.stroke(character)
+/// The current keyboard layout's lookup from character to key.
+fn layout_strokes() -> CoreResult<impl Fn(char) -> Option<Keystroke>> {
+	let keymap = Keymap::current()?;
+	Ok(move |character| keymap.as_deref()?.stroke(character))
 }
 
 fn window_identity(window: &DesktopWindow) -> CoreResult<(libc::pid_t, u32)> {
@@ -303,20 +295,22 @@ enum KeyboardConflict {
 }
 
 /// Background keyboard delivery to window `wid`: inside the self-activation
-/// guard, makes `wid` its application's key window, then runs `deliver`.
+/// guard, makes `wid` its application's key window, then runs `deliver` with
+/// a guard to run before every press.
 ///
 /// macOS posts key events to a *process*, which hands them to whichever window
 /// it treats as key; unlike pointer events they carry no window id. When the
 /// process has other windows that could be key, keys are sent only once the
-/// application reports `wid` as its focused window. Candidates come from the
-/// process's accessibility windows, not `WindowServer`'s list, which also holds
-/// the per-window compositor surfaces of Chromium, Electron, and `WebKit` apps.
+/// application reports `wid` as its focused window, and each press first
+/// checks that it still does. Candidates come from the process's
+/// accessibility windows, not `WindowServer`'s list, which also holds the
+/// per-window compositor surfaces of Chromium, Electron, and `WebKit` apps.
 fn with_background_keyboard<T>(
 	source: &CGEventSource,
 	pid: libc::pid_t,
 	wid: u32,
 	window: &DesktopWindow,
-	deliver: impl FnOnce() -> CoreResult<T>,
+	deliver: impl FnOnce(&dyn Fn() -> CoreResult<()>) -> CoreResult<T>,
 ) -> CoreResult<T> {
 	let conflict = ax::window_records(pid)
 		.map_or(Some(KeyboardConflict::Unmapped), |records| keyboard_conflict(wid, &records));
@@ -340,8 +334,28 @@ fn with_background_keyboard<T>(
 		if prepared {
 			still_behind_user(pid, wid)?;
 		}
-		deliver()
+		deliver(&|| key_window_guard(conflict.as_ref(), wid, || ax::focused_window_id(pid)))
 	})
+}
+
+/// Before a background press: with other windows that could be key, `wid`
+/// must still be the key window `focused` reports, or the press would land in
+/// whichever sibling the user picked.
+fn key_window_guard(
+	conflict: Option<&KeyboardConflict>,
+	wid: u32,
+	focused: impl FnOnce() -> Option<u32>,
+) -> CoreResult<()> {
+	match conflict {
+		Some(KeyboardConflict::Siblings(_)) if focused() != Some(wid) => {
+			Err(DesktopError::input_failed(format!(
+				"window {wid} stopped being its application's key window during background input; \
+				 keys sent before that may already have landed, and nothing more was sent; inspect \
+				 the window before retrying",
+			)))
+		},
+		_ => Ok(()),
+	}
 }
 
 fn keyboard_conflict(wid: u32, records: &[ax::AxWindowRecord]) -> Option<KeyboardConflict> {
@@ -1081,16 +1095,33 @@ enum TypedKey<'a> {
 /// UTF-16 units a Quartz keyboard event carries at most.
 const MAX_EVENT_UNITS: usize = 20;
 
-/// The keys that type `text`, from `stroke`'s keyboard layout lookup.
-///
-/// Outside a remote screen, a character that needs Option goes out as
-/// Unicode, because Option can act as a shortcut or Meta key there. A remote
-/// screen forwards key codes and drops the Unicode payload, so text no key
+/// The keys that type `text` into a target. A remote screen forwards key
+/// codes and drops the Unicode payload, so it gets the keys of the layout
+/// `layout` looks up; a local application reads the payload on virtual key 0.
+fn keys_for<S: Fn(char) -> Option<Keystroke>>(
+	text: &str,
+	remote: Option<RemoteScreen>,
+	layout: impl FnOnce() -> CoreResult<S>,
+) -> CoreResult<Vec<TypedKey<'_>>> {
+	match remote {
+		Some(_) => typed_keys(text, layout()?),
+		None => Ok(unicode_keys(text)),
+	}
+}
+
+/// `text` as Unicode payloads on virtual key 0, grapheme by grapheme.
+fn unicode_keys(text: &str) -> Vec<TypedKey<'_>> {
+	graphemes_str(text)
+		.flat_map(unicode_runs)
+		.map(TypedKey::Unicode)
+		.collect()
+}
+
+/// The layout keys that type `text`, from `stroke`'s lookup. Text no key
 /// types fails before anything is posted.
 fn typed_keys(
 	text: &str,
 	stroke: impl Fn(char) -> Option<Keystroke>,
-	remote: Option<RemoteScreen>,
 ) -> CoreResult<Vec<TypedKey<'_>>> {
 	let mut keys = Vec::with_capacity(text.len());
 	let mut untypable = Vec::new();
@@ -1102,17 +1133,10 @@ fn typed_keys(
 			(Some('\r'), Some('\n'), None) => Some('\r'),
 			_ => None,
 		};
-		match character
-			.and_then(&stroke)
-			.filter(|stroke| remote.is_some() || !stroke.option)
-		{
-			Some(stroke) => keys.push(TypedKey::Layout(stroke, grapheme)),
-			None if remote.is_some() => {
-				if !untypable.contains(&grapheme) {
-					untypable.push(grapheme);
-				}
-			},
-			None => keys.extend(unicode_runs(grapheme).map(TypedKey::Unicode)),
+		if let Some(stroke) = character.and_then(&stroke) {
+			keys.push(TypedKey::Layout(stroke, grapheme));
+		} else if !untypable.contains(&grapheme) {
+			untypable.push(grapheme);
 		}
 	}
 	if untypable.is_empty() {
@@ -1361,22 +1385,96 @@ fn key_chord(
 	gap: Duration,
 	post: impl FnMut(&CGEvent) -> CoreResult<()>,
 ) -> CoreResult<()> {
+	press_chord(source, &ansi_keys(keys)?, gap, post)
+}
+
+fn press_chord(
+	source: &CGEventSource,
+	keys: &[KeyPress],
+	gap: Duration,
+	post: impl FnMut(&CGEvent) -> CoreResult<()>,
+) -> CoreResult<()> {
 	if keys.is_empty() {
 		return Err(DesktopError::invalid_key("key chord must not be empty"));
 	}
-	with_held_keys(source, keys, gap, post, control::check)
+	hold_presses(source, keys, gap, post, control::check)
 }
 
 fn with_held_keys(
 	source: &CGEventSource,
 	keys: &[KeyName],
 	gap: Duration,
+	post: impl FnMut(&CGEvent) -> CoreResult<()>,
+	body: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<()> {
+	hold_presses(source, &ansi_keys(keys)?, gap, post, body)
+}
+
+/// A key and the virtual key code that presses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KeyPress {
+	name: KeyName,
+	code: u16,
+}
+
+/// `keys` at the ANSI key positions that macOS virtual key codes name.
+fn ansi_keys(keys: &[KeyName]) -> CoreResult<Vec<KeyPress>> {
+	keys
+		.iter()
+		.map(|&name| Ok(KeyPress { name, code: key_code(name)? }))
+		.collect()
+}
+
+/// The presses for the chord `keys` into a target. A remote screen hands key
+/// codes to the remote computer, which reads them through its own layout, so
+/// a character there is the key of the layout `layout` looks up.
+fn chord_keys<S: Fn(char) -> Option<Keystroke>>(
+	keys: &[KeyName],
+	remote: Option<RemoteScreen>,
+	layout: impl FnOnce() -> CoreResult<S>,
+) -> CoreResult<Vec<KeyPress>> {
+	match remote {
+		Some(_) => layout_chord(keys, layout()?),
+		None => ansi_keys(keys),
+	}
+}
+
+/// `keys` with each character on `stroke`'s key for it, preceded by the Shift
+/// or Option that key needs unless the chord already names it. Letters are
+/// matched case-insensitively, as on the ANSI path.
+fn layout_chord(
+	keys: &[KeyName],
+	stroke: impl Fn(char) -> Option<Keystroke>,
+) -> CoreResult<Vec<KeyPress>> {
+	let mut chord = Vec::with_capacity(keys.len() + 2);
+	for &name in keys {
+		let KeyName::Char(character) = name else {
+			chord.push(KeyPress { name, code: key_code(name)? });
+			continue;
+		};
+		let key = stroke(character.to_ascii_lowercase()).ok_or_else(|| {
+			DesktopError::invalid_key(format!(
+				"the target shows a remote screen, which receives key codes, and no key on the \
+				 current keyboard layout types '{character}'; nothing was sent"
+			))
+		})?;
+		for (needed, modifier) in [(key.shift, KeyName::Shift), (key.option, KeyName::Alt)] {
+			if needed && !keys.contains(&modifier) {
+				chord.push(KeyPress { name: modifier, code: key_code(modifier)? });
+			}
+		}
+		chord.push(KeyPress { name, code: key.code });
+	}
+	Ok(chord)
+}
+
+fn hold_presses(
+	source: &CGEventSource,
+	keys: &[KeyPress],
+	gap: Duration,
 	mut post: impl FnMut(&CGEvent) -> CoreResult<()>,
 	body: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<()> {
-	for &key in keys {
-		key_code(key)?;
-	}
 	let mut active = Modifiers::default();
 	let mut pressed = 0;
 	let mut result = Ok(());
@@ -1388,10 +1486,10 @@ fn with_held_keys(
 			result = Err(error);
 			break;
 		}
-		update_modifier(&mut active, key, true);
+		update_modifier(&mut active, key.name, true);
 		pressed += 1;
 		if let Err(error) = control::check()
-			.and_then(|()| post_key(source, key, true, modifier_flags(active), &mut post))
+			.and_then(|()| post_code(source, key.code, true, modifier_flags(active), &mut post))
 			.and_then(|()| control::wait(gap))
 		{
 			result = Err(error);
@@ -1404,8 +1502,8 @@ fn with_held_keys(
 	let cleanup = control::cleanup(|| {
 		let mut cleanup = Ok(());
 		for &key in keys[..pressed].iter().rev() {
-			update_modifier(&mut active, key, false);
-			let release = post_key(source, key, false, modifier_flags(active), &mut post);
+			update_modifier(&mut active, key.name, false);
+			let release = post_code(source, key.code, false, modifier_flags(active), &mut post);
 			cleanup = skylight::after_cleanup(cleanup, release);
 		}
 		cleanup
@@ -1420,7 +1518,16 @@ fn post_key(
 	flags: CGEventFlags,
 	post: &mut impl FnMut(&CGEvent) -> CoreResult<()>,
 ) -> CoreResult<()> {
-	let code = key_code(key)?;
+	post_code(source, key_code(key)?, down, flags, post)
+}
+
+fn post_code(
+	source: &CGEventSource,
+	code: u16,
+	down: bool,
+	flags: CGEventFlags,
+	post: &mut impl FnMut(&CGEvent) -> CoreResult<()>,
+) -> CoreResult<()> {
 	let event = CGEvent::new_keyboard_event(source.clone(), code, down)
 		.map_err(|()| DesktopError::input_failed("failed to create a Quartz keyboard event"))?;
 	event.set_flags(flags);
@@ -2147,7 +2254,7 @@ mod tests {
 		let token = cancellation.token();
 		let mut events = Vec::new();
 		let result = control::with_token_for_test(&token, || {
-			let keys = typed_keys("e\u{301}later", us_stroke, None).unwrap();
+			let keys = unicode_keys("e\u{301}later");
 			type_keys(
 				&source,
 				&keys,
@@ -2178,7 +2285,7 @@ mod tests {
 			'B' => key(11, true, false),
 			'C' => key(8, true, false),
 			' ' => key(49, false, false),
-			'\r' => key(36, false, false),
+			'\r' | '\n' => key(36, false, false),
 			'€' => key(19, true, true),
 			'å' => key(0, false, true),
 			_ => None,
@@ -2211,7 +2318,7 @@ mod tests {
 	#[test]
 	fn typed_text_posts_layout_keys_and_holds_shift_only_across_shifted_keys() {
 		let source = source().expect("event source");
-		let keys = typed_keys("aBC b\r\n😀", us_stroke, None).unwrap();
+		let keys = typed_keys("aBC b\r\n", us_stroke).unwrap();
 		let mut events = Vec::new();
 		type_keys(
 			&source,
@@ -2242,16 +2349,13 @@ mod tests {
 			key(up, 11, false, "b"),
 			key(down, 36, false, "\r\n"),
 			key(up, 36, false, "\r\n"),
-			// No key types it: virtual key 0 carries the text.
-			key(down, 0, false, "😀"),
-			key(up, 0, false, "😀"),
 		]);
 	}
 
 	#[test]
 	fn failed_shifted_key_still_releases_shift() {
 		let source = source().expect("event source");
-		let keys = typed_keys("Ba", us_stroke, None).unwrap();
+		let keys = typed_keys("Ba", us_stroke).unwrap();
 		let mut events = Vec::new();
 		let result = type_keys(
 			&source,
@@ -2285,7 +2389,7 @@ mod tests {
 	#[test]
 	fn failed_modifier_release_is_retried_by_cleanup() {
 		let source = source().expect("event source");
-		let keys = typed_keys("Ba", us_stroke, None).unwrap();
+		let keys = typed_keys("Ba", us_stroke).unwrap();
 		let mut events = Vec::new();
 		let mut releases = 0;
 		let result = type_keys(
@@ -2324,7 +2428,7 @@ mod tests {
 		lose_after: (CGEventType, i64),
 	) -> (CoreResult<()>, Vec<(u32, i64, bool)>) {
 		let source = source().expect("event source");
-		let keys = typed_keys(text, us_stroke, None).unwrap();
+		let keys = typed_keys(text, us_stroke).unwrap();
 		let lost = std::cell::Cell::new(false);
 		let mut posted = Vec::new();
 		let result = type_keys(
@@ -2399,7 +2503,7 @@ mod tests {
 		lose_after: Option<(u16, bool)>,
 		fail: Option<(u16, bool)>,
 	) -> (CoreResult<()>, Vec<(u16, bool)>) {
-		let keys = typed_keys("aB", us_stroke, Some(RemoteScreen::HidReports)).unwrap();
+		let keys = typed_keys("aB", us_stroke).unwrap();
 		let lost = std::cell::Cell::new(false);
 		let mut failed = false;
 		let mut posted = Vec::new();
@@ -2452,19 +2556,131 @@ mod tests {
 	}
 
 	#[test]
-	fn option_and_keyless_text_stay_unicode_except_on_a_remote_screen() {
-		// Option can be a shortcut or Meta in a local app, so its characters
-		// keep the Unicode payload there; a remote screen gets the key.
-		assert_eq!(typed_keys("€😀", us_stroke, None).unwrap(), [
-			TypedKey::Unicode("€"),
-			TypedKey::Unicode("😀"),
+	fn local_text_stays_unicode_on_key_zero_and_only_a_remote_screen_gets_layout_keys() {
+		let no_layout = || -> CoreResult<fn(char) -> Option<Keystroke>> {
+			panic!("local text reads no keyboard layout")
+		};
+		let local = keys_for("aB\n", None, no_layout).unwrap();
+		let source = source().expect("event source");
+		let mut events = Vec::new();
+		type_keys(
+			&source,
+			&local,
+			Duration::ZERO,
+			|| Ok(()),
+			|event| {
+				let typed = typed_event(event);
+				events.push((typed.0, typed.1, event.get_flags(), typed.4));
+				Ok(())
+			},
+		)
+		.unwrap();
+		// No Shift for B, and a newline is text rather than a Return press.
+		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
+		let key = |kind, text: &str| (kind, 0, CGEventFlags::CGEventFlagNull, text.to_string());
+		assert_eq!(events, [
+			key(down, "a"),
+			key(up, "a"),
+			key(down, "B"),
+			key(up, "B"),
+			key(down, "\n"),
+			key(up, "\n"),
 		]);
-		assert_eq!(typed_keys("€", us_stroke, Some(RemoteScreen::KeyEvents)).unwrap(), [
-			TypedKey::Layout(Keystroke { code: 19, shift: true, option: true }, "€"),
+		let stroke = |code, shift| Keystroke { code, shift, option: false };
+		assert_eq!(keys_for("aB\n", Some(RemoteScreen::KeyEvents), || Ok(us_stroke)).unwrap(), [
+			TypedKey::Layout(stroke(0, false), "a"),
+			TypedKey::Layout(stroke(11, true), "B"),
+			TypedKey::Layout(stroke(36, false), "\n"),
 		]);
+	}
+
+	#[test]
+	fn cancelled_layout_read_cancels_remote_typing() {
+		let cancelled = keys_for("a", Some(RemoteScreen::HidReports), || {
+			Err::<fn(char) -> Option<Keystroke>, _>(DesktopError::cancelled("cancelled"))
+		});
+		assert_eq!(cancelled.err().map(|error| error.code), Some(ErrorCode::Cancelled));
+	}
+
+	#[test]
+	fn background_keys_stop_once_a_sibling_window_becomes_key() {
+		let source = source().expect("event source");
+		let siblings = KeyboardConflict::Siblings(1);
+		let focused = std::cell::Cell::new(Some(7));
+		let mut posted = Vec::new();
+		let result = type_keys(
+			&source,
+			&unicode_keys("ab"),
+			Duration::ZERO,
+			|| key_window_guard(Some(&siblings), 7, || focused.get()),
+			|event| {
+				let typed = typed_event(event);
+				// The user picks a sibling window right after a is typed.
+				if typed.0 == CGEventType::KeyUp as u32 {
+					focused.set(Some(9));
+				}
+				posted.push((typed.0, typed.4));
+				Ok(())
+			},
+		);
+		let error = result.unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert!(error.message.contains("may already have landed"), "{}", error.message);
+		assert_eq!(posted, [
+			(CGEventType::KeyDown as u32, "a".to_string()),
+			(CGEventType::KeyUp as u32, "a".to_string()),
+		]);
+		// A window with no sibling to lose focus to is not rechecked.
+		assert!(key_window_guard(None, 7, || Some(9)).is_ok());
+	}
+
+	#[test]
+	fn remote_chords_press_the_layouts_key_for_each_character() {
+		// AZERTY: q sits on the ANSI a key, a on the ANSI q key, and 1 needs
+		// Shift on the ANSI 1 key.
+		let azerty = |character| {
+			let key = |code, shift| Some(Keystroke { code, shift, option: false });
+			match character {
+				'q' => key(0, false),
+				'a' => key(12, false),
+				'1' => key(18, true),
+				_ => None,
+			}
+		};
+		let press = |name, code| KeyPress { name, code };
+		let remote = Some(RemoteScreen::KeyEvents);
+		assert_eq!(chord_keys(&[KeyName::Char('Q')], remote, || Ok(azerty)).unwrap(), [press(
+			KeyName::Char('Q'),
+			0
+		)]);
+		let local = || -> CoreResult<fn(char) -> Option<Keystroke>> {
+			panic!("a local chord reads no keyboard layout")
+		};
+		assert_eq!(chord_keys(&[KeyName::Char('q')], None, local).unwrap(), [press(
+			KeyName::Char('q'),
+			12
+		)]);
+		// The Shift a character needs joins the chord, so Screen Sharing's
+		// background modifier check refuses it before anything is sent.
+		let shifted = [press(KeyName::Shift, 56), press(KeyName::Char('1'), 18)];
+		assert_eq!(chord_keys(&[KeyName::Char('1')], remote, || Ok(azerty)).unwrap(), shifted);
+		assert_eq!(
+			chord_keys(&[KeyName::Shift, KeyName::Char('1')], remote, || Ok(azerty)).unwrap(),
+			shifted
+		);
+		let error = chord_keys(&[KeyName::Char('z')], remote, || Ok(azerty)).unwrap_err();
+		assert_eq!(error.code, ErrorCode::InvalidKey);
+	}
+
+	#[test]
+	fn remote_text_takes_option_keys_and_refuses_text_no_key_types() {
+		assert_eq!(typed_keys("€", us_stroke).unwrap(), [TypedKey::Layout(
+			Keystroke { code: 19, shift: true, option: true },
+			"€"
+		),]);
 		// A remote screen ignores the Unicode payload, so text no key types
 		// refuses before anything is posted, naming each character once.
-		let error = typed_keys("a😀bé😀", us_stroke, Some(RemoteScreen::HidReports)).unwrap_err();
+		let error = typed_keys("a😀bé😀", us_stroke).unwrap_err();
 		assert_eq!(error.code, ErrorCode::InvalidKey);
 		assert!(error.message.contains("types 😀 é;"), "{}", error.message);
 	}
@@ -2483,7 +2699,7 @@ mod tests {
 
 	#[test]
 	fn remote_takeover_presses_modifier_keys_and_background_names_what_needs_them() {
-		let keys = typed_keys("BC€a", us_stroke, Some(RemoteScreen::KeyEvents)).unwrap();
+		let keys = typed_keys("BC€a", us_stroke).unwrap();
 		// Shift is held across B and C, Option joins it for €, and both are
 		// released before the plain a.
 		assert_eq!(bare_transitions(&keys), [
@@ -2501,22 +2717,9 @@ mod tests {
 			(0, false),
 		]);
 		assert_eq!(modified_text(&keys), ["B", "C", "€"]);
-		assert!(
-			modified_text(&typed_keys("ab", us_stroke, Some(RemoteScreen::KeyEvents)).unwrap())
-				.is_empty()
-		);
+		assert!(modified_text(&typed_keys("ab", us_stroke).unwrap()).is_empty());
 		// Option alone also needs a modifier the remote reads from the keyboard.
-		assert_eq!(
-			modified_text(&typed_keys("aå", us_stroke, Some(RemoteScreen::KeyEvents)).unwrap()),
-			["å"]
-		);
-	}
-
-	#[test]
-	fn only_hid_report_devices_get_slow_key_pacing() {
-		assert_eq!(key_gap(Some(RemoteScreen::HidReports)), REPORT_KEY_GAP);
-		assert_eq!(key_gap(Some(RemoteScreen::KeyEvents)), KEY_GAP);
-		assert_eq!(key_gap(None), KEY_GAP);
+		assert_eq!(modified_text(&typed_keys("aå", us_stroke).unwrap()), ["å"]);
 	}
 
 	#[test]

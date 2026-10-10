@@ -5,8 +5,11 @@
 use std::{
 	collections::HashMap,
 	process::{Command, Stdio},
+	sync::Arc,
 	time::{Duration, Instant},
 };
+
+use parking_lot::Mutex;
 
 use super::super::{
 	control,
@@ -43,6 +46,14 @@ const HELPER: &[u8] = include_bytes!(env!("OMP_KEYMAP_DARWIN_HELPER"));
 const NO_LAYOUT_DATA: i32 = 3;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(5);
 const HELPER_POLL: Duration = Duration::from_millis(2);
+/// How long a read keyboard layout is reused: typing in quick succession
+/// skips the helper, and a layout switch takes effect within this.
+const KEYMAP_TTL: Duration = Duration::from_secs(10);
+
+/// When the current layout was last read, and its map.
+type CachedKeymap = Mutex<Option<(Instant, Option<Arc<Keymap>>)>>;
+
+static CURRENT: CachedKeymap = Mutex::new(None);
 
 #[link(name = "CoreServices", kind = "framework")]
 unsafe extern "C" {
@@ -61,11 +72,16 @@ unsafe extern "C" {
 }
 
 impl Keymap {
-	/// The map of the current keyboard layout; `None` when the layout
-	/// publishes no Unicode key layout data. Text Input Sources asserts that
-	/// it runs on the main queue, which the desktop worker thread is not, so
-	/// a helper process reads the layout.
-	pub(super) fn current() -> CoreResult<Option<Self>> {
+	/// The map of the current keyboard layout, read at most once per
+	/// `KEYMAP_TTL`; `None` when the layout publishes no Unicode key layout
+	/// data.
+	pub(super) fn current() -> CoreResult<Option<Arc<Self>>> {
+		cached(&CURRENT, Instant::now(), Self::read)
+	}
+
+	/// Text Input Sources asserts that it runs on the main queue, which the
+	/// desktop worker thread is not, so a helper process reads the layout.
+	fn read() -> CoreResult<Option<Self>> {
 		let Some((keyboard_type, layout)) = current_layout()? else {
 			return Ok(None);
 		};
@@ -124,6 +140,25 @@ impl Keymap {
 	pub(super) fn stroke(&self, character: char) -> Option<Keystroke> {
 		self.strokes.get(&character).copied()
 	}
+}
+
+/// `slot`'s map while it is younger than `KEYMAP_TTL` at `now`, otherwise a
+/// new one from `read`. A failed read, cancellation included, is returned and
+/// not kept, so the next call reads again.
+fn cached(
+	slot: &CachedKeymap,
+	now: Instant,
+	read: impl FnOnce() -> CoreResult<Option<Keymap>>,
+) -> CoreResult<Option<Arc<Keymap>>> {
+	let mut slot = slot.lock();
+	if let Some((read_at, keymap)) = &*slot
+		&& now.saturating_duration_since(*read_at) < KEYMAP_TTL
+	{
+		return Ok(keymap.clone());
+	}
+	let keymap = read()?.map(Arc::new);
+	*slot = Some((now, keymap.clone()));
+	Ok(keymap)
 }
 
 /// The current layout's keyboard type and `uchr` data, read by the helper;
@@ -196,6 +231,7 @@ fn single_char(units: &[u16]) -> Option<char> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::desktop::error::ErrorCode;
 
 	/// Key 0 types `q`/`Q`/`@`, key 1 types `é` only with Shift-Option, keypad
 	/// 83 and main 18 both type `1`, and Return yields a control character.
@@ -251,8 +287,36 @@ mod tests {
 		let keymap = std::thread::spawn(Keymap::current)
 			.join()
 			.expect("keymap thread")
-			.expect("keyboard layout helper")
-			.expect("current keyboard layout data");
+			.expect("keyboard layout helper");
+		// A session without a keyboard layout (no Aqua login) has nothing to map.
+		let Some(keymap) = keymap else {
+			return;
+		};
 		assert_eq!(keymap.stroke(' '), Some(Keystroke { code: 49, shift: false, option: false }));
+	}
+
+	#[test]
+	fn layout_is_reused_until_it_ages_out_and_a_failed_read_is_not_kept() {
+		let slot = CachedKeymap::default();
+		let reads = std::cell::Cell::new(0);
+		let read = || {
+			reads.set(reads.get() + 1);
+			Ok(Some(Keymap::build(translate)))
+		};
+		let start = Instant::now();
+		cached(&slot, start, read).unwrap();
+		let reused = cached(&slot, start + KEYMAP_TTL / 2, || panic!("read within the TTL")).unwrap();
+		assert_eq!(
+			reused.unwrap().stroke('q'),
+			Some(Keystroke { code: 0, shift: false, option: false })
+		);
+		cached(&slot, start + KEYMAP_TTL, read).unwrap();
+		assert_eq!(reads.get(), 2);
+		// A cancelled read reaches the caller, and the next call reads again.
+		let later = start + KEYMAP_TTL * 2;
+		let cancelled = cached(&slot, later, || Err(DesktopError::cancelled("cancelled")));
+		assert_eq!(cancelled.err().map(|error| error.code), Some(ErrorCode::Cancelled));
+		cached(&slot, later, read).unwrap();
+		assert_eq!(reads.get(), 3);
 	}
 }
