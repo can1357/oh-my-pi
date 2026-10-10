@@ -397,14 +397,14 @@ export async function redeemConsentedResets(
  * executor's `no` veto still backs this up.
  */
 export function headlessApprovals(actions: readonly ResetAction[]): ApprovedResetAction[] {
-	const approved: ApprovedResetAction[] = actions
-		.filter(action => action.autoRedeem === "yes")
-		.map(action => ({ action, approval: "auto-redeem-yes" }));
-	const unset = actions.filter(action => action.autoRedeem === "unset");
-	for (const action of headlessApprovedResetActions(unset)) {
-		approved.push({ action, approval: "headless-last-chance" });
-	}
-	return approved;
+	// Only `unset` actions go through the last-chance rule; it pins each to its credit.
+	const lastChance = headlessApprovedResetActions(actions.filter(action => action.autoRedeem === "unset"));
+	// Keep the planner's order: restores first, then earliest expiry.
+	return actions.flatMap((action): ApprovedResetAction[] => {
+		if (action.autoRedeem === "yes") return [{ action, approval: "auto-redeem-yes" }];
+		const pinned = lastChance.find(candidate => candidate.attemptKey === action.attemptKey);
+		return pinned ? [{ action: pinned, approval: "headless-last-chance" }] : [];
+	});
 }
 
 /**
