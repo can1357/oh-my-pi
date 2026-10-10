@@ -106,11 +106,11 @@ behavior {
 			"gemini-3.5-flash" "gemini-3-flash-preview" "grok-4.7" "grok-4.6" "grok-4.5" "atlas-07-21" \
 			"aster-07-15"
 	}
-	// OpenCode Go's `*-free` SKUs are unlimited and sit outside the 5h/weekly/
-	// monthly subscription allowances every other Go model draws from.
+	// Only the documented unlimited Go SKUs bypass subscription windows.
+	// Unknown ids remain metered; a "-free" suffix is not quota evidence.
 	quota-tiers provider="opencode-go" default="subscription" {
-		tier "free" "longcat-2.5-preview-free" "step-5-preview-free" "ox-alpha-free" "space-bunny-free"
-		fallback "free" substring="-free"
+		tier "free" "longcat-2.5-preview-free" "step-5-preview-free"
+		tier "subscription" "space-bunny-free"
 	}
 	// Subscription eligibility for model-aware Codex credential routing.
 	plan-requirement provider="openai-codex" {

@@ -24,9 +24,8 @@ const exhaustedWeeklyFetch = (async () =>
 		{ status: 200, headers: { "content-type": "application/json" } },
 	)) as unknown as typeof fetch;
 
-// Go's `*-free` SKUs are documented as unlimited outside the 5h/weekly/monthly
-// subscription allowances, so exhausting the subscription on metered models
-// must not bench the credential for free-SKU requests, and the reverse (#15183).
+// Documented unlimited Go SKUs sit outside the subscription allowances;
+// a model-id suffix alone is not proof that it is exempt (#15183).
 describe("OpenCode Go free-SKU credential selection", () => {
 	let tempDir = "";
 	let store: SqliteAuthCredentialStore | undefined;
@@ -88,14 +87,14 @@ describe("OpenCode Go free-SKU credential selection", () => {
 		expect(await auth.keys.get(PROVIDER, "free", { modelId: FREE_MODEL })).toBe("go-b");
 	});
 
-	test("an exhausted subscription window does not gate free-SKU selection", async () => {
+	test("an exhausted subscription window gates bundled Space Bunny but not free SKUs", async () => {
 		const auth = await openStorage(exhaustedWeeklyFetch);
 		await auth.usage.reports();
 
 		// Selection turns each credential's exhausted weekly window into a block.
-		await auth.keys.get(PROVIDER, "metered", { modelId: METERED_MODEL });
+		await auth.keys.get(PROVIDER, "metered", { modelId: "space-bunny-free" });
 		expect(
-			(await auth.limits.markReached(PROVIDER, "metered", { apiKey: "go-a", modelId: METERED_MODEL })).switched,
+			(await auth.limits.markReached(PROVIDER, "metered", { apiKey: "go-a", modelId: "space-bunny-free" })).switched,
 		).toBe(false);
 
 		expect(await auth.keys.get(PROVIDER, "free", { modelId: FREE_MODEL })).toBe("go-a");
