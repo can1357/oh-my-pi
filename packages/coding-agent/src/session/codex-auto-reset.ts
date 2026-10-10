@@ -691,6 +691,8 @@ export interface ResetRecoveryResult {
 	restoredCredentialIds?: number[];
 	/** The session's account pool excluded a restore candidate or dropped a planned restore. */
 	poolLimited?: boolean;
+	/** The pass stopped on its caller's cancellation before spending. */
+	cancelled?: boolean;
 }
 
 /**

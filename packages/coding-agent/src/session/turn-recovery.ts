@@ -254,8 +254,14 @@ export interface TurnRecoveryHost {
 	 * Spend an eligible saved reset for the blocked provider pool.
 	 * `activeBlockUnblockAtMs` is the absolute unblock time parsed from the live
 	 * usage-limit error and never substitutes for live grant eligibility.
+	 * `beforeTakeover` is set for the pass that runs while a sibling could take
+	 * over (`restoreBeforeReserve`): it spends only within the session's account
+	 * pool and stops before spending once its signal aborts.
 	 */
-	maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult>;
+	maybeAutoRedeemReset(
+		activeBlockUnblockAtMs?: number,
+		beforeTakeover?: { signal: AbortSignal },
+	): Promise<ResetRecoveryResult>;
 	/**
 	 * With a sibling credential able to take over a usage-limited turn, whether
 	 * to try {@link maybeAutoRedeemReset} first: the provider's reset policy
@@ -738,6 +744,16 @@ export class TurnRecovery {
 		},
 	): Promise<boolean> {
 		return this.#handleRetryableError(message, options);
+	}
+
+	/**
+	 * Whether a usage-limit failure arriving now would reach the credential
+	 * branch of {@link handleRetryableError} with retry budget left, so a sibling
+	 * takeover deferred to it still happens there.
+	 */
+	canRecoverUsageLimit(): boolean {
+		const retrySettings = cfgRetry.get(this.#host.settings);
+		return retrySettings.enabled && this.#retryAttempt < retrySettings.maxRetries;
 	}
 
 	/**
@@ -2481,7 +2497,10 @@ export class TurnRecovery {
 					const startedAtMs = Date.now();
 					const unblockAtMs = parsedRetryAfterMs === undefined ? undefined : startedAtMs + parsedRetryAfterMs;
 					for (let attempt = 0; ; attempt++) {
-						const result = await this.#host.maybeAutoRedeemReset(unblockAtMs);
+						const result = await this.#host.maybeAutoRedeemReset(
+							unblockAtMs,
+							rotated ? { signal: resetAbortController.signal } : undefined,
+						);
 						resetAbortController.signal.throwIfAborted();
 						if (result.restored) {
 							restored = true;

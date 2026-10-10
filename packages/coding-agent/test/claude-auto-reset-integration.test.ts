@@ -764,6 +764,7 @@ describe("saved reset before a reserve-protected sibling", () => {
 		usedPct: number;
 		resets: number;
 		usageUnavailable?: boolean;
+		resetExpiresInMs?: number;
 	}
 	const previousProxy = Bun.env.PI_PROXY_ANTHROPIC;
 	let tempDir: TempDir;
@@ -856,7 +857,7 @@ describe("saved reset before a reserve-protected sibling", () => {
 										{
 											id: "saved-reset",
 											resets_left: account.resets,
-											ends_at: new Date(now + 7 * 24 * HOUR).toISOString(),
+											ends_at: new Date(now + (account.resetExpiresInMs ?? 7 * 24 * HOUR)).toISOString(),
 											clears: ["five_hour", "seven_day"],
 											usable_now: true,
 											percent_used: { seven_day: account.usedPct },
@@ -909,7 +910,11 @@ describe("saved reset before a reserve-protected sibling", () => {
 			primaryResets?: number;
 			/** A third stored account outside the session's account pool. */
 			excluded?: "healthy" | "unknown" | "blocked with a reset";
-			abortAtRecoveryHealthRead?: boolean;
+			excludedResetExpiresInMs?: number;
+			abortAt?: "recovery health read" | "reset listing";
+			/** The primary serves the prompt and hits its wall on the next request. */
+			primaryServesFirst?: boolean;
+			settings?: Record<string, unknown>;
 		},
 	) {
 		const accounts: Record<string, Account> = {
@@ -943,9 +948,12 @@ describe("saved reset before a reserve-protected sibling", () => {
 				usedPct: blocked ? 100 : 8,
 				resets: blocked ? 1 : 0,
 				usageUnavailable: options.excluded === "unknown",
+				resetExpiresInMs: options.excludedResetExpiresInMs,
 			};
 		}
 		const resetPosts: string[] = [];
+		let healthReads = 0;
+		const live: { session?: AgentSession } = {};
 		const requests: string[] = [];
 		const model = getBundledModel(provider, provider === "anthropic" ? "claude-sonnet-4-5" : "gpt-5.6-sol");
 		if (!model) throw new Error(`Expected a bundled ${provider} model`);
@@ -958,7 +966,10 @@ describe("saved reset before a reserve-protected sibling", () => {
 				const account = accounts[token.replace(/^key-/, "")];
 				if (!account) return new Response("unknown key", { status: 401 });
 				requests.push(account.accountId);
-				if (account.accountId !== "primary" || account.usedPct < 99) return modelAnswer(provider, model.id);
+				const servesFirst = options.primaryServesFirst && requests.length === 1;
+				if (account.accountId !== "primary" || account.usedPct < 99 || servesFirst) {
+					return modelAnswer(provider, model.id);
+				}
 				// The selection-time report read 99%; this request spends the rest of the window.
 				account.usedPct = 100;
 				const error =
@@ -970,6 +981,9 @@ describe("saved reset before a reserve-protected sibling", () => {
 			const account = accounts[token.replace(/^access-/, "")];
 			if (!account) return new Response("not found", { status: 404 });
 			if (account.usageUnavailable) return new Response("unavailable", { status: 500 });
+			const listing = url.searchParams.has("cedar_ember") || url.pathname.endsWith("/wham/rate-limit-reset-credits");
+			// Recovery has read pool health twice and now discovers the blocked account's reset.
+			if (options.abortAt === "reset listing" && listing && healthReads >= 2) void live.session?.abort();
 			const consume = url.pathname.endsWith("/reset_rate_limits") || url.pathname.endsWith("/consume");
 			if (init?.method === "POST" && consume) {
 				resetPosts.push(account.accountId);
@@ -985,7 +999,7 @@ describe("saved reset before a reserve-protected sibling", () => {
 					credits: Array.from({ length: account.resets }, (_, index) => ({
 						id: `credit-${account.accountId}-${index}`,
 						status: "available",
-						expires_at: new Date(Date.now() + 7 * 24 * HOUR).toISOString(),
+						expires_at: new Date(Date.now() + (account.resetExpiresInMs ?? 7 * 24 * HOUR)).toISOString(),
 					})),
 				});
 			}
@@ -1034,6 +1048,7 @@ describe("saved reset before a reserve-protected sibling", () => {
 			"claudeResets.autoRedeem": provider === "anthropic" ? "yes" : "no",
 			"codexResets.restoreBeforeReserve": options.restoreBeforeReserve,
 			"claudeResets.restoreBeforeReserve": options.restoreBeforeReserve,
+			...options.settings,
 		});
 		const sessionManager = SessionManager.inMemory(tempDir.path());
 		const { session } = await createAgentSession({
@@ -1063,16 +1078,18 @@ describe("saved reset before a reserve-protected sibling", () => {
 			);
 		}
 		const healthModel = storage.health.model.bind(storage.health);
-		let healthReads = 0;
+		live.session = session;
 		vi.spyOn(storage.health, "model").mockImplementation(async (...args) => {
 			healthReads++;
 			// The stream's rotation reads pool health first; turn recovery reads it again before any reset.
-			if (options.abortAtRecoveryHealthRead && healthReads === 2) void session.abort();
+			if (options.abortAt === "recovery health read" && healthReads === 2) void session.abort();
 			return healthModel(...args);
 		});
+		const captures = vi.spyOn(session, "runAutolearnCapture");
 
 		await session.prompt("keep working through the limit");
 		await session.waitForIdle();
+		await Promise.all(captures.mock.results.map(result => result.value));
 		return { resetPosts, requests, healthReads, last: session.agent.state.messages.at(-1) };
 	}
 
@@ -1127,8 +1144,45 @@ describe("saved reset before a reserve-protected sibling", () => {
 	});
 
 	it("spends nothing when the turn is cancelled while recovery reads pool health", async () => {
-		const result = await hitWall("anthropic", { restoreBeforeReserve: true, abortAtRecoveryHealthRead: true });
+		const result = await hitWall("anthropic", { restoreBeforeReserve: true, abortAt: "recovery health read" });
 		expect(result.resetPosts).toEqual([]);
 		expect(result.requests).toEqual(["primary"]);
+	});
+
+	it("spends nothing when the turn is cancelled while recovery discovers the reset", async () => {
+		const result = await hitWall("anthropic", { restoreBeforeReserve: true, abortAt: "reset listing" });
+		expect(result.resetPosts).toEqual([]);
+		expect(result.requests).toEqual(["primary"]);
+	});
+
+	it.each([
+		["retries are off", { "retry.enabled": false }],
+		["the retry budget is spent", { "retry.maxRetries": 0 }],
+	])("lets the backup take over in-stream when %s", async (_name, settings) => {
+		const result = await hitWall("anthropic", { restoreBeforeReserve: true, settings });
+		expect(result.resetPosts).toEqual([]);
+		expect(result.requests).toEqual(["primary", "backup"]);
+		expect(result.last).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it("lets the backup take over an auto-learn capture in-stream", async () => {
+		const result = await hitWall("anthropic", {
+			restoreBeforeReserve: true,
+			primaryServesFirst: true,
+			settings: { "autolearn.enabled": true, "autolearn.autoContinue": true, "autolearn.minToolCalls": 0 },
+		});
+		expect(result.resetPosts).toEqual([]);
+		expect(result.requests).toEqual(["primary", "primary", "backup"]);
+	});
+
+	it("never spends an outside account's expiring reset while the backup could take over", async () => {
+		const result = await hitWall("anthropic", {
+			restoreBeforeReserve: true,
+			primaryResets: 0,
+			excluded: "blocked with a reset",
+			excludedResetExpiresInMs: 60_000,
+		});
+		expect(result.resetPosts).toEqual([]);
+		expect(result.requests).toEqual(["primary", "backup"]);
 	});
 });

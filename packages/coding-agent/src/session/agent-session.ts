@@ -1804,8 +1804,9 @@ export class AgentSession implements SettingsScope {
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
-			maybeAutoRedeemReset: activeBlockUnblockAtMs => this.#maybeAutoRedeemReset(activeBlockUnblockAtMs),
-			shouldRedeemBeforeTakeover: signal => this.shouldRedeemBeforeTakeover(this.model, signal),
+			maybeAutoRedeemReset: (activeBlockUnblockAtMs, beforeTakeover) =>
+				this.#maybeAutoRedeemReset(activeBlockUnblockAtMs, beforeTakeover),
+			shouldRedeemBeforeTakeover: signal => this.#shouldRedeemBeforeTakeover(this.model, signal),
 			runAutoCompaction: (reason, willRetry, options) =>
 				this.#maintenance.runAutoCompaction(reason, willRetry, options),
 			shakeForRequestBodyReadTimeout: generation => this.#maintenance.shakeForRequestBodyReadTimeout(generation),
@@ -12559,6 +12560,7 @@ export class AgentSession implements SettingsScope {
 		provider: "openai-codex" | "anthropic",
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
+		signal?: AbortSignal,
 	): Promise<boolean> {
 		const first = actions[0];
 		if (!first) return false;
@@ -12599,16 +12601,20 @@ export class AgentSession implements SettingsScope {
 				? `Spend a saved ${providerLabel} rate-limit reset?\n${lines[0]}`
 				: `Spend ${actions.length} saved ${providerLabel} rate-limit resets?\n${lines.join("\n")}`;
 		try {
-			const choice = await runner.getUIContext().select(question, [
-				{
-					label: "Yes",
-					description: `Redeem now and remember yes for future eligible ${providerLabel} resets.`,
-				},
-				{
-					label: "No",
-					description: `Do not auto-redeem saved ${providerLabel} resets.`,
-				},
-			]);
+			const choice = await runner.getUIContext().select(
+				question,
+				[
+					{
+						label: "Yes",
+						description: `Redeem now and remember yes for future eligible ${providerLabel} resets.`,
+					},
+					{
+						label: "No",
+						description: `Do not auto-redeem saved ${providerLabel} resets.`,
+					},
+				],
+				{ signal },
+			);
 			if (choice === "Yes") {
 				if (provider === "anthropic") cfgClaudeResetsAutoRedeem.set(this.settings, "yes");
 				else cfgCodexResetsAutoRedeem.set(this.settings, "yes");
@@ -12750,25 +12756,33 @@ export class AgentSession implements SettingsScope {
 	 * Shared consume executor for Codex and Claude plans. Attempt keys enter the
 	 * process-wide set before mutation, while nonterminal outcomes release and
 	 * defer the episode so a still-banked grant is not buried permanently.
-	 * Returns the credentials whose reset was spent or adopted from a peer, and
-	 * whether the session's account pool dropped a planned restore.
+	 * Returns the credentials whose reset was spent or adopted from a peer,
+	 * whether the session's account pool dropped a planned action, and whether
+	 * `signal` stopped the run before a spend. `poolOnly` holds every action, not
+	 * only restores, to the session's account pool.
 	 */
 	async #executeResetActions(
 		provider: "openai-codex" | "anthropic",
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
-	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean }> {
+		options?: { signal?: AbortSignal; poolOnly?: boolean },
+	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean; cancelled: boolean }> {
 		const authStorage = this.#modelRegistry.authStorage;
 		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
 		// Consent, earlier actions, the fence and the live listing all wait after
-		// planning: a restore the session's account pool no longer allows is dropped.
-		// Checked with no await before the redeem call.
-		const outsidePool = (action: CodexResetAction | ClaudeResetAction): boolean =>
-			action.reason === "blocked-account" &&
-			!authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId);
+		// planning: a cancelled run, or a restore the session's account pool no
+		// longer allows, is dropped. Checked with no await before the redeem call.
+		const dropReason = (action: CodexResetAction | ClaudeResetAction): "cancelled" | "outside-pool" | undefined => {
+			if (options?.signal?.aborted) return "cancelled";
+			if (!options?.poolOnly && action.reason !== "blocked-account") return undefined;
+			return authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId)
+				? undefined
+				: "outside-pool";
+		};
 		const restored: number[] = [];
 		let poolLimited = false;
+		let cancelled = false;
 		for (const action of actions) {
 			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
 			const previousAttemptAt = coordinator.lastAttemptAtByAccount.get(action.accountKey);
@@ -12776,7 +12790,7 @@ export class AgentSession implements SettingsScope {
 			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
 			let outcome: ResetCreditRedeemOutcome | undefined;
 			let sharedReset = false;
-			let leftPool = false;
+			let dropped: "cancelled" | "outside-pool" | undefined;
 			try {
 				const redeemOptions = {
 					target: action.target,
@@ -12787,8 +12801,8 @@ export class AgentSession implements SettingsScope {
 				const lockKey = resetAccountLockKey(action.target);
 				if (!lockKey) {
 					// An account without an upstream identity cannot share a cross-process fence.
-					leftPool = outsidePool(action);
-					if (!leftPool) outcome = await authStorage.resets.redeem(redeemOptions);
+					dropped = dropReason(action);
+					if (!dropped) outcome = await authStorage.resets.redeem(redeemOptions);
 				} else {
 					// The coordinator is process-local. Fence concurrent processes and
 					// remember a recent attempt so a late 429 cannot spend again.
@@ -12826,8 +12840,8 @@ export class AgentSession implements SettingsScope {
 							}
 							const attemptedAt = Date.now();
 							await Bun.write(lockPath, `pending:${attemptedAt}`);
-							leftPool = outsidePool(action);
-							if (leftPool) {
+							dropped = dropReason(action);
+							if (dropped) {
 								await Bun.write(lockPath, "");
 								return undefined;
 							}
@@ -12854,13 +12868,17 @@ export class AgentSession implements SettingsScope {
 			}
 			if (!outcome) {
 				if (sharedReset) restored.push(action.target.credentialId);
-				if (leftPool) {
-					// Never attempted: the episode and cooldown stay free if the pool allows it again.
-					poolLimited = true;
+				if (dropped) {
+					// Never attempted: the episode and cooldown stay free for a later pass.
 					coordinator.attemptedKeys.delete(action.attemptKey);
 					if (previousAttemptAt === undefined) coordinator.lastAttemptAtByAccount.delete(action.accountKey);
 					else coordinator.lastAttemptAtByAccount.set(action.accountKey, previousAttemptAt);
-					logger.debug(`${source}: restore dropped, account left the session's pool`, {
+					if (dropped === "cancelled") {
+						cancelled = true;
+						break;
+					}
+					poolLimited = true;
+					logger.debug(`${source}: action dropped, account outside the session's pool`, {
 						account: action.accountKey,
 					});
 				}
@@ -12926,10 +12944,13 @@ export class AgentSession implements SettingsScope {
 			}
 		}
 		if (restored.length > 0) void this.fetchUsageReports();
-		return { restoredCredentialIds: restored, poolLimited };
+		return { restoredCredentialIds: restored, poolLimited, cancelled };
 	}
 
-	async #maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult> {
+	async #maybeAutoRedeemReset(
+		activeBlockUnblockAtMs?: number,
+		beforeTakeover?: { signal: AbortSignal },
+	): Promise<ResetRecoveryResult> {
 		const provider = this.model?.provider;
 		if (provider !== "anthropic" && provider !== "openai-codex") return { restored: false };
 		const cfg = (provider === "anthropic" ? cfgClaudeResets : cfgCodexResets).get(this.settings);
@@ -12942,17 +12963,19 @@ export class AgentSession implements SettingsScope {
 		const accountKey = `${provider}|${identity?.orgId?.trim().toLowerCase() ?? "-"}|${identityValue}`;
 		// A pass plans within its own session's account pool. A session joining it
 		// keeps its outcome only if the pass restored an account this session may
-		// use, or restored nothing without its pool excluding a candidate.
+		// use, or restored nothing without its pool excluding a candidate or its
+		// caller cancelling it.
 		let existing = coordinator.inFlightByAccount.get(accountKey);
 		while (existing) {
 			const shared = await existing;
 			const serves = shared.restored
 				? shared.restoredCredentialIds?.some(id => authStorage.sessions.permits(provider, this.sessionId, id))
-				: !shared.poolLimited;
+				: !shared.poolLimited && !shared.cancelled;
 			if (serves) return shared;
 			existing = coordinator.inFlightByAccount.get(accountKey);
 		}
 
+		const signal = beforeTakeover?.signal;
 		const run = (async (): Promise<ResetRecoveryResult> => {
 			let reports: UsageReport[] | null = null;
 			if (provider === "openai-codex") {
@@ -12961,7 +12984,11 @@ export class AgentSession implements SettingsScope {
 			}
 			// Claude's live reset listing includes the same response's quota
 			// windows; a second broker usage poll adds no evidence and can 429.
-			const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), provider);
+			const listingTimeout = AbortSignal.timeout(10_000);
+			const statuses = await this.listResetCredits(
+				signal ? AbortSignal.any([signal, listingTimeout]) : listingTimeout,
+				provider,
+			);
 			const plan =
 				provider === "anthropic"
 					? this.#planClaudeResets("blocked", reports, statuses, coordinator, activeBlockUnblockAtMs)
@@ -12972,8 +12999,16 @@ export class AgentSession implements SettingsScope {
 							coordinator,
 							activeBlockUnblockAtMs,
 						);
-			const poolLimited = plan.skipped.some(skip => skip.reason === "outside-account-pool");
-			if (plan.actions.length === 0) {
+			// While a sibling could take over, spend only within the session's
+			// account pool, salvage included.
+			const actions = beforeTakeover
+				? plan.actions.filter(action =>
+						authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId),
+					)
+				: plan.actions;
+			const poolLimited =
+				actions.length < plan.actions.length || plan.skipped.some(skip => skip.reason === "outside-account-pool");
+			if (actions.length === 0) {
 				const adoptedId = await this.#adoptRecentReset(statuses, coordinator);
 				if (adoptedId !== undefined) return { restored: true, restoredCredentialIds: [adoptedId] };
 				let retryAfterMs: number | undefined;
@@ -12989,18 +13024,23 @@ export class AgentSession implements SettingsScope {
 			}
 			if (
 				shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
-				!(await this.#confirmAutoRedeem(provider, plan.actions, coordinator))
+				!(await this.#confirmAutoRedeem(provider, actions, coordinator, signal))
 			) {
-				return { restored: false, poolLimited };
+				return { restored: false, poolLimited, cancelled: signal?.aborted === true };
 			}
-			const executed = await this.#executeResetActions(provider, plan.actions, coordinator);
+			const executed = await this.#executeResetActions(provider, actions, coordinator, {
+				signal,
+				poolOnly: beforeTakeover !== undefined,
+			});
 			return {
 				restored: executed.restoredCredentialIds.length > 0,
 				restoredCredentialIds: executed.restoredCredentialIds,
 				poolLimited: poolLimited || executed.poolLimited,
+				cancelled: executed.cancelled,
 			};
 		})()
 			.catch((error): ResetRecoveryResult => {
+				if (signal?.aborted) return { restored: false, cancelled: true };
 				logger.warn("auto-reset: blocked pass failed", { provider, account: accountKey, error: String(error) });
 				return { restored: false };
 			})
@@ -13010,12 +13050,21 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Whether the stream should leave a usage-limited request's sibling takeover
+	 * to turn recovery, so a saved reset can be spent first: recovery will still
+	 * handle the failure (retries on, budget left) and the takeover check holds.
+	 */
+	async shouldDeferUsageLimitTakeover(model: Model, signal?: AbortSignal): Promise<boolean> {
+		return this.#recovery.canRecoverUsageLimit() && (await this.#shouldRedeemBeforeTakeover(model, signal));
+	}
+
+	/**
 	 * Whether a usage limit on `model` should try a saved reset before a sibling
 	 * takes over: the provider's `restoreBeforeReserve` and auto-redeem are on,
 	 * and every other account this session may use that could take over is
 	 * inside its usage reserve.
 	 */
-	async shouldRedeemBeforeTakeover(model: Model | undefined, signal?: AbortSignal): Promise<boolean> {
+	async #shouldRedeemBeforeTakeover(model: Model | undefined, signal?: AbortSignal): Promise<boolean> {
 		const provider = model?.provider;
 		if (!model || (provider !== "anthropic" && provider !== "openai-codex")) return false;
 		const cfg = (provider === "anthropic" ? cfgClaudeResets : cfgCodexResets).get(this.settings);
