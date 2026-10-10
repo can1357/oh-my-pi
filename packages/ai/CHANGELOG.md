@@ -2,15 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `reserveMarginFraction` to model usage health options, raising every account's reserve threshold by that margin for one check
+
 ## [18.8.7] - 2026-10-09
 
 ### Added
 
 - Added routing-session cleanup for OpenAI Responses and Codex while preserving shared provider fallbacks ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
-
-### Added
-
-- Added `reserveMarginFraction` to model usage health options, raising every account's reserve threshold by that margin for one check
 
 ### Fixed
 
