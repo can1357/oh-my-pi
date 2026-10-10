@@ -10,6 +10,7 @@ import { describeMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "./
 import { createHttpTransport } from "./transports/http";
 import { LegacySseConnectionTimeoutError, createSseTransport } from "./transports/sse";
 import { createStdioTransport } from "./transports/stdio";
+import { applyMCPToolFilter, filterMCPTools } from "./tool-filter";
 import type {
 	MCPGetPromptParams,
 	MCPGetPromptResult,
@@ -243,10 +244,32 @@ export async function listTools(
 		cursor = result.nextCursor;
 	} while (cursor);
 
-	// Cache tools
-	connection.tools = allTools;
+	// Filter advertised tools at reception boundary
+	const filteredTools = applyMCPToolFilter(connection.name, allTools, connection.config);
 
-	return allTools;
+	// Cache tools
+	connection.tools = filteredTools;
+	// Reception diagnostics for `/mcp test`: unmatched entries (both sides) plus the
+	// excluded count. Computed from the raw advertised names — the filtered list
+	// alone cannot distinguish a deny that matched from a typo that matched
+	// nothing. Compile cache makes the second pass cheap; runs only when a
+	// filter is configured.
+	if (connection.config.enabledTools?.length || connection.config.disabledTools?.length) {
+		const { unmatched, unmatchedDisabled } = filterMCPTools({
+			toolNames: allTools.map(t => t.name),
+			enabledTools: connection.config.enabledTools,
+			disabledTools: connection.config.disabledTools,
+		});
+		connection.lastFilterDiagnostics = {
+			unmatched,
+			unmatchedDisabled,
+			excluded: allTools.length - filteredTools.length,
+		};
+	} else {
+		connection.lastFilterDiagnostics = undefined;
+	}
+
+	return filteredTools;
 }
 
 /**

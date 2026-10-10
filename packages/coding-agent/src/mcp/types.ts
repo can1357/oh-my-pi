@@ -100,6 +100,19 @@ interface MCPServerConfigBase {
 		/** `prompt` param for the authorization request (default "consent"; "" to omit) */
 		prompt?: string;
 	};
+	/**
+	 * Per-server tool allowlist: only tools matching one entry are contributed
+	 * to the session. Entries are literal tool names or glob patterns (`*`,
+	 * `?`, `[...]`, `{a,b}`) matched over the raw advertised name and its
+	 * sanitized spelling. OMP-specific; only OMP-owned discovery providers
+	 * parse it.
+	 */
+	enabledTools?: string[];
+	/**
+	 * Per-server tool denylist: matching tools are excluded. When both filters
+	 * are set the denylist wins (deny subtracts from allow).
+	 */
+	disabledTools?: string[];
 }
 
 /** Stdio server configuration */
@@ -346,6 +359,8 @@ export interface MCPServerConnection {
 	capabilities: MCPServerCapabilities;
 	/** Cached tools (populated on demand) */
 	tools?: MCPToolDefinition[];
+	/** Last reception filter diagnostics (populated by `listTools` when filters are configured). */
+	lastFilterDiagnostics?: { unmatched: string[]; unmatchedDisabled: string[]; excluded: number };
 	/** Source metadata (for display) */
 	_source?: SourceMeta;
 	/** Cached resources (populated on demand) */

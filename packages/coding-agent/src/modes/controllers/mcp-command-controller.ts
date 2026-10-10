@@ -1757,6 +1757,16 @@ export class MCPCommandController {
 				`  Tools: ${tools.length}`,
 			];
 
+			// Surface filter diagnostics: an unmatched deny entry is silent at
+			// reception by design (defensive denies legitimately match nothing),
+			// so `/mcp test` is where a typo fails visibly instead of failing open.
+			const diagnostics = connection.lastFilterDiagnostics;
+			if (diagnostics && (diagnostics.excluded > 0 || diagnostics.unmatched.length > 0 || diagnostics.unmatchedDisabled.length > 0)) {
+				lines.push("");
+				lines.push(`  Filter: excluded ${diagnostics.excluded} tool${diagnostics.excluded === 1 ? "" : "s"}.`);
+				for (const entry of diagnostics.unmatched) lines.push(`    • "${entry}" matched no advertised tool (allowed list)`);
+				for (const entry of diagnostics.unmatchedDisabled) lines.push(`    • "${entry}" matched no advertised tool (deny list — typo fails open)`);
+			}
 			// Show tool names if there are any
 			if (tools.length > 0 && tools.length <= 10) {
 				lines.push("");

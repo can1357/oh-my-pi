@@ -8,6 +8,7 @@ import {
 	getConfigDirName,
 	getPluginsDir,
 	getProjectDir,
+	logger,
 	normalizePathForComparison,
 	parseFrontmatter,
 	tryParseJson,
@@ -16,6 +17,7 @@ import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
+import type { MCPServer } from "../capability/mcp";
 import {
 	MAIN_AGENT_RULE_NAME,
 	parseRuleAgents,
@@ -173,12 +175,113 @@ export function parseBoolean(value: unknown): boolean | undefined {
 }
 
 /**
+ * Coerce an MCP `enabled` value: booleans pass through, "true"/"1" and
+ * "false"/"0" (any case) coerce, everything else warns and stays undefined
+ * (fail-open). Warns with the raw configured value so a typo is diagnosable.
+ */
+export function parseMCPEnabled(serverName: string, rawValue: unknown, expandedValue: unknown): boolean | undefined {
+	if (expandedValue === undefined || expandedValue === null) return undefined;
+	if (typeof expandedValue === "boolean") return expandedValue;
+	if (typeof expandedValue === "string") {
+		const lower = expandedValue.toLowerCase();
+		if (lower === "false" || lower === "0") return false;
+		if (lower === "true" || lower === "1") return true;
+		logger.warn(`MCP server "${serverName}": invalid enabled value "${rawValue}", ignoring`);
+		return undefined;
+	}
+	logger.warn(`MCP server "${serverName}": invalid enabled type ${typeof rawValue}, ignoring`);
+	return undefined;
+}
+
+/**
+ * Coerce an MCP `timeout` value: finite non-negative numbers and numeric
+ * strings pass; anything else warns and stays undefined (fail-open).
+ */
+export function parseMCPTimeout(serverName: string, rawValue: unknown, expandedValue: unknown): number | undefined {
+	if (expandedValue === undefined || expandedValue === null) return undefined;
+	if (typeof expandedValue === "number") {
+		if (Number.isFinite(expandedValue) && expandedValue >= 0) return expandedValue;
+		logger.warn(`MCP server "${serverName}": invalid timeout ${rawValue}, ignoring`);
+		return undefined;
+	}
+	if (typeof expandedValue === "string") {
+		const parsed = Number(expandedValue);
+		if (expandedValue.length > 0 && Number.isFinite(parsed) && parsed >= 0) return parsed;
+		logger.warn(`MCP server "${serverName}": invalid timeout "${rawValue}", ignoring`);
+		return undefined;
+	}
+	logger.warn(`MCP server "${serverName}": invalid timeout type ${typeof rawValue}, ignoring`);
+	return undefined;
+}
+
+/**
  * Parse an MCP `requestIdFormat` value. Unrecognized values are dropped so a typo
  * degrades to the default integer ids rather than reaching a transport.
  */
 export function parseRequestIdFormat(value: unknown): MCPRequestIdFormat | undefined {
 	if (value === "string" || value === "number") return value;
 	return undefined;
+}
+/**
+ * Parse and validate an MCP `enabledTools` / `disabledTools` value: a strict
+ * array of non-empty strings. Strings are rejected (not CSV-split) so glob
+ * entries with commas like `"{create,delete}_*"` survive intact. Warns when
+ * the configured value is not a valid filter: non-array values (a typo like
+ * `"tool_a, tool_b"` or an object) would otherwise be silently dropped and
+ * the server would contribute ALL tools — the opposite of the allowlist
+ * intent, with no diagnostic. An empty array (`[]`) is valid and filters
+ * nothing (fail-open): it degrades to `undefined`, the same as an absent
+ * field, so the server contributes every tool. To exclude every tool,
+ * use `"*"` in `disabledTools` (or a never-matching entry such as
+ * `"__none__"` in `enabledTools`).
+ *
+ * Invalid values degrade to `undefined` (filter off) so a typo never breaks
+ * an otherwise usable server; the warning is the diagnostic.
+ */
+export function parseMCPToolFilterEntry(serverName: string, value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) {
+		if (value !== undefined) {
+			logger.warn(`MCP server "${serverName}": invalid tool filter value ${JSON.stringify(value)}, ignoring`);
+		}
+		return undefined;
+	}
+	const filtered = value.filter((item): item is string => typeof item === "string" && item.length > 0);
+	if (filtered.length === 0 && value.length > 0) {
+		// A non-empty array with no valid members degrades to "filter off"
+		// exactly like a non-array value: the server contributes EVERY tool —
+		// the allowlist's fail-open direction, so warn like the non-array case.
+		logger.warn(`MCP server "${serverName}": tool filter array has no valid entries, ignoring`, {
+			value,
+		});
+		return undefined;
+	}
+	return filtered.length > 0 ? filtered : undefined;
+}
+
+/**
+ * Parse both per-server tool filters in one step, for spreading into an
+ * `MCPServer` object: `...parseMCPToolFilters(name, config)`. Undefined
+ * members are omitted, so the spread adds only configured filters.
+ */
+const NEAR_MISS_FILTER_KEYS = ["enabledTool", "enableTools", "disableTools", "disabledTool", "enable_tools", "disable_tools"];
+export function parseMCPToolFilters(
+	serverName: string,
+	config: { enabledTools?: unknown; disabledTools?: unknown },
+): Pick<MCPServer, "enabledTools" | "disabledTools"> {
+	for (const key of NEAR_MISS_FILTER_KEYS) {
+		if ((config as Record<string, unknown>)[key] !== undefined) {
+			logger.warn(
+				`MCP server "${serverName}": unknown filter key "${key}" — did you mean "${key.startsWith("disable") || key.startsWith("disabled") ? "disabledTools" : "enabledTools"}"? All tools load until it is fixed.`,
+			);
+			break;
+		}
+	}
+	const enabledTools = parseMCPToolFilterEntry(serverName, config.enabledTools);
+	const disabledTools = parseMCPToolFilterEntry(serverName, config.disabledTools);
+	return {
+		...(enabledTools !== undefined && { enabledTools }),
+		...(disabledTools !== undefined && { disabledTools }),
+	};
 }
 
 /**
