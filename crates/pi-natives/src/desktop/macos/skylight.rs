@@ -768,6 +768,11 @@ pub(super) fn front_window_context() -> Option<(pid_t, u32)> {
 	Some((pid, ax::key_window_id(pid)?))
 }
 
+/// The front process's pid as `WindowServer` reports it.
+pub(super) fn front_pid() -> Option<pid_t> {
+	front_process(FOREGROUND.as_ref()?.get_front)?.pid
+}
+
 /// Whether the target already is the key window of the front process.
 fn preserves_exact_existing_focus(
 	previous: Option<ProcessSerialNumber>,

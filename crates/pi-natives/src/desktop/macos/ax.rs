@@ -796,8 +796,13 @@ fn replace_native_text(element: &AXUIElement, text: &str) -> CoreResult<bool> {
 		return Ok(false);
 	}
 	// An unfocused Cocoa field has no field editor, so it publishes no
-	// settable selection until it is focused.
+	// settable selection until it is focused. Focus moves only inside a
+	// background app: in the front app it would move the user's caret.
 	if copy_bool(element, "AXFocused") != Some(true) {
+		let pid = element_pid(element)?;
+		if skylight::front_pid().is_none_or(|front| front == pid) {
+			return Ok(false);
+		}
 		let attribute = CFString::from_str("AXFocused");
 		// SAFETY: The singleton CFBoolean and retained element remain valid
 		// for the synchronous setter call.
