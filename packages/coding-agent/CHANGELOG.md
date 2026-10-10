@@ -510,6 +510,7 @@
 - Added `contextFiles.extra` to load extra instruction files, such as `AGENTS.local.md`, beside the usual context file ([#15147](https://github.com/can1357/oh-my-pi/pull/15147) by [@Shadorain](https://github.com/Shadorain)).
 - `/annotate` opens the note you are writing, a file or typed-prompt source, or (for local diff reviews) the current working-tree file in `$VISUAL` or `$EDITOR` with the external-editor key (Ctrl+G by default); a file source is saved back and its notes follow the edited text ([#15151](https://github.com/can1357/oh-my-pi/pull/15151) by [@Shadorain](https://github.com/Shadorain))
 - Added `codexResets.restoreBeforeReserve` and `claudeResets.restoreBeforeReserve` (off by default) to spend a blocked account's saved reset before the turn moves to an account inside its usage reserve, such as a `reservePct: 100` backup or a Codex account on paid credits
+- Added `codexResets.restoreBeforeReserve` and `claudeResets.restoreBeforeReserve` (off by default) to spend a blocked account's saved reset before the turn moves to an account inside its usage reserve, such as a `reservePct: 100` backup or a Codex account on paid credits ([#15130](https://github.com/can1357/oh-my-pi/pull/15130) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
