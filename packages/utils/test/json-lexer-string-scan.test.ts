@@ -47,12 +47,16 @@ describe("JsonLexer string scan", () => {
 			stableLen: prefix.length,
 			complete: false,
 		});
-		expect(parseStreamingJson(`{"text":"${prefix}\\uD83D\\uDE00"}`)).toEqual({ text: `${prefix}😀` });
+		expect(parseStreamingJson<{ text: string }>(`{"text":"${prefix}\\uD83D\\uDE00"}`)).toEqual({
+			text: `${prefix}😀`,
+		});
 	});
 
 	it("preserves inner quote recovery and following fields after a long run", () => {
 		const prefix = "x".repeat(128);
-		expect(parseStreamingJson(`{"text":"${prefix}say "hello" again", "next": 1}`)).toEqual({
+		expect(
+			parseStreamingJson<{ text: string; next: number }>(`{"text":"${prefix}say "hello" again", "next": 1}`),
+		).toEqual({
 			text: `${prefix}say "hello" again`,
 			next: 1,
 		});
