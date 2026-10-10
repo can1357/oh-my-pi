@@ -17,6 +17,8 @@
 
 ### Added
 
+- Added Mistral to `/login` with an API-key flow that validates against `https://api.mistral.ai/v1/models`, so `MISTRAL_API_KEY` no longer has to come from the environment
+- Added Google Cloud partner-model pricing for Claude Opus 5.5 and Sonnet 5.5 on Google Antigravity ([#14195](https://github.com/can1357/oh-my-pi/pull/14195) by [@eggpeat](https://github.com/eggpeat)).
 - Added prompt-cache lookback support for Claude models across all hosts, including the public `prompt-cache-lookback` catalog axis and `resolvePromptCacheLookback` API.
 
 ### Fixed
