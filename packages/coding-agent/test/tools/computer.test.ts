@@ -32,7 +32,7 @@ import type {
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
 
-import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgComputerBackgroundFallback, cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 /** Method name of the last step in a facade call chain, or "" when the chain is malformed. */
 function terminalMethod(chain: unknown): string {
@@ -307,13 +307,17 @@ class MemoryTransport implements ComputerWorkerTransport {
 	}
 }
 
-const snapshot = (readOnly = false): ComputerSessionSnapshot => ({
+const snapshot = (
+	readOnly = false,
+	backgroundFallback: ComputerSessionSnapshot["backgroundFallback"] = "takeover",
+): ComputerSessionSnapshot => ({
 	cwd: import.meta.dir,
 	sessionId: crypto.randomUUID(),
 	captureMaxWidth: 1280,
 	captureMaxHeight: 896,
 	display: "active",
 	readOnly,
+	backgroundFallback,
 });
 
 async function runWorker(
@@ -1880,5 +1884,138 @@ describe("computer supervisor recovery", () => {
 		const direct = await supervisor.capabilities(snapshot(true));
 		expect(direct).toEqual(capabilities);
 		await supervisor.close();
+	});
+});
+
+describe("computer background fallback", () => {
+	const reason = "window 42 (Wish) reads the hardware pointer for button presses; nothing was sent";
+	const clickTarget = 'await (await desktop.window("42")).click(1, 2)';
+
+	/** Refuses background clicks the way the native backend does; a takeover click moves focus to `focusAfterTakeover`. */
+	class RefusingSession extends FakeNativeSession {
+		readonly sent: Array<PointerOptions | null | undefined> = [];
+		refusal = `BackgroundUnavailable: ${reason}`;
+		focusedPid = 300;
+		focusAfterTakeover = 300;
+
+		override async listWindows(): Promise<DesktopWindow[]> {
+			return [
+				{ ...windowFixture, id: "42", app: "Wish", pid: 200, focused: this.focusedPid === 200 },
+				{ ...windowFixture, id: "7", app: "Notes", pid: 300, focused: this.focusedPid === 300 },
+				{ ...windowFixture, id: "9", app: "Mail", pid: 400, focused: this.focusedPid === 400 },
+			];
+		}
+
+		override async click(_target: string, _x: number, _y: number, opts?: PointerOptions | null): Promise<void> {
+			this.sent.push(opts);
+			if (opts?.takeover !== true) throw new Error(this.refusal);
+			this.focusedPid = this.focusAfterTakeover;
+		}
+	}
+
+	async function run(
+		native: NativeDesktopSession,
+		code: string,
+		backgroundFallback: ComputerSessionSnapshot["backgroundFallback"],
+	): Promise<Extract<ComputerWorkerOutbound, { type: "result" }>> {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const id = crypto.randomUUID();
+		transport.inbound({ type: "run", id, code, timeoutMs: 2_000, session: snapshot(false, backgroundFallback) });
+		const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+		if (message.type !== "result") throw new Error(`Expected computer result, received ${message.type}`);
+		return message;
+	}
+
+	function texts(result: Extract<ComputerWorkerOutbound, { type: "result" }>): string[] {
+		if (!result.ok) throw new Error(`run failed: ${result.error.message}`);
+		return result.payload.displays.flatMap(block => (block.type === "text" ? [block.text] : []));
+	}
+
+	it("reads computer.backgroundFallback on every call, with a session override above the configured value", async () => {
+		const seen: string[] = [];
+		const invoke = async (session: ToolSession) => {
+			const prelude = createComputerPrelude(session, () => ({
+				async run(_code, _timeoutMs, runSnapshot) {
+					seen.push(runSnapshot.backgroundFallback);
+					return { displays: [], returnValue: undefined, screenshots: [] };
+				},
+				async capabilities() {
+					return capabilities;
+				},
+				async close() {},
+			}));
+			await prelude.invoke({ action: "run", code: "1" }, { session, toolCallId: crypto.randomUUID() });
+		};
+		await invoke(toolSession());
+		const configured: ToolSession = {
+			...toolSession(),
+			settings: Settings.isolated({ "computer.enabled": true, "computer.backgroundFallback": "refuse" }),
+		};
+		await invoke(configured);
+		cfgComputerBackgroundFallback.override(configured.settings, "takeover");
+		await invoke(configured);
+		expect(seen).toEqual(["takeover", "refuse", "takeover"]);
+	});
+
+	it("reruns a refused background call once in takeover and says so, naming the app focus returned to", async () => {
+		const native = new RefusingSession();
+		const result = await run(native, clickTarget, "takeover");
+		expect(texts(result)).toEqual([`click ran in takeover because ${reason}; focus returned to Notes`]);
+		expect(native.sent).toEqual([{}, { takeover: true, returnFocus: true }]);
+
+		// Negative control: an error other than BackgroundUnavailable is never rerun.
+		const failing = new RefusingSession();
+		failing.refusal = "InputFailed: window 42 rejected the event";
+		const failed = await run(failing, clickTarget, "takeover");
+		expect(failed.ok).toBe(false);
+		if (failed.ok) return;
+		expect(failed.error.message).toBe("InputFailed: window 42 rejected the event");
+		expect(failing.sent).toHaveLength(1);
+	});
+
+	it("refuses without a takeover under refuse, and tells the model so without suggesting one", async () => {
+		const native = new RefusingSession();
+		const result = await run(native, clickTarget, "refuse");
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.message).toBe(
+			`BackgroundUnavailable: ${reason}; computer.backgroundFallback is "refuse", so no takeover happened`,
+		);
+		expect(result.error.message).not.toContain("takeover:");
+		expect(native.sent).toEqual([{}]);
+		expect(native.focusedPid).toBe(300);
+	});
+
+	it("leaves an explicit takeover to the model: true takes over under refuse, false never falls back", async () => {
+		const forced = new RefusingSession();
+		const result = await run(forced, 'await (await desktop.window("42")).click(1, 2, { takeover: true })', "refuse");
+		expect(texts(result)).toEqual([]);
+		expect(forced.sent).toEqual([{ takeover: true }]);
+
+		const background = new RefusingSession();
+		const refused = await run(
+			background,
+			'await (await desktop.window("42")).click(1, 2, { takeover: false })',
+			"takeover",
+		);
+		expect(refused.ok).toBe(false);
+		if (refused.ok) return;
+		expect(refused.error.message).toBe(`BackgroundUnavailable: ${reason}`);
+		expect(background.sent).toEqual([{ takeover: false }]);
+	});
+
+	it("reports where focus actually ended instead of assuming it returned", async () => {
+		const switched = new RefusingSession();
+		switched.focusAfterTakeover = 400;
+		expect(texts(await run(switched, clickTarget, "takeover"))).toEqual([
+			`click ran in takeover because ${reason}; focus is on Mail, which became active during the action; it was left there`,
+		]);
+
+		const stuck = new RefusingSession();
+		stuck.focusAfterTakeover = 200;
+		expect(texts(await run(stuck, clickTarget, "takeover"))).toEqual([
+			`click ran in takeover because ${reason}; focus stayed on Wish; it did not return to Notes`,
+		]);
 	});
 });
