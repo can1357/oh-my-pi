@@ -10,7 +10,11 @@ const DAY = 24 * HOUR;
 export function formatDuration(ms: number): string {
 	if (!Number.isFinite(ms) || ms <= 0) return "0ms";
 	if (ms < SEC) return `${Math.floor(ms)}ms`;
-	if (ms < MIN) return `${(ms / SEC).toFixed(1)}s`;
+	if (ms < MIN) {
+		// Round to tenths first: `toFixed(1)` alone turns 59.95s+ into an impossible `60.0s`.
+		const tenths = Math.round(ms / 100);
+		return tenths < 600 ? `${(tenths / 10).toFixed(1)}s` : "1m";
+	}
 	if (ms < HOUR) {
 		const mins = Math.floor(ms / MIN);
 		const secs = Math.floor((ms % MIN) / SEC);
