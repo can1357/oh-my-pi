@@ -38,6 +38,12 @@ darwin_helper(
     minimum_macos = "14.0",
 )
 
+darwin_helper(
+    name = "keymap_darwin_helper",
+    src = "src/desktop/macos/keymap-helper.m",
+    frameworks = ["Carbon"],
+)
+
 # Apple Foundation Models bridge (src/applefm/build-bridge.sh): a bridge.swift
 # dylib built with the //bazel/toolchains/swift toolchain (host Xcode on mac
 # exec hosts, pinned swift.org Swift + @macos_sdk on linux ones), else an empty
@@ -101,6 +107,7 @@ rust_shared_library(
             ":applefm_bridge",
             ":oauth_callback_darwin_helper",
             ":capture_darwin_helper",
+            ":keymap_darwin_helper",
         ],
         "//conditions:default": [":oauth_callback_relay"],
     }),
@@ -113,6 +120,7 @@ rust_shared_library(
             "OMP_OAUTH_DARWIN_HELPER": "$(execpath :oauth_callback_darwin_helper)",
             "OMP_SYNTAX_SET": "$(execpath :syntax_set)",
             "OMP_CAPTURE_DARWIN_HELPER": "$(execpath :capture_darwin_helper)",
+            "OMP_KEYMAP_DARWIN_HELPER": "$(execpath :keymap_darwin_helper)",
         },
         "//conditions:default": {
             "OMP_OAUTH_RELAY_BINARY": "$(execpath :oauth_callback_relay)",

@@ -2,9 +2,17 @@
 //! text reaches applications that read a key event's key code rather than
 //! the Unicode text it carries.
 
-use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
+use std::{
+	collections::HashMap,
+	process::{Command, Stdio},
+	time::{Duration, Instant},
+};
 
-use objc2_core_foundation::{CFData, CFRetained, CFString, CFType};
+use super::super::{
+	control,
+	error::{CoreResult, DesktopError},
+	native_helper::HelperDirectory,
+};
 
 /// A key, with the modifiers held around it, that types one character.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,12 +37,15 @@ const SHIFT_STATE: u32 = 0x02;
 const OPTION_STATE: u32 = 0x08;
 const KEY_ACTION_DOWN: u16 = 0;
 
-#[link(name = "Carbon", kind = "framework")]
+/// Writes the current layout's keyboard type and `uchr` data to a file.
+const HELPER: &[u8] = include_bytes!(env!("OMP_KEYMAP_DARWIN_HELPER"));
+/// The helper's exit status for a layout without Unicode key layout data.
+const NO_LAYOUT_DATA: i32 = 3;
+const HELPER_TIMEOUT: Duration = Duration::from_secs(5);
+const HELPER_POLL: Duration = Duration::from_millis(2);
+
+#[link(name = "CoreServices", kind = "framework")]
 unsafe extern "C" {
-	static kTISPropertyUnicodeKeyLayoutData: &'static CFString;
-	fn TISCopyCurrentKeyboardLayoutInputSource() -> *mut CFType;
-	fn TISGetInputSourceProperty(source: &CFType, key: &CFString) -> *const c_void;
-	fn LMGetKbdType() -> u8;
 	fn UCKeyTranslate(
 		layout: *const u8,
 		code: u16,
@@ -51,31 +62,24 @@ unsafe extern "C" {
 
 impl Keymap {
 	/// The map of the current keyboard layout; `None` when the layout
-	/// publishes no Unicode key layout data. Text Input Sources calls must not
-	/// overlap; every caller holds the desktop input lock.
-	pub(super) fn current() -> Option<Self> {
-		// SAFETY: The copy follows the create rule, so `CFRetained` owns it.
-		let source =
-			unsafe { CFRetained::from_raw(NonNull::new(TISCopyCurrentKeyboardLayoutInputSource())?) };
-		// SAFETY: `source` is a live input source and the key is a framework
-		// constant; the property follows the get rule and lives with `source`.
-		let data = unsafe { TISGetInputSourceProperty(&source, kTISPropertyUnicodeKeyLayoutData) };
-		// SAFETY: `kTISPropertyUnicodeKeyLayoutData` is documented as a CFData.
-		let data = unsafe { data.cast::<CFData>().as_ref()? };
-		let layout = data.byte_ptr();
-		// SAFETY: A plain getter with no preconditions.
-		let keyboard_type = u32::from(unsafe { LMGetKbdType() });
-		Some(Self::build(|code, modifiers| {
+	/// publishes no Unicode key layout data. Text Input Sources asserts that
+	/// it runs on the main queue, which the desktop worker thread is not, so
+	/// a helper process reads the layout.
+	pub(super) fn current() -> CoreResult<Option<Self>> {
+		let Some((keyboard_type, layout)) = current_layout()? else {
+			return Ok(None);
+		};
+		Ok(Some(Self::build(|code, modifiers| {
 			// Dead-key processing stays on, so a dead key yields no character and
 			// never maps: posted alone it would accent the next character instead.
 			let mut dead_key_state = 0;
 			let mut characters = [0u16; 4];
 			let mut length = 0;
-			// SAFETY: `layout` points into `data`, which `source` keeps alive for
-			// this call, and every out-pointer is valid for the stated capacity.
+			// SAFETY: `layout` holds the layout's `uchr` data for the whole call,
+			// and every out-pointer is valid for the stated capacity.
 			let status = unsafe {
 				UCKeyTranslate(
-					layout,
+					layout.as_ptr().cast::<u8>(),
 					code,
 					KEY_ACTION_DOWN,
 					modifiers,
@@ -90,7 +94,7 @@ impl Keymap {
 			(status == 0)
 				.then(|| single_char(&characters[..length.min(characters.len())]))
 				.flatten()
-		}))
+		})))
 	}
 
 	/// Keeps, per character, the first key that types it, trying no
@@ -120,6 +124,60 @@ impl Keymap {
 	pub(super) fn stroke(&self, character: char) -> Option<Keystroke> {
 		self.strokes.get(&character).copied()
 	}
+}
+
+/// The current layout's keyboard type and `uchr` data, read by the helper;
+/// `None` when the layout has no Unicode key layout data. The data is kept in
+/// 4-byte words because `UCKeyTranslate` reads aligned table fields.
+fn current_layout() -> CoreResult<Option<(u32, Vec<u32>)>> {
+	let failed = |error: &dyn std::fmt::Display| {
+		DesktopError::input_failed(format!("cannot read the keyboard layout: {error}"))
+	};
+	let directory = HelperDirectory::create("omp-keymap")?;
+	let executable = directory.write("omp-keymap-helper", HELPER, 0o700)?;
+	let output = directory.write("layout", &[], 0o600)?;
+	let mut child = Command::new(executable)
+		.arg(&output)
+		.stdin(Stdio::null())
+		.stdout(Stdio::null())
+		.stderr(Stdio::null())
+		.spawn()
+		.map_err(|error| failed(&error))?;
+	let deadline = Instant::now() + HELPER_TIMEOUT;
+	let status = loop {
+		let polled = control::check().and_then(|()| {
+			if Instant::now() >= deadline {
+				return Err(DesktopError::timeout("the keyboard layout helper did not finish"));
+			}
+			child.try_wait().map_err(|error| failed(&error))
+		});
+		match polled {
+			Ok(Some(status)) => break status,
+			Ok(None) => std::thread::sleep(HELPER_POLL),
+			Err(error) => {
+				let _ = child.kill();
+				let _ = child.wait();
+				return Err(error);
+			},
+		}
+	};
+	match status.code() {
+		Some(0) => {},
+		Some(NO_LAYOUT_DATA) => return Ok(None),
+		_ => return Err(failed(&format!("helper exited with {status}"))),
+	}
+	let bytes = std::fs::read(&output).map_err(|error| failed(&error))?;
+	let (Some(header), Some(data)) = (bytes.get(..4), bytes.get(4..)) else {
+		return Err(failed(&"helper output is truncated"));
+	};
+	let keyboard_type = u32::from_le_bytes(header.try_into().expect("four header bytes"));
+	let mut layout = vec![0u32; data.len().div_ceil(4)];
+	for (word, chunk) in layout.iter_mut().zip(data.chunks(4)) {
+		let mut bytes = [0u8; 4];
+		bytes[..chunk.len()].copy_from_slice(chunk);
+		*word = u32::from_ne_bytes(bytes);
+	}
+	Ok(Some((keyboard_type, layout)))
 }
 
 const fn is_keypad(code: u16) -> bool {
@@ -189,7 +247,12 @@ mod tests {
 	#[test]
 	fn current_layout_types_space_on_the_space_bar() {
 		// Every layout types a space with the space bar, whatever its letters.
-		let keymap = Keymap::current().expect("current keyboard layout data");
+		// The lookup runs off the main thread, as on the desktop worker.
+		let keymap = std::thread::spawn(Keymap::current)
+			.join()
+			.expect("keymap thread")
+			.expect("keyboard layout helper")
+			.expect("current keyboard layout data");
 		assert_eq!(keymap.stroke(' '), Some(Keystroke { code: 49, shift: false, option: false }));
 	}
 }

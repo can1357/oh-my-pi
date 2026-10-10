@@ -114,6 +114,7 @@ class FakeNativeSession implements NativeDesktopSession {
 	readonly inputModes: boolean[] = [];
 	sourceWidth = 64;
 	sourceHeight = 32;
+	inputNotice: string | null = null;
 
 	async listDisplays(): Promise<DesktopDisplay[]> {
 		return [display];
@@ -166,6 +167,7 @@ class FakeNativeSession implements NativeDesktopSession {
 	}
 	async holdKeys(target: string, keys: string[], options: { duration: number }) {
 		this.operations.push(`holdKeys:${target}:${keys.join("+")}:${options.duration}`);
+		return this.inputNotice;
 	}
 	async holdMouse(target: string, x: number, y: number, options: { duration: number }) {
 		this.operations.push(`holdMouse:${target}:${x},${y}:${options.duration}`);
@@ -198,8 +200,12 @@ class FakeNativeSession implements NativeDesktopSession {
 		_dy: number,
 		_opts?: PointerOptions | null,
 	): Promise<void> {}
-	async typeText(_target: string, _text: string, _opts?: PointerOptions | null): Promise<void> {}
-	async keyChord(_target: string, _keys: string[], _opts?: PointerOptions | null): Promise<void> {}
+	async typeText(_target: string, _text: string, _opts?: PointerOptions | null) {
+		return this.inputNotice;
+	}
+	async keyChord(_target: string, _keys: string[], _opts?: PointerOptions | null) {
+		return this.inputNotice;
+	}
 	async raiseWindow(_windowId: string): Promise<void> {}
 	async axSnapshot(_target: string, _opts?: AxSnapshotOptions | null): Promise<{ text: string }> {
 		return { text: "- button [ref=e1]" };
@@ -1041,6 +1047,27 @@ describe("computer worker round trips", () => {
 		expect(result.payload.screenshots).toHaveLength(1);
 		expect(result.payload.screenshots[0]).toMatchObject({ width: 64, height: 32, target: "desktop" });
 		expect(result.payload.screenshots[0]?.path).toMatch(/omp-computer-.*\.png$/);
+	});
+
+	it("shows a native input notice in the run output", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		native.inputNotice = "warning: key press 2 may have been received modified";
+		new ComputerWorkerCore(transport, () => native);
+
+		for (const [id, code] of [
+			["type", 'await desktop.type("abc")'],
+			["press", 'await desktop.press("enter")'],
+			["hold", 'await desktop.holdKeys(["x"], { duration: 1 })'],
+		] as const) {
+			const result = await runWorker(transport, id, code);
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(result.payload.displays).toEqual([{ type: "text", text: native.inputNotice }]);
+		}
+		native.inputNotice = null;
+		const quiet = await runWorker(transport, "quiet", 'await desktop.type("abc")');
+		expect(quiet.ok && quiet.payload.displays).toEqual([]);
 	});
 
 	it("reports source dimensions when a screenshot is scaled", async () => {

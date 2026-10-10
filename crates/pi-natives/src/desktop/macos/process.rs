@@ -206,12 +206,29 @@ pub(super) enum RemoteScreen {
 	HidReports,
 }
 
-/// Whether `pid` shows a remote screen, judged by the Apple screen-sharing
-/// framework its executable links. Such a client forwards a key event's key
-/// code and ignores its Unicode text.
+/// Whether `pid` shows a remote screen. Such a client forwards a key event's
+/// key code and ignores its Unicode text.
 pub(super) fn remote_screen(pid: libc::pid_t) -> Option<RemoteScreen> {
-	let mut executable = File::open(executable_path(pid)?).ok()?;
-	remote_screen_linkage(&linked_dylibs(&mut executable)?)
+	let bundle = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+		.and_then(|app| app.bundleIdentifier())
+		.map(|bundle| bundle.to_string());
+	classify_remote_screen(bundle.as_deref(), || {
+		linked_dylibs(&mut File::open(executable_path(pid)?).ok()?)
+	})
+}
+
+/// Apple's own clients are known by bundle identifier, so an executable that
+/// cannot be read (replaced by an update, say) never hides them; any other
+/// application is judged by the Apple screen-sharing framework it links.
+fn classify_remote_screen(
+	bundle: Option<&str>,
+	linked_dylibs: impl FnOnce() -> Option<Vec<Vec<u8>>>,
+) -> Option<RemoteScreen> {
+	match bundle {
+		Some("com.apple.ScreenSharing") => Some(RemoteScreen::KeyEvents),
+		Some("com.apple.ScreenContinuity") => Some(RemoteScreen::HidReports),
+		_ => remote_screen_linkage(&linked_dylibs()?),
+	}
 }
 
 fn remote_screen_linkage(dylibs: &[Vec<u8>]) -> Option<RemoteScreen> {
@@ -451,6 +468,24 @@ mod tests {
 		let mut truncated = macho(NATIVE_CPU_TYPE, &[KIT]);
 		truncated.truncate(truncated.len() - 16);
 		assert_eq!(linked_dylibs(&mut std::io::Cursor::new(truncated)), None);
+	}
+
+	#[test]
+	fn apple_clients_are_remote_screens_even_when_their_executable_is_unreadable() {
+		let unreadable = || None;
+		assert_eq!(
+			classify_remote_screen(Some("com.apple.ScreenSharing"), unreadable),
+			Some(RemoteScreen::KeyEvents)
+		);
+		assert_eq!(
+			classify_remote_screen(Some("com.apple.ScreenContinuity"), unreadable),
+			Some(RemoteScreen::HidReports)
+		);
+		assert_eq!(classify_remote_screen(Some("com.example.Viewer"), unreadable), None);
+		assert_eq!(
+			classify_remote_screen(Some("com.example.Viewer"), || Some(vec![KIT.as_bytes().to_vec()])),
+			Some(RemoteScreen::HidReports)
+		);
 	}
 
 	#[test]
