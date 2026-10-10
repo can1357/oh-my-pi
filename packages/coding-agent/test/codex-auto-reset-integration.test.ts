@@ -5,6 +5,10 @@ import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { createAcpExtensionUiContext } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -13,6 +17,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import type { AgentSideConnection, CreateElicitationRequest } from "@oh-my-pi/pi-utils/acp";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { getTestModel } from "./helpers/model-fixtures";
 
@@ -108,7 +113,12 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		authStorage.close();
 	});
 
-	function buildSession(options: { accounts: CodexAccount[]; streamErrorFirst?: boolean }): {
+	function buildSession(options: {
+		accounts: CodexAccount[];
+		streamErrorFirst?: boolean;
+		/** Builds the session the way ACP does for a client with or without form elicitation. */
+		acpForm?: boolean;
+	}): {
 		session: AgentSession;
 		coordinator: CodexAutoRedeemCoordinator;
 		targets: ResetCreditTarget[];
@@ -159,6 +169,11 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 			settings,
 			modelRegistry,
 			codexResetCoordinator: coordinator,
+			extensionRunner:
+				options.acpForm === undefined
+					? undefined
+					: new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry),
+			interactivePrompts: options.acpForm,
 		});
 		sessions.push(session);
 		const notices: string[] = [];
@@ -166,6 +181,28 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 			if (event.type === "notice") notices.push(event.message);
 		});
 		return { session, coordinator, targets, notices };
+	}
+
+	/** Initializes extensions with ACP's elicitation-bridged UI context, installed whether or not the client can show forms. */
+	async function attachAcpClient(session: AgentSession, form: boolean): Promise<string[]> {
+		const elicitations: string[] = [];
+		const connection = {
+			unstable_createElicitation: async (request: CreateElicitationRequest) => {
+				elicitations.push(request.message);
+				return { action: "decline" };
+			},
+		} as unknown as AgentSideConnection;
+		await initializeExtensions(session, {
+			mode: "rpc",
+			reportSendError: () => {},
+			reportRuntimeError: () => {},
+			uiContext: createAcpExtensionUiContext(
+				connection,
+				() => session.sessionId,
+				form ? { elicitation: { form: {} } } : {},
+			),
+		});
+		return elicitations;
 	}
 
 	it("restores a blocked turn with a reset expiring within five minutes and continues", async () => {
@@ -237,5 +274,54 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		]);
 		expect(notices).toContainEqual(expect.stringContaining("auto-redeem is unset and no prompt UI is available"));
 		expect([...coordinator.attemptedKeys]).toEqual([expect.stringContaining("openai-codex|-|1|")]);
+	});
+
+	it("spends a reset about to expire for an ACP client without form elicitation", async () => {
+		const account = {
+			accountId: "acct-a",
+			credentialId: 1,
+			weeklyUsed: 1,
+			limitReached: true,
+			creditExpiresInMs: 4 * MINUTE,
+		};
+		const { session, targets, notices } = buildSession({
+			accounts: [account],
+			streamErrorFirst: true,
+			acpForm: false,
+		});
+		const elicitations = await attachAcpClient(session, false);
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("trigger a codex usage limit");
+		await session.waitForIdle();
+
+		// Extensions keep ACP's UI context; only the consent prompt knows it cannot reach anyone.
+		expect(session.extensionRunner?.hasUI()).toBe(true);
+		expect(elicitations).toEqual([]);
+		expect(targets).toEqual([
+			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
+		]);
+		expect(notices).toContainEqual(expect.stringContaining(`Spending a saved Codex reset for ${EMAIL}`));
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it("still asks an ACP client with form elicitation about a reset about to expire", async () => {
+		const account = {
+			accountId: "acct-a",
+			credentialId: 1,
+			weeklyUsed: 1,
+			limitReached: true,
+			creditExpiresInMs: 4 * MINUTE,
+		};
+		const { session, targets } = buildSession({ accounts: [account], streamErrorFirst: true, acpForm: true });
+		const elicitations = await attachAcpClient(session, true);
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("trigger a codex usage limit");
+		await session.waitForIdle();
+
+		expect(elicitations).toEqual([expect.stringContaining("Spend a saved Codex rate-limit reset?")]);
+		expect(targets).toEqual([]);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
 	});
 });
