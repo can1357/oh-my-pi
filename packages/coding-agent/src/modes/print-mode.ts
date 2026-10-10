@@ -376,11 +376,7 @@ async function runPrintModeCore(
 	// line, same ordering after dispose, without terminating the process here.
 	if (mode === "text" && terminalFailure && assistantMsg) {
 		const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
-		if (!process.stderr.write(`${errorLine}\n`)) {
-			const { promise, resolve } = Promise.withResolvers<void>();
-			process.stderr.once("drain", resolve);
-			await promise;
-		}
+		writeStderrLine(errorLine);
 	}
 
 	await stderrTail;

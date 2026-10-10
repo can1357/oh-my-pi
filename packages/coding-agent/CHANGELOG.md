@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Fixed `--print` mode hanging on exit instead of printing the final error line when stderr cannot take the write; the drain wait now also settles when the stream errors or closes ([#14825](https://github.com/can1357/oh-my-pi/pull/14825) by [@jchanghong023](https://github.com/jchanghong023)).
 - Fixed `/usage` (or clicking the status-line cost) while the usage dashboard was already open stacking a second dashboard on top; it now focuses the open one ([#15145](https://github.com/can1357/oh-my-pi/pull/15145) by [@H4vC](https://github.com/H4vC))
 - Fixed the custom-tool examples' full-documentation link opening a missing page ([#15076](https://github.com/can1357/oh-my-pi/pull/15076) by [@qingshungLI](https://github.com/qingshungLI))
 - Fixed the `/models` compaction limit preview and **Compacts at** row rounding fractional percentages (`12.5%` showed as `13%`) ([#15074](https://github.com/can1357/oh-my-pi/pull/15074) by [@H4vC](https://github.com/H4vC))
