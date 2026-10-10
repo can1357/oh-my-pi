@@ -163,11 +163,16 @@ const SHELL_PROMPT_OPERATOR_RE = /(?:^|\s)(?:&&|\|\||\||2>&1|[<>]{1,2})(?:\s|$)/
 const OMP_STATUS_LINE_RE = /^\s*in:\s+\d+\s+out:\s+\d+(?:\s+cache\s+\S+)?\s+t:\s+\S+\s+tok\/s:\s+\S+/m;
 
 /**
- * Read-only slash commands that also run from a focused subagent view, keyed by name to
- * a check on their arguments; every other command (and mutating forms such as
- * `/usage reset`, which spends a saved rate-limit reset) still needs the main session.
+ * Slash commands that also run from a focused subagent view, keyed by name to a check
+ * on their arguments; every other command (and mutating forms such as `/usage reset`,
+ * which spends a saved rate-limit reset) still needs the main session. `/advisor on|off`
+ * is the deliberate exception: it toggles the focused agent's own advisor (#15055).
  */
 const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
+	advisor: args => {
+		const { verb } = parseSubcommand(args);
+		return verb === "on" || verb === "off";
+	},
 	btw: () => true,
 	export: () => true,
 	usage: args => {
@@ -1429,7 +1434,8 @@ export class InputController {
 			const parsed = parseSlashCommand(text);
 			if (parsed && FOCUSED_VIEW_COMMANDS[parsed.name]?.(parsed.args)) {
 				// Viewer-scoped commands: /btw asks about the focused transcript, /export
-				// writes it (with its own subagents), /usage reports account-wide limits.
+				// writes it (with its own subagents), /usage reports account-wide limits,
+				// /advisor toggles the focused agent's own advisor.
 				this.#recordSlashCommandUsage(text);
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx })) === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
