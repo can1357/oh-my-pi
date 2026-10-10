@@ -803,8 +803,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#codexResetSnapshots = new Map<string, CodexResetUsageSnapshot>();
 	#onCodexResetFireworks: ((event: CodexResetFireworksEvent) => void) | undefined;
 	#onResetExpiryNotice: ((notice: string) => void) | undefined;
-	/** One saved-reset expiry warning per status line: later refreshes stay quiet. */
-	#resetExpiryNoticed = false;
+	/** Conversations already warned about expiring saved resets: later refreshes stay quiet. */
+	#resetExpiryNoticedSessions = new Set<string>();
 	// Context-usage memo. The status line redraws on every agent event, so the
 	// hot path must not recompute context tokens unless an input changed.
 	// `getContextUsage()` anchors on the last assistant's real prompt-token
@@ -2037,7 +2037,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#invalidateStatusLineRenderCache();
 			this.#onBranchChange?.();
 		}
-		this.#noticeResetExpiry(reports);
+		this.#noticeResetExpiry(session, reports);
 		if (!resetSnapshot) return;
 		const contextKey = this.#formatUsageContextKey(activeProvider, activeIdentity);
 		const previous = this.#codexResetSnapshots.get(contextKey);
@@ -2047,15 +2047,18 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (event) this.#onCodexResetFireworks?.(event);
 	}
 
-	#noticeResetExpiry(reports: unknown): void {
+	#noticeResetExpiry(session: TSession, reports: unknown): void {
+		// A focused subagent's view is not a conversation the user started; warn in their own.
 		if (
-			this.#resetExpiryNoticed ||
+			this.#focusedAgentId !== undefined ||
 			!this.#onResetExpiryNotice ||
 			!this.host.resetExpiryNotice ||
 			!Array.isArray(reports)
 		) {
 			return;
 		}
+		const sessionId = session.sessionManager.getSessionId();
+		if (this.#resetExpiryNoticedSessions.has(sessionId)) return;
 		// fetchUsageReports supplies normalized rows; keep only entries shaped like reports.
 		const usageReports = reports.filter(
 			(report): report is UsageReport =>
@@ -2067,7 +2070,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		);
 		const notice = this.host.resetExpiryNotice(usageReports, Date.now());
 		if (!notice) return;
-		this.#resetExpiryNoticed = true;
+		this.#resetExpiryNoticedSessions.add(sessionId);
 		this.#onResetExpiryNotice(notice);
 	}
 

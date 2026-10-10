@@ -304,8 +304,9 @@ import {
 } from "./async-job-delivery";
 import {
 	adoptRecentReset,
+	type ApprovedResetAction,
 	type AutoResetHost,
-	headlessConsentedActions,
+	headlessApprovals,
 	planClaudeResets,
 	planCodexResets,
 	redeemConsentedResets,
@@ -328,6 +329,7 @@ import {
 	defaultCodexAutoRedeemCoordinator,
 	effectiveAutoRedeemMode,
 	overlayLiveResetCredits,
+
 	SWEEP_MIN_INTERVAL_MS,
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
@@ -12563,18 +12565,24 @@ export class AgentSession implements SettingsScope {
 		provider: "openai-codex" | "anthropic",
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
-	): Promise<(CodexResetAction | ClaudeResetAction)[]> {
+	): Promise<ApprovedResetAction[]> {
 		const asked = actions.filter(action => shouldPromptCodexAutoRedeem(action.autoRedeem));
 		const first = asked[0];
-		if (!first) return actions;
-		const preapproved = actions.filter(action => !shouldPromptCodexAutoRedeem(action.autoRedeem));
+		const approve = (action: CodexResetAction | ClaudeResetAction): ApprovedResetAction => ({
+			action,
+			approval: shouldPromptCodexAutoRedeem(action.autoRedeem) ? "prompt-yes" : "auto-redeem-yes",
+		});
+		if (!first) return actions.map(approve);
+		const preapproved = actions.filter(action => !shouldPromptCodexAutoRedeem(action.autoRedeem)).map(approve);
 		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
 		const settingsKey = provider === "anthropic" ? "claudeResets.autoRedeem" : "codexResets.autoRedeem";
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
 		const runner = this.#extensionRunner;
 		if (!runner?.hasUI() || !this.#interactivePrompts) {
-			const approved = headlessConsentedActions(actions);
-			const waiting = asked.find(action => !approved.some(spend => spend.attemptKey === action.attemptKey));
+			const approved = headlessApprovals(actions);
+			const waiting = asked.find(
+				action => !approved.some(spend => spend.action.attemptKey === action.attemptKey),
+			);
 			if (waiting && !coordinator.notifiedKeys.has(waiting.attemptKey)) {
 				coordinator.notifiedKeys.add(waiting.attemptKey);
 				this.emitNotice(
@@ -12583,8 +12591,8 @@ export class AgentSession implements SettingsScope {
 					source,
 				);
 			}
-			for (const action of approved) {
-				if (!shouldPromptCodexAutoRedeem(action.autoRedeem)) continue;
+			for (const { action, approval } of approved) {
+				if (approval !== "headless-last-chance") continue;
 				this.emitNotice(
 					"info",
 					`Spending a saved ${providerLabel} reset for ${action.label} before it expires in ${formatDuration(action.expiresInMs ?? 0)}; auto-redeem is unset and no prompt UI is available. Set ${settingsKey} to no to let resets expire instead.`,
@@ -12628,7 +12636,7 @@ export class AgentSession implements SettingsScope {
 			if (choice === "Yes") {
 				if (provider === "anthropic") cfgClaudeResetsAutoRedeem.set(this.settings, "yes");
 				else cfgCodexResetsAutoRedeem.set(this.settings, "yes");
-				return actions;
+				return actions.map(approve);
 			}
 			if (choice === "No") {
 				if (provider === "anthropic") cfgClaudeResetsAutoRedeem.set(this.settings, "no");
@@ -12652,6 +12660,7 @@ export class AgentSession implements SettingsScope {
 			confirm: (provider, actions, coordinator) => this.#confirmAutoRedeem(provider, actions, coordinator),
 			onRedeemed: () => void this.fetchUsageReports(),
 		};
+
 	}
 
 	async #maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult> {
