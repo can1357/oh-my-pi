@@ -7,6 +7,7 @@ import {
 	type UsageLimit,
 	type UsageReport,
 	type UsageResetCredit,
+	type UsageResetCreditDetail,
 } from "@oh-my-pi/pi-ai";
 import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
 import {
@@ -125,8 +126,12 @@ function normalized(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
 }
 
-function reportMatchesStatus(report: UsageReport, status: ResetCreditAccountStatus): boolean {
-	if (report.provider !== CLAUDE_PROVIDER) return false;
+/** Whether a usage report belongs to a stored account: the organization gates, then account id, else email. */
+export function reportMatchesStatus(
+	report: UsageReport,
+	status: Pick<ResetCreditAccountStatus, "provider" | "orgId" | "accountId" | "email">,
+): boolean {
+	if (report.provider !== status.provider) return false;
 	const reportOrgId = normalized(report.metadata?.orgId);
 	const statusOrgId = normalized(status.orgId);
 	if (reportOrgId !== statusOrgId) return false;
@@ -154,6 +159,30 @@ function maxPlausibleRemainingMs(limitId: string, limit: UsageLimit | undefined)
 	const duration = limit?.window?.durationMs;
 	if (duration !== undefined && Number.isFinite(duration) && duration > 0) return duration + 3_600_000;
 	return limitId === FIVE_HOUR_LIMIT_ID ? MAX_PLAUSIBLE_FIVE_HOUR_MS : MAX_PLAUSIBLE_WEEKLY_MS;
+}
+
+/** Limits a grant restores: the ones it clears, and only the 5h window for a Juniper grant. */
+export function claudeCoveredLimits(limits: readonly UsageLimit[], credit: UsageResetCreditDetail): UsageLimit[] {
+	const clears = new Set(credit.clears ?? []);
+	return limits.filter(
+		limit => clears.has(limit.id) && (credit.program !== JUNIPER_PROGRAM || limit.id === FIVE_HOUR_LIMIT_ID),
+	);
+}
+
+/** The fullest covered limit by the report's or the grant's own used fraction: what a salvage spend restores. */
+export function fullestClaudeLimit(
+	covered: readonly UsageLimit[],
+	credit: UsageResetCreditDetail,
+): { limit: UsageLimit; used: number } | undefined {
+	let fullest: { limit: UsageLimit; used: number } | undefined;
+	for (const limit of covered) {
+		const resolved = resolveUsedFraction(limit);
+		const observed = resolved === undefined || !Number.isFinite(resolved) ? 0 : Math.max(0, resolved);
+		const server = credit.usedFractions?.[limit.id];
+		const used = Math.max(observed, typeof server === "number" && Number.isFinite(server) ? server : 0);
+		if (!fullest || used > fullest.used) fullest = { limit, used };
+	}
+	return fullest;
 }
 
 function claudeBlockedAttemptKey(
@@ -475,22 +504,12 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			skip("incomplete-coverage");
 			continue;
 		}
-		const covered = snapshot.limits.filter(
-			limit =>
-				clears.has(limit.id) && (snapshot.credit.program !== JUNIPER_PROGRAM || limit.id === FIVE_HOUR_LIMIT_ID),
-		);
+		const covered = claudeCoveredLimits(snapshot.limits, snapshot.credit);
 		if (covered.length === 0) {
 			skip("unsupported-window");
 			continue;
 		}
-		let fullest: { id: string; used: number } | undefined;
-		for (const limit of covered) {
-			const resolved = resolveUsedFraction(limit);
-			const observed = resolved === undefined || !Number.isFinite(resolved) ? 0 : Math.max(0, resolved);
-			const server = snapshot.credit.usedFractions?.[limit.id];
-			const used = Math.max(observed, typeof server === "number" && Number.isFinite(server) ? server : 0);
-			if (!fullest || used > fullest.used) fullest = { id: limit.id, used };
-		}
+		const fullest = fullestClaudeLimit(covered, snapshot.credit);
 		if (!fullest || (!imminent && fullest.used < SALVAGE_MIN_USED_FRACTION)) {
 			skip("window-mostly-free");
 			continue;
@@ -518,7 +537,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			label: snapshot.label,
 			availableCount: snapshot.availableCount,
 			expiresInMs: expiresAtMs - input.nowMs,
-			salvageWindow: fullest.id,
+			salvageWindow: fullest.limit.id,
 			salvageUsedFraction: fullest.used,
 			active: snapshot.active,
 			program: snapshot.credit.program ?? "",

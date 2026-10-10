@@ -217,7 +217,8 @@ function soonestCreditExpiryMs(
 
 type CodexChatWindow = "5h" | "weekly";
 
-interface CodexChatWindowSnapshot {
+export interface CodexChatWindowSnapshot {
+	limit: UsageLimit;
 	window: CodexChatWindow;
 	usedFraction: number | undefined;
 	resetsAt: number | undefined;
@@ -251,11 +252,42 @@ function classifyChatWindow(limit: UsageLimit, fallback: CodexChatWindow): Codex
 function snapshotChatWindow(limit: UsageLimit, fallback: CodexChatWindow): CodexChatWindowSnapshot {
 	const window = classifyChatWindow(limit, fallback);
 	return {
+		limit,
 		window,
 		usedFraction: limit.amount.usedFraction,
 		resetsAt: limit.window?.resetsAt,
 		plausibleMs: window === "weekly" ? MAX_PLAUSIBLE_WEEKLY_REMAINING_MS : MAX_PLAUSIBLE_PRIMARY_REMAINING_MS,
 	};
+}
+
+/** The 5h and weekly chat windows, selected by their stable limit ids. */
+function codexChatWindows(report: UsageReport): CodexChatWindowSnapshot[] {
+	const primary = report.limits.find(l => l.id === "openai-codex:primary");
+	const weekly = report.limits.find(l => l.id === "openai-codex:secondary");
+	const windows: CodexChatWindowSnapshot[] = [];
+	if (primary) windows.push(snapshotChatWindow(primary, "5h"));
+	if (weekly) windows.push(snapshotChatWindow(weekly, "weekly"));
+	return windows;
+}
+
+/** The fullest chat window with known usage: the one a salvage redeem restores. */
+function fullestChatWindow(windows: readonly CodexChatWindowSnapshot[]): CodexChatWindowSnapshot | undefined {
+	let fullest: CodexChatWindowSnapshot | undefined;
+	for (const window of windows) {
+		if (
+			window.usedFraction !== undefined &&
+			window.usedFraction >= 0 &&
+			(!fullest || window.usedFraction > (fullest.usedFraction ?? 0))
+		) {
+			fullest = window;
+		}
+	}
+	return fullest;
+}
+
+/** The chat window the `expiring-credit` rule measures for one Codex usage report. */
+export function fullestCodexChatWindow(report: UsageReport): CodexChatWindowSnapshot | undefined {
+	return fullestChatWindow(codexChatWindows(report));
 }
 
 function usedFractionForWindow(snapshot: AccountSnapshot, window: CodexChatWindow): number | undefined {
@@ -327,11 +359,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			skipped.push({ accountKey, rule: "account", reason: "no-credits" });
 			continue;
 		}
-		const primary = report.limits.find(l => l.id === "openai-codex:primary");
-		const weekly = report.limits.find(l => l.id === "openai-codex:secondary");
-		const windows: CodexChatWindowSnapshot[] = [];
-		if (primary) windows.push(snapshotChatWindow(primary, "5h"));
-		if (weekly) windows.push(snapshotChatWindow(weekly, "weekly"));
+		const windows = codexChatWindows(report);
 		const baseLabel = email ?? accountId ?? accountKey;
 		const label = orgId && orgId !== baseLabel ? `${baseLabel} (${orgId})` : baseLabel;
 		snapshots.push({
@@ -507,16 +535,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		// Broader salvage needs meaningful usage in either chat window. In the
 		// last five minutes, live credit eligibility outranks zero/unknown usage:
 		// let the provider decide whether there is anything left to restore.
-		let fullestWindow: CodexChatWindowSnapshot | undefined;
-		for (const window of snapshot.windows) {
-			if (
-				window.usedFraction !== undefined &&
-				window.usedFraction >= 0 &&
-				(!fullestWindow || window.usedFraction > (fullestWindow.usedFraction ?? 0))
-			) {
-				fullestWindow = window;
-			}
-		}
+		const fullestWindow = fullestChatWindow(snapshot.windows);
 		const salvageUsedFraction = fullestWindow?.usedFraction;
 		if (!imminent && (salvageUsedFraction === undefined || salvageUsedFraction < SALVAGE_MIN_USED_FRACTION)) {
 			skip("window-mostly-free");
