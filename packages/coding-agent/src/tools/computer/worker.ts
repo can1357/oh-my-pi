@@ -257,6 +257,8 @@ function guardRun(context: ComputerRunContext, method: string): void {
 type Fallback = { takeover: true; returnFocus: true };
 const FALLBACK: Fallback = { takeover: true, returnFocus: true };
 const BACKGROUND_UNAVAILABLE = "BackgroundUnavailable: ";
+/** A refusal's closing "nothing was sent", true of the refused background attempt only. */
+const UNSENT_CLAUSE = /(?:;|,? so) (?:nothing|no input) was sent$/;
 const RAISE_ROUTE = "Background input and screenshots reach a covered window, so no raise is needed.";
 
 /**
@@ -353,9 +355,10 @@ async function sendInput(
 			const message = rerun instanceof Error ? rerun.message : String(rerun);
 			throw new ToolError(`${method} fell back to takeover because ${reason}, and the takeover failed: ${message}`);
 		}
+		const focus = await focusReport(session, context.signal, report, target);
 		context.output.push({
 			type: "text",
-			text: `${method} ran in takeover because ${reason}; ${await focusReport(session, context.signal, report, target)}`,
+			text: `${method} ran in takeover because ${reason.replace(UNSENT_CLAUSE, "")}; the input was delivered, and ${focus}`,
 		});
 	}
 }
