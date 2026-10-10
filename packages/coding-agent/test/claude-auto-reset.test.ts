@@ -310,7 +310,9 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 				permitsCredential: credentialId => credentialId === 11,
 			}),
 		);
-		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: "anthropic|org-a|11", active: true }]);
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", accountKey: "anthropic|org-a|11", active: true },
+		]);
 		expect(plan.skipped).toContainEqual({
 			accountKey: "anthropic|org-b|22",
 			rule: "blocked-account",
