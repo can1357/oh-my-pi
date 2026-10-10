@@ -68,8 +68,12 @@ export interface JobsSheetSource {
 	load(): JobsPanelSnapshot;
 	/** The selected job's detail; runs once per frame, undefined once the job is gone. */
 	inspect(id: string): JobsPanelDetail | undefined;
-	/** Cancel a running job. */
-	cancel(id: string): void;
+	/**
+	 * Cancel a running job. Omitted by a read-only sheet — one whose jobs belong
+	 * to another session (a focused subagent view reads the main session's jobs) —
+	 * which lists them and offers no way to stop them.
+	 */
+	cancel?(id: string): void;
 	/** Dismiss the sheet. */
 	close(): void;
 }
@@ -98,7 +102,8 @@ const FALLBACK_TAIL_LINES = 8;
  * live pids, exit code, the full command and a tail-following output pane.
  * It re-reads the session every frame, so the caller re-renders it on a
  * timer while it is open. ↑/↓ select, X cancels the selected running job,
- * Esc or Close dismisses; nothing enters the transcript.
+ * Esc or Close dismisses; nothing enters the transcript. A source without
+ * `cancel` renders read-only: the same rows and detail, no Cancel action.
  */
 export class JobsSheet implements Component {
 	readonly nativeOverlay = {
@@ -137,7 +142,7 @@ export class JobsSheet implements Component {
 		const output = detail?.output;
 		if (this.#native?.key === key && this.#native.output === output) return this.#native.node;
 		const actions = [null, actionButton("Close", "close", { keys: "escape" })];
-		if (selected?.status === "running") {
+		if (this.#source.cancel && selected?.status === "running") {
 			actions.unshift(actionButton("Cancel job", "cancel", { keys: "x", tone: "error" }));
 		}
 		const described = col(
@@ -194,14 +199,14 @@ export class JobsSheet implements Component {
 		if (matchesSelectCancel(data)) this.#source.close();
 		else if (matchesSelectUp(data)) this.#move(-1);
 		else if (matchesSelectDown(data)) this.#move(1);
-		else if (matchesKey(data, "x")) this.#cancelSelected();
+		else if (this.#source.cancel && matchesKey(data, "x")) this.#cancelSelected();
 	}
 
 	/** Clicks select a row; Close and Cancel job run what Esc and X run. */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type === "select" || event.type === "activate") this.#selectedId = event.item;
 		else if (event.type === "action" && event.act === "close") this.#source.close();
-		else if (event.type === "action" && event.act === "cancel") this.#cancelSelected();
+		else if (this.#source.cancel && event.type === "action" && event.act === "cancel") this.#cancelSelected();
 	}
 
 	/** Every job, running first, and the selected one (the first when the selection left). */
@@ -230,7 +235,7 @@ export class JobsSheet implements Component {
 
 	#cancelSelected(): void {
 		const { selected } = this.#current();
-		if (selected?.status === "running") this.#source.cancel(selected.id);
+		if (selected?.status === "running") this.#source.cancel?.(selected.id);
 	}
 }
 

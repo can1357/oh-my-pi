@@ -569,7 +569,7 @@ export interface InteractiveModeContext {
 	 */
 	showCommandReport(options: { title: string; head?: TspText; body: Component }): void;
 	/** The live background-jobs sheet (the jobs pill's). */
-	showJobsSheet(): void;
+	showJobsSheet(options?: { readOnly?: boolean }): void;
 	/** Clear the docked command report; false when none was shown (Esc falls through). */
 	dismissCommandReport(): boolean;
 	/** Screen rows a report above the editor may take (all of them but the editor and the chrome under it). */

@@ -7,13 +7,20 @@
  *
  * Failure mode if this regresses: these commands silently do nothing (or steer the
  * agent) in a focused view, or `/export` writes the main session instead of the viewed one.
+ *
+ * `/jobs` in a focused view also opens its sheet read-only: the sheet lists the
+ * MAIN session's jobs, so a focused view must not reach its Cancel action.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { isNativeRendering, setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
+
+/** One running job, as the session snapshot the `/jobs` sheet reads reports it. */
+const RUNNING_JOB = { id: "job-1", type: "bash", status: "running", label: "sleep 5", startTime: Date.now() };
 
 function createFocusedContext() {
 	let editorText = "";
@@ -121,6 +128,33 @@ describe("focused subagent view slash commands", () => {
 			expect(raw.handleJobsCommand).toHaveBeenCalledTimes(1);
 			expect(raw.handleJobsCommand).toHaveBeenCalledWith({ full });
 			expect(prompt).not.toHaveBeenCalled();
+		}
+	});
+
+	// The sheet the command opens lists the MAIN session's jobs, so a focused
+	// view's Cancel would stop a job that session owns (#14814).
+	it("opens the jobs sheet read-only from a focused view, cancel-capable from the main session", async () => {
+		const wasNative = isNativeRendering();
+		setNativeRendering(true);
+		try {
+			for (const [focusedAgentId, readOnly] of [
+				["Worker", true],
+				[undefined, false],
+			] as const) {
+				const showJobsSheet = vi.fn();
+				const ctx = {
+					session: { getAsyncJobSnapshot: () => ({ running: [RUNNING_JOB], recent: [] }) },
+					focusedAgentId,
+					showJobsSheet,
+					showWarning: vi.fn(),
+				} as unknown as InteractiveModeContext;
+
+				await new CommandController(ctx).handleJobsCommand();
+
+				expect(showJobsSheet).toHaveBeenCalledWith({ readOnly });
+			}
+		} finally {
+			setNativeRendering(wasNative);
 		}
 	});
 

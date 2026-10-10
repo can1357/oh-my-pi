@@ -699,7 +699,9 @@ class HudPillsRow implements Component {
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type !== "action") return;
 		if (event.act === "agents.open") this.mode.showAgentHub();
-		else if (event.act === "jobs.open") this.mode.showJobsSheet();
+		// The pill stays reachable while a subagent view is focused, and the sheet
+		// it opens reads the main session's jobs: read-only there, as for `/jobs`.
+		else if (event.act === "jobs.open") this.mode.showJobsSheet({ readOnly: this.mode.focusedAgentId !== undefined });
 	}
 }
 
@@ -7195,20 +7197,27 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * The jobs pill's sheet: live background jobs in a dismissable overlay.
 	 * Unlike `/jobs` it adds nothing to the transcript, so a click mid-turn
 	 * leaves no deferred command preview above the editor.
+	 *
+	 * `readOnly` drops the Cancel action — the sheet then lists jobs and stops
+	 * none. A focused subagent view reads the MAIN session's jobs through it, so
+	 * cancelling there would kill a job that session owns (#14814).
 	 */
-	showJobsSheet(): void {
+	showJobsSheet(options?: { readOnly?: boolean }): void {
 		if (this.#jobsSheetHandle) return;
 		if (!this.session.getAsyncJobSnapshot()) {
 			this.showWarning("Async background jobs are unavailable in this session.");
 			return;
 		}
+		const readOnly = options?.readOnly === true;
 		const sheet = new JobsSheet({
 			load: () => this.session.getAsyncJobSnapshot({ recentLimit: 5 }) ?? { running: [], recent: [] },
 			inspect: id => this.session.inspectAsyncJob(id),
-			cancel: id => {
-				this.session.cancelAsyncJob(id);
-				this.ui.requestRender();
-			},
+			cancel: readOnly
+				? undefined
+				: id => {
+						this.session.cancelAsyncJob(id);
+						this.ui.requestRender();
+					},
 			close: () => this.#hideJobsSheet(),
 		});
 		this.#jobsSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
