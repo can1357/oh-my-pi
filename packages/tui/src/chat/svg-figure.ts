@@ -13,7 +13,7 @@
  * places it 1:1: any resampling, even 0.99×, blurs every glyph edge.
  */
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
-import { logger } from "@oh-my-pi/pi-utils";
+import { hexToOklch, hueDistance, logger, oklchCusp, oklchToHex } from "@oh-my-pi/pi-utils";
 import { Image, type ImageBudget, imageMaxColumns } from "../components/image";
 import { fencedCode, type Markdown } from "../components/markdown";
 import { type CellDimensions, getCellDimensions, getImageDimensions } from "../terminal-capabilities";
@@ -30,7 +30,10 @@ const MAX_EDGE_PX = 4096;
 /** Share of the terminal's rows one figure may fill, so it fits on screen whole. */
 const MAX_VIEWPORT_SHARE = 0.8;
 
-/** Foreground theme colors behind the figure tokens (`var(--name)`); `surface` is the selection background. */
+/**
+ * Foreground theme colors behind the figure tokens (`var(--name)`); `surface`
+ * is the selection background and `c1`…`c6` come from {@link seriesColors}.
+ */
 const PALETTE: Readonly<Record<string, ThemeColor>> = {
 	fg: "text",
 	muted: "muted",
@@ -39,19 +42,53 @@ const PALETTE: Readonly<Record<string, ThemeColor>> = {
 	success: "success",
 	warning: "warning",
 	error: "error",
-	c1: "syntaxKeyword",
-	c2: "syntaxString",
-	c3: "syntaxFunction",
-	c4: "syntaxType",
-	c5: "syntaxNumber",
-	c6: "syntaxVariable",
 };
+
+/** Hue families (OKLCH degrees) the series colors draw from: blue, orange, green, purple, pink, teal. */
+const SERIES_HUES = [255, 55, 145, 305, 0, 200];
+/** Gold, for a sixth series when the accent's hue crowds out two families. */
+const RESERVE_HUE = 90;
+/** Least hue distance between a family and the accent's hue for both to lead series. */
+const MIN_SERIES_HUE_GAP = 30;
+/** Chroma below which the accent reads as gray and blue leads instead. */
+const MIN_ACCENT_CHROMA = 0.04;
+/** Lightness band of series colors: deep enough for labels on light surfaces, bright enough on dark ones. */
+const SERIES_LIGHTNESS = { light: [0.52, 0.66], dark: [0.68, 0.82] } as const;
+/** Chroma ceiling: vivid, not neon. */
+const SERIES_CHROMA = 0.19;
 
 /** The active theme's color per figure token, for resolving a figure with `prepareSvg`. */
 export function svgFigurePalette(): Record<string, string> {
 	const palette: Record<string, string> = { surface: theme.getBgHex("selectedBg") };
 	for (const token in PALETTE) palette[token] = theme.getColorHex(PALETTE[token]!);
+	seriesColors(palette.accent!, theme.isLight).forEach((color, at) => {
+		palette[`c${at + 1}`] = color;
+	});
 	return palette;
+}
+
+/**
+ * Six series colors of even visual weight, in the manner of Apple's system
+ * palette: led by the theme accent's hue (blue when the accent is gray), each
+ * next hue the family farthest from those already taken. Every hue sits at
+ * its gamut cusp clamped into the theme's {@link SERIES_LIGHTNESS} band, so
+ * orange stays orange and blue stays deep.
+ */
+function seriesColors(accent: string, light: boolean): string[] {
+	const { c, h } = hexToOklch(accent);
+	const lead = c >= MIN_ACCENT_CHROMA ? h : SERIES_HUES[0]!;
+	const hues = [lead];
+	const pool = SERIES_HUES.filter(hue => hueDistance(hue, lead) >= MIN_SERIES_HUE_GAP);
+	while (pool.length > 0) {
+		const gaps = pool.map(hue => Math.min(...hues.map(taken => hueDistance(hue, taken))));
+		hues.push(pool.splice(gaps.indexOf(Math.max(...gaps)), 1)[0]!);
+	}
+	if (hues.length < 6) hues.push(RESERVE_HUE);
+	const [low, high] = SERIES_LIGHTNESS[light ? "light" : "dark"];
+	return hues.slice(0, 6).map(hue => {
+		const cusp = oklchCusp(hue);
+		return oklchToHex({ l: Math.min(high, Math.max(low, cusp.l)), c: Math.min(SERIES_CHROMA, cusp.c), h: hue });
+	});
 }
 
 let figuresEnabled = true;

@@ -73,4 +73,16 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(mode.editor.onEscape).toBeDefined();
 		expect(refreshSpy).toHaveBeenCalled();
 	});
+
+	it("keeps the startup submit gate on an editor swapped in before init lifts it", () => {
+		vi.spyOn(mode, "refreshSlashCommandState").mockResolvedValue();
+		expect(mode.editor.disableSubmit).toBe(true);
+
+		mode.setEditorComponent((_tui, editorTheme) => new TestModalEditor(editorTheme));
+		expect(mode.editor.disableSubmit).toBe(true);
+
+		mode.editor.disableSubmit = false;
+		mode.setEditorComponent(undefined);
+		expect(mode.editor.disableSubmit).toBe(false);
+	});
 });

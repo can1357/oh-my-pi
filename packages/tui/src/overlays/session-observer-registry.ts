@@ -64,6 +64,8 @@ export interface ObservableSession {
 	lastUpdate: number;
 	/** Latest progress snapshot from the subagent executor */
 	progress?: AgentProgress;
+	/** `Date.now()` when {@link progress} arrived; its `durationMs` was current then. */
+	progressAt?: number;
 }
 
 /** Coarse source of an observer change; callers use it to separate lifecycle work from high-frequency progress. */
@@ -225,6 +227,9 @@ export class SessionObserverRegistry {
 							existing.detached = payload.detached ?? existing.detached;
 							if (payload.description) existing.description = payload.description;
 							if (payload.sessionFile) existing.sessionFile = payload.sessionFile;
+							// A kept-alive or parked agent's next turn restarts its clock; the prior turn's
+							// snapshot must not be aged across the idle gap before the new turn's first frame.
+							if (payload.status === "started") existing.progressAt = undefined;
 						} else {
 							this.#sessions.set(payload.id, {
 								id: payload.id,
@@ -256,12 +261,14 @@ export class SessionObserverRegistry {
 
 						const sortOrder = this.#ensureSortOrder(id);
 						this.#ensureParentSortOrder(payload.parentToolCallId, sortOrder);
+						const now = Date.now();
 						if (existing) {
-							existing.lastUpdate = Date.now();
+							existing.lastUpdate = now;
 							existing.index = payload.index;
 							existing.parentToolCallId = payload.parentToolCallId ?? existing.parentToolCallId;
 							existing.detached = payload.detached ?? existing.detached;
 							existing.progress = progress;
+							existing.progressAt = now;
 							if (progress.description) existing.description = progress.description;
 							if (payload.sessionFile) existing.sessionFile = payload.sessionFile;
 						} else {
@@ -276,8 +283,9 @@ export class SessionObserverRegistry {
 								parentToolCallId: payload.parentToolCallId,
 								detached: payload.detached,
 								index: payload.index,
-								lastUpdate: Date.now(),
+								lastUpdate: now,
 								progress,
+								progressAt: now,
 							});
 						}
 						this.#notifyListeners("progress");

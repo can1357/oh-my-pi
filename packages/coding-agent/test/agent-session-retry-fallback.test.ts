@@ -5289,7 +5289,7 @@ describe("AgentSession retry fallback", () => {
 		await session.waitForIdle();
 
 		expect(closeSpy).toHaveBeenCalledTimes(1);
-		expect(session.providerSessionState.has("openai-responses:openai")).toBe(false);
+		expect(session.providerSessionState.has("openai-responses:openai")).toBe(true);
 		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
 		expect(fallbackAppliedEvents).toHaveLength(0);
 		expect(retryStartEvents).toHaveLength(1);
@@ -5370,7 +5370,7 @@ describe("AgentSession retry fallback", () => {
 		await session.waitForIdle();
 
 		expect(closeSpy).toHaveBeenCalledTimes(1);
-		expect(session.providerSessionState.has("openai-responses:openai")).toBe(false);
+		expect(session.providerSessionState.has("openai-responses:openai")).toBe(true);
 		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
 		expect(fallbackAppliedEvents).toHaveLength(0);
 		expect(retryStartEvents).toHaveLength(1);

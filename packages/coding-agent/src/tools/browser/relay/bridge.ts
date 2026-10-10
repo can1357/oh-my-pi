@@ -925,7 +925,9 @@ export class RelayBridge {
 					this.#replyError(conn, msg, "relay extension is not connected");
 					return;
 				}
-				const result = (await this.#rpc({ op: "createTab", url }, inst)) as { tab: TabSnapshot };
+				// CDP `background: true` creates the tab without selecting it; an extension that predates `active` ignores it.
+				const active = msg.params?.background === true ? false : undefined;
+				const result = (await this.#rpc({ op: "createTab", url, active }, inst)) as { tab: TabSnapshot };
 				this.#onTabUpsert(result.tab, inst.instanceId);
 				// Creating a tab is an explicit act of driving it.
 				const createdKey = tabKeyOf(inst.code, result.tab.tabId);
