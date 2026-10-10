@@ -892,6 +892,7 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 | `ask.notify`           | enum    | `on`            | `on`, `off`.                                                                                            |
 | `input.bareExitOnEmptySession` | boolean | `true` | Submitting exactly `exit`, `quit`, or `q` (case-insensitive) before the first message quits. |
 | `input.bareSlashCommands` | boolean | `false` | Run an exact command name without `/`; after session messages exist, Enter must be pressed twice to confirm. |
+| `paste.imagePathAttachment` | boolean | `true` | Attach the image when a pasted path points at an image or video file; off, the path lands as text. |
 | `tui.vimMode` | boolean | `false` | Enable modal prompt editing; `tui.vimModeDisplay` selects `text`, `icon`, or `none` (default `text`). |
 | `startup.quiet` | boolean | `false` | Suppress welcome/startup chrome, including the splash. |
 | `startup.showSplash` | boolean | `false` | Show the full setup animation on ordinary interactive startup without rerunning setup. |

@@ -79,6 +79,7 @@ import {
 	cfgDoubleEscapeAction,
 	cfgEmojiAutocomplete,
 	cfgImagesAutoResize,
+	cfgPasteImagePathAttachment,
 	cfgPasteLargeMenuThreshold,
 	cfgTuiMouse,
 } from "../settings";
@@ -644,7 +645,13 @@ export class InputController {
 			this.ctx.keybindings.getKeys("app.clipboard.pasteImage"),
 		);
 		this.ctx.editor.onPasteImage = () => this.handleImagePaste();
-		this.ctx.editor.onPasteImagePath = path => this.handleImagePathPaste(path);
+		// Only a real image-file path routed through the editor's bracketed-paste
+		// handler is gated: with the setting off, `onPasteImagePath` stays unset so
+		// the editor pastes the path as text. The clipboard-image chord
+		// (`onPasteImage` above) is unaffected — it is an explicit "paste image".
+		if (isSettingsInitialized() && cfgPasteImagePathAttachment.get(settings)) {
+			this.ctx.editor.onPasteImagePath = path => this.handleImagePathPaste(path);
+		}
 		this.ctx.editor.setActionKeys(
 			"app.clipboard.pasteTextRaw",
 			this.ctx.keybindings.getKeys("app.clipboard.pasteTextRaw"),
@@ -2429,8 +2436,11 @@ export class InputController {
 			// loaded and attached instead of pasting the path as literal
 			// text. Covers terminals that paste the Finder file path as
 			// plain text rather than as a `public.file-url` (most macOS
-			// terminals do this for image clipboards).
-			const imagePath = textOnlyPrompt ? null : extractImagePathFromText(text);
+			// terminals do this for image clipboards). Gated by
+			// `paste.imagePathAttachment`.
+			const attachPastedPath =
+				!textOnlyPrompt && isSettingsInitialized() && cfgPasteImagePathAttachment.get(settings);
+			const imagePath = attachPastedPath ? extractImagePathFromText(text) : null;
 			if (imagePath) {
 				await this.#pasteImagePath(imagePath, sink);
 				return true;

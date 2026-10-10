@@ -3,7 +3,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -27,6 +27,7 @@ type FakeEditor = {
 	onSelectModelTemporary?: () => void;
 	onSelectModel?: () => void;
 	onPasteImage?: () => Promise<boolean>;
+	onPasteImagePath?: (path: string) => void | Promise<void>;
 	onCopyPrompt?: () => void;
 	onRetry?: () => void;
 	onChange?: (text: string) => void;
@@ -337,6 +338,24 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
 		expect(spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
+	});
+
+	it("installs the image-path paste handler only when paste.imagePathAttachment is on", async () => {
+		const settingsState = beginSettingsTest();
+		try {
+			await Settings.init({ inMemory: true, overrides: { "paste.imagePathAttachment": false } });
+			const off = await createContext();
+			new off.InputController(off.ctx).setupKeyHandlers();
+			expect(off.editor.onPasteImagePath).toBeUndefined();
+
+			resetSettingsForTest();
+			await Settings.init({ inMemory: true, overrides: { "paste.imagePathAttachment": true } });
+			const on = await createContext();
+			new on.InputController(on.ctx).setupKeyHandlers();
+			expect(typeof on.editor.onPasteImagePath).toBe("function");
+		} finally {
+			restoreSettingsTestState(settingsState);
+		}
 	});
 
 	it("enters Python mode only once whitespace follows a typed sigil", async () => {

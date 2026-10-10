@@ -1041,6 +1041,19 @@ export const cfgPasteLargeMenuThreshold = register({
 	},
 });
 
+export const cfgPasteImagePathAttachment = register({
+	id: "paste.imagePathAttachment",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Paste Image Path as Image",
+		description:
+			"Attach the image when a pasted path points at an image or video file. Off: the path is pasted as plain text.",
+	},
+});
+
 export const cfgStartupQuiet = register({
 	id: "startup.quiet",
 	type: "boolean",
