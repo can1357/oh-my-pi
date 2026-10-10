@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `reserveMarginFraction` to model usage health options, raising every account's reserve threshold by that margin for one check
+- Added `reserveMarginFraction` to model usage health options, raising every account's reserve threshold by that margin for one check ([#15136](https://github.com/can1357/oh-my-pi/pull/15136) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.7] - 2026-10-09
 
