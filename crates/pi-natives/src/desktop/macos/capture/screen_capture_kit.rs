@@ -25,6 +25,7 @@ use crate::desktop::{
 	control,
 	error::{CoreResult, DesktopError},
 	frame::MAX_COMPOSITE_PIXELS,
+	macos::permission,
 	native_helper::HelperDirectory,
 };
 
@@ -321,9 +322,7 @@ fn frame_bytes(width: u32, height: u32) -> CoreResult<usize> {
 pub(super) fn capture(requests: Vec<CaptureRequest>) -> CoreResult<Vec<Captured>> {
 	control::check()?;
 	if !super::capture_permission() {
-		return Err(DesktopError::permission_denied(
-			"macOS Screen Recording permission is not granted for this process",
-		));
+		return Err(permission::denied("Screen Recording"));
 	}
 	if !*MODERN_CAPTURE {
 		return requests

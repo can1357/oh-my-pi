@@ -493,7 +493,7 @@ impl Worker {
 		self.frames.insert(target.key().to_string(), geometry);
 		// Refreshing here keeps the snapshot current for getter reads that
 		// land while a later operation holds the worker.
-		let capabilities = self.backend()?.capabilities();
+		let capabilities = self.read_capabilities(token)?;
 		*self.capabilities.lock() = Some(capabilities.clone());
 		Ok(DesktopCapture {
 			data: Uint8Array::from(png),
@@ -606,13 +606,20 @@ impl Worker {
 			.ok_or_else(DesktopError::ax_unsupported)
 	}
 
+	/// Backend capabilities, without global Escape while held control runs
+	/// without its monitor.
+	fn read_capabilities(&mut self, token: &OperationToken) -> CoreResult<DesktopCapabilities> {
+		let mut capabilities = self.backend()?.capabilities();
+		capabilities.global_escape &= !token.control_lacks_escape();
+		Ok(capabilities)
+	}
+
 	fn process(&mut self, request: &Request, token: &OperationToken) -> CoreResult<Response> {
 		match request {
 			Request::Capabilities { .. } => {
-				let caps = match self.backend.as_mut() {
-					Ok(backend) => backend.capabilities(),
-					Err(_) => DesktopCapabilities::unavailable(),
-				};
+				let caps = self
+					.read_capabilities(token)
+					.unwrap_or_else(|_| DesktopCapabilities::unavailable());
 				*self.capabilities.lock() = Some(caps.clone());
 				Ok(Response::Capabilities(caps))
 			},
@@ -707,7 +714,7 @@ impl Worker {
 				let (coordinate_width, coordinate_height) = base.dimensions();
 				token.check()?;
 				let png = encode_png(image)?;
-				let capabilities = self.backend()?.capabilities();
+				let capabilities = self.read_capabilities(token)?;
 				*self.capabilities.lock() = Some(capabilities.clone());
 				Ok(Response::Capture(DesktopCapture {
 					data: Uint8Array::from(png),

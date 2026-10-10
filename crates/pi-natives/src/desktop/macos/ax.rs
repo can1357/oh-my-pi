@@ -24,7 +24,7 @@ use super::{
 		error::{CoreResult, DesktopError},
 		types::DesktopWindow,
 	},
-	date, process, skylight,
+	date, permission, process, skylight,
 };
 
 const AX_TIMEOUT_SECONDS: f32 = 2.0;
@@ -776,9 +776,7 @@ fn ensure_trusted() -> CoreResult<()> {
 	if is_trusted() {
 		Ok(())
 	} else {
-		Err(DesktopError::permission_denied(
-			"macOS Accessibility permission is not granted for this process",
-		))
+		Err(permission::denied("Accessibility"))
 	}
 }
 

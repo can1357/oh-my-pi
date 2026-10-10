@@ -92,6 +92,16 @@ impl CancellationSource {
 	pub(crate) fn control_active(&self) -> bool {
 		self.0.state.lock().is_some()
 	}
+
+	/// Whether held task control runs without its physical-Escape monitor.
+	pub(crate) fn control_lacks_escape(&self) -> bool {
+		self
+			.0
+			.state
+			.lock()
+			.as_ref()
+			.is_some_and(|lease| lease.escape.is_none())
+	}
 }
 
 /// Weak callback ownership avoids a lease -> monitor -> source -> lease cycle.
@@ -115,6 +125,10 @@ pub(crate) struct OperationToken {
 impl OperationToken {
 	pub(crate) fn control_active(&self) -> bool {
 		self.source.control_active()
+	}
+
+	pub(crate) fn control_lacks_escape(&self) -> bool {
+		self.source.control_lacks_escape()
 	}
 
 	pub(crate) fn enter(&self) -> OperationScope {
@@ -313,29 +327,51 @@ fn busy() -> DesktopError {
 /// another host thread. Closing/crashing the process releases the OS resource.
 struct ControlLease {
 	#[cfg(target_os = "macos")]
-	_escape: Option<macos::EscapeMonitor>,
+	escape:  Option<macos::EscapeMonitor>,
 	#[cfg(windows)]
-	_escape: Option<windows::EscapeMonitor>,
+	escape:  Option<windows::EscapeMonitor>,
 	#[cfg(target_os = "linux")]
-	_escape: Option<linux::EscapeMonitor>,
+	escape:  Option<linux::EscapeMonitor>,
 	_kernel: KernelOwner,
 	running: AtomicBool,
 }
 
 impl ControlLease {
+	#[cfg(target_os = "macos")]
+	fn acquire(source: &CancellationSource) -> CoreResult<Self> {
+		Self::acquire_with(source, macos::EscapeMonitor::start)
+	}
+
+	/// The physical-Escape stop never gates input: a monitor that cannot start
+	/// is logged and the lease runs without it.
+	#[cfg(target_os = "macos")]
+	fn acquire_with(
+		source: &CancellationSource,
+		start: impl FnOnce(EmergencyStop) -> CoreResult<macos::EscapeMonitor>,
+	) -> CoreResult<Self> {
+		let kernel = KernelOwner::acquire()?;
+		let escape = start(EmergencyStop(Arc::downgrade(&source.0)))
+			.inspect_err(|error| {
+				log::warn!(
+					"physical Escape stop unavailable; desktop input proceeds without it: {error}"
+				);
+			})
+			.ok();
+		Ok(Self { escape, _kernel: kernel, running: AtomicBool::new(false) })
+	}
+
+	#[cfg(not(target_os = "macos"))]
 	fn acquire(source: &CancellationSource) -> CoreResult<Self> {
 		let kernel = KernelOwner::acquire()?;
-		#[cfg(target_os = "macos")]
-		let escape = macos::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))?;
 		#[cfg(windows)]
 		let escape = windows::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))?;
 		#[cfg(target_os = "linux")]
 		let escape = linux::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))?;
 		Ok(Self {
-			#[cfg(any(target_os = "macos", windows))]
-			_escape: Some(escape),
+			#[cfg(windows)]
+			escape: Some(escape),
 			#[cfg(target_os = "linux")]
-			_escape: escape,
+			escape,
 			_kernel: kernel,
 			running: AtomicBool::new(false),
 		})
@@ -565,7 +601,7 @@ mod tests {
 	/// not depend on an interactive desktop or Accessibility permissions.
 	fn grant_for_test(source: &CancellationSource) {
 		let owner = ControlLease {
-			_escape: None,
+			escape:  None,
 			_kernel: KernelOwner::acquire().expect("test kernel owner"),
 			running: AtomicBool::new(false),
 		};
@@ -630,6 +666,24 @@ mod tests {
 		assert!(!source.control_active());
 		assert!(fresh.check().is_err());
 		drop(KernelOwner::acquire().expect("idle Escape releases kernel ownership"));
+		remove_test_lock();
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn input_proceeds_when_the_escape_monitor_cannot_start() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		let lease = ControlLease::acquire_with(&source, |_| {
+			Err(DesktopError::permission_denied("event-listening access denied"))
+		})
+		.expect("a missing Escape monitor does not block control");
+		*source.0.state.lock() = Some(Arc::new(lease));
+		assert!(source.control_lacks_escape());
+		drop(InputLease::acquire(&source.token()).expect("input runs without the monitor"));
+		source.release_control();
+		assert!(!source.control_lacks_escape());
+		drop(KernelOwner::acquire().expect("release frees kernel ownership"));
 		remove_test_lock();
 	}
 
