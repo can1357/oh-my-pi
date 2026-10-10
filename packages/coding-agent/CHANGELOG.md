@@ -2,7 +2,13 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Subagents that declare `tools:` now receive exactly that list: custom, extension, and MCP proxy tools not named in it are excluded from the active set and the `xd://` catalog instead of being force-included. This includes the bundled `scout`/`reviewer`/`security-reviewer` agents (they declare `tools:`), which no longer inherit MCP/extension/custom tools, and session-managed builtins (`manage_skill`, `learn`, `context_notes`, `new_context`) plus the `checkpoint`/`rewind` sister are no longer force-added to declared lists. The scope also gates MCP server instructions, MCP resource listing/reads, and Cursor-provider frame execution for scoped subagents ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
+
 ### Added
+
+- Added the `disallowedTools:` frontmatter field for agent definitions: it removes tools by exact name, `mcp__*` / `mcp__<server>_*` wildcard, or bare `*` deny-all ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
 
 - Added `/jobs kill <id>|all` to cancel a running background job (or every one this session owns) from the command line, even while the agent is busy ([#14160](https://github.com/can1357/oh-my-pi/pull/14160) by [@KanwarGill](https://github.com/KanwarGill))
 - Added `omp anonymize [session] [-o dir]` to write a shareable copy of a session and its subagent transcripts: only an explicit allowlist of omp metadata (ids, timestamps, models, usage, built-in tool names and options) is kept; message, thinking, and tool-output text become size-annotated `[redacted …]` markers; tool-call paths become mock paths (`/home/seg3/seg4/src/seg9.ts:10-20`), shell commands keep known programs and flags, other literals such as a grep pattern become `PLACEHOLDER_N`, and extension or MCP payloads are redacted whole, with the same original always mapping to the same token across files ([#15077](https://github.com/can1357/oh-my-pi/pull/15077) by [@H4vC](https://github.com/H4vC))

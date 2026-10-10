@@ -8,6 +8,7 @@ import { resolveAgentAdvisorRolePattern } from "../config/model-resolver";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
+import { resolveMCPToolAlias } from "../mcp/tool-bridge";
 import { initializeExtensions } from "../modes/runtime-init";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -134,16 +135,16 @@ export function createPersistedSubagentReviverFactory(
 				...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 				...(init.advisor
 					? {
-							"advisor.enabled": true,
-							...(init.advisor !== "on"
-								? {
-										modelRoles: {
-											...ctx.settings.getModelRoles(),
-											advisor: resolveAgentAdvisorRolePattern(init.advisor, ctx.settings),
-										},
-									}
-								: undefined),
-						}
+						"advisor.enabled": true,
+						...(init.advisor !== "on"
+							? {
+								modelRoles: {
+									...ctx.settings.getModelRoles(),
+									advisor: resolveAgentAdvisorRolePattern(init.advisor, ctx.settings),
+								},
+							}
+							: undefined),
+					}
 					: undefined),
 				...compactionThresholdSettings(init.compactionThreshold),
 			});
@@ -207,8 +208,8 @@ export function createPersistedSubagentReviverFactory(
 					// bucket.
 					agentName:
 						init.agent &&
-						init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
-						init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
+							init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
+							init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
 							? init.agent
 							: ref.displayName,
 					parentTaskPrefix: ref.id,
@@ -216,7 +217,9 @@ export function createPersistedSubagentReviverFactory(
 					oauthAccountPools,
 					expectedAgentRef: expectedRef,
 					taskDepth,
-					toolNames: revivedToolNames,
+					toolNames: init.declaredTools ?? revivedToolNames,
+					enforceToolAllowlist: init.enforceToolAllowlist || undefined,
+					disallowedTools: init.disallowedTools,
 					outputSchema: init.outputSchema,
 					outputSchemaMode: init.outputSchemaMode,
 					restrictToolNames: restrictToolNames || undefined,
@@ -232,26 +235,50 @@ export function createPersistedSubagentReviverFactory(
 					enableLsp: restrictToolNames ? false : ctx.enableLsp,
 					...(restrictToolNames
 						? {
-								enableIrc: false,
-								enableMCP: false,
-								preloadedExtensionPaths: [],
-								preloadedCustomToolPaths: [],
-							}
+							enableIrc: false,
+							enableMCP: false,
+							preloadedExtensionPaths: [],
+							preloadedCustomToolPaths: [],
+						}
 						: {
-								enableMCP: !mcpManager,
-								mcpManager,
-								mcpTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
-							}),
+							enableMCP: !mcpManager,
+							mcpManager,
+							mcpTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+						}),
 				}));
 			} catch (error) {
 				mcpFollower?.dispose();
 				throw error;
 			}
 			mcpFollower?.bind(session);
-			// Clamp the active set to the persisted list: createAgentSession's
+			// Clamp the active set to the persisted scope: createAgentSession's
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
 			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
+			// Enforced revivals clamp to the declarative allowlist — the enabled
+			// snapshot predates tools that registered late originally and would
+			// drop one that is available again at revival time with no later
+			// registration event to re-activate it.
+			// Under an enforced `tools:` allowlist the declared list is exact:
+			// session creation no longer force-adds session-managed builtins or
+			// the checkpoint/rewind sister, so the clamp must not union them
+			// back — the cold path reproduces the declaration, matching what a
+			// fresh spawn carries. (`yield` rides `requireYieldTool` in both.)
+			//
+			// MCP entries are canonicalized against the live registry first. The
+			// declaration may name a tool the Claude Code way
+			// (`mcp__srv-x__tool`), while `declaredTools` persists that original
+			// spelling: session creation resolves it to the minted key, and
+			// clamping to the raw persisted name would then drop the very tool the
+			// agent declared. An unresolvable spelling is left untouched.
+			const declaredScope = (init.declaredTools ?? revivedToolNames).map(name => {
+				if (name.endsWith("*")) return name;
+				return (
+					resolveMCPToolAlias(name, candidate =>
+						session.getToolByName(candidate) ? { name: candidate } : undefined,
+					)?.name ?? name
+				);
+			});
+			await session.setActiveToolsByName([...declaredScope, ...session.getMountedXdevToolNames()]);
 			// The yield tool's schema carries the last batch's items; the replayed prefix must match it.
 			if (init.workPoolYieldItems) await session.setWorkPoolYieldItems(init.workPoolYieldItems);
 			// Wire the extension runtime exactly as the live executor does. Without

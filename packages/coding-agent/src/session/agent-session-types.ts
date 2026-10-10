@@ -261,6 +261,8 @@ export interface AgentSessionConfig {
 	builtInToolNames?: Iterable<string>;
 	/** MCP names whose initial registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
+	/** Live manager tool records (carry raw mcpServerName) for dual-source resource gating. */
+	mcpManagerTools?: () => Iterable<{ readonly name?: string; readonly mcpServerName?: unknown }>;
 	/** Reconcile browser MCP connections after browser prelude availability changes. */
 	reconcileBrowserMcpFilter?: (enabled: boolean) => Promise<CustomTool[]>;
 	/** Updates tool-session predicates from the live active tool set. */
@@ -308,6 +310,15 @@ export interface AgentSessionConfig {
 	xdev?: XdevState;
 	/** Names pinned top-level during runtime repartitioning. */
 	presentationPinnedToolNames?: ReadonlySet<string>;
+	/** Subagent tool scoping: every runtime active-set mutation preserves the startup scope. */
+	enforceToolAllowlist?: boolean;
+	/** Exact names the enforced `tools:` allowlist permits. Hidden protocol tools
+	 * (`yield`, `goal`, `think`) stay permitted only when built-in provenance
+	 * holds (an extension-defined same-named tool is still gated); wildcards
+	 * are not expanded here. */
+	allowedToolNames?: ReadonlySet<string>;
+	/** Disallow patterns removed from every runtime selection (trailing `*` = prefix wildcard). */
+	disallowedToolPatterns?: readonly string[];
 	/** Accessor for live MCP server instructions. */
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	/** Time-traveling stream-rule manager. */
@@ -361,6 +372,12 @@ export interface AgentSessionConfig {
 	 * empty catalog and every `read_mcp_resource` a `not_found`.
 	 */
 	advisorMcpResources?: CursorMcpResourceAdapter;
+	/** Owning session scope for advisor Cursor resource frames. */
+	advisorSessionScope?: {
+		isToolScopedIn(name: string): boolean;
+		isMCPServerResourceAllowed(serverName: string): boolean;
+		mcpManagerTools(): Iterable<{ readonly name?: string; readonly mcpServerName?: unknown }>;
+	};
 	/** Preloaded watchdog prompt content for the advisor. */
 	advisorWatchdogPrompt?: string;
 	/** Shared advisor instructions loaded from WATCHDOG.yml. */

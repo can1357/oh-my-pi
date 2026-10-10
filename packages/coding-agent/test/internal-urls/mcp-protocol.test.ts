@@ -26,13 +26,14 @@ function createMockManager(opts: {
 	} as unknown as MCPManager;
 }
 
-function createToolSession(): ToolSession {
+function createToolSession(isMCPServerResourceAllowed?: (serverName: string) => boolean): ToolSession {
 	return {
 		cwd: os.tmpdir(),
 		hasUI: false,
 		settings: Settings.isolated(),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
+		isMCPServerResourceAllowed,
 	};
 }
 
@@ -485,5 +486,141 @@ describe("McpProtocolHandler", () => {
 		const router = InternalUrlRouter.instance();
 
 		await expect(router.resolve("mcp://test://anything")).rejects.toThrow("(none)");
+	});
+
+	it("refuses a read of a scoped-out MCP server's resource, even though the router would resolve it", async () => {
+		// `mcp://` resolves through the process-global router, which has no session,
+		// so a scoped subagent (`tools: [read]`, or a deny of the server) could
+		// otherwise read any connected server's resources by URI while the scope
+		// excluded that server everywhere else.
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("allowed-server", {
+			resources: [{ uri: "test://ok", name: "ok" }],
+			templates: [],
+		});
+		resources.set("denied-server", {
+			resources: [{ uri: "test://secret", name: "secret" }],
+			templates: [],
+		});
+		const manager = createMockManager({
+			servers: ["allowed-server", "denied-server"],
+			resources,
+			readResult: { contents: [{ uri: "test://secret", text: "classified", mimeType: "text/plain" }] },
+		});
+		MCPManager.setInstance(manager);
+		InternalUrlRouter.instance();
+
+		// The router itself still resolves it: the gate is the session's, not the router's.
+		expect((await InternalUrlRouter.instance().resolve("mcp://test://secret")).content).toContain("classified");
+
+		const scoped = new ReadTool(createToolSession(server => server !== "denied-server"));
+		await expect(scoped.execute("read-scoped-out-resource", { path: "mcp://test://secret" })).rejects.toThrow(
+			/No MCP server has resource/,
+		);
+
+		// The permitted server still reads, so the gate is not blanket.
+		const allowed = await new ReadTool(createToolSession(server => server === "allowed-server")).execute(
+			"read-scoped-in-resource",
+			{ path: "mcp://test://ok" },
+		);
+		expect(allowed.isError ?? false).toBe(false);
+	});
+
+	it("refuses a scoped-out server's NATIVE-scheme resource, which also routes to MCP", async () => {
+		// A server can advertise a native URI (`ags://secret`) whose scheme no OMP
+		// handler claims; the router falls back to the MCP handler for it. Gating
+		// only `mcp://` would leave this whole class readable by a scoped child.
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("native-server", {
+			resources: [{ uri: "ags://secret", name: "secret" }],
+			templates: [],
+		});
+		MCPManager.setInstance(
+			createMockManager({
+				servers: ["native-server"],
+				resources,
+				readResult: { contents: [{ uri: "ags://secret", text: "classified", mimeType: "text/plain" }] },
+			}),
+		);
+		InternalUrlRouter.instance();
+
+		const scoped = new ReadTool(createToolSession(server => server !== "native-server"));
+		await expect(scoped.execute("read-native-scoped-out", { path: "ags://secret" })).rejects.toThrow(
+			/No MCP server has resource/,
+		);
+
+		// Unscoped still reads it: the gate is the scope's, not a blanket refusal.
+		const allowed = await new ReadTool(createToolSession()).execute("read-native-unscoped", {
+			path: "ags://secret",
+		});
+		expect(allowed.isError ?? false).toBe(false);
+	});
+
+	it("refuses a scoped-out server through the filesystem path that glob/find use", async () => {
+		// Regression for the handler-level gate: glob, find, ast-grep, and bash
+		// reach MCP resources through InternalUrlFilesystem, not through read's
+		// `#handleInternalUrl`, so a per-tool gate in read/grep leaves them open.
+		const { InternalUrlFilesystem } = await import("@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem");
+		const { sessionResolveContext } = await import("@oh-my-pi/pi-coding-agent/internal-urls/context");
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("denied-server", {
+			resources: [{ uri: "test://secret", name: "secret" }],
+			templates: [],
+		});
+		MCPManager.setInstance(
+			createMockManager({
+				servers: ["denied-server"],
+				resources,
+				readResult: { contents: [{ uri: "test://secret", text: "classified", mimeType: "text/plain" }] },
+			}),
+		);
+		InternalUrlRouter.instance();
+		const scopedSession = createToolSession(server => server !== "denied-server");
+		const filesystem = new InternalUrlFilesystem({
+			context: sessionResolveContext(scopedSession),
+			tier: "read",
+		});
+		await expect(filesystem.readPrefix("mcp://test://secret", 1024)).rejects.toThrow(/No MCP server has resource/);
+	});
+
+	it("reads an MCP resource when the session has no scope gate", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("open-server", {
+			resources: [{ uri: "test://open", name: "open" }],
+			templates: [],
+		});
+		MCPManager.setInstance(
+			createMockManager({
+				servers: ["open-server"],
+				resources,
+				readResult: { contents: [{ uri: "test://open", text: "public", mimeType: "text/plain" }] },
+			}),
+		);
+		InternalUrlRouter.instance();
+
+		const result = await new ReadTool(createToolSession()).execute("read-unscoped-resource", {
+			path: "mcp://test://open",
+		});
+		expect(result.isError ?? false).toBe(false);
+	});
+
+	it("uses unknown for binary content without mimeType", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("bin-server", {
+			resources: [{ uri: "test://bin", name: "bin" }],
+			templates: [],
+		});
+		const manager = createMockManager({
+			servers: ["bin-server"],
+			resources,
+			readResult: {
+				contents: [{ uri: "test://bin", blob: "data" }],
+			},
+		});
+		MCPManager.setInstance(manager);
+		const router = InternalUrlRouter.instance();
+
+		const resource = await router.resolve("mcp://test://bin");
+		expect(resource.content).toContain("[Binary content: unknown,");
 	});
 });

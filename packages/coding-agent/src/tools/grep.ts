@@ -369,11 +369,11 @@ async function recordSnapshotTags(store: EditStore, snapshotPaths: readonly stri
 
 /**
  * Per-file native fetch budget that guarantees the JS range filter can still
- * surface `perFileKeep` in-range hits. Matches arrive one entry per matched
+ * surface`perFileKeep` in -range hits.Matches arrive one entry per matched
  * line in line order, so a bounded range's hits all sit within the first
- * `endLine` entries, and an open-ended range starting at S is preceded by at
- * most S-1 out-of-range entries — S-1+perFileKeep entries cover the kept
- * window or exhaust the file. Clamped to the native file-size ceiling (a
+ * `endLine` entries, and an open - ended range starting at S is preceded by at
+ * most S - 1 out - of - range entries — S - 1 + perFileKeep entries cover the kept
+ * window or exhaust the file.Clamped to the native file - size ceiling(a
  * ≤4 MiB file cannot have more matched lines than bytes), which also keeps
  * the scaled global budget inside the native layer's u32 bounds.
  */
