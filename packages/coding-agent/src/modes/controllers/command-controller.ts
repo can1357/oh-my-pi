@@ -736,6 +736,9 @@ export class CommandController {
 	 * `/jobs`: natively the live jobs sheet the jobs pill opens (inspect and
 	 * cancel included); `/jobs full`, and text mode, a report of the running
 	 * and recent jobs (see {@link showCommandReport}).
+	 *
+	 * The sheet lists the MAIN session's jobs, so a focused subagent view opens
+	 * it read-only: cancelling there would stop a job that session owns (#14814).
 	 */
 	async handleJobsCommand(options?: { full?: boolean }): Promise<void> {
 		const full = options?.full === true;
@@ -745,7 +748,7 @@ export class CommandController {
 			return;
 		}
 		if (isNativeRendering() && !full) {
-			this.ctx.showJobsSheet();
+			this.ctx.showJobsSheet({ readOnly: this.ctx.focusedAgentId !== undefined });
 			return;
 		}
 

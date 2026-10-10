@@ -165,11 +165,16 @@ const OMP_STATUS_LINE_RE = /^\s*in:\s+\d+\s+out:\s+\d+(?:\s+cache\s+\S+)?\s+t:\s
 /**
  * Read-only slash commands that also run from a focused subagent view, keyed by name to
  * a check on their arguments; every other command (and mutating forms such as
- * `/usage reset`, which spends a saved rate-limit reset) still needs the main session.
+ * `/usage reset`, which spends a saved rate-limit reset, or `/jobs kill`, which cancels
+ * a running job) still needs the main session.
  */
 const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
 	btw: () => true,
 	export: () => true,
+	jobs: args => {
+		const { verb, rest } = parseSubcommand(args);
+		return !verb || (verb === "full" && !rest);
+	},
 	usage: args => {
 		const { verb, rest } = parseSubcommand(args);
 		return !verb || (verb === "show" && !rest);
@@ -1429,7 +1434,9 @@ export class InputController {
 			const parsed = parseSlashCommand(text);
 			if (parsed && FOCUSED_VIEW_COMMANDS[parsed.name]?.(parsed.args)) {
 				// Viewer-scoped commands: /btw asks about the focused transcript, /export
-				// writes it (with its own subagents), /usage reports account-wide limits.
+				// writes it (with its own subagents), /jobs and /usage are read-only views
+				// of the main session's jobs (its Cancel action stays behind, so a focused
+				// view stops no job — see handleJobsCommand) and account-wide limits.
 				this.#recordSlashCommandUsage(text);
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx })) === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
