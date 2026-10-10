@@ -39,8 +39,9 @@ import {
 	selectReportableAccounts,
 	type UsageAccountIdentity,
 } from "../slash-commands/helpers/usage-accounts";
-
 import { cfgRetryUsageReservePct } from "../session/settings";
+import { cfgDisplayShowZeroUsageMeters } from "../modes/settings";
+import { filterUsageReportsForDisplay, type UsageDisplayOptions } from "../utils/usage-display";
 
 const BAR_WIDTH = 28;
 
@@ -678,14 +679,15 @@ function formatPolicyLine(
  * each provider section as "no usage data" rows.
  */
 export function formatUsageBreakdown(
-	reports: UsageReport[],
+	inputReports: UsageReport[],
 	accounts: UsageAccountIdentity[],
 	nowMs: number,
 	redaction?: Map<string, string>,
 	disabled: DisabledCredentialSummary[] = [],
 	policyOptions?: UsagePolicyDiagnosticsOptions,
+	options: UsageDisplayOptions = {},
 ): string {
-	const displayReports = collapseSharedUsageReports(reports);
+	const displayReports = filterUsageReportsForDisplay(collapseSharedUsageReports(inputReports), options);
 	const reportsByProvider = new Map<string, UsageReport[]>();
 	for (const report of displayReports) {
 		const list = reportsByProvider.get(report.provider) ?? [];
@@ -1381,7 +1383,9 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		}
 
 		process.stdout.write(
-			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions)}\n`,
+			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, {
+				showZeroUsageMeters: cfgDisplayShowZeroUsageMeters.get(settings),
+			})}\n`,
 		);
 	} catch (error) {
 		// Broker-backed reads (`clients`, `--history`) fail on an unreachable or

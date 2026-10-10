@@ -62,6 +62,36 @@ function makeLimit(opts: {
 function makeReport(provider: string, email: string, limits: UsageReport["limits"], notes?: string[]): UsageReport {
 	return { provider, fetchedAt: Date.now(), limits, ...(notes ? { notes } : {}), metadata: { email } };
 }
+describe("runUsageCommand", () => {
+	it("reads display.showZeroUsageMeters for standalone text output", async () => {
+		const provider = "meter-provider";
+		const report = makeReport(provider, "user@example.test", [
+			makeLimit({ id: "Base quota", provider, usedFraction: 0.2 }),
+			makeLimit({ id: "Unused tier", provider, tier: "unused-tier", usedFraction: 0 }),
+		]);
+		const authStorage = createInMemoryAuthStorage();
+		vi.spyOn(authStorage.usage, "reports").mockResolvedValue([report]);
+		const discover = vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		const loadSettings = vi
+			.spyOn(Settings, "loadReadOnly")
+			.mockResolvedValue(Settings.isolated({ display: { showZeroUsageMeters: false } }));
+		let output = "";
+		const write = vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			output += String(chunk);
+			return true;
+		});
+
+		try {
+			await runUsageCommand({});
+			expect(output).toContain("Base quota");
+			expect(output).not.toContain("Unused tier");
+		} finally {
+			write.mockRestore();
+			loadSettings.mockRestore();
+			discover.mockRestore();
+		}
+	});
+});
 
 describe("buildRedactionMap", () => {
 	it("masks everything past a two-char anchor when the anchor is unique", () => {
@@ -1123,6 +1153,28 @@ describe("formatUsageBreakdown", () => {
 		// Here we assert the CLI doesn't add spurious duplicates beyond one-per-limit.
 		const occurrences = text.split(note).length - 1;
 		expect(occurrences).toBe(2);
+	});
+
+	it("filters zero supplemental meters before expanding multi-account templates", () => {
+		const provider = "meter-provider";
+		const reports = [
+			makeReport(provider, "account-a@example.test", [
+				makeLimit({ id: "base", provider, usedFraction: 0.2, windowId: "weekly" }),
+				makeLimit({ id: "supplemental", provider, tier: "unused-tier", usedFraction: 0, windowId: "weekly" }),
+			]),
+			makeReport(provider, "account-b@example.test", [
+				makeLimit({ id: "base", provider, usedFraction: 0.3, windowId: "weekly" }),
+			]),
+		];
+		const visible = stripVTControlCharacters(formatUsageBreakdown(reports, [], Date.now()));
+		const hidden = stripVTControlCharacters(
+			formatUsageBreakdown(reports, [], Date.now(), undefined, [], undefined, { showZeroUsageMeters: false }),
+		);
+
+		expect(visible).toContain("supplemental");
+		expect(hidden).toContain("base");
+		expect(hidden).not.toContain("supplemental");
+		expect(hidden).not.toContain("not reported");
 	});
 });
 
