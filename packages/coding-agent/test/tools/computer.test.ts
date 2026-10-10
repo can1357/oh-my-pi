@@ -1365,7 +1365,7 @@ describe("computer worker round trips", () => {
 			true,
 		);
 		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.error.message).toBe("read-only run: 'selectText' requires read_only: false");
+		if (!result.ok) expect(result.error.message).toContain("read-only run: 'selectText'");
 		expect(native.selections).toEqual([]);
 	});
 

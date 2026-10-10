@@ -208,7 +208,8 @@ interface ComputerElement {
 	 * movement or keystrokes; the value is unchanged. `prefix`/`suffix` must directly surround the
 	 * match and pick one of several; `select: "start" | "end"` places a caret there instead.
 	 * Throws when the selection is not settable, the text is missing, or it is ambiguous.
-	 * Returns the selection read back. A following `type` replaces it when `focused` is true.
+	 * Returns the selection read back. In an editable field, a following `type` replaces it when
+	 * `focused` is true; a terminal's selection is displayed output, not its input line.
 	 */
 	selectText(text: string, options?: ComputerSelectTextOptions): Promise<ComputerTextSelection>;
 	/** Bounds in global desktop coordinates, or null when the element has none. */

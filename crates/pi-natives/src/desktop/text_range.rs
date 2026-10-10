@@ -65,7 +65,8 @@ impl TextSelectRequest {
 			));
 		}
 		let mut occurrences = 0usize;
-		let mut matches = Vec::new();
+		let mut matched = 0usize;
+		let mut listed = [0usize; LISTED_MATCHES];
 		let mut units = 0usize;
 		let boundaries = value
 			.char_indices()
@@ -78,13 +79,17 @@ impl TextSelectRequest {
 				if value[..byte].ends_with(&self.prefix)
 					&& rest[self.text.len()..].starts_with(&self.suffix)
 				{
-					matches.push(units);
+					if let Some(slot) = listed.get_mut(matched) {
+						*slot = units;
+					}
+					matched += 1;
 				}
 			}
 			units += width;
 		}
-		match matches.as_slice() {
-			[start] => {
+		let listed = &listed[..matched.min(LISTED_MATCHES)];
+		match (matched, listed) {
+			(1, [start]) => {
 				let length = self.text.encode_utf16().count();
 				Ok(match self.part {
 					SelectPart::Text => Utf16Range { start: *start, length },
@@ -92,12 +97,12 @@ impl TextSelectRequest {
 					SelectPart::End => Utf16Range { start: start + length, length: 0 },
 				})
 			},
-			[] if occurrences == 0 => Err(DesktopError::ax_failed(format!(
+			(0, _) if occurrences == 0 => Err(DesktopError::ax_failed(format!(
 				"{:?} does not occur in the element's value ({units} UTF-16 units); nothing was \
 				 selected",
 				self.text
 			))),
-			[] => Err(DesktopError::ax_failed(format!(
+			(0, _) => Err(DesktopError::ax_failed(format!(
 				"{:?} occurs {occurrences} time(s) in the element's value, but none {}; nothing was \
 				 selected",
 				self.text,
@@ -105,10 +110,10 @@ impl TextSelectRequest {
 			))),
 			_ => {
 				let mut offsets = String::new();
-				for (index, start) in matches.iter().take(LISTED_MATCHES).enumerate() {
+				for (index, start) in listed.iter().enumerate() {
 					let _ = write!(offsets, "{}{start}", if index == 0 { "" } else { ", " });
 				}
-				if matches.len() > LISTED_MATCHES {
+				if matched > LISTED_MATCHES {
 					offsets.push_str(", …");
 				}
 				let scope = if has_context {
@@ -117,10 +122,9 @@ impl TextSelectRequest {
 					String::new()
 				};
 				Err(DesktopError::ax_failed(format!(
-					"{:?} occurs {} times{scope} (UTF-16 offsets {offsets}), so it is ambiguous; give \
-					 a longer prefix or suffix to choose one; nothing was selected",
+					"{:?} occurs {matched} times{scope} (UTF-16 offsets {offsets}), so it is \
+					 ambiguous; give a longer prefix or suffix to choose one; nothing was selected",
 					self.text,
-					matches.len()
 				)))
 			},
 		}
@@ -274,6 +278,15 @@ mod tests {
 			.unwrap_err();
 		assert!(unmatched.message.contains("occurs 1 time(s)"), "{unmatched}");
 		assert!(unmatched.message.contains("none after prefix \"blue \""), "{unmatched}");
+	}
+
+	#[test]
+	fn many_matches_list_the_first_offsets_and_count_them_all() {
+		let error = request("x", "", "", SelectPart::Text)
+			.locate("xxxxxxxxxxxx")
+			.unwrap_err();
+		assert!(error.message.contains("occurs 12 times"), "{error}");
+		assert!(error.message.contains("offsets 0, 1, 2, 3, 4, 5, 6, 7, …)"), "{error}");
 	}
 
 	#[test]
