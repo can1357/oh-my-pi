@@ -1,5 +1,11 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
+import {
+	type AuthAccountPolicy,
+	DEFAULT_USAGE_RESERVE_PCT,
+	type ResetCreditAccountStatus,
+	type ResetCreditTarget,
+	type UsageReport,
+} from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { BrokerResetSweeper } from "@oh-my-pi/pi-coding-agent/session/broker-reset-sweep";
@@ -12,6 +18,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 const HOUR = 3_600_000;
 const CODEX = { credentialId: 1, accountId: "codex-account", email: "codex@example.com" };
+const SECOND_CODEX = { credentialId: 3, accountId: "second-codex-account", email: "second@example.com" };
 const CLAUDE = {
 	credentialId: 2,
 	accountId: "claude-account",
@@ -19,7 +26,9 @@ const CLAUDE = {
 	orgId: "11111111-1111-4111-8111-111111111111",
 };
 
-function codexReport(nowMs: number): UsageReport {
+type CodexAccount = typeof CODEX;
+
+function codexReport(nowMs: number, account: CodexAccount = CODEX): UsageReport {
 	return {
 		provider: "openai-codex",
 		fetchedAt: nowMs,
@@ -27,29 +36,29 @@ function codexReport(nowMs: number): UsageReport {
 			{
 				id: "openai-codex:primary",
 				label: "5 Hour",
-				scope: { provider: "openai-codex", accountId: CODEX.accountId, windowId: "5h" },
+				scope: { provider: "openai-codex", accountId: account.accountId, windowId: "5h" },
 				window: { id: "5h", label: "5 Hour", resetsAt: nowMs + 2 * HOUR },
 				amount: { usedFraction: 0.1, unit: "percent" },
 			},
 			{
 				id: "openai-codex:secondary",
 				label: "Weekly",
-				scope: { provider: "openai-codex", accountId: CODEX.accountId },
+				scope: { provider: "openai-codex", accountId: account.accountId },
 				window: { id: "7d", label: "Weekly", resetsAt: nowMs + 3 * 24 * HOUR },
 				amount: { usedFraction: 0.8, unit: "percent" },
 			},
 		],
-		metadata: { accountId: CODEX.accountId, email: CODEX.email },
+		metadata: { accountId: account.accountId, email: account.email },
 	};
 }
 
-function codexStatus(expiresAtMs: number): ResetCreditAccountStatus {
+function codexStatus(expiresAtMs: number, account: CodexAccount = CODEX): ResetCreditAccountStatus {
 	return {
 		provider: "openai-codex",
-		...CODEX,
+		...account,
 		active: false,
 		availableCount: 1,
-		credits: [{ id: "codex-credit-1", expiresAt: new Date(expiresAtMs).toISOString(), status: "available" }],
+		credits: [{ id: `${account.accountId}-credit`, expiresAt: new Date(expiresAtMs).toISOString(), status: "available" }],
 	};
 }
 
@@ -91,6 +100,15 @@ function claudeReport(nowMs: number, expiresAtMs: number): UsageReport {
 	};
 }
 
+/** The live listing of the Claude account, carrying the same offer as its report. */
+function claudeStatus(report: UsageReport): ResetCreditAccountStatus {
+	return { provider: "anthropic", ...CLAUDE, active: false, report, ...report.resetCredits! };
+}
+
+function autoRedeemPolicy(provider: string, email: string, autoRedeem: boolean): AuthAccountPolicy {
+	return { provider, account: { email }, autoRedeem };
+}
+
 describe("auth broker saved-reset sweep", () => {
 	let authStorage: AuthStorage;
 	let tempDir: TempDir;
@@ -109,6 +127,7 @@ describe("auth broker saved-reset sweep", () => {
 		for (const sweeper of sweepers) sweeper.close();
 		tempDir.removeSync();
 		vi.restoreAllMocks();
+		authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
 	});
 
 	afterAll(() => {
@@ -116,15 +135,16 @@ describe("auth broker saved-reset sweep", () => {
 	});
 
 	/**
-	 * Stub the broker's upstreams: cached usage, the live Codex listing and
+	 * Stub the broker's upstreams: cached usage, the live reset listings and
 	 * redeem. Sweep wakes are captured instead of armed so the test moves the
 	 * clock to each one and runs it.
 	 */
 	function startBroker(options: {
 		now: { ms: number };
 		reports: () => UsageReport[];
-		codexList?: () => ResetCreditAccountStatus;
+		live?: (provider: string) => ResetCreditAccountStatus[];
 		settings: Record<string, unknown>;
+		policies?: AuthAccountPolicy[];
 	}) {
 		vi.spyOn(Date, "now").mockImplementation(() => options.now.ms);
 		vi.spyOn(authStorage.oauth, "accounts").mockImplementation(provider =>
@@ -134,7 +154,11 @@ describe("auth broker saved-reset sweep", () => {
 		const listed: string[] = [];
 		vi.spyOn(authStorage.resets, "list").mockImplementation(async request => {
 			listed.push(request?.provider ?? "");
-			return request?.provider === "openai-codex" && options.codexList ? [options.codexList()] : [];
+			return options.live?.(request?.provider ?? "") ?? [];
+		});
+		authStorage.setAccountPolicies({
+			accountPolicies: options.policies ?? [],
+			defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
 		});
 		const redeemed: ResetCreditTarget[] = [];
 		vi.spyOn(authStorage.resets, "redeem").mockImplementation(async request => {
@@ -178,7 +202,7 @@ describe("auth broker saved-reset sweep", () => {
 		const broker = startBroker({
 			now,
 			reports: () => [codexReport(now.ms)],
-			codexList: () => codexStatus(expiresAtMs),
+			live: provider => (provider === "openai-codex" ? [codexStatus(expiresAtMs)] : []),
 			settings: { "codexResets.autoRedeem": "unset", "claudeResets.autoRedeem": "no" },
 		});
 
@@ -192,7 +216,7 @@ describe("auth broker saved-reset sweep", () => {
 		expect(broker.lastDelayMs()).toBe(HOUR - IMMINENT_RESET_EXPIRY_MS);
 
 		await broker.wake();
-		expect(broker.redeemed).toEqual([{ provider: "openai-codex", ...CODEX }]);
+		expect(broker.redeemed).toEqual([{ provider: "openai-codex", ...CODEX, creditId: "codex-account-credit" }]);
 	});
 
 	it("retries within a minute when the listing fails at a credit's last-chance wake", async () => {
@@ -202,10 +226,12 @@ describe("auth broker saved-reset sweep", () => {
 		const broker = startBroker({
 			now,
 			reports: () => [codexReport(now.ms)],
-			codexList: () =>
-				listingFails
-					? { ...codexStatus(expiresAtMs), availableCount: 0, credits: [], error: "Failed to load saved resets" }
-					: codexStatus(expiresAtMs),
+			live: provider =>
+				provider !== "openai-codex"
+					? []
+					: listingFails
+						? [{ ...codexStatus(expiresAtMs), availableCount: 0, credits: [], error: "Failed to load saved resets" }]
+						: [codexStatus(expiresAtMs)],
 			settings: { "codexResets.autoRedeem": "unset", "claudeResets.autoRedeem": "no" },
 		});
 
@@ -218,20 +244,54 @@ describe("auth broker saved-reset sweep", () => {
 
 		listingFails = false;
 		await broker.wake();
-		expect(broker.redeemed).toEqual([{ provider: "openai-codex", ...CODEX }]);
+		expect(broker.redeemed).toEqual([{ provider: "openai-codex", ...CODEX, creditId: "codex-account-credit" }]);
 	});
 
-	it("spends a Claude credit expiring in four minutes from the report inventory, without listing", async () => {
+	it("spends a Claude credit expiring in four minutes once a live listing confirms the report inventory's candidate", async () => {
 		const now = { ms: Date.parse("2026-10-09T12:00:00Z") };
+		const report = () => claudeReport(now.ms, Date.parse("2026-10-09T12:04:00Z"));
 		const broker = startBroker({
 			now,
-			reports: () => [claudeReport(now.ms, now.ms + 4 * 60_000)],
+			reports: () => [report()],
+			live: provider => (provider === "anthropic" ? [claudeStatus(report())] : []),
 			settings: { "codexResets.autoRedeem": "no", "claudeResets.autoRedeem": "unset" },
 		});
 
 		await broker.start();
+		expect(broker.listed).toEqual(["anthropic"]);
 		expect(broker.redeemed).toEqual([{ provider: "anthropic", creditId: "cedar-grant-1", ...CLAUDE }]);
-		expect(broker.listed).toEqual([]);
+	});
+
+	it("never spends an account whose policy turns auto-redeem off, even when the provider says yes", async () => {
+		const now = { ms: Date.parse("2026-10-09T12:00:00Z") };
+		const expiresAtMs = now.ms + 2 * HOUR;
+		const broker = startBroker({
+			now,
+			reports: () => [codexReport(now.ms), codexReport(now.ms, SECOND_CODEX)],
+			live: provider =>
+				provider === "openai-codex" ? [codexStatus(expiresAtMs), codexStatus(expiresAtMs, SECOND_CODEX)] : [],
+			settings: { "codexResets.autoRedeem": "yes", "claudeResets.autoRedeem": "no" },
+			policies: [autoRedeemPolicy("openai-codex", CODEX.email, false)],
+		});
+
+		await broker.start();
+		expect(broker.redeemed).toEqual([{ provider: "openai-codex", ...SECOND_CODEX }]);
+	});
+
+	it("salvages for an account whose policy turns auto-redeem on while the provider says no", async () => {
+		const now = { ms: Date.parse("2026-10-09T12:00:00Z") };
+		const expiresAtMs = now.ms + 2 * HOUR;
+		const broker = startBroker({
+			now,
+			reports: () => [codexReport(now.ms), codexReport(now.ms, SECOND_CODEX)],
+			live: provider =>
+				provider === "openai-codex" ? [codexStatus(expiresAtMs), codexStatus(expiresAtMs, SECOND_CODEX)] : [],
+			settings: { "codexResets.autoRedeem": "no", "claudeResets.autoRedeem": "no" },
+			policies: [autoRedeemPolicy("openai-codex", CODEX.email, true)],
+		});
+
+		await broker.start();
+		expect(broker.redeemed).toEqual([{ provider: "openai-codex", ...CODEX }]);
 	});
 
 	it("leaves every credit alone when both providers' auto-redeem is no", async () => {
@@ -239,7 +299,7 @@ describe("auth broker saved-reset sweep", () => {
 		const broker = startBroker({
 			now,
 			reports: () => [codexReport(now.ms), claudeReport(now.ms, now.ms + 4 * 60_000)],
-			codexList: () => codexStatus(now.ms + 4 * 60_000),
+			live: provider => (provider === "openai-codex" ? [codexStatus(now.ms + 4 * 60_000)] : []),
 			settings: { "codexResets.autoRedeem": "no", "claudeResets.autoRedeem": "no" },
 		});
 

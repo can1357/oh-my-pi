@@ -193,10 +193,22 @@ describe("Claude saved-reset trigger integration", () => {
 			email: EMAIL,
 			orgId: ORG_ID,
 		});
+		const siblings = options.siblings ?? [];
 		vi.spyOn(authStorage.oauth, "accounts").mockReturnValue([
 			{ position: 0, credentialId: CREDENTIAL_ID, accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID, active: true },
+			...siblings.map((sibling, index) => ({
+				position: index + 1,
+				credentialId: sibling.credentialId,
+				accountId: sibling.accountId,
+				email: sibling.email,
+				orgId: sibling.orgId,
+				active: false,
+			})),
 		]);
-		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => options.report && [options.report]);
+		vi.spyOn(authStorage.usage, "reports").mockImplementation(
+			async () =>
+				options.report && [options.report, ...siblings.map(sibling => withInventory(sibling.report!, sibling))],
+		);
 		let listAttempts = 0;
 		vi.spyOn(authStorage.resets, "list").mockImplementation(async request => {
 			if (request?.provider !== "anthropic") return [];
@@ -525,9 +537,10 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("leaves an account whose policy turns auto-redeem off out of the heartbeat salvage until the policy is removed", async () => {
+		const status = claudeStatus(false);
 		const { session, coordinator, targets } = buildSession({
-			report: claudeReport(0.5),
-			status: claudeStatus(false),
+			report: withInventory(claudeReport(0.5), status),
+			status,
 		});
 		authStorage.setAccountPolicies(accountPolicies(false));
 		try {
@@ -548,9 +561,10 @@ describe("Claude saved-reset trigger integration", () => {
 	it.each(["no", "unset"] as const)(
 		"spends without asking only the account whose policy turns auto-redeem on while claudeResets.autoRedeem is %s",
 		async autoRedeem => {
+			const status = claudeStatus(false);
 			const { session, coordinator, targets } = buildSession({
-				report: claudeReport(0.5),
-				status: claudeStatus(false),
+				report: withInventory(claudeReport(0.5), status),
+				status,
 				siblings: [siblingStatus()],
 				autoRedeem,
 			});
@@ -570,9 +584,10 @@ describe("Claude saved-reset trigger integration", () => {
 
 	it("asks only about accounts following an unset claudeResets.autoRedeem, and a No still spends the account turned on", async () => {
 		const questions: string[] = [];
+		const status = claudeStatus(false);
 		const { session, coordinator, targets } = buildSession({
-			report: claudeReport(0.5),
-			status: claudeStatus(false),
+			report: withInventory(claudeReport(0.5), status),
+			status,
 			siblings: [siblingStatus()],
 			autoRedeem: "unset",
 			select: async question => {
@@ -596,9 +611,10 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("does not spend a planned salvage when the account's policy turns auto-redeem off before execution", async () => {
+		const status = claudeStatus(false);
 		const { session, coordinator, targets } = buildSession({
-			report: claudeReport(0.5),
-			status: claudeStatus(false),
+			report: withInventory(claudeReport(0.5), status),
+			status,
 		});
 		const planned = Promise.withResolvers<void>();
 		const policy = authStorage.oauth.policy.bind(authStorage.oauth);
@@ -626,9 +642,10 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("does not spend a queued salvage whose account's policy turns auto-redeem off while an earlier spend runs", async () => {
+		const status = claudeStatus(false);
 		const { session, coordinator, targets } = buildSession({
-			report: claudeReport(0.5),
-			status: claudeStatus(false),
+			report: withInventory(claudeReport(0.5), status),
+			status,
 			siblings: [siblingStatus()],
 		});
 		const spending = Promise.withResolvers<void>();
