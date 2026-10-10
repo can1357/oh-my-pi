@@ -830,7 +830,7 @@ describe("AuthStorage codex oauth ranking", () => {
 		).toThrow("without surrounding whitespace");
 	});
 
-	test("keeps hot-window and measured-usage safety ahead of configured priority", async () => {
+	test("keeps hot-window safety ahead of configured priority but not a failed usage fetch", async () => {
 		if (!store) throw new Error("test setup failed");
 		authStorage = new AuthStorage(store, {
 			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
@@ -863,8 +863,34 @@ describe("AuthStorage codex oauth ranking", () => {
 		);
 
 		const counts = await countApiKeySelections(authStorage, "openai-codex", "policy-safety");
-		expectExclusivePreference(counts, "api-acct-safe", "api-acct-hot");
-		expectExclusivePreference(counts, "api-acct-safe", "api-acct-unknown");
+		expectExclusivePreference(counts, "api-acct-unknown", "api-acct-hot");
+		expectExclusivePreference(counts, "api-acct-unknown", "api-acct-safe");
+	});
+
+	test("prefers a measured account over a failed usage fetch at equal configured priority", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{ provider: "openai-codex", account: { email: "unknown@example.com" }, priority: 10 },
+				{ provider: "openai-codex", account: { email: "measured@example.com" }, priority: 10 },
+			],
+		});
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-unknown", "unknown@example.com") },
+			{ type: "oauth", ...createCredential("acct-measured", "measured@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-measured",
+			createCodexUsageReport({
+				accountId: "acct-measured",
+				primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.5, resetInMs: WEEK_MS },
+			}),
+		);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "policy-equal-priority");
+		expectExclusivePreference(counts, "api-acct-measured", "api-acct-unknown");
 	});
 
 	test("applies deterministic priority without a usage ranking strategy", async () => {
