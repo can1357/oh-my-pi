@@ -144,8 +144,10 @@ def test_index_serves_dashboard_html(settings: Settings) -> None:
     assert '"replayEnabled":' in resp.text
 
 
-def test_index_substitutes_replay_token(env, monkeypatch: pytest.MonkeyPatch) -> None:
-    """When a replay token is set, the config blob exposes it to the SPA."""
+def test_index_never_embeds_replay_token(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a replay token set, the config blob exposes only the auth
+    posture — the token itself must never appear in the unauthenticated
+    dashboard HTML (the SPA fetches it via GET /api/config instead)."""
     monkeypatch.setenv("ROBOMP_REPLAY_TOKEN", "secret-token-7")
     reset_settings_cache()
     cfg = Settings()  # type: ignore[call-arg]
@@ -156,7 +158,8 @@ def test_index_substitutes_replay_token(env, monkeypatch: pytest.MonkeyPatch) ->
             resp = client.get("/")
         assert resp.status_code == 200
         assert '"replayEnabled":true' in resp.text
-        assert '"replayToken":"secret-token-7"' in resp.text
+        assert '"replayToken":""' in resp.text
+        assert "secret-token-7" not in resp.text
     finally:
         close_database()
 
