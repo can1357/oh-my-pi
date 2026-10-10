@@ -42,6 +42,11 @@ export type RelayWaitOutcome =
 	/** The relay extension is older than the running server. */
 	| "outdated-extension";
 
+/** The OMP version a parsed `/json/version` body (ready or waiting) reports; empty when it reports none. */
+export function relayVersionOf(parsed: object): string {
+	return "ompRelayVersion" in parsed && typeof parsed.ompRelayVersion === "string" ? parsed.ompRelayVersion : "";
+}
+
 function parseUnavailableInfo(body: string): RelayUnavailableInfo | null {
 	try {
 		const parsed: unknown = JSON.parse(body);
@@ -59,8 +64,7 @@ function parseUnavailableInfo(body: string): RelayUnavailableInfo | null {
 				error: "",
 				extensionSeen: parsed.extensionSeen,
 				uptimeMs: parsed.uptimeMs,
-				ompRelayVersion:
-					"ompRelayVersion" in parsed && typeof parsed.ompRelayVersion === "string" ? parsed.ompRelayVersion : "",
+				ompRelayVersion: relayVersionOf(parsed),
 				disconnectedMs,
 			};
 		}
@@ -86,7 +90,7 @@ function readyOutcome(body: string): RelayWaitOutcome {
 			parsed.ompExtensionDiscardedTabsProtocol !== String(DISCARDED_TABS_PROTOCOL_VERSION)
 		) {
 			// A relay from another OMP version is the likelier culprit than the extension.
-			if (!("ompRelayVersion" in parsed) || parsed.ompRelayVersion !== VERSION) return "outdated-relay";
+			if (relayVersionOf(parsed) !== VERSION) return "outdated-relay";
 			return "outdated-extension";
 		}
 		return "ready";

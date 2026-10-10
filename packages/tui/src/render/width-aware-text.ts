@@ -51,6 +51,11 @@ export class WidthAwareText implements Component {
 		this.#inner.invalidate();
 	}
 
+	/** The formatted text stays: the inner `Text` renders from it, so dropping it would free nothing. */
+	releaseRenderCaches(): void {
+		this.#inner.releaseRenderCaches();
+	}
+
 	/**
 	 * Re-run the formatter on the next render because its inputs changed.
 	 * Unlike {@link invalidate}, the inner `Text` keeps its wrap cache, so a

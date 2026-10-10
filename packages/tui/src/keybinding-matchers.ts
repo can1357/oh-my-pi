@@ -53,11 +53,15 @@ export function matchesSelectPageDown(data: string): boolean {
 	return getKeybindings().matches(data, "tui.select.pageDown");
 }
 
+/** Effective external-editor key: the first bound key, or Ctrl+G when unbound. */
+export function appExternalEditorKey(): KeyId {
+	return getKeybindings().getKeys("app.editor.external")[0] ?? "ctrl+g";
+}
+
 /** Match the external-editor keybinding, falling back to Ctrl+G when unbound. */
 export function matchesAppExternalEditor(data: string): boolean {
 	const keybindings = getKeybindings();
-	const externalEditorKeys = keybindings.getKeys("app.editor.external");
-	if (externalEditorKeys.length > 0) {
+	if (keybindings.getKeys("app.editor.external").length > 0) {
 		return keybindings.matches(data, "app.editor.external");
 	}
 	return matchesKey(data, "ctrl+g");

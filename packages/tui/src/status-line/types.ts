@@ -114,7 +114,7 @@ export interface SegmentContext {
 	} | null;
 	/** Modal editing state, or null when `tui.vimMode` is off. */
 	vim: {
-		mode: "insert" | "normal" | "visual" | "visual-line";
+		mode: "insert" | "normal" | "visual" | "visual-line" | "replace";
 		/** Half-typed operator/count (`"2d"`), empty when nothing is pending. */
 		pending: string;
 		/** Lines spanned by the active Visual selection; 0 outside Visual modes. */
