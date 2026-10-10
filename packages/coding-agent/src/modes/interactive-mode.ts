@@ -4716,7 +4716,9 @@ export class InteractiveMode implements InteractiveModeContext {
 					return;
 				}
 				try {
-					await this.session.setModelTemporary(transition.model, transition.thinkingLevel);
+					await this.session.setModelTemporary(transition.model, transition.thinkingLevel, {
+						preserveDefaultRole: true,
+					});
 				} catch (error) {
 					this.showWarning(
 						`Failed to switch to plan model for plan mode: ${error instanceof Error ? error.message : String(error)}`,
@@ -4733,7 +4735,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingPlanModelSwitch = false;
 		if (!pending) return;
 		try {
-			await this.session.setModelTemporary(pending.model, pending.thinkingLevel);
+			await this.session.setModelTemporary(pending.model, pending.thinkingLevel, { preserveDefaultRole: true });
+			if (!this.planModeEnabled) await this.session.reapplyDefaultRoleModel();
 		} catch (error) {
 			this.showWarning(
 				`Failed to switch model after streaming: ${error instanceof Error ? error.message : String(error)}`,
@@ -4994,7 +4997,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			};
 			this.#pendingPlanModelSwitch = false;
 		} else {
-			await this.session.setModelTemporary(prev.model, prev.thinkingLevel);
+			await this.session.setModelTemporary(prev.model, prev.thinkingLevel, { preserveDefaultRole: true });
 		}
 	}
 
@@ -5016,6 +5019,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.#applyPlanExecutionModel(executionModel);
 		} else {
 			await this.#restorePlanPreviousModel(deferredPrev);
+			// The default may have changed while plan mode held the entry model.
+			await this.session.reapplyDefaultRoleModel();
 		}
 	}
 
@@ -5067,6 +5072,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			if (this.#planModePreviousModelState && !options?.deferModelRestore) {
 				await this.#restorePlanPreviousModel(this.#planModePreviousModelState);
+				// Only a role-owned entry model follows a default edited during planning.
+				await this.session.reapplyDefaultRoleModel();
 			}
 			// If #applyPlanModeModel queued a deferred switch to the plan-role model
 			// (because the session was streaming on entry), drop it now: we are

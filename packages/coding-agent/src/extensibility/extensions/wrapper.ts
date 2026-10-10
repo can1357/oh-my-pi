@@ -10,8 +10,9 @@ import {
 	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
-import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import type { Settings } from "../../config/settings";
 import {
 	denyError,
 	formatApprovalPrompt,
@@ -220,6 +221,15 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		return target.restartForModeChange();
 	}
 
+	#refreshApprovalSettings(settings: Settings | undefined): Promise<void> | undefined {
+		return settings?.refreshForToolApproval()?.catch(error => {
+			logger.warn("Settings reload before tool approval failed", {
+				tool: this.tool.name,
+				error: String(error),
+			});
+		});
+	}
+
 	async execute(
 		toolCallId: string,
 		params: Static<TParameters>,
@@ -227,6 +237,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<TDetails, TParameters>> {
+		const settings: Settings | undefined = context?.settings ?? this.runner.sessionSettings;
+		let approvalRefresh = this.#refreshApprovalSettings(settings);
+		if (approvalRefresh) await approvalRefresh;
 		// The agent loop emits `tool_call` at arg-prep time (session
 		// `beforeToolCall` wiring) so a handler revision lands before concurrency
 		// scheduling and `tool_execution_start`. Consume the marker
@@ -244,9 +257,8 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// runner is touched — an already-denied tool never emits `tool_call` — while the full gate below
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or
 		// newly prompt-gated command and have it run unapproved.
-		const { approvalMode, userPolicies } = resolveApprovalFromContext(
-			context ?? (this.runner.sessionSettings ? { settings: this.runner.sessionSettings } : undefined),
-		);
+		const approvalContext = context ?? (settings ? { settings } : undefined);
+		let { approvalMode, userPolicies } = resolveApprovalFromContext(approvalContext);
 		const preResolved = resolveApproval(this.tool, approvalArgs(params, context), approvalMode, userPolicies);
 		if (preResolved.policy === "deny") {
 			throw denyError(preResolved, this.tool.name);
@@ -318,6 +330,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// policy and prompts on `effectiveParams`, so the user approves exactly what executes. A revised
 		// input that newly resolves to `deny` is caught here even though the original passed the
 		// short-circuit above.
+		approvalRefresh = this.#refreshApprovalSettings(settings);
+		if (approvalRefresh) await approvalRefresh;
+		({ approvalMode, userPolicies } = resolveApprovalFromContext(approvalContext));
 		const resolvedArgs = approvalArgs(effectiveParams, context);
 		const resolved = resolveApproval(this.tool, resolvedArgs, approvalMode, userPolicies);
 		context?.xdevTierResolved?.(resolved.tier);
