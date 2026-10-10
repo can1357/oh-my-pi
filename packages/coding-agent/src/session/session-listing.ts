@@ -9,6 +9,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { computeDefaultSessionDir } from "./session-paths";
+import { compareSessionRecency } from "./recent-session-sync";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
 
@@ -538,12 +539,7 @@ async function collectSessionsFromFiles(
 					)
 				).flat();
 
-	sessions.sort(
-		(a, b) =>
-			b.modified.getTime() - a.modified.getTime() ||
-			b.created.getTime() - a.created.getTime() ||
-			b.path.localeCompare(a.path),
-	);
+	sessions.sort(compareSessionRecency);
 	return sessions;
 }
 

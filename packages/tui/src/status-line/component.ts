@@ -3725,8 +3725,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const compactContext = ctx.options.context_pct?.compact === true && segments.includes("context_pct");
 		const compactContextLabel = `ctx:${formatCompactContextPercent(pct)}`;
 		const startupCompactContextLabel =
-			compactContext && pct === null && ctx.session.startupContextPercent != null
-				? `ctx:${formatCompactContextPercent(ctx.session.startupContextPercent)}`
+			compactContext && pct === null
+				? `ctx:${formatCompactContextPercent(ctx.session.startupContextPercent ?? 100)}`
 				: undefined;
 		const nativeCompactContextLabel = startupCompactContextLabel
 			? compactContextLabel.padEnd(startupCompactContextLabel.length)

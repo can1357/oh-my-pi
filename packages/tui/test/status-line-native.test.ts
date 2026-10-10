@@ -84,6 +84,23 @@ describe("native composer facts", () => {
 		}
 	});
 
+	it("reserves representative live width when no cached context percentage exists", () => {
+		setNativeRendering(true);
+		const line = statusLine({
+			preset: "custom",
+			leftSegments: ["context_pct"],
+			rightSegments: [],
+			segmentOptions: { context_pct: { compact: true } },
+		});
+
+		try {
+			const meterJson = JSON.stringify(line.describeComposerFacts().context);
+			expect(meterJson).toContain('"label":"ctx:?   "');
+		} finally {
+			line.dispose();
+		}
+	});
+
 	it("keeps the configured segments without another home, outer edges dropping last", () => {
 		setNativeRendering(true);
 		const segs = facts(

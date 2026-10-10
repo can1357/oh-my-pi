@@ -17,6 +17,7 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import {
 	applyStartupComposerPreferences,
 	beginStartupComposer,
+	canReusePrepaintSessionUsage,
 	ComposerLease,
 	resolveTerminalSessionPrepaint,
 	stopPendingStartupComposer,
@@ -86,6 +87,34 @@ describe("startup composer terminal session identity", () => {
 			setAgentDir(originalAgentDir);
 			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
 			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("breaks equal session mtimes with the header creation time used by live resume", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-session-created-"));
+		const project = path.join(root, "project");
+		const sessions = path.join(root, "sessions");
+		const olderSessionFile = path.join(sessions, "z-older.jsonl");
+		const newerSessionFile = path.join(sessions, "a-newer.jsonl");
+		fs.mkdirSync(project);
+		fs.mkdirSync(sessions);
+		for (const [file, id, timestamp] of [
+			[olderSessionFile, "old", "2026-01-01T00:00:00Z"],
+			[newerSessionFile, "new", "2026-01-02T00:00:00Z"],
+		] as const) {
+			fs.writeFileSync(
+				file,
+				`${JSON.stringify({ type: "session", id, timestamp, cwd: project })}\n${JSON.stringify({
+					type: "message",
+					message: { role: "user", content: `${id} work` },
+				})}\n`,
+			);
+			fs.utimesSync(file, new Date("2026-02-01T00:00:00Z"), new Date("2026-02-01T00:00:00Z"));
+		}
+		try {
+			expect(resolveTerminalSessionPrepaint(project, olderSessionFile)?.sessionFile).toBe(newerSessionFile);
+		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -256,6 +285,12 @@ describe("startup settings cache scope", () => {
 		expect(settingCacheScope("env")).toBeUndefined();
 		expect(settingCacheScope("runtime")).toBeUndefined();
 		expect(settingCacheScope("overlay")).toBeUndefined();
+	});
+
+	it("rejects cached session usage when launch-local config overlays are present", () => {
+		expect(canReusePrepaintSessionUsage(true)).toBeTrue();
+		expect(canReusePrepaintSessionUsage(true, ["", "/tmp/launch.yml"].join(path.delimiter))).toBeFalse();
+		expect(canReusePrepaintSessionUsage(false, "/tmp/launch.yml")).toBeFalse();
 	});
 });
 

@@ -20,6 +20,7 @@ import {
 	resolveBreadcrumbToInteractiveRoot,
 } from "../session/session-paths";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
+import { findMostRecentNonEmptySessionSync } from "../session/recent-session-sync";
 
 /** Inputs available at the CLI prepaint boundary before command modules load. */
 export interface PrepaintComposerOptions {
@@ -59,91 +60,15 @@ export interface TerminalSessionPrepaint {
 	readonly sessionFile: string;
 }
 
-function hasDisplayText(content: unknown): boolean {
-	if (typeof content === "string") return content.trim().length > 0;
-	if (!Array.isArray(content)) return false;
-	return content.some(part => {
-		if (!part || typeof part !== "object") return false;
-		const text = (part as { text?: unknown }).text;
-		return typeof text === "string" && text.trim().length > 0;
-	});
-}
-
-/**
- * Prepaint-only mirror of the resumable-content boundary in `isEmptySession`.
- * This stays synchronous and dependency-light because the first frame runs
- * before the session graph loads.
- */
-function hasResumableSessionContent(sessionFile: string): boolean {
-	let file: number | undefined;
-	try {
-		file = fs.openSync(sessionFile, "r");
-		const buffer = Buffer.allocUnsafe(64 * 1024);
-		const decoder = new TextDecoder();
-		let pending = "";
-		const inspect = (line: string): boolean => {
-			let entry: unknown;
-			try {
-				entry = JSON.parse(line);
-			} catch {
-				return false;
-			}
-			if (!entry || typeof entry !== "object") return false;
-			const record = entry as {
-				type?: unknown;
-				title?: unknown;
-				shortSummary?: unknown;
-				message?: { role?: unknown; content?: unknown };
-			};
-			if (typeof record.title === "string" && record.title.trim()) return true;
-			if (record.type === "compaction" && typeof record.shortSummary === "string" && record.shortSummary.trim()) {
-				return true;
-			}
-			if (record.type !== "message" || !record.message) return false;
-			if (record.message.role === "assistant") return true;
-			return (
-				(record.message.role === "user" || record.message.role === "developer") &&
-				hasDisplayText(record.message.content)
-			);
-		};
-
-		for (;;) {
-			const bytes = fs.readSync(file, buffer, 0, buffer.length, null);
-			if (bytes === 0) break;
-			pending += decoder.decode(buffer.subarray(0, bytes), { stream: true });
-			let newline = pending.indexOf("\n");
-			while (newline >= 0) {
-				if (inspect(pending.slice(0, newline).trim())) return true;
-				pending = pending.slice(newline + 1);
-				newline = pending.indexOf("\n");
-			}
-		}
-		pending += decoder.decode();
-		return pending.trim().length > 0 && inspect(pending.trim());
-	} catch {
-		return false;
-	} finally {
-		if (file !== undefined) fs.closeSync(file);
-	}
-}
-
 /** Resolve the newest project-local target `continueRecent()` will choose after skipping empty `/new` stubs. */
 function resolveCurrentProjectSession(currentSessionFile: string | undefined): string | undefined {
 	if (!currentSessionFile || !fs.existsSync(currentSessionFile)) return undefined;
-	try {
-		const sessionDir = path.dirname(currentSessionFile);
-		return fs
-			.readdirSync(sessionDir, { withFileTypes: true })
-			.filter(entry => entry.isFile() && entry.name.endsWith(".jsonl"))
-			.map(entry => {
-				const sessionFile = path.join(sessionDir, entry.name);
-				return { sessionFile, modified: fs.statSync(sessionFile).mtimeMs };
-			})
-			.sort((a, b) => b.modified - a.modified || b.sessionFile.localeCompare(a.sessionFile))
-			.find(entry => hasResumableSessionContent(entry.sessionFile))?.sessionFile;
-	} catch {
-		return undefined;
-	}
+	return findMostRecentNonEmptySessionSync(path.dirname(currentSessionFile));
+}
+
+/** Cached usage is unsafe when process-local settings can override the persisted auto-resume intent. */
+export function canReusePrepaintSessionUsage(allowSessionUsage: boolean | undefined, configFiles?: string): boolean {
+	return allowSessionUsage === true && !(configFiles?.split(path.delimiter).some(Boolean) ?? false);
 }
 
 /** Resolve the session identity needed by prepaint, without loading the session graph. */
@@ -207,7 +132,7 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 		: resolveTerminalSessionPrepaint(cwd, cache?.cachedSessionFile(cwd));
 	const cached = cache
 		? cache.read(terminalSession?.cacheCwd ?? cwd, {
-				allowSessionUsage: options.allowSessionUsage,
+				allowSessionUsage: canReusePrepaintSessionUsage(options.allowSessionUsage, process.env.PI_CONFIG_FILES),
 				sessionFile: terminalSession?.sessionFile,
 			})
 		: { preferences: undefined, theme: undefined, status: undefined };
