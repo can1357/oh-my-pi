@@ -14,6 +14,7 @@ use std::{
 use core_graphics::{event::CGEvent, geometry::CGPoint};
 use foreign_types::ForeignType;
 use libc::pid_t;
+use parking_lot::Mutex;
 
 use super::{
 	super::{
@@ -41,9 +42,11 @@ const ACTIVATION_TIMEOUT: Duration = Duration::from_millis(400);
 const ACTIVATION_POLL: Duration = Duration::from_millis(10);
 /// How recent a mouse click or ⌘/⌃ chord must be for a target activation to
 /// count as the user's own switch. Measured on a VM: ⌘-Tab activates the chosen
-/// app about 3 ms after ⌘ is released, at most one poll after the guard last
-/// saw ⌘ held.
+/// app about 3 ms after ⌘ is released.
 const USER_SWITCH_WINDOW: Duration = Duration::from_millis(250);
+/// How often the chord sampler reads whether ⌘ or ⌃ is held: well inside the
+/// ~100 ms a ⌘-Tab holds ⌘, on a thread no AX probe blocks.
+const CHORD_SAMPLE: Duration = Duration::from_millis(5);
 /// Keeps the target frontmost until it has consumed foreground input.
 const FOREGROUND_SETTLE: Duration = Duration::from_millis(40);
 
@@ -367,16 +370,10 @@ pub(super) fn after_cleanup<T>(result: CoreResult<T>, cleanup: CoreResult<()>) -
 const HID_SYSTEM_STATE: i32 = 1;
 /// Left, right and other mouse button down and up (`CGEventType`).
 const MOUSE_BUTTON_EVENTS: [u32; 6] = [1, 2, 3, 4, 25, 26];
-/// `kCGEventFlagsChanged`: a modifier key went down or up.
-const FLAGS_CHANGED: u32 = 12;
 /// ⌘ and ⌃ (`kCGEventFlagMaskCommand | Control`). ⌥ is left out: it types
 /// characters on German, Polish, French and Nordic layouts, and alone it
 /// picks no app (⌥-click counts as a click).
 const SWITCH_MODIFIERS: u64 = 0x0010_0000 | 0x0004_0000;
-/// Longest gap between two samples that cannot hide a whole ⌘/⌃ chord: a
-/// ⌘-Tab holds ⌘ about 100 ms. Across a longer gap (the poll blocked in an AX
-/// probe, or descheduled) any modifier change may have been one.
-const UNSEEN_CHORD_GAP: Duration = Duration::from_millis(40);
 
 /// What one poll reads of how the user could be switching apps. Typing, Shift
 /// and Caps Lock pick no app, so none of them appear here.
@@ -388,8 +385,9 @@ struct SwitchSignals {
 	last_click: Option<Instant>,
 	/// A switch modifier is held now.
 	chord:      bool,
-	/// HID counter of modifier key changes, including Shift's.
-	modifiers:  u32,
+	/// When the chord sampler last saw ⌘ or ⌃ held, however long this poll
+	/// was blocked.
+	last_chord: Option<Instant>,
 	/// The process that has the keyboard.
 	key_focus:  Option<ProcessSerialNumber>,
 }
@@ -399,13 +397,13 @@ impl SwitchSignals {
 		buttons: [u32; 6],
 		last_click: Option<Instant>,
 		flags: u64,
-		modifiers: u32,
+		last_chord: Option<Instant>,
 		key_focus: Option<ProcessSerialNumber>,
 	) -> Self {
-		Self { buttons, last_click, chord: flags & SWITCH_MODIFIERS != 0, modifiers, key_focus }
+		Self { buttons, last_click, chord: flags & SWITCH_MODIFIERS != 0, last_chord, key_focus }
 	}
 
-	fn read(spi: &ForegroundSpi, now: Instant) -> Self {
+	fn read(spi: &ForegroundSpi, now: Instant, last_chord: &Mutex<Option<Instant>>) -> Self {
 		// SAFETY: HIDSystemState and these public CGEventType values are defined
 		// by CGEventSource.h / CGEventTypes.h; these are read-only queries.
 		let buttons = MOUSE_BUTTON_EVENTS.map(|event_type| unsafe {
@@ -420,10 +418,8 @@ impl SwitchSignals {
 			.filter_map(|seconds| Duration::try_from_secs_f64(seconds).ok())
 			.min()
 			.and_then(|since| now.checked_sub(since));
-		// SAFETY: as above.
-		let flags = unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) };
-		// SAFETY: as above.
-		let modifiers = unsafe { CGEventSourceCounterForEventType(HID_SYSTEM_STATE, FLAGS_CHANGED) };
+		let flags = modifier_flags();
+		let last_chord = *last_chord.lock();
 		let key_focus = spi.get_key_focus.and_then(|get_key_focus| {
 			let mut psn = ProcessSerialNumber::default();
 			let mut status = 0u8;
@@ -431,7 +427,21 @@ impl SwitchSignals {
 			// which writes the 8-byte PSN and one status byte.
 			(unsafe { get_key_focus(&mut psn, &mut status) } == 0).then_some(psn)
 		});
-		Self::new(buttons, last_click, flags, modifiers, key_focus)
+		Self::new(buttons, last_click, flags, last_chord, key_focus)
+	}
+}
+
+fn modifier_flags() -> u64 {
+	// SAFETY: HIDSystemState is defined by CGEventSource.h; a read-only query.
+	unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) }
+}
+
+/// One chord-sampler reading: `now` becomes the latest time ⌘ or ⌃ was seen
+/// held. Other modifiers leave it alone, so Shift or ⌥ while a poll is
+/// blocked never looks like a chord.
+fn sample_chord(last_chord: &Mutex<Option<Instant>>, flags: u64, now: Instant) {
+	if flags & SWITCH_MODIFIERS != 0 {
+		*last_chord.lock() = Some(now);
 	}
 }
 
@@ -451,19 +461,17 @@ enum UserSwitch {
 
 /// Answers "did the user switch apps on purpose since T, and how?" for an
 /// action between the user's app and the `target`, whose own focus grabs are
-/// not the user's doing. Clicks are timed exactly from the HID state. A chord
-/// or panel is seen while it lasts; a chord that began and ended between two
-/// samples further apart than `UNSEEN_CHORD_GAP` is assumed from the modifier
-/// counter.
+/// not the user's doing. Clicks are timed exactly from the HID state, and a
+/// held ⌘/⌃ from the chord sampler, so a poll blocked in an AX probe neither
+/// loses a whole ⌘-Tab nor makes an older modifier change look like a recent
+/// chord. A panel is seen while it lasts.
 struct UserSwitchWatch {
-	user:      ProcessSerialNumber,
-	target:    ProcessSerialNumber,
-	buttons:   [u32; 6],
-	modifiers: u32,
-	sampled:   Instant,
-	click:     Option<Instant>,
-	chord:     Option<Instant>,
-	panel:     Option<Instant>,
+	user:    ProcessSerialNumber,
+	target:  ProcessSerialNumber,
+	buttons: [u32; 6],
+	click:   Option<Instant>,
+	chord:   Option<Instant>,
+	panel:   Option<Instant>,
 }
 
 impl UserSwitchWatch {
@@ -480,8 +488,6 @@ impl UserSwitchWatch {
 			user,
 			target,
 			buttons: signals.buttons,
-			modifiers: signals.modifiers,
-			sampled: now,
 			click: signals
 				.last_click
 				.filter(|at| now.saturating_duration_since(*at) <= lookback),
@@ -497,13 +503,7 @@ impl UserSwitchWatch {
 			self.buttons = signals.buttons;
 			self.click = Some(signals.last_click.unwrap_or(now));
 		}
-		if signals.modifiers != self.modifiers
-			&& now.saturating_duration_since(self.sampled) > UNSEEN_CHORD_GAP
-		{
-			self.chord = Some(now);
-		}
-		self.modifiers = signals.modifiers;
-		self.sampled = now;
+		self.chord = self.chord.max(signals.last_chord);
 		self.observe_held(signals, front, now);
 	}
 
@@ -644,16 +644,24 @@ pub(super) fn with_background_guard<T>(
 		)
 	})?;
 	let now = Instant::now();
+	let last_chord = Mutex::new(None);
 	let mut lease = BackgroundFocusLease::new(
 		previous.psn,
 		target,
 		previous_key,
-		SwitchSignals::read(spi, now),
+		SwitchSignals::read(spi, now, &last_chord),
 		now,
 	);
 	let stopped = AtomicBool::new(false);
+	let start_failed = |error: std::io::Error| {
+		DesktopError::background_unavailable(format!(
+			"could not start the background focus guard: {error}; retry with takeover:true or use ax \
+			 actions"
+		))
+	};
 	thread::scope(|scope| {
 		let stop = &stopped;
+		let chord = &last_chord;
 		let observer = thread::Builder::new()
 			.name("desktop-focus-lease".to_string())
 			.spawn_scoped(scope, move || -> CoreResult<()> {
@@ -670,7 +678,7 @@ pub(super) fn with_background_guard<T>(
 						None
 					};
 					let now = Instant::now();
-					match lease.observe(front.psn, key, SwitchSignals::read(spi, now), now) {
+					match lease.observe(front.psn, key, SwitchSignals::read(spi, now, chord), now) {
 						FocusDecision::Disarm => return Ok(()),
 						FocusDecision::Observe => {},
 						FocusDecision::Restore => {
@@ -678,7 +686,8 @@ pub(super) fn with_background_guard<T>(
 							// may have raced a newer application or user switch.
 							if front_process(spi.get_front).is_some_and(|front| front.psn == target) {
 								let now = Instant::now();
-								match lease.observe(target, None, SwitchSignals::read(spi, now), now) {
+								match lease.observe(target, None, SwitchSignals::read(spi, now, chord), now)
+								{
 									FocusDecision::Disarm => return Ok(()),
 									FocusDecision::Observe => {},
 									FocusDecision::Restore => {
@@ -701,7 +710,12 @@ pub(super) fn with_background_guard<T>(
 					if stop.load(Ordering::Acquire) {
 						let now = Instant::now();
 						if front_process(spi.get_front).is_some_and(|front| {
-							lease.reactivated(restored, front.psn, SwitchSignals::read(spi, now), now)
+							lease.reactivated(
+								restored,
+								front.psn,
+								SwitchSignals::read(spi, now, chord),
+								now,
+							)
 						}) {
 							return Err(DesktopError::input_failed(
 								"the background target reactivated after focus restoration; input may \
@@ -714,12 +728,7 @@ pub(super) fn with_background_guard<T>(
 					thread::park_timeout(ACTIVATION_POLL);
 				}
 			})
-			.map_err(|error| {
-				DesktopError::background_unavailable(format!(
-					"could not start the background focus guard: {error}; retry with takeover:true or \
-					 use ax actions"
-				))
-			})?;
+			.map_err(start_failed)?;
 		struct StopObserver<'a> {
 			stopped: &'a AtomicBool,
 			thread:  thread::Thread,
@@ -731,6 +740,18 @@ pub(super) fn with_background_guard<T>(
 			}
 		}
 		let stop = StopObserver { stopped: &stopped, thread: observer.thread().clone() };
+		// Watches ⌘/⌃ apart from the observer, whose AX probes can block it for
+		// up to half a second, until the action ends.
+		let stopped = &stopped;
+		thread::Builder::new()
+			.name("desktop-chord-sampler".to_string())
+			.spawn_scoped(scope, move || {
+				while !stopped.load(Ordering::Acquire) {
+					sample_chord(chord, modifier_flags(), Instant::now());
+					thread::sleep(CHORD_SAMPLE);
+				}
+			})
+			.map_err(start_failed)?;
 		let result = action().and_then(|value| control::wait(BACKGROUND_SETTLE).map(|()| value));
 		drop(stop);
 		let cleanup = observer.join().unwrap_or_else(|_| {
@@ -1036,22 +1057,27 @@ mod tests {
 	/// Signals after `clicks` hardware clicks (left down and up), timed between
 	/// polls, with no key focus reading.
 	fn input(clicks: u32, flags: u64) -> SwitchSignals {
-		SwitchSignals::new([clicks, clicks, 0, 0, 0, 0], None, flags, 0, None)
+		SwitchSignals::new([clicks, clicks, 0, 0, 0, 0], None, flags, None, None)
 	}
 
-	/// Signals after `count` modifier key changes, none held now.
-	fn modifier_changes(count: u32) -> SwitchSignals {
-		SwitchSignals::new([0; 6], None, NO_MODIFIERS, count, None)
+	/// Signals after the chord sampler read `readings` (flags, time), with no
+	/// modifier held as the poll reads them.
+	fn sampled(readings: &[(u64, Instant)]) -> SwitchSignals {
+		let last_chord = Mutex::new(None);
+		for &(flags, at) in readings {
+			sample_chord(&last_chord, flags, at);
+		}
+		SwitchSignals::new([0; 6], None, NO_MODIFIERS, *last_chord.lock(), None)
 	}
 
 	/// Signals after one click at `at`, timed by the HID state.
 	fn clicked_at(at: Instant) -> SwitchSignals {
-		SwitchSignals::new([1, 1, 0, 0, 0, 0], Some(at), NO_MODIFIERS, 0, None)
+		SwitchSignals::new([1, 1, 0, 0, 0, 0], Some(at), NO_MODIFIERS, None, None)
 	}
 
 	/// Signals with no clicks or modifiers while `process` has the keyboard.
 	fn keyboard_in(process: ProcessSerialNumber) -> SwitchSignals {
-		SwitchSignals::new([0; 6], None, NO_MODIFIERS, 0, Some(process))
+		SwitchSignals::new([0; 6], None, NO_MODIFIERS, None, Some(process))
 	}
 
 	fn ms(millis: u64) -> Duration {
@@ -1061,7 +1087,7 @@ mod tests {
 	/// A lease started at `start`, the user's last hardware click at
 	/// `last_click`.
 	fn lease_at(start: Instant, last_click: Option<Instant>) -> BackgroundFocusLease {
-		let signals = SwitchSignals::new([0; 6], last_click, NO_MODIFIERS, 0, None);
+		let signals = SwitchSignals::new([0; 6], last_click, NO_MODIFIERS, None, None);
 		BackgroundFocusLease::new(PREVIOUS, TARGET, 42, signals, start)
 	}
 
@@ -1091,16 +1117,13 @@ mod tests {
 		let started = UserSwitchWatch::new(PREVIOUS, TARGET, clicked_at(t0), t0 + ms(251), ms(250));
 		assert_eq!(started.since(t0), None);
 
-		// Modifier changes between polls are typing; across a gap long enough to
-		// hide a whole ⌘-Tab they may have been a chord.
-		let mut polled = watch(input(0, NO_MODIFIERS));
-		polled.observe(modifier_changes(2), PREVIOUS, t0 + UNSEEN_CHORD_GAP);
-		assert_eq!(polled.since(t0), None);
+		// A held ⌘/⌃ counts from when the sampler last saw it, not from when a
+		// poll read it.
 		let mut blocked = watch(input(0, NO_MODIFIERS));
-		blocked.observe(modifier_changes(0), PREVIOUS, t0 + ms(500));
-		assert_eq!(blocked.since(t0), None, "no modifier changed");
-		blocked.observe(modifier_changes(2), PREVIOUS, t0 + ms(1000));
-		assert_eq!(blocked.since(t0 + ms(1000)), Some(UserSwitch::Chord));
+		let command_c = sampled(&[(COMMAND, t0 + ms(100)), (NO_MODIFIERS, t0 + ms(105))]);
+		blocked.observe(command_c, PREVIOUS, t0 + ms(500));
+		assert_eq!(blocked.since(t0 + ms(100)), Some(UserSwitch::Chord));
+		assert_eq!(blocked.since(t0 + ms(101)), None, "the chord came before");
 
 		// The latest switch names the reason; one before `start` does not count.
 		let mut both = watch(input(0, COMMAND));
@@ -1151,17 +1174,24 @@ mod tests {
 			);
 		}
 
-		// Shift pressed and released between two polls, 9 ms before the target
-		// came forward (a traced failure).
+		// Shift or ⌥ pressed and released while a poll was blocked for 500 ms in
+		// an AX probe, then the target activates itself.
+		let idle = input(0, NO_MODIFIERS);
+		for flags in [SHIFT, OPTION] {
+			let mut guard = lease_at(t0, None);
+			assert_eq!(guard.observe(PREVIOUS, Some(42), idle, t0 + ms(10)), FocusDecision::Observe);
+			let stall = sampled(&[(flags, t0 + ms(400)), (NO_MODIFIERS, t0 + ms(480))]);
+			assert_eq!(
+				guard.observe(TARGET, None, stall, t0 + ms(510)),
+				FocusDecision::Restore,
+				"flags {flags:#x}"
+			);
+		}
+		// ⌘C early in the same stall: by then the chord is 400 ms old, not new.
 		let mut guard = lease_at(t0, None);
-		assert_eq!(
-			guard.observe(PREVIOUS, Some(42), modifier_changes(0), t0 + ms(10)),
-			FocusDecision::Observe
-		);
-		assert_eq!(
-			guard.observe(TARGET, None, modifier_changes(2), t0 + ms(22)),
-			FocusDecision::Restore
-		);
+		assert_eq!(guard.observe(PREVIOUS, Some(42), idle, t0 + ms(10)), FocusDecision::Observe);
+		let stall = sampled(&[(COMMAND, t0 + ms(100)), (NO_MODIFIERS, t0 + ms(110))]);
+		assert_eq!(guard.observe(TARGET, None, stall, t0 + ms(510)), FocusDecision::Restore);
 
 		// A chord or click that ended longer ago than the switch window picked
 		// nothing the target's activation follows from.
@@ -1216,17 +1246,13 @@ mod tests {
 			);
 		}
 
-		// A whole ⌘-Tab between two polls while one was blocked in an AX probe:
-		// ⌘ was never seen held, but its press and release were counted.
+		// A whole ⌘-Tab while a poll was blocked in an AX probe: the poll never
+		// saw ⌘ held, but the sampler did until its release.
 		let mut guard = lease_at(t0, None);
-		assert_eq!(
-			guard.observe(PREVIOUS, Some(42), modifier_changes(0), t0 + ms(10)),
-			FocusDecision::Observe
-		);
-		assert_eq!(
-			guard.observe(TARGET, None, modifier_changes(2), t0 + ms(510)),
-			FocusDecision::Disarm
-		);
+		assert_eq!(guard.observe(PREVIOUS, Some(42), idle, t0 + ms(10)), FocusDecision::Observe);
+		let stall =
+			sampled(&[(COMMAND, t0 + ms(400)), (COMMAND, t0 + ms(500)), (NO_MODIFIERS, t0 + ms(505))]);
+		assert_eq!(guard.observe(TARGET, None, stall, t0 + ms(510)), FocusDecision::Disarm);
 
 		// A click on the Dock or another window, seen by the poll that also sees
 		// the target in front (a click seen earlier is in the test below).
