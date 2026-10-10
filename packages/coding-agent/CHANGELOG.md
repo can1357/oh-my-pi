@@ -326,6 +326,7 @@
 - Made browser `tab.observe()` much faster on element-heavy pages, especially over the relay: listed elements are resolved to handles only when `tab.id(n)` uses them ([#14431](https://github.com/can1357/oh-my-pi/pull/14431) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
+- The built-in `async-result` branch ran before the `registerMessageRenderer` lookup in both the live and replay paths, so an extension renderer could never own the completion card ([#14131](https://github.com/can1357/oh-my-pi/issues/14131)).
 
 - Fixed Tern tooltips naming keys with Nerd Font icons Tern's UI font lacks (a box after "Thinking effort"); they show keycaps (`⇧⇥`) whatever the symbol preset
 - Fixed `/new`, session switches, and Esc aborts hanging for up to 30 seconds while an extension's `message_end` hook was still running; they now wait only for end-of-turn maintenance.

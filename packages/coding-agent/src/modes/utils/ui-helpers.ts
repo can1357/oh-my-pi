@@ -278,8 +278,23 @@ export class UiHelpers {
 			case "custom": {
 				if (message.display) {
 					if (message.customType === "async-result") {
-						const component = buildAsyncResultBlock(message);
-						this.ctx.chatContainer.addChild(component);
+						const renderer = this.ctx.viewSession.extensionRunner?.getMessageRenderer(message.customType);
+						// A registered renderer owns this card. The built-in block stays the
+						// fallback both when no renderer exists and when one declines
+						// (returns undefined), so an extension can override the completion
+						// row instead of being bypassed by it (#14131).
+						if (!renderer) {
+							const component = buildAsyncResultBlock(message);
+							this.ctx.chatContainer.addChild(component);
+							break;
+						}
+						const rendered = new CustomMessageComponent(
+							message as CustomMessage<unknown>,
+							(delegate, options, rendererTheme) =>
+								renderer(delegate, options, rendererTheme) ?? buildAsyncResultBlock(message),
+						);
+						rendered.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(rendered);
 						break;
 					}
 					if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {
