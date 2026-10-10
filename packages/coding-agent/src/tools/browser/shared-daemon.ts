@@ -13,7 +13,7 @@ import * as path from "node:path";
 import { logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { type DaemonBrokerClient, daemonClientForProject } from "../../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../../launch/ensure";
-import { daemonRuntimeDir } from "../../launch/paths";
+import { daemonRuntimeDir, placeRuntimeData } from "../../launch/paths";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
 import { throwIfAborted } from "../tool-errors";
 import { probeCdpStatus } from "./attach";
@@ -93,14 +93,17 @@ export async function ensureSharedBrowser(opts: {
 	const name = sharedBrowserDaemonName(opts.headless);
 	// Stable profile under the broker's runtime dir: reused across launches, and
 	// never contended by pre-daemon Chromiums that used throwaway temp profiles.
-	const userDataDir = path.join(daemonRuntimeDir(client.projectDir), `${name}.profile`);
+	// The launch spec relocates it when the executable cannot write there (Snap);
+	// the standard path then becomes a link, so dead-scope pruning reclaims it.
+	const profileDir = path.join(daemonRuntimeDir(client.projectDir), `${name}.profile`);
 	const launch = await resolveSharedBrowserLaunchSpec({
 		headless: opts.headless,
-		userDataDir,
+		userDataDir: profileDir,
 		viewport: opts.viewport,
 	});
 	if (!launch) return null;
-	await fs.mkdir(userDataDir, { recursive: true });
+	await placeRuntimeData(profileDir, launch.userDataDir);
+	await fs.mkdir(launch.userDataDir, { recursive: true });
 	for (let attempt = 0; attempt < ENSURE_ATTEMPTS; attempt++) {
 		throwIfAborted(opts.signal);
 		const existing = await describeQuietly(client, name, "Shared browser", opts.signal);

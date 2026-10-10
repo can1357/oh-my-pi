@@ -577,10 +577,105 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	}
 }
 
-/** Fully resolved executable and argv for a broker-spawned shared Chromium. */
+/** Fully resolved executable, argv, and profile for a broker-spawned shared Chromium. */
 export interface SharedBrowserLaunchSpec {
 	executablePath: string;
 	args: string[];
+	/** Profile directory named in `args`; the caller creates it before starting the daemon. */
+	userDataDir: string;
+}
+
+/** Launcher dirs snapd populates: `/snap/bin` (Ubuntu, Debian) and `/var/lib/snapd/snap/bin` (Fedora, Arch). */
+const SNAP_BIN_DIRS: Record<string, true> = { "/snap/bin": true, "/var/lib/snapd/snap/bin": true };
+
+/** A snapd alias has the same `/snap/bin/<name> -> snap` symlink as a primary app. */
+async function snapNameForCommand(command: string): Promise<string> {
+	try {
+		const response = await fetch("http://snapd.local/v2/aliases", {
+			unix: "/run/snapd.socket",
+			signal: AbortSignal.timeout(1_000),
+		});
+		if (response.ok) {
+			const payload: unknown = await response.json();
+			if (isRecord(payload) && isRecord(payload.result)) {
+				for (const snap in payload.result) {
+					if (!Object.hasOwn(payload.result, snap)) continue;
+					const aliases = payload.result[snap];
+					if (!isRecord(aliases) || !Object.hasOwn(aliases, command)) continue;
+					const alias = aliases[command];
+					if (
+						isRecord(alias) &&
+						(alias.status === "manual" || alias.status === "auto") &&
+						typeof alias.command === "string" &&
+						(alias.command === snap || alias.command.startsWith(`${snap}.`))
+					) {
+						return snap;
+					}
+				}
+			}
+		}
+	} catch {
+		// Primary snap launchers still work when snapd's alias service is unavailable.
+	}
+	return command.split(".", 1)[0]!;
+}
+
+/**
+ * Passwd home of the current account. snapd derives `$SNAP_USER_COMMON` from
+ * it (Go `user.Current()`), not from an inherited `HOME` override.
+ */
+async function accountHomeDir(): Promise<string> {
+	const uid = process.getuid?.();
+	if (uid !== undefined) {
+		try {
+			const proc = Bun.spawn(["getent", "passwd", String(uid)], {
+				stdout: "pipe",
+				stderr: "ignore",
+				signal: AbortSignal.timeout(1_000),
+				killSignal: "SIGKILL",
+			});
+			const home = (await new Response(proc.stdout).text()).trim().split(":")[5];
+			if ((await proc.exited) === 0 && home) return home;
+		} catch {
+			// No getent (or NSS stalled): fall back to the inherited home.
+		}
+	}
+	return os.homedir();
+}
+
+/**
+ * `$SNAP_USER_COMMON` for a Snap launcher, including symlink aliases and
+ * shell wrappers that exec the launcher (as Ubuntu's chromium-browser does).
+ * Strict confinement denies writes to hidden home dirs such as `~/.omp`.
+ */
+async function snapUserCommonDir(executablePath: string): Promise<string | undefined> {
+	let candidate = path.resolve(executablePath);
+	for (let depth = 0; depth < 8; depth++) {
+		if (Object.hasOwn(SNAP_BIN_DIRS, path.dirname(candidate))) {
+			const snap = await snapNameForCommand(path.basename(candidate));
+			return path.join(await accountHomeDir(), "snap", snap, "common");
+		}
+		try {
+			const stat = await fs.promises.lstat(candidate);
+			if (stat.isSymbolicLink()) {
+				candidate = path.resolve(path.dirname(candidate), await fs.promises.readlink(candidate));
+				continue;
+			}
+			if (!stat.isFile() || stat.size > 16_384) return undefined;
+			const script = await Bun.file(candidate).text();
+			if (!script.startsWith("#!")) return undefined;
+			// The Ubuntu transition package ends with `exec /snap/bin/chromium "$@"`.
+			// Only a literal exec forwarding argv proves this wrapper launches a snap.
+			const delegate = script.match(
+				/^[ \t]*exec[ \t]+(?:(\/(?:snap\/bin|var\/lib\/snapd\/snap\/bin)\/[a-zA-Z0-9._-]+)|(?:\/usr\/bin\/)?snap[ \t]+run[ \t]+([a-zA-Z0-9._-]+))[ \t]+"\$@"[ \t]*$/m,
+			);
+			if (!delegate) return undefined;
+			candidate = delegate[1] ?? path.join("/snap/bin", delegate[2]!);
+		} catch {
+			return undefined;
+		}
+	}
+	return undefined;
 }
 
 /**
@@ -588,8 +683,10 @@ export interface SharedBrowserLaunchSpec {
  * broker spawns directly (no puppeteer inside the broker). Mirrors
  * `launchHeadlessBrowser` flag assembly — puppeteer's default args minus the
  * stealth-suppressed set — suppresses Puppeteer's unowned startup window, and
- * exposes CDP on an ephemeral port. Returns null when no executable resolves;
- * callers fall back to a process-local launch.
+ * exposes CDP on an ephemeral port. A Snap-confined Chromium cannot write
+ * `opts.userDataDir`, so its profile moves to the same path mirrored under the
+ * snap's common dir, keeping it per-project and isolated. Returns null when no
+ * executable resolves; callers fall back to a process-local launch.
  */
 export async function resolveSharedBrowserLaunchSpec(opts: {
 	headless: boolean;
@@ -601,14 +698,17 @@ export async function resolveSharedBrowserLaunchSpec(opts: {
 	const puppeteer = await loadPuppeteer();
 	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
 	const ignored = new Set(stealthIgnoreDefaultArgs(executablePath));
+	const snapCommon = await snapUserCommonDir(executablePath);
+	const userDataDir = snapCommon ? path.join(snapCommon, "omp", opts.userDataDir) : opts.userDataDir;
 	const defaults = await puppeteer.defaultArgs({
 		headless: opts.headless,
 		args: buildHeadlessLaunchArgs(vp),
-		userDataDir: opts.userDataDir,
+		userDataDir,
 	});
 	return {
 		executablePath,
 		args: [...defaults.filter(arg => !ignored.has(arg)), "--no-startup-window", "--remote-debugging-port=0"],
+		userDataDir,
 	};
 }
 

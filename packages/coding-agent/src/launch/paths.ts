@@ -22,6 +22,76 @@ export const DAEMON_META_FILE = "meta.json";
 export const DAEMON_SPEC_FILE = "spec.json";
 
 /**
+ * Target of a relocation symlink for `original`, or undefined when the link
+ * does not mirror that path under an `omp` dir. This excludes foreign links
+ * from profile cleanup.
+ */
+async function relocatedTarget(link: string, original: string = link): Promise<string | undefined> {
+	let target: string;
+	try {
+		target = await fs.readlink(link);
+	} catch {
+		return undefined; // Missing or not a symlink.
+	}
+	return path.isAbsolute(target) && target.endsWith(path.join(`${path.sep}omp`, original)) ? target : undefined;
+}
+
+/** Retain a previous Snap profile until dead-scope pruning proves no daemon still uses it. */
+async function retainRelocatedTarget(original: string, target: string): Promise<void> {
+	for (let index = 1; ; index++) {
+		const marker = `${original}.relocated.${index}`;
+		try {
+			await fs.symlink(target, marker);
+			return;
+		} catch (error) {
+			if (!hasFsCode(error, "EEXIST")) throw error;
+			if ((await fs.readlink(marker).catch(() => undefined)) === target) return;
+		}
+	}
+}
+
+/**
+ * Make runtime-dir path `original` name the data actually stored at `actual`.
+ *
+ * A launcher that cannot write the runtime dir stores the data elsewhere (a
+ * Snap-confined Chromium mirrors its profile under
+ * `$SNAP_USER_COMMON/omp/<original path>`). That replaces whatever sits at
+ * `original` with a symlink to `actual`, so the scope still owns the data and
+ * pruning reclaims it ({@link removeRelocatedRuntimeData}). Retargeting or
+ * returning to `original` keeps the previous Snap target recorded by a
+ * separate link until dead-scope pruning confirms no broker still uses it.
+ */
+export async function placeRuntimeData(original: string, actual: string): Promise<void> {
+	const previous = await relocatedTarget(original);
+	if (actual === original) {
+		if (previous === undefined) return;
+		await retainRelocatedTarget(original, previous);
+		await fs.rm(original, { force: true });
+		return;
+	}
+	if ((await fs.readlink(original).catch(() => undefined)) === actual) return;
+	if (previous !== undefined) await retainRelocatedTarget(original, previous);
+	await fs.rm(original, { recursive: true, force: true });
+	try {
+		await fs.symlink(actual, original);
+	} catch (error) {
+		if (hasFsCode(error, "EEXIST") && (await fs.readlink(original).catch(() => undefined)) === actual) return;
+		throw error;
+	}
+}
+
+/** Remove relocated profiles once the broker and all clients have left the scope; see {@link placeRuntimeData}. */
+export async function removeRelocatedRuntimeData(runtimeDir: string): Promise<void> {
+	for (const name of await fs.readdir(runtimeDir)) {
+		const marker = name.match(/^(.*)\.relocated\.[1-9]\d*$/);
+		const link = path.join(runtimeDir, name);
+		const original = path.join(runtimeDir, marker?.[1] ?? name);
+		const target = await relocatedTarget(link, original);
+		if (target !== undefined) await fs.rm(target, { recursive: true, force: true });
+	}
+}
+
+/**
  * Canonicalize a project directory the same way every broker client does, so
  * hash-keyed runtime dirs and Windows pipe names agree across processes.
  * Missing paths and permission-denied lookups (EPERM/EACCES on protected

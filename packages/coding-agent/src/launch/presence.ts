@@ -2,7 +2,7 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
-import { canonicalProjectDir, daemonRuntimeDir } from "./paths";
+import { canonicalProjectDir, daemonRuntimeDir, removeRelocatedRuntimeData } from "./paths";
 
 const CLIENTS_DIR = "clients";
 const BROKER_PID_FILE = "broker.pid";
@@ -116,7 +116,8 @@ export async function readLiveDaemonBrokerPid(runtimeDir: string): Promise<numbe
 /**
  * Remove sibling project daemon runtime directories whose broker is dead and
  * whose client-presence set is empty, reclaiming the disk that short-lived
- * project directories leave behind (issue #8674).
+ * project directories leave behind (issue #8674), including Snap Chromium
+ * profiles relocated outside the scope (`removeRelocatedRuntimeData`).
  *
  * Best-effort and non-throwing: a scope is deleted only when its `broker.pid`
  * is absent/dead, no live client presence remains, and it has been untouched
@@ -152,6 +153,7 @@ export async function pruneDeadDaemonRuntimeDirs(currentRuntimeDir: string): Pro
 			if (now - stat.mtimeMs < DAEMON_RUNTIME_STALE_GRACE_MS) continue;
 			if ((await readLiveDaemonBrokerPid(dir)) !== undefined) continue;
 			if (await hasLiveDaemonProjectPresence(dir)) continue;
+			await removeRelocatedRuntimeData(dir);
 			await fs.rm(dir, { recursive: true, force: true });
 		} catch (error) {
 			if (isEnoent(error)) continue;

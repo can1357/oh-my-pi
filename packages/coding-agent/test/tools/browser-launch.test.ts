@@ -1,6 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
 	chromiumExecutableProbeForTest,
@@ -8,7 +9,7 @@ import {
 	stealthIgnoreDefaultArgsForTest,
 	systemChromiumCandidatesForTest,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { computeExecutablePath, detectBrowserPlatform } from "@oh-my-pi/pi-utils/browsers";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { PUPPETEER_REVISIONS } from "puppeteer-core/internal/revisions.js";
@@ -49,21 +50,131 @@ describe("browser launch stealth defaults", () => {
 });
 
 describe("shared browser launch", () => {
-	it("suppresses the broker-owned blank startup window", async () => {
+	const withExecutable = async <T>(executablePath: string, run: () => Promise<T>): Promise<T> => {
 		const previousExecutable = process.env.PUPPETEER_EXECUTABLE_PATH;
-		process.env.PUPPETEER_EXECUTABLE_PATH = "/test/chrome";
+		process.env.PUPPETEER_EXECUTABLE_PATH = executablePath;
 		try {
-			const launch = await resolveSharedBrowserLaunchSpec({
-				headless: true,
-				userDataDir: "/test/profile",
-			});
-
-			expect(launch?.args).toContain("--no-startup-window");
+			return await run();
 		} finally {
 			if (previousExecutable === undefined) delete process.env.PUPPETEER_EXECUTABLE_PATH;
 			else process.env.PUPPETEER_EXECUTABLE_PATH = previousExecutable;
 		}
+	};
+	// snapd keys `$SNAP_USER_COMMON` on the account's passwd home, which can differ from `HOME`.
+	const passwdHome = $which("getent")
+		? Bun.spawnSync(["getent", "passwd", String(process.getuid?.() ?? "")], { stderr: "ignore" })
+				.stdout.toString()
+				.trim()
+				.split(":")[5]
+		: undefined;
+	const accountHome = passwdHome || os.homedir();
+
+	it("suppresses the broker-owned blank startup window", async () => {
+		const launch = await withExecutable("/test/chrome", () =>
+			resolveSharedBrowserLaunchSpec({ headless: true, userDataDir: "/test/profile" }),
+		);
+
+		expect(launch?.args).toContain("--no-startup-window");
 	});
+
+	it("places a Snap-confined Chromium's profile under the snap's revision-independent common dir", async () => {
+		const profile = "/home/test/.omp/run/daemons/abc/omp.browser.headless.profile";
+		for (const [executablePath, expected] of [
+			["/snap/bin/chromium", path.join(accountHome, "snap/chromium/common/omp", profile)],
+			["/var/lib/snapd/snap/bin/chromium", path.join(accountHome, "snap/chromium/common/omp", profile)],
+			["/usr/bin/chromium", profile],
+		] as const) {
+			const launch = await withExecutable(executablePath, () =>
+				resolveSharedBrowserLaunchSpec({ headless: true, userDataDir: profile }),
+			);
+
+			expect(launch?.userDataDir).toBe(expected);
+			expect(launch?.args).toContain(`--user-data-dir=${expected}`);
+		}
+	});
+
+	it.skipIf(process.platform !== "linux" || !passwdHome)(
+		"keys the Snap profile on the account home, not an overridden HOME",
+		async () => {
+			const previousHome = process.env.HOME;
+			const overriddenHome = path.join(os.tmpdir(), "omp-isolated", ".omp-home");
+			process.env.HOME = overriddenHome;
+			try {
+				const profile = "/home/test/.omp/run/daemons/abc/omp.browser.headless.profile";
+				const launch = await withExecutable("/snap/bin/chromium", () =>
+					resolveSharedBrowserLaunchSpec({ headless: true, userDataDir: profile }),
+				);
+				expect(launch?.userDataDir).toBe(path.join(accountHome, "snap/chromium/common/omp", profile));
+				expect(launch?.userDataDir.startsWith(overriddenHome)).toBe(false);
+			} finally {
+				if (previousHome === undefined) delete process.env.HOME;
+				else process.env.HOME = previousHome;
+			}
+		},
+	);
+
+	it("uses snapd's active alias owner instead of the launcher filename", async () => {
+		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+			Response.json({
+				type: "sync",
+				result: {
+					chromium: {
+						chrome: { command: "chromium.chromium", status: "manual" },
+						chromium: { command: "chromium.chromium", status: "auto" },
+					},
+				},
+			}),
+		);
+		try {
+			const profile = "/home/test/.omp/run/daemons/abc/omp.browser.headless.profile";
+			const launch = await withExecutable("/snap/bin/chrome", () =>
+				resolveSharedBrowserLaunchSpec({ headless: true, userDataDir: profile }),
+			);
+			const expected = path.join(accountHome, "snap/chromium/common/omp", profile);
+			expect(launch?.userDataDir).toBe(expected);
+			expect(launch?.args).toContain(`--user-data-dir=${expected}`);
+		} finally {
+			fetchSpy.mockRestore();
+		}
+	});
+
+	it.skipIf(process.platform !== "linux")(
+		"recognizes Ubuntu's Chromium transition wrapper and Snap aliases",
+		async () => {
+			const dir = TempDir.createSync("@snap-chromium-wrapper-");
+			try {
+				const wrapper = path.join(dir.path(), "chromium-browser");
+				const alias = path.join(dir.path(), "chromium-alias");
+				const snapRun = path.join(dir.path(), "chromium-snap-run");
+				const regular = path.join(dir.path(), "chromium");
+				const profile = path.join(dir.path(), ".omp/run/daemons/project/omp.browser.headless.profile");
+				await Bun.write(
+					wrapper,
+					'#!/bin/sh\nif [ "$1" = "--version" ]; then echo "Chromium 154"; exit 0; fi\nif ! [ -x /snap/bin/chromium ]; then exit 1; fi\nexec /snap/bin/chromium "$@"\n',
+				);
+				await Bun.write(snapRun, '#!/bin/sh\nexec snap run chromium "$@"\n');
+				await Bun.write(regular, '#!/bin/sh\n# exec /snap/bin/chromium "$@"\nexec /usr/bin/chromium "$@"\n');
+				fs.chmodSync(wrapper, 0o755);
+				fs.symlinkSync("chromium-browser", alias);
+				expect(await chromiumExecutableProbeForTest(wrapper)).toBe(true);
+				for (const executablePath of [wrapper, alias, snapRun]) {
+					const spec = await withExecutable(executablePath, () =>
+						resolveSharedBrowserLaunchSpec({ headless: true, userDataDir: profile }),
+					);
+					const expected = path.join(accountHome, "snap/chromium/common/omp", profile);
+					expect(spec?.userDataDir).toBe(expected);
+					expect(spec?.args).toContain(`--user-data-dir=${expected}`);
+				}
+				const native = await withExecutable(regular, () =>
+					resolveSharedBrowserLaunchSpec({ headless: true, userDataDir: profile }),
+				);
+				expect(native?.userDataDir).toBe(profile);
+				expect(native?.args).toContain(`--user-data-dir=${profile}`);
+			} finally {
+				await dir.remove();
+			}
+		},
+	);
 });
 
 const UNGOOGLED_CHROMIUM_FLATPAK_ID = "io.github.ungoogled_software.ungoogled_chromium";
