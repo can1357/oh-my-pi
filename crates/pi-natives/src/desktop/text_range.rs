@@ -60,7 +60,8 @@ impl TextSelectRequest {
 		let has_context = !self.prefix.is_empty() || !self.suffix.is_empty();
 		if self.text.is_empty() && !has_context {
 			return Err(DesktopError::ax_failed(
-				"text is empty and no prefix or suffix says where to put the caret; nothing was selected",
+				"text is empty and no prefix or suffix says where to put the caret; nothing was \
+				 selected",
 			));
 		}
 		let mut occurrences = 0usize;
@@ -110,7 +111,11 @@ impl TextSelectRequest {
 				if matches.len() > LISTED_MATCHES {
 					offsets.push_str(", …");
 				}
-				let scope = if has_context { format!(" {}", self.context()) } else { String::new() };
+				let scope = if has_context {
+					format!(" {}", self.context())
+				} else {
+					String::new()
+				};
 				Err(DesktopError::ax_failed(format!(
 					"{:?} occurs {} times{scope} (UTF-16 offsets {offsets}), so it is ambiguous; give \
 					 a longer prefix or suffix to choose one; nothing was selected",
@@ -175,19 +180,39 @@ mod tests {
 	#[test]
 	fn unique_text_selects_its_utf16_range() {
 		let value = "Hello, world";
-		assert_eq!(request("world", "", "", SelectPart::Text).locate(value).unwrap(), range(7, 5));
-		assert_eq!(request("world", "", "", SelectPart::Start).locate(value).unwrap(), range(7, 0));
-		assert_eq!(request("world", "", "", SelectPart::End).locate(value).unwrap(), range(12, 0));
+		assert_eq!(
+			request("world", "", "", SelectPart::Text)
+				.locate(value)
+				.unwrap(),
+			range(7, 5)
+		);
+		assert_eq!(
+			request("world", "", "", SelectPart::Start)
+				.locate(value)
+				.unwrap(),
+			range(7, 0)
+		);
+		assert_eq!(
+			request("world", "", "", SelectPart::End)
+				.locate(value)
+				.unwrap(),
+			range(12, 0)
+		);
 	}
 
 	#[test]
 	fn offsets_count_utf16_units_past_emoji_and_accents() {
-		// 😀 is two UTF-16 units and four UTF-8 bytes; é is one unit and two bytes.
+		// 😀 is two UTF-16 units and four UTF-8 bytes; é is one unit and two
+		// bytes.
 		let value = "😀 café 😀 tea";
-		let found = request("tea", "", "", SelectPart::Text).locate(value).unwrap();
+		let found = request("tea", "", "", SelectPart::Text)
+			.locate(value)
+			.unwrap();
 		assert_eq!(found, range(11, 3));
 		assert_eq!(utf16_slice(value, found), Some("tea"));
-		let emoji = request("😀", "café ", "", SelectPart::Text).locate(value).unwrap();
+		let emoji = request("😀", "café ", "", SelectPart::Text)
+			.locate(value)
+			.unwrap();
 		assert_eq!(emoji, range(8, 2));
 		assert_eq!(utf16_slice(value, emoji), Some("😀"));
 	}
@@ -205,9 +230,24 @@ mod tests {
 	#[test]
 	fn prefix_or_suffix_picks_one_occurrence() {
 		let value = "red cat, blue cat, red dog";
-		assert_eq!(request("cat", "blue ", "", SelectPart::Text).locate(value).unwrap(), range(14, 3));
-		assert_eq!(request("red", "", " dog", SelectPart::Text).locate(value).unwrap(), range(19, 3));
-		assert_eq!(request("cat", "red ", ",", SelectPart::End).locate(value).unwrap(), range(7, 0));
+		assert_eq!(
+			request("cat", "blue ", "", SelectPart::Text)
+				.locate(value)
+				.unwrap(),
+			range(14, 3)
+		);
+		assert_eq!(
+			request("red", "", " dog", SelectPart::Text)
+				.locate(value)
+				.unwrap(),
+			range(19, 3)
+		);
+		assert_eq!(
+			request("cat", "red ", ",", SelectPart::End)
+				.locate(value)
+				.unwrap(),
+			range(7, 0)
+		);
 	}
 
 	#[test]
@@ -215,7 +255,12 @@ mod tests {
 		let error = request("cat", "red ", "", SelectPart::Text)
 			.locate("red cat, red cat")
 			.unwrap_err();
-		assert!(error.message.contains("occurs 2 times after prefix \"red \""), "{error}");
+		assert!(
+			error
+				.message
+				.contains("occurs 2 times after prefix \"red \""),
+			"{error}"
+		);
 	}
 
 	#[test]
@@ -242,8 +287,15 @@ mod tests {
 	#[test]
 	fn empty_text_places_a_caret_by_context_alone() {
 		let value = "first line\nsecond line";
-		assert_eq!(request("", "line\n", "", SelectPart::Text).locate(value).unwrap(), range(11, 0));
-		let unplaced = request("", "", "", SelectPart::Text).locate("").unwrap_err();
+		assert_eq!(
+			request("", "line\n", "", SelectPart::Text)
+				.locate(value)
+				.unwrap(),
+			range(11, 0)
+		);
+		let unplaced = request("", "", "", SelectPart::Text)
+			.locate("")
+			.unwrap_err();
 		assert!(unplaced.message.contains("text is empty"), "{unplaced}");
 	}
 
