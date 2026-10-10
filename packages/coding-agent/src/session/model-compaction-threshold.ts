@@ -58,17 +58,24 @@ function formatWindow(tokens: number): string {
 
 /**
  * Where a compaction policy triggers on a window, and why: at a `fixed` token
- * count, or `scaled` to `share` percent of `scaledFrom` (the entry's base when
- * `fromBase`, else the window). `share` is the configured percentage when one
- * applies, else the reserve policy's exact share, so fractions survive.
+ * count (`cappedFrom` the configured count when it is at or past the window,
+ * which then compacts at the window less its reserve), or `scaled` to `share`
+ * percent of `scaledFrom` (the entry's base when `fromBase`, else the window).
+ * `share` is the configured percentage when one applies, else the reserve
+ * policy's exact share, so fractions survive.
  */
 export type ModelCompactionTrigger =
-	| { kind: "fixed"; tokens: number }
+	| { kind: "fixed"; tokens: number; cappedFrom?: number }
 	| { kind: "scaled"; tokens: number; share: number; scaledFrom: number; fromBase: boolean };
 
 function resolveTrigger(settings: CompactionSettings, window: number): ModelCompactionTrigger {
 	const tokens = resolveThresholdTokens(window, settings);
-	if (settings.thresholdTokens > 0) return { kind: "fixed", tokens };
+	if (settings.thresholdTokens > 0) {
+		// Capped exactly when `resolveThresholdTokens` lowered it, whatever its boundary.
+		return tokens < settings.thresholdTokens
+			? { kind: "fixed", tokens, cappedFrom: settings.thresholdTokens }
+			: { kind: "fixed", tokens };
+	}
 	const base = settings.baseWindowTokens;
 	const fromBase = base !== undefined && base > 0 && base < window;
 	const scaledFrom = fromBase ? base : window;
@@ -80,9 +87,11 @@ function resolveTrigger(settings: CompactionSettings, window: number): ModelComp
 	return { kind: "scaled", tokens, share, scaledFrom, fromBase };
 }
 
-/** Why a trigger sits where it does, in a few words: `fixed`, `85% of 400K base`, `12.5% of window`. */
+/** Why a trigger sits where it does, in a few words: `fixed`, `fixed 300K, capped by window`, `85% of 400K base`, `12.5% of window`. */
 function formatBasis(trigger: ModelCompactionTrigger): string {
-	if (trigger.kind === "fixed") return "fixed";
+	if (trigger.kind === "fixed") {
+		return trigger.cappedFrom === undefined ? "fixed" : `fixed ${formatWindow(trigger.cappedFrom)}, capped by window`;
+	}
 	const share = `${trigger.share.toLocaleString("en-US", { maximumFractionDigits: 1 })}%`;
 	return trigger.fromBase ? `${share} of ${formatWindow(trigger.scaledFrom)} base` : `${share} of window`;
 }
@@ -159,9 +168,10 @@ function summarizePlan(plan: ModelCompactionEntryPlan): string | undefined {
 	if (!plan.settings.enabled) return "auto-compaction is off";
 	const trigger = planTrigger(plan);
 	if (!trigger) return undefined;
-	return trigger.kind === "fixed"
-		? `compacts at exactly ${formatWindow(trigger.tokens)}`
-		: `compacts at ${formatWindow(trigger.tokens)} · ${formatBasis(trigger)}`;
+	if (trigger.kind === "fixed" && trigger.cappedFrom === undefined) {
+		return `compacts at exactly ${formatWindow(trigger.tokens)}`;
+	}
+	return `compacts at ${formatWindow(trigger.tokens)} · ${formatBasis(trigger)}`;
 }
 
 /** Parse and plan typed hub input; undefined when it does not parse or fit. */

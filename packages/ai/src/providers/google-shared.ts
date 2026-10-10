@@ -596,6 +596,23 @@ export function startTextOrThinkingBlock(
 }
 
 /**
+ * Error for an in-band `error` frame in a 200 generateContent stream. Keeps the
+ * RPC status alongside the message: an in-band quota failure is classified
+ * from this text, and `RESOURCE_EXHAUSTED` is the only account-exhaustion
+ * signal some of these chunks carry (#13090).
+ */
+export function googleStreamChunkError(error: NonNullable<GenerateContentResponse["error"]>, provider: string): Error {
+	const detail =
+		error.message && error.status
+			? `${error.message} (${error.status})`
+			: error.message || error.status || "unknown error";
+	const message = `Google API stream error: ${detail}`;
+	return typeof error.code === "number" && error.code >= 400
+		? new AIError.GoogleApiError(message, error.code)
+		: new AIError.ProviderResponseError(message, { provider, kind: "output" });
+}
+
+/**
  * Drives the chunked `generateContentStream` iterator into an `AssistantMessage` and
  * the corresponding `AssistantMessageEventStream`. Shared between `streamGoogle` and
  * `streamGoogleVertex` — every observable event order and stop-reason rule is preserved.
@@ -645,19 +662,7 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 	};
 
 	for await (const chunk of googleStream) {
-		if (chunk.error) {
-			// Keep the RPC status alongside the message: an in-band quota failure
-			// is classified from this text, and `RESOURCE_EXHAUSTED` is the only
-			// account-exhaustion signal some of these chunks carry (#13090).
-			const detail =
-				chunk.error.message && chunk.error.status
-					? `${chunk.error.message} (${chunk.error.status})`
-					: chunk.error.message || chunk.error.status || "unknown error";
-			const message = `Google API stream error: ${detail}`;
-			throw typeof chunk.error.code === "number" && chunk.error.code >= 400
-				? new AIError.GoogleApiError(message, chunk.error.code)
-				: new AIError.ProviderResponseError(message, { provider: model.provider, kind: "output" });
-		}
+		if (chunk.error) throw googleStreamChunkError(chunk.error, model.provider);
 		if (!chunk.candidates?.length && chunk.promptFeedback?.blockReason) {
 			const detail = chunk.promptFeedback.blockReasonMessage;
 			throw new AIError.ProviderResponseError(

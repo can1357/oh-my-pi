@@ -112,11 +112,12 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// authoritative model rows.
 			// v3 invalidates zero-price rows written before rich lanes were priced
 			// from the KDL rate card; v4 keys the scope on the token's stable
-			// account subject instead of the rotating JWT.
+			// account subject instead of the rotating JWT; v5 drops rows that still
+			// mark the account default `isProviderDefault`, which startup now honors.
 			const baseUrl = (options.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
 			const apiKey = options.apiKey ?? "";
 			const scope = `${cursorCredentialSubject(apiKey) ?? apiKey}\u0000${baseUrl}`;
-			return `cursor:rich-models-v4:${Bun.hash(scope).toString(36)}`;
+			return `cursor:rich-models-v5:${Bun.hash(scope).toString(36)}`;
 		}
 		case "charm-hyper": {
 			// Discovery is authoritative for this gateway, so a warm cache is served

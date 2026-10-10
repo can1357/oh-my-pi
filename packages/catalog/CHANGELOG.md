@@ -5,6 +5,10 @@
 ### Added
 
 - Added built-in Experiential Labs support with `/login`, live per-key model discovery, gateway pricing, and per-model reasoning levels. ([#15179](https://github.com/can1357/oh-my-pi/pull/15179) by [@dbk216](https://github.com/dbk216))
+- Added the `connection-bound-native-history` rule axis for Responses hosts that reject native history items from an earlier connection, set for GitHub Copilot ([#15148](https://github.com/can1357/oh-my-pi/pull/15148) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed Devin's discovered models not marking the account's default model, the one Devin's own CLI starts the account on (SWE-2 High on Pro, SWE-1.6 Slow on Free); when it is an effort lane of a family, the family starts at that effort. Cursor's discovered models no longer carry that marker, so Cursor keeps its existing startup selection ([#15115](https://github.com/can1357/oh-my-pi/pull/15115) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.7] - 2026-10-09
 

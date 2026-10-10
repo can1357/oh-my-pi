@@ -2637,11 +2637,17 @@ class CodexStreamProcessor {
 		}
 
 		if (item.type === "function_call") {
+			const partial = block?.type === "toolCall" ? block[kStreamingPartialJson] : undefined;
 			const toolCall: ToolCall = {
 				type: "toolCall",
 				id: encodeResponsesToolCallId(item.call_id, item.id),
 				name: item.name,
-				arguments: parseToolCallArguments(item.arguments),
+				// An empty terminal item falls back to what `.delta`/`.done` already delivered.
+				arguments: item.arguments
+					? parseToolCallArguments(item.arguments)
+					: block?.type === "toolCall" && !partial
+						? block.arguments
+						: parseToolCallArguments(partial),
 			};
 			item.arguments = replayableToolCallArguments(item.arguments, toolCall.arguments);
 			if (block?.type === "toolCall") {
