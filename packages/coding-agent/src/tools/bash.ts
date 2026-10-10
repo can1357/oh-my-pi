@@ -1182,6 +1182,12 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				throw waitResult.error;
 			}
 			if (waitResult.kind === "aborted") {
+				// Stop forwarding before the terminal frame. Cancelling only signals
+				// the job; its run is still unwinding, and the catch path's terminal
+				// reportProgress would otherwise reach onUpdate a few ms after this
+				// call has thrown — a `tool_execution_update` after the matching
+				// `tool_execution_end` (#12875). The steer exit below already does this.
+				job.stopUpdates();
 				autoBgManager.cancel(job.jobId);
 				autoBgManager.releaseForegroundJob(job.jobId);
 				throw new ToolAbortError(job.getLatestText() || "Command aborted");

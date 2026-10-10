@@ -713,6 +713,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			throw waitResult.error;
 		}
 		if (waitResult.kind === "aborted") {
+			// Stop forwarding before the terminal frame. Cancelling only signals
+			// the job; its run is still unwinding, and the catch path's terminal
+			// reportProgress would otherwise reach onUpdate a few ms after this
+			// call has thrown — a `tool_execution_update` after the matching
+			// `tool_execution_end` (#12875). Mirrors bash's abort exit.
+			forwardUpdates = false;
 			autoBgManager.cancel(jobId);
 			autoBgManager.releaseForegroundJob(jobId);
 			throw new ToolAbortError(latestText || "Eval cell aborted");

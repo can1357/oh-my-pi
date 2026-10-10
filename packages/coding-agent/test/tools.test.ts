@@ -2578,6 +2578,62 @@ function b() {
 			await asyncJobManager.dispose();
 		});
 
+		it("stops forwarding tool updates when an aborted command unwinds after the terminal frame (#12875)", async () => {
+			const updates: string[] = [];
+			const asyncJobManager = new AsyncJobManager({});
+			const autoBackgroundBashTool = wrapToolWithMetaNotice(
+				new BashTool(
+					createTestToolSession(
+						testDir,
+						Settings.isolated({
+							"bash.autoBackground.enabled": true,
+							// High threshold: only the abort signal can end the wait.
+							"bash.autoBackground.thresholdMs": 60_000,
+						}),
+						{
+							getSessionId: () => "test-session",
+							asyncJobManager,
+						},
+					),
+				),
+			);
+
+			const controller = new AbortController();
+			const started = Promise.withResolvers<void>();
+			const pending = autoBackgroundBashTool.execute(
+				"test-call-9-auto-abort-updates",
+				{ command: "printf 'READY\\n'; sleep 30" },
+				controller.signal,
+				update => {
+					const text = update.content?.find(block => block.type === "text")?.text ?? "";
+					updates.push(text);
+					if (text.includes("READY")) started.resolve();
+				},
+			);
+
+			// Abort once the shell is provably live (it emitted output), so the wait
+			// is genuinely mid-flight rather than racing the command's startup.
+			await started.promise;
+			const job = asyncJobManager.getJob("bg_1");
+			expect(job?.status).toBe("running");
+			controller.abort("test abort");
+
+			// The abort exit is terminal for the call: it throws, and the agent loop
+			// turns that into `tool_execution_end`.
+			await expect(pending).rejects.toThrow();
+			const updatesAtAbort = updates.slice();
+
+			// Cancelling only signals the job — the killed command is still unwinding,
+			// and its terminal reportProgress used to reach onUpdate a few ms later.
+			// That is a `tool_execution_update` AFTER the matching
+			// `tool_execution_end` for the same call, which an RPC consumer cannot
+			// apply coherently. The job's own promise covers that late progress, so
+			// this needs no sleep.
+			await job?.promise;
+			expect(updates).toEqual(updatesAtAbort);
+			await asyncJobManager.dispose();
+		}, 15_000);
+
 		it("backgrounds a running command when the steering signal fires mid-wait", async () => {
 			const asyncJobManager = new AsyncJobManager({});
 			const autoBackgroundBashTool = wrapToolWithMetaNotice(

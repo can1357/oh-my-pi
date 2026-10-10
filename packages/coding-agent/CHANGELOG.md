@@ -451,6 +451,7 @@
 - Advisor concerns and notes now reach an active same-run continuation after a terminal answer instead of being retained unnecessarily.
 
 ### Fixed
+- A cancelled Bash command or Eval cell kept forwarding async-job progress after the tool call had already thrown, so a `tool_execution_update` could arrive after the matching `tool_execution_end`; both paths now stop forwarding before the terminal frame ([#12875](https://github.com/can1357/oh-my-pi/issues/12875)).
 
 - Fixed background-job completions being lost when IRC-woken subagents finished while owned asynchronous work was still settling.
 - Fixed session reset leaving stale hashline edit snapshots available for later mismatch diagnostics.

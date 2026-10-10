@@ -218,4 +218,66 @@ describe("EvalTool auto-background", () => {
 		expect(asyncJobManager.getJob(jobId)?.status).toBe("completed");
 		await asyncJobManager.dispose();
 	});
+
+	it("stops forwarding tool updates when an aborted cell unwinds after the terminal frame (#12875)", async () => {
+		const asyncJobManager = new AsyncJobManager({});
+		const updates: string[] = [];
+		// `started` fires once the cell is genuinely running (job registered, first
+		// chunk streamed); `cell` gates it. No sleeps: both are real signals.
+		const started = Promise.withResolvers<void>();
+		const cell = Promise.withResolvers<void>();
+		vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation((async (
+			_code: string,
+			options: { onChunk?: (chunk: string) => void },
+		) => {
+			options.onChunk?.("start\n");
+			started.resolve();
+			await cell.promise;
+			// The cancelled cell keeps unwinding and streams once more before it
+			// settles — the shape that used to reach onUpdate after the throw.
+			options.onChunk?.("late\n");
+			return baseResult({ output: "late\n" });
+		}) as never);
+
+		const tool = new EvalTool(
+			makeSession(
+				Settings.isolated({
+					"eval.autoBackground.enabled": true,
+					// High threshold: only the abort signal can end the wait.
+					"eval.autoBackground.thresholdMs": 60_000,
+				}),
+				asyncJobManager,
+			),
+		);
+		const abort = new AbortController();
+		const pending = tool.execute(
+			"call-abort",
+			{ language: "js", code: "await work()" },
+			abort.signal,
+			update => {
+				updates.push(update.content?.find(block => block.type === "text")?.text ?? "");
+			},
+		);
+
+		await started.promise;
+		const job = asyncJobManager.getJob("bg_1");
+		expect(job?.status).toBe("running");
+		abort.abort();
+
+		// The abort exit is terminal for the call: it throws, and the agent loop
+		// turns that into `tool_execution_end`.
+		await expect(pending).rejects.toThrow();
+		// Snapshot whatever the (50 ms-coalesced) live updates produced so far; the
+		// count may legitimately be 0 — the point is that it must not grow.
+		const updatesAtAbort = updates.slice();
+
+		// Cancelling only signals the job — the cancelled cell is still unwinding.
+		// Its late chunk and its terminal reportProgress both used to reach
+		// onUpdate, producing a `tool_execution_update` AFTER `tool_execution_end`
+		// for the same tool call, which an RPC consumer cannot apply coherently.
+		cell.resolve();
+		await job?.promise;
+		expect(updates).toEqual(updatesAtAbort);
+		await asyncJobManager.dispose();
+	});
 });
