@@ -814,6 +814,18 @@ export function getGithubCacheDbPath(): string {
 	if (override) return override;
 	return dirs.rootSubdir(path.join("cache", "github-cache.db"), "cache");
 }
+
+/**
+ * Get the materialized `omp://` documentation cache directory
+ * (~/.omp/cache/docs; XDG: $XDG_CACHE_HOME/omp/cache/docs).
+ * Honors the `OMP_DOCS_CACHE_DIR` env var when set so tests and operators can
+ * isolate the materialized docs without touching the rest of the config root.
+ */
+export function getDocsCacheDir(): string {
+	const override = process.env.OMP_DOCS_CACHE_DIR;
+	if (override) return override;
+	return dirs.rootSubdir(path.join("cache", "docs"), "cache");
+}
 /**
  * Get the conventional commit inference cache database path (~/.omp/cache/commit-inference.db).
  * Honors `OMP_COMMIT_CACHE_DB` so tests and operators can isolate the cache.
