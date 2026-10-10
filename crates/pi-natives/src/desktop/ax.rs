@@ -111,6 +111,14 @@ pub struct AxBounds {
 	pub height: f64,
 }
 
+/// Whether a tree walk reads each element's bounds: `ax()` renders none,
+/// while `find()` returns them on its nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkBounds {
+	Read,
+	Skip,
+}
+
 struct Registered {
 	handle:      AxHandle,
 	target_key:  String,
@@ -291,6 +299,7 @@ struct WalkState {
 	max_nodes: u32,
 	max_depth: u32,
 	truncated: bool,
+	bounds:    WalkBounds,
 }
 
 fn walk_raw(
@@ -304,16 +313,8 @@ fn walk_raw(
 		return Ok(None);
 	}
 	state.visited += 1;
-	let props = match backend.props(&handle) {
-		Ok(props) => props,
-		Err(_) if depth > 0 => {
-			state.skipped = state.skipped.saturating_add(1);
-			return Ok(None);
-		},
-		Err(error) => return Err(error),
-	};
-	let child_handles = match backend.children(&handle) {
-		Ok(children) => children,
+	let (props, child_handles) = match backend.walk_node(&handle, state.bounds) {
+		Ok(node) => node,
 		Err(_) if depth > 0 => {
 			state.skipped = state.skipped.saturating_add(1);
 			return Ok(None);
@@ -509,6 +510,7 @@ pub fn snapshot(
 		max_nodes: options.max_nodes.unwrap_or(800).max(1),
 		max_depth: options.max_depth.unwrap_or(24),
 		truncated: false,
+		bounds:    WalkBounds::Skip,
 	};
 	let root = walk_raw(backend, root, 0, &mut state)?
 		.and_then(|node| filter_node(node, options.all.unwrap_or(false)));
@@ -552,8 +554,14 @@ pub fn query(
 	let target = &window.id;
 	let generation = registry.current_generation(target);
 	let root = backend.window_root(window)?;
-	let mut state =
-		WalkState { visited: 0, skipped: 0, max_nodes: 5_000, max_depth: 24, truncated: false };
+	let mut state = WalkState {
+		visited:   0,
+		skipped:   0,
+		max_nodes: 5_000,
+		max_depth: 24,
+		truncated: false,
+		bounds:    WalkBounds::Read,
+	};
 	let Some(root) = walk_raw(backend, root, 0, &mut state)? else {
 		return Ok(Vec::new());
 	};
@@ -680,6 +688,8 @@ mod tests {
 		unidentified: HashSet<u64>,
 		/// Nodes whose earlier reads are gone, their identity taken over.
 		gone:         HashSet<u64>,
+		/// Bounds read by tree walks.
+		bounds_reads: u32,
 	}
 	impl Mock {
 		fn handle(&self, id: u64) -> AxHandle {
@@ -722,6 +732,19 @@ mod tests {
 				.flatten()
 				.map(|id| self.handle(*id))
 				.collect())
+		}
+
+		fn walk_node(
+			&mut self,
+			h: &AxHandle,
+			bounds: WalkBounds,
+		) -> CoreResult<(AxProps, Vec<AxHandle>)> {
+			let mut props = self.props(h)?;
+			match bounds {
+				WalkBounds::Read => self.bounds_reads += u32::from(props.bounds.is_some()),
+				WalkBounds::Skip => props.bounds = None,
+			}
+			Ok((props, self.children(h)?))
 		}
 
 		fn parent(&mut self, _: &AxHandle) -> CoreResult<Option<AxHandle>> {
@@ -845,6 +868,30 @@ mod tests {
 		assert_eq!(found[0].ref_, "e2");
 		assert!(matches!(registry.resolve("e2").unwrap(), AxHandle::Test(2)));
 		assert_eq!(registry.resolve("e3").err().map(|error| error.code), Some(ErrorCode::StaleRef));
+	}
+	#[test]
+	fn ax_reads_no_bounds_while_find_returns_them() {
+		let mut button = p("button", Some("Go"));
+		button.bounds = Some(AxBounds { x: 10.0, y: 20.0, width: 30.0, height: 40.0 });
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, button)].into(),
+			children: [(1, vec![2])].into(),
+			..Default::default()
+		};
+		let mut registry = AxRegistry::default();
+		snapshot(&mut m, &mut registry, &window(), &AxSnapshotOptions::default()).unwrap();
+		assert_eq!(m.bounds_reads, 0);
+		let found = query(&mut m, &mut registry, &window(), &AxQuery {
+			role:  Some("button".into()),
+			title: None,
+			value: None,
+			limit: None,
+		})
+		.unwrap();
+		assert_eq!(
+			(found[0].x, found[0].y, found[0].width, found[0].height),
+			(Some(10.0), Some(20.0), Some(30.0), Some(40.0))
+		);
 	}
 	#[test]
 	fn a_relabelled_element_keeps_its_old_ref_until_it_expires() {

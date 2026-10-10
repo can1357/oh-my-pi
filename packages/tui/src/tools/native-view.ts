@@ -6,7 +6,7 @@
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
-import { code, keyed, node, row, span, text } from "../native/describe";
+import { ansi, code, compact, keyed, node, row, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { type ParsedDiagnostic, parseDiagnosticMessage, shortenPath } from "../render/render-utils";
 import { plainText } from "../native/spans";
@@ -187,6 +187,107 @@ export function footnoteText(parts: readonly string[], meta?: OutputMeta): Nativ
 		...text([span(all.join(" · "), "muted")], { wrap: "word", role: notice ? "omp.tool.notice" : "omp.tool.stats" }),
 		key: "foot",
 	};
+}
+
+/** Drawn lines of a run's input (command, cell code) before its "N more lines" button. */
+export const RUN_INPUT_PREVIEW_LINES = 6;
+
+/**
+ * What a run's foot names: `running` (live clock), `background` (an async job
+ * outlives the call), and the settled outcomes. A failure with an exit code
+ * reads `exit N`; without one, `Failed`.
+ */
+export type RunState = "running" | "background" | "done" | "failed" | "cancelled" | "timed-out";
+
+const RUN_STATE: Record<RunState, { readonly word: string; readonly tone: TspTone }> = {
+	running: { word: "Running", tone: "pending" },
+	background: { word: "In background", tone: "pending" },
+	done: { word: "Done", tone: "success" },
+	failed: { word: "Failed", tone: "error" },
+	cancelled: { word: "Cancelled", tone: "muted" },
+	"timed-out": { word: "Timed out", tone: "warning" },
+};
+
+/** Inputs of {@link runFoot}. */
+export interface RunFootInput {
+	readonly state: RunState;
+	/** Exit code of a `failed` run; a non-zero code names the state `exit N`. */
+	readonly exitCode?: number;
+	/** Milliseconds run so far (`running`) or in total; the time is omitted when undefined. */
+	readonly elapsedMs?: number;
+	/** Quiet facts (job id, service state, artifact), muted and ` · `-joined. */
+	readonly facts?: readonly string[];
+	/** Truncation / artifact-capture notices, appended to the facts in `warning`. */
+	readonly meta?: OutputMeta;
+}
+
+/**
+ * The foot line of a run box (`omp.run.foot`): the state word in its tone,
+ * the run time (a live clock while running, frozen once settled) and the
+ * quiet facts. Glyphs are the terminal's styling, never text.
+ */
+export function runFoot(input: RunFootInput): NativeNode {
+	const failedWithCode = input.state === "failed" && input.exitCode !== undefined && input.exitCode !== 0;
+	const state = failedWithCode
+		? { word: `exit ${input.exitCode}`, tone: RUN_STATE.failed.tone }
+		: RUN_STATE[input.state];
+	const facts = (input.facts ?? []).map(fact => plainText(fact).trim()).filter(fact => fact.length > 0);
+	const notices: string[] = [];
+	if (input.meta?.truncation) notices.push(formatTruncationMetaNotice(input.meta.truncation, input.meta.source));
+	if (input.meta?.artifactError) notices.push(formatArtifactErrorNotice(input.meta.artifactError));
+	const factSpans: TspSpan[] = [];
+	if (facts.length > 0) factSpans.push(span(facts.join(" · "), "muted"));
+	for (const notice of notices) {
+		if (factSpans.length > 0) factSpans.push(span(" · ", "muted"));
+		factSpans.push(span(notice, "warning"));
+	}
+	const ms = input.elapsedMs === undefined ? undefined : Math.max(0, Math.round(input.elapsedMs));
+	const time =
+		ms === undefined
+			? undefined
+			: node(
+					"elapsed",
+					input.state === "running"
+						? { role: "omp.run.time", age: ms, format: "short" }
+						: { role: "omp.run.time", age: ms, stopped: ms, format: "short" },
+					undefined,
+					"time",
+				);
+	return node(
+		"row",
+		{ role: "omp.run.foot", gap: "sm", align: "center" },
+		compact<NativeNode>([
+			keyed(text([span(state.word)], { role: "omp.run.state", tone: state.tone }), "state"),
+			time,
+			factSpans.length > 0 && keyed(text(factSpans, { role: "omp.run.facts", wrap: "word" }), "facts"),
+		]),
+		"foot",
+	);
+}
+
+/** A run's input section: the command or cell source, clamped to {@link RUN_INPUT_PREVIEW_LINES}. */
+export function runInput(source: string, p: { role: string; lang: string; wrap: boolean }): NativeNode {
+	return keyed(
+		code(source.trimEnd(), { role: p.role, lang: p.lang, wrap: p.wrap, preview: { lines: RUN_INPUT_PREVIEW_LINES } }),
+		"input",
+	);
+}
+
+/** A run's terminal output: follows its tail, clamped to the last `previewLines` lines while folded. */
+export function runOutput(output: string, p: { role: string; previewLines: number; key?: string }): NativeNode {
+	return keyed(ansi(output, { role: p.role, follow: true, preview: { lines: p.previewLines } }), p.key ?? "output");
+}
+
+/**
+ * One run as one box (`omp.run`): input, output, status lines and foot in
+ * order. `tone` tints the box: `error` for a failed run, `warning` for a
+ * timed-out one.
+ */
+export function runBox(
+	children: readonly (NativeChild | undefined | false)[],
+	p: { key: string; tone?: TspTone },
+): NativeNode {
+	return node("col", { role: "omp.run", gap: "none", tone: p.tone }, compact(children), p.key);
 }
 
 /** Diagnostic rows shown before `+N more`. */

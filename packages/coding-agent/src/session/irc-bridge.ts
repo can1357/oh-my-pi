@@ -41,6 +41,11 @@ export class IrcBridge {
 		return this.#interrupts.length > 0;
 	}
 
+	/** Whether an aside is ready for step-boundary injection (not a parked wake). */
+	hasAsides(): boolean {
+		return this.#asides.length > 0;
+	}
+
 	/** Whether any undelivered IRC record remains queued. */
 	hasPending(): boolean {
 		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;

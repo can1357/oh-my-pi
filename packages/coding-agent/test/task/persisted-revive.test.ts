@@ -678,6 +678,25 @@ describe("persisted subagent revival", () => {
 		expect(cfgAdvisorEnabled.get(unadvised)).toBe(false);
 	});
 
+	it("keeps a nested spawn's owner-resolved advisor when reviving under root settings with a different advisor", async () => {
+		const cwd = makeTempDir("@pi-nested-advisor-revive-");
+		// What spawn persists for `@advisor:high` under a parent subagent whose advisor role is Sonnet.
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, "anthropic/claude-sonnet-4-5:high");
+		const rootSettings = Settings.isolated({ modelRoles: { advisor: "anthropic/claude-haiku-4-5" } });
+		let captured: Settings | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			captured = options?.settings;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, { settings: rootSettings })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(captured?.getModelRole("advisor")).toBe("anthropic/claude-sonnet-4-5:high");
+	});
+
 	it("restores the persisted custom model role before reopening the session", async () => {
 		const cwd = makeTempDir("@pi-custom-role-revive-");
 		const sessionFile = await createPersistedSession(cwd, false, "review-fast");

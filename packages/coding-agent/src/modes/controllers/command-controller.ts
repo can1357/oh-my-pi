@@ -21,6 +21,8 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getActiveProfile, getConfigDirName } from "@oh-my-pi/pi-utils/dirs";
+import { classifyTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
@@ -87,7 +89,7 @@ import {
 	selectChangelogEntries,
 } from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
-import { formatDumpArchiveReport } from "../../session/session-dump-format";
+import { formatDumpArchiveReport, type SessionDumpArchive } from "../../session/session-dump-format";
 import { openPath } from "../../utils/open";
 import { resumeCommand } from "../../utils/resume-command";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
@@ -102,6 +104,16 @@ import type { UnavailableUsageAccount } from "@oh-my-pi/pi-tui/overlays/usage-da
 import { cfgTerminalShowImages } from "../settings";
 import { cfgProviderAppendOnlyContext } from "../../session/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../../commands/settings";
+import { flagConsumesValue, restartArgv } from "../../cli/flag-tables";
+import {
+	createDefaultTerminalLaunchRequest,
+	getTerminalLaunchPlacement,
+	launchTerminal,
+	TerminalLaunchError,
+	type TerminalLaunchRequest,
+	type TerminalLaunchResult,
+} from "../../subprocess/terminal-launch";
+import { resolveCliEntryCmd } from "../../subprocess/worker-client";
 
 /** How long `/fork` waits for Tern to open the fork's pane. */
 const TERN_FORK_TIMEOUT_MS = 10_000;
@@ -113,13 +125,78 @@ function formatCreditValue(value: number): string {
 	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
+interface ForkTerminalDependencies {
+	classifyTerminalMultiplexer: typeof classifyTerminalMultiplexer;
+	environment: () => NodeJS.ProcessEnv;
+	launchTerminal: (request: TerminalLaunchRequest) => Promise<TerminalLaunchResult>;
+	resolveCliEntryCmd: typeof resolveCliEntryCmd;
+	getActiveProfile: typeof getActiveProfile;
+	argv: () => string[];
+}
+
+/**
+ * Startup flags the fork child re-supplies from the parent's live state
+ * (`--profile`, `--model`, `--thinking`, `--prompt-cache-key`) or that would
+ * re-point it at a stale scope (`--config`/`--cwd`/`--provider`; the child
+ * gets the effective overlays via `PI_CONFIG_FILES` and the session cwd).
+ */
+const FORK_LAUNCH_OVERRIDES: Readonly<Record<string, true>> = {
+	"--config": true,
+	"--cwd": true,
+	"--model": true,
+	"--profile": true,
+	"--prompt-cache-key": true,
+	"--provider": true,
+	"--thinking": true,
+};
+
+/**
+ * `env` prefix pinning each scope variable for the fork child. Multiplexer
+ * servers keep stale environment snapshots, so every variable is pinned:
+ * defined values are assigned, absent (or empty) ones are unset with `-u`
+ * (which must precede the assignments) rather than exported as empty strings
+ * that `??`-style consumers would treat as a set, relative path.
+ */
+function forkScopeEnvCommand(scope: Readonly<Record<string, string | undefined>>): string[] {
+	const unset: string[] = [];
+	const assignments: string[] = [];
+	for (const [name, value] of Object.entries(scope)) {
+		if (value) assignments.push(`${name}=${value}`);
+		else unset.push("-u", name);
+	}
+	return ["env", ...unset, ...assignments];
+}
+
+function hasForkApiKeyOverride(argv: string[]): boolean {
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i]!;
+		if (arg === "--api-key" || arg.startsWith("--api-key=")) return true;
+		if (flagConsumesValue(arg, argv[i + 1])) i++;
+	}
+	return false;
+}
+
 export class CommandController {
 	/** The open native report sheet. */
 	#reportSheet: OverlayHandle | undefined;
 	/** The editor sat on the bottom row when the text-mode report above it opened. */
 	#reportOpenedAtBottom = false;
+	#forkTerminalDependencies: ForkTerminalDependencies;
 
-	constructor(private readonly ctx: InteractiveModeContext) {}
+	constructor(
+		private readonly ctx: InteractiveModeContext,
+		forkTerminalDependencies: Partial<ForkTerminalDependencies> = {},
+	) {
+		this.#forkTerminalDependencies = {
+			classifyTerminalMultiplexer,
+			environment: () => process.env,
+			launchTerminal,
+			resolveCliEntryCmd,
+			getActiveProfile,
+			argv: () => process.argv.slice(2),
+			...forkTerminalDependencies,
+		};
+	}
 
 	/**
 	 * Esc: take away the report shown above the editor (text mode); false when
@@ -334,9 +411,17 @@ export class CommandController {
 		}
 	}
 
-	async handleDumpAllCommand(): Promise<void> {
+	handleDumpAllCommand(): Promise<void> {
+		return this.#writeDumpArchive(() => this.ctx.session.dumpSessionArchiveToTmpDir());
+	}
+
+	handleDumpAnonCommand(): Promise<void> {
+		return this.#writeDumpArchive(() => this.ctx.session.dumpAnonymizedArchiveToTmpDir());
+	}
+
+	async #writeDumpArchive(write: () => Promise<SessionDumpArchive | undefined>): Promise<void> {
 		try {
-			const archive = await this.ctx.session.dumpSessionArchiveToTmpDir();
+			const archive = await write();
 			if (!archive) {
 				this.ctx.showError("No messages to dump yet.");
 				return;
@@ -1281,7 +1366,12 @@ export class CommandController {
 		await this.#runNewSessionFlow({ drop: true }, "Session deleted");
 	}
 
-	async handleForkCommand(): Promise<void> {
+	async handleForkCommand(placement?: "pane" | "window"): Promise<void> {
+		if (placement !== undefined) {
+			await this.#handleForkTerminalCommand(placement);
+			return;
+		}
+
 		if (this.ctx.session.isStreaming) {
 			this.ctx.showWarning("Wait for the current response to finish or abort it before forking.");
 			return;
@@ -1322,6 +1412,129 @@ export class CommandController {
 				1,
 			),
 		]);
+	}
+
+	async #handleForkTerminalCommand(placement: "pane" | "window"): Promise<void> {
+		const dependencies = this.#forkTerminalDependencies;
+		const environment = dependencies.environment();
+		const multiplexer = dependencies.classifyTerminalMultiplexer(environment);
+		const placementInfo = getTerminalLaunchPlacement(multiplexer, placement);
+		if ("error" in placementInfo) {
+			this.ctx.showError(placementInfo.error);
+			return;
+		}
+
+		if (this.ctx.session.isStreaming) {
+			const confirmed = await this.ctx.showHookConfirm(
+				"Fork while a response is running?",
+				"The child may not include the partial response. Continue opening a fork? The current session will keep running here.",
+			);
+			if (!confirmed) return;
+		}
+
+		const initialSessionFile = this.ctx.sessionManager.getSessionFile();
+		if (!initialSessionFile) {
+			this.ctx.showError("Cannot open a fork in another terminal: the current session has not been persisted yet.");
+			return;
+		}
+
+		const childArgs = restartArgv(dependencies.argv(), undefined, FORK_LAUNCH_OVERRIDES);
+		if (hasForkApiKeyOverride(childArgs)) {
+			this.ctx.showError(
+				"Cannot open a fork in another terminal when --api-key was supplied at startup; the key cannot be forwarded without exposing it in the multiplexer command. Configure provider credentials in the auth store and retry.",
+			);
+			return;
+		}
+		const shellGrammar = placementInfo.shellGrammar;
+		if (shellGrammar === "posix") {
+			const confirmed = await this.ctx.showHookConfirm(
+				"Confirm destination shell compatibility",
+				"This fork command uses POSIX shell syntax. Continue only if the destination's configured interactive shell accepts POSIX syntax; this cannot be inferred from the current terminal.",
+			);
+			if (!confirmed) {
+				this.ctx.showWarning("Fork cancelled: POSIX shell compatibility was not confirmed for the destination.");
+				return;
+			}
+		}
+
+		try {
+			await this.ctx.sessionManager.flush();
+		} catch (error) {
+			logger.error("Failed to flush the session before opening a terminal fork", { error });
+			this.ctx.showError("Cannot open a fork in another terminal: failed to save the current session.");
+			return;
+		}
+
+		const sessionFile = this.ctx.sessionManager.getSessionFile();
+		if (!sessionFile) {
+			this.ctx.showError("Cannot open a fork in another terminal: the current session is no longer persisted.");
+			return;
+		}
+		const sourceSessionFile = path.resolve(sessionFile);
+		try {
+			await fs.access(sourceSessionFile);
+		} catch {
+			this.ctx.showError("Cannot open a fork in another terminal: the persisted session transcript is unavailable.");
+			return;
+		}
+
+		try {
+			const activeProfile = dependencies.getActiveProfile();
+			const activeModel = this.ctx.session.model;
+			if (activeProfile) childArgs.push("--profile", activeProfile);
+			if (activeModel) childArgs.push("--model", `${activeModel.provider}/${activeModel.id}`);
+			const activeThinkingLevel = this.ctx.session.configuredThinkingLevel();
+			if (activeThinkingLevel !== undefined) childArgs.push("--thinking", activeThinkingLevel);
+			// Forcing --model/--thinking marks the fork's cache shape as changed, which would
+			// drop the inherited key; pin what the parent's requests populated the cache under.
+			childArgs.push("--prompt-cache-key", this.ctx.session.agent.promptCacheKey ?? this.ctx.session.sessionId);
+			childArgs.push("--fork", sourceSessionFile);
+			// Pin only non-secret scope variables.
+			const command = [
+				...forkScopeEnvCommand({
+					PI_CODING_AGENT_DIR: this.ctx.settings.getAgentDir(),
+					PI_CONFIG_DIR: getConfigDirName(),
+					OMP_PROFILE: activeProfile,
+					PI_PROFILE: activeProfile,
+					PI_CONFIG_FILES: this.ctx.settings.getConfigFiles().join(path.delimiter),
+					PI_CODING_AGENT_SESSION_DIR: environment.PI_CODING_AGENT_SESSION_DIR,
+					XDG_DATA_HOME: environment.XDG_DATA_HOME,
+					XDG_STATE_HOME: environment.XDG_STATE_HOME,
+					XDG_CACHE_HOME: environment.XDG_CACHE_HOME,
+				}),
+				...dependencies.resolveCliEntryCmd(),
+				...childArgs,
+			];
+			const launchPlan = createDefaultTerminalLaunchRequest(
+				multiplexer,
+				placement,
+				command,
+				this.ctx.sessionManager.getCwd(),
+				shellGrammar,
+			);
+			if ("error" in launchPlan) {
+				this.ctx.showError(launchPlan.error);
+				return;
+			}
+
+			const result = await dependencies.launchTerminal(launchPlan.request);
+			if (result.warning) {
+				this.ctx.showWarning(
+					`Opened a fork in ${placementInfo.displayName}, but ${result.warning} This session continues here.`,
+				);
+				return;
+			}
+			this.ctx.showStatus(
+				`Opened a fork in ${placementInfo.displayName} (${placementInfo.placementLabel}); this session continues here.`,
+			);
+		} catch (error) {
+			logger.error("Failed to open a terminal fork", { multiplexer, error });
+			this.ctx.showError(
+				error instanceof TerminalLaunchError
+					? `Could not open a fork in ${placementInfo.displayName}: ${error.message}`
+					: `Could not open a fork in ${placementInfo.displayName}. See logs for details.`,
+			);
+		}
 	}
 
 	/**
@@ -1454,14 +1667,19 @@ export class CommandController {
 
 	/**
 	 * `/wt [<branch>]` — fork the checkout into a new linked git worktree on
-	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along,
-	 * then relocate the session there like `/move`.
+	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along
+	 * unless `keepChanges` is false, then relocate the session there like `/move`.
+	 * Returns the worktree only when the session now lives in it.
 	 */
-	async handleWorktreeCommand(branch?: string): Promise<void> {
+	async handleWorktreeCommand(
+		branch?: string,
+		options: { keepChanges?: boolean } = {},
+	): Promise<SessionWorktree | undefined> {
 		if (this.ctx.session.isStreaming) {
 			this.ctx.showWarning("Wait for the current response to finish or abort it before creating a worktree.");
-			return;
+			return undefined;
 		}
+		let created: SessionWorktree | undefined;
 		await this.#withSessionMove(async () => {
 			const branchName = branch?.trim() || defaultSessionWorktreeBranch();
 			const cwd = this.ctx.sessionManager.getCwd();
@@ -1477,7 +1695,7 @@ export class CommandController {
 			this.ctx.ui.requestRender();
 			let worktree: SessionWorktree;
 			try {
-				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName);
+				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, options);
 			} catch (err) {
 				this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
 				return false;
@@ -1492,7 +1710,10 @@ export class CommandController {
 				});
 			}
 			if (!(await this.#relocateSession(worktree.path))) return false;
-			const cleanup = await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings);
+			created = worktree;
+			const cleanup = worktree.keptChanges
+				? await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings)
+				: { cleaned: false, errorMessage: undefined };
 			if (cleanup.errorMessage !== undefined) {
 				this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
 			}
@@ -1506,6 +1727,7 @@ export class CommandController {
 			]);
 			return true;
 		});
+		return created;
 	}
 
 	/** Save source settings before acquiring the gate for a complete relocation operation. */

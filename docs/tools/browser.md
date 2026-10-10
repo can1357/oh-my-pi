@@ -46,6 +46,8 @@ await tab.close();
 - `browser.close({ name?, all?, kill?, timeout? }) -> Promise<void>` releases one or all managed tabs.
 - `tab.close({ kill?, timeout? }) -> Promise<void>` releases that handle's tab.
 
+`close` and `run` resolve `timeout` like `open`: seconds, default 30, capped by positive `tools.maxTimeout`, then clamped to 1–300. `waitFor*` helpers take `timeout` in milliseconds and cannot outlast the enclosing call's `timeout`.
+
 ### Open options
 
 | Option | Contract |
@@ -58,13 +60,13 @@ await tab.close();
 | `dialogs` | `"accept"` or `"dismiss"` automatic policy. Without one, alerts and beforeunload prompts are accepted; confirms and prompts remain pending. |
 | `allowed_domains` | Exact hostnames or `*.example.com` patterns (including the bare domain). The network manager aborts intercepted HTTP(S)/WS(S) requests to other hosts; an empty list leaves requests unrestricted. This is not a sandbox, and native-webview coverage differs below. |
 | `init_scripts` | Document-start JavaScript sources or cwd-relative source-file paths. |
-| `downloads` | Absolute or cwd-relative download directory. |
+| `downloads` | Absolute or cwd-relative directory for this tab's downloads; defaults to a temporary folder per tab. Tabs in a managed or spawned Chromium keep separate folders while they share a browser, downloads their iframes start included; there a download no tab tracks keeps Chromium's GUID file name. Connected and relay browsers also receive the user's own downloads, so they keep one browser-wide folder (the last tab to set it wins) and real file names. |
 | `user_agent` | Per-tab user-agent override. |
 | `ignore_https_errors` | Ignore invalid HTTPS certificates for the tab. |
 | `allow_file_access` | Launch flag permitting local file pages to read local files; cannot change an already-running shared Chromium. |
 | `headed` | Override `browser.headless` for this open. `headed: false` also opts out of automatic Tern selection. |
 | `persist` | Default `false`; opt out of settle-freeze and idle-close management. Explicit reuse by the owning session can change it. |
-| `timeout` | Seconds; default 30, capped by positive `tools.maxTimeout`, then clamped to 1–300. First-use Chromium installation is outside the open deadline. |
+| `timeout` | Seconds; default 30, capped by positive `tools.maxTimeout`, then clamped to 1–300. First-use Chromium installation is outside the open deadline. An open that runs out names the step it stalled in: launching or connecting to the browser, closing a tab to reopen it, or opening the tab. |
 
 Reopening with init scripts, a download directory, a user-agent override, or `ignore_https_errors: true` recycles an existing tab so those worker-init options can take effect.
 
@@ -93,7 +95,7 @@ Direct `waitFor` and `waitForSelector` return booleans for the resolved handle, 
 
 Selectors accept CSS and Puppeteer `aria/…`, `text/…`, `xpath/…`, `pierce/…`, plus `label/…`, `placeholder/…`, `testid/…`, `alt/…`, `title/…`, and `role/<role>[name="…"]` query handlers. Add ` exact` inside the role name filter for exact matching. Playwright-only pseudos such as `:has-text()` and `:visible` are rejected. Use `tab.select` for `<select>` elements; `tab.fill` does not support them.
 
-`observe()` assigns numeric ids consumed by `tab.id`. `ariaSnapshot()` assigns `[ref=eN]` ids consumed by `tab.ref`; `diff: true` returns a revisioned full, unchanged, or delta object. Navigation and re-rendering invalidate handles; re-observe and act in the same Eval cell.
+`observe()` lists interactive elements and assigns numeric ids consumed by `tab.id`; `includeAll: true` adds non-interactive accessibility nodes, and `viewportOnly: true` keeps only elements intersecting the viewport (ignored on cmux). `ariaSnapshot()` assigns `[ref=eN]` ids consumed by `tab.ref`; `diff: true` returns a revisioned full, unchanged, or delta object. Navigation and re-rendering invalidate handles; re-observe and act in the same Eval cell.
 
 ### `tab.run(fnOrCode, options?)`
 

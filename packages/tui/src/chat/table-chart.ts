@@ -16,8 +16,8 @@ import { chartAlt, renderChartSvg } from "../charts/chart-svg";
 import { analyzeTable, type TableAnalysis } from "../charts/table-data";
 import type { ImageBudget } from "../components/image";
 import { lexDocument } from "../components/markdown";
-import { node } from "../native/describe";
-import { registerNativeBlob } from "../native/blobs";
+import { keyed } from "../native/describe";
+import { nativeImageNode } from "../native/blobs";
 import type { NativeNode } from "../native/node";
 import { getThemeEpoch } from "../theme";
 import type { Component } from "../tui";
@@ -85,11 +85,11 @@ interface ChartEntry {
 let chartMode: TableChartMode = "off";
 let chartPlanner: TableChartPlanner | undefined;
 const charts = new Map<string, ChartEntry>();
-/** The theme-resolved native blob last registered for a chart. */
-const kNativeBlob = Symbol("tableChart.nativeBlob");
+/** The theme-resolved image node owning a chart's native bytes. */
+const kNativeImage = Symbol("tableChart.nativeImage");
 
 interface NativeTagged extends TableChart {
-	[kNativeBlob]?: { epoch: number; blob: string };
+	[kNativeImage]?: { epoch: number; image: NativeNode };
 }
 
 /** Set how tables become charts (the host's `tui.autoGraph`) and its `smart` planner; the host rebuilds the transcript after. */
@@ -205,24 +205,21 @@ function drawChart(analysis: TableAnalysis, plan: ChartPlan, guessed = false): T
 export function describeTableChart(chart: TableChart, key: string): NativeNode {
 	const epoch = getThemeEpoch();
 	const tagged: NativeTagged = chart;
-	let entry = tagged[kNativeBlob];
+	let entry = tagged[kNativeImage];
 	if (entry?.epoch !== epoch) {
 		const svg = prepareSvg(chart.svg, svgFigurePalette());
-		entry = { epoch, blob: registerNativeBlob(new TextEncoder().encode(svg), "image/svg+xml") };
-		tagged[kNativeBlob] = entry;
+		entry = {
+			epoch,
+			image: nativeImageNode(new TextEncoder().encode(svg), "image/svg+xml", {
+				alt: chart.alt,
+				w: chart.width,
+				h: chart.height,
+				max: { w: `${Math.round(chart.width / UNITS_PER_COLUMN)}ch` },
+			}),
+		};
+		tagged[kNativeImage] = entry;
 	}
-	return node(
-		"image",
-		{
-			blob: entry.blob,
-			alt: chart.alt,
-			w: chart.width,
-			h: chart.height,
-			max: { w: `${Math.round(chart.width / UNITS_PER_COLUMN)}ch` },
-		},
-		undefined,
-		key,
-	);
+	return keyed(entry.image, key);
 }
 
 export interface TableChartFigureOptions {

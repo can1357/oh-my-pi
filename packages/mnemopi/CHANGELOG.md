@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [18.8.8] - 2026-10-10
+
+### Fixed
+
+- Fixed long retained transcripts exhausting local memory extraction models by limiting each extraction input to 8192 characters while keeping the opening context and newest turns ([#14956](https://github.com/can1357/oh-my-pi/issues/14956)).
+
+## [18.8.7] - 2026-10-09
+
+### Fixed
+
+- Fixed proactive linking freezing the host for seconds per stored memory on large banks; a memory's graph links are now written in one commit instead of one per link ([#14998](https://github.com/can1357/oh-my-pi/issues/14998)).
+
+## [18.8.5] - 2026-10-08
+
+### Fixed
+
+- Fixed new memories gaining graph links (`related_to`, `references`, `ctx`) to memories that were already invalidated, superseded, or expired; proactive linking and consolidation now link only to memories recall can still return, so the graph stops growing toward retired memories ([#14427](https://github.com/can1357/oh-my-pi/pull/14427) by [@tickernelz](https://github.com/tickernelz)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Changed

@@ -31,8 +31,7 @@ impl CommandFdInjectionExt for std::process::Command {
 			})
 			.collect::<Result<Vec<_>, _>>()?;
 
-		// `fd_mappings` registers a `pre_exec` closure even for an empty list, and
-		// any closure forces std onto its fork+exec path instead of `posix_spawn`.
+		// An empty mapping still registers a pre_exec hook, disabling posix_spawn.
 		if fd_mappings.is_empty() {
 			return Ok(());
 		}
@@ -87,17 +86,11 @@ pub trait CommandSessionExt {
 
 impl CommandSessionExt for std::process::Command {
 	fn detach_session(&mut self) {
-		// Unlike a `pre_exec` closure, this keeps std's `posix_spawn` path
-		// (`POSIX_SPAWN_SETSID`, vfork-style) available on linux-gnu, so spawn cost
-		// does not scale with the host's address space. Elsewhere std calls
-		// `setsid()` in its fork+exec fallback. Callers never combine this with
-		// `process_group`, so the fresh child cannot already lead a process group
-		// and `setsid()` cannot fail with EPERM.
-		//
-		// glibc rejects `POSIX_SPAWN_SETSID` with EINVAL before 2.26, but std only
-		// reaches it here on glibc 2.29+: `compose_std_command` always sets a
-		// working directory, and std takes `posix_spawn` with one only when
-		// `posix_spawn_file_actions_addchdir_np` (glibc 2.29) exists.
+		// Unlike pre_exec, this allows std to use POSIX_SPAWN_SETSID on
+		// linux-gnu. Callers never combine this with process_group, so the child
+		// cannot already lead a process group and setsid cannot fail with EPERM.
+		// compose_std_command always sets cwd: std needs glibc 2.29's addchdir
+		// for posix_spawn here, which also guarantees SETSID support (glibc 2.26).
 		self.setsid(true);
 	}
 

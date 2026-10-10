@@ -102,6 +102,8 @@ export function createSessionStub(
 		isCompacting: false,
 		isAborting: false,
 		isRetrying: false,
+		hasPostPromptWork: false,
+		queuedMessageCount: 0,
 		isTtsrAbortPending: false,
 		retryAttempt: 0,
 		messages: [],
@@ -128,6 +130,9 @@ export function createSessionStub(
 		setMCPPromptCommands: vi.fn(),
 		setActiveToolsByName: vi.fn(async () => {}),
 		runIdleCompaction: vi.fn(async () => {}),
+		waitForIdle: async () => {},
+		hasPendingAsyncWork: () => false,
+		settleAsyncWork: async () => {},
 		subscribe: vi.fn(() => () => {}),
 	} satisfies SessionOverrides;
 	if (overrides) layer(stub, overrides);

@@ -1,8 +1,13 @@
+import {
+	type AgentCompactionThresholdOverride,
+	validateModelCompactionThresholds,
+} from "../config/compaction-threshold";
 import { combine, register, type SettingValueOf } from "../config/registry";
 import { COMPACTION_METHOD_CHOICES, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-methods";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 
 const EMPTY_STRING_ARRAY: string[] = [];
+const EMPTY_MODEL_COMPACTION_THRESHOLDS: Record<string, AgentCompactionThresholdOverride> = {};
 
 export const cfgWorkspaceAdditionalDirectories = register({
 	id: "workspace.additionalDirectories",
@@ -14,6 +19,46 @@ export const cfgWorkspaceAdditionalDirectories = register({
 		label: "Additional Workspace Dirs",
 		description:
 			"Extra workspace directories added to every session as additional roots (multi-root workspace). Managed live via /add-dir and /remove-dir. Paths resolve relative to cwd; absolute paths recommended. The agent is told these roots exist and can read/grep/glob them.",
+	},
+});
+
+/** Built-in context filenames. Listing them in `contextFiles.extra` would load a second copy or bypass one-per-depth shadowing. */
+const BUILTIN_CONTEXT_FILE_NAMES: Record<string, true> = {
+	"agents.md": true,
+	"claude.md": true,
+	"gemini.md": true,
+	"copilot-instructions.md": true,
+};
+
+/** Why `entry` is not a valid `contextFiles.extra` name; undefined for a plain, non-built-in file name. */
+function contextFileNameError(entry: unknown): string | undefined {
+	if (typeof entry !== "string") return `contextFiles.extra entries must be strings (${String(entry)})`;
+	const name = entry.trim();
+	if (name === "") return "contextFiles.extra entries must not be empty";
+	if (BUILTIN_CONTEXT_FILE_NAMES[name.toLowerCase()] === true) {
+		return `contextFiles.extra cannot list a built-in context file (${name})`;
+	}
+	if (name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.includes("\0")) {
+		return `contextFiles.extra entries must be file names, not paths (${name})`;
+	}
+	return undefined;
+}
+
+/**
+ * Extra instruction filenames discovered in addition to AGENTS.md / CLAUDE.md / GEMINI.md.
+ * Config-file only: the names are open-ended, so there is no settings-panel vocabulary.
+ */
+export const cfgContextFilesExtra = register({
+	id: "contextFiles.extra",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	validate: raw => {
+		if (raw === undefined) return;
+		if (!Array.isArray(raw)) throw new Error("contextFiles.extra must be a list of file names");
+		for (const entry of raw) {
+			const error = contextFileNameError(entry);
+			if (error !== undefined) throw new Error(error);
+		}
 	},
 });
 
@@ -150,6 +195,34 @@ export const cfgCompactionThresholdTokens = register({
 			{ value: "500000", label: "500K tokens", description: "Very large context window" },
 		],
 	},
+});
+
+/**
+ * Per-model compaction limits for the models they match: `provider/model-id`
+ * exactly, else the longest `…*` prefix. A token entry is the base the
+ * threshold policy scales in place of the window (see
+ * `applyModelCompactionThreshold`); a percentage entry replaces both
+ * `compaction.threshold*` fields. Edited from the /models hub; a per-agent
+ * `task.agentCompactionThresholdOverrides` entry still wins. A token base past a
+ * model's standard window opts that model into its extended window
+ * (`ModelRegistry.contextWindowTiers`).
+ */
+export const cfgCompactionModelThresholds = register({
+	id: "compaction.modelThresholds",
+	type: "record",
+	default: EMPTY_MODEL_COMPACTION_THRESHOLDS,
+	validate: validateModelCompactionThresholds,
+});
+
+/**
+ * Whether `compaction.modelThresholds` applies. Subagent spawn turns it off for an
+ * agent whose `task.agentCompactionThresholdOverrides` entry applies, so that entry
+ * outranks every model entry, including ones added while the agent runs.
+ */
+export const cfgCompactionModelThresholdsEnabled = register({
+	id: "compaction.modelThresholdsEnabled",
+	type: "boolean",
+	default: true,
 });
 
 export const cfgCompactionHandoffSaveToDisk = register({
@@ -323,8 +396,12 @@ export const cfgCompaction = combine({
 	dropUseless: cfgCompactionDropUseless,
 });
 
-/** Configured compaction policy ({@link cfgCompaction}). */
-export type CompactionSettings = SettingValueOf<typeof cfgCompaction>;
+/**
+ * Configured compaction policy ({@link cfgCompaction}). `baseWindowTokens` is
+ * never configured directly: a `compaction.modelThresholds` token entry sets it
+ * for its model (see `applyModelCompactionThreshold`).
+ */
+export type CompactionSettings = SettingValueOf<typeof cfgCompaction> & { baseWindowTokens?: number };
 
 // Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 export const cfgSnapcompactSystemPrompt = register({

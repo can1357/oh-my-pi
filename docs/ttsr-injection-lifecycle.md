@@ -300,7 +300,7 @@ A rule with `question` is judged: its natural-language question goes to the `jud
 
 - A yes-probability ≥ 0.7 flags the rule. Flagged rules pass through `TtsrManager.claim()`, which drops rules another verdict already claimed or that the repeat policy blocks, and marks the rest injected in memory; one rule flagged by several outputs is therefore delivered once.
 - Verdicts arriving after a session replacement (`/new`, session switch) are dropped.
-- Survivors emit `ttsr_triggered` and are rendered with `ttsr-warning.md` into a hidden `ttsr-injection` custom message (`details.rules`), sent with `deliverAs: "aside"`: mid-run it joins the next step without interrupting; on an idle session it starts a turn. Its `message_end` persists the `ttsr_injection` entry.
+- Survivors emit `ttsr_triggered` and are rendered with `ttsr-warning.md` into a hidden `ttsr-injection` custom message (`details.rules`), sent with `deliverAs: "aside"`: mid-run it joins the next step without interrupting (a running interruptible `wait` ends); on an idle session it starts a turn. Its `message_end` persists the `ttsr_injection` entry.
 - The session's `onBeforeYield` hook awaits in-flight judgments (up to 5s) before the agent loop drains asides and stops, so a warning about the final reply or last tool call lands in the same run. Later verdicts still arrive as asides.
 - Judge failures (no credentials, timeouts, parse errors) are logged and deliver nothing.
 

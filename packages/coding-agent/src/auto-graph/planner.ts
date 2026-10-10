@@ -29,6 +29,9 @@ const KIND_CRITERIA: Record<KindChoice, string> = {
 	share: "Parts of one whole: shares summing to 100% or to a total.",
 	diverging: "Signed changes or deltas around zero.",
 	scatter: "Two continuous measures per item, looking for a relationship.",
+	change:
+		"Before/after (or baseline vs. variants) values of metrics in different units, compared as factors: 48× less time, +27% icons.",
+	progress: "Scores out of a total (12/12, 154/160) or completion rates, as bars filling toward 100%.",
 	none: "Identifiers, settings, or too few comparable values: a chart adds nothing.",
 };
 
@@ -79,8 +82,8 @@ export async function pickTableChart(request: TableChartRequest, judge: ChainJud
 			kind: choice,
 			label: guess.label,
 			series: choice === "scatter" ? series.slice(0, 2) : series,
-			// Rows that are metrics only need their own scales when units change down a column.
-			transpose: answers.transpose.noul >= 0.5 && candidates.some(column => column.mixed),
+			// Rows that are metrics only need their own scales when units change down a column; factors need none.
+			transpose: choice !== "change" && answers.transpose.noul >= 0.5 && candidates.some(column => column.mixed),
 		};
 	}, options);
 }
@@ -89,7 +92,8 @@ export async function pickTableChart(request: TableChartRequest, judge: ChainJud
 function columnType(column: TableColumn): string {
 	switch (column.role) {
 		case "measure":
-			return column.mixed ? "number (mixed units)" : `number (${column.dim ?? "count"})`;
+			if (column.mixed) return "number (mixed units)";
+			return column.scores ? "number (score out of a total)" : `number (${column.dim ?? "count"})`;
 		case "sequence":
 			return "ordered step";
 		case "index":

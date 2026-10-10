@@ -179,9 +179,20 @@ export class OAuthAccounts implements OAuthApi {
 		options: AuthApiKeyOptions | undefined,
 	): Promise<OAuthAccessResolution> {
 		try {
+			// tryOAuth refreshes only expired tokens; it resyncs this row from the store after a forced re-mint.
+			let index = selection.index;
+			if (options?.forceRefresh) {
+				await this.refresh(selection.credentialId, options.signal, {
+					reuseRecentMint: options.refreshReason === "auth-recovery",
+					reason: options.refreshReason,
+				});
+				// The refresh re-lists rows, so a concurrently removed row can shift this one's position.
+				index = this.#deps.pool.entries(provider).findIndex(entry => entry.id === selection.credentialId);
+				if (index === -1) throw new Error(`OAuth credential ${selection.credentialId} was removed during refresh`);
+			}
 			const resolved = await this.#deps.selector.tryOAuth(
 				provider,
-				{ credential: selection.credential, index: selection.index },
+				{ credential: selection.credential, index },
 				providerKey,
 				undefined,
 				options,
@@ -289,9 +300,10 @@ export class OAuthAccounts implements OAuthApi {
 	 * Resolve one stored OAuth credential by its durable storage row id.
 	 *
 	 * Unlike the normal session resolver, this method never ranks, rotates, or
-	 * falls back to sibling credentials. A forced refresh re-mints only the
-	 * requested row, preserving exact-account affinity for operations whose
-	 * provenance and policy boundary are tied to one workspace.
+	 * falls back to sibling credentials. A generic forced refresh re-mints only the
+	 * requested row; with `refreshReason: "auth-recovery"` it may instead reuse a
+	 * still-usable recent mint of that row. Either way exact-account affinity holds
+	 * for operations whose provenance and policy boundary are tied to one workspace.
 	 *
 	 * Returns `undefined` when the row does not exist for `provider` or an
 	 * explicit runtime/config API-key override suppresses OAuth.

@@ -84,10 +84,12 @@ export interface ProviderCard {
 	/** Number of represented accounts, including unavailable usage lookups. */
 	accounts: number;
 	unavailableAccounts: string[];
-	/** Window rows sorted most-pressing first. */
+	/** Window rows in provider-declared order (e.g. 5h → weekly → monthly); the fullest CARD_MAX_WINDOWS lead. */
 	windows: CardWindowRow[];
-	/** True when every account reports no limits (e.g. enterprise plans). */
+	/** True when every account reports no limits (e.g. enterprise plans, providers without a quota API). */
 	unlimited: boolean;
+	/** Distinct report notes across accounts (e.g. why a provider exposes no quota windows). */
+	notes: string[];
 	/** True when nothing is used anywhere (or there are no limits): collapses to a tick. */
 	idle: boolean;
 	resetCredits?: {
@@ -146,8 +148,10 @@ function compactWindowTag(window: NonNullable<UsageLimit["window"]>): string {
  * Collapse usage reports into one compact card per provider: limits grouped by
  * quota bucket (label + window), each bucket showing the mean used fraction
  * across accounts (matching the classic report's aggregate "% free") with the
- * most-used account's reset countdown. Cards sort most-pressing first so
- * what's burning is on top-left; fully idle providers collapse into a tick.
+ * most-used account's reset countdown. Rows keep the provider's declared window
+ * order so 5h → week → month reads the same every time; cards sort by their
+ * fullest window so what's burning is on top-left; fully idle providers
+ * collapse into a tick.
  */
 export function buildProviderCards(
 	reports: UsageReport[],
@@ -181,7 +185,7 @@ export function buildProviderCards(
 			}
 		}
 
-		const windows: CardWindowRow[] = [...buckets.values()].map(bucket => {
+		const declared: CardWindowRow[] = [...buckets.values()].map(bucket => {
 			const fractions = bucket.limits
 				.map(limit => resolveUsedFraction(limit))
 				.filter((value): value is number => value !== undefined);
@@ -200,7 +204,13 @@ export function buildProviderCards(
 				usedText: fraction === undefined ? formatAbsoluteOnlyAmount(bucket.limits) : undefined,
 			};
 		});
-		windows.sort((a, b) => (b.fraction ?? -1) - (a.fraction ?? -1));
+		// Cards render at most CARD_MAX_WINDOWS rows; when a provider declares
+		// more, keep the fullest ones visible (still in declared order) so an
+		// exhausted bucket never hides behind "+N more".
+		const visible = new Set(
+			[...declared].sort((a, b) => (b.fraction ?? -1) - (a.fraction ?? -1)).slice(0, CARD_MAX_WINDOWS),
+		);
+		const windows = [...declared.filter(row => visible.has(row)), ...declared.filter(row => !visible.has(row))];
 		// The window tag earns its columns only when sibling rows would otherwise
 		// be indistinguishable (e.g. Antigravity's daily vs weekly "Usage (Google)").
 		for (const window of windows) {
@@ -254,6 +264,7 @@ export function buildProviderCards(
 			unavailableAccounts: unavailable,
 			windows,
 			unlimited: windows.length === 0 && unavailable.length === 0,
+			notes: [...new Set(providerReports.flatMap(report => report.notes ?? []))],
 			idle:
 				unavailable.length === 0 &&
 				!resetCredits &&
@@ -264,9 +275,12 @@ export function buildProviderCards(
 		});
 	}
 
+	const worstFraction = new Map(
+		cards.map(card => [card, card.windows.reduce((max, window) => Math.max(max, window.fraction ?? -1), -1)]),
+	);
 	cards.sort((a, b) => {
-		const aWorst = a.windows[0]?.fraction ?? -1;
-		const bWorst = b.windows[0]?.fraction ?? -1;
+		const aWorst = worstFraction.get(a)!;
+		const bWorst = worstFraction.get(b)!;
 		if (aWorst !== bWorst) return bWorst - aWorst;
 		return a.name.localeCompare(b.name);
 	});
@@ -438,6 +452,25 @@ function resetLabel(nowMs: number, resetMs: number): { text: string; title: stri
 
 function mutedText(content: string, wrap = false): NativeNode {
 	return text([span(content, "muted")], wrap ? { wrap: "word" } : { truncate: "end" });
+}
+
+/**
+ * A quiet line under the provider grid naming the providers that get no
+ * frame (`Untouched: Kimi Code, Zai`); `title` says why on hover.
+ */
+function footnote(key: string, label: string, cards: readonly ProviderCard[], title?: string): NativeNode {
+	const names = cards.map(card => card.name).join(", ");
+	return node(
+		"text",
+		{
+			spans: [span(`${label}: `, "dim"), span(names)],
+			wrap: "word",
+			role: "omp.usage.footnote",
+			...(title ? { title: sanitizeDisplayLine(title) } : {}),
+		},
+		undefined,
+		key,
+	);
 }
 
 /** Stable, human account name for a report in the detail view. */
@@ -1009,36 +1042,59 @@ export class UsageDashboardComponent implements Component {
 		const children: NativeChild[] = [];
 		if (this.#cards.length === 0) {
 			children.push(
-				node("text", { spans: [span("No usage data available.")], role: "omp.usage.untouched" }, undefined, "none"),
+				node("text", { spans: [span("No usage data available.")], role: "omp.usage.footnote" }, undefined, "none"),
 			);
 		} else {
-			// Unlimited providers keep a frame reading "No limits"; only untouched ones collapse.
-			const active = this.#cards.filter(entry => !entry.idle || entry.unlimited);
-			const idle = this.#cards.filter(entry => entry.idle && !entry.unlimited);
-			if (active.length > 0) {
+			// Only providers with something to show get a frame: the rest are
+			// named in footnotes, whether untouched, unreadable or quota-less.
+			const framed: ProviderCard[] = [];
+			const untouched: ProviderCard[] = [];
+			const unreported: ProviderCard[] = [];
+			const unmetered: ProviderCard[] = [];
+			for (const entry of this.#cards) {
+				const shown =
+					entry.windows.length > 0 || entry.resetCredits !== undefined || entry.daybreakAccounts !== undefined;
+				if (!shown) (entry.unavailableAccounts.length > 0 ? unreported : unmetered).push(entry);
+				else if (entry.idle) untouched.push(entry);
+				else framed.push(entry);
+			}
+			if (framed.length > 0) {
 				children.push(
 					node(
 						"row",
 						{ wrap: true, gap: "md", role: "omp.usage.grid" },
-						active.map(entry => this.#describeCard(entry, meter)),
+						framed.map(entry => this.#describeCard(entry, meter)),
 						"providers",
 					),
 				);
 			}
-			if (idle.length > 0) {
-				children.push(
-					node(
-						"text",
-						{
-							spans: [span(`Untouched: ${idle.map(entry => entry.name).join(", ")}`)],
-							wrap: "word",
-							role: "omp.usage.untouched",
-						},
-						undefined,
-						"idle",
+			const notes: NativeNode[] = [];
+			if (untouched.length > 0) notes.push(footnote("idle", "Untouched", untouched));
+			if (unreported.length > 0) {
+				const accounts = unreported.flatMap(entry =>
+					entry.unavailableAccounts.map(account => `${entry.name} (${account})`),
+				);
+				notes.push(
+					footnote(
+						"unreported",
+						"No usage data",
+						unreported,
+						`No usage report came back for ${accounts.join(", ")}: the sign-in expired, the request failed, or the plan has no quotas`,
 					),
 				);
 			}
+			if (unmetered.length > 0) {
+				const why = unmetered.flatMap(entry => entry.notes.map(note => `${entry.name}: ${note}`));
+				notes.push(
+					footnote(
+						"unmetered",
+						"No quotas reported",
+						unmetered,
+						why.length > 0 ? why.join(" • ") : "These providers report no quota windows to track",
+					),
+				);
+			}
+			if (notes.length > 0) children.push(node("col", { gap: "xs" }, notes, "footnotes"));
 		}
 		children.push(this.#describeActivity(chart));
 		return children;
@@ -1089,10 +1145,10 @@ export class UsageDashboardComponent implements Component {
 			);
 		}
 		for (const account of entry.unavailableAccounts) {
-			children.push(mutedText(`${sanitizeDisplayLine(account)}: usage unavailable`, true));
+			children.push(mutedText(`${sanitizeDisplayLine(account)}: no usage data`, true));
 		}
 		if (entry.unlimited) {
-			children.push(mutedText("No limits"));
+			children.push(mutedText("No quotas reported"));
 		} else {
 			for (const [index, window] of entry.windows.slice(0, CARD_MAX_WINDOWS).entries()) {
 				const label: TspSpan[] = [span(sanitizeDisplayLine(window.label))];
@@ -1101,7 +1157,9 @@ export class UsageDashboardComponent implements Component {
 					text(label, { role: "omp.usage.label", truncate: "middle", title: sanitizeDisplayLine(window.label) }),
 				];
 				if (window.fraction === undefined) {
-					cells.push(text([span(window.usedText ?? "No data", "muted")], { truncate: "end" }));
+					cells.push(
+						text([span(window.usedText ?? "No data", "muted")], { role: "omp.usage.amount", truncate: "end" }),
+					);
 				} else {
 					const token =
 						window.status === "exhausted" ? "error" : window.status === "warning" ? "warning" : undefined;
@@ -1218,7 +1276,7 @@ export class UsageDashboardComponent implements Component {
 			const children: NativeChild[] = [];
 			for (const account of unavailable) {
 				if (account.provider !== entry.provider) continue;
-				children.push(mutedText(`${sanitizeDisplayLine(account.label)}: usage unavailable`, true));
+				children.push(mutedText(`${sanitizeDisplayLine(account.label)}: no usage data`, true));
 			}
 
 			const facts: { k: TspText; v: TspText }[] = [];
@@ -1310,7 +1368,7 @@ export class UsageDashboardComponent implements Component {
 				children.push(node("table", { cols, rows }, undefined, "limits"));
 				for (const note of new Set(limitNotes)) children.push(mutedText(note, true));
 			} else if (unavailable.every(account => account.provider !== entry.provider)) {
-				children.push(mutedText("No limits"));
+				children.push(mutedText("No quotas reported"));
 			}
 			sections.push(
 				node(

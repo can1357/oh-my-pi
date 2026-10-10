@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [18.8.9] - 2026-10-10
+
+### Added
+
+- Added `hueDistance`, the angular distance between two OKLCH hues
+
+## [18.8.8] - 2026-10-10
+
+### Fixed
+
+- Fixed `formatDuration` printing `60.0s` for durations just under a minute; they now read `1m` ([#15121](https://github.com/can1357/oh-my-pi/pull/15121) by [@H4vC](https://github.com/H4vC))
+
+## [18.8.7] - 2026-10-09
+
+### Added
+
+- Added `getNativeGrammarsDir()`, where the native addon loads downloaded tree-sitter grammars from (`~/.omp/natives/grammars`).
+
+### Fixed
+
+- Fixed the virtual terminal misreading private CSI sequences such as kitty keyboard `CSI < u` and modifyOtherKeys `CSI > 4;1 m` as cursor restores or text styling, which garbled replayed PTY output.
+
 ## [18.8.1] - 2026-10-07
 
 ### Added

@@ -189,6 +189,9 @@ fn check_apply(source: &str, case_name: &str, call: &Value) {
 
 #[test]
 fn legacy_parser_and_applier_cases_match_byte_for_byte() {
+	// The Lua boundary-repair cases need a grammar; Lua's is downloaded on
+	// demand in production, so link the native crate instead.
+	pi_ast::language::wasm_grammars::LUA.register(tree_sitter_lua::LANGUAGE.into());
 	let mut covered_names = 0_usize;
 	let mut calls = 0_usize;
 	for fixture_name in FIXTURES {

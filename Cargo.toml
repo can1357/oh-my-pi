@@ -25,7 +25,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "18.8.4"
+version = "18.8.9"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
@@ -435,62 +435,30 @@ ast-grep-core = { version = "0.39", default-features = false, features = [
    "tree-sitter",
 ] }
 tree-sitter = "0.25"
-tree-sitter-astro = { version = "0.1.1", package = "tree-sitter-astro-next" }
 tree-sitter-bash = "0.25"
 tree-sitter-c = "0.24"
-tree-sitter-c-sharp = "0.23"
-tree-sitter-clojure = "0.1"
-tree-sitter-cmake = "0.7.5"
 tree-sitter-cpp = "0.23"
 tree-sitter-css = "0.25"
-tree-sitter-dart = "0.2"
 tree-sitter-diff = "0.1"
-tree-sitter-dockerfile = { version = "0.2.0", package = "tree-sitter-dockerfile-updated" }
-tree-sitter-elixir = "0.3"
+# elisp, fortran, lua, ruby, swift: test-only stand-ins for wasm grammars (see
+# the pi-ast and pi-edit dev-dependencies); every other grammar here is linked in.
 tree-sitter-elisp = "1.7.2"
-tree-sitter-erlang = "0.16.0"
 tree-sitter-fortran = "0.6.0"
 tree-sitter-go = "0.25"
-tree-sitter-graphql = "0.1.0"
-tree-sitter-haskell = "0.23"
-tree-sitter-hcl = "1.1"
 tree-sitter-html = "0.23"
-tree-sitter-ini = "1.4.0"
 tree-sitter-java = "0.23"
 tree-sitter-javascript = "0.25"
 tree-sitter-json = "0.24"
-tree-sitter-julia = "0.23"
-tree-sitter-just = "0.2.0"
-tree-sitter-kotlin = { version = "0.4", package = "tree-sitter-kotlin-sg" }
 tree-sitter-lua = "0.5"
-tree-sitter-make = "1.1"
 tree-sitter-md = "0.5"
-tree-sitter-nix = "0.3"
-tree-sitter-objc = "3.0"
-tree-sitter-ocaml = "0.24.2"
-tree-sitter-odin = "1.3"
-tree-sitter-php = "0.24"
-tree-sitter-powershell = "0.26.4"
-tree-sitter-proto = "0.4.0"
 tree-sitter-python = "0.25"
-tree-sitter-r = "1.3.0"
 tree-sitter-regex = "0.25"
 tree-sitter-ruby = "0.23"
 tree-sitter-rust = "0.24"
-tree-sitter-scala = "0.26"
-tree-sitter-solidity = "1.2"
-tree-sitter-sql = { version = "0.3.11", package = "tree-sitter-sequel" }
-tree-sitter-starlark = "1.3"
-tree-sitter-svelte = { version = "0.1.1", package = "tree-sitter-svelte-next" }
 tree-sitter-swift = "0.7"
-tree-sitter-tlaplus = "1.5"
 tree-sitter-toml-ng = "0.7"
 tree-sitter-typescript = "0.23"
-tree-sitter-verilog = "1.0"
-tree-sitter-vue = { version = "0.1.0", package = "tree-sitter-vue-next" }
-tree-sitter-xml = "0.7"
 tree-sitter-yaml = "0.7"
-tree-sitter-zig = "1.1"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Machine Learning (pi-predict SmolLM2 engine)

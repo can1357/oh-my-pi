@@ -41,6 +41,11 @@ export class TruncatedText implements Component {
 		this.#cachedLines = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#cachedWidth = -1;
+		this.#cachedLines = undefined;
+	}
+
 	/** First line only, clamped to one visual line with an end ellipsis. */
 	describe(_cx: DescribeContext): NativeNode {
 		if (this.#native) return this.#native;

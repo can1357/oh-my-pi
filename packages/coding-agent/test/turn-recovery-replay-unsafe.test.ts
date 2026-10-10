@@ -15,6 +15,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createProviderErrorMessage } from "../../ai/src/providers/error-message";
+import { streamFactoryDroidGemini } from "../../ai/src/providers/factory-droid/gemini";
+import { captureFetch, gemini as factoryGemini } from "../../ai/test/helpers/factory-droid";
 
 const USAGE: Usage = {
 	input: 0,
@@ -1215,6 +1217,24 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				expect(new TurnRecovery(host).handleCommittedTextStreamStall(message)).toBe(true);
 				expect(continues).toEqual(["stream-stall-continue"]);
 			}
+		});
+
+		it("resumes a Factory Droid Gemini text stream that ends without a finish reason", async () => {
+			const truncated = JSON.stringify({
+				candidates: [{ content: { role: "model", parts: [{ text: "Here is the first half" }] } }],
+			});
+			const message = await streamFactoryDroidGemini(
+				factoryGemini(),
+				{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+				{
+					baseUrl: "https://api.factory.ai/api/llm/g/v1",
+					headers: { "x-api-provider": "google" },
+					fetch: captureFetch([], [truncated]),
+				},
+			).result();
+			const { host, continues } = continuationHost(message);
+			expect(new TurnRecovery(host).handleCommittedTextStreamStall(message)).toBe(true);
+			expect(continues).toEqual(["stream-stall-continue"]);
 		});
 
 		it("stops continuing past the per-prompt cap and resets on a new prompt", () => {

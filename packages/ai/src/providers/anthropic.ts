@@ -1307,10 +1307,12 @@ function buildClaudeCodeTlsFetchOptions(
 		},
 	};
 }
-function mergeHeaders(...headerSources: (Record<string, string> | undefined)[]): Record<string, string> {
-	// Case-insensitive merge: later sources win and keep their casing. A plain
-	// Object.assign would let `authorization` and `Authorization` coexist, and
-	// the Headers constructor then joins both values comma-separated on the wire.
+/**
+ * Merge headers case-insensitively; later sources win and preserve their key casing.
+ * Undefined sources are ignored. Differently cased duplicates are removed so the
+ * Headers constructor cannot join competing values comma-separated on the wire.
+ */
+export function mergeHeaders(...headerSources: (Record<string, string> | undefined)[]): Record<string, string> {
 	const merged: Record<string, string> = {};
 	const keyByLower = new Map<string, string>();
 	for (const headers of headerSources) {
@@ -4513,6 +4515,23 @@ export function resolveAnthropicCompactionEffort(
 }
 
 /**
+ * Whether effort controls earlier requests left in `messages` rule out
+ * `thinking: {type: "disabled"}`: Anthropic rejects a per-message effort
+ * control with thinking off, and `disabled` above `high` effort. Both stay in
+ * force across a thinking toggle, so such a request falls back to the
+ * adaptive-only off path (lowest effort) instead of a 400.
+ */
+function effortControlsBlockDisabledThinking(
+	model: Model<"anthropic-messages">,
+	messages: readonly Message[],
+	records: readonly AnthropicControlRecord[],
+): boolean {
+	if (model.compat.supportsPerMessageEffort !== true) return false;
+	const plan = planAnthropicEffortControls(undefined, messages, records, true, undefined, false);
+	return plan.inserts.length > 0 || plan.topLevel === "xhigh" || plan.topLevel === "max";
+}
+
+/**
  * Splice control markers into `messages`. Inserts sharing an index come from
  * one request and merge into one control: tool changes first, then the effort.
  */
@@ -4730,7 +4749,11 @@ function buildParams(
 	let outputConfigEffort: AnthropicOutputEffort | undefined;
 	if (model.reasoning) {
 		const disabledThinking = model.compat.disabledThinking;
-		if (options?.thinkingEnabled === false && disabledThinking !== undefined) {
+		if (
+			options?.thinkingEnabled === false &&
+			disabledThinking !== undefined &&
+			!(disabledThinking === "disabled" && effortControlsBlockDisabledThinking(model, context.messages, records))
+		) {
 			if (disabledThinking !== "omit") {
 				thinking =
 					disabledThinking === "adaptive"

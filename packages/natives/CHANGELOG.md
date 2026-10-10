@@ -4,7 +4,38 @@
 
 ### Changed
 
-- Sped up external commands in the embedded shell on glibc 2.29+ Linux: launching one no longer copies the host process's memory mappings (about 9 ms → 0.8 ms per launch with omp at ~450 MB RSS); commands run after `ulimit`/`umask` or with redirects above fd 2 still launch the old way ([#14847](https://github.com/can1357/oh-my-pi/issues/14847), [#14858](https://github.com/can1357/oh-my-pi/pull/14858) by [@farnoy](https://github.com/farnoy))
+- Reduced external-command launch latency in the embedded shell on glibc 2.29+ Linux when no explicit `ulimit`, `umask`, or extra file descriptors are needed ([#14847](https://github.com/can1357/oh-my-pi/issues/14847), [#14858](https://github.com/can1357/oh-my-pi/pull/14858) by [@farnoy](https://github.com/farnoy)).
+
+## [18.8.8] - 2026-10-10
+
+### Changed
+
+- Reduced macOS accessibility-tree latency for `ax()` without changing its text output: each element's children are read once, and its bounds, which the tree never shows, are no longer read ([#15159](https://github.com/can1357/oh-my-pi/pull/15159) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed macOS computer use reporting `AxFailed` instead of `StaleRef` for a ref whose element the app had removed ([#15156](https://github.com/can1357/oh-my-pi/pull/15156) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS `el.press()` and `el.perform()` reporting `AxFailed` when the app did not answer in time, such as a press that opens a modal dialog; they now report `AxUnconfirmed` ([#15156](https://github.com/can1357/oh-my-pi/pull/15156) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.8.7] - 2026-10-09
+
+### Added
+
+- Added `wasmGrammarFor` for tree-sitter grammars loaded as WebAssembly on demand from `<natives dir>/grammars`, and `missingGrammars` on `astGrep`/`astEdit` results naming languages skipped because their grammar is not installed.
+
+### Changed
+
+- Reduced syntax-highlighting startup work by bundling the complete precompiled grammar set ([#14104](https://github.com/can1357/oh-my-pi/pull/14104) by [@iliaal](https://github.com/iliaal)).
+- Changed standalone binaries to embed each native addon as its own deterministic zstd frame instead of a timestamped gzip tarball, making binaries smaller.
+- Updated the shell's built-in `jq` to jaq 3.1.1, which `jq --version` now reports ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed the built-in `jq` erroring where jq returns `null` (`.a.b` over `{}`, `.[0]` over `null`) and lacking `IN`, `input_filename`, `input_line_number` and `--unbuffered` ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the built-in `jq` reading each file operand separately: `-s` now slurps them into one array and `input` reads on into the next file, as in jq ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the built-in `jq` stopping at the first input that fails and rejecting `"021"` and `"+1"` in `tonumber`, where jq does neither; a run that reported a failing input is never shortened by the output minimizer, even when it exits 0 ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the built-in `jq`'s `halt_error` printing its message to stdout; like jq, it now goes to stderr ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+- Shrank the native addon by about 77 MB: only 17 common tree-sitter grammars are linked in, and the other 39 languages load WebAssembly grammars from the grammar directory, treated as unsupported until installed.
 
 ## [18.8.4] - 2026-10-08
 
