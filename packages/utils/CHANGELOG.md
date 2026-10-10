@@ -9,6 +9,7 @@
 ### Added
 
 - Added `withLoopPhase(label, fn)`, which runs `fn` under a loop phase and pops it in `finally`; for an async `fn` only its synchronous prefix is labeled ([#15001](https://github.com/can1357/oh-my-pi/pull/15001) by [@jaredlyon](https://github.com/jaredlyon)).
+- Added the unstable ACP subagent protocol surface: the `subagents` client capability and the `subagent_update` and `session_message` session updates, with wire validation ([#15043](https://github.com/can1357/oh-my-pi/pull/15043) by [@vnguyen42](https://github.com/vnguyen42))
 
 ### Changed
 
