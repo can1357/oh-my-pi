@@ -6303,6 +6303,17 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.getAllToolInfos();
 	}
 
+	/** Approval-only seam for providers that retain native execution ownership. */
+	authorizeNativeTool(
+		name: string,
+		toolCallId: string,
+		args: unknown,
+		signal: AbortSignal,
+		context: AgentToolContext,
+	): Promise<void> {
+		return this.#tools.authorizeNativeTool(name, toolCallId, args, signal, context);
+	}
+
 	/** Installs and activates the ephemeral vibe tool set. */
 	activateVibeTools(baseToolNames: string[]): Promise<void> {
 		return this.#tools.activateVibeTools(baseToolNames);
