@@ -1878,7 +1878,11 @@ export async function runRootCommand(
 		// extended-context window caps, so it must receive the finalized settings.
 		const modelRegistry = logger.time(
 			"modelRegistry:init",
-			() => new ModelRegistry(authStorage, undefined, { settings: settingsInstance }),
+			() =>
+				new ModelRegistry(authStorage, undefined, {
+					settings: settingsInstance,
+					extraModelsPath: parsedArgs.modelsConfig,
+				}),
 		);
 		// Credential-scoped catalogs (e.g. GitHub Copilot) load from their cache
 		// rows only after credentials resolve. `--model` and `enabledModels` below
