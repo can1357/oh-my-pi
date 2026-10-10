@@ -467,6 +467,20 @@ describe("formatUsageBreakdown", () => {
 		expect(text).not.toContain("policy:");
 	});
 
+	it("shows eligibility when only the global reserve taper is configured", () => {
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			globalReserveTaperHours: 24,
+			getAccountPolicy: () => undefined,
+		};
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(reports, accounts, Date.now(), undefined, [], policyOptions),
+		);
+
+		expect(text).toContain("reserve 10% (global), tapers over 24h (global) · eligible · 16.0% left");
+		expect(text.slice(text.indexOf("API key"))).not.toContain("policy:");
+	});
+
 	it("shows an explicit priority and reserve override with the observed eligibility reason", () => {
 		const report = makeReport("openai-codex", "protected@example.test", [
 			makeLimit({
@@ -495,6 +509,32 @@ describe("formatUsageBreakdown", () => {
 		);
 
 		expect(text).toContain("policy: priority 100 · reserve 50% (override) · eligible · 80.0% left");
+	});
+
+	it("shows per-window reserve overrides and flags a window the account does not report", () => {
+		const report = makeReport("openai-codex", "shared@example.test", [
+			makeLimit({ id: "5h", provider: "openai-codex", usedFraction: 0.8, durationMs: FIVE_HOURS, windowId: "5h" }),
+			makeLimit({ id: "7d", provider: "openai-codex", usedFraction: 0.75, durationMs: SEVEN_DAYS, windowId: "7d" }),
+		]);
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: () => ({
+				provider: "openai-codex",
+				account: { email: "shared@example.test" },
+				priority: 20,
+				reservePct: 15,
+				windows: { "7d": { reservePct: 30, taperHours: 72 }, weekly: { reservePct: 30 } },
+			}),
+		};
+
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], Date.now(), undefined, [], policyOptions),
+		);
+
+		expect(text).toContain("reserve 15% (override)");
+		expect(text).toContain("7d reserve 30%, tapers over 72h ·");
+		expect(text).toContain("weekly reserve 30% (no such window)");
+		expect(text).toContain("inside reserve · 20.0% left");
 	});
 
 	it("shows the inherited global reserve for an unconfigured sibling in a policy-enabled provider", () => {

@@ -1,13 +1,15 @@
 import * as AIError from "../error";
+import { resolveUsageReserve, type UsageReserve } from "./reserve";
 import type {
 	AuthAccountPolicies,
 	AuthAccountPolicy,
 	AuthAccountSelector,
+	AuthAccountWindowPolicy,
 	AuthCredential,
 	OAuthAccountIdentity,
 	OAuthCredential,
 } from "./types";
-import { DEFAULT_USAGE_RESERVE_PCT } from "./types";
+import { DEFAULT_USAGE_RESERVE_PCT, DEFAULT_USAGE_RESERVE_TAPER_HOURS } from "./types";
 
 /** Whether every identity field set on `selector` matches `identity`. */
 export function matchesAuthAccountSelector(selector: AuthAccountSelector, identity: OAuthAccountIdentity): boolean {
@@ -19,23 +21,37 @@ export function matchesAuthAccountSelector(selector: AuthAccountSelector, identi
 	);
 }
 
-/** Validated per-account routing policies (priority/reserve) plus the global reserve fallback. */
+/** Validated per-account routing policies (priority/reserve/taper) plus the global reserve fallbacks. */
 export class AccountPolicies {
 	#accountPolicies: AuthAccountPolicies;
 	#defaultReservePct: number;
+	#defaultReserveTaperHours: number;
 
-	constructor(policies: AuthAccountPolicies, defaultReservePct: number | undefined) {
+	constructor(
+		policies: AuthAccountPolicies,
+		defaultReservePct: number | undefined,
+		defaultReserveTaperHours?: number,
+	) {
 		AccountPolicies.#validateAccountPolicyConfiguration(policies);
 		this.#accountPolicies = policies;
 		this.#defaultReservePct =
 			typeof defaultReservePct === "number" && Number.isFinite(defaultReservePct)
 				? Math.max(0, Math.min(100, defaultReservePct))
 				: DEFAULT_USAGE_RESERVE_PCT;
+		this.#defaultReserveTaperHours =
+			typeof defaultReserveTaperHours === "number" && Number.isFinite(defaultReserveTaperHours)
+				? Math.max(0, defaultReserveTaperHours)
+				: DEFAULT_USAGE_RESERVE_TAPER_HOURS;
 	}
 
 	/** Global usage reserve (0–100) for accounts without a per-account `reservePct`. */
 	get defaultReservePct(): number {
 		return this.#defaultReservePct;
+	}
+
+	/** Global reserve taper (hours before reset, 0 = static) for accounts without a per-account `taperHours`. */
+	get defaultReserveTaperHours(): number {
+		return this.#defaultReserveTaperHours;
 	}
 
 	/**
@@ -46,12 +62,14 @@ export class AccountPolicies {
 	replace(
 		policies: AuthAccountPolicies,
 		defaultReservePct: number | undefined,
+		defaultReserveTaperHours: number | undefined,
 		storedCredentials: ReadonlyMap<string, readonly AuthCredential[]> = new Map(),
 	): void {
-		const next = new AccountPolicies(policies, defaultReservePct);
+		const next = new AccountPolicies(policies, defaultReservePct, defaultReserveTaperHours);
 		for (const [provider, credentials] of storedCredentials) next.validateFor(provider, credentials);
 		this.#accountPolicies = next.#accountPolicies;
 		this.#defaultReservePct = next.#defaultReservePct;
+		this.#defaultReserveTaperHours = next.#defaultReserveTaperHours;
 	}
 
 	static #validateAccountPolicyConfiguration(accountPolicies: AuthAccountPolicies): void {
@@ -85,23 +103,63 @@ export class AccountPolicies {
 			if (policy.priority !== undefined && !Number.isFinite(policy.priority)) {
 				throw new AIError.ConfigurationError(`${path}.priority must be a finite number`);
 			}
-			if (
-				policy.reservePct !== undefined &&
-				(!Number.isFinite(policy.reservePct) || policy.reservePct < 0 || policy.reservePct > 100)
-			) {
-				throw new AIError.ConfigurationError(`${path}.reservePct must be a finite number between 0 and 100`);
+			AccountPolicies.#validateReserveFields(path, policy);
+			if (policy.windows === undefined) continue;
+			if (!policy.windows || typeof policy.windows !== "object" || Array.isArray(policy.windows)) {
+				throw new AIError.ConfigurationError(`${path}.windows must be an object keyed by usage window id`);
+			}
+			const windowIds = Object.keys(policy.windows);
+			if (windowIds.length === 0) {
+				throw new AIError.ConfigurationError(`${path}.windows must name at least one usage window`);
+			}
+			for (const windowId of windowIds) {
+				if (windowId.length === 0 || windowId.trim() !== windowId) {
+					throw new AIError.ConfigurationError(
+						`${path}.windows keys must be usage window ids without surrounding whitespace`,
+					);
+				}
+				const windowPath = `${path}.windows.${windowId}`;
+				const override = policy.windows[windowId];
+				if (!override || typeof override !== "object" || Array.isArray(override)) {
+					throw new AIError.ConfigurationError(`${windowPath} must be an object`);
+				}
+				const unknownFields = Object.keys(override).filter(
+					field => field !== "reservePct" && field !== "taperHours",
+				);
+				if (unknownFields.length > 0) {
+					throw new AIError.ConfigurationError(`${windowPath} has unknown fields: ${unknownFields.join(", ")}`);
+				}
+				if (override.reservePct === undefined && override.taperHours === undefined) {
+					throw new AIError.ConfigurationError(`${windowPath} must set reservePct or taperHours`);
+				}
+				AccountPolicies.#validateReserveFields(windowPath, override);
 			}
 		}
 	}
 
+	static #validateReserveFields(path: string, fields: AuthAccountWindowPolicy): void {
+		if (
+			fields.reservePct !== undefined &&
+			(!Number.isFinite(fields.reservePct) || fields.reservePct < 0 || fields.reservePct > 100)
+		) {
+			throw new AIError.ConfigurationError(`${path}.reservePct must be a finite number between 0 and 100`);
+		}
+		if (fields.taperHours !== undefined && (!Number.isFinite(fields.taperHours) || fields.taperHours < 0)) {
+			throw new AIError.ConfigurationError(`${path}.taperHours must be a finite number of at least 0`);
+		}
+	}
+
 	validateUsageCapability(provider: string, canFetchUsage: boolean): void {
-		const policyIndex = this.#accountPolicies.findIndex(
-			policy => policy.provider === provider && policy.reservePct !== undefined,
-		);
-		if (policyIndex !== -1 && !canFetchUsage) {
-			throw new AIError.ConfigurationError(
-				`auth.accountPolicies[${policyIndex}].reservePct requires a usage provider for ${provider}`,
+		if (canFetchUsage) return;
+		for (const field of ["reservePct", "windows"] as const) {
+			const policyIndex = this.#accountPolicies.findIndex(
+				policy => policy.provider === provider && policy[field] !== undefined,
 			);
+			if (policyIndex !== -1) {
+				throw new AIError.ConfigurationError(
+					`auth.accountPolicies[${policyIndex}].${field} requires a usage provider for ${provider}`,
+				);
+			}
 		}
 	}
 
@@ -158,5 +216,22 @@ export class AccountPolicies {
 	/** Return the configured policy for a stored OAuth credential. */
 	forCredential(provider: string, credential: AuthCredential): AuthAccountPolicy | undefined {
 		return credential.type === "oauth" ? this.find(provider, credential) : undefined;
+	}
+
+	/**
+	 * Resolve the reserve protecting a stored credential: its account's
+	 * `reservePct` / `taperHours` win over `fallbackFraction` and the global taper.
+	 * `undefined` when neither the account nor the caller supplies a reserve.
+	 */
+	reserveFor(
+		provider: string,
+		credential: AuthCredential,
+		fallbackFraction: number | undefined,
+	): UsageReserve | undefined {
+		return resolveUsageReserve(
+			this.forCredential(provider, credential),
+			fallbackFraction,
+			this.#defaultReserveTaperHours,
+		);
 	}
 }

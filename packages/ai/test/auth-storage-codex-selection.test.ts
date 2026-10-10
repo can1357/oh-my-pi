@@ -482,16 +482,20 @@ describe("AuthStorage codex oauth ranking", () => {
 	});
 
 	test.each([
-		{ reservePct: 30, usedFraction: 0.7, inReserve: true },
-		{ reservePct: 30, usedFraction: 0.69, inReserve: false },
+		{ reservePct: 30, taperHours: 0, resetInMs: WEEK_MS, usedFraction: 0.7, inReserve: true },
+		{ reservePct: 30, taperHours: 0, resetInMs: WEEK_MS, usedFraction: 0.69, inReserve: false },
+		{ reservePct: 60, taperHours: 24, resetInMs: 12 * HOUR_MS, usedFraction: 0.7, inReserve: true },
+		{ reservePct: 60, taperHours: 24, resetInMs: 12 * HOUR_MS, usedFraction: 0.69, inReserve: false },
 	])(
-		"treats $usedFraction used against a $reservePct% reserve as inReserve=$inReserve",
-		async ({ reservePct, usedFraction, inReserve }) => {
+		"treats $usedFraction used against a $reservePct% reserve with $taperHours h taper as inReserve=$inReserve",
+		async ({ reservePct, taperHours, resetInMs, usedFraction, inReserve }) => {
 			if (!store) throw new Error("test setup failed");
+			const nowMs = Date.now();
+			vi.spyOn(Date, "now").mockReturnValue(nowMs);
 			authStorage = new AuthStorage(store, {
 				usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
 				accountPolicies: [
-					{ provider: "openai-codex", account: { email: "protected@example.com" }, priority: 100, reservePct },
+					{ provider: "openai-codex", account: { email: "protected@example.com" }, priority: 100, reservePct, taperHours },
 					{ provider: "openai-codex", account: { email: "drain@example.com" }, priority: 10, reservePct: 0 },
 				],
 			});
@@ -504,7 +508,7 @@ describe("AuthStorage codex oauth ranking", () => {
 				createCodexUsageReport({
 					accountId: "acct-protected",
 					primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
-					secondary: { usedFraction, resetInMs: WEEK_MS },
+					secondary: { usedFraction, resetInMs },
 				}),
 			);
 			usageByAccount.set(
@@ -524,6 +528,114 @@ describe("AuthStorage codex oauth ranking", () => {
 			expect(health.accounts.map(account => account.state)).toEqual([inReserve ? "reserve" : "healthy", "healthy"]);
 		},
 	);
+
+	test("a reset-aware taper releases a preferred account's reserve before its weekly reset", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { email: "protected@example.com" },
+					priority: 100,
+					reservePct: 50,
+					taperHours: 24,
+				},
+				{
+					provider: "openai-codex",
+					account: { email: "drain@example.com" },
+					priority: 10,
+					reservePct: 10,
+				},
+			],
+		});
+		await authStorage.credentials.reload();
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-protected", "protected@example.com") },
+			{ type: "oauth", ...createCredential("acct-drain", "drain@example.com") },
+		]);
+		// 40% weekly quota left, 6 h to reset: the 50% reserve has tapered to 50% × 6/24 = 12.5%.
+		for (const accountId of ["acct-protected", "acct-drain"]) {
+			usageByAccount.set(
+				accountId,
+				createCodexUsageReport({
+					accountId,
+					primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.6, resetInMs: 6 * HOUR_MS },
+				}),
+			);
+		}
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "tapered-reserve");
+		const health = await authStorage.health.model("openai-codex", {
+			reserveFraction: 0.1,
+		});
+
+		expectExclusivePreference(counts, "api-acct-protected", "api-acct-drain");
+		expect(health.accounts.map(account => account.state)).toEqual(["healthy", "healthy"]);
+	});
+
+	test("per-window reserves keep a shared account's 5h and weekly shares apart in ranking and eviction", async () => {
+		if (!store) throw new Error("test setup failed");
+		const base = Date.now();
+		let clockOffset = 0;
+		vi.spyOn(Date, "now").mockImplementation(() => base + clockOffset);
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { accountId: "acct-shared" },
+					priority: 20,
+					reservePct: 15,
+					windows: { "7d": { reservePct: 30, taperHours: 72 } },
+				},
+				{ provider: "openai-codex", account: { accountId: "acct-own" }, priority: 10, reservePct: 0 },
+			],
+		});
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-shared", "shared@example.com") },
+			{ type: "oauth", ...createCredential("acct-own", "own@example.com") },
+		]);
+		const fiveHourWindow: UsageWindowConfig = { windowId: "5h", windowLabel: "5 Hours", durationMs: FIVE_HOUR_MS };
+		const setUsage = (shared: { fiveHour: number; week: number; weekResetInMs: number }): void => {
+			usageByAccount.set(
+				"acct-shared",
+				createCodexUsageReport({
+					accountId: "acct-shared",
+					primary: { usedFraction: shared.fiveHour, resetInMs: HOUR_MS },
+					secondary: { usedFraction: shared.week, resetInMs: shared.weekResetInMs },
+					primaryWindow: fiveHourWindow,
+				}),
+			);
+			usageByAccount.set(
+				"acct-own",
+				createCodexUsageReport({
+					accountId: "acct-own",
+					primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.1, resetInMs: WEEK_MS },
+					primaryWindow: fiveHourWindow,
+				}),
+			);
+		};
+
+		// 5h at 80% is outside its 15% reserve even though one 30% reserve would have refused it.
+		setUsage({ fiveHour: 0.8, week: 0.5, weekResetInMs: 5 * 24 * HOUR_MS });
+		expect(await authStorage.keys.get("openai-codex", "running")).toBe("api-acct-shared");
+
+		// Weekly at 75% used five days before its reset: inside the 30% weekly reserve.
+		clockOffset = 10 * 60_000;
+		setUsage({ fiveHour: 0.2, week: 0.75, weekResetInMs: 5 * 24 * HOUR_MS });
+		await authStorage.usage.invalidate("openai-codex");
+		expect(await authStorage.keys.get("openai-codex", "running")).toBe("api-acct-own");
+		expect(await authStorage.keys.get("openai-codex", "new-early")).toBe("api-acct-own");
+
+		// A day before the reset the weekly reserve has tapered to 10%: new sessions spend it.
+		clockOffset = 20 * 60_000;
+		setUsage({ fiveHour: 0.2, week: 0.75, weekResetInMs: 24 * HOUR_MS });
+		await authStorage.usage.invalidate("openai-codex");
+		expect(await authStorage.keys.get("openai-codex", "new-late")).toBe("api-acct-shared");
+	});
 
 	test("applies the global reserve fallback to unconfigured siblings", async () => {
 		if (!store) throw new Error("test setup failed");
@@ -811,6 +923,27 @@ describe("AuthStorage codex oauth ranking", () => {
 
 		authStorage.usage.setProvider(provider, { ...usageProvider, id: provider });
 		await expect(authStorage.keys.get(provider, "after-runtime-usage")).resolves.toBe("api-acct-runtime");
+	});
+
+	test.each([
+		[{}, "auth.accountPolicies[0].windows must name at least one usage window"],
+		[{ "7d": {} }, "auth.accountPolicies[0].windows.7d must set reservePct or taperHours"],
+		[{ " 7d": { reservePct: 30 } }, "windows keys must be usage window ids without surrounding whitespace"],
+		[
+			{ "7d": { reservePct: 130 } },
+			"auth.accountPolicies[0].windows.7d.reservePct must be a finite number between 0 and 100",
+		],
+		[{ "7d": { reservePct: 30, taperHour: 72 } }, "auth.accountPolicies[0].windows.7d has unknown fields: taperHour"],
+		[JSON.parse('{ "7d": [30] }'), "auth.accountPolicies[0].windows.7d must be an object"],
+	])("rejects per-window reserve overrides that cannot apply: %j", (windows, error) => {
+		if (!store) throw new Error("test setup failed");
+		const activeStore = store;
+		expect(
+			() =>
+				new AuthStorage(activeStore, {
+					accountPolicies: [{ provider: "openai-codex", account: { accountId: "acct-shared" }, windows }],
+				}),
+		).toThrow(error);
 	});
 
 	test("requires a base selector identity", () => {

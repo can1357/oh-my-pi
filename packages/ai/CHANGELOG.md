@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a reset-aware usage reserve: `AuthStorageOptions.defaultReserveTaperHours` and per-account `AuthAccountPolicy.taperHours` release the reserve as `reserve × min(1, timeToReset / taper)` per usage window (taper capped at the window length; unknown or rolling resets keep the static reserve), in both model usage health and credential ranking. Default `0` keeps reserves static ([#14074](https://github.com/can1357/oh-my-pi/pull/14074) by [@schickling-assistant](https://github.com/schickling-assistant)).
+- Added per-window reserve overrides: `AuthAccountPolicy.windows` sets `reservePct` and `taperHours` for one usage window by its id (e.g. `5h`, `7d`), in usage health, credential ranking and warm-pin eviction ([#15126](https://github.com/can1357/oh-my-pi/pull/15126) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.8.7] - 2026-10-09
 
 ### Added
