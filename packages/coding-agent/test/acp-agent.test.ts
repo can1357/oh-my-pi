@@ -1916,6 +1916,7 @@ describe("ACP agent", () => {
 			AgentRegistry.resetGlobalForTests();
 			const bus = new EventBus();
 			const harness = await createHarness({ clientCapabilities, subagentEventBus: bus });
+			vi.useFakeTimers();
 			const { sessionId } = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 			AgentRegistry.global().register({
 				id: "Scout",
@@ -1936,17 +1937,20 @@ describe("ACP agent", () => {
 				event: { type: "tool_execution_start", toolCallId: "tc-scout", toolName: "bash", args: { command: "ls" } },
 			});
 			await Promise.resolve();
-
-			const subagentTraffic = harness.updates.filter(
-				n => n.update.sessionUpdate === "subagent_update" || n.sessionId !== sessionId,
-			);
+			const subagentTraffic = () =>
+				harness.updates.filter(n => n.update.sessionUpdate === "subagent_update" || n.sessionId !== sessionId);
+			// Nothing names the session before the bootstrap guard lets the client learn it.
+			expect(subagentTraffic()).toEqual([]);
+			await advanceBootstrapGuard();
+			await Promise.resolve();
+			vi.useRealTimers();
 			if (clientCapabilities.subagents) {
-				expect(subagentTraffic.map(n => [n.sessionId, n.update.sessionUpdate])).toEqual([
+				expect(subagentTraffic().map(n => [n.sessionId, n.update.sessionUpdate])).toEqual([
 					[sessionId, "subagent_update"],
 					[`${sessionId}/Scout`, "tool_call"],
 				]);
 			} else {
-				expect(subagentTraffic).toEqual([]);
+				expect(subagentTraffic()).toEqual([]);
 			}
 		}
 		AgentRegistry.resetGlobalForTests();

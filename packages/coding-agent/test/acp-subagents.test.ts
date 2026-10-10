@@ -58,6 +58,7 @@ describe("AcpSubagentStreams", () => {
 			sessionManager: { getCwd: () => "/work" },
 		} as unknown as AgentSession;
 		streams = new AcpSubagentStreams(connection, session, bus);
+		streams.start();
 	});
 
 	afterEach(() => {
@@ -291,7 +292,7 @@ describe("AcpSubagentStreams", () => {
 		]);
 	});
 
-	it("does not append a new run's text to a previous run whose message_end never arrived", async () => {
+	it("keeps runs apart when a previous run's message_end arrives late or never", async () => {
 		registerAgent("Worker", ROOT_AGENT_ID);
 		const emit = (event: Record<string, unknown>) =>
 			bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, { id: "Worker", event: event as AgentSessionEvent });
@@ -304,10 +305,12 @@ describe("AcpSubagentStreams", () => {
 		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "started"));
 		emit({ type: "agent_start" });
 		emit({ type: "message_update", message: answer, assistantMessageEvent: { type: "thinking_delta", delta: "." } });
-		// Run 1 ends before its `message_end`, which never arrives.
+		// Run 1 ends before its `message_end`.
 		emit({ type: "agent_end", messages: [answer] });
 		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "completed"));
 		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "started"));
+		// Run 1's `message_end` lands after run 2 started; the fallback already sent it.
+		emit({ type: "message_end", message: answer });
 		emit({ type: "agent_start" });
 		emit({
 			type: "agent_end",
@@ -321,6 +324,34 @@ describe("AcpSubagentStreams", () => {
 		);
 		expect(chunks.map(chunk => chunk.text)).toEqual(["run 1", "boom"]);
 		expect(chunks[1]!.messageId).not.toBe(chunks[0]!.messageId);
+	});
+
+	it("holds back traffic until started, so nothing names the child before the client knows the root session", async () => {
+		const held: SessionNotification[] = [];
+		const pending = new AcpSubagentStreams(
+			{ sessionUpdate: async (n: SessionNotification) => void held.push(n) } as unknown as AgentSideConnection,
+			{
+				sessionId: ROOT_SESSION_ID,
+				getAgentId: () => ROOT_AGENT_ID,
+				sessionManager: { getCwd: () => "/work" },
+			} as unknown as AgentSession,
+			bus,
+		);
+		registerAgent("Early", ROOT_AGENT_ID);
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Early", "started"));
+		bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "Early",
+			event: { type: "tool_execution_start", toolCallId: "tc-early", toolName: "bash", args: { command: "ls" } },
+		});
+		await Promise.resolve();
+		expect(held).toEqual([]);
+		expect(pending.resolveAgentSessionId("Early")).toBeUndefined();
+
+		pending.start();
+		await Promise.resolve();
+		expect(held.map(n => n.update.sessionUpdate)).toEqual(["subagent_update", "tool_call"]);
+		expect(pending.resolveAgentSessionId("Early")).toBe(`${ROOT_SESSION_ID}/Early`);
+		pending.dispose();
 	});
 });
 

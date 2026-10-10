@@ -38,6 +38,13 @@ interface ChildStream extends AcpLiveMessageState {
 	awaitingAssignment: boolean;
 	/** Whether the current turn streamed an assistant error to the client. */
 	turnErrorEmitted: boolean;
+	/**
+	 * Timestamp of the last assistant message of the most recent finished turn.
+	 * Its `message_end` can arrive after `agent_end`, even after the next run
+	 * starts; such late events are dropped because the end-of-turn fallback
+	 * already delivered that message.
+	 */
+	settledMessageTimestamp: number | undefined;
 	/** The child session's own cwd (its worktree for isolated runs), read from its registry ref. */
 	cwd: string | undefined;
 }
@@ -59,7 +66,9 @@ const IDLE_STATE_BY_LIFECYCLE: Record<Exclude<SubagentLifecyclePayload["status"]
  * exposed: parentage comes from the agent registry and is never guessed.
  * Notifications are written as soon as the subagent bus delivers each frame;
  * the connection writes in call order, so the announcement precedes the
- * child's traffic and any later parent message that names the child.
+ * child's traffic and any later parent message that names the child. Until
+ * {@link start} is called, notifications are held back: a client may drop
+ * traffic for a session id it has not received yet.
  *
  * Individual cancellation is not advertised: cancelling a task job in omp
  * hard-aborts the agent, while the RFD requires a cancelled child to stay
@@ -71,6 +80,8 @@ export class AcpSubagentStreams {
 	readonly #children = new Map<string, ChildStream>();
 	readonly #blobs = new BlobStore(getBlobsDir());
 	readonly #unsubscribers: Array<() => void>;
+	/** Held-back notifications until {@link start}; `undefined` once streaming. */
+	#pending: SessionNotification[] | undefined = [];
 
 	constructor(connection: AgentSideConnection, session: AgentSession, subagentEventBus: EventBus) {
 		this.#connection = connection;
@@ -88,7 +99,20 @@ export class AcpSubagentStreams {
 	/** ACP session id of an omp agent in this session's tree, or `undefined` when it is not exposed. */
 	resolveAgentSessionId(agentId: string): string | undefined {
 		if (agentId === this.#session.getAgentId()) return this.#session.sessionId;
+		// Held-back announcements have not reached the client, so nothing may name the child yet.
+		if (this.#pending) return undefined;
 		return this.#children.get(agentId)?.sessionId;
+	}
+
+	/**
+	 * Begin streaming once the client knows the root session id, sending any
+	 * notifications held back until then in their original order.
+	 */
+	start(): void {
+		const pending = this.#pending;
+		if (!pending) return;
+		this.#pending = undefined;
+		for (const notification of pending) this.#deliver(notification);
 	}
 
 	/**
@@ -135,7 +159,12 @@ export class AcpSubagentStreams {
 		}
 		if (payload.status !== "started") return;
 		const parentAgentId = AgentRegistry.global().get(payload.id)?.parentId;
-		const parentSessionId = parentAgentId === undefined ? undefined : this.resolveAgentSessionId(parentAgentId);
+		const parentSessionId =
+			parentAgentId === this.#session.getAgentId()
+				? this.#session.sessionId
+				: parentAgentId === undefined
+					? undefined
+					: this.#children.get(parentAgentId)?.sessionId;
 		if (parentSessionId === undefined) return;
 		const child: ChildStream = {
 			// omp agent ids are unique within one root session's tree, so prefixing the
@@ -149,6 +178,7 @@ export class AcpSubagentStreams {
 			runs: 1,
 			awaitingAssignment: true,
 			turnErrorEmitted: false,
+			settledMessageTimestamp: undefined,
 			cwd: undefined,
 			liveMessageId: undefined,
 			liveMessageProgress: undefined,
@@ -194,6 +224,13 @@ export class AcpSubagentStreams {
 		if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
 			child.toolArgsById.set(event.toolCallId, event.args);
 		}
+		if (
+			(event.type === "message_start" || event.type === "message_update" || event.type === "message_end") &&
+			event.message.role === "assistant" &&
+			event.message.timestamp === child.settledMessageTimestamp
+		) {
+			return [];
+		}
 		if (event.type === "agent_start") child.turnErrorEmitted = false;
 		const fallback = event.type === "agent_end" ? this.#endOfTurnFallback(child, event) : [];
 		prepareLiveAssistantMessage(child, event);
@@ -229,6 +266,7 @@ export class AcpSubagentStreams {
 			(message): message is AssistantMessage => message.role === "assistant",
 		);
 		if (!lastAssistant) return [];
+		child.settledMessageTimestamp = lastAssistant.timestamp;
 		const texts: string[] = [];
 		// A live message whose `message_end` has not been mapped yet still holds its progress.
 		const progress = child.liveMessageProgress;
@@ -261,6 +299,10 @@ export class AcpSubagentStreams {
 	}
 
 	#deliver(notification: SessionNotification): void {
+		if (this.#pending) {
+			this.#pending.push(notification);
+			return;
+		}
 		this.#connection.sessionUpdate(notification).catch(error => {
 			logger.warn("Failed to deliver ACP subagent update", { error: String(error) });
 		});
