@@ -14,6 +14,7 @@ use core_graphics::{
 	sys::{CGEventRef, CGEventSourceRef},
 };
 use foreign_types::ForeignType;
+use objc2_app_kit::{NSPasteboard, NSPasteboardNameDrag};
 use xutf::graphemes_str;
 
 use super::{
@@ -1057,6 +1058,8 @@ fn stroke_path(
 /// the start, then [`stroke_path`], all routed to `wid` so the user's pointer
 /// stays where it is. `keys` are held around the gesture as key transitions
 /// to the target process, and their modifiers ride on every pointer event.
+/// A drag that starts a drag-and-drop session fails as
+/// [`drag_session_outcome`] describes.
 fn background_drag(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -1069,6 +1072,7 @@ fn background_drag(
 	let (cg_button, down, up, dragged, number) = button_types(button);
 	let flags = held_flags(keys);
 	let group = click_group_id();
+	let sessions = drag_pasteboard_count();
 	with_held_keys(
 		source,
 		keys,
@@ -1088,7 +1092,60 @@ fn background_drag(
 				post_window_pointer(pid, wid, window, &event, at.x, at.y, 1, number, group)
 			})
 		},
-	)
+	)?;
+	// An accessibility round trip, which the target answers from its run loop
+	// once it has handled the events posted before it.
+	drag_session_outcome(window, sessions, drag_pasteboard_count, || {
+		ax::reports_active(pid);
+	})
+}
+
+/// Change count of the drag pasteboard, which a drag source clears and
+/// writes as it begins a drag-and-drop session.
+fn drag_pasteboard_count() -> isize {
+	// SAFETY: `NSPasteboardNameDrag` is an immutable AppKit string constant.
+	NSPasteboard::pasteboardWithName(unsafe { NSPasteboardNameDrag }).changeCount()
+}
+
+/// [`background_drag`]'s verdict after its release, from the drag
+/// pasteboard's change count as `count` reads it and as it was `before` the
+/// press.
+///
+/// A drag that picks up an item (a file, a font, a table row, selected text)
+/// makes its application begin a drag-and-drop session, which macOS completes
+/// from the user's real pointer and button as well as from the routed events,
+/// so where the item lands is not up to the drag. On macOS 26, Font Book
+/// dropped a font on the collection at the path's end in some drags and
+/// nowhere in others, depending on where the user's pointer and windows were,
+/// and `TextEdit` moved dragged text to the end of its document. Such a drag
+/// fails, and it is not rerun in takeover, which would repeat a drop that did
+/// land. Escape posted to the source did not cancel the drop, and releasing
+/// early would only drop the item short of the path's end. A drag inside a
+/// view (a slider, a text selection, a web page's mouse-driven drag) leaves
+/// the count alone.
+///
+/// The source writes the pasteboard while it handles the routed events; when
+/// the count has not moved yet, `caught_up` waits until the target has handled
+/// them, and the count is read once more.
+fn drag_session_outcome(
+	window: &DesktopWindow,
+	before: isize,
+	mut count: impl FnMut() -> isize,
+	caught_up: impl FnOnce(),
+) -> CoreResult<()> {
+	if count() == before {
+		caught_up();
+		if count() == before {
+			return Ok(());
+		}
+	}
+	Err(DesktopError::input_failed(format!(
+		"the drag reached window {} ({}) but started a drag-and-drop session, which macOS completes \
+		 from the user's real pointer and button, so the item may have been dropped at the path's \
+		 end, elsewhere, or not at all; inspect the window before retrying; if nothing was dropped, \
+		 drag with takeover:true or use the app's menu command or ax actions",
+		window.id, window.app,
+	)))
 }
 
 /// A background press held for `duration` at `at`, routed to `wid`; the
@@ -2891,6 +2948,50 @@ mod tests {
 		assert_eq!(run(Some((Down, 1.0))), (false, vec![(Down, 1.0), (Up, 1.0)]));
 		// The release goes where the failed move may have taken the target.
 		assert_eq!(run(Some((Dragged, 5.0))), (false, vec![(Down, 1.0), (Dragged, 5.0), (Up, 5.0)]));
+	}
+
+	#[test]
+	fn a_drag_that_starts_a_drag_and_drop_session_fails_instead_of_reporting_success() {
+		use std::cell::{Cell, RefCell};
+		let window = background_window("Font Book");
+		// `reads` are the drag pasteboard's change counts after the release, in
+		// order; the count before the press was 7.
+		let run = |reads: &[isize]| {
+			let next = Cell::new(0);
+			let log = RefCell::new(Vec::new());
+			let outcome = drag_session_outcome(
+				&window,
+				7,
+				|| {
+					let count = reads[next.get()];
+					next.set(next.get() + 1);
+					log.borrow_mut().push(format!("read {count}"));
+					count
+				},
+				|| log.borrow_mut().push("caught up".to_owned()),
+			);
+			(outcome.map_err(|error| error.code.as_str()), log.into_inner())
+		};
+		// Font Book wrote the drag pasteboard while it handled the routed
+		// drag: its session may drop the font at the path's end, elsewhere or
+		// nowhere, so the call fails instead of returning as if it had moved.
+		assert_eq!(run(&[8]), (Err("InputFailed"), vec!["read 8".to_owned()]));
+		// A source that begins its session only once it catches up with the
+		// events is found by the read after the round trip.
+		assert_eq!(
+			run(&[7, 9]),
+			(Err("InputFailed"), vec![
+				"read 7".to_owned(),
+				"caught up".to_owned(),
+				"read 9".to_owned()
+			])
+		);
+		// A drag inside a view (a slider, a selection) leaves the pasteboard
+		// alone.
+		assert_eq!(
+			run(&[7, 7]),
+			(Ok(()), vec!["read 7".to_owned(), "caught up".to_owned(), "read 7".to_owned()])
+		);
 	}
 
 	#[test]
