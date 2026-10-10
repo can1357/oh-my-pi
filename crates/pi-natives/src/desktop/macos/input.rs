@@ -250,7 +250,8 @@ fn screen_sharing_refusal(window: &DesktopWindow, dropped: &str) -> DesktopError
 /// the target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum KeyboardConflict {
-	/// The target is not among the process's accessibility windows, so no
+	/// The target is not among the process's accessibility windows, is not
+	/// its focused window, and is not attached to one of its windows, so no
 	/// claim about its key status can be proven.
 	Unmapped,
 	/// Other windows of the process could be the key window.
@@ -269,7 +270,9 @@ enum KeyboardConflict {
 /// own even while attached to `wid`, so it never stands in for `wid`.
 /// Candidates come from the process's accessibility windows, not
 /// `WindowServer`'s list, which also holds the per-window compositor surfaces
-/// of Chromium, Electron, and `WebKit` apps.
+/// of Chromium, Electron, and `WebKit` apps. `AXWindows` omits sheets and
+/// panels such as Finder's Go to Folder; such a target counts as a window of
+/// the process while it is the focused window or attached to a listed one.
 fn with_background_keyboard<T>(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -277,19 +280,26 @@ fn with_background_keyboard<T>(
 	window: &DesktopWindow,
 	deliver: impl FnOnce(libc::pid_t) -> CoreResult<T>,
 ) -> CoreResult<T> {
-	let conflict = ax::window_records(pid)
-		.map_or(Some(KeyboardConflict::Unmapped), |records| keyboard_conflict(wid, &records));
+	let conflict = ax::window_records(pid).map_or(Some(KeyboardConflict::Unmapped), |records| {
+		keyboard_conflict(wid, &records, || {
+			ax::focused_window_id(pid) == Some(wid)
+				|| attached_under(wid, skylight::window_parent, |parent| {
+					records.iter().any(|record| record.id == Some(parent))
+				})
+		})
+	});
 	if conflict == Some(KeyboardConflict::Unmapped) {
 		return Err(DesktopError::background_unavailable(format!(
-			"window {wid} is not among its application's accessibility windows, so background \
-			 keystrokes cannot be proven to reach it; retry with takeover:true or use ax actions",
+			"window {wid} is not among its application's accessibility windows, is not its focused \
+			 window, and is not attached to one of its windows, so background keystrokes cannot be \
+			 proven to reach it; retry with takeover:true or use ax actions",
 		)));
 	}
 	// The target cannot become key while a window attached to it has focus,
 	// so waiting for that would only delay the same refusal.
 	let destination = ax::key_focus(pid).destination(pid, wid);
 	if let ax::KeyDestination::Other(Some(other)) = destination
-		&& attached_to(other, wid, skylight::window_parent)
+		&& attached_under(other, skylight::window_parent, |parent| parent == wid)
 	{
 		return Err(key_refusal(wid, destination, conflict, skylight::window_parent));
 	}
@@ -304,8 +314,14 @@ fn with_background_keyboard<T>(
 	})
 }
 
-fn keyboard_conflict(wid: u32, records: &[ax::AxWindowRecord]) -> Option<KeyboardConflict> {
-	if !records.iter().any(|record| record.id == Some(wid)) {
+/// `outside_list` tells whether a target missing from `records` still is a
+/// window of the process, such as a focused or attached sheet.
+fn keyboard_conflict(
+	wid: u32,
+	records: &[ax::AxWindowRecord],
+	outside_list: impl FnOnce() -> bool,
+) -> Option<KeyboardConflict> {
+	if !records.iter().any(|record| record.id == Some(wid)) && !outside_list() {
 		return Some(KeyboardConflict::Unmapped);
 	}
 	// A minimized window cannot be key; an unreadable state could be. An entry
@@ -365,13 +381,18 @@ fn await_key_destination(
 /// Most windows deep a chain of sheets attached to sheets is followed.
 const MAX_ATTACHED_DEPTH: usize = 4;
 
-/// Whether `window` is attached to `wid`, directly or through other attached
-/// windows, as `parent_of` reports `WindowServer`'s parents.
-fn attached_to(window: u32, wid: u32, parent_of: impl Fn(u32) -> Option<u32>) -> bool {
+/// Whether `window` is attached, directly or through other attached windows,
+/// to a window `is_ancestor` accepts, as `parent_of` reports `WindowServer`'s
+/// parents.
+fn attached_under(
+	window: u32,
+	parent_of: impl Fn(u32) -> Option<u32>,
+	is_ancestor: impl Fn(u32) -> bool,
+) -> bool {
 	let mut current = window;
 	for _ in 0..MAX_ATTACHED_DEPTH {
 		match parent_of(current) {
-			Some(parent) if parent == wid => return true,
+			Some(parent) if is_ancestor(parent) => return true,
 			Some(parent) => current = parent,
 			None => return false,
 		}
@@ -391,7 +412,9 @@ fn key_refusal(
 	parent_of: impl Fn(u32) -> Option<u32>,
 ) -> DesktopError {
 	match destination {
-		ax::KeyDestination::Other(Some(other)) if attached_to(other, wid, parent_of) => {
+		ax::KeyDestination::Other(Some(other))
+			if attached_under(other, parent_of, |parent| parent == wid) =>
+		{
 			DesktopError::invalid_target(format!(
 				"window {wid} has window {other} (a sheet, panel or popover) attached and focused, \
 				 which takes every keystroke sent to its application, so window {wid} cannot receive \
@@ -2151,18 +2174,22 @@ mod tests {
 
 	#[test]
 	fn keyboard_destination_counts_only_windows_that_can_be_key() {
-		assert_eq!(keyboard_conflict(10, &[record(10, Some(false))]), None);
-		assert_eq!(keyboard_conflict(10, &[record(10, Some(false)), record(11, Some(true))]), None);
+		let listed_only = || false;
+		assert_eq!(keyboard_conflict(10, &[record(10, Some(false))], listed_only), None);
 		assert_eq!(
-			keyboard_conflict(10, &[
-				record(10, Some(false)),
-				record(11, None),
-				record(12, Some(false))
-			]),
+			keyboard_conflict(10, &[record(10, Some(false)), record(11, Some(true))], listed_only),
+			None
+		);
+		assert_eq!(
+			keyboard_conflict(
+				10,
+				&[record(10, Some(false)), record(11, None), record(12, Some(false))],
+				listed_only
+			),
 			Some(KeyboardConflict::Siblings(2)),
 		);
 		assert_eq!(
-			keyboard_conflict(10, &[record(11, Some(false))]),
+			keyboard_conflict(10, &[record(11, Some(false))], listed_only),
 			Some(KeyboardConflict::Unmapped),
 		);
 	}
@@ -2172,9 +2199,28 @@ mod tests {
 		// Finder lists its desktop in AXWindows with no window id.
 		let desktop = ax::AxWindowRecord { id: None, minimized: None };
 		assert_eq!(
-			keyboard_conflict(10, &[record(10, Some(false)), desktop]),
+			keyboard_conflict(10, &[record(10, Some(false)), desktop], || false),
 			Some(KeyboardConflict::Siblings(1)),
 		);
+	}
+
+	#[test]
+	fn a_sheet_outside_ax_windows_is_a_window_of_its_application() {
+		// Finder's Go to Folder sheet 41740 is attached to window 41732 and
+		// missing from AXWindows, which lists the window, another one and the
+		// desktop: keys for the sheet wait until it is the focused window.
+		let desktop = ax::AxWindowRecord { id: None, minimized: None };
+		let records = [record(41732, Some(false)), record(35240, Some(false)), desktop];
+		assert_eq!(keyboard_conflict(41740, &records, || true), Some(KeyboardConflict::Siblings(3)),);
+		assert_eq!(keyboard_conflict(41740, &records, || false), Some(KeyboardConflict::Unmapped));
+		// A sheet opened on a sheet: 191 on 186 on listed window 177.
+		let parents = |id| match id {
+			191 => Some(186),
+			186 => Some(177),
+			_ => None,
+		};
+		assert!(attached_under(191, parents, |parent| parent == 177));
+		assert!(!attached_under(177, parents, |parent| parent == 177));
 	}
 
 	#[test]
