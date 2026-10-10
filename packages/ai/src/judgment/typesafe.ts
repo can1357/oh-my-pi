@@ -14,7 +14,7 @@
  * overrides the API root, `TYPESAFE_DEFAULT_MODEL` the model.
  */
 import { TYPESAFE_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/discovery";
-import type { Api, FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import type { Api, FetchImpl, JudgmentConfig } from "@oh-my-pi/pi-catalog/types";
 import { $env } from "@oh-my-pi/pi-utils";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
@@ -68,6 +68,8 @@ export interface TypeSafeJudgeOptions {
 	model?: string;
 	/** Static headers attached to judgment requests (e.g. proxy routing, gateway auth). */
 	headers?: Record<string, string>;
+	/** Per-model judgment endpoint overrides (route, type/value key maps, usage keys). */
+	judgment?: JudgmentConfig;
 	fetch?: FetchImpl;
 	/** Per-attempt timeout; defaults to {@link DEFAULT_TIMEOUT_MS}. */
 	timeoutMs?: number;
@@ -85,9 +87,9 @@ const BACKOFF_MAX_MS = 5_000;
 
 interface SystemOneResponse {
 	model: string;
-	answers: Record<string, Answer>;
+	answers: Record<string, Record<string, unknown> | undefined>;
 	/** OpenRouter adds the billed `cost` in USD; some routes omit token counts. */
-	usage: { input_tokens?: number; output_tokens?: number; cost?: number };
+	usage: { input_tokens?: number; output_tokens?: number; cost?: number } & Record<string, unknown>;
 }
 
 /** Server hint wins (capped); otherwise exponential backoff from {@link BACKOFF_BASE_MS}. */
@@ -105,6 +107,7 @@ export class TypeSafeJudge implements Judge {
 	readonly baseUrl: string;
 	readonly #apiKey: ApiKey;
 	readonly #headers: Record<string, string> | undefined;
+	readonly #judgment: JudgmentConfig | undefined;
 	readonly #fetch: FetchImpl;
 	readonly #timeoutMs: number;
 
@@ -115,34 +118,84 @@ export class TypeSafeJudge implements Judge {
 		this.baseUrl = (options.baseUrl ?? typesafeBaseUrl()).replace(/\/+$/, "");
 		this.model = options.model ?? typesafeModel();
 		this.#headers = options.headers;
+		this.#judgment = options.judgment;
 		this.#fetch = options.fetch ?? fetch;
 		this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		this.label = `${this.provider}/${this.model}`;
 	}
 
 	async judge<Q extends Questions>(request: JudgmentRequest<Q>, options?: JudgeOptions): Promise<JudgmentResult<Q>> {
-		const body = JSON.stringify({ state: request.state, model: this.model, questions: request.questions });
+		const judgment = this.#judgment;
+		const typeField = judgment?.typeField ?? "type";
+		let questions: Record<string, Record<string, unknown>> | Questions = request.questions;
+		if (judgment?.typeMap !== undefined || typeField !== "type") {
+			const wireQuestions: Record<string, Record<string, unknown>> = {};
+			for (const id in request.questions) {
+				const question = request.questions[id];
+				const wireQuestion: Record<string, unknown> = {
+					...question,
+					[typeField]: judgment?.typeMap?.[question.type] ?? question.type,
+				};
+				if (typeField !== "type") delete wireQuestion.type;
+				wireQuestions[id] = wireQuestion;
+			}
+			questions = wireQuestions;
+		}
+		const body = JSON.stringify({ state: request.state, model: this.model, questions });
+		const route = judgment?.route ?? JUDGMENT_ROUTES[this.api];
 		const signal = options?.signal;
-		const response = await withAuth(
-			this.#apiKey,
-			key => this.#attempt<SystemOneResponse>(JUDGMENT_ROUTES[this.api], body, key, signal),
-			{ signal },
-		);
+		const response = await withAuth(this.#apiKey, key => this.#attempt<SystemOneResponse>(route, body, key, signal), {
+			signal,
+		});
+		const answers: Record<string, Answer> = {};
 		for (const id in request.questions) {
-			const answer = response.answers[id];
-			if (answer === undefined || answer.type !== request.questions[id].type) {
+			const canonical = request.questions[id].type;
+			const expectedWire = judgment?.typeMap?.[canonical] ?? canonical;
+			const raw = response.answers[id];
+			if (raw === undefined || raw[typeField] !== expectedWire) {
 				throw new AIError.ProviderResponseError(
-					`${this.label} response is missing a "${request.questions[id].type}" answer for question "${id}"`,
+					`${this.label} response is missing a "${canonical}" answer for question "${id}"`,
 					{ provider: this.provider, kind: "envelope" },
 				);
 			}
+			const normalized: Record<string, unknown> = { ...raw, type: canonical };
+			if (typeField !== "type") delete normalized[typeField];
+			const valueMap: Record<string, string> | undefined = judgment?.valueMap;
+			if (valueMap !== undefined) {
+				for (const canonicalKey in valueMap) {
+					const wireKey = valueMap[canonicalKey];
+					if (
+						normalized[canonicalKey] === undefined &&
+						wireKey !== undefined &&
+						normalized[wireKey] !== undefined
+					) {
+						normalized[canonicalKey] = normalized[wireKey];
+						// Drop the consumed wire key: callers (and the gateway
+						// encodeResponse path) must see the canonical shape, not
+						// a mix of both spellings.
+						delete normalized[wireKey];
+					}
+				}
+			}
+			// Validated envelope: the discriminator matched `expectedWire` above and
+			// canonical value keys were copied over, so the shape is an Answer.
+			answers[id] = normalized as unknown as Answer;
 		}
+		const usage = response.usage ?? {};
+		const usageNumber = (key: string): number | undefined => {
+			const value = usage[key];
+			return typeof value === "number" ? value : undefined;
+		};
 		return {
 			api: this.api,
 			provider: this.provider,
 			model: response.model,
-			answers: response.answers as JudgmentResult<Q>["answers"],
-			usage: tokenUsage(response.usage.input_tokens, response.usage.output_tokens, response.usage.cost),
+			answers: answers as JudgmentResult<Q>["answers"],
+			usage: tokenUsage(
+				usageNumber(judgment?.usageMap?.input ?? "input_tokens"),
+				usageNumber(judgment?.usageMap?.output ?? "output_tokens"),
+				usageNumber(judgment?.usageMap?.cost ?? "cost") ?? 0,
+			),
 		};
 	}
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `TypeSafeJudge` `judgment` option (`route`, `typeField`, `typeMap`, `valueMap`, `usageMap`) so `typesafe`-family models can answer System One judgments on compatible third-party endpoints such as the Vercel AI Gateway's `/v1/evaluate` ([#15006](https://github.com/can1357/oh-my-pi/pull/15006) by [@szavadsky](https://github.com/szavadsky)).
+
 ## [18.8.7] - 2026-10-09
 
 ### Added

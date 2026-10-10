@@ -7,7 +7,7 @@
  */
 import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import { getAppleFoundationModelsAvailability } from "@oh-my-pi/pi-ai/providers/apple-foundation-models";
-import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
+import type { Api, FetchImpl, JudgmentConfig, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	getBundledModelReferenceIndex,
@@ -183,6 +183,7 @@ export interface DiscoveryProviderConfig {
 	headers?: Record<string, string>;
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: RemoteCompactionConfig<Api>;
+	judgment?: JudgmentConfig;
 	discovery: ProviderDiscovery;
 	optional?: boolean;
 }
