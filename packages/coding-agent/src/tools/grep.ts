@@ -425,10 +425,12 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		const isLineNumberMode = !displayMode.hashLines && displayMode.lineNumbers;
 		const hasFind = this.session.isToolActive?.("find") ?? isFindEnabled(this.session);
 		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
-		const scoutAvailable = isScoutSpawnable(
-			cfgTaskDisabledAgents.get(this.session.settings),
-			this.session.getSessionSpawns?.() ?? "*",
-		);
+		const scoutAvailable =
+			this.session.isScoutSpawnable?.() ??
+			isScoutSpawnable(
+				cfgTaskDisabledAgents.get(this.session.settings),
+				this.session.getSessionSpawns?.() ?? "*",
+			);
 		// Every render input is a boolean; pack them so repeat reads skip the template render.
 		const key =
 			(isHlMode ? 1 : 0) |

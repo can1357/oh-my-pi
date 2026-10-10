@@ -1,7 +1,5 @@
-import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
 import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { prompt } from "@oh-my-pi/pi-utils";
 import {
 	formatModelString,
@@ -21,16 +19,28 @@ import {
 	type ModelPresetSession,
 	saveModelPreset,
 } from "../config/model-presets";
+import ratchetKickoffPrompt from "../prompts/ratchet-kickoff.md" with { type: "text" };
 import { describeLoopCondition } from "../modes/loop-condition";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
-import ratchetKickoffPrompt from "../prompts/ratchet-kickoff.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { createDefaultPersonaModelHooks } from "../session/persona-model-hooks";
+import { appendPersonaJournalEntry, clearPersonaJournalEntry } from "../session/persisted-persona";
+import { discoverAgents, getAgent } from "../task";
+import type { PersonaExplicitOverrides } from "../session/tool-policy";
+import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { CLI_THINKING_LEVELS, getConfiguredThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 import { noThinkingMessage, resolveThinkingArgument } from "./helpers/effort";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
-import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
+import type {
+	ParsedSlashCommand,
+	SlashCommandResult,
+	SlashCommandRuntime,
+	SlashCommandSpec,
+	TuiSlashCommandRuntime,
+} from "./types";
 
 import {
 	cfgComputerDisplay,
@@ -239,27 +249,6 @@ function applyComputerUseToggle(session: AgentSession, enable: boolean): string 
 	return enable
 		? `Computer use enabled for this session. ${formatComputerUseStatus(session)}`
 		: "Computer use disabled for this session.";
-}
-
-/** Tools the ratchet loop needs: the eval kernel hosts `ratchet()`, `task` runs its analyzer. */
-const RATCHET_REQUIRED_TOOLS = ["eval", "task"] as const;
-
-/**
- * Arm `/ratchet`: enable the ratchet prelude for this session (override, never persisted) and
- * render the kickoff prompt carrying the user's request as data.
- */
-function prepareRatchet(session: AgentSession, request: string): { kickoff: string } | { error: string } {
-	const tools = session.getEnabledToolNames();
-	const missing = RATCHET_REQUIRED_TOOLS.filter(tool => !tools.includes(tool));
-	if (missing.length > 0) return { error: `/ratchet needs the ${missing.join(" and ")} tool active.` };
-	const previous = cfgRatchetEnabled.get(session.settings);
-	if (!previous) cfgRatchetEnabled.override(session.settings, true);
-	if (!session.getEvalPreludes().some(definition => definition.name === "ratchet")) {
-		if (!previous) cfgRatchetEnabled.override(session.settings, previous);
-		return { error: "The ratchet eval prelude is unavailable in this session." };
-	}
-	const kickoff = prompt.render(ratchetKickoffPrompt, { request: request.trim() || undefined, tools }).trim();
-	return { kickoff };
 }
 
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
@@ -581,8 +570,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		acpDescription: "Toggle slow mode",
 		acpInputHint: "[on|off|status]",
 		subcommands: [
-			{ name: "on", description: "Flex tier, or Anthropic low priority at the session limit (auto)" },
-			{ name: "off", description: "Standard service; stop Anthropic low priority" },
+			{ name: "on", description: "Flex tier, or Anthropic lower priority at the session limit (auto)" },
+			{ name: "off", description: "Standard service; stop Anthropic lower-priority mode" },
 			{ name: "status", description: "Show slow mode status" },
 		],
 		allowArgs: true,
@@ -727,6 +716,40 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			runtime.ctx.showStatus("Usage: /computer [on|off|status]");
 			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "agent",
+		icon: "agents",
+		description: "Switch agent persona for this session (/agent <name>; bare /agent clears the active persona)",
+		acpDescription: "Switch agent persona for this session",
+		acpInputHint: "<name>",
+		inlineHint: "<name>",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const session = runtime.ctx.session;
+			if (session.getToolPolicy()?.isPersonaActive()) return "Agent persona: active (/agent to exit)";
+			return "Agent persona: none";
+		},
+		handle: handleAgentCommand,
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const name = command.args.trim();
+			if (name) {
+				// Error boundary: a failed enter throws (the runtime rolls back),
+				// and nothing above catches — surface it instead of bubbling.
+				try {
+					await runtime.ctx.switchAgentPersona(name);
+				} catch (error) {
+					runtime.ctx.showError(error instanceof Error ? error.message : String(error));
+				}
+				return;
+			}
+			if (runtime.ctx.session.getToolPolicy()?.isPersonaActive()) {
+				await runtime.ctx.exitAgentPersona();
+				return;
+			}
+			await runtime.ctx.showAgentPersonaPicker();
 		},
 	},
 	{
@@ -931,6 +954,27 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 ];
 
+/** Tools the ratchet loop needs: the eval kernel hosts `ratchet()`, `task` runs its analyzer. */
+const RATCHET_REQUIRED_TOOLS = ["eval", "task"] as const;
+
+/**
+ * Arm `/ratchet`: enable the ratchet prelude for this session (override, never persisted) and
+ * render the kickoff prompt carrying the user's request as data.
+ */
+function prepareRatchet(session: AgentSession, request: string): { kickoff: string } | { error: string } {
+	const tools = session.getEnabledToolNames();
+	const missing = RATCHET_REQUIRED_TOOLS.filter(tool => !tools.includes(tool));
+	if (missing.length > 0) return { error: `/ratchet needs the ${missing.join(" and ")} tool active.` };
+	const previous = cfgRatchetEnabled.get(session.settings);
+	if (!previous) cfgRatchetEnabled.override(session.settings, true);
+	if (!session.getEvalPreludes().some(definition => definition.name === "ratchet")) {
+		if (!previous) cfgRatchetEnabled.override(session.settings, previous);
+		return { error: "The ratchet eval prelude is unavailable in this session." };
+	}
+	const kickoff = prompt.render(ratchetKickoffPrompt, { request: request.trim() || undefined, tools }).trim();
+	return { kickoff };
+}
+
 const PRESETS_USAGE = "Usage: /modelpreset [list | save <name> | switch <name> | delete <name>]";
 const NO_PRESETS_MESSAGE = "No model presets saved. Use /modelpreset save <name> to create one.";
 
@@ -993,4 +1037,98 @@ async function runPresetsCommand(
 		default:
 			return { message: PRESETS_USAGE, usage: true };
 	}
+}
+
+/**
+ * Refuse persona enter/exit under an active plan/goal/vibe mode (TUI parity:
+ * switchAgentPersona/exitAgentPersona). The mode owns the tool partition and
+ * the pre-mode presentation snapshot; a persona restore would clobber it.
+ */
+function personaModeBlocker(session: AgentSession): string | undefined {
+	// Mutual exclusion mirrors the TUI (switchAgentPersona/exitAgentPersona refuse
+	// when plan/goal are enabled OR paused). Pause is TUI-local state with no
+	// session-visible flag and no ACP/text equivalent, so `enabled` covers every
+	// mode this surface can observe.
+	const plan = typeof session.getPlanModeState === "function" ? session.getPlanModeState() : undefined;
+	if (plan?.enabled) return "Exit plan mode before switching or clearing the agent persona.";
+	const goal = typeof session.getGoalModeState === "function" ? session.getGoalModeState() : undefined;
+	if (goal?.enabled) return "Exit goal mode before switching or clearing the agent persona.";
+	const vibe = typeof session.getVibeModeState === "function" ? session.getVibeModeState() : undefined;
+	if (vibe?.enabled) return "Exit vibe mode before switching or clearing the agent persona.";
+	return undefined;
+}
+
+/** Bare `/agent` with no persona active: usage message in ACP/text mode (TUI opens the picker). */
+async function handleAgentCommandNoName(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+	const session = runtime.session;
+	if (session.getToolPolicy()?.isPersonaActive()) {
+		// fw_r- parity with the TUI (exitAgentPersona): persona and plan mode are
+		// mutually exclusive, and the exit's model/presentation restore would
+		// clobber an ACTIVE plan partition. The user can never strand: exiting
+		// the mode first is the recovery path (handleAgentCommandSwitch already
+		// refuses entry under plan mode, so the two cannot co-activate here).
+		const blocker = personaModeBlocker(session);
+		if (blocker) return usage(blocker, runtime);
+		await session.getPersonaRuntime()?.exit(createDefaultPersonaModelHooks(session));
+		clearPersonaJournalEntry(session);
+		// Exit reverts the model/thinking/toolset to the pre-persona baseline;
+		// ACP and text-mode clients must see the reverted configuration.
+		await runtime.notifyConfigChanged?.();
+		await runtime.output("Agent persona cleared.");
+		return commandConsumed();
+	}
+	await runtime.output("Usage: /agent <name> to activate an agent persona.");
+	return commandConsumed();
+}
+
+/** `/agent <name>`: discover the agent and enter its persona through the session runtime. */
+async function handleAgentCommandSwitch(name: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+	const session = runtime.session;
+	const blocker = personaModeBlocker(session);
+	if (blocker) return usage(blocker, runtime);
+	const personaRuntime = session.getPersonaRuntime();
+	if (!personaRuntime) {
+		return usage("Persona switching is unavailable: this session has no persona runtime.", runtime);
+	}
+	const discovery = await discoverAgents(runtime.cwd, undefined, session.effectiveExtensionRoots);
+	const agent = getAgent(discovery.agents, name);
+	if (!agent) {
+		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
+		return usage(`Unknown agent: ${name}. Available: ${available}`, runtime);
+	}
+	// j2m: the CLI `--tools`/`--no-tools` ceiling is durable policy state the
+	// runtime does not know about — `enter` with empty explicit overrides would
+	// let a wider persona frontmatter widen the session past it. Serialize the
+	// ceiling into `explicit.tools` BEFORE enter so #computePersonaGrant's
+	// intersect path runs (cliGrant null → leave explicit.tools undefined).
+	const cliGrant = session.getToolPolicy()?.cliGrant ?? null;
+	const explicitOverrides: PersonaExplicitOverrides = cliGrant ? { tools: [...cliGrant] } : {};
+	try {
+		await personaRuntime.enter(agent, explicitOverrides, createDefaultPersonaModelHooks(session));
+	} catch (error) {
+		return usage(`Persona switch failed: ${errorMessage(error)}`, runtime);
+	}
+	// Caller-owned journal persistence (runtime stays pure; resume reconcile reads).
+	// j2g: the pre-persona baseline rides the entry for the resume reconcile.
+	appendPersonaJournalEntry(session, {
+		name: agent.name,
+		explicit: explicitOverrides,
+		baseline: personaRuntime.getActiveBaseline(),
+	});
+	await runtime.output(`Agent persona: ${agent.name}`);
+	await runtime.notifyConfigChanged?.();
+	return commandConsumed();
+}
+
+/**
+ * ACP/text-mode `/agent` handler. Interactive TUI behavior (picker) lives in
+ * `handleTui`; this path answers with text and switches directly by name.
+ */
+async function handleAgentCommand(
+	command: ParsedSlashCommand,
+	runtime: SlashCommandRuntime,
+): Promise<SlashCommandResult> {
+	const name = command.args.trim();
+	if (!name) return handleAgentCommandNoName(runtime);
+	return handleAgentCommandSwitch(name, runtime);
 }

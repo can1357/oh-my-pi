@@ -44,6 +44,7 @@ const host: SessionToolsHost = {
 	sessionManager: SessionManager.inMemory(),
 	settings,
 	effectiveExtensionRoots: () => ({}) as never,
+	getSessionSpawns: () => null,
 	modelRegistry: {} as never,
 	extensionRunner: () => undefined,
 	clientBridge: () => undefined,

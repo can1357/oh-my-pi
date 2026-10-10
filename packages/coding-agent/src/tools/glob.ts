@@ -122,10 +122,12 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	get description(): string {
 		const hasFind = this.session.isToolActive?.("find") ?? isFindEnabled(this.session);
 		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
-		const scoutAvailable = isScoutSpawnable(
-			cfgTaskDisabledAgents.get(this.session.settings),
-			this.session.getSessionSpawns?.() ?? "*",
-		);
+		const scoutAvailable =
+			this.session.isScoutSpawnable?.() ??
+			isScoutSpawnable(
+				cfgTaskDisabledAgents.get(this.session.settings),
+				this.session.getSessionSpawns?.() ?? "*",
+			);
 		// Every render input is a boolean; pack them so repeat reads skip the template render.
 		const key = (hasFind ? 1 : 0) | (eagerDelegation ? 2 : 0) | (scoutAvailable ? 4 : 0);
 		if (key !== this.#descriptionKey) {

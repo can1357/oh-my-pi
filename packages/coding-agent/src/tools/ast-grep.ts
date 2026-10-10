@@ -140,10 +140,12 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 	readonly summary = "Search code with AST patterns (structural grep)";
 	get description(): string {
 		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
-		const scoutAvailable = isScoutSpawnable(
-			cfgTaskDisabledAgents.get(this.session.settings),
-			this.session.getSessionSpawns?.() ?? "*",
-		);
+		const scoutAvailable =
+			this.session.isScoutSpawnable?.() ??
+			isScoutSpawnable(
+				cfgTaskDisabledAgents.get(this.session.settings),
+				this.session.getSessionSpawns?.() ?? "*",
+			);
 		// Both render inputs are booleans; pack them so repeat reads skip the template render.
 		const key = (eagerDelegation ? 1 : 0) | (scoutAvailable ? 2 : 0);
 		if (key !== this.#descriptionKey) {
