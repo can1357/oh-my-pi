@@ -14,7 +14,7 @@
 
 - Fixed macOS background key presses, typing, held keys, left clicks and menu actions taking keyboard focus from the user's app, which then dropped pastes and shortcuts until clicked again
 - Fixed macOS background typing into Chrome pages and background shortcuts such as ⌘A in TextEdit doing nothing
-- Fixed a macOS background right-click or Control-click that opened a context menu leaving the menu open, which kept the keyboard from the user's app; the menu now closes and the click throws `BackgroundUnavailable`
+- Fixed a macOS background right-click or Control-click that opened a context menu leaving the menu open, which kept the keyboard from the user's app; the menu now closes and the click throws `InputFailed` saying so, never `BackgroundUnavailable`, since a takeover rerun would close the menu again when focus returns
 
 ## [18.8.7] - 2026-10-09
 

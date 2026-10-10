@@ -781,9 +781,13 @@ fn with_menu_dismissal(
 			 keyboard from the user's app; inspect the desktop before retrying",
 			window.id, window.app,
 		))),
-		(Ok(()), Ok(Some(true))) => Err(DesktopError::background_unavailable(format!(
+		// Not `BackgroundUnavailable`: the input was delivered, and a takeover
+		// rerun cannot keep the menu either, because handing focus back to the
+		// user's app closes it.
+		(Ok(()), Ok(Some(true))) => Err(DesktopError::input_failed(format!(
 			"the input reached window {} ({}) and opened a context menu, which takes the keyboard \
-			 from the user's app while it is open; it was closed with Escape, with nothing chosen",
+			 from the user's app while it is open; it was closed with Escape, with nothing chosen. \
+			 Reach that command through the app's menu bar or ax actions",
 			window.id, window.app,
 		))),
 		(delivered, Ok(_)) => delivered,
@@ -2608,7 +2612,9 @@ mod tests {
 				.map_err(|error| error.code.as_str())
 		};
 		assert_eq!(outcome(Ok(()), Ok(None)), Ok(()));
-		assert_eq!(outcome(Ok(()), Ok(Some(true))), Err("BackgroundUnavailable"));
+		// A closed menu is delivered input, never a background refusal the
+		// host would rerun in takeover.
+		assert_eq!(outcome(Ok(()), Ok(Some(true))), Err("InputFailed"));
 		assert_eq!(outcome(Ok(()), Ok(Some(false))), Err("InputFailed"));
 		assert_eq!(
 			outcome(Err(DesktopError::cancelled("cancelled")), Ok(Some(false))),
