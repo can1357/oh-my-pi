@@ -213,9 +213,38 @@ export function setActiveSkills(value: readonly Skill[]): void {
 	activeSkills = value;
 }
 
-/** Reset the active skill snapshot. Test-only. */
+/**
+ * On-demand re-discovery for the active session. A `skill://` lookup that misses
+ * the startup snapshot — an unknown name, or a bare URL whose file was removed,
+ * renamed, or moved — calls this instead of failing, so skill edits made
+ * mid-session resolve without a restart. Only the main session registers one.
+ */
+let activeSkillsRefresher: (() => Promise<readonly Skill[]>) | undefined;
+
+/** Register (or clear) the active session's on-demand skill re-discovery callback. */
+export function setActiveSkillsRefresher(refresher: (() => Promise<readonly Skill[]>) | undefined): void {
+	activeSkillsRefresher = refresher;
+}
+
+/**
+ * Re-discover the active session's skills from disk, just in time. Returns
+ * `previous` unchanged when no refresher is registered (nothing to re-read) or
+ * the reload throws — callers retry only when the returned array differs, so a
+ * missing refresher keeps the old error path intact.
+ */
+export async function refreshActiveSkills(previous: readonly Skill[]): Promise<readonly Skill[]> {
+	if (!activeSkillsRefresher) return previous;
+	try {
+		return await activeSkillsRefresher();
+	} catch {
+		return previous;
+	}
+}
+
+/** Reset the active skill snapshot and refresher. Test-only. */
 export function resetActiveSkillsForTests(): void {
 	activeSkills = [];
+	activeSkillsRefresher = undefined;
 }
 
 /**

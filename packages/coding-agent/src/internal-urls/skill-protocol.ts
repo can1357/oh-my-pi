@@ -13,7 +13,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { resolveContainedPath } from "../discovery/contained-path";
-import { getActiveSkills, type Skill } from "../extensibility/skills";
+import { getActiveSkills, refreshActiveSkills, type Skill } from "../extensibility/skills";
 import skillDoc from "../prompts/internal-urls/skill.md" with { type: "text" };
 import {
 	buildDirectoryResource,
@@ -32,6 +32,55 @@ import type {
 	SchemeSpec,
 	UrlCompletion,
 } from "./types";
+
+/** A skill name absent from the snapshot a lookup used. */
+class UnknownSkillError extends Error {}
+
+/**
+ * A bare `skill://<name>` target missing on disk. Also the case where the
+ * snapshot is merely stale, so it earns one re-discovery retry — a missing
+ * sub-path does not, and stays a plain {@link Error}.
+ */
+class MissingSkillFileError extends Error {}
+
+/** `<name>` with no relative sub-path addresses the skill itself. */
+function isBareSkillUrl(url: InternalUrl): boolean {
+	return url.pathname.length <= 1;
+}
+
+/** A lookup miss explained by a stale snapshot rather than a genuine absence. */
+function isStaleSkillLookup(error: unknown): boolean {
+	return error instanceof UnknownSkillError || error instanceof MissingSkillFileError;
+}
+
+/** Missing target: retryable when the skill itself is addressed, fatal for a sub-path. */
+function missingSkillFile(url: InternalUrl, targetPath: string): Error {
+	return isBareSkillUrl(url)
+		? new MissingSkillFileError(`File not found: ${targetPath}`)
+		: new Error(`File not found: ${targetPath}`);
+}
+
+/**
+ * Runs `attempt` against `context`'s skill snapshot (else the process one) and,
+ * when it reports a stale-snapshot miss, re-discovers skills from disk and runs
+ * it once more. {@link refreshActiveSkills} returns the same array when no live
+ * session registered a refresher, so the retry — and its cost — is skipped and
+ * the original error surfaces.
+ */
+async function withFreshSkills<T>(
+	context: ResolveContext | undefined,
+	attempt: (skills: readonly Skill[]) => Promise<T>,
+): Promise<T> {
+	const snapshot = context?.skills ?? getActiveSkills();
+	try {
+		return await attempt(snapshot);
+	} catch (error) {
+		if (!isStaleSkillLookup(error)) throw error;
+		const fresh = await refreshActiveSkills(snapshot);
+		if (fresh === snapshot) throw error;
+		return await attempt(fresh);
+	}
+}
 
 /**
  * Path a skill:// URL addresses, after traversal and plugin-root containment
@@ -66,7 +115,7 @@ async function skillTargetPath(
 	if (!skill) {
 		const available = skills.map(s => s.name);
 		const availableStr = available.length > 0 ? available.join(", ") : "none";
-		throw new Error(`Unknown skill: ${skillName}\nAvailable: ${availableStr}`);
+		throw new UnknownSkillError(`Unknown skill: ${skillName}\nAvailable: ${availableStr}`);
 	}
 
 	let resolvedPath: string;
@@ -119,14 +168,19 @@ export class SkillProtocolHandler implements ProtocolHandler {
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
-		const targetPath = await skillTargetPath(url, context?.skills ?? getActiveSkills(), false);
+		return await withFreshSkills(context, skills => this.#resolveAgainst(url, skills));
+	}
+
+	/** Read the skill file or directory `url` addresses from one skill snapshot. */
+	async #resolveAgainst(url: InternalUrl, skills: readonly Skill[]): Promise<InternalResource> {
+		const targetPath = await skillTargetPath(url, skills, false);
 
 		let stats: fsTypes.Stats;
 		try {
 			stats = await fs.stat(targetPath);
 		} catch (error) {
 			if (isEnoent(error)) {
-				throw new Error(`File not found: ${targetPath}`);
+				throw missingSkillFile(url, targetPath);
 			}
 			throw error;
 		}
@@ -152,17 +206,34 @@ export class SkillProtocolHandler implements ProtocolHandler {
 	/**
 	 * Skill file or directory; `options.directory` maps a bare `skill://<name>` to the skill base dir.
 	 * Null for a missing entry (or dangling symlink) without `create`, plugin skill or not.
+	 * A miss re-discovers skills from disk once, so a skill added or moved
+	 * mid-session is found without a restart.
 	 */
 	async locate(url: InternalUrl, context?: ResolveContext, options?: LocateOptions): Promise<string | null> {
-		const skills = context?.skills ?? getActiveSkills();
+		try {
+			return await withFreshSkills(context, skills => this.#locateAgainst(url, skills, options));
+		} catch (error) {
+			// Exhausted the retry: the addressed skill really is gone.
+			if (error instanceof MissingSkillFileError) return null;
+			throw error;
+		}
+	}
+
+	/** Resolve `url` against one skill snapshot; a bare miss throws to trigger the retry. */
+	async #locateAgainst(
+		url: InternalUrl,
+		skills: readonly Skill[],
+		options?: LocateOptions,
+	): Promise<string | null> {
 		const targetPath = await skillTargetPath(url, skills, options?.directory === true, options?.create === true);
 		if (options?.create) return targetPath;
 		try {
 			await fs.stat(targetPath);
 			return targetPath;
 		} catch (error) {
-			if (isEnoent(error)) return null;
-			throw error;
+			if (!isEnoent(error)) throw error;
+			if (isBareSkillUrl(url)) throw missingSkillFile(url, targetPath);
+			return null;
 		}
 	}
 
