@@ -5,17 +5,18 @@
  * The bash tool executes through the natives brush shell, which `fork`/`exec`s
  * external commands and therefore hands every inheritable descriptor to them
  * (the same property pinned by `config-value-fd-inheritance.test.ts`). Bun's
- * `fs.open*` omits `O_CLOEXEC` where libuv adds it, so before #13224 a command
- * — or any daemon it started — held a writable handle to the session it was
- * launched from for its whole life.
+ * `fs.open*` omitted `O_CLOEXEC` before 1.4.3 (libuv always adds it), so before
+ * #13224 a command — or any daemon it started — held a writable handle to the
+ * session it was launched from for its whole life.
  *
  * Oracle: list the child's descriptor table. `sh -c` is required — a bare `ls`
  * resolves to an in-process builtin, whose `$$` is omp itself. A deliberately
- * inheritable control descriptor (the exact `fs.openSync(path, "a")` the
- * pre-fix writer used) runs in the same child so the assertions cannot pass
- * vacuously. /proc makes this Linux-only; the helper's flag handling is
- * covered on every platform by `packages/utils/test/fs-open.test.ts`.
+ * inheritable control descriptor (close-on-exec cleared via `fcntl`, since Bun
+ * 1.4.3+ sets it on every `fs.open*`) runs in the same child so the assertions
+ * cannot pass vacuously. /proc makes this Linux-only; the helper's flag
+ * handling is covered on every platform by `packages/utils/test/fs-open.test.ts`.
  */
+import { dlopen, FFIType } from "bun:ffi";
 import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
@@ -31,6 +32,21 @@ const ROOTS: string[] = [];
 afterAll(async () => {
 	for (const root of ROOTS) await removeWithRetries(root).catch(() => {});
 });
+
+/** `fcntl(2)` command that replaces the descriptor flags (`FD_CLOEXEC`). */
+const F_SETFD = 2;
+
+/** Open `filePath` for append with close-on-exec cleared, whatever Bun's `fs.open*` default is. */
+function openInheritableSync(filePath: string): number {
+	const fd = fs.openSync(filePath, "a");
+	const libc = dlopen("libc.so.6", { fcntl: { args: [FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
+	try {
+		if (libc.symbols.fcntl(fd, F_SETFD, 0) !== 0) throw new Error(`fcntl(F_SETFD) failed for fd ${fd}`);
+	} finally {
+		libc.close();
+	}
+	return fd;
+}
 
 test.skipIf(process.platform !== "linux")("bash tool children never inherit session or log descriptors", async () => {
 	const root = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-fd-"));
@@ -53,7 +69,7 @@ test.skipIf(process.platform !== "linux")("bash tool children never inherit sess
 	logSink.write("entry");
 
 	const control = path.join(root, "control.jsonl");
-	const controlFd = fs.openSync(control, "a");
+	const controlFd = openInheritableSync(control);
 
 	let output = "";
 	try {
