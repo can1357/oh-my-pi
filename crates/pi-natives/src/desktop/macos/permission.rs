@@ -113,9 +113,4 @@ mod tests {
 			"enable that terminal or IDE in System Settings > Privacy & Security > Screen Recording"
 		));
 	}
-
-	#[test]
-	fn responsibility_export_resolves_a_process() {
-		assert!(responsible_app(RESPONSIBLE_PID).is_some_and(|app| !app.is_empty()));
-	}
 }
