@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `startup.scratchDir` and `/scratch` to choose the directory omp starts in when launched from your home directory, instead of the system temp directory ([#14150](https://github.com/can1357/oh-my-pi/pull/14150) by [@jaredlyon](https://github.com/jaredlyon))
+
 ### Changed
 
 - In terminals that speak the Tern Surface Protocol (Tern), the composer's bottom bar shows the git branch and its status beside the model chip when the status line has the `git` segment; it outlasts the other facts as the bar narrows, and clicking it opens `/git` ([#15220](https://github.com/can1357/oh-my-pi/pull/15220) by [@H4vC](https://github.com/H4vC))
