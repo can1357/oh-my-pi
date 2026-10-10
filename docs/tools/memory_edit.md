@@ -9,7 +9,7 @@
 
 ## Registration / Visibility
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`, even though successful calls mutate local memory.
-- Registration requires `memory.backend = "mnemopi"`; the tool is absent for `"off"`, `"local"`, and `"hindsight"`.
+- Registration requires `memory.backend = "mnemopi"`; the tool is absent for `"off"`, `"local"`, `"hindsight"`, and `"dakera"`.
 - In an unrestricted session with an explicit tool list, registration auto-includes `memory_edit` for Mnemopi. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://memory_edit`; an explicitly requested tool remains top-level.
 - Execution is synchronous and single-shot, with no progress callback or cancellation parameter.
@@ -53,7 +53,7 @@
 - Session state: reads the active session's scoped Mnemopi state; it does not rewrite already injected `<memories>` context.
 
 ## Limits & Caps
-- Availability requires `memory.backend = "mnemopi"`; Hindsight and local file-backed memory do not expose this tool.
+- Availability requires `memory.backend = "mnemopi"`; Hindsight, Dakera, and local file-backed memory do not expose this tool.
 - `id` must be supplied directly; the tool does not search by content.
 - Recall previews are capped at 500 characters by default. Always fetch `read memory://<id>` before `update`; the URL resolves the full row from the calling session's scoped banks.
 - `update` with neither `content` nor `importance` is rejected before any backend write.

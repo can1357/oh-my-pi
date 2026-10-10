@@ -154,6 +154,39 @@ describe("hindsightBackend.start", () => {
 		expect(retainSpy.mock.calls[0]?.[2]?.timestamp).toBeInstanceOf(Date);
 	});
 
+	// An ESC-aborted turn fires `agent_end` with the user prompt present and no
+	// assistant reply yet: retaining that husk spends the turn delta, so the real
+	// answer is lost when the resumed turn completes.
+	it("does not retain an aborted turn ending on the user prompt", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.retainEveryNTurns": 2,
+		});
+		const retainSpy = vi.spyOn(HindsightApi.prototype, "retain").mockResolvedValue({} as never);
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+
+		const entries: Array<{ role: "user" | "assistant"; text: string }> = [
+			{ role: "user", text: "first user message that is long enough" },
+			{ role: "assistant", text: "first assistant reply that is long enough" },
+			{ role: "user", text: "second user message aborted before any reply" },
+		];
+		const session = makeFakeSession({ sessionId: "s3b", entries });
+
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		// The retained promise is fire-and-forget; a microtask turn lets the
+		// handler settle without a real timer.
+		session.emit({ type: "agent_end", messages: [] });
+		await Bun.sleep(0);
+		expect(retainSpy).toHaveBeenCalledTimes(0);
+	});
 	it("aliases parent state on subagent runs (taskDepth > 0) so tools share the parent bank", async () => {
 		const settings = Settings.isolated({
 			"memory.backend": "hindsight",
