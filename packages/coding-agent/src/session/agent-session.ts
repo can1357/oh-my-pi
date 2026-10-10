@@ -206,6 +206,7 @@ import {
 	obfuscateProviderContext,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
@@ -407,7 +408,12 @@ import { buildSessionContext, getRestorableSessionModels, isTranscriptEntry } fr
 import type { CacheWarmer, CacheWarmingMode, CacheWarmingStatus } from "./cache-warmer";
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { anonymizeSessionTranscripts } from "./session-anonymizer";
-import { formatSessionDumpText, formatSubagentDumpText, type SessionDumpArchive } from "./session-dump-format";
+import {
+	formatSessionDumpText,
+	formatSubagentDumpText,
+	type SessionDumpArchive,
+	type SessionDumpLiveState,
+} from "./session-dump-format";
 import { collectSubSessions, type SubSession } from "./sub-sessions";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
@@ -704,6 +710,42 @@ export function powerAssertionOptions(mode: "off" | "idle" | "display" | "system
 		display: mode === "display" || mode === "system",
 		system: mode === "system",
 		user: mode === "system",
+	};
+}
+
+/**
+ * Snapshot a live subagent for `/dump all`: registry status/heartbeat, the
+ * partial assistant message still streaming (never persisted until
+ * `message_end`), and tool calls dispatched but not finished.
+ */
+function captureLiveDumpState(ref: AgentRef): SessionDumpLiveState | undefined {
+	const session = ref.session;
+	if (!session) return undefined;
+	const state = session.agent.state;
+	let streamMessage = state.streamMessage;
+	const obfuscator = session.obfuscator;
+	if (streamMessage?.role === "assistant" && obfuscator?.hasSecrets()) {
+		streamMessage = { ...streamMessage, content: deobfuscateAssistantContent(obfuscator, streamMessage.content) };
+	}
+	// Tools run after their assistant message ends, so pending calls live in the newest
+	// persisted assistant turns; scan backwards and stop once every pending id is named.
+	const toolNames = new Map<string, string>();
+	const messages = state.messages;
+	for (let i = messages.length - 1; i >= 0 && toolNames.size < state.pendingToolCalls.size; i--) {
+		const message = messages[i];
+		if (message.role !== "assistant") continue;
+		for (const block of message.content) {
+			if (block.type === "toolCall" && state.pendingToolCalls.has(block.id)) toolNames.set(block.id, block.name);
+		}
+	}
+	return {
+		status: ref.status,
+		capturedAt: Date.now(),
+		lastActivity: ref.lastActivity,
+		activity: ref.activity,
+		busy: session.isStreaming,
+		streamMessage,
+		pendingToolCalls: [...state.pendingToolCalls].map(id => `${toolNames.get(id) ?? "unknown"} (${id})`),
 	};
 }
 
@@ -12603,6 +12645,8 @@ export class AgentSession implements SettingsScope {
 				salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
 			},
 			identity,
+			permitsCredential: credentialId =>
+				this.#modelRegistry.authStorage.sessions.permits("openai-codex", this.sessionId, credentialId),
 			reports,
 			attemptedKeys: coordinator.attemptedKeys,
 			deferredUntilByKey: coordinator.deferredUntilByKey,
@@ -12637,6 +12681,8 @@ export class AgentSession implements SettingsScope {
 			},
 			reports,
 			statuses,
+			permitsCredential: credentialId =>
+				this.#modelRegistry.authStorage.sessions.permits("anthropic", this.sessionId, credentialId),
 			attemptedKeys: coordinator.attemptedKeys,
 			deferredUntilByKey: coordinator.deferredUntilByKey,
 			lastAttemptAtByAccount: coordinator.lastAttemptAtByAccount,
@@ -12680,7 +12726,7 @@ export class AgentSession implements SettingsScope {
 	async #adoptRecentReset(
 		statuses: readonly ResetCreditAccountStatus[],
 		coordinator: CodexAutoRedeemCoordinator,
-	): Promise<boolean> {
+	): Promise<number | undefined> {
 		for (const status of statuses) {
 			if (status.provider !== this.model?.provider) continue;
 			const lockKey = resetAccountLockKey(status);
@@ -12694,32 +12740,43 @@ export class AgentSession implements SettingsScope {
 			);
 			if (adopted) {
 				await this.#modelRegistry.authStorage.credentials.revalidate();
-				return true;
+				return status.credentialId;
 			}
 		}
-		return false;
+		return undefined;
 	}
 
 	/**
 	 * Shared consume executor for Codex and Claude plans. Attempt keys enter the
 	 * process-wide set before mutation, while nonterminal outcomes release and
 	 * defer the episode so a still-banked grant is not buried permanently.
+	 * Returns the credentials whose reset was spent or adopted from a peer, and
+	 * whether the session's account pool dropped a planned restore.
 	 */
 	async #executeResetActions(
 		provider: "openai-codex" | "anthropic",
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
-	): Promise<number> {
+	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean }> {
 		const authStorage = this.#modelRegistry.authStorage;
 		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
-		let redeemed = 0;
+		// Consent, earlier actions, the fence and the live listing all wait after
+		// planning: a restore the session's account pool no longer allows is dropped.
+		// Checked with no await before the redeem call.
+		const outsidePool = (action: CodexResetAction | ClaudeResetAction): boolean =>
+			action.reason === "blocked-account" &&
+			!authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId);
+		const restored: number[] = [];
+		let poolLimited = false;
 		for (const action of actions) {
 			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
+			const previousAttemptAt = coordinator.lastAttemptAtByAccount.get(action.accountKey);
 			coordinator.attemptedKeys.add(action.attemptKey);
 			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
 			let outcome: ResetCreditRedeemOutcome | undefined;
 			let sharedReset = false;
+			let leftPool = false;
 			try {
 				const redeemOptions = {
 					target: action.target,
@@ -12730,7 +12787,8 @@ export class AgentSession implements SettingsScope {
 				const lockKey = resetAccountLockKey(action.target);
 				if (!lockKey) {
 					// An account without an upstream identity cannot share a cross-process fence.
-					outcome = await authStorage.resets.redeem(redeemOptions);
+					leftPool = outsidePool(action);
+					if (!leftPool) outcome = await authStorage.resets.redeem(redeemOptions);
 				} else {
 					// The coordinator is process-local. Fence concurrent processes and
 					// remember a recent attempt so a late 429 cannot spend again.
@@ -12768,6 +12826,11 @@ export class AgentSession implements SettingsScope {
 							}
 							const attemptedAt = Date.now();
 							await Bun.write(lockPath, `pending:${attemptedAt}`);
+							leftPool = outsidePool(action);
+							if (leftPool) {
+								await Bun.write(lockPath, "");
+								return undefined;
+							}
 							const result = await authStorage.resets.redeem(redeemOptions);
 							if (result.code === "reset") {
 								await Bun.write(lockPath, `reset:${attemptedAt}`);
@@ -12790,7 +12853,17 @@ export class AgentSession implements SettingsScope {
 				continue;
 			}
 			if (!outcome) {
-				if (sharedReset) redeemed++;
+				if (sharedReset) restored.push(action.target.credentialId);
+				if (leftPool) {
+					// Never attempted: the episode and cooldown stay free if the pool allows it again.
+					poolLimited = true;
+					coordinator.attemptedKeys.delete(action.attemptKey);
+					if (previousAttemptAt === undefined) coordinator.lastAttemptAtByAccount.delete(action.accountKey);
+					else coordinator.lastAttemptAtByAccount.set(action.accountKey, previousAttemptAt);
+					logger.debug(`${source}: restore dropped, account left the session's pool`, {
+						account: action.accountKey,
+					});
+				}
 				continue;
 			}
 			if (!isTerminalRedeemOutcome(outcome.code)) {
@@ -12799,7 +12872,7 @@ export class AgentSession implements SettingsScope {
 			}
 			switch (outcome.code) {
 				case "reset": {
-					redeemed++;
+					restored.push(action.target.credentialId);
 					const left =
 						action.availableCount === undefined ? undefined : ` (${Math.max(0, action.availableCount - 1)} left)`;
 					const detail =
@@ -12852,8 +12925,8 @@ export class AgentSession implements SettingsScope {
 					break;
 			}
 		}
-		if (redeemed > 0) void this.fetchUsageReports();
-		return redeemed;
+		if (restored.length > 0) void this.fetchUsageReports();
+		return { restoredCredentialIds: restored, poolLimited };
 	}
 
 	async #maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult> {
@@ -12867,8 +12940,18 @@ export class AgentSession implements SettingsScope {
 		const identityValue = (identity?.accountId ?? identity?.email ?? identity?.orgId)?.trim().toLowerCase();
 		if (!identityValue) return { restored: false };
 		const accountKey = `${provider}|${identity?.orgId?.trim().toLowerCase() ?? "-"}|${identityValue}`;
-		const existing = coordinator.inFlightByAccount.get(accountKey);
-		if (existing) return existing;
+		// A pass plans within its own session's account pool. A session joining it
+		// keeps its outcome only if the pass restored an account this session may
+		// use, or restored nothing without its pool excluding a candidate.
+		let existing = coordinator.inFlightByAccount.get(accountKey);
+		while (existing) {
+			const shared = await existing;
+			const serves = shared.restored
+				? shared.restoredCredentialIds?.some(id => authStorage.sessions.permits(provider, this.sessionId, id))
+				: !shared.poolLimited;
+			if (serves) return shared;
+			existing = coordinator.inFlightByAccount.get(accountKey);
+		}
 
 		const run = (async (): Promise<ResetRecoveryResult> => {
 			let reports: UsageReport[] | null = null;
@@ -12889,8 +12972,10 @@ export class AgentSession implements SettingsScope {
 							coordinator,
 							activeBlockUnblockAtMs,
 						);
+			const poolLimited = plan.skipped.some(skip => skip.reason === "outside-account-pool");
 			if (plan.actions.length === 0) {
-				if (await this.#adoptRecentReset(statuses, coordinator)) return { restored: true };
+				const adoptedId = await this.#adoptRecentReset(statuses, coordinator);
+				if (adoptedId !== undefined) return { restored: true, restoredCredentialIds: [adoptedId] };
 				let retryAfterMs: number | undefined;
 				if (provider === "anthropic" && cfg.autoRedeem === "yes") {
 					for (const status of statuses) {
@@ -12900,15 +12985,20 @@ export class AgentSession implements SettingsScope {
 						retryAfterMs = retryAfterMs === undefined ? delay : Math.min(retryAfterMs, delay);
 					}
 				}
-				return { restored: false, retryAfterMs };
+				return { restored: false, retryAfterMs, poolLimited };
 			}
 			if (
 				shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
 				!(await this.#confirmAutoRedeem(provider, plan.actions, coordinator))
 			) {
-				return { restored: false };
+				return { restored: false, poolLimited };
 			}
-			return { restored: (await this.#executeResetActions(provider, plan.actions, coordinator)) > 0 };
+			const executed = await this.#executeResetActions(provider, plan.actions, coordinator);
+			return {
+				restored: executed.restoredCredentialIds.length > 0,
+				restoredCredentialIds: executed.restoredCredentialIds,
+				poolLimited: poolLimited || executed.poolLimited,
+			};
 		})()
 			.catch((error): ResetRecoveryResult => {
 				logger.warn("auto-reset: blocked pass failed", { provider, account: accountKey, error: String(error) });
@@ -13133,9 +13223,11 @@ export class AgentSession implements SettingsScope {
 	 * {@link formatSessionAsText} transcript), `llm-request.json` (the
 	 * {@link dumpLlmRequestToTmpDir} payload), and one `subagents/<path>.md` per
 	 * persisted subagent transcript stored next to the session file, nested
-	 * subagents included. Subagents with no messages are skipped. A subagent
-	 * discovery failure still writes the main dump and is reported in
-	 * `subagentError`.
+	 * subagents included. Subagents still live in this process also carry their
+	 * registry status, last activity, pending tool calls, and the in-flight
+	 * assistant turn that is not persisted yet. Subagents with no messages and
+	 * no in-flight turn are skipped. A subagent discovery failure still writes
+	 * the main dump and is reported in `subagentError`.
 	 *
 	 * The archive persists on disk and may contain raw context/secrets.
 	 *
@@ -13161,16 +13253,26 @@ export class AgentSession implements SettingsScope {
 			subagentError = error instanceof Error ? error.message : String(error);
 			logger.warn("Failed to collect subagent transcripts for dump", { sessionFile, error: subagentError });
 		}
+		const liveByFile = new Map<string, AgentRef>();
+		for (const ref of AgentRegistry.global().list()) {
+			if (ref.session && ref.sessionFile) liveByFile.set(path.resolve(ref.sessionFile), ref);
+		}
+		const subagentRoot = sessionFile?.endsWith(".jsonl") ? sessionFile.slice(0, -6) : undefined;
 		let subagentCount = 0;
 		for (const [key, sub] of Object.entries(subSessions)) {
 			const context = deobfuscateSessionContext(buildSessionContext(sub.entries, sub.leafId), this.#obfuscator);
-			if (context.messages.length === 0) continue;
+			const liveRef = subagentRoot
+				? liveByFile.get(path.resolve(path.join(subagentRoot, ...key.split("/")) + ".jsonl"))
+				: undefined;
+			const live = liveRef ? captureLiveDumpState(liveRef) : undefined;
+			if (context.messages.length === 0 && !live?.streamMessage) continue;
 			const text = formatSubagentDumpText({
 				key,
 				messages: context.messages,
 				model: context.models.default,
 				thinkingLevel: context.thinkingLevel,
 				aborted: sub.aborted,
+				live,
 			});
 			entries.push([`subagents/${key}.md`, `${text}\n`]);
 			subagentCount++;

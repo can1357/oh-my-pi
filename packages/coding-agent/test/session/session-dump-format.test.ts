@@ -189,7 +189,7 @@ describe("formatSessionDumpText markdown-headings transcript", () => {
 			messages: [{ role: "user", content: "helper task", timestamp: 3 }],
 		});
 		expect(killed.startsWith("# Subagent: Explore/Helper\n\nModel: (unknown)\nStatus: aborted\n")).toBe(true);
-		expect(killed).toContain("## User\n\nhelper task");
+		expect(killed).toContain("## User · 1970-01-01T00:00:00.003Z\n\nhelper task");
 
 		const live = formatSubagentDumpText({
 			key: "Explore",
@@ -199,6 +199,17 @@ describe("formatSessionDumpText markdown-headings transcript", () => {
 		});
 		expect(live).toContain("Model: anthropic/claude-sonnet\nThinking Level: high\n");
 		expect(live).not.toContain("Status: aborted");
+	});
+
+	it("still renders the transcript when a persisted timestamp is outside the Date range", () => {
+		const out = formatSessionDumpText({
+			messages: [
+				{ role: "user", content: "corrupt stamp", timestamp: 1e20 },
+				{ role: "user", content: "next message", timestamp: 2 },
+			],
+		});
+		expect(out).toContain("## User · invalid time 100000000000000000000\n\ncorrupt stamp");
+		expect(out).toContain("## User · 1970-01-01T00:00:00.002Z\n\nnext message");
 	});
 
 	it("fences system notices under a readable title without breaking on nested code fences", () => {

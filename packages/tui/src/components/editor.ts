@@ -2376,7 +2376,7 @@ export class Editor implements Component, Focusable {
 
 	#replaceVimSpan(from: VimPosition, to: VimPosition, text: string): void {
 		const line = this.#state.lines[from.line] ?? "";
-		if (this.#atomicTokenAt(line, from.col) || this.#spanCutsAtomicToken(line, from.col, to.col)) return;
+		if (this.#spanCutsAtomicToken(line, from.col, to.col)) return;
 		this.#recordUndoState();
 		this.#lastAction = null;
 		this.#state.lines[from.line] = line.slice(0, from.col) + text + line.slice(to.col);
@@ -2399,6 +2399,9 @@ export class Editor implements Component, Focusable {
 			this.#replaceLog.length = 0;
 		}
 		this.#lastAction = "replace";
+		// Editing a recalled prompt makes it a draft, so Up/Down at an edge move the cursor again
+		// instead of navigating history over the overwritten text (same as `#afterVimEdit`).
+		this.#historyIndex = -1;
 		const end = col >= line.length ? col : nextGraphemeStart(line, col);
 		const removed = line.slice(col, end);
 		this.#state.lines[lineIdx] = line.slice(0, col) + grapheme + line.slice(end);
@@ -3566,14 +3569,21 @@ export class Editor implements Component, Focusable {
 		return undefined;
 	}
 
-	/** True when `[from, to)` runs into a placeholder. Counted `r` must no-op rather than split it. */
+	/** True when `[from, to)` overlaps a placeholder. Counted `r` must no-op rather than split it.
+	 *  One pass over the line's matches, so a long counted replace stays linear. */
 	#spanCutsAtomicToken(line: string, from: number, to: number): boolean {
-		for (let col = from; col < to;) {
-			const token = this.#atomicTokenAt(line, col);
-			if (token && token.start < to && token.end > from) return true;
-			col = token && token.end > col ? token.end : col + 1;
+		const re = this.#getAtomicTokenRe();
+		if (re === undefined) return false;
+		re.lastIndex = 0;
+		for (;;) {
+			const match = re.exec(line);
+			if (match === null || match.index >= to) return false;
+			if (match[0].length === 0) {
+				re.lastIndex = match.index + 1;
+				continue;
+			}
+			if (match.index + match[0].length > from) return true;
 		}
-		return false;
 	}
 
 	/** Expand the half-open range [start, end) so it never cuts through an atomic

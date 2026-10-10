@@ -1189,6 +1189,12 @@ export interface SessionsApi {
 	 */
 	unrestrict(provider: string, sessionId: string, lease: SessionRestrictionLease): void;
 	/**
+	 * Whether stored credential `credentialId` may serve `sessionId`: always for
+	 * an unrestricted session, otherwise only an OAuth account its
+	 * {@link restrict} list names.
+	 */
+	permits(provider: string, sessionId: string, credentialId: number): boolean;
+	/**
 	 * Release a session's sticky credential so its next {@link getApiKey} call
 	 * re-runs native pool ranking. This never blocks or penalizes the released
 	 * account; usage-aware routing uses it when another sibling has more

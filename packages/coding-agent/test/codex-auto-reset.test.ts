@@ -520,6 +520,20 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		]);
 	});
 
+	it("never restores a sibling outside the session's account pool when the active account has no credits", () => {
+		const active = report({ credits: 0 });
+		const excluded = report({ accountId: "acct-sib", email: "sib@example.com", credits: 2 });
+		const plan = planCodexResetRedemptions(
+			input([active, excluded], { permitsCredential: credentialId => credentialId === CREDENTIAL_ID }),
+		);
+		expect(plan.actions).toEqual([]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|2",
+			rule: "blocked-account",
+			reason: "outside-account-pool",
+		});
+	});
+
 	it("prefers the active account over an otherwise better sibling", () => {
 		const active = report({ credits: 1 });
 		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", credits: 3 });

@@ -38,6 +38,7 @@ export type ClaudeResetSkipReason =
 	| "credit-expired"
 	| "provider-cooldown"
 	| "reserve"
+	| "outside-account-pool"
 	| "no-blocked-window"
 	| "unsupported-window"
 	| "incomplete-coverage"
@@ -67,6 +68,8 @@ export interface ClaudeResetPlanInput {
 	reports: UsageReport[] | null;
 	/** Authoritative live Cedar/Juniper eligibility for every stored account. */
 	statuses: readonly ResetCreditAccountStatus[];
+	/** Blocked recovery: whether a stored credential may serve the blocked session; absent allows every account. */
+	permitsCredential?: (credentialId: number) => boolean;
 	attemptedKeys: ReadonlySet<string>;
 	deferredUntilByKey: ReadonlyMap<string, number>;
 	lastAttemptAtByAccount: ReadonlyMap<string, number>;
@@ -315,6 +318,11 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 		for (const snapshot of snapshots) {
 			const skip = (reason: ClaudeResetSkipReason) =>
 				skipped.push({ accountKey: snapshot.accountKey, rule: "blocked-account", reason });
+			// Restoring an account the session may not use cannot unblock it.
+			if (input.permitsCredential && !input.permitsCredential(snapshot.target.credentialId)) {
+				skip("outside-account-pool");
+				continue;
+			}
 			if (snapshot.availableCount - Math.max(0, Math.trunc(input.settings.keepCredits)) < 1) {
 				skip("reserve");
 				continue;
