@@ -51,6 +51,8 @@ export interface PruneConfig extends CacheLookbackConfig {
 	supersedeKey?: SupersedeKeyFn;
 	/** Whether a keyed result shows its whole target (see {@link SupersedePruneConfig.supersedeComplete}). */
 	supersedeComplete?: SupersedeCompleteFn;
+	/** Results that rely on earlier results never supersede them (see {@link SupersedeDependentFn}). */
+	supersedeDependent?: SupersedeDependentFn;
 	/** Useless-flagged results bypass the protect window (see {@link USELESS_NOTICE}). Default true. */
 	pruneUseless?: boolean;
 	/**
@@ -137,6 +139,14 @@ export type SupersedeKeyFn = (toolName: string, args: Record<string, unknown>) =
  */
 export type SupersedeCompleteFn = (message: ToolResultMessage) => boolean;
 
+/**
+ * Whether a successful keyed result leans on earlier results still being in
+ * context (e.g. a read that points at rows an earlier read already returned).
+ * Such a result carries only part of its target itself, so it never
+ * supersedes the results it leans on.
+ */
+export type SupersedeDependentFn = (message: ToolResultMessage) => boolean;
+
 export interface SupersedePruneConfig extends CacheLookbackConfig {
 	/** Supersede key function; a newer successful result with the same key supersedes older ones (see {@link SupersedeKeyFn}). */
 	supersedeKey?: SupersedeKeyFn;
@@ -153,6 +163,8 @@ export interface SupersedePruneConfig extends CacheLookbackConfig {
 	 * detail is preferred over losing detail the summary does not show.
 	 */
 	supersedeComplete?: SupersedeCompleteFn;
+	/** Results that rely on earlier results never supersede them (see {@link SupersedeDependentFn}). */
+	supersedeDependent?: SupersedeDependentFn;
 	/** Also prune results flagged useless by their tool. Default false. */
 	pruneUseless?: boolean;
 	/**
@@ -372,6 +384,7 @@ function collectSupersededResults(
 	toolCalls: SentToolCalls,
 	supersedeKey: SupersedeKeyFn,
 	supersedeComplete: SupersedeCompleteFn | undefined,
+	supersedeDependent: SupersedeDependentFn | undefined,
 	protectedTools: readonly ProtectedToolMatcher[],
 ): SupersedeCandidate[] {
 	// Walk newest → oldest: supersession only depends on NEWER results, so
@@ -394,7 +407,7 @@ function collectSupersededResults(
 			? sameKey !== undefined || parent?.success === true
 			: sameKey?.success === true || parent?.complete === true;
 		const newer = sameKey ?? { success: false, complete: false };
-		if (!message.isError && !newer.success) {
+		if (!message.isError && !newer.success && !supersedeDependent?.(message)) {
 			newer.success = true;
 			newer.complete = supersedeComplete?.(message) ?? true;
 		}
@@ -464,6 +477,7 @@ export function pruneSupersededToolResults(
 				toolCalls,
 				config.supersedeKey,
 				config.supersedeComplete,
+				config.supersedeDependent,
 				config.protectedTools,
 			)
 		: [];
@@ -556,6 +570,7 @@ export function pruneToolOutputs(
 					toolCalls,
 					config.supersedeKey,
 					config.supersedeComplete,
+					config.supersedeDependent,
 					config.protectedTools,
 				).map(candidate => candidate.message),
 			)

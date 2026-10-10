@@ -121,6 +121,7 @@ import {
 	readHashlineHeaderContext,
 	toReadTruncationStats,
 } from "./read-format";
+import { elideRowsAlreadyInContext } from "./read-dedupe";
 import {
 	findSuffixMatchCached,
 	isNotFoundError,
@@ -1100,6 +1101,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				}
 			}
 			appendRepeatReadHint(this.session, staged?.path ?? (context.args as ReadParams).path, result);
+			elideRowsAlreadyInContext(this.session, result);
 			return await postProcessToolResult(result, this.name, this.session as unknown as AgentToolContext);
 		} finally {
 			this.#speculativeReads.delete(context.toolCall.id);
@@ -1638,6 +1640,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const displayTarget = InternalUrlRouter.instance().locateSync(params.path);
 		if (displayTarget && result.details) result.details.displayTarget = displayTarget;
 		appendRepeatReadHint(this.session, params.path, result);
+		elideRowsAlreadyInContext(this.session, result);
 		return result;
 	}
 

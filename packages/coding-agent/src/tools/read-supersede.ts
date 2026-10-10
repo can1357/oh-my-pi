@@ -16,3 +16,12 @@ export function isCompleteReadResult(message: ToolResultMessage): boolean {
 	if (details.meta?.truncation || details.meta?.limits?.columnTruncated) return false;
 	return details.totalLines !== undefined || message.content.some(block => block.type === "image");
 }
+
+/**
+ * Whether a `read` result points at rows an earlier read already returned
+ * instead of repeating them (`supersedeDependent` for `pruneSupersededToolResults`).
+ * Such a result must never supersede the read that holds those rows.
+ */
+export function readResultReusesRows(message: ToolResultMessage): boolean {
+	return ((message.details as ReadToolDetails | undefined)?.reusedRows ?? 0) > 0;
+}
