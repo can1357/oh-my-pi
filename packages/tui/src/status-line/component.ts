@@ -83,9 +83,9 @@ const PINNED_NATIVE_PRIORITY = 1000;
 /**
  * Segments a TSP terminal shows outside the composer's facts: the model chip,
  * the context hairline and usage text (context, cost), Tern's pane header
- * (path, git), the tab title (session name, PR), the HUD pills (subagents),
- * the editor (vim) and the brand (`pi`; while focus-proxied, the viewed agent
- * is the composer's viewing header).
+ * (path), the tab title (session name, PR), the HUD pills (subagents), the
+ * editor (vim) and the brand (`pi`; while focus-proxied, the viewed agent is
+ * the composer's viewing header).
  */
 const COMPOSER_HOMED_SEGMENTS: Partial<Record<StatusLineSegmentId, true>> = {
 	pi: true,
@@ -94,7 +94,6 @@ const COMPOSER_HOMED_SEGMENTS: Partial<Record<StatusLineSegmentId, true>> = {
 	context_total: true,
 	cost: true,
 	path: true,
-	git: true,
 	pr: true,
 	session_name: true,
 	subagents: true,
@@ -3676,13 +3675,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#buildComposerFacts(effectiveSettings: EffectiveStatusLineSettings, nowMs: number): ComposerFacts {
 		const { leftSegments, rightSegments } = effectiveSettings;
 		const segments = [...leftSegments, ...rightSegments];
-		// Tern's pane header shows the path and branch from the pane's cwd; only the PR is looked up here.
+		// Tern's pane header shows the path from the pane's cwd; the branch sits by the model chip.
+		const gitEnabled = this.#gitEnabled();
 		const ctx = this.#buildSegmentContext(
 			0,
 			effectiveSettings.segmentOptions,
 			false,
-			false,
-			this.#gitEnabled() && hasPrSegment(segments),
+			gitEnabled && hasGitSegment(segments),
+			gitEnabled && hasPrSegment(segments),
 			nowMs,
 		);
 		const pr = ctx.git.pr ?? undefined;
@@ -3700,8 +3700,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				if (!view) return;
 				const props: TspProps<"seg"> = {
 					role: "omp.composer.fact",
-					priority: statusSegmentPriority(side, index, ids.length),
+					priority:
+						(PINNED_NATIVE_SEGMENTS[id] === true ? PINNED_NATIVE_PRIORITY : 0) +
+						statusSegmentPriority(side, index, ids.length),
 				};
+				const action = NATIVE_SEGMENT_ACTIONS[id];
+				if (action) props.actions = { click: action };
 				facts.push(describeSeg(id, props, view, dim));
 			});
 		};
