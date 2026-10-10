@@ -45,7 +45,12 @@ function nextBrokerResetSweepDelayMs(inventory: readonly ResetCreditAccountStatu
 export class BrokerResetSweeper {
 	readonly #host: AutoResetHost;
 	readonly #coordinator: CodexAutoRedeemCoordinator;
-	/** Credits each account was last seen with; a failed listing keeps the account's last good entry. */
+	/**
+	 * Credits each account was last seen with, for scheduling only: an account
+	 * a sweep did not refresh (no usage report, a failed or thrown listing)
+	 * keeps its last good entry until a good one replaces it or the account is
+	 * removed. Spends always re-plan from a live listing.
+	 */
 	#inventory: ResetCreditAccountStatus[] = [];
 	#timer: NodeJS.Timeout | undefined;
 	#closed = false;
@@ -77,10 +82,17 @@ export class BrokerResetSweeper {
 		try {
 			const reports = (await this.#host.authStorage.usage.reports?.()) ?? [];
 			const swept = await sweepResets(this.#host, reports, this.#coordinator);
-			const previous = new Map(this.#inventory.map(status => [`${status.provider}|${status.credentialId}`, status]));
-			this.#inventory = swept.map(status =>
-				status.error ? (previous.get(`${status.provider}|${status.credentialId}`) ?? status) : status,
+			const key = (status: ResetCreditAccountStatus) => `${status.provider}|${status.credentialId}`;
+			const refreshed = swept.filter(status => !status.error);
+			const refreshedKeys = new Set(refreshed.map(key));
+			const retained = this.#inventory.filter(
+				status =>
+					!refreshedKeys.has(key(status)) &&
+					this.#host.authStorage.oauth
+						.accounts(status.provider)
+						.some(account => account.credentialId === status.credentialId),
 			);
+			this.#inventory = [...refreshed, ...retained];
 		} catch (error) {
 			logger.warn("auth-broker reset sweep failed", { error: String(error) });
 		}

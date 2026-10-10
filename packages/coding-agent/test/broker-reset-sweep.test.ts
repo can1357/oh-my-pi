@@ -9,8 +9,10 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { headlessApprovals } from "@oh-my-pi/pi-coding-agent/session/auto-reset";
 import { BrokerResetSweeper } from "@oh-my-pi/pi-coding-agent/session/broker-reset-sweep";
 import {
+	type CodexResetAction,
 	createCodexAutoRedeemCoordinator,
 	IMMINENT_RESET_EXPIRY_MS,
 	SWEEP_MIN_INTERVAL_MS,
@@ -150,7 +152,12 @@ describe("auth broker saved-reset sweep", () => {
 	}) {
 		vi.spyOn(Date, "now").mockImplementation(() => options.now.ms);
 		vi.spyOn(authStorage.oauth, "accounts").mockImplementation(provider =>
-			provider === "anthropic" ? [{ position: 0, ...CLAUDE, active: false }] : [],
+			provider === "anthropic"
+				? [{ position: 0, ...CLAUDE, active: false }]
+				: [
+						{ position: 0, ...CODEX, active: false },
+						{ position: 1, ...SECOND_CODEX, active: false },
+					],
 		);
 		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => options.reports());
 		const listed: string[] = [];
@@ -256,6 +263,41 @@ describe("auth broker saved-reset sweep", () => {
 		expect(broker.redeemed).toEqual([{ provider: "openai-codex", ...CODEX, creditId: "codex-account-credit" }]);
 	});
 
+	it.each([
+		{ outage: "the usage reports omit the provider", reportsFail: true, listingThrows: false },
+		{ outage: "the reset listing throws", reportsFail: false, listingThrows: true },
+	])(
+		"keeps retrying within a minute when $outage at a credit's last-chance wake",
+		async ({ reportsFail, listingThrows }) => {
+			const now = { ms: Date.parse("2026-10-09T12:00:00Z") };
+			const expiresAtMs = now.ms + 30 * 60_000;
+			let outage = false;
+			const broker = startBroker({
+				now,
+				// The usage aggregator drops a provider whose fetch failed instead of reporting an error.
+				reports: () => (outage && reportsFail ? [] : [codexReport(now.ms)]),
+				live: provider => {
+					if (outage && listingThrows) throw new Error("listing timed out");
+					return provider === "openai-codex" ? [codexStatus(expiresAtMs)] : [];
+				},
+				settings: { "codexResets.autoRedeem": "unset", "claudeResets.autoRedeem": "no" },
+			});
+
+			await broker.start();
+			expect(broker.lastDelayMs()).toBe(30 * 60_000 - IMMINENT_RESET_EXPIRY_MS);
+			outage = true;
+			await broker.wake();
+			expect(broker.redeemed).toEqual([]);
+			expect(broker.lastDelayMs()).toBe(SWEEP_MIN_INTERVAL_MS);
+			await broker.wake();
+			expect(broker.lastDelayMs()).toBe(SWEEP_MIN_INTERVAL_MS);
+
+			outage = false;
+			await broker.wake();
+			expect(broker.redeemed).toEqual([{ provider: "openai-codex", ...CODEX, creditId: "codex-account-credit" }]);
+		},
+	);
+
 	it("spends a Claude credit expiring in four minutes once a live listing confirms the report inventory's candidate", async () => {
 		const now = { ms: Date.parse("2026-10-09T12:00:00Z") };
 		const expiresAtMs = now.ms + 4 * 60_000;
@@ -333,5 +375,36 @@ describe("auth broker saved-reset sweep", () => {
 		await broker.start();
 		expect(broker.redeemed).toEqual([]);
 		expect(broker.listed).toEqual([]);
+	});
+});
+
+describe("headless saved-reset approvals", () => {
+	function action(name: string, overrides: Partial<CodexResetAction>): CodexResetAction {
+		return {
+			reason: "expiring-credit",
+			target: { provider: "openai-codex", credentialId: name.length, accountId: name },
+			accountKey: name,
+			attemptKey: name,
+			label: name,
+			autoRedeem: "yes",
+			active: false,
+			...overrides,
+		};
+	}
+
+	it("keeps the planner's order across mixed consent: a restore, then the most imminent credit first", () => {
+		const restore = action("restore", { reason: "blocked-account", autoRedeem: "yes" });
+		const imminent = action("imminent", { autoRedeem: "unset", expiresInMs: 20_000, creditId: "imminent-credit" });
+		const later = action("later", { autoRedeem: "yes", expiresInMs: 2 * HOUR, creditId: "later-credit" });
+		const waiting = action("waiting", { autoRedeem: "unset", expiresInMs: 3 * HOUR, creditId: "waiting-credit" });
+
+		const approved = headlessApprovals([restore, imminent, later, waiting]);
+
+		expect(approved.map(({ action, approval }) => [action.accountKey, approval])).toEqual([
+			["restore", "auto-redeem-yes"],
+			["imminent", "headless-last-chance"],
+			["later", "auto-redeem-yes"],
+		]);
+		expect(approved[1]!.action.target.creditId).toBe("imminent-credit");
 	});
 });
