@@ -14,6 +14,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import * as attach from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import {
 	attachPageWithTimeout,
 	findFreeCdpPort,
@@ -762,6 +763,48 @@ describe("pickElectronTarget", () => {
 				expect(secondPage).not.toEqual(firstPage);
 			} finally {
 				await chromium.dispose([second, first]);
+			}
+		},
+		30_000,
+	);
+
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"opens a tab on one connected browser while another browser's page pick is stalled",
+		async () => {
+			const stalled = await connectedChromium("connected-stalled-pick");
+			const other = await connectedChromium("connected-free-pick");
+			const first = `stalled-first-${crypto.randomUUID()}`;
+			const second = `free-second-${crypto.randomUUID()}`;
+			const firstUrl = "data:text/html,<title>Stalled</title>";
+			const secondUrl = "data:text/html,<title>Free</title>";
+			const stalledHost = new URL(stalled.cdpUrl).host;
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const pick = attach.pickElectronTarget;
+			// Holds browser A's page discovery open, as a page stuck loading would.
+			const spy = vi.spyOn(attach, "pickElectronTarget").mockImplementation(async (browser, options) => {
+				if (browser.wsEndpoint().includes(stalledHost)) {
+					entered.resolve();
+					await release.promise;
+				}
+				return await pick(browser, options);
+			});
+			try {
+				const openingFirst = stalled.open(first, firstUrl);
+				await entered.promise;
+				// Browser B's open must finish while A's pick is still held; a shared
+				// pick lock would deadlock here until the test times out.
+				await other.open(second, secondUrl);
+				release.resolve();
+				await openingFirst;
+
+				expect(await other.pageOf(second)).toMatchObject({ url: secondUrl });
+				expect(await stalled.pageOf(first)).toMatchObject({ url: firstUrl });
+			} finally {
+				release.resolve();
+				spy.mockRestore();
+				await other.dispose([second]);
+				await stalled.dispose([first]);
 			}
 		},
 		30_000,

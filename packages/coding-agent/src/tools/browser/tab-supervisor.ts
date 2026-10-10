@@ -221,10 +221,13 @@ const acquireChains = new Map<string, Promise<void>>();
 // `acquireChains` keeps one acquisition per name in flight, so an entry is
 // dropped by name once that acquisition settles.
 const reservedTargets = new Map<string, string>();
-// CDP discovery URLs can alias the same browser (localhost vs 127.0.0.1, or
-// different DNS names). Serialize only picking/reservation globally, not worker
-// startup; the raw registry key cannot safely identify a distinct browser.
-let targetPick: Promise<void> = Promise.resolve();
+// Per-browser pick chain: serializes attached-target selection and its
+// reservation so two picks on one browser never read the same snapshot. Keyed
+// by the debugger websocket path (`/devtools/browser/<id>` for Chromium,
+// `/cdp` for the relay): it names the browser instance however the discovery
+// URL was spelled (localhost vs 127.0.0.1), while unrelated browsers stay
+// independent. Worker startup runs outside the chain.
+const targetPicks = new Map<string, Promise<void>>();
 const GRACE_MS = 750;
 // Cold-start guard for the worker's `setup` handshake (realm usable: puppeteer
 // loaded, browser connected, page acquired). On hosts where the worker's cold
@@ -1543,9 +1546,10 @@ async function buildInitPayload(
 	// target may be backgrounded, so retain activation for target-correct pixels.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
 	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
-	const prior = targetPick;
+	const pickKey = new URL(browserWSEndpoint).pathname;
+	const prior = targetPicks.get(pickKey) ?? Promise.resolve();
 	const { promise: picked, resolve: pickDone } = Promise.withResolvers<void>();
-	targetPick = picked;
+	targetPicks.set(pickKey, picked);
 	let targetId: string;
 	try {
 		await prior;
@@ -1567,6 +1571,7 @@ async function buildInitPayload(
 		reservedTargets.set(targetId, name);
 	} finally {
 		pickDone();
+		if (targetPicks.get(pickKey) === picked) targetPicks.delete(pickKey);
 	}
 	return {
 		mode: "attach",
