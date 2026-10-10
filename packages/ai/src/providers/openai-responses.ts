@@ -37,8 +37,13 @@ import {
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
-import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
+import { OpenAIHttpError, postOpenAIStream, projectOpenAIResponsesSelection } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
+import {
+	assertSafeGovernedJson,
+	createRequestSelectionGuard,
+	shouldAwaitPayloadHookResult,
+} from "../utils/request-selection";
 import {
 	adaptSchemaForStrict,
 	findStrictToolSchemaViolation,
@@ -679,6 +684,11 @@ const streamOpenAIResponsesOnce = (
 	options?: OpenAIResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const selectionOptions = {
+		preserveModelSelection: options?.preserveModelSelection,
+		preserveThinkingEffort: options?.preserveThinkingEffort,
+		onBeforeRequest: options?.onBeforeRequest,
+	};
 
 	// Start async processing
 	(async () => {
@@ -763,6 +773,7 @@ const streamOpenAIResponsesOnce = (
 			let activeReasoningEffortFallbackKey: string | undefined;
 			let activeRequestParams: OpenAIResponsesSamplingParams | undefined;
 			const applyReasoningEffortFallbackForRequest = (requestParams: OpenAIResponsesSamplingParams): string => {
+				if (selectionOptions.preserveThinkingEffort) return "";
 				const fallbackKey = createOpenAIReasoningEffortFallbackKey(
 					"responses",
 					resolvedBaseUrl,
@@ -773,6 +784,15 @@ const streamOpenAIResponsesOnce = (
 					: getOpenAIReasoningEffortFallback(providerSessionState, fallbackKey);
 				if (requestReasoningEffortFallback !== undefined) {
 					applyOpenAIReasoningEffortFallback(requestParams, requestReasoningEffortFallback);
+				}
+				if (selectionOptions.preserveModelSelection && model.reasoningMode) {
+					const reasoning = requestParams.reasoning;
+					const mode = reasoning && "mode" in reasoning ? reasoning.mode : undefined;
+					if (mode !== model.reasoningMode) {
+						throw new AIError.ModelSelectionError(
+							"Reasoning negotiation would discard the selected model's serving mode.",
+						);
+					}
 				}
 				return fallbackKey;
 			};
@@ -794,10 +814,20 @@ const streamOpenAIResponsesOnce = (
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 			const requestUrl = `${resolvedBaseUrl}/responses`;
+			let selectionGuard: ((serialized: string) => void) | undefined;
 			const applyPayloadReplacement = async (requestParams: OpenAIResponsesSamplingParams) => {
-				const replacementPayload = await options?.onPayload?.(requestParams, model);
+				selectionGuard = createRequestSelectionGuard(selectionOptions, requestParams, payload =>
+					projectOpenAIResponsesSelection(payload, selectionOptions),
+				);
+				const hookResult = options?.onPayload?.(requestParams, model);
+				const replacementPayload = shouldAwaitPayloadHookResult(hookResult, selectionGuard !== undefined)
+					? await hookResult
+					: hookResult;
 				const payload =
 					replacementPayload !== undefined ? (replacementPayload as OpenAIResponsesSamplingParams) : requestParams;
+				if (selectionOptions.preserveModelSelection || selectionOptions.preserveThinkingEffort) {
+					assertSafeGovernedJson(payload);
+				}
 				applyReasoningEffortFallbackForRequest(payload);
 				return payload;
 			};
@@ -837,6 +867,8 @@ const streamOpenAIResponsesOnce = (
 						url: requestUrl,
 						headers: headersWithTimeout,
 						body: requestParams,
+						...selectionOptions,
+						validateSerializedBody: selectionGuard,
 						signal: requestSignal,
 						fetch: wrapFetchForCopilotFallback(
 							options?.fetch,
@@ -844,6 +876,7 @@ const streamOpenAIResponsesOnce = (
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,
 							copilotCacheSnapshot,
+							selectionOptions.onBeforeRequest,
 						),
 						shouldRetryResponse: (response, bodyText) =>
 							!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
@@ -890,9 +923,13 @@ const streamOpenAIResponsesOnce = (
 						}
 						break;
 					} catch (error) {
+						if (AIError.is(AIError.classify(error), AIError.Flag.HostAdmission)) throw error;
 						const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 						const reasoningEffortFallback =
-							activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted
+							activeReasoningEffortFallbackKey &&
+							activeRequestParams &&
+							!requestSignal.aborted &&
+							!selectionOptions.preserveThinkingEffort
 								? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, activeRequestParams, {
 										explicitDisable:
 											options?.forceReasoningOff === true || options?.disableReasoning === true,
@@ -931,7 +968,7 @@ const streamOpenAIResponsesOnce = (
 							const fallbackBuilt = buildParams(
 								model,
 								context,
-								options,
+								{ ...options, ...selectionOptions },
 								providerSessionState,
 								strictToolsScope,
 								true,
@@ -986,7 +1023,7 @@ const streamOpenAIResponsesOnce = (
 						const currentBuilt = buildParams(
 							model,
 							context,
-							options,
+							{ ...options, ...selectionOptions },
 							providerSessionState,
 							strictToolsScope,
 							forceDisableStrictTools,
@@ -998,6 +1035,7 @@ const streamOpenAIResponsesOnce = (
 						// breaker only trips when each retry stores and the next turn re-chains.
 						currentParams.store = !zdrRejection;
 						const retryParams = await applyPayloadReplacement(currentParams);
+						if (zdrRejection) retryParams.store = false;
 						chained = { params: retryParams };
 						activeRawRequestDump.body = retryParams;
 						activeParams = currentParams;
@@ -1534,6 +1572,22 @@ export function buildParams(
 	disableStrictToolsOverride = false,
 	statefulCacheBaseline?: ResponseInput,
 ): { params: OpenAIResponsesSamplingParams; trailingScaffoldingItems: number; strictToolsApplied: boolean } {
+	const selectionOptions = {
+		preserveModelSelection: options?.preserveModelSelection,
+		preserveThinkingEffort: options?.preserveThinkingEffort,
+	};
+	if (selectionOptions.preserveModelSelection && model.reasoningMode && options?.forceReasoningOff) {
+		throw new AIError.ModelSelectionError("Thinking Off would discard the selected model's reasoning mode.");
+	}
+	if (
+		selectionOptions.preserveThinkingEffort &&
+		isForcedToolChoice(options?.toolChoice) &&
+		(!model.compat.supportsToolChoice || !model.compat.supportsForcedToolChoice)
+	) {
+		throw new AIError.ModelSelectionError(
+			"The forced tool selection cannot be honored with the fixed thinking effort.",
+		);
+	}
 	const policy = resolveOpenAICompatPolicy(model, {
 		endpoint: "responses",
 		reasoning: options?.reasoning,
@@ -1692,6 +1746,17 @@ export function buildParams(
 		filterReasoningHistory: options?.filterReasoningHistory,
 		omitReasoningEffort: options?.omitReasoningEffort,
 	});
+	if (
+		selectionOptions.preserveThinkingEffort &&
+		options?.reasoning !== undefined &&
+		!options?.disableReasoning &&
+		!options?.forceReasoningOff &&
+		(!reasoningPolicy.reasoning.enabled || reasoningPolicy.reasoning.omitReasoningEffort)
+	) {
+		throw new AIError.ModelSelectionError(
+			"The selected reasoning effort cannot be honored with this tool request; no effort suppression is permitted.",
+		);
+	}
 	applyResponsesCompatPolicy(params, reasoningPolicy, {
 		reasoningSummary: resolveReasoningSummaryOption(model, options),
 		forceReasoningOff: options?.forceReasoningOff,
@@ -1708,6 +1773,17 @@ export function buildParams(
 		params.reasoning = { ...params.reasoning, mode: model.reasoningMode };
 	}
 	applyResponsesStableEffort(model, params, messages, options, providerSessionState);
+	if (
+		selectionOptions.preserveThinkingEffort &&
+		options?.disableReasoning &&
+		!options.forceReasoningOff &&
+		model.reasoning
+	) {
+		const disabled =
+			params.reasoning?.effort === "none" ||
+			(params.reasoning !== undefined && "enabled" in params.reasoning && params.reasoning.enabled === false);
+		if (!disabled) throw new AIError.ModelSelectionError("This Responses endpoint cannot honor fixed Thinking Off.");
+	}
 
 	if (model.compat.isVercelGatewayHost) {
 		applyVercelResponsesCacheControls(params, model.compat, cacheRetention);
@@ -1715,7 +1791,23 @@ export function buildParams(
 		applyOpenAIGatewayRouting(params, model.compat);
 	}
 
+	if (selectionOptions.preserveModelSelection || selectionOptions.preserveThinkingEffort) {
+		assertSafeGovernedJson(params);
+		assertSafeGovernedJson(options?.extraBody);
+	}
+	const configSelection =
+		selectionOptions.preserveModelSelection || selectionOptions.preserveThinkingEffort
+			? projectOpenAIResponsesSelection(params, selectionOptions)
+			: undefined;
+	const configGuard = createRequestSelectionGuard(selectionOptions, configSelection, selection => selection);
 	applyOpenAIExtraBody(params, options?.extraBody);
+	if (configGuard) {
+		assertSafeGovernedJson(params);
+		// Chaining may legitimately omit historical controls. Reject config
+		// weakening before chaining, then capture that derived wire payload
+		// separately before the mutable hook.
+		configGuard(JSON.stringify(projectOpenAIResponsesSelection(params, selectionOptions)));
+	}
 	applyOpenAIResponsesPromptCachePolicy(params, model, options, statefulCacheBaseline);
 
 	let trailingScaffoldingItems = 0;

@@ -17,6 +17,8 @@ import { obfuscateProviderContext } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import type { SessionManager } from "./session-manager";
+import { concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { resolveRoleRoute, wrapRoleRouteStream, type RoleRoutePermit } from "../task/role-routing";
 
 import { cfgCompactionHandoffSaveToDisk } from "./context-settings";
 
@@ -42,6 +44,7 @@ export interface SessionHandoffHost {
 	sessionManager: SessionManager;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
+	roleRoute?(): RoleRoutePermit | undefined;
 	sideStreamFn: StreamFn;
 	obfuscator(): SecretObfuscator | undefined;
 	model(): Model | undefined;
@@ -124,6 +127,10 @@ export class SessionHandoff {
 			if (!apiKey) {
 				throw new Error(`No API key for ${model.provider}`);
 			}
+			const getPermit = () => this.#host.roleRoute?.();
+			const handoffStream = getPermit()
+				? wrapRoleRouteStream(getPermit, this.#host.sideStreamFn, this.#host.modelRegistry)
+				: this.#host.sideStreamFn;
 
 			// Build the handoff request through the SAME pipeline a live turn uses
 			// (`runEphemeralTurn` / `/btw` share it) so the oneshot reads the
@@ -176,7 +183,17 @@ export class SessionHandoff {
 				{
 					streamOptions: handoffStreamOptions,
 					completeImpl: async (requestModel, requestContext, requestOptions) => {
-						const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
+						const permit = getPermit();
+						const selected = permit ? resolveRoleRoute(permit, this.#host.modelRegistry) : undefined;
+						const streamOptions = selected?.fixedEffort
+							? {
+									...requestOptions,
+									reasoning: toReasoningEffort(concreteThinkingLevel(selected.thinkingLevel)),
+									disableReasoning: selected.thinkingLevel === "off",
+									forceReasoningOff: selected.thinkingLevel === "off",
+								}
+							: requestOptions;
+						const stream = await handoffStream(requestModel, requestContext, streamOptions);
 						return stream.result();
 					},
 					telemetry: resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId()),

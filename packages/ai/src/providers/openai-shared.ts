@@ -844,7 +844,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 		preserve_thinking?: boolean;
 		reasoning_effort?: string;
 	};
-	reasoning?: { effort?: string; enabled?: boolean; max_tokens?: number };
+	reasoning?: { effort?: string; enabled?: boolean; max_tokens?: number; mode?: Model["reasoningMode"] };
 	venice_parameters?: { disable_thinking?: boolean; [key: string]: unknown };
 	reasoning_effort?: string | null;
 	service_tier?: ServiceTier;

@@ -190,6 +190,8 @@ omp auth-gateway check   [--strict] [--json]
 | `POST` | `/v1/messages`          | bearer | Anthropic Messages wire format                               |
 | `POST` | `/v1/responses`         | bearer | OpenAI Responses wire format                                 |
 | `POST` | `/v1/pi/stream`         | bearer | Native `pi-ai` stream wire format                            |
+| `POST` | `/v1/pi/stream/admitted` | bearer | Governed native stream with per-attempt origin approval |
+| `POST` | `/v1/pi/admission`      | bearer | One-use origin decision for a pending governed inference |
 | `POST` | `/v1/systemone`         | bearer | TypeSafe System One judgments (`judge` models, e.g. `typesafe/jev-latest`); `/alpha/decisions` is the OpenRouter Decisions alias |
 | `POST` | `/v1/images/generations` | bearer | Image generation, OpenAI Images JSON wire; `/v1/images` is the OpenRouter alias (`image` models) |
 | `POST` | `/v1/images/edits`      | bearer | Image edits: OpenAI multipart or OpenRouter JSON input images |
@@ -200,6 +202,8 @@ omp auth-gateway check   [--strict] [--json]
 | `POST` | `/v1/videos`            | bearer | Submit a video generation job, OpenRouter wire (`video` models on `openrouter-video`); answers `202` with gateway-rewritten polling/content URLs |
 | `GET`  | `/v1/videos/:id`        | bearer | Poll a video job. `:id` is gateway-issued and stateless: it encodes provider, model, and upstream job id |
 | `GET`  | `/v1/videos/:id/content` | bearer | Stream the finished video bytes with the upstream content type |
+
+Governed pi-native clients use `/v1/pi/stream/admitted` with `admission: { version: 1 }`. The gateway confirms the protocol with `x-omp-native-admission: 1` and emits an `inference_admission` SSE event before each actual provider request, including retries. The origin rechecks its current permission and posts `{ requestId, nonce, allow }` to `/v1/pi/admission` using the same authorization as the stream. Each random nonce is single-use and request-bound; a different authenticated origin or a consumed nonce cannot approve it. Abort and stream closure release pending decisions. A gateway without this protocol cannot serve a governed client; the client does not fall back to `/v1/pi/stream`. Ordinary native clients retain the existing endpoint. Updating a client does not deploy or restart its gateway.
 
 The model id is read from the top-level `model` field for foreign wire formats and from the pi-native request body for `/v1/pi/stream`. It may be provider-qualified (`typesafe/jev-latest`) or bare (`jev-latest`). The gateway resolves it against the served catalog — every registry model of a kind the gateway has a route for (`chat`, `judge`, `image`, `tts`, `stt`, `embedding`, `rerank`, `video`), scoped to providers the broker holds credentials for — parses the inbound wire format, resolves the provider credential from broker-backed `AuthStorage`, dispatches through the matching `pi-ai` client (`streamSimple()` for chat, `TypeSafeJudge` for judgments, `generateImage` / `synthesizeSpeech` / `transcribeAudio` / `embed` / `rerank` / `submitVideo` for the modality routes), and re-encodes the result to the inbound format (SSE for streamed chat responses).
 

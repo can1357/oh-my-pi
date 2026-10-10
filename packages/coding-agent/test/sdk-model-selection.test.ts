@@ -18,18 +18,18 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { createTaskModelRoute } from "@oh-my-pi/pi-coding-agent/task/role-routing";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 import {
 	cfgCompactionModelThresholds,
 	cfgCompactionModelThresholdsEnabled,
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
-import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
-
 describe("createAgentSession deferred model pattern resolution", () => {
 	let tempDir: string;
 	let fixtureDir: string;
@@ -659,7 +659,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		const { session, modelFallbackMessage } = await createAgentSession({
 			...buildSessionOptions("runtime-provider/runtime-model"),
 			settings,
-			modelPatternAuthFallback: "runtime-provider/runtime-fallback-model",
 		});
 
 		try {
@@ -738,51 +737,205 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
-	test("uses auth fallback when deferred subagent modelPattern resolves without working credentials", async () => {
+	test("rejects an unavailable governed singleton instead of using the authenticated default", async () => {
 		const parentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!parentModel) {
-			throw new Error("Expected bundled anthropic parent model");
-		}
+		if (!parentModel) throw new Error("Expected bundled anthropic parent model");
+		const options = buildSessionOptions("runtime-provider/runtime-model");
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.keys.setRuntime(parentModel.provider, "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "fallback-models.yml"));
-		const getApiKeySpy = vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async requested => {
-			if (requested.provider === "runtime-provider") return undefined;
-			if (requested.provider === parentModel.provider) return "test-key";
-			return undefined;
+		options.authStorage = authStorage;
+		options.modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "governed-fallback-models.yml"));
+		const settings = Settings.isolated({ modelRoles: { default: `${parentModel.provider}/${parentModel.id}` } });
+		options.authStorage.keys.setRuntime(parentModel.provider, "test-key");
+		const { permit } = await createTaskModelRoute({
+			authority: { settings, agentName: "task", agentModel: "runtime-provider/runtime-model" },
+			modelRegistry: options.modelRegistry,
+			selectors: ["runtime-provider/runtime-model"],
+			explicit: true,
 		});
-		const { session, modelFallbackMessage } = await createAgentSession({
-			cwd: tempDir,
-			agentDir: tempDir,
-			authStorage,
-			modelRegistry,
-			sessionManager: SessionManager.inMemory(),
-			disableExtensionDiscovery: true,
-			extensions: [providerExtension],
-			skills: [],
-			contextFiles: [],
-			promptTemplates: [],
-			slashCommands: [],
-			enableMCP: false,
-			enableLsp: false,
-			skipPythonPreflight: true,
-			rules: [],
-			preloadedCustomToolPaths: [],
-			toolNames: ["read"],
-			modelPattern: "runtime-provider/runtime-model",
-			modelPatternAuthFallback: `${parentModel.provider}/${parentModel.id}`,
-		});
-
-		try {
-			expect(session.model?.provider).toBe(parentModel.provider);
-			expect(session.model?.id).toBe(parentModel.id);
-			expect(modelFallbackMessage).toBeUndefined();
-		} finally {
-			await session.dispose();
-			getApiKeySpy.mockRestore();
-		}
+		vi.spyOn(options.modelRegistry, "hasConfiguredAuth").mockImplementation(
+			model => model.provider === parentModel.provider,
+		);
+		await expect(createAgentSession({ ...options, settings, roleRoute: permit })).rejects.toThrow(
+			/No usable model remains|selected occurrence is unavailable/,
+		);
 	});
+
+	test.each(["omitted", "sdk-pattern", "explicit-unpinned", "explicit-high"] as const)(
+		"keeps external thinking for %s selection without weakening a fixed request",
+		async selectionKind => {
+			const requests: Array<{
+				model: string;
+				reasoning?: { effort?: string };
+				tools?: Array<{ type: string; name?: string }>;
+				input?: Array<{ type?: string; call_id?: string }>;
+			}> = [];
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch: async request => {
+					requests.push((await request.json()) as (typeof requests)[number]);
+					if (requests.length === 1) {
+						const argumentsJson = JSON.stringify({ thoughts: "Check the request before answering." });
+						const item = { type: "function_call", id: "fc_think", call_id: "call_think", name: "think" };
+						const events = [
+							{ type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "" } },
+							{
+								type: "response.function_call_arguments.done",
+								output_index: 0,
+								item_id: item.id,
+								arguments: argumentsJson,
+							},
+							{
+								type: "response.output_item.done",
+								output_index: 0,
+								item: { ...item, arguments: argumentsJson },
+							},
+							{
+								type: "response.completed",
+								response: {
+									id: "resp_external_think",
+									status: "completed",
+									usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+								},
+							},
+						];
+						return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+							headers: { "content-type": "text/event-stream" },
+						});
+					}
+					const events = [
+						{ type: "response.created", response: { id: "resp_external", status: "in_progress" } },
+						{
+							type: "response.output_item.added",
+							output_index: 0,
+							item: {
+								type: "message",
+								id: "msg_external",
+								role: "assistant",
+								status: "in_progress",
+								content: [],
+							},
+						},
+						{ type: "response.output_text.delta", output_index: 0, item_id: "msg_external", delta: "Done." },
+						{
+							type: "response.output_item.done",
+							output_index: 0,
+							item: {
+								type: "message",
+								id: "msg_external",
+								role: "assistant",
+								status: "completed",
+								content: [{ type: "output_text", text: "Done." }],
+							},
+						},
+						{
+							type: "response.completed",
+							response: {
+								id: "resp_external",
+								status: "completed",
+								usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+							},
+						},
+					];
+					return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+						headers: { "content-type": "text/event-stream" },
+					});
+				},
+			});
+			let session: AgentSession | undefined;
+			try {
+				const selector = "external-thinking-local/worker";
+				const settings = Settings.isolated({
+					modelRoles: { default: selector, worker: selector },
+					externalThinking: true,
+					"compaction.enabled": false,
+					"todo.enabled": false,
+				});
+				const authStorage = createInMemoryAuthStorage();
+				authStoragesToClose.push(authStorage);
+				const modelPath = path.join(tempDir, "external-thinking-models.yml");
+				await Bun.write(
+					modelPath,
+					JSON.stringify({
+						providers: {
+							"external-thinking-local": {
+								baseUrl: `${server.url.origin}/v1`,
+								api: "openai-responses",
+								apiKey: "test-only-key",
+								models: [
+									{
+										id: "worker",
+										name: "External thinking worker",
+										reasoning: true,
+										thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+										input: ["text"],
+										supportsTools: true,
+										cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+										contextWindow: 32768,
+										maxTokens: 1024,
+									},
+								],
+							},
+						},
+					}),
+				);
+				const modelRegistry = new ModelRegistry(authStorage, modelPath, { settings });
+				const roleRoute = selectionKind.startsWith("explicit")
+					? (
+							await createTaskModelRoute({
+								authority: { settings, agentName: "worker" },
+								modelRegistry,
+								selectors: [selectionKind === "explicit-high" ? `${selector}:high` : selector],
+								explicit: true,
+							})
+						).permit
+					: undefined;
+				({ session } = await createAgentSession({
+					cwd: tempDir,
+					agentDir: tempDir,
+					authStorage,
+					modelRegistry,
+					settings,
+					roleRoute,
+					modelPattern: selectionKind === "sdk-pattern" ? selector : undefined,
+					thinkingLevel: Effort.High,
+					sessionManager: SessionManager.inMemory(tempDir),
+					cacheWarming: false,
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					slashCommands: [],
+					rules: [],
+					preloadedCustomToolPaths: [],
+					toolNames: ["think"],
+					restrictToolNames: true,
+					enableMCP: false,
+					enableLsp: false,
+					skipPythonPreflight: true,
+					taskDepth: 1,
+				}));
+				await session.sendUserMessage("Answer briefly.");
+				expect(session.getLastAssistantMessage()?.stopReason).toBe("stop");
+				expect(requests).toHaveLength(2);
+				for (const request of requests) {
+					expect(request.model).toBe("worker");
+					expect(request.reasoning?.effort).toBe(selectionKind === "explicit-high" ? "high" : "none");
+					expect(request.tools).toContainEqual(expect.objectContaining({ type: "function", name: "think" }));
+				}
+				expect(session.agent.state.messages).toContainEqual(
+					expect.objectContaining({ role: "toolResult", toolName: "think", details: { recorded: true } }),
+				);
+				expect(requests[1]?.input).toContainEqual(
+					expect.objectContaining({ type: "function_call_output", call_id: "call_think" }),
+				);
+			} finally {
+				await session?.dispose();
+				server.stop(true);
+			}
+		},
+	);
 
 	test("resolves deferred role-alias modelPattern after extension providers register", async () => {
 		const settings = Settings.isolated();
@@ -1048,24 +1201,45 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
-	test("preserves deferred bare role fallback chains", async () => {
-		const settings = Settings.isolated();
-		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model");
-
-		const { session, modelFallbackMessage } = await createAgentSession({
-			...buildSessionOptions("task"),
-			modelPatternFallbackRole: "subagent:deferred",
-			settings,
+	test("keeps governed role retries inside the configured occurrence chain", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { task: "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model:high" },
 		});
-
+		const options = buildSessionOptions("@task");
+		options.sessionManager.appendSessionInit({
+			systemPrompt: ["Preserve the original task contract."],
+			task: "Inspect the configured task target.",
+			tools: ["read"],
+			agent: "task",
+		});
+		const { permit } = await createTaskModelRoute({
+			authority: { settings, agentName: "task" },
+			modelRegistry: options.modelRegistry,
+			selectors: ["@task"],
+			explicit: true,
+		});
+		const { session } = await createAgentSession({ ...options, settings, roleRoute: permit });
 		try {
-			expect(session.model?.provider).toBe("runtime-provider");
-			expect(session.model?.id).toBe("runtime-model");
-			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
-			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([
-				"runtime-provider/runtime-fallback-model",
-			]);
-			expect(modelFallbackMessage).toBeUndefined();
+			const primary = session.model;
+			const fallback = session.modelRegistry.find("runtime-provider", "runtime-fallback-model");
+			if (!primary || !fallback) throw new Error("Expected governed runtime models");
+			const observedSwitches: Array<{ model: string | undefined; thinking: string | undefined }> = [];
+			session.subscribe(event => {
+				if (event.type === "model_changed")
+					observedSwitches.push({ model: session.model?.id, thinking: session.thinkingLevel });
+			});
+			await session.setModelTemporary(fallback);
+			expect(session.model?.id).toBe("runtime-fallback-model");
+			expect(session.thinkingLevel).toBe(Effort.High);
+			expect(observedSwitches).toEqual([{ model: "runtime-fallback-model", thinking: Effort.High }]);
+			const receipt = session.sessionManager.getBranch().findLast(entry => entry.type === "session_init");
+			if (!receipt || receipt.type !== "session_init") throw new Error("Expected committed worker route receipt");
+			expect(receipt.roleRouting?.selectedOccurrence).toBe(1);
+			expect(receipt.resolvedModel).toBe("runtime-provider/runtime-fallback-model:high");
+			expect(receipt.task).toBe("Inspect the configured task target.");
+			expect(() => session.setThinkingLevel(Effort.Low, true)).toThrow("fixed approved effort");
+			await expect(session.setModelTemporary(primary)).rejects.toThrow("approved occurrence");
+			expect(session.model?.id).toBe("runtime-fallback-model");
 		} finally {
 			await session.dispose();
 		}
@@ -1088,7 +1262,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		);
 		const { session, modelFallbackMessage } = await createAgentSession({
 			...options,
-			modelPatternFallbackRole: "subagent:usage-aware",
 			settings,
 			hasUI: false,
 		});
@@ -1119,7 +1292,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 		const { session, modelFallbackMessage } = await createAgentSession({
 			...options,
-			modelPatternFallbackRole: "subagent:usage-aware-terminal",
 			settings,
 			hasUI: false,
 		});
@@ -1156,7 +1328,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		);
 		const { session } = await createAgentSession({
 			...options,
-			modelPatternFallbackRole: "subagent:usage-aware-acp",
 			settings,
 			hasUI: false,
 			deferUsageReserveConfirmation: true,
@@ -1189,63 +1360,59 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		).rejects.toThrow("reserve policy is fail-closed");
 	});
 
-	test("installs fallback chain for remaining deferred subagent modelPattern candidates", async () => {
-		const { session } = await createAgentSession({
-			...buildSessionOptions(["runtime-provider/runtime-model", "runtime-provider/runtime-fallback-model"]),
-			modelPatternFallbackRole: "subagent:deferred",
+	test("preserves configured auto when a governed ordered selection advances", async () => {
+		const selectors = ["runtime-provider/runtime-model", "runtime-provider/runtime-fallback-model:auto"];
+		const settings = Settings.isolated();
+		const options = buildSessionOptions(selectors);
+		const { permit } = await createTaskModelRoute({
+			authority: { settings, agentName: "task", agentModel: selectors },
+			modelRegistry: options.modelRegistry,
+			selectors,
+			explicit: true,
 		});
-
+		const { session } = await createAgentSession({ ...options, settings, roleRoute: permit });
 		try {
-			expect(session.model?.provider).toBe("runtime-provider");
-			expect(session.model?.id).toBe("runtime-model");
-			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
-			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([
-				"runtime-provider/runtime-fallback-model",
-			]);
+			const fallback = session.modelRegistry.find("runtime-provider", "runtime-fallback-model");
+			if (!fallback) throw new Error("Expected governed fallback model");
+			await session.setModelTemporary(fallback);
+			expect(session.model?.id).toBe("runtime-fallback-model");
+			expect(session.configuredThinkingLevel()).toBe("auto");
+			expect(() => session.setThinkingLevel(Effort.Low)).toThrow("approved automatic selector");
 		} finally {
 			await session.dispose();
 		}
 	});
 
-	test("installs an inherited fallback chain for a deferred singleton modelPattern", async () => {
+	test("does not inherit a generic default fallback for a governed concrete singleton", async () => {
 		const settings = Settings.isolated({
-			"retry.fallbackChains": {
-				default: ["runtime-provider/runtime-fallback-model"],
-			},
+			modelRoles: { default: "runtime-provider/runtime-fallback-model" },
+			"retry.fallbackChains": { default: ["runtime-provider/runtime-fallback-model"] },
 		});
-		settings.setModelRole("default", "runtime-provider/runtime-fallback-model");
-		const { session } = await createAgentSession({
-			...buildSessionOptions("runtime-provider/runtime-model"),
-			settings,
-			modelPatternFallbackRole: "subagent:deferred-default",
-			modelPatternDefaultFallbackChain: ["runtime-provider/runtime-fallback-model"],
+		const options = buildSessionOptions("runtime-provider/runtime-model");
+		const { permit } = await createTaskModelRoute({
+			authority: { settings, agentName: "task", agentModel: "runtime-provider/runtime-model" },
+			modelRegistry: options.modelRegistry,
+			selectors: ["runtime-provider/runtime-model"],
+			explicit: true,
 		});
-
+		const { session } = await createAgentSession({ ...options, settings, roleRoute: permit });
 		try {
-			expect(session.model?.provider).toBe("runtime-provider");
+			const fallback = session.modelRegistry.find("runtime-provider", "runtime-fallback-model");
+			if (!fallback) throw new Error("Expected authenticated configured fallback model");
+			await expect(session.setModelTemporary(fallback)).rejects.toThrow("approved occurrence");
 			expect(session.model?.id).toBe("runtime-model");
-			expect(session.settings.getModelRole("subagent:deferred-default")).toBe("runtime-provider/runtime-model");
-			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred-default"]).toEqual([
-				"runtime-provider/runtime-fallback-model",
-			]);
 		} finally {
 			await session.dispose();
 		}
 	});
 
-	test("splits deferred comma-delimited modelPattern and installs fallback chain", async () => {
-		const { session } = await createAgentSession({
-			...buildSessionOptions("runtime-provider/runtime-model,runtime-provider/runtime-fallback-model"),
-			modelPatternFallbackRole: "subagent:deferred",
-		});
-
+	test("splits deferred comma-delimited modelPattern without installing synthetic role settings", async () => {
+		const { session } = await createAgentSession(
+			buildSessionOptions("runtime-provider/runtime-model,runtime-provider/runtime-fallback-model"),
+		);
 		try {
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-model");
-			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
-			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([
-				"runtime-provider/runtime-fallback-model",
-			]);
 		} finally {
 			await session.dispose();
 		}

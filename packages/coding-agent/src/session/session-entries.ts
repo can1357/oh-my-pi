@@ -1,3 +1,4 @@
+import type { RoleRouteMetadata } from "../task/role-routing";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
 	ImageContent,
@@ -235,6 +236,8 @@ export interface CredentialPinEntry extends SessionEntryBase {
 /** Session init entry - captures initial context for subagent sessions (debugging/replay). */
 export interface SessionInitEntry extends SessionEntryBase {
 	type: "session_init";
+	/** Persisted closure/provenance for readmission; never an authorization capability. */
+	roleRouting?: RoleRouteMetadata;
 	/** System prompt blocks exactly as sent to the model; files written before blocks were kept store one joined string. */
 	systemPrompt: string[] | string;
 	/** Initial task/user message */
@@ -247,7 +250,7 @@ export interface SessionInitEntry extends SessionEntryBase {
 	modelRole?: string;
 	/** Initially resolved provider/model selector for historical display. */
 	resolvedModel?: string;
-	/** Subagent's `subagent:<id>` retry fallback role as installed at spawn; cold revival reinstalls it. Absent when none was installed or on older files. */
+	/** Historical legacy retry diagnostics; never restored as model authority. */
 	retryFallback?: RetryFallbackRole;
 	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */
 	readOnly?: boolean;

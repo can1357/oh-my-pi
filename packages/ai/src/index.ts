@@ -68,4 +68,5 @@ export * from "./utils/openrouter-headers";
 export * from "./utils/schema";
 export * from "./utils/thinking-loop";
 export * from "./utils/tool-call-loop-guard";
+export { canForceToolChoiceWhilePreservingEffort } from "./utils/tool-choice";
 export * from "./utils/validation";

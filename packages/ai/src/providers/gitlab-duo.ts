@@ -92,6 +92,7 @@ export function streamGitLabDuo(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
+	if (options?.preserveModelSelection || options?.preserveThinkingEffort) options = { ...options };
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
@@ -134,6 +135,13 @@ export function streamGitLabDuo(
 			const reasoningEffort = options.reasoning;
 			const anthropicReasoningEffort =
 				options.disableReasoning || options.forceReasoningOff ? undefined : options.reasoning;
+			if (
+				options.preserveThinkingEffort &&
+				reasoningEffort !== undefined &&
+				(!model.reasoning || options.disableReasoning || options.forceReasoningOff)
+			) {
+				throw new AIError.ModelSelectionError("The GitLab wire cannot honor the fixed requested effort.");
+			}
 
 			const inner =
 				route.api === "anthropic-messages"
@@ -165,6 +173,9 @@ export function streamGitLabDuo(
 								promptCacheKey: options.promptCacheKey,
 								providerSessionState: options.providerSessionState,
 								onPayload: options.onPayload,
+								preserveModelSelection: options.preserveModelSelection,
+								preserveThinkingEffort: options.preserveThinkingEffort,
+								onBeforeRequest: options.onBeforeRequest,
 								onResponse: options.onResponse,
 								onSseEvent: options.onSseEvent,
 								fetch: options.fetch,
@@ -206,6 +217,9 @@ export function streamGitLabDuo(
 									statefulResponses: options.statefulResponses,
 									providerSessionState: options.providerSessionState,
 									onPayload: options.onPayload,
+									preserveModelSelection: options.preserveModelSelection,
+									preserveThinkingEffort: options.preserveThinkingEffort,
+									onBeforeRequest: options.onBeforeRequest,
 									onResponse: options.onResponse,
 									onSseEvent: options.onSseEvent,
 									fetch: options.fetch,
@@ -242,6 +256,9 @@ export function streamGitLabDuo(
 									promptCacheKey: options.promptCacheKey,
 									providerSessionState: options.providerSessionState,
 									onPayload: options.onPayload,
+									preserveModelSelection: options.preserveModelSelection,
+									preserveThinkingEffort: options.preserveThinkingEffort,
+									onBeforeRequest: options.onBeforeRequest,
 									onResponse: options.onResponse,
 									onSseEvent: options.onSseEvent,
 									fetch: options.fetch,

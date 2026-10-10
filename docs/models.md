@@ -577,6 +577,8 @@ A model can exist in the registry without being available, and a configured cred
 fail when resolved for a request. `enabledProviders` controls foreign configuration-source discovery,
 not an allowlist of model transports.
 
+Availability is not permission to route a task/eval worker to that model. Worker routes must be authorized by current operator configuration, the selected agent's model contract, or the actual live parent; see [Task/eval worker routing](#taskeval-worker-routing).
+
 ## Runtime model resolution
 
 ### CLI and pattern parsing
@@ -651,6 +653,34 @@ lists. The advisor uses an explicitly configured `slow`, otherwise its own stron
 chain rather than inheriting the active conversation model.
 
 If a role points at another role, the target model still inherits normally and any explicit suffix on the referring role wins for that role-specific use.
+
+### Task/eval worker routing
+
+For `task`, eval `agent()`, and `workpool()`, `agent` selects semantic instructions and allowed tools; `model` independently selects a routing role/model. Omitting `model` retains ordinary configured agent routing, including stock role priorities, fuzzy configured selectors, authentication fallback, configured retries, coarse effort/AUTO, and prewalk. It does not create an explicit model-selection permit.
+
+A supplied `model` overrides exact settings and agent-frontmatter defaults. Its concrete candidates must already be authorized by the current operator's configured roles/fallbacks, the selected agent's frontmatter or exact `task.agentModelOverrides[agentName]` entry, or the actual live parent. Availability, credentials, enabled/catalog membership, and project recommendations are not explicit permission. An invalid, unauthorized, unavailable, or exhausted explicit request stops without dropping `model` or trying a lower-precedence source. Task batches put `model` on each `tasks[]` item, not on the container.
+
+Pass one selector or an ordered, non-empty array. Role aliases retain identity and may use their current configured approved fallback chain; custom roles work when actually configured. `@review:high`, for example, applies `high` throughout the configured `review` chain rather than choosing a `review` agent. No automatic-classifier roster limits these role names. Raw literal selections stay within the requested candidate closure and do not inherit another role/default/auth chain; list literal alternatives explicitly. Hooks may narrow that closure, never widen it; retries and revival revalidate current permission within it.
+
+Provider-side model alternatives and fallback payloads cannot replace the final admitted selection. Governed payload/configuration rewrites and loss of selected-model eligibility stop the request instead of triggering model recovery. Genuine provider failures may still advance through the requested approved chain. Cold nested revival rechecks the original operator's current grants, not child-owned routing/advisor overlays.
+
+Governed requests validate the actual serialized model and native effort controls after configuration and payload hooks, and re-admit each inference attempt, including transport retries. Local admission errors remain terminal; ordinary transient provider/configuration failures remain recoverable within the requested approved chain. Unsafe serializers, getters, and proxies cannot rewrite the guarded request.
+
+Governed local compaction and handoff retain the admitted model and fixed effort. Provider-native remote compaction is skipped, and a remote-only compaction policy reports a selection error. Opaque custom API transports, injected Anthropic clients, GitLab multi-model workflows, and Devin server-selected routers cannot provide the governed transport contract and reject instead of claiming a pin. Native Apple execution requires its supported platform; governed Apple hooks support mutation in place, not replacement payloads.
+
+`@default` is a worker-specific exact selection of the live parent's provider/model with its actual effort, not the configured `modelRoles.default` assignment or a parent-role fallback chain. `@default:high` overrides only effort. `@inherit` and bare `default`/`inherit` (also suffixed) are invalid. Unknown roles, empty arrays/selectors, and invalid suffixes fail preflight; registered literal model IDs ending in a recognized suffix remain literal IDs.
+
+A requested fixed suffix outranks the agent thinking default and task's supported coarse `effort` (`lo`/`med`/`hi`) field; it is never clamped or discarded, and unsupported effort fails. Without fixed effort, runtime effort selection remains available and configured `auto` remains `auto`. A pool applies its selector when creating each worker; follow-ups retain that worker's model/effort contract, not per-item rerouting.
+
+Examples, assuming `review` is a configured approved chat role and `reviewer` is a discovered agent:
+
+```js
+const review = await agent("Review the change", { agent: "reviewer", model: "@review:high" });
+const sameParent = await agent("Analyze with the parent's current model", { model: "@default" });
+const pool = await workpool("reviewer", { model: ["@review:high", "@default:high"] });
+```
+
+Role aliases may fall back within their approved configured chains. Use an exact `provider/model-id:high` instead when that concrete model is approved and no cross-model fallback is wanted.
 
 ### Model presets
 

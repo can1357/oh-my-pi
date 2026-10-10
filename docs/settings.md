@@ -457,6 +457,35 @@ Existing configs are migrated automatically when loaded. Retired backend selecto
 
 See [Models](./models.md) for the `models.yml` schema and custom-provider definitions.
 
+#### Task/eval model requests
+
+`task` items, eval `agent()`, and `workpool()` accept a raw `model` selector or ordered, non-empty array. `agent` chooses semantic instructions/tools; a supplied `model` independently chooses a routing role/model and overrides exact `task.agentModelOverrides[agentName]` and frontmatter defaults. Put task batch selections on each `tasks[]` item, never the container.
+
+Omitting `model` keeps ordinary configured agent routing, authentication fallback, configured retries, coarse effort/AUTO, and prewalk. Only explicit selections require a model-selection permit. Their concrete candidates must already be authorized by current operator roles/fallbacks, selected-agent frontmatter or an exact model override, or the actual live parent. Availability, authentication, enabled/catalog membership, `modelTags`, and project recommendations alone do not authorize an explicit request. Real custom configured roles support suffixes such as `@review:high`; no automatic-classifier roster is an allowlist.
+
+Role aliases retain identity and may use their currently configured approved fallback chains. Raw literals stay inside the requested candidate closure instead of acquiring an unrelated role/default/auth chain; list additional literal candidates explicitly. `@default` selects the exact live parent with its actual effort, not `modelRoles.default` or a parent-role fallback chain; `@default:high` changes only effort. `@inherit` and bare `default`/`inherit` (also with suffixes) are invalid.
+
+A requested fixed suffix outranks agent defaults and the supported task coarse `effort` field (`lo`/`med`/`hi`), is not clamped or discarded, and fails when unsupported. Unqualified routes permit runtime effort selection; configured `auto` remains `auto`. Explicit invalid, unauthorized, unavailable, or exhausted selection stops without dropping `model` or substituting another source. Hooks may narrow, never enlarge, the approved closure; retries and revival revalidate current permission within it. Pools select models at worker creation; follow-ups retain each worker's model/effort contract.
+
+For example, this operator configuration authorizes a custom `review` chain:
+
+```yaml
+modelRoles:
+  review: openai/gpt-5.4:high
+retry:
+  fallbackChains:
+    review:
+      - openai/gpt-5.5:high
+```
+
+```js
+const review = await agent("Review the change", { agent: "reviewer", model: "@review:high" });
+const sameParent = await agent("Analyze on the live parent", { model: "@default" });
+```
+
+The alias may use its approved configured chain; an approved exact `openai/gpt-5.4:high` request stays on that model. See [Task/eval worker routing](./models.md#taskeval-worker-routing).
+
+
 ### Advisor
 
 Advisors review primary turns on a configurable cadence and can inject advice. Enable them with `advisor.enabled`, `/advisor on`, or `--advisor`. For the default single advisor, `modelRoles.advisor` selects its model; when unset, resolution uses a configured `slow` role or the built-in slow-model priorities. An unavailable explicit advisor assignment does not silently select another model.
@@ -583,9 +612,9 @@ providers:
 | `providers.openai-codex.codeMode`           | enum    | `off`             | Codex Code Mode for `code_mode_only` models, mirroring codex-rs: the direct tool surface collapses to `eval`/`ask`/`todo` and every other session tool is invoked from `eval` cells via its `tool.<name>()` bridge, collapsing multi-step tool work into one model round trip. `auto` follows the model catalog's `tool_mode` flag; `on` forces it for any Codex model; `off` (default) leaves the full direct surface. The turn metadata carries codex-rs's `tool_namespaces_info` exposure snapshot while active. |
 | `providers.openai-codex.codeModeDirectTools` | array   | `[]`              | Extra tool names to keep directly callable alongside `eval`/`ask`/`todo` when Codex Code Mode is active; entries that are not enabled in the session are ignored. |
 
-When the active chat model keeps failing (429s, quota walls, provider outages) and `retry.modelFallback` is on, the session picks the chain that owns the failing model, by specificity: an exact `provider/model-id` key, then a `provider/*` wildcard, then the current role's chain, then `default` — which also owns a live model that belongs to no role (`/model` switch, ephemeral hop). The effective chain is the owning role's primary followed by its configured entries, and a live selector that appears nowhere in it is offered the whole chain. If several roles assign the same model, yaml key order does not decide: the live session role wins, and `default` wins over other matching chat roles when the session is not on those roles. It skips chat candidates whose selectors are still cooling down and switches for the rest of the turn. Model-kind runners resolve their named role chain separately and never consume `default`. Subagents get their own per-spawn chains when their agent definition lists multiple model patterns — the first resolvable pattern is primary and the rest become its fallbacks; there is no `agent:<name>` key in `fallbackChains`.
+For ordinary sessions, when the active chat model keeps failing (429s, quota walls, provider outages) and `retry.modelFallback` is on, the session picks the chain that owns the failing model, by specificity: an exact `provider/model-id` key, then a `provider/*` wildcard, then the current role's chain, then `default` — which also owns a live model that belongs to no role (`/model` switch, ephemeral hop). The effective chain is the owning role's primary followed by its configured entries, and a live selector that appears nowhere in it is offered the whole chain. If several roles assign the same model, yaml key order does not decide: the live session role wins, and `default` wins over other matching chat roles when the session is not on those roles. It skips chat candidates whose selectors are still cooling down and switches for the rest of the turn. Model-kind runners resolve their named role chain separately and never consume `default`. Explicit task/eval workers instead retain their approved per-spawn candidate closure, including any permitted configured role chain; raw literals and `@default` do not acquire unrelated session fallbacks. There is no `agent:<name>` key in `fallbackChains`.
 
-A prefixed wildcard such as `openrouter/google/*` can be used as a chain key or entry: it matches ids under that prefix or prepends the prefix to the failing model's bare id when changing providers. Bare fallback entries inherit the failing turn's thinking level; an explicit suffix can replace it. When a chain is exhausted, recovery can consult the current fallback model's own chain as well, and each hop still consumes a retry attempt. See [Retry policy](./non-compaction-retry-policy.md) for recovery ordering and quota behavior.
+A prefixed wildcard such as `openrouter/google/*` can be used as a chain key or entry: it matches ids under that prefix or prepends the prefix to the failing model's bare id when changing providers. In ordinary sessions, including workers that omit `model`, bare fallback entries inherit the failing turn's thinking level; an explicit suffix can replace it. When a chain is exhausted, ordinary recovery can consult the current fallback model's own chain as well, and each hop still consumes a retry attempt. Explicit task/eval recovery cannot enlarge its approved candidate closure or weaken fixed requested effort. See [Retry policy](./non-compaction-retry-policy.md) for recovery ordering and quota behavior.
 
 ### Tools and approvals
 

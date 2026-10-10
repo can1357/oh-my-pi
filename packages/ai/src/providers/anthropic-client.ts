@@ -26,7 +26,8 @@ import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeout
 
 export { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError };
 
-import type { FetchImpl } from "../types";
+import type { FetchImpl, StreamOptions } from "../types";
+import { invokeBeforeRequest, serializeRequestBody } from "../utils/request-selection";
 import type { MessageCreateParams } from "./anthropic-wire";
 
 /** Default pre-response timeout, matching the SDK's 10-minute default. */
@@ -37,7 +38,10 @@ const INITIAL_RETRY_DELAY_S = 0.5;
 const MAX_RETRY_DELAY_S = 8;
 
 /** Per-request options accepted by {@link AnthropicMessages.create}. */
-export interface AnthropicRequestOptions {
+export interface AnthropicRequestOptions extends Pick<
+	StreamOptions,
+	"preserveModelSelection" | "preserveThinkingEffort" | "onBeforeRequest"
+> {
 	signal?: AbortSignal;
 	/** Pre-response timeout in milliseconds. */
 	timeout?: number;
@@ -51,6 +55,12 @@ export interface AnthropicRequestOptions {
 	maxRetryDelayMs?: number;
 	/** Per-request headers merged after client defaults. */
 	headers?: Record<string, string>;
+	/** Owned-provider capture, reused by protocol and transport retries. */
+	serializedBody?: string;
+	/** Checks the final body after owned transport rewrites. */
+	requestSelectionGuard?: (serialized: string) => void;
+	/** The admitted owned Messages endpoint, including its beta channel. */
+	requestUrl?: string;
 }
 
 /**
@@ -91,6 +101,8 @@ export interface AnthropicClientOptions {
 	defaultHeaders?: Record<string, string>;
 	fetch?: FetchImpl;
 	fetchOptions?: AnthropicFetchOptions;
+	/** Owned byte rewrite applied before selection checks and every send. */
+	prepareRequestBody?: (serialized: string) => string | Uint8Array<ArrayBuffer>;
 }
 
 function createAbortError(): Error {
@@ -241,22 +253,45 @@ export class AnthropicHttpClient {
 		options?: AnthropicRequestOptions,
 	): Promise<Response> {
 		const opts = this.#options;
+		const onBeforeRequest = options?.onBeforeRequest;
 		const fetchFn: FetchImpl = opts.fetch ?? fetch;
 		const callerSignal = options?.signal;
 		const timeoutMs = options?.timeout ?? opts.timeout ?? DEFAULT_TIMEOUT_MS;
 		const maxRetries = Math.max(0, options?.maxRetries ?? opts.maxRetries ?? DEFAULT_MAX_RETRIES);
 		const maxRetryDelayMs = options?.maxRetryDelayMs ?? opts.maxRetryDelayMs ?? 60_000;
 		const url = `${opts.baseURL ?? "https://api.anthropic.com"}${path}`;
+		if (options?.requestUrl !== undefined && url !== options.requestUrl) {
+			throw new AIError.ModelSelectionError("The owned Anthropic transport changed the admitted request endpoint.");
+		}
 		const headers = this.#buildHeaders(options?.headers);
-		const body = params === undefined ? undefined : JSON.stringify(params);
+		const serializedBody =
+			options?.serializedBody ?? (params === undefined ? undefined : serializeRequestBody(params, options));
+		const preparedBody =
+			serializedBody === undefined ? undefined : (opts.prepareRequestBody?.(serializedBody) ?? serializedBody);
+		const body =
+			(options?.preserveModelSelection || options?.preserveThinkingEffort) && preparedBody instanceof Uint8Array
+				? new TextDecoder().decode(preparedBody)
+				: preparedBody;
+		if (options?.requestSelectionGuard && body !== undefined) {
+			options.requestSelectionGuard(typeof body === "string" ? body : new TextDecoder().decode(body));
+		}
 
 		for (let attempt = 0; ; attempt++) {
 			if (callerSignal?.aborted) throw createAbortError();
+			await invokeBeforeRequest(onBeforeRequest);
 
 			let response: Response;
 			try {
 				response = await this.#fetchOnce(fetchFn, url, method, headers, body, timeoutMs, callerSignal);
 			} catch (error) {
+				const errorId = AIError.classify(error);
+				if (
+					AIError.is(errorId, AIError.Flag.HostAdmission) ||
+					AIError.is(errorId, AIError.Flag.Abort) ||
+					AIError.is(errorId, AIError.Flag.UserInterrupt)
+				) {
+					throw error;
+				}
 				if (callerSignal?.aborted) throw createAbortError();
 				if (attempt < maxRetries) {
 					await this.#backoff(attempt, undefined, callerSignal);
@@ -291,7 +326,7 @@ export class AnthropicHttpClient {
 		url: string,
 		method: "GET" | "POST",
 		headers: Record<string, string>,
-		body: string | undefined,
+		body: string | Uint8Array<ArrayBuffer> | undefined,
 		timeoutMs: number,
 		callerSignal: AbortSignal | undefined,
 	): Promise<Response> {

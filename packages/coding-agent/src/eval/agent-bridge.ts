@@ -6,6 +6,7 @@ import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
 import {
 	buildStructuredSubagentRecoveryHint,
+	invalidModelSelectorReason,
 	reserveStructuredSubagentId,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
@@ -25,6 +26,7 @@ export const EVAL_AGENT_BRIDGE_NAME = "__agent__";
 const agentArgsSchema = type({
 	prompt: "string>0",
 	"agent?": "string>0",
+	"model?": "string | string[]",
 	"label?": "string",
 	"schema?": "unknown",
 	"schemaMode?": "'permissive' | 'strict'",
@@ -38,6 +40,7 @@ const agentArgsSchema = type({
 interface EvalAgentArgs {
 	prompt: string;
 	agent?: string;
+	model?: string | string[];
 	label?: string;
 	schema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
@@ -66,7 +69,8 @@ export interface EvalAgentResult {
 	details: {
 		agent: string;
 		id: string;
-		model?: string | string[];
+		/** Host-observed serving selector, not the requested candidate array. */
+		model?: string;
 		structured: boolean;
 		schemaSource?: "caller" | "agent" | "session";
 		schemaMode?: StructuredSubagentSchemaMode;
@@ -89,6 +93,8 @@ function parseAgentArgs(args: unknown): EvalAgentArgs {
 	if (result instanceof type.errors) {
 		throw new ToolError(`agent() received invalid arguments: ${result.summary}`);
 	}
+	const selectorProblem = invalidModelSelectorReason(result.model, "agent()");
+	if (selectorProblem) throw new ToolError(selectorProblem);
 	return result;
 }
 
@@ -140,7 +146,7 @@ async function buildEvalAgentResult(execution: StructuredSubagentResult): Promis
 	const schemaSource = structuredOutput?.source === "none" ? undefined : structuredOutput?.source;
 	const schemaMode = structured ? structuredOutput?.mode : undefined;
 	const schemaStatus = structuredOutput?.status === "unavailable" ? undefined : structuredOutput?.status;
-	const model = result.resolvedModel ?? policy.modelOverride;
+	const model = result.resolvedModel;
 	const nestedPatches = result.nestedPatches?.length ? result.nestedPatches : undefined;
 	const isolationSummary = mergeSummary ? mergeSummary.trim() : undefined;
 	return {
@@ -196,6 +202,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			invocationKind: "eval",
 			assignment: parsed.prompt,
 			...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
+			...(parsed.model !== undefined ? { model: parsed.model } : {}),
 			...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 			...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
 			...(isolation ? { isolation } : {}),
@@ -219,6 +226,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						invocationKind: "eval",
 						assignment: parsed.prompt,
 						...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
+						...(parsed.model !== undefined ? { model: parsed.model } : {}),
 						...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 						...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
 						identity: { id, label: parsed.label },

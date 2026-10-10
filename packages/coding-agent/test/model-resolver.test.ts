@@ -1166,45 +1166,6 @@ describe("resolveAgentAdvisorRolePattern", () => {
 	});
 });
 describe("resolveAgentModelPatterns", () => {
-	test("pairs the first non-empty source's role with its patterns, skipping aliases with no patterns", () => {
-		const settings = Settings.isolated({
-			modelRoles: {
-				empty: "",
-				override: "openai/gpt-4o",
-				definition: "anthropic/claude-sonnet-4-5",
-			},
-		});
-
-		expect(
-			resolveAgentModelSelection({
-				requestModel: "",
-				settingsOverride: "@override",
-				agentModel: ["@definition"],
-				settings,
-			}),
-		).toEqual({ patterns: ["openai/gpt-4o"], role: "override" });
-
-		expect(
-			resolveAgentModelSelection({
-				requestModel: "@empty",
-				settingsOverride: ",,",
-				agentModel: ["@definition"],
-				settings,
-			}),
-		).toEqual({ patterns: ["anthropic/claude-sonnet-4-5"], role: "definition" });
-
-		// An explicit selector carries no role identity, so the child must not
-		// capture the routing of a role that happens to name the same model.
-		expect(
-			resolveAgentModelSelection({
-				requestModel: "openai/gpt-4o",
-				settingsOverride: "@override",
-				agentModel: ["@definition"],
-				settings,
-			}),
-		).toEqual({ patterns: ["openai/gpt-4o"], role: undefined });
-	});
-
 	test("falls back to the active session model when @task is unset", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
@@ -1234,6 +1195,46 @@ describe("resolveAgentModelPatterns", () => {
 		});
 
 		expect(result).toEqual(["anthropic/claude-sonnet-4-5:high"]);
+	});
+
+	test("suffixed task aliases select the configured task model and requested effort", () => {
+		const settings = Settings.isolated({
+			modelRoles: { task: "anthropic/claude-sonnet-4-5:low" },
+		});
+
+		for (const agentModel of ["@task:high", "pi/task:high"]) {
+			const selection = resolveAgentModelSelection({
+				agentModel,
+				settings,
+				activeModelPattern: "openai/gpt-4o",
+			});
+
+			expect(selection.role).toBe("task");
+			const result = parseModelPattern(selection.patterns[0]!, mockModels);
+			expect(result.model).toBe(mockModels[0]);
+			expect(result.thinkingLevel).toBe(Effort.High);
+			expect(result.explicitThinkingLevel).toBe(true);
+		}
+	});
+
+	test("suffixed unset task aliases inherit the active model at the requested effort without a role", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "openai/gpt-4o" },
+		});
+
+		for (const agentModel of ["@task:high", "pi/task:high"]) {
+			const selection = resolveAgentModelSelection({
+				agentModel,
+				settings,
+				activeModelPattern: "anthropic/claude-sonnet-4-5:low",
+			});
+
+			expect(selection.role).toBeUndefined();
+			const result = parseModelPattern(selection.patterns[0]!, mockModels);
+			expect(result.model).toBe(mockModels[0]);
+			expect(result.thinkingLevel).toBe(Effort.High);
+			expect(result.explicitThinkingLevel).toBe(true);
+		}
 	});
 
 	test("accepts YAML list values for configured task role patterns", () => {

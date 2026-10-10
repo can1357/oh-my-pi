@@ -105,7 +105,9 @@ export interface VibeParentSession {
 	asyncJobManager?: AsyncJobManager;
 	settings: ToolSession["settings"];
 	getActiveModelString?: () => string | undefined;
+	getActiveModelSelector?: () => string | undefined;
 	getModelString?: () => string | undefined;
+	getModelAuthoritySettings?: ToolSession["getModelAuthoritySettings"];
 }
 
 interface VibeRestoreCandidate {
@@ -357,17 +359,19 @@ export class VibeSessionRegistry {
 			throw new ToolError(`Bundled agent "${agentName}" for vibe cli "${cli}" is unavailable.`);
 		}
 		const agentModelOverrides = cfgTaskAgentModelOverrides.get(session.settings);
-		// Same contract as the task spawn path: the expansion discards the role
-		// alias (`@task`, `@smol`), so patterns and role identity come from one
-		// call — the child's inherited retry-fallback chain is keyed off the role.
+		const override = Object.hasOwn(agentModelOverrides, agentName) ? agentModelOverrides[agentName] : undefined;
 		const { patterns, role } = resolveAgentModelSelection({
-			settingsOverride: agentModelOverrides[agentName],
+			settingsOverride: override,
 			agentModel: agent.model,
 			settings: session.settings,
 			activeModelPattern: session.getActiveModelString?.(),
 			fallbackModelPattern: session.getModelString?.(),
 		});
-		return { agent, modelOverride: patterns, modelRole: role };
+		return {
+			agent,
+			modelOverride: patterns.length > 0 ? patterns : undefined,
+			modelRole: role,
+		};
 	}
 
 	async #appendLifecycleEvent(
@@ -1297,6 +1301,13 @@ export class VibeSessionRegistry {
 			modelOverride: record.modelOverride,
 			modelRole: record.modelRole,
 			parentActiveModelPattern: session.getActiveModelString?.(),
+			modelAuthority: {
+				settings: session.getModelAuthoritySettings?.() ?? session.settings,
+				agentName: record.agent.name,
+				agentModel: record.agent.model,
+				getParentSelector: () => session.getActiveModelSelector?.(),
+				getParentModel: () => session.getActiveModel?.(),
+			},
 			thinkingLevel: record.agent.thinkingLevel,
 			sessionFile,
 			persistArtifacts: Boolean(sessionFile),

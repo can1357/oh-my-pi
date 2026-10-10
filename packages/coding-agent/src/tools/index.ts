@@ -410,8 +410,10 @@ export interface ToolSession {
 	advertisedSessionAgents?: () => readonly AgentDefinition[];
 	/** Get resolved model string if explicitly set for this session */
 	getModelString?: () => string | undefined;
-	/** Get the current session model string, regardless of how it was chosen */
+	/** Get the current provider/model display identity, regardless of how it was chosen. */
 	getActiveModelString?: () => string | undefined;
+	/** Exact live-parent selector for governed inheritance, including upstream routing and effective effort. */
+	getActiveModelSelector?: () => string | undefined;
 	/** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */
 	getActiveModel?: () => Model | undefined;
 	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
@@ -452,6 +454,8 @@ export interface ToolSession {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Settings instance for passing to subagents */
 	settings: Settings;
+	/** Original operator grants, excluding governed-session routing overlays. */
+	getModelAuthoritySettings?(): Settings;
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */

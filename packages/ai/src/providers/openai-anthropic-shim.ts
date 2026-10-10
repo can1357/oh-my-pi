@@ -9,6 +9,8 @@
  */
 
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
+import * as AIError from "../error";
 import { ANTHROPIC_THINKING, mapAnthropicToolChoice } from "../stream";
 import type { Context, Model, ModelSpec, SimpleStreamOptions, ThinkingControlMode } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -47,6 +49,8 @@ export function streamOpenAIAnthropicShim(
 	options: OpenAIAnthropicShimOptions | undefined,
 	config: OpenAIAnthropicShimConfig,
 ): AssistantMessageEventStream {
+	const governed = options?.preserveModelSelection === true || options?.preserveThinkingEffort === true;
+	if (governed) options = { ...options };
 	const stream = new AssistantMessageEventStream();
 	const format = options?.format ?? config.defaultFormat;
 	// The resolver form of `apiKey` is resolved upstream in `streamSimple`;
@@ -61,6 +65,11 @@ export function streamOpenAIAnthropicShim(
 			};
 
 			if (format === "anthropic") {
+				if (governed && model.reasoningMode !== undefined) {
+					throw new AIError.ModelSelectionError(
+						"The alternate Anthropic wire cannot encode the admitted model-mode selector.",
+					);
+				}
 				const anthropicModel = buildModel({
 					id: model.id,
 					name: model.name,
@@ -68,6 +77,14 @@ export function streamOpenAIAnthropicShim(
 					provider: model.provider,
 					baseUrl: config.anthropicBaseUrl,
 					headers: mergedHeaders,
+					...(governed
+						? {
+								requestModelId: resolveWireModelId(
+									model,
+									options?.disableReasoning || options?.forceReasoningOff ? undefined : options?.reasoning,
+								),
+							}
+						: {}),
 					contextWindow: model.contextWindow,
 					maxTokens: model.maxTokens,
 					reasoning: model.reasoning,
@@ -79,10 +96,23 @@ export function streamOpenAIAnthropicShim(
 				} as ModelSpec<"anthropic-messages">);
 
 				const reasoningEffort = options?.reasoning;
-				const thinkingEnabled = !!reasoningEffort && model.reasoning && !options?.disableReasoning;
+				const thinkingEnabled =
+					!!reasoningEffort &&
+					model.reasoning &&
+					!options?.disableReasoning &&
+					(!governed || !options?.forceReasoningOff);
 				const thinkingBudget = reasoningEffort
 					? (options?.thinkingBudgets?.[reasoningEffort] ?? ANTHROPIC_THINKING[reasoningEffort])
 					: undefined;
+				if (
+					options?.preserveThinkingEffort &&
+					reasoningEffort !== undefined &&
+					(!thinkingEnabled || thinkingBudget === undefined || thinkingBudget <= 0)
+				) {
+					throw new AIError.ModelSelectionError(
+						"The alternate Anthropic wire cannot honor the fixed requested effort.",
+					);
+				}
 
 				const innerStream = streamAnthropic(anthropicModel, context, {
 					apiKey,
@@ -100,12 +130,21 @@ export function streamOpenAIAnthropicShim(
 					sessionId: options?.sessionId,
 					promptCacheKey: options?.promptCacheKey,
 					onPayload: options?.onPayload,
+					preserveModelSelection: options?.preserveModelSelection,
+					preserveThinkingEffort: options?.preserveThinkingEffort,
+					onBeforeRequest: options?.onBeforeRequest,
 					onResponse: options?.onResponse,
 					onSseEvent: options?.onSseEvent,
 					fetch: options?.fetch,
 					thinkingEnabled,
 					thinkingBudgetTokens: thinkingBudget,
-					reasoning: config.anthropicThinkingMode ? reasoningEffort : undefined,
+					reasoning: governed
+						? thinkingEnabled
+							? reasoningEffort
+							: undefined
+						: config.anthropicThinkingMode
+							? reasoningEffort
+							: undefined,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 					serviceTier: options?.serviceTier,
 				});
@@ -140,13 +179,16 @@ export function streamOpenAIAnthropicShim(
 					sessionId: options?.sessionId,
 					promptCacheKey: options?.promptCacheKey,
 					onPayload: options?.onPayload,
+					preserveModelSelection: options?.preserveModelSelection,
+					preserveThinkingEffort: options?.preserveThinkingEffort,
+					onBeforeRequest: options?.onBeforeRequest,
 					onResponse: options?.onResponse,
 					onSseEvent: options?.onSseEvent,
 					fetch: options?.fetch,
 					reasoning: reasoningEffort,
 					toolChoice: options?.toolChoice,
 					serviceTier: options?.serviceTier,
-					disableReasoning: options?.disableReasoning,
+					disableReasoning: options?.disableReasoning || (governed && options?.forceReasoningOff),
 					waitForTerminalDrain: options?.waitForTerminalDrain,
 				});
 

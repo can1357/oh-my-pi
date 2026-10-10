@@ -1,3 +1,4 @@
+import type { RoleRouteMetadata } from "../task/role-routing";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
@@ -3456,6 +3457,7 @@ export class SessionManager {
 		tools: string[];
 		agent?: string;
 		modelRole?: string;
+		roleRouting?: RoleRouteMetadata;
 		resolvedModel?: string;
 		retryFallback?: RetryFallbackRole;
 		readOnly?: boolean;
@@ -4373,6 +4375,7 @@ export interface PersistedSessionInit {
 	tools: string[];
 	agent?: string;
 	modelRole?: string;
+	roleRouting?: RoleRouteMetadata;
 	resolvedModel?: string;
 	retryFallback?: RetryFallbackRole;
 	readOnly?: boolean;
@@ -4401,6 +4404,7 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			tools: entry.tools,
 			agent: entry.agent,
 			modelRole: entry.modelRole,
+			roleRouting: entry.roleRouting,
 			resolvedModel: entry.resolvedModel,
 			retryFallback: entry.retryFallback,
 			readOnly: entry.readOnly,

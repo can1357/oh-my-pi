@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { AssistantMessage, Context, Tool, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { streamOllama } from "@oh-my-pi/pi-ai/providers/ollama";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "@oh-my-pi/pi-ai/providers/vision-guard";
@@ -84,8 +85,12 @@ describe("Ollama chat thinking controls", () => {
 
 	it("retries EOS-only empty completions before surfacing Ollama output", async () => {
 		let attempts = 0;
-		const fetchMock = async (): Promise<Response> => {
+		let hooks = 0;
+		let admissions = 0;
+		const requests: string[] = [];
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 			attempts++;
+			requests.push(init?.body as string);
 			if (attempts === 1) {
 				return new Response(
 					'{"message":{"content":""},"done":true,"done_reason":"stop","prompt_eval_count":98563,"eval_count":1}\n',
@@ -103,13 +108,125 @@ describe("Ollama chat thinking controls", () => {
 
 		const result = await streamOllama(createReasoningOllamaModel(), context, {
 			apiKey: "test-key",
+			reasoning: "high",
+			preserveThinkingEffort: true,
+			onPayload: () => {
+				hooks++;
+			},
+			onBeforeRequest: () => {
+				admissions++;
+			},
 			fetch: fetchMock,
 			providerRetryWait: async () => {},
 		}).result();
 
 		expect(attempts).toBe(2);
 		expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
+		expect(hooks).toBe(2);
+		expect(admissions).toBe(2);
+		expect(requests[1]).toBe(requests[0]);
+		expect(JSON.parse(requests[0]!).think).toBe("high");
 	});
+
+	for (const disabled of [false, true]) {
+		it(`rejects changes to fixed native think ${disabled ? "false" : "high"}`, async () => {
+			let requests = 0;
+			const result = await streamOllama(
+				createReasoningOllamaModel(),
+				{
+					messages: [{ role: "user", content: "Keep this effort.", timestamp: 0 }],
+				},
+				{
+					apiKey: "test-key",
+					reasoning: "high",
+					disableReasoning: disabled,
+					preserveThinkingEffort: true,
+					fetch: async () => {
+						requests++;
+						return new Response('{"message":{"content":"unexpected"},"done":true}\n');
+					},
+					onPayload: payload =>
+						Object.assign(payload as Record<string, unknown>, { think: disabled ? true : false }),
+				},
+			).result();
+			expect(result.stopReason).toBe("error");
+			expect(AIError.is(result.errorId, AIError.Flag.HostAdmission)).toBe(true);
+			expect(requests).toBe(0);
+		});
+	}
+
+	it("rejects a native governed serializer before evaluating it", async () => {
+		let requests = 0;
+		let serializers = 0;
+		const result = await streamOllama(
+			createReasoningOllamaModel(),
+			{
+				messages: [{ role: "user", content: "One attempt.", timestamp: 0 }],
+			},
+			{
+				apiKey: "test-key",
+				preserveModelSelection: true,
+				reasoning: "high",
+				preserveThinkingEffort: true,
+				fetch: async () => {
+					requests++;
+					return new Response('{"message":{"content":"unexpected"},"done":true}\n');
+				},
+				onPayload: payload => ({
+					...(payload as Record<string, unknown>),
+					toJSON() {
+						serializers++;
+						return { model: "unapproved-ollama-model", think: false, stream: true, messages: [] };
+					},
+				}),
+			},
+		).result();
+		expect(result.stopReason).toBe("error");
+		expect(AIError.is(result.errorId, AIError.Flag.HostAdmission)).toBe(true);
+		expect(requests).toBe(0);
+		expect(serializers).toBe(0);
+	});
+
+	for (const revoke of [false, true]) {
+		it(`${revoke ? "denies revoked" : "permits unchanged"} native admission after HTTP backoff`, async () => {
+			let allowed = true;
+			let hooks = 0;
+			const requests: string[] = [];
+			const result = await streamOllama(
+				createReasoningOllamaModel(),
+				{
+					messages: [{ role: "user", content: "Retry the same request.", timestamp: 0 }],
+				},
+				{
+					apiKey: "test-key",
+					reasoning: "high",
+					preserveModelSelection: true,
+					preserveThinkingEffort: true,
+					onPayload: () => {
+						hooks++;
+					},
+					onBeforeRequest: () => {
+						if (!allowed) throw new Error("The native model grant was revoked.");
+					},
+					fetch: async (_input, init) => {
+						requests.push(init?.body as string);
+						if (requests.length === 1) {
+							if (revoke) allowed = false;
+							return new Response("unavailable", { status: 503, headers: { "retry-after": "0" } });
+						}
+						return new Response(
+							'{"message":{"content":"recovered"},"done":true,"prompt_eval_count":1,"eval_count":1}\n',
+						);
+					},
+				},
+			).result();
+			expect(result.stopReason).toBe(revoke ? "error" : "stop");
+			expect(requests).toHaveLength(revoke ? 1 : 2);
+			expect(hooks).toBe(1);
+			if (!revoke) expect(requests[1]).toBe(requests[0]);
+			else expect(AIError.is(result.errorId, AIError.Flag.HostAdmission)).toBe(true);
+		}, 10_000);
+	}
 
 	it("normalizes tool schemas for Ollama's Go parser", async () => {
 		let payload: OllamaChatRequestPayload | undefined;

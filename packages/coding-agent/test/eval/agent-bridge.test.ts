@@ -17,8 +17,10 @@ import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 import { cfgTaskIsolationEnabled } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { createTaskModelFixture, type TaskModelFixture } from "../helpers/model-fixtures";
 
 const jobManagers = new Set<AsyncJobManager>();
+const modelFixtures: TaskModelFixture[] = [];
 
 function isEvalAgentResult(value: unknown): value is EvalAgentResult {
 	return (
@@ -81,9 +83,16 @@ function createUsage(output: number) {
 }
 
 function createBudgetSession(sessionManager: SessionManager): ToolSession {
+	const settings = Settings.isolated();
+	const fixture = createTaskModelFixture(settings);
+	modelFixtures.push(fixture);
 	return {
 		cwd: "/tmp",
-		settings: Settings.isolated(),
+		settings,
+		modelRegistry: fixture.modelRegistry,
+		getActiveModel: fixture.getActiveModel,
+		getActiveModelString: fixture.getActiveModelString,
+		getActiveModelSelector: fixture.getActiveModelSelector,
 		getSessionSpawns: () => "*",
 		getSessionFile: () => null,
 		getTurnBudget: () => sessionManager.getTurnBudget(),
@@ -93,9 +102,10 @@ function createBudgetSession(sessionManager: SessionManager): ToolSession {
 
 describe("runEvalAgent", () => {
 	afterEach(async () => {
-		vi.restoreAllMocks();
 		await Promise.all([...jobManagers].map(manager => manager.dispose()));
 		jobManagers.clear();
+		vi.restoreAllMocks();
+		for (const fixture of modelFixtures.splice(0)) fixture.close();
 	});
 
 	it("updates the real turn budget by output tokens only", async () => {
@@ -178,13 +188,9 @@ describe("runEvalAgent", () => {
 			source: "bundled",
 		};
 		const recordEvalSubagentUsage = vi.fn();
-		const session = {
-			cwd: "/tmp",
-			settings: Settings.isolated(),
-			getSessionSpawns: () => "*",
-			getSessionFile: () => null,
-			recordEvalSubagentUsage,
-		} as unknown as ToolSession;
+		const sessionManager = SessionManager.inMemory();
+		const session = createBudgetSession(sessionManager);
+		session.recordEvalSubagentUsage = recordEvalSubagentUsage;
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(createResult({ usage: createUsage(3_456) }));
 

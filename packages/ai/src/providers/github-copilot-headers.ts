@@ -7,7 +7,8 @@ import {
 } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { $env, logger } from "@oh-my-pi/pi-utils";
-import type { FetchImpl, Message } from "../types";
+import type { FetchImpl, Message, StreamOptions } from "../types";
+import { invokeBeforeRequest } from "../utils/request-selection";
 /**
  * Infer whether the current request to Copilot is user-initiated or agent-initiated.
  * Accepts `unknown[]` because providers may pass pre-converted message shapes.
@@ -199,6 +200,7 @@ export function wrapFetchForCopilotFallback(
 	 * mid-flight cannot change this request's retry decision.
 	 */
 	cacheSnapshot?: string | null,
+	onBeforeRequest?: StreamOptions["onBeforeRequest"],
 ): FetchImpl {
 	const inner = base ?? fetch;
 	if (!enabled) return inner;
@@ -227,6 +229,7 @@ export function wrapFetchForCopilotFallback(
 				);
 				const retryHeaders = new Headers(outgoing);
 				retryHeaders.set("Copilot-Integration-Id", cliIntegrationId);
+				await invokeBeforeRequest(onBeforeRequest);
 				const retry = await inner(input, { ...init, headers: retryHeaders });
 				if (cacheKey) {
 					if (retry.ok) rememberCopilotWorkingIntegrationId(cacheKey, cliIntegrationId);
@@ -247,6 +250,7 @@ export function wrapFetchForCopilotFallback(
 				);
 				const retryHeaders = new Headers(outgoing);
 				retryHeaders.set("Copilot-Integration-Id", COPILOT_CHAT_INTEGRATION_ID);
+				await invokeBeforeRequest(onBeforeRequest);
 				const retry = await inner(input, { ...init, headers: retryHeaders });
 				if (retry.ok) rememberCopilotWorkingIntegrationId(cacheKey, COPILOT_CHAT_INTEGRATION_ID);
 				else clearCopilotIntegrationCache(cacheKey);

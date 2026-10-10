@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { buildTransformedCodexRequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
 	createOpenAIEffortControlState,
@@ -309,6 +310,147 @@ describe("openai-responses configuration_update", () => {
 		const updateIndex = input.findIndex(item => item.type === "configuration_update");
 		expect(input[updateIndex]).toEqual(update("high"));
 		expect(input[updateIndex + 1]?.role).toBe("user");
+	});
+
+	for (const change of ["unchanged", "rewrite", "remove", "append", "extraBody"] as const) {
+		it(`protects fixed high effort carried in-band against ${change}`, async () => {
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const bodies: Array<Record<string, unknown>> = [];
+			const fetchMock: FetchImpl = async (_input, init) => {
+				bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>);
+				return sse(`guarded_${bodies.length}`);
+			};
+			const firstUser = { role: "user" as const, content: "first", timestamp: 1 };
+			const common = {
+				apiKey: "test-key",
+				fetch: fetchMock,
+				providerSessionState,
+				sessionId: `fixed-inband-${change}`,
+				preserveModelSelection: true,
+				preserveThinkingEffort: true,
+			};
+			const first = await streamOpenAIResponses(
+				model,
+				{ messages: [firstUser] },
+				{ ...common, reasoning: "low" },
+			).result();
+			expect(first.stopReason).toBe("stop");
+			const result = await streamOpenAIResponses(
+				model,
+				{
+					messages: [firstUser, first, { role: "user", content: "second", timestamp: 2 }],
+				},
+				{
+					...common,
+					reasoning: "high",
+					extraBody: change === "extraBody" ? { input: [user("second")] } : undefined,
+					onPayload: payload => {
+						const body = payload as Record<string, unknown>;
+						const items = body.input as TestItem[];
+						const control = items.find(item => item.type === "configuration_update");
+						if (change === "rewrite" && control) control.reasoning = { effort: "low" };
+						if (change === "remove") body.input = items.filter(item => item.type !== "configuration_update");
+						if (change === "append") items.push(update("low"));
+					},
+				},
+			).result();
+			expect(result.stopReason).toBe(change === "unchanged" ? "stop" : "error");
+			expect(bodies).toHaveLength(change === "unchanged" ? 2 : 1);
+			if (change === "unchanged") {
+				expect(bodies[1]?.reasoning).toEqual({ effort: "low", summary: "auto" });
+				expect(inputItems(bodies[1]).filter(item => item.type === "configuration_update")).toEqual([
+					update("high"),
+				]);
+			} else {
+				expect(AIError.is(result.errorId, AIError.Flag.HostAdmission)).toBe(true);
+			}
+		});
+	}
+
+	for (const field of ["models", "fallbacks", "provider", "providerOptions"] as const) {
+		it(`rejects late Responses ${field} routing alternatives before HTTP`, async () => {
+			let requests = 0;
+			const result = await streamOpenAIResponses(
+				model,
+				{ messages: [{ role: "user", content: "one", timestamp: 1 }] },
+				{
+					apiKey: "test-key",
+					preserveModelSelection: true,
+					fetch: async () => {
+						requests++;
+						return sse("not-admitted");
+					},
+					onPayload: payload =>
+						Object.assign(payload as Record<string, unknown>, {
+							[field]:
+								field === "provider"
+									? { order: ["unapproved-upstream"], allow_fallbacks: true }
+									: field === "providerOptions"
+										? { gateway: { only: ["unapproved-upstream"] } }
+										: ["other-model"],
+						}),
+				},
+			).result();
+			expect(result.stopReason).toBe("error");
+			expect(AIError.is(result.errorId, AIError.Flag.HostAdmission)).toBe(true);
+			expect(requests).toBe(0);
+		});
+	}
+
+	for (const dropMode of [false, true]) {
+		it(`${dropMode ? "rejects dropping" : "preserves"} a model-only pro selector on the wire`, async () => {
+			const pro = { ...model, id: "logical-pro", requestModelId: model.id, reasoningMode: "pro" as const };
+			const bodies: Array<Record<string, unknown>> = [];
+			const result = await streamOpenAIResponses(
+				pro,
+				{
+					messages: [{ role: "user", content: "Use the admitted model variant.", timestamp: 0 }],
+				},
+				{
+					apiKey: "test-key",
+					preserveModelSelection: true,
+					fetch: async (_input, init) => {
+						bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>);
+						return sse("pro-response");
+					},
+					onPayload: dropMode
+						? payload => {
+								const body = payload as Record<string, unknown>;
+								body.reasoning = { summary: "auto" };
+							}
+						: undefined,
+				},
+			).result();
+			expect(result.stopReason).toBe(dropMode ? "error" : "stop");
+			expect(bodies).toHaveLength(dropMode ? 0 : 1);
+			if (!dropMode) expect(bodies[0]).toMatchObject({ model: model.id, reasoning: { mode: "pro" } });
+			else expect(AIError.is(result.errorId, AIError.Flag.HostAdmission)).toBe(true);
+		});
+	}
+
+	it("rejects forced-tool relaxation when a fixed Responses effort cannot support it", async () => {
+		let requests = 0;
+		const incompatible = { ...model, compat: { ...model.compat, supportsForcedToolChoice: false } };
+		const result = await streamOpenAIResponses(
+			incompatible,
+			{
+				messages: [{ role: "user", content: "Call the required tool.", timestamp: 0 }],
+				tools: [{ name: "read", description: "Read", parameters: { type: "object", properties: {} } }],
+			},
+			{
+				apiKey: "test-key",
+				reasoning: "high",
+				preserveThinkingEffort: true,
+				toolChoice: "required",
+				fetch: async () => {
+					requests++;
+					return sse("relaxed-tool");
+				},
+			},
+		).result();
+		expect(result.stopReason).toBe("error");
+		expect(AIError.is(result.errorId, AIError.Flag.HostAdmission)).toBe(true);
+		expect(requests).toBe(0);
 	});
 
 	/** The gpt-6-astra id served by a custom Responses-compatible proxy — the shape a `models.yml` entry builds. */

@@ -356,6 +356,108 @@ function createAzureResponsesModel(): Model<"azure-openai-responses"> {
 }
 
 describe("OpenAI reasoning effort fallback retry", () => {
+	it("surfaces a governed Chat Completions effort rejection without retrying another effort", async () => {
+		const efforts: unknown[] = [];
+		const fetchMock: FetchImpl = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				efforts.push(parseJsonBody(init).reasoning_effort);
+				return invalidReasoningResponse("reasoning_effort", "xhigh");
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const result = await streamOpenAICompletions(createCompletionsModel(), testContext, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			reasoning: "xhigh",
+			preserveModelSelection: true,
+			preserveThinkingEffort: true,
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(efforts).toEqual(["xhigh"]);
+	});
+
+	it("ignores cached Responses negotiation for a governed requested effort", async () => {
+		const efforts: unknown[] = [];
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const fetchMock: FetchImpl = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const reasoning = parseJsonBody(init).reasoning as { effort?: string };
+				efforts.push(reasoning.effort);
+				return efforts.length === 1 || efforts.length === 3
+					? invalidReasoningResponse("reasoning.effort", "xhigh")
+					: createResponsesSseResponse();
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const model = createMaxLadderResponsesModel();
+		const ordinary = await streamOpenAIResponses(model, testContext, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			reasoning: "xhigh",
+			providerSessionState,
+		}).result();
+		expect(ordinary.stopReason).toBe("stop");
+		const governed = await streamOpenAIResponses(model, testContext, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			reasoning: "xhigh",
+			providerSessionState,
+			preserveModelSelection: true,
+			preserveThinkingEffort: true,
+		}).result();
+		expect(governed.stopReason).toBe("error");
+		expect(efforts).toEqual(["xhigh", "max", "xhigh"]);
+	});
+
+	it("does not negotiate away governed Azure effort after provider rejection", async () => {
+		const efforts: unknown[] = [];
+		const fetchMock: FetchImpl = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const reasoning = parseJsonBody(init).reasoning as { effort?: string };
+				efforts.push(reasoning.effort);
+				return invalidReasoningResponse("reasoning.effort", "xhigh");
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const result = await streamAzureOpenAIResponses(createAzureResponsesModel(), testContext, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			reasoning: "xhigh",
+			preserveModelSelection: true,
+			preserveThinkingEffort: true,
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(efforts).toEqual(["xhigh"]);
+	});
+
+	it("rejects governed native tool policy that would discard the selected effort", async () => {
+		let requests = 0;
+		const fetchMock: FetchImpl = Object.assign(
+			async (): Promise<Response> => {
+				requests++;
+				return createChatSseResponse();
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const result = await streamOpenAICompletions(
+			createAzureAstraCompletionsModel(),
+			{
+				messages: testContext.messages,
+				tools: [{ name: "read", description: "Read a file", parameters: { type: "object", properties: {} } }],
+			},
+			{
+				apiKey: "test-key",
+				fetch: fetchMock,
+				reasoning: "max",
+				preserveModelSelection: true,
+				preserveThinkingEffort: true,
+			},
+		).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("effort suppression");
+		expect(requests).toBe(0);
+	});
+
 	it("retries Chat Completions xhigh as provider max", async () => {
 		const bodies: Record<string, unknown>[] = [];
 		const fetchMock: FetchImpl = Object.assign(

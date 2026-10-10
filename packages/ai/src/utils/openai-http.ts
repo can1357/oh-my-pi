@@ -14,14 +14,15 @@
  *   captured response body for the strict-tools fallback and the responses
  *   chain-state detectors, which regex over `error.message`.
  */
-import { fetchWithRetry, readSseJsonOrText, type SseEventObserver } from "@oh-my-pi/pi-utils";
+import { fetchWithRetry, isRecord, readSseJsonOrText, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { OpenAIHttpError } from "../error";
 
 export { OpenAIHttpError };
 
-import type { FetchImpl } from "../types";
+import type { FetchImpl, StreamOptions } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
+import { invokeBeforeRequest, serializeRequestBody } from "./request-selection";
 
 /**
  * Total attempts (initial + retries). Parity with the removed SDK clients'
@@ -68,6 +69,11 @@ export interface OpenAIStreamRequestInit {
 	body: unknown;
 	signal: AbortSignal;
 	fetch?: FetchImpl;
+	preserveModelSelection?: StreamOptions["preserveModelSelection"];
+	preserveThinkingEffort?: StreamOptions["preserveThinkingEffort"];
+	onBeforeRequest?: StreamOptions["onBeforeRequest"];
+	/** Provider-owned assertion over the exact captured JSON resent by retries. */
+	validateSerializedBody?: (serialized: string) => void;
 	/** Optional caller-specific gate composed with shared transport retry exclusions. */
 	shouldRetryResponse?: (response: Response, bodyText: string) => boolean | Promise<boolean>;
 	/**
@@ -88,6 +94,44 @@ export interface OpenAIStreamHandle<TEvent> {
 	requestId: string | null;
 }
 
+/** Protected Responses wire controls, including in-band effort updates. */
+export function projectOpenAIResponsesSelection(
+	payload: unknown,
+	options: Pick<StreamOptions, "preserveModelSelection" | "preserveThinkingEffort"> | undefined,
+): unknown {
+	if (!isRecord(payload)) {
+		throw new AIError.ModelSelectionError("Provider payload discarded the governed Responses selection.");
+	}
+	const reasoning = isRecord(payload.reasoning) ? payload.reasoning : undefined;
+	return {
+		...(options?.preserveModelSelection
+			? {
+					model: payload.model,
+					models: payload.models,
+					fallbacks: payload.fallbacks,
+					provider: payload.provider,
+					providerOptions: payload.providerOptions,
+					reasoning_mode: reasoning?.mode,
+				}
+			: {}),
+		...(options?.preserveThinkingEffort
+			? {
+					reasoning: reasoning && {
+						effort: reasoning.effort,
+						enabled: reasoning.enabled,
+						max_tokens: reasoning.max_tokens,
+						mode: reasoning.mode,
+					},
+					configuration_updates: Array.isArray(payload.input)
+						? payload.input.flatMap((item, index) =>
+								isRecord(item) && item.type === "configuration_update" ? [{ index, item }] : [],
+							)
+						: [],
+				}
+			: {}),
+	};
+}
+
 /**
  * POST a JSON body and stream back decoded SSE events.
  *
@@ -96,13 +140,21 @@ export interface OpenAIStreamHandle<TEvent> {
  * watchdog timers and abort-reason bookkeeping.
  */
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
+	const onBeforeRequest = init.onBeforeRequest;
+	const body = serializeRequestBody(init.body, init, init.validateSerializedBody);
 	const response = await fetchWithRetry(init.url, {
 		method: "POST",
 		headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...init.headers },
-		body: JSON.stringify(init.body),
+		body,
 		signal: init.signal,
 		fetch: init.fetch,
 		maxAttempts: DEFAULT_MAX_ATTEMPTS,
+		shouldRetryError: error => !AIError.is(AIError.classify(error), AIError.Flag.HostAdmission),
+		// Admission runs outside the fetch exception retry catch on every attempt.
+		prepareInit: async () => {
+			await invokeBeforeRequest(onBeforeRequest);
+			return {};
+		},
 		// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 		// surfaces immediately instead of being slept-and-retried here; session
 		// recovery owns its backoff/fallback (issue #8854).

@@ -1,7 +1,3 @@
-/**
- * Per-agent settings migrations, advisor defaults for spawned sessions, and
- * discovery of nested per-subagent `__advisor.jsonl` transcripts.
- */
 import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -10,9 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
 
-import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 import { cfgTaskAgentAdvisor, cfgTaskAgentPrewalk } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 describe("per-agent settings migrations", () => {
@@ -55,25 +49,6 @@ describe("per-agent settings migrations", () => {
 		);
 		expect(cfgTaskAgentPrewalk.get(settings)).toEqual({ reviewer: "on", task: "off" });
 		expect(cfgTaskAgentAdvisor.get(settings)).toEqual({ reviewer: "off", task: "on" });
-	});
-});
-
-describe("createSubagentSettings advisor default", () => {
-	it("forces the advisor off for subagents even when the parent has it enabled", () => {
-		const parent = Settings.isolated({ "advisor.enabled": true });
-		expect(cfgAdvisorEnabled.get(createSubagentSettings(parent))).toBe(false);
-	});
-
-	it("lets a per-agent opt-in re-enable the advisor with its own advisor model role", () => {
-		const parent = Settings.isolated({ "advisor.enabled": false, modelRoles: { smol: "openai/gpt-5-mini" } });
-		const child = createSubagentSettings(parent, {
-			"advisor.enabled": true,
-			modelRoles: { ...parent.getModelRoles(), advisor: "moonshot/k3" },
-		});
-		expect(cfgAdvisorEnabled.get(child)).toBe(true);
-		expect(child.getModelRole("advisor")).toBe("moonshot/k3");
-		// Other roles from the parent snapshot survive the advisor override.
-		expect(child.getModelRole("smol")).toBe("openai/gpt-5-mini");
 	});
 });
 

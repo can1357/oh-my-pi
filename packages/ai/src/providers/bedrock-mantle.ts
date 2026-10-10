@@ -2,6 +2,7 @@ import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { type AwsBedrockProviderOptions, resolveAwsBearerToken } from "../registry/aws";
 import type { FetchImpl, Model } from "../types";
 import { resolveAwsRegion } from "../utils/aws-profile";
+import { invokeBeforeRequest } from "../utils/request-selection";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { signRequest } from "./aws-sigv4";
 import type { OpenAIResponsesOptions } from "./openai-responses";
@@ -25,6 +26,7 @@ async function requestBody(input: string | URL | Request, init?: RequestInit): P
 
 function createSignedFetch(options: BedrockMantleOptions, region: string): FetchImpl {
 	const baseFetch = options.fetch ?? (globalThis.fetch as FetchImpl);
+	const onBeforeRequest = options.onBeforeRequest;
 	const signedFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const url = new URL(input instanceof Request ? input.url : input.toString());
 		const method = init?.method ?? (input instanceof Request ? input.method : "POST");
@@ -52,6 +54,7 @@ function createSignedFetch(options: BedrockMantleOptions, region: string): Fetch
 		for (const [name, value] of Object.entries(signed)) {
 			if (value !== undefined && name !== "host") headers.set(name, value);
 		}
+		if (onBeforeRequest) await invokeBeforeRequest(onBeforeRequest);
 		const response = await baseFetch(
 			url,
 			method === "GET" || method === "HEAD" ? { ...init, method, headers } : { ...init, method, headers, body },
@@ -75,10 +78,12 @@ export function createBedrockMantleAuthenticatedFetch(options: BedrockMantleOpti
 	if (!bearerToken) return createSignedFetch(options, region);
 
 	const baseFetch = options.fetch ?? (globalThis.fetch as FetchImpl);
+	const onBeforeRequest = options.onBeforeRequest;
 	const authenticatedFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const headers = new Headers(input instanceof Request ? input.headers : undefined);
 		for (const [name, value] of new Headers(init?.headers)) headers.set(name, value);
 		headers.set("authorization", `Bearer ${bearerToken}`);
+		if (onBeforeRequest) await invokeBeforeRequest(onBeforeRequest);
 		return baseFetch(input, { ...init, headers });
 	};
 	return Object.assign(authenticatedFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});

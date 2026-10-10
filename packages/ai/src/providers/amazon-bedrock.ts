@@ -45,6 +45,13 @@ import {
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs } from "../utils/idle-iterator";
+import {
+	assertSafeGovernedJson,
+	createRequestSelectionGuard,
+	invokeBeforeRequest,
+	serializeRequestBody,
+	shouldAwaitPayloadHookResult,
+} from "../utils/request-selection";
 import { toolWireSchema } from "../utils/schema/wire";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { decodeEventStream } from "./aws-eventstream";
@@ -413,6 +420,12 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 	context: Context,
 	options: BedrockOptions,
 ): AssistantMessageEventStream => {
+	const preserveModelSelection = options.preserveModelSelection;
+	const preserveThinkingEffort = options.preserveThinkingEffort;
+	const onBeforeRequest = options.onBeforeRequest;
+	if (preserveModelSelection || preserveThinkingEffort || onBeforeRequest) {
+		options = { ...options, preserveModelSelection, preserveThinkingEffort, onBeforeRequest };
+	}
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
@@ -457,10 +470,24 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				!thinkingDisabled && model.thinking?.prefixBinding
 					? (options.anthropicPrefixMismatchBehavior ?? "drop_block")
 					: undefined;
+			if (options.preserveThinkingEffort && !options.reasoning && prefixMismatchBehavior) {
+				throw new AIError.ModelSelectionError(
+					"Bedrock prefix-binding controls cannot enable thinking on a fixed off request.",
+				);
+			}
 
 			// Some models (Opus/Sonnet 5.5) reject forced tool use outright; keep the
 			// tools offered under `auto` and leave thinking intact.
 			const forcedChoice = toolConfig?.toolChoice?.any || toolConfig?.toolChoice?.tool;
+			if (
+				options.preserveThinkingEffort &&
+				forcedChoice &&
+				(!model.compat.supportsForcedToolChoice || (additionalModelRequestFields && !thinkingDisabled))
+			) {
+				throw new AIError.ModelSelectionError(
+					"The selected Bedrock effort cannot be honored with forced tool selection.",
+				);
+			}
 			if (toolConfig && forcedChoice && !model.compat.supportsForcedToolChoice) {
 				toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
 			} else if (toolConfig && forcedChoice && additionalModelRequestFields && !thinkingDisabled) {
@@ -493,8 +520,34 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 						: undefined,
 				...(prefixMismatchBehavior ? { additionalModelResponseFieldPaths: ["/input_transformations"] } : {}),
 			};
-			const replacementInput = await options?.onPayload?.(commandInput, model);
+			const modelId = model.id;
+			const requestBaseUrl = model.baseUrl;
+			const selectionGuard = createRequestSelectionGuard(options, commandInput, input => ({
+				...(options.preserveModelSelection && {
+					model: "model" in input ? input.model : undefined,
+					modelId: "modelId" in input ? input.modelId : undefined,
+					alternatives: {
+						fallbacks: input.additionalModelRequestFields?.fallbacks,
+						model: input.additionalModelRequestFields?.model,
+						provider: input.additionalModelRequestFields?.provider,
+					},
+				}),
+				...(options.preserveThinkingEffort && {
+					additionalModelRequestFields: input.additionalModelRequestFields,
+					toolChoice: input.toolConfig?.toolChoice,
+				}),
+			}));
+			const payloadHookResult = options?.onPayload?.(commandInput, model);
+			const replacementInput = shouldAwaitPayloadHookResult(payloadHookResult, !!selectionGuard)
+				? await payloadHookResult
+				: payloadHookResult;
 			if (replacementInput !== undefined) commandInput = replacementInput as ConverseStreamRequest;
+			if (options.preserveModelSelection || options.preserveThinkingEffort) {
+				assertSafeGovernedJson(commandInput);
+				if (!isRecord(commandInput)) {
+					throw new AIError.ModelSelectionError("The governed Bedrock request requires a JSON object.");
+				}
+			}
 			// After the hook so extension-injected tags are validated too, and before the
 			// raw dump so the inspector shows exactly what was sent.
 			commandInput = { ...commandInput, requestMetadata: sanitizeRequestMetadata(commandInput.requestMetadata) };
@@ -502,10 +555,10 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			// `baseUrl` is the origin verbatim, path prefix (and query, for gateways
 			// that authenticate via a query parameter) included, so a gateway mounted
 			// under a path works. AWS's own host is re-pointed: the catalog can't know the region.
-			const base = new URL(model.baseUrl || `https://bedrock-runtime.${region}.amazonaws.com`);
+			const base = new URL(requestBaseUrl || `https://bedrock-runtime.${region}.amazonaws.com`);
 			if (AWS_REGIONAL_BEDROCK_HOST.test(base.host)) base.host = `bedrock-runtime.${region}.amazonaws.com`;
 			const host = base.host;
-			const urlPath = `${base.pathname.replace(/\/+$/, "")}/model/${encodeURIComponent(model.id)}/converse-stream`;
+			const urlPath = `${base.pathname.replace(/\/+$/, "")}/model/${encodeURIComponent(modelId)}/converse-stream`;
 			const query = base.search.slice(1) || undefined;
 			const url = `${base.origin}${urlPath}${base.search}`;
 
@@ -560,7 +613,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			// absolute `AbortSignal.timeout` would keep aborting the actively
 			// streaming body, not just a stalled time-to-first-byte (issue #2422).
 			const sendRequest = async (input: ConverseStreamRequest): Promise<Response> => {
-				const bodyText = JSON.stringify(input);
+				const bodyText = serializeRequestBody(input, options, selectionGuard);
 				const body = new TextEncoder().encode(bodyText);
 				let requestHeaders: Record<string, string>;
 				if (bearerToken) {
@@ -596,7 +649,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					model: model.id,
 					method: "POST",
 					url,
-					body: input,
+					body: preserveModelSelection || preserveThinkingEffort ? JSON.parse(bodyText) : input,
 				};
 				const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
 				try {
@@ -607,6 +660,11 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 						signal: watchdog.signal,
 						fetch: options.fetch,
 						timeout: false,
+						prepareInit: async () => {
+							await invokeBeforeRequest(options.onBeforeRequest);
+							return {};
+						},
+						shouldRetryError: error => !AIError.is(AIError.classify(error), AIError.Flag.HostAdmission),
 					});
 				} finally {
 					watchdog.clear();
@@ -1339,6 +1397,20 @@ function buildAdditionalModelRequestFields(
 	options: BedrockOptions,
 ): Record<string, unknown> | undefined {
 	const reasoning = options.reasoning;
+	if (options.preserveThinkingEffort) {
+		if (reasoning && !model.reasoning) {
+			throw new AIError.ModelSelectionError("The selected Bedrock model cannot honor a fixed thinking effort.");
+		}
+		if (
+			!reasoning &&
+			model.reasoning &&
+			(model.thinking?.mode === "anthropic-adaptive" || model.thinking?.requiresEffort) &&
+			model.compat.disabledThinking !== "disabled" &&
+			model.compat.disabledThinking !== "omit"
+		) {
+			throw new AIError.ModelSelectionError("The selected Bedrock model cannot turn thinking off.");
+		}
+	}
 	if (!model.reasoning) return undefined;
 	if (!reasoning) {
 		if (model.compat.disabledThinking === "disabled") {
@@ -1384,6 +1456,9 @@ function buildAdditionalModelRequestFields(
 		max: 32768,
 	};
 	const budget = options.thinkingBudgets?.[level] ?? defaultBudgets[level];
+	if (options.preserveThinkingEffort && (!Number.isFinite(budget) || budget <= 0)) {
+		throw new AIError.ModelSelectionError("The selected Bedrock effort requires a positive thinking budget.");
+	}
 
 	const result: Record<string, unknown> = {
 		thinking: {

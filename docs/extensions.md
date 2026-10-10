@@ -364,7 +364,7 @@ If you use raw `setInterval`/`setTimeout` or detached promises instead, you own 
 
 ### Model selection (`ctx.models`)
 
-`ctx.models` is a read-only facade for picking and comparing models the same way core does:
+`ctx.models` is a read-only facade for querying and resolving model availability, not permission to route a task/eval worker:
 
 - `list()` — authenticated models available this session.
 - `current()` — the live session model (read lazily, so it reflects `/model` switches).
@@ -378,6 +378,13 @@ const contrasting = ctx.models
   .list()
   .find((m) => current && ctx.models.family(m) !== ctx.models.family(current));
 ```
+
+For task/eval workers, `agent` chooses semantic instructions/tools and a supplied `model` independently chooses a governed route. Omission retains ordinary configured routing, authentication fallback, retries, agent thinking/AUTO, and prewalk. Explicit candidates must be authorized by current operator roles/fallbacks, selected-agent frontmatter or an exact model override, or the actual live parent. Availability from `list()`/`resolve()`, credentials, enabled/catalog membership, and recommendations are not explicit permission.
+
+A per-call selector overrides settings and agent-frontmatter defaults rather than falling through to them after failure. Actual custom configured chat roles support `@review:high`; no automatic-classifier roster restricts them. A role retains identity and its approved configured chain. Raw literals and ordered arrays stay within the requested closure instead of gaining unrelated role/default/auth chains.
+
+`@default` selects the exact live parent's provider/model plus actual effort, not `modelRoles.default` or a parent-role fallback chain; `@default:high` changes only effort. `@inherit` and bare `default`/`inherit` (also suffixed) are invalid. A requested fixed suffix outranks agent thinking defaults and the supported task coarse `effort` field; unsupported fixed effort fails rather than clamping or discarding it. Unqualified routes permit runtime effort selection; configured `auto` remains `auto`. Invalid, unauthorized, unavailable, or exhausted explicit selections stop without dropping `model` or substituting another source. Retries and revival revalidate current permission within the original candidate closure. Workpool follow-ups retain each worker's model/effort contract, not per-item rerouting. See [Task/eval worker routing](./models.md#taskeval-worker-routing).
+
 
 ## 3) Command context (`ExtensionCommandContext`)
 
@@ -498,7 +505,7 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 
 ### Subagent lifecycle
 
-- `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight, so stateful routers (round-robin, quota) advance once per child. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`. A returned `model` replaces the spawn's attempt-ordered patterns while keeping the role identity, so the remaining entries become the child's retry fallback chain; handlers run in extension order and the last returned `model` wins, along with its `note`, which the task UI shows as the spawn's routing reason on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
+- `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`. A returned `model` may narrow to already-approved candidate occurrences, never add models, change route authority, or weaken fixed effort. Remaining permitted entries form the child's retry candidates; ordinary configured role fallback stays inside that same approved closure. Handlers run in extension order; the last returned selection and its `note` are checked against the prior approved route, not treated as fresh authority. The task UI shows the routing note on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
 
 ### Reliability/runtime signals
 

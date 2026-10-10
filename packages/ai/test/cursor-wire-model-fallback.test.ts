@@ -278,6 +278,31 @@ describe("Cursor discovered effort wire fallback", () => {
 		expect(requests[1].requestedModel?.parameters).toEqual([]);
 		expect(requests[1].modelDetails?.modelId).toBe("gpt-5.6-sol-medium");
 	});
+
+	it("does not substitute a discovered wire model when model selection must be preserved", async () => {
+		responses = [
+			{ kind: "error", code: "not_found", message: "normalized model unavailable" },
+			{ kind: "success", text: "must not be requested" },
+		];
+		const baseUrl = await startServer();
+		const stream = streamCursor(makeModel(baseUrl), context, {
+			apiKey: "test-token",
+			sessionId: crypto.randomUUID(),
+			wireModelId: "gpt-5.6-sol-medium",
+			preserveModelSelection: true,
+		});
+		for await (const _event of stream) {
+			// Drain the loopback request to its terminal error.
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("normalized model unavailable");
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.requestedModel?.modelId).toBe("gpt-5.6-sol");
+		expect(requests[0]?.requestedModel?.parameters).toEqual([
+			expect.objectContaining({ id: "reasoning", value: "medium" }),
+		]);
+	});
 	it("retries a structured BAD_MODEL_NAME with the exact discovered sibling id", async () => {
 		responses = [
 			{

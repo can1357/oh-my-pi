@@ -14,6 +14,13 @@ import {
 import { notifyProviderResponse } from "../../utils/provider-response";
 import { dereferenceJsonSchema, normalizeSchemaForFactoryDroid, toolWireSchema } from "../../utils/schema";
 import {
+	assertSafeGovernedJson,
+	createRequestSelectionGuard,
+	invokeBeforeRequest,
+	serializeRequestBody,
+	shouldAwaitPayloadHookResult,
+} from "../../utils/request-selection";
+import {
 	extractGoogleErrorMessage,
 	mapGoogleUsage,
 	mapStopReasonString,
@@ -289,6 +296,12 @@ export function streamFactoryDroidGemini(
 	context: Context,
 	options: FactoryDroidGeminiOptions,
 ): AssistantMessageEventStream {
+	const preserveModelSelection = options.preserveModelSelection;
+	const preserveThinkingEffort = options.preserveThinkingEffort;
+	const onBeforeRequest = options.onBeforeRequest;
+	if (preserveModelSelection || preserveThinkingEffort || onBeforeRequest) {
+		options = { ...options, preserveModelSelection, preserveThinkingEffort, onBeforeRequest };
+	}
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
@@ -321,6 +334,21 @@ export function streamFactoryDroidGemini(
 		let firstEventTimer: NodeJS.Timeout | undefined;
 
 		try {
+			if (options.preserveModelSelection || options.preserveThinkingEffort) {
+				assertSafeGovernedJson(options.headers);
+				options = { ...options, headers: Object.fromEntries(new Headers(options.headers)) };
+			}
+			if (
+				options.preserveThinkingEffort &&
+				(options.disableReasoning ||
+					options.forceReasoningOff ||
+					!options.reasoning ||
+					["off", "none"].includes(options.reasoning))
+			) {
+				throw new AIError.ModelSelectionError(
+					"The native Factory Gemini thinking-level protocol cannot honor thinking off.",
+				);
+			}
 			const { contents, systemInstruction } = toGeminiContents(model, context);
 			let body: Record<string, unknown> = {
 				model: model.requestModelId ?? model.id,
@@ -346,8 +374,23 @@ export function streamFactoryDroidGemini(
 			const toolNamesByWire = factoryDroidToolNamesByWire(context.tools);
 			const tools = toGeminiTools(context.tools);
 			if (tools) body.tools = tools;
-			const replacement = await options.onPayload?.(body, model, options.signal);
+			const selectionGuard = createRequestSelectionGuard(options, body, payload => ({
+				...(options.preserveModelSelection && {
+					model: payload.model,
+					models: payload.models,
+					provider: payload.provider,
+					fallbacks: payload.fallbacks,
+				}),
+				...(options.preserveThinkingEffort && {
+					thinkingConfig: (payload.generationConfig as Record<string, unknown> | undefined)?.thinkingConfig,
+				}),
+			}));
+			const payloadHookResult = options.onPayload?.(body, model, options.signal);
+			const replacement = shouldAwaitPayloadHookResult(payloadHookResult, !!selectionGuard)
+				? await payloadHookResult
+				: payloadHookResult;
 			if (replacement !== undefined) body = replacement as Record<string, unknown>;
+			const bodyText = serializeRequestBody(body, options, selectionGuard);
 
 			// Caller wins, then env, then the idle-floored default — same
 			// precedence as the anthropic transport. The first-event deadline is
@@ -361,6 +404,7 @@ export function streamFactoryDroidGemini(
 				firstEventTimer.unref?.();
 			}
 
+			await invokeBeforeRequest(options.onBeforeRequest);
 			const response = await (options.fetch ?? fetch)(`${options.baseUrl}/generate`, {
 				method: "POST",
 				headers: {
@@ -369,7 +413,7 @@ export function streamFactoryDroidGemini(
 					...(options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}),
 					...options.headers,
 				},
-				body: JSON.stringify(body),
+				body: bodyText,
 				signal: tracker.requestSignal,
 			});
 			if (!response.ok) {

@@ -233,6 +233,17 @@ import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
 import { isScoutSpawnable } from "./task/spawn-policy";
+import {
+	assertRoleDispatch,
+	assertRoleModel,
+	resolveRoleRoute,
+	roleRouteCandidateSelectors,
+	roleRouteThinkingLevel,
+	taskModelAuthoritySettings,
+	wrapRoleRouteStream,
+	type RoleRouteModelSelection,
+	type RoleRoutePermit,
+} from "./task/role-routing";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	AUTO_THINKING,
@@ -582,14 +593,18 @@ export interface CreateAgentSessionOptions {
 	 * so interactive startup keeps it off the first-frame path.
 	 */
 	deferRetryFallbackValidation?: boolean;
+	/** Host-issued primary-request routing authority, never reconstructed from session metadata. */
+	roleRoute?: RoleRoutePermit;
+	/** Original operator grant source for nested dispatch; execution overlays never grant explicit models. */
+	modelAuthoritySettings?: Settings;
 	/** Raw model pattern(s) (e.g. from --model CLI flag) to resolve after extensions load.
 	 * Used when model lookup is deferred because extension-provided models aren't registered yet. */
 	modelPattern?: string | string[];
-	/** Authenticated fallback selector for deferred subagent model patterns. */
+	/** Authenticated parent fallback selector for deferred implicit subagent patterns. */
 	modelPatternAuthFallback?: string;
-	/** Role name used to install retry fallbacks after deferred subagent patterns resolve. */
+	/** Session-scoped role used to install retry fallbacks after implicit patterns resolve. */
 	modelPatternFallbackRole?: string;
-	/** Validated default retry chain to install when a deferred singleton pattern resolves. */
+	/** Configured implicit retry chain used when a deferred singleton pattern resolves. */
 	modelPatternDefaultFallbackChain?: string[];
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
@@ -1350,7 +1365,7 @@ const TOOL_DEFINITION_MARKER = Symbol("__isToolDefinition");
 /** Matches the truncation applied to per-server instructions inside `rebuildSystemPrompt`. */
 const MAX_MCP_INSTRUCTIONS_LENGTH = 4000;
 /** Built-ins `createTools` force-includes into explicit tool lists; the active set mirrors them. */
-const SESSION_MANAGED_BUILTIN_TOOL_NAMES = ["manage_skill", "learn", "context_notes", "new_context"];
+const SESSION_MANAGED_BUILTIN_TOOL_NAMES = ["manage_skill", "learn", "context_notes", "new_context", "think"];
 
 let sshCleanupRegistered = false;
 
@@ -1882,6 +1897,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	}
 	const forkCacheShapeChanged =
 		options.model !== undefined ||
+		options.roleRoute !== undefined ||
 		options.modelPattern !== undefined ||
 		options.thinkingLevel !== undefined ||
 		options.systemPrompt !== undefined ||
@@ -1941,9 +1957,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		: options.modelPattern?.trim()
 			? [options.modelPattern.trim()]
 			: [];
-	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
+	const hasExplicitModel =
+		options.roleRoute !== undefined || options.model !== undefined || deferredModelPatterns.length > 0;
 	const modelMatchPreferences = getModelMatchPreferences(settings);
-	const defaultRoleValue = settings.getModelRole("default");
+	const defaultRoleValue = options.roleRoute ? undefined : settings.getModelRole("default");
 	let explicitDefaultProviders: Set<string> | undefined;
 	if ((cfgEnabledModels.get(settings)?.length ?? 0) === 0) {
 		const patterns = resolveConfiguredModelPatterns(defaultRoleValue, settings);
@@ -1965,11 +1982,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	if (!options.modelRegistry) {
 		modelRegistry.refreshInBackground();
 	}
-	const allowedModels = await logger.time("resolveAllowedModels", () =>
-		explicitDefaultProviders
-			? modelRegistry.getAvailableForProviders(explicitDefaultProviders)
-			: resolveAllowedModels(modelRegistry, settings, modelMatchPreferences),
-	);
+	const allowedModels = options.roleRoute
+		? []
+		: await logger.time("resolveAllowedModels", () =>
+				explicitDefaultProviders
+					? modelRegistry.getAvailableForProviders(explicitDefaultProviders)
+					: resolveAllowedModels(modelRegistry, settings, modelMatchPreferences),
+			);
 	let defaultRoleSpec = logger.time("resolveDefaultModelRole", () =>
 		resolveModelRoleValue(defaultRoleValue, allowedModels, {
 			settings,
@@ -1977,6 +1996,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}),
 	);
 	let model = options.model;
+	let roleSelection: RoleRouteModelSelection | undefined;
+	if (model) {
+		assertRoleModel(options.roleRoute, model, undefined, modelRegistry);
+		if (options.roleRoute) roleSelection = resolveRoleRoute(options.roleRoute, modelRegistry);
+	}
 	let modelFallbackMessage: string | undefined;
 	let initialRetryFallback: InitialRetryFallbackState | undefined;
 	// Identify session model strings to restore in fallback order. We do an
@@ -2030,6 +2054,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// role reclaim so the final model's own defaults aren't masked by an earlier
 	// fallback model's.
 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
+		if (options.roleRoute && selectedModel) {
+			if (roleSelection?.fixedEffort) return roleSelection.thinkingLevel;
+			const governedThinking =
+				roleSelection?.thinkingLevel ?? roleRouteThinkingLevel(options.roleRoute, selectedModel);
+			if (governedThinking !== undefined) return governedThinking;
+		}
 		let level = options.thinkingLevel;
 		if (level === undefined && hasExistingSession && hasThinkingEntry) {
 			level =
@@ -2058,10 +2088,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let effectiveThinkingLevel: ThinkingLevel | undefined = concreteThinkingLevel(thinkingLevel);
 	if (model) {
 		const resolvedModel = model;
+		const governedThinking = options.roleRoute ? roleRouteThinkingLevel(options.roleRoute, resolvedModel) : undefined;
 		effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
 			autoThinking
 				? resolveProvisionalAutoLevel(resolvedModel)
-				: resolveThinkingLevelForModel(resolvedModel, effectiveThinkingLevel),
+				: roleSelection?.fixedEffort || governedThinking !== undefined
+					? concreteThinkingLevel(governedThinking)
+					: resolveThinkingLevelForModel(resolvedModel, effectiveThinkingLevel),
+		);
+		assertRoleDispatch(
+			options.roleRoute,
+			resolvedModel,
+			toReasoningEffort(effectiveThinkingLevel),
+			undefined,
+			modelRegistry,
 		);
 		// Fire-and-forget TLS+H2 handshake to the model's host so it overlaps
 		// with the rest of session setup (extension/skill load, tool registry,
@@ -2079,10 +2119,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		thinkingLevel = pickInitialThinkingLevel(selectedModel);
 		autoThinking = thinkingLevel === AUTO_THINKING;
 		const concreteLevel = concreteThinkingLevel(thinkingLevel);
+		const governedThinking = options.roleRoute ? roleRouteThinkingLevel(options.roleRoute, selectedModel) : undefined;
 		effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
 			autoThinking
 				? resolveProvisionalAutoLevel(selectedModel)
-				: resolveThinkingLevelForModel(selectedModel, concreteLevel),
+				: roleSelection?.fixedEffort || governedThinking !== undefined
+					? concreteThinkingLevel(governedThinking)
+					: resolveThinkingLevelForModel(selectedModel, concreteLevel),
+		);
+		assertRoleDispatch(
+			options.roleRoute,
+			selectedModel,
+			toReasoningEffort(effectiveThinkingLevel),
+			undefined,
+			modelRegistry,
 		);
 	};
 
@@ -2226,10 +2276,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	try {
 		const getActiveModelString = (): string | undefined => {
-			const activeModel = agent?.state.model;
-			if (activeModel) return formatModelString(activeModel);
-			if (model) return formatModelString(model);
-			return undefined;
+			if (session?.isDisposed) return undefined;
+			const activeModel = agent?.state.model ?? model;
+			return activeModel ? formatModelString(activeModel) : undefined;
+		};
+		const getActiveModelSelector = (): string | undefined => {
+			if (session?.isDisposed) return undefined;
+			const activeModel = agent?.state.model ?? model;
+			if (!activeModel) return undefined;
+			// Inherit the live route and effective effort, not just the model identity.
+			// A later effort change must not reuse the startup selector or restart auto triage.
+			const effort = agent?.state.model
+				? agent.state.disableReasoning
+					? "off"
+					: agent.state.thinkingLevel
+				: shouldDisableReasoning(effectiveThinkingLevel)
+					? "off"
+					: effectiveThinkingLevel;
+			return formatModelSelectorValue(formatModelStringWithRouting(activeModel), effort);
 		};
 		// Per-path mutation counter shared across edit/write tools. Late-diagnostics
 		// entries capture it at fetch time and are dropped at injection if a newer
@@ -2330,7 +2394,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advertisedSessionAgents: () => session?.getAdvertisedSessionAgents() ?? [],
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
-			getActiveModel: () => agent?.state.model ?? model,
+			getActiveModelSelector,
+			getActiveModel: () => (session?.isDisposed ? undefined : (agent?.state.model ?? model)),
+			getModelAuthoritySettings: () => {
+				const permit = session?.roleRoute ?? options.roleRoute;
+				return permit ? taskModelAuthoritySettings(permit) : (options.modelAuthoritySettings ?? settings);
+			},
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
 			getImageAttachments: () => session?.getImageAttachments() ?? [],
 			getPlanModeState: () => session?.getPlanModeState(),
@@ -2753,8 +2822,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			});
 			return runtimeDiscoveryPromise;
 		};
-		if (!options.hasUI || deferredModelPatterns.length > 0) {
+		if (!options.hasUI || options.roleRoute || deferredModelPatterns.length > 0) {
 			void startRuntimeDiscovery();
+		}
+
+		if (options.roleRoute) {
+			await logger.time("resolveRoleRouteRuntimeDiscovery", startRuntimeDiscovery);
+			const providers = sessionModelDiscoveryProviders(
+				modelRegistry,
+				roleRouteCandidateSelectors(options.roleRoute),
+				disabledProviderIds(settings),
+			);
+			if (providers.size > 0) {
+				await modelRegistry.refreshDiscoverableProviders(providers, "online-if-uncached");
+			}
+			roleSelection = resolveRoleRoute(options.roleRoute, modelRegistry);
+			model = roleSelection.model;
+			adoptThinkingForModel(model);
+			preconnectModelHost(model.baseUrl);
 		}
 
 		// Retry session-model candidates now that extension providers are
@@ -2821,7 +2906,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Resolve deferred --model/subagent patterns now that extension models are
 		// registered. Use the same CLI resolver as the immediate path so bare role
 		// names, exact model names, and provider selectors keep one precedence rule.
-		if (!model && deferredModelPatterns.length > 0) {
+		if (!options.roleRoute && !model && deferredModelPatterns.length > 0) {
 			// Deferred `--model` patterns almost always failed at the immediate
 			// path (main.ts:881) precisely because discovery-backed providers
 			// hadn't populated yet. Await the in-flight runtime discovery
@@ -3128,7 +3213,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Fall back to first available model with a valid API key, honoring the
 		// path-scoped `enabledModels` allow-list when configured. Skip when the
 		// user explicitly requested a model via --model that wasn't found.
-		if (!model && deferredModelPatterns.length === 0) {
+		if (!options.roleRoute && !model && deferredModelPatterns.length === 0) {
 			// Retry the configured default role against the current catalog,
 			// setting `model` (+ thinking level) when it resolves. Extension
 			// factories register providers AFTER the early `defaultRoleSpec`
@@ -3249,6 +3334,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				adoptThinkingForModel(refreshedModel);
 			}
 		}
+		assertRoleDispatch(options.roleRoute, model, toReasoningEffort(effectiveThinkingLevel), undefined, modelRegistry);
 
 		// A first-turn user tail has no assistant metadata to copy. Once startup
 		// has selected its final model, use that model to terminate the
@@ -3389,6 +3475,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// unwrapped native execute (inheriting the caller's already-granted approval, not re-gating).
 		for (const [name, tool] of toolRegistry) {
 			nativeToolsByName.set(name, tool);
+		}
+		// Tools were constructed before deferred selectors, role routes and model
+		// metadata settled. Register the scratchpad against the final model before
+		// extension overrides and active-set assembly, reusing any existing native.
+		const thinkRequested =
+			cfgExternalThinking.get(settings) &&
+			supportsExternalThinking(model) &&
+			(!restrictToolNames ||
+				(options.toolNames !== undefined && normalizeToolNames(options.toolNames).includes("think")));
+		if (!thinkRequested) {
+			toolRegistry.delete("think");
+			builtInRegistryToolNames.delete("think");
+			nativeToolsByName.delete("think");
+		} else if (!toolRegistry.has("think")) {
+			const thinkTool = await logger.time("createTools:think:session", HIDDEN_TOOLS.think, toolSession);
+			if (thinkTool) {
+				const wrapped = wrapToolWithMetaNotice(thinkTool);
+				toolRegistry.set(thinkTool.name, wrapped);
+				builtInRegistryToolNames.add(thinkTool.name);
+				nativeToolsByName.set(thinkTool.name, wrapped);
+				builtInToolNames.push(thinkTool.name);
+			}
 		}
 		if (!restrictToolNames && !toolRegistry.has("goal") && cfgGoalEnabled.get(settings)) {
 			const goalTool = await logger.time("createTools:goal:session", HIDDEN_TOOLS.goal, toolSession);
@@ -4278,15 +4386,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Primary-agent (and its auto-learn capture twin) provider options read per
 		// request, so `/settings` changes to budgets, Kimi format, or the Codex
 		// websocket policy reach the next call without a session recreate.
-		const primaryStreamFn: StreamFn = (streamModel, context, streamOptions) => {
-			const kimiApiFormat = cfgProvidersKimiApiFormat.get(settings);
-			return settingsAwareStreamFn(streamModel, context, {
-				...streamOptions,
-				thinkingBudgets: streamOptions?.thinkingBudgets ?? cfgThinkingBudgets.get(settings),
-				kimiApiFormat: streamOptions?.kimiApiFormat ?? (kimiApiFormat === "auto" ? undefined : kimiApiFormat),
-				preferWebsockets: streamOptions?.preferWebsockets ?? resolveOpenAIWebsocketPreference(settings),
-			});
-		};
+		const primaryStreamFn = wrapRoleRouteStream(
+			() => session?.roleRoute ?? options.roleRoute,
+			(streamModel, context, streamOptions) => {
+				const kimiApiFormat = cfgProvidersKimiApiFormat.get(settings);
+				return settingsAwareStreamFn(streamModel, context, {
+					...streamOptions,
+					thinkingBudgets: streamOptions?.thinkingBudgets ?? cfgThinkingBudgets.get(settings),
+					kimiApiFormat: streamOptions?.kimiApiFormat ?? (kimiApiFormat === "auto" ? undefined : kimiApiFormat),
+					preferWebsockets: streamOptions?.preferWebsockets ?? resolveOpenAIWebsocketPreference(settings),
+				});
+			},
+			modelRegistry,
+		);
 		// Prompt-cache warmer for the main agent loop only: replays the last
 		// request through the same primary wrapper just before the entry would
 		// expire, so idle gaps do not force a full-prefix cache re-write.
@@ -4318,6 +4430,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// a session recreate. The single shared host keeps its evidence across
 		// toggles; per-turn coordinator close never touches it.
 		const speculativeToolExecution = createSpeculativeToolExecutionConfig(settings, toolSession, extensionRunner);
+		assertRoleDispatch(options.roleRoute, model, toReasoningEffort(effectiveThinkingLevel), undefined, modelRegistry);
 
 		agent = new Agent({
 			initialState: {
@@ -4359,7 +4472,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						});
 					}
 				}
+				const activePermit = session?.roleRoute ?? options.roleRoute;
+				const requestedThinking = activePermit ? roleRouteThinkingLevel(activePermit, streamModel) : undefined;
+				const fixedEffort = requestedThinking !== undefined && requestedThinking !== AUTO_THINKING;
 				const externalThinking =
+					!fixedEffort &&
 					cfgExternalThinking.get(settings) &&
 					agent.state.tools.some(tool => tool.name === "think") &&
 					supportsExternalThinking(streamModel);
@@ -4434,6 +4551,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Restore messages if session has existing data
 		if (hasExistingSession) {
 			agent.replaceMessages(existingSession.messages);
+			if (model && roleSelection) sessionManager.appendModelChange(roleSelection.selector, roleSelection.role);
 			if (persistInitialServiceTier) {
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
@@ -4442,7 +4560,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
-				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
+				sessionManager.appendModelChange(
+					roleSelection?.selector ?? `${model.provider}/${model.id}`,
+					roleSelection?.role,
+				);
 			}
 			if (!autoThinking) {
 				// Do not write the `auto` selector before the first turn resolves; auto
@@ -4548,6 +4669,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
+			roleRoute: options.roleRoute,
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,
 			prewalk,
 			planYolo: options.planYolo,

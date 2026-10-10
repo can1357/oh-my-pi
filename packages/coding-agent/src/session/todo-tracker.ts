@@ -7,7 +7,7 @@ import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
 import { getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
 import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import { buildNamedToolChoice } from "../utils/tool-choice";
+import { buildNamedToolChoice, type NamedToolChoiceOptions } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
 
@@ -63,6 +63,7 @@ export interface TodoTrackerHost {
 	sessionManager: SessionManager;
 	settings: Settings;
 	model(): Model | undefined;
+	toolChoiceOptions?(): NamedToolChoiceOptions | undefined;
 	agentKind(): "main" | "sub";
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	scheduleAgentContinue(options: { source: string; generation?: number }): void;
@@ -174,7 +175,7 @@ export class TodoTracker {
 		};
 		if (promptText === undefined || mode === "preferred") return { message };
 		const model = this.#host.model();
-		const toolChoice = buildNamedToolChoice("todo", model);
+		const toolChoice = buildNamedToolChoice("todo", model, this.#host.toolChoiceOptions?.());
 		if (!toolChoice) {
 			logger.warn(
 				"Eager todo proceeding with the reminder only because the current model does not support a forced todo tool_choice",

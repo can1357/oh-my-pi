@@ -4,7 +4,7 @@ import * as tls from "node:tls";
 import { isAnthropicSigningProxyUrl, isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { hostMatchesUrl, isVertexRawPredictUrl } from "@oh-my-pi/pi-catalog/hosts";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
+import { mapEffortToAnthropicAdaptiveEffort, resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
@@ -90,6 +90,12 @@ import {
 } from "./anthropic-slow-mode";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
+import {
+	assertSafeGovernedJson,
+	createRequestSelectionGuard,
+	serializeRequestBody,
+	shouldAwaitPayloadHookResult,
+} from "../utils/request-selection";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
@@ -707,27 +713,23 @@ function patchCch(body: Uint8Array): "patched" | "no-billing-header" | "unanchor
 	return "patched";
 }
 
-/**
- * Wraps a fetch implementation to patch the Claude Code billing-header `cch`
- * attestation into outgoing request bodies. Bodies without the placeholder
- * pass through untouched, so installing it on every OAuth flow is safe.
- */
+function prepareCchBody(body: string): string | Uint8Array<ArrayBuffer> {
+	if (!body.includes(CCH_PLACEHOLDER_STR)) return body;
+	const encoded = cchEncoder.encode(body);
+	if (patchCch(encoded) === "unanchored") {
+		// Hooks can reorder the billing header's keys. Preserve the ordinary
+		// unattested request behavior, while reporting the missing fingerprint.
+		logger.warn("anthropic: cch billing placeholder present but not patched; sending unattested request");
+	}
+	return encoded;
+}
+
+/** Patch the Claude Code billing attestation on ordinary fetch consumers. */
 export function wrapFetchForCch(base: FetchImpl): FetchImpl {
 	return (input, init) => {
-		if (init?.body && typeof init.body === "string" && init.body.includes(CCH_PLACEHOLDER_STR)) {
-			const encoded = cchEncoder.encode(init.body);
-			if (patchCch(encoded) === "unanchored") {
-				// The OAuth billing placeholder is anchored to system[0] but we couldn't
-				// patch it — e.g. an `onPayload` hook reordered the first system block's keys
-				// so BILLING_SYSTEM_MARKER no longer matches. Send the body as-is (cch stays
-				// `00000`, the prior behaviour) rather than failing the request, but surface the
-				// fingerprint regression instead of letting it ship silently. A `cch=00000`
-				// literal in user content alone ("no-billing-header") is not a regression.
-				logger.warn("anthropic: cch billing placeholder present but not patched; sending unattested request");
-			}
-			return base(input, { ...init, body: encoded });
-		}
-		return base(input, init);
+		if (typeof init?.body !== "string") return base(input, init);
+		const body = prepareCchBody(init.body);
+		return base(input, body === init.body ? init : { ...init, body });
 	};
 }
 
@@ -1098,6 +1100,7 @@ export type AnthropicClientOptionsArgs = {
 	thinkingDisplay?: AnthropicThinkingDisplay;
 	disableStrictTools?: boolean;
 	fetch?: FetchImpl;
+	onBeforeRequest?: StreamOptions["onBeforeRequest"];
 	maxRetryDelayMs?: number;
 	sessionId?: string;
 	/** Working-identity cache key for this credential+host; undefined off the Copilot path. */
@@ -1120,6 +1123,7 @@ export type AnthropicClientOptionsResult = {
 	defaultHeaders: Record<string, string>;
 	fetch?: FetchImpl;
 	fetchOptions?: AnthropicFetchOptions;
+	prepareRequestBody?: (serialized: string) => string | Uint8Array<ArrayBuffer>;
 };
 
 const CLAUDE_CODE_TLS_CIPHERS = tls.DEFAULT_CIPHERS;
@@ -2037,11 +2041,25 @@ export function maybeAddReplayUnsignedThinkingHint(model: Model<"anthropic-messa
 	return `${hint}\n\n${message}`;
 }
 
+type AnthropicReplayPayload = {
+	profile: string;
+	body: string;
+	requestControls: AnthropicRequestControls | undefined;
+	selectionGuard: ((serialized: string) => void) | undefined;
+};
+
 const streamAnthropicOnce = (
 	model: Model<"anthropic-messages">,
 	context: Context,
 	options?: AnthropicOptions,
+	replayPayload?: { current?: AnthropicReplayPayload },
 ): AssistantMessageEventStream => {
+	const preserveModelSelection = options?.preserveModelSelection;
+	const preserveThinkingEffort = options?.preserveThinkingEffort;
+	const onBeforeRequest = options?.onBeforeRequest;
+	if (preserveModelSelection || preserveThinkingEffort || onBeforeRequest) {
+		options = { ...options, preserveModelSelection, preserveThinkingEffort, onBeforeRequest };
+	}
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
@@ -2065,6 +2083,52 @@ const streamAnthropicOnce = (
 		const rawSseObserver = onSseEvent ? (event: RawSseEvent) => onSseEvent(event, model) : undefined;
 
 		try {
+			if ((preserveModelSelection || preserveThinkingEffort || onBeforeRequest) && options?.client) {
+				throw new AIError.ModelSelectionError(
+					"Governed Anthropic requests require the owned final-body transport; injected clients are unsupported.",
+				);
+			}
+			if (preserveModelSelection || preserveThinkingEffort) {
+				if (options?.fallbacks !== undefined) {
+					assertSafeGovernedJson(options.fallbacks);
+					if (!Array.isArray(options.fallbacks) || options.fallbacks.length > 0) {
+						throw new AIError.ModelSelectionError(
+							"Governed Anthropic requests cannot re-admit server-side fallback iterations.",
+						);
+					}
+				}
+				const declaredWireId = model.requestModelId ?? model.id;
+				const requestedWireId = options?.requestModelId ?? declaredWireId;
+				if (typeof requestedWireId !== "string" || requestedWireId.length === 0) {
+					throw new AIError.ModelSelectionError("The governed Anthropic request has no stable wire model.");
+				}
+				const canonical = options?.reasoning;
+				const fixedOff = preserveThinkingEffort && options?.thinkingEnabled === false;
+				if (canonical !== undefined || fixedOff) {
+					const expectedWireId = resolveWireModelId(model, canonical);
+					if (options?.requestModelId !== undefined && requestedWireId !== expectedWireId) {
+						throw new AIError.ModelSelectionError("The Anthropic wire model changed the requested effort route.");
+					}
+					options = { ...options, requestModelId: expectedWireId };
+				} else {
+					const routes = Object.values(model.thinking?.effortRouting ?? {});
+					if (preserveThinkingEffort && (routes.length > 0 || requestedWireId !== declaredWireId)) {
+						throw new AIError.ModelSelectionError(
+							"A fixed Anthropic wire effort route requires its canonical reasoning selection.",
+						);
+					}
+					if (
+						preserveModelSelection &&
+						requestedWireId !== model.id &&
+						requestedWireId !== declaredWireId &&
+						!routes.includes(requestedWireId)
+					) {
+						throw new AIError.ModelSelectionError(
+							"The Anthropic request escaped the declared wire model family.",
+						);
+					}
+				}
+			}
 			// Built inside the try so a copilot credential/header failure surfaces as
 			// an error event instead of an unhandled rejection that leaves the stream
 			// (and any consumer awaiting `result()`) hanging forever.
@@ -2284,6 +2348,7 @@ const streamAnthropicOnce = (
 					thinkingEnabled: options?.thinkingEnabled,
 					thinkingDisplay: options?.thinkingDisplay,
 					fetch: options?.fetch,
+					onBeforeRequest: options?.onBeforeRequest,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					copilotCacheKey,
 					copilotCacheSnapshot: copilotCached ?? null,
@@ -2300,8 +2365,11 @@ const streamAnthropicOnce = (
 				requestExtraBetas = extraBetas;
 			}
 			const preparedContext = await prepareAnthropicManyImageContext(context, model.input.includes("image"));
-			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
-				const built = buildParams(model, preparedContext, isOAuthToken, options, {
+			const governed = preserveModelSelection || preserveThinkingEffort;
+			let selectionGuard: ((serialized: string) => void) | undefined;
+			let serializedBody: string | undefined;
+			const buildRequestParams = () =>
+				buildParams(model, preparedContext, isOAuthToken, options, {
 					compactionSupported,
 					disableStrictTools,
 					useUmansGatewayWebSearch: umansGatewayWebSearchHeader !== undefined,
@@ -2313,31 +2381,81 @@ const streamAnthropicOnce = (
 					fallbacks,
 					effectiveBaseUrl: baseUrl,
 				});
-				let nextParams = built.params;
-				// The last build wins: a retry may rebuild with different controls.
-				if (built.requestControls) output.requestControls = built.requestControls;
-				else delete output.requestControls;
-				if (disableStrictTools) {
-					dropAnthropicStrictTools(nextParams);
+			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
+				const profile = governed
+					? JSON.stringify([
+							baseUrl,
+							isOAuthToken,
+							getClaudeCodeVersion(),
+							disableStrictTools,
+							dropFastMode,
+							forceDemoteUnsignedThinking,
+							dropAllThinking,
+							prefixMismatchBehavior,
+							[...(providerSessionState?.prefixDroppedThinkingBlocks ?? [])],
+						])
+					: undefined;
+				const cached =
+					profile !== undefined && replayPayload?.current?.profile === profile ? replayPayload.current : undefined;
+				let nextParams: MessageCreateParamsStreaming;
+				if (cached) {
+					nextParams = JSON.parse(cached.body) as MessageCreateParamsStreaming;
+					serializedBody = cached.body;
+					selectionGuard = cached.selectionGuard;
+					if (cached.requestControls) output.requestControls = cached.requestControls;
+					else delete output.requestControls;
+				} else {
+					const built = buildRequestParams();
+					selectionGuard ??= built.selectionGuard;
+					nextParams = built.params;
+					if (built.requestControls) output.requestControls = built.requestControls;
+					else delete output.requestControls;
+					if (disableStrictTools) dropAnthropicStrictTools(nextParams);
+					if (dropFastMode) dropAnthropicFastMode(nextParams);
+					const payloadHookResult = options?.onPayload?.(nextParams, model);
+					const replacementPayload = shouldAwaitPayloadHookResult(payloadHookResult, !!governed)
+						? await payloadHookResult
+						: payloadHookResult;
+					if (replacementPayload !== undefined) nextParams = replacementPayload as typeof nextParams;
+					if (governed) {
+						assertSafeGovernedJson(nextParams);
+						if (!isRecord(nextParams)) {
+							throw new AIError.ModelSelectionError("The governed Anthropic request requires a JSON object.");
+						}
+					}
+					try {
+						if (nextParams.compaction) stripCompactionIncompatibleParams(nextParams);
+						if (model.compat.bedrockMessagesApi) fitBedrockAnthropicPayload(nextParams);
+						nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
+						if (governed && nextParams.stream !== true) nextParams = { ...nextParams, stream: true };
+					} catch (cause) {
+						if (governed) {
+							throw new AIError.ModelSelectionError(
+								"Anthropic normalization cannot preserve the selected controls.",
+								{
+									cause,
+								},
+							);
+						}
+						throw cause;
+					}
+					serializedBody = governed ? serializeRequestBody(nextParams, options) : undefined;
+					if (replayPayload && profile !== undefined) {
+						replayPayload.current = {
+							profile,
+							body: serializedBody!,
+							requestControls: built.requestControls,
+							selectionGuard,
+						};
+					}
 				}
-				if (dropFastMode) {
-					dropAnthropicFastMode(nextParams);
-				}
-				const replacementPayload = await options?.onPayload?.(nextParams, model);
-				if (replacementPayload !== undefined) {
-					nextParams = replacementPayload as typeof nextParams;
-				}
-				if (nextParams.compaction) stripCompactionIncompatibleParams(nextParams);
-				// After `onPayload`, so a hook cannot restore a field Bedrock rejects.
-				if (model.compat.bedrockMessagesApi) fitBedrockAnthropicPayload(nextParams);
-				nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
 					model: model.id,
 					method: "POST",
 					url: `${baseUrl}/v1/messages${isOAuthToken ? "?beta=true" : ""}`,
-					body: nextParams,
+					body: governed ? JSON.parse(serializedBody!) : nextParams,
 				};
 				return nextParams;
 			};
@@ -2352,6 +2470,7 @@ const streamAnthropicOnce = (
 			) {
 				const redemption = options.fallbackCreditRedemption;
 				usingFallbackCredit = true;
+				if (governed) assertSafeGovernedJson(redemption.params);
 				const frozenParams = structuredClone(redemption.params as MessageCreateParamsStreaming);
 				const targetModelId = options?.requestModelId ?? model.requestModelId ?? model.id;
 				frozenParams.model = targetModelId;
@@ -2374,13 +2493,21 @@ const streamAnthropicOnce = (
 					fallbackCreditShape = "unchanged";
 				}
 				params = frozenParams;
+				if (governed) {
+					params.stream = true;
+					const baseline = buildRequestParams().params;
+					baseline.fallback_credit_token = redemption.token;
+					delete baseline.fallbacks;
+					selectionGuard = createAnthropicSelectionGuard(options, baseline, model);
+					serializedBody = serializeRequestBody(params, options);
+				}
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
 					model: model.id,
 					method: "POST",
 					url: `${baseUrl}/v1/messages${isOAuthToken ? "?beta=true" : ""}`,
-					body: params,
+					body: governed ? JSON.parse(serializedBody!) : params,
 				};
 			} else {
 				params = await prepareParams();
@@ -2584,12 +2711,25 @@ const streamAnthropicOnce = (
 				const requestOptions = {
 					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
 					maxRetries: 0,
+					...(governed || onBeforeRequest
+						? {
+								preserveModelSelection,
+								preserveThinkingEffort,
+								onBeforeRequest,
+								serializedBody,
+								requestSelectionGuard: selectionGuard,
+								requestUrl: preserveModelSelection
+									? `${baseUrl}/v1/messages${isOAuthToken ? "?beta=true" : ""}`
+									: undefined,
+							}
+						: {}),
 					...(perRequestHeaders ? { headers: perRequestHeaders } : {}),
 				};
+				const requestParams = governed ? params : { ...params, stream: true as const };
 				const anthropicRequest: unknown =
 					isOAuthToken && client.beta
-						? client.beta.messages.create({ ...params, stream: true }, requestOptions)
-						: client.messages.create({ ...params, stream: true }, requestOptions);
+						? client.beta.messages.create(requestParams, requestOptions)
+						: client.messages.create(requestParams, requestOptions);
 				let streamedReplayUnsafeContent = false;
 
 				try {
@@ -3163,6 +3303,14 @@ const streamAnthropicOnce = (
 					break;
 				} catch (streamError) {
 					const streamFailure = activeAbortTracker.getLocalAbortReason() ?? streamError;
+					const failureId = AIError.classify(streamFailure);
+					if (
+						AIError.is(failureId, AIError.Flag.HostAdmission) ||
+						AIError.is(failureId, AIError.Flag.Abort) ||
+						AIError.is(failureId, AIError.Flag.UserInterrupt)
+					) {
+						throw streamFailure;
+					}
 					if (
 						!disableStrictTools &&
 						firstTokenTime === undefined &&
@@ -3215,12 +3363,17 @@ const streamAnthropicOnce = (
 								},
 							);
 							fallbackCreditShape = "unchanged";
+							if (governed) assertSafeGovernedJson(redemption.params);
 							const frozenParams = structuredClone(redemption.params as MessageCreateParamsStreaming);
 							const targetModelId = options?.requestModelId ?? model.requestModelId ?? model.id;
 							frozenParams.model = targetModelId;
 							frozenParams.fallback_credit_token = redemption.token;
 							delete frozenParams.fallbacks;
 							params = frozenParams;
+							if (governed) {
+								params.stream = true;
+								serializedBody = serializeRequestBody(params, options);
+							}
 							resetStreamOutputState();
 							continue;
 						}
@@ -3535,10 +3688,24 @@ const streamAnthropicOnce = (
  * Public entry: retry benign empty completions before they reach the agent
  * loop. The inner attempt owns Anthropic provider-failure retries.
  */
-export const streamAnthropic: StreamFunction<"anthropic-messages"> = (model, context, options) =>
-	withReplaySafeStreamRetry(model, context, options, streamAnthropicOnce, {
-		retryEmptyCompletion: true,
-	});
+export const streamAnthropic: StreamFunction<"anthropic-messages"> = (model, context, options) => {
+	const preserveModelSelection = options?.preserveModelSelection;
+	const preserveThinkingEffort = options?.preserveThinkingEffort;
+	const onBeforeRequest = options?.onBeforeRequest;
+	const requestOptions =
+		preserveModelSelection || preserveThinkingEffort || onBeforeRequest
+			? { ...options, preserveModelSelection, preserveThinkingEffort, onBeforeRequest }
+			: options;
+	const replayPayload =
+		requestOptions?.preserveModelSelection || requestOptions?.preserveThinkingEffort ? {} : undefined;
+	return withReplaySafeStreamRetry(
+		model,
+		context,
+		requestOptions,
+		(model, context, options) => streamAnthropicOnce(model, context, options, replayPayload),
+		{ retryEmptyCompletion: true },
+	);
+};
 
 export type AnthropicSystemBlock = {
 	type: "text";
@@ -3697,6 +3864,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 				resolveCopilotRequestIdentity(headers),
 				copilotCacheKey ?? getCopilotIntegrationCacheKey(apiKey, baseUrl),
 				copilotCacheSnapshot,
+				args.onBeforeRequest,
 			),
 			fetchOptions,
 		};
@@ -3800,6 +3968,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		defaultHeaders,
 		fetch: cchFetch,
 		fetchOptions,
+		prepareRequestBody: oauthToken ? prepareCchBody : undefined,
 	};
 }
 
@@ -3808,7 +3977,12 @@ function createClient(
 	args: AnthropicClientOptionsArgs,
 ): { client: AnthropicMessagesClient; isOAuthToken: boolean; defaultHeaders?: Record<string, string> } {
 	const { isOAuthToken: oauthToken, ...clientOptions } = buildAnthropicClientOptions({ ...args, model });
-	const client = new AnthropicMessagesClient(clientOptions);
+	const client = new AnthropicMessagesClient({
+		...clientOptions,
+		// The owned body rewrite already precedes the final byte guard. Do not
+		// install a second OAuth rewrite inside the fetch retry catch.
+		fetch: oauthToken ? (args.fetch ?? fetch) : clientOptions.fetch,
+	});
 	return { client, isOAuthToken: oauthToken, defaultHeaders: clientOptions.defaultHeaders };
 }
 
@@ -3871,7 +4045,11 @@ function disableThinkingIfToolChoiceForced(
 	}
 }
 
-function ensureMaxTokensForThinking(params: MessageCreateParamsStreaming, maxAllowedTokens: number): void {
+function ensureMaxTokensForThinking(
+	params: MessageCreateParamsStreaming,
+	maxAllowedTokens: number,
+	preserveThinkingEffort: boolean | undefined,
+): void {
 	const thinking = params.thinking;
 	if (thinking?.type !== "enabled") return;
 
@@ -3882,6 +4060,9 @@ function ensureMaxTokensForThinking(params: MessageCreateParamsStreaming, maxAll
 	params.max_tokens = output.maxTokens;
 
 	if (output.budgetTokens === budgetTokens) return;
+	if (preserveThinkingEffort) {
+		throw new AIError.ModelSelectionError("The Anthropic output ceiling cannot honor the selected thinking budget.");
+	}
 
 	if (output.budgetTokens <= 0) {
 		throw new AIError.ConfigurationError(
@@ -4664,13 +4845,60 @@ export function shouldStripThinkingHistory(messages: readonly Message[]): boolea
 	return hasThinkinglessAssistantHistory(messages) || hasNonThinkingTurnAfterLastUser(messages);
 }
 
+function createAnthropicSelectionGuard(
+	options: AnthropicOptions | undefined,
+	params: MessageCreateParamsStreaming,
+	model: Model<"anthropic-messages">,
+): ((serialized: string) => void) | undefined {
+	return createRequestSelectionGuard(options, params, payload => ({
+		...(options?.preserveModelSelection && {
+			model: payload.model,
+			fallbacks: payload.fallbacks?.map(fallback => ({ model: fallback.model })),
+			fallbackCredit: payload.fallback_credit_token,
+		}),
+		...(options?.preserveThinkingEffort && {
+			...(model.thinking?.effortRouting && { effortModel: payload.model }),
+			thinking: payload.thinking && {
+				type: payload.thinking.type,
+				...(payload.thinking.type === "enabled" ? { budget_tokens: payload.thinking.budget_tokens } : {}),
+			},
+			effort: payload.output_config?.effort,
+			taskBudget: payload.output_config?.task_budget,
+			controls: payload.messages.flatMap(message =>
+				message.output_config?.effort === undefined && message.output_config?.task_budget === undefined
+					? []
+					: [
+							{
+								role: message.role,
+								effort: message.output_config.effort,
+								taskBudget: message.output_config.task_budget,
+							},
+						],
+			),
+			fallbacks: payload.fallbacks?.map(fallback => ({
+				thinking: fallback.thinking && {
+					type: fallback.thinking.type,
+					...(fallback.thinking.type === "enabled" ? { budget_tokens: fallback.thinking.budget_tokens } : {}),
+				},
+				effort: fallback.output_config?.effort,
+				taskBudget: fallback.output_config?.task_budget,
+			})),
+			toolChoice: payload.tool_choice,
+		}),
+	}));
+}
+
 function buildParams(
 	model: Model<"anthropic-messages">,
 	context: Context,
 	isOAuthToken: boolean,
 	options: AnthropicOptions | undefined,
 	buildOptions: AnthropicParamBuildOptions,
-): { params: MessageCreateParamsStreaming; requestControls: AnthropicRequestControls | undefined } {
+): {
+	params: MessageCreateParamsStreaming;
+	requestControls: AnthropicRequestControls | undefined;
+	selectionGuard: ((serialized: string) => void) | undefined;
+} {
 	const {
 		disableStrictTools,
 		useUmansGatewayWebSearch,
@@ -4710,6 +4938,37 @@ function buildParams(
 	// Controls earlier requests recorded on their responses fix the declared
 	// tools, the top-level effort and every control message in between.
 	const records = collectAnthropicControlRecords(context.messages);
+	if (options?.preserveThinkingEffort) {
+		if (
+			((options.effort || options.reasoning) &&
+				options.thinkingEnabled !== true &&
+				!model.compat.requiresThinkingEnabled) ||
+			((options.thinkingEnabled || options.effort || options.reasoning) && !model.reasoning)
+		) {
+			throw new AIError.ModelSelectionError("The selected Anthropic effort cannot be disabled.");
+		}
+		if (
+			options.thinkingEnabled === false &&
+			model.reasoning &&
+			(model.compat.disabledThinking === "adaptive" ||
+				((isAdaptiveOnlyThinking(model) ||
+					model.compat.requiresThinkingEnabled ||
+					model.thinking?.requiresEffort) &&
+					model.compat.disabledThinking !== "disabled" &&
+					model.compat.disabledThinking !== "omit") ||
+				(model.compat.disabledThinking === "disabled" &&
+					effortControlsBlockDisabledThinking(model, context.messages, records)))
+		) {
+			throw new AIError.ModelSelectionError("The selected Anthropic model cannot honor thinking off.");
+		}
+		if (
+			options.thinkingEnabled &&
+			options.thinkingBudgetTokens !== undefined &&
+			(!Number.isFinite(options.thinkingBudgetTokens) || options.thinkingBudgetTokens <= 0)
+		) {
+			throw new AIError.ModelSelectionError("The selected Anthropic effort requires a positive thinking budget.");
+		}
+	}
 	const toolPlan = planAnthropicToolControls(
 		context,
 		records,
@@ -4840,6 +5099,11 @@ function buildParams(
 		model.compat.stripThinkingHistory === true &&
 		thinking?.type === "enabled" &&
 		shouldStripThinkingHistory(context.messages);
+	if (stripThinkingHistory && options?.preserveThinkingEffort) {
+		throw new AIError.ModelSelectionError(
+			"The native Anthropic history policy cannot preserve the selected thinking effort.",
+		);
+	}
 	if (stripThinkingHistory) thinking = undefined;
 
 	// Pre-compute context_management. Send keep: "all" for every enabled or
@@ -4888,6 +5152,15 @@ function buildParams(
 		compactionReplay,
 		!compactionRequest,
 	);
+	if (
+		options?.preserveThinkingEffort &&
+		outputConfigEffort !== undefined &&
+		(!model.compat.supportsOutputEffort || (effortPlan.record?.tail ?? effortPlan.topLevel) !== outputConfigEffort)
+	) {
+		throw new AIError.ModelSelectionError(
+			"The Anthropic history or compaction controls cannot honor the requested thinking effort.",
+		);
+	}
 	// `between_tools` returns a 400 at `xhigh`/`max` effort, and the effort in
 	// force from earlier turns outlives a thinking toggle. Fall back to the
 	// default adaptive request, which accepts every effort level.
@@ -5034,15 +5307,25 @@ function buildParams(
 			(choiceType === "any" || choiceType === "tool") &&
 			(compactionRequest || !model.compat.supportsForcedToolChoice)
 		) {
+			if (options.preserveThinkingEffort) {
+				throw new AIError.ModelSelectionError("The selected Anthropic effort cannot honor forced tool selection.");
+			}
 			params.tool_choice = { type: "auto" };
 		}
 	}
 
-	disableThinkingIfToolChoiceForced(params, model);
-	ensureMaxTokensForThinking(params, maxOutputTokens);
+	const selectionGuard = createAnthropicSelectionGuard(options, params, model);
+	if (options?.preserveThinkingEffort && isForcedToolChoice(params.tool_choice)) {
+		if (params.thinking && params.thinking.type !== "disabled") {
+			throw new AIError.ModelSelectionError("The selected Anthropic effort cannot honor forced tool selection.");
+		}
+	} else {
+		disableThinkingIfToolChoiceForced(params, model);
+	}
+	ensureMaxTokensForThinking(params, maxOutputTokens, options?.preserveThinkingEffort);
 	applyPromptCaching(params, cacheControl);
 
-	return { params, requestControls };
+	return { params, requestControls, selectionGuard };
 }
 
 const EMPTY_ERROR_TOOL_RESULT_TEXT = "Tool failed with no output.";

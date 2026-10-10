@@ -6,6 +6,7 @@ import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/ove
 import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import {
+	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
@@ -27,6 +28,8 @@ export interface RetryFallbackSelector {
 	provider: string;
 	id: string;
 	thinkingLevel: ThinkingLevel | undefined;
+	/** Original configured selector, including `auto`, before resolving a wire effort. */
+	configuredThinkingLevel?: ConfiguredThinkingLevel;
 }
 
 /** Minimal model lookup needed by fallback-chain resolution. */
@@ -109,6 +112,7 @@ export function parseRetryFallbackSelector(
 		provider: parsed.provider,
 		id: parsed.id,
 		thinkingLevel: concreteThinkingLevel(parsed.thinkingLevel),
+		...(parsed.thinkingLevel !== undefined ? { configuredThinkingLevel: parsed.thinkingLevel } : {}),
 	};
 }
 
@@ -387,7 +391,7 @@ function selectorMatchKind(
 	if (!primary) return "none";
 	const provider = primary.provider;
 	const id = primary.id;
-	const level = primary.thinkingLevel;
+	const level = primary.configuredThinkingLevel ?? primary.thinkingLevel;
 	let matchedCurrent: RetryFallbackSelector | undefined;
 	if (provider === current.provider && id === current.id) {
 		matchedCurrent = current;
@@ -395,9 +399,11 @@ function selectorMatchKind(
 		matchedCurrent = currentPlain;
 	}
 	if (!matchedCurrent) return "none";
-	if (level === matchedCurrent.thinkingLevel) return "exact";
+	if (level === (matchedCurrent.configuredThinkingLevel ?? matchedCurrent.thinkingLevel)) return "exact";
 	if (level === undefined) return "base";
 	if (
+		level !== AUTO_THINKING &&
+		matchedCurrent.configuredThinkingLevel !== AUTO_THINKING &&
 		currentModel &&
 		resolveThinkingLevelForModel(currentModel, level) ===
 			resolveThinkingLevelForModel(currentModel, matchedCurrent.thinkingLevel)
@@ -420,7 +426,10 @@ export function resolveRetryFallbackChainKey(
 ): string | undefined {
 	const parsedConfigured = parseRetryFallbackSelector(currentSelector, context.modelLookup);
 	const currentPlainSelector = currentModel
-		? formatModelSelectorValue(formatModelString(currentModel), parsedConfigured?.thinkingLevel)
+		? formatModelSelectorValue(
+				formatModelString(currentModel),
+				parsedConfigured?.configuredThinkingLevel ?? parsedConfigured?.thinkingLevel,
+			)
 		: undefined;
 	const parsedCurrent =
 		parsedConfigured ??
@@ -617,7 +626,10 @@ export function findRetryFallbackCandidates(
 	);
 	const parsedConfigured = parseRetryFallbackSelector(currentSelector, context.modelLookup);
 	const currentPlainSelector = currentModel
-		? formatModelSelectorValue(formatModelString(currentModel), parsedConfigured?.thinkingLevel)
+		? formatModelSelectorValue(
+				formatModelString(currentModel),
+				parsedConfigured?.configuredThinkingLevel ?? parsedConfigured?.thinkingLevel,
+			)
 		: undefined;
 	const parsedCurrent =
 		parsedConfigured ??

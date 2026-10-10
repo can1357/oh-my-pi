@@ -77,7 +77,8 @@ import type { MemoryBackendOperationContext } from "../memory-backend/types";
 import { computeNonMessageTokens, type NonMessageTokenSource } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import { isCompleteReadResult } from "../tools/read-supersede";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { concreteThinkingLevel, toReasoningEffort, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { resolveRoleRoute, wrapRoleRouteStream, type RoleRoutePermit } from "../task/role-routing";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
@@ -400,6 +401,7 @@ export interface SessionMaintenanceHost {
 	sessionManager: SessionManager;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
+	roleRoute?(): RoleRoutePermit | undefined;
 	extensionRunner: ExtensionRunner | undefined;
 	sideStreamFn: StreamFn;
 	providerSessionState: Map<string, ProviderSessionState>;
@@ -1184,6 +1186,7 @@ export class SessionMaintenance {
 			let selectedMethod: CompactionMethod | undefined;
 			for (let index = methodOffset; index < methods.length; index++) {
 				const method = methods[index];
+				if (method === "remote" && this.#host.roleRoute?.()) continue;
 				if (method === "remote") {
 					if (canUseRemoteCompaction(activeModel, resolveMethodSettings(compactionSettings, method))) {
 						selectedMethod = method;
@@ -1210,6 +1213,9 @@ export class SessionMaintenance {
 				}
 			}
 			if (!selectedMethod) {
+				if (this.#host.roleRoute?.()) {
+					throw new AIError.ModelSelectionError("Governed workers require a configured local compaction method.");
+				}
 				throw new Error("No configured compaction method can run manually.");
 			}
 
@@ -1514,6 +1520,7 @@ export class SessionMaintenance {
 			const err = error instanceof Error ? error : new Error(String(error));
 			if (error instanceof ManualCompactionNoOpError) rejectedAsNoOp = true;
 			if (
+				!AIError.is(AIError.classify(error), AIError.Flag.HostAdmission) &&
 				methodAttempted &&
 				!compactionCommitted &&
 				!compactionAbortController.signal.aborted &&
@@ -2208,6 +2215,7 @@ export class SessionMaintenance {
 		const clear = () => {
 			if (this.#speculation === run) this.#speculation = undefined;
 		};
+		if (method === "remote" && this.#host.roleRoute?.()) return clear();
 		const model = this.#model;
 		if (!model) return clear();
 		const settings = this.#compactionSettings;
@@ -3396,6 +3404,11 @@ export class SessionMaintenance {
 		availableModels: Model[],
 		filter?: (model: Model) => boolean,
 	): Model[] {
+		const permit = this.#host.roleRoute?.();
+		if (permit) {
+			const selected = resolveRoleRoute(permit, this.#host.modelRegistry).model;
+			return filter && !filter(selected) ? [] : [selected];
+		}
 		// Shared catalog rows carry the registry's extended-window opt-ins; judge
 		// and compact with the window this session's settings select.
 		const registry = this.#host.modelRegistry;
@@ -3450,6 +3463,47 @@ export class SessionMaintenance {
 		);
 	}
 
+	/** Keep local summaries on the admitted route and the session's side-stream transport. */
+	#prepareCompactionRequest(preparation: CompactionPreparation): {
+		preparation: CompactionPreparation;
+		completeImpl: NonNullable<SummaryOptions["completeImpl"]>;
+	} {
+		const getPermit = () => this.#host.roleRoute?.();
+		const permit = getPermit();
+		const compactionStream = permit
+			? wrapRoleRouteStream(getPermit, this.#host.sideStreamFn, this.#host.modelRegistry)
+			: this.#host.sideStreamFn;
+		const providerPreparation = this.#host.obfuscatePreparationForProvider(preparation);
+		const guardedPreparation = permit
+			? {
+					...providerPreparation,
+					settings: {
+						...providerPreparation.settings,
+						remoteEnabled: false,
+						remoteStreamingV2Enabled: false,
+						remoteEndpoint: undefined,
+					},
+				}
+			: providerPreparation;
+		return {
+			preparation: guardedPreparation,
+			completeImpl: async (requestModel, requestContext, requestOptions) => {
+				const currentPermit = getPermit();
+				const selected = currentPermit ? resolveRoleRoute(currentPermit, this.#host.modelRegistry) : undefined;
+				const streamOptions = selected?.fixedEffort
+					? {
+							...requestOptions,
+							reasoning: toReasoningEffort(concreteThinkingLevel(selected.thinkingLevel)),
+							disableReasoning: selected.thinkingLevel === "off",
+							forceReasoningOff: selected.thinkingLevel === "off",
+						}
+					: requestOptions;
+				const stream = await compactionStream(requestModel, requestContext, streamOptions);
+				return stream.result();
+			},
+		};
+	}
+
 	async #compactWithFallbackModel(
 		preparation: CompactionPreparation,
 		customInstructions: string | undefined,
@@ -3461,6 +3515,7 @@ export class SessionMaintenance {
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
+		const compactionRequest = this.#prepareCompactionRequest(preparation);
 
 		for (const candidate of candidates) {
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
@@ -3475,7 +3530,7 @@ export class SessionMaintenance {
 
 			try {
 				return await compact(
-					this.#host.obfuscatePreparationForProvider(preparation),
+					compactionRequest.preparation,
 					candidate,
 					this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
 					this.#host.obfuscateTextForProvider(customInstructions),
@@ -3498,22 +3553,12 @@ export class SessionMaintenance {
 						promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
 						providerSessionState: this.#host.providerSessionState,
 						preferWebsockets: this.#host.preferWebsockets(),
-						// Route every summarization HTTP request through the
-						// session's side-stream transport so the provider
-						// concurrency cap (e.g. providers.ollama-cloud.maxConcurrency)
-						// brackets compaction the same way it brackets the live
-						// agent turn — without this, multiple ollama-cloud
-						// subagents auto/manually compacting issued uncapped
-						// summary requests in parallel (chatgpt-codex review on
-						// #3751).
-						completeImpl: async (requestModel, requestContext, requestOptions) => {
-							const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
-							return stream.result();
-						},
+						completeImpl: compactionRequest.completeImpl,
 					},
 				);
 			} catch (error) {
 				const id = AIError.classify(error instanceof NativeCompactionError ? error.cause : error, candidate.api);
+				if (AIError.is(id, AIError.Flag.HostAdmission)) throw error;
 				if (AIError.is(id, AIError.Flag.AuthFailed)) continue;
 				if (error instanceof NativeCompactionError) {
 					nativeCompactionFailure ??= { error, provider: candidate.provider };
@@ -4319,6 +4364,7 @@ export class SessionMaintenance {
 		let method: CompactionMethod | undefined;
 		for (let index = startIndex; index < methods.length; index++) {
 			const candidate = methods[index];
+			if (candidate === "remote" && this.#host.roleRoute?.()) continue;
 			if (
 				!isCompactionMethodUsable(
 					candidate,
@@ -4358,7 +4404,12 @@ export class SessionMaintenance {
 			break;
 		}
 
-		if (!method) return COMPACTION_CHECK_NONE;
+		if (!method) {
+			if (this.#host.roleRoute?.()) {
+				throw new AIError.ModelSelectionError("Governed workers require a configured local compaction method.");
+			}
+			return COMPACTION_CHECK_NONE;
+		}
 
 		// A speculative pass may have already produced this compaction's summary
 		// in the background. Claiming consumes the slot either way: an in-flight
@@ -4909,8 +4960,9 @@ export class SessionMaintenance {
 					let attempt = 0;
 					while (true) {
 						try {
+							const compactionRequest = this.#prepareCompactionRequest(preparation);
 							compactResult = await compact(
-								this.#host.obfuscatePreparationForProvider(preparation),
+								compactionRequest.preparation,
 								candidate,
 								this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
 								undefined,
@@ -4936,6 +4988,7 @@ export class SessionMaintenance {
 									promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
 									providerSessionState: this.#host.providerSessionState,
 									preferWebsockets: this.#host.preferWebsockets(),
+									completeImpl: compactionRequest.completeImpl,
 									codexCompaction,
 									// This loop already retries the whole compaction attempt on
 									// transient errors, so the summarization oneshots must not
@@ -4955,6 +5008,7 @@ export class SessionMaintenance {
 								error instanceof NativeCompactionError ? error.cause : error,
 								candidate.api,
 							);
+							if (AIError.is(id, AIError.Flag.HostAdmission)) throw error;
 							if (AIError.is(id, AIError.Flag.AuthFailed)) {
 								if (!nativeCompactionFailure) lastError = this.#buildCompactionAuthError();
 								break;
@@ -5084,6 +5138,7 @@ export class SessionMaintenance {
 				},
 			});
 		} catch (error) {
+			if (AIError.is(AIError.classify(error), AIError.Flag.HostAdmission)) throw error;
 			if (autoCompactionSignal.aborted) {
 				await this.#emitLifecycleEvent(
 					{

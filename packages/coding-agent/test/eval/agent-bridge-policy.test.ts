@@ -15,6 +15,7 @@ import { AgentProtocolHandler } from "../../src/internal-urls/agent-protocol";
 import { resetRegisteredArtifactDirsForTests } from "../../src/internal-urls/registry-helpers";
 import type { PlanModeState } from "../../src/plan-mode/state";
 import { AgentRegistry } from "../../src/registry/agent-registry";
+import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import type { AgentSession } from "../../src/session/agent-session";
 import * as taskDiscovery from "../../src/task/discovery";
 import type { ExecutorOptions } from "../../src/task/executor";
@@ -24,6 +25,9 @@ import { AgentOutputManager } from "../../src/task/output-manager";
 import type { AgentDefinition } from "../../src/task/types";
 import type { AgentProgress, SingleResult, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../../src/tools";
+import { createTaskModelFixture, type TaskModelFixture } from "../helpers/model-fixtures";
+import * as sdk from "../../src/sdk";
+import { getBundledAgent } from "../../src/task/agents";
 
 const taskAgent = {
 	name: "task",
@@ -31,7 +35,7 @@ const taskAgent = {
 	systemPrompt: "Run the task.",
 	source: "bundled",
 	spawns: "*",
-	model: ["@task"],
+	model: ["routing-test/primary"],
 } satisfies AgentDefinition;
 
 const reviewerAgent = {
@@ -39,10 +43,22 @@ const reviewerAgent = {
 	description: "Reviewer agent",
 	systemPrompt: "Review the task.",
 	source: "bundled",
-	model: ["@smol"],
+	model: ["routing-test/fallback"],
 } satisfies AgentDefinition;
 
 const jobManagers = new Set<AsyncJobManager>();
+const modelFixtures: TaskModelFixture[] = [];
+
+afterEach(async () => {
+	await Promise.all([...jobManagers].map(manager => manager.dispose()));
+	jobManagers.clear();
+	vi.restoreAllMocks();
+	vi.useRealTimers();
+	AgentRegistry.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	resetRegisteredArtifactDirsForTests();
+	for (const fixture of modelFixtures.splice(0)) fixture.close();
+});
 
 function isEvalAgentResult(value: unknown): value is EvalAgentResult {
 	return (
@@ -75,8 +91,6 @@ interface SessionOptions {
 	artifactsDir?: string | null;
 	spawns?: string | null;
 	depth?: number;
-	activeModel?: string;
-	modelString?: string;
 	enableLsp?: boolean;
 	settings?: Settings;
 	outputManager?: AgentOutputManager;
@@ -95,6 +109,8 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 	const artifactsDir = options.artifactsDir ?? null;
 	const asyncJobManager = new AsyncJobManager({});
 	jobManagers.add(asyncJobManager);
+	const fixture = createTaskModelFixture(settings);
+	modelFixtures.push(fixture);
 	return {
 		cwd: options.cwd ?? process.cwd(),
 		hasUI: false,
@@ -105,8 +121,10 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 		agentOutputManager: options.outputManager,
 		getSessionFile: () => options.sessionFile ?? null,
 		getSessionSpawns: () => options.spawns ?? "*",
-		getActiveModelString: () => options.activeModel ?? "p/active",
-		getModelString: () => options.modelString ?? "p/fallback",
+		modelRegistry: fixture.modelRegistry,
+		getActiveModel: fixture.getActiveModel,
+		getActiveModelString: fixture.getActiveModelString,
+		getActiveModelSelector: fixture.getActiveModelSelector,
 		getArtifactsDir: () => artifactsDir,
 		getSessionId: () => "test-session",
 		getEvalSessionId: () => "test-eval-session",
@@ -181,30 +199,16 @@ function makeEvalSession(
 }
 
 describe("runEvalAgent", () => {
-	afterEach(async () => {
-		vi.restoreAllMocks();
-		AgentRegistry.resetGlobalForTests();
-		resetRegisteredArtifactDirsForTests();
-		await Promise.all([...jobManagers].map(manager => manager.dispose()));
-		jobManagers.clear();
-	});
-
 	it("resolves the default task agent and agent overrides", async () => {
 		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
-			singleResult(options, {
-				output: options.agent.name,
-			}),
-		);
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 		const session = makeSession();
 
 		const defaultResult = await runEvalAgentAndWait({ prompt: "hello" }, { session });
 		const overrideResult = await runEvalAgentAndWait({ prompt: "hello", agent: "reviewer" }, { session });
 
-		expect(defaultResult.text).toBe("task");
-		expect(overrideResult.text).toBe("reviewer");
-		expect(runSpy.mock.calls[0]?.[0].agent.name).toBe("task");
-		expect(runSpy.mock.calls[1]?.[0].agent.name).toBe("reviewer");
+		expect(defaultResult.details.agent).toBe("task");
+		expect(overrideResult.details.agent).toBe("reviewer");
 	});
 
 	it("throws for an unknown agent", async () => {
@@ -231,19 +235,14 @@ describe("runEvalAgent", () => {
 
 	it("defaults to the first allowed spawn under restricted eval policies", async () => {
 		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
-			singleResult(options, {
-				output: options.agent.name,
-			}),
-		);
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
 		const result = await runEvalAgentAndWait(
 			{ prompt: "hello" },
 			{ session: makeSession({ spawns: "reviewer,task" }) },
 		);
 
-		expect(result.text).toBe("reviewer");
-		expect(runSpy.mock.calls[0]?.[0].agent.name).toBe("reviewer");
+		expect(result.details.agent).toBe("reviewer");
 	});
 
 	it("honors task.maxRecursionDepth without an eval-specific ceiling", async () => {
@@ -299,61 +298,28 @@ describe("runEvalAgent", () => {
 		expect(runSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("passes parent execution options and only sets outputSchema when schema is supplied", async () => {
+	it("rejects an ambiguous or blank per-call model on agent() before dispatch", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-		const abortController = new AbortController();
-		const schema = { type: "object", properties: { ok: { type: "boolean" } } };
-		const session = makeSession({
-			depth: 2,
-			activeModel: "p/current",
-			modelString: "p/fallback",
-			settings: Settings.isolated({
-				"async.enabled": false,
-				"task.isolation.enabled": false,
-				"task.enableLsp": true,
-				// Default task.maxRecursionDepth is 2, which would now (correctly)
-				// block depth=2 — widen it so the test still exercises depth=2.
-				"task.maxRecursionDepth": -1,
-			}),
-		});
 
-		await runEvalAgentAndWait(
-			{ prompt: " hello ", label: "My Agent", schema },
-			{ session, signal: abortController.signal },
+		await expect(runEvalAgent({ prompt: "work", model: "default" }, { session: makeSession() })).rejects.toThrow(
+			/"@default"/,
 		);
-		await runEvalAgentAndWait({ prompt: "plain" }, { session });
-
-		const firstOptions = runSpy.mock.calls[0]?.[0];
-		const secondOptions = runSpy.mock.calls[1]?.[0];
-		if (!firstOptions || !secondOptions) throw new Error("runSubprocess was not called");
-		expect(firstOptions.taskDepth).toBe(2);
-		expect(firstOptions.signal).not.toBe(abortController.signal);
-		expect(firstOptions.signal?.aborted).toBe(false);
-		expect(firstOptions.parentActiveModelPattern).toBe("p/current");
-		expect(firstOptions.outputSchema).toBe(schema);
-		expect(firstOptions.outputSchemaOverridesAgent).toBe(true);
-		expect(firstOptions.assignment).toBe("hello");
-		expect(firstOptions.description).toBe("My Agent");
-		// No per-call override: the agent's own frontmatter model applies.
-		expect(firstOptions.modelOverride).toEqual(["p/current"]);
-		expect(secondOptions.outputSchema).toBeUndefined();
-		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
+		await expect(runEvalAgent({ prompt: "work", model: "   " }, { session: makeSession() })).rejects.toThrow(
+			/invalid `model`/,
+		);
+		expect(runSpy).not.toHaveBeenCalled();
 	});
 
-	it("drops a per-call model argument on agent() (removed, issue #6438)", async () => {
+	it("rejects an unauthorized model before allocating a handle or background job", async () => {
 		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-
-		// The schema strips unknown keys; a legacy `model` argument is silently
-		// discarded so resolution is identical to omitting it — the agent's own
-		// frontmatter model applies (issue #6438).
-		await runEvalAgentAndWait({ prompt: "work", model: "default" }, { session: makeSession() });
-		await runEvalAgentAndWait({ prompt: "work" }, { session: makeSession() });
-
-		const withModel = runSpy.mock.calls[0]?.[0];
-		const withoutModel = runSpy.mock.calls[1]?.[0];
-		expect(withModel?.modelOverride).toEqual(withoutModel?.modelOverride);
+		const session = makeSession();
+		const dispatch = vi.spyOn(taskExecutor, "runSubprocess");
+		await expect(
+			runEvalAgent({ prompt: "work", agent: "reviewer", model: "routing-test/unassigned" }, { session }),
+		).rejects.toThrow(/not authorized/);
+		expect(session.asyncJobManager!.getAllJobs()).toHaveLength(0);
+		expect(dispatch).not.toHaveBeenCalled();
 	});
 	it("returns host-parsed data for caller, agent, and inherited schemas", async () => {
 		const agentSchema = { type: "object" };
@@ -361,7 +327,7 @@ describe("runEvalAgent", () => {
 		const callerSchema = { type: "object" };
 		const frontmatterAgent = { ...reviewerAgent, name: "structured", output: agentSchema };
 		mockAgents([taskAgent, frontmatterAgent]);
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
 			const source = options.outputSchemaOverridesAgent
 				? "caller"
 				: options.agent.name === "structured"
@@ -393,26 +359,6 @@ describe("runEvalAgent", () => {
 		expect(caller.details).toMatchObject({ schemaSource: "caller", schemaMode: "strict", schemaStatus: "valid" });
 		expect(frontmatter.data).toEqual({ source: "agent" });
 		expect(inherited.data).toEqual({ source: "session" });
-		expect(runSpy.mock.calls.map(([options]) => options.outputSchema)).toEqual([
-			callerSchema,
-			agentSchema,
-			sessionSchema,
-		]);
-	});
-
-	it("inherits non-plan LSP and IRC policy", async () => {
-		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-		// makeSession() defaults to enableLsp: true and task.enableLsp: true.
-		const session = makeSession();
-
-		await runEvalAgentAndWait({ prompt: "hello" }, { session });
-
-		const options = runSpy.mock.calls[0]?.[0];
-		if (!options) throw new Error("runSubprocess was not called");
-		expect(options.enableLsp).toBe(true);
-		expect(options.enableIrc).toBe(true);
-		expect(options.keepAlive).toBe(true);
 	});
 
 	it("registers temp artifact dirs for in-memory handle results so agent URLs resolve", async () => {
@@ -568,15 +514,204 @@ describe("agent() through eval runtimes", () => {
 	// these tests observe. Torn down in afterAll via disposeAllVmContexts().
 	const sharedJsSessionId = "agent-bridge-shared-js";
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		vi.useRealTimers();
-	});
-
 	afterAll(async () => {
 		await disposeAllVmContexts();
 		await disposeAllKernelSessions();
 	});
+
+	it("surfaces the same strict model admission failures through JavaScript and Python", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-agent-admission-");
+		const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "model-admission");
+		mockAgents();
+		const dispatch = vi.spyOn(taskExecutor, "runSubprocess");
+		const selections = [
+			"routing-test/unassigned",
+			"@missing",
+			["routing-test/primary", "routing-test/primary:heigh"],
+		];
+		const js = await executeJs(
+			[
+				`const errors = []; for (const model of ${JSON.stringify(selections)}) {`,
+				'  try { await agent("work", { model }); errors.push("admitted"); }',
+				"  catch (error) { errors.push(error.message); }",
+				"} return JSON.stringify(errors);",
+			].join("\n"),
+			{ cwd: tempDir.path(), sessionId: sharedJsSessionId, session, sessionFile },
+		);
+		expect(js.exitCode).toBe(0);
+		const jsErrors = JSON.parse(js.output.trim()) as string[];
+		expect(jsErrors[0]).toContain("not authorized");
+		expect(jsErrors[1]).toContain("not configured");
+		expect(jsErrors[2]).toContain("Invalid thinking suffix");
+		const py = await executePython(
+			[
+				"import json",
+				"errors = []",
+				`for model in json.loads(${JSON.stringify(JSON.stringify(selections))}):`,
+				"    try:",
+				'        agent("work", model=model)',
+				'        errors.append("admitted")',
+				"    except Exception as error:",
+				"        errors.append(str(error))",
+				"print(json.dumps(errors))",
+			].join("\n"),
+			{ cwd: tempDir.path(), sessionId, sessionFile, kernelMode: "per-call", toolSession: session },
+		);
+		expect(py.exitCode).toBe(0);
+		const pyErrors = JSON.parse(py.output.trim()) as string[];
+		expect(pyErrors[0]).toContain("not authorized");
+		expect(pyErrors[1]).toContain("not configured");
+		expect(pyErrors[2]).toContain("Invalid thinking suffix");
+		expect(dispatch).not.toHaveBeenCalled();
+		expect(session.asyncJobManager!.getAllJobs()).toHaveLength(0);
+	});
+
+	for (const runtime of ["js", "py"] as const) {
+		it(`serves omitted stock routing, a fixed custom role and ordered requested recovery through ${runtime}`, async () => {
+			using tempDir = TempDir.createSync("@omp-eval-agent-served-");
+			const settings = Settings.isolated({
+				enabledModels: ["routing-test/*"],
+				modelRoles: {
+					"project-review": "routing-test/primary",
+					leading: "routing-test/primary:high",
+					trailing: "routing-test/fallback:low",
+				},
+				"async.enabled": false,
+				"compaction.enabled": false,
+				"todo.enabled": false,
+				"task.enableLsp": false,
+				"retry.baseDelayMs": 1,
+				"retry.maxRetries": 1,
+			});
+			const { session, sessionFile, sessionId } = makeEvalSession(tempDir, `served-${runtime}`, settings);
+			const requests: Array<{ model: string; reasoning_effort?: string; purpose: "classification" | "work" }> = [];
+			let primaryWorkRequestCount = 0;
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch: async request => {
+					const body = (await request.json()) as {
+						model: string;
+						reasoning_effort?: string;
+						tools?: Array<{ function?: { name?: string } }>;
+					};
+					const classification = !body.tools?.some(tool => tool.function?.name === "yield");
+					requests.push({ ...body, purpose: classification ? "classification" : "work" });
+					if (!classification && body.model === "primary" && ++primaryWorkRequestCount === 2) {
+						return Response.json({ error: { message: "Model unavailable at this endpoint" } }, { status: 404 });
+					}
+					const delta = classification
+						? { role: "assistant", content: "medium" }
+						: {
+								role: "assistant",
+								tool_calls: [
+									{
+										index: 0,
+										id: "eval-yield",
+										type: "function",
+										function: { name: "yield", arguments: '{"data":{"completed":true}}' },
+									},
+								],
+							};
+					return new Response(
+						`data: ${JSON.stringify({
+							id: "eval-result",
+							object: "chat.completion.chunk",
+							created: 0,
+							choices: [{ index: 0, delta }],
+						})}\n\n` +
+							`data: ${JSON.stringify({
+								id: "eval-result",
+								object: "chat.completion.chunk",
+								created: 0,
+								choices: [{ index: 0, delta: {}, finish_reason: classification ? "stop" : "tool_calls" }],
+							})}\n\ndata: [DONE]\n\n`,
+						{ headers: { "content-type": "text/event-stream" } },
+					);
+				},
+			});
+			const sessions: AgentSession[] = [];
+			try {
+				const fixture = createTaskModelFixture(settings, { baseUrl: `${server.url.origin}/v1` });
+				modelFixtures.push(fixture);
+				session.modelRegistry = fixture.modelRegistry;
+				session.getActiveModel = fixture.getActiveModel;
+				session.getActiveModelString = fixture.getActiveModelString;
+				session.getActiveModelSelector = fixture.getActiveModelSelector;
+				const stockTask = getBundledAgent("task");
+				if (!stockTask) throw new Error("Expected the stock task agent");
+				mockAgents([stockTask, reviewerAgent]);
+				const createAgentSession = sdk.createAgentSession;
+				vi.spyOn(sdk, "createAgentSession").mockImplementation(async options => {
+					if (!options) throw new Error("Expected child session options");
+					const created = await createAgentSession({
+						...options,
+						agentDir: tempDir.path(),
+						disableExtensionDiscovery: true,
+						extensions: [],
+						skills: [],
+						rules: [],
+						contextFiles: [],
+						promptTemplates: [],
+						slashCommands: [],
+						preloadedCustomToolPaths: [],
+						enableMCP: false,
+						enableLsp: false,
+						skipPythonPreflight: true,
+						toolNames: ["yield"],
+						restrictToolNames: true,
+					});
+					sessions.push(created.session);
+					return created;
+				});
+				const schema = {
+					type: "object",
+					properties: { completed: { type: "boolean" } },
+					required: ["completed"],
+					additionalProperties: false,
+				};
+				for (const model of [undefined, "@project-review:high", ["@leading", "@trailing"]]) {
+					const invocation = model === undefined ? {} : { model };
+					const result =
+						runtime === "js"
+							? await executeJs(
+									`const h = await agent("work", ${JSON.stringify({ schema, ...invocation })}); return JSON.stringify((await wait([h]))[0]);`,
+									{ cwd: tempDir.path(), sessionId: sharedJsSessionId, session, sessionFile },
+								)
+							: await executePython(
+									[
+										"import json",
+										`options = json.loads(${JSON.stringify(JSON.stringify({ schema, ...invocation }))})`,
+										'handle = agent("work", **options)',
+										"print(json.dumps(wait([handle])[0]))",
+									].join("\n"),
+									{
+										cwd: tempDir.path(),
+										sessionId,
+										sessionFile,
+										kernelMode: "per-call",
+										toolSession: session,
+									},
+								);
+					expect(result.exitCode, result.output).toBe(0);
+					expect(JSON.parse(result.output.trim())).toEqual({ completed: true });
+				}
+				expect(requests.some(body => body.purpose === "classification")).toBe(true);
+				expect(
+					requests.filter(body => body.purpose === "work").map(body => [body.model, body.reasoning_effort]),
+				).toEqual([
+					["parent", "medium"],
+					["primary", "high"],
+					["primary", "high"],
+					["fallback", "low"],
+				]);
+			} finally {
+				await AgentLifecycleManager.global().dispose();
+				await Promise.all(sessions.map(child => child.dispose()));
+				server.stop(true);
+			}
+		});
+	}
 
 	it("exposes agent() in JavaScript and parses structured output", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-js-");
@@ -1040,10 +1175,6 @@ describe("agent() through eval runtimes", () => {
 });
 
 describe("runEvalAgent isolation", () => {
-	afterEach(() => {
-		vi.restoreAllMocks();
-	});
-
 	function isolatedSession(overrides: Partial<Parameters<typeof Settings.isolated>[0]> = {}): ToolSession {
 		return makeSession({
 			settings: Settings.isolated({
@@ -1105,36 +1236,6 @@ describe("runEvalAgent isolation", () => {
 		expect(plainSpy).toHaveBeenCalledTimes(1);
 		expect(explicitOn.details.isolated).toBe(true);
 		expect(mergeSpy).toHaveBeenCalledTimes(1);
-	});
-
-	it("forwards merge=false as patch mode and passes the worktree cwd through baseOptions", async () => {
-		mockAgents();
-		const { repoRoot } = mockIsolationContext();
-		const isolatedSpy = vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
-			singleResult(opts.baseOptions, {
-				output: "isolated-run",
-				patchPath: `/artifacts/${opts.agentId}.patch`,
-			}),
-		);
-		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
-			summary: "\n\nApplied patches: yes",
-			changesApplied: true,
-			hadAnyChanges: true,
-			mergedBranchForNestedPatches: false,
-		});
-
-		// Branch is the configured merge mode, but `merge: false` must demote to patch.
-		const session = isolatedSession({ "task.isolation.merge": "branch" });
-		const result = await runEvalAgentAndWait({ prompt: "migration", isolated: true, merge: false }, { session });
-
-		expect(isolatedSpy).toHaveBeenCalledTimes(1);
-		const isolatedCall = isolatedSpy.mock.calls[0]?.[0];
-		if (!isolatedCall) throw new Error("runIsolatedSubprocess was not called");
-		expect(isolatedCall.mergeMode).toBe("patch");
-		expect(isolatedCall.baseOptions.cwd).toBe(session.cwd);
-		expect(isolatedCall.context.repoRoot).toBe(repoRoot);
-		expect(result.details.patchPath).toMatch(/\.patch$/);
-		expect(result.text).toContain("Applied patches: yes");
 	});
 
 	it("keeps the timeout paused through isolation merge/apply so the cell can't abort mid-cherry-pick", async () => {

@@ -120,12 +120,14 @@ import type { ModelRegistry } from "../config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
 	disabledProviderIds,
+	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
 	resolveCliModel,
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
 } from "../config/model-resolver";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
@@ -262,9 +264,16 @@ import {
 	splitCardTitle,
 } from "../utils/title-card";
 import { generateSessionTitle, nerdGlyphsActive } from "../utils/title-generator";
-import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
+import { buildNamedToolChoice, isToolChoiceActive, type NamedToolChoiceOptions } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
+import {
+	assertRoleDispatch,
+	assertRoleModel,
+	resolveRoleRoute,
+	roleRouteMetadata,
+	type RoleRoutePermit,
+} from "../task/role-routing";
 import type {
 	AgentSessionConfig,
 	AgentSessionDisposeOptions,
@@ -986,6 +995,7 @@ export class AgentSession implements SettingsScope {
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
+	readonly #roleRoute: RoleRoutePermit | undefined;
 	/** Creation-time permission for switchSession to keep the current model when a target's saved model is unrestorable. */
 	readonly #allowSessionModelFallback: boolean;
 	#usageFallbackConfirmer: UsageFallbackConfirmer | undefined;
@@ -1620,6 +1630,7 @@ export class AgentSession implements SettingsScope {
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
+		this.#roleRoute = config.roleRoute;
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
 		this.#extensionRoots =
 			config.extensionRoots ??
@@ -1703,6 +1714,7 @@ export class AgentSession implements SettingsScope {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			model: () => this.model,
+			toolChoiceOptions: () => this.#namedToolChoiceOptions(),
 			agentKind: () => this.#agentKind,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
@@ -1728,6 +1740,7 @@ export class AgentSession implements SettingsScope {
 			agent: this.agent,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			roleRoute: this.#roleRoute,
 			sessionManager: this.sessionManager,
 			providerSessionState: this.#providerSessionState,
 			model: () => this.model,
@@ -1735,8 +1748,8 @@ export class AgentSession implements SettingsScope {
 			promptGeneration: () => this.#promptGeneration,
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
-			setModelWithProviderSessionReset: async (model, selection = "explicit") => {
-				await this.#setModelWithProviderSessionReset(model);
+			setModelWithProviderSessionReset: async (model, selection = "explicit", options) => {
+				await this.#setModelWithProviderSessionReset(model, options);
 				// Only a completed explicit selection, including same-model reselection, takes ownership.
 				if (selection === "explicit") this.#prewalk.releaseHandoff();
 			},
@@ -1776,6 +1789,7 @@ export class AgentSession implements SettingsScope {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			roleRoute: this.#roleRoute,
 			configWarnings: this.configWarnings,
 			model: () => this.model,
 			contextFitsModel: (model, excludedMessage) => this.#maintenance.contextFitsModel(model, excludedMessage),
@@ -1798,7 +1812,7 @@ export class AgentSession implements SettingsScope {
 			appendSessionMessage: message => this.#appendSessionMessage(message),
 			persistedAssistantEntryId: message => (message as PersistedAssistantMessage)[kPersistedSessionEntryId],
 			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
-			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
+			setModelWithProviderSessionReset: (model, options) => this.#setModelWithProviderSessionReset(model, options),
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
@@ -2264,6 +2278,7 @@ export class AgentSession implements SettingsScope {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			roleRoute: () => this.#roleRoute,
 			extensionRunner: this.#extensionRunner,
 			sideStreamFn: this.#sideStreamFn,
 			providerSessionState: this.#providerSessionState,
@@ -2388,6 +2403,7 @@ export class AgentSession implements SettingsScope {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			roleRoute: () => this.#roleRoute,
 			sideStreamFn: this.#sideStreamFn,
 			obfuscator: () => this.#obfuscator,
 			model: () => this.model,
@@ -2625,6 +2641,20 @@ export class AgentSession implements SettingsScope {
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this.#modelRegistry;
+	}
+
+	/** Host-issued routing authority retained across in-process session lifecycle transitions. */
+	get roleRoute(): RoleRoutePermit | undefined {
+		return this.#roleRoute;
+	}
+
+	#namedToolChoiceOptions(): NamedToolChoiceOptions | undefined {
+		if (!this.#roleRoute) return undefined;
+		const selected = resolveRoleRoute(this.#roleRoute, this.#modelRegistry);
+		return {
+			preserveThinkingEffort: selected.fixedEffort,
+			reasoning: toReasoningEffort(this.thinkingLevel),
+		};
 	}
 
 	get asyncJobManager(): AsyncJobManager | undefined {
@@ -5975,6 +6005,13 @@ export class AgentSession implements SettingsScope {
 			if (!current || !modelsAreEqual(current, refreshed) || refreshed.contextWindow === current.contextWindow) {
 				return;
 			}
+			assertRoleDispatch(
+				this.#roleRoute,
+				refreshed,
+				toReasoningEffort(this.thinkingLevel),
+				undefined,
+				this.#modelRegistry,
+			);
 			this.agent.setModel(refreshed);
 		} catch (error) {
 			logger.debug("Lazy local model context refresh failed", {
@@ -6178,7 +6215,18 @@ export class AgentSession implements SettingsScope {
 		const base = this.#tools.baseOfSystemPrompt(prompt);
 		const items = this.#workPoolYieldItems;
 		const persistedItems = init.workPoolYieldItems ?? [];
+		const roleRouting = roleRouteMetadata(this.#roleRoute);
+		const resolvedModel =
+			roleRouting && this.model
+				? formatModelSelectorValue(formatModelStringWithRouting(this.model), this.configuredThinkingLevel())
+				: undefined;
+		const routeChanged =
+			roleRouting !== undefined &&
+			(!Bun.deepEquals(init.roleRouting, roleRouting) ||
+				init.resolvedModel !== resolvedModel ||
+				init.modelRole !== roleRouting.role);
 		if (
+			!routeChanged &&
 			base.length === init.systemPrompt.length &&
 			base.every((block, index) => block === init.systemPrompt[index]) &&
 			items.length === persistedItems.length &&
@@ -6188,7 +6236,12 @@ export class AgentSession implements SettingsScope {
 		) {
 			return;
 		}
-		cached.init = { ...init, systemPrompt: base, workPoolYieldItems: items.length > 0 ? [...items] : undefined };
+		cached.init = {
+			...init,
+			systemPrompt: base,
+			workPoolYieldItems: items.length > 0 ? [...items] : undefined,
+			...(roleRouting ? { roleRouting, resolvedModel, modelRole: roleRouting.role } : {}),
+		};
 		this.sessionManager.appendSessionInit(cached.init);
 	}
 
@@ -7338,7 +7391,7 @@ export class AgentSession implements SettingsScope {
 			cfgExternalThinking.get(this.settings) &&
 			this.getEnabledToolNames().includes("think") &&
 			supportsExternalThinking(activeModel)
-				? buildNamedToolChoice("think", activeModel)
+				? buildNamedToolChoice("think", activeModel, this.#namedToolChoiceOptions())
 				: undefined;
 		const eagerTodoPrelude =
 			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
@@ -10644,7 +10697,19 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
-	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
+	async #setModelWithProviderSessionReset(
+		model: Model,
+		options?: { thinkingLevel: ConfiguredThinkingLevel | undefined },
+	): Promise<void> {
+		assertRoleModel(this.#roleRoute, model, undefined, this.#modelRegistry);
+		if (!options)
+			assertRoleDispatch(
+				this.#roleRoute,
+				model,
+				toReasoningEffort(this.thinkingLevel),
+				undefined,
+				this.#modelRegistry,
+			);
 		const currentModel = this.model;
 		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
 		if (currentModel) {
@@ -10653,7 +10718,35 @@ export class AgentSession implements SettingsScope {
 				this.#clearInheritedProviderPromptCacheKey();
 			}
 		}
+		const previousThinking = this.thinkingLevel;
+		const previousConfiguredThinking = this.configuredThinkingLevel();
 		this.agent.setModel(model);
+		if (options) {
+			this.#models.restoreThinkingLevel(options.thinkingLevel);
+			const configured = this.configuredThinkingLevel();
+			if (previousThinking !== this.thinkingLevel || previousConfiguredThinking !== configured) {
+				this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, configured);
+				this.#emit({ type: "thinking_level_changed", thinkingLevel: this.thinkingLevel, configured });
+			}
+		}
+		if (this.#roleRoute) {
+			const init = extractSessionInit(this.sessionManager.getBranch());
+			const roleRouting = roleRouteMetadata(this.#roleRoute)!;
+			const resolvedModel = formatModelSelectorValue(
+				formatModelStringWithRouting(model),
+				this.configuredThinkingLevel(),
+			);
+			if (
+				init &&
+				(!Bun.deepEquals(init.roleRouting, roleRouting) ||
+					init.resolvedModel !== resolvedModel ||
+					init.modelRole !== roleRouting.role)
+			) {
+				const updated = { ...init, roleRouting, resolvedModel, modelRole: roleRouting.role };
+				this.sessionManager.appendSessionInit(updated);
+				this.#sessionInit = { sessionFile: this.sessionManager.getSessionFile(), init: updated };
+			}
+		}
 		// Model mutations driven through ModelControls (explicit /model, prewalk
 		// hand-offs, retry-fallback, model cycling) funnel through this method,
 		// so this is the single point that notifies subscribers (ACP config
@@ -11274,6 +11367,7 @@ export class AgentSession implements SettingsScope {
 		},
 	): Promise<boolean> {
 		const explicitModel = options?.model;
+		if (explicitModel) assertRoleModel(this.#roleRoute, explicitModel, undefined, this.#modelRegistry);
 		if (explicitModel && !this.#modelRegistry.hasConfiguredAuth(explicitModel)) {
 			throw new Error(`No API key for ${explicitModel.provider}/${explicitModel.id}`);
 		}
@@ -11411,6 +11505,8 @@ export class AgentSession implements SettingsScope {
 			);
 			let targetModel = explicitModel;
 			let modelFallbackWarning: string | undefined;
+			if (this.#roleRoute && !targetModel)
+				targetModel = resolveRoleRoute(this.#roleRoute, this.#modelRegistry).model;
 			if (!targetModel && !options?.keepModel && targetModelStrings.length > 0) {
 				targetModel = await this.#resolveSessionModel(targetModelStrings);
 				if (!targetModel && switchingToDifferentSession) {
@@ -11425,6 +11521,7 @@ export class AgentSession implements SettingsScope {
 						: `Could not restore model ${targetModelStrings[0]}`;
 				}
 			}
+			assertRoleModel(this.#roleRoute, targetModel ?? this.model, undefined, this.#modelRegistry);
 			const didReloadConversationChange =
 				previousSessionContext !== undefined &&
 				didSessionMessagesChange(previousSessionContext.messages, sessionContext.messages);
@@ -11461,6 +11558,7 @@ export class AgentSession implements SettingsScope {
 				if (shouldResetProviderState) {
 					await this.#setModelWithProviderSessionReset(targetModel);
 				} else {
+					assertRoleModel(this.#roleRoute, targetModel, undefined, this.#modelRegistry);
 					this.agent.setModel(targetModel);
 				}
 				// Saved selectors may carry a thinking suffix; compare resolved models.
@@ -13350,6 +13448,13 @@ export class AgentSession implements SettingsScope {
 		const found = this.#modelRegistry.find(current.provider, current.id);
 		const refreshed = found && this.#modelRegistry.fitContextWindow(found, this.settings);
 		if (!refreshed || refreshed.contextWindow === current.contextWindow) return;
+		assertRoleDispatch(
+			this.#roleRoute,
+			refreshed,
+			toReasoningEffort(this.thinkingLevel),
+			undefined,
+			this.#modelRegistry,
+		);
 		this.agent.setModel(refreshed);
 		await this.#reconcileModelDependentState(current, refreshed);
 		if (this.#isDisposed) return;

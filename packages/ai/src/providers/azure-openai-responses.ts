@@ -20,7 +20,12 @@ import {
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
-import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
+import { OpenAIHttpError, postOpenAIStream, projectOpenAIResponsesSelection } from "../utils/openai-http";
+import {
+	assertSafeGovernedJson,
+	createRequestSelectionGuard,
+	shouldAwaitPayloadHookResult,
+} from "../utils/request-selection";
 import { sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
 import {
@@ -32,13 +37,15 @@ import {
 import type { ResponseCreateParamsStreaming, ResponseStreamEvent } from "./openai-responses-wire";
 import {
 	applyCommonResponsesSamplingParams,
-	applyResponsesReasoningParams,
+	applyResponsesCompatPolicy,
 	buildResponsesInput,
 	createInitialResponsesAssistantMessage,
 	getOpenAIPromptCacheKey,
 	isOpenAIResponsesProgressEvent,
 	parseAzureDeploymentNameMap,
 	processResponsesStream,
+	resolveOpenAICompatPolicy,
+	resolveReasoningSummaryOption,
 } from "./openai-shared";
 
 export { parseAzureDeploymentNameMap } from "./openai-shared";
@@ -83,6 +90,11 @@ const streamAzureOpenAIResponsesOnce = (
 	options?: AzureOpenAIResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const selectionOptions = {
+		preserveModelSelection: options?.preserveModelSelection,
+		preserveThinkingEffort: options?.preserveThinkingEffort,
+		onBeforeRequest: options?.onBeforeRequest,
+	};
 
 	// Start async processing
 	(async () => {
@@ -127,11 +139,16 @@ const streamAzureOpenAIResponsesOnce = (
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const { url, headers, baseUrl } = buildAzureResponsesRequest(model, apiKey, options);
 			const requestModel = modelForAzureEndpoint(model, baseUrl);
-			let params = buildParams(requestModel, context, options, deploymentName);
-			const replacementPayload = await options?.onPayload?.(params, requestModel);
-			if (replacementPayload !== undefined) {
-				params = replacementPayload as typeof params;
-			}
+			let params = buildParams(requestModel, context, { ...options, ...selectionOptions }, deploymentName);
+			const selectionGuard = createRequestSelectionGuard(selectionOptions, params, payload =>
+				projectOpenAIResponsesSelection(payload, selectionOptions),
+			);
+			const hookResult = options?.onPayload?.(params, requestModel);
+			const replacementPayload = shouldAwaitPayloadHookResult(hookResult, selectionGuard !== undefined)
+				? await hookResult
+				: hookResult;
+			if (replacementPayload !== undefined) params = replacementPayload as typeof params;
+			if (selectionGuard) assertSafeGovernedJson(params);
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
 			const firstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs);
@@ -169,6 +186,8 @@ const streamAzureOpenAIResponsesOnce = (
 						url,
 						headers: headersWithTimeout,
 						body: params,
+						...selectionOptions,
+						validateSerializedBody: selectionGuard,
 						signal: requestSignal,
 						fetch: options?.fetch,
 						// Transient 408/429/5xx get Retry-After-aware transport retries;
@@ -179,10 +198,12 @@ const streamAzureOpenAIResponsesOnce = (
 					openaiStream = handle.events;
 					break;
 				} catch (error) {
+					if (AIError.is(AIError.classify(error), AIError.Flag.HostAdmission)) throw error;
 					const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
-					const reasoningEffortFallback: OpenAIReasoningEffortFallback | undefined = !requestSignal.aborted
-						? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, params)
-						: undefined;
+					const reasoningEffortFallback: OpenAIReasoningEffortFallback | undefined =
+						!requestSignal.aborted && !selectionOptions.preserveThinkingEffort
+							? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, params)
+							: undefined;
 					if (reasoningEffortFallback === undefined) throw error;
 					const retryMarker = `${reasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
 					if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
@@ -445,7 +466,42 @@ function buildParams(
 		}
 	}
 
-	applyResponsesReasoningParams(params, model, options);
+	const reasoningPolicy = resolveOpenAICompatPolicy(model, {
+		endpoint: "responses",
+		reasoning: options?.reasoning,
+		disableReasoning: options?.disableReasoning,
+		toolChoice: options?.toolChoice,
+	});
+	if (
+		options?.preserveThinkingEffort &&
+		options.reasoning !== undefined &&
+		!options.disableReasoning &&
+		(!reasoningPolicy.reasoning.enabled || reasoningPolicy.reasoning.omitReasoningEffort)
+	) {
+		throw new AIError.ModelSelectionError(
+			"The selected reasoning effort cannot be honored with this Azure tool request.",
+		);
+	}
+	applyResponsesCompatPolicy(params, reasoningPolicy, {
+		reasoningSummary: resolveReasoningSummaryOption(model, options),
+	});
+	if (options?.preserveThinkingEffort && options.disableReasoning && model.reasoning) {
+		const disabled =
+			params.reasoning?.effort === "none" ||
+			(params.reasoning !== undefined &&
+				params.reasoning !== null &&
+				"enabled" in params.reasoning &&
+				params.reasoning.enabled === false);
+		if (!disabled) throw new AIError.ModelSelectionError("This Azure endpoint cannot honor fixed Thinking Off.");
+	}
+	if (
+		options?.preserveThinkingEffort &&
+		options.reasoning !== undefined &&
+		!options.disableReasoning &&
+		params.reasoning?.effort === undefined
+	) {
+		throw new AIError.ModelSelectionError("The Azure request cannot encode the selected fixed thinking effort.");
+	}
 
 	return params;
 }

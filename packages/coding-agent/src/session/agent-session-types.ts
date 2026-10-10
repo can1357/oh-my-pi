@@ -26,6 +26,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { AgentDefinition } from "../task/types";
 import type { SessionAccountPoolScope } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
+import type { RoleRoutePermit } from "../task/role-routing";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import type { SkillsSettings } from "../extensibility/settings";
@@ -196,6 +197,8 @@ export interface AgentSessionConfig {
 	thinkingLevelCeiling?: Effort;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
+	/** Process-local host authority for this session's primary provider requests. */
+	roleRoute?: RoleRoutePermit;
 	/** Skip retry.fallbackChains validation at construction; the host calls `validateRetryFallbackChains()` later. */
 	deferRetryFallbackValidation?: boolean;
 	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */

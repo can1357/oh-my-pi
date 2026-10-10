@@ -22,6 +22,7 @@ import { mapAnthropicToolChoice } from "../stream";
 import type { Api, Context, Model, ModelSpec, ServiceTier, StreamFunction, StreamOptions, ToolChoice } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { assertSafeGovernedJson } from "../utils/request-selection";
 import { type AnthropicOptions, mapStainlessArch, mapStainlessOs, shouldStripThinkingHistory } from "./anthropic";
 import { createProviderErrorMessage } from "./error-message";
 import droidIdentity from "./factory-droid/droid-identity.md" with { type: "text" };
@@ -97,8 +98,11 @@ function defaultUpstream(
 	return (model.factoryDroidApiProviders ?? registry?.rotation ?? ["fireworks"])[0];
 }
 
-function requireUpstream(upstream: string | undefined): string {
-	if (!upstream) throw new AIError.ConfigurationError("Factory Droid model is unavailable in this account region.");
+function requireUpstream(upstream: string | undefined, governed: boolean | undefined): string {
+	if (!upstream) {
+		const message = "Factory Droid model is unavailable in this account region.";
+		throw governed ? new AIError.ModelSelectionError(message) : new AIError.ConfigurationError(message);
+	}
 	return upstream;
 }
 
@@ -124,11 +128,12 @@ function scopeToAccount(
 	wire: FactoryDroidWire,
 	identity: OAuthRequestIdentity | undefined,
 	token: string,
+	governed: boolean | undefined,
 ): AccountScope {
 	if (!identity) {
 		return {
 			model,
-			upstream: requireUpstream(defaultUpstream(model, registry)),
+			upstream: requireUpstream(defaultUpstream(model, registry), governed),
 			orgId: factoryDroidOrgIdFromToken(token) ?? model.factoryDroidOrgId,
 			baseUrl: model.baseUrl || factoryDroidWireBaseUrl(wire, undefined),
 		};
@@ -140,24 +145,30 @@ function scopeToAccount(
 		model.baseUrl === factoryDroidWireBaseUrl(wire, "eu");
 	const baseUrl = defaultEndpoint ? factoryDroidWireBaseUrl(wire, identity.region) : model.baseUrl;
 	if (!registry) {
-		return { model, upstream: requireUpstream(defaultUpstream(model, registry)), orgId: identity.orgId, baseUrl };
+		return {
+			model,
+			upstream: requireUpstream(defaultUpstream(model, registry), governed),
+			orgId: identity.orgId,
+			baseUrl,
+		};
 	}
 
 	const inferenceRegion = resolveFactoryDroidInferenceRegion(identity);
 	const eligible = resolveFactoryDroidRotation(registry, inferenceRegion);
 	const upstream = requireUpstream(
 		(model.factoryDroidApiProviders ?? eligible).find(provider => eligible.some(candidate => candidate === provider)),
+		governed,
 	);
 	const limits = factoryDroidRegionalLimits(registry, inferenceRegion);
 	if (model.contextWindow != null && limits.contextWindow != null && limits.contextWindow < model.contextWindow) {
 		// No authoritative count exists for this exact request: prior-turn usage
 		// cannot prove the appended history fits, and tokenization belongs to the
 		// caller's context-management layer.
-		throw new AIError.ConfigurationError(
+		const message =
 			`Factory Droid ${model.id} now has a ${limits.contextWindow}-token context window in ${inferenceRegion}, ` +
-				`smaller than the selected model's ${model.contextWindow}. Rediscover and select the regional model ` +
-				"so context management can check or compact the history before retrying.",
-		);
+			`smaller than the selected model's ${model.contextWindow}. Rediscover and select the regional model ` +
+			"so context management can check or compact the history before retrying.";
+		throw governed ? new AIError.ModelSelectionError(message) : new AIError.ConfigurationError(message);
 	}
 	// Only native limits change: custom endpoints, policy overrides, routing
 	// constraints and credit metadata remain caller-owned.
@@ -231,14 +242,29 @@ function selectEffort(
 	registry: FactoryDroidModelPolicy | undefined,
 	options: FactoryDroidOptions | undefined,
 ): { effort: Effort | undefined; disabled: boolean } {
-	if (options?.disableReasoning || options?.forceReasoningOff) return { effort: undefined, disabled: true };
-	// Without a caller effort the native default applies, which can be thinking off.
-	// Untyped callers may still pass the native `off`/`none` rungs.
 	const selected: string | undefined =
 		options?.reasoning ?? (registry?.defaultReasoningOff ? "off" : model.thinking?.defaultLevel);
-	return selected === "none" || selected === "off"
-		? { effort: undefined, disabled: true }
-		: { effort: selected as Effort | undefined, disabled: false };
+	const disabled =
+		options?.disableReasoning || options?.forceReasoningOff || selected === "none" || selected === "off";
+	if (options?.preserveThinkingEffort) {
+		if (disabled && options.reasoning && selected !== "none" && selected !== "off") {
+			throw new AIError.ModelSelectionError("The selected Factory effort cannot be disabled.");
+		}
+		if (disabled && model.thinking?.requiresEffort) {
+			throw new AIError.ModelSelectionError("The selected Factory model cannot turn thinking off.");
+		}
+		if (
+			!disabled &&
+			selected &&
+			model.thinking?.efforts.length &&
+			!model.thinking.efforts.includes(selected as Effort)
+		) {
+			throw new AIError.ModelSelectionError(
+				"The selected Factory model does not support the fixed thinking effort.",
+			);
+		}
+	}
+	return { effort: disabled ? undefined : (selected as Effort | undefined), disabled: !!disabled };
 }
 
 /**
@@ -358,6 +384,9 @@ type ForwardedOptions = Pick<
 	| "cacheRetention"
 	| "providerSessionState"
 	| "onPayload"
+	| "preserveModelSelection"
+	| "preserveThinkingEffort"
+	| "onBeforeRequest"
 	| "onResponse"
 	| "onSseEvent"
 	| "providerRetryWait"
@@ -410,7 +439,10 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 				? "high"
 				: effort;
 	const fallbackModels = a.route.serverSideFallbackModels;
-	const refusalFallbacks = fallbackModels?.length ? fallbackModels.map(model => ({ model })) : undefined;
+	const refusalFallbacks =
+		!options?.preserveModelSelection && !options?.preserveThinkingEffort && fallbackModels?.length
+			? fallbackModels.map(model => ({ model }))
+			: undefined;
 	return streamAnthropic(inner, a.context, {
 		...a.forwarded,
 		// The non-OAuth client keeps Factory's system channel intact and sends
@@ -421,9 +453,13 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 		userProfileId: options?.userProfileId,
 		metadata: options?.metadata,
 		taskBudget: options?.taskBudget,
-		fallbackCreditRedemption: options?.fallbackCreditRedemption,
+		fallbackCreditRedemption:
+			options?.preserveModelSelection || options?.preserveThinkingEffort
+				? undefined
+				: options?.fallbackCreditRedemption,
 		anthropicSlowMode: options?.anthropicSlowMode,
 		thinkingEnabled: !a.disabled,
+		...(options?.preserveModelSelection || options?.preserveThinkingEffort ? { reasoning: effort } : {}),
 		effort: outputEffort as AnthropicOptions["effort"],
 		// Token budgets come from the KDL ladder; adaptive thinking has none.
 		thinkingBudgetTokens: adaptive || effort === undefined ? undefined : inner.thinking?.effortBudgets?.[effort],
@@ -490,10 +526,20 @@ function streamResponsesWire(a: Attempt, inner: Model<"openai-responses">): Assi
 
 function streamCompletionsWire(a: Attempt, inner: Model<"openai-completions">): AssistantMessageEventStream {
 	const { options } = a;
+	if (
+		options?.preserveThinkingEffort &&
+		((a.route.policy.completionsReasoningMode === "none" && a.effort !== undefined) ||
+			(a.route.policy.completionsReasoningMode === "forced-on" && a.disabled))
+	) {
+		throw new AIError.ModelSelectionError("The selected Factory route cannot honor the fixed thinking effort.");
+	}
 	// The selected dialect owns every reasoning field, so the shared encoder gets none.
-	const extraBody = buildCompletionsReasoningBody(a.route.policy, a.effort, a.disabled);
-	return streamOpenAICompletions({ ...inner, compat: { ...inner.compat, extraBody } }, a.context, {
+	const reasoningBody = buildCompletionsReasoningBody(a.route.policy, a.effort, a.disabled);
+	// Native Factory has always superseded generic extraBody with this dialect.
+	// Keep that contract, but hand the native controls to the encoder before its guard.
+	return streamOpenAICompletions({ ...inner, compat: { ...inner.compat, extraBody: undefined } }, a.context, {
 		...a.forwarded,
+		reasoningBody,
 		sessionId: a.sessionUuid,
 		temperature: options?.temperature ?? FACTORY_DROID_COMPLETIONS_TEMPERATURE,
 		topP: options?.topP,
@@ -531,6 +577,12 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 	context: Context,
 	options?: FactoryDroidOptions,
 ): AssistantMessageEventStream => {
+	const preserveModelSelection = options?.preserveModelSelection;
+	const preserveThinkingEffort = options?.preserveThinkingEffort;
+	const onBeforeRequest = options?.onBeforeRequest;
+	if (preserveModelSelection || preserveThinkingEffort || onBeforeRequest) {
+		options = { ...options, preserveModelSelection, preserveThinkingEffort, onBeforeRequest };
+	}
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
@@ -545,8 +597,18 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				);
 			}
 			const registry = resolveFactoryDroidPolicy(model);
+			if (options?.preserveModelSelection || options?.preserveThinkingEffort) {
+				assertSafeGovernedJson(options.headers);
+			}
 			const wire = registry?.wire ?? "openai-completions";
-			const scope = scopeToAccount(model, registry, wire, options?.oauthIdentity, harnessToken);
+			const scope = scopeToAccount(
+				model,
+				registry,
+				wire,
+				options?.oauthIdentity,
+				harnessToken,
+				options?.preserveModelSelection || options?.preserveThinkingEffort,
+			);
 			// The proxy expects v4-shaped ids; the OMP session id is a UUIDv7-style
 			// timestamp id, so it maps through a deterministic v4 shape that stays
 			// stable per session.
@@ -573,6 +635,9 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					cacheRetention: options?.cacheRetention,
 					providerSessionState: options?.providerSessionState,
 					onPayload: options?.onPayload,
+					preserveModelSelection: options?.preserveModelSelection,
+					preserveThinkingEffort: options?.preserveThinkingEffort,
+					onBeforeRequest: options?.onBeforeRequest,
 					onResponse: options?.onResponse,
 					onSseEvent: options?.onSseEvent,
 					providerRetryWait: options?.providerRetryWait,
@@ -601,6 +666,13 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					},
 				},
 			};
+			if (options?.preserveModelSelection || options?.preserveThinkingEffort) {
+				const headers = new Headers(attempt.forwarded.headers);
+				if (options.preserveModelSelection && headers.get("x-api-provider") !== scope.upstream) {
+					throw new AIError.ModelSelectionError("Factory request headers changed the admitted upstream.");
+				}
+				attempt.forwarded.headers = Object.fromEntries(headers);
+			}
 
 			for await (const event of streamWire(wire, attempt)) {
 				if (event.type === "error") {
@@ -613,10 +685,22 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				stream.push(event);
 			}
 		} catch (error) {
-			const message = createProviderErrorMessage(model, error);
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				signal: options?.signal,
+			});
+			const message = {
+				...createProviderErrorMessage(model, error),
+				stopReason: result.stopReason,
+				errorStatus: result.status,
+				errorId: result.id,
+				errorMessage: result.message,
+			};
 			const regionMessage = asRegionUnavailableError(model, message.errorMessage);
 			if (regionMessage != null) message.errorMessage = regionMessage;
-			stream.push({ type: "error", reason: "error", error: message });
+			stream.push({ type: "error", reason: message.stopReason, error: message });
 			stream.end();
 		}
 	})();

@@ -1,6 +1,7 @@
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
 	AssignModelRequestSchema,
 	AssignModelResponseSchema,
@@ -39,6 +40,7 @@ import type {
 	Api,
 	AssistantMessage,
 	Context,
+	Effort,
 	DeveloperMessage,
 	Message,
 	Model,
@@ -54,6 +56,12 @@ import { normalizeSystemPrompts } from "../utils";
 import { isDemotedThinking } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import {
+	assertSafeGovernedProtobuf,
+	invokeBeforeRequest,
+	serializeRequestBody,
+	shouldAwaitPayloadHookResult,
+} from "../utils/request-selection";
 import { normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import {
 	CONNECT_COMPRESSED_FLAG,
@@ -73,6 +81,8 @@ export interface DevinOptions extends StreamOptions {
 	sessionId?: string;
 	/** Wire model uid selected after thinking-effort routing. */
 	chatModelUid?: string;
+	/** @internal Carries the fixed effort whose native UID was projected upstream. */
+	reasoning?: Effort;
 }
 
 const CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
@@ -154,6 +164,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 	context: Context,
 	options?: DevinOptions,
 ): AssistantMessageEventStream => {
+	if (options?.preserveModelSelection || options?.preserveThinkingEffort) options = { ...options };
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
@@ -225,6 +236,28 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		try {
 			const fetchImpl = options?.fetch ?? fetch;
 			const baseUrl = (model.baseUrl || DEVIN_API_URL).replace(/\/+$/, "");
+			const preserveModelSelection = options?.preserveModelSelection === true;
+			const preserveThinkingEffort = options?.preserveThinkingEffort === true;
+			const governed = preserveModelSelection || preserveThinkingEffort;
+			const onBeforeRequest = options?.onBeforeRequest;
+			if (governed && model.compat.modelRouter) {
+				throw new AIError.ModelSelectionError(
+					"Devin's server-selected router cannot preserve a governed downstream model identity.",
+				);
+			}
+			const expectedModelUid = governed ? resolveWireModelId(model, options?.reasoning) : undefined;
+			if (governed && options?.chatModelUid !== undefined && options.chatModelUid !== expectedModelUid) {
+				throw new AIError.ModelSelectionError("The Devin wire UID escaped the admitted model/effort route.");
+			}
+			if (
+				preserveThinkingEffort &&
+				model.reasoning &&
+				model.thinking?.effortRouting?.[options?.reasoning ?? "off"] === undefined
+			) {
+				throw new AIError.ModelSelectionError(
+					"Devin cannot encode this fixed effort without an authoritative native effort UID route.",
+				);
+			}
 			const auth = await fetchDevinAuthMetadata(options?.apiKey, baseUrl, fetchImpl, options?.signal);
 			const chatBaseUrl = auth.baseUrl ?? baseUrl;
 			const turn: DevinTurn = {
@@ -242,9 +275,31 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				output.upstreamModel = assignment.modelUid;
 			}
 			let request = buildDevinChatRequest(model, context, options, turn, assignment);
-			const replacementRequest = await options?.onPayload?.(request, model);
+			if (governed) assertSafeGovernedProtobuf(request);
+			const selection = (value: typeof request): unknown => ({
+				chatModelUid: value.chatModelUid,
+				modelAssignmentJwt: value.modelAssignmentJwt,
+				requestType: value.requestType,
+				plannerMode: value.plannerMode,
+				apiKey: value.metadata?.apiKey,
+				userJwt: value.metadata?.userJwt,
+			});
+			const controls = { preserveModelSelection, preserveThinkingEffort };
+			const expectedSelection = governed ? serializeRequestBody(selection(request), controls) : undefined;
+			const payloadHookResult = options?.onPayload?.(request, model);
+			const replacementRequest = shouldAwaitPayloadHookResult(payloadHookResult, governed)
+				? await payloadHookResult
+				: payloadHookResult;
 			if (replacementRequest !== undefined) request = replacementRequest as typeof request;
+			if (governed) assertSafeGovernedProtobuf(request);
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
+			if (
+				governed &&
+				serializeRequestBody(selection(fromBinary(GetChatMessageRequestSchema, reqBytes)), controls) !==
+					expectedSelection
+			) {
+				throw new AIError.ModelSelectionError("The encoded Devin request changed the admitted model or route.");
+			}
 			const gz = gzipSync(reqBytes);
 			logger.debug("devin: sending chat request", {
 				model: model.id,
@@ -253,6 +308,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				compressedBytes: gz.byteLength,
 			});
 			const frame = frameConnectMessage(gz, CONNECT_COMPRESSED_FLAG);
+			await invokeBeforeRequest(onBeforeRequest);
 
 			const response = await fetchImpl(chatBaseUrl + CHAT_MESSAGE_PATH, {
 				method: "POST",
@@ -369,6 +425,11 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 
 					const raw = flag & CONNECT_COMPRESSED_FLAG ? gunzipSync(payload) : payload;
 					const msg = fromBinary(GetChatMessageResponseSchema, raw);
+					if (governed && msg.actualModelUid && msg.actualModelUid !== expectedModelUid) {
+						throw new AIError.ModelSelectionError(
+							"Devin reported an unapproved downstream model for the pinned request.",
+						);
+					}
 					if (msg.messageId && !output.responseId) output.responseId = msg.messageId;
 					// The router reports the concrete model it landed on; it can differ
 					// from the uid AssignModel handed back (fallbacks, capacity routing).

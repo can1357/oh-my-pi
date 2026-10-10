@@ -1,5 +1,5 @@
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { fetchWithRetry, parseStreamingJson, readJsonl } from "@oh-my-pi/pi-utils";
+import { fetchWithRetry, isRecord, parseStreamingJson, readJsonl } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey } from "../env-api-key";
@@ -21,6 +21,12 @@ import { clearStreamingPartialJson, kStreamingPartialJson } from "../utils/block
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
+import {
+	createRequestSelectionGuard,
+	invokeBeforeRequest,
+	serializeRequestBody,
+	shouldAwaitPayloadHookResult,
+} from "../utils/request-selection";
 import {
 	armPreResponseTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
@@ -307,7 +313,18 @@ function convertTools(tools: Tool[] | undefined): OllamaFunctionTool[] | undefin
 }
 
 function createChatBody(model: Model<"ollama-chat">, context: Context, options: OllamaChatOptions | undefined) {
-	const think = mapReasoning(model, options?.reasoning, options?.disableReasoning);
+	if (
+		options?.preserveThinkingEffort &&
+		options.reasoning !== undefined &&
+		!options.disableReasoning &&
+		!model.reasoning
+	) {
+		throw new AIError.ModelSelectionError("The selected Ollama model cannot honor fixed thinking effort.");
+	}
+	const think =
+		options?.preserveThinkingEffort && options.disableReasoning
+			? false
+			: mapReasoning(model, options?.reasoning, options?.disableReasoning);
 	const toolChoice = mapToolChoice(options?.toolChoice);
 	const selectedTools = selectToolsForToolChoice(context.tools, options?.toolChoice);
 	const tools = convertTools(selectedTools);
@@ -452,6 +469,11 @@ const streamOllamaOnce = (
 	options: OllamaChatOptions = {},
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const selectionOptions = {
+		preserveModelSelection: options.preserveModelSelection,
+		preserveThinkingEffort: options.preserveThinkingEffort,
+		onBeforeRequest: options.onBeforeRequest,
+	};
 	void (async () => {
 		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
@@ -562,11 +584,22 @@ const streamOllamaOnce = (
 				throw new AIError.MissingApiKeyError(model.provider);
 			}
 			const baseUrl = normalizeBaseUrl(model.baseUrl);
-			let body = createChatBody(model, context, options);
-			const replacementPayload = await options.onPayload?.(body, model);
-			if (replacementPayload !== undefined) {
-				body = replacementPayload as typeof body;
-			}
+			let body = createChatBody(model, context, { ...options, ...selectionOptions });
+			const selectionGuard = createRequestSelectionGuard(selectionOptions, body, payload => {
+				if (!isRecord(payload)) {
+					throw new AIError.ModelSelectionError("Provider payload discarded the governed Ollama selection.");
+				}
+				return {
+					...(selectionOptions.preserveModelSelection ? { model: payload.model } : {}),
+					...(selectionOptions.preserveThinkingEffort ? { think: payload.think } : {}),
+				};
+			});
+			const payloadHookResult = options.onPayload?.(body, model);
+			const replacementPayload = shouldAwaitPayloadHookResult(payloadHookResult, !!selectionGuard)
+				? await payloadHookResult
+				: payloadHookResult;
+			if (replacementPayload !== undefined) body = replacementPayload as typeof body;
+			const bodyJson = serializeRequestBody(body, selectionOptions, selectionGuard);
 			rawRequestDump = {
 				provider: model.provider,
 				api: model.api,
@@ -596,9 +629,14 @@ const streamOllamaOnce = (
 						Authorization: `Bearer ${apiKey}`,
 						"Content-Type": "application/json",
 					},
-					body: JSON.stringify(body),
+					body: bodyJson,
 					signal: watchdog.signal,
+					prepareInit: async () => {
+						await invokeBeforeRequest(selectionOptions.onBeforeRequest);
+						return {};
+					},
 					defaultDelayMs: OLLAMA_RETRY_DELAYS_MS,
+					shouldRetryError: error => !AIError.is(AIError.classify(error), AIError.Flag.HostAdmission),
 					shouldRetryResponse: shouldRetryOllamaResponse,
 					fetch: options.fetch,
 					timeout: false,

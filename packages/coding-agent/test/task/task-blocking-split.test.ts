@@ -28,6 +28,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { createTaskModelFixture, type TaskModelFixture } from "../helpers/model-fixtures";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -44,11 +45,20 @@ const scoutAgent: AgentDefinition = {
 	blocking: true,
 };
 
+const modelFixtures: TaskModelFixture[] = [];
+
 function createSession(options: { manager?: AsyncJobManager; settings?: Record<string, unknown> } = {}): ToolSession {
+	const settings = Settings.isolated(options.settings ?? { "async.enabled": true, "task.batch": true });
+	const fixture = createTaskModelFixture(settings);
+	modelFixtures.push(fixture);
 	return {
 		cwd: "/tmp",
 		hasUI: false,
-		settings: Settings.isolated(options.settings ?? { "async.enabled": true, "task.batch": true }),
+		settings,
+		modelRegistry: fixture.modelRegistry,
+		getActiveModel: fixture.getActiveModel,
+		getActiveModelString: fixture.getActiveModelString,
+		getActiveModelSelector: fixture.getActiveModelSelector,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getAgentId: () => null,
@@ -102,12 +112,13 @@ describe("task per-item blocking split", () => {
 	});
 
 	afterEach(async () => {
-		vi.restoreAllMocks();
 		for (const manager of managers.splice(0)) {
 			await manager.dispose({ timeoutMs: 1000 });
 		}
+		vi.restoreAllMocks();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+		for (const fixture of modelFixtures.splice(0)) fixture.close();
 	});
 
 	it("runs blocking items inline while non-blocking siblings spawn as jobs", async () => {

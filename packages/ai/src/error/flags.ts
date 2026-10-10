@@ -16,9 +16,12 @@ import {
 	matchesUsageLimitText,
 	parseRateLimitReason,
 } from "./rate-limit";
+import { ModelSelectionError } from "./validation";
 
 export const Flag = {
 	Class: 0x1000,
+	/** Trusted local model/effort admission rejection; never inferred from provider diagnostics. */
+	HostAdmission: 0x0800,
 	ThinkingLoop: 0x0001_0000,
 	Transient: 0x0002_0000,
 	Timeout: 0x0004_0000,
@@ -47,7 +50,12 @@ export const Flag = {
 
 export type Flag = (typeof Flag)[keyof typeof Flag];
 
+// Only a local attachment may rehydrate admission identity from a finalized
+// message. Arbitrary numeric fields on provider errors are never authority.
+const hostAdmissionErrors = new WeakSet<object>();
+
 const KIND_MASK =
+	Flag.HostAdmission |
 	Flag.ThinkingLoop |
 	Flag.Transient |
 	Flag.Timeout |
@@ -67,6 +75,8 @@ const KIND_MASK =
 	Flag.Grammar |
 	Flag.FastModeUnsupported |
 	Flag.OAuthExpiry;
+
+const INTERRUPT_KINDS = Flag.SilentAbort | Flag.UserInterrupt | Flag.Abort;
 
 const RETRIABLE_KINDS =
 	Flag.Transient |
@@ -356,6 +366,7 @@ export function isOAuthExpiry(errorMessage: string): boolean {
 }
 
 const ERROR_KIND_LABELS: readonly [Flag, string][] = [
+	[Flag.HostAdmission, "host-admission"],
 	[Flag.ThinkingLoop, "thinking-loop"],
 	[Flag.Transient, "transient"],
 	[Flag.Timeout, "timeout"],
@@ -393,6 +404,7 @@ export function is(id: number | undefined, flag: Flag): boolean {
 }
 
 export function retriable(id: number | undefined, opts?: { replayUnsafe?: boolean }): boolean {
+	if (isHostAdmissionId(id)) return false;
 	if (is(id, Flag.ContentBlocked)) return false;
 	if (is(id, Flag.PayloadRejected)) return false;
 	if (opts?.replayUnsafe) return false;
@@ -404,8 +416,12 @@ function isClassified(id: number | undefined): boolean {
 	return ((id ?? 0) & Flag.Class) !== 0;
 }
 
+function isHostAdmissionId(id: number | undefined): boolean {
+	return isClassified(id) && is(id, Flag.HostAdmission);
+}
+
 function statusFromId(id: number | undefined): number | undefined {
-	return id && !isClassified(id) ? id : undefined;
+	return id !== undefined && id >= 100 && id <= 599 ? id : undefined;
 }
 
 export function status(error: unknown): number | undefined {
@@ -649,8 +665,15 @@ export function classify(error: unknown, api?: Api): number {
 			if (seen.has(link)) break;
 			seen.add(link);
 
-			if ("errorId" in link && typeof (link as { errorId: unknown }).errorId === "number") {
-				kinds |= (link as { errorId: number }).errorId & KIND_MASK;
+			if (link instanceof ModelSelectionError || hostAdmissionErrors.has(link)) {
+				const localId = "errorId" in link && typeof link.errorId === "number" ? link.errorId : 0;
+				return create(Flag.HostAdmission, (kinds | localId) & INTERRUPT_KINDS);
+			}
+
+			if ("errorId" in link && typeof link.errorId === "number") {
+				// Raw provider errors may carry arbitrary ids; only the local class
+				// or a trusted local attachment above can introduce host identity.
+				kinds |= link.errorId & KIND_MASK & ~Flag.HostAdmission;
 			}
 			if ("code" in link && typeof link.code === "string") {
 				if (ACCOUNT_POLICY_PATTERN.test(link.code)) {
@@ -861,6 +884,14 @@ export function classifyMessage(message: {
 	errorStatus?: number;
 }): number {
 	const existingId = message.errorId;
+	// AssistantMessage.errorId is the serialized host classification, not a raw
+	// provider field. Preserve admission identity without reinterpreting its
+	// display text, transport status, or diagnostic cause as a retry signal.
+	if (isHostAdmissionId(existingId)) {
+		const id = create(Flag.HostAdmission, (existingId ?? 0) & INTERRUPT_KINDS);
+		message.errorId = id;
+		return id;
+	}
 	const currentStatus = message.errorStatus ?? statusFromId(existingId);
 	const existingOverflowOnly =
 		existingId !== undefined && is(existingId, Flag.ContextOverflow) && !is(existingId, Flag.PayloadRejected);
@@ -874,7 +905,7 @@ export function classifyMessage(message: {
 		message.model,
 	);
 
-	let kinds = ((existingId ?? 0) | textId) & KIND_MASK;
+	let kinds = ((existingId ?? 0) | textId) & KIND_MASK & ~Flag.HostAdmission;
 	// Two-phase finalization: drop stale status-inferred payload bit when final text proves token overflow (#9235).
 	if (
 		currentStatus === 413 &&
@@ -898,6 +929,8 @@ export function classifyMessage(message: {
 
 export function attach<E extends object>(error: E, id: number): E {
 	Object.defineProperty(error, "errorId", { value: id, enumerable: false, configurable: true });
+	if (isHostAdmissionId(id)) hostAdmissionErrors.add(error);
+	else hostAdmissionErrors.delete(error);
 	return error;
 }
 
@@ -915,6 +948,7 @@ export interface ContextOverflowMessage extends Pick<AssistantMessage, "errorId"
  * many times over while the conversation itself stays small.
  */
 export function isUsageBackedContextOverflow(message: ContextOverflowMessage, contextWindow?: number): boolean {
+	if (isHostAdmissionId(message.errorId)) return false;
 	const usage = message.usage;
 	if (!contextWindow || !usage) return false;
 	const inputTokens = usage.contextTokens ?? usage.input + usage.cacheRead + usage.cacheWrite;
@@ -923,6 +957,7 @@ export function isUsageBackedContextOverflow(message: ContextOverflowMessage, co
 
 /** Classify overflow from error flags, available token usage, or provider error text. */
 export function isContextOverflow(message: ContextOverflowMessage, contextWindow?: number): boolean {
+	if (isHostAdmissionId(message.errorId)) return false;
 	if (is(message.errorId, Flag.ContextOverflow)) return true;
 	if (isUsageBackedContextOverflow(message, contextWindow)) return true;
 	return message.stopReason === "error" && !!message.errorMessage && matchesOverflowText(message.errorMessage);
@@ -931,6 +966,7 @@ export function isContextOverflow(message: ContextOverflowMessage, contextWindow
 /** HTTP 413 byte/media rejection (#9235); may co-occur with {@link isContextOverflow} for bare `413 (no body)`.
  *  Callers with local headroom should skip compaction when this returns true. */
 export function isPayloadRejection(message: AssistantMessage): boolean {
+	if (isHostAdmissionId(message.errorId)) return false;
 	if (is(message.errorId, Flag.PayloadRejected)) return true;
 	const { errorMessage } = message;
 	if (message.stopReason !== "error" || !errorMessage) return false;
@@ -945,6 +981,7 @@ export function isTextAmbiguousContextOverflow(
 	message: ContextOverflowMessage | undefined,
 	contextWindow?: number,
 ): boolean {
+	if (isHostAdmissionId(errorId)) return false;
 	const overflowFlagged =
 		is(errorId, Flag.ContextOverflow) || (message !== undefined && isContextOverflow(message, contextWindow));
 	if (!overflowFlagged) return false;

@@ -1,10 +1,12 @@
 import { isRetryableError, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils";
 import {
+	classify,
 	CODEX_HTTP_BODY_READ_ERROR_PATTERN,
+	Flag,
+	is,
 	isRetryableStreamEnvelopeError,
 	isTransientStreamDropError,
 	isTransientStreamParseError,
-	isUsageLimit,
 	status,
 	TRANSIENT_TRANSPORT_PATTERN,
 } from "./flags";
@@ -43,7 +45,8 @@ function isTransientTransportMessage(message: string): boolean {
  */
 export function isProviderRetryableError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
-	if (isUsageLimit(error)) return false;
+	const id = classify(error);
+	if (is(id, Flag.HostAdmission) || is(id, Flag.UsageLimit)) return false;
 	const httpStatus = status(error);
 	if (httpStatus !== undefined && httpStatus >= 400 && httpStatus < 500 && httpStatus !== 408 && httpStatus !== 429) {
 		return false;

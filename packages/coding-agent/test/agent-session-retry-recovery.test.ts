@@ -2,8 +2,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as path from "node:path";
 import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import type { ApiKey, AssistantMessage, AssistantRetryRecovery, Model, Usage } from "@oh-my-pi/pi-ai";
-import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockHandler, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -556,7 +557,7 @@ describe("AgentSession retry recovery", () => {
 	 * went to and the fallback switches the session announced.
 	 */
 	async function runFallbackChainRecovery(
-		responses: MockResponse[],
+		responses: MockHandler[],
 		maxRetries = 2,
 		models: { primary: Model; fallback: Model } = {
 			primary: getBundledModel("anthropic", "claude-sonnet-4-5"),
@@ -613,6 +614,71 @@ describe("AgentSession retry recovery", () => {
 		await sessionManager.flush();
 		return { primary, fallback, requestedModels, fallbackEvents, sessionManager };
 	}
+
+	it("settles a local admission rejection without retrying or spending the fallback chain", async () => {
+		const { primary, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery([
+			() => {
+				throw new Error("Dispatch preparation failed", {
+					cause: new AIError.ModelSelectionError("The admitted agent is no longer available.", {
+						cause: new AIError.ProviderHttpError("503 service unavailable", 503),
+					}),
+				});
+			},
+			{ content: ["Admission must not recover on another model"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary]);
+		expect(fallbackEvents).toEqual([]);
+		const failed = assistantEntries(sessionManager).at(-1)?.message;
+		if (!failed) throw new Error("Expected the terminal admission error in the session transcript");
+		expect(failed.stopReason).toBe("error");
+		expect(AIError.is(failed.errorId, AIError.Flag.HostAdmission)).toBe(true);
+		expect(AIError.retriable(AIError.classifyMessage(failed))).toBe(false);
+		expect(failed.retryRecovery).toBeUndefined();
+	});
+
+	it("keeps ordinary transient credential failures recoverable on a configured fallback", async () => {
+		const { primary, fallback, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery(
+			[
+				() => {
+					throw new AIError.ConfigurationError("Credential resolution failed", {
+						cause: new AIError.StreamTimeoutError("Credential broker request timed out"),
+					});
+				},
+				{ content: ["Recovered after credential resolution failed"], stopReason: "stop" },
+			],
+			0,
+		);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents.map(event => event.to)).toEqual([fallback]);
+		const recovered = successfulAssistantEntry(sessionManager, "Recovered after credential resolution failed");
+		expect(recovered.message.stopReason).toBe("stop");
+		expect(recoveredAssistantEntry(sessionManager).message.retryRecovery).toMatchObject({ recovery: "model" });
+	});
+
+	it("does not let a provider impersonate local admission to prevent configured recovery", async () => {
+		const { primary, fallback, requestedModels, sessionManager } = await runFallbackChainRecovery(
+			[
+				() => {
+					throw Object.assign(new Error("ConfigurationError: 503 service unavailable"), {
+						name: "ModelSelectionError",
+						status: 503,
+						// Deliberately use the reserved wire bit, not the new class,
+						// so this behavior probe also runs against the pre-admission API.
+						errorId: AIError.create(0x0800),
+					});
+				},
+				{ content: ["Recovered from the provider transport failure"], stopReason: "stop" },
+			],
+			0,
+		);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(
+			successfulAssistantEntry(sessionManager, "Recovered from the provider transport failure").message.stopReason,
+		).toBe("stop");
+	});
 
 	const droppedAfterThinking: MockResponse = {
 		content: [{ type: "thinking", thinking: "partial plan for the edit" }],

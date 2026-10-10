@@ -1,712 +1,596 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { RetryFallbackRole, ServingModel } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
-import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
-import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { getBundledAgent, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { type ExecutorOptions, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
-import { createSessionDefaults } from "./helpers/session-defaults";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import * as path from "node:path";
 
-import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
+type RuntimeModelDefinition = NonNullable<ProviderConfigInput["models"]>[number] & { provider: string };
+interface ServedRequest {
+	selector: string;
+	purpose: "classification" | "work";
+	reasoning_effort?: string;
+	tool_choice?: unknown;
+}
+interface RuntimeFixture {
+	registry: ModelRegistry;
+	cwd: string;
+	requests: ServedRequest[];
+}
+type ScriptedResponse = "yield" | "answer" | "read" | "unavailable";
 
-function model(provider: string, id: string): Model<Api> {
-	return buildModel({
+function modelDefinition(provider: string, id: string): RuntimeModelDefinition {
+	return {
 		provider,
 		id,
 		name: id,
 		api: "openai-completions",
-		baseUrl: provider === "openrouter" ? "https://openrouter.ai/api/v1" : `https://${provider}.example.test`,
-		reasoning: false,
+		reasoning: true,
+		thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max] },
+		compat: { supportsReasoningEffort: true, thinkingFormat: "openai" },
+		supportsTools: true,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 128000,
 		maxTokens: 8192,
+	};
+}
+
+const primary = modelDefinition("issue2750-primary", "bad-runtime-model");
+const fallback = modelDefinition("issue2750-fallback", "working-model");
+const unrelated = modelDefinition("issue2750-global", "other-model");
+const primarySelector = `${primary.provider}/${primary.id}`;
+const fallbackSelector = `${fallback.provider}/${fallback.id}`;
+const unrelatedSelector = `${unrelated.provider}/${unrelated.id}`;
+const createAgentSession = sdkModule.createAgentSession;
+const sessions: AgentSession[] = [];
+const resources: Array<{ dir: TempDir; authStorage: AuthStorage; stop: () => void }> = [];
+
+beforeEach(() => {
+	AgentRegistry.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	// Only discovery/tool breadth is isolated; the SDK and recovery are real.
+	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+		if (!options) throw new Error("Expected worker options");
+		const result = await createAgentSession({
+			...options,
+			agentDir: options.cwd,
+			disableExtensionDiscovery: true,
+			extensions: [],
+			skills: [],
+			rules: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			preloadedCustomToolPaths: [],
+			toolNames: ["read", "yield"],
+		});
+		sessions.push(result.session);
+		return result;
+	});
+});
+
+async function createRegistry(
+	models: RuntimeModelDefinition[] = [primary, fallback, unrelated],
+	response: (request: ServedRequest, index: number) => ScriptedResponse = () => "yield",
+): Promise<RuntimeFixture> {
+	const requests: ServedRequest[] = [];
+	let workRequestCount = 0;
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: async request => {
+			const body = (await request.json()) as {
+				model: string;
+				reasoning_effort?: string;
+				tool_choice?: unknown;
+				tools?: Array<{ function?: { name?: string } }>;
+			};
+			const provider = new URL(request.url).pathname.split("/")[1]!;
+			// AUTO judgments use the real text-judge protocol, not the worker's yield schema.
+			const classification = !body.tools?.some(tool => tool.function?.name === "yield");
+			const served: ServedRequest = {
+				selector: `${provider}/${body.model}`,
+				purpose: classification ? "classification" : "work",
+				reasoning_effort: body.reasoning_effort,
+				tool_choice: body.tool_choice,
+			};
+			requests.push(served);
+			const next = classification ? "classification" : response(served, workRequestCount++);
+			if (next === "unavailable") {
+				return Response.json({ error: { message: "Model unavailable at this endpoint" } }, { status: 404 });
+			}
+			const delta =
+				next === "classification" || next === "answer"
+					? { role: "assistant", content: next === "classification" ? "medium" : "work completed" }
+					: {
+							role: "assistant",
+							tool_calls: [
+								{
+									index: 0,
+									id: "runtime-yield",
+									type: "function",
+									function:
+										next === "read"
+											? { name: "read", arguments: '{"path":"worker-input.txt"}' }
+											: { name: "yield", arguments: '{"data":{"completed":true}}' },
+								},
+							],
+						};
+			return new Response(
+				`data: ${JSON.stringify({
+					id: "runtime-fixture",
+					object: "chat.completion.chunk",
+					created: 0,
+					choices: [{ index: 0, delta }],
+				})}\n\n` +
+					`data: ${JSON.stringify({
+						id: "runtime-fixture",
+						object: "chat.completion.chunk",
+						created: 0,
+						choices: [
+							{
+								index: 0,
+								delta: {},
+								finish_reason: next === "answer" || next === "classification" ? "stop" : "tool_calls",
+							},
+						],
+					})}\n\n` +
+					"data: [DONE]\n\n",
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		},
+	});
+	const dir = TempDir.createSync("omp-subagent-runtime-route-");
+	await Bun.write(dir.join("worker-input.txt"), "worker fixture input");
+	const authStorage = await AuthStorage.create(":memory:");
+	resources.push({ dir, authStorage, stop: () => server.stop(true) });
+	const registry = new ModelRegistry(authStorage, path.join(dir.path(), "models.yml"));
+	for (const provider of new Set(models.map(candidate => candidate.provider))) {
+		const baseUrl = new URL(`${provider}/v1`, server.url).toString();
+		registry.registerProvider(provider, {
+			api: "openai-completions",
+			baseUrl,
+			apiKey: "test-key",
+			models: models
+				.filter(candidate => candidate.provider === provider)
+				.map(candidate => ({ ...candidate, baseUrl })),
+		});
+	}
+	return { registry, cwd: dir.path(), requests };
+}
+
+function retrySettings(overrides: Readonly<Record<string, unknown>> = {}) {
+	return Settings.isolated({
+		"compaction.enabled": false,
+		"todo.enabled": false,
+		"retry.baseDelayMs": 1,
+		"retry.maxRetries": 1,
+		...overrides,
 	});
 }
 
-/**
- * Fake session that runs a turn on its primary, applies a retry fallback, and
- * yields.
- *
- * `servingModel` mirrors the real session contract: it names the model that
- * produced output and holds the previous one while a fallback is armed but
- * unproven, so the executor is exercised against the same shape production
- * gives it.
- *
- * `fallback` picks what the target does with the switch it was handed:
- * - `"served"` settles a real turn on it, which moves attribution.
- * - `"unproven"` errors on its first request, producing none of the run's work.
- */
-function createYieldingSession(
-	fallback: "served" | "unproven" | "none" = "served",
-	beforeYield?: () => Promise<void>,
-): AgentSession {
-	const listeners: Array<(event: { type: string; [key: string]: unknown }) => void> = [];
-	const session = {
-		...createSessionDefaults(),
-		agent: { state: { systemPrompt: ["test"] } },
-		state: { messages: [] },
-		model: model("primary", "bad-runtime-model"),
-		servingModel: { selector: "primary/bad-runtime-model", isFallback: false } as ServingModel | undefined,
-		extensionRunner: undefined,
-		sessionManager: { appendSessionInit: () => {} },
-		getActiveToolNames: () => ["yield"],
-		getEnabledToolNames: () => ["yield"],
-		subscribe: (listener: (event: { type: string; [key: string]: unknown }) => void) => {
-			listeners.push(listener);
-			return () => {};
-		},
-		prompt: async () => {
-			// Broadcast per event, not per subscriber: every observer must see the
-			// same session state at the same point in the sequence.
-			const emit = (event: { type: string; [key: string]: unknown }): void => {
-				for (const listener of listeners) listener(event);
-			};
-			await beforeYield?.();
-			if (fallback !== "none") {
-				session.model = model("fallback", "working-model");
-				emit({
-					type: "retry_fallback_applied",
-					from: "primary/bad-runtime-model",
-					to: "fallback/working-model",
-					role: "subagent:issue-2750",
-				});
-				if (fallback === "served") {
-					session.servingModel = { selector: "fallback/working-model", isFallback: true };
-					emit({ type: "retry_fallback_succeeded", model: "fallback/working-model", role: "subagent:issue-2750" });
-				}
-			}
-			emit({
-				type: "tool_execution_end",
-				toolCallId: "tool-yield",
-				toolName: "yield",
-				result: { content: [{ type: "text", text: "Result submitted." }], details: { status: "success" } },
-				isError: false,
-			});
-		},
+const agent = {
+	name: "task",
+	description: "test",
+	systemPrompt: "test",
+	source: "bundled" as const,
+	model: [primarySelector],
+	tools: ["yield"],
+};
+
+function workerOptions(fixture: RuntimeFixture, settings = retrySettings()): ExecutorOptions {
+	return {
+		cwd: fixture.cwd,
+		agent,
+		task: "work",
+		index: 0,
+		id: "runtime-worker",
+		settings,
+		modelRegistry: fixture.registry,
+		enableLsp: false,
+		enableIrc: false,
+		restrictToolNames: true,
 	};
-	return session as unknown as AgentSession;
 }
+
+afterEach(async () => {
+	await AgentLifecycleManager.global().dispose();
+	await Promise.all(sessions.splice(0).map(session => session.dispose()));
+	vi.restoreAllMocks();
+	AgentLifecycleManager.resetGlobalForTests();
+	AgentRegistry.resetGlobalForTests();
+	for (const { dir, authStorage, stop } of resources.splice(0)) {
+		stop();
+		authStorage.close();
+		await dir.remove();
+	}
+});
 
 describe("subagent runtime model resolution", () => {
-	afterEach(() => {
-		vi.restoreAllMocks();
-	});
-
-	for (const { level, collide } of [
-		{ level: undefined, collide: false },
-		{ level: ThinkingLevel.High, collide: false },
-		{ level: undefined, collide: true },
-	]) {
-		it(`keeps literal suffix attribution distinct from thinking (${collide ? "colliding selector" : (level ?? "unset")})`, async () => {
-			const literal = model("custom", "coding-router:max");
+	for (const level of [undefined, ThinkingLevel.High]) {
+		it(`serves a literal model-id colon separately from effort (${level ?? "unset"})`, async () => {
+			const literal = modelDefinition("issue2750-literal", "coding-router:max");
+			const fixture = await createRegistry([literal]);
+			const identity = `${literal.provider}/${literal.id}`;
+			const selector = `${identity}${level ? `:${level}` : ""}`;
 			const snapshots: AgentProgress[] = [];
-			vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-				if (!options?.model) throw new Error("Expected resolved model");
-				let activeModel = options.model;
-				let activeLevel: ThinkingLevel | undefined = level;
-				const recovery = new TurnRecovery({
-					model: () => activeModel,
-					thinkingLevel: () => activeLevel,
-					sessionManager: { getSessionId: () => "literal-model" },
-					settings: Settings.isolated({}),
-					modelRegistry: {},
-					configWarnings: [],
-				} as unknown as TurnRecoveryHost);
-				const session = createYieldingSession("none", async () => {
-					if (collide) {
-						// Same concatenated selector, different identity and reasoning.
-						activeModel = model("custom", "coding-router");
-						activeLevel = ThinkingLevel.Max;
-					}
-					await recovery.onAssistantSettledSuccessfully({
-						role: "assistant",
-						content: [{ type: "text", text: "literal model produced this answer" }],
-						stopReason: "stop",
-					} as AssistantMessage);
-					// A newly armed model must not steal the settled answer's identity.
-					activeModel = model("custom", "unserved-candidate");
-				});
-				Object.defineProperty(session, "servingModel", { get: () => recovery.servingModel });
-				expect(recovery.servingModel?.modelIdentity).toBe("custom/coding-router:max");
-				expect(recovery.servingModel?.thinkingLevel).toBe(level);
-				return { session, extensionsResult: {}, setToolUIContext: () => {} } as never;
-			});
-			const settings = Settings.isolated({});
-			settings.setModelRole("default", "custom/coding-router:max");
 			const result = await runSubprocess({
-				cwd: "/tmp",
-				agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
-				task: "work",
-				index: 0,
-				id: "literal-model",
-				modelOverride: level ? `custom/coding-router:max:${level}` : "custom/coding-router:max",
-				settings,
-				modelRegistry: {
-					refresh: async () => {},
-					getAvailable: () => [literal],
-					getApiKey: async () => "test-key",
-				} as never,
+				...workerOptions(fixture),
+				agent: { ...agent, model: [identity] },
+				modelOverride: selector,
+				explicitModelSelection: true,
 				onProgress: progress => snapshots.push({ ...progress }),
-				enableLsp: false,
 			});
-			const expectedSelector = level ? `custom/coding-router:max:${level}` : "custom/coding-router:max";
-			const latest = snapshots.findLast(progress => progress.resolvedModel !== undefined);
-			expect(latest?.resolvedModelIdentity).toBe(collide ? "custom/coding-router" : "custom/coding-router:max");
-			expect(latest?.resolvedThinkingLevel).toBe(collide ? ThinkingLevel.Max : level);
-			expect(result.resolvedModel).toBe(expectedSelector);
-			expect(result.resolvedModelIdentity).toBe(collide ? "custom/coding-router" : "custom/coding-router:max");
-			expect(result.resolvedThinkingLevel).toBe(collide ? ThinkingLevel.Max : level);
-			expect(result.resolvedModelIsFallback).toBeFalsy();
+			expect(result.exitCode, result.stderr).toBe(0);
+			expect(fixture.requests.map(request => request.selector)).toEqual([identity]);
+			if (level) expect(fixture.requests[0]?.reasoning_effort).toBe(level);
+			expect(result.resolvedModelIdentity).toBe(identity);
+			expect(snapshots.findLast(progress => progress.resolvedModel)?.resolvedModelIdentity).toBe(identity);
 		});
 	}
 
-	it("keeps a subagent fallback reachable when default uses the same primary model", async () => {
-		const primary = model("primary", "bad-runtime-model");
-		const fallback = model("fallback", "working-model");
-		let candidates: string[] = [];
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options?.settings || !options.sessionManager) throw new Error("Expected child settings and history");
-			const recovery = new TurnRecovery({
-				model: () => primary,
-				thinkingLevel: () => undefined,
-				sessionManager: options.sessionManager,
-				settings: options.settings,
-				modelRegistry: {
-					find: (provider: string, id: string) =>
-						[primary, fallback].find(m => m.provider === provider && m.id === id),
-					hasProvider: () => true,
-					getAvailable: () => [primary, fallback],
-				},
-				configWarnings: [],
-			} as unknown as TurnRecoveryHost);
-			return {
-				session: createYieldingSession("none", async () => {
-					const selector = "primary/bad-runtime-model";
-					candidates = recovery
-						.retryFallbackChainKeys(selector)
-						.flatMap(role =>
-							recovery.findRetryFallbackCandidates(role, selector).map(candidate => candidate.raw),
-						);
-				}),
-				extensionsResult: {},
-				setToolUIContext: () => {},
-			} as never;
-		});
-		await runSubprocess({
-			cwd: "/tmp",
-			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
-			task: "work",
-			index: 0,
-			id: "shared-primary",
-			modelOverride: ["primary/bad-runtime-model", "fallback/working-model"],
-			settings: Settings.isolated({
-				modelRoles: { default: "primary/bad-runtime-model" },
-				"retry.fallbackChains": { default: [] },
-			}),
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [primary, fallback],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
-		});
-		expect(candidates).toEqual(["fallback/working-model"]);
-	});
-
-	it("passes ordered subagent candidates as a child retry fallback chain", async () => {
-		const primary = model("primary", "bad-runtime-model");
-		const fallback = model("fallback", "working-model");
-		let childFallbackChains: Record<string, string[]> | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = (options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined) as
-				| Record<string, string[]>
-				| undefined;
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
-		});
-
-		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
-		const settings = Settings.isolated({
-			"retry.fallbackChains": {
-				default: ["global/inherited-model"],
-			},
-		});
-		settings.setModelRole("default", "primary/bad-runtime-model");
-		const result = await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "issue-2750",
-			modelOverride: ["primary/bad-runtime-model", "fallback/working-model"],
-			settings,
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [primary, fallback],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
-		});
-
-		let firstFallbackRole: string | undefined;
-		let subagentFallbackChain: string[] | undefined;
-		let inheritedFallbackChain: string[] | undefined;
-		for (const role in childFallbackChains) {
-			const chain = childFallbackChains[role];
-			if (!firstFallbackRole) {
-				firstFallbackRole = role;
-			}
-			if (role === "subagent:issue-2750") {
-				subagentFallbackChain = chain;
-			}
-			if (role === "default") {
-				inheritedFallbackChain = chain;
-			}
-		}
-		expect(firstFallbackRole).toBe("subagent:issue-2750");
-		expect(subagentFallbackChain).toEqual(["fallback/working-model"]);
-		expect(inheritedFallbackChain).toEqual(["global/inherited-model"]);
-		expect(result.modelOverride).toEqual(["primary/bad-runtime-model", "fallback/working-model"]);
-		expect(result.resolvedModel).toBe("fallback/working-model");
-		expect(result.resolvedModelIsFallback).toBe(true);
-	});
-
-	it("persists the installed subagent fallback role for cold revival (#13789)", async () => {
-		const primary = model("primary", "bad-runtime-model");
-		const fallback = model("fallback", "working-model");
-		let persisted: RetryFallbackRole | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
-			const session = createYieldingSession("none");
-			vi.spyOn(session.sessionManager, "appendSessionInit").mockImplementation(init => {
-				persisted = init.retryFallback;
-				return "session-init";
+	for (const mode of ["agent alias", "pre-expanded implicit role"] as const) {
+		it(`omitted retries inherit the selected singleton role rather than a shared-primary default (${mode})`, async () => {
+			const fixture = await createRegistry(undefined, request =>
+				request.selector === primarySelector ? "unavailable" : "yield",
+			);
+			const settings = retrySettings({
+				modelRoles: { qa: primarySelector, default: primarySelector },
+				"retry.fallbackChains": { qa: [`${fallbackSelector}:high`], default: [unrelatedSelector] },
 			});
-			return { session, extensionsResult: {}, setToolUIContext: () => {} } as never;
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				agent: { ...agent, model: ["@qa"] },
+				...(mode === "pre-expanded implicit role" ? { modelOverride: [primarySelector], modelRole: "qa" } : {}),
+			});
+			expect(result.exitCode, result.stderr).toBe(0);
+			expect(fixture.requests.map(request => request.selector)).toEqual([primarySelector, fallbackSelector]);
+			expect(fixture.requests.at(-1)?.reasoning_effort).toBe("high");
+			expect(result.resolvedModel).toBe(`${fallbackSelector}:high`);
+			expect(result.resolvedModelIsFallback).toBe(true);
 		});
-		await runSubprocess({
-			cwd: "/tmp",
-			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
-			task: "work",
-			index: 0,
-			id: "issue-13789",
-			modelOverride: ["primary/bad-runtime-model", "fallback/working-model"],
-			settings: Settings.isolated({}),
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [primary, fallback],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
-		});
-		expect(persisted).toEqual({ primary: "primary/bad-runtime-model", chain: ["fallback/working-model"] });
-	});
+	}
 
-	it("does not attribute the run to a fallback that never served a turn", async () => {
-		// The incident shape: the primary does all the work, a transient error
-		// routes the child onto a chain candidate, and that candidate errors on its
-		// first request. Crediting the run to it reports 0 tokens of its output as
-		// the whole run — to the Agent Hub row and, via the hub job snapshot, to
-		// the parent model.
-		const primary = model("primary", "bad-runtime-model");
-		const fallback = model("fallback", "working-model");
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
-			return {
-				session: createYieldingSession("unproven"),
-				extensionsResult: {},
-				setToolUIContext: () => {},
-			} as never;
+	for (const model of [[primarySelector], ["@qa"]]) {
+		it(`omitted singleton ${model[0]} inherits the configured default retry chain`, async () => {
+			const fixture = await createRegistry(undefined, request =>
+				request.selector === primarySelector ? "unavailable" : "yield",
+			);
+			const settings = retrySettings({
+				modelRoles: { qa: primarySelector, default: primarySelector },
+				"retry.fallbackChains": { default: [`${fallbackSelector}:high`] },
+			});
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				agent: { ...agent, model },
+			});
+			expect(result.exitCode, result.stderr).toBe(0);
+			expect(fixture.requests.map(request => request.selector)).toEqual([primarySelector, fallbackSelector]);
+			expect(fixture.requests.at(-1)?.reasoning_effort).toBe("high");
+			expect(result.resolvedModelIdentity).toBe(fallbackSelector);
 		});
+	}
 
-		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
-		const settings = Settings.isolated({});
-		settings.setModelRole("default", "primary/bad-runtime-model");
+	it("omitted ordered agent models keep their fallback reachable when default shares the primary", async () => {
+		const fixture = await createRegistry(undefined, request =>
+			request.selector === primarySelector ? "unavailable" : "yield",
+		);
 		const result = await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "unproven-fallback",
-			modelOverride: ["primary/bad-runtime-model"],
-			settings,
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [primary, fallback],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
+			...workerOptions(
+				fixture,
+				retrySettings({
+					modelRoles: { default: primarySelector },
+					"retry.fallbackChains": { default: [unrelatedSelector] },
+				}),
+			),
+			agent: { ...agent, model: [primarySelector, `${fallbackSelector}:high`] },
 		});
-
-		expect(result.resolvedModel).toBe("primary/bad-runtime-model");
-		expect(result.resolvedModelIsFallback).toBeFalsy();
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(fixture.requests.map(request => request.selector)).toEqual([primarySelector, fallbackSelector]);
+		expect(fixture.requests.at(-1)?.reasoning_effort).toBe("high");
 	});
 
-	it("inherits an explicitly configured default fallback chain for a single subagent model", async () => {
-		const primary = model("lm-studio", "local-reviewer");
-		const fallback = model("openai-codex", "gpt-5.6-sol");
-		let childFallbackChains: Record<string, string[]> | undefined;
-		let childFallbackChainKeys: string[] = [];
-		let childModelRole: string | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = (options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined) as
-				| Record<string, string[]>
-				| undefined;
-			childFallbackChainKeys = Object.keys(childFallbackChains ?? {});
-			childModelRole = options.settings?.getModelRoles()["subagent:single-model-configured-fallback"];
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+	for (const explicit of [false, true]) {
+		it(`${explicit ? "explicit pin refuses" : "omitted worker serves"} the configured provider-wildcard fallback`, async () => {
+			const mirror = modelDefinition(fallback.provider, primary.id);
+			const mirrorSelector = `${mirror.provider}/${mirror.id}`;
+			const fixture = await createRegistry([primary, mirror, unrelated], request =>
+				request.selector === primarySelector ? "unavailable" : "yield",
+			);
+			const settings = retrySettings({
+				modelRoles: { default: primarySelector },
+				"retry.fallbackChains": { [`${primary.provider}/*`]: [`${mirror.provider}/*`] },
+			});
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				...(explicit ? { modelOverride: primarySelector, explicitModelSelection: true } : {}),
+			});
+			expect(result.exitCode, result.stderr).toBe(explicit ? 1 : 0);
+			expect(fixture.requests.map(request => request.selector)).toEqual(
+				explicit ? [primarySelector] : [primarySelector, mirrorSelector],
+			);
+			if (!explicit) expect(result.resolvedModelIdentity).toBe(mirrorSelector);
 		});
+	}
 
-		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
-		await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "single-model-configured-fallback",
-			modelOverride: "lm-studio/local-reviewer",
-			settings: Settings.isolated({
-				modelRoles: { "existing-local-role": "lm-studio/local-reviewer" },
-				"retry.fallbackChains": {
-					default: ["openai-codex/gpt-5.6-sol"],
-					"existing-local-role": ["other-provider/other-model"],
+	it("explicit role retries stay in that role's chain and retain exact fallback effort above the coarse ceiling", async () => {
+		const fixture = await createRegistry(undefined, request =>
+			request.selector === primarySelector ? "unavailable" : "yield",
+		);
+		const settings = retrySettings({
+			modelRoles: { qa: primarySelector, default: primarySelector },
+			"retry.fallbackChains": { qa: [`${fallbackSelector}:high`], default: [unrelatedSelector] },
+			"task.maxEffort": "low",
+		});
+		const result = await runSubprocess({
+			...workerOptions(fixture, settings),
+			modelOverride: "@qa",
+			explicitModelSelection: true,
+		});
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(fixture.requests.map(request => request.selector)).toEqual([primarySelector, fallbackSelector]);
+		expect(fixture.requests.at(-1)?.reasoning_effort).toBe("high");
+		expect(result.resolvedThinkingLevel).toBe(ThinkingLevel.High);
+	});
+
+	it("explicit literal retries stay closed even when another role and default authorize the fallback", async () => {
+		const fixture = await createRegistry(undefined, request =>
+			request.selector === primarySelector ? "unavailable" : "yield",
+		);
+		const result = await runSubprocess({
+			...workerOptions(
+				fixture,
+				retrySettings({
+					modelRoles: { other: unrelatedSelector, default: primarySelector },
+					"retry.fallbackChains": { default: [unrelatedSelector] },
+				}),
+			),
+			modelOverride: primarySelector,
+			explicitModelSelection: true,
+		});
+		expect(result.exitCode, result.stderr).toBe(1);
+		expect(fixture.requests.map(request => request.selector)).toEqual([primarySelector]);
+	});
+
+	it("does not credit an approved fallback that failed before serving any work", async () => {
+		const fixture = await createRegistry(undefined, (_request, index) => (index === 0 ? "answer" : "unavailable"));
+		const result = await runSubprocess({
+			...workerOptions(
+				fixture,
+				retrySettings({
+					modelRoles: { qa: primarySelector },
+					"retry.fallbackChains": { qa: [fallbackSelector] },
+				}),
+			),
+			modelOverride: "@qa",
+			explicitModelSelection: true,
+		});
+		expect(result.exitCode, result.stderr).toBe(1);
+		expect(fixture.requests.map(request => request.selector)).toEqual([
+			primarySelector,
+			primarySelector,
+			fallbackSelector,
+		]);
+		expect(result.resolvedModelIdentity).toBe(primarySelector);
+		expect(result.resolvedModelIsFallback).toBe(false);
+	});
+
+	for (const [name, id] of [
+		["scout", "claude-haiku-5-5"],
+		["reviewer", "gpt-5.6-sol"],
+	] as const) {
+		it(`stock ${name} omission serves a fresh-role priority candidate instead of the live parent`, async () => {
+			const priority = modelDefinition("issue2750-priority", id);
+			const fixture = await createRegistry([primary, priority]);
+			const stock = getBundledAgent(name);
+			if (!stock) throw new Error(`Expected stock ${name} agent`);
+			const settings = retrySettings();
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				agent: stock,
+				thinkingLevel: stock.thinkingLevel,
+				modelAuthority: {
+					settings,
+					agentName: stock.name,
+					agentModel: stock.model,
+					getParentModel: () => fixture.registry.find(primary.provider, primary.id),
+					getParentSelector: () => `${primarySelector}:high`,
 				},
-			}),
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [primary, fallback],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
+			});
+			expect(result.exitCode, result.stderr).toBe(0);
+			expect(fixture.requests.map(request => request.selector)).toEqual([`${priority.provider}/${priority.id}`]);
 		});
+	}
 
-		expect(childModelRole).toBe("lm-studio/local-reviewer");
-		expect(childFallbackChainKeys[0]).toBe("subagent:single-model-configured-fallback");
-		expect(childFallbackChains?.["subagent:single-model-configured-fallback"]).toEqual(["openai-codex/gpt-5.6-sol"]);
-		expect(childFallbackChains?.default).toEqual(["openai-codex/gpt-5.6-sol"]);
-		expect(childFallbackChains?.["existing-local-role"]).toEqual(["other-provider/other-model"]);
-	});
-
-	it("inherits the aliased role's chain, not the default chain, for a role-alias subagent model", async () => {
-		const fast = model("fast", "hy3");
-		const slow = model("slow", "opus");
-		let childFallbackChains: Record<string, string[]> | undefined;
-		let childModelRole: string | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = (options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined) as
-				| Record<string, string[]>
-				| undefined;
-			childModelRole = options.settings?.getModelRoles()["subagent:role-alias-chain"];
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+	for (const [alias, selector] of [
+		["pi/task", primarySelector],
+		["pi/smol", fallbackSelector],
+		["pi/slow", unrelatedSelector],
+	] as const) {
+		it(`omitted agent-file ${alias} retains legacy role resolution`, async () => {
+			const fixture = await createRegistry();
+			const settings = retrySettings({
+				modelRoles: { task: primarySelector, smol: fallbackSelector, slow: unrelatedSelector },
+			});
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				agent: parseAgent(
+					path.join(fixture.cwd, "legacy-agent.md"),
+					`---\nname: legacy-agent\ndescription: test\nmodel: ${alias}\ntools: yield\n---\nWork`,
+					"project",
+				),
+			});
+			expect(result.exitCode, result.stderr).toBe(0);
+			expect(fixture.requests.map(request => request.selector)).toEqual([selector]);
 		});
+	}
 
-		// Direct executor callers may still pass an unexpanded agent role alias.
-		const agent: AgentDefinition = {
-			name: "scout",
-			description: "test",
-			systemPrompt: "test",
-			source: "bundled",
-			model: ["@smol"],
-		};
-		await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "role-alias-chain",
-			settings: Settings.isolated({
-				modelRoles: { default: "slow/opus", smol: "fast/hy3" },
-				"retry.fallbackChains": {
-					default: ["slow/opus-backup"],
-					smol: ["fast/composer"],
-				},
-			}),
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [fast, slow],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
-		});
-
-		expect(childModelRole).toBe("fast/hy3");
-		expect(childFallbackChains?.["subagent:role-alias-chain"]).toEqual(["fast/composer"]);
-		expect(childFallbackChains?.default).toEqual(["slow/opus-backup"]);
-	});
-
-	it("inherits the aliased role's chain when the spawn path pre-expands the alias", async () => {
-		// The real task flow (structured-subagent) resolves `@task` to a concrete
-		// selector before calling the executor and carries the role identity in
-		// `modelRole`. Re-deriving the role from the expanded patterns yields
-		// nothing, so the child must route off `modelRole`, not `default`.
-		const roleModel = model("task-provider", "sonnet");
-		const defaultModel = model("default-provider", "opus");
-		let childFallbackChains: Record<string, string[]> | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = (options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined) as
-				| Record<string, string[]>
-				| undefined;
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
-		});
-
-		const agent: AgentDefinition = {
-			name: "task",
-			description: "test",
-			systemPrompt: "test",
-			source: "bundled",
-			model: ["@task"],
-		};
-		await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "pre-expanded-role",
-			modelOverride: ["task-provider/sonnet"],
-			modelRole: "task",
-			settings: Settings.isolated({
-				modelRoles: { default: "default-provider/opus", task: "task-provider/sonnet" },
-				"retry.fallbackChains": {
-					default: ["task-provider/sonnet", "default-provider/sol"],
-					task: ["task-provider/sonnet"],
-				},
-			}),
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [roleModel, defaultModel],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
-		});
-
-		expect(childFallbackChains?.["subagent:pre-expanded-role"]).toEqual(["task-provider/sonnet"]);
-	});
-
-	it("inherits the default chain for a role alias whose role configures no chain", async () => {
-		const fast = model("fast", "hy3");
-		const slow = model("slow", "opus");
-		let childFallbackChains: Record<string, string[]> | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = (options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined) as
-				| Record<string, string[]>
-				| undefined;
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
-		});
-
-		const agent: AgentDefinition = {
-			name: "scout",
-			description: "test",
-			systemPrompt: "test",
-			source: "bundled",
-			model: ["@smol"],
-		};
-		await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "role-alias-default-chain",
-			settings: Settings.isolated({
-				modelRoles: { default: "slow/opus", smol: "fast/hy3" },
-				"retry.fallbackChains": { default: ["slow/opus-backup"] },
-			}),
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [fast, slow],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
-		});
-
-		expect(childFallbackChains?.["subagent:role-alias-default-chain"]).toEqual(["slow/opus-backup"]);
-	});
-
-	it("does not inherit the default chain when multiple requested models collapse to one candidate", async () => {
-		const primary = model("lm-studio", "local-reviewer");
-		const fallback = model("openai-codex", "gpt-5.6-sol");
-		let childFallbackChains: unknown;
-		let childModelRole: string | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined;
-			childModelRole = options.settings?.getModelRoles()["subagent:collapsed-multiple-models"];
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
-		});
-
-		const settings = Settings.isolated({
-			"retry.fallbackChains": {
-				default: ["openai-codex/gpt-5.6-sol"],
+	it("omitted agent-file model: default inherits the live parent rather than the configured default", async () => {
+		const fixture = await createRegistry();
+		const settings = retrySettings({ modelRoles: { default: unrelatedSelector } });
+		const fileAgent = parseAgent(
+			path.join(fixture.cwd, "inherit-agent.md"),
+			"---\nname: inherit-agent\ndescription: test\nmodel: default\ntools: yield\n---\nWork",
+			"project",
+		);
+		const result = await runSubprocess({
+			...workerOptions(fixture, settings),
+			agent: fileAgent,
+			parentActiveModelPattern: primarySelector,
+			modelAuthority: {
+				settings,
+				agentName: fileAgent.name,
+				agentModel: fileAgent.model,
+				getParentModel: () => fixture.registry.find(primary.provider, primary.id),
+				getParentSelector: () => `${primarySelector}:high`,
 			},
 		});
-		settings.setModelRole("default", "openai-codex/gpt-5.6-sol");
-		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
-		await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "collapsed-multiple-models",
-			modelOverride: ["missing/provider", "lm-studio/local-reviewer"],
-			settings,
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [primary, fallback],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
-		});
-
-		expect(childModelRole).toBeUndefined();
-		expect(childFallbackChains).toEqual({
-			default: ["openai-codex/gpt-5.6-sol"],
-		});
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(fixture.requests.map(request => request.selector)).toEqual([primarySelector]);
 	});
 
-	it("keeps a single local subagent model pinned without a configured fallback chain", async () => {
-		const primary = model("lm-studio", "local-reviewer");
-		const parent = model("openai-codex", "gpt-5.6-sol");
-		let childModelRole: string | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options) throw new Error("Expected createAgentSession options");
-			childModelRole = options.settings?.getModelRoles()["subagent:single-model-no-fallback"];
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+	for (const [pattern, id] of [
+		["claude-sonnet", "claude-sonnet-fixture"],
+		["gpt-5", "gpt-5-fixture"],
+	] as const) {
+		it(`omitted configured fuzzy ${pattern} serves the matching catalog model without an exact pin`, async () => {
+			const fuzzy = modelDefinition("issue2750-fuzzy", id);
+			const fixture = await createRegistry([primary, fuzzy]);
+			const result = await runSubprocess({
+				...workerOptions(fixture, retrySettings({ modelRoles: { task: pattern } })),
+				agent: { ...agent, model: ["@task"] },
+			});
+			expect(result.exitCode, result.stderr).toBe(0);
+			expect(fixture.requests.map(request => request.selector)).toEqual([`${fuzzy.provider}/${fuzzy.id}`]);
 		});
+	}
 
-		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
-		await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "single-model-no-fallback",
-			modelOverride: "lm-studio/local-reviewer",
-			parentActiveModelPattern: "openai-codex/gpt-5.6-sol",
-			settings: Settings.isolated(),
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [primary, parent],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
+	it("omitted disabled frontmatter serves the enabled configured default", async () => {
+		const fixture = await createRegistry();
+		const settings = retrySettings({
+			disabledProviders: [primary.provider],
+			modelRoles: { default: fallbackSelector },
 		});
-
-		expect(childModelRole).toBeUndefined();
+		const result = await runSubprocess({
+			...workerOptions(fixture, settings),
+			agent: parseAgent(
+				path.join(fixture.cwd, "disabled-agent.md"),
+				`---\nname: disabled-agent\ndescription: test\nmodel: ${primarySelector}\ntools: yield\n---\nWork`,
+				"project",
+			),
+		});
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(fixture.requests.map(request => request.selector)).toEqual([fallbackSelector]);
 	});
 
-	it("leaves malformed default fallback entries for child validation", async () => {
-		const primary = model("lm-studio", "local-reviewer");
-		let childFallbackChains: unknown;
-		let childModelRole: string | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined;
-			childModelRole = options.settings?.getModelRoles()["subagent:single-model-invalid-default-fallback"];
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+	it("fixed-high final yield survives forced-tool reasoning suppression without weakening the request", async () => {
+		const fixed = modelDefinition("issue2750-forced-tool", "kimi-style");
+		fixed.compat = {
+			...fixed.compat,
+			supportsForcedToolChoice: true,
+			disableReasoningOnForcedToolChoice: true,
+		};
+		const selector = `${fixed.provider}/${fixed.id}`;
+		const fixture = await createRegistry([fixed], (_request, index) => (index < 3 ? "answer" : "yield"));
+		const result = await runSubprocess({
+			...workerOptions(fixture),
+			agent: { ...agent, model: [selector] },
+			modelOverride: `${selector}:high`,
+			explicitModelSelection: true,
 		});
-
-		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
-		await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "single-model-invalid-default-fallback",
-			modelOverride: "lm-studio/local-reviewer",
-			settings: Settings.isolated({ "retry.fallbackChains": { default: [123] } as never }),
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [primary],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
-		});
-
-		expect(childFallbackChains).toEqual({ default: [123] });
-		expect(childModelRole).toBeUndefined();
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(fixture.requests).toHaveLength(4);
+		expect(
+			fixture.requests.every(request => request.selector === selector && request.reasoning_effort === "high"),
+		).toBe(true);
+		const toolChoice = fixture.requests.at(-1)?.tool_choice;
+		if (toolChoice !== undefined && typeof toolChoice !== "string") {
+			throw new Error("Expected final yield tool choice to be omitted or a string");
+		}
+		expect([undefined, "auto"]).toContain(toolChoice);
 	});
 
-	it("preserves upstream routing selectors in the child retry fallback chain", async () => {
-		const routedModel = model("openrouter", "z-ai/glm-4.7");
-		let childFallbackChains: Record<string, string[]> | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = (options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined) as
-				| Record<string, string[]>
-				| undefined;
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
-		});
-
-		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
-		await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "issue-2750-routed",
-			modelOverride: ["openrouter/z-ai/glm-4.7@cerebras", "openrouter/z-ai/glm-4.7@fireworks"],
-			settings: Settings.isolated(),
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [routedModel],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
-		});
-
-		expect(childFallbackChains?.["subagent:issue-2750-routed"]).toEqual(["openrouter/z-ai/glm-4.7@fireworks"]);
-	});
-
-	it("defers unresolved explicit subagent model selectors instead of picking an available default", async () => {
-		const defaultModel = model("zai", "glm-5.2");
-		let childModel: Model | undefined;
-		let childModelPattern: unknown;
-		let childModelPatternAuthFallback: unknown;
-		let childModelPatternFallbackRole: unknown;
-		let childModelPatternDefaultFallbackChain: unknown;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options) throw new Error("Expected createAgentSession options");
-			childModel = options.model;
-			childModelPattern = options.modelPattern;
-			childModelPatternAuthFallback = options.modelPatternAuthFallback;
-			childModelPatternFallbackRole = options.modelPatternFallbackRole;
-			childModelPatternDefaultFallbackChain = options.modelPatternDefaultFallbackChain;
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
-		});
-
-		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
-		await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "issue-4421",
-			modelOverride: ["openai-codex/gpt-5.5:auto"],
-			parentActiveModelPattern: "openai-codex/gpt-5.5",
-			settings: Settings.isolated({
-				"retry.fallbackChains": {
-					default: ["openai-codex/gpt-5.6-sol"],
+	for (const explicit of [false, true]) {
+		it(`${explicit ? "explicit @default refuses its next inference" : "stock @task omission keeps serving its initial parent"} after the live parent switches`, async () => {
+			let liveParent = primary;
+			const fixture = await createRegistry(undefined, (_request, index) => {
+				if (index === 0) {
+					liveParent = fallback;
+					return "read";
+				}
+				return "yield";
+			});
+			const stockTask = getBundledAgent("task");
+			if (!stockTask) throw new Error("Expected stock task agent");
+			const settings = retrySettings();
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				agent: stockTask,
+				thinkingLevel: stockTask.thinkingLevel,
+				...(explicit ? { modelOverride: "@default", explicitModelSelection: true } : {}),
+				modelAuthority: {
+					settings,
+					agentName: stockTask.name,
+					agentModel: stockTask.model,
+					getParentModel: () => fixture.registry.find(liveParent.provider, liveParent.id),
+					getParentSelector: () => `${liveParent.provider}/${liveParent.id}:high`,
 				},
-			}),
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [defaultModel],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
+			});
+			expect(result.exitCode, result.stderr).toBe(explicit ? 1 : 0);
+			const workRequests = fixture.requests.filter(request => request.purpose === "work");
+			expect(workRequests.map(request => request.selector)).toEqual(
+				explicit ? [primarySelector] : [primarySelector, primarySelector],
+			);
+			if (!explicit) {
+				expect(fixture.requests.some(request => request.purpose === "classification")).toBe(true);
+				expect(workRequests.every(request => request.reasoning_effort === Effort.Medium)).toBe(true);
+			}
+			expect(result.resolvedModelIdentity).toBe(primarySelector);
 		});
+	}
 
-		expect(childModel).toBeUndefined();
-		expect(childModelPattern).toEqual(["openai-codex/gpt-5.5:auto"]);
-		expect(childModelPatternAuthFallback).toBe("openai-codex/gpt-5.5");
-		expect(childModelPatternFallbackRole).toBe("subagent:issue-4421");
-		expect(childModelPatternDefaultFallbackChain).toEqual(["openai-codex/gpt-5.6-sol"]);
-	});
+	for (const effort of [undefined, "lo"] as const) {
+		it(`stock @task omission accepts a concrete parent effort with its role unset (${effort ?? "AUTO"})`, async () => {
+			const fixture = await createRegistry();
+			const stockTask = getBundledAgent("task");
+			if (!stockTask) throw new Error("Expected stock task agent");
+			const settings = retrySettings({ modelRoles: { default: primarySelector } });
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				agent: stockTask,
+				thinkingLevel: stockTask.thinkingLevel,
+				effort,
+				modelAuthority: {
+					settings,
+					agentName: stockTask.name,
+					agentModel: stockTask.model,
+					getParentModel: () => fixture.registry.find(primary.provider, primary.id),
+					getParentSelector: () => `${primarySelector}:high`,
+				},
+			});
+			expect(result.exitCode, result.stderr).toBe(0);
+			const workRequests = fixture.requests.filter(request => request.purpose === "work");
+			expect(workRequests.map(request => request.selector)).toEqual([primarySelector]);
+			if (effort === "lo") {
+				expect(workRequests[0]?.reasoning_effort).toBe(Effort.Low);
+				expect(fixture.requests.some(request => request.purpose === "classification")).toBe(false);
+			} else {
+				expect(fixture.requests.some(request => request.purpose === "classification")).toBe(true);
+				expect(workRequests[0]?.reasoning_effort).toBe(Effort.Medium);
+			}
+		});
+	}
 });

@@ -95,3 +95,17 @@ describe("task spawn validation", () => {
 		expect(text).toContain("Missing `task`");
 	});
 });
+
+describe("per-call model schema boundaries", () => {
+	for (const model of [42, true, {}, ["routing-test/primary", 42]]) {
+		it(`rejects a non-selector wire value ${JSON.stringify(model)} on flat and batch calls`, () => {
+			const flat = taskSchema({ task: "Do work", solutionSpace: "c", model });
+			expect(flat instanceof type.errors).toBe(true);
+			const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true })({
+				context: "Shared context",
+				tasks: [{ task: "Do work", solutionSpace: "c", model }],
+			});
+			expect(batch instanceof type.errors).toBe(true);
+		});
+	}
+});

@@ -108,6 +108,7 @@ function backoffDelayMs(attempt: number, baseDelayMs: number): number {
 
 /** Retryable when the provider says transient, or when it says "wait, then retry". */
 function isRetryableOneshotFailure(errorId: number, errorStatus: number | undefined, errorMessage: string): boolean {
+	if (AIError.is(errorId, AIError.Flag.HostAdmission)) return false;
 	// llama.cpp reports deterministic tool-call JSON parse failures as HTTP 500.
 	// Replaying the same prompt produces the same malformed output.
 	if (AIError.LLAMA_CPP_TOOL_CALL_PARSE_PATTERN.test(errorMessage)) return false;

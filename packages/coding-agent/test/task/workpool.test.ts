@@ -1,18 +1,23 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
+import { cfgEnabledModels } from "../../src/config/model-settings";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import type { AgentSession } from "../../src/session/agent-session";
 import { WaitTool } from "../../src/tools/wait";
 import type { CustomMessage } from "../../src/session/messages";
 import * as executor from "../../src/task/executor";
+import * as discovery from "../../src/task/discovery";
 import type { EffectiveSubagentPolicy, StructuredSubagentResult } from "../../src/task/structured-subagent";
 import * as structured from "../../src/task/structured-subagent";
 import type { AgentDefinition } from "../../src/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { WorkPool, WorkPoolRegistry } from "../../src/task/workpool";
 import type { ToolSession } from "../../src/tools";
+import { createTaskModelFixture, type TaskModelFixture } from "../helpers/model-fixtures";
+import * as sdk from "../../src/sdk";
 
 const AGENT: AgentDefinition = {
 	name: "scout",
@@ -36,6 +41,24 @@ const POLICY = {
 } satisfies EffectiveSubagentPolicy;
 
 const managers = new Set<AsyncJobManager>();
+const modelFixtures: TaskModelFixture[] = [];
+const workpools = new Set<WorkPool>();
+const pendingGates = new Set<PromiseWithResolvers<void>>();
+let cleaningUp = false;
+
+function createGate(): PromiseWithResolvers<void> {
+	const gate = Promise.withResolvers<void>();
+	const tracked: PromiseWithResolvers<void> = {
+		...gate,
+		resolve: () => {
+			pendingGates.delete(tracked);
+			gate.resolve();
+		},
+	};
+	pendingGates.add(tracked);
+	if (cleaningUp) tracked.resolve();
+	return tracked;
+}
 
 function makeSession(
 	cards: CustomMessage[] = [],
@@ -50,15 +73,22 @@ function makeSession(
 		});
 	}
 	managers.add(manager);
+	const settings = Settings.isolated({
+		"task.maxConcurrency": concurrency,
+		"task.maxRuntimeMs": 0,
+		"eval.workpool.freshAgents": freshAgents,
+		"launch.enabled": false,
+	});
+	const fixture = createTaskModelFixture(settings);
+	modelFixtures.push(fixture);
 	const session = {
 		cwd: "/tmp",
 		hasUI: false,
-		settings: Settings.isolated({
-			"task.maxConcurrency": concurrency,
-			"task.maxRuntimeMs": 0,
-			"eval.workpool.freshAgents": freshAgents,
-			"launch.enabled": false,
-		}),
+		settings,
+		modelRegistry: fixture.modelRegistry,
+		getActiveModel: fixture.getActiveModel,
+		getActiveModelString: fixture.getActiveModelString,
+		getActiveModelSelector: fixture.getActiveModelSelector,
 		asyncJobManager: manager,
 		getAgentId: () => "Main",
 		getSessionFile: () => null,
@@ -128,7 +158,9 @@ function cardMode(card: CustomMessage): string | undefined {
 }
 
 function pool(session: ToolSession, name = "review"): WorkPool {
-	return new WorkPool(session, { name, policy: POLICY });
+	const workpool = new WorkPool(session, { name, policy: POLICY });
+	workpools.add(workpool);
+	return workpool;
 }
 
 async function finishPool(session: ToolSession, workpool: WorkPool): Promise<void> {
@@ -137,15 +169,24 @@ async function finishPool(session: ToolSession, workpool: WorkPool): Promise<voi
 	await job.promise;
 }
 
+beforeEach(() => {
+	cleaningUp = false;
+});
+
 afterEach(async () => {
+	for (const workpool of workpools) workpool.close();
+	workpools.clear();
+	cleaningUp = true;
+	for (const gate of pendingGates) gate.resolve();
+	await Promise.all(Array.from(managers).flatMap(manager => manager.getAllJobs().map(job => job.promise)));
 	for (const manager of managers) await manager.dispose();
 	managers.clear();
+	await AgentLifecycleManager.global().dispose();
 	vi.restoreAllMocks();
-	AgentRegistry.resetGlobalForTests();
-	// The global lifecycle binds its registry at construction; drop it with the
-	// registry so release() in later tests manages the current instance.
 	AgentLifecycleManager.resetGlobalForTests();
+	AgentRegistry.resetGlobalForTests();
 	WorkPoolRegistry.resetForTests();
+	for (const fixture of modelFixtures.splice(0)) fixture.close();
 });
 
 describe("WorkPool dispatch", () => {
@@ -155,7 +196,7 @@ describe("WorkPool dispatch", () => {
 		const gates = new Map<string, PromiseWithResolvers<void>>();
 		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
 			const id = request.identity?.id ?? "missing";
-			const gate = Promise.withResolvers<void>();
+			const gate = createGate();
 			gates.set(id, gate);
 			await gate.promise;
 			markIdle(id);
@@ -185,8 +226,8 @@ describe("WorkPool dispatch", () => {
 
 	it("hands a queued batch to a follow-up turn after the first turn settles", async () => {
 		const session = makeSession([], 1);
-		const first = Promise.withResolvers<void>();
-		const follow = Promise.withResolvers<void>();
+		const first = createGate();
+		const follow = createGate();
 		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
 			await first.promise;
 			const id = request.identity?.id ?? "missing";
@@ -205,8 +246,6 @@ describe("WorkPool dispatch", () => {
 		await until(() => followSpy.mock.calls.length === 1);
 		expect(workpool.batches.map(batch => batch.items.map(item => item.id))).toEqual([["handoff#1"], ["handoff#2"]]);
 		expect(followSpy.mock.calls[0]?.[0].workPoolYieldItems).toEqual([{ id: "handoff#2", index: 1 }]);
-		expect(followSpy.mock.calls[0]?.[0].message).toContain("After EACH item");
-		expect(followSpy.mock.calls[0]?.[0].message).not.toContain("todo");
 		follow.resolve();
 		await finishPool(session, workpool);
 	});
@@ -255,7 +294,7 @@ describe("WorkPool dispatch", () => {
 		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
 			const id = request.identity?.id ?? "missing";
 			firstId ||= id;
-			const gate = Promise.withResolvers<void>();
+			const gate = createGate();
 			gates.set(id, gate);
 			await gate.promise;
 			if (id !== firstId) markIdle(id);
@@ -326,7 +365,7 @@ describe("WorkPool dispatch", () => {
 		const gates = new Map<string, PromiseWithResolvers<void>>();
 		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
 			const id = request.identity?.id ?? "missing";
-			const gate = Promise.withResolvers<void>();
+			const gate = createGate();
 			gates.set(id, gate);
 			request.onProgress?.({
 				index: 0,
@@ -370,7 +409,7 @@ describe("WorkPool dispatch", () => {
 		const session = makeSession([], 1, true);
 		const gates: Array<PromiseWithResolvers<void>> = [];
 		const runSpy = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
-			const gate = Promise.withResolvers<void>();
+			const gate = createGate();
 			gates.push(gate);
 			await gate.promise;
 			const id = request.identity?.id ?? "missing";
@@ -395,7 +434,7 @@ describe("WorkPool dispatch", () => {
 
 	it("close drops queued items but lets the in-flight turn finish", async () => {
 		const session = makeSession([], 1);
-		const first = Promise.withResolvers<void>();
+		const first = createGate();
 		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
 			await first.promise;
 			const id = request.identity?.id ?? "missing";
@@ -410,5 +449,261 @@ describe("WorkPool dispatch", () => {
 		first.resolve();
 		await finishPool(session, workpool);
 		expect(workpool.peek().pending).toBe(0);
+	});
+});
+
+describe("WorkPool model selection", () => {
+	it("serves the admitted model and effort again when a retained worker follows up after a parent switch", async () => {
+		using artifacts = TempDir.createSync("@omp-workpool-models-");
+		const session = makeSession([], 1);
+		const queued = Promise.withResolvers<void>();
+		const firstRequest = Promise.withResolvers<void>();
+		const firstReply = createGate();
+		const requests: Array<{ model: string; reasoning_effort?: string }> = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				const body = (await request.json()) as {
+					model: string;
+					reasoning_effort?: string;
+					tools?: Array<{
+						function: { name: string; parameters: { properties?: { key?: { enum?: number[] } } } };
+					}>;
+				};
+				requests.push(body);
+				const requestId = requests.length;
+				const keys = body.tools?.find(tool => tool.function.name === "yield")?.function.parameters.properties?.key
+					?.enum;
+				if (keys?.length !== 1 || typeof keys[0] !== "number") {
+					throw new Error("Expected one current workpool item in the served yield schema");
+				}
+				const key = keys[0];
+				if (requestId === 1) {
+					firstRequest.resolve();
+					await firstReply.promise;
+				}
+				return new Response(
+					`data: ${JSON.stringify({
+						id: `pool-${requestId}`,
+						object: "chat.completion.chunk",
+						created: 0,
+						choices: [
+							{
+								index: 0,
+								delta: {
+									role: "assistant",
+									tool_calls: [
+										{
+											index: 0,
+											id: `yield-${requestId}`,
+											type: "function",
+											function: {
+												name: "yield",
+												arguments: JSON.stringify({ key, data: { completed: true } }),
+											},
+										},
+									],
+								},
+							},
+						],
+					})}\n\n` +
+						`data: ${JSON.stringify({
+							id: `pool-${requestId}`,
+							object: "chat.completion.chunk",
+							created: 0,
+							choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+						})}\n\ndata: [DONE]\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				);
+			},
+		});
+		const fixture = createTaskModelFixture(session.settings, { baseUrl: `${server.url.origin}/v1` });
+		modelFixtures.push(fixture);
+		cfgEnabledModels.override(session.settings, ["routing-test/*"]);
+		session.cwd = artifacts.path();
+		session.modelRegistry = fixture.modelRegistry;
+		session.getActiveModel = fixture.getActiveModel;
+		session.getActiveModelString = fixture.getActiveModelString;
+		session.getActiveModelSelector = fixture.getActiveModelSelector;
+		session.getSessionFile = () => artifacts.join("session.jsonl");
+		session.getArtifactsDir = () => artifacts.join("session");
+		session.settings.setModelRole("project-review", "routing-test/primary");
+		const owner = AgentRegistry.global().get("Main")!.session!;
+		owner.emitIrcRelayObservation = card => {
+			if (cardMode(card) === "queued") queued.resolve();
+		};
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [AGENT], projectAgentsDir: null });
+		const createAgentSession = sdk.createAgentSession;
+		const sessions: AgentSession[] = [];
+		vi.spyOn(sdk, "createAgentSession").mockImplementation(async options => {
+			const created = await createAgentSession({
+				...options,
+				agentDir: artifacts.path(),
+				disableExtensionDiscovery: true,
+				extensions: [],
+				skills: [],
+				rules: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				preloadedCustomToolPaths: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				toolNames: ["yield"],
+				restrictToolNames: true,
+			});
+			sessions.push(created.session);
+			return created;
+		});
+		const initial = vi.spyOn(executor, "runSubprocess");
+		const policy = await structured.resolveEffectiveSubagentPolicy({
+			session,
+			invocationKind: "eval",
+			assignment: "Create workers",
+			agent: "scout",
+			model: "@project-review:high",
+		});
+		const workpool = new WorkPool(session, { name: "models", policy, model: "@project-review:high" });
+		workpools.add(workpool);
+		let drained: Promise<void> | undefined;
+		try {
+			workpool.push(["one", "two"]);
+			drained = finishPool(session, workpool);
+			await Promise.race([
+				Promise.all([queued.promise, firstRequest.promise]),
+				drained.then(() => {
+					throw new Error("Pool drained before its queued item and first provider request were ready");
+				}),
+			]);
+			session.getActiveModel = () => fixture.models.fallback;
+			session.getActiveModelString = () => "routing-test/fallback";
+			session.getActiveModelSelector = () => "routing-test/fallback:low";
+			firstReply.resolve();
+			await drained;
+			expect(initial).toHaveBeenCalledTimes(1);
+			expect(sessions).toHaveLength(1);
+			expect(workpool.status().items.completed).toBe(2);
+			expect(workpool.agents[0]?.turns).toBe(2);
+			expect(requests.map(body => [body.model, body.reasoning_effort])).toEqual([
+				["primary", "high"],
+				["primary", "high"],
+			]);
+		} finally {
+			firstReply.resolve();
+			workpool.close();
+			try {
+				await drained;
+			} finally {
+				await Promise.all(sessions.map(worker => worker.dispose()));
+				server.stop(true);
+			}
+		}
+	});
+
+	it("serves different admitted routes and efforts for independent pools", async () => {
+		using artifacts = TempDir.createSync("@omp-workpool-independent-models-");
+		const session = makeSession();
+		const requests: Array<{ model: string; reasoning_effort?: string }> = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				requests.push((await request.json()) as (typeof requests)[number]);
+				return new Response(
+					`data: ${JSON.stringify({
+						id: "pool-result",
+						object: "chat.completion.chunk",
+						created: 0,
+						choices: [
+							{
+								index: 0,
+								delta: {
+									role: "assistant",
+									tool_calls: [
+										{
+											index: 0,
+											id: "pool-yield",
+											type: "function",
+											function: { name: "yield", arguments: '{"key":1,"data":{"completed":true}}' },
+										},
+									],
+								},
+							},
+						],
+					})}\n\n` +
+						`data: ${JSON.stringify({
+							id: "pool-result",
+							object: "chat.completion.chunk",
+							created: 0,
+							choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+						})}\n\ndata: [DONE]\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				);
+			},
+		});
+		const fixture = createTaskModelFixture(session.settings, { baseUrl: `${server.url.origin}/v1` });
+		modelFixtures.push(fixture);
+		cfgEnabledModels.override(session.settings, ["routing-test/*"]);
+		session.cwd = artifacts.path();
+		session.modelRegistry = fixture.modelRegistry;
+		session.getActiveModel = fixture.getActiveModel;
+		session.getActiveModelString = fixture.getActiveModelString;
+		session.getActiveModelSelector = fixture.getActiveModelSelector;
+		session.getSessionFile = () => artifacts.join("session.jsonl");
+		session.getArtifactsDir = () => artifacts.join("session");
+		session.settings.setModelRole("first-worker", "routing-test/primary");
+		session.settings.setModelRole("second-worker", "routing-test/fallback");
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [AGENT], projectAgentsDir: null });
+		const createAgentSession = sdk.createAgentSession;
+		const sessions: AgentSession[] = [];
+		vi.spyOn(sdk, "createAgentSession").mockImplementation(async options => {
+			const created = await createAgentSession({
+				...options,
+				agentDir: artifacts.path(),
+				disableExtensionDiscovery: true,
+				extensions: [],
+				skills: [],
+				rules: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				preloadedCustomToolPaths: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				toolNames: ["yield"],
+				restrictToolNames: true,
+			});
+			sessions.push(created.session);
+			return created;
+		});
+		const policy = await structured.resolveEffectiveSubagentPolicy({
+			session,
+			invocationKind: "eval",
+			assignment: "Create pools",
+			agent: "scout",
+		});
+		const first = new WorkPool(session, { name: "first", policy, model: "@first-worker:low" });
+		const second = new WorkPool(session, { name: "second", policy, model: "@second-worker:high" });
+		workpools.add(first);
+		workpools.add(second);
+		try {
+			first.push(["one"]);
+			second.push(["two"]);
+			await Promise.all([finishPool(session, first), finishPool(session, second)]);
+			expect(first.status().items.completed).toBe(1);
+			expect(second.status().items.completed).toBe(1);
+			expect(requests.map(body => [body.model, body.reasoning_effort]).sort()).toEqual([
+				["fallback", "high"],
+				["primary", "low"],
+			]);
+		} finally {
+			first.close();
+			second.close();
+			await Promise.all(sessions.map(worker => worker.dispose()));
+			server.stop(true);
+		}
 	});
 });

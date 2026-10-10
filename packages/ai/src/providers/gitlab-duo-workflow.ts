@@ -426,6 +426,11 @@ export const streamGitLabDuoWorkflow: StreamFunction<"gitlab-duo-agent"> = (
 	context: Context,
 	options: GitLabDuoWorkflowOptions,
 ): AssistantMessageEventStream => {
+	if (options.preserveModelSelection || options.preserveThinkingEffort) {
+		throw new AIError.ModelSelectionError(
+			"GitLab's remote multi-model workflow does not expose final model/effort controls or per-inference host admission; use a direct GitLab model route for governed calls.",
+		);
+	}
 	const stream = new AssistantMessageEventStream();
 	const output = createAssistantMessage(model);
 	stream.push({ type: "start", partial: output });

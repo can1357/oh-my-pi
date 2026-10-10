@@ -22,6 +22,7 @@ import {
 	type ToolChoice,
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -2032,12 +2033,25 @@ export class Agent {
 			}
 		} catch (err) {
 			if (this.#abortController !== loopAbortController) return;
-			const stoppedForAbort = loopSignal.aborted;
+			let stoppedForAbort = loopSignal.aborted;
+			const finalizedError =
+				!stoppedForAbort &&
+				(err instanceof AIError.ConfigurationError ||
+					AIError.is(AIError.classify(err, model.api), AIError.Flag.HostAdmission))
+					? await AIError.finalize(err, {
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							signal: loopSignal,
+						})
+					: undefined;
+			if (finalizedError) {
+				if (this.#abortController !== loopAbortController) return;
+				stoppedForAbort = loopSignal.aborted;
+			}
 			const errorMessage = stoppedForAbort
 				? abortReasonText(loopSignal)
-				: err instanceof Error
-					? err.message
-					: String(err);
+				: (finalizedError?.message ?? (err instanceof Error ? err.message : String(err)));
 			const shouldEmitVisibleError = !stoppedForAbort;
 			const assistantPartial = partial?.role === "assistant" ? partial : undefined;
 			const hadAssistantStart = assistantPartial !== undefined;
@@ -2084,6 +2098,10 @@ export class Agent {
 							errorMessage,
 							timestamp: Date.now(),
 						};
+			if (finalizedError && !stoppedForAbort) {
+				errorMsg.errorId = finalizedError.id;
+				errorMsg.errorStatus = finalizedError.status;
+			}
 
 			if (shouldEmitVisibleError) {
 				if (!turnOpen) {
