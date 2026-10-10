@@ -60,10 +60,10 @@ export interface AuthAccountPolicy {
 	readonly account: AuthAccountSelector;
 	/** Higher values win after hard, plan, reserve, hot-window, and measured-usage safety checks. */
 	readonly priority?: number;
-	/** Protected remaining quota percentage for this account. */
-	readonly reservePct?: number;
 	/** Overrides the provider's saved-reset auto-redeem mode for this account: `true` = yes, `false` = no. */
 	readonly autoRedeem?: boolean;
+	/** Protected remaining quota percentage for this account. */
+	readonly reservePct?: number;
 }
 
 /** Read-only set of per-account routing policies. */
