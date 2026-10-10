@@ -1,13 +1,26 @@
+use std::time::Duration;
+
 use image::RgbaImage;
 
 use super::{
 	ax::{AxHandle, AxProps},
+	control::OperationToken,
 	error::{CoreResult, DesktopError},
 	frame::FrameGeometry,
 	keys::KeyName,
-	types::{CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, Target},
+	menus::DesktopMenuItem,
+	types::{
+		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, Target,
+	},
 };
 
+/// How window-targeted input reaches its target.
+///
+/// `Background` avoids deliberate activation and physical pointer movement;
+/// unsupported routes refuse, and detected focus side effects surface as
+/// potentially delivered input. `Foreground` is the explicit `takeover: true`
+/// escalation: it activates the target and restores state where the OS allows,
+/// without overwriting a newer user focus choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeliveryMode {
 	#[default]
@@ -16,8 +29,8 @@ pub enum DeliveryMode {
 }
 
 impl DeliveryMode {
-	pub(crate) fn parse(value: Option<&str>) -> Self {
-		if value.is_some_and(|value| value.trim().eq_ignore_ascii_case("foreground")) {
+	pub(crate) const fn from_takeover(takeover: Option<bool>) -> Self {
+		if matches!(takeover, Some(true)) {
 			Self::Foreground
 		} else {
 			Self::Background
@@ -70,6 +83,14 @@ pub enum PointerEvent {
 		path:      Vec<(f64, f64)>,
 		button:    MouseButton,
 		modifiers: Modifiers,
+		keys:      Vec<KeyName>,
+	},
+	Hold {
+		x:        f64,
+		y:        f64,
+		button:   MouseButton,
+		keys:     Vec<KeyName>,
+		duration: Duration,
 	},
 	Scroll {
 		x:  f64,
@@ -83,10 +104,30 @@ pub trait Backend: Send {
 	fn capabilities(&mut self) -> DesktopCapabilities;
 	fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>>;
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>>;
+	/// Explicit display keyboard input must establish the focused surface's
+	/// real global monitor, not infer it from window-relative coordinates.
+	fn focused_keyboard_window(&mut self) -> CoreResult<DesktopWindow> {
+		self
+			.windows()?
+			.into_iter()
+			.find(|window| window.focused)
+			.ok_or_else(|| {
+				DesktopError::invalid_target("no focused window was found for display keyboard input")
+			})
+	}
+	fn validate_frame_layout(&mut self, frame: &FrameGeometry) -> CoreResult<()> {
+		let displays = self.displays().map_err(|error| {
+			DesktopError::invalid_coordinate_frame(format!(
+				"cannot establish current display layout: {error}"
+			))
+		})?;
+		frame.validate_layout(&displays)
+	}
 	fn capture(
 		&mut self,
 		target: &Target,
 		caps: &CaptureCaps,
+		selector: Option<&DisplaySelector>,
 	) -> CoreResult<(RgbaImage, FrameGeometry)>;
 	fn pointer(
 		&mut self,
@@ -94,16 +135,57 @@ pub trait Backend: Send {
 		ev: PointerEvent,
 		frame: &FrameGeometry,
 		mode: DeliveryMode,
+		token: &OperationToken,
 	) -> CoreResult<()>;
-	fn type_text(&mut self, target: &Target, text: &str, mode: DeliveryMode) -> CoreResult<()>;
-	fn key_chord(&mut self, target: &Target, keys: &[KeyName], mode: DeliveryMode)
-	-> CoreResult<()>;
-	fn raise_window(&mut self, id: &str) -> CoreResult<()>;
+	fn type_text(
+		&mut self,
+		target: &Target,
+		text: &str,
+		mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<()>;
+	fn key_chord(
+		&mut self,
+		target: &Target,
+		keys: &[KeyName],
+		mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<()>;
+	fn hold_keys(
+		&mut self,
+		target: &Target,
+		keys: &[KeyName],
+		duration: Duration,
+		mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<()>;
+	fn menu_items(
+		&mut self,
+		window: &DesktopWindow,
+		path: &[String],
+	) -> CoreResult<Vec<DesktopMenuItem>>;
+	fn menu_select(
+		&mut self,
+		window: &DesktopWindow,
+		path: &[String],
+		token: &OperationToken,
+	) -> CoreResult<()>;
+	fn bring_to_current_space(&mut self, _id: &str, _token: &OperationToken) -> CoreResult<()> {
+		Err(DesktopError::new(
+			super::error::ErrorCode::SpaceUnsupported,
+			"moving windows between Spaces is available only on macOS",
+		))
+	}
+	fn raise_window(&mut self, id: &str, token: &OperationToken) -> CoreResult<()>;
 	fn ax(&mut self) -> Option<&mut dyn AxBackend>;
 }
 
 pub trait AxBackend {
 	fn window_root(&mut self, win: &DesktopWindow) -> CoreResult<AxHandle>;
+	/// Resolves an element's owning top-level window for coordinate input.
+	/// Refuses missing or ambiguous ownership instead of hit-testing unrelated
+	/// windows.
+	fn window_id(&mut self, h: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String>;
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps>;
 	fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>>;
 	fn parent(&mut self, h: &AxHandle) -> CoreResult<Option<AxHandle>>;
@@ -113,16 +195,10 @@ pub trait AxBackend {
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>>;
 	fn focused_element(&mut self) -> CoreResult<Option<AxHandle>>;
 	fn attributes(&mut self, h: &AxHandle) -> CoreResult<Vec<(String, String)>>;
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn delivery_only_escalates_explicit_foreground() {
-		assert_eq!(DeliveryMode::parse(None), DeliveryMode::Background);
-		assert_eq!(DeliveryMode::parse(Some("garbage")), DeliveryMode::Background);
-		assert_eq!(DeliveryMode::parse(Some(" FoReGrOuNd ")), DeliveryMode::Foreground);
+	/// Whether the element `h` was read from still exists. Backends whose
+	/// identities a later element can take over once the first is gone check
+	/// it, so a ref is never renewed onto the newcomer.
+	fn alive(&mut self, _h: &AxHandle) -> bool {
+		true
 	}
 }

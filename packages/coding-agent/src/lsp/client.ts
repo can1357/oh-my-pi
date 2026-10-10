@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
-import { MessageFramer } from "../jsonrpc/message-framing";
+import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { getConfig } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
@@ -18,7 +18,7 @@ import type {
 	ServerConfig,
 	WorkspaceEdit,
 } from "./types";
-import { detectLanguageId, EquivalentUriMap, fileToUri, uriToFile } from "./utils";
+import { detectLanguageId, EquivalentUriMap, fileToUri, readTextFromDisk, uriToFile } from "./utils";
 import { WATCHED_FILES_METHOD, WatchedFiles } from "./watched-files";
 
 // =============================================================================
@@ -60,7 +60,8 @@ const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
 // Broker-shared server mode (one language server per project shared by every
 // omp instance through the LSP mux daemon). Off by default so embedders and
 // tests that drive getOrCreateClient directly never touch the daemon broker;
-// the SDK turns it on from the `lsp.shared` setting at session creation.
+// the SDK sets it from the `lsp.shared` setting at session creation and on every
+// later change. Only consulted at cold-start, so running clients keep their transport.
 let sharedLspEnabled = false;
 
 /** Enable or disable attaching to broker-shared language servers. */
@@ -320,10 +321,7 @@ async function writeMessage(
 	if (signal?.aborted) {
 		throw abortReason(signal);
 	}
-	const content = JSON.stringify(message);
-	const write = Promise.resolve(
-		sink.write(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n${content}`),
-	);
+	const write = Promise.resolve(sink.write(encodeMessageFrame(message)));
 	// Attach before flush(): it may throw synchronously after write() returned a
 	// rejected Promise, and leaving that rejection unobserved kills the host.
 	void write.catch(() => {});
@@ -390,7 +388,11 @@ function queueWriteMessage(
 		throw err;
 	});
 	client.writeQueue = result.catch(() => {});
-	return result;
+	// Keep the internal queue chained so writes stay serialized, but do not make
+	// this caller wait forever behind an earlier wedged write. `writeMessage`
+	// observes the same signal once this write reaches the sink; until then the
+	// abort race only releases the caller and deliberately leaves the client alive.
+	return untilAborted(signal, result);
 }
 
 // =============================================================================
@@ -407,7 +409,7 @@ async function startMessageReader(client: LspClient): Promise<void> {
 
 	const reader = (client.proc.stdout as ReadableStream<Uint8Array>).getReader();
 
-	const framer = new MessageFramer(Buffer.from(client.messageBuffer));
+	const framer = new MessageFramer(Buffer.alloc(0));
 
 	let readerFailed = false;
 	try {
@@ -415,7 +417,7 @@ async function startMessageReader(client: LspClient): Promise<void> {
 			const { done, value } = await reader.read();
 			if (done) break;
 
-			framer.push(Buffer.from(value));
+			framer.push(value);
 
 			// Drain every complete message currently buffered.
 			for (const messageText of framer.drain(headerText => {
@@ -505,8 +507,6 @@ async function startMessageReader(client: LspClient): Promise<void> {
 		}
 		client.pendingRequests.clear();
 	} finally {
-		// Persist any unparsed remainder so a restarted reader resumes mid-message.
-		client.messageBuffer = framer.remainder();
 		reader.releaseLock();
 		client.isReading = false;
 		await clientWatchers.get(client)?.close();
@@ -1128,10 +1128,10 @@ export async function getOrCreateClient(
 			dynamicCapabilityRegistrations: new Map(),
 			openFiles: new Map(),
 			pendingRequests: new Map(),
-			messageBuffer: new Uint8Array(0),
 			isReading: false,
 			status: "connecting",
 			lastActivity: Date.now(),
+			startedAt: Date.now(),
 			writeQueue: Promise.resolve(),
 			activeProgressTokens: new Set(),
 			projectLoaded,
@@ -1336,7 +1336,7 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 
 		let content: string;
 		try {
-			content = await Bun.file(filePath).text();
+			content = await readTextFromDisk(filePath);
 			throwIfAborted(signal);
 		} catch (err) {
 			if (isEnoent(err)) return;
@@ -1424,7 +1424,7 @@ export async function reconcileFileFromDisk(
 
 		let content: string;
 		try {
-			content = await Bun.file(filePath).text();
+			content = await readTextFromDisk(filePath);
 			throwIfAborted(signal);
 		} catch (err) {
 			if (isEnoent(err)) return;
@@ -1554,8 +1554,19 @@ export async function syncContent(
 }
 
 /**
+ * Whether the server opted into full text on `didSave`
+ * (`textDocumentSync.save.includeText`); otherwise it already has the text from didChange.
+ */
+function saveIncludesText(client: LspClient): boolean {
+	const sync = client.serverCapabilities?.textDocumentSync;
+	const save = typeof sync === "object" && sync !== null && "save" in sync ? sync.save : undefined;
+	return typeof save === "object" && save !== null && "includeText" in save && save.includeText === true;
+}
+
+/**
  * Notify LSP that a file was saved.
- * Assumes content was already synced via syncContent - just sends didSave.
+ * Assumes content was already synced via syncContent; the saved text is read
+ * back only for servers that asked for it.
  */
 export async function notifySaved(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
 	const uri = fileToUri(filePath);
@@ -1563,12 +1574,12 @@ export async function notifySaved(client: LspClient, filePath: string, signal?: 
 	if (!info) return; // File not open, nothing to notify
 
 	throwIfAborted(signal);
+	const text = saveIncludesText(client) ? await Bun.file(filePath).text() : undefined;
+	throwIfAborted(signal);
 	await sendNotification(
 		client,
 		"textDocument/didSave",
-		{
-			textDocument: { uri },
-		},
+		text === undefined ? { textDocument: { uri } } : { textDocument: { uri }, text },
 		signal,
 	);
 	client.lastActivity = Date.now();
@@ -1587,7 +1598,9 @@ const WATCHED_FILES_NOTIFY_TIMEOUT_MS = 2_000;
 /**
  * Announce harness-authored filesystem changes to active LSP clients for `cwd`.
  *
- * This covers sibling files that are not open text documents, such as generated
+ * Created or deleted files can change module resolution for otherwise untouched
+ * open documents, so those overlays are refreshed after the watcher notification.
+ * This also covers sibling files that are not open text documents, such as generated
  * CSS modules or type files that another edited document imports immediately.
  *
  * The underlying stdin write drain is self-bounded by
@@ -1621,6 +1634,8 @@ export async function notifyWorkspaceWatchedFiles(
 				});
 			if (clientChanges.length === 0) return;
 			await sendNotification(client, "workspace/didChangeWatchedFiles", { changes: clientChanges }, sendSignal);
+			if (clientChanges.every(change => change.type === FileChangeType.Changed)) return;
+			await Promise.all(Array.from(client.openFiles.keys(), uri => refreshFile(client, uriToFile(uri), sendSignal)));
 		}),
 	);
 	throwIfAborted(signal);
@@ -1660,7 +1675,7 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 
 		let content: string;
 		try {
-			content = await Bun.file(filePath).text();
+			content = await readTextFromDisk(filePath);
 			throwIfAborted(signal);
 		} catch (err) {
 			if (isEnoent(err)) return;
@@ -1683,10 +1698,7 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 		await sendNotification(
 			client,
 			"textDocument/didSave",
-			{
-				textDocument: { uri },
-				text: content,
-			},
+			saveIncludesText(client) ? { textDocument: { uri }, text: content } : { textDocument: { uri } },
 			signal,
 		);
 

@@ -1,12 +1,17 @@
+import { encodeSixelAsync } from "@oh-my-pi/pi-natives";
 import { getKittyGraphics } from "../kitty-graphics";
 import {
+	encodeSixelNow,
 	getCellDimensions,
 	getImageDimensions,
 	type ImageDimensions,
+	ImageProtocol,
 	imageFallback,
 	renderImage,
 	TERMINAL,
 } from "../terminal-capabilities";
+import { nativeImageNode } from "../native/blobs";
+import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 
 export interface ImageTheme {
@@ -25,6 +30,29 @@ export interface ImageOptions {
 	 * repaint replaces the placement instead of stacking a duplicate.
 	 */
 	imageKey?: string;
+	/**
+	 * Schedules a repaint once this image's off-thread SIXEL encode lands.
+	 * Defaults to the budget's repaint; a host without a budget must pass one,
+	 * or the image's reserved rows stay blank until an unrelated repaint.
+	 */
+	requestRender?: () => void;
+}
+
+/** Renders in progress whose rows are bound for native scrollback. */
+let scrollbackRenderDepth = 0;
+
+/**
+ * Run `render` for rows bound for native scrollback. Those rows are never
+ * repainted, so an image whose off-thread SIXEL encode has not landed encodes
+ * synchronously instead of committing its reserved blank rows.
+ */
+export function renderForScrollback<T>(render: () => T): T {
+	scrollbackRenderDepth++;
+	try {
+		return render();
+	} finally {
+		scrollbackRenderDepth--;
+	}
 }
 
 const EMPTY_IDS: readonly number[] = [];
@@ -35,6 +63,11 @@ const RESTORE_CURSOR = "\x1b8";
 // Direct placements reserve height with leading zero-width rows. Keep them
 // non-plain so transcript blank-edge trimming does not collapse image-only blocks.
 const RESERVED_IMAGE_ROW = "\x1b[0m";
+
+/** Widest an {@link Image} rendered at `width` columns draws; callers sizing a raster for it (`SvgFigure`) match it. */
+export function imageMaxColumns(width: number): number {
+	return Math.max(1, width - 2);
+}
 
 /** Default count of inline images kept as live graphics before older ones fall back to text. */
 export const DEFAULT_MAX_INLINE_IMAGES = 8;
@@ -84,7 +117,7 @@ interface SurfaceSplit {
 	 * id so a partial pass reproduces the on-screen live/text split without a
 	 * full, correctly-ordered walk.
 	 */
-	suppressedIds: Set<number>;
+	readonly suppressedIds: Set<number>;
 }
 
 function newSurfaceSplit(): SurfaceSplit {
@@ -96,7 +129,7 @@ function resetSurfaceSplit(split: SurfaceSplit): void {
 	split.onTerminal = 0;
 	split.planned = 0;
 	split.lastTotal = 0;
-	split.suppressedIds = new Set();
+	if (split.suppressedIds.size > 0) split.suppressedIds.clear();
 }
 
 let nextImageBudgetSeed = Math.floor(Math.random() * 0xffffff);
@@ -205,6 +238,8 @@ export class ImageBudget {
 	 * placements) instead of every image ever registered.
 	 */
 	#watchedPlacements = new Set<PlacementEmitState>();
+	/** Ids whose owner replaced them for good ({@link release}); retired once no frame shows them. */
+	#released = new Set<number>();
 
 	constructor(cap: number = DEFAULT_MAX_INLINE_IMAGES, requestRender: () => void = () => {}) {
 		this.#cap = normalizeCap(cap);
@@ -221,6 +256,11 @@ export class ImageBudget {
 
 	setRequestRender(requestRender: () => void): void {
 		this.#requestRender = requestRender;
+	}
+
+	/** Ask for a repaint, e.g. once an image's off-thread encode settles. */
+	requestRender(): void {
+		this.#requestRender();
 	}
 
 	setCap(cap: number): void {
@@ -248,6 +288,17 @@ export class ImageBudget {
 		const id = this.#nextId;
 		this.#nextId = (this.#nextId + 1) & 0xffffff || 1;
 		return id;
+	}
+
+	/**
+	 * Retire the graphic held under `key` as soon as no frame shows it, instead
+	 * of when the residency sweep reaches it. For an owner that replaced the
+	 * image for good — a streaming SVG figure's earlier raster — so superseded
+	 * revisions never push older images (scrollback included) out of the store.
+	 */
+	release(key: string): void {
+		const id = this.#keyToId.get(key);
+		if (id !== undefined) this.#released.add(id);
 	}
 
 	/**
@@ -283,8 +334,8 @@ export class ImageBudget {
 	 */
 	beginPass(stable = false, altScreen = false): void {
 		this.#passIds.length = 0;
-		this.#passSuppression.clear();
-		this.#passIndex.clear();
+		if (this.#passSuppression.size > 0) this.#passSuppression.clear();
+		if (this.#passIndex.size > 0) this.#passIndex.clear();
 		this.#stablePass = stable;
 		this.#surface = altScreen ? "alt" : "screen";
 		this.#split = altScreen ? this.#altSplit : this.#screenSplit;
@@ -295,7 +346,7 @@ export class ImageBudget {
 		// first. Note that leaving alt mode is not the same as unstacking a
 		// fullscreen overlay: the flush must exclude one that is still stacked
 		// from the pass itself, which is that caller's job, not this line's.
-		if (!altScreen) this.#liveIds.alt.clear();
+		if (!altScreen && this.#liveIds.alt.size > 0) this.#liveIds.alt.clear();
 		this.#applyingReset = !stable && this.#cap > 0 && this.#split.planned > this.#split.onTerminal;
 	}
 
@@ -348,7 +399,10 @@ export class ImageBudget {
 		// [0, onTerminal) is what this surface currently shows as text. Partial
 		// passes replay this per id (see #stablePass) instead of re-deriving it
 		// from a reversed, tail-only walk.
-		split.suppressedIds = new Set(this.#passIds.slice(0, split.onTerminal));
+		const suppressedIds = split.suppressedIds;
+		if (suppressedIds.size > 0) suppressedIds.clear();
+		const suppressedCount = Math.min(total, split.onTerminal);
+		for (let i = 0; i < suppressedCount; i++) suppressedIds.add(this.#passIds[i]);
 		return retry;
 	}
 
@@ -361,8 +415,20 @@ export class ImageBudget {
 	 * the next pass on the *other* surface knows what it may not destroy.
 	 */
 	limitResidentImages(): void {
-		this.#liveIds[this.#surface] = new Set(this.#passIds.filter(id => this.#passShowsLive(id)));
+		const liveIds = this.#liveIds[this.#surface];
+		if (liveIds.size > 0) liveIds.clear();
+		for (let i = 0; i < this.#passIds.length; i++) {
+			const id = this.#passIds[i];
+			if (this.#passShowsLive(id)) liveIds.add(id);
+		}
 		const transmitted = this.#transmitted[this.#surface];
+		for (const id of this.#released) {
+			// #retire refuses while this pass or the other surface still shows it.
+			if (transmitted.has(id)) this.#retire(id);
+			if (this.#isTransmitted(id)) continue;
+			this.#forgetKeyForId(id);
+			this.#released.delete(id);
+		}
 		if (this.#cap <= 0 || transmitted.size <= this.#cap) return;
 		for (const id of transmitted) {
 			if (transmitted.size <= this.#cap) break;
@@ -459,6 +525,7 @@ export class ImageBudget {
 		this.#idToKey.clear();
 		this.#placementState.clear();
 		this.#watchedPlacements.clear();
+		this.#released.clear();
 		for (const surface of SURFACES) this.#liveIds[surface].clear();
 		return [...ids];
 	}
@@ -722,6 +789,9 @@ export class Image implements Component {
 	// pads itself to this height so a budget demotion never shrinks the block
 	// (its rows may already be committed to native scrollback).
 	#renderedGraphicRows = 0;
+	#native?: NativeNode;
+	/** Newest SIXEL encode: its target size and, once settled, the sequence (`null` on failure). */
+	#sixel?: { widthPx: number; heightPx: number; sequence?: string | null };
 
 	constructor(
 		base64Data: string,
@@ -755,6 +825,67 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#cachedLines = undefined;
+		this.#cachedWidth = undefined;
+	}
+
+	/**
+	 * SIXEL sequence for a target size. A new size starts the encode off the JS
+	 * thread and answers `undefined` until it settles; the settled encode
+	 * invalidates the cached lines and requests a repaint. A render bound for
+	 * scrollback cannot wait, so it encodes synchronously.
+	 */
+	#sixelSequence(widthPx: number, heightPx: number): string | null | undefined {
+		const current = this.#sixel;
+		const sameSize = current !== undefined && current.widthPx === widthPx && current.heightPx === heightPx;
+		if (sameSize && current.sequence !== undefined) return current.sequence;
+		if (scrollbackRenderDepth > 0) {
+			// Replacing the entry makes a still-pending async encode settle as stale.
+			const sequence = encodeSixelNow(this.#base64Data, widthPx, heightPx);
+			this.#sixel = { widthPx, heightPx, sequence };
+			return sequence;
+		}
+		if (sameSize) return undefined;
+		const request: { widthPx: number; heightPx: number; sequence?: string | null } = { widthPx, heightPx };
+		this.#sixel = request;
+		const settle = (sequence: string | null): void => {
+			request.sequence = sequence;
+			if (this.#sixel !== request) return;
+			this.invalidate();
+			if (this.#options.requestRender) this.#options.requestRender();
+			else this.#budget?.requestRender();
+		};
+		encodeSixelAsync(new Uint8Array(Buffer.from(this.#base64Data, "base64")), widthPx, heightPx).then(settle, () =>
+			settle(null),
+		);
+		return undefined;
+	}
+
+	/**
+	 * A native `image` backed by a content-addressed blob; the terminal fits
+	 * it. Cell caps become `ch`/`lines` bounds. The inline-image budget and
+	 * graphics protocols do not apply.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		if (this.#native) return this.#native;
+		const maxW = this.#options.maxWidthCells;
+		const maxH = this.#options.maxHeightCells;
+		this.#native = nativeImageNode(Buffer.from(this.#base64Data, "base64"), this.#mimeType, {
+			alt: imageFallback(this.#mimeType, this.#dimensions, this.#options.filename),
+			w: this.#dimensions.widthPx,
+			h: this.#dimensions.heightPx,
+			max:
+				(maxW ?? 0) > 0 || (maxH ?? 0) > 0
+					? {
+							w: maxW && maxW > 0 ? `${maxW}ch` : undefined,
+							h: maxH && maxH > 0 ? `${maxH}lines` : undefined,
+						}
+					: undefined,
+		});
+		return this.#native;
+	}
+
 	render(width: number): readonly string[] {
 		const imageProtocol = TERMINAL.imageProtocol;
 		const hasProtocol = imageProtocol != null;
@@ -765,6 +896,13 @@ export class Image implements Component {
 		// toward (and are demoted by) the budget; without a protocol every image is
 		// already text.
 		const suppressed = hasProtocol && this.#budget !== undefined ? this.#budget.observe(this.#imageId ?? 0) : false;
+		// Only Kitty images with a budget id transmit their data separately from
+		// the placement; a pending re-transmit (after a purge or history clear)
+		// must rebuild the lines. SIXEL and iTerm2 carry the image inside the line
+		// itself and never register a transmit, so gating their cache on it would
+		// re-encode the full image on every render pass.
+		const imageId = this.#imageId;
+		const transmitsSeparately = imageProtocol === ImageProtocol.Kitty && imageId != null;
 
 		if (
 			this.#cachedLines &&
@@ -774,25 +912,28 @@ export class Image implements Component {
 			this.#cachedCellWidthPx === cellDimensions.widthPx &&
 			this.#cachedCellHeightPx === cellDimensions.heightPx &&
 			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
-			(this.#imageId == null || this.#budget?.shouldTransmit(this.#imageId) !== true)
+			(!transmitsSeparately || this.#budget?.shouldTransmit(imageId) !== true) &&
+			// Cached rows reserved for a pending SIXEL encode must not reach scrollback.
+			!(scrollbackRenderDepth > 0 && this.#sixel !== undefined && this.#sixel.sequence === undefined)
 		) {
 			return this.#cachedLines;
 		}
 
 		const cap = this.#options.maxWidthCells;
-		const maxWidth = cap != null && cap > 0 ? Math.min(width - 2, cap) : width - 2;
+		const maxWidth = cap != null && cap > 0 ? Math.min(imageMaxColumns(width), cap) : imageMaxColumns(width);
 
 		let lines: string[];
 
 		if (hasProtocol && !suppressed) {
 			// Transmit the data once (keyed by id); thereafter renderImage returns
 			// just the placement, so repaints never re-send the base64.
-			const needsTransmit = this.#imageId != null && (this.#budget?.shouldTransmit(this.#imageId) ?? false);
+			const needsTransmit = transmitsSeparately && (this.#budget?.shouldTransmit(imageId) ?? false);
 			const result = renderImage(this.#base64Data, this.#dimensions, {
 				maxWidthCells: maxWidth,
 				maxHeightCells: this.#options.maxHeightCells,
 				imageId: this.#imageId,
 				includeTransmit: needsTransmit,
+				sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx),
 			});
 
 			if (result?.transmit && this.#imageId != null && this.#budget !== undefined) {

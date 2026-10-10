@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
+import { createRequire, isBuiltin } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as vm from "node:vm";
@@ -29,6 +29,7 @@ export class LocalModuleLoader {
 	#externalModules = new Map<string, Promise<vm.Module>>();
 	#requireCache = new Map<string, NodeJS.Require>();
 	#modulePaths = new WeakMap<vm.Module, string>();
+	#packageRoot: string | undefined;
 	#linkChain: Promise<void> = Promise.resolve();
 
 	constructor(sessionId: string) {
@@ -36,9 +37,16 @@ export class LocalModuleLoader {
 		this.#sessionTag = Bun.hash(sessionId).toString(16);
 	}
 
-	async resolveForRun(cwd: string, source: string): Promise<LocalImportResolution> {
+	setPackageRoot(packageRoot: string | undefined): void {
+		const normalized = packageRoot ? path.resolve(packageRoot) : undefined;
+		if (normalized === this.#packageRoot) return;
+		this.#packageRoot = normalized;
+		this.#requireCache.clear();
+	}
+
+	async resolveForRun(baseDir: string, source: string): Promise<LocalImportResolution> {
 		this.#refreshTrackedLocalModules();
-		return await this.#resolveFromBase(cwd, source);
+		return await this.#resolveFromBase(baseDir, source);
 	}
 
 	async resolveForModule(moduleUrl: string, source: string, cwd: string): Promise<LocalImportResolution> {
@@ -52,7 +60,7 @@ export class LocalModuleLoader {
 		const basePath = this.filenameForUrl(moduleUrlOrPath) ?? path.join(cwd, "[eval]");
 		let cached = this.#requireCache.get(basePath);
 		if (!cached) {
-			cached = buildRequire(basePath);
+			cached = buildRequire(basePath, this.#packageRoot);
 			this.#requireCache.set(basePath, cached);
 		}
 		return cached;
@@ -70,7 +78,7 @@ export class LocalModuleLoader {
 	}
 
 	async #resolveFromBase(baseDir: string, source: string): Promise<LocalImportResolution> {
-		const resolved = resolveImportSpecifier(baseDir, source);
+		const resolved = resolveImportSpecifier(baseDir, source, this.#packageRoot);
 		if (isLocalPathSpecifier(source) && isManagedLocalModulePath(resolved)) {
 			const module = await this.#loadLocalModule(resolved);
 			return { mode: "local", value: module.namespace };
@@ -104,7 +112,7 @@ export class LocalModuleLoader {
 		const moduleDir = path.dirname(modulePath);
 		const localDeps = new Set<string>();
 		for (const specifier of await collectModuleSourceSpecifiers(stripped)) {
-			const resolved = resolveImportSpecifier(moduleDir, specifier);
+			const resolved = resolveImportSpecifier(moduleDir, specifier, this.#packageRoot);
 			if (isLocalPathSpecifier(specifier) && isManagedLocalModulePath(resolved)) {
 				localDeps.add(resolved);
 			}
@@ -191,7 +199,7 @@ export class LocalModuleLoader {
 		if (referrerPath === undefined) {
 			throw new Error(`local module loader: unknown referrer while linking "${specifier}"`);
 		}
-		const resolved = resolveImportSpecifier(path.dirname(referrerPath), specifier);
+		const resolved = resolveImportSpecifier(path.dirname(referrerPath), specifier, this.#packageRoot);
 		if (isLocalPathSpecifier(specifier) && isManagedLocalModulePath(resolved)) {
 			return (await this.#ensureLocalModule(resolved)).module;
 		}
@@ -201,7 +209,7 @@ export class LocalModuleLoader {
 	// Resolver for runtime `import()` inside evaluated module code: the result must be a
 	// fully linked+evaluated module, so local targets are loaded as graph roots.
 	async #resolveDynamicImport(referrerPath: string, specifier: string): Promise<vm.Module> {
-		const resolved = resolveImportSpecifier(path.dirname(referrerPath), specifier);
+		const resolved = resolveImportSpecifier(path.dirname(referrerPath), specifier, this.#packageRoot);
 		if (isLocalPathSpecifier(specifier) && isManagedLocalModulePath(resolved)) {
 			return await this.#loadLocalModule(resolved);
 		}
@@ -305,9 +313,47 @@ export class LocalModuleLoader {
 	}
 }
 
-function buildRequire(fromPath: string): NodeJS.Require {
+function buildRequire(fromPath: string, packageRoot: string | undefined): NodeJS.Require {
 	const basePath = path.extname(fromPath) ? fromPath : path.join(fromPath, "[eval]");
-	return createRequire(pathToFileURL(basePath).href);
+	const primary = createRequire(pathToFileURL(basePath).href);
+	if (!packageRoot) return primary;
+	const fallback = createRequire(pathToFileURL(path.join(packageRoot, "package.json")).href);
+	const requireWithFallback = ((id: string) => {
+		if (!isBareSpecifier(id)) return primary(id);
+		let primaryResolutionError: unknown;
+		try {
+			primary.resolve(id);
+		} catch (error) {
+			primaryResolutionError = error;
+		}
+		if (!primaryResolutionError) return primary(id);
+		try {
+			fallback.resolve(id);
+		} catch (fallbackError) {
+			throw packageFallbackError(primaryResolutionError, fallbackError, packageRoot);
+		}
+		return fallback(id);
+	}) as NodeJS.Require;
+	const resolve = ((id: string, options?: { paths?: string[] }) => {
+		try {
+			return primary.resolve(id, options);
+		} catch (primaryError) {
+			if (!isBareSpecifier(id)) throw primaryError;
+			try {
+				return fallback.resolve(id, options);
+			} catch (fallbackError) {
+				throw packageFallbackError(primaryError, fallbackError, packageRoot);
+			}
+		}
+	}) as NodeJS.Require["resolve"] & { paths(request: string): string[] | null };
+	resolve.paths = request => primary.resolve.paths(request);
+	Object.defineProperties(requireWithFallback, {
+		resolve: { value: resolve },
+		cache: { value: primary.cache },
+		extensions: { value: primary.extensions },
+		main: { value: primary.main },
+	});
+	return requireWithFallback;
 }
 
 function buildModuleSource(source: string, modulePath: string): string {
@@ -320,13 +366,67 @@ function buildModuleSource(source: string, modulePath: string): string {
 	].join("\n");
 }
 
-function resolveImportSpecifier(cwd: string, source: string): string {
-	if (/^[a-z][a-z0-9+.-]*:/i.test(source)) return source;
+function resolveImportSpecifier(baseDir: string, source: string, packageRoot: string | undefined): string {
+	if (/^[a-z][a-z0-9+.-]*:/i.test(source) || isBuiltin(source)) return source;
+	if (!isBareSpecifier(source)) return Bun.resolveSync(source, baseDir);
+	let projectError: unknown;
 	try {
-		return Bun.resolveSync(source, cwd);
-	} catch {
-		return source;
+		return resolveBareSpecifierWithinProject(source, baseDir);
+	} catch (error) {
+		projectError = error;
 	}
+	if (packageRoot) {
+		try {
+			return resolveBareSpecifierWithinProject(source, packageRoot);
+		} catch (fallbackError) {
+			throw packageFallbackError(projectError, fallbackError, packageRoot);
+		}
+	}
+	throw projectError;
+}
+
+function resolveBareSpecifierWithinProject(source: string, baseDir: string): string {
+	const resolved = Bun.resolveSync(source, baseDir);
+	if (!path.isAbsolute(resolved)) {
+		throw new Error(
+			`Refusing non-file resolution ${JSON.stringify(resolved)} for bare package ${JSON.stringify(source)} from ${baseDir}`,
+		);
+	}
+	const segments = source.split("/");
+	const packageName = source.startsWith("@") ? segments.slice(0, 2) : segments.slice(0, 1);
+	const target = path.resolve(resolved);
+	let ancestor = path.resolve(baseDir);
+	for (;;) {
+		if (fs.existsSync(path.join(ancestor, "node_modules", ...packageName))) return resolved;
+		const parent = path.dirname(ancestor);
+		if (parent !== ancestor && fs.existsSync(path.join(ancestor, "package.json")) && pathIsWithin(ancestor, target)) {
+			return resolved;
+		}
+		if (parent === ancestor) break;
+		ancestor = parent;
+	}
+	throw new Error(
+		`Refusing package ${JSON.stringify(source)} resolved outside the importing project's ancestry: ${resolved}`,
+	);
+}
+
+function pathIsWithin(root: string, candidate: string): boolean {
+	const relative = path.relative(root, candidate);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function packageFallbackError(projectError: unknown, fallbackError: unknown, packageRoot: string): Error {
+	const projectMessage = projectError instanceof Error ? projectError.message : String(projectError);
+	const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+	return new Error(
+		`${projectMessage}\nJS package environment fallback ${packageRoot} also failed: ${fallbackMessage}\n` +
+			"Install the missing dependency with %bun add (select %environment project only to modify the project).",
+		{ cause: projectError },
+	);
+}
+
+function isBareSpecifier(source: string): boolean {
+	return !isLocalPathSpecifier(source) && !/^[a-z][a-z0-9+.-]*:/i.test(source) && !isBuiltin(source);
 }
 
 function isLocalPathSpecifier(source: string): boolean {

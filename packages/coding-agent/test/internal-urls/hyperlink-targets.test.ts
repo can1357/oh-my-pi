@@ -6,15 +6,20 @@ import * as url from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
-import {
-	resolveMarkdownLinkTargets,
-	tryResolveInternalUrlSync,
-} from "@oh-my-pi/pi-coding-agent/internal-urls/hyperlink-targets";
+import { resolveMarkdownLinkHrefs } from "@oh-my-pi/pi-coding-agent/internal-urls/hyperlink-targets";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { getMarkdownTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import * as terminalCaps from "@oh-my-pi/pi-tui";
 import { isHyperlinkEnabled } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { isFeedModelBadgeEnabled, resolveImageOptions } from "@oh-my-pi/pi-tui/render/render-utils";
+
+import { cfgTaskShowResolvedModelBadge } from "@oh-my-pi/pi-coding-agent/task/settings";
+import {
+	cfgTuiHyperlinks,
+	cfgTuiMaxInlineImageColumns,
+	cfgTuiMaxInlineImageRows,
+} from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 function extractAnyTerminatorLinkUri(text: string): string | undefined {
 	return text.match(/\x1b\]8;[^;]*;([^\x1b\x07]+)(?:\x1b\\|\x07)/)?.[1];
@@ -30,7 +35,7 @@ afterAll(() => {
 	resetSettingsForTest();
 });
 
-describe("tryResolveInternalUrlSync", () => {
+describe("InternalUrlRouter.locateSync", () => {
 	// The "no session options" contract below asserts on process-global state
 	// (AgentRegistry main session, LocalProtocolHandler override) that sibling
 	// test files in the same worker may have populated. Pin the premise
@@ -46,27 +51,20 @@ describe("tryResolveInternalUrlSync", () => {
 	});
 
 	it("returns undefined for non-internal URLs", () => {
-		expect(tryResolveInternalUrlSync("/abs/path/file.ts")).toBeUndefined();
-		expect(tryResolveInternalUrlSync("relative/path.ts")).toBeUndefined();
-		expect(tryResolveInternalUrlSync("https://example.com/foo")).toBeUndefined();
-	});
-
-	it("returns undefined for unsupported internal URL schemes", () => {
-		// Async-resolved schemes are intentionally not handled here.
-		expect(tryResolveInternalUrlSync("artifact://123")).toBeUndefined();
-		expect(tryResolveInternalUrlSync("agent://abc")).toBeUndefined();
-		expect(tryResolveInternalUrlSync("skill://foo")).toBeUndefined();
-		expect(tryResolveInternalUrlSync("omp://docs.md")).toBeUndefined();
+		const router = InternalUrlRouter.instance();
+		expect(router.locateSync("/abs/path/file.ts")).toBeUndefined();
+		expect(router.locateSync("relative/path.ts")).toBeUndefined();
+		expect(router.locateSync("https://example.com/foo")).toBeUndefined();
 	});
 
 	it("returns undefined when local:// resolution has no session options", () => {
 		// No AgentRegistry main session in this unit test, no override installed.
-		expect(tryResolveInternalUrlSync("local://foo.md")).toBeUndefined();
+		expect(InternalUrlRouter.instance().locateSync("local://foo.md")).toBeUndefined();
 	});
 
 	it("swallows errors from malformed URLs", () => {
 		// Malformed input should not throw, just return undefined.
-		expect(tryResolveInternalUrlSync("local://%ZZ")).toBeUndefined();
+		expect(InternalUrlRouter.instance().locateSync("local://%ZZ")).toBeUndefined();
 	});
 });
 
@@ -77,26 +75,26 @@ describe("renderer settings propagation", () => {
 		try {
 			Object.defineProperty(process.stdout, "rows", { value: 40, configurable: true });
 			await Settings.init({ inMemory: true });
-			settings.set("tui.maxInlineImageColumns", 64);
-			settings.set("tui.maxInlineImageRows", 7);
-			settings.set("task.showResolvedModelBadge", true);
-			settings.set("tui.hyperlinks", "always");
+			cfgTuiMaxInlineImageColumns.set(settings, 64);
+			cfgTuiMaxInlineImageRows.set(settings, 7);
+			cfgTaskShowResolvedModelBadge.set(settings, true);
+			cfgTuiHyperlinks.set(settings, "always");
 			expect(resolveImageOptions()).toEqual({ maxWidthCells: 64, maxHeightCells: 7 });
 			expect(isFeedModelBadgeEnabled()).toBe(true);
 			expect(isHyperlinkEnabled()).toBe(true);
 
-			settings.override("tui.maxInlineImageColumns", 72);
-			settings.override("tui.maxInlineImageRows", 0);
-			settings.override("task.showResolvedModelBadge", false);
-			settings.override("tui.hyperlinks", "off");
+			cfgTuiMaxInlineImageColumns.override(settings, 72);
+			cfgTuiMaxInlineImageRows.override(settings, 0);
+			cfgTaskShowResolvedModelBadge.override(settings, false);
+			cfgTuiHyperlinks.override(settings, "off");
 			expect(resolveImageOptions()).toEqual({ maxWidthCells: 72, maxHeightCells: 24 });
 			expect(isFeedModelBadgeEnabled()).toBe(false);
 			expect(isHyperlinkEnabled()).toBe(false);
 
-			settings.clearOverride("tui.maxInlineImageColumns");
-			settings.clearOverride("tui.maxInlineImageRows");
-			settings.clearOverride("task.showResolvedModelBadge");
-			settings.clearOverride("tui.hyperlinks");
+			cfgTuiMaxInlineImageColumns.clearOverride(settings);
+			cfgTuiMaxInlineImageRows.clearOverride(settings);
+			cfgTaskShowResolvedModelBadge.clearOverride(settings);
+			cfgTuiHyperlinks.clearOverride(settings);
 			expect(resolveImageOptions()).toEqual({ maxWidthCells: 64, maxHeightCells: 7 });
 			expect(isFeedModelBadgeEnabled()).toBe(true);
 			expect(isHyperlinkEnabled()).toBe(true);
@@ -160,7 +158,7 @@ describe("resource links in chat markdown", () => {
 			"",
 			"[output]: artifact://42",
 		].join("\n");
-		const targets = await resolveMarkdownLinkTargets([text], {
+		const targets = await resolveMarkdownLinkHrefs(terminalCaps.getMarkdownLinkUrls(text), {
 			localProtocolOptions: { getArtifactsDir: () => tempDir },
 		});
 		const localUri = url.pathToFileURL(await fs.realpath(localFile)).href;
@@ -184,7 +182,7 @@ describe("resource links in chat markdown", () => {
 		const relative = "src/my%20file.ts#L7";
 		const absolute = file.replaceAll("\\", "/").replaceAll(" ", "%20");
 		const text = `[Source](${relative}) and [Absolute](${absolute}) and [Missing](src/missing.ts) and [Heading](#heading)`;
-		const targets = await resolveMarkdownLinkTargets([text], { cwd: tempDir });
+		const targets = await resolveMarkdownLinkHrefs(terminalCaps.getMarkdownLinkUrls(text), { cwd: tempDir });
 		const fileUri = url.pathToFileURL(file).href;
 		const output = new terminalCaps.Markdown(text, 0, 0, {
 			...getMarkdownTheme(),
@@ -202,6 +200,19 @@ describe("resource links in chat markdown", () => {
 		expect(visible).not.toContain("file://");
 	});
 
+	it("stops linking a file once it is deleted", async () => {
+		const file = path.join(tempDir, "gone.txt");
+		await Bun.write(file, "x");
+		const text = "[Gone](gone.txt)";
+		expect([
+			...(await resolveMarkdownLinkHrefs(terminalCaps.getMarkdownLinkUrls(text), { cwd: tempDir })).keys(),
+		]).toEqual(["gone.txt"]);
+		await fs.rm(file);
+		expect([
+			...(await resolveMarkdownLinkHrefs(terminalCaps.getMarkdownLinkUrls(text), { cwd: tempDir })).keys(),
+		]).toEqual([]);
+	});
+
 	it("leaves missing, escaping, remote, and non-link destinations unexpanded", async () => {
 		await Bun.write(path.join(tempDir, "local", "report.json"), "{}");
 		await Bun.write(path.join(tempDir, "outside.json"), "{}");
@@ -217,7 +228,7 @@ describe("resource links in chat markdown", () => {
 			"[remote](mcp://server/resource)",
 			"[web](https://example.com/report)",
 		].join("\n\n");
-		const targets = await resolveMarkdownLinkTargets([text], {
+		const targets = await resolveMarkdownLinkHrefs(terminalCaps.getMarkdownLinkUrls(text), {
 			localProtocolOptions: { getArtifactsDir: () => tempDir },
 		});
 		expect([...targets]).toEqual([]);
@@ -238,7 +249,7 @@ describe("resource links in chat markdown", () => {
 			const artifactsDir = path.join(tempDir, session);
 			const file = path.join(artifactsDir, "local", "report.json");
 			await Bun.write(file, session);
-			const targets = await resolveMarkdownLinkTargets([text], {
+			const targets = await resolveMarkdownLinkHrefs(terminalCaps.getMarkdownLinkUrls(text), {
 				localProtocolOptions: { getArtifactsDir: () => artifactsDir },
 			});
 			const output = new terminalCaps.Markdown(text, 0, 0, {
@@ -255,8 +266,8 @@ describe("resource links in chat markdown", () => {
 });
 
 describe("applyHyperlinkSetting on project-scoped reload", () => {
-	// A cross-project reload (`/move`, resume, rollback) fires SETTING_HOOKS via
-	// Settings.reloadForCwd → the tui.hyperlinks hook reapplies the policy, so
+	// A cross-project reload (`/move`, resume, rollback) notifies changed values via
+	// Settings.reloadForCwd → the tui.hyperlinks effect reapplies the policy, so
 	// renderers gating on TERMINAL.hyperlinks never keep the previous project's
 	// value while path links already track the new one (#10196 review).
 	it("reapplies the effective policy so the runtime flag tracks the reloaded setting", async () => {
@@ -265,15 +276,15 @@ describe("applyHyperlinkSetting on project-scoped reload", () => {
 		const dirB = path.join(os.tmpdir(), "omp-hyperlink-reload-b");
 		try {
 			terminalCaps.setTerminalHyperlinks(false);
-			settings.override("tui.hyperlinks", "always");
+			cfgTuiHyperlinks.override(settings, "always");
 			await settings.reloadForCwd(dirA);
 			expect(terminalCaps.TERMINAL.hyperlinks).toBe(true);
 
-			settings.override("tui.hyperlinks", "off");
+			cfgTuiHyperlinks.override(settings, "off");
 			await settings.reloadForCwd(dirB);
 			expect(terminalCaps.TERMINAL.hyperlinks).toBe(false);
 		} finally {
-			settings.clearOverride("tui.hyperlinks");
+			cfgTuiHyperlinks.clearOverride(settings);
 			terminalCaps.setTerminalHyperlinks(origHyperlinks);
 		}
 	});

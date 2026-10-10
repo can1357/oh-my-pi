@@ -17,9 +17,18 @@ import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+
+import {
+	cfgCompactionEnabled,
+	cfgCompactionHandoffSaveToDisk,
+	cfgCompactionMethodOrder,
+	cfgCompactionThresholdPercent,
+	cfgContextPromotionEnabled,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 const HANDOFF_SECRET = "HANDOFF_SECRET_TOKEN_12345";
 const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
@@ -53,7 +62,7 @@ describe("AgentSession handoff", () => {
 	beforeAll(async () => {
 		sharedDir = TempDir.createSync("@pi-handoff-shared-");
 		authStorage = await AuthStorage.create(path.join(sharedDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -83,6 +92,7 @@ describe("AgentSession handoff", () => {
 				tools: [],
 				messages: [],
 			},
+			convertToLlm: compactionModule.defaultConvertToLlm,
 		});
 
 		session = new AgentSession({
@@ -158,6 +168,71 @@ describe("AgentSession handoff", () => {
 		expect(session.agent.state.messages.some(message => message.role === "compactionSummary")).toBe(true);
 		expect(events.filter(event => event.type === "auto_compaction_start")).toHaveLength(0);
 		expect(events.filter(event => event.type === "auto_compaction_end")).toHaveLength(0);
+	});
+
+	it("dispatches a prompt only after manual handoff commits its compaction", async () => {
+		const started = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<string>();
+		const mock = createMockModel({ responses: [{ content: ["post-handoff answer"] }] });
+		session.agent.streamFn = mock.stream;
+		session.agent.getApiKey = () => "test-key";
+		const enteredAdmission = Promise.withResolvers<void>();
+		let admissionSettled = false;
+		const waitForCleanup = SessionMaintenance.prototype.waitForManualMaintenanceCleanup;
+		vi.spyOn(SessionMaintenance.prototype, "waitForManualMaintenanceCleanup").mockImplementation(
+			function (this: SessionMaintenance) {
+				const waiting = waitForCleanup.call(this);
+				enteredAdmission.resolve();
+				void waiting.then(() => {
+					admissionSettled = true;
+				});
+				return waiting;
+			},
+		);
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(() => {
+			started.resolve();
+			return finish.promise;
+		});
+
+		const handoff = session.handoff();
+		expect(session.isCompacting).toBe(true);
+		await started.promise;
+		const prompt = session.prompt("next task");
+		await enteredAdmission.promise;
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(admissionSettled).toBe(false);
+		expect(session.isStreaming).toBe(false);
+		expect(mock.calls).toHaveLength(0);
+
+		finish.resolve("## Goal\nContinue from handoff");
+		await handoff;
+		await prompt;
+		expect(mock.calls).toHaveLength(1);
+		expect(JSON.stringify(mock.calls[0]?.context)).toContain("Continue from handoff");
+	});
+
+	it("releases a waiting prompt when manual handoff fails", async () => {
+		const started = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<string>();
+		const mock = createMockModel({ responses: [{ content: ["resumed answer"] }] });
+		session.agent.streamFn = mock.stream;
+		session.agent.getApiKey = () => "test-key";
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(() => {
+			started.resolve();
+			return finish.promise;
+		});
+
+		const handoff = session.handoff();
+		await started.promise;
+		const prompt = session.prompt("continue after failure");
+		finish.reject(new Error("summary request failed"));
+		await expect(handoff).rejects.toThrow("summary request failed");
+		await prompt;
+
+		expect(session.isCompacting).toBe(false);
+		expect(sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
+		expect(mock.calls).toHaveLength(1);
 	});
 
 	it("runs handoff generation through the configured side stream function", async () => {
@@ -260,7 +335,7 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("obfuscates the previous compaction summary but preserves opaque replay data", async () => {
-		session.settings.set("compaction.methodOrder", ["soft"]);
+		cfgCompactionMethodOrder.set(session.settings, ["soft"]);
 		const placeholder = obfuscator.obfuscate(HANDOFF_SECRET);
 		const entries = sessionManager.getBranch();
 		const lastEntryId = entries[entries.length - 1]?.id;
@@ -303,7 +378,7 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("obfuscates migrated snapcompact archive text but preserves opaque replay data", async () => {
-		session.settings.set("compaction.methodOrder", ["soft"]);
+		cfgCompactionMethodOrder.set(session.settings, ["soft"]);
 		const placeholder = obfuscator.obfuscate(HANDOFF_SECRET);
 		const entries = sessionManager.getBranch();
 		const lastEntryId = entries[entries.length - 1]?.id;
@@ -388,7 +463,7 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("advances from auto snapcompact to soft compaction when local preflight rejects the transcript", async () => {
-		session.settings.set("compaction.methodOrder", ["snapcompact", "soft"]);
+		cfgCompactionMethodOrder.set(session.settings, ["snapcompact", "soft"]);
 		const entries = sessionManager.getBranch();
 		const lastEntryId = entries[entries.length - 1]?.id;
 		if (!lastEntryId) throw new Error("Expected a seeded entry id");
@@ -586,7 +661,7 @@ describe("AgentSession handoff", () => {
 	});
 	it("keeps pre-prompt context-full checks aligned with provider-anchored usage", async () => {
 		await session.dispose();
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		events = [];
 
@@ -699,7 +774,7 @@ describe("AgentSession handoff", () => {
 		// NOT encrypted reasoning. The provider reports a deflated 1k prompt tokens, yet
 		// the stored conversation is ~20k tokens — compaction MUST still fire.
 		await session.dispose();
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		events = [];
 
@@ -778,7 +853,7 @@ describe("AgentSession handoff", () => {
 	});
 	it("does not double-count unchanged non-message tokens in provider-anchored pre-prompt checks", async () => {
 		await session.dispose();
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		events = [];
 
@@ -830,7 +905,7 @@ describe("AgentSession handoff", () => {
 
 		await session.prompt("seed prompt");
 		expect(mock.calls).toHaveLength(1);
-		session.settings.set("compaction.enabled", true);
+		cfgCompactionEnabled.set(session.settings, true);
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
 			summary: "pre-prompt compacted",
 			shortSummary: undefined,
@@ -847,9 +922,9 @@ describe("AgentSession handoff", () => {
 		expect(mock.calls).toHaveLength(2);
 	});
 	it("does not run auto maintenance after final yield", async () => {
-		session.settings.set("compaction.methodOrder", ["handoff", "soft"]);
-		session.settings.set("compaction.thresholdPercent", 1);
-		session.settings.set("contextPromotion.enabled", false);
+		cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
+		cfgCompactionThresholdPercent.set(session.settings, 1);
+		cfgContextPromotionEnabled.set(session.settings, false);
 
 		const model = session.model;
 		if (!model) {
@@ -922,9 +997,9 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("does not run auto maintenance when strategy is off", async () => {
-		session.settings.set("compaction.methodOrder", []);
-		session.settings.set("compaction.thresholdPercent", 1);
-		session.settings.set("contextPromotion.enabled", false);
+		cfgCompactionMethodOrder.set(session.settings, []);
+		cfgCompactionThresholdPercent.set(session.settings, 1);
+		cfgContextPromotionEnabled.set(session.settings, false);
 
 		const model = session.model;
 		if (!model) {
@@ -960,12 +1035,12 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("restores default methods when enabling auto-compaction from an empty order", () => {
-		session.settings.set("compaction.enabled", true);
-		session.settings.set("compaction.methodOrder", []);
+		cfgCompactionEnabled.set(session.settings, true);
+		cfgCompactionMethodOrder.set(session.settings, []);
 
 		expect(session.autoCompactionEnabled).toBe(false);
 		session.setAutoCompactionEnabled(true);
-		expect(session.settings.get("compaction.methodOrder")).toEqual([
+		expect(cfgCompactionMethodOrder.get(session.settings)).toEqual([
 			"remote",
 			"snapcompact",
 			"handoff",
@@ -974,13 +1049,9 @@ describe("AgentSession handoff", () => {
 		]);
 		expect(session.autoCompactionEnabled).toBe(true);
 	});
-	it("completes threshold-triggered auto-handoff while the original prompt is still unwinding", async () => {
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) {
-			throw new Error("Expected built-in anthropic model to exist");
-		}
 
+	/** Rebuild the session so one terminal text turn crosses a 1% threshold with a `handoff` method order. */
+	async function createThresholdHandoffSession(autoContinue: boolean) {
 		await session.dispose();
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		events = [];
@@ -1060,7 +1131,7 @@ describe("AgentSession handoff", () => {
 			sessionManager,
 			settings: Settings.isolated({
 				"compaction.enabled": true,
-				"compaction.autoContinue": false,
+				"compaction.autoContinue": autoContinue,
 				"compaction.methodOrder": ["handoff", "soft"],
 				"compaction.thresholdPercent": 1,
 				"contextPromotion.enabled": false,
@@ -1075,6 +1146,11 @@ describe("AgentSession handoff", () => {
 		const generateHandoffSpy = vi
 			.spyOn(compactionModule, "generateHandoffFromContext")
 			.mockResolvedValue("## Goal\nContinue from here");
+		return { mock, agentEndWillContinue, generateHandoffSpy };
+	}
+
+	it("completes threshold-triggered auto-handoff while the original prompt is still unwinding", async () => {
+		const { mock, agentEndWillContinue, generateHandoffSpy } = await createThresholdHandoffSession(false);
 		await session.prompt("Trigger threshold handoff");
 
 		expect(mock.calls).toHaveLength(1);
@@ -1085,6 +1161,23 @@ describe("AgentSession handoff", () => {
 		expect(endEvents[0]).toMatchObject({ type: "auto_compaction_end", action: "handoff", aborted: false });
 		expect(endEvents[0]).not.toMatchObject({ errorMessage: expect.any(String) });
 		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
+	});
+
+	it("yields the run when a threshold auto-handoff after a final answer schedules no continuation", async () => {
+		// Auto-continue is enabled, but a terminal text answer never auto-continues
+		// after compaction. The settle must say so: a non-yielded agent_end here
+		// promises a run that never starts, so RPC hosts wait forever for the
+		// prompt's `prompt_result`.
+		const { mock, agentEndWillContinue, generateHandoffSpy } = await createThresholdHandoffSession(true);
+		await session.prompt("Trigger threshold handoff");
+
+		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
+		expect(mock.calls).toHaveLength(1);
+		expect(agentEndWillContinue).toEqual([undefined]);
+		expect(events.filter(event => event.type === "agent_end")).toEqual([
+			expect.objectContaining({ type: "agent_end", isTerminal: true, yielded: true }),
+		]);
 	});
 	it("resets to the base system prompt before generating a handoff", async () => {
 		const model = session.model;
@@ -1221,7 +1314,7 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("saves auto-handoff document to disk when enabled", async () => {
-		session.settings.set("compaction.handoffSaveToDisk", true);
+		cfgCompactionHandoffSaveToDisk.set(session.settings, true);
 
 		const handoffText = "## Goal\nContinue from here";
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(handoffText);
@@ -1235,7 +1328,7 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("does not save manual handoff document when save setting is enabled", async () => {
-		session.settings.set("compaction.handoffSaveToDisk", true);
+		cfgCompactionHandoffSaveToDisk.set(session.settings, true);
 
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nManual handoff");
 

@@ -1,4 +1,7 @@
 import { matchesKey } from "../keys";
+import { rowsText } from "../native/spans";
+import { col } from "../native/describe";
+import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 import { Ellipsis, getWidthConfigEpoch, padding, replaceTabs, truncateToWidth, visibleWidth } from "../utils";
 import {
@@ -126,6 +129,7 @@ export class ScrollView implements Component {
 	#rangeSnapshot: RangeSnapshot | undefined;
 	#cache: RenderCache | undefined;
 	#disposed = false;
+	#native: { content: readonly string[] | Component; height: number; node: NativeNode } | undefined;
 
 	constructor(content: readonly string[] | Component, options: ScrollViewOptions) {
 		this.#child = isComponent(content) ? content : undefined;
@@ -400,7 +404,13 @@ export class ScrollView implements Component {
 	invalidate(): void {
 		if (this.#disposed) return;
 		this.#cache = undefined;
+		this.#native = undefined;
 		this.#child?.invalidate?.();
+	}
+
+	releaseRenderCaches(): void {
+		this.#cache = undefined;
+		this.#child?.releaseRenderCaches?.();
 	}
 
 	/** Permanently release a wrapped child's timers, subscriptions, and other resources. */
@@ -413,6 +423,24 @@ export class ScrollView implements Component {
 		const child = this.#child;
 		this.#child = undefined;
 		child?.dispose?.();
+	}
+
+	/**
+	 * The whole content in a `col` capped at the viewport height: the
+	 * terminal scrolls it natively and draws its own scrollbar.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		const content = this.#child ?? this.#lines;
+		const cached = this.#native;
+		if (cached?.content === content && cached.height === this.#height) return cached.node;
+		const described = this.#disposed
+			? col([], { hidden: true })
+			: col([this.#child ?? rowsText(this.#lines)], {
+					max: { h: `${this.#height}lines` },
+					hidden: this.#height === 0 ? true : undefined,
+				});
+		this.#native = { content, height: this.#height, node: described };
+		return described;
 	}
 
 	render(width: number): readonly string[] {

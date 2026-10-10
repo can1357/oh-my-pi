@@ -1,7 +1,7 @@
 // Provider-wire compat for "zenmux"; regenerated from the frozen census using deployment contract selectors.
 
 provider "zenmux" {
-	default-model "anthropic/claude-opus-4.8"
+	default-model "anthropic/claude-opus-5"
 	env "ZENMUX_API_KEY"
 	allow-unauthenticated #true
 	discovery label="ZenMux" allow-unauthenticated=#true

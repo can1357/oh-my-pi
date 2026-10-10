@@ -141,7 +141,7 @@ describe("BTW session boundaries", () => {
 		const list = await SessionManager.list(directory.path(), directory.path());
 		const selected = list.find(item => item.path === file);
 		if (!selected) throw new Error("Expected saved picker target");
-		vi.spyOn(SessionManager, "list").mockResolvedValue([selected]);
+		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue([selected]);
 		await new SelectorController(mode).showSessionSelector();
 		const component = vi.spyOn(mode.ui, "showOverlay").mock.calls.at(-1)?.[0];
 		if (!(component instanceof SessionSelectorComponent)) throw new Error("Expected session selector");

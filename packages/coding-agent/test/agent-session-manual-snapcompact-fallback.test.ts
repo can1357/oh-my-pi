@@ -55,7 +55,7 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 
 		tempDir = TempDir.createSync("@pi-manual-snapcompact-text-only-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("aimlapi", "test-key");
+		authStorage.keys.setRuntime("aimlapi", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 
 		const agent = new Agent({

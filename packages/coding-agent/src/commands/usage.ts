@@ -12,7 +12,7 @@ export default class Usage extends Command {
 		action: Args.string({
 			description: "Optional subcommand to execute",
 			required: false,
-			options: ["invalidate", "clients"],
+			options: ["invalidate", "clients", "accounts"],
 		}),
 	};
 
@@ -29,6 +29,14 @@ export default class Usage extends Command {
 			default: false,
 		}),
 		days: Flags.integer({ char: "d", description: "History window in days (with --history or clients)", default: 7 }),
+		extension: Flags.string({
+			char: "e",
+			description: "Load an extension file before fetching usage (repeatable)",
+			multiple: true,
+		}),
+		"no-extensions": Flags.boolean({
+			description: "Disable extension discovery (explicit -e paths still work)",
+		}),
 	};
 
 	static examples = [
@@ -38,6 +46,7 @@ export default class Usage extends Command {
 		"# Machine-readable output\n  omp usage --json",
 		"# Usage-limit trend over the last 30 days\n  omp usage --history --days 30",
 		"# Per-client token burn (which machine/app spent what) over the last 30 days\n  omp usage clients --days 30",
+		"# OAuth identity keys for task.agentAccountPools (no tokens)\n  omp usage accounts",
 		"# Invalidate cached usage reports for all providers\n  omp usage invalidate",
 		"# Invalidate cached usage reports for a specific provider\n  omp usage invalidate --provider anthropic",
 	];
@@ -51,6 +60,8 @@ export default class Usage extends Command {
 			redact: flags.redact,
 			history: flags.history,
 			days: flags.days,
+			extensions: flags.extension,
+			noExtensions: flags["no-extensions"],
 		});
 	}
 }

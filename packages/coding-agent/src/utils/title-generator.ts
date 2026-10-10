@@ -2,7 +2,9 @@
  * Generate session titles using a smol, fast model.
  */
 import { dlopen, FFIType, ptr } from "bun:ffi";
+import * as os from "node:os";
 import * as path from "node:path";
+import * as url from "node:url";
 
 import {
 	type Api,
@@ -13,20 +15,24 @@ import {
 	retryTransientCompletion,
 } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
-import { writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
+import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
+import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
 import { $env, isTerminalHeadless, isWsl, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
+import { roleCandidatePool } from "../config/model-roles";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import { formatTitleUserMessage } from "../tiny/message-preproc";
-import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
+
+import { cfgRetryModelFallback } from "../session/settings";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
@@ -34,17 +40,9 @@ const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
 // Plain π, not the nerd-font `icon.omp` glyph: window/tab titles render in the
 // OS UI font, which has no nerd-font PUA coverage.
 const DEFAULT_TERMINAL_TITLE = "π";
+/** The native tab title without a session name. */
+const NATIVE_TERMINAL_TITLE = "omp";
 const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
-/**
- * Emit a raw title escape sequence. While the TUI owns stdout its frames are
- * written by an off-thread pump, and a direct `process.stdout.write` can land
- * mid-frame — inside a torn escape sequence — making the terminal print the
- * title payload as text into the viewport. Route through the active terminal's
- * write path; fall back to stdout only when no TUI has the terminal.
- */
-function writeTitleSequence(seq: string): void {
-	if (!writeThroughActiveTerminal(seq)) process.stdout.write(seq);
-}
 
 interface WindowsConsoleTitleApi {
 	set(title: string): boolean;
@@ -120,7 +118,7 @@ const LEADING_PROSE_THINKING_PREAMBLE_RE =
 	/^[ \t]*(?:(?:here(?:['’]s| is)[ \t]+(?:a|the|my)[ \t]+)|my[ \t]+)?(?:thinking|thought|reasoning)[ \t]+process[ \t]*:?[ \t]*(?:\r?\n|$)/i;
 
 function getTitleModels(registry: ModelRegistry, settings: Settings, currentModel?: Model<Api>): Model<Api>[] {
-	const availableModels = registry.getAvailable();
+	const availableModels = roleCandidatePool("tiny", settings, registry);
 	if (availableModels.length === 0) return [];
 
 	const models = collectOnlineTinyCandidates(["tiny", "commit", "smol"], settings, availableModels).map(
@@ -128,7 +126,7 @@ function getTitleModels(registry: ModelRegistry, settings: Settings, currentMode
 	);
 	if (
 		currentModel &&
-		(models.length === 0 || settings.get("retry.modelFallback") !== false) &&
+		(models.length === 0 || cfgRetryModelFallback.get(settings) !== false) &&
 		!models.some(model => formatModelStringWithRouting(model) === formatModelStringWithRouting(currentModel))
 	) {
 		// Append currentModel and expand its own chain separately — never merge it
@@ -181,15 +179,20 @@ export async function generateSessionTitle(
 		return null;
 	}
 
+	const models = getTitleModels(registry, settings, currentModel);
+	const firstModel = models[0];
+	if (!firstModel) {
+		logger.warn("title-generator: no title model found", { sessionId, reason: "no-title-model" });
+		return null;
+	}
+
 	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
-	const tinyModel = settings.get("providers.tinyModel");
-	if (tinyModel === ONLINE_TINY_TITLE_MODEL_KEY) {
-		return generateTitleOnline(
+	if (firstModel.api !== "local-inference") {
+		return generateTitleOnlineWithModels(
 			firstMessage,
+			models,
 			registry,
-			settings,
 			sessionId,
-			currentModel,
 			metadataResolver,
 			signal,
 			titleSystemPrompt,
@@ -197,37 +200,28 @@ export async function generateSessionTitle(
 		);
 	}
 
-	// User explicitly picked a local tiny model. NEVER fall back to the online
-	// smol path (issue #3187): the smol role resolves through priority.json and
-	// silently bills whatever provider holds the resolved API key — OpenRouter
-	// in the reporter's case, leaking real credits without consent. If the
-	// local worker fails (unknown key, download missing, transformers.js
-	// crash, abort), leave the session untitled; the next user turn retries.
-	if (!isTinyTitleLocalModelKey(tinyModel)) {
-		logger.warn("title-generator: unknown local tiny model; skipping title (will not fall back to online)", {
-			sessionId,
-			model: tinyModel,
-			reason: "unknown-local-model",
-		});
-		return null;
-	}
+	// A local role selection is an explicit no-billing boundary. If the worker
+	// fails (download missing, runtime crash, abort, or no output), leave the
+	// session untitled rather than advancing into a paid fallback candidate.
 	try {
 		let localTitle: string | null;
 		if (signal) {
 			localTitle = await tinyTitleClient.generate(
-				tinyModel,
+				firstModel.id,
 				firstMessage,
 				titleSystemPrompt ? { signal, systemPrompt: titleSystemPrompt } : { signal },
 			);
 		} else if (titleSystemPrompt) {
-			localTitle = await tinyTitleClient.generate(tinyModel, firstMessage, { systemPrompt: titleSystemPrompt });
+			localTitle = await tinyTitleClient.generate(firstModel.id, firstMessage, {
+				systemPrompt: titleSystemPrompt,
+			});
 		} else {
-			localTitle = await tinyTitleClient.generate(tinyModel, firstMessage);
+			localTitle = await tinyTitleClient.generate(firstModel.id, firstMessage);
 		}
 		if (!localTitle) {
 			logger.warn("title-generator: local tiny model produced no title; skipping (no online fallback)", {
 				sessionId,
-				model: tinyModel,
+				model: firstModel.id,
 				reason: "local-no-output",
 			});
 			return null;
@@ -236,7 +230,7 @@ export async function generateSessionTitle(
 	} catch (err) {
 		logger.warn("title-generator: local tiny model errored; skipping (no online fallback)", {
 			sessionId,
-			model: tinyModel,
+			model: firstModel.id,
 			error: err instanceof Error ? err.message : String(err),
 		});
 		return null;
@@ -259,7 +253,28 @@ export async function generateTitleOnline(
 		logger.warn("title-generator: no title model found", { sessionId, reason: "no-title-model" });
 		return null;
 	}
+	return generateTitleOnlineWithModels(
+		firstMessage,
+		models,
+		registry,
+		sessionId,
+		metadataResolver,
+		signal,
+		customSystemPrompt,
+		credentialSourceSessionId,
+	);
+}
 
+async function generateTitleOnlineWithModels(
+	firstMessage: string,
+	models: Model<Api>[],
+	registry: ModelRegistry,
+	sessionId?: string,
+	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
+	signal?: AbortSignal,
+	customSystemPrompt?: string,
+	credentialSourceSessionId?: string,
+): Promise<string | null> {
 	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
 	// The model is always asked to wrap the title in `<title>...</title>` and
 	// the title is parsed from text. A forced `set_title` tool call was the old
@@ -289,15 +304,11 @@ export async function generateTitleOnline(
 
 		try {
 			if (credentialSourceSessionId && sessionId && credentialSourceSessionId !== sessionId) {
-				const foregroundCredential = registry.authStorage
-					.listOAuthAccounts(model.provider, credentialSourceSessionId)
+				const foregroundCredential = registry.authStorage.oauth
+					.accounts(model.provider, credentialSourceSessionId)
 					.find(account => account.active);
 				if (foregroundCredential) {
-					registry.authStorage.pinSessionOAuthAccount(
-						model.provider,
-						sessionId,
-						foregroundCredential.credentialId,
-					);
+					registry.authStorage.sessions.pin(model.provider, sessionId, foregroundCredential.credentialId);
 				}
 			}
 			const apiKey = await registry.getApiKey(model, sessionId);
@@ -614,16 +625,21 @@ function writeTerminalTitle(title: string, recomposeStaticOnFailure = false): vo
 						true,
 					);
 				if (latched === lastTerminalTitle) return;
-				writeTitleSequence(`\x1b]0;${latched}\x07`);
+				writeTerminalSequence(`\x1b]0;${latched}\x07`);
 				lastTerminalTitle = latched;
 				return;
 			}
 		}
-		writeTitleSequence(`\x1b]0;${next}\x07`);
+		writeTerminalSequence(`\x1b]0;${next}\x07`);
 	}
 	lastTerminalTitle = next;
 }
 
+/**
+ * Set the session's base terminal title: the session name, which a generated
+ * title carries in the card form `<icon> <CODE>: <name>` that Tern indexes
+ * parked panes by, else the cwd.
+ */
 export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: string): void {
 	// An authoritative session title (rename, new session, focus swap) supersedes
 	// any extension override so the base title tracks the real session again.
@@ -636,7 +652,80 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
 	// write into the parent shell's tab. Only `initTerminalTitleState()`, the
 	// explicit terminal-ownership path, releases the latch.
 	terminalTitleRuntime.extensionOverride = undefined;
-	terminalTitleRuntime.label = sanitizeTerminalTitlePart(sessionName) ?? getFallbackTerminalTitle(cwd);
+	terminalTitleRuntime.sessionName = sanitizeTerminalTitlePart(sessionName);
+	terminalTitleRuntime.label = terminalTitleRuntime.sessionName ?? getFallbackTerminalTitle(cwd);
+	emitTerminalTitle();
+	reportTernSession();
+}
+
+/**
+ * Whether the effective symbol preset is `nerd`: under `nf+emoji` title icons,
+ * the title fork then asks the model for a Nerd Fonts glyph to head the title.
+ */
+export function nerdGlyphsActive(): boolean {
+	return typeof theme !== "undefined" && theme.getSymbolPreset() === "nerd";
+}
+
+/** The OSC 1337 user variable Tern reads the session file from. */
+const TERN_SESSION_FILE_VAR = "omp_session_file";
+
+/** The live session as Tern hears about it (read from the interactive session manager). */
+export interface TerminalSessionSource {
+	/** The session file, if the session persists to one. */
+	file(): string | undefined;
+	/** The session's working directory. */
+	cwd(): string;
+}
+
+/** Where the current session's file and directory are read from. */
+let sessionSource: TerminalSessionSource | undefined;
+/** The session file Tern was last told about. */
+let reportedSessionFile: string | undefined;
+/** The working directory Tern was last told about. */
+let reportedCwd: string | undefined;
+
+/**
+ * Name the live session's source. Every session title update (start, new
+ * session, resume, cwd switch) and {@link reportTernSession} re-read it and, in
+ * Tern, report what changed: the file, so Tern's daemon can relaunch
+ * `omp --resume <file>` after it restarts, and the directory, which Tern names
+ * in omp's composer bar.
+ */
+export function setTerminalSessionSource(source: TerminalSessionSource | undefined): void {
+	sessionSource = source;
+	reportTernSession();
+}
+
+/**
+ * Tell Tern (`TERM_PROGRAM=tern`, nowhere else) what changed about the session:
+ * the file as an OSC 1337 user variable holding its absolute path in base64 (no
+ * file removes the variable), and the working directory as OSC 7
+ * (`file://host/path`), as a shell reports it at each prompt.
+ */
+export function reportTernSession(): void {
+	if (terminalTitleRuntime.disposed || $env.TERM_PROGRAM?.toLowerCase() !== "tern") return;
+	if (!process.stdout.isTTY || isTerminalHeadless()) return;
+	const file = sessionSource?.file();
+	const resolvedFile = file ? path.resolve(file) : undefined;
+	if (resolvedFile !== reportedSessionFile) {
+		reportedSessionFile = resolvedFile;
+		const value = resolvedFile ? `=${Buffer.from(resolvedFile).toString("base64")}` : "";
+		writeTerminalSequence(`\x1b]1337;SetUserVar=${TERN_SESSION_FILE_VAR}${value}\x07`);
+	}
+	// Without a session the shell takes the directory back at its next prompt.
+	const cwd = sessionSource ? path.resolve(sessionSource.cwd()) : undefined;
+	if (cwd && cwd !== reportedCwd) {
+		writeTerminalSequence(`\x1b]7;file://${os.hostname()}${url.pathToFileURL(cwd).pathname}\x07`);
+	}
+	reportedCwd = cwd;
+}
+
+/**
+ * The branch's pull request number for the native tab title, which carries it
+ * after the session name (a TSP terminal has no status strip to show it in).
+ */
+export function setTerminalTitlePullRequest(pr: number | undefined): void {
+	terminalTitleRuntime.pullRequest = pr;
 	emitTerminalTitle();
 }
 
@@ -689,7 +778,14 @@ const TITLE_IDLE_SEPARATOR = ">";
 const TITLE_ATTENTION_SEPARATOR = "!";
 
 const terminalTitleRuntime: {
+	/** The classic title's label: the session name, else the cwd. */
 	label: string | undefined;
+	/** The session's own name, without the cwd fallback `label` uses. */
+	sessionName: string | undefined;
+	/** The branch's pull request, shown in the native title only. */
+	pullRequest: number | undefined;
+	/** Unsubscribes the native-rendering watch taken by `initTerminalTitleState()`. */
+	unwatchNative: (() => void) | undefined;
 	state: TerminalTitleState;
 	frame: number;
 	enabled: boolean;
@@ -714,6 +810,9 @@ const terminalTitleRuntime: {
 	nativeTitleFailed: boolean;
 } = {
 	label: undefined,
+	sessionName: undefined,
+	pullRequest: undefined,
+	unwatchNative: undefined,
 	state: "idle",
 	frame: 0,
 	enabled: true,
@@ -759,27 +858,41 @@ export function buildTerminalTitleWithState(
 	return label ? `${DEFAULT_TERMINAL_TITLE} ${separator} ${label}` : `${DEFAULT_TERMINAL_TITLE} ${separator}`;
 }
 
+/**
+ * The tab title while a TSP terminal renders: the session name (`omp` before
+ * there is one) and the branch's pull request. The terminal shows run state
+ * itself, so there is no brand or state separator.
+ */
+export function buildNativeTerminalTitle(sessionName: string | undefined, pullRequest: number | undefined): string {
+	const name = sessionName ?? NATIVE_TERMINAL_TITLE;
+	return pullRequest === undefined ? name : `${name} · #${pullRequest}`;
+}
+
 function emitTerminalTitle(): void {
 	// The teardown latch lives at the sink (`writeTerminalTitle`), so every path
 	// here is covered without a second check.
 	// An extension override owns the terminal verbatim; the terminal sink
 	// deduplicates repeated state updates.
+	const native = isNativeRendering();
 	const next =
 		terminalTitleRuntime.extensionOverride ??
-		buildTerminalTitleWithState(
-			terminalTitleRuntime.label,
-			terminalTitleRuntime.state,
-			terminalTitleRuntime.frame,
-			terminalTitleRuntime.enabled,
-			process.platform,
-			terminalTitleRuntime.style,
-			$env as NodeJS.ProcessEnv,
-			terminalTitleRuntime.nativeTitleFailed,
-		);
+		(native
+			? buildNativeTerminalTitle(terminalTitleRuntime.sessionName, terminalTitleRuntime.pullRequest)
+			: buildTerminalTitleWithState(
+					terminalTitleRuntime.label,
+					terminalTitleRuntime.state,
+					terminalTitleRuntime.frame,
+					terminalTitleRuntime.enabled,
+					process.platform,
+					terminalTitleRuntime.style,
+					$env as NodeJS.ProcessEnv,
+					terminalTitleRuntime.nativeTitleFailed,
+				));
 	// The composed working title is the only write that can fail into an
 	// animated OSC frame: on native failure it re-pins static (`:`), while a
 	// direct `setTerminalTitle` preserves its caller's title verbatim.
 	const recomposeStaticOnFailure =
+		!native &&
 		terminalTitleRuntime.extensionOverride === undefined &&
 		terminalTitleRuntime.state === "working" &&
 		terminalTitleRuntime.enabled &&
@@ -794,6 +907,7 @@ function stopTerminalTitleSpinner(): void {
 
 function startTerminalTitleSpinner(): void {
 	if (
+		isNativeRendering() ||
 		isStaticTitleHost() ||
 		terminalTitleRuntime.disposed ||
 		terminalTitleRuntime.timer ||
@@ -805,7 +919,8 @@ function startTerminalTitleSpinner(): void {
 	terminalTitleRuntime.timer = setInterval(() => {
 		terminalTitleRuntime.frame =
 			(terminalTitleRuntime.frame + 1) % TERMINAL_TITLE_SPINNER_STYLES[terminalTitleRuntime.style].length;
-		emitTerminalTitle();
+		// An extension override is frame-independent; the sink would dedupe it anyway.
+		if (terminalTitleRuntime.extensionOverride === undefined) emitTerminalTitle();
 	}, TITLE_SPINNER_INTERVAL_MS);
 	// Never keep the event loop alive for a cosmetic animation.
 	terminalTitleRuntime.timer.unref?.();
@@ -873,6 +988,13 @@ export function initTerminalTitleState(): void {
 	// Releasing the latch alone would leave a stopped timer behind a `working`
 	// state — a frozen spinner frame. Mirror the enable path and re-arm.
 	if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
+	// A TSP terminal takes the plain native title while it renders; the
+	// classic `π > label` (and its spinner) comes back when it stops.
+	terminalTitleRuntime.unwatchNative ??= onNativeRenderingChange(native => {
+		if (native) stopTerminalTitleSpinner();
+		else if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
+		emitTerminalTitle();
+	});
 }
 
 /**
@@ -883,7 +1005,12 @@ export function initTerminalTitleState(): void {
  * shell's tab. Released only by {@link initTerminalTitleState}.
  */
 export function disposeTerminalTitleState(): void {
+	// The session ends with the UI: Tern must not resume it in this pane.
+	sessionSource = undefined;
+	reportTernSession();
 	terminalTitleRuntime.disposed = true;
+	terminalTitleRuntime.unwatchNative?.();
+	terminalTitleRuntime.unwatchNative = undefined;
 	// `popTerminalTitle()` hands the terminal back to the shell, so the runtime no
 	// longer knows what is on screen: the stale dedupe cache (`lastTerminalTitle`,
 	// cleared below) must not swallow the first write after the latch releases.
@@ -897,7 +1024,7 @@ export function disposeTerminalTitleState(): void {
  */
 export function pushTerminalTitle(): void {
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	writeTitleSequence("\x1b[22;2t");
+	writeTerminalSequence("\x1b[22;2t");
 }
 
 /**
@@ -905,5 +1032,5 @@ export function pushTerminalTitle(): void {
  */
 export function popTerminalTitle(): void {
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	writeTitleSequence("\x1b[23;2t");
+	writeTerminalSequence("\x1b[23;2t");
 }

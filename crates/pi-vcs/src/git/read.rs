@@ -101,6 +101,24 @@ impl GitRepo {
 		}
 	}
 
+	/// Abbreviate the object `rev` names to its shortest unambiguous id
+	/// (honoring `core.abbrev`), as `git rev-parse --short` does.
+	pub fn short_id(&self, rev: &str) -> Result<String> {
+		if self.is_reftable() {
+			return Ok(cli_text(self.root(), &["rev-parse", "--short", rev])?
+				.trim()
+				.to_owned());
+		}
+		let repo = self.gix()?;
+		let id = repo
+			.rev_parse_single(rev)
+			.map_err(|err| Error::backend("git rev-parse", err))?;
+		Ok(id
+			.shorten()
+			.map_err(|err| Error::backend("git rev-parse", err))?
+			.to_string())
+	}
+
 	/// Test whether a ref or revision resolves.
 	pub fn ref_exists(&self, name: &str) -> Result<bool> {
 		Ok(self.resolve_ref(name)?.is_some())
@@ -200,6 +218,36 @@ impl GitRepo {
 		self
 			.status_porcelain_capped(&StatusOptions::default(), DIRTY_PROBE_CAPTURE_LIMIT)
 			.map(|status| !status.is_empty())
+	}
+
+	/// Whether a merge, rebase, cherry-pick, revert, or `am` is underway in
+	/// this checkout: the index holds unmerged entries, or the operation's
+	/// state files remain because it is resolved but not yet committed or
+	/// aborted (a phase `git ls-files --unmerged` no longer reports).
+	pub fn operation_in_progress(&self) -> Result<bool> {
+		const STATE: [&str; 6] = [
+			"MERGE_HEAD",
+			"CHERRY_PICK_HEAD",
+			"REVERT_HEAD",
+			"REBASE_HEAD",
+			"rebase-merge",
+			"rebase-apply",
+		];
+		if STATE
+			.iter()
+			.any(|name| self.info.git_dir.join(name).exists())
+		{
+			return Ok(true);
+		}
+		if self.is_reftable() {
+			return Ok(!cli_text(self.root(), &["ls-files", "--unmerged"])?.is_empty());
+		}
+		let repo = self.gix()?;
+		let index = load_index_or_empty(&repo, "git ls-files")?;
+		Ok(index
+			.entries()
+			.iter()
+			.any(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted))
 	}
 
 	/// Render git status in porcelain-v1 form.
@@ -1631,7 +1679,9 @@ mod tests {
 		let worktrees = repo.worktrees()?;
 		assert_eq!(worktrees.len(), 2);
 		assert_eq!(worktrees[0].path, dir.path());
-		assert_eq!(worktrees[1].path, linked.canonicalize()?);
+		// git records the real path, with `/` separators on Windows; compare
+		// resolved locations rather than spellings.
+		assert_eq!(worktrees[1].path.canonicalize()?, linked.canonicalize()?);
 		assert_eq!(worktrees[1].branch.as_deref(), Some("refs/heads/linked-branch"));
 		Ok(())
 	}

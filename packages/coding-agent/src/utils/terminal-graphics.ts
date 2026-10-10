@@ -1,7 +1,8 @@
-import { deflateSync, inflateSync } from "node:zlib";
+import { inflateSync } from "node:zlib";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { decodeSixelToPng } from "@oh-my-pi/pi-natives";
+import { decodeSixelToPngAsync } from "@oh-my-pi/pi-natives";
 import { MAX_IMAGE_INPUT_BYTES, convertImageToPng } from "@oh-my-pi/pi-tui/chat/image-loading";
+import { encodeRawPng, PNG_SIGNATURE } from "./png-encode";
 
 const ESC = "\x1b";
 const KITTY_CHUNK_BYTES = 3072;
@@ -14,7 +15,8 @@ const MAX_FRAME_CHARS = MAX_BASE64_CHARS + 4096;
 const MAX_FRAME_PARTS = 8192;
 const MAX_KITTY_CHUNKS = 8192;
 const MAX_SIXEL_CHARS = MAX_IMAGE_INPUT_BYTES;
-const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+/** Any byte sequence that can start (or begin to start) a Kitty APC or sixel DCS frame. */
+const GRAPHICS_INTRODUCER = /\x1b[_P]|[\x90\x9f]/u;
 
 type FrameKind = "kitty" | "sixel";
 type ParserMode = "ground" | FrameKind | "discard";
@@ -54,6 +56,16 @@ export class TerminalGraphicsDecoder {
 
 	push(chunk: string): string {
 		if (!chunk && !this.#groundPrefix) return "";
+		// Graphics are rare: a ground-state chunk with no introducer candidate (and
+		// no trailing ESC that could start one) passes through without a scan.
+		if (
+			this.#mode === "ground" &&
+			!this.#groundPrefix &&
+			chunk.charCodeAt(chunk.length - 1) !== 0x1b &&
+			!GRAPHICS_INTRODUCER.test(chunk)
+		) {
+			return chunk;
+		}
 		let input = this.#groundPrefix + chunk;
 		this.#groundPrefix = "";
 		let output = "";
@@ -341,7 +353,7 @@ export async function encodeTerminalImage(image: ImageContent): Promise<string> 
 }
 
 async function decodeSixel(bytes: Uint8Array): Promise<ImageContent | undefined> {
-	const png = decodeSixelToPng(bytes);
+	const png = await decodeSixelToPngAsync(bytes);
 	if (png.length > MAX_IMAGE_INPUT_BYTES) return undefined;
 	return normalizePng(png);
 }
@@ -419,55 +431,4 @@ function latin1Bytes(value: string): Uint8Array {
 	const bytes = new Uint8Array(value.length);
 	for (let index = 0; index < value.length; index++) bytes[index] = value.charCodeAt(index) & 0xff;
 	return bytes;
-}
-
-function encodeRawPng(bytes: Uint8Array, width: number, height: number, channels: 3 | 4): Uint8Array {
-	const stride = width * channels;
-	const scanlines = Buffer.allocUnsafe((stride + 1) * height);
-	for (let row = 0; row < height; row++) {
-		const outputOffset = row * (stride + 1);
-		scanlines[outputOffset] = 0;
-		scanlines.set(bytes.subarray(row * stride, (row + 1) * stride), outputOffset + 1);
-	}
-	const header = Buffer.allocUnsafe(13);
-	header.writeUInt32BE(width, 0);
-	header.writeUInt32BE(height, 4);
-	header[8] = 8;
-	header[9] = channels === 3 ? 2 : 6;
-	header[10] = 0;
-	header[11] = 0;
-	header[12] = 0;
-	return Buffer.concat([
-		PNG_SIGNATURE,
-		pngChunk("IHDR", header),
-		pngChunk("IDAT", deflateSync(scanlines)),
-		pngChunk("IEND", new Uint8Array()),
-	]);
-}
-
-function pngChunk(type: string, data: Uint8Array): Uint8Array {
-	const chunk = Buffer.allocUnsafe(12 + data.length);
-	chunk.writeUInt32BE(data.length, 0);
-	chunk.write(type, 4, 4, "ascii");
-	chunk.set(data, 8);
-	chunk.writeUInt32BE(crc32(chunk.subarray(4, 8 + data.length)), 8 + data.length);
-	return chunk;
-}
-
-let crcTable: Uint32Array | undefined;
-function crc32(bytes: Uint8Array): number {
-	crcTable ??= makeCrcTable();
-	let crc = 0xffffffff;
-	for (const byte of bytes) crc = crcTable[(crc ^ byte) & 0xff]! ^ (crc >>> 8);
-	return (crc ^ 0xffffffff) >>> 0;
-}
-
-function makeCrcTable(): Uint32Array {
-	const table = new Uint32Array(256);
-	for (let index = 0; index < table.length; index++) {
-		let value = index;
-		for (let bit = 0; bit < 8; bit++) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
-		table[index] = value >>> 0;
-	}
-	return table;
 }

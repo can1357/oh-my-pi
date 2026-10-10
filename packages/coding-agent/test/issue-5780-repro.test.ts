@@ -70,7 +70,7 @@ describe("issue #5780 post-auth runtime provider refresh", () => {
 		expect(registry.find(providerName, "gated-model")).toBeUndefined();
 
 		// Login persists a credential.
-		await authStorage.set(providerName, { type: "api_key", key: FAKE_KEY });
+		await authStorage.credentials.set(providerName, { type: "api_key", key: FAKE_KEY });
 
 		// What the fixed /login, /logout, sign-in, and RPC login sites now do: a
 		// provider-scoped online refresh. It must bypass the fresh authoritative

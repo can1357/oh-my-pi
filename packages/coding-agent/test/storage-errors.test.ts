@@ -10,7 +10,9 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 async function corruptDatabase(dbPath: string): Promise<Uint8Array<ArrayBuffer>> {
 	const db = new Database(dbPath);
 	db.run("CREATE TABLE IF NOT EXISTS preserved (value TEXT)");
-	db.prepare("INSERT INTO preserved (value) VALUES (?)").run("salvage this data");
+	// An unfinalized prepared statement would leave the closed connection a zombie
+	// still holding the files, which Windows then refuses to quarantine.
+	db.run("INSERT INTO preserved (value) VALUES (?)", ["salvage this data"]);
 	db.run("PRAGMA wal_checkpoint(TRUNCATE)");
 	db.close();
 
@@ -96,7 +98,7 @@ test("auth startup quarantines corruption and persists new credentials", async (
 	const dbPath = tempDir.join("auth.db");
 
 	const original = await SqliteAuthCredentialStore.open(dbPath);
-	original.saveApiKey("damaged-provider", "damaged-secret");
+	await original.saveApiKey("damaged-provider", "damaged-secret");
 	original.close();
 	const damaged = await corruptDatabase(dbPath);
 
@@ -104,7 +106,7 @@ test("auth startup quarantines corruption and persists new credentials", async (
 	try {
 		expect(storage.listProviders()).toEqual([]);
 		expect(storage.getApiKey("damaged-provider")).toBeNull();
-		storage.saveApiKey("recovered-provider", "recovered-secret");
+		await storage.saveApiKey("recovered-provider", "recovered-secret");
 	} finally {
 		storage.close();
 	}
@@ -132,7 +134,7 @@ test("concurrent agent and auth startup share one private recovered database", a
 		]);
 		auth = openedAuth;
 		agent.recordModelUsage("openai/concurrent-recovery");
-		auth.saveApiKey("concurrent-provider", "concurrent-secret");
+		await auth.saveApiKey("concurrent-provider", "concurrent-secret");
 		expect(agent.getModelUsageOrder()).toEqual(["openai/concurrent-recovery"]);
 		expect(agent.listAuthCredentials("concurrent-provider")).toMatchObject([
 			{ credential: { type: "api_key", key: "concurrent-secret" } },

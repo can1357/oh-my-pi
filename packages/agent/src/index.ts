@@ -6,6 +6,8 @@ export * from "./agent-loop";
 export * from "./append-only-context";
 // Compaction
 export * from "./compaction";
+// Output cap sized to the remaining context window
+export * from "./output-budget";
 // Process-global pause gate
 export * from "./pause";
 // Proxy utilities
@@ -14,14 +16,20 @@ export * from "./proxy";
 export * from "./replay-policy";
 // Run-level telemetry collector + aggregators
 export * from "./run-collector";
+// Tool definitions remembered for Anthropic inactive-tool re-declaration
+export * from "./sent-tool-definitions";
 // Speculative execution coordinator
 export * from "./speculative-execution";
 // Telemetry
 export * from "./telemetry";
 // Thinking selectors
 export * from "./thinking";
+// Tool-context augmentation
+export * from "./tool-context";
 // Tokenizer choice
 export * from "./tokenizer";
+// Lenient-aware tool argument validation
+export * from "./tool-arguments";
 // Types
 export * from "./types";
 // Yield utilities for Bun event-loop busy-wait prevention

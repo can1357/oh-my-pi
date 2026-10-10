@@ -3,18 +3,25 @@
  * to `createAgentSession` so subagents skip the FS scans the parent already
  * paid for. Regression guard for issue #2190.
  */
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import type { ToolPathWithSource } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
+import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import type { LoadExtensionsResult, PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -22,8 +29,14 @@ import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createSessionDefaults } from "../helpers/session-defaults";
+import { manyToolName } from "../fixtures/many-tools-mcp";
+import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
-function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void): AgentSession {
+import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
+
+function createMockSession(
+	onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void | Promise<void>,
+): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const emit = (event: AgentSessionEvent) => {
 		for (const listener of listeners) listener(event);
@@ -45,25 +58,28 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 			};
 		},
 		prompt: async (_text: string, _options?: PromptOptions) => {
-			onPrompt({ emit });
+			await onPrompt({ emit });
+			return true;
 		},
 	};
 	return session as unknown as AgentSession;
 }
 
-function yieldEmittingSession(): AgentSession {
-	return createMockSession(({ emit }) => {
-		emit({
-			type: "tool_execution_end",
-			toolCallId: "tool-pass-through",
-			toolName: "yield",
-			result: {
-				content: [{ type: "text", text: "Result submitted." }],
-				details: { status: "success", data: { ok: true } },
-			},
-			isError: false,
-		});
+function emitYield(emit: (event: AgentSessionEvent) => void): void {
+	emit({
+		type: "tool_execution_end",
+		toolCallId: "tool-pass-through",
+		toolName: "yield",
+		result: {
+			content: [{ type: "text", text: "Result submitted." }],
+			details: { status: "success", data: { ok: true } },
+		},
+		isError: false,
 	});
+}
+
+function yieldEmittingSession(): AgentSession {
+	return createMockSession(({ emit }) => emitYield(emit));
 }
 
 function createSessionResult(session: AgentSession): CreateAgentSessionResult {
@@ -202,7 +218,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toBeUndefined();
 	});
 
-	it("does not inject hub into read-only subagents", async () => {
+	it("grants wait only to unrestricted subagents that can start background work, and requires write for peers", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 
@@ -214,20 +230,28 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const writableResult = await runSubprocess({
 			...baseOptions,
 			id: "writable-child",
-			agent: { ...baseAgent, tools: ["read", "write"] },
+			agent: { ...baseAgent, tools: ["read", "write", "bash"] },
 		});
 		const spawningResult = await runSubprocess({
 			...baseOptions,
 			id: "spawning-child",
 			agent: { ...baseAgent, tools: ["read"], spawns: ["scout"] },
 		});
+		const restrictedResult = await runSubprocess({
+			...baseOptions,
+			id: "restricted-child",
+			agent: { ...baseAgent, tools: ["read", "bash"] },
+			restrictToolNames: true,
+		});
 
 		expect(readOnlyResult.exitCode).toBe(0);
 		expect(writableResult.exitCode).toBe(0);
 		expect(spawningResult.exitCode).toBe(0);
+		expect(restrictedResult.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "glob"]);
-		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write", "hub"]);
-		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task", "hub"]);
+		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write", "bash", "wait"]);
+		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task", "wait"]);
+		expect(spy.mock.calls[3]?.[0]?.toolNames).toEqual(["read", "bash"]);
 
 		const promptText = (index: number): string => {
 			const prompt = spy.mock.calls[index]?.[0]?.systemPrompt;
@@ -239,7 +263,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const spawningPrompt = promptText(2);
 		expect(readOnlyPrompt.includes("# Peers")).toBe(false);
 		expect(writablePrompt.includes("# Peers")).toBe(true);
-		expect(spawningPrompt.includes("# Peers")).toBe(true);
+		expect(spawningPrompt.includes("# Peers")).toBe(false);
 	});
 
 	it("records the spawning agent as parentAgentId, distinct from the child's own id and prefix", async () => {
@@ -303,6 +327,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.enableMCP).toBe(false);
 		expect(forwarded?.mcpManager).toBeUndefined();
 		expect(forwarded?.customTools).toBeUndefined();
+		expect(forwarded?.mcpTools).toBeUndefined();
 		expect(forwarded?.preloadedExtensionPaths).toEqual([]);
 		expect(forwarded?.preloadedCustomToolPaths).toEqual([]);
 		expect(getTools).not.toHaveBeenCalled();
@@ -356,11 +381,33 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ tools: ["read", "write", "yield"] }));
 	});
 
+	it("persists @advisor expanded against the spawning owner's roles so cold revival keeps its model", async () => {
+		const session = yieldEmittingSession();
+		const appendSessionInit = vi.spyOn(session.sessionManager, "appendSessionInit");
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		// A nested spawn's owner is a parent subagent whose advisor role overrides the root's.
+		const parentSettings = Settings.isolated({ modelRoles: { advisor: "anthropic/claude-sonnet-4-5" } });
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "nested-advised-child",
+			settings: parentSettings,
+			agent: { ...baseAgent, advisor: "@advisor:high" },
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.settings?.getModelRole("advisor")).toBe("anthropic/claude-sonnet-4-5:high");
+		expect(appendSessionInit).toHaveBeenCalledWith(
+			expect.objectContaining({ advisor: "anthropic/claude-sonnet-4-5:high" }),
+		);
+	});
+
 	it("retains inherited MCP proxy tools for normal children", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 		const mcpManager = {
 			getTools: () => [{ name: "mcp__private_read", label: "private/read" }],
+			addToolsChangedListener: () => () => {},
 		} as unknown as MCPManager;
 
 		const result = await runSubprocess({ ...baseOptions, id: "normal-child", mcpManager });
@@ -369,7 +416,8 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const forwarded = spy.mock.calls[0]?.[0];
 		expect(forwarded?.enableMCP).toBe(true);
 		expect(forwarded?.mcpManager).toBe(mcpManager);
-		expect(forwarded?.customTools?.map(tool => tool.name)).toEqual(["mcp__private_read"]);
+		expect(forwarded?.mcpTools?.map(tool => tool.name)).toEqual(["mcp__private_read"]);
+		expect(forwarded?.customTools).toBeUndefined();
 	});
 
 	it("preserves the legacy result shape when no output schema is selected", async () => {
@@ -524,6 +572,47 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 	});
 });
 
+describe("runSubprocess per-agent compaction threshold overrides", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("applies the override to the named child only, not to agents that child spawns", async () => {
+		const createSession = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValueOnce(createSessionResult(yieldEmittingSession()))
+			.mockResolvedValueOnce(createSessionResult(yieldEmittingSession()));
+		const rootSettings = Settings.isolated({ "compaction.thresholdTokens": 40_000 });
+
+		const child = await runSubprocess({
+			...baseOptions,
+			id: "compaction-override-child",
+			settings: rootSettings,
+			compactionThresholdOverride: { thresholdPercent: 80, thresholdTokens: -1 },
+		});
+		expect(child.exitCode).toBe(0);
+		const childSettings = createSession.mock.calls[0]?.[0]?.settings;
+		if (!childSettings) throw new Error("Expected child settings");
+		const childCompaction = cfgCompaction.get(childSettings);
+		expect(resolveThresholdTokens(200_000, childCompaction)).toBe(160_000);
+		expect(shouldCompact(50_000, 200_000, childCompaction)).toBe(false);
+		expect(shouldCompact(160_001, 200_000, childCompaction)).toBe(true);
+
+		// A grandchild without its own entry is spawned from the child's settings.
+		const grandchild = await runSubprocess({
+			...baseOptions,
+			id: "compaction-override-grandchild",
+			settings: childSettings,
+		});
+		expect(grandchild.exitCode).toBe(0);
+		const grandchildSettings = createSession.mock.calls[1]?.[0]?.settings;
+		if (!grandchildSettings) throw new Error("Expected grandchild settings");
+		const grandchildCompaction = cfgCompaction.get(grandchildSettings);
+		expect(resolveThresholdTokens(200_000, grandchildCompaction)).toBe(40_000);
+		expect(shouldCompact(50_000, 200_000, grandchildCompaction)).toBe(true);
+	});
+});
+
 describe("runSubprocess per-agent service-tier overrides", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -579,10 +668,36 @@ describe("runSubprocess per-agent service-tier overrides", () => {
 		const sessionOptions = spy.mock.calls[0]?.[0];
 		expect(sessionOptions?.resolveServiceTierByFamily).toBeUndefined();
 		expect([
-			sessionOptions?.settings?.get("tier.openai"),
-			sessionOptions?.settings?.get("tier.anthropic"),
-			sessionOptions?.settings?.get("tier.google"),
+			sessionOptions?.settings ? cfgTierOpenai.get(sessionOptions?.settings) : undefined,
+			sessionOptions?.settings ? cfgTierAnthropic.get(sessionOptions?.settings) : undefined,
+			sessionOptions?.settings ? cfgTierGoogle.get(sessionOptions?.settings) : undefined,
 		]).toEqual(["flex", "none", "flex"]);
+	});
+
+	it("drops inherited live tiers a family can't realize instead of failing the spawn", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		// A resumed parent session file can carry a live tier its family never realizes.
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: [`${model.provider}/${model.id}`] },
+			id: "subagent-inherited-unrealizable-tier",
+			settings: Settings.isolated({ "tier.subagent": "inherit" }),
+			parentServiceTier: { openai: "flex", anthropic: "flex" },
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		const childSettings = spy.mock.calls[0]?.[0]?.settings;
+		if (!childSettings) throw new Error("Expected createAgentSession to receive settings");
+		expect([
+			cfgTierOpenai.get(childSettings),
+			cfgTierAnthropic.get(childSettings),
+			cfgTierGoogle.get(childSettings),
+		]).toEqual(["flex", "none", "none"]);
 	});
 
 	it("lets an unsupported concrete override beat the global tier without crossing families", async () => {
@@ -657,4 +772,144 @@ describe("runSubprocess per-agent service-tier overrides", () => {
 		expect(childTiers(sessionOptions, openAIModel)).toEqual({ openai: "priority" });
 		expect(childTiers(sessionOptions, undefined)).toEqual({});
 	});
+});
+
+describe("runSubprocess follows the parent's MCP manager", () => {
+	const FIXTURE_PATH = path.join(import.meta.dir, "..", "fixtures", "many-tools-mcp.ts");
+	const fixtureConfig = (): MCPStdioServerConfig => ({
+		type: "stdio",
+		command: process.execPath,
+		args: [FIXTURE_PATH],
+	});
+	const toolOf = (server: string) => `mcp__${server}_${manyToolName(0)}`;
+	let workDir: string;
+	let manager: MCPManager;
+
+	/**
+	 * Connects and awaits the initial tool loads. `connectServers` alone returns after
+	 * its startup window (250 ms by default), which a loaded runner outlasts while the
+	 * stdio fixture spawns, leaving the server's tools unregistered.
+	 */
+	const connectReady = async (configs: Record<string, MCPStdioServerConfig>): Promise<void> => {
+		await manager.connectServers(configs, {});
+		expect(await manager.waitForStartup(0)).toEqual({ connected: Object.keys(configs), pending: [], failed: [] });
+	};
+
+	beforeEach(() => {
+		workDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-subagent-mcp-follow-"));
+		manager = new MCPManager(workDir);
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await manager.disconnectAll();
+		removeSyncWithRetries(workDir);
+	});
+
+	/** A live child that records MCP rebinds and the teardowns it registers. */
+	function followingChild(onPrompt: (child: { refreshedWith: (names: string[]) => Promise<void> }) => Promise<void>) {
+		const refreshed: string[][] = [];
+		const disposers: Array<() => void> = [];
+		const waiters: Array<{ names: string[]; resolve: () => void }> = [];
+		const covers = (tools: string[], names: string[]) => names.every(name => tools.includes(name));
+		/** Resolves once a rebind carries every name — awaits the signal, not a guessed delay. */
+		const refreshedWith = (names: string[]): Promise<void> => {
+			if (covers(refreshed.at(-1) ?? [], names)) return Promise.resolve();
+			const { promise, resolve } = Promise.withResolvers<void>();
+			waiters.push({ names, resolve });
+			return promise;
+		};
+		const session = createMockSession(async ({ emit }) => {
+			await onPrompt({ refreshedWith });
+			emitYield(emit);
+		});
+		Object.assign(session, {
+			refreshMCPTools: async (tools: CustomTool[]) => {
+				const names = tools.map(tool => tool.name);
+				refreshed.push(names);
+				for (const waiter of waiters.splice(0)) {
+					if (covers(names, waiter.names)) waiter.resolve();
+					else waiters.push(waiter);
+				}
+			},
+			addDisposer: (dispose: () => void) => {
+				disposers.push(dispose);
+			},
+		});
+		return { session, refreshed, disposers };
+	}
+
+	it("rebinds a live subagent's MCP tools when the parent adds a server and reloads mid-run", async () => {
+		await connectReady({ alpha: fixtureConfig() });
+		const child = followingChild(async ({ refreshedWith }) => {
+			// `/mcp add bravo` then `/mcp reload` in the parent while the child runs.
+			await manager.disconnectAll();
+			await manager.connectServers({ alpha: fixtureConfig(), bravo: fixtureConfig() }, {});
+			await refreshedWith([toolOf("alpha"), toolOf("bravo")]);
+		});
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(child.session));
+
+		const result = await runSubprocess({ ...baseOptions, id: "mcp-follow-reload", mcpManager: manager });
+
+		expect(result.exitCode).toBe(0);
+		const spawnTools = spy.mock.calls[0]?.[0]?.mcpTools?.map(tool => tool.name) ?? [];
+		expect(spawnTools).toContain(toolOf("alpha"));
+		expect(spawnTools).not.toContain(toolOf("bravo"));
+
+		// Session teardown releases the subscription: later reloads leave it alone.
+		// disconnectAll emits synchronously, and a still-subscribed follower would
+		// rebind in the microtask queued before this await resumes.
+		for (const dispose of child.disposers) dispose();
+		const refreshCount = child.refreshed.length;
+		await manager.disconnectAll();
+		expect(child.refreshed).toHaveLength(refreshCount);
+	}, 20_000);
+
+	it("replays a manager change that lands while the subagent session is still being created", async () => {
+		const child = followingChild(async ({ refreshedWith }) => {
+			await refreshedWith([toolOf("alpha")]);
+		});
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			// The server finishes connecting after proxies were minted but before bind.
+			await connectReady({ alpha: fixtureConfig() });
+			return createSessionResult(child.session);
+		});
+
+		const result = await runSubprocess({ ...baseOptions, id: "mcp-follow-startup", mcpManager: manager });
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.mcpTools).toBeUndefined();
+		expect(child.refreshed.at(-1)).toContain(toolOf("alpha"));
+	}, 20_000);
+
+	it("never rebinds an MCP proxy over an explicitly supplied same-name child tool", async () => {
+		// Kernel-defined (eval) tools reach children through `customTools` and may
+		// carry `mcp__…` names; the child's own tool must keep the name on reload.
+		const kernelTool: CustomTool = {
+			name: toolOf("alpha"),
+			label: toolOf("alpha"),
+			description: "Kernel-defined tool sharing an MCP tool's minted name.",
+			parameters: { type: "object", properties: {} },
+			execute: async () => ({ content: [{ type: "text", text: "kernel" }] }),
+		};
+		const siblingProxy = `mcp__alpha_${manyToolName(1)}`;
+		await connectReady({ alpha: fixtureConfig() });
+		const child = followingChild(async ({ refreshedWith }) => {
+			await manager.disconnectAll();
+			await manager.connectServers({ alpha: fixtureConfig() }, {});
+			await refreshedWith([siblingProxy]);
+		});
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(child.session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "mcp-follow-collision",
+			mcpManager: manager,
+			customTools: [kernelTool],
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.customTools).toEqual([kernelTool]);
+		expect(child.refreshed.at(-1)).not.toContain(toolOf("alpha"));
+	}, 20_000);
 });

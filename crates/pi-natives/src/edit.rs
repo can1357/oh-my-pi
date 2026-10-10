@@ -6,7 +6,11 @@
 //! computes per-file diff previews off the JS thread and delivers them via
 //! the `onPreview` callback, and [`EditSession::apply`] stages the finished
 //! edit in memory and writes every file through the host-owned `writer`
-//! callback (LSP writethrough / ACP bridge stay in TypeScript).
+//! callback (LSP writethrough / ACP bridge stay in TypeScript). Internal URL
+//! targets the engine misses resolve through the host `resolveUrl` callback,
+//! awaited without blocking a thread; previews and apply rerun on the answers.
+//! Apply never reuses a preview's answers: it asks again for every URL target
+//! the finished payload names, in one pass, before staging.
 //!
 //! [`EditStore`] holds the session-wide snapshot/clipboard/no-op state that
 //! read-side tools populate. The remaining exports are pure helpers used by
@@ -14,6 +18,7 @@
 //! formatting, notebook decoding).
 
 use std::{
+	collections::HashSet,
 	path::{Path, PathBuf},
 	sync::{
 		Arc,
@@ -23,12 +28,13 @@ use std::{
 
 use async_trait::async_trait;
 use napi::{
+	Status,
 	bindgen_prelude::{Promise, Result},
 	threadsafe_function::{ThreadsafeFunction, UnknownReturnValue},
 };
 use napi_derive::napi;
 use pi_edit::{
-	EditError, EditMode, EditResult, PathPolicy, Session,
+	EditError, EditMode, EditResult, PathPolicy, Session, UrlResolution,
 	diff_string::{BlockContextSource, generate_diff_string},
 	modes::{hashline, sloppy},
 	path_policy::canonical_key,
@@ -51,14 +57,6 @@ fn reason(err: impl std::fmt::Display) -> napi::Error {
 // Policy and result objects
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// A cached `vault://` root.
-#[napi(object)]
-pub struct EditVaultRoot {
-	/// Vault name; `_` is the active vault.
-	pub name: String,
-	pub root: String,
-}
-
 /// Session-wide policy; TypeScript builds it once per tool call.
 #[napi(object)]
 pub struct EditPolicy {
@@ -70,10 +68,13 @@ pub struct EditPolicy {
 	pub enforce_seen_lines:   bool,
 	pub block_auto_generated: bool,
 	pub plan_active:          bool,
-	/// Root of the `local://` artifact sandbox; null when the session has none.
-	pub local_sandbox_root:   Option<String>,
-	/// Cached vault roots; null when the vault protocol is disabled.
-	pub vault_roots:          Option<Vec<EditVaultRoot>>,
+	/// Registered internal URL schemes (router spec keys).
+	pub url_schemes:          Vec<String>,
+	/// The `urlSchemes` whose single-slash `scheme:/x` spelling aliases
+	/// `scheme://x` (spec `singleSlashAlias`).
+	pub url_alias_schemes:    Vec<String>,
+	/// Plain-path roots writable in plan mode.
+	pub plan_writable_roots:  Vec<String>,
 	pub home_dir:             String,
 	/// The payload is a verbatim custom-format string, not JSON.
 	pub raw_input:            bool,
@@ -86,13 +87,13 @@ impl EditPolicy {
 			policy:             PathPolicy {
 				cwd:                  PathBuf::from(self.cwd),
 				home_dir:             PathBuf::from(self.home_dir),
-				local_sandbox_root:   self.local_sandbox_root.map(PathBuf::from),
-				vault_roots:          self.vault_roots.map(|roots| {
-					roots
-						.into_iter()
-						.map(|r| (r.name, PathBuf::from(r.root)))
-						.collect()
-				}),
+				url_schemes:          self.url_schemes,
+				url_alias_schemes:    self.url_alias_schemes,
+				plan_writable_roots:  self
+					.plan_writable_roots
+					.into_iter()
+					.map(PathBuf::from)
+					.collect(),
 				plan_active:          self.plan_active,
 				block_auto_generated: self.block_auto_generated,
 			},
@@ -102,6 +103,17 @@ impl EditPolicy {
 			raw_input:          self.raw_input,
 		})
 	}
+}
+
+/// Host answer for one internal URL (`resolveUrl`).
+#[napi(object)]
+pub struct EditUrlResolution {
+	/// Absolute backing file; null when no local file backs the URL.
+	pub path:          Option<String>,
+	/// Model-facing refusal (read-only, disabled…); wins over `path`.
+	pub error:         Option<String>,
+	/// Writable while plan mode is active (sandbox-scoped scheme).
+	pub plan_writable: bool,
 }
 
 /// One file's streamed diff preview.
@@ -296,8 +308,7 @@ impl EditStore {
 	pub fn head_hash(&self, absolute_path: String) -> Option<String> {
 		self
 			.inner
-			.head(&canonical_key(Path::new(&absolute_path)))
-			.map(|s| s.hash)
+			.head_hash(&canonical_key(Path::new(&absolute_path)))
 	}
 
 	/// Recorded text of `absolutePath` tagged `hash`.
@@ -316,7 +327,7 @@ impl EditStore {
 		self
 			.inner
 			.by_hash(&canonical_key(Path::new(&absolute_path)), &hash)
-			.and_then(|s| s.seen_lines.map(|set| set.into_iter().collect()))
+			.and_then(|s| s.seen_lines.map(|set| set.iter().copied().collect()))
 	}
 
 	#[napi]
@@ -346,6 +357,12 @@ impl EditStore {
 type PreviewCallback = ThreadsafeFunction<EditPreviewBatch, UnknownReturnValue>;
 type WriterCallback = ThreadsafeFunction<EditWriteRequest, Promise<EditWriteResponse>>;
 
+/// Weak so a session awaiting GC never keeps the event loop alive: every call
+/// happens while the pump's preview callback or `apply`'s pending promise
+/// holds it.
+type ResolverCallback =
+	ThreadsafeFunction<String, Promise<EditUrlResolution>, String, Status, true, true>;
+
 /// Argument mutations queued on the JS thread and drained into the session
 /// under its lock, preserving arrival order without ever blocking JS.
 enum ArgOp {
@@ -355,16 +372,65 @@ enum ArgOp {
 }
 
 struct Shared {
-	session: napi::tokio::sync::Mutex<Session>,
-	queue:   parking_lot::Mutex<Vec<ArgOp>>,
-	closed:  AtomicBool,
-	wake:    flume::Sender<()>,
+	session:     napi::tokio::sync::Mutex<Session>,
+	queue:       parking_lot::Mutex<Vec<ArgOp>>,
+	/// Stops the preview pump; set by both `close` and `apply`.
+	closed:      AtomicBool,
+	/// Set by `apply` before it waits for the lock. A preview pass that
+	/// observes `closed` must then leave the session alone: it holds the
+	/// arguments the pass already drained, and `apply` releases it itself.
+	applying:    AtomicBool,
+	wake:        flume::Sender<()>,
+	/// Host internal-URL resolver; without one, misses surface as errors.
+	resolve_url: Option<ResolverCallback>,
 }
 
 impl Shared {
 	fn enqueue(&self, op: ArgOp) {
 		self.queue.lock().push(op);
 		let _ = self.wake.try_send(());
+	}
+
+	/// Drop the session's cached file reads, URL answers, and argument buffer
+	/// once it is closed, so they do not wait for the JS GC to finalize the
+	/// wrapper (nothing reports this native memory to the GC). A closed session
+	/// is never previewed or applied again, so a fresh one is equivalent.
+	fn release(session: &mut Session) {
+		*session = Session::new(session.config().clone(), session.store().clone());
+	}
+
+	/// `true` when the pump must stop. Releases the session's buffers only
+	/// when `close` ended it, never while `apply` is about to consume them.
+	fn stop_previewing(&self, session: &mut Session) -> bool {
+		if !self.closed.load(Ordering::Acquire) {
+			return false;
+		}
+		if !self.applying.load(Ordering::Acquire) {
+			Self::release(session);
+		}
+		true
+	}
+
+	/// Stop previews ahead of `apply`, which takes over the session.
+	fn begin_apply(&self) {
+		self.applying.store(true, Ordering::Release);
+		self.closed.store(true, Ordering::Release);
+		let _ = self.wake.try_send(());
+	}
+
+	/// One preview computation under the session lock (blocking pool): the
+	/// batch plus the URLs it missed, or `None` when nothing is pending or the
+	/// session closed meanwhile.
+	fn preview_pass(&self, session: &mut Session) -> Option<(PreviewBatch, Vec<String>)> {
+		self.drain_into(session);
+		if !session.preview_pending() {
+			return None;
+		}
+		let batch = session.preview();
+		if self.stop_previewing(session) {
+			return None;
+		}
+		Some((batch, session.take_unresolved()))
 	}
 
 	/// Apply every queued mutation to the locked session.
@@ -415,6 +481,47 @@ impl EditWriter for TsfnWriter {
 	}
 }
 
+/// One host round trip for `url`, awaited on the async side (never blocking
+/// a thread on JS). A resolver or promise failure becomes a refusal carrying
+/// the failure message.
+async fn resolve_one(resolver: &ResolverCallback, url: &str) -> UrlResolution {
+	let answer = match resolver.call_async(Ok(url.to_owned())).await {
+		Ok(promise) => promise.await,
+		Err(err) => Err(err),
+	};
+	match answer {
+		Ok(answer) => UrlResolution {
+			absolute:      answer.path.map(PathBuf::from),
+			error:         answer.error,
+			plan_writable: answer.plan_writable,
+		},
+		Err(err) => UrlResolution {
+			absolute:      None,
+			error:         Some(err.reason),
+			plan_writable: false,
+		},
+	}
+}
+
+/// Resolve the URLs `session` missed that `resolved` has not answered yet
+/// and feed the answers back. `true` when anything new was provided, so a
+/// retry can make progress; a URL that misses again after its answer never
+/// triggers another round trip.
+async fn resolve_misses(
+	session: &mut Session,
+	resolver: &ResolverCallback,
+	resolved: &mut HashSet<String>,
+) -> bool {
+	let mut misses = session.take_unresolved();
+	misses.retain(|url| resolved.insert(url.clone()));
+	let progressed = !misses.is_empty();
+	for url in misses {
+		let resolution = resolve_one(resolver, &url).await;
+		session.provide(url, resolution);
+	}
+	progressed
+}
+
 /// One edit tool call's streaming session.
 #[napi]
 pub struct EditSession {
@@ -425,6 +532,8 @@ pub struct EditSession {
 impl EditSession {
 	/// Open a session. `onPreview` (optional) receives every settled preview
 	/// batch; batches are delivered one at a time, in generation order.
+	/// `resolveUrl` (optional) maps an internal URL target to its backing
+	/// file; without it such targets fail as unresolved.
 	#[napi(constructor)]
 	pub fn new(
 		store: &EditStore,
@@ -432,6 +541,9 @@ impl EditSession {
 		#[napi(ts_arg_type = "((error: Error | null, batch: EditPreviewBatch) => void) | \
 		                      undefined | null")]
 		on_preview: Option<PreviewCallback>,
+		#[napi(ts_arg_type = "((error: Error | null, url: string) => Promise<EditUrlResolution>) \
+		                      | undefined | null")]
+		resolve_url: Option<ResolverCallback>,
 	) -> Result<Self> {
 		let config = policy.into_config()?;
 		let (wake, rx) = flume::bounded::<()>(1);
@@ -439,7 +551,9 @@ impl EditSession {
 			session: napi::tokio::sync::Mutex::new(Session::new(config, store.inner.clone())),
 			queue: parking_lot::Mutex::new(Vec::new()),
 			closed: AtomicBool::new(false),
+			applying: AtomicBool::new(false),
 			wake,
+			resolve_url,
 		});
 		if let Some(on_preview) = on_preview {
 			napi::bindgen_prelude::spawn(preview_pump(Arc::clone(&shared), rx, on_preview));
@@ -476,18 +590,39 @@ impl EditSession {
 		                      Promise<EditWriteResponse>")]
 		writer: WriterCallback,
 	) -> Result<EditApplyOutcome> {
-		self.shared.closed.store(true, Ordering::Release);
-		let _ = self.shared.wake.try_send(());
+		self.shared.begin_apply();
 		let shared = Arc::clone(&self.shared);
 		let mut session = shared.session.lock().await;
 		shared.drain_into(&mut session);
 		let writer = TsfnWriter { tsfn: writer };
-		let outcome = session
-			.apply(
-				ApplyRequest { lsp_batch_id: request.lsp_batch_id, lsp_flush: request.lsp_flush },
-				&writer,
-			)
-			.await;
+		let request =
+			ApplyRequest { lsp_batch_id: request.lsp_batch_id, lsp_flush: request.lsp_flush };
+		// Apply never reuses preview-time answers (resolved before approval,
+		// without this call's abort signal): every URL target the payload names
+		// is asked again, in one pass, before the first stage.
+		let mut resolved = HashSet::new();
+		if let Some(resolver) = &shared.resolve_url {
+			for url in session.begin_apply_url_targets() {
+				let resolution = resolve_one(resolver, &url).await;
+				resolved.insert(url.clone());
+				session.provide(url, resolution);
+			}
+		}
+		// Misses the payload projection did not predict surface before the first
+		// write, so a retry is safe; each one follows a newly resolved URL,
+		// bounding attempts by distinct URLs + 1.
+		let outcome = loop {
+			let outcome = session.apply(request.clone(), &writer).await;
+			if matches!(outcome, Err(EditError::UnresolvedUrl(_)))
+				&& let Some(resolver) = &shared.resolve_url
+				&& resolve_misses(&mut session, resolver, &mut resolved).await
+			{
+				continue;
+			}
+			break outcome;
+		};
+		Shared::release(&mut session);
+		drop(session);
 		Ok(match outcome {
 			Ok(outcome) => EditApplyOutcome {
 				text:     outcome.text,
@@ -523,31 +658,30 @@ impl EditSession {
 	pub fn close(&self) {
 		self.shared.closed.store(true, Ordering::Release);
 		let _ = self.shared.wake.try_send(());
+		// While `apply` runs it owns the buffers and releases them itself. A
+		// busy lock otherwise belongs to a preview pass, which releases on its
+		// way out once it observes `closed`.
+		if self.shared.applying.load(Ordering::Acquire) {
+			return;
+		}
+		if let Ok(mut session) = self.shared.session.try_lock() {
+			self.shared.queue.lock().clear();
+			Shared::release(&mut session);
+		}
 	}
 }
 
-/// Preview pump: wait for a wake, compute the preview for the newest
-/// buffer on the blocking pool, deliver it, and repeat until the final
-/// (post-`finish`) pass ran or the session closed. One callback is in
-/// flight at a time so the JS event loop's consumption rate backpressures
-/// preview work.
+/// Preview pump: wait for a wake, settle the preview for the newest buffer,
+/// deliver it, and repeat until the final (post-`finish`) pass ran or the
+/// session closed. One callback is in flight at a time so the JS event
+/// loop's consumption rate backpressures preview work.
 async fn preview_pump(shared: Arc<Shared>, rx: flume::Receiver<()>, on_preview: PreviewCallback) {
 	while rx.recv_async().await.is_ok() {
 		while rx.try_recv().is_ok() {}
 		if shared.closed.load(Ordering::Acquire) {
 			return;
 		}
-		let compute = Arc::clone(&shared);
-		let batch = napi::bindgen_prelude::spawn_blocking(move || {
-			let mut session = compute.session.blocking_lock();
-			compute.drain_into(&mut session);
-			if !session.preview_pending() {
-				return None;
-			}
-			Some(session.preview())
-		})
-		.await;
-		let Ok(Some(batch)) = batch else {
+		let Some(batch) = settled_preview(&shared).await else {
 			continue;
 		};
 		let is_final = !batch.streaming;
@@ -564,6 +698,49 @@ async fn preview_pump(shared: Arc<Shared>, rx: flume::Receiver<()>, on_preview: 
 		}
 		if is_final {
 			return;
+		}
+	}
+}
+
+/// Compute the preview on the blocking pool; while it misses internal URLs
+/// this settle has not answered yet, resolve them with no session lock held
+/// across the JS round trips, feed the answers back, and recompute, so a
+/// delivered batch is never superseded by a pending resolution rerun. Each
+/// rerun follows a newly resolved URL, bounding passes by distinct URLs + 1.
+/// `None` when nothing is pending, the session closed, or the blocking task
+/// failed.
+async fn settled_preview(shared: &Arc<Shared>) -> Option<PreviewBatch> {
+	let mut resolved = HashSet::new();
+	loop {
+		if shared.closed.load(Ordering::Acquire) {
+			return None;
+		}
+		let compute = Arc::clone(shared);
+		let pass = napi::bindgen_prelude::spawn_blocking(move || {
+			compute.preview_pass(&mut compute.session.blocking_lock())
+		})
+		.await;
+		let Ok(Some((batch, mut misses))) = pass else {
+			return None;
+		};
+		let Some(resolver) = &shared.resolve_url else {
+			return Some(batch);
+		};
+		misses.retain(|url| resolved.insert(url.clone()));
+		if misses.is_empty() {
+			return Some(batch);
+		}
+		let mut answers = Vec::with_capacity(misses.len());
+		for url in misses {
+			let resolution = resolve_one(resolver, &url).await;
+			answers.push((url, resolution));
+		}
+		let mut session = shared.session.lock().await;
+		if shared.stop_previewing(&mut session) {
+			return None;
+		}
+		for (url, resolution) in answers {
+			session.provide(url, resolution);
 		}
 	}
 }
@@ -642,8 +819,9 @@ pub fn edit_diff_string(
 	path: Option<String>,
 ) -> EditDiffResult {
 	let output = generate_diff_string(&old_text, &new_text, None, &BlockContextSource {
-		path: path.as_deref(),
-		lang: None,
+		path:      path.as_deref(),
+		lang:      None,
+		streaming: false,
 	});
 	EditDiffResult { diff: output.diff, first_changed_line: output.first_changed_line }
 }
@@ -668,8 +846,9 @@ pub fn edit_auto_generated_message(absolute_path: String, display_path: String) 
 	let policy = PathPolicy {
 		cwd:                  PathBuf::new(),
 		home_dir:             PathBuf::new(),
-		local_sandbox_root:   None,
-		vault_roots:          None,
+		url_schemes:          Vec::new(),
+		url_alias_schemes:    Vec::new(),
+		plan_writable_roots:  Vec::new(),
 		plan_active:          false,
 		block_auto_generated: true,
 	};
@@ -702,7 +881,7 @@ pub struct InlineSloppyRegion {
 	pub payload: String,
 }
 
-/// Locate `<SM:EDIT path="…">` payloads the model emitted as plain text.
+/// Locate `*** Edit File: path` payloads the model emitted as plain text.
 #[napi]
 pub fn extract_inline_sloppy_regions(text: String) -> Vec<InlineSloppyRegion> {
 	sloppy::parse::extract_inline_sloppy_regions(&text)
@@ -771,4 +950,69 @@ pub fn hashline_count_ops(input: String) -> Vec<HashlineOpCount> {
 #[napi]
 pub fn notebook_to_editable_text(json: String, display_path: String) -> Result<String> {
 	pi_edit::notebook::notebook_to_editable_text(&json, &display_path).map_err(reason)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn shared_with_finished_patch(cwd: &Path) -> Shared {
+		let config = SessionConfig {
+			mode:               EditMode::ApplyPatch,
+			policy:             PathPolicy {
+				cwd:                  cwd.to_path_buf(),
+				home_dir:             cwd.to_path_buf(),
+				url_schemes:          Vec::new(),
+				url_alias_schemes:    Vec::new(),
+				plan_writable_roots:  Vec::new(),
+				plan_active:          false,
+				block_auto_generated: true,
+			},
+			allow_fuzzy:        true,
+			fuzzy_threshold:    0.95,
+			enforce_seen_lines: false,
+			raw_input:          false,
+		};
+		let (wake, _rx) = flume::bounded::<()>(1);
+		let shared = Shared {
+			session: napi::tokio::sync::Mutex::new(Session::new(config, store::EditStore::new())),
+			queue: parking_lot::Mutex::new(Vec::new()),
+			closed: AtomicBool::new(false),
+			applying: AtomicBool::new(false),
+			wake,
+			resolve_url: None,
+		};
+		let args = serde_json::json!({
+			"input": "*** Begin Patch\n*** Add File: pi-edit-session-test.txt\n+hi\n*** End Patch\n",
+		});
+		shared.enqueue(ArgOp::SetArgs(args.to_string()));
+		shared.enqueue(ArgOp::Finish);
+		shared
+	}
+
+	/// `finish()` then `apply()` while the final preview pass holds the lock:
+	/// the pass has drained the queue into the session, so releasing it on
+	/// seeing `closed` would leave `apply` an empty buffer. Fails on the
+	/// single shared `closed` flag.
+	#[test]
+	fn preview_pass_keeps_buffers_when_apply_closed_the_session() {
+		let shared = shared_with_finished_patch(&std::env::temp_dir());
+		let mut session = shared.session.blocking_lock();
+		shared.begin_apply();
+		assert!(shared.preview_pass(&mut session).is_none());
+		assert!(shared.queue.lock().is_empty(), "the pass drained the queue");
+		let batch = session.preview();
+		assert!(!batch.streaming);
+		assert_eq!(batch.files.len(), 1, "{batch:?}");
+	}
+
+	/// A pass that sees `close()` still frees the buffers.
+	#[test]
+	fn preview_pass_releases_buffers_after_close() {
+		let shared = shared_with_finished_patch(&std::env::temp_dir());
+		let mut session = shared.session.blocking_lock();
+		shared.closed.store(true, Ordering::Release);
+		assert!(shared.preview_pass(&mut session).is_none());
+		assert!(session.preview().files.is_empty());
+	}
 }

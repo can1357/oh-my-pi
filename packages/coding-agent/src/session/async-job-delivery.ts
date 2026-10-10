@@ -12,6 +12,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -26,6 +27,11 @@ export const ASYNC_RESULT_MESSAGE_TYPE = "async-result";
 /** Result payloads longer than this spill to an artifact with an inline preview. */
 export const ASYNC_INLINE_RESULT_MAX_CHARS = 12_000;
 export const ASYNC_PREVIEW_MAX_CHARS = 4_000;
+/**
+ * Tail share of the preview when the link points at a raw capture: tools append
+ * notices (wall time, exit code, timeout) after the captured stream.
+ */
+export const ASYNC_PREVIEW_TAIL_CHARS = 1_000;
 
 export interface AsyncResultEntry {
 	jobId: string;
@@ -75,12 +81,26 @@ export function renderStructuredJson(structured: StructuredSubagentOutput): stri
 	return truncateMiddle(serialized, { maxBytes: ASYNC_PREVIEW_MAX_CHARS }).content;
 }
 
+/**
+ * Headline for the delivery's "Structured output:" line. `unavailable` means
+ * no payload was ever validated (the run failed before yielding, or the
+ * schema itself was unusable) — never a schema verdict, so it must not read
+ * as "schema unavailable"/"schema invalid".
+ */
+export function structuredStatusLabel(status: StructuredSubagentOutput["status"]): string {
+	return status === "unavailable" ? "unavailable" : `schema ${status}`;
+}
+
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
 	const jobs = entries.map(entry => {
 		const structured = entry.job?.structured;
 		const hasStructuredData = structured ? Object.hasOwn(structured, "data") : false;
 		const structuredJson = structured && structured.status !== "valid" ? renderStructuredJson(structured) : undefined;
+		// Job output (a command's output, or a task's `<task-result>` around a
+		// subagent's output), a subagent's payload and its validation error are
+		// text the job controls: it must not close the `<system-notice>` it renders
+		// into or open a forged harness block.
 		return {
 			jobId: entry.jobId,
 			// The job manager disambiguates a requested job id when it collides
@@ -90,16 +110,17 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			// advertised `agent://` URL from that, or the delivery would point
 			// at an id with no backing `<id>.md`/`.json` on disk.
 			agentUrlId: entry.job?.agentId ?? entry.jobId,
-			result: entry.result,
+			result: escapeHarnessTags(entry.result),
 			type: entry.job?.type,
 			label: entry.job?.label,
 			durationMs: entry.durationMs,
 			meta: entry.job?.latestDetails?.meta,
 			structured,
-			structuredJson,
+			structuredJson: structuredJson === undefined ? undefined : escapeHarnessTags(structuredJson),
 			hasStructuredData,
 			schemaStatus: structured?.status,
-			schemaError: structured?.error,
+			schemaStatusLabel: structured ? structuredStatusLabel(structured.status) : undefined,
+			schemaError: structured?.error === undefined ? undefined : escapeHarnessTags(structured.error),
 			schemaValid: structured?.status === "valid",
 		};
 	});

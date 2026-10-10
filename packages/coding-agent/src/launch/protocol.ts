@@ -4,7 +4,7 @@ import {
 	type DaemonReadySpec,
 	type DaemonSpec,
 	type DaemonSnapshot,
-} from "@oh-my-pi/pi-tui/tools/hub";
+} from "@oh-my-pi/pi-tui/tools/daemon";
 /**
  * Cross-process daemon broker protocol shared by the tool, client, and broker.
  */
@@ -29,7 +29,7 @@ export type DaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT" | "SIGKIL
 /** Typed broker operation sent over the authenticated socket. */
 export type DaemonOperation =
 	| { op: "ping" }
-	| { op: "start"; spec: DaemonSpec; owner?: string }
+	| { op: "start"; spec: DaemonSpec; owner?: string; replace?: boolean }
 	| { op: "list" }
 	| {
 			op: "logs";
@@ -45,8 +45,15 @@ export type DaemonOperation =
 	  }
 	| { op: "wait"; name: string; for: "ready" | "exit"; pattern?: string; timeoutMs: number }
 	| { op: "send"; name: string; data?: string; signal?: DaemonSignal }
-	| { op: "stop"; name: string; timeoutMs: number }
+	| {
+			op: "stop";
+			name: string;
+			timeoutMs: number;
+			/** Stop only this generation (`DaemonSnapshot.id`); another one is left running. Legacy brokers ignore it. */
+			id?: string;
+	  }
 	| { op: "restart"; name: string }
+	| { op: "mode"; name: string; mode: "persist" | "session" | "detached" }
 	| { op: "describe"; name: string }
 	| { op: "shutdown" };
 
@@ -71,6 +78,7 @@ export type DaemonRpcResult =
 	| { op: "send"; daemon: DaemonSnapshot }
 	| { op: "stop"; daemon: DaemonSnapshot }
 	| { op: "restart"; daemon: DaemonSnapshot }
+	| { op: "mode"; daemon: DaemonSnapshot }
 	| { op: "describe"; daemon: DaemonSnapshot; spec: DaemonSpec }
 	| { op: "shutdown" };
 
@@ -307,6 +315,7 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				op,
 				spec: parseDaemonSpec(source.spec),
 				owner: optionalString(source.owner, "operation.owner"),
+				replace: source.replace === undefined ? undefined : booleanValue(source.replace, "operation.replace"),
 			};
 		case "logs":
 			return {
@@ -346,10 +355,17 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				op,
 				name: stringValue(source.name, "operation.name"),
 				timeoutMs: numberValue(source.timeoutMs, "operation.timeoutMs"),
+				id: optionalString(source.id, "operation.id"),
 			};
 		case "restart":
 		case "describe":
 			return { op, name: stringValue(source.name, "operation.name") };
+		case "mode": {
+			const mode = stringValue(source.mode, "operation.mode");
+			if (mode !== "persist" && mode !== "session" && mode !== "detached")
+				throw new Error("operation.mode must be persist, session, or detached");
+			return { op, name: stringValue(source.name, "operation.name"), mode };
+		}
 		default:
 			throw new Error(`Unknown daemon operation: ${op}`);
 	}
@@ -397,6 +413,8 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 			return { op: "stop", daemon: parseDaemonSnapshot(source.daemon) };
 		case "restart":
 			return { op: "restart", daemon: parseDaemonSnapshot(source.daemon) };
+		case "mode":
+			return { op: "mode", daemon: parseDaemonSnapshot(source.daemon) };
 		case "describe":
 			return {
 				op: "describe",

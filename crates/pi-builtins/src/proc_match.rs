@@ -13,10 +13,8 @@
 
 use std::{
 	collections::{HashMap, HashSet},
-	fs,
 	future::Future,
 	io::{self, BufRead, Write},
-	path::{Path, PathBuf},
 	time::Duration,
 };
 
@@ -25,7 +23,12 @@ use brush_core::{ExecutionContext, ExecutionExitCode, ExecutionResult};
 use brush_core::openfiles::OpenFiles;
 use tokio_util::sync::CancellationToken;
 
-use crate::{kill::signal_number, proc_snapshot};
+use crate::{
+	host::ShellPaths,
+	kill::signal_number,
+	proc_select::{parse_group_list, parse_i32_list, parse_terminal_list, parse_user_list},
+	proc_snapshot,
+};
 
 /// What a process-matching command does with the processes it selects.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -83,7 +86,7 @@ pub(crate) fn run<SE: brush_core::ShellExtensions>(
 ) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
 	{
 		let command_name = context.command_name.clone();
-		let cwd = context.shell.working_dir().to_path_buf();
+		let paths = ShellPaths::new(&context);
 		async move {
 			#[cfg(unix)]
 			let stdin_watcher = context.try_fd(OpenFiles::STDIN_FD).and_then(|stdin| {
@@ -91,7 +94,13 @@ pub(crate) fn run<SE: brush_core::ShellExtensions>(
 				tokio::io::unix::AsyncFd::new(fd).ok()
 			});
 			let mut stdin = io::BufReader::new(context.stdin());
-			let mut options = match parse_proc_match_args(mode, &argv, &cwd, &mut stdin) {
+			let (parsed, mut stdin) = tokio::task::spawn_blocking(move || {
+				let parsed = parse_proc_match_args(mode, &argv, &paths, &mut stdin);
+				(parsed, stdin)
+			})
+			.await
+			.map_err(|error| io::Error::other(format!("process argument reader failed: {error}")))?;
+			let mut options = match parsed {
 				Ok(ParseProcResult::Options(options)) => *options,
 				Ok(ParseProcResult::Help) => {
 					write_proc_match_help(context.stdout(), &command_name, mode)?;
@@ -238,32 +247,99 @@ pub(crate) fn run<SE: brush_core::ShellExtensions>(
 							)?;
 						}
 					}
-					loop {
-						if processes
-							.iter()
-							.all(|process| process.status() == proc_snapshot::ProcessStatus::Exited)
-						{
-							break;
+					// `biased` keeps the old precedence: processes that are already gone
+					// report success even if cancellation is also pending.
+					if let Some(cancel_token) = context.cancel_token() {
+						tokio::select! {
+							biased;
+							() = wait_for_exits(&processes) => {},
+							() = cancel_token.cancelled() => {
+								return Ok(ExecutionExitCode::Interrupted.into());
+							},
 						}
-						if context.is_cancelled() {
-							return Ok(ExecutionExitCode::Interrupted.into());
-						}
-						if let Some(cancel_token) = context.cancel_token() {
-							tokio::select! {
-								() = tokio::time::sleep(Duration::from_millis(50)) => {},
-								() = cancel_token.cancelled() => {
-									return Ok(ExecutionExitCode::Interrupted.into());
-								},
-							}
-						} else {
-							tokio::time::sleep(Duration::from_millis(50)).await;
-						}
+					} else {
+						wait_for_exits(&processes).await;
 					}
 				},
 			}
 			Ok(ExecutionResult::success())
 		}
 	}
+}
+
+/// Resolves once every process in `processes` has exited.
+///
+/// Processes are awaited on kernel exit notifications where the platform has
+/// them (pidfds on Linux, process handles on Windows); only the ones that
+/// cannot be watched that way fall back to a 50 ms status poll.
+async fn wait_for_exits(processes: &[proc_snapshot::ProcInfo]) {
+	let polled = wait_for_watchable_exits(processes).await;
+	while polled
+		.iter()
+		.any(|process| process.status() != proc_snapshot::ProcessStatus::Exited)
+	{
+		tokio::time::sleep(Duration::from_millis(50)).await;
+	}
+}
+
+/// Waits on a pidfd per process and returns the processes that need polling.
+#[cfg(target_os = "linux")]
+async fn wait_for_watchable_exits(
+	processes: &[proc_snapshot::ProcInfo],
+) -> Vec<&proc_snapshot::ProcInfo> {
+	use tokio::io::{Interest, unix::AsyncFd};
+
+	let mut polled = Vec::new();
+	let mut watched = Vec::new();
+	for process in processes {
+		let Some(fd) = proc_snapshot::sys::open_pidfd(process.pid()) else {
+			polled.push(process);
+			continue;
+		};
+		// The pidfd names whoever owns the pid now. It is the selected process
+		// only if that process (matched by start time) is still alive after the
+		// open; otherwise it already exited and the pid may have been reused.
+		if process.status() == proc_snapshot::ProcessStatus::Exited {
+			continue;
+		}
+		match AsyncFd::with_interest(fd, Interest::READABLE) {
+			Ok(fd) => watched.push((process, fd)),
+			Err(_) => polled.push(process),
+		}
+	}
+	// A pidfd turns readable once its process has exited; readiness is never
+	// cleared, so awaiting them one after another is the same as awaiting all.
+	for (process, fd) in &watched {
+		if fd.readable().await.is_err() {
+			polled.push(process);
+		}
+	}
+	polled
+}
+
+/// Waits on each process's snapshot handle and returns the processes whose
+/// wait could not be registered, which need polling.
+#[cfg(windows)]
+async fn wait_for_watchable_exits(
+	processes: &[proc_snapshot::ProcInfo],
+) -> Vec<&proc_snapshot::ProcInfo> {
+	let mut polled = Vec::new();
+	// A process handle stays signalled once its process has exited, so
+	// awaiting them one after another is the same as awaiting all.
+	for process in processes {
+		if process.exited().await.is_err() {
+			polled.push(process);
+		}
+	}
+	polled
+}
+
+/// No exit notification primitive is wired up here; every process is polled.
+#[cfg(not(any(target_os = "linux", windows)))]
+async fn wait_for_watchable_exits(
+	processes: &[proc_snapshot::ProcInfo],
+) -> Vec<&proc_snapshot::ProcInfo> {
+	processes.iter().collect()
 }
 
 #[cfg(unix)]
@@ -319,7 +395,7 @@ enum ParseProcResult {
 fn parse_proc_match_args(
 	mode: ProcMatchMode,
 	argv: &[String],
-	cwd: &Path,
+	paths: &ShellPaths,
 	stdin: &mut impl BufRead,
 ) -> std::result::Result<ParseProcResult, (u8, String)> {
 	let mut options =
@@ -393,7 +469,7 @@ fn parse_proc_match_args(
 				"--euid" => parse_user_list(value.unwrap_or_default(), &mut options.effective_users)?,
 				"--uid" => parse_user_list(value.unwrap_or_default(), &mut options.real_users)?,
 				"--group" => parse_group_list(value.unwrap_or_default(), &mut options.real_groups)?,
-				"--terminal" => parse_terminal_list(value.unwrap_or_default(), &mut options.terminals)?,
+				"--terminal" => parse_terminal_list(value.unwrap_or_default(), &mut options.terminals, paths)?,
 				"--pidfile" => options
 					.pid_files
 					.push(value.unwrap_or_default().to_string()),
@@ -480,7 +556,7 @@ fn parse_proc_match_args(
 					'u' => parse_user_list(value, &mut options.effective_users)?,
 					'U' => parse_user_list(value, &mut options.real_users)?,
 					'G' => parse_group_list(value, &mut options.real_groups)?,
-					't' => parse_terminal_list(value, &mut options.terminals)?,
+					't' => parse_terminal_list(value, &mut options.terminals, paths)?,
 					'F' => options.pid_files.push(value.to_string()),
 					'L' => options.require_lock = true,
 					'p' => {
@@ -567,18 +643,17 @@ fn parse_proc_match_args(
 				.map_err(|err| (3, format!("cannot read pidfile from standard input: {err}")))?;
 			contents
 		} else {
-			let path = resolve_shell_path(cwd, file);
-			let mut pidfile = fs::File::open(&path)
-				.map_err(|err| (3, format!("cannot read pidfile '{}': {err}", path.display())))?;
+			let mut pidfile = paths.fs().open(paths.resolve(file))
+				.map_err(|err| (3, format!("cannot read pidfile '{file}': {err}")))?;
 			if options.require_lock
-				&& !pidfile_is_locked(&pidfile)
-					.map_err(|err| (3, format!("cannot inspect pidfile '{}': {err}", path.display())))?
+				&& !pidfile.is_locked()
+					.map_err(|err| (3, format!("cannot inspect pidfile '{file}': {err}")))?
 			{
-				return Err((3, format!("pidfile '{}' is not locked", path.display())));
+				return Err((3, format!("pidfile '{file}' is not locked")));
 			}
 			let mut contents = String::new();
 			io::Read::read_to_string(&mut pidfile, &mut contents)
-				.map_err(|err| (3, format!("cannot read pidfile '{}': {err}", path.display())))?;
+				.map_err(|err| (3, format!("cannot read pidfile '{file}': {err}")))?;
 			contents
 		};
 		let pid = contents
@@ -751,131 +826,6 @@ fn select_processes(
 	Ok((selected, host))
 }
 
-fn parse_i32_list(value: &str, target: &mut Vec<i32>) -> std::result::Result<(), (u8, String)> {
-	for item in value.split(',') {
-		let parsed = item
-			.parse::<i32>()
-			.map_err(|_| (2, format!("invalid numeric selector '{item}'")))?;
-		target.push(parsed);
-	}
-	Ok(())
-}
-
-fn parse_user_list(value: &str, target: &mut Vec<u32>) -> std::result::Result<(), (u8, String)> {
-	for item in value.split(',') {
-		target.push(resolve_user(item).ok_or_else(|| (2, format!("unknown user '{item}'")))?);
-	}
-	Ok(())
-}
-
-fn parse_group_list(value: &str, target: &mut Vec<u32>) -> std::result::Result<(), (u8, String)> {
-	for item in value.split(',') {
-		target.push(resolve_group(item).ok_or_else(|| (2, format!("unknown group '{item}'")))?);
-	}
-	Ok(())
-}
-
-#[cfg(unix)]
-fn resolve_user(value: &str) -> Option<u32> {
-	use std::ffi::CString;
-	if let Ok(id) = value.parse() {
-		return Some(id);
-	}
-	let name = CString::new(value).ok()?;
-	let mut record = std::mem::MaybeUninit::<libc::passwd>::zeroed();
-	let mut result = std::ptr::null_mut();
-	let mut buffer = vec![0u8; 16 * 1024];
-	// SAFETY: all pointers refer to live, writable storage for this call.
-	let status = unsafe {
-		libc::getpwnam_r(
-			name.as_ptr(),
-			record.as_mut_ptr(),
-			buffer.as_mut_ptr().cast(),
-			buffer.len(),
-			&raw mut result,
-		)
-	};
-	if status != 0 || result.is_null() {
-		return None;
-	}
-	// SAFETY: a successful getpwnam_r call initialized `record`.
-	Some(unsafe { record.assume_init() }.pw_uid)
-}
-
-#[cfg(not(unix))]
-fn resolve_user(value: &str) -> Option<u32> {
-	value.parse().ok()
-}
-
-#[cfg(unix)]
-fn resolve_group(value: &str) -> Option<u32> {
-	use std::ffi::CString;
-	if let Ok(id) = value.parse() {
-		return Some(id);
-	}
-	let name = CString::new(value).ok()?;
-	let mut record = std::mem::MaybeUninit::<libc::group>::zeroed();
-	let mut result = std::ptr::null_mut();
-	let mut buffer = vec![0u8; 16 * 1024];
-	// SAFETY: all pointers refer to live, writable storage for this call.
-	let status = unsafe {
-		libc::getgrnam_r(
-			name.as_ptr(),
-			record.as_mut_ptr(),
-			buffer.as_mut_ptr().cast(),
-			buffer.len(),
-			&raw mut result,
-		)
-	};
-	if status != 0 || result.is_null() {
-		return None;
-	}
-	// SAFETY: a successful getgrnam_r call initialized `record`.
-	Some(unsafe { record.assume_init() }.gr_gid)
-}
-
-#[cfg(not(unix))]
-fn resolve_group(value: &str) -> Option<u32> {
-	value.parse().ok()
-}
-
-fn parse_terminal_list(
-	value: &str,
-	target: &mut Vec<Option<u64>>,
-) -> std::result::Result<(), (u8, String)> {
-	for item in value.split(',') {
-		if matches!(item, "?" | "-") {
-			target.push(None);
-		} else if let Some(id) = resolve_terminal(item) {
-			target.push(Some(id));
-		} else if let Ok(id) = item.parse() {
-			target.push(Some(id));
-		} else {
-			return Err((2, format!("unknown terminal '{item}'")));
-		}
-	}
-	Ok(())
-}
-
-#[cfg(unix)]
-fn resolve_terminal(value: &str) -> Option<u64> {
-	use std::os::unix::fs::MetadataExt;
-	let primary = if value.starts_with('/') {
-		PathBuf::from(value)
-	} else {
-		Path::new("/dev").join(value)
-	};
-	fs::metadata(&primary)
-		.or_else(|_| fs::metadata(Path::new("/dev").join(format!("tty{value}"))))
-		.ok()
-		.map(|metadata| metadata.rdev())
-}
-
-#[cfg(not(unix))]
-fn resolve_terminal(_value: &str) -> Option<u64> {
-	None
-}
-
 fn parse_states(value: &str, target: &mut HashSet<char>) -> std::result::Result<(), (u8, String)> {
 	for state in value.split(',').flat_map(str::chars) {
 		if !state.is_ascii_alphabetic() {
@@ -884,40 +834,6 @@ fn parse_states(value: &str, target: &mut HashSet<char>) -> std::result::Result<
 		target.insert(state.to_ascii_uppercase());
 	}
 	Ok(())
-}
-
-fn resolve_shell_path(cwd: &Path, value: &str) -> PathBuf {
-	let normalized = brush_core::sys::fs::normalize_shell_path(Path::new(value));
-	if normalized.is_absolute() {
-		normalized.into_owned()
-	} else {
-		cwd.join(normalized)
-	}
-}
-
-#[cfg(unix)]
-fn pidfile_is_locked(file: &fs::File) -> io::Result<bool> {
-	use std::os::fd::AsRawFd;
-	let mut lock = libc::flock {
-		l_type:   libc::F_WRLCK as libc::c_short,
-		l_whence: libc::SEEK_SET as libc::c_short,
-		l_start:  0,
-		l_len:    0,
-		l_pid:    0,
-	};
-	// SAFETY: `file` owns a valid fd and `lock` is writable for F_GETLK.
-	if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &raw mut lock) } == -1 {
-		return Err(io::Error::last_os_error());
-	}
-	Ok(lock.l_type != libc::F_UNLCK as libc::c_short)
-}
-
-#[cfg(not(unix))]
-fn pidfile_is_locked(_file: &fs::File) -> io::Result<bool> {
-	Err(io::Error::new(
-		io::ErrorKind::Unsupported,
-		"pidfile lock validation is unavailable on this platform",
-	))
 }
 
 fn write_proc_match_help(
@@ -958,12 +874,14 @@ fn write_proc_match_help(
 
 #[cfg(all(test, windows))]
 mod tests {
+	use std::path::PathBuf;
+
 	use super::*;
 
 	#[test]
 	fn resolves_msys_drive_alias_pidfiles() {
 		assert_eq!(
-			resolve_shell_path(Path::new(r"C:\workspace"), "/c/Users/Adam/app.pid"),
+			ShellPaths::with_cwd(r"C:\workspace").resolve("/c/Users/Adam/app.pid"),
 			PathBuf::from(r"C:\Users\Adam\app.pid"),
 		);
 	}

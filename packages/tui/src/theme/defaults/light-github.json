@@ -111,5 +111,15 @@
 		"pageBg": "#f6f8fa",
 		"cardBg": "#ffffff",
 		"infoBg": "#fff8c5"
+	},
+	"terminal": {
+		"background": "bgDefault",
+		"foreground": "fgDefault",
+		"chrome": "bgMuted",
+		"widget": "bgDefault",
+		"ansi": [
+			"#24292f", "danger", "#116329", "#4d2d00", "accent", "done", "#1b7c83", "#6e7781",
+			"#57606a", "#a40e26", "#1a7f37", "#633c01", "#218bff", "#a475f9", "#3192aa", "lightGray"
+		]
 	}
 }

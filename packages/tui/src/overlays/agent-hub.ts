@@ -14,24 +14,34 @@
  * Replaces the old SessionObserverOverlayComponent (ctrl+s observer).
  */
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type {
+	TspPickerAction,
+	TspPickerColumn,
+	TspPickerItem,
+	TspPickerProps,
+	TspPickerScope,
+	TspSpan,
+	TspTreeNode,
+} from "@oh-my-pi/pi-wire";
 import { Container, type OverlayHandle, type TUI } from "../tui";
 import { matchesKey } from "../keys";
 import { routeSelectListMouse, routeSgrMouseInput, type SelectListMouseTarget } from "../mouse";
 import { padding, visibleWidth, wrapTextWithAnsi } from "../utils";
-import { formatAge, formatNumber, getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import { formatAge, formatDuration, formatNumber, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import {
 	type AgentActivitySource,
 	type AgentActivityKind,
 	type AgentActivityRow,
 	activityRowsFromProgress,
 } from "./agent-activity";
-import type { KeyId } from "../app-keybindings";
+import { formatKeyHint, formatKeyHints, type KeyId } from "../app-keybindings";
 import type { MessageRenderer } from "../chat/extension-types";
 import type { AgentLifecycleLike, IrcBusLike } from "./agent-hub-types";
 import { type AgentRecordLike, type AgentHubRegistry, type AgentStatus, MAIN_AGENT_ID } from "./agent-hub-types";
 import { USER_INTERRUPT_LABEL } from "../chat/messages";
 import { shortenPath, truncateToWidth } from "../render/render-utils";
 import { formatLocalDateTimeWithOffset } from "../chrome/local-date";
+import { getContextUsageLevel, getContextUsageTone } from "../chrome/context-thresholds";
 import type { ObservableSession, SessionObserverRegistry } from "./session-observer-registry";
 import { theme } from "../theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
@@ -39,7 +49,8 @@ import {
 	type AgentMetrics,
 	type AggregateMetrics,
 	aggregateMetrics,
-	progressMetrics,
+	hubFallbackStatsSession,
+	hubRowMetrics,
 	projectAgentTree,
 	STATUS_ORDER,
 } from "./agent-hub-projection";
@@ -52,11 +63,19 @@ import {
 	formatMetricDuration,
 	formatMetrics,
 	formatRoleBadge,
+	metricsText,
 	modelBadge,
+	modelBadgeSpans,
+	modelChip,
+	roleBadgeSpan,
 	type RosterRender,
 	sanitizeLine,
 	statusGlyph,
+	statusDot,
+	statusGlyphSpan,
 	statusText,
+	statusTone,
+	taskSummary,
 	treeBranch,
 	treeContinuation,
 	treeMetadataIndent,
@@ -68,6 +87,23 @@ import { fuzzyMatch } from "../fuzzy";
 import { bottomBorder, divider, dividerSplit, PanelRows, row, topBorder, topBorderSplit } from "../chrome/overlay-box";
 import { SplitPane } from "../components/layout/split-pane";
 import { Stack } from "../components/layout/stack";
+import { node, span, stableKey, text } from "../native/describe";
+import { type DescribeContext, leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
+import { hintsRow, type NativeHint, overlayCard } from "../native/overlay";
+import { CLOSE_ACTION, picker, pickerQuery } from "../native/picker";
+import { Input } from "../components/input";
+
+/** A chrome-less search field: the hub draws its own prompt. */
+function filterInput(): Input {
+	const input = new Input();
+	input.prompt = "";
+	return input;
+}
+
+/** The field's text with its caret drawn, sized to the value (no trailing padding). */
+function filterText(input: Input): string {
+	return input.render(visibleWidth(input.getValue()) + 1)[0] ?? "";
+}
 
 /** Two-pane mode needs a useful roster and a readable inspector. */
 const SPLIT_MIN_WIDTH = 96;
@@ -80,11 +116,95 @@ type ActivityScope = "all" | "agent" | "subtree";
 
 type HubViewMode = "roster" | "tree";
 
+const SECTION_TABS = [
+	{ id: "agents", label: "1 Agents" },
+	{ id: "activity", label: "2 Activity" },
+] as const satisfies ReadonlyArray<{ id: AgentHubSection; label: string }>;
+const VIEW_TABS = [
+	{ id: "roster", label: "Flat" },
+	{ id: "tree", label: "By parent" },
+] as const satisfies ReadonlyArray<{ id: HubViewMode; label: string }>;
+const AGENT_HINTS: Readonly<Record<HubViewMode, readonly NativeHint[]>> = {
+	roster: agentHints("by parent"),
+	tree: agentHints("flat"),
+};
+const ACTIVITY_HINTS: readonly NativeHint[] = [
+	{ keys: ["j", "k"], label: "select" },
+	{ keys: ["enter"], label: "transcript" },
+	{ keys: ["space"], label: "follow" },
+	{ keys: ["f"], label: "filter" },
+	{ keys: ["s"], label: "scope" },
+	{ keys: ["/"], label: "search" },
+	{ keys: ["escape"], label: "close" },
+];
+/** Recent-activity entries the native inspector lists for the selected agent. */
+const NATIVE_RECENT_ACTIVITY = 20;
+/** Child ids the native inspector names before summarizing the rest. */
+const NATIVE_CHILD_IDS = 12;
+
+/** Picker tabs: the two top-level projections (keys 1/2). */
+const PICKER_TABS = [
+	{ id: "agents", label: "Agents" },
+	{ id: "activity", label: "Activity" },
+] as const satisfies ReadonlyArray<{ id: AgentHubSection; label: string }>;
+/** Roster fact columns; lower priorities hide first on narrow sheets. */
+const AGENT_COLUMNS: readonly TspPickerColumn[] = [
+	{ id: "cost", head: "Cost", format: "price", priority: 6 },
+	{ id: "time", head: "Time", format: "elapsed", priority: 5 },
+	{ id: "req", head: "Req", format: "num", priority: 2 },
+	{ id: "tools", head: "Tools", format: "num", priority: 1 },
+	{ id: "tok", head: "Tok", format: "num", priority: 3 },
+	{ id: "ctx", head: "Ctx", format: "bar", priority: 4 },
+];
+const ACTIVITY_COLUMNS: readonly TspPickerColumn[] = [
+	{ id: "agent", head: "Agent", format: "text", priority: 2 },
+	{ id: "at", head: "Time", format: "dim", priority: 1 },
+];
+/** What the roster/activity projections contribute to the picker (the shared head is added once). */
+type PickerBody = Omit<Partial<TspPickerProps>, "title">;
+const ACTIVITY_FILTERS: readonly ActivityFilter[] = ["all", "errors", "responses", "tools"];
+/** Activity filters as the picker's scope column (`f` cycles them). */
+const ACTIVITY_FILTER_SCOPES: readonly TspPickerScope[] = [
+	{ id: "all", label: "All", icon: "list", group: "Show" },
+	{ id: "errors", label: "Errors", icon: "x-circle", group: "Show" },
+	{ id: "responses", label: "Responses", icon: "message", group: "Show" },
+	{ id: "tools", label: "Tools", icon: "wrench", group: "Show" },
+];
+const ACTIVITY_KIND_ICON: Readonly<Record<AgentActivityKind, string>> = {
+	response: "message",
+	tool: "wrench",
+	irc: "send",
+	lifecycle: "activity",
+};
+
+function agentHints(nextView: string): readonly NativeHint[] {
+	return [
+		{ keys: ["j", "k"], label: "select" },
+		{ keys: ["enter"], label: "open" },
+		{ keys: ["t"], label: nextView },
+		{ keys: ["/"], label: "filter" },
+		{ keys: ["r"], label: "revive" },
+		{ keys: ["x"], label: "kill" },
+		{ keys: ["escape"], label: "close" },
+	];
+}
+
+/** A tree node whose children are still being attached while the roster projects. */
+interface AgentTreeEntry extends TspTreeNode {
+	children?: AgentTreeEntry[];
+}
+
 /** Refresh cadence for the relative-time column. */
 const AGE_TICK_MS = 5_000;
 const DATA_CHANGE_RENDER_COALESCE_MS = 100;
 /** Double-tap window for the table's left-left "close hub" gesture. */
 const LEFT_TAP_WINDOW_MS = 500;
+
+function compareRosterAgents(a: AgentRecordLike, b: AgentRecordLike): number {
+	return (
+		STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || b.lastActivity - a.lastActivity || a.id.localeCompare(b.id)
+	);
+}
 
 function activityGlyph(row: AgentActivityRow): string {
 	if (row.status === "error") return theme.fg("error", theme.status.error);
@@ -102,13 +222,40 @@ function activityGlyph(row: AgentActivityRow): string {
 	}
 }
 
+/** Native span of {@link activityGlyph}. */
+function activityGlyphSpan(row: AgentActivityRow): TspSpan {
+	if (row.status === "error") return span(theme.status.error, "error");
+	if (row.status === "aborted") return span(theme.status.aborted, "warning");
+	if (row.status === "pending") return span(theme.status.running, "accent");
+	switch (row.kind) {
+		case "response":
+			return span("◆", "success");
+		case "tool":
+			return span(theme.status.success, "success");
+		case "irc":
+			return span("→", "accent");
+		case "lifecycle":
+			return span("○", "muted");
+	}
+}
+
+const ACTIVITY_CLOCK_FORMAT = new Intl.DateTimeFormat(undefined, {
+	hour: "2-digit",
+	minute: "2-digit",
+	second: "2-digit",
+	hour12: false,
+});
+const ACTIVITY_CLOCK_CACHE_LIMIT = 512;
+const activityClockCache = new Map<number, string>();
+
 function activityClock(timestamp: number): string {
-	return new Date(timestamp).toLocaleTimeString(undefined, {
-		hour: "2-digit",
-		minute: "2-digit",
-		second: "2-digit",
-		hour12: false,
-	});
+	let text = activityClockCache.get(timestamp);
+	if (text === undefined) {
+		text = ACTIVITY_CLOCK_FORMAT.format(timestamp);
+		if (activityClockCache.size >= ACTIVITY_CLOCK_CACHE_LIMIT) activityClockCache.clear();
+		activityClockCache.set(timestamp, text);
+	}
+	return text;
 }
 /** Result of one host-backed transcript read for the Agent Hub viewer. */
 export interface AgentHubRemoteTranscript {
@@ -159,6 +306,7 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	/** Mirrors the main transcript's thinking-block visibility. */
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	expandThinkingBlocks?: () => boolean;
 	/** Keys toggling tool output expansion (app.tools.expand). */
 	expandKeys?: KeyId[];
 	/** Focus the main view on this agent's live session (ctx.focusAgentSession). When absent (collab guest, tests), Enter opens the in-hub chat view instead. */
@@ -205,7 +353,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#selectedActivityRow = 0;
 	#activityFilter: ActivityFilter = "all";
 	#activityScope: ActivityScope = "all";
-	#activitySearch = "";
+	/** Activity search (`/`); shown while editing or non-empty. */
+	readonly #activitySearch = filterInput();
 	#activitySearchEditing = false;
 	#activityFollow = true;
 	#activitySyncGeneration = 0;
@@ -215,11 +364,10 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#rows: TRecord[] = [];
 	#statusCounts: Record<AgentStatus, number> = { running: 0, idle: 0, parked: 0, aborted: 0 };
 	#selectedRow = 0;
-	/** Stable roster order captured on first refresh: keyboard navigation must
-	 *  not jump as agents heartbeat. Existing agent generations keep their rank
-	 *  while the hub is open; newly appearing generations append at the end. */
+	/** Initial status/recency rank stays fixed while open; new generations
+	 *  prepend without changing the relative order of existing rows. */
 	#rowOrder: Map<TRecord, number> | undefined;
-	#nextRowOrder = 0;
+	#nextNewRowOrder = 0;
 	#hoveredRow: number | null = null;
 	/** Per-render screen-line to agent-row map, shared by click and hover routing. */
 	#hitRows: Array<number | undefined> = [];
@@ -233,7 +381,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#treeLastSiblingById = new Map<string, boolean>();
 	#treeMaxDepth = 0;
 	/** Fuzzy agent filter (`/`), applied to id and display name. */
-	#agentFilter = "";
+	readonly #agentFilter = filterInput();
 	#agentFilterEditing = false;
 	/** Current observer index and summary data, rebuilt on source changes rather than every paint. */
 	#observedById = new Map<string, ObservableSession>();
@@ -303,12 +451,20 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#cwd: string;
 	#hideThinkingBlock: (() => boolean) | undefined;
 	#proseOnlyThinking: (() => boolean) | undefined;
+	#expandThinkingBlocks: (() => boolean) | undefined;
 	#expandKeys: KeyId[];
 	#focusAgent: ((id: string) => Promise<void>) | undefined;
 
 	// Fullscreen transcript overlay opened by openChat(), if any.
 	#transcriptOverlay: OverlayHandle | undefined;
 	#transcriptViewer: AgentTranscriptViewer | undefined;
+
+	/** Last native description; every visible state change goes through requestRender, which drops it. */
+	#native: NativeNode | undefined;
+	/** Which terminal kinds {@link #native} was described for (support may change between frames). */
+	#nativeVariant = "";
+	/** Preview recent-activity rows by node key, for their pointer actions. */
+	#recentByKey = new Map<string, AgentActivityRow>();
 
 	constructor(deps: AgentHubDeps<TRecord>) {
 		super();
@@ -322,7 +478,10 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#irc = deps.irc;
 		this.#lifecycle = deps.lifecycle;
 		this.#onDone = deps.onDone;
-		this.#requestRender = deps.requestRender;
+		this.#requestRender = () => {
+			this.#native = undefined;
+			deps.requestRender();
+		};
 		this.#hubKeys = deps.hubKeys;
 		this.#remote = deps.remote;
 		this.#loadingPersistedSubagents = !this.#remote && Boolean(deps.sessionFile?.endsWith(".jsonl"));
@@ -338,6 +497,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#cwd = deps.cwd ?? getProjectDir();
 		this.#hideThinkingBlock = deps.hideThinkingBlock;
 		this.#proseOnlyThinking = deps.proseOnlyThinking;
+		this.#expandThinkingBlocks = deps.expandThinkingBlocks;
 		this.#expandKeys = deps.expandKeys ?? ["ctrl+o"];
 		this.#focusAgent = deps.focusAgent;
 
@@ -461,6 +621,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#lastLeftTap = Date.now();
 	}
 
+	/** Show `section`, as a slash-command deep link into an already-open hub does. */
+	showSection(section: AgentHubSection): void {
+		this.#switchSection(section);
+	}
+
 	/**
 	 * Open the fullscreen transcript viewer for an agent id (public for table Enter
 	 * and tests). Mounts {@link AgentTranscriptViewer} as a `fullscreen` overlay so it
@@ -487,6 +652,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			cwd: this.#cwd,
 			hideThinkingBlock: this.#hideThinkingBlock,
 			proseOnlyThinking: this.#proseOnlyThinking,
+			expandThinkingBlocks: this.#expandThinkingBlocks,
 			expandKeys: this.#expandKeys,
 			hubKeys: this.#hubKeys,
 			requestRender: this.#requestRender,
@@ -520,6 +686,831 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	}
 
 	// ========================================================================
+	// Native description
+	// ========================================================================
+
+	/** A `picker` is its own sheet: the backend mounts it in `layer` without an `overlay` wrapper. */
+	nativeSheet(cx: DescribeContext): boolean {
+		return cx.supports("picker");
+	}
+
+	override describe(cx: DescribeContext): NativeNode {
+		const usePicker = cx.supports("picker");
+		const nativeTree = cx.supports("tree");
+		const meter = cx.supports("meter");
+		const variant = usePicker ? `picker:${meter}` : nativeTree ? "tree" : "list";
+		if (this.#native && this.#nativeVariant === variant) return this.#native;
+		this.#nativeVariant = variant;
+		if (usePicker) {
+			this.#native = this.#describePicker(meter);
+			return this.#native;
+		}
+		const tabs = node("tabs", { items: SECTION_TABS, active: this.#section }, undefined, "section");
+		const body = this.#section === "activity" ? this.#describeActivity() : this.#describeAgents(nativeTree);
+		this.#native = overlayCard("omp.overlay.agentHub", "Agent Hub", [tabs, ...body]);
+		return this.#native;
+	}
+
+	/**
+	 * Pointer actions on the described hub. `select` mirrors keyboard selection
+	 * (roster row, activity row, section tab, projection tab); `activate` does
+	 * what Enter does on that row. Picker actions run the key handlers' paths.
+	 */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.key === "") {
+			this.#handlePickerEvent(event);
+			return;
+		}
+		if (event.type === "action") {
+			const activity = this.#recentByKey.get(leafKey(event.key));
+			if (event.act === "transcript" && activity) this.openChat(activity.agentId, activity.entryId);
+			return;
+		}
+		if (event.type !== "select" && event.type !== "activate") return;
+		const target = leafKey(event.key);
+		const item = event.item;
+		switch (target) {
+			case "section":
+				if (item === "agents" || item === "activity") this.#switchSection(item);
+				return;
+			case "view":
+				if ((item === "roster" || item === "tree") && item !== this.#viewMode) {
+					this.#hoveredRow = null;
+					this.#viewMode = item;
+					this.#refreshRows();
+					this.#requestRender();
+				}
+				return;
+			case "agents": {
+				const index = this.#rows.findIndex(ref => ref.id === item);
+				const ref = this.#rows[index];
+				if (!ref) return;
+				this.#hoveredRow = null;
+				this.#selectRow(index);
+				this.#requestRender();
+				if (event.type === "activate") this.#activateAgent(ref);
+				return;
+			}
+			case "activity": {
+				const index = this.#activityRows.findIndex(row => row.id === item);
+				const activity = this.#activityRows[index];
+				if (!activity) return;
+				if (event.type === "activate") {
+					this.openChat(activity.agentId, activity.entryId);
+					return;
+				}
+				this.#activityFollow = false;
+				this.#selectedActivityRow = index;
+				this.#requestRender();
+				return;
+			}
+			case "recent": {
+				const agentId = this.#rows[this.#selectedRow]?.id;
+				if (event.type !== "activate" || !agentId) return;
+				const activity = this.#activity.recent(agentId, NATIVE_RECENT_ACTIVITY).find(row => row.id === item);
+				if (activity) this.openChat(activity.agentId, activity.entryId);
+				return;
+			}
+		}
+	}
+
+	/** Picker events (the sheet is this component's root): same paths as the keys. */
+	#handlePickerEvent(event: NativeUiEvent): void {
+		const activity = this.#section === "activity";
+		if (event.type === "select" || event.type === "activate") {
+			if (activity) {
+				const index = this.#activityRows.findIndex(row => row.id === event.item);
+				const row = this.#activityRows[index];
+				if (!row) return;
+				if (event.type === "activate") {
+					this.openChat(row.agentId, row.entryId);
+					return;
+				}
+				this.#activityFollow = false;
+				this.#selectedActivityRow = index;
+				this.#requestRender();
+				return;
+			}
+			const index = this.#rows.findIndex(ref => ref.id === event.item);
+			const ref = this.#rows[index];
+			if (!ref) return;
+			this.#hoveredRow = null;
+			this.#selectRow(index);
+			this.#requestRender();
+			if (event.type === "activate") this.#activateAgent(ref);
+			return;
+		}
+		if (event.type !== "action") return;
+		switch (event.act) {
+			case "tab":
+				if (event.value === "agents" || event.value === "activity") this.#switchSection(event.value);
+				return;
+			case "scope":
+				if (activity && ACTIVITY_FILTERS.includes(event.value as ActivityFilter)) {
+					this.#setActivityFilter(event.value as ActivityFilter);
+				}
+				return;
+			case "close":
+				this.#onDone();
+				return;
+			case "filter":
+				if (activity) this.#activitySearchEditing = true;
+				else this.#agentFilterEditing = true;
+				this.#requestRender();
+				return;
+		}
+		if (activity) {
+			switch (event.act) {
+				case "open": {
+					const row = this.#activityRows[this.#selectedActivityRow];
+					if (row) this.openChat(row.agentId, row.entryId);
+					return;
+				}
+				case "follow":
+					this.#toggleActivityFollow();
+					return;
+				case "agents":
+					this.#cycleActivityScope();
+					return;
+			}
+			return;
+		}
+		switch (event.act) {
+			case "open": {
+				const ref = this.#rows[this.#selectedRow];
+				if (ref) this.#activateAgent(ref);
+				return;
+			}
+			case "revive":
+				this.#reviveSelected();
+				return;
+			case "kill":
+				this.#killSelected();
+				return;
+			case "view":
+				this.#toggleViewMode();
+				return;
+		}
+	}
+
+	/** The hub as a data-first `picker` (§9.1): roster or activity log, selected agent as preview. */
+	#describePicker(meter: boolean): NativeNode {
+		const activity = this.#section === "activity";
+		const props: TspPickerProps = {
+			title: "Agents",
+			subtitle: this.#pickerSubtitle(),
+			icon: "users",
+			size: "lg",
+			tabs: PICKER_TABS,
+			tab: this.#section,
+			...(activity ? this.#activityPickerProps() : this.#agentPickerProps()),
+		};
+		const preview = activity ? [] : this.#describePreview(this.#rows[this.#selectedRow], meter);
+		return picker(props, preview);
+	}
+
+	/** Roster totals: `$0.389 · 18.7s · 6 req · 114K tok`. */
+	#pickerSubtitle(): string {
+		const metrics = this.#aggregate;
+		if (metrics.reportedAgents === 0) return "No usage reported yet";
+		const parts = [formatCost(metrics.cost)];
+		if (metrics.durationMs > 0) parts.push(formatDuration(metrics.durationMs));
+		parts.push(`${formatNumber(metrics.requests)} req`, `${formatNumber(metrics.tokens)} tok`);
+		return parts.join(theme.sep.dot);
+	}
+
+	#agentPickerProps(): PickerBody {
+		const selected = this.#rows[this.#selectedRow];
+		const readOnly = selected?.kind === "advisor" ? "Read-only advisor transcript" : undefined;
+		const actions: TspPickerAction[] = [
+			{
+				id: "open",
+				label: "Open transcript",
+				keys: ["enter"],
+				primary: true,
+				disabled: selected ? undefined : true,
+			},
+			{
+				id: "revive",
+				label: "Revive",
+				keys: ["r"],
+				disabled: readOnly ?? (selected?.status === "parked" ? undefined : "Only parked agents can be revived"),
+			},
+			{ id: "kill", label: "Kill", keys: ["x"], danger: true, disabled: readOnly ?? (selected ? undefined : true) },
+			{ id: "view", label: "By parent", keys: ["t"], on: this.#viewMode === "tree" },
+			{ id: "filter", label: "Filter", keys: ["/"] },
+			CLOSE_ACTION,
+		];
+		return {
+			noun: "agents",
+			layout: this.#viewMode === "tree" ? "tree" : "rows",
+			preview: "side",
+			...pickerQuery(this.#agentFilterEditing || this.#agentFilter.getValue() ? this.#agentFilter : null),
+			placeholder: "Filter agents…",
+			columns: AGENT_COLUMNS,
+			items: this.#rows.map(ref => this.#pickerAgentItem(ref)),
+			selected: selected?.id ?? null,
+			total: this.#registry.list().length - (this.#registry.get(MAIN_AGENT_ID) ? 1 : 0),
+			state: this.#rows.length === 0 && this.#loadingPersistedSubagents ? "loading" : "ready",
+			empty: "No agents in this session. Finished, parked and killed subagents stay with the session that created them.",
+			actions,
+			focus: "list",
+		};
+	}
+
+	#pickerAgentItem(ref: TRecord): TspPickerItem {
+		const observed = this.#observableFor(ref.id);
+		const metrics = this.#metricsFor(ref, observed);
+		const task = observed?.description ?? observed?.progress?.task ?? ref.activity;
+		const badges: { text: string; tone?: "warning" | "muted"; title?: string }[] = [];
+		const modelRole = observed?.progress?.modelRole ?? ref.history?.modelRole;
+		if (modelRole && this.#getRoleInfo) {
+			const info = this.#getRoleInfo(modelRole);
+			badges.push({ text: sanitizeDisplaySingleLine(info.tag ?? info.name ?? modelRole), title: "Model role" });
+		}
+		if (ref.kind === "advisor") badges.push({ text: "read-only", tone: "warning" });
+		const unread = this.#irc.unreadCount(ref.id);
+		if (unread > 0) badges.push({ text: `${unread} unread`, tone: "warning" });
+		if (this.#viewMode === "roster" && ref.parentId && ref.parentId !== MAIN_AGENT_ID) {
+			badges.push({ text: `↳ ${sanitizeDisplaySingleLine(ref.parentId)}`, tone: "muted", title: "Spawned by" });
+		}
+		const model = modelChip(ref, observed);
+		const item: TspPickerItem = {
+			id: ref.id,
+			label: sanitizeDisplaySingleLine(ref.id),
+			mono: true,
+			dot: statusDot(ref.status),
+			detail: task ? taskSummary(task) : undefined,
+			chips: model
+				? [{ text: model.fallback ? `fallback → ${model.text}` : model.text, dot: model.dot }]
+				: undefined,
+			badges: badges.length > 0 ? badges.slice(0, 3) : undefined,
+		};
+		if (this.#viewMode === "tree") {
+			const depth = this.#treeDepthById.get(ref.id) ?? 0;
+			return { ...item, depth, open: this.#childrenByParent.has(ref.id) ? true : undefined };
+		}
+		if (!metrics) return item;
+		// A running agent's active time ticks terminal-side from the age at send; a settled one
+		// is frozen text. Progress `durationMs` was current when its frame arrived, so age it to now
+		// — re-sending the stale value on every repaint rewinds Tern's clock. A first frame can
+		// report 0 ms, so a progress timestamp alone makes the row clockable.
+		const progressAt = observed?.progress ? observed.progressAt : undefined;
+		const facts: Record<string, string | number> = {
+			cost: formatCost(metrics.cost),
+			time:
+				ref.status === "running" && (metrics.durationMs > 0 || progressAt !== undefined)
+					? metrics.durationMs + (progressAt === undefined ? 0 : Math.max(0, Date.now() - progressAt))
+					: formatDuration(metrics.durationMs),
+			req: metrics.requests,
+			tools: metrics.tools,
+			tok: metrics.tokens,
+		};
+		let title: string | undefined;
+		if (metrics.contextTokens !== undefined && metrics.contextWindow) {
+			facts.ctx = Math.max(0, Math.min(1, metrics.contextTokens / metrics.contextWindow));
+			title = `Context ${formatNumber(metrics.contextTokens)} / ${formatNumber(metrics.contextWindow)}`;
+		}
+		return { ...item, facts, title };
+	}
+
+	/** Selected agent's preview: title with status, facts, context meter, recent activity. */
+	#describePreview(ref: TRecord | undefined, meter: boolean): NativeChild[] {
+		this.#recentByKey.clear();
+		if (!ref) return [];
+		const observed = this.#observableFor(ref.id);
+		const metrics = this.#metricsFor(ref, observed);
+		const out: NativeChild[] = [
+			node(
+				"row",
+				{ role: "omp.hub.title", gap: "sm", align: "center" },
+				[
+					text(sanitizeDisplaySingleLine(ref.displayName || ref.id), {
+						role: "omp.picker.title",
+						truncate: "end",
+					}),
+					node("badge", { text: ref.status, tone: statusDot(ref.status) }),
+				],
+				"title",
+			),
+		];
+		if (this.#notice) {
+			out.push(node("text", { text: this.#notice, tone: "error", wrap: "word" }, undefined, "notice"));
+		}
+		const facts = this.#detailFacts(ref, observed, metrics);
+		const chip = modelChip(ref, observed);
+		if (chip) {
+			const model: TspSpan[] = [];
+			if (chip.fallback) model.push(span("fallback → ", "warning"));
+			model.push(span(chip.text, "mono"));
+			if (chip.level && chip.dot) model.push(span(theme.sep.dot, "dim"), span(chip.level, chip.dot));
+			const modelRole = observed?.progress?.modelRole ?? ref.history?.modelRole;
+			if (modelRole && this.#getRoleInfo) {
+				model.push(span(theme.sep.dot, "dim"), roleBadgeSpan(modelRole, this.#getRoleInfo(modelRole)));
+			}
+			facts.splice(facts[0]?.k === "Task" ? 1 : 0, 0, { k: "Model", v: model });
+		}
+		out.push(node("kv", { items: facts, layout: "grid", role: "omp.hub.kv" }, undefined, "facts"));
+		if (metrics?.contextTokens !== undefined && metrics.contextWindow) {
+			const ratio = Math.max(0, Math.min(1, metrics.contextTokens / metrics.contextWindow));
+			const label = `${formatNumber(metrics.contextTokens)} / ${formatNumber(metrics.contextWindow)} · ${Math.round(ratio * 100)}%`;
+			out.push(
+				meter
+					? node(
+							"meter",
+							{
+								value: ratio,
+								style: "bar",
+								size: "md",
+								label,
+								tone: getContextUsageTone(getContextUsageLevel(ratio * 100, metrics.contextWindow)),
+							},
+							undefined,
+							"context",
+						)
+					: node("progress", { value: ratio, label }, undefined, "context"),
+			);
+		}
+		const recent = this.#activity.recent(ref.id, NATIVE_RECENT_ACTIVITY);
+		const rows: NativeChild[] = recent.map(activity => {
+			const key = stableKey(activity.id);
+			this.#recentByKey.set(key, activity);
+			const name = activity.kind === "tool" ? (activity.toolName ?? activity.title) : activity.title;
+			return node(
+				"row",
+				{
+					role: "omp.hub.activity.row",
+					gap: "sm",
+					align: "baseline",
+					actions: { click: "transcript" },
+					title: "Open in transcript",
+				},
+				[
+					text([span(activityClock(activity.timestamp), "mono dim")]),
+					text([activityGlyphSpan(activity)]),
+					text([span(sanitizeDisplaySingleLine(name), "mono muted")]),
+					text(sanitizeDisplaySingleLine(activity.summary), { truncate: "end", grow: 1 }),
+				],
+				key,
+			);
+		});
+		if (rows.length === 0) rows.push(text([span("No response or tool activity yet", "dim")]));
+		out.push(node("section", { head: "Recent activity", role: "omp.hub.activity" }, rows, "recentActivity"));
+		return out;
+	}
+
+	#activityPickerProps(): PickerBody {
+		const agent = this.#rows[this.#selectedRow]?.id;
+		const scope =
+			this.#activityScope === "all"
+				? "All agents"
+				: this.#activityScope === "agent"
+					? (agent ?? "Selected agent")
+					: `${agent ?? "Selected"} subtree`;
+		const selected = this.#activityRows[this.#selectedActivityRow];
+		return {
+			noun: "events",
+			layout: "rows",
+			preview: "none",
+			...pickerQuery(this.#activitySearchEditing || this.#activitySearch.getValue() ? this.#activitySearch : null),
+			placeholder: "Search activity…",
+			scopes: ACTIVITY_FILTER_SCOPES,
+			scope: this.#activityFilter,
+			columns: ACTIVITY_COLUMNS,
+			items: this.#activityRows.map(activity => this.#pickerActivityItem(activity)),
+			selected: selected?.id ?? null,
+			empty: "No agent activity recorded yet",
+			actions: [
+				{
+					id: "open",
+					label: "Open transcript",
+					keys: ["enter"],
+					primary: true,
+					disabled: selected ? undefined : true,
+				},
+				{ id: "follow", label: "Follow", keys: ["space"], on: this.#activityFollow },
+				{ id: "agents", label: sanitizeDisplaySingleLine(scope), keys: ["s"] },
+				{ id: "filter", label: "Search", keys: ["/"] },
+				CLOSE_ACTION,
+			],
+			focus: "list",
+		};
+	}
+
+	#pickerActivityItem(activity: AgentActivityRow): TspPickerItem {
+		const title = activity.kind === "tool" ? (activity.toolName ?? activity.title) : activity.title;
+		const tone = activity.status === "error" ? "error" : activity.status === "aborted" ? "warning" : undefined;
+		return {
+			id: activity.id,
+			label: sanitizeDisplaySingleLine(title),
+			mono: activity.kind === "tool" || undefined,
+			detail: sanitizeDisplaySingleLine(activity.summary),
+			icon: ACTIVITY_KIND_ICON[activity.kind],
+			dot: activity.status === "pending" ? "pending" : undefined,
+			tone,
+			facts: {
+				agent: [span(sanitizeDisplaySingleLine(activity.agentId), "mono")],
+				at: activityClock(activity.timestamp),
+			},
+			title: formatLocalDateTimeWithOffset(new Date(activity.timestamp)),
+		};
+	}
+
+	#describeAgents(nativeTree: boolean): NativeChild[] {
+		const head: NativeChild[] = [
+			text([span("Roster", "strong")]),
+			node("tabs", { items: VIEW_TABS, active: this.#viewMode }, undefined, "view"),
+		];
+		const counts: TspSpan[] = [];
+		for (const status of ["running", "idle", "parked", "aborted"] as const) {
+			const count = this.#statusCounts[status];
+			if (count === 0) continue;
+			if (counts.length > 0) counts.push(span(theme.sep.dot, "dim"));
+			counts.push(statusGlyphSpan(status), span(` ${count} ${status}`, statusTone(status)));
+		}
+		if (counts.length > 0) head.push(text(counts));
+
+		const children: NativeChild[] = [
+			node("row", { gap: "sm", wrap: true, align: "center" }, head, "head"),
+			node("text", { spans: this.#usageSpans(), wrap: "word" }, undefined, "usage"),
+		];
+		if (this.#agentFilterEditing) {
+			children.push(
+				node(
+					"input",
+					{
+						text: this.#agentFilter.getValue(),
+						cursor: this.#agentFilter.getCursor(),
+						prompt: [span("/", "muted")],
+					},
+					undefined,
+					"filter",
+				),
+			);
+		} else if (this.#agentFilter.getValue()) {
+			children.push(
+				node("text", { spans: [span(`/${this.#agentFilter.getValue()}`, "accent")] }, undefined, "filter"),
+			);
+		}
+		children.push(
+			node(
+				"row",
+				{ gap: "md", wrap: true, align: "start", grow: 1 },
+				[this.#describeRoster(nativeTree), this.#describeDetail(this.#rows[this.#selectedRow])],
+				"body",
+			),
+		);
+		if (this.#notice) {
+			children.push(
+				node("text", { spans: [span(this.#notice, "error")], wrap: "word", tone: "error" }, undefined, "notice"),
+			);
+		}
+		children.push(hintsRow(AGENT_HINTS[this.#viewMode]));
+		return children;
+	}
+
+	#usageSpans(): TspSpan[] {
+		const metrics = this.#aggregate;
+		const dot = theme.sep.dot;
+		if (metrics.reportedAgents === 0) return [span(`Usage —${dot}0/${this.#rows.length} measured`, "dim")];
+		const activeTime = formatMetricDuration(metrics);
+		return [
+			span(formatCost(metrics.cost), "statusLineCost"),
+			span(
+				[
+					"",
+					activeTime ? `${activeTime} agent time` : "agent time —",
+					`${formatNumber(metrics.requests)} req`,
+					`${formatNumber(metrics.tools)} tools`,
+					`${formatNumber(metrics.tokens)} tok`,
+					`${metrics.activeDurationAgents}/${metrics.reportedAgents} timed`,
+					`${metrics.reportedAgents}/${this.#rows.length} measured`,
+				].join(dot),
+				"dim",
+			),
+		];
+	}
+
+	#describeRoster(nativeTree: boolean): NativeNode {
+		const layout = { grow: 3, min: { w: `${ROSTER_MIN_WIDTH}ch` } } as const;
+		if (this.#rows.length === 0) {
+			if (this.#loadingPersistedSubagents) {
+				return node(
+					"spinner",
+					{ ...layout, label: [span("Loading saved agents…", "accent")] },
+					undefined,
+					"loading",
+				);
+			}
+			return node(
+				"col",
+				layout,
+				[
+					text([span(`${theme.status.shadowed} `, "muted"), span("No agents in this session", "strong")]),
+					text(
+						[span("Finished, parked, and killed subagents remain with the session that created them.", "dim")],
+						{ wrap: "word" },
+					),
+					text([span("Resume that session with omp-dev --continue, or spawn a task here.", "dim")], {
+						wrap: "word",
+					}),
+				],
+				"empty",
+			);
+		}
+		if (this.#viewMode === "tree" && nativeTree) {
+			return node("tree", { ...layout, nodes: this.#agentTreeNodes() }, undefined, "agents");
+		}
+		// Without native trees the parent view degrades to the parent-first list, naming each parent.
+		const showParent = this.#viewMode === "roster" || !nativeTree;
+		return node(
+			"list",
+			{ ...layout, selected: this.#rows[this.#selectedRow]?.id ?? null, virtual: true },
+			this.#rows.map((ref, index) => this.#describeAgentItem(ref, index === this.#selectedRow, showParent)),
+			"agents",
+		);
+	}
+
+	#agentLabel(ref: TRecord, selected: boolean, showParent: boolean): TspSpan[] {
+		const label = [
+			statusGlyphSpan(ref.status),
+			span(" "),
+			span(sanitizeDisplaySingleLine(ref.id), selected ? "accent strong" : "strong"),
+		];
+		if (showParent && ref.parentId && ref.parentId !== MAIN_AGENT_ID) {
+			label.push(span(`  ↳ ${sanitizeDisplaySingleLine(ref.parentId)}`, "dim"));
+		}
+		if (ref.kind === "advisor") label.push(span("  read-only", "warning"));
+		const unread = this.#irc.unreadCount(ref.id);
+		if (unread > 0) label.push(span(`  ⧉ ${unread}`, "warning"));
+		return label;
+	}
+
+	#modelSpans(ref: TRecord, observed: ObservableSession | undefined): TspSpan[] | undefined {
+		const spans: TspSpan[] = [];
+		const modelRole = observed?.progress?.modelRole ?? ref.history?.modelRole;
+		if (modelRole && this.#getRoleInfo) spans.push(roleBadgeSpan(modelRole, this.#getRoleInfo(modelRole)));
+		const model = modelBadgeSpans(ref, observed);
+		if (model) {
+			if (spans.length > 0) spans.push(span(theme.sep.dot, "dim"));
+			spans.push(...model);
+		}
+		return spans.length > 0 ? spans : undefined;
+	}
+
+	#describeAgentItem(ref: TRecord, selected: boolean, showParent: boolean): NativeNode {
+		const observed = this.#observableFor(ref.id);
+		const metrics = this.#metricsFor(ref, observed);
+		const age = formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)));
+		const detail = [
+			span(metrics ? `${metricsText(metrics)}${theme.sep.dot}${age}` : `usage${theme.sep.dot}${age}`, "dim"),
+		];
+		const task = observed?.description ?? observed?.progress?.task ?? ref.activity;
+		if (task) detail.push(span(theme.sep.dot, "dim"), span(sanitizeDisplaySingleLine(task), "muted"));
+		return node(
+			"item",
+			{ label: this.#agentLabel(ref, selected, showParent), detail, value: this.#modelSpans(ref, observed) },
+			undefined,
+			ref.id,
+		);
+	}
+
+	/** The parent projection as a disclosure tree; node ids are agent ids (the `item` of select events). */
+	#agentTreeNodes(): AgentTreeEntry[] {
+		const roots: AgentTreeEntry[] = [];
+		const byId = new Map<string, AgentTreeEntry>();
+		for (let index = 0; index < this.#rows.length; index++) {
+			const ref = this.#rows[index]!;
+			const observed = this.#observableFor(ref.id);
+			const label = this.#agentLabel(ref, index === this.#selectedRow, false);
+			const task = observed?.description ?? observed?.progress?.task ?? ref.activity;
+			if (task) label.push(span(theme.sep.dot, "dim"), span(sanitizeDisplaySingleLine(task), "muted"));
+			const model = this.#modelSpans(ref, observed);
+			if (model) label.push(span(theme.sep.dot, "dim"), ...model);
+			const entry: AgentTreeEntry = { id: ref.id, label, open: true };
+			byId.set(ref.id, entry);
+			const parentId = (this.#treeDepthById.get(ref.id) ?? 0) > 0 ? this.#treeParentById.get(ref.id) : undefined;
+			const parent = parentId === undefined ? undefined : byId.get(parentId);
+			if (!parent) roots.push(entry);
+			else if (parent.children) parent.children.push(entry);
+			else parent.children = [entry];
+		}
+		return roots;
+	}
+
+	#describeDetail(ref: TRecord | undefined): NativeNode {
+		const layout = {
+			grow: 2,
+			min: { w: `${DETAIL_MIN_WIDTH}ch` },
+			gap: "sm",
+			role: "omp.overlay.agentHub.detail",
+		} as const;
+		if (!ref) return node("col", layout, [text([span("Select an agent to inspect", "dim")])], "detail");
+		const observed = this.#observableFor(ref.id);
+		const metrics = this.#metricsFor(ref, observed);
+
+		const out: NativeChild[] = [
+			text([
+				statusGlyphSpan(ref.status),
+				span(" "),
+				span(sanitizeDisplaySingleLine(ref.displayName || ref.id), "strong"),
+			]),
+		];
+		if (ref.displayName && ref.displayName !== ref.id)
+			out.push(text([span(sanitizeDisplaySingleLine(ref.id), "dim")]));
+		const state: NativeChild[] = [
+			ref.status === "running"
+				? node("spinner", { label: [span("running", "accent")] })
+				: text([span(ref.status, statusTone(ref.status))]),
+		];
+		const duration = metrics ? formatMetricDuration(metrics) : undefined;
+		if (duration) state.push(text([span(duration, "dim")]));
+		state.push(
+			text([span("last active", "dim")]),
+			node("elapsed", { age: Math.max(0, Date.now() - ref.lastActivity), format: "short" }),
+			text([span("ago", "dim")]),
+		);
+		out.push(node("row", { gap: "sm", wrap: true, align: "baseline" }, state, "state"));
+		const model = this.#modelSpans(ref, observed);
+		if (model) out.push(node("text", { spans: model }, undefined, "model"));
+		out.push(node("kv", { items: this.#detailFacts(ref, observed, metrics), layout: "grid" }, undefined, "facts"));
+		if (metrics?.contextTokens !== undefined && metrics.contextWindow) {
+			const ratio = Math.max(0, Math.min(1, metrics.contextTokens / metrics.contextWindow));
+			out.push(
+				node(
+					"progress",
+					{
+						value: ratio,
+						label: `${formatNumber(metrics.contextTokens)}/${formatNumber(metrics.contextWindow)} ${Math.round(ratio * 100)}%`,
+					},
+					undefined,
+					"context",
+				),
+			);
+		}
+		const recent = this.#activity.recent(ref.id, NATIVE_RECENT_ACTIVITY);
+		out.push(
+			node(
+				"section",
+				{ head: [span("Recent activity", "accent strong")] },
+				[
+					node(
+						"list",
+						{ empty: [span("No response or tool activity yet", "muted")] },
+						recent.map(activity => this.#describeActivityItem(activity)),
+						"recent",
+					),
+				],
+				"recentActivity",
+			),
+		);
+		return node("col", layout, out, "detail");
+	}
+
+	/** Inspector facts shared by the fallback detail pane and the picker preview. */
+	#detailFacts(
+		ref: TRecord,
+		observed: ObservableSession | undefined,
+		metrics: AgentMetrics | undefined,
+	): Array<{ k: string; v: TspSpan[] | string }> {
+		const progress = observed?.progress;
+		const children = this.#childrenByParent.get(ref.id) ?? [];
+		const dot = theme.sep.dot;
+		const facts: Array<{ k: string; v: TspSpan[] | string }> = [];
+		const task = observed?.description ?? progress?.task ?? ref.activity;
+		if (task) facts.push({ k: "Task", v: taskSummary(task) });
+		const current = progress?.currentTool
+			? `${progress.currentTool}${progress.currentToolArgs ? `${dot}${progress.currentToolArgs}` : ""}`
+			: (progress?.lastIntent ?? ref.activity);
+		if (current) {
+			const value = [span(sanitizeDisplaySingleLine(current))];
+			if (progress?.retryState) {
+				value.push(
+					span(`${dot}retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`, "warning"),
+				);
+			}
+			facts.push({ k: "Current", v: value });
+		}
+		facts.push({ k: "Usage", v: metrics ? metricsText(metrics) : [span("usage —", "dim")] });
+		facts.push({
+			k: "Lineage",
+			v: `Spawned by ${sanitizeDisplaySingleLine(ref.parentId ?? MAIN_AGENT_ID)}${children.length > 0 ? `${dot}${children.length} ${children.length === 1 ? "child" : "children"}` : ""}`,
+		});
+		if (children.length > 0) {
+			const named = children.slice(0, NATIVE_CHILD_IDS).map(child => sanitizeDisplaySingleLine(child.id));
+			const more = children.length - named.length;
+			facts.push({ k: "Children", v: [span(`${named.join(", ")}${more > 0 ? `, … +${more}` : ""}`, "dim")] });
+		}
+		facts.push({ k: "Registered", v: [span(formatLocalDateTimeWithOffset(new Date(ref.createdAt)), "dim")] });
+		facts.push({
+			k: "Changes",
+			v: [
+				span(
+					ref.kind === "advisor" || ref.history?.readOnly
+						? "Read-only · 0 LoC"
+						: "Shared workspace · per-agent LoC not attributable",
+					"dim",
+				),
+			],
+		});
+		const artifacts = ref.history;
+		if (artifacts?.outputPath) {
+			facts.push({
+				k: "Output",
+				v: [span(shortenPath(artifacts.outputPath), "path", { href: `file://${artifacts.outputPath}` })],
+			});
+		}
+		if (artifacts?.patchPath) facts.push({ k: "Patch", v: [span(shortenPath(artifacts.patchPath), "path")] });
+		for (const nestedPath of artifacts?.nestedPatchPaths ?? []) {
+			facts.push({ k: "Nested patch", v: [span(shortenPath(nestedPath), "path")] });
+		}
+		if (artifacts?.branchName) facts.push({ k: "Worktree branch", v: [span(artifacts.branchName, "code")] });
+		return facts;
+	}
+
+	#describeActivityItem(activity: AgentActivityRow): NativeNode {
+		const ref = this.#registry.get(activity.agentId);
+		const observed = this.#observedById.get(activity.agentId);
+		const role = observed?.progress?.modelRole ?? ref?.history?.modelRole;
+		const label = [activityGlyphSpan(activity), span(" ")];
+		if (role && this.#getRoleInfo) label.push(roleBadgeSpan(role, this.#getRoleInfo(role)), span(" "));
+		const title = activity.kind === "tool" ? (activity.toolName ?? activity.title) : activity.title;
+		label.push(
+			span(sanitizeDisplaySingleLine(activity.agentId), "strong"),
+			span(" "),
+			span(sanitizeDisplaySingleLine(title), activity.kind === "response" ? "success" : "muted"),
+		);
+		return node(
+			"item",
+			{
+				label,
+				detail: sanitizeDisplaySingleLine(activity.summary),
+				value: [span(activityClock(activity.timestamp), "dim")],
+			},
+			undefined,
+			activity.id,
+		);
+	}
+
+	#describeActivity(): NativeChild[] {
+		const selectedAgent = this.#rows[this.#selectedRow]?.id;
+		const scope =
+			this.#activityScope === "all"
+				? "all agents"
+				: this.#activityScope === "agent"
+					? (selectedAgent ?? "selected agent")
+					: `${selectedAgent ?? "selected"} subtree`;
+		const dot = theme.sep.dot;
+		const status: NativeChild[] = [
+			text([
+				span(
+					`${sanitizeDisplaySingleLine(scope)}${dot}${this.#activityFilter}${dot}${this.#activityFollow ? "following" : "paused"}`,
+					"dim",
+				),
+			]),
+			this.#activitySearchEditing
+				? node(
+						"input",
+						{
+							text: this.#activitySearch.getValue(),
+							cursor: this.#activitySearch.getCursor(),
+							prompt: [span("search: ", "muted")],
+						},
+						undefined,
+						"search",
+					)
+				: text([
+						span(
+							this.#activitySearch.getValue() ? `search: ${this.#activitySearch.getValue()}` : "search: —",
+							"dim",
+						),
+					]),
+		];
+		const selected = this.#activityRows[this.#selectedActivityRow]?.id ?? null;
+		return [
+			node("row", { gap: "md", wrap: true, align: "baseline" }, status, "status"),
+			node(
+				"list",
+				{
+					selected,
+					filter: this.#activitySearch.getValue() || undefined,
+					virtual: true,
+					grow: 1,
+					empty: [
+						span(
+							this.#activitySearch.getValue() ? "No matching activity" : "No agent activity recorded yet",
+							"muted",
+						),
+					],
+				},
+				this.#activityRows.map(activity => this.#describeActivityItem(activity)),
+				"activity",
+			),
+			hintsRow(ACTIVITY_HINTS),
+		];
+	}
+
+	// ========================================================================
 	// Live data plumbing
 	// ========================================================================
 
@@ -542,44 +1533,44 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID);
 		this.#observedById = new Map();
 		for (const session of this.#observers.getSessions()) this.#observedById.set(session.id, session);
-		// Stable roster order: capture the status+recency ranking once so keyboard
-		// navigation is not disrupted by heartbeats (issue #10524). Existing rows
-		// keep their rank while the hub is open; new agents append at the end.
-		// Defer the capture until persisted-subagent discovery settles so a
-		// mid-scan refresh cannot freeze a partial roster (the remaining agents
-		// would otherwise append in readdir order instead of being ranked).
+		// Capture the status+recency ranking once so keyboard navigation does
+		// not jump on heartbeats. Defer until persisted-subagent discovery
+		// settles so a partial roster is not frozen in readdir order.
 		const rowOrder = this.#rowOrder;
 		let ordered: TRecord[];
 		if (!rowOrder) {
-			ordered = refs.sort(
-				(a, b) =>
-					STATUS_ORDER[a.status] - STATUS_ORDER[b.status] ||
-					b.lastActivity - a.lastActivity ||
-					a.id.localeCompare(b.id),
-			);
+			ordered = refs.sort(compareRosterAgents);
 			if (!this.#loadingPersistedSubagents && ordered.length > 0) {
-				this.#rowOrder = new Map();
-				for (const ref of ordered) this.#rowOrder.set(ref, this.#nextRowOrder++);
+				const rowOrder = new Map<TRecord, number>();
+				for (const [index, ref] of ordered.entries()) rowOrder.set(ref, index);
+				this.#rowOrder = rowOrder;
 			}
 		} else {
 			for (const rankedRef of rowOrder.keys()) {
 				if (!refs.includes(rankedRef)) rowOrder.delete(rankedRef);
 			}
-			ordered = refs.sort(
-				(a, b) => (rowOrder.get(a) ?? Number.MAX_SAFE_INTEGER) - (rowOrder.get(b) ?? Number.MAX_SAFE_INTEGER),
-			);
-			for (const ref of ordered) {
-				if (!rowOrder.has(ref)) rowOrder.set(ref, this.#nextRowOrder++);
+			// Each batch of newly appearing generations uses the initial sort,
+			// then takes ranks above every agent already on screen.
+			let newcomers: TRecord[] | undefined;
+			for (const ref of refs) {
+				if (!rowOrder.has(ref)) (newcomers ??= []).push(ref);
 			}
+			if (newcomers) {
+				newcomers.sort(compareRosterAgents);
+				for (let i = newcomers.length - 1; i >= 0; i--) {
+					rowOrder.set(newcomers[i]!, --this.#nextNewRowOrder);
+				}
+			}
+			ordered = refs.sort((a, b) => rowOrder.get(a)! - rowOrder.get(b)!);
 		}
-		const query = this.#agentFilter.trim();
+		const query = this.#agentFilter.getValue().trim();
 		const rosterRows =
 			query.length > 0
 				? ordered.filter(ref => fuzzyMatch(query, `${ref.id} ${ref.displayName ?? ""}`).matches)
 				: ordered;
 
 		if (this.#viewMode === "tree") {
-			const tree = projectAgentTree(rosterRows);
+			const tree = projectAgentTree(rosterRows, rowOrder);
 			this.#rows = tree.rows;
 			this.#treeDepthById = tree.depthById;
 			this.#treeParentById = tree.parentById;
@@ -612,7 +1603,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		for (const ref of rosterRows) this.#statusCounts[ref.status]++;
 		this.#refreshAggregate();
 		this.#refreshActivityData(rosterRows);
-		this.#refreshActivityRows();
+		// The 2,000-row activity query only feeds the Activity tab; switching to it refreshes.
+		if (this.#section === "activity") this.#refreshActivityRows();
 	}
 
 	#refreshActivityData(refs: readonly TRecord[]): void {
@@ -643,7 +1635,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		void Promise.all(pending)
 			.then(() => {
 				if (this.#disposed || generation !== this.#activitySyncGeneration) return;
-				this.#refreshActivityRows();
+				if (this.#section === "activity") this.#refreshActivityRows();
 				this.#requestRender();
 			})
 			.catch(() => {
@@ -678,7 +1670,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		let rows = this.#activity.query({
 			agentIds: this.#activityAgentIds(),
 			kinds,
-			search: this.#activitySearch,
+			search: this.#activitySearch.getValue(),
 			limit: 2_000,
 		});
 		if (this.#activityFilter === "errors") rows = rows.filter(row => row.status === "error");
@@ -689,19 +1681,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	}
 
 	#metricsFor(ref: TRecord, observed: ObservableSession | undefined): AgentMetrics | undefined {
-		if (observed?.progress) return progressMetrics(observed);
-		if (ref.history?.metrics) return ref.history.metrics;
-		const session = this.#fallbackStatsSession(ref, observed);
-		return session ? this.#sessionMetrics.get(session)?.metrics : undefined;
-	}
-
-	#fallbackStatsSession(
-		ref: TRecord,
-		observed: ObservableSession | undefined,
-	): NonNullable<TRecord["session"]> | undefined {
-		if (observed?.progress) return undefined;
-		const session = ref.session;
-		return session && typeof session.getSessionStats === "function" ? session : undefined;
+		return hubRowMetrics(ref, observed, this.#sessionMetrics);
 	}
 
 	// ========================================================================
@@ -729,9 +1709,9 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 					? (selectedAgent ?? "selected agent")
 					: `${selectedAgent ?? "selected"} subtree`;
 		const search = this.#activitySearchEditing
-			? theme.fg("accent", `search: ${this.#activitySearch}▌`)
-			: this.#activitySearch
-				? `search: ${this.#activitySearch}`
+			? theme.fg("accent", `search: ${filterText(this.#activitySearch)}`)
+			: this.#activitySearch.getValue()
+				? `search: ${this.#activitySearch.getValue()}`
 				: "search: —";
 		body.push(
 			theme.fg(
@@ -743,7 +1723,12 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 		const budget = Math.max(0, contentRows - body.length);
 		if (this.#activityRows.length === 0 && budget > 0) {
-			body.push(theme.fg("muted", this.#activitySearch ? "No matching activity" : "No agent activity recorded yet"));
+			body.push(
+				theme.fg(
+					"muted",
+					this.#activitySearch.getValue() ? "No matching activity" : "No agent activity recorded yet",
+				),
+			);
 		} else if (budget > 0) {
 			const selected = Math.min(this.#selectedActivityRow, this.#activityRows.length - 1);
 			const start = this.#activityFollow
@@ -767,7 +1752,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			row(
 				theme.fg(
 					"dim",
-					"1:agents  j/k:select  Enter:transcript  Space:follow  f:filter  s:scope  /:search  Esc:close",
+					`1:agents  ${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:transcript  ${formatKeyHint("space")}:follow  ${formatKeyHint("f")}:filter  ${formatKeyHint("s")}:scope  /:search  ${formatKeyHint("escape")}:close`,
 				),
 				width,
 			),
@@ -829,20 +1814,26 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 	#footer(showingNarrowDetails: boolean, availableWidth: number): string {
 		const nextView = this.#viewMode === "roster" ? "by parent" : "flat";
-		const filter =
-			this.#agentFilter.length > 0 ? `/${this.#agentFilter}${this.#agentFilterEditing ? "▌" : ""}  ·  ` : "";
+		const filter = this.#agentFilterEditing
+			? `/${filterText(this.#agentFilter)}  ·  `
+			: this.#agentFilter.getValue()
+				? `/${this.#agentFilter.getValue()}  ·  `
+				: "";
 		if (showingNarrowDetails) {
 			return theme.fg(
 				"dim",
-				`${filter}1:agents  2:activity  Tab:roster  PgUp/PgDn:scroll  Enter:open  t:${nextView}  Esc:roster`,
+				`${filter}1:agents  2:activity  ${formatKeyHint("tab")}:roster  ${formatKeyHints(["pageUp", "pageDown"])}:scroll  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("escape")}:roster`,
 			);
 		}
 		if (availableWidth < 96) {
-			return theme.fg("dim", `${filter}j/k:select  Enter:open  t:${nextView}  Tab:details  r/x:manage  Esc:close`);
+			return theme.fg(
+				"dim",
+				`${filter}${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("tab")}:details  ${formatKeyHints(["r", "x"])}:manage  ${formatKeyHint("escape")}:close`,
+			);
 		}
 		return theme.fg(
 			"dim",
-			`${filter}1:agents  2:activity  j/k/wheel:select  PgUp/PgDn:details  Enter/click:open  t:${nextView}  r:revive  x:kill  Esc:close`,
+			`${filter}1:agents  2:activity  ${formatKeyHints(["j", "k"])}/wheel:select  ${formatKeyHints(["pageUp", "pageDown"])}:details  ${formatKeyHint("enter")}/click:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("r")}:revive  ${formatKeyHint("x")}:kill  ${formatKeyHint("escape")}:close`,
 		);
 	}
 
@@ -1026,7 +2017,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			rows: this.#rows,
 			observedById: this.#observedById,
 			metricsFor: (ref, observed) => this.#metricsFor(ref, observed),
-			fallbackStatsSession: (ref, observed) => this.#fallbackStatsSession(ref, observed),
+			fallbackStatsSession: hubFallbackStatsSession,
 			sessionMetrics: this.#sessionMetrics,
 			refreshFallback,
 		});
@@ -1299,12 +2290,13 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#handleActivitySearchInput(keyData: string): void {
 		if (matchesKey(keyData, "escape") || matchesKey(keyData, "enter") || keyData === "\r" || keyData === "\n") {
 			this.#activitySearchEditing = false;
-		} else if (matchesKey(keyData, "backspace")) {
-			this.#activitySearch = this.#activitySearch.slice(0, -1);
-		} else if (keyData.length === 1 && keyData >= " " && keyData !== "\u007f") {
-			this.#activitySearch += keyData;
 		} else {
-			return;
+			const before = this.#activitySearch.getValue();
+			if (!this.#activitySearch.handleInput(keyData)) return;
+			if (this.#activitySearch.getValue() === before) {
+				this.#requestRender();
+				return;
+			}
 		}
 		this.#refreshActivityRows();
 		this.#requestRender();
@@ -1312,8 +2304,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 	#handleActivityInput(keyData: string): void {
 		if (matchesKey(keyData, "escape")) {
-			if (this.#activitySearch) {
-				this.#activitySearch = "";
+			if (this.#activitySearch.getValue()) {
+				this.#activitySearch.setValue("");
 				this.#refreshActivityRows();
 				this.#requestRender();
 			} else {
@@ -1331,25 +2323,17 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			return;
 		}
 		if (keyData === " ") {
-			this.#activityFollow = !this.#activityFollow;
-			if (this.#activityFollow && this.#activityRows.length > 0) {
-				this.#selectedActivityRow = this.#activityRows.length - 1;
-			}
-			this.#requestRender();
+			this.#toggleActivityFollow();
 			return;
 		}
 		if (keyData === "f") {
-			const filters: ActivityFilter[] = ["all", "errors", "responses", "tools"];
-			this.#activityFilter = filters[(filters.indexOf(this.#activityFilter) + 1) % filters.length]!;
-			this.#refreshActivityRows();
-			this.#requestRender();
+			this.#setActivityFilter(
+				ACTIVITY_FILTERS[(ACTIVITY_FILTERS.indexOf(this.#activityFilter) + 1) % ACTIVITY_FILTERS.length]!,
+			);
 			return;
 		}
 		if (keyData === "s") {
-			const scopes: ActivityScope[] = ["all", "agent", "subtree"];
-			this.#activityScope = scopes[(scopes.indexOf(this.#activityScope) + 1) % scopes.length]!;
-			this.#refreshActivityRows();
-			this.#requestRender();
+			this.#cycleActivityScope();
 			return;
 		}
 		if (matchesKey(keyData, "j") || matchesSelectDown(keyData)) {
@@ -1374,25 +2358,58 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		}
 	}
 
+	/** Space on the activity log: follow the newest row, or hold the selection. */
+	#toggleActivityFollow(): void {
+		this.#activityFollow = !this.#activityFollow;
+		if (this.#activityFollow && this.#activityRows.length > 0) {
+			this.#selectedActivityRow = this.#activityRows.length - 1;
+		}
+		this.#requestRender();
+	}
+
+	/** `f` cycles through these; the picker's filter scopes set one directly. */
+	#setActivityFilter(filter: ActivityFilter): void {
+		this.#activityFilter = filter;
+		this.#refreshActivityRows();
+		this.#requestRender();
+	}
+
+	/** `s`: all agents → the selected agent → its subtree. */
+	#cycleActivityScope(): void {
+		const scopes: ActivityScope[] = ["all", "agent", "subtree"];
+		this.#activityScope = scopes[(scopes.indexOf(this.#activityScope) + 1) % scopes.length]!;
+		this.#refreshActivityRows();
+		this.#requestRender();
+	}
+
+	/** `t`: flat roster ⇄ grouped by parent. */
+	#toggleViewMode(): void {
+		this.#hoveredRow = null;
+		this.#viewMode = this.#viewMode === "roster" ? "tree" : "roster";
+		this.#refreshRows();
+		this.#requestRender();
+	}
+
 	#handleTableInput(keyData: string): void {
 		if (this.#agentFilterEditing) {
 			if (matchesKey(keyData, "escape") || matchesKey(keyData, "enter") || keyData === "\r" || keyData === "\n") {
 				this.#agentFilterEditing = false;
-				if (matchesKey(keyData, "escape")) this.#agentFilter = "";
-			} else if (matchesKey(keyData, "backspace")) {
-				this.#agentFilter = this.#agentFilter.slice(0, -1);
-			} else if (keyData.length === 1 && keyData >= " " && keyData !== "\u007f") {
-				this.#agentFilter += keyData;
+				if (matchesKey(keyData, "escape")) this.#agentFilter.setValue("");
 			} else {
-				return;
+				const before = this.#agentFilter.getValue();
+				if (!this.#agentFilter.handleInput(keyData)) return;
+				if (this.#agentFilter.getValue() === before) {
+					this.#requestRender();
+					return;
+				}
 			}
 			this.#refreshRows();
 			this.#requestRender();
 			return;
 		}
 		if (matchesKey(keyData, "escape")) {
-			if (this.#agentFilter) {
-				this.#agentFilter = "";
+			if (this.#agentFilter.getValue()) {
+				this.#agentFilter.setValue("");
 				this.#refreshRows();
 				this.#requestRender();
 			} else if (this.#narrowDetailsOpen && this.#split.mode !== "split") {
@@ -1424,10 +2441,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			}
 		}
 		if (keyData === "t") {
-			this.#hoveredRow = null;
-			this.#viewMode = this.#viewMode === "roster" ? "tree" : "roster";
-			this.#refreshRows();
-			this.#requestRender();
+			this.#toggleViewMode();
 			return;
 		}
 		if (matchesKey(keyData, "left")) {

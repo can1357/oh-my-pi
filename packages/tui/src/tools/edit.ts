@@ -6,9 +6,22 @@ import { type EditInspection, editInspect } from "@oh-my-pi/pi-natives";
 import type { Component } from "../tui";
 import { sliceWithWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer } from "./renderer";
+import { code, compact, node, span } from "../native/describe";
+import type { NativeChild, NativeNode } from "../native/node";
+import {
+	diagnosticsBadge,
+	diagnosticsSection,
+	diffStatsMeta,
+	displayPath,
+	errorText,
+	fileDiffSection,
+	fileHref,
+	noteText,
+	resultText,
+} from "./native-view";
 import type { FileDiagnosticsResult } from "./lsp";
-import { renderDiff as renderDiffColored } from "../chrome/diff";
+import { nativeDiff, renderDiff as renderDiffColored } from "../chrome/diff";
 import { getLanguageFromPath } from "../lang-from-path";
 import type { Theme } from "../theme/theme";
 import type { OutputMeta } from "./output-meta";
@@ -23,6 +36,7 @@ import {
 	invalidateRenderedStringCache,
 	PREVIEW_LIMITS,
 	previewWindowRows,
+	releaseRenderedStringCache,
 	type RenderedStringCache,
 	replaceTabs,
 	shortenPath,
@@ -239,16 +253,14 @@ function decodePartialJsonStringFragment(fragment: string): string {
 	}
 }
 
-function extractPartialJsonString(partialJson: string | undefined, key: string): string | undefined {
-	if (!partialJson) return undefined;
-	const pattern = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)`, "u");
-	const match = pattern.exec(partialJson);
-	if (!match) return undefined;
-	return decodePartialJsonStringFragment(match[1]);
-}
+// `"path": "<possibly unterminated string>` in a raw streamed args buffer.
+const PARTIAL_JSON_PATH_RE = /"path"\s*:\s*"((?:\\.|[^"\\])*)/u;
 
 function getPartialJsonEditPath(args: EditRenderArgs): string | undefined {
-	return filePathFromEditEntry(extractPartialJsonString(args.__partialJson, "path"));
+	const partialJson = args.__partialJson;
+	if (!partialJson) return undefined;
+	const match = PARTIAL_JSON_PATH_RE.exec(partialJson);
+	return match ? decodePartialJsonStringFragment(match[1]!) : undefined;
 }
 
 /** Count distinct file paths in an edits array. */
@@ -427,8 +439,33 @@ function hasEditCallPayload(args: EditRenderArgs, renderContext: EditRenderConte
 	return false;
 }
 
+/**
+ * Head-window preview of streamed replacement text. Only the displayed head is
+ * sanitized and split; the hidden-line count comes from a raw newline scan.
+ * That matches sanitizing the whole text because, on ESC-free input,
+ * `sanitizeText` only deletes individual code units and never a `\n`: the
+ * cut sits on a `\n`, so it cannot split a surrogate pair. The one non-local
+ * rule — a lone surrogate anywhere drops every U+FFFD — is replayed on the
+ * head. ESC-bearing text (ANSI stripping can span lines) takes the full path.
+ */
 function renderPlainTextPreview(text: string, uiTheme: Theme, _filePath?: string): string {
-	const previewLines = cappedHeadLines(sanitizeText(text).split("\n"), CALL_TEXT_PREVIEW_LINES);
+	let previewLines: { lines: readonly string[]; hidden: number };
+	let headEnd = -1;
+	if (!text.includes("\x1b")) {
+		for (let newlines = 0; newlines < CALL_TEXT_PREVIEW_LINES; newlines++) {
+			headEnd = text.indexOf("\n", headEnd + 1);
+			if (headEnd === -1) break;
+		}
+	}
+	if (headEnd === -1) {
+		previewLines = cappedHeadLines(sanitizeText(text).split("\n"), CALL_TEXT_PREVIEW_LINES);
+	} else {
+		let head = sanitizeText(text.slice(0, headEnd));
+		if (head.includes("\ufffd") && !text.isWellFormed()) head = head.replaceAll("\ufffd", "");
+		let hidden = 1;
+		for (let i = text.indexOf("\n", headEnd + 1); i !== -1; i = text.indexOf("\n", i + 1)) hidden++;
+		previewLines = { lines: head.split("\n"), hidden };
+	}
 	let preview = "\n\n";
 	for (const line of previewLines.lines) {
 		preview += `${uiTheme.fg("toolOutput", truncateToWidth(replaceTabs(line), CALL_TEXT_PREVIEW_WIDTH))}\n`;
@@ -657,6 +694,29 @@ function getHashlineInputSections(input: string): HashlineInputEntry[] {
 	return entries;
 }
 
+/** Extract display targets using the existing parsers for supported freeform edit modes. */
+export function getEditInputPaths(input: string, resolvedMode?: EditMode): readonly string[] {
+	const mode =
+		resolvedMode ??
+		(/^\*\*\* (?:Add|Update|Delete) File:/m.test(input)
+			? "apply_patch"
+			: /^[ \t]*\*{3}[ \t]+Edit[ \t]+File:/im.test(input)
+				? "sloppy"
+				: undefined);
+	try {
+		const entries =
+			mode && mode !== "hashline" ? inspectInputEntries({}, mode, input) : getHashlineInputSections(input);
+		const paths: string[] = [];
+		for (const entry of entries) {
+			if (entry.path) paths.push(entry.path);
+			if (entry.rename && entry.rename !== entry.path) paths.push(entry.rename);
+		}
+		return paths;
+	} catch {
+		return [];
+	}
+}
+
 function getHashlineInputRenderSummary(
 	args: EditRenderArgs,
 	editMode: EditMode | undefined,
@@ -751,17 +811,30 @@ interface EditCallFacts {
  * fields tolerate a small lag) or when the payload shrinks (rewind). The
  * final frame (`isPartial === false`) always recomputes. This turns the
  * per-frame O(n) stringify+parse+scan into O(n^2/K) total per call.
+ *
+ * The reveal hands over a fresh args object on every frame, so the gate
+ * keys on the streamed raw payload (`__partialJson`) rather than on args
+ * identity: a frame reuses the facts only when its payload extends, byte for
+ * byte, the payload the facts were derived from, and every direct field the
+ * facts read (path, file_path, rename, op, edits) is unchanged. Final args
+ * carry no `__partialJson`, so the completed call always derives exact facts.
  */
 const EDIT_FACTS_MIN_GROWTH = 512;
-let lastFactsCache:
-	| {
-			editArgs: EditRenderArgs;
-			isPartial: boolean;
-			editMode: EditMode | undefined;
-			length: number;
-			facts: EditCallFacts;
-	  }
-	| undefined;
+interface EditFactsCacheEntry {
+	editArgs: EditRenderArgs;
+	isPartial: boolean;
+	editMode: EditMode | undefined;
+	length: number;
+	/** Streamed raw payload the facts were derived from; set only for streamed `input` payloads. */
+	streamedPayload: string | undefined;
+	filePath: unknown;
+	path: unknown;
+	rename: unknown;
+	op: Operation | undefined;
+	edits: EditRenderEntry[] | undefined;
+	facts: EditCallFacts;
+}
+let lastFactsCache: EditFactsCacheEntry | undefined;
 
 function editFactsInputLength(editArgs: EditRenderArgs): number {
 	const input = editArgs.input ?? editArgs._input;
@@ -772,27 +845,72 @@ function editFactsInputLength(editArgs: EditRenderArgs): number {
 	return Array.isArray(editArgs.edits) ? editArgs.edits.length : 0;
 }
 
+/**
+ * Raw streamed payload of a mid-stream `input` edit, or undefined when the
+ * args are final (no `__partialJson`) or carry no `input` string — only the
+ * `input` payloads pay the expensive whole-payload inspect per frame.
+ */
+function streamedInputPayload(editArgs: EditRenderArgs): string | undefined {
+	if (typeof (editArgs.input ?? editArgs._input) !== "string") return undefined;
+	const payload = editArgs.__partialJson;
+	return typeof payload === "string" ? payload : undefined;
+}
+
+/**
+ * Whether a fresh streamed frame continues the payload `cached` was derived
+ * from within the growth gate. Exact: the cached payload must be a verbatim
+ * prefix of the new one, so a rewind or another call's payload never reuses.
+ */
+function continuesCachedPayload(cached: EditFactsCacheEntry, editArgs: EditRenderArgs): boolean {
+	const base = cached.streamedPayload;
+	if (base === undefined) return false;
+	const payload = streamedInputPayload(editArgs);
+	if (payload === undefined || payload.length < base.length) return false;
+	if (payload.length - base.length >= EDIT_FACTS_MIN_GROWTH) return false;
+	if (
+		editArgs.file_path !== cached.filePath ||
+		editArgs.path !== cached.path ||
+		editArgs.rename !== cached.rename ||
+		editArgs.op !== cached.op ||
+		editArgs.edits !== cached.edits
+	) {
+		return false;
+	}
+	return payload.startsWith(base);
+}
+
 function resolveEditCallFacts(
 	editArgs: EditRenderArgs,
 	isPartial: boolean,
 	editMode: EditMode | undefined,
 ): EditCallFacts {
 	const cached = lastFactsCache;
-	if (
-		cached !== undefined &&
-		cached.editArgs === editArgs &&
-		cached.isPartial === isPartial &&
-		cached.editMode === editMode
-	) {
-		const length = editFactsInputLength(editArgs);
-		// Same args object, still growing gradually: reuse. A rewind
-		// (shorter), a jump past the gate, or the final frame recomputes.
-		if (isPartial && length >= cached.length && length - cached.length < EDIT_FACTS_MIN_GROWTH) {
+	if (cached !== undefined && isPartial && cached.isPartial && cached.editMode === editMode) {
+		if (cached.editArgs === editArgs) {
+			const length = editFactsInputLength(editArgs);
+			// Same args object, still growing gradually: reuse. A rewind
+			// (shorter), a jump past the gate, or the final frame recomputes.
+			if (length >= cached.length && length - cached.length < EDIT_FACTS_MIN_GROWTH) {
+				return cached.facts;
+			}
+		} else if (continuesCachedPayload(cached, editArgs)) {
 			return cached.facts;
 		}
 	}
 	const facts = resolveEditCallFactsUncached(editArgs, isPartial, editMode);
-	lastFactsCache = { editArgs, isPartial, editMode, length: editFactsInputLength(editArgs), facts };
+	lastFactsCache = {
+		editArgs,
+		isPartial,
+		editMode,
+		length: editFactsInputLength(editArgs),
+		streamedPayload: streamedInputPayload(editArgs),
+		filePath: editArgs.file_path,
+		path: editArgs.path,
+		rename: editArgs.rename,
+		op: editArgs.op,
+		edits: editArgs.edits,
+		facts,
+	};
 	return facts;
 }
 
@@ -993,41 +1111,159 @@ export const editToolRenderer = {
 			return renderInlineEditRow(uiTheme, { op, rename, rawPath, pending: true });
 		}
 		const callPreviewCaches: RenderedStringCache[] = [];
-		return framedToolCard(uiTheme, ({ width }) => {
-			// No status icon on the head row: it's the head of the framed block,
-			// and native-scrollback commits are prefix-only — an animated glyph
-			// would pin the commit boundary at the top, and the pending hourglass
-			// just adds noise. The liveness cue rides the trailing "(preview)" /
-			// "(streaming)" line instead.
-			const header = renderEditHeader(width, uiTheme, {
-				op,
-				rawPath,
-				rename,
-				extraSuffix: fileCount > 1 ? uiTheme.fg("dim", ` (+${fileCount - 1} more)`) : undefined,
-			});
-			let body = getCallPreview(
-				editArgs,
-				rawPath,
-				width,
-				uiTheme,
-				renderContext,
-				options.expanded,
-				options?.spinnerFrame,
-				callPreviewCaches,
-			);
-			if (applyPatchError) {
-				body += `\n${uiTheme.fg("error", truncateToWidth(replaceTabs(applyPatchError), Math.max(1, width - 2)))}`;
+		return framedToolCard(
+			uiTheme,
+			({ width }) => {
+				// No status icon on the head row: it's the head of the framed block,
+				// and native-scrollback commits are prefix-only — an animated glyph
+				// would pin the commit boundary at the top, and the pending hourglass
+				// just adds noise. The liveness cue rides the trailing "(preview)" /
+				// "(streaming)" line instead.
+				const header = renderEditHeader(width, uiTheme, {
+					op,
+					rawPath,
+					rename,
+					extraSuffix: fileCount > 1 ? uiTheme.fg("dim", ` (+${fileCount - 1} more)`) : undefined,
+				});
+				let body = getCallPreview(
+					editArgs,
+					rawPath,
+					width,
+					uiTheme,
+					renderContext,
+					options.expanded,
+					options?.spinnerFrame,
+					callPreviewCaches,
+				);
+				if (applyPatchError) {
+					body += `\n${uiTheme.fg("error", truncateToWidth(replaceTabs(applyPatchError), Math.max(1, width - 2)))}`;
+				}
+				const bodyLines = body ? body.split("\n") : [];
+				while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
+				return {
+					header,
+					sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
+					phase: applyPatchError ? "error" : "pending",
+					borderColor: applyPatchError ? "error" : "borderMuted",
+					contentPaddingLeft: 0,
+				};
+			},
+			{
+				onReleaseRenderCaches: () => {
+					for (const cache of callPreviewCaches) releaseRenderedStringCache(cache);
+				},
+			},
+		);
+	},
+
+	describeCall(
+		args: EditRenderArgs,
+		options: RenderResultOptions & { renderContext?: EditRenderContext },
+	): NativeToolView {
+		const renderContext = options.renderContext;
+		const { rawPath, rename, op, fileCount, applyPatchError } = resolveEditCallFacts(
+			args,
+			options.isPartial,
+			renderContext?.editMode,
+		);
+		const body: NativeChild[] = [];
+		let tool: NativeToolHead;
+		const multi = renderContext?.perFileDiffPreview;
+		if (multi && multi.length > 1 && multi.some(p => p.diff || p.error)) {
+			let added = 0;
+			let removed = 0;
+			for (const preview of multi) {
+				const stats = preview.diff ? getDiffStats(preview.diff) : undefined;
+				added += stats?.added ?? 0;
+				removed += stats?.removed ?? 0;
+				body.push(
+					fileDiffSection(
+						{ path: preview.path, added: stats?.added, removed: stats?.removed },
+						[preview.error ? errorText(preview.error) : editDiff(preview.diff ?? "", preview.path)],
+						{ role: "omp.tool.edit.file", tone: preview.error ? "error" : undefined },
+					),
+				);
 			}
-			const bodyLines = body ? body.split("\n") : [];
-			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
+			tool = editToolHead({ op, files: Math.max(fileCount, multi.length), added, removed });
+		} else {
+			let diffText: string | undefined;
+			let firstChangedLine: number | undefined;
+			if (args.previewDiff || (args.diff && args.op)) {
+				diffText = args.previewDiff ?? args.diff ?? "";
+				body.push(editDiff(diffText, rawPath));
+			} else if (args.diff || args.newText || args.patch) {
+				body.push(code(args.diff ?? args.newText ?? args.patch ?? "", { lang: getLanguageFromPath(rawPath) }));
+			} else if (renderContext?.editDiffPreview) {
+				const preview = renderContext.editDiffPreview;
+				if ("error" in preview && preview.error) body.push(errorText(preview.error));
+				else if (preview.diff) {
+					diffText = preview.diff;
+					firstChangedLine = preview.firstChangedLine;
+					body.push(editDiff(preview.diff, rawPath));
+				}
+			}
+			const stats = diffText ? getDiffStats(diffText) : undefined;
+			tool = editToolHead({
+				op,
+				path: rawPath,
+				files: fileCount,
+				line: firstChangedLine,
+				rename,
+				added: stats?.added ?? 0,
+				removed: stats?.removed ?? 0,
+			});
+		}
+		if (applyPatchError) body.push(errorText(applyPatchError));
+		return { tool, body, tone: applyPatchError ? "error" : undefined };
+	},
+
+	describeResult(
+		result: { content: Array<{ type: string; text?: string }>; details?: EditToolDetails; isError?: boolean },
+		options: RenderResultOptions & { renderContext?: EditRenderContext },
+		args?: EditRenderArgs,
+	): NativeToolView {
+		const edits = Array.isArray(args?.edits) ? args.edits : undefined;
+		const perFileResults = result.details?.perFileResults;
+		const totalFiles = edits ? countEditFiles(edits) : 0;
+		if (perFileResults && (perFileResults.length > 1 || totalFiles > 1)) {
+			const remaining = Math.max(0, totalFiles - perFileResults.length);
+			let added = 0;
+			let removed = 0;
+			// Files are borderless sections inside the one tool frame.
+			const body: NativeChild[] = perFileResults.map(fileResult => {
+				const file = editFileParts({ content: [], details: fileResult, isError: fileResult.isError }, options);
+				added += file.added;
+				removed += file.removed;
+				return fileDiffSection(file, file.body, {
+					role: "omp.tool.edit.file",
+					tone: file.isError ? "error" : undefined,
+				});
+			});
+			if (remaining > 0) {
+				body.push(
+					node("spinner", {
+						label: [span(`${remaining} more file${remaining > 1 ? "s" : ""} pending…`, "muted")],
+					}),
+				);
+			}
+			const failed = perFileResults.some(file => file.isError);
 			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
-				phase: applyPatchError ? "error" : "pending",
-				borderColor: applyPatchError ? "error" : "borderMuted",
-				contentPaddingLeft: 0,
+				tool: editToolHead({
+					files: Math.max(totalFiles, perFileResults.length),
+					added,
+					removed,
+					diagnostics: perFileResults.map(file => file.diagnostics),
+				}),
+				body,
+				tone: failed ? "error" : undefined,
 			};
-		});
+		}
+		const file = editFileParts(result, options, args);
+		return {
+			tool: editToolHead({ ...file, href: fileHref(file.resolvedPath), diagnostics: [file.fileDiagnostics] }),
+			body: file.body,
+			tone: file.isError ? "error" : undefined,
+		};
 	},
 
 	renderResult(
@@ -1045,6 +1281,128 @@ export const editToolRenderer = {
 		return renderSingleFileResult(result, options, uiTheme, args);
 	},
 } satisfies ToolRenderer<EditRenderArgs, EditToolDetails>;
+
+/** Facts behind a native edit head: one file (path, first changed line, rename) or a file count. */
+interface EditHeadFacts {
+	op?: Operation;
+	path?: string;
+	/** Distinct files in the call; more than one heads the call as `N files`. */
+	files?: number;
+	line?: number;
+	href?: string;
+	rename?: string;
+	added: number;
+	removed: number;
+	diagnostics?: readonly (FileDiagnosticsResult | undefined)[];
+}
+
+/**
+ * Native edit head (§7.3): `Edit · path:line · +8 −1 · → new/path` for one
+ * file, `Edit · 3 files · +21 −4` for several; a diagnostics chip when LSP reported.
+ */
+function editToolHead(facts: EditHeadFacts): NativeToolHead {
+	const multi = (facts.files ?? 0) > 1;
+	const meta = compact([
+		diffStatsMeta(facts.added, facts.removed),
+		!multi && facts.rename ? `→ ${displayPath(facts.rename)}` : undefined,
+	]);
+	const badge = facts.diagnostics && diagnosticsBadge(facts.diagnostics);
+	const target = multi
+		? `${facts.files} files`
+		: facts.path
+			? `${displayPath(facts.path)}${facts.line ? `:${facts.line}` : ""}`
+			: undefined;
+	return {
+		title: multi ? "Edit" : getOperationTitle(facts.op),
+		target,
+		targetKind: multi ? "text" : "path",
+		href: multi ? undefined : facts.href,
+		meta: meta.length > 0 ? meta : undefined,
+		badges: badge ? [badge] : undefined,
+	};
+}
+
+/** A file's diff: hunks highlighted by the path's language, no path header (the head or section names the file). */
+function editDiff(diffText: string, filePath: string): NativeNode {
+	return nativeDiff(diffText, { lang: filePath ? getLanguageFromPath(filePath) : undefined });
+}
+
+/** One file's edit result for native views: head facts plus its body (diff or error, then diagnostics). */
+interface EditFileParts extends Omit<EditHeadFacts, "diagnostics"> {
+	path: string;
+	/** Absolute path the edit resolved to, when known. */
+	resolvedPath?: string;
+	isError: boolean;
+	fileDiagnostics?: FileDiagnosticsResult;
+	body: NativeChild[];
+}
+
+function editFileParts(
+	result: {
+		content: Array<{ type: string; text?: string }>;
+		details?: EditToolDetails | EditToolPerFileResult;
+		isError?: boolean;
+	},
+	options: RenderResultOptions & { renderContext?: EditRenderContext },
+	args?: EditRenderArgs,
+): EditFileParts {
+	const details = result.details;
+	const isError = result.isError ?? (details && "isError" in details ? details.isError : false) ?? false;
+	const firstEdit = Array.isArray(args?.edits) ? args.edits[0] : undefined;
+	const firstHashlineInputEntry = getHashlineInputRenderSummary(args ?? {}, options.renderContext?.editMode)
+		?.entries[0];
+	const moveSource =
+		details && "sourcePath" in details && typeof details.sourcePath === "string" ? details.sourcePath : undefined;
+	const detailPath = details && "path" in details && typeof details.path === "string" ? details.path : undefined;
+	const rawPath =
+		moveSource ??
+		(typeof args?.file_path === "string"
+			? args.file_path
+			: typeof args?.path === "string"
+				? args.path
+				: (filePathFromEditEntry(firstEdit?.path) ?? detailPath ?? firstHashlineInputEntry?.path ?? ""));
+	const op = args?.op || firstEdit?.op || details?.op;
+	const rename =
+		(typeof args?.rename === "string" ? args.rename : undefined) ??
+		filePathFromEditEntry(firstEdit?.rename) ??
+		filePathFromEditEntry(firstEdit?.move) ??
+		(details && "move" in details && typeof details.move === "string" ? details.move : undefined);
+	const editDiffPreview = details ? undefined : options.renderContext?.editDiffPreview;
+	const previewDiff = editDiffPreview && !("error" in editDiffPreview) ? editDiffPreview.diff : undefined;
+	const diffText = isError ? undefined : details?.diff || previewDiff;
+	const firstChangedLine =
+		(editDiffPreview && "firstChangedLine" in editDiffPreview ? editDiffPreview.firstChangedLine : undefined) ||
+		(details && !isError ? details.firstChangedLine : undefined);
+	const shownPath = displayPath(detailPath ?? rawPath);
+	const body: NativeChild[] = [];
+	if (isError) {
+		const displayErrorText = details && "displayErrorText" in details ? details.displayErrorText : undefined;
+		const message =
+			displayErrorText || (details && "errorText" in details && details.errorText) || resultText(result);
+		if (message) body.push(errorText(message));
+	} else if (diffText) {
+		body.push(editDiff(diffText, detailPath ?? rawPath));
+	} else if (editDiffPreview && "error" in editDiffPreview) {
+		body.push(errorText(editDiffPreview.error));
+	} else if (details && op !== "delete" && op !== "create" && !rename) {
+		body.push(noteText(`No changes were made${shownPath ? ` to ${shownPath}` : ""}.`));
+	}
+	const diagnostics = diagnosticsSection(details?.diagnostics);
+	if (diagnostics) body.push(diagnostics);
+	const stats = diffText ? getDiffStats(diffText) : undefined;
+	return {
+		op,
+		path: rawPath,
+		line: firstChangedLine,
+		rename,
+		resolvedPath: detailPath,
+		added: stats?.added ?? 0,
+		removed: stats?.removed ?? 0,
+		isError: Boolean(isError),
+		fileDiagnostics: details?.diagnostics,
+		body,
+	};
+}
 
 function renderSingleFileResult(
 	result: {
@@ -1103,74 +1461,54 @@ function renderSingleFileResult(
 	const renderedDiffCache = createRenderedStringCache();
 	const statsSuffixCache = createRenderedStringCache();
 
-	return framedToolCard(uiTheme, ({ width }) => {
-		const { expanded, renderContext } = options;
-		// A finalized result is authoritative: its `details` describe exactly
-		// what happened. The shared streaming `editDiffPreview` is a call-phase
-		// artifact (in a batch it reflects only the first file), so consulting it
-		// for an empty-diff delete/move/no-op result mislabels the card. Fall
-		// back to the preview only when no details exist yet.
-		const editDiffPreview = details ? undefined : renderContext?.editDiffPreview;
-		const renderDiffFn = renderContext?.renderDiff ?? renderFallbackDiff;
+	return framedToolCard(
+		uiTheme,
+		({ width }) => {
+			const { expanded, renderContext } = options;
+			// A finalized result is authoritative: its `details` describe exactly
+			// what happened. The shared streaming `editDiffPreview` is a call-phase
+			// artifact (in a batch it reflects only the first file), so consulting it
+			// for an empty-diff delete/move/no-op result mislabels the card. Fall
+			// back to the preview only when no details exist yet.
+			const editDiffPreview = details ? undefined : renderContext?.editDiffPreview;
+			const renderDiffFn = renderContext?.renderDiff ?? renderFallbackDiff;
 
-		if (diffSectionRenderDiffFn !== renderDiffFn) {
-			diffSectionRenderDiffFn = renderDiffFn;
-			invalidateRenderedStringCache(diffSectionCache);
-			invalidateRenderedStringCache(renderedDiffCache);
-		}
-		const firstChangedLine =
-			(editDiffPreview && "firstChangedLine" in editDiffPreview ? editDiffPreview.firstChangedLine : undefined) ||
-			(details && !isError ? details.firstChangedLine : undefined);
-		const linkPath = details && "path" in details ? details.path : undefined;
-
-		// Change stats ride inline on the header bar next to the path.
-		const previewDiff = editDiffPreview && !("error" in editDiffPreview) ? editDiffPreview.diff : undefined;
-		const headerDiff = isError ? undefined : details?.diff || previewDiff;
-		const statsSuffix = headerDiff
-			? cachedRenderedString(statsSuffixCache, uiTheme, false, "", headerDiff, () =>
-					formatDiffStatsSuffix(headerDiff, uiTheme),
-				)
-			: "";
-		const header = renderEditHeader(width, uiTheme, {
-			icon: isError ? "error" : "success",
-			iconOverride: !isError && !options.isPartial ? uiTheme.styledSymbol("tool.edit", "accent") : undefined,
-			op,
-			rawPath,
-			rename,
-			firstChangedLine,
-			linkPath,
-			statsSuffix,
-		});
-		const innerWidth = Math.max(1, width - 2);
-
-		let body = "";
-		if (isError) {
-			if (errorText) body = uiTheme.fg("error", replaceTabs(errorText));
-		} else if (details?.diff) {
-			body = renderDiffSection(
-				details.diff,
-				rawPath,
-				expanded,
-				innerWidth,
-				uiTheme,
-				renderDiffFn,
-				renderedDiffCache,
-				diffSectionCache,
-			);
-		} else if (details) {
-			// Authoritative result with no textual diff: a delete, a move-only
-			// rename, or a genuine no-op. The header already names the op
-			// (Delete / `src → dst`); only a true no-op needs an explanatory
-			// body so an empty card isn't mistaken for a stalled edit.
-			if (op !== "delete" && op !== "create" && !rename) {
-				const noChangePath = linkPath ? shortenPath(linkPath) : rawPath ? shortenPath(rawPath) : "";
-				body = uiTheme.fg("dim", `No changes were made${noChangePath ? ` to ${noChangePath}` : ""}.`);
+			if (diffSectionRenderDiffFn !== renderDiffFn) {
+				diffSectionRenderDiffFn = renderDiffFn;
+				invalidateRenderedStringCache(diffSectionCache);
+				invalidateRenderedStringCache(renderedDiffCache);
 			}
-		} else if (editDiffPreview) {
-			if ("error" in editDiffPreview) body = uiTheme.fg("error", replaceTabs(editDiffPreview.error));
-			else if (editDiffPreview.diff)
+			const firstChangedLine =
+				(editDiffPreview && "firstChangedLine" in editDiffPreview ? editDiffPreview.firstChangedLine : undefined) ||
+				(details && !isError ? details.firstChangedLine : undefined);
+			const linkPath = details && "path" in details ? details.path : undefined;
+
+			// Change stats ride inline on the header bar next to the path.
+			const previewDiff = editDiffPreview && !("error" in editDiffPreview) ? editDiffPreview.diff : undefined;
+			const headerDiff = isError ? undefined : details?.diff || previewDiff;
+			const statsSuffix = headerDiff
+				? cachedRenderedString(statsSuffixCache, uiTheme, false, "", headerDiff, () =>
+						formatDiffStatsSuffix(headerDiff, uiTheme),
+					)
+				: "";
+			const header = renderEditHeader(width, uiTheme, {
+				icon: isError ? "error" : "success",
+				iconOverride: !isError && !options.isPartial ? uiTheme.styledSymbol("tool.edit", "accent") : undefined,
+				op,
+				rawPath,
+				rename,
+				firstChangedLine,
+				linkPath,
+				statsSuffix,
+			});
+			const innerWidth = Math.max(1, width - 2);
+
+			let body = "";
+			if (isError) {
+				if (errorText) body = uiTheme.fg("error", replaceTabs(errorText));
+			} else if (details?.diff) {
 				body = renderDiffSection(
-					editDiffPreview.diff,
+					details.diff,
 					rawPath,
 					expanded,
 					innerWidth,
@@ -1179,27 +1517,56 @@ function renderSingleFileResult(
 					renderedDiffCache,
 					diffSectionCache,
 				);
-		}
-		if (details?.diagnostics) {
-			body += formatDiagnostics(details.diagnostics, expanded, uiTheme, (fp: string) =>
-				uiTheme.getLangIcon(getLanguageFromPath(fp)),
-			);
-		}
+			} else if (details) {
+				// Authoritative result with no textual diff: a delete, a move-only
+				// rename, or a genuine no-op. The header already names the op
+				// (Delete / `src → dst`); only a true no-op needs an explanatory
+				// body so an empty card isn't mistaken for a stalled edit.
+				if (op !== "delete" && op !== "create" && !rename) {
+					const noChangePath = linkPath ? shortenPath(linkPath) : rawPath ? shortenPath(rawPath) : "";
+					body = uiTheme.fg("dim", `No changes were made${noChangePath ? ` to ${noChangePath}` : ""}.`);
+				}
+			} else if (editDiffPreview) {
+				if ("error" in editDiffPreview) body = uiTheme.fg("error", replaceTabs(editDiffPreview.error));
+				else if (editDiffPreview.diff)
+					body = renderDiffSection(
+						editDiffPreview.diff,
+						rawPath,
+						expanded,
+						innerWidth,
+						uiTheme,
+						renderDiffFn,
+						renderedDiffCache,
+						diffSectionCache,
+					);
+			}
+			if (details?.diagnostics) {
+				body += formatDiagnostics(details.diagnostics, expanded, uiTheme, (fp: string) =>
+					uiTheme.getLangIcon(getLanguageFromPath(fp)),
+				);
+			}
 
-		// Diff lines self-wrap with a continuation gutter; pre-wrap to the frame's
-		// inner width so renderOutputBlock's generic wrap is a no-op. Edit frames
-		// use a flush left border because code-frame gutters already provide padding.
-		const bodyLines = body.length > 0 ? body.split("\n").flatMap(line => wrapEditRendererLine(line, innerWidth)) : [];
-		while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
+			// Diff lines self-wrap with a continuation gutter; pre-wrap to the frame's
+			// inner width so renderOutputBlock's generic wrap is a no-op. Edit frames
+			// use a flush left border because code-frame gutters already provide padding.
+			const bodyLines =
+				body.length > 0 ? body.split("\n").flatMap(line => wrapEditRendererLine(line, innerWidth)) : [];
+			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 
-		return {
-			header,
-			sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
-			phase: isError ? "error" : options.isPartial ? "partial" : "success",
-			borderColor: isError ? "error" : "borderMuted",
-			contentPaddingLeft: 0,
-		};
-	});
+			return {
+				header,
+				sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
+				phase: isError ? "error" : options.isPartial ? "partial" : "success",
+				borderColor: isError ? "error" : "borderMuted",
+				contentPaddingLeft: 0,
+			};
+		},
+		{
+			// Only the width-keyed diff section goes; the highlighted diff and stats suffix do not depend on width, and
+			// re-highlighting every committed card on each resize replay costs seconds.
+			onReleaseRenderCaches: () => releaseRenderedStringCache(diffSectionCache),
+		},
+	);
 }
 
 function renderMultiFileResult(
@@ -1253,6 +1620,10 @@ function renderMultiFileResult(
 		invalidate() {
 			cached = undefined;
 			for (const c of fileComponents) c.invalidate?.();
+		},
+		releaseRenderCaches() {
+			cached = undefined;
+			for (const c of fileComponents) c.releaseRenderCaches?.();
 		},
 	};
 }

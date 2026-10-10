@@ -1,21 +1,17 @@
 export interface EmbeddedAddonFile {
 	variant: "modern" | "baseline" | "default";
+	/** Basename of the extracted `.node` file. */
 	filename: string;
-	size?: number;
-	filePath?: string;
-}
-
-export interface EmbeddedAddonArchive {
-	format: "tar.gz";
-	filename: string;
-	filePath: string;
+	/** Decompressed addon size in bytes. */
+	size: number;
+	/** Embedded zstd frame holding the addon bytes. */
+	zstdPath: string;
 }
 
 export interface EmbeddedAddon {
 	platformTag: string;
 	version: string;
 	files: EmbeddedAddonFile[];
-	archive?: EmbeddedAddonArchive;
 }
 
 export interface DetectCompiledBinaryInput {
@@ -75,7 +71,6 @@ export interface NativeLoaderContext {
 	addonFilenames: string[];
 	addonLabel: string;
 	candidates: string[];
-	versionSentinelExport: string;
 	isWorkspaceLoad: boolean;
 	nativesDir: string;
 }
@@ -91,13 +86,13 @@ export function cleanupStaleNativeVersions(input: CleanupStaleNativeVersionsInpu
 
 export function prepareNativeVersionDir(versionedDir: string): void;
 
-export interface ExtractEmbeddedAddonArchiveInput {
-	archivePath: string;
+export interface ExtractEmbeddedAddonsInput {
 	files: EmbeddedAddonFile[];
 	targetDir: string;
 }
 
-export function extractEmbeddedAddonArchive(input: ExtractEmbeddedAddonArchiveInput): string[];
+/** Decompress every manifest addon missing or wrong-sized in `targetDir`; returns the paths written. */
+export function extractEmbeddedAddons(input: ExtractEmbeddedAddonsInput): string[];
 
 export interface SelectCpuVariantInput {
 	arch: string;
@@ -118,7 +113,6 @@ export function selectCpuVariant(input: SelectCpuVariantInput): SelectCpuVariant
 export interface ValidateLoadedBindingsContext {
 	isWorkspaceLoad: boolean;
 	packageVersion: string;
-	versionSentinelExport: string;
 }
 
 export function validateLoadedBindings(
@@ -126,5 +120,32 @@ export function validateLoadedBindings(
 	bindings: Record<string, unknown>,
 	candidate: string,
 ): void;
+
+/** Identity of the addon `loadNative()` returned, for missing-export diagnostics. */
+export interface NativeAddonStatus {
+	/** Absolute path of the loaded `.node`. */
+	path: string;
+	/** Release the loaded addon reports (post-link stamp or legacy sentinel), or `null` when unidentified. */
+	version: string | null;
+	/** `package.json#version` of the loader that loaded it. */
+	packageVersion: string;
+	/** True when the addon carries a different release than this package. */
+	stale: boolean;
+}
+
+/** The addon behind this process's exports; `null` before a successful load. */
+export function nativeAddonStatus(): NativeAddonStatus | null;
+
+/**
+ * Stub for an export the addon does not provide: `undefined` on a current
+ * addon, a throwing function on a stale one.
+ */
+export function missingNativeExport(
+	symbolName: string,
+	addon?: NativeAddonStatus | null,
+): (() => never) | undefined;
+
+/** Actionable text for {@link missingNativeExport}. */
+export function missingNativeExportMessage(symbolName: string, addon?: NativeAddonStatus | null): string;
 
 export function loadNative(): Record<string, unknown>;

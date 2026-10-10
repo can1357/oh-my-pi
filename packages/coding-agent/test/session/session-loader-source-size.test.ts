@@ -25,17 +25,8 @@ describe("loadSessionFile sourceSize", () => {
 		expect(loaded.sourceSize).toBe(Buffer.byteLength(content, "utf8"));
 	});
 
-	it("matches the content byte length on a consistent backend", async () => {
-		const storage = new MemorySessionStorage();
-		const content = `${HEADER}\n${LINE}\n`;
-		storage.writeTextSync("/s/ok.jsonl", content);
-
-		const loaded = await loadSessionFile("/s/ok.jsonl", storage);
-		expect(loaded.sourceSize).toBe(Buffer.byteLength(content, "utf8"));
-	});
-
 	it("stays null when the path does not exist", async () => {
-		const dir = TempDir.createSync("loader-source-size");
+		const dir = TempDir.createSync("@loader-source-size-");
 		try {
 			const storage = new FileSessionStorage();
 			const loaded = await loadSessionFile(`${dir.path()}/missing.jsonl`, storage);

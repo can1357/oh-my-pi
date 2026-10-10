@@ -19,26 +19,38 @@
  *
  * Keys: Up/Down step through rendered items in transcript order (within the
  * active column when a strip is open), Left/Right slide between branch
- * variants at a fork and jump between user turns elsewhere, Enter rewinds to
- * the outlined item, Esc cancels.
+ * variants at a fork and jump between user turns elsewhere, `f` opens a
+ * filter (typing narrows the current path to matching items; Esc leaves the
+ * filter with the selection kept), Enter rewinds to the outlined item, A loads
+ * earlier turns without changing selection (stepping above the oldest replayed
+ * turn loads them too), Esc cancels.
+ *
+ * In a TSP terminal (Tern) the same replay is a page, not a sheet: a screen
+ * surface of the transcript's own blocks with `pick`/`drop` marks in place of
+ * the dotted outline (see `describeScreen`).
  */
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
 	type Component,
+	Input,
 	matchesKey,
 	padding,
 	routeSgrMouseInput,
 	sliceByColumn,
 	type TUI,
 	truncateToWidth,
+	visibleWidth,
 } from "../index";
 import type { MessageRenderer } from "../chat/extension-types";
-import type { TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
+import { recentTranscriptEntries, type TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
 import { theme } from "../theme/theme";
 import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { ChatTranscriptBuilder } from "../chat/chat-transcript-builder";
 import { TranscriptBrowser, type TranscriptBrowserFrame } from "../chat/transcript-browser";
 import { padToWidth } from "../render/utils";
+import { expandKeyHint } from "../render/render-utils";
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import {
 	appendOutlineEntries,
 	type ComposedColumn,
@@ -49,6 +61,12 @@ import {
 	positionRail,
 	userTurnLabel,
 } from "../chat/transcript-outline";
+import type { TspMark } from "@oh-my-pi/pi-wire";
+import { kbd, node, span, text } from "../native/describe";
+import type { DescribeContext, NativeChild, NativeNode, NativeScreen, NativeUiEvent } from "../native/node";
+import { actionBar, actionButton, actionHint, hintsRow } from "../native/overlay";
+import { isNativeRendering } from "../native/state";
+import { collectBlocks, targetCopy } from "./copy-selector";
 
 /** One alternate branch at a divergence: its root and message path root → most-recent leaf. */
 export interface BranchVariantPath {
@@ -65,6 +83,7 @@ export interface RewindSelectorDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	expandThinkingBlocks?: () => boolean;
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
 	/** Sibling branch paths of `entryId`'s turn (excluding the turn itself). */
@@ -83,10 +102,68 @@ interface SiblingColumn {
 	label: string;
 }
 
+/**
+ * A replayed block on the rewind page, carrying a transient `mark`: it
+ * describes as the block with the mark merged into its root props, and hands
+ * events and rendering to the block.
+ */
+class MarkedBlock implements Component {
+	mark: TspMark | undefined;
+	#memo: { node: NativeNode; mark: TspMark; out: NativeNode } | undefined;
+
+	constructor(readonly block: Component) {}
+
+	render(width: number): readonly string[] {
+		return this.block.render(width);
+	}
+
+	invalidate(): void {
+		this.block.invalidate?.();
+	}
+
+	describe(cx: DescribeContext): NativeNode | null {
+		const described = this.block.describe?.(cx) ?? null;
+		const mark = this.mark;
+		if (!described || !mark) return described;
+		const memo = this.#memo;
+		if (memo?.node === described && memo.mark === mark) return memo.out;
+		const out = node(described.k, { ...described.p, mark }, described.c, described.key);
+		this.#memo = { node: described, mark, out };
+		return out;
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		this.block.handleNativeEvent?.(event);
+	}
+}
+
+const kMarked = Symbol("rewind.marked");
+
+/** A replayed block tagged with its page wrapper, so stepping reuses one wrapper per block. */
+interface MarkTagged {
+	[kMarked]?: MarkedBlock;
+}
+
+/** The page's first row while older history is unreplayed: `a` loads it. */
+const EARLIER_TURNS = node(
+	"row",
+	{ role: "omp.rewind.earlier", gap: "xs", align: "center" },
+	[kbd("a"), text([span("load earlier turns", "muted")])],
+	"earlier",
+);
+
 /** Blank columns between branch-strip columns. */
 const STRIP_GAP = 2;
 /** Duration of the branch-swap camera slide. */
 const SLIDE_MS = 160;
+
+/** Same length and identical elements (or both undefined). */
+function sameElements<T>(a: readonly T[] | undefined, b: readonly T[] | undefined): boolean {
+	if (a === b) return true;
+	if (a === undefined || b === undefined || a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+	return true;
+}
 
 export class RewindSelectorComponent implements Component {
 	#builder: ChatTranscriptBuilder;
@@ -110,12 +187,51 @@ export class RewindSelectorComponent implements Component {
 	#slide: { from: number; to: number; startedAt: number } | undefined;
 	#slideTimer: NodeJS.Timeout | undefined;
 
+	/** Whole branch; the selector may currently replay only its tail. */
+	#entries: TranscriptEntry[];
+	/** True while older history is still unreplayed. */
+	#truncated = false;
+	/** Filter field while the filter prompt is open; undefined shows the full transcript. */
+	#filterInput: Input | undefined;
+	/** Filter query while the filter prompt is open; undefined shows the full transcript. */
+	get #filter(): string | undefined {
+		return this.#filterInput?.getValue();
+	}
+	/** Main transcript rows from the last frame; the filter matches what is on screen. */
+	#mainRows: readonly (readonly string[])[] = [];
+	/** Lowercased plain text per rendered child row array (row arrays are cached, so identity is stable). */
+	#rowText = new WeakMap<readonly string[], string>();
+	/** Native filter haystack: lowercased turn text per main target (no rendered rows under TSP). */
+	#nativeTexts: { targets: OutlineTarget[]; texts: string[] } | undefined;
+	/** Compiled word patterns of the last filter query. */
+	#filterPatterns: { query: string; patterns: RegExp[] } | undefined;
+	/**
+	 * Last {@link #filterMatches} result and its inputs. Frames hand back fresh
+	 * outer `mainRows`/`mainVisible` arrays over cached per-child rows, so those
+	 * compare element-wise.
+	 */
+	#filterMemo:
+		| {
+				query: string;
+				targets: OutlineTarget[];
+				expanded: boolean;
+				native: boolean;
+				mainRows: readonly (readonly string[])[];
+				mainVisible: readonly boolean[] | undefined;
+				matches: readonly number[];
+		  }
+		| undefined;
+	/** Last described bar and the state it was built from. */
+	#bar: { memo: string; targets: OutlineTarget[]; node: NativeNode } | undefined;
+
 	constructor(
 		entries: TranscriptEntry[],
 		private readonly deps: RewindSelectorDeps,
 	) {
-		this.#builder = this.#newBuilder();
-		this.#targets = appendOutlineEntries(this.#builder, entries);
+		this.#entries = entries;
+		const tail = recentTranscriptEntries(entries);
+		this.#truncated = tail.length < entries.length;
+		this.#builder = this.#replay(tail);
 		this.#selected = Math.max(0, this.#targets.length - 1);
 		this.#browser = new TranscriptBrowser({
 			getHeight: () => this.deps.ui.terminal?.rows || process.stdout.rows || 40,
@@ -129,7 +245,7 @@ export class RewindSelectorComponent implements Component {
 	}
 
 	#newBuilder(): ChatTranscriptBuilder {
-		return new ChatTranscriptBuilder({
+		const builder = new ChatTranscriptBuilder({
 			ui: this.deps.ui,
 			getTool: this.deps.getTool,
 			isBuiltInTool: this.deps.isBuiltInTool,
@@ -137,9 +253,34 @@ export class RewindSelectorComponent implements Component {
 			cwd: this.deps.cwd,
 			hideThinkingBlock: this.deps.hideThinkingBlock,
 			proseOnlyThinking: this.deps.proseOnlyThinking,
+			expandThinkingBlocks: this.deps.expandThinkingBlocks,
 			linkTargets: this.deps.linkTargets,
 			requestRender: this.deps.requestRender,
 		});
+		builder.setExpanded(this.#expanded);
+		return builder;
+	}
+
+	/** Build a transcript for `entries` and adopt its targets. */
+	#replay(entries: TranscriptEntry[]): ChatTranscriptBuilder {
+		const builder = this.#newBuilder();
+		this.#targets = appendOutlineEntries(builder, entries);
+		return builder;
+	}
+
+	/** Replay the whole branch, keeping the main outline on the same turn. */
+	#loadFullHistory(): void {
+		if (!this.#truncated) return;
+		const selectedId = this.#targets[this.#selected]?.turnId;
+		const previous = this.#builder;
+		this.#builder = this.#replay(this.#entries);
+		previous.dispose();
+		this.#truncated = false;
+		this.#mainVisible = undefined;
+		this.#mainRows = [];
+		const restored = selectedId ? this.#targets.findIndex(target => target.turnId === selectedId) : -1;
+		this.#selected = restored >= 0 ? restored : Math.max(0, this.#targets.length - 1);
+		this.deps.requestRender();
 	}
 
 	invalidate(): void {
@@ -173,7 +314,6 @@ export class RewindSelectorComponent implements Component {
 		for (const sibling of this.deps.siblingPaths(target.turnId)) {
 			if (sibling.entries.length === 0) continue;
 			const builder = this.#newBuilder();
-			builder.setExpanded(this.#expanded);
 			const targets = appendOutlineEntries(builder, sibling.entries);
 			const firstUser = sibling.entries.find(isUserTurnEntry);
 			const label = (firstUser && userTurnLabel(firstUser)) || sibling.rootId;
@@ -196,6 +336,11 @@ export class RewindSelectorComponent implements Component {
 		const from = this.#slidePosition(now);
 		this.#slide = { from, to: variant, startedAt: now };
 		this.#activeVariant = variant;
+		// The camera slide is repaint-only; a native surface has no camera to move.
+		if (isNativeRendering()) {
+			this.deps.requestRender();
+			return;
+		}
 		this.#slideTimer ??= setInterval(() => {
 			if (!this.#slide || Date.now() - this.#slide.startedAt >= SLIDE_MS) this.#stopSlide();
 			this.deps.requestRender();
@@ -235,17 +380,20 @@ export class RewindSelectorComponent implements Component {
 			});
 			return;
 		}
+		if (this.#filter !== undefined) {
+			this.#handleFilterInput(data);
+			return;
+		}
 		if (matchesSelectCancel(data) || matchesKey(data, "escape")) {
 			this.deps.onCancel();
 			return;
 		}
+		if (matchesKey(data, "f")) {
+			this.#openFilter();
+			return;
+		}
 		if (matchesAppToolsExpand(data)) {
-			this.#expanded = !this.#expanded;
-			this.#builder.setExpanded(this.#expanded);
-			for (const columns of this.#variantCache.values()) {
-				for (const column of columns) column.builder.setExpanded(this.#expanded);
-			}
-			this.deps.requestRender();
+			this.#toggleExpanded();
 			return;
 		}
 		if (matchesSelectUp(data)) {
@@ -257,29 +405,233 @@ export class RewindSelectorComponent implements Component {
 			return;
 		}
 		if (matchesKey(data, "left")) {
-			if (this.#activeVariant > 0) this.#slideTo(this.#activeVariant - 1);
-			else this.#move(-1, target => target.isUserTurn);
+			this.#left();
 			return;
 		}
 		if (matchesKey(data, "right")) {
-			const columns = this.#stripColumns();
-			if (this.#activeVariant < columns.length) {
-				this.#siblingSelected = 0;
-				this.#slideTo(this.#activeVariant + 1);
-			} else if (this.#activeVariant === 0) {
-				this.#move(1, target => target.isUserTurn);
-			}
+			this.#right();
+			return;
+		}
+		if (data === "a" || data === "A") {
+			this.#loadFullHistory();
 			return;
 		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-			const target = this.#outlinedTarget();
-			if (target) this.deps.onSelect(target.entryId);
+			this.#selectOutlined();
 			return;
 		}
 		// Page/home/end/shift+arrow scrolling without moving the selection.
 		if (this.#browser.handleScrollKey(data)) {
 			this.deps.requestRender();
 		}
+	}
+
+	/** `f`: open the filter over the whole branch. */
+	#openFilter(): void {
+		// The filter must search the whole branch, not just the startup tail.
+		this.#loadFullHistory();
+		const input = new Input();
+		input.prompt = `${theme.fg("accent", "filter:")} `;
+		input.placeholder = "words…";
+		this.#filterInput = input;
+		this.#activeVariant = 0;
+		this.#siblingSelected = 0;
+		this.#stopSlide();
+		this.deps.requestRender();
+	}
+
+	/** Left: the previous branch at a fork, else the previous user turn. */
+	#left(): void {
+		if (this.#activeVariant > 0) this.#slideTo(this.#activeVariant - 1);
+		else this.#move(-1, target => target.isUserTurn);
+	}
+
+	/** Right: the next branch at a fork, else the next user turn. */
+	#right(): void {
+		const columns = this.#stripColumns();
+		if (this.#activeVariant < columns.length) {
+			this.#siblingSelected = 0;
+			this.#slideTo(this.#activeVariant + 1);
+		} else if (this.#activeVariant === 0) {
+			this.#move(1, target => target.isUserTurn);
+		}
+	}
+
+	/** Enter while filtering: rewind to the selection when it matches. */
+	#selectFiltered(): void {
+		const target = this.#filterMatches().includes(this.#selected) ? this.#targets[this.#selected] : undefined;
+		if (target) this.deps.onSelect(target.entryId);
+	}
+
+	/** Enter: rewind to the outlined turn (main path or the active branch column). */
+	#selectOutlined(): void {
+		const target = this.#outlinedTarget();
+		if (target) this.deps.onSelect(target.entryId);
+	}
+
+	#toggleExpanded(): void {
+		this.#expanded = !this.#expanded;
+		this.#builder.setExpanded(this.#expanded);
+		for (const columns of this.#variantCache.values()) {
+			for (const column of columns) column.builder.setExpanded(this.#expanded);
+		}
+		this.deps.requestRender();
+	}
+
+	// ========================================================================
+	// Filter
+	// ========================================================================
+
+	#handleFilterInput(data: string): void {
+		if (matchesSelectCancel(data) || matchesKey(data, "escape")) {
+			this.#closeFilter();
+			return;
+		}
+		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+			this.#selectFiltered();
+			return;
+		}
+		if (matchesAppToolsExpand(data)) {
+			this.#toggleExpanded();
+			return;
+		}
+		if (matchesSelectUp(data) || matchesKey(data, "left")) {
+			const userTurnsOnly = !matchesSelectUp(data);
+			this.#stepFiltered(-1, userTurnsOnly);
+			return;
+		}
+		if (matchesSelectDown(data) || matchesKey(data, "right")) {
+			const userTurnsOnly = !matchesSelectDown(data);
+			this.#stepFiltered(1, userTurnsOnly);
+			return;
+		}
+		const input = this.#filterInput!;
+		const before = input.getValue();
+		if (matchesKey(data, "backspace") && before.length === 0) {
+			this.#closeFilter();
+			return;
+		}
+		if (input.handleInput(data)) {
+			if (input.getValue() !== before) this.#filterChanged();
+			else this.deps.requestRender();
+			return;
+		}
+		if (this.#browser.handleScrollKey(data)) {
+			this.deps.requestRender();
+		}
+	}
+
+	/** Leave the filter, keeping the selected item outlined in the full transcript. */
+	#closeFilter(): void {
+		this.#filterInput = undefined;
+		this.deps.requestRender();
+	}
+
+	/** The query changed; keep the selection when it still matches, else rest on the newest match above it. */
+	#filterChanged(): void {
+		const matches = this.#filterMatches();
+		if (!matches.includes(this.#selected)) {
+			this.#selected = matches.findLast(index => index < this.#selected) ?? matches.at(-1) ?? this.#selected;
+		}
+		this.deps.requestRender();
+	}
+
+	#stepFiltered(delta: -1 | 1, userTurnsOnly: boolean): void {
+		const matches = this.#filterMatches().filter(index => !userTurnsOnly || this.#targets[index]!.isUserTurn);
+		const next =
+			delta < 0 ? matches.findLast(index => index < this.#selected) : matches.find(index => index > this.#selected);
+		if (next === undefined) return;
+		this.#selected = next;
+		this.deps.requestRender();
+	}
+
+	/**
+	 * Visible main-path target indices whose rendered text contains every
+	 * whitespace-separated Latin query word as a whole word (case-insensitive:
+	 * `ls` matches `ls -la` but not `tools`). Other scripts match substrings so
+	 * a Chinese query can find text inside a sentence without spaces.
+	 * All visible targets match an empty query.
+	 * Matching the rendered rows keeps results honest: collapsed tool output
+	 * only matches once Ctrl+O expands it.
+	 */
+	#filterMatches(): readonly number[] {
+		const query = this.#filter ?? "";
+		const native = isNativeRendering();
+		const memo = this.#filterMemo;
+		if (
+			memo &&
+			memo.query === query &&
+			memo.targets === this.#targets &&
+			memo.expanded === this.#expanded &&
+			memo.native === native &&
+			sameElements(memo.mainVisible, this.#mainVisible) &&
+			(native || sameElements(memo.mainRows, this.#mainRows))
+		) {
+			memo.mainRows = this.#mainRows;
+			memo.mainVisible = this.#mainVisible;
+			return memo.matches;
+		}
+		const patterns = this.#compileFilter(query);
+		if (native && this.#nativeTexts?.targets !== this.#targets) {
+			this.#nativeTexts = {
+				targets: this.#targets,
+				// Turn text plus its commands and tool output, like the expanded rendered rows.
+				texts: this.#targets.map(target => {
+					const blocks = collectBlocks(target.entries);
+					const parts = [targetCopy(target, blocks).content, ...blocks.map(block => block.content)];
+					return parts.join("\n").toLowerCase();
+				}),
+			};
+		}
+		const matches: number[] = [];
+		for (let index = 0; index < this.#targets.length; index++) {
+			if (!this.#isMainSelectable(index)) continue;
+			const target = this.#targets[index]!;
+			const matched = native
+				? patterns.every(pattern => pattern.test(this.#nativeTexts?.texts[index] ?? ""))
+				: patterns.every(pattern => {
+						for (let child = target.start; child < target.end; child++) {
+							const rows = this.#mainRows[child];
+							if (rows !== undefined && pattern.test(this.#plainRowText(rows))) return true;
+						}
+						return false;
+					});
+			if (matched) matches.push(index);
+		}
+		this.#filterMemo = {
+			query,
+			targets: this.#targets,
+			expanded: this.#expanded,
+			native,
+			mainRows: this.#mainRows,
+			mainVisible: this.#mainVisible,
+			matches,
+		};
+		return matches;
+	}
+
+	/** Word patterns of `query`, compiled once per distinct query. */
+	#compileFilter(query: string): RegExp[] {
+		const cached = this.#filterPatterns;
+		if (cached?.query === query) return cached.patterns;
+		const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+		const patterns = words.map(word =>
+			/^[\p{Script=Latin}\p{N}_]+$/u.test(word)
+				? new RegExp(`(?<![\\p{L}\\p{N}_])${RegExp.escape(word)}(?![\\p{L}\\p{N}_])`, "u")
+				: new RegExp(RegExp.escape(word), "u"),
+		);
+		this.#filterPatterns = { query, patterns };
+		return patterns;
+	}
+
+	/** Lowercased plain text of one rendered child row array, cached by array identity. */
+	#plainRowText(rows: readonly string[]): string {
+		let text = this.#rowText.get(rows);
+		if (text === undefined) {
+			text = Bun.stripANSI(rows.join("\n")).toLowerCase();
+			this.#rowText.set(rows, text);
+		}
+		return text;
 	}
 
 	/** Up/Down: step within the active column; leaving a sibling column's top exits the strip. */
@@ -303,7 +655,10 @@ export class RewindSelectorComponent implements Component {
 		this.#move(delta, () => true);
 	}
 
-	/** Step the main selection by `delta` to the nearest visible target passing `accept`. */
+	/**
+	 * Step the main selection by `delta` to the nearest visible target passing
+	 * `accept`; stepping above the replayed tail loads the earlier history first.
+	 */
 	#move(delta: -1 | 1, accept: (target: OutlineTarget) => boolean): void {
 		let index = this.#selected + delta;
 		while (index >= 0 && index < this.#targets.length) {
@@ -317,10 +672,219 @@ export class RewindSelectorComponent implements Component {
 			}
 			index += delta;
 		}
+		if (delta < 0 && this.#truncated) {
+			this.#loadFullHistory();
+			this.#move(delta, accept);
+		}
 	}
 
 	#isMainSelectable(index: number): boolean {
 		return this.#mainVisible?.[index] ?? true;
+	}
+
+	// ========================================================================
+	// Native: the transcript as a page
+	// ========================================================================
+
+	/**
+	 * The rewind page: the replayed transcript fills a screen surface block by
+	 * block, as the live one reads, the outlined turn marked `pick` under a
+	 * "Continue from here" caption (revealed as the outline moves) and what the
+	 * rewind drops marked `drop`. At a fork the region below it becomes a strip
+	 * of branch columns, the current path first. The bar is this component's
+	 * own node, docked under the page, so the filter field keeps the caret.
+	 */
+	describeScreen(_cx: DescribeContext): NativeScreen {
+		return { role: "omp.rewind", main: this.#page(), dock: [this] };
+	}
+
+	/** The page's blocks, marked for the current outline. */
+	#page(): NativeChild[] {
+		const blocks = this.#builder.container.children;
+		const page: NativeChild[] = [];
+		const filter = this.#filter;
+		if (filter !== undefined) {
+			// Only the matching turns of the current path, like the filtered frame.
+			const matches = this.#filterMatches();
+			for (const index of matches) {
+				const target = this.#targets[index]!;
+				const picked = index === this.#selected;
+				if (picked) page.push(this.#caption(this.#targets, index, "main"));
+				for (let i = target.start; i < target.end; i++)
+					page.push(this.#marked(blocks[i]!, picked ? "pick" : undefined));
+			}
+			if (matches.length === 0) {
+				page.push(text([span(`No turns match "${filter}"`, "muted")], { role: "omp.rewind.empty" }));
+			}
+			return page;
+		}
+		if (this.#truncated) page.push(EARLIER_TURNS);
+		const columns = this.#stripColumns();
+		const anchor = this.#targets[this.#selected];
+		if (columns.length === 0 || !anchor) {
+			this.#markRun(page, blocks, 0, this.#targets, this.#selected, "main");
+			return page;
+		}
+		// Shared history above the fork at full width, then the branches side by side.
+		for (let i = 0; i < anchor.start; i++) page.push(this.#marked(blocks[i]!, undefined));
+		const count = columns.length + 1;
+		const current: NativeChild[] = [this.#columnHead(0, count, "current")];
+		this.#markRun(
+			current,
+			blocks,
+			anchor.start,
+			this.#targets,
+			this.#activeVariant === 0 ? this.#selected : -1,
+			"main",
+		);
+		const strip = [this.#column(0, current, "current")];
+		for (let index = 0; index < columns.length; index++) {
+			const column = columns[index]!;
+			const active = this.#activeVariant === index + 1;
+			const children: NativeChild[] = [this.#columnHead(index + 1, count, column.label)];
+			const picked = active ? this.#siblingSelected : -1;
+			this.#markRun(children, column.builder.container.children, 0, column.targets, picked, column.rootId);
+			strip.push(this.#column(index + 1, children, column.rootId));
+		}
+		page.push(node("row", { role: "omp.rewind.strip", gap: "lg", align: "start" }, strip, "strip"));
+		return page;
+	}
+
+	/**
+	 * Push `blocks[from..]` marked for `targets[picked]` (-1: none): unmarked
+	 * above it, then the caption and `pick` on its blocks, `drop` below.
+	 */
+	#markRun(
+		out: NativeChild[],
+		blocks: readonly Component[],
+		from: number,
+		targets: readonly OutlineTarget[],
+		picked: number,
+		column: string,
+	): void {
+		const target = targets[picked];
+		for (let i = from; i < blocks.length; i++) {
+			if (target && i === target.start) out.push(this.#caption(targets, picked, column));
+			const mark = !target || i < target.start ? undefined : i < target.end ? "pick" : "drop";
+			out.push(this.#marked(blocks[i]!, mark));
+		}
+	}
+
+	/**
+	 * The line over the outlined turn: what Enter does and what it drops.
+	 * Keyed by the turn, so every step adds a fresh one that scrolls into view.
+	 */
+	#caption(targets: readonly OutlineTarget[], picked: number, column: string): NativeNode {
+		const target = targets[picked]!;
+		const below = targets.length - picked - 1;
+		const spans = [
+			span(`${theme.icon.rewind} `, "accent"),
+			span(target.isUserTurn ? "Rewind to here" : "Continue from here", "accent strong"),
+		];
+		if (target.isUserTurn) spans.push(span(`${theme.sep.dot}the prompt returns to the editor`, "dim"));
+		spans.push(
+			span(
+				below > 0
+					? `${theme.sep.dot}${below} turn${below === 1 ? "" : "s"} below dropped`
+					: `${theme.sep.dot}nothing below to drop`,
+				"dim",
+			),
+		);
+		const caption = text(spans, { role: "omp.rewind.here", wrap: "none" });
+		return { ...caption, key: `here:${column}:${target.turnId}`, reveal: "start" };
+	}
+
+	/** One branch column of the strip; the active one carries the accent tone. */
+	#column(index: number, children: readonly NativeChild[], key: string): NativeNode {
+		const active = index === this.#activeVariant;
+		return node(
+			"col",
+			{ role: "omp.rewind.branch", gap: "lg", ...(active ? { tone: "accent" } : {}) },
+			children,
+			key,
+		);
+	}
+
+	/** A strip column's caption: `⎇ i/n · label`. */
+	#columnHead(index: number, count: number, label: string): NativeNode {
+		const active = index === this.#activeVariant;
+		return text(
+			[
+				span(`${theme.icon.branch} `, active ? "accent" : "dim"),
+				span(`${index + 1}/${count}`, active ? "accent" : "dim"),
+				span(`${theme.sep.dot}${label}`, active ? "strong" : "dim"),
+			],
+			{ role: "omp.rewind.branch.head", wrap: "none" },
+		);
+	}
+
+	/** `block` wrapped to carry `mark`; one wrapper per block, so ids and view state persist while stepping. */
+	#marked(block: Component & MarkTagged, mark: TspMark | undefined): MarkedBlock {
+		const marked = (block[kMarked] ??= new MarkedBlock(block));
+		marked.mark = mark;
+		return marked;
+	}
+
+	/** The bar docked under the page: position, key hints, Cancel and Rewind; the filter field while filtering. */
+	describe(_cx: DescribeContext): NativeNode {
+		const filter = this.#filter;
+		const columns = filter === undefined ? this.#stripColumns() : [];
+		const memo = `${this.#selected}|${this.#activeVariant}|${this.#siblingSelected}|${this.#truncated}|${columns.length}|${filter ?? "\0"}`;
+		if (this.#bar?.memo === memo && this.#bar.targets === this.#targets) return this.#bar.node;
+
+		const title = text([span(`${theme.icon.rewind} `, "accent"), span("Rewind", "strong")], { wrap: "none" });
+		const upDown = actionHint(["tui.select.up", "tui.select.down"], "step");
+		const rewind = actionButton("Rewind here", "rewind", { keys: "enter", tone: "accent" });
+		let children: NativeChild[];
+		if (filter === undefined) {
+			const column = columns[this.#activeVariant - 1];
+			const at = column ? this.#siblingSelected : this.#selected;
+			const of = column ? column.targets.length : this.#targets.length;
+			children = [
+				title,
+				text([span(`${at + 1}/${of}`, "dim")], { wrap: "none" }),
+				hintsRow([
+					upDown,
+					{ keys: ["left", "right"], label: columns.length > 0 ? "branches" : "user turns" },
+					{ keys: ["f"], label: "filter" },
+					this.#truncated ? { keys: ["a"], label: "earlier turns" } : undefined,
+				]),
+				actionBar([null, actionButton("Cancel", "cancel", { keys: "escape" }), rewind]),
+			];
+		} else {
+			const matches = this.#filterMatches();
+			const at = matches.indexOf(this.#selected);
+			children = [
+				title,
+				this.#filterInput!,
+				text(
+					[
+						matches.length === 0
+							? span("no matches", "error")
+							: span(`${at >= 0 ? at + 1 : "-"}/${matches.length}`, "dim"),
+					],
+					{ wrap: "none" },
+				),
+				hintsRow([upDown, { keys: ["left", "right"], label: "user turns" }]),
+				actionBar([null, actionButton("Show all", "cancel", { keys: "escape" }), rewind]),
+			];
+		}
+		const root = node("row", { role: "omp.rewind.bar", gap: "md", align: "center", wrap: true }, children);
+		this.#bar = { memo, targets: this.#targets, node: root };
+		return root;
+	}
+
+	/** The bar's buttons run their keys' paths; everything else belongs to the blocks. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type !== "action") return;
+		const filtering = this.#filter !== undefined;
+		if (event.act === "rewind") {
+			if (filtering) this.#selectFiltered();
+			else this.#selectOutlined();
+		} else if (event.act === "cancel") {
+			if (filtering) this.#closeFilter();
+			else this.deps.onCancel();
+		}
 	}
 
 	// ========================================================================
@@ -337,6 +901,7 @@ export class RewindSelectorComponent implements Component {
 		const children = this.#builder.container.children;
 		const prepared = this.#browser.prepareOutline(children, this.#targets, this.#selected, contentWidth);
 		this.#mainVisible = prepared.visible;
+		this.#mainRows = prepared.childRows;
 		if (prepared.selected !== this.#selected) {
 			// The current target collapsed (e.g. expansion toggle): rest on the
 			// nearest visible one and leave the strip.
@@ -344,6 +909,8 @@ export class RewindSelectorComponent implements Component {
 			this.#activeVariant = 0;
 			this.#siblingSelected = 0;
 		}
+
+		if (this.#filter !== undefined) return this.#filterFrame(this.#filter, prepared.childRows, contentWidth);
 
 		const columns = this.#stripColumns();
 		const composed =
@@ -357,16 +924,64 @@ export class RewindSelectorComponent implements Component {
 						prepared,
 					}).column;
 		const position = this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : "";
-		const lateral = columns.length > 0 ? "←/→ branches" : "←/→ user turns";
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
+		const leftRight = formatKeyHints(["left", "right"]);
+		const lateral = columns.length > 0 ? `${leftRight} branches` : `${leftRight} user turns`;
+		const keys = `${upDown} step  ${lateral}  ${formatKeyHint("f")} filter  ${formatKeyHint("enter")} rewind  ${this.#truncated ? `${formatKeyHint("a")} earlier turns  ` : ""}${expandKeyHint()} expand  ${editorKey("tui.select.cancel")} cancel`;
 		return {
-			header: [
-				`${theme.icon.rewind} ${theme.bold("Rewind")}${theme.sep.dot}${theme.fg("dim", "pick the point to continue from")}`,
-			],
+			header: [this.#header()],
 			body: {
 				lines: composed.lines,
 				anchor: this.#outlineAnchor(composed),
 			},
-			footer: [theme.fg("dim", `${position}↑/↓ step  ${lateral}  enter rewind  ctrl+o expand  esc cancel`)],
+			footer: [theme.fg("dim", `${position}${keys}`)],
+		};
+	}
+
+	#header(): string {
+		return `${theme.icon.rewind} ${theme.bold("Rewind")}${theme.sep.dot}${theme.fg("dim", "pick the point to continue from")}`;
+	}
+
+	/** Only the matching items of the current path, concatenated; no branch strip. */
+	#filterFrame(
+		query: string,
+		childRows: readonly (readonly string[])[],
+		contentWidth: number,
+	): TranscriptBrowserFrame {
+		const matches = this.#filterMatches();
+		const rows: (readonly string[])[] = [];
+		const targets: OutlineTarget[] = [];
+		for (const index of matches) {
+			const target = this.#targets[index]!;
+			const start = rows.length;
+			rows.push(...childRows.slice(target.start, target.end));
+			targets.push({ ...target, start, end: rows.length });
+		}
+		const selected = matches.indexOf(this.#selected);
+		const composed = composeOutlineColumn(rows, 0, rows.length, targets, selected, contentWidth, undefined);
+		const lines = matches.length > 0 ? composed.lines : [theme.fg("muted", `  No items match "${query}"`)];
+		const count =
+			matches.length === 0
+				? theme.fg("error", "no matches")
+				: theme.fg("dim", `${selected >= 0 ? selected + 1 : "-"}/${matches.length}`);
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
+		const keys = `${upDown} step  ${formatKeyHints(["left", "right"])} user turns  ${formatKeyHint("enter")} rewind  ${editorKey("tui.select.cancel")} show all`;
+		return {
+			header: [this.#header()],
+			body: {
+				lines,
+				anchor:
+					composed.selStart >= 0
+						? {
+								id: `rewind:filter:${query}:${this.#targets[this.#selected]?.turnId ?? this.#selected}`,
+								start: composed.selStart,
+								end: composed.selEnd,
+							}
+						: undefined,
+			},
+			footer: [
+				`${this.#filterInput!.render(visibleWidth(`filter: ${query}`) + 1)[0]}  ${count}  ${theme.fg("dim", keys)}`,
+			],
 		};
 	}
 

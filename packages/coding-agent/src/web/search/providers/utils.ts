@@ -1,6 +1,6 @@
 import type { AgentStorage } from "../../../session/agent-storage";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";
-import { SEARCH_PROVIDER_LABELS, type SearchProviderId, type SearchSource } from "@oh-my-pi/pi-tui/tools/web-search";
+import { SEARCH_PROVIDER_LABELS, type SearchProviderId, type SearchSource } from "../types";
 import { dateToAgeSeconds } from "../utils";
 
 /**
@@ -134,6 +134,19 @@ export function normalizeSearchText(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
 	const text = value.replace(/\s+/g, " ").trim();
 	return text.length > 0 ? text : undefined;
+}
+
+/**
+ * Bare, deduplicated hosts from `site:` values (`github.com/anthropics` → `github.com`)
+ * for provider domain filters; path parts are enforced by the central lenient post-filter.
+ */
+export function siteHosts(sites: readonly string[]): string[] {
+	const hosts = new Set<string>();
+	for (const site of sites) {
+		const host = site.split("/", 1)[0];
+		if (host) hosts.add(host);
+	}
+	return [...hosts];
 }
 
 /**

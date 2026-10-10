@@ -2,16 +2,28 @@ import * as url from "node:url";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { BracketedPasteHandler } from "../bracketed-paste";
 import { BRACKETED_PASTE_END, BRACKETED_PASTE_START } from "../stdin-buffer";
-import { Editor, type EditorTextDecorationContext, type EditorTheme } from "../components/editor";
+import {
+	Editor,
+	type EditorTextDecorationContext,
+	type EditorTheme,
+	type NativeEditorLayout,
+} from "../components/editor";
 import { addKeyAliases, canonicalKeyId, getKeybindings } from "../keybindings";
 import { type KeyId, parseKey, parseKittySequence } from "../keys";
-import { TUI } from "../tui";
+import { getSpaceHoldText, SpaceHoldGesture } from "../space-hold";
+import { type Component, TUI } from "../tui";
 import type { AppKeybinding } from "../app-keybindings";
+import { formatTooltipKey } from "../key-hint-format";
+import { MAIN_AGENT_ID } from "../overlays/agent-hub-types";
+import { compact, keyed, node, row, span } from "../native/describe";
+import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
+import type { ComposerFacts, ComposerFactsSource } from "../status-line/types";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
 import { expandModelMentionTags, MODEL_MENTION_RE, modelMentionToken } from "./model-mention-syntax";
-import { isVideoPath, videoPreviewSource } from "./video";
+import { isVideoPath } from "./video";
 import {
 	attachmentSgr,
+	type ChipKind,
 	COMPOSER_TOKEN_REGEX,
 	chipLabel,
 	collapseImageMarkers,
@@ -19,15 +31,78 @@ import {
 	collapseSkillTokens,
 	composerTokenRegex,
 	modelChipStyle,
+	PLACEHOLDER_REGEX,
+	referencedAttachments,
 	renderPlaceholders,
 	skillChipLabel,
 	skillChipStyle,
 	skillToken,
 } from "./composer-attachments";
-import { MacOSSpellingProvider, type SpellingFeatures } from "./macos-spelling";
-import { hasMagicKeyword, highlightMagicKeywords } from "./magic-keywords";
+import { type MacOSSpellingFeatures, MacOSSpellingProvider } from "./macos-spelling";
+import { hasMagicKeyword, highlightMagicKeywords, magicKeywordRanges } from "./magic-keywords";
+import type { TspEditorDecoration, TspText } from "@oh-my-pi/pi-wire";
+import { isNativeRendering } from "../native/state";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "./queue-input";
+import { type WordCompletionMethod, WordCompletionProvider } from "./word-completion";
 import { fgOrPlain, theme } from "../theme/theme";
+
+/** A shell-mode draft's sigil (`!`, `!!`, `$`, `$$`) with its surrounding blanks; the mode chip stands in for it natively. */
+const SHELL_SIGIL_RE = /^\s*(?:!!?|\$\$?)[ \t]?/;
+
+/** The untitled session's TSP placeholder; the rotating ANSI hints (thinking effort, …) move into control tooltips. */
+const NATIVE_COMPOSER_PLACEHOLDER = "What are we cooking?";
+
+/** Live composer state the TSP layout shows; the interactive host wires {@link CustomEditor.composerState}. */
+export interface ComposerNativeState {
+	/** The draft runs as a shell command (`!`, `!!`) or Python (`$`, `$$`); `excluded` keeps it from the model. */
+	readonly shell?: { readonly kind: "bash" | "python"; readonly excluded: boolean };
+	/** Thinking effort word (`high`, `off`, `auto`); undefined when the model has no thinking. */
+	readonly thinking?: string;
+	/** The thinking level draws as the model chip's icon instead of its own chip (where the terminal has `effort`). */
+	readonly thinkingInModel?: boolean;
+	/** Generation tok/s after the thinking level (live while running, else the last reading); undefined hides it. */
+	readonly rate?: number;
+	/** A turn is running: the send keycap becomes a Stop button. */
+	readonly running: boolean;
+	/** The viewed subagent's lineage, outermost first and the viewed agent last; undefined on the main session. */
+	readonly viewing?: readonly string[];
+	/** The session's title, quoted in italics as the TSP placeholder; undefined until it has one. */
+	readonly title?: string;
+}
+
+/** Action code prefix of the viewing header's links: `focus:<agent id>`, {@link MAIN_AGENT_ID} for the main session. */
+const FOCUS_ACTION = "focus:";
+
+const IDLE_COMPOSER: ComposerNativeState = { running: false };
+
+/** The composer's controls around the input, rebuilt when what they show changes; the bar adds the rate and facts. */
+interface ComposerControls {
+	readonly focus: NativeNode | undefined;
+	readonly mode: NativeNode | undefined;
+	readonly model: NativeNode | undefined;
+	readonly effort: NativeNode | undefined;
+	readonly submit: NativeNode;
+}
+
+/**
+ * Filled steps (of four) of the effort chip's fallback meter, for terminals without the `effort`
+ * kind; `auto` before it resolves has none known.
+ */
+const EFFORT_STEPS: Partial<Record<string, number>> = {
+	off: 0,
+	minimal: 1,
+	low: 1,
+	medium: 2,
+	high: 3,
+	xhigh: 4,
+	max: 4,
+};
+
+/** Independently switchable prose-assistance features of the composer. */
+export interface SpellingFeatures extends MacOSSpellingFeatures {
+	/** Word-completion engine; `off` disables ghost text. */
+	autocomplete: WordCompletionMethod;
+}
 
 type ConfigurableEditorAction = Extract<
 	AppKeybinding,
@@ -116,34 +191,6 @@ const ABSOLUTE_PATH_PREFIX_REGEX = new RegExp(`^${ABSOLUTE_PATH_PREFIX_SOURCE}`)
  */
 const INTERIOR_PATH_ANCHOR_REGEX = new RegExp(String.raw`(?<!\\)\s(?:${ABSOLUTE_PATH_PREFIX_SOURCE}|\.\.?[\\/])`);
 
-/** Max gap (ms) between two spaces for the later one to count as OS key auto-repeat rather than a
- *  deliberate press. OS auto-repeat is fast; a deliberate tap (even a fast one) is slower. */
-export const SPACE_REPEAT_MAX_GAP_MS = 120;
-/** Two consecutive inter-space gaps are "mechanical" (machine-driven auto-repeat) when both are
- *  within {@link SPACE_REPEAT_MAX_GAP_MS} and differ by no more than this — an absolute jitter floor
- *  or, for slower repeat rates, {@link SPACE_REPEAT_JITTER_RATIO} of the smaller gap. OS key-repeat
- *  is metronomic; a human smashing the bar is fast but irregular, so its deltas never stay this
- *  steady. */
-export const SPACE_REPEAT_JITTER_MS = 18;
-export const SPACE_REPEAT_JITTER_RATIO = 0.35;
-/** Consecutive mechanical (fast + steady) deltas that confirm the space bar is held and start
- *  recording. Needs a sustained metronomic cadence, so jittery smashing and deliberate taps never
- *  reach it. */
-export const SPACE_HOLD_MECHANICAL_RUN = 2;
-/** Idle gap (ms) after the last repeated space that counts as the space bar being released, ending
- *  the push-to-talk recording. Must comfortably exceed the OS key-repeat interval. */
-export const SPACE_HOLD_RELEASE_MS = 250;
-
-/** Whether two consecutive inter-space gaps look machine-driven: both within the auto-repeat band
- *  and steady enough (small absolute or proportional difference). OS key-repeat is metronomic, so
- *  its successive deltas match closely; human smashing is fast but irregular and deliberate taps are
- *  too slow, so neither passes. */
-function gapsAreMechanical(gap: number, prevGap: number): boolean {
-	if (gap > SPACE_REPEAT_MAX_GAP_MS || prevGap > SPACE_REPEAT_MAX_GAP_MS) return false;
-	const tolerance = Math.max(SPACE_REPEAT_JITTER_MS, Math.min(gap, prevGap) * SPACE_REPEAT_JITTER_RATIO);
-	return Math.abs(gap - prevGap) <= tolerance;
-}
-
 function isPastedPathSeparator(char: string | undefined): boolean {
 	return char === undefined || char === " " || char === "\t" || char === "\r" || char === "\n";
 }
@@ -164,11 +211,17 @@ function normalizePastedPath(path: string): string {
 		try {
 			return url.fileURLToPath(unquoted);
 		} catch {
-			// Malformed file URL: drop through to the shell-unescape branch
-			// so the caller can still reject it as a non-explicit path.
+			// Windows rejects drive-less URLs (`file:///Users/…`, forwarded from a
+			// macOS pasteboard or a remote session); decode them as POSIX paths.
+			try {
+				return url.fileURLToPath(unquoted, { windows: false });
+			} catch {
+				// Malformed file URL: drop through to the shell-unescape branch
+				// so the caller can still reject it as a non-explicit path.
+			}
 		}
 	}
-	return unquoted.replace(SHELL_ESCAPED_PATH_CHAR_REGEX, "$1");
+	return (unquoted.startsWith("\\~/") ? unquoted.slice(1) : unquoted).replace(SHELL_ESCAPED_PATH_CHAR_REGEX, "$1");
 }
 
 function isExplicitPastedPath(path: string): boolean {
@@ -400,6 +453,7 @@ export type ComposerChipDescriptor =
  */
 export class CustomEditor extends Editor {
 	#spelling = new MacOSSpellingProvider();
+	#wordCompletion = new WordCompletionProvider();
 	imageLinks?: readonly (string | undefined)[];
 
 	/** Draft images pasted into the composer, consumed on submit. Co-located with
@@ -425,8 +479,8 @@ export class CustomEditor extends Editor {
 				chips: ComposerChipDescriptor[];
 		  }
 		| undefined;
-	/** Host-wired producer of per-image `file://` links (session blob store); drives clickable
-	 *  chip tokens for restored drafts (esc-esc, `/tree`, branch). */
+	/** Host-wired producer of per-image chip targets (a file on disk, or a session blob copy);
+	 *  drives clickable chip tokens for restored drafts (esc-esc, `/tree`, branch). */
 	draftImageLinkMaterializer?: (images: readonly ImageContent[]) => Promise<(string | undefined)[] | undefined>;
 
 	/**
@@ -458,14 +512,24 @@ export class CustomEditor extends Editor {
 			this.#requestShimmerRepaint?.();
 		};
 		this.#spelling.onUpdate = requestTextAssistRepaint;
+		this.#wordCompletion.onUpdate = requestTextAssistRepaint;
 		this.onTextAssistApplied = requestTextAssistRepaint;
-		this.setTextAssistProvider(this.#spelling);
+		this.setTextAssistProvider({
+			getWordCompletion: (lines, cursorLine, cursorCol) =>
+				this.#wordCompletion.getWordCompletion(lines, cursorLine, cursorCol),
+			wordCompletionFeedback: (lines, cursorLine, cursorCol, suggestion, accepted) =>
+				this.#wordCompletion.wordCompletionFeedback(lines, cursorLine, cursorCol, suggestion, accepted),
+			tryAutocorrect: (lines, cursorLine, cursorCol) => this.#spelling.tryAutocorrect(lines, cursorLine, cursorCol),
+			getWordReplacements: (lines, cursorLine, cursorCol) =>
+				this.#spelling.getWordReplacements(lines, cursorLine, cursorCol),
+		});
 		if (args[0] instanceof TUI) this.tui = args[0];
 	}
 
-	/** Independently configure typo detection, word autocomplete, and autocorrect. */
+	/** Independently configure typo detection, the word-completion engine, and autocorrect. */
 	setSpellingFeatures(features: SpellingFeatures): void {
-		this.#spelling.setFeatures(features);
+		this.#spelling.setFeatures({ typoDetection: features.typoDetection, autocorrect: features.autocorrect });
+		this.#wordCompletion.setMethod(features.autocomplete);
 	}
 
 	/** Clear the composer draft: optionally commit `historyText` to history, then
@@ -670,14 +734,29 @@ export class CustomEditor extends Editor {
 		) {
 			return cached.chips;
 		}
-		const text = this.getText();
+		const recorded = new Map<string, ChipKind>();
+		if (this.pendingImages.length > 0) {
+			for (const [label, expansion] of this.atoms) {
+				const kind = expansion.startsWith("[Image #")
+					? "image"
+					: expansion.startsWith("[Video #")
+						? "video"
+						: undefined;
+				if (kind !== undefined && expansion.match(PLACEHOLDER_REGEX)?.[0] === expansion) {
+					recorded.set(label, kind);
+				}
+			}
+		}
+		for (const entry of this.pendingTexts) {
+			// A reused label belongs to the atom currently expanding it, not a deleted paste.
+			if (!recorded.has(entry.label)) recorded.set(entry.label, "paste");
+		}
+		const refs = referencedAttachments(this.getText(), recorded);
 		const chips: ComposerChipDescriptor[] = [];
 		for (let i = 0; i < this.pendingImages.length; i++) {
 			const n = i + 1;
-			const video =
-				text.includes(chipLabel("video", n)) || text.includes(`[Video #${n}]`) || text.includes(`[Video #${n},`);
-			const image =
-				text.includes(chipLabel("image", n)) || text.includes(`[Image #${n}]`) || text.includes(`[Image #${n},`);
+			const video = refs.video.has(n);
+			const image = refs.image.has(n);
 			if (!video && !image) continue;
 			chips.push({
 				kind: video ? "video" : "image",
@@ -687,7 +766,7 @@ export class CustomEditor extends Editor {
 			});
 		}
 		for (const entry of this.pendingTexts) {
-			if (!text.includes(entry.label)) continue;
+			if (!refs.paste.has(entry.n)) continue;
 			chips.push({ kind: "paste", n: entry.n, text: entry });
 		}
 		this.#composerChipsCache = {
@@ -711,7 +790,7 @@ export class CustomEditor extends Editor {
 		if (!materialize || images.length === 0) return;
 		const links = await materialize(images);
 		if (!links || this.pendingImages !== images) return;
-		this.pendingImageLinks = images.map((image, index) => videoPreviewSource(image) ?? links[index]);
+		this.pendingImageLinks = links;
 		this.imageLinks = this.pendingImageLinks;
 		this.#requestShimmerRepaint?.();
 	}
@@ -720,10 +799,21 @@ export class CustomEditor extends Editor {
 	 *  indivisible: a stray backspace deletes the whole token instead of corrupting it. */
 	override atomicTokenPattern = COMPOSER_TOKEN_REGEX;
 
+	/** Atom-table revision and pattern the composer token matcher was last built for. */
+	#tokenPatternAtomsRevision = -1;
+	#tokenPattern: RegExp | undefined;
+
 	#syncComposerTokenPattern(): void {
-		const labels = [...this.atoms].filter(([, expansion]) => expansion.startsWith("^")).map(([label]) => label);
+		// Rebuild only when the atom table changed or someone replaced the pattern since the last sync.
+		if (this.#tokenPatternAtomsRevision === this.atomsRevision && this.#tokenPattern === this.atomicTokenPattern) {
+			return;
+		}
+		const labels: string[] = [];
+		for (const [label, expansion] of this.atoms) if (expansion.startsWith("^")) labels.push(label);
 		const next = composerTokenRegex(labels);
 		if (next.source !== this.atomicTokenPattern.source) this.atomicTokenPattern = next;
+		this.#tokenPatternAtomsRevision = this.atomsRevision;
+		this.#tokenPattern = this.atomicTokenPattern;
 	}
 
 	/** Magic-keyword shimmer cadence — drives one editor repaint every 70 ms while
@@ -741,27 +831,35 @@ export class CustomEditor extends Editor {
 	 *  timer to request the next animation frame. Undefined when nobody is
 	 *  listening (tests, headless callers); the timer chain still self-cleans. */
 	#requestShimmerRepaint: (() => void) | undefined;
-	#queueDecorationText: string | undefined;
+	/** Text revision the per-revision decoration inputs below were computed for. */
+	#decorationRevision = -1;
+	#decorationText = "";
 	#decorationLines: readonly string[] = [""];
 	#queueShorthandActive = false;
 	#queueListActive = false;
 
 	/** Decorate magic keywords, attachments, and the queue-composer header/list markers.
 	 *  Queue shorthand reserves its first logical line as a dim `Queueing` label; sequential
-	 *  item markers use the accent color so separate follow-ups remain visible while composing. */
+	 *  item markers use the accent color so separate follow-ups remain visible while composing.
+	 *  Called once per layout segment, so whole-buffer inputs are computed once per text revision. */
 	override decorateText = (text: string, context: EditorTextDecorationContext): string => {
 		this.#syncComposerTokenPattern();
-		const editorText = this.getText();
+		if (this.#decorationRevision !== this.textRevision) {
+			this.#decorationRevision = this.textRevision;
+			const editorText = this.getText();
+			if (this.#decorationText !== editorText) {
+				this.#decorationText = editorText;
+				this.#decorationLines = this.getLines();
+				const queueBody = parseQueueShorthand(editorText);
+				this.#queueShorthandActive = queueBody !== undefined;
+				this.#queueListActive = queueBody !== undefined && isQueuedMessageList(queueBody);
+			}
+		}
+		// One string instance per revision: whole-buffer memos downstream hit on identity.
+		const editorText = this.#decorationText;
 		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
 		if (animated) this.#scheduleShimmerFrame();
-		if (this.#queueDecorationText !== editorText) {
-			this.#queueDecorationText = editorText;
-			this.#decorationLines = this.getLines();
-			const queueBody = parseQueueShorthand(editorText);
-			this.#queueShorthandActive = queueBody !== undefined;
-			this.#queueListActive = queueBody !== undefined && isQueuedMessageList(queueBody);
-		}
 		let sourceSearchOffset = 0;
 		const locateSource = (value: string): number => {
 			const offset = text.indexOf(value, sourceSearchOffset);
@@ -828,6 +926,67 @@ export class CustomEditor extends Editor {
 		);
 	};
 
+	/**
+	 * TSP decorations: magic keywords shimmer (terminal-clocked) in the accent
+	 * color, chips and markers take their token colors, misspellings are marked,
+	 * and queue-composer markers are dimmed/accented, all as ranges over the raw
+	 * buffer instead of painted text. A shell-mode draft is code: only its sigil
+	 * is decorated, hidden behind the mode chip.
+	 */
+	override describeDecorations = (lines: readonly string[]): readonly TspEditorDecoration[] => {
+		const text = lines.join("\n");
+		if (this.composerState().shell) {
+			const sigil = SHELL_SIGIL_RE.exec(text)?.[0].length ?? 0;
+			return sigil > 0 ? [{ from: 0, to: sigil, s: "hide" }] : [];
+		}
+		this.#syncComposerTokenPattern();
+		const decor: TspEditorDecoration[] = [];
+		let offset = 0;
+		const mark = (length: number, s: string): string => {
+			decor.push({ from: offset, to: offset + length, s });
+			offset += length;
+			return "";
+		};
+		renderPlaceholders(
+			text,
+			{
+				renderText: value => {
+					offset += value.length;
+					return "";
+				},
+				renderSkill: label => mark(label.length, "customMessageLabel strong"),
+				renderMention: label => mark(label.length, "statusLineModel strong"),
+				renderReference: value => mark(value.length, "accent strong"),
+			},
+			this.atomicTokenPattern,
+		);
+
+		const fx = this.#shimmerEnabled() ? "shimmer" : undefined;
+		for (const range of magicKeywordRanges(text)) decor.push({ ...range, s: "accent", fx });
+
+		const queueBody = parseQueueShorthand(text);
+		const queueList = queueBody !== undefined && isQueuedMessageList(queueBody);
+		let lineStart = 0;
+		for (let line = 0; line < lines.length; line++) {
+			const value = lines[line] ?? "";
+			if (queueBody !== undefined && (value.startsWith("->") || value.startsWith("=>"))) {
+				decor.push({ from: lineStart, to: lineStart + 2, s: "dim" });
+			}
+			if (queueList) {
+				const marker = QUEUE_LIST_MARKER_RE.exec(value);
+				if (marker) {
+					const indent = marker[1]?.length ?? 0;
+					decor.push({ from: lineStart + indent, to: lineStart + marker[0].length, s: "accent" });
+				}
+			}
+			for (const typo of this.#spelling.typoRanges(value, { editorText: text, lines, line, startCol: 0 })) {
+				decor.push({ from: lineStart + typo.start, to: lineStart + typo.start + typo.length, s: "typo" });
+			}
+			lineStart += value.length + 1;
+		}
+		return decor.sort((a, b) => a.from - b.from);
+	};
+
 	/** Optional test override for the magic-keyword shimmer gate. */
 	magicKeywordsEnabledOverride: boolean | undefined;
 
@@ -867,13 +1026,360 @@ export class CustomEditor extends Editor {
 	 *  decides whether to schedule another, so the chain stops by itself when
 	 *  `focused` flips off or the keyword leaves the buffer. */
 	#scheduleShimmerFrame(): void {
-		if (this.#shimmerTimer || !this.#requestShimmerRepaint) return;
+		// A TSP terminal animates the keyword shimmer from `describeDecorations`.
+		if (this.#shimmerTimer || !this.#requestShimmerRepaint || isNativeRendering()) return;
 		this.#shimmerTimer = setTimeout(() => {
 			this.#shimmerTimer = undefined;
 			this.#requestShimmerRepaint?.();
 		}, CustomEditor.SHIMMER_FRAME_MS);
 		this.#shimmerTimer.unref?.();
 	}
+	/** Editing is available during bootstrap; atomic sends wait until submission is wired and enabled. */
+	protected override get nativeSendable(): boolean {
+		return this.onSubmit !== undefined && !this.disableSubmit;
+	}
+	/** The quoted-title placeholder, kept while the title stands so the editor node stays reused. */
+	#titlePlaceholder: { title: string; text: TspText } | undefined;
+	/** Viewing a subagent, the draft goes to it: the placeholder names it; else the session's title, quoted in italics. */
+	override describePlaceholder = (): TspText => {
+		const { viewing, title } = this.composerState();
+		const agent = viewing?.at(-1);
+		if (agent !== undefined) return `Message ${agent}`;
+		if (!title) return NATIVE_COMPOSER_PLACEHOLDER;
+		if (this.#titlePlaceholder?.title !== title) {
+			this.#titlePlaceholder = { title, text: [{ t: `“${title}”`, s: "em" }] };
+		}
+		return this.#titlePlaceholder.text;
+	};
+	/** A shell-mode draft highlights as its language. */
+	override describeLanguage = (): string | undefined => this.composerState().shell?.kind;
+	/** Host-owned live state for the TSP composer (shell mode, effort chip, send/stop). */
+	composerState: () => ComposerNativeState = () => IDLE_COMPOSER;
+	/** The attachment band, described inside the composer on a TSP terminal (ANSI renders it above). */
+	attachmentChips: Component | undefined;
+	/** The status line's facts the TSP composer carries (context, model, usage, the other segments). */
+	composerFacts: ComposerFactsSource | undefined;
+	#nativeComposer:
+		| {
+				key: string;
+				facts: ComposerFacts | undefined;
+				chips: Component | undefined;
+				input: NativeNode;
+				rate: number | undefined;
+				controls: ComposerControls;
+				bar: NativeNode;
+				layout: NativeEditorLayout;
+		  }
+		| undefined;
+
+	/**
+	 * The TSP composer: role `omp.editor[.bash|.python]` (tone `pending` while
+	 * a turn runs) over the context hairline, the viewing header while a
+	 * subagent is focused, the attachment chips, a `line` row of the
+	 * shell-mode chip and the input, and the `bar`: model chip, effort chip
+	 * (or the effort glyph as the model chip's icon), the generation rate,
+	 * the other status facts, usage, then send (Stop while a turn runs).
+	 * Clicks come back as `status.model`, `thinking.cycle`, `submit`,
+	 * `interrupt` and `focus:<id>` actions.
+	 */
+	override describeLayout = (input: NativeNode, cx: DescribeContext): NativeEditorLayout => {
+		const effortGlyph = cx.supports("effort");
+		const state = this.composerState();
+		const shell = state.shell;
+		const facts = this.composerFacts?.describeComposerFacts();
+		const thinkingKey = this.#actionKeys.get("app.thinking.cycle")?.[0];
+		const modelKey = this.#actionKeys.get("app.model.selectTemporary")?.[0];
+		const interruptKey = this.#actionKeys.get("app.interrupt")?.[0] ?? "escape";
+		const key = [
+			shell?.kind,
+			shell?.excluded,
+			state.thinking,
+			state.running,
+			thinkingKey,
+			modelKey,
+			interruptKey,
+			state.viewing?.join("\u0001"),
+			effortGlyph,
+			state.thinkingInModel,
+		].join("\0");
+		const rate = state.rate;
+		const chips = this.attachmentChips;
+		const memo = this.#nativeComposer;
+		if (
+			memo &&
+			memo.key === key &&
+			memo.rate === rate &&
+			memo.facts === facts &&
+			memo.input === input &&
+			memo.chips === chips
+		) {
+			return memo.layout;
+		}
+		const controls =
+			memo?.key === key && memo.facts === facts
+				? memo.controls
+				: this.#describeComposerControls(state, facts, thinkingKey, modelKey, interruptKey, effortGlyph);
+		// The rate ticks while a turn streams: only the bar follows it.
+		const bar =
+			memo?.controls === controls && memo.rate === rate
+				? memo.bar
+				: keyed(
+						row(
+							compact([
+								controls.model,
+								controls.effort,
+								rate !== undefined &&
+									node(
+										"rate",
+										{ value: rate, unit: "tok/s", role: "omp.composer.rate", title: "Generation rate" },
+										undefined,
+										"rate",
+									),
+								// The status facts are the bar's flexible space; without them a spacer keeps send at the end.
+								facts?.extras ?? node("row", { grow: 1 }, [], "gap"),
+								facts?.usage,
+								controls.submit,
+							]),
+							{ role: "omp.composer.bar", gap: "sm", align: "center" },
+						),
+						"bar",
+					);
+		const line = keyed(
+			row(compact([controls.mode, input]), { role: "omp.composer.line", align: "start", gap: "sm" }),
+			"line",
+		);
+		const layout: NativeEditorLayout = {
+			role: shell ? `omp.editor.${shell.kind}` : "omp.editor",
+			tone: state.running ? "pending" : undefined,
+			children: compact([facts?.context, controls.focus, chips, line, bar]),
+			caret: "line/input",
+		};
+		this.#nativeComposer = { key, facts, chips, input, rate, controls, bar, layout };
+		return layout;
+	};
+
+	/**
+	 * The viewing header (`omp.composer.focus`) while a subagent is focused:
+	 * an eye, the agent's ancestors as `omp.composer.crumb` links, the agent
+	 * itself (`omp.composer.agent`), then the way back to the main session
+	 * (`omp.composer.exit`, the interrupt key's keycap: Esc on an empty draft).
+	 */
+	#describeViewing(viewing: readonly string[], interruptKey: KeyId): NativeNode | undefined {
+		const agent = viewing.at(-1);
+		if (agent === undefined) return undefined;
+		const back = formatTooltipKey(interruptKey);
+		const crumbs = viewing.slice(0, -1).map(id =>
+			node(
+				"text",
+				{
+					role: "omp.composer.crumb",
+					text: id,
+					wrap: "none",
+					title: `View ${id}`,
+					actions: { click: `${FOCUS_ACTION}${id}` },
+				},
+				undefined,
+				`crumb:${id}`,
+			),
+		);
+		return keyed(
+			row(
+				[
+					node("icon", { name: "eye" }, undefined, "icon"),
+					node("text", { text: "Viewing", wrap: "none" }, undefined, "label"),
+					...crumbs,
+					node("text", { role: "omp.composer.agent", text: agent, wrap: "none" }, undefined, "agent"),
+					node(
+						"row",
+						{
+							role: "omp.composer.exit",
+							gap: "xs",
+							align: "center",
+							title: `Back to the main session  ${back}`,
+							actions: { click: `${FOCUS_ACTION}${MAIN_AGENT_ID}` },
+						},
+						[
+							node("kbd", { keys: [interruptKey] }, undefined, "key"),
+							node("text", { text: "main", wrap: "none" }, undefined, "label"),
+						],
+						"exit",
+					),
+				],
+				{
+					role: "omp.composer.focus",
+					gap: "xs",
+					align: "center",
+					title: `Viewing subagent ${agent}: what you send goes to it`,
+				},
+			),
+			"focus",
+		);
+	}
+
+	/** The viewing header over the text, the shell-mode chip before the input, and the bar's controls under it. */
+	#describeComposerControls(
+		state: ComposerNativeState,
+		facts: ComposerFacts | undefined,
+		thinkingKey: KeyId | undefined,
+		modelKey: KeyId | undefined,
+		interruptKey: KeyId,
+		effortGlyph: boolean,
+	): ComposerControls {
+		const shell = state.shell;
+		const focus = state.viewing && this.#describeViewing(state.viewing, interruptKey);
+		const thinking = state.thinking;
+		const thinkingHint = thinkingKey ? `  ${formatTooltipKey(thinkingKey)}` : "";
+		// The level collapses into the model chip's icon; its own tooltip and click stay.
+		const modelIcon =
+			facts && thinking !== undefined && effortGlyph && state.thinkingInModel
+				? node(
+						"effort",
+						{
+							level: thinking,
+							role: "omp.composer.model.effort",
+							title: `Thinking effort: ${thinking}${thinkingHint}`,
+							actions: { click: "thinking.cycle" },
+						},
+						undefined,
+						"effort",
+					)
+				: undefined;
+		const model =
+			facts &&
+			node(
+				"row",
+				{
+					role: "omp.composer.model",
+					gap: "xs",
+					align: "center",
+					tone: facts.model.tone,
+					title: modelKey ? `Switch model  ${formatTooltipKey(modelKey)}` : "Switch model",
+					actions: { click: "status.model" },
+				},
+				[
+					modelIcon ?? node("icon", { name: "model" }, undefined, "icon"),
+					node("text", { spans: facts.model.spans, wrap: "none" }, undefined, "name"),
+					node("icon", { name: "chev" }, undefined, "chev"),
+				],
+				"model",
+			);
+		const effortSteps = thinking === undefined ? undefined : EFFORT_STEPS[thinking];
+		const effort =
+			thinking !== undefined && !modelIcon
+				? node(
+						"row",
+						{
+							role: "omp.composer.effort",
+							gap: "xs",
+							align: "center",
+							title: `Thinking effort${thinkingHint}`,
+							actions: { click: "thinking.cycle" },
+						},
+						[
+							effortGlyph
+								? node("effort", { level: thinking }, undefined, "glyph")
+								: node(
+										"meter",
+										{ value: effortSteps === undefined ? null : effortSteps / 4, style: "blocks", steps: 4 },
+										undefined,
+										"meter",
+									),
+							node("text", { text: thinking, wrap: "none" }, undefined, "level"),
+						],
+						"effort",
+					)
+				: undefined;
+		const submit = state.running
+			? node(
+					"text",
+					{
+						role: "omp.composer.stop",
+						text: "Stop",
+						tone: "error",
+						title: `Stop  ${formatTooltipKey(interruptKey)}`,
+						actions: { click: "interrupt" },
+					},
+					undefined,
+					"stop",
+				)
+			: node(
+					"kbd",
+					{
+						role: "omp.composer.send",
+						keys: ["enter"],
+						title: `Send  ${formatTooltipKey("enter")}`,
+						actions: { click: "submit" },
+					},
+					undefined,
+					"send",
+				);
+		if (!shell) return { focus, mode: undefined, model, effort, submit };
+		const runs = shell.kind === "bash" ? "Runs in your shell" : "Runs in Python";
+		const mode = keyed(
+			row(
+				compact([
+					shell.excluded &&
+						node("icon", { name: "eye-off", title: "Not sent to the model" }, undefined, "excluded"),
+					node(
+						"text",
+						{ spans: [span(shell.kind, shell.kind === "bash" ? "bashMode" : "pythonMode")], wrap: "none" },
+						undefined,
+						"label",
+					),
+				]),
+				{
+					role: "omp.composer.mode",
+					gap: "xs",
+					align: "center",
+					title: shell.excluded ? `${runs} · not sent to the model` : runs,
+				},
+			),
+			"mode",
+		);
+		return { focus, mode, model, effort, submit };
+	}
+
+	/**
+	 * Clicks on the composer's controls take the same paths as their keys: ⇧⇥,
+	 * ⏎ and Esc; the viewing header's links (`focus:<id>`) go to the host,
+	 * the status facts' clicks (`status.*`) to their source. Selection edits
+	 * go to the buffer; `send` submits its own prompt after saving the old draft
+	 * for recall and waiting for in-flight clipboard work.
+	 */
+	override handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "send") {
+			// A send is its own prompt: never submit a stale draft for blank input,
+			// and retain a displaced draft (including its attachments) for recall.
+			if (!event.text.trim() || !this.nativeSendable) return;
+			if (this.#pasteInFlight > 0) {
+				this.#pendingInput.push(event);
+				return;
+			}
+			this.clearDraftForRecall();
+			this.setCollapsedText(event.text);
+			this.submit();
+			return;
+		}
+		if (event.type !== "action") {
+			super.handleNativeEvent(event);
+			return;
+		}
+		switch (event.act) {
+			case "thinking.cycle":
+				this.onCycleThinkingLevel?.();
+				return;
+			case "submit":
+				this.submit();
+				return;
+			case "interrupt":
+				this.onEscape?.();
+				return;
+			default:
+				if (event.act.startsWith(FOCUS_ACTION)) this.onFocusAgent?.(event.act.slice(FOCUS_ACTION.length));
+				else this.composerFacts?.handleNativeEvent(event);
+		}
+	}
+
 	onEscape?: () => void;
 	onClear?: () => void;
 	onExit?: () => void;
@@ -900,16 +1406,21 @@ export class CustomEditor extends Editor {
 	onCapsLock?: () => void;
 	/** Called when left-arrow is pressed while the editor is empty (cursor necessarily at start). */
 	onLeftAtStart?: () => void;
+	/** Called when the viewing header asks to view agent `id` ({@link MAIN_AGENT_ID}: the main session). */
+	onFocusAgent?: (id: string) => void;
 
-	/** Fired when a sustained space-bar hold is recognized — the push-to-talk STT start. The
-	 *  optimistically-typed spaces have already been deleted by the time this runs. */
-	onSpaceHoldStart?: () => void;
-	/** Fired when the held space bar is released (detected as an idle gap with no further repeated
-	 *  spaces) — the push-to-talk STT stop. */
-	onSpaceHoldEnd?: () => void;
-	/** Gate for the space-hold gesture. Returns false to keep the space bar inserting spaces
-	 *  normally; wired to `stt.enabled` so disabling STT restores plain space behavior. */
-	sttHoldEnabled?: () => boolean;
+	#spaceHoldSnapshot: { revision: number; line: number; col: number } | undefined;
+
+	/** Configurable push-to-talk; set its `handler` to enable it. It is a text-composition gesture, so
+	 *  it stays out of Vim's Normal/Visual modes (where the space bar is the `l` motion), away from an
+	 *  open autocomplete menu, and out of a pending character jump (whose target may be the key). */
+	readonly spaceHold = new SpaceHoldGesture(
+		count => {
+			this.#spaceHoldSnapshot = undefined;
+			if (count > 0) this.deleteBeforeCursor(count);
+		},
+		() => this.vimMode === "insert" && !this.isShowingAutocomplete() && !this.isJumpPending,
+	);
 
 	/** Custom key handlers from extensions and non-built-in app actions. */
 	#customKeyHandlers = new Map<KeyId, () => void>();
@@ -924,21 +1435,9 @@ export class CustomEditor extends Editor {
 	 *  dispatching them so a trailing `Enter` after `Cmd+V` can't submit before the image lands on
 	 *  `pendingImages` (Codex PR #3602 review). */
 	#pasteInFlight = 0;
-	/** Input chunks deferred behind an in-flight paste, drained in FIFO order once the paste
-	 *  count returns to zero. */
-	#pendingInput: string[] = [];
-	/** Spaces actually inserted in the current run; tracked back out when a hold is recognized. */
-	#spaceRunInserted = 0;
-	/** Consecutive "mechanical" deltas (fast + steady); a sustained run of these confirms a held bar. */
-	#mechanicalRun = 0;
-	/** Inter-space gap (ms) of the previous space pair, compared against the next to judge steadiness. */
-	#prevSpaceGap: number | undefined;
-	/** Monotonic timestamp (ms) of the last space, to measure the gap to the next one. */
-	#lastSpaceAt = Number.NEGATIVE_INFINITY;
-	/** True while a recognized space-hold push-to-talk recording is in progress. */
-	#spaceHoldActive = false;
-	/** Idle timer that fires `onSpaceHoldEnd` once repeated spaces stop arriving. */
-	#spaceHoldTimer: NodeJS.Timeout | undefined;
+	/** Input chunks and explicit prompts deferred behind an in-flight paste,
+	 *  drained in FIFO order once the paste count returns to zero. */
+	#pendingInput: (string | Extract<NativeUiEvent, { type: "send" }>)[] = [];
 	#actionKeys = new Map<ConfigurableEditorAction, KeyId[]>(
 		Object.entries(DEFAULT_ACTION_KEYS).map(([action, keys]) => [action as ConfigurableEditorAction, [...keys]]),
 	);
@@ -1003,93 +1502,6 @@ export class CustomEditor extends Editor {
 		this.#rebuildCustomMatchKeys();
 	}
 
-	#spaceHoldGestureEnabled(): boolean {
-		// Push-to-talk is a text-composition gesture, so it stays out of Vim's Normal/Visual modes
-		// where the space bar is the `l` motion.
-		if (this.vimMode !== "insert") return false;
-		return this.onSpaceHoldStart !== undefined && (this.sttHoldEnabled?.() ?? false) && !this.isShowingAutocomplete();
-	}
-
-	/** Drive the space-hold push-to-talk state machine. Returns true when the gesture consumed the
-	 *  input so it must not reach normal editing. A held space bar emits OS auto-repeat: a *steady*
-	 *  stream of spaces at a fixed fast interval. We watch the inter-space deltas and only recognize a
-	 *  hold once {@link SPACE_HOLD_MECHANICAL_RUN} consecutive deltas are "mechanical" — both
-	 *  auto-repeat-fast and near-identical (see {@link gapsAreMechanical}). Smashing the bar is fast
-	 *  but jittery and deliberate taps are too slow, so neither escalates and both keep typing real
-	 *  spaces; the few spaces typed before a real hold is recognized are tracked back out. */
-	#handleSpaceHold(data: string, canonical: string | undefined): boolean {
-		const isSpace = canonical === "space";
-		if (this.#spaceHoldActive) {
-			if (isSpace) {
-				// Auto-repeat while held: swallow it and keep the release timer alive.
-				this.#armSpaceHoldReleaseTimer();
-				return true;
-			}
-			// Any non-space means the bar was released — stop recording, then let the key through.
-			this.#endSpaceHold();
-			return false;
-		}
-		if (!isSpace) {
-			this.#resetSpaceRun();
-			return false;
-		}
-		if (!this.#spaceHoldGestureEnabled()) return false;
-		const now = performance.now();
-		const gap = now - this.#lastSpaceAt;
-		const prevGap = this.#prevSpaceGap;
-		this.#lastSpaceAt = now;
-		this.#prevSpaceGap = gap;
-		if (prevGap === undefined || !gapsAreMechanical(gap, prevGap)) {
-			// First space, a deliberate tap, or jittery smashing: not a steady machine cadence yet, so
-			// type a real space and reset the mechanical run.
-			this.#mechanicalRun = 0;
-			this.#forwardInput(data);
-			this.#spaceRunInserted++;
-			return true;
-		}
-		// Steady fast repeat: swallow it. Once the cadence has held for SPACE_HOLD_MECHANICAL_RUN
-		// deltas it's a held bar — track back the few pre-burst spaces already typed and start.
-		if (++this.#mechanicalRun >= SPACE_HOLD_MECHANICAL_RUN) {
-			this.deleteBeforeCursor(this.#spaceRunInserted);
-			this.#resetSpaceRun();
-			this.#beginSpaceHold();
-		}
-		return true;
-	}
-
-	#resetSpaceRun(): void {
-		this.#spaceRunInserted = 0;
-		this.#mechanicalRun = 0;
-		this.#prevSpaceGap = undefined;
-		this.#lastSpaceAt = Number.NEGATIVE_INFINITY;
-	}
-
-	#beginSpaceHold(): void {
-		this.#spaceHoldActive = true;
-		this.#armSpaceHoldReleaseTimer();
-		this.onSpaceHoldStart?.();
-	}
-
-	#armSpaceHoldReleaseTimer(): void {
-		if (this.#spaceHoldTimer) clearTimeout(this.#spaceHoldTimer);
-		this.#spaceHoldTimer = setTimeout(() => {
-			this.#spaceHoldTimer = undefined;
-			this.#endSpaceHold();
-		}, SPACE_HOLD_RELEASE_MS);
-		this.#spaceHoldTimer.unref?.();
-	}
-
-	#endSpaceHold(): void {
-		if (!this.#spaceHoldActive) return;
-		this.#spaceHoldActive = false;
-		this.#resetSpaceRun();
-		if (this.#spaceHoldTimer) {
-			clearTimeout(this.#spaceHoldTimer);
-			this.#spaceHoldTimer = undefined;
-		}
-		this.onSpaceHoldEnd?.();
-	}
-
 	/** Decrement {@link #pasteInFlight} once an async paste settles and, when the count returns
 	 *  to zero, drain {@link #pendingInput} through `handleInput` so requeueing still works if a
 	 *  drained chunk triggers another async paste. Bound member so it can be passed straight to
@@ -1097,9 +1509,16 @@ export class CustomEditor extends Editor {
 	#onPasteSettled = (): void => {
 		this.#pasteInFlight--;
 		if (this.#pasteInFlight > 0) return;
-		const drained = this.#pendingInput.splice(0);
-		for (const chunk of drained) this.handleInput(chunk);
+		this.#drainPendingInput();
 	};
+
+	#drainPendingInput(): void {
+		const drained = this.#pendingInput.splice(0);
+		for (const input of drained) {
+			if (typeof input === "string") this.handleInput(input);
+			else this.handleNativeEvent(input);
+		}
+	}
 
 	/** Track `promise` as an in-flight paste so subsequent `handleInput` calls queue behind it,
 	 *  then drain the queue once it settles. Codex PR #3602 review: without this, a trailing
@@ -1109,6 +1528,10 @@ export class CustomEditor extends Editor {
 	#trackAsyncPaste(promise: Promise<unknown>): void {
 		this.#pasteInFlight++;
 		void promise.then(this.#onPasteSettled, this.#onPasteSettled);
+	}
+
+	capturesInput(data: string): boolean {
+		return this.spaceHold.shouldRoute(data);
 	}
 
 	override handleInput(data: string): void {
@@ -1170,13 +1593,74 @@ export class CustomEditor extends Editor {
 			this.#collapseSkillTokens();
 			this.#collapseModelMentions();
 			// No async paste was started; drain the queued trailing bytes ourselves.
-			const drained = this.#pendingInput.splice(0);
-			for (const chunk of drained) this.handleInput(chunk);
+			this.#drainPendingInput();
 			return;
 		}
 
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
+
+		// Space-hold push-to-talk runs before editor shortcuts so a reserved binding can never
+		// delete, move, submit, or invoke an app action while the gesture is enabled.
+		const spaceHoldText = getSpaceHoldText(data, canonical);
+		const priorSnapshot = this.#spaceHoldSnapshot;
+		if (priorSnapshot) {
+			const cursor = this.getCursor();
+			if (
+				this.textRevision !== priorSnapshot.revision ||
+				cursor.line !== priorSnapshot.line ||
+				cursor.col !== priorSnapshot.col
+			) {
+				this.spaceHold.process(undefined);
+				this.#spaceHoldSnapshot = undefined;
+			}
+		}
+
+		switch (this.spaceHold.process(canonical, spaceHoldText?.length ?? 0)) {
+			case "type": {
+				const text = spaceHoldText!;
+				const beforeCursor = this.getCursor();
+				const beforeLine = this.getLines()[beforeCursor.line] ?? "";
+				const beforeRevision = this.textRevision;
+				this.typeCharacter(text);
+				this.#collapseSkillTokens();
+				this.#collapseModelMentions();
+				this.#normalizeQueuePrefix(hadBareQueuePrefix);
+
+				const afterCursor = this.getCursor();
+				const afterLine = this.getLines()[afterCursor.line] ?? "";
+				const noInsertion =
+					this.textRevision === beforeRevision &&
+					afterCursor.line === beforeCursor.line &&
+					afterCursor.col === beforeCursor.col &&
+					afterLine === beforeLine;
+				const literalInsertion =
+					afterCursor.line === beforeCursor.line &&
+					afterCursor.col === beforeCursor.col + text.length &&
+					afterLine === beforeLine.slice(0, beforeCursor.col) + text + beforeLine.slice(beforeCursor.col);
+				if (noInsertion) {
+					this.spaceHold.recordTyped(0);
+				} else if (literalInsertion) {
+					this.spaceHold.recordTyped(text.length);
+				} else {
+					// Typing hooks rewrote the candidate (e.g. autocorrect/inline replacement).
+					// Commit that edit and start a fresh cadence rather than deleting its suffix later.
+					this.spaceHold.process(undefined);
+					this.#spaceHoldSnapshot = undefined;
+					return;
+				}
+				const cursor = this.getCursor();
+				this.#spaceHoldSnapshot = {
+					revision: this.textRevision,
+					line: cursor.line,
+					col: cursor.col,
+				};
+				return;
+			}
+			case "swallow":
+				return;
+		}
+		this.#spaceHoldSnapshot = undefined;
 
 		// Left-arrow on an empty editor: surface for the agent-hub double-tap
 		// gesture. Plain "left" only — modified arrows and any in-text cursor
@@ -1186,18 +1670,16 @@ export class CustomEditor extends Editor {
 			return;
 		}
 
-		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.
-		if (this.#handleSpaceHold(data, canonical)) return;
-
 		// One union probe decides whether any per-action interception below can
 		// match — plain typing then skips the ~20 per-action set lookups per key.
 		if (
 			canonical !== undefined &&
 			(this.#actionMatchKeyUnion.has(canonical) || this.#customMatchKeys.has(canonical))
 		) {
-			// Intercept configured image paste (async - fires and handles result)
+			// Serialize configured clipboard paste just like bracketed image paste:
+			// explicit sends and subsequent keys must wait for its attachments.
 			if (this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
-				void this.onPasteImage();
+				this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
 				return;
 			}
 

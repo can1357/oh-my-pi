@@ -1,42 +1,41 @@
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { ToolExample } from "@oh-my-pi/pi-ai";
 import * as natives from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, hasFsCode, isEnoent, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import { InternalUrlRouter } from "../internal-urls";
-import { splitMemoryGlobPattern } from "../internal-urls/memory-protocol";
+import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
+import { InternalUrlFilesystem, type UrlFileStat } from "../internal-urls/url-filesystem";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
 import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import type { ToolSession } from ".";
+import { resolveToolTier } from "./approval";
+import { isFindEnabled } from "./jfind";
 import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
 import {
 	expandDelimitedPathEntries,
 	formatPathRelativeToCwd,
-	hasGlobPathChars,
-	isSshUrl,
 	normalizePathLikeInput,
 	parseFindPattern,
 	partitionExistingPaths,
 	resolveExplicitFindPatterns,
-	resolveToCwd,
+	resolveSearchBase,
+	resolveSearchResultPath,
 } from "./path-utils";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
+import { cfgTaskDisabledAgents } from "../task/settings";
+
 const findSchema = type({
-	"path?": type("string").describe(
-		'glob, file, or directory to search — a single path or a semicolon-delimited list ("src/**/*.ts; test/**/*.ts"). Omitted -> searches the workspace root (".")',
-	),
-	"hidden?": type("boolean").describe("include hidden files"),
-	"gitignore?": type("boolean").describe("respect gitignore"),
-	"limit?": type("number").describe("max results"),
+	"path?": "string",
+	"hidden?": "boolean",
+	"gitignore?": "boolean",
+	"limit?": "number",
 });
 
 export type GlobToolInput = typeof findSchema.infer;
@@ -57,7 +56,38 @@ export interface GlobOperations {
 		absolutePath: string,
 	) => Promise<{ isFile(): boolean; isDirectory(): boolean }> | { isFile(): boolean; isDirectory(): boolean };
 	/** Find files matching glob pattern. Returns relative paths. */
-	glob: (pattern: string, cwd: string, options: { ignore: string[]; limit: number }) => Promise<string[]> | string[];
+	glob: (pattern: string, cwd: string, options: GlobOperationsOptions) => Promise<string[]> | string[];
+}
+
+/** Search policy the tool resolved for this call, plus the cancellation signal. */
+export interface GlobOperationsOptions {
+	/** Globs the tool always excludes. */
+	ignore: string[];
+	/** Effective result cap for this call, already clamped to the tool maximum. */
+	limit: number;
+	/** Include dotfiles. Resolved from the caller's `hidden`, defaulting to true. */
+	hidden: boolean;
+	/** Honour gitignore files. Resolved from the caller's `gitignore`, defaulting to true. */
+	gitignore: boolean;
+	/** Aborts when the caller cancels or when the tool's scan deadline expires.
+	 * Backends are expected to stop on it; the tool does not wait for one that
+	 * does not, but it still stops reporting at the deadline. */
+	signal?: AbortSignal;
+}
+
+/**
+ * Model-facing text for a scan that hit the tool deadline. Shared by the native
+ * and custom backends so both describe the same failure the same way.
+ */
+function globTimeoutNotice(partialCount: number, timeoutMs: number): string {
+	const seconds = timeoutMs % 1000 === 0 ? `${timeoutMs / 1000}` : (timeoutMs / 1000).toFixed(1);
+	// Walk cost tracks directory-tree size, not pattern specificity: a
+	// mtime-ranked scan cannot early-exit, so a "narrow" pattern over a
+	// huge tree still times out. Say so instead of implying the pattern
+	// was too broad.
+	return partialCount > 0
+		? `glob timed out after ${seconds}s; returning ${partialCount} partial matches — results are incomplete, scope to a deeper directory instead of retrying blindly`
+		: `Glob timed out after ${seconds}s before finding any matches — the scan is incomplete, NOT proof of absence. The walk is bounded by directory size, not pattern width; scope the search to a deeper directory (e.g. \`sub/dir/*.ext\` instead of \`*.ext\` at a huge root).`;
 }
 
 export interface GlobToolOptions {
@@ -90,34 +120,22 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly loadMode = "essential";
 	readonly label = "Glob";
 	get description(): string {
-		return prompt.render(globDescription, {
-			eagerDelegation: sessionDelegationBias(this.session) === "eager",
-			scoutAvailable: isScoutSpawnable(
-				this.session.settings.get("task.disabledAgents") as string[] | undefined,
-				this.session.getSessionSpawns?.() ?? "*",
-			),
-		});
+		const hasFind = this.session.isToolActive?.("find") ?? isFindEnabled(this.session);
+		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
+		const scoutAvailable = isScoutSpawnable(
+			cfgTaskDisabledAgents.get(this.session.settings),
+			this.session.getSessionSpawns?.() ?? "*",
+		);
+		// Every render input is a boolean; pack them so repeat reads skip the template render.
+		const key = (hasFind ? 1 : 0) | (eagerDelegation ? 2 : 0) | (scoutAvailable ? 4 : 0);
+		if (key !== this.#descriptionKey) {
+			this.#description = prompt.render(globDescription, { hasFind, eagerDelegation, scoutAvailable });
+			this.#descriptionKey = key;
+		}
+		return this.#description;
 	}
 	readonly parameters = findSchema;
 
-	readonly examples: readonly ToolExample<typeof findSchema.infer>[] = [
-		{
-			caption: "Glob files",
-			call: { path: "src/**/*.ts" },
-		},
-		{
-			caption: "Multiple targets — semicolon-delimited list",
-			call: { path: "src/**/*.ts; test/**/*.ts" },
-		},
-		{
-			caption: "Glob gitignored files like .env",
-			call: { path: ".env*", gitignore: false },
-		},
-		{
-			caption: "Glob directories matching a name (returns both files and dirs; directories are suffixed with `/`)",
-			call: { path: "**/tests" },
-		},
-	];
 	readonly strict = true;
 
 	readonly #customOps?: GlobOperations;
@@ -125,6 +143,8 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly #nativeGlob: typeof natives.glob;
 	readonly #stat: typeof fs.promises.stat;
 	readonly #timeoutMs: number;
+	#descriptionKey = -1;
+	#description = "";
 
 	constructor(
 		private readonly session: ToolSession,
@@ -153,8 +173,8 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 		// Preparation still rejects immediately on caller abort. Once every
 		// filesystem stat has settled, detach this proxy before launching native
 		// scans so execute can drain each worker through the real caller signal.
-		// Custom operations have no signal API and keep immediate abort coverage
-		// for their entire execution.
+		// Custom operations receive the combined signal via GlobOperationsOptions,
+		// but keep immediate caller-abort coverage for their entire execution.
 		const preparationController = !this.#customOps?.glob && signal ? new AbortController() : undefined;
 		const abortPreparation = (): void => preparationController?.abort();
 		if (preparationController && signal) {
@@ -176,60 +196,12 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				throw new ToolError("Searching from root directory '/' is not allowed");
 			}
 			const internalRouter = InternalUrlRouter.instance();
-			const normalizedPatterns: string[] = [];
-			for (const rawPattern of aliasResolvedPatterns) {
-				if (!internalRouter.canHandle(rawPattern)) {
-					normalizedPatterns.push(rawPattern);
-					continue;
-				}
-				if (isSshUrl(rawPattern)) {
-					throw new ToolError(
-						`find cannot operate on a remote ssh:// path: ${rawPattern}. ssh:// has no local file to glob; use \`read ${rawPattern}\` to list or inspect the remote path.`,
-					);
-				}
-				if (hasGlobPathChars(rawPattern)) {
-					if (!/^memory:\/\//i.test(rawPattern)) {
-						throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPattern}`);
-					}
-					const memoryGlob = splitMemoryGlobPattern(rawPattern);
-					const resource = await internalRouter.resolve(memoryGlob.baseUrl, {
-						cwd: this.session.cwd,
-						settings: this.session.settings,
-						signal,
-						sessionFile: this.session.getSessionFile() ?? undefined,
-						sessionId:
-							this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
-						agentRegistry: this.session.agentRegistry,
-						localProtocolOptions: this.session.localProtocolOptions,
-						skills: this.session.skills,
-						rules: this.session.activeRules,
-						pathOnly: true,
-					});
-					if (!resource.sourcePath) {
-						throw new ToolError(`Cannot find internal URL without a backing file: ${memoryGlob.baseUrl}`);
-					}
-					normalizedPatterns.push(
-						path.join(resource.sourcePath.replace(/[*?[{]/g, "[$&]"), memoryGlob.globPattern),
-					);
-					continue;
-				}
-				const resource = await internalRouter.resolve(rawPattern, {
-					cwd: this.session.cwd,
-					settings: this.session.settings,
-					signal,
-					sessionFile: this.session.getSessionFile() ?? undefined,
-					sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
-					agentRegistry: this.session.agentRegistry,
-					localProtocolOptions: this.session.localProtocolOptions,
-					skills: this.session.skills,
-					rules: this.session.activeRules,
-					pathOnly: true,
-				});
-				if (!resource.sourcePath) {
-					throw new ToolError(`Cannot find internal URL without a backing file: ${rawPattern}`);
-				}
-				normalizedPatterns.push(resource.sourcePath);
-			}
+			// Internal URLs resolve inside the native walk, bounded by the tier this call was approved at.
+			const urlFilesystem = new InternalUrlFilesystem({
+				context: sessionResolveContext(this.session, { signal }),
+				tier: resolveToolTier(this, params),
+			});
+			const normalizedPatterns = aliasResolvedPatterns.map(pattern => internalRouter.normalize(pattern));
 			if (normalizedPatterns.some(pattern => pattern.length === 0)) {
 				throw new ToolError("`path` must contain non-empty globs or paths");
 			}
@@ -241,7 +213,12 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			let missingPaths: string[] = [];
 			let effectivePatterns = normalizedPatterns;
 			if (normalizedPatterns.length > 1 && !this.#customOps) {
-				const partition = await partitionExistingPaths(normalizedPatterns, this.session.cwd, parseFindPattern);
+				const partition = await partitionExistingPaths(
+					normalizedPatterns,
+					this.session.cwd,
+					parseFindPattern,
+					urlFilesystem,
+				);
 				if (partition.valid.length === 0) {
 					throw new ToolError(`Path not found: ${partition.missing.join(", ")}`);
 				}
@@ -253,7 +230,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const isSingle = !multiPattern;
 			const targets: GlobTarget[] = multiPattern
 				? multiPattern.targets.map(target => ({
-						searchPath: resolveToCwd(target.basePath, this.session.cwd),
+						searchPath: target.basePath,
 						globPattern: target.globPattern,
 						hasGlob: target.hasGlob,
 					}))
@@ -261,7 +238,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						(() => {
 							const parsed = parseFindPattern(effectivePatterns[0] ?? ".");
 							return {
-								searchPath: resolveToCwd(parsed.basePath, this.session.cwd),
+								searchPath: resolveSearchBase(parsed.basePath, this.session.cwd),
 								globPattern: parsed.globPattern,
 								hasGlob: parsed.hasGlob,
 							};
@@ -280,6 +257,12 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				throw new ToolError("Limit must be a positive number");
 			}
 			const effectiveLimit = Math.min(MAX_LIMIT, Math.max(1, Math.floor(requestedLimit)));
+			// A request above the hard cap is silently reduced today; say so up
+			// front so `limit=1000` no longer reads as "200 is all there is" (#13263).
+			const clampNotice =
+				requestedLimit > MAX_LIMIT
+					? `Requested limit ${requestedLimit} clamped to the max of ${MAX_LIMIT}`
+					: undefined;
 			const includeHidden = hidden ?? true;
 			const useGitignore = gitignore ?? true;
 			const timeoutMs = this.#timeoutMs;
@@ -287,8 +270,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 			const formatMatchPath = (matchPath: string, base: string, fileType?: natives.FileType): string => {
 				const hadTrailingSlash = matchPath.endsWith("/") || matchPath.endsWith("\\");
-				const absolutePath = path.isAbsolute(matchPath) ? matchPath : path.resolve(base, matchPath);
-				return formatPathRelativeToCwd(absolutePath, this.session.cwd, {
+				return formatPathRelativeToCwd(resolveSearchResultPath(base, matchPath), this.session.cwd, {
 					trailingSlash: fileType === natives.FileType.Dir || hadTrailingSlash,
 				});
 			};
@@ -308,6 +290,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						fileCount: 0,
 						files: [],
 						truncated: forceTruncated,
+						timedOut: opts?.timedOut || undefined,
 						cwd: this.session.cwd,
 						missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 					};
@@ -328,6 +311,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				const baseOutput = formatGroupedPaths(limited);
 				const trailingNotes: string[] = [];
 				if (notice) trailingNotes.push(notice);
+				if (clampNotice) trailingNotes.push(clampNotice);
 				if (missingPathsNote) trailingNotes.push(missingPathsNote);
 				const rawOutput = trailingNotes.length > 0 ? `${baseOutput}\n\n${trailingNotes.join("\n")}` : baseOutput;
 				const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
@@ -337,15 +321,28 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					fileCount: limited.length,
 					files: limited,
 					truncated: Boolean(forceTruncated || limitMeta.resultLimit || truncation.truncated),
+					timedOut: opts?.timedOut || undefined,
 					resultLimitReached: limitMeta.resultLimit?.reached,
 					truncation: truncation.truncated ? truncation : undefined,
 					cwd: this.session.cwd,
 					missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 				};
 
+				// Cap the doubled suggestion at MAX_LIMIT; once the reached count
+				// is already the cap there is no larger usable limit, so suppress
+				// the advice rather than recommend a value that clamps back (#13263).
+				const reachedLimit = limitMeta.resultLimit;
+				const cappedSuggestion =
+					reachedLimit === undefined ? undefined : Math.min(reachedLimit.reached * 2, MAX_LIMIT);
+				const resultLimitInput =
+					reachedLimit === undefined
+						? undefined
+						: cappedSuggestion !== undefined && cappedSuggestion > reachedLimit.reached
+							? { reached: reachedLimit.reached, suggestion: cappedSuggestion }
+							: { reached: reachedLimit.reached, suggestion: null };
 				const resultBuilder = toolResult(details)
 					.text(truncation.content)
-					.limits({ resultLimit: limitMeta.resultLimit?.reached });
+					.limits({ resultLimit: resultLimitInput });
 				if (truncation.truncated) {
 					resultBuilder.truncation(truncation, { direction: "head" });
 				}
@@ -359,21 +356,70 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			// roots keep each scan bounded to exactly what the user asked for.
 			if (this.#customOps?.glob) {
 				const customOps = this.#customOps;
+				let customTimedOut = false;
+				// A custom backend is third-party code that may never settle and is
+				// under no obligation to honour the signal, so never await one
+				// outright: race every call against the tool deadline instead. The
+				// detached operation keeps a settlement handler attached, so a late
+				// rejection lands there instead of becoming an unhandled rejection
+				// after we returned.
+				//
+				// An unanswered call resolves to `{ timedOut: true }` rather than to a
+				// stand-in value. A stand-in is a lie the caller cannot see: reading
+				// "the deadline fired" as "the path is absent" turned a slow `exists()`
+				// into `Path not found: <root>`, telling the model a directory is gone
+				// when the scan merely ran out of time. Absence and timeout are
+				// different user-facing outcomes, so each call site decides.
+				type CustomCall<T> = { timedOut: false; value: T } | { timedOut: true; value?: never };
+				const runCustom = async <T>(operation: Promise<T>): Promise<CustomCall<T>> => {
+					const settled = operation.then(
+						value => ({ kind: "settled" as const, value }),
+						(error: unknown) => ({ kind: "failed" as const, error }),
+					);
+					const ABORTED = Symbol("custom-glob-aborted");
+					const { promise: aborted, resolve: resolveAborted } = Promise.withResolvers<typeof ABORTED>();
+					const onAbort = (): void => resolveAborted(ABORTED);
+					if (combinedSignal.aborted) resolveAborted(ABORTED);
+					else combinedSignal.addEventListener("abort", onAbort, { once: true });
+					try {
+						const outcome = await Promise.race([settled, aborted]);
+						if (outcome === ABORTED) {
+							if (signal?.aborted) throw new ToolAbortError();
+							customTimedOut = true;
+							return { timedOut: true };
+						}
+						if (outcome.kind === "failed") throw outcome.error;
+						return { timedOut: false, value: outcome.value };
+					} finally {
+						combinedSignal.removeEventListener("abort", onAbort);
+					}
+				};
 				const perTarget = await Promise.all(
 					targets.map(async target => {
-						if (!(await customOps.exists(target.searchPath))) {
+						const exists = await runCustom(Promise.resolve(customOps.exists(target.searchPath)));
+						if (exists.timedOut) return [] as string[];
+						if (!exists.value) {
 							if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
 							return [] as string[];
 						}
 						if (!target.hasGlob && customOps.stat) {
-							const stat = await customOps.stat(target.searchPath);
-							if (stat.isFile()) return [formatScopePath(target.searchPath)];
+							const stat = await runCustom(Promise.resolve(customOps.stat(target.searchPath)));
+							if (stat.timedOut) return [] as string[];
+							if (stat.value.isFile()) return [formatScopePath(target.searchPath)];
 						}
-						const results = await customOps.glob(target.globPattern, target.searchPath, {
-							ignore: ["**/node_modules/**", "**/.git/**"],
-							limit: effectiveLimit,
-						});
-						return results.map(matchPath => formatMatchPath(matchPath, target.searchPath));
+						const results = await runCustom(
+							Promise.resolve(
+								customOps.glob(target.globPattern, target.searchPath, {
+									ignore: ["**/node_modules/**", "**/.git/**"],
+									limit: effectiveLimit,
+									hidden: includeHidden,
+									gitignore: useGitignore,
+									signal: combinedSignal,
+								}),
+							),
+						);
+						if (results.timedOut) return [] as string[];
+						return results.value.map(matchPath => formatMatchPath(matchPath, target.searchPath));
 					}),
 				);
 				const seen = new Set<string>();
@@ -385,31 +431,54 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						merged.push(entry);
 					}
 				}
+				if (customTimedOut) {
+					// Roots that finished before the deadline still count: report them
+					// as incomplete rather than throwing the partial work away.
+					return buildResult(merged, {
+						notice: globTimeoutNotice(merged.length, timeoutMs),
+						forceTruncated: true,
+						timedOut: true,
+					});
+				}
 				return buildResult(merged);
 			}
 
 			const preparedTargets: NativePreparedTarget[] = await Promise.all(
 				targets.map(async target => {
 					throwIfAborted(signal);
-					let stat: fs.Stats;
-					try {
-						stat = await this.#stat(target.searchPath);
-					} catch (err) {
-						// ENAMETOOLONG can never name a real target; surface a clean
-						// "Path not found" instead of leaking the raw errno (issue #7597).
-						if (isEnoent(err) || hasFsCode(err, "ENAMETOOLONG")) {
-							if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
-							return { target, result: [] };
+					let stat: UrlFileStat;
+					if (internalRouter.canHandle(target.searchPath)) {
+						// A URL failure carries its handler's diagnosis (`Artifact 9 not found. Available: 4`).
+						stat = await urlFilesystem.stat(target.searchPath).catch((err: unknown) => {
+							throw new ToolError(
+								`Cannot glob ${target.searchPath}: ${err instanceof Error ? err.message : String(err)}`,
+							);
+						});
+					} else {
+						try {
+							const hostStat = await this.#stat(target.searchPath);
+							stat = {
+								type: hostStat.isDirectory() ? "directory" : hostStat.isFile() ? "file" : "other",
+								size: hostStat.size,
+								mtimeMs: hostStat.mtimeMs,
+							};
+						} catch (err) {
+							// ENAMETOOLONG can never name a real target; surface a clean
+							// "Path not found" instead of leaking the raw errno (issue #7597).
+							if (isEnoent(err) || hasFsCode(err, "ENAMETOOLONG")) {
+								if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
+								return { target, result: [] };
+							}
+							throw err;
 						}
-						throw err;
 					}
-					if (!target.hasGlob && stat.isFile()) {
+					if (!target.hasGlob && stat.type === "file") {
 						return {
 							target,
 							result: [{ path: formatScopePath(target.searchPath), mtime: stat.mtimeMs }],
 						};
 					}
-					if (!stat.isDirectory()) {
+					if (stat.type !== "directory") {
 						if (isSingle) throw new ToolError(`Path is not a directory: ${target.searchPath}`);
 						return { target, result: [] };
 					}
@@ -444,10 +513,10 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			};
 			const streamed = new Set<string>();
 			const makeOnMatch =
-				(base: string) =>
+				(formatTargetMatch: (match: natives.GlobMatch) => string) =>
 				(err: Error | null, match: natives.GlobMatch | null): void => {
 					if (err || combinedSignal.aborted || !match?.path) return;
-					const relativePath = formatMatchPath(match.path, base, match.fileType);
+					const relativePath = formatTargetMatch(match);
 					if (streamed.has(relativePath)) return;
 					streamed.add(relativePath);
 					onUpdateMatches.push(relativePath);
@@ -459,6 +528,18 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const runTarget = async (prepared: NativePreparedTarget): Promise<Array<{ path: string; mtime: number }>> => {
 				if (prepared.result) return prepared.result;
 				const { target } = prepared;
+				// Native streams exactly the matches it returns; the streamed update and
+				// the final list share one formatting pass per raw path (a path's file
+				// type is fixed within one walk).
+				const formattedPaths = new Map<string, string>();
+				const formatTargetMatch = (match: natives.GlobMatch): string => {
+					let formatted = formattedPaths.get(match.path);
+					if (formatted === undefined) {
+						formatted = formatMatchPath(match.path, target.searchPath, match.fileType);
+						formattedPaths.set(match.path, formatted);
+					}
+					return formatted;
+				};
 				try {
 					const result = await this.#nativeGlob(
 						{
@@ -477,17 +558,15 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							recursive: false,
 							signal: combinedSignal,
 							timeoutMs,
+							filesystem: urlFilesystem.shellFilesystem(),
 						},
-						makeOnMatch(target.searchPath),
+						makeOnMatch(formatTargetMatch),
 					);
 					throwIfAborted(signal);
 					const out: Array<{ path: string; mtime: number }> = [];
 					for (const match of result.matches) {
 						if (!match.path) continue;
-						out.push({
-							path: formatMatchPath(match.path, target.searchPath, match.fileType),
-							mtime: match.mtime ?? 0,
-						});
+						out.push({ path: formatTargetMatch(match), mtime: match.mtime ?? 0 });
 					}
 					return out;
 				} catch (error) {
@@ -521,16 +600,11 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				const partial = onUpdateMatches.map((entry, index) => ({ p: entry, m: onUpdateMtimes[index] ?? 0 }));
 				partial.sort((a, b) => b.m - a.m);
 				const sortedPaths = partial.map(entry => entry.p);
-				const seconds = timeoutMs % 1000 === 0 ? `${timeoutMs / 1000}` : (timeoutMs / 1000).toFixed(1);
-				// Walk cost tracks directory-tree size, not pattern specificity: a
-				// mtime-ranked scan cannot early-exit, so a "narrow" pattern over a
-				// huge tree still times out. Say so instead of implying the pattern
-				// was too broad.
-				const notice =
-					sortedPaths.length > 0
-						? `glob timed out after ${seconds}s; returning ${sortedPaths.length} partial matches — results are incomplete, scope to a deeper directory instead of retrying blindly`
-						: `Glob timed out after ${seconds}s before finding any matches — the scan is incomplete, NOT proof of absence. The walk is bounded by directory size, not pattern width; scope the search to a deeper directory (e.g. \`sub/dir/*.ext\` instead of \`*.ext\` at a huge root).`;
-				return buildResult(sortedPaths, { notice, forceTruncated: true, timedOut: true });
+				return buildResult(sortedPaths, {
+					notice: globTimeoutNotice(sortedPaths.length, timeoutMs),
+					forceTruncated: true,
+					timedOut: true,
+				});
 			}
 
 			// Merge per-target results: native glob already ranks each target's own

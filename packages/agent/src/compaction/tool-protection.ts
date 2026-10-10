@@ -1,5 +1,5 @@
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
-import type { AgentToolCall } from "../types";
+import type { AgentMessage, AgentToolCall } from "../types";
 import type { SessionEntry } from "./entries";
 
 export interface ProtectedToolContext {
@@ -11,9 +11,15 @@ export type ProtectedToolMatcher = string | ((context: ProtectedToolContext) => 
 
 const SKILL_INTERNAL_URL_PREFIX = "skill://";
 
-export function collectToolCallsById(entries: readonly SessionEntry[]): Map<string, AgentToolCall> {
+/** Map tool-call ids to their calls across `entries[start, end)` (later calls win). */
+export function collectToolCallsById(
+	entries: readonly SessionEntry[],
+	start = 0,
+	end = entries.length,
+): Map<string, AgentToolCall> {
 	const toolCalls = new Map<string, AgentToolCall>();
-	for (const entry of entries) {
+	for (let i = start; i < end; i++) {
+		const entry = entries[i];
 		if (entry.type !== "message") continue;
 		const message = entry.message;
 		if (message.role !== "assistant") continue;
@@ -22,6 +28,14 @@ export function collectToolCallsById(entries: readonly SessionEntry[]): Map<stri
 		}
 	}
 	return toolCalls;
+}
+
+/** Return the tool-result message carried by a session entry, if any. */
+export function getToolResultMessage(entry: SessionEntry): ToolResultMessage | undefined {
+	if (entry.type !== "message") return undefined;
+	const message = entry.message as AgentMessage;
+	if (message.role !== "toolResult") return undefined;
+	return message as ToolResultMessage;
 }
 
 /**

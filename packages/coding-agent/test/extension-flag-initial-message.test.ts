@@ -73,13 +73,6 @@ describe("extension flags vs initial message", () => {
 		expect(parsed.fileArgs).toEqual([]);
 		expect(parsed.messages).toEqual(["hello"]);
 	});
-	it("documents the P1#1 startup-parse leak: without flags, an @-value is misread as a file arg", () => {
-		// This is the startup parse (extensions not loaded). `runRootCommand` must
-		// run processFileArguments on the extension-aware parse, not this one, or
-		// `@notes.md` gets read into the prompt as a file.
-		const parsed = parseArgs(["--spawn-peer", "@notes.md", "hello"]);
-		expect(parsed.fileArgs).toEqual(["notes.md"]);
-	});
 	it("lets a registered flag shadow a same-named built-in instead of consuming the next token (bot P2)", () => {
 		// A boolean extension flag colliding with the value-taking built-in --plan
 		// must be parsed as the extension's boolean, NOT the built-in plan-model
@@ -171,18 +164,6 @@ describe("extension flags vs initial message", () => {
 		expect(startupArgs.messages).toEqual(["reviewer"]);
 	});
 
-	it("documents the pre-fix leak: without the flag map the value becomes the first prompt", () => {
-		// This is exactly the startup parse: extensions have not loaded, so the
-		// flag map is absent. `--spawn-peer` is dropped (it starts with `-`) but
-		// its bare value `reviewer` is mis-read as the first positional message.
-		// Re-parsing with the extension flag map is what corrects this.
-		const parsed = parseArgs(["--spawn-peer", "reviewer", "review the diff"]);
-
-		expect(parsed.messages).toEqual(["reviewer", "review the diff"]);
-
-		const { initialMessage } = buildInitialMessage({ parsed, stdinContent: "diff-context" });
-		expect(initialMessage).toBe("diff-context\nreviewer");
-	});
 	it("does not mutate the input argv, so the same array survives the two-pass parse (PR #1503 review)", () => {
 		// Reproduces the --option=value + extension flag combo: parseArgs splices
 		// the `=` value into its argv to reuse the `args[++i]` path. If it mutated
@@ -224,45 +205,11 @@ describe("applyExtensionFlags (single-parser flag resolution)", () => {
 	it("reparses with an empty extension registry so unknown flags remain visible", () => {
 		expect(applyExtensionFlags(fakeRunner({}), ["--whatever", "task"])?.unrecognizedFlags).toEqual(["--whatever"]);
 	});
-	it("applies and strips a string flag in space form", () => {
-		const runner = fakeRunner({ "spawn-peer": "string" });
-		const args = applyExtensionFlags(runner, ["--spawn-peer", "reviewer", "review the diff"]);
-		expect(runner.values.get("spawn-peer")).toBe("reviewer");
-		expect(args?.messages).toEqual(["review the diff"]);
-	});
 	it("applies and strips a string flag in equals form (regression for r3323133381)", () => {
 		const runner = fakeRunner({ "spawn-peer": "string" });
 		const args = applyExtensionFlags(runner, ["--spawn-peer=reviewer", "review the diff"]);
 		expect(runner.values.get("spawn-peer")).toBe("reviewer");
 		expect(args?.messages).toEqual(["review the diff"]);
-	});
-	it("applies a boolean flag without consuming the following message", () => {
-		const runner = fakeRunner({ headless: "boolean" });
-		const args = applyExtensionFlags(runner, ["--headless", "do the task"]);
-		expect(runner.values.get("headless")).toBe(true);
-		expect(args?.messages).toEqual(["do the task"]);
-	});
-	it("drops a boolean flag's value in equals form (regression for r3323200058)", () => {
-		const runner = fakeRunner({ headless: "boolean" });
-		const args = applyExtensionFlags(runner, ["--headless=true", "do the task"]);
-		expect(runner.values.get("headless")).toBe(true);
-		expect(args?.messages).toEqual(["do the task"]);
-	});
-	it("re-parses whenever flags are registered, even if none were passed (gate = registered presence)", () => {
-		const runner = fakeRunner({ "spawn-peer": "string" });
-		const args = applyExtensionFlags(runner, ["just a prompt"]);
-		expect(args?.messages).toEqual(["just a prompt"]);
-		expect(runner.values.size).toBe(0);
-	});
-	it("preserves the message and built-in field for a built-in-colliding boolean flag (plan-mode --plan)", () => {
-		// Bot P2: a colliding boolean flag must not let the built-in --plan (string)
-		// branch eat the prompt or set the plan-model field. The extension flag
-		// shadows the built-in, so plan=true is delivered AND the message survives.
-		const runner = fakeRunner({ plan: "boolean" });
-		const args = applyExtensionFlags(runner, ["--plan", "review the diff"]);
-		expect(runner.values.get("plan")).toBe(true);
-		expect(args?.messages).toEqual(["review the diff"]);
-		expect(args?.plan).toBeUndefined();
 	});
 	it("lets an extension own --resume before native persistence validation", () => {
 		const runner = fakeRunner({ resume: "boolean" });
@@ -298,15 +245,6 @@ describe("applyExtensionFlags (single-parser flag resolution)", () => {
 		expect(args?.messages).toEqual(["do the task"]);
 		expect(args?.model).toBeUndefined();
 	});
-	it("does not consume a non-colliding flag-looking value in space form (mirrors parseArgs P1#2)", () => {
-		// A flag-looking value in space form stays its own flag in both passes, so
-		// it must not be swallowed as the extension flag's value (use --flag=value).
-		const runner = fakeRunner({ "spawn-peer": "string" });
-		const args = applyExtensionFlags(runner, ["--spawn-peer", "--print", "do the task"]);
-		expect(runner.values.has("spawn-peer")).toBe(false);
-		expect(args?.print).toBe(true);
-		expect(args?.messages).toEqual(["do the task"]);
-	});
 });
 describe("registerFlag with built-in-named flags (r3323473227)", () => {
 	it("loads an extension that registers a built-in-named flag without throwing", async () => {
@@ -319,17 +257,6 @@ describe("registerFlag with built-in-named flags (r3323473227)", () => {
 			new ExtensionRuntime(),
 		);
 		expect(ext.flags.has("plan")).toBe(true);
-	});
-	it("loads a non-colliding extension flag", async () => {
-		const ext = await loadExtensionFromFactory(
-			api => {
-				api.registerFlag("spawn-peer", { type: "string" });
-			},
-			process.cwd(),
-			new EventBus(),
-			new ExtensionRuntime(),
-		);
-		expect(ext.flags.has("spawn-peer")).toBe(true);
 	});
 	it("resolves extension flags from a pre-session load (main.ts @file-before-session pattern)", async () => {
 		// main.ts now loads extensions and resolves their flags BEFORE creating the

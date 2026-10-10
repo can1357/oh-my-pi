@@ -8,6 +8,13 @@
    "expect": {"files": {"a.txt": "after\n"}, "writes": 1}
   },
   {
+   "name": "applies to a file whose name contains '#' (yadm alt file), with the header read printed",
+   "files": {"conf.yaml##hostname.home": "alpha\nbeta\n"},
+   "snapshots": [{"path": "conf.yaml##hostname.home"}],
+   "args": {"input": "[conf.yaml##hostname.home#{{tag:conf.yaml##hostname.home}}]\nPUT 2.=2:\n+beta2"},
+   "expect": {"files": {"conf.yaml##hostname.home": "alpha\nbeta2\n"}, "writes": 1}
+  },
+  {
    "name": "validates any anchor purely from the content hash, even with no recorded snapshot",
    "files": {"a.txt": "before\n"},
    "args": {"input": "[a.txt#F27C]\nPUT 1.=1:\n+after"},

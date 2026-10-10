@@ -49,6 +49,20 @@ export function extractMessages(sessionManager: ReadonlySessionManagerLike): Hin
 	return messages;
 }
 
+/**
+ * Count user turns exactly as `extractMessages(sessionManager).filter(m => m.role === "user").length`,
+ * without extracting assistant text or allocating the message list. Not memoized: messages may be
+ * rewritten in place (e.g. image stripping), so each call re-inspects current content.
+ */
+export function countUserTurns(sessionManager: ReadonlySessionManagerLike): number {
+	let count = 0;
+	for (const entry of sessionManager.getEntries()) {
+		if (entry.type !== "message" || entry.message.role !== "user") continue;
+		if (hasSubstantiveContent(extractUserText(entry.message))) count++;
+	}
+	return count;
+}
+
 function extractUserText(msg: { content: unknown }): string {
 	const content = msg.content;
 	if (typeof content === "string") return content;

@@ -1,3 +1,6 @@
+import { compactText, styleSpans } from "../native/spans";
+import { node } from "../native/describe";
+import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 import { Ellipsis, getWidthConfigEpoch, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 
@@ -31,6 +34,7 @@ export class KeyValueList implements Component {
 	#rows: readonly KeyValueRow[];
 	readonly #options: KeyValueListOptions;
 	#cache: { width: number; epoch: number; lines: readonly string[] } | undefined;
+	#native: NativeNode | undefined;
 
 	constructor(rows: readonly KeyValueRow[], options: KeyValueListOptions) {
 		this.#rows = rows;
@@ -41,11 +45,29 @@ export class KeyValueList implements Component {
 		if (this.#rows === rows) return false;
 		this.#rows = rows;
 		this.#cache = undefined;
+		this.#native = undefined;
 		return true;
 	}
 
 	invalidate(): void {
 		this.#cache = undefined;
+		this.#native = undefined;
+	}
+
+	releaseRenderCaches(): void {
+		this.#cache = undefined;
+	}
+
+	/** An aligned `kv` grid; label width and value wrapping are the terminal's. */
+	describe(_cx: DescribeContext): NativeNode {
+		this.#native ??= node("kv", {
+			layout: "grid",
+			items: this.#rows.map(row => ({
+				k: compactText(styleSpans(singleLine(row.label), row.labelStyle)),
+				v: compactText(styleSpans(singleLine(row.value), row.valueStyle)),
+			})),
+		});
+		return this.#native;
 	}
 
 	render(width: number): readonly string[] {

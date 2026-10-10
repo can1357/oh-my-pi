@@ -12,9 +12,13 @@ import {
 	PREVIEW_LIMITS,
 	toPathList,
 } from "../render/render-utils";
-import { classifyGroupedLines, groupLineIndicesByBlank } from "./grouped-file-output";
+import { classifyGroupedLines, describeGroupedOutput, groupLineIndicesByBlank } from "./grouped-file-output";
+import { getLanguageFromPath } from "../lang-from-path";
+import { code, compact, node, span } from "../native/describe";
+import type { NativeChild } from "../native/node";
+import { errorText, noteText, resultText, toolHead } from "./native-view";
 import type { OutputMeta } from "./output-meta";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type { NativeToolView, RenderResultOptions, ToolRenderer } from "./renderer";
 
 /** Display metadata returned by ast-grep. */
 export interface AstGrepToolDetails {
@@ -119,25 +123,41 @@ export const astGrepToolRenderer = {
 		// Resolve hyperlinks over the whole output so nested directory headers
 		// reconstruct across the blank-line groups the tree list collapses by.
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
-		const styledLines = allLines.map((line, index) => {
+		// Style lazily: the collapsed tree list only renders the first few groups,
+		// so a large result never styles/hyperlinks rows nobody sees.
+		const styledLines: (string | undefined)[] = Array.from({ length: allLines.length }, () => undefined);
+		const styleLine = (index: number): string => {
+			const cached = styledLines[index];
+			if (cached !== undefined) return cached;
+			const line = allLines[index]!;
 			const ctx = contexts[index]!;
+			let styled: string;
 			if (ctx.kind === "dir") {
-				const styled = uiTheme.fg("accent", line);
-				return ctx.headerPath ? fileHyperlink(ctx.headerPath, styled) : styled;
+				const accent = uiTheme.fg("accent", line);
+				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, accent) : accent;
+			} else if (ctx.kind === "file") {
+				const tinted = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", line);
+				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, tinted) : tinted;
+			} else {
+				styled = uiTheme.fg(line.startsWith("  meta:") ? "dim" : "toolOutput", line);
 			}
-			if (ctx.kind === "file") {
-				const styled = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", line);
-				return ctx.headerPath ? fileHyperlink(ctx.headerPath, styled) : styled;
-			}
-			if (line.startsWith("  meta:")) return uiTheme.fg("dim", line);
-			return uiTheme.fg("toolOutput", line);
+			styledLines[index] = styled;
+			return styled;
+		};
+		const matchGroups = groupLineIndicesByBlank(allLines).filter(indices => {
+			const first = allLines[indices[0]!]!;
+			return !first.startsWith("Result limit reached") && !first.startsWith("Parse issues:");
 		});
-		const matchGroups = groupLineIndicesByBlank(allLines)
-			.filter(indices => {
-				const first = allLines[indices[0]!]!;
-				return !first.startsWith("Result limit reached") && !first.startsWith("Parse issues:");
-			})
-			.map(indices => indices.map(index => styledLines[index]!));
+		// Line offset at which each group starts. A collapsed tree list stops at the
+		// first group that overflows its line budget, so groups starting at or past
+		// the budget are never shown — hand it same-length placeholders instead of
+		// styling them (renderTreeList only needs their line counts).
+		const groupStarts: number[] = [];
+		let groupStart = 0;
+		for (const group of matchGroups) {
+			groupStarts.push(groupStart);
+			groupStart += group.length;
+		}
 
 		const extraLines: string[] = [];
 		if (limitReached) {
@@ -159,13 +179,92 @@ export const astGrepToolRenderer = {
 						maxCollapsed: matchGroups.length,
 						maxCollapsedLines: COLLAPSED_MATCH_LIMIT,
 						itemType: "match",
-						renderItem: group => group,
+						renderItem: (group, context) =>
+							!options.expanded && groupStarts[context.index]! >= COLLAPSED_MATCH_LIMIT
+								? Array.from({ length: group.length }, () => "")
+								: group.map(styleLine),
 					},
 					uiTheme,
 				);
 				return [header, ...matchLines, ...extraLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
 			},
 		);
+	},
+	describeCall(args: AstGrepRenderArgs): NativeToolView {
+		const meta: string[] = [];
+		const scopePaths = toPathList(args.path ?? args.paths);
+		if (scopePaths.length) meta.push(`in ${scopePaths.join(", ")}`);
+		if (args.skip !== undefined && args.skip > 0) meta.push(`skip:${args.skip}`);
+		return { head: toolHead("AST Grep", span(args.pat ?? "?", "code"), ...meta) };
+	},
+
+	describeResult(
+		result: { content: Array<{ type: string; text?: string }>; details?: AstGrepToolDetails; isError?: boolean },
+		_options: RenderResultOptions,
+		args?: AstGrepRenderArgs,
+	): NativeToolView {
+		const details = result.details;
+		const pattern = span(args?.pat ?? "?", "code");
+		if (result.isError) {
+			return {
+				head: toolHead("AST Grep", pattern),
+				tone: "error",
+				body: [errorText(resultText(result) || "Unknown error")],
+			};
+		}
+		const matchCount = details?.matchCount ?? 0;
+		const filesSearched = details?.filesSearched ?? 0;
+		const limitReached = details?.limitReached ?? false;
+		const parseErrors = details?.parseErrors ?? [];
+		const parseNote =
+			parseErrors.length > 0
+				? node(
+						"section",
+						{
+							head: [span(formatParseErrorsCountLabel(parseErrors, details?.parseErrorsTotal), "warning")],
+							collapsible: true,
+							collapsed: true,
+						},
+						[code(parseErrors.join("\n"))],
+						"parse-errors",
+					)
+				: undefined;
+		if (matchCount === 0) {
+			const meta = ["0 matches"];
+			if (details?.scopePath) meta.push(`in ${details.scopePath}`);
+			if (filesSearched > 0) meta.push(`searched ${filesSearched}`);
+			return {
+				head: toolHead("AST Grep", pattern, ...meta),
+				tone: "warning",
+				body: compact<NativeChild>([
+					noteText("No matches found"),
+					parseErrors.length > 0 &&
+						noteText("Query may be mis-scoped; narrow `path` before concluding absence", "warning"),
+					parseNote,
+				]),
+			};
+		}
+		const meta = [formatCount("match", matchCount), formatCount("file", details?.fileCount ?? 0)];
+		if (details?.scopePath) meta.push(`in ${details.scopePath}`);
+		meta.push(`searched ${filesSearched}`);
+		const head = toolHead("AST Grep", pattern, ...meta);
+		if (limitReached) head.push(span(" limit reached", "warning"));
+		const allLines = (details?.displayContent ?? resultText(result)).split("\n");
+		const kept = groupLineIndicesByBlank(allLines)
+			.filter(indices => {
+				const first = allLines[indices[0]!]!;
+				return !first.startsWith("Result limit reached") && !first.startsWith("Parse issues:");
+			})
+			.flatMap(indices => [...indices.map(index => allLines[index]!), ""]);
+		return {
+			head,
+			body: compact<NativeChild>([
+				...describeGroupedOutput(kept, { lang: getLanguageFromPath }),
+				limitReached && noteText("limit reached; narrow path or increase limit", "warning"),
+				parseNote,
+			]),
+			preview: { lines: COLLAPSED_MATCH_LIMIT },
+		};
 	},
 	mergeCallAndResult: true,
 } satisfies ToolRenderer<AstGrepRenderArgs, AstGrepToolDetails>;

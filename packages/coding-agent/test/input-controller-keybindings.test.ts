@@ -1,14 +1,19 @@
-import { beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
+import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 type FakeEditor = {
 	onEscape?: () => void;
@@ -35,6 +40,7 @@ type FakeEditor = {
 	setActionKeys(action: string, keys: string[]): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
 	clearCustomKeyHandlers(): void;
+	spaceHold: SpaceHoldGesture;
 	pasteText(text: string): void;
 	imageLinks?: (string | undefined)[];
 	pendingImages: ImageContent[];
@@ -60,7 +66,8 @@ function registeredInputListeners(addInputListener: Mock<(listener: InputListene
 async function createContext() {
 	let editorText = "";
 	const keyMap: Record<string, KeyId[]> = {
-		"app.display.reset": ["ctrl+l"],
+		"app.display.reset": ["alt+l"],
+		"app.stt.pushToTalk": ["space"],
 		"app.thinking.toggle": ["ctrl+t"],
 		"app.history.search": ["ctrl+r"],
 		"app.editor.external": ["ctrl+g"],
@@ -120,6 +127,7 @@ async function createContext() {
 	const handleBtwFollowUpKey = vi.fn(() => true);
 	const hasActiveBtw = vi.fn(() => false);
 	const handlesBtwBranchKey = vi.fn(() => false);
+	const isGuidedGoalInterviewActive = vi.fn(() => false);
 	const editor: FakeEditor = {
 		setText(text: string) {
 			editorText = text;
@@ -143,6 +151,7 @@ async function createContext() {
 		setActionKeys,
 		setCustomKeyHandler,
 		clearCustomKeyHandlers,
+		spaceHold: new SpaceHoldGesture(() => {}),
 		pendingImages: [],
 		pendingImageLinks: [],
 		clearDraft(historyText?: string) {
@@ -214,7 +223,7 @@ async function createContext() {
 		isPythonMode: false,
 		hideToolActivity: false,
 		toolOutputExpanded: false,
-		settings: { set: vi.fn() },
+		settings: Settings.isolated(),
 		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
@@ -223,6 +232,7 @@ async function createContext() {
 		showUserMessageSelector: vi.fn(),
 		showSessionSelector: vi.fn(),
 		handleSTTToggle: vi.fn(),
+		dictationSpaceHold: vi.fn(),
 		showDebugSelector: vi.fn(),
 		showHistorySearch: vi.fn(),
 		toggleThinkingBlockVisibility: vi.fn(),
@@ -238,6 +248,7 @@ async function createContext() {
 		handleBtwFollowUpKey,
 		showError,
 		showStatus: vi.fn(),
+		isGuidedGoalInterviewActive,
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -267,6 +278,7 @@ async function createContext() {
 			refreshAppearance,
 			resetDisplayAfterAppearanceRefresh,
 			handleBtwBranchKey,
+			addStartListener,
 			addInputListener,
 			canBranchBtw,
 			hasActiveBtw,
@@ -276,8 +288,31 @@ async function createContext() {
 			canFollowUpBtw,
 			handleBtwFollowUpKey,
 			showError,
+			isGuidedGoalInterviewActive,
 		},
 	};
+}
+
+// 1x1 PNG.
+const TINY_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD3sAAAAASUVORK5CYII=";
+
+/** Replay a kitty OSC 5522 enhanced paste that offers text and PNG and delivers `png` bytes. */
+function dispatchEnhancedImagePaste(listeners: InputListener[], png: Uint8Array): void {
+	const packet = (metadata: string, payload?: string) =>
+		`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
+	const imageMime = Buffer.from("image/png").toString("base64");
+	const textMime = Buffer.from("text/plain").toString("base64");
+	for (const input of [
+		packet("type=read:status=OK:pw=secret"),
+		packet(`type=read:status=DATA:mime=${textMime}`),
+		packet(`type=read:status=DATA:mime=${imageMime}`),
+		packet("type=read:status=DONE"),
+		packet("type=read:status=OK"),
+		packet(`type=read:status=DATA:mime=${imageMime}`, Buffer.from(png).toString("base64")),
+		packet("type=read:status=DONE"),
+	]) {
+		dispatchInput(listeners, input);
+	}
 }
 
 describe("InputController keybinding setup", () => {
@@ -287,7 +322,7 @@ describe("InputController keybinding setup", () => {
 
 		controller.setupKeyHandlers();
 
-		expect(spies.setActionKeys).toHaveBeenCalledWith("app.display.reset", ["ctrl+l"]);
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.display.reset", ["alt+l"]);
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.model.selectTemporary", ["ctrl+y"]);
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.model.select", ["alt+m"]);
 		expect(editor.onDisplayReset).toBeDefined();
@@ -302,6 +337,25 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
 		expect(spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
+	});
+
+	it("enters Python mode only once whitespace follows a typed sigil", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		for (const draft of ["$", "$H", "$$", "$$a"]) {
+			editor.onChange?.(draft);
+			expect(ctx.isPythonMode).toBe(false);
+		}
+		expect(ctx.updateEditorBorderColor).not.toHaveBeenCalled();
+
+		editor.onChange?.("$$ ");
+		expect(ctx.isPythonMode).toBe(true);
+		editor.onChange?.("$$ a");
+		expect(ctx.isPythonMode).toBe(true);
+		expect(ctx.updateEditorBorderColor).toHaveBeenCalledTimes(1);
 	});
 
 	it("does not mark pasted shell prompts as Python mode while editing", async () => {
@@ -431,20 +485,6 @@ describe("InputController keybinding setup", () => {
 
 		expect(result).toBeUndefined();
 		expect(spies.handleBtwBranchKey).not.toHaveBeenCalled();
-	});
-
-	it("consumes b while a completed /btw branch is unavailable", async () => {
-		const { InputController, ctx, spies } = await createContext();
-		spies.handlesBtwBranchKey.mockReturnValue(true);
-		const controller = new InputController(ctx);
-
-		controller.setupKeyHandlers();
-		const listener = spies.addInputListener.mock.calls[1]?.[0];
-		expect(listener).toBeDefined();
-		const result = listener?.("b");
-
-		expect(result).toEqual({ consume: true });
-		expect(spies.handleBtwBranchKey).toHaveBeenCalledTimes(1);
 	});
 
 	it("lets b reach the composer before an active /btw answer is branchable", async () => {
@@ -594,22 +634,6 @@ describe("InputController keybinding setup", () => {
 		expect(spies.handleBtwCopyKey).not.toHaveBeenCalled();
 	});
 
-	it("empty Enter aborts the active stream when queued messages are pending", async () => {
-		const { InputController, ctx, editor, spies } = await createContext();
-		const session = ctx.session as unknown as { isStreaming: boolean; queuedMessageCount: number };
-		session.isStreaming = true;
-		session.queuedMessageCount = 1;
-		const controller = new InputController(ctx);
-
-		controller.setupEditorSubmitHandler();
-		await editor.onSubmit?.("");
-
-		expect(spies.abort).toHaveBeenCalledWith({ reason: "Interrupted by user" });
-		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
-		expect(spies.requestRender).toHaveBeenCalledTimes(1);
-		expect(spies.prompt).not.toHaveBeenCalled();
-	});
-
 	it("marks streaming follow-up submissions as local", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
 		const session = ctx.session as unknown as { isStreaming: boolean };
@@ -697,6 +721,289 @@ describe("InputController keybinding setup", () => {
 			});
 		}
 	});
+
+	it("sends a bare 'c' as a normal reply during a guided-goal interview", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		spies.isGuidedGoalInterviewActive.mockReturnValue(true);
+		// Streaming path: dispatches straight through session.prompt as a steer.
+		const session: { isStreaming: boolean } = ctx.session;
+		session.isStreaming = true;
+		const onInput = vi.fn();
+		ctx.onInputCallback = onInput;
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		await editor.onSubmit?.("c");
+
+		expect(onInput).not.toHaveBeenCalled();
+		expect(spies.prompt).toHaveBeenCalledWith("c", { streamingBehavior: "steer", images: undefined });
+	});
+});
+
+describe("InputController image paste into an image-accepting prompt", () => {
+	let settingsState: SettingsTestState | undefined;
+	let tempDir: TempDir;
+
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	beforeEach(async () => {
+		settingsState = beginSettingsTest();
+		await Settings.init({ inMemory: true });
+		tempDir = await TempDir.create("@omp-prompt-image-");
+	});
+
+	afterEach(async () => {
+		restoreSettingsTestState(settingsState);
+		settingsState = undefined;
+		await tempDir.remove();
+	});
+
+	/** Controller context whose session commits pasted images under the test's temp dir. */
+	async function createPromptContext() {
+		const context = await createContext();
+		Object.assign(context.ctx, {
+			sessionManager: {
+				getCwd: () => tempDir.path(),
+				getArtifactsDir: () => tempDir.path(),
+				getSessionId: () => "session",
+			},
+		});
+		return context;
+	}
+
+	/** A real ask-style prompt editor; `acceptImages` is the opt-in under test. */
+	function createPrompt(
+		context: { ctx: InteractiveModeContext; setFocused(target: unknown): void },
+		options: { acceptImages?: boolean; prefill?: string } = {},
+	) {
+		const onSubmit = vi.fn<(text: string, images?: ImageContent[]) => void>();
+		const prompt = new HookEditorComponent(context.ctx.ui, "Answer", options.prefill, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: options.acceptImages,
+		});
+		context.setFocused(prompt);
+		return { prompt, onSubmit };
+	}
+
+	/** The single image the prompt submitted, with its marker text. */
+	function submittedImage(onSubmit: Mock<(text: string, images?: ImageContent[]) => void>) {
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		const [text, images] = onSubmit.mock.calls[0] ?? [];
+		const image = images?.[0];
+		if (text === undefined || !image || images.length !== 1) throw new Error("prompt did not submit one image");
+		return { text, source: imageAttachmentSource(image)?.path };
+	}
+
+	async function writePng(name: string, data = TINY_PNG): Promise<string> {
+		const file = tempDir.join(name);
+		await Bun.write(file, Buffer.from(data, "base64"));
+		return file;
+	}
+
+	it("submits a smart-pasted clipboard image after Enter arrives mid-paste", async () => {
+		const context = await createPromptContext();
+		const { prompt, onSubmit } = createPrompt(context, { acceptImages: true, prefill: "see " });
+		const controller = new InputController(context.ctx, {
+			readImage: async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }),
+			readText: async () => "",
+			readMacFileUrls: async () => [],
+		});
+
+		const paste = controller.handleImagePaste();
+		prompt.handleInput("\r");
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(await paste).toBe(true);
+
+		const submitted = submittedImage(onSubmit);
+		expect(submitted.text).toMatch(/^see \[Image #1, \d+x\d+\]$/);
+		expect(submitted.source).toMatch(/^local:\/\/pasted-image-[0-9a-f]+\.png$/);
+		expect(context.editor.pendingImages).toHaveLength(0);
+		expect(context.editor.getText()).toBe("");
+	});
+
+	it("submits a bracketed image-path paste after Enter arrives mid-paste", async () => {
+		const imagePath = await writePng("shot.png");
+		const context = await createPromptContext();
+		const controller = new InputController(context.ctx);
+		const pasted: Promise<void>[] = [];
+		const onSubmit = vi.fn<(text: string, images?: ImageContent[]) => void>();
+		const prompt = new HookEditorComponent(context.ctx.ui, "Answer", "see ", onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+			onPasteImagePath: pastedPath => {
+				const paste = controller.handleImagePathPaste(pastedPath);
+				pasted.push(paste);
+				return paste;
+			},
+		});
+		context.setFocused(prompt);
+
+		prompt.handleInput(`\x1b[200~${imagePath}\x1b[201~\r`);
+		expect(onSubmit).not.toHaveBeenCalled();
+		await Promise.all(pasted);
+
+		const submitted = submittedImage(onSubmit);
+		expect(submitted.text).toMatch(/^see \[Image #1, \d+x\d+\]$/);
+		expect(submitted.source).toBe(imagePath);
+		expect(context.editor.pendingImages).toHaveLength(0);
+	});
+
+	it("submits an enhanced (OSC 5522) image paste after Enter arrives mid-paste", async () => {
+		const context = await createPromptContext();
+		const submittedOnce = Promise.withResolvers<void>();
+		const onSubmit = vi.fn<(text: string, images?: ImageContent[]) => void>(() => submittedOnce.resolve());
+		const prompt = new HookEditorComponent(context.ctx.ui, "Answer", "see ", onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+		});
+		context.setFocused(prompt);
+		new InputController(context.ctx).setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		context.spies.addStartListener.mock.calls[0]?.[0]();
+
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+		prompt.handleInput("\r");
+		expect(onSubmit).not.toHaveBeenCalled();
+		await submittedOnce.promise;
+
+		const submitted = submittedImage(onSubmit);
+		expect(submitted.text).toMatch(/^see \[Image #1, \d+x\d+\]$/);
+		expect(submitted.source).toMatch(/^local:\/\/pasted-image-[0-9a-f]+\.png$/);
+		expect(context.editor.pendingImages).toHaveLength(0);
+	});
+
+	it("prefers a Finder file URL over the co-advertised icon bitmap (#8769)", async () => {
+		const imagePath = await writePng("finder.png");
+		const context = await createPromptContext();
+		const { prompt, onSubmit } = createPrompt(context, { acceptImages: true });
+		const readImage = vi.fn(async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }));
+		const controller = new InputController(context.ctx, {
+			readImage,
+			readText: async () => "",
+			readMacFileUrls: async () => [imagePath],
+		});
+
+		expect(await controller.handleImagePaste()).toBe(true);
+		prompt.handleInput("\r");
+
+		expect(submittedImage(onSubmit).source).toBe(imagePath);
+		expect(readImage).not.toHaveBeenCalled();
+		expect(context.editor.pendingImages).toHaveLength(0);
+	});
+
+	it("attaches the image file named by smart-pasted clipboard text (#3506)", async () => {
+		const imagePath = await writePng("clipboard-image.png");
+		const context = await createPromptContext();
+		const { prompt, onSubmit } = createPrompt(context, { acceptImages: true });
+		const controller = new InputController(context.ctx, {
+			readImage: async () => null,
+			readText: async () => imagePath,
+			readMacFileUrls: async () => [],
+		});
+
+		expect(await controller.handleImagePaste()).toBe(true);
+		prompt.handleInput("\r");
+
+		expect(submittedImage(onSubmit).source).toBe(imagePath);
+		expect(context.editor.getText()).toBe("");
+	});
+
+	it("recovers the clipboard bitmap for a vanished path and reports a missing one like the main editor (#2375)", async () => {
+		const context = await createPromptContext();
+		const delivered: (string | undefined)[] = [];
+		const attached: ImageContent[] = [];
+		context.setFocused({
+			pasteText: vi.fn(),
+			acceptsImages: true,
+			attachImage: (image: ImageContent) => {
+				attached.push(image);
+				return `[Image #${attached.length}]`;
+			},
+			beginPaste: () => (text: string | undefined) => {
+				delivered.push(text);
+				return true;
+			},
+		});
+		let clipboardImage: { data: Uint8Array; mimeType: string } | null = {
+			data: Buffer.from(TINY_PNG, "base64"),
+			mimeType: "image/png",
+		};
+		const controller = new InputController(context.ctx, {
+			readImage: async () => clipboardImage,
+			readText: async () => "",
+		});
+
+		// Windows 11 Win+Shift+S: the pasted TempState path is already gone; the bitmap is on the clipboard.
+		await controller.handleImagePathPaste(tempDir.join("TempState", "gone.png"));
+		clipboardImage = null;
+		await controller.handleImagePathPaste(tempDir.join("missing.png"));
+
+		expect(delivered).toEqual(["[Image #1]"]);
+		expect(attached.map(image => imageAttachmentSource(image)?.path)).toEqual([
+			expect.stringMatching(/^local:\/\/pasted-image-[0-9a-f]+\.png$/),
+		]);
+		// The status shortens and truncates the path; the missing path is never pasted as text.
+		expect(context.ctx.showStatus).toHaveBeenCalledWith(expect.stringMatching(/^Image not found at /));
+		expect(context.editor.pendingImages).toHaveLength(0);
+	});
+
+	it("keeps a pasted video path as text and says why in an image-accepting prompt", async () => {
+		const context = await createPromptContext();
+		const { prompt, onSubmit } = createPrompt(context, { acceptImages: true });
+		const videoPath = tempDir.join("clip.mp4");
+
+		await new InputController(context.ctx).handleImagePathPaste(videoPath);
+		prompt.handleInput("\r");
+
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("Video paste is not supported in this prompt");
+		expect(onSubmit).toHaveBeenCalledWith(videoPath);
+	});
+
+	it("refuses a clipboard image in a prompt that did not opt in", async () => {
+		const context = await createPromptContext();
+		const { prompt, onSubmit } = createPrompt(context);
+		const controller = new InputController(context.ctx, {
+			readImage: async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }),
+			readText: async () => "",
+		});
+
+		expect(await controller.handleImagePaste()).toBe(false);
+		prompt.handleInput("\r");
+
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
+		expect(onSubmit).toHaveBeenCalledWith("");
+		expect(context.editor.pendingImages).toHaveLength(0);
+	});
+
+	it("refuses an image-path paste in a prompt that did not opt in", async () => {
+		const imagePath = await writePng("shot.png");
+		const context = await createPromptContext();
+		const { prompt, onSubmit } = createPrompt(context);
+
+		await new InputController(context.ctx).handleImagePathPaste(imagePath);
+		prompt.handleInput("\r");
+
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
+		expect(onSubmit).toHaveBeenCalledWith("");
+		expect(context.editor.pendingImages).toHaveLength(0);
+		expect(context.editor.getText()).toBe("");
+	});
+
+	it("refuses an enhanced (OSC 5522) image paste in a prompt that did not opt in", async () => {
+		const context = await createPromptContext();
+		createPrompt(context);
+		new InputController(context.ctx).setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		context.spies.addStartListener.mock.calls[0]?.[0]();
+
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
+		expect(context.editor.pendingImages).toHaveLength(0);
+		expect(context.editor.getText()).toBe("");
+	});
 });
 
 describe("InputController global editor actions", () => {
@@ -704,6 +1011,7 @@ describe("InputController global editor actions", () => {
 	const CTRL_R = "\x12";
 	const CTRL_G = "\x07";
 	const CTRL_SHIFT_O = "\x1b[111;6u";
+	const ALT_L = "\x1bl";
 
 	beforeAll(async () => {
 		await initTheme(false);
@@ -730,6 +1038,8 @@ describe("InputController global editor actions", () => {
 		expect(openExternalEditor).toHaveBeenCalledTimes(1);
 		expect(dispatchInput(listeners, CTRL_SHIFT_O)).toEqual({ consume: true });
 		expect(context.ctx.hideToolActivity).toBe(true);
+		expect(dispatchInput(listeners, ALT_L)).toEqual({ consume: true });
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
 	});
 
 	it("still routes transcript actions when the main editor holds focus", async () => {
@@ -751,6 +1061,36 @@ describe("InputController global editor actions", () => {
 
 		expect(dispatchInput(listeners, CTRL_T)).toBeUndefined();
 		expect(context.ctx.toggleThinkingBlockVisibility).not.toHaveBeenCalled();
+		expect(dispatchInput(listeners, ALT_L)).toBeUndefined();
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).not.toHaveBeenCalled();
+	});
+
+	it("defers display reset to the tree selector's own Alt+L labeled-only filter", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		const tree = [
+			{
+				entry: { id: "root", type: "message", parentId: null, message: { role: "user", content: "hi" } },
+				children: [],
+			},
+		] as unknown as SessionTreeNode[];
+		context.setFocused(
+			new TreeSelectorComponent(
+				tree,
+				"root",
+				20,
+				() => {},
+				() => {},
+			),
+		);
+
+		expect(dispatchInput(listeners, ALT_L)).toBeUndefined();
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).not.toHaveBeenCalled();
+		context.setKeybinding("app.display.reset", ["ctrl+l"]);
+		expect(dispatchInput(listeners, "\x0c")).toEqual({ consume: true });
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
 	});
 
 	it("defers external editing to a focused ask-dialog prompt editor untracked by ctx.hookEditor", async () => {

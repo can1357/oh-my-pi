@@ -3,7 +3,7 @@
  * for one structured model target from the compiled rule tree.
  *
  * Faithful port of the o2 reference resolver (`cascade.rs`): rules are
- * conjunctions over `(class, provider, api, family, revision, models)`; per axis
+ * conjunctions over `(class, provider, api, upstream, family, revision, models)`; per axis
  * the matching rule with the greatest `(model-selector exactness,
  * constrained-dimension count, priority)` tuple wins, and an equal-tuple
  * same-axis contest throws {@link AmbiguousOverlapError}. Declaration and
@@ -129,6 +129,7 @@ function buildRuleIndex(cascade: CompiledCascade): RuleIndex {
 				Number(compiled.class !== undefined) +
 				Number(compiled.providers !== undefined) +
 				Number(compiled.apis !== undefined) +
+				Number(compiled.upstreams !== undefined) +
 				Number(compiled.family !== undefined) +
 				Number(compiled.revision !== undefined) +
 				Number(compiled.models !== undefined),
@@ -215,6 +216,11 @@ function rankRule(rule: IndexedRule, prepared: PreparedTarget): readonly [number
 	const { compiled } = rule;
 	const { target } = prepared;
 	if (compiled.apis !== undefined && !compiled.apis.includes(target.api)) return undefined;
+	if (
+		compiled.upstreams !== undefined &&
+		(target.upstream === undefined || !compiled.upstreams.includes(target.upstream))
+	)
+		return undefined;
 	if (compiled.family !== undefined && compiled.family !== target.family) return undefined;
 	if (rule.revision !== undefined && (!prepared.revision || !revisionSatisfies(prepared.revision, rule.revision))) {
 		return undefined;
@@ -239,6 +245,30 @@ function rankCompare(a: readonly [number, number, number], b: readonly [number, 
 	return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 }
 
+function contestAxis(
+	winners: WinnerTable,
+	axis: string,
+	rank: readonly [number, number, number],
+	rule: IndexedRule,
+	target: ResolveTarget,
+): void {
+	const held = winners[axis];
+	if (held) {
+		const order = rankCompare(held.rank, rank);
+		if (order === 0) {
+			throw new AmbiguousOverlapError(
+				target.provider,
+				target.model,
+				axis,
+				held.rule.compiled.source,
+				rule.compiled.source,
+			);
+		}
+		if (order > 0) return;
+	}
+	winners[axis] = { rank, rule };
+}
+
 function contest(
 	winners: WinnerTable,
 	axes: Record<string, unknown> | undefined,
@@ -247,23 +277,7 @@ function contest(
 	target: ResolveTarget,
 ): void {
 	if (!axes) return;
-	for (const axis in axes) {
-		const held = winners[axis];
-		if (held) {
-			const order = rankCompare(held.rank, rank);
-			if (order === 0) {
-				throw new AmbiguousOverlapError(
-					target.provider,
-					target.model,
-					axis,
-					held.rule.compiled.source,
-					rule.compiled.source,
-				);
-			}
-			if (order > 0) continue;
-		}
-		winners[axis] = { rank, rule };
-	}
+	for (const axis in axes) contestAxis(winners, axis, rank, rule, target);
 }
 
 function collect(winners: WinnerTable, pick: (rule: CompiledRule) => Record<string, unknown> | undefined) {
@@ -274,7 +288,12 @@ function collect(winners: WinnerTable, pick: (rule: CompiledRule) => Record<stri
 	return out;
 }
 
-const resolveCache = new LRUCache<string, ResolvedAxes>({ max: 512 });
+/**
+ * Sized above the bundled catalog (~5.6k targets) plus discovered rows so a
+ * catalog-wide buildModel pass (discovery, then merge rebuilding the same ids)
+ * hits instead of thrashing. Entries share rule values: a few hundred bytes each.
+ */
+const resolveCache = new LRUCache<string, ResolvedAxes>({ max: 16384 });
 
 function keyPart(value: string | undefined): string {
 	return value === undefined ? "-1:" : `${value.length}:${value}`;
@@ -284,6 +303,7 @@ function targetKey(target: ResolveTarget): string {
 	return (
 		keyPart(target.provider) +
 		keyPart(target.api) +
+		keyPart(target.upstream) +
 		keyPart(target.class) +
 		keyPart(target.family) +
 		keyPart(target.revision) +
@@ -314,8 +334,9 @@ function cloneAxes(axes: ResolvedAxes): ResolvedAxes {
 
 /**
  * Resolve wire, thinking, and catalog assignments for one structured target.
- * Exact model effort corrections can enable reasoning; absent family/revision
- * facts never satisfy selectors that require them. Returned axes are caller-owned.
+ * Exact model effort corrections and identity-scoped neutral-upgrade policies
+ * can enable reasoning; absent family/revision facts never satisfy selectors
+ * that require them. Returned axes are caller-owned.
  *
  * @throws AmbiguousOverlapError when equal-rank rules contest one axis.
  */
@@ -368,11 +389,24 @@ function resolveOverIndex(index: RuleIndex, target: ResolveTarget): ResolvedAxes
 	const ranked = rankRelevantRules(index, prepareTarget(target));
 	let reasoning = target.reasoning === true;
 	if (!reasoning) {
+		const upgrade: WinnerTable = {};
+		let hasEfforts = false;
 		for (const { rule, rank } of ranked) {
-			if (rule.hasExactEffortsRule && rank[0] === 2) {
-				reasoning = true;
-				break;
-			}
+			const thinking = rule.compiled.thinking;
+			if (thinking === undefined) continue;
+			if ("upgradeNeutral" in thinking) contestAxis(upgrade, "upgradeNeutral", rank, rule, target);
+			if ("efforts" in thinking) hasEfforts = true;
+			if (rule.hasExactEffortsRule && rank[0] === 2) reasoning = true;
+		}
+		const upgradeRule = upgrade.upgradeNeutral?.rule.compiled;
+		const identityScoped =
+			upgradeRule !== undefined &&
+			((upgradeRule.class !== undefined && upgradeRule.class !== "unknown") ||
+				upgradeRule.family !== undefined ||
+				upgradeRule.revision !== undefined ||
+				upgradeRule.models !== undefined);
+		if (identityScoped && upgradeRule?.thinking?.upgradeNeutral === true && hasEfforts) {
+			reasoning = true;
 		}
 	}
 	const wire: WinnerTable = {};

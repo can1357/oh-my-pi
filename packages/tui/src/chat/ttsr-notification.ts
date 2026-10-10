@@ -1,7 +1,14 @@
 import { Text } from "../components/text";
 import { type Component, Container } from "../tui";
-import { MessageNoticeComponent, type MessageNoticePresentation } from "../chrome/message-notice";
+import {
+	MessageNoticeComponent,
+	type MessageNoticeNativePresentation,
+	type MessageNoticePresentation,
+} from "../chrome/message-notice";
 import { theme } from "../theme";
+import { expandKeyHint } from "../render/render-utils";
+import { span, text } from "../native/describe";
+import type { NativeNode } from "../native/node";
 
 /** Rule fields shown in rewind notifications. */
 export interface NotificationRule {
@@ -29,6 +36,8 @@ export class TtsrNotificationComponent extends Container {
 		this.#rules = [...rules];
 		this.#notice = new MessageNoticeComponent({
 			presentation: context => this.#presentation(context.expanded),
+			nativePresentation: () => this.#nativePresentation(),
+			role: "omp.notice.ttsr",
 		});
 		this.addChild(this.#notice);
 	}
@@ -54,6 +63,35 @@ export class TtsrNotificationComponent extends Container {
 
 	isExpanded(): boolean {
 		return this.#notice.isExpanded();
+	}
+
+	/**
+	 * An inline warning notice, "Rule applied: no-unwrap", with every rule's
+	 * full description as the disclosure below it.
+	 */
+	#nativePresentation(): MessageNoticeNativePresentation {
+		const single = this.#rules.length === 1 ? this.#rules[0] : undefined;
+		const head = single
+			? [span("Rule applied: ", "warning"), span(single.name, "mono strong")]
+			: [
+					span(`${this.#rules.length} rules applied: `, "warning"),
+					span(this.#rules.map(rule => rule.name).join(", "), "mono strong"),
+				];
+		const body: NativeNode[] = [];
+		for (const rule of this.#rules) {
+			const desc = (rule.description || rule.content)?.trim();
+			if (single) {
+				if (desc) body.push(text([span(desc, "em")], { wrap: "word", key: rule.name }));
+				continue;
+			}
+			body.push(
+				text(desc ? [span(rule.name, "strong"), span(": "), span(desc, "em")] : [span(rule.name, "strong")], {
+					wrap: "word",
+					key: rule.name,
+				}),
+			);
+		}
+		return { head, body, inline: { icon: "shield-alert" } };
 	}
 
 	#presentation(expanded: boolean): MessageNoticePresentation {
@@ -83,7 +121,7 @@ export class TtsrNotificationComponent extends Container {
 
 		const body: Component[] = [new Text(theme.italic(displayText), 0, 0)];
 		if (truncated) {
-			body.push(new Text(theme.italic(" (ctrl+o to expand)"), 0, 0));
+			body.push(new Text(theme.italic(` (${expandKeyHint()} to expand)`), 0, 0));
 		}
 		return { icon: theme.icon.warning, header, body };
 	}
@@ -114,9 +152,9 @@ export class TtsrNotificationComponent extends Container {
 
 		const hidden = this.#rules.length - visible.length;
 		if (hidden > 0) {
-			body.push(new Text(theme.italic(`… +${hidden} more (ctrl+o to expand)`), 0, 0));
+			body.push(new Text(theme.italic(`… +${hidden} more (${expandKeyHint()} to expand)`), 0, 0));
 		} else if (elidedDetail) {
-			body.push(new Text(theme.italic(" (ctrl+o to expand)"), 0, 0));
+			body.push(new Text(theme.italic(` (${expandKeyHint()} to expand)`), 0, 0));
 		}
 		return { icon: theme.icon.warning, header, body };
 	}

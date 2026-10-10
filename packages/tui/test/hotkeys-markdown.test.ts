@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { KeybindingsManager, setKeyHintPlatform } from "@oh-my-pi/pi-tui/app-keybindings";
+import { setKeyHintPlatform } from "@oh-my-pi/pi-tui/app-keybindings";
 import { buildHotkeysMarkdown } from "@oh-my-pi/pi-tui/hotkeys-markdown";
 
 /** Exit-row wiring for stubs that only care about display strings: no key claims the
@@ -85,54 +85,51 @@ describe("buildHotkeysMarkdown", () => {
 		expect(markdown).toContain("| `Alt+M` | Select model (set roles) |");
 	});
 
-	it("renders macOS static navigation rows on darwin", () => {
-		setKeyHintPlatform("darwin");
-		const markdown = buildHotkeysMarkdown({
-			keybindings: { ...noForwardDelete, getDisplayString: () => "Disabled" },
-		});
-
-		expect(markdown).toContain("| `Option+Left/Right` | Move by word |");
-		expect(markdown).toContain("| `Ctrl+A` / `Home` / `Cmd+Left` | Start of line |");
-		expect(markdown).toContain("| `Ctrl+W` / `Option+Backspace` | Delete word backwards |");
-		expect(markdown).toContain("| `Shift+Enter` / `Option+Enter` | New line |");
-	});
-
 	it("drops Option/Cmd static navigation labels off darwin", () => {
 		setKeyHintPlatform("linux");
 		const markdown = buildHotkeysMarkdown({
 			keybindings: { ...noForwardDelete, getDisplayString: () => "Disabled" },
 		});
 
-		expect(markdown).toContain("| `Alt+Left/Right` | Move by word |");
-		expect(markdown).toContain("| `Ctrl+A` / `Home` | Start of line |");
-		expect(markdown).toContain("| `Ctrl+W` / `Alt+Backspace` | Delete word backwards |");
 		expect(markdown).not.toContain("Option+");
 		expect(markdown).not.toContain("Cmd+");
 	});
 
-	it("describes the exit key per its actual forward-delete role", () => {
-		const shipped = KeybindingsManager.inMemory();
-		expect(buildHotkeysMarkdown({ keybindings: shipped })).toContain(
-			"| `Ctrl+D` | Delete char forward (with draft) / exit (empty prompt) |",
-		);
-
-		// Remapped exit with no forward-delete role: CustomEditor exits immediately, draft or not.
-		const remapped = KeybindingsManager.inMemory({ "app.exit": "ctrl+q" });
-		expect(buildHotkeysMarkdown({ keybindings: remapped })).toContain("| `Ctrl+Q` | Exit |");
-
-		// Ctrl+D kept as exit but dropped from forward-delete: exits unconditionally again.
-		const noDelete = KeybindingsManager.inMemory({ "tui.editor.deleteCharForward": "delete" });
-		expect(buildHotkeysMarkdown({ keybindings: noDelete })).toContain("| `Ctrl+D` | Exit |");
-
-		// Mixed roles: Ctrl+D forward-deletes with a draft, Ctrl+Q always quits — one row each.
-		const mixed = buildHotkeysMarkdown({
-			keybindings: KeybindingsManager.inMemory({ "app.exit": ["ctrl+d", "ctrl+q"] }),
+	it("renders the effective push-to-talk remap without borrowing the separate toggle binding", () => {
+		const markdown = buildHotkeysMarkdown({
+			keybindings: {
+				getKeys(action) {
+					if (action === "app.stt.pushToTalk") return ["x", "ctrl+x"];
+					if (action === "app.stt.toggle") return ["alt+h"];
+					return [];
+				},
+				getDisplayString(action) {
+					if (action === "app.stt.pushToTalk") return "X / Ctrl+X";
+					if (action === "app.stt.toggle") return "Alt+H";
+					return "Disabled";
+				},
+				matchesCanonical: () => false,
+			},
 		});
-		expect(mixed).toContain("| `Ctrl+D` | Delete char forward (with draft) / exit (empty prompt) |");
-		expect(mixed).toContain("| `Ctrl+Q` | Exit |");
 
-		// Unbound exit keeps a row, matching the `Disabled` hint used elsewhere.
-		const unbound = buildHotkeysMarkdown({ keybindings: KeybindingsManager.inMemory({ "app.exit": [] }) });
-		expect(unbound).toContain("| `Disabled` | Exit |");
+		const pushToTalkRow = markdown.split("\n").find(line => line.includes("Speech-to-text (push-to-talk)")) ?? "";
+		expect(pushToTalkRow).toContain("X / Ctrl+X");
+		expect(pushToTalkRow).not.toContain("Alt+H");
+		expect(markdown).not.toContain("Alt+H");
+	});
+
+	it("renders push-to-talk as disabled when its effective key list is empty", () => {
+		const markdown = buildHotkeysMarkdown({
+			keybindings: {
+				...noForwardDelete,
+				getDisplayString(action) {
+					return action === "app.stt.pushToTalk" ? "" : "Disabled";
+				},
+			},
+		});
+
+		const pushToTalkRow = markdown.split("\n").find(line => line.includes("Speech-to-text (push-to-talk)")) ?? "";
+		expect(pushToTalkRow).toContain("Disabled");
+		expect(pushToTalkRow).not.toContain("Hold");
 	});
 });

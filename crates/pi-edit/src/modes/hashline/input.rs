@@ -16,7 +16,7 @@ use super::{
 		ABORT_MARKER, BEGIN_PATCH_MARKER, CLIPBOARD_INTERLEAVED_SECTIONS, END_PATCH_MARKER,
 		json_quote,
 	},
-	parser::parse_patch,
+	parser::{UNIFIED_HUNK_RE, parse_patch},
 	tokenizer::{Token, Tokenizer, header_path_has_orphan_bracket},
 	types::{Cursor, Edit, FileOp, PasteTarget},
 };
@@ -32,8 +32,6 @@ static APPLY_PATCH_PATH_NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RECOVERY_TAG_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"#([0-9A-Fa-f]{4})\s*$").expect("valid regex"));
-static UNIFIED_HUNK_RE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@").expect("valid regex"));
 
 /// Parsed edits, optional file operation, and parser warnings for one section.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,7 +212,10 @@ fn normalize_hashline_path(raw: &str, cwd: Option<&Path>) -> String {
 	let Some(cwd) = cwd else {
 		return cleaned;
 	};
-	if !path.is_absolute() {
+	// Shortening is lexical, so a rooted path counts even without a Windows
+	// drive prefix (`/repo/src/a.ts` under cwd `/repo`); a prefix mismatch
+	// simply fails `strip_prefix` below.
+	if !path.has_root() {
 		return cleaned;
 	}
 	let path = lexical_normalize(path);
@@ -278,7 +279,10 @@ fn recover_header(line: &str, cwd: Option<&Path>) -> Option<RawSection> {
 	} else {
 		(body.trim_end(), None)
 	};
-	if path_text.contains('#') || header_path_has_orphan_bracket(path_text) {
+	// Only a recovered tag disambiguates a `#` inside the path; untagged, it is
+	// a malformed tag (`a.ts#1A2B copied`), not part of a file name.
+	if (file_hash.is_none() && path_text.contains('#')) || header_path_has_orphan_bracket(path_text)
+	{
 		return None;
 	}
 	let path = normalize_hashline_path(path_text, cwd);

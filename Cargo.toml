@@ -10,17 +10,22 @@ members = [
    "crates/pi-edit",
    "crates/pi-iso",
    "crates/pi-natives",
+   "crates/pi-predict",
    "crates/pi-shell",
    "crates/pi-vcs",
+   "crates/pi-vfs",
    "crates/pi-voice",
    "crates/pi-walker",
    "crates/vendor/brush-core",
+   "crates/vendor/brush-parser",
    "crates/vendor/cfg_aliases",
+   "crates/vendor/napi",
+   "crates/vendor/tree-sitter-go",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "18.2.6"
+version = "18.8.7"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
@@ -29,9 +34,18 @@ repository = "https://github.com/can1357/oh-my-pi"
 
 [patch.crates-io]
 brush-core = { path = "crates/vendor/brush-core" }
+# brush-parser 0.4.0 (latest release) re-parses `$(...)` bodies without
+# here-document awareness; the vendored copy fixes it (see its README.md).
+brush-parser = { path = "crates/vendor/brush-parser" }
 # portable-pty 0.9.0 pins nix 0.28, whose cfg_aliases 0.1.1 expansion emits
 # future-incompatible trailing semicolons.
 cfg_aliases = { path = "crates/vendor/cfg_aliases" }
+# napi 3.13.0 pins every `bun test --isolate` realm through per-thread handles
+# of never-torn-down envs; the vendored copy releases them (see its README.md).
+napi = { path = "crates/vendor/napi" }
+# tree-sitter-go 0.25.0 (latest release) rejects Go 1.26 `new(expr)`; the
+# vendored copy carries the upstream grammar fix (see its README.md).
+tree-sitter-go = { path = "crates/vendor/tree-sitter-go" }
 
 [profile.release]
 opt-level = 3
@@ -219,9 +233,11 @@ pi-diff = { path = "crates/pi-diff" }
 pi-edit = { path = "crates/pi-edit" }
 pi-iso = { path = "crates/pi-iso" }
 pi-shell = { path = "crates/pi-shell" }
+pi-predict = { path = "crates/pi-predict" }
 pi-voice = { path = "crates/pi-voice" }
 pi-walker = { path = "crates/pi-walker" }
 pi-vcs = { path = "crates/pi-vcs" }
+pi-vfs = { path = "crates/pi-vfs" }
 brush-core = { path = "crates/vendor/brush-core" }
 pi-builtins = { path = "crates/pi-builtins" }
 
@@ -230,7 +246,6 @@ pi-builtins = { path = "crates/pi-builtins" }
 # ──────────────────────────────────────────────────────────────────────────────
 async-trait = "0.1"
 futures = "0.3"
-dashmap = "6.2"
 parking_lot = "0.12.5"
 rayon = "1.12"
 tokio = { version = "1", features = ["full"] }
@@ -307,8 +322,9 @@ windows-sys = { version = "0.61", features = [
    "Win32_System_Ioctl",
    "Win32_System_Threading",
 ] }
-# Transitive-only pin (wired through crates/pi-natives build-deps so the
-# constraint participates in resolution): cc 1.2.x passes
+# Transitive-only pin (wired through crates/pi-natives' `cfg(false)` target
+# deps so the constraint participates in resolution without tripping the
+# unused-dependency lint): cc 1.2.x passes
 # FILE_ATTRIBUTE_TEMPORARY to OpenOptionsExt::custom_flags as u32, but
 # find-msvc-tools 0.1.13 retyped that constant to i32, breaking every Windows
 # build. tree-sitter-sequel caps cc at ~1.2.1 so the fixed cc 1.4.x line is
@@ -361,10 +377,13 @@ zune-jpeg = { version = "0.5", default-features = false, features = ["log"] }
 tinyvec = "=1.13.3"
 png = "0.18"
 inferno = { version = "0.12", default-features = false }
+# Oniguruma, not fancy-regex: onig is already linked (pi-builtins), and its
+# compiled grammar regexes are ~5x smaller and faster (TS+TSX warm: 29 vs 149 MB
+# RSS; a 16.8k-line .d.ts highlights in 226 vs 1166 ms).
 syntect = { version = "5.3", default-features = false, features = [
    "default-syntaxes",
    "default-themes",
-   "regex-fancy",
+   "regex-onig",
    "yaml-load",
 ] }
 
@@ -384,7 +403,7 @@ tiktoken-rs = "0.12"
 # ──────────────────────────────────────────────────────────────────────────────
 # Shell Parsing
 # ──────────────────────────────────────────────────────────────────────────────
-brush-parser = "0.4"
+brush-parser = { path = "crates/vendor/brush-parser" }
 # ──────────────────────────────────────────────────────────────────────────────
 # Version Control (in-process git + jujutsu)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -416,62 +435,39 @@ ast-grep-core = { version = "0.39", default-features = false, features = [
    "tree-sitter",
 ] }
 tree-sitter = "0.25"
-tree-sitter-astro = { version = "0.1.1", package = "tree-sitter-astro-next" }
 tree-sitter-bash = "0.25"
 tree-sitter-c = "0.24"
-tree-sitter-c-sharp = "0.23"
-tree-sitter-clojure = "0.1"
-tree-sitter-cmake = "0.7.5"
 tree-sitter-cpp = "0.23"
 tree-sitter-css = "0.25"
-tree-sitter-dart = "0.2"
 tree-sitter-diff = "0.1"
-tree-sitter-dockerfile = { version = "0.2.0", package = "tree-sitter-dockerfile-updated" }
-tree-sitter-elixir = "0.3"
+# elisp, fortran, lua, ruby, swift: test-only stand-ins for wasm grammars (see
+# the pi-ast and pi-edit dev-dependencies); every other grammar here is linked in.
 tree-sitter-elisp = "1.7.2"
-tree-sitter-erlang = "0.16.0"
 tree-sitter-fortran = "0.6.0"
 tree-sitter-go = "0.25"
-tree-sitter-graphql = "0.1.0"
-tree-sitter-haskell = "0.23"
-tree-sitter-hcl = "1.1"
 tree-sitter-html = "0.23"
-tree-sitter-ini = "1.4.0"
 tree-sitter-java = "0.23"
 tree-sitter-javascript = "0.25"
 tree-sitter-json = "0.24"
-tree-sitter-julia = "0.23"
-tree-sitter-just = "0.2.0"
-tree-sitter-kotlin = { version = "0.4", package = "tree-sitter-kotlin-sg" }
 tree-sitter-lua = "0.5"
-tree-sitter-make = "1.1"
 tree-sitter-md = "0.5"
-tree-sitter-nix = "0.3"
-tree-sitter-objc = "3.0"
-tree-sitter-ocaml = "0.24.2"
-tree-sitter-odin = "1.3"
-tree-sitter-php = "0.24"
-tree-sitter-powershell = "0.26.4"
-tree-sitter-proto = "0.4.0"
 tree-sitter-python = "0.25"
-tree-sitter-r = "1.3.0"
 tree-sitter-regex = "0.25"
 tree-sitter-ruby = "0.23"
 tree-sitter-rust = "0.24"
-tree-sitter-scala = "0.26"
-tree-sitter-solidity = "1.2"
-tree-sitter-sql = { version = "0.3.11", package = "tree-sitter-sequel" }
-tree-sitter-starlark = "1.3"
-tree-sitter-svelte = { version = "0.1.1", package = "tree-sitter-svelte-next" }
 tree-sitter-swift = "0.7"
-tree-sitter-tlaplus = "1.5"
 tree-sitter-toml-ng = "0.7"
 tree-sitter-typescript = "0.23"
-tree-sitter-verilog = "1.0"
-tree-sitter-vue = { version = "0.1.0", package = "tree-sitter-vue-next" }
-tree-sitter-xml = "0.7"
 tree-sitter-yaml = "0.7"
-tree-sitter-zig = "1.1"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Machine Learning (pi-predict SmolLM2 engine)
+# ──────────────────────────────────────────────────────────────────────────────
+# macOS-only (Metal decoder; other targets use pi-predict's own CPU decoder).
+# 0.9.x, not 0.10+: later candle-core releases depend unconditionally on
+# `tokenizers` with the `onig` C library.
+candle-core = "0.9.2"
+candle-nn = "0.9.2"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Unsorted (added by `cargo add` - move into a section above)

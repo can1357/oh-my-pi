@@ -2,50 +2,36 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
-#[cfg(unix)]
-use std::os::unix;
-#[cfg(unix)]
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-#[cfg(windows)]
-use std::os::windows;
 use std::{
 	ffi::OsString,
 	fmt,
-	fs,
 	io::{self, Write},
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, error::ErrorKind};
-use fs_extra::dir::get_size as dir_get_size;
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle, TermLike};
-use parking_lot::Mutex;
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-use rustc_hash::FxHashMap;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use pi_vfs::{
+	BlockingFs, CanonicalizeOptions, MissingHandling, ResolveMode, child_path, file_name,
+	is_virtual_path, parent_path,
+};
 use rustc_hash::FxHashSet;
 use thiserror::Error;
 #[cfg(unix)]
-use uucore::fs::{display_permissions_unix, make_fifo};
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-use uucore::fsxattr;
+use uucore::fs::display_permissions_unix;
 use uucore::{
 	backup_control::{self, BackupMode, source_is_target_backup},
 	display::Quotable,
-	fs::{
-		MissingHandling, ResolveMode, are_hardlinks_or_one_way_symlink_to_same_file,
-		are_hardlinks_to_same_file, canonicalize, path_ends_with_terminator,
-	},
+	fs::path_ends_with_terminator,
 	update_control::{self, UpdateMode},
 };
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
-#[cfg(unix)]
-use self::hardlink::{
-	HardlinkGroupScanner, HardlinkOptions, HardlinkTracker, create_hardlink_context,
-	with_optional_hardlink_context,
+use crate::{
+	cp::{CpError, MoveCopier},
+	file_backup::{backup_display, backup_path, determine_backup_mode, determine_backup_suffix},
+	host::{Host, Utility, format_usage, matches_parser, util},
+	progress::stderr_draw_target,
 };
 
 #[derive(Debug, Error)]
@@ -82,6 +68,12 @@ enum MvFailure {
 
 type MvResult<T> = Result<T, MvFailure>;
 
+/// A move that failed after its diagnostics were printed: the copy between
+/// filesystems reports each entry it could not copy as it goes.
+#[derive(Debug, Error)]
+#[error("")]
+struct Reported;
+
 /// Parsed `mv` invocation.
 pub(crate) struct Mv {
 	matches: ArgMatches,
@@ -89,88 +81,11 @@ pub(crate) struct Mv {
 
 matches_parser!(Mv, app);
 
-/// A terminal-like indicatif sink backed by the command's stderr.
-struct ProgressTerminal {
-	writer: Mutex<OpenFile>,
-}
-
-impl fmt::Debug for ProgressTerminal {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("ProgressTerminal").finish_non_exhaustive()
-	}
-}
-
-impl ProgressTerminal {
-	fn write_control(&self, value: impl fmt::Display) -> io::Result<()> {
-		write!(self.writer.lock(), "{value}")
-	}
-
-	fn move_cursor(&self, n: usize, direction: char) -> io::Result<()> {
-		if n == 0 {
-			Ok(())
-		} else {
-			self.write_control(format_args!("\x1b[{n}{direction}"))
-		}
-	}
-}
-
-impl TermLike for ProgressTerminal {
-	fn width(&self) -> u16 {
-		#[cfg(unix)]
-		{
-			let writer = self.writer.lock();
-			if let Ok(fd) = writer.try_borrow_as_fd() {
-				let mut size = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
-				// SAFETY: `size` is writable for the duration of the ioctl, and
-				// `fd` is borrowed from the live `OpenFile` guarded above.
-				if unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCGWINSZ, &mut size) } == 0
-					&& size.ws_col > 0
-				{
-					return size.ws_col;
-				}
-			}
-		}
-		80
-	}
-
-	fn move_cursor_up(&self, n: usize) -> io::Result<()> {
-		self.move_cursor(n, 'A')
-	}
-
-	fn move_cursor_down(&self, n: usize) -> io::Result<()> {
-		self.move_cursor(n, 'B')
-	}
-
-	fn move_cursor_right(&self, n: usize) -> io::Result<()> {
-		self.move_cursor(n, 'C')
-	}
-
-	fn move_cursor_left(&self, n: usize) -> io::Result<()> {
-		self.move_cursor(n, 'D')
-	}
-
-	fn write_line(&self, s: &str) -> io::Result<()> {
-		writeln!(self.writer.lock(), "{s}")
-	}
-
-	fn write_str(&self, s: &str) -> io::Result<()> {
-		self.writer.lock().write_all(s.as_bytes())
-	}
-
-	fn clear_line(&self) -> io::Result<()> {
-		self.write_control("\r\x1b[2K")
-	}
-
-	fn flush(&self) -> io::Result<()> {
-		self.writer.lock().flush()
-	}
-}
-
 fn progress_manager(host: &Host, enabled: bool) -> Option<MultiProgress> {
-	(enabled && host.stderr.is_terminal()).then(|| {
-		let terminal = ProgressTerminal { writer: Mutex::new(host.stderr_clone()) };
-		MultiProgress::with_draw_target(ProgressDrawTarget::term_like(Box::new(terminal)))
-	})
+	if !enabled {
+		return None;
+	}
+	stderr_draw_target(host).map(MultiProgress::with_draw_target)
 }
 
 /// Options contains all the possible behaviors and flags for mv.
@@ -296,65 +211,6 @@ fn show(host: &mut Host, err: impl fmt::Display) {
 	host.error(err, 1);
 }
 
-fn match_backup_method(method: &str, origin: &str) -> MvResult<BackupMode> {
-	let matches = backup_control::BACKUP_CONTROL_VALUES
-		.iter()
-		.filter(|value| value.starts_with(method))
-		.collect::<Vec<_>>();
-	if matches.len() == 1 {
-		match *matches[0] {
-			"simple" | "never" => Ok(BackupMode::Simple),
-			"numbered" | "t" => Ok(BackupMode::Numbered),
-			"existing" | "nil" => Ok(BackupMode::Existing),
-			"none" | "off" => Ok(BackupMode::None),
-			_ => unreachable!("matched value comes from BACKUP_CONTROL_VALUES"),
-		}
-	} else {
-		let kind = if matches.is_empty() { "invalid" } else { "ambiguous" };
-		Err(MvFailure::Message(format!(
-			"{kind} argument {} for '{origin}'\nValid arguments are:\n  - 'none', 'off'\n  - \
-			 'simple', 'never'\n  - 'existing', 'nil'\n  - 'numbered', 't'",
-			method.quote()
-		)))
-	}
-}
-
-fn determine_backup_mode(matches: &ArgMatches, host: &Host) -> MvResult<BackupMode> {
-	let cli_method = matches
-		.get_one::<String>(backup_control::arguments::OPT_BACKUP)
-		.map(String::as_str);
-	if matches.contains_id(backup_control::arguments::OPT_BACKUP) {
-		if let Some(method) = cli_method {
-			match_backup_method(method, "backup type")
-		} else if let Some(method) = host.var("VERSION_CONTROL") {
-			match_backup_method(method, "$VERSION_CONTROL")
-		} else {
-			Ok(BackupMode::Existing)
-		}
-	} else if matches.get_flag(backup_control::arguments::OPT_BACKUP_NO_ARG)
-		|| matches.contains_id(backup_control::arguments::OPT_SUFFIX)
-	{
-		host.var("VERSION_CONTROL").map_or(Ok(BackupMode::Existing), |method| {
-			match_backup_method(method, "$VERSION_CONTROL")
-		})
-	} else {
-		Ok(BackupMode::None)
-	}
-}
-
-fn determine_backup_suffix(matches: &ArgMatches, host: &Host) -> String {
-	let suffix = matches
-		.get_one::<String>(backup_control::arguments::OPT_SUFFIX)
-		.map(String::as_str)
-		.or_else(|| host.var("SIMPLE_BACKUP_SUFFIX"))
-		.unwrap_or(backup_control::DEFAULT_BACKUP_SUFFIX);
-	if suffix.contains('/') {
-		backup_control::DEFAULT_BACKUP_SUFFIX.to_string()
-	} else {
-		suffix.to_string()
-	}
-}
-
 fn run_matches(matches: &ArgMatches, host: &mut Host) -> MvResult<()> {
 	let files: Vec<OsString> = matches
 		.get_many::<OsString>(ARG_FILES)
@@ -363,7 +219,7 @@ fn run_matches(matches: &ArgMatches, host: &mut Host) -> MvResult<()> {
 		.collect();
 
 	let overwrite_mode = determine_overwrite_mode(matches);
-	let backup_mode = determine_backup_mode(matches, host)?;
+	let backup_mode = determine_backup_mode(matches, host).map_err(MvFailure::Message)?;
 	let update_mode = update_control::determine_update_mode(matches);
 
 	if backup_mode != BackupMode::None
@@ -379,7 +235,7 @@ fn run_matches(matches: &ArgMatches, host: &mut Host) -> MvResult<()> {
 	let backup_suffix = determine_backup_suffix(matches, host);
 	let target_dir = matches.get_one::<OsString>(OPT_TARGET_DIRECTORY).cloned();
 	if let Some(maybe_dir) = &target_dir
-		&& !host.resolve(Path::new(maybe_dir)).is_dir()
+		&& !host.fs().is_dir(host.resolve(Path::new(maybe_dir)))
 	{
 		return Err(MvError::TargetNotADirectory(maybe_dir.quote().to_string()).into());
 	}
@@ -555,7 +411,14 @@ fn parse_paths(files: &[OsString], opts: &Options) -> Vec<PathBuf> {
 
 	if opts.strip_slashes {
 		paths
-			.map(|p| p.components().as_path().to_owned())
+			.map(|p| {
+				// A virtual root keeps the `//` of its `scheme://` spelling.
+				if is_virtual_path(p) && parent_path(p).is_none() {
+					p.to_owned()
+				} else {
+					p.components().as_path().to_owned()
+				}
+			})
 			.collect::<Vec<PathBuf>>()
 	} else {
 		paths.map(ToOwned::to_owned).collect::<Vec<PathBuf>>()
@@ -577,10 +440,11 @@ fn handle_two_paths(host: &mut Host, source: &Path, target: &Path, opts: &Option
 		);
 	}
 
+	let filesystem = host.fs().clone();
 	let source_fs = host.resolve(source);
 	let target_fs = host.resolve(target);
 
-	if source_fs.symlink_metadata().is_err() {
+	if filesystem.symlink_metadata(&source_fs).is_err() {
 		return Err(if path_ends_with_terminator(source) {
 			MvError::CannotStatNotADirectory(source.quote().to_string()).into()
 		} else {
@@ -588,11 +452,13 @@ fn handle_two_paths(host: &mut Host, source: &Path, target: &Path, opts: &Option
 		});
 	}
 
-	let source_is_dir = source_fs.is_dir() && !source_fs.is_symlink();
-	let target_is_dir = if target_fs.is_symlink() {
-		fs::canonicalize(&target_fs).is_ok_and(|p| p.is_dir())
+	let source_is_dir = filesystem.is_dir(&source_fs) && !filesystem.is_symlink(&source_fs);
+	let target_is_dir = if filesystem.is_symlink(&target_fs) {
+		filesystem
+			.canonicalize(&target_fs)
+			.is_ok_and(|p| filesystem.is_dir(p))
 	} else {
-		target_fs.is_dir()
+		filesystem.is_dir(&target_fs)
 	};
 
 	if path_ends_with_terminator(target)
@@ -606,24 +472,13 @@ fn handle_two_paths(host: &mut Host, source: &Path, target: &Path, opts: &Option
 	assert_not_same_file(host, source, target, target_is_dir, opts)?;
 
 	if target_is_dir {
-		if opts.no_target_dir {
-			if source_fs.is_dir() {
-				#[cfg(unix)]
-				let (mut hardlink_tracker, hardlink_scanner) = create_hardlink_context();
-				#[cfg(unix)]
-				let hardlink_params = (Some(&mut hardlink_tracker), Some(&hardlink_scanner));
-				#[cfg(not(unix))]
-				let hardlink_params = (None, None);
-
-				rename(host, source, target, opts, None, hardlink_params.0, hardlink_params.1)
-					.map_err(|e| MvFailure::Message(format!("cannot move {} to {}: {e}", source.quote(), target.quote())))
-			} else {
-				Err(MvError::DirectoryToNonDirectory(target.quote().to_string()).into())
-			}
-		} else {
-			move_files_into_dir(host, &[source.to_path_buf()], target, opts)
+		if !opts.no_target_dir {
+			return move_files_into_dir(host, &[source.to_path_buf()], target, opts);
 		}
-	} else if target_fs.exists() && source_is_dir {
+		if !filesystem.is_dir(&source_fs) {
+			return Err(MvError::DirectoryToNonDirectory(target.quote().to_string()).into());
+		}
+	} else if filesystem.exists(&target_fs) && source_is_dir {
 		match opts.overwrite {
 			OverwriteMode::NoClobber => return Ok(()),
 			OverwriteMode::Interactive => prompt_overwrite(host, target, None)?,
@@ -635,20 +490,24 @@ fn handle_two_paths(host: &mut Host, source: &Path, target: &Path, opts: &Option
 				}
 			},
 		}
-		Err(
+		return Err(
 			MvError::NonDirectoryToDirectory(source.quote().to_string(), target.quote().to_string())
 				.into(),
-		)
-	} else {
-		#[cfg(unix)]
-		let (mut hardlink_tracker, hardlink_scanner) = create_hardlink_context();
-		#[cfg(unix)]
-		let hardlink_params = (Some(&mut hardlink_tracker), Some(&hardlink_scanner));
-		#[cfg(not(unix))]
-		let hardlink_params = (None, None);
+		);
+	}
 
-		rename(host, source, target, opts, None, hardlink_params.0, hardlink_params.1)
-			.map_err(|e| MvFailure::Message(format!("{e}")))
+	match rename(host, source, target, opts, None, &mut MoveCopier::new(opts.verbose)) {
+		Ok(()) => Ok(()),
+		Err(e) if e.get_ref().is_some_and(|e| e.is::<Reported>()) => {
+			host.fail(1);
+			Ok(())
+		},
+		Err(e) if target_is_dir => Err(MvFailure::Message(format!(
+			"cannot move {} to {}: {e}",
+			source.quote(),
+			target.quote()
+		))),
+		Err(e) => Err(MvFailure::Message(e.to_string())),
 	}
 }
 
@@ -659,17 +518,18 @@ fn assert_not_same_file(
 	target_is_dir: bool,
 	opts: &Options,
 ) -> MvResult<()> {
+	let filesystem = host.fs().clone();
 	let source_abs = host.resolve(source);
 	let target_abs = host.resolve(target);
+	let logical = CanonicalizeOptions::new(MissingHandling::Normal, ResolveMode::Logical);
 
 	// we'll compare canonicalized_source and canonicalized_target for same file
 	// detection
-	let canonicalized_source =
-		match canonicalize(&source_abs, MissingHandling::Normal, ResolveMode::Logical) {
-			Ok(source) if source.exists() => source,
-			_ => source_abs.clone(), /* file or symlink target doesn't exist but its absolute path
-			                          * is still used for comparison */
-		};
+	let canonicalized_source = match filesystem.canonicalize_with(&source_abs, &logical) {
+		Ok(source) if filesystem.exists(&source) => source,
+		_ => source_abs.clone(), /* file or symlink target doesn't exist but its absolute path
+		                          * is still used for comparison */
+	};
 
 	// special case if the target exists, is a directory, and the `-T` flag wasn't
 	// used
@@ -678,30 +538,36 @@ fn assert_not_same_file(
 		// `mv source_file target_dir` => target_dir/source_file
 		// canonicalize the path that exists (target directory) and join the source file
 		// name
-		canonicalize(&target_abs, MissingHandling::Normal, ResolveMode::Logical)?
-			.join(source.file_name().unwrap_or_default())
+		child_path(
+			&filesystem.canonicalize_with(&target_abs, &logical)?,
+			&file_name(source).unwrap_or_default(),
+		)
 	} else {
 		// `mv source target_dir/target` => target_dir/target
 		// we canonicalize target_dir and join /target
-		match target_abs.parent() {
-			Some(parent) if parent.to_str() != Some("") => {
-				canonicalize(parent, MissingHandling::Normal, ResolveMode::Logical)?
-					.join(target.file_name().unwrap_or_default())
-			},
-			// path.parent() returns Some("") or None if there's no parent
+		match parent_path(&target_abs) {
+			Some(parent) if !parent.as_os_str().is_empty() => child_path(
+				&filesystem.canonicalize_with(parent, &logical)?,
+				&file_name(target).unwrap_or_default(),
+			),
+			// the parent is empty or missing if there's no parent
 			_ => target_abs.clone(), /* absolute paths should always have a parent, but we'll fall
 			                          * back just in case */
 		}
 	};
 
 	let same_file = (canonicalized_source.eq(&canonicalized_target)
-		|| are_hardlinks_to_same_file(&source_abs, &target_abs)
-		|| are_hardlinks_or_one_way_symlink_to_same_file(&source_abs, &target_abs))
+		|| are_hardlinks_to_same_file(&filesystem, &source_abs, &target_abs)
+		|| are_hardlinks_or_one_way_symlink_to_same_file(&filesystem, &source_abs, &target_abs))
 		&& opts.backup == BackupMode::None;
 
 	// get the expected target path to show in errors
 	// this is based on the argument and not canonicalized
-	let target_display = match source.file_name() {
+	let target_display = match file_name(source) {
+		// A virtual root keeps the `//` of its `scheme://` spelling.
+		Some(file_name) if target_is_dir && is_virtual_path(target) && parent_path(target).is_none() => {
+			child_path(target, &file_name).quote().to_string()
+		},
 		Some(file_name) if target_is_dir => {
 			// join target_dir/source_file in a platform-independent manner
 			let mut path = target
@@ -722,18 +588,44 @@ fn assert_not_same_file(
 		&& (canonicalized_source.eq(&canonicalized_target)
 			|| source.eq(Path::new("."))
 			|| source.ends_with("/.")
-			|| source_abs.is_file())
+			|| filesystem.is_file(&source_abs))
 	{
 		return Err(MvError::SameFile(source.quote().to_string(), target_display).into());
 	} else if (same_file || canonicalized_target.starts_with(&canonicalized_source))
         // don't error if we're moving a symlink of a directory into itself
-        && !source_abs.is_symlink()
+        && !filesystem.is_symlink(&source_abs)
 	{
 		return Err(
 			MvError::SelfTargetSubdirectory(source.quote().to_string(), target_display).into(),
 		);
 	}
 	Ok(())
+}
+
+/// Whether `source` and `target` are hard links to the same file, without
+/// following either.
+fn are_hardlinks_to_same_file(filesystem: &BlockingFs, source: &Path, target: &Path) -> bool {
+	let (Ok(source), Ok(target)) =
+		(filesystem.symlink_metadata(source), filesystem.symlink_metadata(target))
+	else {
+		return false;
+	};
+	source.same_file(&target)
+}
+
+/// Whether `source`, followed, is the same file as `target`, unfollowed: hard
+/// links, or a symlink `source` that resolves to `target`.
+fn are_hardlinks_or_one_way_symlink_to_same_file(
+	filesystem: &BlockingFs,
+	source: &Path,
+	target: &Path,
+) -> bool {
+	let (Ok(source), Ok(target)) =
+		(filesystem.metadata(source), filesystem.symlink_metadata(target))
+	else {
+		return false;
+	};
+	source.same_file(&target)
 }
 
 fn handle_multiple_paths(host: &mut Host, paths: &[PathBuf], opts: &Options) -> MvResult<()> {
@@ -768,21 +660,10 @@ fn move_files_into_dir(host: &mut Host, files: &[PathBuf], target_dir: &Path, op
 	// remember the moved destinations for further usage
 	let mut moved_destinations: FxHashSet<PathBuf> =
 		FxHashSet::with_capacity_and_hasher(files.len(), rustc_hash::FxBuildHasher);
-	// Create hardlink tracking context
-	#[cfg(unix)]
-	let (mut hardlink_tracker, hardlink_scanner) = {
-		let (tracker, mut scanner) = create_hardlink_context();
+	// Hard links among the moved files survive a move between filesystems.
+	let mut copier = MoveCopier::new(options.verbose);
 
-		// Use hardlink options
-		let hardlink_options = HardlinkOptions { verbose: options.verbose || options.debug };
-
-		// Pre-scan files if needed
-		scanner.scan_files(host, files, &hardlink_options);
-
-		(tracker, scanner)
-	};
-
-	if !host.resolve(target_dir).is_dir() {
+	if !host.fs().is_dir(host.resolve(target_dir)) {
 		return Err(MvError::NotADirectory(target_dir.quote().to_string()).into());
 	}
 
@@ -809,10 +690,7 @@ fn move_files_into_dir(host: &mut Host, files: &[PathBuf], target_dir: &Path, op
 	};
 
 	for sourcepath in files {
-		if host.resolve(sourcepath)
-			.symlink_metadata()
-			.is_err()
-		{
+		if host.fs().symlink_metadata(host.resolve(sourcepath)).is_err() {
 			show(host, &MvError::NoSuchFile(sourcepath.quote().to_string()));
 			continue;
 		}
@@ -822,8 +700,8 @@ fn move_files_into_dir(host: &mut Host, files: &[PathBuf], target_dir: &Path, op
 			pb.set_message(msg);
 		}
 
-		let targetpath = if let Some(name) = sourcepath.file_name() {
-			target_dir.join(name)
+		let targetpath = if let Some(name) = file_name(sourcepath) {
+			child_path(target_dir, &name)
 		} else {
 			show(host, &MvError::NoSuchFile(sourcepath.quote().to_string()));
 			continue;
@@ -847,19 +725,7 @@ fn move_files_into_dir(host: &mut Host, files: &[PathBuf], target_dir: &Path, op
 			continue;
 		}
 
-		#[cfg(unix)]
-		let hardlink_params = (Some(&mut hardlink_tracker), Some(&hardlink_scanner));
-		#[cfg(not(unix))]
-		let hardlink_params = (None, None);
-
-		match rename(host, 
-			sourcepath,
-			&targetpath,
-			options,
-			display_manager.as_ref(),
-			hardlink_params.0,
-			hardlink_params.1,
-		) {
+		match rename(host, sourcepath, &targetpath, options, display_manager.as_ref(), &mut copier) {
 			Err(e) if e.to_string().is_empty() => host.fail(1),
 			Err(e) => {
 				let e = format!("cannot move {} to {}: {e}", sourcepath.quote(), targetpath.quote());
@@ -885,18 +751,16 @@ fn rename(
 	to: &Path,
 	opts: &Options,
 	display_manager: Option<&MultiProgress>,
-	#[cfg(unix)] hardlink_tracker: Option<&mut HardlinkTracker>,
-	#[cfg(unix)] hardlink_scanner: Option<&HardlinkGroupScanner>,
-	#[cfg(not(unix))] _hardlink_tracker: Option<()>,
-	#[cfg(not(unix))] _hardlink_scanner: Option<()>,
+	copier: &mut MoveCopier,
 ) -> io::Result<()> {
-	let mut backup_path = None;
+	let mut backup = None;
 
 	// filesystem checks; keep `from`/`to` for display.
+	let filesystem = host.fs().clone();
 	let from_fs = host.resolve(from);
 	let to_fs = host.resolve(to);
 
-	if to_fs.exists() {
+	if filesystem.exists(&to_fs) {
 		if opts.update == UpdateMode::None {
 			if opts.debug {
 				let _ = writeln!(host.stdout, "skipped {}", to.quote());
@@ -905,7 +769,7 @@ fn rename(
 		}
 
 		if (opts.update == UpdateMode::IfOlder)
-			&& fs::metadata(&from_fs)?.modified()? <= fs::metadata(&to_fs)?.modified()?
+			&& filesystem.metadata(&from_fs)?.modified()? <= filesystem.metadata(&to_fs)?.modified()?
 		{
 			return Ok(());
 		}
@@ -932,52 +796,33 @@ fn rename(
 			},
 		}
 
-		// numbered-backup probing hits the shell's working directory.
-		backup_path = backup_control::get_backup_path(opts.backup, &to_fs, &opts.suffix);
-		if let Some(backup_path) = &backup_path {
-			// For backup renames, we don't need to track hardlinks as we're just moving the
-			// existing file
-			rename_with_fallback(host, to, backup_path, display_manager, false, None, None)?;
+		// numbered-backup probing goes through the injected filesystem.
+		backup = backup_path(&filesystem, opts.backup, &to_fs, &opts.suffix);
+		if let Some(backup) = &backup {
+			// The existing file is only moved aside: its copy, if any, is
+			// neither reported nor linked to the moved files.
+			rename_with_fallback(host, to, backup, display_manager, &mut MoveCopier::new(false))?;
 		}
 	}
 
 	// "to" may no longer exist if it was backed up
-	if to_fs.exists() && to_fs.is_dir() && !to_fs.is_symlink() {
+	if filesystem.exists(&to_fs) && filesystem.is_dir(&to_fs) && !filesystem.is_symlink(&to_fs) {
 		// normalize behavior between *nix and windows
-		if from_fs.is_dir() {
+		if filesystem.is_dir(&from_fs) {
 			if is_empty_dir(host, to) {
-				fs::remove_dir(&to_fs)?;
+				filesystem.remove_dir(&to_fs)?;
 			} else {
 				return Err(io::Error::other("Directory not empty"));
 			}
 		}
 	}
 
-	#[cfg(unix)]
-	{
-		rename_with_fallback(host, 
-			from,
-			to,
-			display_manager,
-			opts.verbose,
-			hardlink_tracker,
-			hardlink_scanner,
-		)?;
-	}
-	#[cfg(not(unix))]
-	{
-		rename_with_fallback(host, from, to, display_manager, opts.verbose, None, None)?;
-	}
-
+	rename_with_fallback(host, from, to, display_manager, copier)?;
 
 	if opts.verbose {
-		let message = if let Some(path) = &backup_path {
+		let message = if let Some(path) = &backup {
 			// rebuild a display path from the operand for the verbose message.
-			let backup_display = match (to.parent(), path.file_name()) {
-				(Some(parent), Some(name)) if !parent.as_os_str().is_empty() => parent.join(name),
-				(_, Some(name)) => PathBuf::from(name),
-				_ => path.clone(),
-			};
+			let backup_display = backup_display(to, path);
 			format!("renamed {} -> {} (backup: {})", from.quote(), to.quote(), backup_display.quote())
 		} else {
 			format!("renamed {} -> {}", from.quote(), to.quote())
@@ -995,401 +840,66 @@ fn rename(
 	Ok(())
 }
 
-#[cfg(unix)]
-fn is_fifo(filetype: fs::FileType) -> bool {
-	filetype.is_fifo()
+/// Whether a failed rename crossed devices or filesystem providers, so the
+/// move may be completed by copying and removing.
+fn crosses_devices(error: &io::Error) -> bool {
+	#[cfg(windows)]
+	const EXDEV: i32 = windows_sys::Win32::Foundation::ERROR_NOT_SAME_DEVICE as _;
+	#[cfg(unix)]
+	const EXDEV: i32 = libc::EXDEV as _;
+	#[cfg(target_os = "wasi")]
+	const EXDEV: i32 = 18; // POSIX EXDEV value
+
+	error.kind() == io::ErrorKind::CrossesDevices || error.raw_os_error() == Some(EXDEV)
 }
 
-#[cfg(not(unix))]
-fn is_fifo(_filetype: fs::FileType) -> bool {
-	false
-}
-
-/// A wrapper around `fs::rename`, so that if it fails, we try falling back on
+/// A wrapper around `rename`, so that if it fails, we try falling back on
 /// copying and removing.
 fn rename_with_fallback(
 	host: &mut Host,
 	from: &Path,
 	to: &Path,
 	display_manager: Option<&MultiProgress>,
-	verbose: bool,
-	#[cfg(unix)] hardlink_tracker: Option<&mut HardlinkTracker>,
-	#[cfg(unix)] hardlink_scanner: Option<&HardlinkGroupScanner>,
-	#[cfg(not(unix))] _hardlink_tracker: Option<()>,
-	#[cfg(not(unix))] _hardlink_scanner: Option<()>,
+	copier: &mut MoveCopier,
 ) -> io::Result<()> {
+	let filesystem = host.fs().clone();
 	let from_fs = host.resolve(from);
 	let to_fs = host.resolve(to);
 
-	fs::rename(&from_fs, &to_fs).or_else(|err| {
-		#[cfg(windows)]
-		const EXDEV: i32 = windows_sys::Win32::Foundation::ERROR_NOT_SAME_DEVICE as _;
-		#[cfg(unix)]
-		const EXDEV: i32 = libc::EXDEV as _;
-		#[cfg(target_os = "wasi")]
-		const EXDEV: i32 = 18; // POSIX EXDEV value
-
-		// We will only copy if:
-		// 1. Files are on different devices (EXDEV error)
-		// 2. On Windows, if the target file exists and source file is opened by another
-		//    process (MoveFileExW fails with "Access Denied" even if the source file
-		//    has FILE_SHARE_DELETE permission)
-		let should_fallback = matches!(err.raw_os_error(), Some(EXDEV))
-			|| (from_fs.is_file() && can_delete_file(host, &from_fs));
-		if !should_fallback {
-			return Err(err);
-		}
-		// Get metadata without following symlinks
-		let metadata = from_fs.symlink_metadata()?;
-		let file_type = metadata.file_type();
-		if file_type.is_symlink() {
-			rename_symlink_fallback(host, from, to)
-		} else if file_type.is_dir() {
-			#[cfg(unix)]
-			{
-				with_optional_hardlink_context(
-					hardlink_tracker,
-					hardlink_scanner,
-					|tracker, scanner| {
-						rename_dir_fallback(host, 
-							from,
-							to,
-							display_manager,
-							verbose,
-							Some(tracker),
-							Some(scanner),
-						)
-					},
-				)
-			}
-			#[cfg(not(unix))]
-			{
-				rename_dir_fallback(host, from, to, display_manager, verbose)
-			}
-		} else if is_fifo(file_type) {
-			rename_fifo_fallback(host, from, to)
-		} else {
-			#[cfg(unix)]
-			{
-				with_optional_hardlink_context(
-					hardlink_tracker,
-					hardlink_scanner,
-					|tracker, scanner| rename_file_fallback(host, from, to, Some(tracker), Some(scanner)),
-				)
-			}
-			#[cfg(not(unix))]
-			{
-				rename_file_fallback(host, from, to)
-			}
-		}
-	})
-}
-
-/// Replace the destination with a new pipe with the same name as the source.
-#[cfg(unix)]
-fn rename_fifo_fallback(host: &mut Host, from: &Path, to: &Path) -> io::Result<()> {
-	let to_fs = host.resolve(to);
-	if to_fs.try_exists()? {
-		fs::remove_file(&to_fs)?;
-	}
-	make_fifo(&to_fs).and_then(|_| fs::remove_file(host.resolve(from)))
-}
-
-#[cfg(not(unix))]
-#[expect(clippy::unnecessary_wraps, reason = "fn sig must match on all platforms")]
-fn rename_fifo_fallback(_host: &mut Host, _from: &Path, _to: &Path) -> io::Result<()> {
-	Ok(())
-}
-
-/// Move the given symlink to the given destination. On Windows, dangling
-/// symlinks return an error.
-#[cfg(unix)]
-fn rename_symlink_fallback(host: &mut Host, from: &Path, to: &Path) -> io::Result<()> {
-	// `read_link` returns the symlink's *contents* (its literal target), which
-	// must not be resolved; only the from/to operands are filesystem locations.
-	let path_symlink_points_to = fs::read_link(host.resolve(from))?;
-	unix::fs::symlink(path_symlink_points_to, host.resolve(to))?;
-	#[cfg(not(any(target_os = "macos", target_os = "redox")))]
-	{
-		let _ = copy_xattrs_if_supported(host, from, to);
-	}
-	fs::remove_file(host.resolve(from))
-}
-
-#[cfg(windows)]
-fn rename_symlink_fallback(host: &mut Host, from: &Path, to: &Path) -> io::Result<()> {
-	let path_symlink_points_to = fs::read_link(host.resolve(from))?;
-	let to_fs = host.resolve(to);
-	if path_symlink_points_to.exists() {
-		if path_symlink_points_to.is_dir() {
-			windows::fs::symlink_dir(&path_symlink_points_to, &to_fs)?;
-		} else {
-			windows::fs::symlink_file(&path_symlink_points_to, &to_fs)?;
-		}
-		fs::remove_file(host.resolve(from))
-	} else {
-		Err(io::Error::new(
-			io::ErrorKind::NotFound,
-			"can't determine symlink type, since it is dangling",
-		))
-	}
-}
-
-#[cfg(target_os = "wasi")]
-fn rename_symlink_fallback(host: &mut Host, _from: &Path, _to: &Path) -> io::Result<()> {
-	Err(io::Error::other("your operating system does not support symlinks"))
-}
-
-fn rename_dir_fallback(
-	host: &mut Host,
-	from: &Path,
-	to: &Path,
-	display_manager: Option<&MultiProgress>,
-	verbose: bool,
-	#[cfg(unix)] hardlink_tracker: Option<&mut HardlinkTracker>,
-	#[cfg(unix)] hardlink_scanner: Option<&HardlinkGroupScanner>,
-) -> io::Result<()> {
-	// We remove the destination directory if it exists to match the
-	// behavior of `fs::rename`. As far as I can tell, `fs_extra`'s
-	// `move_dir` would otherwise behave differently.
-	let to_fs = host.resolve(to);
-	if to_fs.exists() {
-		fs::remove_dir_all(&to_fs)?;
-	}
-
-	// Calculate total size of directory
-	// Silently degrades:
-	//    If finding the total size fails for whatever reason,
-	//    the progress bar wont be shown for this file / dir.
-	//    (Move will probably fail due to permission error later?)
-	let total_size = dir_get_size(host.resolve(from)).ok();
-
-	let progress_bar = match (display_manager, total_size) {
-		(Some(display_manager), Some(total_size)) => {
-			let template = "{msg}: [{elapsed_precise}] {wide_bar} {bytes:>7}/{total_bytes:7}";
-			let style = ProgressStyle::with_template(template).unwrap();
-			let bar = ProgressBar::new(total_size).with_style(style);
-			Some(display_manager.add(bar))
-		},
-		(..) => None,
-	};
-
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-	let xattrs = fsxattr::retrieve_xattrs(host.resolve(from))
-		.unwrap_or_else(|_| FxHashMap::default());
-
-	// Use directory copying (with or without hardlink support)
-	let result = copy_dir_contents(host, 
-		from,
-		to,
-		#[cfg(unix)]
-		hardlink_tracker,
-		#[cfg(unix)]
-		hardlink_scanner,
-		verbose,
-		progress_bar.as_ref(),
-		display_manager,
-	);
-
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-	fsxattr::apply_xattrs(host.resolve(to), xattrs)?;
-
-	result?;
-
-	// Remove the source directory after successful copy
-	fs::remove_dir_all(host.resolve(from))?;
-
-	Ok(())
-}
-
-/// Copy directory recursively, optionally preserving hardlinks
-fn copy_dir_contents(
-	host: &mut Host,
-	from: &Path,
-	to: &Path,
-	#[cfg(unix)] hardlink_tracker: Option<&mut HardlinkTracker>,
-	#[cfg(unix)] hardlink_scanner: Option<&HardlinkGroupScanner>,
-	verbose: bool,
-	progress_bar: Option<&ProgressBar>,
-	display_manager: Option<&MultiProgress>,
-) -> io::Result<()> {
-	// Create the destination directory
-	fs::create_dir_all(host.resolve(to))?;
-
-	// Recursively copy contents
-	#[cfg(unix)]
-	{
-		if let (Some(tracker), Some(scanner)) = (hardlink_tracker, hardlink_scanner) {
-			copy_dir_contents_recursive(host, 
-				from,
-				to,
-				tracker,
-				scanner,
-				verbose,
-				progress_bar,
-				display_manager,
-			)?;
-		}
-	}
-	#[cfg(not(unix))]
-	{
-		copy_dir_contents_recursive(host, from, to, verbose, progress_bar, display_manager)?;
-	}
-
-	Ok(())
-}
-
-fn copy_dir_contents_recursive(
-	host: &mut Host,
-	from_dir: &Path,
-	to_dir: &Path,
-	#[cfg(unix)] hardlink_tracker: &mut HardlinkTracker,
-	#[cfg(unix)] hardlink_scanner: &HardlinkGroupScanner,
-	verbose: bool,
-	progress_bar: Option<&ProgressBar>,
-	display_manager: Option<&MultiProgress>,
-) -> io::Result<()> {
-	let print_verbose = |host: &mut Host, from: &Path, to: &Path| {
-		if verbose {
-			let message = format!("renamed {} -> {}", from.quote(), to.quote());
-			match display_manager {
-				Some(pb) => pb.suspend(|| {
-					let _ = writeln!(host.stdout, "{message}");
-				}),
-				None => {
-					let _ = writeln!(host.stdout, "{message}");
-				},
-			}
-		}
-	};
-
-	// Resolve the directory for the read, but rebuild each child path from the display operand
-	// directory so recursion and verbose output keep the operand-relative form.
-	let entries = fs::read_dir(host.resolve(from_dir))?;
-
-	for entry in entries {
-		let entry = entry?;
-		let file_name = entry.file_name();
-		let from_path = from_dir.join(&file_name);
-		let to_path = to_dir.join(&file_name);
-
-		if let Some(pb) = progress_bar {
-			pb.set_message(from_path.to_string_lossy().to_string());
-		}
-
-		if host.resolve(&from_path).is_symlink() {
-			// Handle symlinks first, before checking is_dir() which follows symlinks.
-			// This prevents symlinks to directories from being expanded into full copies.
-			#[cfg(unix)]
-			{
-				copy_file_with_hardlinks_helper(host, 
-					&from_path,
-					&to_path,
-					hardlink_tracker,
-					hardlink_scanner,
-				)?;
-			}
-			#[cfg(not(unix))]
-			{
-				rename_symlink_fallback(host, &from_path, &to_path)?;
-			}
-
-			print_verbose(host, &from_path, &to_path);
-		} else if host.resolve(&from_path).is_dir() {
-			// Recursively copy subdirectory (only real directories, not symlinks)
-			fs::create_dir_all(host.resolve(&to_path))?;
-
-			print_verbose(host, &from_path, &to_path);
-
-			copy_dir_contents_recursive(host, 
-				&from_path,
-				&to_path,
-				#[cfg(unix)]
-				hardlink_tracker,
-				#[cfg(unix)]
-				hardlink_scanner,
-				verbose,
-				progress_bar,
-				display_manager,
-			)?;
-		} else {
-			// Copy file with or without hardlink support based on platform
-			#[cfg(unix)]
-			{
-				copy_file_with_hardlinks_helper(host, 
-					&from_path,
-					&to_path,
-					hardlink_tracker,
-					hardlink_scanner,
-				)?;
-			}
-			#[cfg(not(unix))]
-			{
-				// Symlinks are already handled above, so this is always a regular file
-				fs::copy(host.resolve(&from_path), host.resolve(&to_path))?;
-			}
-
-			print_verbose(host, &from_path, &to_path);
-		}
-
-		if let Some(pb) = progress_bar
-			&& let Ok(metadata) = host.resolve(&from_path).metadata()
-		{
-			pb.inc(metadata.len());
-		}
-	}
-
-	Ok(())
-}
-
-#[cfg(unix)]
-fn copy_file_with_hardlinks_helper(
-	host: &mut Host,
-	from: &Path,
-	to: &Path,
-	hardlink_tracker: &mut HardlinkTracker,
-	hardlink_scanner: &HardlinkGroupScanner,
-) -> io::Result<()> {
-	// Check if this file should be a hardlink to an already-copied file
-	use hardlink::HardlinkOptions;
-	let hardlink_options = HardlinkOptions::default();
-	// Create a hardlink instead of copying
-	if let Some(existing_target) =
-		hardlink_tracker.check_hardlink(host, from, to, hardlink_scanner, &hardlink_options)
-	{
-		fs::hard_link(host.resolve(&existing_target), host.resolve(to))?;
+	let Err(err) = filesystem.rename(&from_fs, &to_fs) else {
 		return Ok(());
+	};
+	// We will only copy if:
+	// 1. Files are on different devices or filesystem providers (EXDEV error)
+	// 2. On Windows, if the target file exists and source file is opened by another
+	//    process (MoveFileExW fails with "Access Denied" even if the source file
+	//    has FILE_SHARE_DELETE permission)
+	let should_fallback =
+		crosses_devices(&err) || (filesystem.is_file(&from_fs) && can_delete_file(host, &from_fs));
+	if !should_fallback {
+		return Err(err);
 	}
+	// Get metadata without following symlinks
+	let metadata = filesystem.symlink_metadata(&from_fs)?;
+	let file_type = metadata.file_type();
+	// Copy and unlink failures of a native file other than a link or a pipe
+	// keep this port's plain `Permission denied`; the rest report their own
+	// error.
+	let plain_denial = !(file_type.is_dir() || file_type.is_symlink() || file_type.is_fifo())
+		&& filesystem.is_native_local(&from_fs)
+		&& filesystem.is_native_local(&to_fs);
+	let describe = |err: io::Error| {
+		if plain_denial { io::Error::new(err.kind(), "Permission denied") } else { err }
+	};
 
-	if host.resolve(from).is_symlink() {
-		// Copy a symlink file (no-follow).
-		rename_symlink_fallback(host, from, to)?;
-	} else if is_fifo(host.resolve(from).symlink_metadata()?.file_type()) {
-		make_fifo(&host.resolve(to))?;
-	} else {
-		// Copy a regular file.
-		fs::copy(host.resolve(from), host.resolve(to))?;
-		// Copy xattrs, ignoring ENOTSUP errors (filesystem doesn't support xattrs)
-		#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-		{
-			let _ = copy_xattrs_if_supported(host, from, to);
+	// The copy replaces the destination as the rename would have: a
+	// directory is not merged into, a file is not written through.
+	if file_type.is_dir() {
+		if filesystem.exists(&to_fs) {
+			filesystem.remove_dir_all(&to_fs)?;
 		}
-	}
-
-	Ok(())
-}
-
-fn rename_file_fallback(
-	host: &mut Host,
-	from: &Path,
-	to: &Path,
-	#[cfg(unix)] hardlink_tracker: Option<&mut HardlinkTracker>,
-	#[cfg(unix)] hardlink_scanner: Option<&HardlinkGroupScanner>,
-) -> io::Result<()> {
-	let to_fs = host.resolve(to);
-	// Remove existing target file if it exists
-	if to_fs.is_symlink() {
-		fs::remove_file(&to_fs).map_err(|err| {
+	} else if filesystem.is_symlink(&to_fs) {
+		filesystem.remove_file(&to_fs).map_err(|err| {
 			let inter_device_msg = format!(
 				"inter-device move failed: {} to {}; unable to remove target: {err}",
 				from.quote(),
@@ -1397,63 +907,37 @@ fn rename_file_fallback(
 			);
 			io::Error::new(err.kind(), inter_device_msg)
 		})?;
-	} else if to_fs.exists() {
-		// For non-symlinks, just remove the file without special error handling
-		fs::remove_file(&to_fs)?;
+	} else if filesystem.exists(&to_fs) {
+		filesystem.remove_file(&to_fs)?;
 	}
 
-	// Check if this file is part of a hardlink group and if so, create a hardlink
-	// instead of copying
-	#[cfg(unix)]
-	{
-		if let (Some(tracker), Some(scanner)) = (hardlink_tracker, hardlink_scanner) {
-			use hardlink::HardlinkOptions;
-			let hardlink_options = HardlinkOptions::default();
-			if let Some(existing_target) = tracker.check_hardlink(host, from, to, scanner, &hardlink_options)
-			{
-				// Create a hardlink to the first moved file instead of copying
-				fs::hard_link(host.resolve(&existing_target), &to_fs)?;
-				fs::remove_file(host.resolve(from))?;
-				return Ok(());
-			}
-		}
+	match copier.copy(host, from, to, metadata, display_manager) {
+		Ok(()) => {},
+		Err(CpError::IoErr(error) | CpError::IoErrContext(error, _)) => return Err(describe(error)),
+		Err(CpError::Error(message) | CpError::Usage(message)) => {
+			return Err(describe(io::Error::other(message)));
+		},
+		// The source stays: some of it was not copied, as already reported.
+		Err(CpError::NotAllFilesCopied | CpError::Skipped(_)) => return Err(io::Error::other(Reported)),
 	}
 
-	// Regular file copy
-	fs::copy(host.resolve(from), &to_fs)
-		.map_err(|err| io::Error::new(err.kind(), "Permission denied"))?;
-
-	// Copy xattrs, ignoring ENOTSUP errors (filesystem doesn't support xattrs)
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-	{
-		let _ = copy_xattrs_if_supported(host, from, to);
-	}
-
-	fs::remove_file(host.resolve(from))
-		.map_err(|err| io::Error::new(err.kind(), "Permission denied"))?;
-	Ok(())
-}
-
-/// Copy xattrs from source to destination, ignoring ENOTSUP/EOPNOTSUPP errors.
-/// These errors indicate the filesystem doesn't support extended attributes,
-/// which is acceptable when moving files across filesystems.
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-fn copy_xattrs_if_supported(host: &Host, from: &Path, to: &Path) -> io::Result<()> {
-	match fsxattr::copy_xattrs(host.resolve(from), host.resolve(to)) {
-		Ok(()) => Ok(()),
-		Err(e) if e.raw_os_error() == Some(libc::EOPNOTSUPP) => Ok(()),
-		Err(e) => Err(e),
+	if file_type.is_dir() {
+		filesystem.remove_dir_all(&from_fs)
+	} else {
+		filesystem.remove_file(&from_fs).map_err(describe)
 	}
 }
 
 fn is_empty_dir(host: &Host, path: &Path) -> bool {
-	fs::read_dir(host.resolve(path)).is_ok_and(|mut contents| contents.next().is_none())
+	host.fs()
+		.read_dir(host.resolve(path))
+		.is_ok_and(|mut contents| contents.next().is_none())
 }
 
 /// Check if file is writable, returning the mode for potential reuse.
 #[cfg(unix)]
 fn is_writable(host: &Host, path: &Path) -> (bool, Option<u32>) {
-	if let Ok(metadata) = host.resolve(path).metadata() {
+	if let Ok(metadata) = host.fs().metadata(host.resolve(path)) {
 		let mode = metadata.permissions().mode();
 		// Check if user write bit is set
 		((mode & 0o200) != 0, Some(mode))
@@ -1465,7 +949,7 @@ fn is_writable(host: &Host, path: &Path) -> (bool, Option<u32>) {
 /// Check if file is writable.
 #[cfg(not(unix))]
 fn is_writable(host: &Host, path: &Path) -> (bool, Option<u32>) {
-	if let Ok(metadata) = host.resolve(path).metadata() {
+	if let Ok(metadata) = host.fs().metadata(host.resolve(path)) {
 		(!metadata.permissions().readonly(), None)
 	} else {
 		(false, None) // If we can't get metadata, prompt user to be safe
@@ -1476,8 +960,8 @@ fn is_writable(host: &Host, path: &Path) -> (bool, Option<u32>) {
 fn get_interactive_prompt(host: &Host, to: &Path, cached_mode: Option<u32>) -> String {
 	// Use cached mode if available, otherwise fetch it
 	let mode = cached_mode.or_else(|| {
-		host.resolve(to)
-			.metadata()
+		host.fs()
+			.metadata(host.resolve(to))
 			.ok()
 			.map(|m| m.permissions().mode())
 	});
@@ -1562,6 +1046,10 @@ fn can_delete_file(host: &Host, path: &Path) -> bool {
 	};
 
 	let resolved = host.resolve(path);
+	// Only native host files have a Win32 handle to probe.
+	if !host.fs().is_native_local(&resolved) {
+		return false;
+	}
 	let wide_path = resolved
 		.as_os_str()
 		.encode_wide()
@@ -1603,301 +1091,6 @@ pub(crate) fn mv_builtin<SE: ShellExtensions>() -> Registration<SE> {
 	util::<Mv, SE>()
 }
 
-#[cfg(unix)]
-mod hardlink {
-	use super::Host;
-	use std::{
-		io::{self, Write},
-		path::{Path, PathBuf},
-	};
-
-	use rustc_hash::FxHashMap;
-	use uucore::display::Quotable;
-
-	/// Tracks hardlinks during cross-partition moves to preserve them
-	#[derive(Debug, Default)]
-	pub struct HardlinkTracker {
-		/// Maps (device, inode) -> destination path for the first occurrence
-		inode_map: FxHashMap<(u64, u64), PathBuf>,
-	}
-
-	/// Pre-scans files to identify hardlink groups with optimized memory usage
-	#[derive(Debug, Default)]
-	pub struct HardlinkGroupScanner {
-		/// Maps (device, inode) -> list of source paths that are hardlinked together
-		hardlink_groups: FxHashMap<(u64, u64), Vec<PathBuf>>,
-		/// List of source files/directories being moved (for destination mapping)
-		source_files:    Vec<PathBuf>,
-		/// Whether scanning has been performed
-		scanned:         bool,
-	}
-
-	/// Configuration options for hardlink preservation
-	#[derive(Debug, Clone, Default)]
-	pub struct HardlinkOptions {
-		/// Whether to show verbose output about hardlink operations
-		pub verbose: bool,
-	}
-
-	/// Errors that can occur during hardlink operations
-	#[derive(Debug)]
-	pub enum HardlinkError {
-		/// An underlying filesystem operation failed.
-		Io(io::Error),
-		/// Pre-scanning a hardlink group failed.
-		Scan(String),
-		/// Recreating a hardlink at its destination failed.
-		Preservation { source: PathBuf, target: PathBuf },
-		/// Metadata for a candidate hardlink could not be read.
-		Metadata { path: PathBuf, error: io::Error },
-	}
-
-	impl std::fmt::Display for HardlinkError {
-		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-			match self {
-				Self::Io(e) => write!(f, "I/O error during hardlink operation: {e}"),
-				Self::Scan(msg) => {
-					write!(f, "Failed to scan files for hardlinks: {msg}")
-				},
-				Self::Preservation { source, target } => {
-					write!(f, "Failed to preserve hardlink: {} -> {}", source.quote(), target.quote())
-				},
-				Self::Metadata { path, error } => {
-					write!(f, "Metadata access error for {}: {error}", path.quote())
-				},
-			}
-		}
-	}
-
-	impl std::error::Error for HardlinkError {
-		fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-			match self {
-				Self::Io(e) => Some(e),
-				Self::Metadata { error, .. } => Some(error),
-				_ => None,
-			}
-		}
-	}
-
-	impl From<io::Error> for HardlinkError {
-		fn from(error: io::Error) -> Self {
-			Self::Io(error)
-		}
-	}
-
-	impl From<HardlinkError> for io::Error {
-		fn from(error: HardlinkError) -> Self {
-			match error {
-				HardlinkError::Io(e) => e,
-				HardlinkError::Scan(msg) => Self::other(msg),
-				HardlinkError::Preservation { source, target } => Self::other(format!(
-					"Failed to preserve hardlink: {} -> {}",
-					source.quote(),
-					target.quote()
-				)),
-
-				HardlinkError::Metadata { path, error } => {
-					Self::other(format!("Metadata access error for {}: {error}", path.quote(),))
-				},
-			}
-		}
-	}
-
-	impl HardlinkTracker {
-		/// Creates an empty hardlink tracker.
-		pub fn new() -> Self {
-			Self::default()
-		}
-
-		/// Check if a file is a hardlink we've seen before, and return the target
-		/// path if so
-		pub fn check_hardlink(
-			&mut self,
-			host: &mut Host,
-			source: &Path,
-			dest: &Path,
-			scanner: &HardlinkGroupScanner,
-			options: &HardlinkOptions,
-		) -> Option<PathBuf> {
-			use std::os::unix::fs::MetadataExt;
-
-			let metadata = match host.resolve(source).metadata() {
-				Ok(meta) => meta,
-				Err(e) => {
-					// Gracefully handle metadata errors by logging and continuing without hardlink
-					// tracking
-					if options.verbose {
-						let _ = writeln!(
-							host.stderr,
-							"warning: cannot get metadata for {}: {e}",
-							source.quote()
-						);
-					}
-					return None;
-				},
-			};
-
-			let key = (metadata.dev(), metadata.ino());
-
-			// Check if we've already processed a file with this inode
-			if let Some(existing_path) = self.inode_map.get(&key) {
-				// Check if this file is part of a hardlink group from the scanner
-				let has_hardlinks = scanner
-					.hardlink_groups
-					.get(&key)
-					.is_some_and(|group| group.len() > 1);
-
-				if has_hardlinks {
-					if options.verbose {
-						let _ = writeln!(
-							host.stderr,
-							"preserving hardlink {} -> {} (hardlinked)",
-							source.quote(),
-							existing_path.quote()
-						);
-					}
-					return Some(existing_path.clone());
-				}
-			}
-
-			// This is the first time we see this file, record its destination
-			self.inode_map.insert(key, dest.to_path_buf());
-
-			None
-		}
-	}
-
-	impl HardlinkGroupScanner {
-		/// Creates an empty hardlink group scanner.
-		pub fn new() -> Self {
-			Self::default()
-		}
-
-		/// Scan files and group them by hardlinks, including recursive directory
-		/// scanning
-		pub fn scan_files(&mut self, host: &mut Host, files: &[PathBuf], options: &HardlinkOptions) {
-			if self.scanned {
-				return;
-			}
-
-			// Store the source files for destination mapping
-			self.source_files = files.to_vec();
-
-			for file in files {
-				if let Err(e) = self.scan_single_path(host, file)
-					&& options.verbose
-				{
-					// Only show warnings for verbose mode
-					let _ =
-						writeln!(host.stderr, "warning: failed to scan {}: {e}", file.quote());
-				}
-				// For non-verbose mode, silently continue for missing files
-				// This provides graceful degradation - we'll lose hardlink info for
-				// this file but can still preserve hardlinks for other files
-			}
-
-			self.scanned = true;
-
-			if options.verbose {
-				let stats = self.stats();
-				if stats.total_groups > 0 {
-					let _ = writeln!(
-						host.stderr,
-						"found {} hardlink groups with {} total files",
-						stats.total_groups,
-						stats.total_files
-					);
-				}
-			}
-		}
-
-		/// Scan a single path (file or directory)
-		fn scan_single_path(&mut self, host: &mut Host, path: &Path) -> io::Result<()> {
-			use std::os::unix::fs::MetadataExt;
-
-			if host.resolve(path).is_dir() {
-				// Recursively scan directory contents
-				self.scan_directory_recursive(host, path)?;
-			} else {
-				let metadata = host.resolve(path).metadata()?;
-				if metadata.nlink() > 1 {
-					let key = (metadata.dev(), metadata.ino());
-					self
-						.hardlink_groups
-						.entry(key)
-						.or_default()
-						.push(path.to_path_buf());
-				}
-			}
-			Ok(())
-		}
-
-		/// Recursively scan a directory for hardlinked files
-		fn scan_directory_recursive(&mut self, host: &mut Host, dir: &Path) -> io::Result<()> {
-			use std::os::unix::fs::MetadataExt;
-
-			let entries = std::fs::read_dir(host.resolve(dir))?;
-			for entry in entries {
-				let entry = entry?;
-				let path = entry.path();
-
-				if path.is_dir() {
-					self.scan_directory_recursive(host, &path)?;
-				} else {
-					let metadata = path.metadata()?;
-					if metadata.nlink() > 1 {
-						let key = (metadata.dev(), metadata.ino());
-						self.hardlink_groups.entry(key).or_default().push(path);
-					}
-				}
-			}
-			Ok(())
-		}
-
-
-		/// Get statistics about scanned hardlinks
-		#[cfg(unix)]
-		pub fn stats(&self) -> ScannerStats {
-			let total_groups = self.hardlink_groups.len();
-			let total_files = self.hardlink_groups.values().map(Vec::len).sum();
-
-			ScannerStats { total_groups, total_files }
-		}
-	}
-
-	/// Statistics about hardlink scanning
-	#[derive(Debug, Clone)]
-	pub struct ScannerStats {
-		/// Number of distinct inode groups found.
-		pub total_groups: usize,
-		/// Number of files belonging to those groups.
-		pub total_files:  usize,
-	}
-
-	/// Create a new hardlink tracker and scanner pair
-	pub fn create_hardlink_context() -> (HardlinkTracker, HardlinkGroupScanner) {
-		(HardlinkTracker::new(), HardlinkGroupScanner::new())
-	}
-
-	/// Convenient function to execute operations with proper hardlink context
-	/// handling
-	pub fn with_optional_hardlink_context<F, R>(
-		tracker: Option<&mut HardlinkTracker>,
-		scanner: Option<&HardlinkGroupScanner>,
-		operation: F,
-	) -> R
-	where
-		F: FnOnce(&mut HardlinkTracker, &HardlinkGroupScanner) -> R,
-	{
-		if let (Some(tracker), Some(scanner)) = (tracker, scanner) {
-			operation(tracker, scanner)
-		} else {
-			let (mut dummy_tracker, dummy_scanner) = create_hardlink_context();
-			operation(&mut dummy_tracker, &dummy_scanner)
-		}
-	}
-
-}
 #[cfg(test)]
 mod tests {
 	use std::{env, fs};

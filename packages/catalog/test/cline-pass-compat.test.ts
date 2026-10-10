@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { toClinePassPublicModelId, toClinePassWireModelId } from "@oh-my-pi/pi-catalog/cline-pass-model-id";
+import { isBareIdReferenceProvider } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
 	DEFAULT_MODEL_PER_PROVIDER,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
@@ -91,10 +91,6 @@ describe("ClinePass catalog", () => {
 		});
 	});
 
-	it("keeps uncurated model names free of the Cline wire namespace", () => {
-		expect(sourceModel("unlisted-model").name).toBe("unlisted-model");
-	});
-
 	it("maps Cline's per-model reasoning controls from the curated snapshot", () => {
 		const model = sourceModel("kimi-k3");
 
@@ -115,11 +111,10 @@ describe("ClinePass catalog", () => {
 
 	it("excludes ClinePass metadata from generic bare-id references", () => {
 		const reference = createReferenceResolver<"openai-completions">(new Map())("kimi-k3");
-		const fireworksReference = getBundledModels("fireworks").find(model => model.id === "kimi-k3");
 
-		expect(reference?.provider).toBe("fireworks");
-		expect(reference?.maxTokens).toBe(fireworksReference?.maxTokens);
-		expect(reference?.maxTokens).not.toBe(sourceModel("kimi-k3").maxTokens);
+		expect(isBareIdReferenceProvider("cline-pass")).toBe(false);
+		expect(reference).toBeDefined();
+		expect(reference?.provider).not.toBe("cline-pass");
 	});
 
 	it("applies the verified Cline gateway request and reasoning compatibility", () => {
@@ -416,5 +411,35 @@ describe("ClinePass catalog", () => {
 		expect(resolveModelPolicy(models?.[0] as ModelSpec<"openai-completions">).compat.wireModelIdMode).toBe(
 			"cline-pass",
 		);
+	});
+
+	it("exposes supported effort levels for DeepSeek V4.1 Flash Free and Muse Spark 1.3 Contributor Free", async () => {
+		const options = clinePassModelManagerOptions({
+			fetch: async () =>
+				new Response(
+					JSON.stringify({
+						clinePass: [{ id: "cline-pass/kimi-k3", name: "cline-pass/kimi-k3" }],
+						free: [
+							{ id: "cline-free/deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash (free)" },
+							{ id: "cline-free/muse-spark-1.3-contributor", name: "Muse Spark 1.3 (C) (free)" },
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				),
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		const deepseek = models?.find(model => model.id === "cline-free/deepseek-v4.1-flash");
+		const muse = models?.find(model => model.id === "cline-free/muse-spark-1.3-contributor");
+
+		expect(deepseek).toBeDefined();
+		expect(deepseek?.name).toBe("DeepSeek V4.1 Flash (free)");
+		expect(deepseek?.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(resolveModelPolicy(deepseek!).compat.supportsReasoningEffort).toBe(true);
+
+		expect(muse).toBeDefined();
+		expect(muse?.name).toBe("Muse Spark 1.3 (C) (free)");
+		expect(muse?.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(resolveModelPolicy(muse!).compat.supportsReasoningEffort).toBe(true);
 	});
 });

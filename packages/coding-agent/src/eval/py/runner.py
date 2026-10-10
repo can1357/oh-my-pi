@@ -5,7 +5,7 @@ wrapper writes typed frames back.
 
 Host -> wrapper:
   {"id": str, "code": str, "silent": bool?, "storeHistory": bool?}
-  {"id": str, "code": str, "silent": bool?, "storeHistory": bool?, "cwd": str?, "env": dict?}
+  {"id": str, "code": str, "silent": bool?, "storeHistory": bool?, "cwd": str?, "filename": str?, "env": dict?}
   {"type": "tool", "id": str, "op": "describe", "names": [str]}
   {"type": "tool", "id": str, "op": "call", "name": str, "args": dict}
   {"type": "exit"}                                # graceful shutdown
@@ -36,8 +36,10 @@ import codecs
 import contextvars
 import inspect
 import io
+import itertools
 import json
 import hashlib
+import linecache
 import locale
 import os
 import re
@@ -50,6 +52,7 @@ import sys
 import threading
 import time
 import traceback
+import tokenize
 from pathlib import Path
 from typing import Any, Callable
 
@@ -917,12 +920,76 @@ def _quote_arg(text: str) -> str:
     return json.dumps(text, ensure_ascii=False)
 
 
+_STRING_START_TOKENS = {
+    getattr(tokenize, name, -1) for name in ("FSTRING_START", "TSTRING_START")
+}
+_STRING_END_TOKENS = {
+    getattr(tokenize, name, -1) for name in ("FSTRING_END", "TSTRING_END")
+}
+
+
+def _magic_line_indices(lines: list[str]) -> set[int]:
+    """Find command lines outside Python strings without lexing shell payloads."""
+    indices: set[int] = set()
+    offset = 0
+    while offset < len(lines):
+        # A synthetic enclosing expression suppresses indentation checks when
+        # restarting in the middle of a suite; this pass only identifies tokens.
+        stream = itertools.chain(
+            ("(\n",),
+            (line + "\n" for line in itertools.islice(lines, offset, None)),
+            (")\n",),
+        )
+        last_row = -1
+        string_depth = 0
+        try:
+            for item in tokenize.generate_tokens(lambda: next(stream, "")):
+                if item.type in _STRING_START_TOKENS:
+                    string_depth += 1
+                elif item.type in _STRING_END_TOKENS:
+                    string_depth -= 1
+                    continue
+                if string_depth or item.type in (
+                    tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
+                    tokenize.DEDENT, tokenize.ENDMARKER, tokenize.COMMENT,
+                ) or (item.type == tokenize.ERRORTOKEN and item.string.isspace()):
+                    # Python < 3.12 emits indentation before `!` as one
+                    # whitespace ERRORTOKEN per column.
+                    continue
+                row = offset + item.start[0] - 2
+                if row < offset or row >= len(lines) or row == last_row:
+                    continue
+                last_row = row
+                stripped = lines[row].lstrip()
+                if item.start[1] != len(lines[row]) - len(stripped):
+                    continue
+                assignment = _ASSIGN_LINE_RE.match(lines[row])
+                rhs = assignment.group("rhs").strip() if assignment else ""
+                if not stripped.startswith(("%", "!")) and not rhs.startswith(("%", "!")):
+                    continue
+                indices.add(row)
+                if stripped.startswith("%%"):
+                    return indices
+                # Shell quotes and cell/line magic arguments are not Python.
+                # Restart after the command instead of tokenizing its payload.
+                consumed = _fold_continuations(lines, row)[1] if stripped.startswith(("%", "!")) else 1
+                offset = row + consumed
+                break
+            else:
+                return indices
+        except (tokenize.TokenError, IndentationError):
+            # Leave incomplete Python source to the ordinary syntax-error path.
+            return indices
+    return indices
+
+
 def transform_cell(source: str) -> str:
     """Translate IPython-style magics + shell escapes into plain Python.
 
     Rules
     -----
     * ``%name args``              -> ``__omp_magic("name", "args")``
+    * ``%load path``              -> ``await __omp_magic_async("load", "path")``
     * ``var = %name args``        -> ``var = __omp_magic("name", "args")``
     * ``!cmd``                    -> ``__omp_shell("cmd")``
     * ``var = !cmd``              -> ``var = __omp_shell("cmd")``
@@ -930,20 +997,24 @@ def transform_cell(source: str) -> str:
       (cell magic must be the first non-whitespace token of a top-level line and
       consumes the remainder of the cell)
 
-    Lines inside strings or comments are left alone — we operate on the raw
-    text before parsing, but the scanner only fires on the first token of each
-    physical line and never touches the body of triple-quoted strings because
-    those bodies are never first tokens themselves.
+    Python tokenization identifies command lines outside strings and comments.
+    Real command payloads are skipped before resuming lexical scanning so shell
+    quoting cannot change how subsequent Python source is interpreted.
     """
 
     if "%" not in source and "!" not in source:
         return source
 
     lines = source.splitlines()
+    magic_lines = _magic_line_indices(lines)
     out: list[str] = []
     i = 0
     while i < len(lines):
         line = lines[i]
+        if i not in magic_lines:
+            out.append(line)
+            i += 1
+            continue
         stripped = line.lstrip()
         indent = line[: len(line) - len(stripped)]
 
@@ -965,7 +1036,9 @@ def transform_cell(source: str) -> str:
             indent = folded[: len(folded) - len(stripped_folded)]
             head, _ = _split_magic_head(stripped_folded[1:])
             name, args = head
-            out.append(f"{indent}__omp_magic({_quote_arg(name)}, {_quote_arg(args)})")
+            call = "__omp_magic_async" if name == "load" else "__omp_magic"
+            prefix = "await " if name == "load" else ""
+            out.append(f"{indent}{prefix}{call}({_quote_arg(name)}, {_quote_arg(args)})")
             i += consumed
             continue
 
@@ -992,8 +1065,10 @@ def transform_cell(source: str) -> str:
             if rhs.startswith("%") and not rhs.startswith("%%"):
                 head, _ = _split_magic_head(rhs[1:])
                 name, args = head
+                call = "__omp_magic_async" if name == "load" else "__omp_magic"
+                prefix = "await " if name == "load" else ""
                 out.append(
-                    f"{m.group('indent')}{m.group('lhs').rstrip()} = __omp_magic({_quote_arg(name)}, {_quote_arg(args)})"
+                    f"{m.group('indent')}{m.group('lhs').rstrip()} = {prefix}{call}({_quote_arg(name)}, {_quote_arg(args)})"
                 )
                 i += 1
                 continue
@@ -1215,6 +1290,16 @@ class _BoundedLineScanner:
 def _magic_pip(args: str) -> None:
     argv = shlex.split(args) if args else ["--help"]
     cmd = [sys.executable, "-m", "pip", *argv]
+    # Installs are host work, not cell compute: suspend the eval watchdog (same
+    # protocol as bridge waits in bridge-timeout.ts). Caller aborts still apply.
+    _emit_status("timeout-pause")
+    try:
+        _run_pip(cmd, args)
+    finally:
+        _emit_status("timeout-resume")
+
+
+def _run_pip(cmd: list[str], args: str) -> None:
     # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
         cmd,
@@ -1351,13 +1436,19 @@ def _magic_reset(_args: str) -> None:
 
 
 @line_magic("load")
-def _magic_load(args: str) -> None:
-    path = Path(os.path.expanduser(args.strip()))
+async def _magic_load(args: str) -> None:
+    try:
+        parts = shlex.split(args)
+    except ValueError as exc:
+        raise ValueError(f"Usage: %load <path> ({exc})") from exc
+    if len(parts) != 1:
+        raise ValueError("Usage: %load <path> (quote paths containing spaces)")
+    path = Path(os.path.expanduser(parts[0])).resolve()
     source = path.read_text(encoding="utf-8")
-    _emit(
-        {"type": "display", "id": _CURRENT_RID.get(), "bundle": {"text/plain": source}}
+    await _exec_source_async(
+        transform_cell(source), _STATE.user_ns,
+        filename=str(path), linecache_source=source,
     )
-    _exec_source(source, _STATE.user_ns)
 
 
 @line_magic("run")
@@ -1470,6 +1561,11 @@ def __omp_magic(name: str, args: str) -> Any:
     return fn(args)
 
 
+async def __omp_magic_async(name: str, args: str) -> Any:
+    result = __omp_magic(name, args)
+    return await result if inspect.isawaitable(result) else result
+
+
 def __omp_magic_cell(name: str, args: str, body: str) -> Any:
     fn = _CELL_MAGICS.get(name)
     if fn is None:
@@ -1573,6 +1669,18 @@ def _mime_bundle(value: Any) -> dict:
     Honors ``_repr_mimebundle_`` first, falls back to individual ``_repr_*_``
     accessors, and always provides ``text/plain``.
     """
+    # Match JS display({type: "image", ...}) without losing detail or remote
+    # references in a plain PNG/JPEG MIME representation.
+    if (
+        isinstance(value, dict)
+        and value.get("type") == "image"
+        and isinstance(value.get("mimeType"), str)
+        and isinstance(value.get("data"), (str, bytes, bytearray))
+    ):
+        image = dict(value)
+        image["data"] = _coerce_image_bytes(image["data"])
+        return {"application/x-omp-image": image}
+
     bundle: dict[str, Any] = {}
     matplotlib_png = _matplotlib_figure_png(value)
     if matplotlib_png is not None:
@@ -1676,6 +1784,7 @@ def _install_builtins(ns: dict) -> None:
     ns["display"] = __omp_display
     ns["__omp_display"] = __omp_display
     ns["__omp_magic"] = __omp_magic
+    ns["__omp_magic_async"] = __omp_magic_async
     ns["__omp_magic_cell"] = __omp_magic_cell
     ns["__omp_shell"] = __omp_shell
     ns["__omp_current_run_id__"] = lambda: _CURRENT_RID.get()
@@ -1812,8 +1921,10 @@ class _ShadowCallSiteTransformer(ast.NodeTransformer):
         return ast.copy_location(wrapped, node)
 
 
-def _compile_source(source: str) -> tuple[Any, Any | None, bool]:
-    module = ast.parse(source, "<cell>", "exec")
+def _compile_source(
+    source: str, filename: str = "<cell>"
+) -> tuple[Any, Any | None, bool]:
+    module = ast.parse(source, filename, "exec")
     line_offsets = [0]
     for line in source.splitlines(keepends=True):
         line_offsets.append(line_offsets[-1] + len(line))
@@ -1828,11 +1939,29 @@ def _compile_source(source: str) -> tuple[Any, Any | None, bool]:
         body_module = ast.Module(body=module.body[:-1], type_ignores=[])
         expr_module = ast.Expression(body=last.value)
         ast.copy_location(expr_module, last)
-        body_code = compile(body_module, "<cell>", "exec", flags=_TLA_FLAG)
-        expr_code = compile(expr_module, "<cell>", "eval", flags=_TLA_FLAG)
+        body_code = compile(body_module, filename, "exec", flags=_TLA_FLAG)
+        expr_code = compile(expr_module, filename, "eval", flags=_TLA_FLAG)
         return body_code, expr_code, True
 
-    return compile(module, "<cell>", "exec", flags=_TLA_FLAG), None, False
+    return compile(module, filename, "exec", flags=_TLA_FLAG), None, False
+
+
+def _prepare_file_source(
+    source: str, ns: dict, filename: str, linecache_source: str | None
+) -> None:
+    display_source = source if linecache_source is None else linecache_source
+    lines = display_source.splitlines(keepends=True)
+    if display_source and (not lines or not lines[-1].endswith(("\n", "\r"))):
+        lines[-1] += "\n"
+    linecache.cache[filename] = (len(display_source), None, lines, filename)
+    ns["__file__"] = filename
+    script_dir = os.path.dirname(filename)
+    if script_dir:
+        try:
+            sys.path.remove(script_dir)
+        except ValueError:
+            pass
+        sys.path.insert(0, script_dir)
 
 
 def _exec_source(source: str, ns: dict) -> None:
@@ -1848,13 +1977,21 @@ def _exec_source(source: str, ns: dict) -> None:
             __omp_display(value, kind="result")
 
 
-async def _exec_source_async(source: str, ns: dict) -> None:
+async def _exec_source_async(
+    source: str,
+    ns: dict,
+    *,
+    filename: str = "<cell>",
+    linecache_source: str | None = None,
+) -> None:
     """Compile + execute ``source``; if the last node is an expression, route
     its value through ``__omp_display`` so dataframes/figures render rich.
     Top-level ``await`` / ``async for`` / ``async with`` is permitted; awaited
     regions yield to other requests in the runner's persistent event loop."""
     _restore_call_site_helper(ns)
-    body_code, expr_code, has_expr = _compile_source(source)
+    body_code, expr_code, has_expr = _compile_source(source, filename)
+    if filename != "<cell>":
+        _prepare_file_source(source, ns, filename, linecache_source)
     if body_code is None:
         return
     await _run_compiled_async(body_code, ns, want_value=False)
@@ -2040,7 +2177,14 @@ async def _handle_request_async(req: dict) -> None:
     try:
         try:
             _apply_request_runtime(req)
-            transformed = transform_cell(req.get("code", ""))
+            source = req.get("code", "")
+            transformed = transform_cell(source)
+            requested_filename = req.get("filename")
+            filename = (
+                requested_filename
+                if isinstance(requested_filename, str) and requested_filename
+                else "<cell>"
+            )
         except SyntaxError as exc:
             _emit_error(rid, exc)
             _emit(
@@ -2072,7 +2216,12 @@ async def _handle_request_async(req: dict) -> None:
             _begin_exec_sigint()
         execution_started = True
         try:
-            await _exec_source_async(transformed, _STATE.user_ns)
+            await _exec_source_async(
+                transformed,
+                _STATE.user_ns,
+                filename=filename,
+                linecache_source=source,
+            )
         except KeyboardInterrupt:
             cancelled = True
             status = "error"
@@ -2082,7 +2231,7 @@ async def _handle_request_async(req: dict) -> None:
             _emit_error(rid, exc)
         except BaseException as exc:  # noqa: BLE001 - we want to surface every user error
             status = "error"
-            _emit_error(rid, exc)
+            _emit_error(rid, exc, source_filename=filename)
         finally:
             _end_exec_sigint()
             try:
@@ -2110,21 +2259,25 @@ async def _handle_request_async(req: dict) -> None:
             _end_exec_sigint()
 
 
-def _emit_error(rid: str, exc: BaseException) -> None:
-    if isinstance(exc, SyntaxError) and exc.filename == "<cell>":
-        # Syntax error in the cell source itself: every stack frame is runner
-        # machinery, so emit only the caret display, like a REPL.
+def _emit_error(rid: str, exc: BaseException, source_filename: str = "<cell>") -> None:
+    if isinstance(exc, SyntaxError) and exc.filename in ("<cell>", source_filename):
+        # Syntax error in the executed source itself: every stack frame is
+        # runner machinery, so emit only the caret display, like a REPL.
         tb_lines = traceback.format_exception_only(type(exc), exc)
     else:
-        # Drop the leading runner-internal frames (_handle_request_async ->
-        # _exec_source_async -> _run_compiled_*) so tracebacks start at user
-        # code. If the exception never reached user code it is a runner bug;
-        # keep the full traceback because those frames are the diagnosis.
-        tb = exc.__traceback__
-        while tb is not None and tb.tb_frame.f_code.co_filename == __file__:
-            tb = tb.tb_next
-        tb_lines = traceback.format_exception(
-            type(exc), exc, tb if tb is not None else exc.__traceback__
+        # Magics execute between the cell and loaded script. Omit runner
+        # frames throughout that chain, not just before the first user frame.
+        # Internal-only failures retain their full traceback for diagnosis.
+        formatted = traceback.TracebackException.from_exception(exc)
+        user_frames = [frame for frame in formatted.stack if frame.filename != __file__]
+        if user_frames:
+            formatted.stack = traceback.StackSummary.from_list(user_frames)
+        tb_lines = list(formatted.format())
+    if isinstance(exc, ModuleNotFoundError) and exc.name:
+        tb_lines.append(
+            f"Install the distribution that provides module {exc.name!r} with "
+            "`%pip install <distribution-name>` in eval. "
+            "Distribution names can differ from import names."
         )
     _emit(
         {
@@ -2219,9 +2372,9 @@ async def _serve_posix(loop: asyncio.AbstractEventLoop, stdin) -> None:
 
     A background thread reads stdin and enqueues requests so a cell parked on
     a top-level ``await`` (an ``await agent(...)`` bridge call, say) does not
-    block sibling requests: eval sessions are shared across concurrent agents
-    (subagents inherit the parent's eval session id), so multiple requests can
-    be in flight on one kernel at once. The reader thread stays blocked in a
+    block sibling requests: auto-backgrounded cells, user Python shortcuts, and
+    kernel-defined tool calls from subagents can all be in flight on one kernel
+    at once. The reader thread stays blocked in a
     ``sys.stdin`` read for its whole life, which is safe on POSIX but wedges
     native-extension imports on Windows (see ``_serve_windows``).
     """

@@ -13,7 +13,9 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
-import { getDefault, type Settings } from "../config/settings";
+import type { Setting } from "../config/registry";
+import type { Settings } from "../config/settings";
+
 import {
 	type OutputSummary,
 	type TruncationResult,
@@ -22,11 +24,20 @@ import {
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { formatOutputNotice, type OutputMeta, type TruncationMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { renderError } from "./tool-errors";
+import {
+	cfgToolsArtifactHeadBytes,
+	cfgToolsArtifactMaxBytes,
+	cfgToolsArtifactSpillThreshold,
+	cfgToolsArtifactTailBytes,
+	cfgToolsArtifactTailLines,
+	cfgToolsOutputMaxColumns,
+} from "./settings";
 
 /** Input for {@link OutputMetaBuilder.limits}. `columnUnit` defaults to `chars`. */
 export interface LimitsInput {
 	matchLimit?: number;
-	resultLimit?: number;
+	/** A bare number doubles as its suggestion; an object may pass `suggestion: null` to suppress the advice when the tool is already at its hard cap (#13263). */
+	resultLimit?: number | { reached: number; suggestion?: number | null };
 	headLimit?: number;
 	columnMax?: number;
 	columnUnit?: "bytes" | "chars";
@@ -183,13 +194,15 @@ export class OutputMetaBuilder {
 		// when the output is otherwise complete (`truncated === false`). The sink
 		// enforces the cap in UTF-8 bytes, so the notice must say "bytes".
 		if (summary.columnMax != null && summary.columnMax > 0 && (summary.columnTruncatedLines ?? 0) > 0) {
-			this.columnTruncated(summary.columnMax, "bytes", summary.artifactId);
+			this.columnTruncated(summary.columnMax, "bytes", summary.artifactId, summary.artifactElidedBytes);
 		}
 		if (!summary.truncated) return this;
 
 		const { direction, startLine = 1, totalFileLines } = options;
 		const totalLines = totalFileLines ?? summary.totalLines;
 		const artifactId = summary.artifactError ? undefined : summary.artifactId;
+		// A capped artifact holds only a head/tail sample; the notice must say so.
+		const artifactElidedBytes = artifactId ? summary.artifactElidedBytes : undefined;
 
 		// Middle elision: the sink retained head + tail with an elision marker.
 		if (summary.elidedBytes != null && summary.elidedBytes > 0) {
@@ -209,6 +222,7 @@ export class OutputMetaBuilder {
 				elidedBytes: summary.elidedBytes,
 				elidedLines,
 				artifactId,
+				...(artifactElidedBytes ? { artifactElidedBytes } : {}),
 			};
 			return this;
 		}
@@ -240,6 +254,7 @@ export class OutputMetaBuilder {
 			outputBytes: summary.outputBytes,
 			shownRange: { start: shownStart, end: shownEnd },
 			artifactId,
+			...(artifactElidedBytes ? { artifactElidedBytes } : {}),
 			nextOffset: direction === "head" ? shownEnd + 1 : undefined,
 		};
 
@@ -304,7 +319,11 @@ export class OutputMetaBuilder {
 			this.matchLimit(limits.matchLimit);
 		}
 		if (limits.resultLimit !== undefined) {
-			this.resultLimit(limits.resultLimit);
+			if (typeof limits.resultLimit === "number") {
+				this.resultLimit(limits.resultLimit);
+			} else {
+				this.resultLimit(limits.resultLimit.reached, limits.resultLimit.suggestion);
+			}
 		}
 		if (limits.headLimit !== undefined) {
 			this.headLimit(limits.headLimit);
@@ -315,10 +334,14 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Add result limit notice. No-op if reached <= 0. */
-	resultLimit(reached: number, suggestion = reached * 2): this {
+	/** Add result limit notice. No-op if reached <= 0. `suggestion: null` omits the "Use limit=" advice (hard cap reached); omitted suggestion defaults to doubling. */
+	resultLimit(reached: number, suggestion?: number | null): this {
 		if (reached <= 0) return this;
-		this.#meta.limits = { ...this.#meta.limits, resultLimit: { reached, suggestion } };
+		const resolved = suggestion === null ? undefined : (suggestion ?? reached * 2);
+		this.#meta.limits = {
+			...this.#meta.limits,
+			resultLimit: { reached, ...(resolved !== undefined ? { suggestion: resolved } : {}) },
+		};
 		return this;
 	}
 
@@ -337,10 +360,24 @@ export class OutputMetaBuilder {
 	 * When `artifactId` is supplied the sink mirrored the raw, uncapped stream
 	 * into that artifact; the rendered notice then advertises it as a recovery
 	 * pointer (see {@link formatOutputNotice}), matching the tail-truncation notice.
+	 * `artifactElidedBytes` marks an artifact the size cap cut to a head/tail sample.
 	 */
-	columnTruncated(maxColumn: number, unit: "bytes" | "chars" = "chars", artifactId?: string): this {
+	columnTruncated(
+		maxColumn: number,
+		unit: "bytes" | "chars" = "chars",
+		artifactId?: string,
+		artifactElidedBytes?: number,
+	): this {
 		if (maxColumn <= 0) return this;
-		this.#meta.limits = { ...this.#meta.limits, columnTruncated: { maxColumn, unit, artifactId } };
+		this.#meta.limits = {
+			...this.#meta.limits,
+			columnTruncated: {
+				maxColumn,
+				unit,
+				artifactId,
+				...(artifactId && artifactElidedBytes ? { artifactElidedBytes } : {}),
+			},
+		};
 		return this;
 	}
 
@@ -359,6 +396,12 @@ export class OutputMetaBuilder {
 	/** Add internal URL source info (skill://, agent://, artifact://). */
 	sourceInternal(value: string): this {
 		this.#meta.source = { type: "internal", value };
+		return this;
+	}
+
+	/** Mark the output as a bounded page of session artifact storage its source re-reads with line selectors ({@link OutputMeta.pagedSource}). */
+	pagedSource(): this {
+		this.#meta.pagedSource = true;
 		return this;
 	}
 
@@ -419,17 +462,12 @@ const kUnwrappedExecute = Symbol("OutputMeta.UnwrappedExecute");
 
 /** Resolved artifact spill config sourced from the session settings (or schema defaults). */
 function getSpillConfig(s: Settings | undefined) {
-	type Path =
-		| "tools.artifactSpillThreshold"
-		| "tools.artifactTailBytes"
-		| "tools.artifactTailLines"
-		| "tools.artifactHeadBytes";
-	const get = <P extends Path>(path: P) => s?.get(path) ?? getDefault(path);
+	const get = (setting: Setting<number>) => (s ? setting.get(s) : setting.default);
 	return {
-		threshold: get("tools.artifactSpillThreshold") * 1024,
-		tailBytes: get("tools.artifactTailBytes") * 1024,
-		tailLines: get("tools.artifactTailLines"),
-		headBytes: get("tools.artifactHeadBytes") * 1024,
+		threshold: get(cfgToolsArtifactSpillThreshold) * 1024,
+		tailBytes: get(cfgToolsArtifactTailBytes) * 1024,
+		tailLines: get(cfgToolsArtifactTailLines),
+		headBytes: get(cfgToolsArtifactHeadBytes) * 1024,
 	};
 }
 
@@ -468,7 +506,16 @@ export function resolveInlineByteCapBudget(s: Settings | undefined): number {
  * line-buffer post-processing, so one setting controls both surfaces.
  */
 export function resolveOutputMaxColumns(s: Settings | undefined): number {
-	return s?.get("tools.outputMaxColumns") ?? getDefault("tools.outputMaxColumns");
+	return s ? cfgToolsOutputMaxColumns.get(s) : cfgToolsOutputMaxColumns.default;
+}
+
+/**
+ * Resolve the OutputSink `artifactMaxBytes` cap (bytes) from session settings
+ * (`tools.artifactMaxBytes`, in MB). `0` keeps artifact files unbounded.
+ */
+export function resolveOutputSinkArtifactMaxBytes(s: Settings | undefined): number {
+	const megabytes = s ? cfgToolsArtifactMaxBytes.get(s) : cfgToolsArtifactMaxBytes.default;
+	return Math.max(0, Math.floor(megabytes * 1024 * 1024));
 }
 
 /**
@@ -491,29 +538,32 @@ async function spillLargeResultToArtifact(
 	const existingMeta: OutputMeta | undefined = result.details?.meta;
 	if (existingMeta?.truncation?.artifactId) return result;
 
-	// Reading an artifact already addresses recoverable full output. Spilling that
-	// read would only create a redundant artifact containing another artifact's
-	// page (and can repeat indefinitely on subsequent reads).
-	if (
-		toolName === "read" &&
-		existingMeta?.source?.type === "internal" &&
-		existingMeta.source.value.startsWith("artifact://")
-	) {
-		return result;
-	}
+	// A bounded page of artifact storage its source URL re-reads with `:N-M` is already
+	// recoverable. Spilling it would only create a redundant artifact holding another
+	// artifact's page (and can repeat indefinitely on subsequent artifact reads).
+	if (existingMeta?.pagedSource) return result;
 
-	// Measure total text content
+	// Measure total text content. `totalLength` is the UTF-16 length of the "\n"-joined text.
 	const textParts: string[] = [];
+	let totalLength = -1;
 	for (const block of result.content) {
 		if (block.type === "text" && block.text) {
 			textParts.push(block.text);
+			totalLength += block.text.length + 1;
 		}
 	}
 	if (textParts.length === 0) return result;
 
+	// UTF-8 takes 1–3 bytes per UTF-16 code unit (a surrogate pair is 4 bytes for 2 units), so
+	// the length alone settles short and long results. In between, per-part byte lengths sum
+	// to the joined length: the "\n" joiner keeps lone surrogates from pairing across parts.
+	if (totalLength * 3 <= threshold) return result;
+	if (totalLength <= threshold) {
+		let totalBytes = textParts.length - 1;
+		for (const part of textParts) totalBytes += Buffer.byteLength(part, "utf-8");
+		if (totalBytes <= threshold) return result;
+	}
 	const fullText = textParts.length === 1 ? textParts[0] : textParts.join("\n");
-	const totalBytes = Buffer.byteLength(fullText, "utf-8");
-	if (totalBytes <= threshold) return result;
 
 	// Save the full output as an artifact so the elided bytes stay recoverable.
 	// In a persistent session this hits `Bun.write`, which can throw (disk full,

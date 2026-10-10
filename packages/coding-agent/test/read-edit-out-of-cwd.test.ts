@@ -10,6 +10,9 @@ import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
+import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
+import { cfgReadSummarizeEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 function textOutput(result: AgentToolResult<ReadToolDetails>): string {
 	return result.content
 		.filter(c => c.type === "text")
@@ -19,7 +22,7 @@ function textOutput(result: AgentToolResult<ReadToolDetails>): string {
 
 function createSession(cwd: string): ToolSession {
 	const settings = Settings.isolated();
-	settings.set("read.summarize.enabled", false);
+	cfgReadSummarizeEnabled.set(settings, false);
 	const artifactsDir = path.join(cwd, "artifacts");
 	return {
 		cwd,
@@ -105,7 +108,8 @@ describe("read → edit round-trip for out-of-cwd files", () => {
 		// The header must retain the workspace-relative directory, not collapse
 		// to the bare `settings.json`, or the edit below resolves against the
 		// existing cwd file and the snapshot-tag guard rejects the valid edit.
-		expect(header).toBe(`[${path.join("src", "settings.json")}#${header.slice(-5, -1)}]`);
+		// Display paths always use `/`, whatever the platform separator.
+		expect(header).toBe(`[src/settings.json#${header.slice(-5, -1)}]`);
 
 		await new EditTool(session, "hashline").execute("edit-in", {
 			input: `${header}\nPUT 1.=1:\n+ALPHA\n`,
@@ -162,7 +166,7 @@ describe("read → edit round-trip for out-of-cwd files", () => {
 			await Bun.write(workspaceFile, "alpha\nbeta\n");
 
 			const session = createSession(cwdDir);
-			session.settings.set("edit.mode", testCase.mode);
+			cfgEditMode.set(session.settings, testCase.mode);
 			const readResult = await new ReadTool(session).execute(`read-workspace-suffix-${testCase.mode}`, {
 				path: fileName,
 			});
@@ -179,7 +183,7 @@ describe("read → edit round-trip for out-of-cwd files", () => {
 		await Bun.write(workspaceFile, "alpha\nbeta\n");
 
 		const session = createSession(cwdDir);
-		session.settings.set("edit.mode", "apply_patch");
+		cfgEditMode.set(session.settings, "apply_patch");
 		const readResult = await new ReadTool(session).execute("read-workspace-suffix-recreate", { path: fileName });
 		expect(textOutput(readResult)).toContain("alpha");
 

@@ -99,7 +99,6 @@ export type SymbolKey =
 	| "icon.advisorClosed"
 	| "icon.time"
 	| "icon.omp"
-	| "icon.esc"
 	| "icon.ghost"
 	| "icon.agents"
 	| "icon.job"
@@ -130,6 +129,7 @@ export type SymbolKey =
 	| "icon.vimInsert"
 	| "icon.vimVisual"
 	| "icon.vimVisualLine"
+	| "icon.vimReplace"
 	// Slash-command type indicators (autocomplete); names without an existing
 	// icon.* equivalent — see SlashCommandIconName for the full vocabulary.
 	| "cmd.action"
@@ -285,7 +285,28 @@ export type SymbolKey =
 	| "tool.goal"
 	| "tool.irc"
 	| "tool.delete"
-	| "tool.move";
+	| "tool.move"
+	// Keyboard keys (rendered by formatKeyHint). `*Mac` variants replace the
+	// generic modifier on macOS, whose keycaps are labelled with ⌃ ⌥ ⌘.
+	| "key.ctrl"
+	| "key.ctrlMac"
+	| "key.shift"
+	| "key.alt"
+	| "key.altMac"
+	| "key.super"
+	| "key.superMac"
+	// Gap after a glyph modifier (`⌃⇧C`); nerd icons render too small to abut
+	| "key.joiner"
+	| "key.enter"
+	| "key.esc"
+	| "key.tab"
+	| "key.backspace"
+	| "key.delete"
+	| "key.space"
+	| "key.up"
+	| "key.down"
+	| "key.left"
+	| "key.right";
 
 export type SymbolMap = Record<SymbolKey, string>;
 /**
@@ -459,7 +480,6 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.advisorClosed": "🙈",
 	"icon.time": "⏱",
 	"icon.omp": "π",
-	"icon.esc": "⎋",
 	"icon.ghost": "👻",
 	"icon.agents": "👥",
 	"icon.job": "⚙",
@@ -492,6 +512,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.vimInsert": "▎",
 	"icon.vimVisual": "◉",
 	"icon.vimVisualLine": "≡",
+	"icon.vimReplace": "▁",
 	// Slash-command type indicators
 	"cmd.action": "❯",
 	"cmd.prompt": "✎",
@@ -646,6 +667,25 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tool.irc": "✉",
 	"tool.delete": "🗑",
 	"tool.move": "➜",
+	// Keys: word modifiers off macOS (⌃/⌥/⌘ name no key on a PC keyboard)
+	"key.ctrl": "Ctrl",
+	"key.ctrlMac": "⌃",
+	"key.shift": "⇧",
+	"key.alt": "Alt",
+	"key.altMac": "⌥",
+	"key.super": "Super",
+	"key.superMac": "⌘",
+	"key.joiner": "",
+	"key.enter": "⏎",
+	"key.esc": "⎋",
+	"key.tab": "⇥",
+	"key.backspace": "⌫",
+	"key.delete": "⌦",
+	"key.space": "␣",
+	"key.up": "↑",
+	"key.down": "↓",
+	"key.left": "←",
+	"key.right": "→",
 };
 
 const NERD_SYMBOLS: SymbolMap = {
@@ -822,8 +862,6 @@ const NERD_SYMBOLS: SymbolMap = {
 	// U+F03FF before (2ec52b8bdd) and reverted because it renders the wrong glyph;
 	// do not swap it again.
 	"icon.omp": "\u{f0d57}",
-	// pick: 󱊷 (nf-md-keyboard_esc) | alt: ⎋
-	"icon.esc": "\u{f12b7}",
 	// pick: 󰊠 (nf-md-ghost) | alt: 👻
 	"icon.ghost": "\u{f02a0}",
 	// pick:  | alt: 
@@ -885,6 +923,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.vimVisual": "\uf06e",
 	// pick:  (nf-fa-bars) | alt:  (nf-fa-align_left)
 	"icon.vimVisualLine": "\uf0c9",
+	// pick:  (nf-fa-exchange) | alt:  (nf-fa-repeat)
+	"icon.vimReplace": "\uf0ec",
 	// Slash-command type indicators
 	// pick:  (nf-cod-terminal) | alt:  (nf-fa-terminal)
 	"cmd.action": "\uea85",
@@ -1098,6 +1138,35 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tool.irc": "\uF086",
 	"tool.delete": "\uf12d",
 	"tool.move": "\uf061",
+	// Keys: word modifiers off macOS; arrows stay Unicode (nerd arrows add nothing)
+	"key.ctrl": "Ctrl",
+	// pick: 󰘴 (nf-md-apple_keyboard_control) | alt: ⌃
+	"key.ctrlMac": "\u{f0634}",
+	// pick: 󰘶 (nf-md-apple_keyboard_shift) | alt: ⇧
+	"key.shift": "\u{f0636}",
+	"key.alt": "Alt",
+	// pick: 󰘵 (nf-md-apple_keyboard_option) | alt: ⌥
+	"key.altMac": "\u{f0635}",
+	"key.super": "Super",
+	// pick: 󰘳 (nf-md-apple_keyboard_command) | alt: ⌘
+	"key.superMac": "\u{f0633}",
+	"key.joiner": " ",
+	// pick: 󰌑 (nf-md-keyboard_return) | alt: ⏎
+	"key.enter": "\u{f0311}",
+	// pick: 󱊷 (nf-md-keyboard_esc) | alt: ⎋
+	"key.esc": "\u{f12b7}",
+	// pick: 󰌒 (nf-md-keyboard_tab) | alt: ⇥
+	"key.tab": "\u{f0312}",
+	// pick: 󰁮 (nf-md-backspace) | alt: ⌫
+	"key.backspace": "\u{f006e}",
+	// pick: 󰹾 (nf-md-backspace_reverse) | alt: ⌦
+	"key.delete": "\u{f0e7e}",
+	// pick: 󱁐 (nf-md-keyboard_space) | alt: ␣
+	"key.space": "\u{f1050}",
+	"key.up": "↑",
+	"key.down": "↓",
+	"key.left": "←",
+	"key.right": "→",
 };
 
 const ASCII_SYMBOLS: SymbolMap = {
@@ -1170,9 +1239,11 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"sep.pipe": " | ",
 	// Icons
 	"icon.model": "[M]",
-	"icon.plan": "plan",
-	"icon.prewalk": "prewalk",
-	"icon.goal": "goal",
+	// Mode icons are always followed by their word label ("Plan", "Prewalk", "Goal");
+	// an ASCII word here would just repeat it, so render the label alone.
+	"icon.plan": "",
+	"icon.prewalk": "",
+	"icon.goal": "",
 	"icon.pause": "||",
 	"icon.loop": "loop",
 	"icon.folder": "[D]",
@@ -1192,7 +1263,6 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.advisorClosed": "(adv)",
 	"icon.time": "t:",
 	"icon.omp": "pi",
-	"icon.esc": "esc",
 	"icon.ghost": "@",
 	"icon.agents": "AG",
 	"icon.job": "bg",
@@ -1223,6 +1293,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.vimInsert": "I",
 	"icon.vimVisual": "V",
 	"icon.vimVisualLine": "L",
+	"icon.vimReplace": "R",
 	// Slash-command type indicators — unused; the icon column is disabled in ASCII mode
 	"cmd.action": "",
 	"cmd.prompt": "",
@@ -1374,6 +1445,24 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tool.irc": "#",
 	"tool.delete": "rm",
 	"tool.move": "mv",
+	"key.ctrl": "Ctrl",
+	"key.ctrlMac": "Ctrl",
+	"key.shift": "Shift",
+	"key.alt": "Alt",
+	"key.altMac": "Option",
+	"key.super": "Super",
+	"key.superMac": "Cmd",
+	"key.joiner": "+",
+	"key.enter": "Enter",
+	"key.esc": "Esc",
+	"key.tab": "Tab",
+	"key.backspace": "Backspace",
+	"key.delete": "Delete",
+	"key.space": "Space",
+	"key.up": "Up",
+	"key.down": "Down",
+	"key.left": "Left",
+	"key.right": "Right",
 };
 
 export const SYMBOL_PRESETS: Record<SymbolPreset, SymbolMap> = {

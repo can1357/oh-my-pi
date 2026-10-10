@@ -1,7 +1,7 @@
-// Gallery fixtures for the agentic orchestration tools (task, hub, goal).
+// Gallery fixtures for agentic orchestration (task, wait, goal, yield).
 import type { Usage } from "@oh-my-pi/pi-ai";
-import type { TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import type { HubDetails } from "@oh-my-pi/pi-tui/tools/hub";
+import type { TaskToolDetails, YieldItem } from "@oh-my-pi/pi-tui/tools/task";
+import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { GalleryFixture } from "./types";
 
 /** Message/activity timestamps are offsets from load time so gallery ages stay plausible. */
@@ -16,6 +16,16 @@ const fixtureUsage = (tokens: { input: number; output: number }, costTotal: numb
 	totalTokens: tokens.input + tokens.output,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: costTotal },
 });
+
+/** A subagent's structured result, as `yield` submits it. */
+const YIELD_DATA = {
+	summary: "Two races in the session store's flush path.\nBoth need the store lock held across the read.",
+	confidence: 0.85,
+	findings: [
+		{ file: "src/session/store.ts", line: 142, issue: "flush() reads entries without holding the lock" },
+		{ file: "src/session/store.ts", line: 188, issue: "concurrent flushes can write the same batch twice" },
+	],
+};
 
 export const agenticFixtures: Record<string, GalleryFixture> = {
 	task: {
@@ -140,68 +150,12 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 		},
 	},
 
-	hub_send: {
-		label: "Hub send",
-		renderer: "hub",
-		// Streaming: recipient known; the message body still arriving.
-		streamingArgs: { op: "send", to: "AuthLoader", message: "Are you still touching" },
-		args: {
-			op: "send",
-			to: "AuthLoader",
-			message: "Are you still touching src/server/auth.ts? I need to add a 401 path.",
-			await: true,
-		},
-		result: {
-			content: [
-				{
-					type: "text",
-					text: [
-						"Delivered to 1 peer(s):",
-						"- AuthLoader: revived",
-						"",
-						"Reply from AuthLoader:",
-						"Done with auth.ts — go ahead, just rebase past my session-store rename.",
-					].join("\n"),
-				},
-			],
-			details: {
-				op: "send",
-				from: "Main",
-				to: "AuthLoader",
-				receipts: [{ to: "AuthLoader", outcome: "revived" }],
-				waited: {
-					id: "7181122334455667789",
-					from: "AuthLoader",
-					to: "Main",
-					body: "Done with auth.ts — go ahead, just rebase past my session-store rename.",
-					ts: FIXTURE_NOW - 5_000,
-					replyTo: "7181122334455667788",
-				},
-			} satisfies HubDetails,
-		},
-		errorResult: {
-			isError: true,
-			content: [
-				{
-					type: "text",
-					text: 'No recipients received the message.\n- RateLimiter: failed — unknown agent "RateLimiter"',
-				},
-			],
-			details: {
-				op: "send",
-				from: "Main",
-				to: "RateLimiter",
-				receipts: [{ to: "RateLimiter", outcome: "failed", error: 'unknown agent "RateLimiter"' }],
-			} satisfies HubDetails,
-		},
-	},
-
-	hub_wait: {
-		label: "Hub wait",
+	wait_message: {
+		label: "Wait for message",
 		customRendered: true,
-		renderer: "hub",
-		streamingArgs: { op: "wait", from: "AuthLoader" },
-		args: { op: "wait", from: "AuthLoader", timeoutMs: 60_000 },
+		renderer: "wait",
+		streamingArgs: {},
+		args: {},
 		result: {
 			content: [
 				{
@@ -219,104 +173,7 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 					body: "session-store rename is merged; auth.ts is yours.",
 					ts: FIXTURE_NOW - 30_000,
 				},
-			} satisfies HubDetails,
-		},
-	},
-
-	hub_inbox: {
-		label: "Hub inbox",
-		customRendered: true,
-		renderer: "hub",
-		streamingArgs: { op: "inbox" },
-		args: { op: "inbox", peek: true },
-		result: {
-			content: [
-				{
-					type: "text",
-					text: [
-						"2 unread message(s):",
-						"- [7181122334455667791] AuthLoader: hub table reads unreadCount — ping me when the bus lands.",
-						"- [7181122334455667792] RateLimiter (reply to 7181122334455667791): bus is in; receipts carry outcome.",
-					].join("\n"),
-				},
-			],
-			details: {
-				op: "inbox",
-				from: "Main",
-				inbox: [
-					{
-						id: "7181122334455667791",
-						from: "AuthLoader",
-						to: "Main",
-						body: "hub table reads unreadCount — ping me when the bus lands.",
-						ts: FIXTURE_NOW - 4 * 60_000,
-					},
-					{
-						id: "7181122334455667792",
-						from: "RateLimiter",
-						to: "Main",
-						body: "bus is in; receipts carry outcome.",
-						ts: FIXTURE_NOW - 60_000,
-						replyTo: "7181122334455667791",
-					},
-				],
-			} satisfies HubDetails,
-		},
-		errorResult: {
-			isError: true,
-			content: [{ type: "text", text: "IRC inbox failed: message store unavailable." }],
-			details: { op: "inbox" } satisfies HubDetails,
-		},
-	},
-
-	hub_list: {
-		label: "Hub peers",
-		customRendered: true,
-		renderer: "hub",
-		streamingArgs: { op: "list" },
-		args: { op: "list" },
-		result: {
-			content: [
-				{
-					type: "text",
-					text: [
-						"2 peer(s):",
-						"- AuthLoader [task · sub · idle] — parent Main, active 2m ago",
-						"- RateLimiter [task · sub · parked] — unread 2, parent Main, active 12m ago",
-						"",
-						"Parked agents are revived automatically when you message them.",
-					].join("\n"),
-				},
-			],
-			details: {
-				op: "list",
-				from: "Main",
-				peers: [
-					{
-						id: "AuthLoader",
-						displayName: "task",
-						kind: "sub",
-						status: "idle",
-						parentId: "Main",
-						unread: 0,
-						lastActivity: FIXTURE_NOW - 2 * 60_000,
-					},
-					{
-						id: "RateLimiter",
-						displayName: "task",
-						kind: "sub",
-						status: "parked",
-						parentId: "Main",
-						unread: 2,
-						lastActivity: FIXTURE_NOW - 12 * 60_000,
-					},
-				],
-			} satisfies HubDetails,
-		},
-		errorResult: {
-			isError: true,
-			content: [{ type: "text", text: "IRC list failed: agent hub is unavailable." }],
-			details: { op: "list" } satisfies HubDetails,
+			} satisfies CoordinationDetails,
 		},
 	},
 
@@ -375,12 +232,10 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 		},
 	},
 
-	hub_jobs: {
-		label: "Hub jobs",
-		renderer: "hub",
-		// Streaming: waiting on a single job id; the second id is still arriving.
-		streamingArgs: { op: "wait", ids: ["job_a1"] },
-		args: { op: "wait", ids: ["job_a1", "job_b2", "job_c3"] },
+	wait: {
+		label: "Wait for jobs",
+		streamingArgs: {},
+		args: {},
 		result: {
 			content: [{ type: "text", text: "3 jobs settled." }],
 			details: {
@@ -429,6 +284,26 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 					},
 				],
 			},
+		},
+	},
+
+	yield: {
+		label: "Submit Result",
+		// Streaming: the payload object is still arriving.
+		streamingArgs: { data: { summary: "Two races in the session store's flush path." } },
+		args: { data: YIELD_DATA },
+		result: {
+			content: [{ type: "text", text: "Result submitted." }],
+			details: { status: "success", data: YIELD_DATA } satisfies YieldItem,
+		},
+		errorResult: {
+			isError: true,
+			content: [
+				{
+					type: "text",
+					text: "Output does not match schema: /confidence must be number. Call yield again with the corrected shape — 2 retry attempt(s) remain before the schema constraint is dropped.",
+				},
+			],
 		},
 	},
 };

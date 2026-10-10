@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import type { TextContent } from "@oh-my-pi/pi-ai";
 import { type Component } from "../tui";
 import { Box } from "../components/box";
@@ -11,6 +12,10 @@ import type { CustomMessage, SkillPromptDetails } from "./messages";
 import { fileHyperlink } from "../render";
 import { collapseSkillTokens, skillChipLabel, skillChipStyle, skillToken } from "../prompt/composer-attachments";
 import { type UserBubbleOptions, UserMessageComponent, userBubbleColor } from "./user-message";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { card, md, node, span, text } from "../native/describe";
+import { type NativeChild, type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
+import { Memo } from "../native/memo";
 
 /**
  * Transcript row for a user-invoked skill. Two layouts, chosen by where the
@@ -41,6 +46,8 @@ export class SkillMessageComponent extends Container {
 
 	readonly #message: CustomMessage<SkillPromptDetails>;
 	readonly #imageLinks?: readonly (string | undefined)[];
+	#expanded = false;
+	readonly #native = new Memo();
 
 	constructor(message: CustomMessage<SkillPromptDetails>, imageLinks?: readonly (string | undefined)[]) {
 		super();
@@ -51,7 +58,63 @@ export class SkillMessageComponent extends Container {
 	}
 
 	setExpanded(expanded: boolean): void {
+		this.#expanded = expanded;
 		this.#disclosure?.setExpanded(expanded);
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		const expanded = rootToggleExpanded(event);
+		if (expanded !== undefined) this.setExpanded(expanded);
+	}
+
+	/**
+	 * A user-toned card (role `omp.skill`): the skill chip (linked to its
+	 * SKILL.md) and prompt size in the head, the user's draft as markdown, and
+	 * the loaded skill prompt, described only while expanded because it can
+	 * be large.
+	 */
+	override describe(): NativeNode {
+		return this.#native.get([this.#expanded], () => {
+			const details = this.#message.details;
+			const name = details?.name?.trim() || "unknown";
+			const token = skillToken(name);
+			const prompt = details?.prompt ?? (details?.args ? `${token} ${details.args}` : token);
+			const display = collapseSkillTokens(
+				prompt,
+				candidate => candidate === name,
+				() => {},
+			);
+			const label = skillChipLabel(name);
+			const leading = display.startsWith(label) && /^\s*$/.test(display.charAt(label.length));
+			const draft = leading ? display.slice(label.length).trim() : display;
+			const head: TspSpan[] = [
+				span(
+					label,
+					"customMessageLabel strong",
+					details?.path ? { href: pathToFileURL(details.path).href } : undefined,
+				),
+			];
+			if (typeof details?.lineCount === "number") {
+				head.push(span(`  ${details.lineCount} ${details.lineCount === 1 ? "line" : "lines"}`, "muted"));
+			}
+			const children: NativeChild[] = [];
+			if (draft) children.push(md(draft));
+			const promptText = this.#expanded ? this.#extractText() : "";
+			if (promptText) {
+				children.push(
+					node(
+						"section",
+						{ head: [span("prompt", "muted")], role: "omp.skill.prompt" },
+						[md(promptText)],
+						"prompt",
+					),
+				);
+			}
+			return card(
+				{ role: "omp.skill", tone: "user", head, collapsible: true, collapsed: !this.#expanded },
+				children.length > 0 ? children : [text([span(label, "muted")])],
+			);
+		});
 	}
 
 	/**
@@ -206,6 +269,12 @@ class SkillCallout implements Component {
 		this.#box.invalidate();
 		this.#source = undefined;
 		this.#lines = undefined;
+	}
+
+	releaseRenderCaches(): void {
+		this.#source = undefined;
+		this.#lines = undefined;
+		this.#box.releaseRenderCaches();
 	}
 
 	render(width: number): readonly string[] {

@@ -5,6 +5,7 @@ import { scheduler } from "node:timers/promises";
 import { ptree } from "@oh-my-pi/pi-utils";
 import type TurndownService from "@oh-my-pi/pi-utils/turndown";
 
+import type { ModelRegistry } from "../../config/model-registry";
 import type { AgentStorage } from "../../session/agent-storage";
 import { ToolAbortError } from "../../tools/tool-errors";
 
@@ -21,11 +22,16 @@ export interface RenderResult {
 	notes: string[];
 }
 
+/**
+ * Site-specific URL renderer: returns `null` for URLs it does not own.
+ * `modelRegistry` is the session's, for handlers that read through a model (X via Grok).
+ */
 export type SpecialHandler = (
 	url: string,
 	timeout: number,
 	signal?: AbortSignal,
 	storage?: AgentStorage | null,
+	modelRegistry?: ModelRegistry,
 ) => Promise<RenderResult | null>;
 
 export const MAX_OUTPUT_CHARS = 500_000;
@@ -216,7 +222,12 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 				}
 			}
 
-			const content = decodeBody(Buffer.concat(chunks), rawContentType);
+			// A single chunk is decoded in place; only multi-chunk bodies need a concat copy.
+			const bytes =
+				chunks.length === 1
+					? Buffer.from(chunks[0].buffer, chunks[0].byteOffset, chunks[0].byteLength)
+					: Buffer.concat(chunks, totalSize);
+			const content = decodeBody(bytes, rawContentType);
 			if (isBotBlocked(response.status, content) && attempt < USER_AGENTS.length - 1) {
 				continue;
 			}
@@ -344,7 +355,8 @@ export function getLocalizedText(value: LocalizedText, defaultLocale?: string): 
  * Check if content looks like HTML by inspecting the leading tag.
  */
 export function looksLikeHtml(content: string): boolean {
-	const trimmed = content.trim().toLowerCase();
+	// Only the leading tag matters; lowercase a short prefix instead of the whole body.
+	const trimmed = content.trimStart().slice(0, 16).toLowerCase();
 	return (
 		trimmed.startsWith("<!doctype") ||
 		trimmed.startsWith("<html") ||

@@ -1,5 +1,5 @@
 import { isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
-import type { Api, AssistantMessage } from "../types";
+import type { Api, AssistantMessage, Usage } from "../types";
 import { AwsCredentialsError } from "./aws";
 import {
 	AnthropicConnectionError,
@@ -85,6 +85,8 @@ const CONTEXT_OVERFLOW_EVIDENCE_PATTERNS = [
 	/reduce the length of the messages/i, // Groq
 	/maximum context length is \d+ tokens/i, // OpenRouter (all backends)
 	/exceeds the available context size/i, // llama.cpp server
+	/\bprompt\s*\(\s*\d+\s+tokens\s*\)\s*\+\s*max\s+tokens\s*\(\s*\d+\s*\)\s+exceeds\s+the\s+context\s*\(\s*\d+\s*\)/i, // Strata server
+	/\bprompt\s*\(\s*\d+\s+tokens\s*\)\s+leaves\s+no\s+room\s+to\s+answer\s+in\s+the\s+context\s*\(\s*\d+\s*\)/i, // Strata server
 	/requested tokens?.*exceed.*context (window|length|size)/i, // llama.cpp / OpenAI-compatible local servers
 	/context (window|length|size).*(exceeded|overflow|too small)/i, // Generic local server variants
 	/(prompt|input).*(too long|too large).*(context|n_ctx)/i, // llama.cpp phrasing variants
@@ -185,6 +187,25 @@ export function isResponsesRequestBodyReadTimeout(message: {
 	);
 }
 
+/**
+ * Codex code for the experimental native turn lane refusing a mid-response
+ * `response.steer`; the server then drops the in-flight response and closes
+ * the socket.
+ */
+export const CODEX_NATIVE_LANE_STEER_REJECTED_CODE = "unsupported_native_inflight_message";
+
+/**
+ * A Codex turn the native turn lane dropped because omp steered it. The
+ * rejection answers our own `response.steer`, not the model's health: the
+ * provider stops steering the session, so the same model replays cleanly.
+ */
+export function isCodexSteerRejection(message: { api?: Api; errorMessage?: string }): boolean {
+	return (
+		message.api === "openai-codex-responses" &&
+		message.errorMessage?.includes(`code=${CODEX_NATIVE_LANE_STEER_REJECTED_CODE}`) === true
+	);
+}
+
 export const TRANSIENT_TRANSPORT_PATTERN =
 	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|provider.?returned.?error|rate.?limit|too many requests|auth-gateway\s+5\d{2}(?=[:\s]|$)|\b(?:429|500|502|503|504)\b|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)|malformed.?function.?call/i;
 const AUTH_FAILURE_PATTERN =
@@ -194,6 +215,17 @@ const PROVIDER_FINISH_ERROR_PATTERN = /\bProvider (?:returned error finish_reaso
 const EMPTY_RESPONSE_PATTERN = /\bthought-only response without final output\b/i;
 const CONTENT_FILTER_PATTERN = /\b(?:incomplete:\s*)?content_filter\b/i;
 const ACCOUNT_POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
+export const ANTHROPIC_ACCOUNT_POLICY_PATTERN =
+	/\b(?:oauth_not_allowed_for_organization|permission_error)\b|\bOAuth authentication is currently not allowed for this organization\b/i;
+
+/** Whether an error message represents an Anthropic account-scoped permission/policy denial. */
+export function isAnthropicAccountPolicyText(text: string, provider?: string, statusArg?: number): boolean {
+	if (provider !== undefined && provider !== "anthropic") return false;
+	const statusCandidate = statusArg ?? (text ? status({ message: text }) : undefined);
+	if (statusCandidate !== undefined && statusCandidate !== 403) return false;
+	return ANTHROPIC_ACCOUNT_POLICY_PATTERN.test(text);
+}
+
 const CODEX_CHATGPT_ACCOUNT_MODEL_POLICY_PATTERN =
 	/\bThe ['"]([^'"\r\n]+)['"] model is not supported when using Codex with a ChatGPT account\./i;
 const CODEX_CHATGPT_ACCOUNT_MODEL_MAX_LENGTH = 256;
@@ -264,6 +296,15 @@ const STRUCTURED_OUTPUTS_PATTERN = /structured[_ -]?outputs?/i;
 const FEATURE_NOT_SUPPORTED_PATTERN = /not (?:supported|available|enabled)|unsupported|does(?: not|n'?t) support/i;
 const ANTHROPIC_STRICT_FIELD_PATTERN = /\btools\.\d+\.custom\.strict\b/i;
 const EXTRA_INPUTS_NOT_PERMITTED_PATTERN = /extra inputs? (?:are|is) not permitted/i;
+// Upstream strict-schema validation surfaced through a translating gateway.
+// Vercel AI Gateway serves non-Anthropic upstreams on its Anthropic
+// `/v1/messages` route and applies Anthropic's `strict: true` to an OpenAI
+// function tool. OpenAI strict mode additionally demands every `properties`
+// key in `required`, which Anthropic's strict subset does not, so a
+// legally-optional parameter is rejected only after translation and the sole
+// recovery is dropping `strict`. Mirrors the phrasings
+// `shouldRetryWithoutStrictTools` already recognizes on the OpenAI-family path.
+const STRICT_TOOL_SCHEMA_REJECTION_PATTERN = /invalid schema for function|invalid tool parameters schema/i;
 // Anthropic fast-mode unsupported: 400 rejecting `speed`, or 429 rate_limit_error
 // because the account lacks the extra-usage entitlement fast mode requires.
 const FAST_MODE_SPEED_PARAM_PATTERN = /\bspeed\b/i;
@@ -283,6 +324,7 @@ function matchesStrictToolsRejection(message: string, errorStatus: number | unde
 		return true;
 	}
 	if (STRUCTURED_OUTPUTS_PATTERN.test(message) && FEATURE_NOT_SUPPORTED_PATTERN.test(message)) return true;
+	if (STRICT_TOOL_SCHEMA_REJECTION_PATTERN.test(message)) return true;
 	if (!INVALID_REQUEST_PATTERN.test(message)) return false;
 	const grammarTooLarge = GRAMMAR_TOO_LARGE_PATTERN.test(message) && GRAMMAR_TOO_LARGE_DETAIL_PATTERN.test(message);
 	const schemaTooComplex =
@@ -380,6 +422,9 @@ function statusInternal(error: unknown, depth: number): number | undefined {
 		}
 		if (typeof errObj.statusCode === "number" && errObj.statusCode >= 100 && errObj.statusCode <= 599) {
 			return errObj.statusCode;
+		}
+		if (typeof errObj.errorStatus === "number" && errObj.errorStatus >= 100 && errObj.errorStatus <= 599) {
+			return errObj.errorStatus;
 		}
 		if (typeof errObj.response === "object" && errObj.response !== null) {
 			const resp = errObj.response as Record<string, unknown>;
@@ -490,6 +535,8 @@ function classifyText(
 		if (isProviderFinishErrorText(errorMessage)) kinds |= Flag.ProviderFinishError;
 		if (EMPTY_RESPONSE_PATTERN.test(errorMessage)) kinds |= Flag.EmptyResponse | Flag.Transient;
 		if (isContentBlockedText(errorMessage)) kinds |= Flag.ContentBlocked;
+		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
+
 		if (
 			ACCOUNT_POLICY_PATTERN.test(errorMessage) ||
 			isCodexChatGPTAccountPolicyText(errorMessage, provider, modelId) ||
@@ -497,9 +544,10 @@ function classifyText(
 		) {
 			kinds |= Flag.AccountPolicy | Flag.ContentBlocked;
 		}
+		if (isAnthropicAccountPolicyText(errorMessage, provider, statusClean)) {
+			kinds |= Flag.AccountPolicy;
+		}
 		if (isAuthFailureText(errorMessage)) kinds |= Flag.AuthFailed;
-
-		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
 		const cleanMessage = errorMessage;
 		const isOpaque = isOpaqueStatusBody(cleanMessage);
 
@@ -523,28 +571,31 @@ function classifyText(
 		) {
 			kinds |= Flag.UsageLimit;
 		}
-		if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
-		else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
-		// A stream truncation, transport-level stream drop, or forwarded Codex HTTP
-		// body-read failure may not match TRANSIENT_TRANSPORT_PATTERN. Flag it
-		// explicitly so AIError.retriable and the turn-recovery layer treat it as
-		// retryable, matching the provider retry path (isProviderRetryableError).
-		// Separate `if` (not chained onto the else-if) so a timeout whose text also
-		// reads as a truncation keeps Flag.Timeout alongside Flag.Transient. The
-		// string arm applies the strict STREAM_PARSE_DIAGNOSTIC_PATTERN, per the
-		// rationale on isTransientStreamParseError. Skip a phrase that rides on a
-		// terminal 4xx (e.g. a malformed request rejected as "400 unexpected EOF"):
-		// that is a deterministic client error that replays identically, so keep it
-		// terminal. classify() carries the outer terminal status down the cause
-		// chain so a wrapped truncation (ProviderHttpError 400 → cause "unexpected
-		// EOF") is caught here too.
-		if (
-			!isTerminalClientErrorStatus(statusClean) &&
-			(isTransientStreamParseError(errorMessage) ||
+		// Transport/timeout/truncation wording that rides on a terminal 4xx (e.g. a
+		// "400 unexpected EOF" malformed request, or a region/entitlement denial
+		// whose body carries `type=server_error`) describes a deterministic client
+		// error that replays identically, so keep it terminal — the same 4xx policy
+		// as isProviderRetryableError. classify() carries the outer terminal status
+		// down the cause chain so a wrapped phrase (ProviderHttpError 400 → cause
+		// "unexpected EOF") is caught here too.
+		if (!isTerminalClientErrorStatus(statusClean)) {
+			if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
+			else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
+			// A stream truncation, transport-level stream drop, or forwarded Codex
+			// HTTP body-read failure may not match TRANSIENT_TRANSPORT_PATTERN. Flag
+			// it explicitly so AIError.retriable and the turn-recovery layer treat it
+			// as retryable, matching the provider retry path. Separate `if` (not
+			// chained onto the else-if) so a timeout whose text also reads as a
+			// truncation keeps Flag.Timeout alongside Flag.Transient. The string arm
+			// applies the strict STREAM_PARSE_DIAGNOSTIC_PATTERN, per the rationale
+			// on isTransientStreamParseError.
+			if (
+				isTransientStreamParseError(errorMessage) ||
 				isTransientStreamDropError(errorMessage) ||
-				CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(errorMessage))
-		) {
-			kinds |= Flag.Transient;
+				CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(errorMessage)
+			) {
+				kinds |= Flag.Transient;
+			}
 		}
 		// A concurrency cap (e.g. Vertex "Online prediction concurrent requests
 		// quota exceeded") is transient — shed-and-backoff. The bare wording need
@@ -554,6 +605,9 @@ function classifyText(
 		if ((api === "openai-responses" || api === "openai-codex-responses") && isStaleResponsesText(errorMessage)) {
 			kinds |= Flag.StaleResponsesItem;
 		}
+		// Retryable like the provider's own classification of the code, so a
+		// message reclassified from its text alone still retries.
+		if (isCodexSteerRejection({ api, errorMessage })) kinds |= Flag.Transient;
 
 		// Fireworks mid-generation NaN 400 is a model-side decode fault, not a bad
 		// request; a byte-identical replay succeeds, so treat it as transient.
@@ -585,9 +639,10 @@ export function classify(error: unknown, api?: Api): number {
 	const causeTokenEvidence = hasCauseTokenContextOverflowEvidence(error);
 	let link: unknown = error;
 	// A terminal 4xx on an outer link governs its own cause diagnostics: a
-	// wrapped truncation is describing why the deterministic request failed,
-	// not an independently retryable transport fault. Carry it down so the
-	// stream-parse guard in classifyText sees it on the status-less cause.
+	// wrapped truncation or transport phrase is describing why the deterministic
+	// request failed, not an independently retryable transport fault. Carry it
+	// down so the terminal-4xx guard in classifyText sees it on the status-less
+	// cause.
 	let governingTerminalStatus: number | undefined;
 	while (link !== undefined && link !== null) {
 		if (typeof link === "object") {
@@ -597,8 +652,12 @@ export function classify(error: unknown, api?: Api): number {
 			if ("errorId" in link && typeof (link as { errorId: unknown }).errorId === "number") {
 				kinds |= (link as { errorId: number }).errorId & KIND_MASK;
 			}
-			if ("code" in link && typeof link.code === "string" && ACCOUNT_POLICY_PATTERN.test(link.code)) {
-				kinds |= Flag.AccountPolicy | Flag.ContentBlocked;
+			if ("code" in link && typeof link.code === "string") {
+				if (ACCOUNT_POLICY_PATTERN.test(link.code)) {
+					kinds |= Flag.AccountPolicy | Flag.ContentBlocked;
+				} else if (ANTHROPIC_ACCOUNT_POLICY_PATTERN.test(link.code)) {
+					kinds |= Flag.AccountPolicy;
+				}
 			}
 		}
 
@@ -628,12 +687,20 @@ export function classify(error: unknown, api?: Api): number {
 				code === "usage_limit_reached" ||
 				(code === "insufficient_quota" && !isDashScopeTokenLimitText(link.message)) ||
 				(codeStatus === 402 &&
-					(code === "payment_required" || code === "deactivated_workspace" || is402BillingCapBody(link.message)))
+					(is402BillingCapBody(link.message) ||
+						(code !== undefined && !isOpaqueStatusBody(code) && is402BillingCapBody(code))))
 			) {
 				linkKinds |= Flag.UsageLimit;
 			}
 			if (code === "overloaded_error" || code === "rate_limit_error") {
 				linkKinds |= Flag.Transient;
+			}
+			if (
+				code === "oauth_not_allowed_for_organization" ||
+				code === "permission_error" ||
+				(codeStatus === 403 && ANTHROPIC_ACCOUNT_POLICY_PATTERN.test(link.message))
+			) {
+				linkKinds |= Flag.AccountPolicy;
 			}
 			if (
 				(codeStatus === 401 || codeStatus === 403) &&
@@ -655,12 +722,12 @@ export function classify(error: unknown, api?: Api): number {
 			linkMessage = link.message;
 		} else if (typeof link === "string") {
 			linkMessage = link;
-		} else if (
-			typeof link === "object" &&
-			"message" in link &&
-			typeof (link as { message: unknown }).message === "string"
-		) {
-			linkMessage = (link as { message: string }).message;
+		} else if (typeof link === "object") {
+			if ("message" in link && typeof link.message === "string") {
+				linkMessage = link.message;
+			} else if ("errorMessage" in link && typeof link.errorMessage === "string") {
+				linkMessage = link.errorMessage;
+			}
 		}
 
 		const linkStatus = status(link);
@@ -834,14 +901,28 @@ export function attach<E extends object>(error: E, id: number): E {
 	return error;
 }
 
-/** Provider-reported usage proves context-window excess — authoritative, compaction-owned (#9235). */
-export function isUsageBackedContextOverflow(message: AssistantMessage, contextWindow?: number): boolean {
-	if (!contextWindow) return false;
-	const inputTokens = message.usage.input + message.usage.cacheRead + message.usage.cacheWrite;
+/** Overflow-classification evidence, including errors received before token usage is available. */
+export interface ContextOverflowMessage extends Pick<AssistantMessage, "errorId" | "stopReason" | "errorMessage"> {
+	readonly usage?: Pick<Usage, "input" | "cacheRead" | "cacheWrite" | "contextTokens">;
+}
+
+/**
+ * Provider-reported usage proves context-window excess — authoritative, compaction-owned (#9235).
+ *
+ * Prefers `contextTokens` when the provider reports it: providers that run
+ * several model calls per turn (Cursor's server-side tool loop) report
+ * `input`/`cacheRead` summed across those calls, which can exceed the window
+ * many times over while the conversation itself stays small.
+ */
+export function isUsageBackedContextOverflow(message: ContextOverflowMessage, contextWindow?: number): boolean {
+	const usage = message.usage;
+	if (!contextWindow || !usage) return false;
+	const inputTokens = usage.contextTokens ?? usage.input + usage.cacheRead + usage.cacheWrite;
 	return inputTokens > contextWindow;
 }
 
-export function isContextOverflow(message: AssistantMessage, contextWindow?: number): boolean {
+/** Classify overflow from error flags, available token usage, or provider error text. */
+export function isContextOverflow(message: ContextOverflowMessage, contextWindow?: number): boolean {
 	if (is(message.errorId, Flag.ContextOverflow)) return true;
 	if (isUsageBackedContextOverflow(message, contextWindow)) return true;
 	return message.stopReason === "error" && !!message.errorMessage && matchesOverflowText(message.errorMessage);
@@ -861,7 +942,7 @@ export function isPayloadRejection(message: AssistantMessage): boolean {
  *  Usage-backed overflows are authoritative window excesses and never ambiguous. */
 export function isTextAmbiguousContextOverflow(
 	errorId: number,
-	message: AssistantMessage | undefined,
+	message: ContextOverflowMessage | undefined,
 	contextWindow?: number,
 ): boolean {
 	const overflowFlagged =

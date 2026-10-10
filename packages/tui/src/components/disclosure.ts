@@ -1,3 +1,5 @@
+import { node } from "../native/describe";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import type { Component } from "../tui";
 
 /** A component slot; factory slots are constructed only when their branch is first rendered. */
@@ -48,6 +50,7 @@ export class Disclosure implements Component {
 	#ignoreTight: boolean | undefined;
 	#disposed = false;
 	#cache: RenderCache | undefined;
+	#native: { expanded: boolean; node: NativeNode } | undefined;
 	#boundedCache:
 		| {
 				source: readonly string[];
@@ -74,6 +77,7 @@ export class Disclosure implements Component {
 		if (this.#disposed || this.#expanded === expanded) return;
 		this.#expanded = expanded;
 		this.#cache = undefined;
+		this.#native = undefined;
 		this.#boundedCache = undefined;
 	}
 
@@ -94,6 +98,14 @@ export class Disclosure implements Component {
 		this.#summary?.invalidate?.();
 		this.#collapsedBody?.invalidate?.();
 		this.#body?.invalidate?.();
+	}
+
+	releaseRenderCaches(): void {
+		this.#cache = undefined;
+		this.#boundedCache = undefined;
+		this.#summary?.releaseRenderCaches?.();
+		this.#collapsedBody?.releaseRenderCaches?.();
+		this.#body?.releaseRenderCaches?.();
 	}
 
 	dispose(): void {
@@ -129,6 +141,34 @@ export class Disclosure implements Component {
 			children.push(this.#collapsedBody);
 		}
 		return children;
+	}
+
+	/**
+	 * A collapsible `section`. The summary (and, while collapsed, the preview)
+	 * form the always-visible header child; the lazily built body is the
+	 * section body and is only materialized once expanded.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		if (this.#disposed) return DISPOSED_NODE;
+		const expanded = this.#expanded;
+		if (this.#native?.expanded === expanded) return this.#native.node;
+		const head: NativeChild[] = [];
+		const summary = this.#getSummary();
+		if (summary) head.push(summary);
+		if (!expanded) {
+			const preview = this.#getCollapsedBody();
+			if (preview) head.push(preview);
+		}
+		const children: NativeChild[] = [node("col", undefined, head, "head")];
+		if (expanded) children.push(this.#getBody());
+		const described = node("section", { collapsible: true, collapsed: !expanded }, children);
+		this.#native = { expanded, node: described };
+		return described;
+	}
+
+	/** Mirror the terminal-local toggle into the controlled state. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "toggle" && event.key === "") this.setExpanded(!event.collapsed);
 	}
 
 	render(width: number): readonly string[] {
@@ -232,4 +272,5 @@ function rowsMatchSnapshot(rows: readonly string[], snapshot: readonly string[])
 }
 
 const EMPTY_ROWS: readonly string[] = [];
+const DISPOSED_NODE: NativeNode = node("col", { hidden: true });
 const EMPTY_COMPONENTS: readonly Component[] = [];

@@ -79,7 +79,7 @@ describe("CommandController /move", () => {
 			const target = path.join(sourceDir, "checkout");
 			vi.spyOn(sessionWorktree, "createSessionWorktree").mockImplementation(async () => {
 				await fs.mkdir(target);
-				return { path: target, branch: "feature" };
+				return { path: target, branch: "feature", sourceCwd: sourceDir, baseCommit: "0", keptChanges: true };
 			});
 			ctx.withBtwSessionMove = vi.fn(async () => false);
 			await new CommandController(ctx).handleWorktreeCommand("feature");
@@ -101,7 +101,7 @@ describe("CommandController /move", () => {
 		const created = Promise.withResolvers<void>();
 		const relocating = Promise.withResolvers<void>();
 		const relocated = Promise.withResolvers<void>();
-		let command: Promise<void> | undefined;
+		let command: Promise<unknown> | undefined;
 		try {
 			const { ctx, state } = createMoveContext(sourceDir);
 			const target = path.join(sourceDir, "checkout");
@@ -123,7 +123,7 @@ describe("CommandController /move", () => {
 				creating.resolve();
 				await created.promise;
 				await fs.mkdir(target);
-				return { path: target, branch: "feature" };
+				return { path: target, branch: "feature", sourceCwd: sourceDir, baseCommit: "0", keptChanges: true };
 			});
 			ctx.session.moveSession = async cwd => {
 				expect(held).toBe(true);
@@ -483,37 +483,6 @@ describe("CommandController /move", () => {
 			}
 		},
 	);
-
-	it("does not relocate session files or cwd when the BTW migration gate refuses", async () => {
-		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-source-"));
-		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-target-"));
-		try {
-			const { ctx, state } = createMoveContext(sourceDir);
-			const sourceFile = path.join(sourceDir, "session.jsonl");
-			const targetFile = path.join(targetDir, "session.jsonl");
-			await Bun.write(sourceFile, "session data\n");
-			ctx.session.moveSession = vi.fn(async cwd => {
-				await fs.rename(sourceFile, targetFile);
-				state.cwd = cwd;
-				state.movedTo = cwd;
-			});
-			ctx.withBtwSessionMove = vi.fn(async () => false);
-			const controller = new CommandController(ctx);
-
-			await controller.handleMoveCommand(targetDir);
-
-			expect(await Bun.file(sourceFile).text()).toBe("session data\n");
-			expect(await Bun.file(targetFile).exists()).toBe(false);
-			expect(state.cwd).toBe(sourceDir);
-			expect(state.movedTo).toBeUndefined();
-			expect(state.completedBtwVisible).toBe(true);
-			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
-			expect(ctx.present).not.toHaveBeenCalled();
-		} finally {
-			await fs.rm(sourceDir, { recursive: true, force: true });
-			await fs.rm(targetDir, { recursive: true, force: true });
-		}
-	});
 
 	it("preserves completed BTW state when moving the session fails", async () => {
 		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-source-"));

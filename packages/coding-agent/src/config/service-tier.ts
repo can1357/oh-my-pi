@@ -1,5 +1,5 @@
 import type { Model, ServiceTier, ServiceTierByFamily, ServiceTierFamily } from "@oh-my-pi/pi-ai";
-// `settings-schema` pulls this module into CLI startup; import the classifier
+// Setting declarations (`session/settings.ts`) pull this module into CLI startup; import the classifier
 // from the dependency-free types module so the `pi-ai` index (and the native
 // addon behind it) stays lazy.
 import { serviceTierFamily } from "@oh-my-pi/pi-ai/types";
@@ -12,7 +12,15 @@ import type { SubmenuOption } from "@oh-my-pi/pi-tui/overlays/settings-defs";
  * only `priority` (fast mode); Google (Gemini API + Vertex) realizes
  * `flex`/`priority`.
  */
-export const SERVICE_TIER_OPENAI_VALUES = ["none", "auto", "default", "flex", "scale", "priority"] as const;
+export const SERVICE_TIER_OPENAI_VALUES = [
+	"none",
+	"auto",
+	"default",
+	"flex",
+	"scale",
+	"priority",
+	"ultrafast",
+] as const;
 export const SERVICE_TIER_ANTHROPIC_VALUES = ["none", "priority"] as const;
 export const SERVICE_TIER_GOOGLE_VALUES = ["none", "flex", "priority"] as const;
 
@@ -64,6 +72,7 @@ export const SERVICE_TIER_INHERIT_SETTING_VALUES = [
 	"flex",
 	"scale",
 	"priority",
+	"ultrafast",
 ] as const;
 
 export type ServiceTierInheritSettingValue = (typeof SERVICE_TIER_INHERIT_SETTING_VALUES)[number];
@@ -104,6 +113,11 @@ export const SERVICE_TIER_OPENAI_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTie
 	{ value: "flex", label: "Flex", description: "Lower cost, higher latency when available" },
 	{ value: "scale", label: "Scale", description: "Scale Tier credits when available" },
 	{ value: "priority", label: "Priority", description: "Faster, higher cost (premium request)" },
+	{
+		value: "ultrafast",
+		label: "Ultrafast",
+		description: "Lowest-latency serving; OpenAI API preview access, or Codex models that advertise it",
+	},
 ];
 
 export const SERVICE_TIER_ANTHROPIC_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierAnthropicSettingValue>> = [
@@ -129,6 +143,7 @@ export const SERVICE_TIER_INHERIT_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTi
 	{ value: "flex", label: "Flex", description: "Flexible capacity tier (OpenAI/Google families)" },
 	{ value: "scale", label: "Scale", description: "Scale Tier credits (OpenAI family)" },
 	{ value: "priority", label: "Priority", description: "Priority on every supported family of the spawned model" },
+	{ value: "ultrafast", label: "Ultrafast", description: "Ultrafast serving (OpenAI family, where available)" },
 ];
 
 /** Map a per-family setting value to a wire {@link ServiceTier}, or `undefined` to omit. */

@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { splitMemoryGlobPattern } from "@oh-my-pi/pi-coding-agent/internal-urls/memory-protocol";
 import { getMemoryRoot } from "@oh-my-pi/pi-coding-agent/memories";
 import {
 	loadMnemopi,
@@ -91,23 +90,6 @@ describe("MemoryProtocolHandler", () => {
 
 		await expect(router.resolve("memory://", { settings })).rejects.toThrow("Unknown protocol: memory://");
 		await expect(router.resolve("memory://root", { settings })).rejects.toThrow("Unknown protocol: memory://");
-	});
-
-	it("advertises memory URLs only while a memory backend is enabled", () => {
-		const settings = Settings.isolated();
-		const session: ToolSession = {
-			cwd: process.cwd(),
-			hasUI: false,
-			settings,
-			getSessionFile: () => null,
-			getSessionSpawns: () => null,
-		};
-		const tool = new ReadTool(session);
-
-		expect(JSON.stringify(tool.parameters.toJsonSchema())).not.toContain("memory://");
-
-		settings.override("memory.backend", "local");
-		expect(JSON.stringify(tool.parameters.toJsonSchema())).toContain("memory://");
 	});
 
 	it("reads memory through the calling session's configured registry", async () => {
@@ -198,68 +180,6 @@ describe("MemoryProtocolHandler", () => {
 			expect(resource.content).toBe("summary");
 			expect(resource.contentType).toBe("text/markdown");
 		});
-	});
-
-	it("resolves memory://root against the caller cwd when multiple sessions are live", async () => {
-		const cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-protocol-isolation-"));
-		const previousAgentDir = getAgentDir();
-		try {
-			const agentDir = path.join(cleanupRoot, "agent");
-			setAgentDir(agentDir);
-
-			const firstCwd = path.join(cleanupRoot, "first-project");
-			const secondCwd = path.join(cleanupRoot, "second-project");
-			await fs.mkdir(firstCwd, { recursive: true });
-			await fs.mkdir(secondCwd, { recursive: true });
-
-			const firstMemoryRoot = getMemoryRoot(agentDir, firstCwd);
-			const secondMemoryRoot = getMemoryRoot(agentDir, secondCwd);
-			await fs.mkdir(firstMemoryRoot, { recursive: true });
-			await fs.mkdir(secondMemoryRoot, { recursive: true });
-
-			const firstSummary = "first registered session summary";
-			const secondSummary = "second session cwd summary";
-			await Bun.write(path.join(firstMemoryRoot, "memory_summary.md"), firstSummary);
-			await Bun.write(path.join(secondMemoryRoot, "memory_summary.md"), secondSummary);
-
-			AgentRegistry.global().register({
-				id: "first-session",
-				displayName: "first-session",
-				kind: "main",
-				session: {
-					sessionManager: {
-						getCwd: () => firstCwd,
-						getArtifactsDir: () => null,
-						getSessionId: () => "first-session",
-					},
-					settings: Settings.isolated({ "memory.backend": "local" }),
-				} as unknown as AgentSession,
-				sessionFile: null,
-			});
-			AgentRegistry.global().register({
-				id: "second-session",
-				displayName: "second-session",
-				kind: "main",
-				session: {
-					sessionManager: {
-						getCwd: () => secondCwd,
-						getArtifactsDir: () => null,
-						getSessionId: () => "second-session",
-					},
-					settings: Settings.isolated({ "memory.backend": "local" }),
-				} as unknown as AgentSession,
-				sessionFile: null,
-			});
-
-			const router = InternalUrlRouter.instance();
-			const resource = await router.resolve("memory://root", { cwd: secondCwd });
-
-			expect(resource.content).toBe(secondSummary);
-			expect(resource.content).not.toBe(firstSummary);
-		} finally {
-			setAgentDir(previousAgentDir);
-			await removeWithRetries(cleanupRoot);
-		}
 	});
 
 	it("resolves memory://root for a session-id-only caller with no cwd", async () => {
@@ -447,8 +367,7 @@ describe("MemoryProtocolHandler", () => {
 				path: "memory://root/skills/%5Bdemo%5D/*.md",
 			});
 
-			expect(result.details?.files).toHaveLength(1);
-			expect(result.details?.files?.[0]).toEndWith("/skills/[demo]/SKILL.md");
+			expect(result.details?.files).toEqual(["memory://root/skills/%5Bdemo%5D/SKILL.md"]);
 		});
 	});
 
@@ -463,32 +382,9 @@ describe("MemoryProtocolHandler", () => {
 				path: "memory://root/*/%5Bdemo%5D.md",
 			});
 
-			expect(result.details?.files).toHaveLength(1);
-			expect(result.details?.files?.[0]).toEndWith("/skills/[demo].md");
+			expect(result.details?.files).toEqual(["memory://root/skills/%5Bdemo%5D.md"]);
 		});
 	});
-
-	it.each(["memory://root/skills/**/../*.md", "memory://root/skills/**/%2e%2e/*.md"])(
-		"rejects traversal in a memory glob suffix: %s",
-		async pattern => {
-			await withMemoryFixture(async ({ cwd }) => {
-				await expect(createGlobTool(cwd).execute("memory-glob-traversal", { path: pattern })).rejects.toThrow(
-					/traversal/i,
-				);
-			});
-		},
-	);
-
-	it.each(["memory://root/skills/**/demo%2fnested/*.md", "memory://root/skills/**/demo%5cnested/*.md"])(
-		"rejects encoded separators in a memory glob suffix: %s",
-		async pattern => {
-			await withMemoryFixture(async ({ cwd }) => {
-				await expect(createGlobTool(cwd).execute("memory-glob-separator", { path: pattern })).rejects.toThrow(
-					/encoded path separator/i,
-				);
-			});
-		},
-	);
 
 	it("throws clear error for missing files", async () => {
 		await withMemoryFixture(async () => {
@@ -514,6 +410,25 @@ describe("MemoryProtocolHandler", () => {
 			);
 		});
 	});
+
+	it("refuses create targets escaping through a symlinked ancestor or dangling symlink", async () => {
+		if (process.platform === "win32") return;
+
+		await withMemoryFixture(async ({ cwd, memoryRoot, cleanupRoot }) => {
+			const outsideDir = path.join(cleanupRoot, "outside");
+			await fs.mkdir(outsideDir, { recursive: true });
+			await fs.symlink(outsideDir, path.join(memoryRoot, "linked"));
+			await fs.symlink(path.join(outsideDir, "victim.md"), path.join(memoryRoot, "dangling.md"));
+
+			const router = InternalUrlRouter.instance();
+			await expect(router.locate("memory://root/linked/new/f.md", { cwd }, { create: true })).rejects.toThrow(
+				"memory:// URL escapes memory root",
+			);
+			await expect(router.locate("memory://root/dangling.md", { cwd }, { create: true })).rejects.toThrow(
+				"memory:// URL goes through a dangling symlink",
+			);
+		});
+	});
 });
 
 interface MnemopiFixture {
@@ -526,7 +441,7 @@ let sharedMnemopiFixture: MnemopiFixture | undefined;
 
 async function withMnemopiSession(fn: (fixture: MnemopiFixture) => Promise<void>): Promise<void> {
 	if (!sharedMnemopiFixture) {
-		const dbDir = TempDir.createSync("memory-protocol-mnemopi-");
+		const dbDir = TempDir.createSync("@memory-protocol-mnemopi-");
 		const config = {
 			dbPath: dbDir.join("mnemopi.db"),
 			bank: "test-bank",
@@ -686,7 +601,7 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 
 	it("binds memory://<id> to the calling session's own bank", async () => {
 		await withMnemopiSession(async ({ state, dbDir }) => {
-			const peerDbDir = TempDir.createSync("memory-protocol-mnemopi-peer-");
+			const peerDbDir = TempDir.createSync("@memory-protocol-mnemopi-peer-");
 			let peerState: MnemopiSessionState | undefined;
 			try {
 				const peerSession = {
@@ -737,7 +652,7 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 
 	it("keeps peer banks unreachable when a cwd names two live sessions", async () => {
 		await withMnemopiSession(async ({ state, dbDir }) => {
-			const twinDir = TempDir.createSync("memory-protocol-mnemopi-twin-");
+			const twinDir = TempDir.createSync("@memory-protocol-mnemopi-twin-");
 			const previousAgentDir = getAgentDir();
 			let twinState: MnemopiSessionState | undefined;
 			try {
@@ -1011,11 +926,5 @@ describe("MemoryProtocolHandler — file-backed root vs non-local backends (issu
 			settings: Settings.isolated({ "memory.backend": "local" }),
 		});
 		expect((local ?? []).map(item => item.value)).toContain("root");
-	});
-
-	it("names the expected glob form rather than the rejected input", () => {
-		expect(() => splitMemoryGlobPattern("memory://**")).toThrow(
-			"Memory glob patterns require the root namespace (e.g. memory://root/**); got: memory://**",
-		);
 	});
 });

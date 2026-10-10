@@ -1,8 +1,12 @@
 import { type SgrMouseEvent } from "../../mouse";
+import { TERMINAL } from "../../terminal-capabilities";
 import { type SelectItem, SelectList } from "../../components/select-list";
 import { Text } from "../../components/text";
 import { WizardStep } from "../../components/wizard-step";
 import { getSelectListTheme, type SymbolPreset, setSymbolPreset, theme } from "../../theme/theme";
+import { col, span, text } from "../../native/describe";
+import type { NativeNode } from "../../native/node";
+import { Memo } from "../../native/memo";
 import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
 const GLYPH_PRESETS = ["nerd", "unicode", "ascii"] as const satisfies readonly SymbolPreset[];
@@ -33,6 +37,7 @@ class GlyphSceneController implements SetupSceneController {
 	#previewRequest = 0;
 	#committing = false;
 	#step: WizardStep | undefined;
+	#native = new Memo();
 
 	readonly #host: SetupSceneHost;
 
@@ -52,6 +57,7 @@ class GlyphSceneController implements SetupSceneController {
 	}
 
 	invalidate(): void {
+		this.#native.clear();
 		if (this.#step) this.#step.invalidate();
 		else this.#selectList.invalidate();
 	}
@@ -91,6 +97,16 @@ class GlyphSceneController implements SetupSceneController {
 		return this.#step.render(width);
 	}
 
+	/** Hint line over the preset list; the list (sample glyphs as item detail) describes itself. */
+	describe(): NativeNode {
+		return this.#native.get([this.#selectList], () =>
+			col(
+				[text([span("If a row shows boxes, tofu, or misaligned icons, pick another.", "muted")]), this.#selectList],
+				{ gap: "sm", role: "omp.setup.glyph" },
+			),
+		);
+	}
+
 	async #commit(preset: SymbolPreset): Promise<void> {
 		if (this.#committing) return;
 		this.#committing = true;
@@ -111,10 +127,16 @@ class GlyphSceneController implements SetupSceneController {
 	}
 }
 
-/** Preview and persist the terminal glyph preset. */
+/**
+ * Preview and persist the terminal glyph preset. Skipped once the Glyph
+ * Protocol handshake confirmed the terminal renders omp's bundled icons: every
+ * row renders cleanly there, and the default `unicode` preset already upgrades
+ * to nerd at runtime while staying safe on terminals without the protocol.
+ */
 export const glyphSetupScene: SetupScene = {
 	id: "glyph-mode",
 	title: "Choose glyph mode",
 	minVersion: 1,
+	shouldRun: () => !TERMINAL.glyphProtocol,
 	mount: host => new GlyphSceneController(host),
 };

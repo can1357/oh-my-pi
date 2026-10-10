@@ -5,7 +5,7 @@ import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-cor
 import type { ThinkingContent } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -20,12 +20,12 @@ type Harness = {
 	session: AgentSession;
 	tempDir: TempDir;
 };
-type SettingsOverrides = Partial<Record<SettingPath, unknown>>;
+type SettingsOverrides = Record<string, unknown>;
 
 const activeHarnesses: Harness[] = [];
 const sharedDir = TempDir.createSync("@pi-empty-stop-guard-shared-");
 const sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
-sharedAuthStorage.setRuntimeApiKey("mock", "test-key");
+sharedAuthStorage.keys.setRuntime("mock", "test-key");
 const sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
 
 afterAll(() => {
@@ -127,7 +127,7 @@ async function createHarness(
 	const authStorage = sharedAuthStorage;
 
 	const mock = createMockModel({ provider: options.provider, id: options.id, responses });
-	authStorage.setRuntimeApiKey(mock.provider, "test-key");
+	authStorage.keys.setRuntime(mock.provider, "test-key");
 	const modelRegistry = sharedModelRegistry;
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
@@ -728,10 +728,10 @@ describe("AgentSession empty stop guard", () => {
 		await session.waitForIdle();
 		// Persisted identity must win regardless of branch enumeration order. The
 		// coarse matcher otherwise selects the commentary when it is encountered first.
-		const getBranch = session.sessionManager.getBranch.bind(session.sessionManager);
+		const getBranchView = session.sessionManager.getBranchView.bind(session.sessionManager);
 		const branchSpy = vi
-			.spyOn(session.sessionManager, "getBranch")
-			.mockImplementation(() => getBranch().slice().reverse());
+			.spyOn(session.sessionManager, "getBranchView")
+			.mockImplementation(() => getBranchView().slice().reverse());
 		await session.followUp("continue after commentary");
 		await session.waitForIdle();
 		branchSpy.mockRestore();
