@@ -1058,8 +1058,8 @@ fn send_action(element: &AXUIElement, action: &str) -> AXError {
 /// did not reply in time, e.g. while the action runs a modal dialog. The
 /// request was made, so its outcome is unknown rather than failed.
 /// `AttributeUnsupported` names no attribute an action reads; Preview answers
-/// it after following a PDF link's `AXPressAction`, so it is no proof of
-/// failure either.
+/// it after following a PDF link's `AXPressAction` and Finder after carrying
+/// out an icon's `AXOpen`, so it is no proof of failure either.
 fn element_action_result(action: &str, error: AXError) -> CoreResult<()> {
 	if matches!(error, AXError::CannotComplete | AXError::AttributeUnsupported) {
 		return Err(DesktopError::ax_unconfirmed(format!(

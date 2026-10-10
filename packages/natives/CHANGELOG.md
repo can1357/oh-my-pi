@@ -14,7 +14,7 @@
 ### Fixed
 
 - Fixed macOS `ax()` marking every cell of a focused table or sidebar `(focused)`; it now marks only the element holding the app's keyboard focus ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed macOS `perform()` reporting a followed Preview PDF link as failed: an attribute error the app answers to an action now reports the outcome as unconfirmed ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS `perform()` reporting a followed Preview PDF link or an opened Finder item as failed: an attribute error the app answers to an action now reports the outcome as unconfirmed ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.8] - 2026-10-10
 
