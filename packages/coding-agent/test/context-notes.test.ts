@@ -151,6 +151,37 @@ describe("experimental context notes", () => {
 		}
 	});
 
+	it("saves notes when the fresh-session journal grows while disk preparation is pending", async () => {
+		using tempDir = TempDir.createSync("@omp-context-notes-growth-");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		const sessionManager = SessionManager.create(tempDir.path(), sessionDir);
+		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
+		const tool = ContextNotesTool.createIf(toolSession(settings, sessionManager));
+		if (!tool) throw new Error("expected context notes tool");
+		// Seed a real leaf, as a running session already has user/assistant entries.
+		sessionManager.appendCustomEntry("turn_seed");
+		try {
+			const pendingEnsure = Promise.withResolvers<void>();
+			const ensureSpy = vi.spyOn(sessionManager, "ensureOnDisk").mockImplementation(() => pendingEnsure.promise);
+			try {
+				const pendingWrite = tool.execute("growing-branch", { text: "must persist on growth" });
+				await Promise.resolve();
+				// A concurrent turn appends under the captured leaf: the leaf moves
+				// forward but stays on the same lineage (issue #12316).
+				sessionManager.appendCustomEntry("concurrent_turn_growth");
+				pendingEnsure.resolve();
+				await expect(pendingWrite).resolves.toMatchObject({
+					content: [{ type: "text", text: "Context notes saved." }],
+				});
+				expect(getContextNotes(sessionManager.getBranch())).toMatchObject({ text: "must persist on growth" });
+			} finally {
+				ensureSpy.mockRestore();
+			}
+		} finally {
+			await sessionManager.close();
+		}
+	});
+
 	it("does not append notes when experimental context management is disabled while preparing disk", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
