@@ -51,6 +51,7 @@ app.history.search: []
 | `app.stt.toggle`             | Unbound                                                               | Start or stop speech-to-text recording with each press; independent of push-to-talk.                                                                                                 |
 | `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                                                      |
 | `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                                                 |
+| `app.images.retransmit`      | Unbound                                                               | Re-send image data the terminal may have dropped (e.g. Kitty payloads emitted while a tmux window was hidden); repairs blank placeholders on repaint                                   |
 
 To disable push-to-talk while keeping speech-to-text available through a separate toggle binding:
 
