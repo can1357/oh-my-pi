@@ -14,6 +14,7 @@ use std::{
 use core_graphics::{event::CGEvent, geometry::CGPoint};
 use foreign_types::ForeignType;
 use libc::pid_t;
+use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFType};
 
 use super::{
 	super::{
@@ -648,6 +649,64 @@ pub(super) fn front_window_context() -> Option<(pid_t, u32)> {
 	let spi = FOREGROUND.as_ref()?;
 	let pid = front_process(spi.get_front)?.pid?;
 	Some((pid, ax::key_window_id(pid)?))
+}
+
+type SLSWindowQueryWindowsFn = unsafe extern "C" fn(i32, &CFArray, u32) -> *mut CFType;
+type SLSWindowQueryResultCopyWindowsFn = unsafe extern "C" fn(&CFType) -> *mut CFType;
+type SLSWindowIteratorAdvanceFn = unsafe extern "C" fn(&CFType) -> bool;
+type SLSWindowIteratorGetIdFn = unsafe extern "C" fn(&CFType) -> u32;
+
+#[derive(Clone, Copy)]
+struct WindowQuerySpi {
+	connection: CGSMainConnectionIDFn,
+	query:      SLSWindowQueryWindowsFn,
+	windows:    SLSWindowQueryResultCopyWindowsFn,
+	advance:    SLSWindowIteratorAdvanceFn,
+	window_id:  SLSWindowIteratorGetIdFn,
+	parent_id:  SLSWindowIteratorGetIdFn,
+}
+
+static WINDOW_QUERY: LazyLock<Option<WindowQuerySpi>> = LazyLock::new(|| {
+	ensure_skylight_loaded()?;
+	Some(WindowQuerySpi {
+		connection: symbol(c"CGSMainConnectionID")?,
+		query:      symbol(c"SLSWindowQueryWindows")?,
+		windows:    symbol(c"SLSWindowQueryResultCopyWindows")?,
+		advance:    symbol(c"SLSWindowIteratorAdvance")?,
+		window_id:  symbol(c"SLSWindowIteratorGetWindowID")?,
+		parent_id:  symbol(c"SLSWindowIteratorGetParentID")?,
+	})
+});
+
+/// The window `wid` is a child of in `WindowServer`, such as the window a
+/// sheet or an inline editor's overlay is attached to; `None` for a top-level
+/// window or when the query is unavailable.
+pub(super) fn window_parent(wid: u32) -> Option<u32> {
+	let spi = WINDOW_QUERY.as_ref()?;
+	let number = CFNumber::new_i64(i64::from(wid));
+	let windows = CFArray::from_objects(&[&*number]);
+	// SAFETY: The no-argument connection query has its exact signature.
+	let connection = unsafe { (spi.connection)() } as i32;
+	// SAFETY: `windows` holds one CFNumber window id and outlives the call; the
+	// result is a create-rule object or null.
+	let query = retained(unsafe { (spi.query)(connection, windows.as_opaque(), 0) })?;
+	// SAFETY: `query` is a live window query; the result is create-rule or null.
+	let iterator = retained(unsafe { (spi.windows)(&query) })?;
+	// SAFETY: `iterator` stays retained across every iterator call.
+	while unsafe { (spi.advance)(&iterator) } {
+		// SAFETY: As above; the iterator was advanced onto a window.
+		if unsafe { (spi.window_id)(&iterator) } == wid {
+			// SAFETY: As above.
+			return Some(unsafe { (spi.parent_id)(&iterator) }).filter(|&parent| parent != 0);
+		}
+	}
+	None
+}
+
+/// Takes ownership of a create-rule `CFType` pointer, which may be null.
+fn retained(pointer: *mut CFType) -> Option<CFRetained<CFType>> {
+	// SAFETY: Every caller passes the +1 result of a copy or create call.
+	ptr::NonNull::new(pointer).map(|pointer| unsafe { CFRetained::from_raw(pointer) })
 }
 
 /// Whether the target already is the key window of the front process.

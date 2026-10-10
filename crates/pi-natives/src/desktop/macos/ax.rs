@@ -106,6 +106,88 @@ pub(super) fn focused_window_id(pid: libc::pid_t) -> Option<u32> {
 	window_id(&window)
 }
 
+/// An application's `AXFocusedWindow`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum FocusedWindow {
+	/// The application reports none.
+	#[default]
+	Unreported,
+	/// `_AXUIElementGetWindow` cannot map the window it reports.
+	Unmapped,
+	Id(u32),
+}
+
+/// Where an application sends keystrokes: its focused window and the element
+/// holding keyboard focus.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct KeyFocus {
+	pub(super) window:         FocusedWindow,
+	/// The window holding `AXFocusedUIElement`: the first id
+	/// `_AXUIElementGetWindow` maps on the element or its nearest ancestor, so
+	/// a field in a sheet maps to the sheet, not to the window it is attached
+	/// to.
+	pub(super) element_window: Option<u32>,
+}
+
+/// Where keystrokes posted for window `wid` would go now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum KeyDestination {
+	/// Into `wid`, posted to this process.
+	Target(libc::pid_t),
+	/// Into another window the application reports as focused; `None` when
+	/// that window cannot be mapped to an id.
+	Other(Option<u32>),
+	/// The application reports no focused window.
+	Unreported,
+}
+
+impl KeyFocus {
+	/// Where keystrokes for window `wid` of process `pid` would go: the
+	/// focused window decides. A sheet or panel the application reports is
+	/// another window, even when attached to `wid`.
+	pub(super) const fn destination(&self, pid: libc::pid_t, wid: u32) -> KeyDestination {
+		match self.window {
+			FocusedWindow::Id(id) if id == wid => KeyDestination::Target(pid),
+			FocusedWindow::Id(id) => KeyDestination::Other(Some(id)),
+			FocusedWindow::Unmapped => KeyDestination::Other(None),
+			FocusedWindow::Unreported => KeyDestination::Unreported,
+		}
+	}
+
+	/// Whether text inserted into the focused element lands in `wid`.
+	pub(super) const fn holds_text_for(&self, wid: u32) -> bool {
+		matches!(self.element_window, Some(id) if id == wid)
+	}
+}
+
+/// Reads where `pid` sends keystrokes; every part it cannot read is `None`.
+pub(super) fn key_focus(pid: libc::pid_t) -> KeyFocus {
+	probe_application(pid).map_or_else(KeyFocus::default, |app| read_key_focus(&app).0)
+}
+
+fn read_key_focus(app: &AXUIElement) -> (KeyFocus, Option<CFRetained<AXUIElement>>) {
+	let window = copy_element(app, "AXFocusedWindow").map_or(FocusedWindow::Unreported, |window| {
+		window_id(&window).map_or(FocusedWindow::Unmapped, FocusedWindow::Id)
+	});
+	let element = copy_element(app, "AXFocusedUIElement");
+	let focus =
+		KeyFocus { window, element_window: element.as_deref().and_then(innermost_window_id) };
+	(focus, element)
+}
+
+/// The first window id `_AXUIElementGetWindow` maps on `element` or, through
+/// a bounded `AXParent` ascent, its nearest ancestor.
+fn innermost_window_id(element: &AXUIElement) -> Option<u32> {
+	let mut current = element.retain();
+	for _ in 0..MAX_ANCESTRY_DEPTH {
+		if let Some(id) = window_id(&current) {
+			return Some(id);
+		}
+		current = copy_element(&current, "AXParent")?;
+	}
+	None
+}
+
 /// The window that should regain key status when `pid` is handed keyboard
 /// focus back: its focused window, else its main window.
 pub(super) fn key_window_id(pid: libc::pid_t) -> Option<u32> {
@@ -712,16 +794,18 @@ fn set_date_value(element: &AXUIElement, text: &str, current: f64) -> CoreResult
 }
 
 /// Inserts into a native field only when its focused element belongs to this
-/// exact window. `false` means no write was attempted; an attempted write never
-/// falls through to keystrokes, including timeouts or partial delivery.
+/// exact window: a field in a sheet belongs to the sheet, not to the window
+/// the sheet is attached to. `false` means no write was attempted; an
+/// attempted write never falls through to keystrokes, including timeouts or
+/// partial delivery.
 pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> CoreResult<bool> {
 	let Some(app) = probe_application(pid) else {
 		return Ok(false);
 	};
-	let Some(element) = copy_element(&app, "AXFocusedUIElement") else {
+	let (focus, Some(element)) = read_key_focus(&app) else {
 		return Ok(false);
 	};
-	if element_window(&element).as_deref().and_then(window_id) != Some(wid)
+	if !focus.holds_text_for(wid)
 		|| text_surface(&element) != TextSurface::Native
 		|| !matches!(
 			copy_string(&element, "AXRole").as_deref(),
@@ -1126,8 +1210,9 @@ mod tests {
 	use objc2_core_foundation::CFNumber;
 
 	use super::{
-		AttachedCandidate, AxWindowRecord, create_system_wide, replace_utf16_selection,
-		select_attached, stringify_value, window_records_of,
+		AttachedCandidate, AxWindowRecord, FocusedWindow, KeyDestination, KeyFocus,
+		create_system_wide, replace_utf16_selection, select_attached, stringify_value,
+		window_records_of,
 	};
 
 	#[test]
@@ -1190,5 +1275,17 @@ mod tests {
 		// cannot map it; the system-wide element is unmappable the same way.
 		let records = window_records_of(&[create_system_wide()]);
 		assert!(matches!(records.as_slice(), [AxWindowRecord { id: None, .. }]));
+	}
+
+	#[test]
+	fn a_focused_sheet_is_not_the_window_it_is_attached_to() {
+		// Finder's Go to Folder sheet 41740 on window 41732: its path field
+		// reports 41732 as its AXWindow but lives in the sheet's own window.
+		let focus =
+			KeyFocus { window: FocusedWindow::Id(41740), element_window: Some(41740) };
+		assert_eq!(focus.destination(7, 41732), KeyDestination::Other(Some(41740)));
+		assert!(!focus.holds_text_for(41732));
+		assert_eq!(focus.destination(7, 41740), KeyDestination::Target(7));
+		assert!(focus.holds_text_for(41740));
 	}
 }
