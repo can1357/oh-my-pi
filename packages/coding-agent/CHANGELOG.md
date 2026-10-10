@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `preparePageForScreenshot` (`tools/browser/tab-worker`), `shouldPreserveConnectedBrowserFocus` (`tools/browser/attach`) and the tab worker's `activateForScreenshot` init option: Chromium screenshots no longer activate their tab
+
 ### Added
 
 - Added `/jobs kill <id>|all` to cancel a running background job (or every one this session owns) from the command line, even while the agent is busy ([#14160](https://github.com/can1357/oh-my-pi/pull/14160) by [@KanwarGill](https://github.com/KanwarGill))
