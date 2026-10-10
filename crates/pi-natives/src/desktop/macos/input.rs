@@ -722,6 +722,7 @@ fn background_pointer(
 	};
 	with_menu_dismissal(
 		window,
+		pointer_kind(&event),
 		before.as_deref(),
 		|| background_gesture(source, pid, wid, window, event),
 		|before| dismiss_new_menu(source, pid, before),
@@ -795,9 +796,10 @@ fn may_open_context_menu(event: &PointerEvent) -> bool {
 /// it, `dismiss`es a context menu the gesture opened. The dismissal runs
 /// whatever the gesture returned, cancellation included, because an open menu
 /// takes the keyboard from the user's app until it closes. `dismiss` yields
-/// whether a menu opened and then closed.
+/// whether a menu opened and then closed; `kind` names the gesture in errors.
 fn with_menu_dismissal(
 	window: &DesktopWindow,
+	kind: &str,
 	before: Option<&[u32]>,
 	gesture: impl FnOnce() -> CoreResult<()>,
 	dismiss: impl FnOnce(&[u32]) -> CoreResult<Option<bool>>,
@@ -813,10 +815,11 @@ fn with_menu_dismissal(
 			 keyboard from the user's app; inspect the desktop before retrying",
 			window.id, window.app,
 		))),
-		(Ok(()), Ok(Some(true))) => Err(DesktopError::background_unavailable(format!(
-			"the input reached window {} ({}) and opened a context menu, which takes the keyboard \
-			 from the user's app while it is open; it was closed with Escape, with nothing chosen. \
-			 To use the menu, retry with takeover:true",
+		(Ok(()), Ok(Some(true))) => Err(DesktopError::input_failed(format!(
+			"the {kind} reached window {} ({}) and opened a context menu, which takes the keyboard \
+			 from the user's app; the menu was closed with Escape, with nothing chosen, but the \
+			 {kind} may already have taken effect; inspect the window before retrying, and retry \
+			 with takeover:true only to use the menu",
 			window.id, window.app,
 		))),
 		(delivered, Ok(_)) => delivered,
@@ -2582,6 +2585,7 @@ mod tests {
 		let result = control::with_token_for_test(&token, || {
 			with_menu_dismissal(
 				&window,
+				"click",
 				Some(&[5]),
 				|| {
 					cancellation.cancel();
@@ -2599,11 +2603,10 @@ mod tests {
 		assert_eq!(result.expect_err("cancelled").code.as_str(), "Cancelled");
 
 		let outcome = |delivered: CoreResult<()>, menu: CoreResult<Option<bool>>| {
-			with_menu_dismissal(&window, Some(&[]), || delivered, |_| menu)
+			with_menu_dismissal(&window, "click", Some(&[]), || delivered, |_| menu)
 				.map_err(|error| error.code.as_str())
 		};
 		assert_eq!(outcome(Ok(()), Ok(None)), Ok(()));
-		assert_eq!(outcome(Ok(()), Ok(Some(true))), Err("BackgroundUnavailable"));
 		assert_eq!(outcome(Ok(()), Ok(Some(false))), Err("InputFailed"));
 		assert_eq!(
 			outcome(Err(DesktopError::cancelled("cancelled")), Ok(Some(false))),
@@ -2612,7 +2615,25 @@ mod tests {
 		assert_eq!(outcome(Ok(()), Err(DesktopError::input_failed("unread"))), Err("InputFailed"));
 		// No snapshot from before: no menu handling at all.
 		let unread = |_: &[u32]| -> CoreResult<Option<bool>> { panic!("no menu handling") };
-		assert!(with_menu_dismissal(&window, None, || Ok(()), unread).is_ok());
+		assert!(with_menu_dismissal(&window, "click", None, || Ok(()), unread).is_ok());
+	}
+
+	#[test]
+	fn a_gesture_whose_context_menu_was_closed_reports_that_it_was_delivered() {
+		// The page's handlers already ran, and a drag ran its whole stroke, so
+		// the caller must inspect rather than take the error for "nothing sent".
+		let window = background_window("TextEdit");
+		for kind in ["click", "drag"] {
+			let error = with_menu_dismissal(&window, kind, Some(&[]), || Ok(()), |_| Ok(Some(true)))
+				.expect_err("menu closed");
+			assert_eq!(error.code.as_str(), "InputFailed", "{kind}");
+			assert!(
+				error
+					.message
+					.contains(&format!("the {kind} may already have taken effect"))
+			);
+			assert!(error.message.contains("inspect the window before retrying"));
+		}
 	}
 
 	#[test]
