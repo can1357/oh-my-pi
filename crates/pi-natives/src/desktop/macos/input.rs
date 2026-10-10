@@ -407,6 +407,34 @@ const ACTIVATION_FLAGS: u64 = 0xc0000;
 const KEY_WINDOW_TIMEOUT: Duration = Duration::from_millis(250);
 const KEY_WINDOW_POLL: Duration = Duration::from_millis(10);
 
+/// Where a background input's target window stands relative to the user's
+/// keyboard focus.
+#[derive(Debug, PartialEq, Eq)]
+enum FrontTarget {
+	/// Another application is frontmost.
+	Background,
+	/// The target already is the key window of the frontmost application.
+	Key,
+	/// The target is another window of the frontmost application, whose key
+	/// window takes the user's typing.
+	UserSibling,
+}
+
+fn front_target(
+	front: Option<libc::pid_t>,
+	pid: libc::pid_t,
+	wid: u32,
+	focused: impl FnOnce() -> Option<u32>,
+) -> FrontTarget {
+	if front != Some(pid) {
+		FrontTarget::Background
+	} else if focused() == Some(wid) {
+		FrontTarget::Key
+	} else {
+		FrontTarget::UserSibling
+	}
+}
+
 /// Makes `wid` the key window of its background application, as that
 /// application sees it, without activating it.
 ///
@@ -416,13 +444,26 @@ const KEY_WINDOW_POLL: Duration = Duration::from_millis(10);
 /// that belief; a press and release just outside the window's frame then make
 /// exactly `wid` key among its windows without reaching any of its controls.
 /// `WindowServer`'s front process and key-focus application, which route the
-/// user's keystrokes and key equivalents, stay with the user's app.
+/// user's keystrokes and key equivalents, stay with the user's app. In the
+/// frontmost application itself, nothing is posted: the target already is
+/// key, or making it key would move the user's typing, so the input refuses.
 pub(super) fn make_key_in_background(
 	source: &CGEventSource,
 	pid: libc::pid_t,
 	wid: u32,
 	window: &DesktopWindow,
 ) -> CoreResult<()> {
+	match front_target(skylight::front_pid(), pid, wid, || ax::focused_window_id(pid)) {
+		FrontTarget::Background => {},
+		FrontTarget::Key => return Ok(()),
+		FrontTarget::UserSibling => {
+			return Err(DesktopError::background_unavailable(format!(
+				"window {wid} belongs to the frontmost application but is not its key window; making \
+				 it key would move the user's typing there, so nothing was sent; retry with \
+				 takeover:true or use ax actions",
+			)));
+		},
+	}
 	let context = skylight::sender_connection()?;
 	let activated = CGEvent::new(source.clone())
 		.map_err(|()| DesktopError::input_failed("failed to create a Quartz activation event"))?;
@@ -1966,6 +2007,19 @@ mod tests {
 			assert!((100.0..400.0).contains(&start), "primer for {x} starts outside at {start}");
 			assert_eq!((start - x).abs(), PRIMER_OFFSETS[0]);
 		}
+	}
+
+	#[test]
+	fn key_window_step_never_moves_the_frontmost_applications_key_window() {
+		// A non-key window of the frontmost app shares the user's key window:
+		// preparing it would send the user's next keystrokes and pastes there.
+		let unread =
+			|| -> Option<u32> { panic!("a background process's focused window is not read") };
+		assert_eq!(front_target(Some(9), 7, 42, unread), FrontTarget::Background);
+		assert_eq!(front_target(None, 7, 42, unread), FrontTarget::Background);
+		assert_eq!(front_target(Some(7), 7, 42, || Some(42)), FrontTarget::Key);
+		assert_eq!(front_target(Some(7), 7, 42, || Some(43)), FrontTarget::UserSibling);
+		assert_eq!(front_target(Some(7), 7, 42, || None), FrontTarget::UserSibling);
 	}
 
 	#[test]

@@ -638,6 +638,11 @@ pub(super) fn is_front_window(pid: pid_t, wid: u32) -> bool {
 	})
 }
 
+/// The front process as `WindowServer` reports it.
+pub(super) fn front_pid() -> Option<pid_t> {
+	front_process(FOREGROUND.as_ref()?.get_front)?.pid
+}
+
 /// Read-only focus identity used to verify non-activating Space operations.
 pub(super) fn front_window_context() -> Option<(pid_t, u32)> {
 	let spi = FOREGROUND.as_ref()?;
