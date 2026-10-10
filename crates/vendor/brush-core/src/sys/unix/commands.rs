@@ -31,6 +31,11 @@ impl CommandFdInjectionExt for std::process::Command {
 			})
 			.collect::<Result<Vec<_>, _>>()?;
 
+		// An empty mapping still registers a pre_exec hook, disabling posix_spawn.
+		if fd_mappings.is_empty() {
+			return Ok(());
+		}
+
 		self
 			.fd_mappings(fd_mappings)
 			.map_err(|_e| error::ErrorKind::ChildCreationFailure)?;
@@ -81,12 +86,12 @@ pub trait CommandSessionExt {
 
 impl CommandSessionExt for std::process::Command {
 	fn detach_session(&mut self) {
-		// SAFETY:
-		// This arranges for a provided function to run in the forked child
-		// before exec. `setsid(2)` is async-signal-safe.
-		unsafe {
-			self.pre_exec(pre_exec_detach_session);
-		}
+		// Unlike pre_exec, this allows std to use POSIX_SPAWN_SETSID on
+		// linux-gnu. Callers never combine this with process_group, so the child
+		// cannot already lead a process group and setsid cannot fail with EPERM.
+		// compose_std_command always sets cwd: std needs glibc 2.29's addchdir
+		// for posix_spawn here, which also guarantees SETSID support (glibc 2.26).
+		self.setsid(true);
 	}
 
 	fn detach_session_reparent(&mut self) {
@@ -124,13 +129,6 @@ fn pre_exec_lead_session() -> Result<(), std::io::Error> {
 	}
 
 	Ok(())
-}
-
-fn pre_exec_detach_session() -> Result<(), std::io::Error> {
-	match nix::unistd::setsid() {
-		Ok(_) | Err(nix::errno::Errno::EPERM) => Ok(()),
-		Err(errno) => Err(std::io::Error::from_raw_os_error(errno as i32)),
-	}
 }
 
 fn pre_exec_detach_session_reparent() -> Result<(), std::io::Error> {
