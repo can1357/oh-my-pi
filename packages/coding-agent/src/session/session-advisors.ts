@@ -1989,7 +1989,7 @@ export class SessionAdvisors {
 	/** Restore an advisor's configured primary once its fallback cooldown expires. */
 	async #maybeRestoreAdvisorRetryFallbackPrimary(advisor: ActiveAdvisor, signal: AbortSignal): Promise<void> {
 		const fallback = advisor.retryFallback;
-		if (!fallback || getRetryFallbackRevertPolicy(this.#host.settings) !== "cooldown-expiry") return;
+		if (!fallback || getRetryFallbackRevertPolicy(this.#host.settings, fallback.role) !== "cooldown-expiry") return;
 
 		const originalSelector = parseRetryFallbackSelector(fallback.originalSelector, this.#host.modelRegistry);
 		if (!originalSelector) {

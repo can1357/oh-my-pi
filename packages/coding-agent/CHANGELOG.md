@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-chain fallback revert policies so worker chains can retry their primary after cooldown while other sessions stay on their fallback, including role policy inheritance across task spawning and cold revival and warnings for orphan policy keys ([#14193](https://github.com/can1357/oh-my-pi/pull/14193) by [@schickling-assistant](https://github.com/schickling-assistant)).
+
 ### Changed
 
 - In terminals that speak the Tern Surface Protocol (Tern), the composer's bottom bar shows the git branch and its status beside the model chip when the status line has the `git` segment; it outlasts the other facts as the bar narrows, and clicking it opens `/git` ([#15220](https://github.com/can1357/oh-my-pi/pull/15220) by [@H4vC](https://github.com/H4vC))

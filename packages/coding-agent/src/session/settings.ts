@@ -32,6 +32,7 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMeta
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
+const EMPTY_FALLBACK_REVERT_POLICIES: Record<string, "cooldown-expiry" | "never"> = {};
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
 
 // Power assertions: macOS IOKit, Linux login1/ScreenSaver, Windows execution state.
@@ -835,6 +836,27 @@ export const cfgRetryFallbackRevertPolicy = register({
 			},
 			{ value: "never", label: "Never", description: "Stay on the fallback model until manually changed" },
 		],
+	},
+});
+
+/** Per-chain overrides; omitted keys keep the global fallback revert policy. */
+export const cfgRetryFallbackRevertPolicies = register({
+	id: "retry.fallbackRevertPolicies",
+	type: "record",
+	default: EMPTY_FALLBACK_REVERT_POLICIES,
+	validate: raw => {
+		// Load/reload validators also receive undefined for an omitted setting.
+		if (raw === undefined) return;
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+			throw new Error("retry.fallbackRevertPolicies must be an object");
+		}
+		for (const [key, policy] of Object.entries(raw)) {
+			if (policy !== "cooldown-expiry" && policy !== "never") {
+				throw new Error(
+					`Invalid retry.fallbackRevertPolicies entry for '${key}': expected cooldown-expiry or never`,
+				);
+			}
+		}
 	},
 });
 

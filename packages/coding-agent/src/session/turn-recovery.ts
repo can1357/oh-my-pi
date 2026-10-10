@@ -1714,7 +1714,7 @@ export class TurnRecovery {
 	}
 
 	#getRetryFallbackRevertPolicy(): RetryFallbackRevertPolicy {
-		return getRetryFallbackRevertPolicy(this.#host.settings);
+		return getRetryFallbackRevertPolicy(this.#host.settings, this.#activeRetryFallback?.role);
 	}
 
 	/** Clears fallback ownership after an explicit model change or a restore. */

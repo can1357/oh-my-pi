@@ -589,6 +589,8 @@ export interface CreateAgentSessionOptions {
 	modelPatternAuthFallback?: string;
 	/** Role name used to install retry fallbacks after deferred subagent patterns resolve. */
 	modelPatternFallbackRole?: string;
+	/** Configured chain/role whose revert policy the deferred fallback role inherits. */
+	modelPatternFallbackPolicyKey?: string;
 	/** Validated default retry chain to install when a deferred singleton pattern resolves. */
 	modelPatternDefaultFallbackChain?: string[];
 	/** Thinking selector. Default: from settings, else unset */
@@ -3095,6 +3097,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						installRetryFallbackRole(settings, options.modelPatternFallbackRole, {
 							primary: primarySelector,
 							chain: fallbackSelectors,
+							policyKey: options.modelPatternFallbackPolicyKey,
 						});
 					}
 				}

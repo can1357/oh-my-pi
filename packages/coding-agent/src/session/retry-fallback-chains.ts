@@ -13,7 +13,7 @@ import {
 import { resolveConfiguredModelPatterns, resolveModelRoleValue } from "../config/model-resolver";
 import { getRoleInfo, isKindRole } from "../config/model-roles";
 
-import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy } from "./settings";
+import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicies, cfgRetryFallbackRevertPolicy } from "./settings";
 
 /** Configured fallback chains keyed by role or model selector. */
 export type RetryFallbackChains = Record<string, string[]>;
@@ -182,14 +182,19 @@ export interface RetryFallbackRole {
 	primary: string;
 	/** Fallback selectors walked after the primary. */
 	chain: string[];
+	/** Configured chain/role whose revert policy this dynamic role inherits. */
+	policyKey?: string;
 }
+
+const retryFallbackPolicyKeys = new WeakMap<Settings, Map<string, string>>();
 
 /** Reads the primary and non-empty chain installed for `role`, if any. */
 export function getRetryFallbackRole(settings: Settings, role: string): RetryFallbackRole | undefined {
 	const primary = settings.getModelRole(role);
 	const chain = cfgRetryFallbackChains.get(settings)[role];
 	if (!primary || !Array.isArray(chain) || chain.length === 0) return undefined;
-	return { primary, chain };
+	const policyKey = retryFallbackPolicyKeys.get(settings)?.get(role);
+	return { primary, chain, ...(policyKey !== undefined ? { policyKey } : {}) };
 }
 
 /**
@@ -200,7 +205,7 @@ export function getRetryFallbackRole(settings: Settings, role: string): RetryFal
 export function installRetryFallbackRole(
 	settings: Settings,
 	role: string,
-	{ primary, chain }: RetryFallbackRole,
+	{ primary, chain, policyKey }: RetryFallbackRole,
 ): void {
 	const modelRoles: Record<string, string> = {};
 	const existingRoles = settings.getModelRoles();
@@ -216,6 +221,16 @@ export function installRetryFallbackRole(
 		if (key !== role) fallbackChains[key] = existingChains[key];
 	}
 	cfgRetryFallbackChains.override(settings, fallbackChains);
+	if (policyKey !== undefined) {
+		let keys = retryFallbackPolicyKeys.get(settings);
+		if (!keys) {
+			keys = new Map();
+			retryFallbackPolicyKeys.set(settings, keys);
+		}
+		keys.set(role, policyKey);
+	} else {
+		retryFallbackPolicyKeys.get(settings)?.delete(role);
+	}
 }
 
 /**
@@ -260,6 +275,12 @@ export function validateRetryFallbackChains(
 	if (!configuredChains || typeof configuredChains !== "object" || Array.isArray(configuredChains)) {
 		report("retry.fallbackChains must be a mapping of role names or model selectors to selector arrays.");
 		return;
+	}
+	const chains = getRetryFallbackChains(settings);
+	for (const key of Object.keys(cfgRetryFallbackRevertPolicies.get(settings))) {
+		if (!Object.hasOwn(chains, key)) {
+			report(`retry.fallbackRevertPolicies key owns no fallback chain: ${key}`);
+		}
 	}
 
 	for (const key in configuredChains) {
@@ -342,9 +363,13 @@ export function validateRetryFallbackChains(
 	}
 }
 
-/** Returns the configured fallback-primary restoration policy. */
-export function getRetryFallbackRevertPolicy(settings: Settings): RetryFallbackRevertPolicy {
-	return cfgRetryFallbackRevertPolicy.get(settings) === "never" ? "never" : "cooldown-expiry";
+/** Returns the owning chain's policy, falling back to the global restoration policy. */
+export function getRetryFallbackRevertPolicy(settings: Settings, chainKey?: string): RetryFallbackRevertPolicy {
+	const policies = cfgRetryFallbackRevertPolicies.get(settings);
+	if (chainKey !== undefined && Object.hasOwn(policies, chainKey)) return policies[chainKey];
+	const policyKey = chainKey === undefined ? undefined : retryFallbackPolicyKeys.get(settings)?.get(chainKey);
+	if (policyKey !== undefined && Object.hasOwn(policies, policyKey)) return policies[policyKey];
+	return cfgRetryFallbackRevertPolicy.get(settings);
 }
 
 /** Resolves the primary selector represented by a fallback-chain key. */
