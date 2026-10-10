@@ -204,6 +204,7 @@ class TreeList implements Component {
 	#roots: TreeSelectorNode[] = [];
 	#rootIds: Set<string> = new Set();
 	#nodeById: Map<string, TreeSelectorNode> = new Map();
+	#parentById: Map<string, string | null> = new Map();
 	#filterMode: FilterMode;
 	/** The search field; its value is the fuzzy query. */
 	readonly searchInput = new Input();
@@ -236,6 +237,15 @@ class TreeList implements Component {
 		| { rows: readonly TreeRow<TreeSelectorNode, string>[]; labels: number; items: TspPickerItem[] }
 		| undefined;
 	#pickerOrder: { rows: readonly TreeRow<TreeSelectorNode, string>[]; order: string[] } | undefined;
+	/** Shift+Left/Right targets for one filtered rows snapshot; filtering replaces the rows array. */
+	#branchTargets:
+		| {
+				rows: readonly TreeRow<TreeSelectorNode, string>[];
+				targets: readonly TreeSelectorNode[];
+				targetIndexByRootId: ReadonlyMap<string, number>;
+				firstVisibleById: ReadonlyMap<string, TreeSelectorNode>;
+		  }
+		| undefined;
 	#previewMemo: { node: TreeSelectorNode | undefined; labels: number; preview: NativeChild[] } | undefined;
 
 	constructor(
@@ -292,8 +302,9 @@ class TreeList implements Component {
 		this.#containsActive.clear();
 		this.#nodeById.clear();
 		this.#activePathIds.clear();
+		this.#parentById.clear();
 
-		const parentIds = new Map<string, string | null>();
+		const parentIds = this.#parentById;
 		const allNodes: TreeSelectorNode[] = [];
 		const visitStack: TreeSelectorNode[] = [...roots];
 		while (visitStack.length > 0) {
@@ -364,6 +375,113 @@ class TreeList implements Component {
 		}
 		if (!hasActive) return children;
 		return [...children].sort((a, b) => Number(this.#containsActive.get(b)) - Number(this.#containsActive.get(a)));
+	}
+
+	/** Visible branch targets, keyed by every raw branch head, and each raw subtree's first selectable row. */
+	#visibleBranchProjection(rows: readonly TreeRow<TreeSelectorNode, string>[]): {
+		targets: readonly TreeSelectorNode[];
+		targetIndexByRootId: ReadonlyMap<string, number>;
+		firstVisibleById: ReadonlyMap<string, TreeSelectorNode>;
+	} {
+		const visibleIndex = new Map<string, number>();
+		for (let index = 0; index < rows.length; index++) visibleIndex.set(rows[index]!.key, index);
+		const nodes: TreeSelectorNode[] = [];
+		const stack = [...this.#roots].reverse();
+		while (stack.length > 0) {
+			const node = stack.pop()!;
+			nodes.push(node);
+			const children = this.#orderedChildren(node);
+			for (let index = children.length - 1; index >= 0; index--) stack.push(children[index]!);
+		}
+
+		// One bottom-up pass makes filtered-head promotion O(nodes), rather than
+		// rescanning a branch subtree for every fork.
+		const firstVisibleById = new Map<string, TreeSelectorNode>();
+		for (let index = nodes.length - 1; index >= 0; index--) {
+			const node = nodes[index]!;
+			let target = visibleIndex.has(node.entry.id) ? node : undefined;
+			if (!target) {
+				for (const child of this.#orderedChildren(node)) {
+					target = firstVisibleById.get(child.entry.id);
+					if (target) break;
+				}
+			}
+			if (target) firstVisibleById.set(node.entry.id, target);
+		}
+
+		const byTargetId = new Map<string, { rootIds: string[]; target: TreeSelectorNode }>();
+		const addFork = (branches: readonly TreeSelectorNode[]) => {
+			if (branches.length < 2) return;
+			for (const branch of branches) {
+				const target = firstVisibleById.get(branch.entry.id);
+				if (!target) continue;
+				const existing = byTargetId.get(target.entry.id);
+				if (existing) existing.rootIds.push(branch.entry.id);
+				else byTargetId.set(target.entry.id, { rootIds: [branch.entry.id], target });
+			}
+		};
+		addFork(this.#roots);
+		for (const node of nodes) addFork(this.#orderedChildren(node));
+
+		const ordered = [...byTargetId.values()].sort(
+			(a, b) => visibleIndex.get(a.target.entry.id)! - visibleIndex.get(b.target.entry.id)!,
+		);
+		const targetIndexByRootId = new Map<string, number>();
+		for (let index = 0; index < ordered.length; index++) {
+			for (const rootId of ordered[index]!.rootIds) targetIndexByRootId.set(rootId, index);
+		}
+		return { targets: ordered.map(entry => entry.target), targetIndexByRootId, firstVisibleById };
+	}
+
+	/** Raw branch root containing `entryId` at its nearest ancestor fork. */
+	#nearestBranchRootId(entryId: string): string | undefined {
+		let branchId = entryId;
+		let parentId = this.#parentById.get(branchId);
+		while (parentId !== undefined) {
+			const siblings = parentId === null ? this.#roots : this.#orderedChildren(this.#nodeById.get(parentId)!);
+			if (siblings.length > 1) return branchId;
+			if (parentId === null) break;
+			branchId = parentId;
+			parentId = this.#parentById.get(parentId);
+		}
+		return undefined;
+	}
+
+	/**
+	 * Move through every visible branch in rendered order, crossing nested fork
+	 * depths. Raw ancestry identifies branch membership; visibility only chooses
+	 * the first selectable descendant when a branch head is filtered.
+	 */
+	#moveBranch(direction: -1 | 1): void {
+		const selected = this.#tree.selectedItem;
+		if (!selected) return;
+		// Projection is O(nodes); reuse it across presses until filtering replaces the rows.
+		const rows = this.#tree.rows;
+		if (this.#branchTargets?.rows !== rows) this.#branchTargets = { rows, ...this.#visibleBranchProjection(rows) };
+		const { targets, targetIndexByRootId, firstVisibleById } = this.#branchTargets;
+
+		// At a fork itself, enter its first/last visible child branch.
+		const selectedChildren = this.#orderedChildren(selected);
+		if (selectedChildren.length > 1) {
+			for (let offset = 0; offset < selectedChildren.length; offset++) {
+				const index = direction > 0 ? offset : selectedChildren.length - 1 - offset;
+				const target = firstVisibleById.get(selectedChildren[index]!.entry.id);
+				if (target) {
+					this.#tree.setSelectedKey(target.entry.id);
+					return;
+				}
+			}
+		}
+		if (targets.length === 0) return;
+		const currentRootId = this.#nearestBranchRootId(selected.entry.id);
+		const currentIndex = currentRootId === undefined ? -1 : (targetIndexByRootId.get(currentRootId) ?? -1);
+		const nextIndex =
+			currentIndex < 0
+				? direction > 0
+					? 0
+					: targets.length - 1
+				: (currentIndex + direction + targets.length) % targets.length;
+		this.#tree.setSelectedKey(targets[nextIndex]!.entry.id);
 	}
 
 	#applyFilter(): void {
@@ -1205,6 +1323,10 @@ class TreeList implements Component {
 					(node.entry.message.role === "user" || node.entry.message.role === "assistant"),
 				1,
 			);
+		} else if (matchesKey(keyData, "shift+left")) {
+			this.#moveBranch(-1);
+		} else if (matchesKey(keyData, "shift+right")) {
+			this.#moveBranch(1);
 		} else if (matchesKey(keyData, "home")) {
 			this.#tree.setSelectionIndex(0);
 		} else if (matchesKey(keyData, "end")) {
@@ -1402,6 +1524,7 @@ export class TreeSelectorComponent extends OverlayPanel {
 					[
 						`${formatKeyHint("enter")}: switch.`,
 						`${formatKeyHints(["alt+up", "alt+down"])}: previous/next turn.`,
+						`${formatKeyHints(["shift+left", "shift+right"])}: previous/next branch.`,
 						`${editorKeys("tui.select.pageUp", "tui.select.pageDown")} (${formatKeyHints(["left", "right"])}): page.`,
 						`${formatKeyHints(["home", "end"])}: first/last item.`,
 						`${formatKeyHint("shift+enter")}: summarize & switch.`,
