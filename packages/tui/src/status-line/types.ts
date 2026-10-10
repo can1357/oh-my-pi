@@ -212,6 +212,8 @@ export interface StatusResetExpiry {
 	/** `soon`: within 7 days; `imminent`: within 24 hours. */
 	tier: "soon" | "imminent";
 	count: number;
+	/** Expiry of the reset the warning is about (epoch ms); it can be later than the soonest banked one. */
+	expiresAtMs: number;
 }
 
 export interface RenderedSegment {

@@ -304,6 +304,54 @@ describe("StatusLineComponent usage refresh", () => {
 		expect(output).toContain("weekly cooldown");
 	});
 
+	it("counts down to the warned Claude grant, not an earlier one clearing only a quiet window", async () => {
+		const grant = (id: string, program: string, clears: string[], hours: number) => ({
+			id,
+			program,
+			remainingCount: 1,
+			usable: true,
+			requiresLimit: false,
+			clears,
+			blocking: [],
+			usedFractions: {},
+			expiresAt: new Date(Date.now() + hours * 3_600_000).toISOString(),
+			status: "available",
+		});
+		const reports = usageReport(10) as Array<Record<string, unknown>>;
+		(reports[0]!.limits as unknown[]).push({
+			id: "anthropic:7d",
+			label: "Claude 7 Day",
+			scope: { provider: "anthropic", windowId: "7d" },
+			window: { id: "7d", label: "7d", resetsAt: Date.now() + 80 * 3_600_000 },
+			amount: { unit: "percent", usedFraction: 0.8 },
+		});
+		reports[0]!.resetCredits = {
+			availableCount: 2,
+			redeemableCount: 1,
+			nextCreditId: "juniper",
+			eligible: true,
+			credits: [
+				grant("juniper", "juniper_tide", ["anthropic:5h"], 1),
+				grant("cedar", "cedar_ember", ["anthropic:7d"], 6),
+			],
+		};
+		const component = new StatusLineComponent(
+			makeSession(async () => reports),
+			statusLineHost,
+		);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["usage"],
+			rightSegments: [],
+			separator: "powerline-thin",
+		});
+
+		await refreshUsage(component);
+
+		expect(plain(component.getTopBorder(120).content)).toContain("▲ 1 exp 6h");
+		component.dispose();
+	});
+
 	it.each([
 		{ name: "keeps a reset beyond 7 days plain", expiresInHours: 8 * 24, text: "✦ 1 exp 8d" },
 		{ name: "flags a reset expiring within 7 days", expiresInHours: 5 * 24, text: "✦ 1 ▲ 1 exp 5d" },
