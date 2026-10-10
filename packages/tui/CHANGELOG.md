@@ -2,9 +2,29 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed the `isInsideTmux()`, `isInsideZellij()`, and `isInsideHerdr()` exports; use `hasTerminalMultiplexerSession("tmux" | "zellij" | "herdr", env)` instead ([#13620](https://github.com/can1357/oh-my-pi/pull/13620) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+
+### Added
+
+- `classifyTerminalMultiplexer()` reports `"orca"` inside Orca terminals while `isInsideTerminalMultiplexer()` stays false there, so Orca keeps the direct-terminal render path; `TERMINAL_MULTIPLEXER_ENV_KEYS` lists every environment variable multiplexer detection reads ([#13620](https://github.com/can1357/oh-my-pi/pull/13620) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Added `terminalMultiplexerSessions()`, `terminalMultiplexerForTerm()`, `classifyTerminalMultiplexerModule()`, and `routeTerminalMultiplexerNotification()`, driven by one multiplexer registry that now owns notification routing and per-multiplexer capability overrides ([#13620](https://github.com/can1357/oh-my-pi/pull/13620) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+### Added
+
+- Added `change` and `progress` table-chart kinds with `ChartSpec.baseline` and `TableColumn.scores`: a before/after table whose rows have their own units charts each metric as a factor of the baseline column (rows without two numbers are named in the caption), and `analyzeTable` reads whole-number scores (`12/12`, `154/160`) as the percent of their total, keeping `a / b` pairs and lists as written
+
 ### Changed
 
 - `StatusLineComponent.describeComposerFacts()` includes the configured `git` segment among the composer's facts (branch and status, the `status.git` click action, pinned so it outlasts the other facts) instead of leaving the branch to Tern's pane header ([#15220](https://github.com/can1357/oh-my-pi/pull/15220) by [@H4vC](https://github.com/H4vC))
+- Small-multiple table charts with more than three panels and at most six categories draw as bands of per-metric panels with a color legend, and `worthCharting` counts their panels like categories
+- Table charts take the look of Apple's charts and Tern: a UI sans, hairline gridlines, rounded bars and cells, smooth lines over a soft area fill, dot legends, left-aligned category labels that never run off the edge, and axes labeled in one unit (`0, 5k, 10k`)
+- Line charts whose series differ 8× or more in size stack panels on their own axes instead of flattening the smaller lines, and their end labels no longer overlap
+- SVG figure series colors `--c1`…`--c6` are an even-weight palette led by the theme accent's hue instead of syntax colors
+
+### Fixed
+
+- Fixed `parseCell` throwing on table cells such as `3 constructor` or `2 valueOf calls`, and reading a `constructor` cell as a missing value
 
 ## [18.8.8] - 2026-10-10
 
@@ -24,20 +44,14 @@
 - Added `TUI.releaseHeldInput()`: on a terminal expected to speak TSP, a `deferInput` start now holds keystrokes (TSP events and the cell-size reply still apply; Ctrl+C/Ctrl+D release early) until the app calls it once its session is wired; such terminals also skip the sixel probe ([#15120](https://github.com/can1357/oh-my-pi/pull/15120) by [@H4vC](https://github.com/H4vC))
 - Added `TUI.replaceHeldFocus(previous, next)`, which `Composer.setEditor()` calls so a swapped-in editor inherits held startup keys; only keys for the start-time focus owner are now held, and a dialog that takes focus gets its input live ([#15122](https://github.com/can1357/oh-my-pi/pull/15122) by [@H4vC](https://github.com/H4vC))
 - Added `RenderResultOptions.elapsedMs` and `cancelled`, `NativeToolHead.command` and `NativeToolView.preview: "children"` for native describe hooks
-- Added `change` and `progress` table-chart kinds with `ChartSpec.baseline` and `TableColumn.scores`: a before/after table whose rows have their own units charts each metric as a factor of the baseline column (rows without two numbers are named in the caption), and `analyzeTable` reads whole-number scores (`12/12`, `154/160`) as the percent of their total, keeping `a / b` pairs and lists as written
 
 ### Changed
 
 - Tern draws each bash run, eval cell and `!`/`$` run as one box: the command or code, its output, status lines and a foot with state, time and facts; images sit below the box and the bash head shows the intent instead of the command
-- Small-multiple table charts with more than three panels and at most six categories draw as bands of per-metric panels with a color legend, and `worthCharting` counts their panels like categories
-- Table charts take the look of Apple's charts and Tern: a UI sans, hairline gridlines, rounded bars and cells, smooth lines over a soft area fill, dot legends, left-aligned category labels that never run off the edge, and axes labeled in one unit (`0, 5k, 10k`)
-- Line charts whose series differ 8× or more in size stack panels on their own axes instead of flattening the smaller lines, and their end labels no longer overlap
-- SVG figure series colors `--c1`…`--c6` are an even-weight palette led by the theme accent's hue instead of syntax colors
 
 ### Fixed
 
 - Fixed the Agents hub Time column rewinding and freezing for running subagents between progress updates ([#15140](https://github.com/can1357/oh-my-pi/pull/15140) by [@H4vC](https://github.com/H4vC))
-- Fixed `parseCell` throwing on table cells such as `3 constructor` or `2 valueOf calls`, and reading a `constructor` cell as a missing value
 
 ## [18.8.7] - 2026-10-09
 
@@ -3000,18 +3014,4 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 - Added Emacs-style kill ring editing with yank and yank-pop keybindings. ([#810](https://github.com/badlogic/pi-mono/pull/810) by [@Perlence](https://github.com/Perlence))
 - Added legacy Alt+letter handling and Alt+D delete word forward support in the editor keymap. ([#810](https://github.com/badlogic/pi-mono/pull/810) by [@Perlence](https://github.com/Perlence))
 
-## [0.48.0] - 2026-01-16
-
-### Added
-
-- `EditorOptions` with optional `paddingX` for horizontal content padding, plus `getPaddingX()`/`setPaddingX()` methods ([#791](https://github.com/badlogic/pi-mono/pull/791) by [@ferologics](https://github.com/ferologics))
-
-### Changed
-
-- Hardware cursor is now disabled by default for better terminal compatibility. Set `PI_HARDWARE_CURSOR=1` to enable (replaces `PI_NO_HARDWARE_CURSOR=1` which disabled it).
-
-### Fixed
-
-- Decode Kitty CSI-u printable sequences in the editor so shifted symbol keys (e.g., `@`, `?`) work in terminals that enable Kitty keyboard protocol ([#779](https://github.com/badlogic/pi-mono/pull/779) by [@iamd3vil](https://github.com/iamd3vil))
-
-Older entries are archived in [packages/tui/CHANGELOG.md@01e0b5c26e26](https://github.com/can1357/oh-my-pi/blob/01e0b5c26e267dff08c305f51d1ab56ec5a2f05d/packages/tui/CHANGELOG.md).
+Older entries are archived in [packages/tui/CHANGELOG.md@1534f1a33954](https://github.com/can1357/oh-my-pi/blob/1534f1a33954da73fc3c234cb0d146e6d6942f89/packages/tui/CHANGELOG.md).

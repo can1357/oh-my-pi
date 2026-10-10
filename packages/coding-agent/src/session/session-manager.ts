@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
-	AssistantMessage,
 	ImageContent,
 	Message,
 	MessageAttribution,
@@ -9,7 +8,6 @@ import type {
 	TextContent,
 	Usage,
 } from "@oh-my-pi/pi-ai";
-import { createSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	directoryIsEnterable,
 	directoryIsMissing,
@@ -42,6 +40,7 @@ import {
 	stripInternalDetailsFields,
 } from "./messages";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
+import { createInterruptedToolResults, sessionExitFollowsLastMessage } from "./exit-diagnostics";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
 import { type BuildSessionContextOptions, buildSessionContext, type SessionContext } from "./session-context";
 import {
@@ -3991,50 +3990,27 @@ export class SessionManager {
 	}
 
 	/**
-	 * Pair any tool calls the forked active branch's final assistant turn left
-	 * unresolved with synthetic aborted results, in place.
+	 * Pair unresolved calls on the fork's active branch with diagnostic results.
 	 *
-	 * A `/tan` fork of a *live* parent is taken while the parent may be mid-turn
-	 * — its last assistant turn emitted a tool call whose `toolResult` is
-	 * delivered only to the parent. {@link createInterruptedTurnAbortMessage}
-	 * cannot repair this: it requires a persisted `session_exit` after the tail,
-	 * which a running parent never wrote. Left unpaired, the clone renders the
-	 * parent's in-flight tool call as its own perpetually pending work (the
-	 * transcript keeps dangling calls while the clone streams) and replays an
-	 * orphan `tool_use` into the model. Synthesizing the same `assistant_stop_
-	 * aborted` results the agent loop records for an interrupted turn makes the
-	 * forked transcript terminal and well-formed before the clone is prompted.
+	 * Forks can be taken while the source parent is still running. A result that
+	 * arrives later is only present in that parent's history, so the child must
+	 * preserve an unknown outcome instead of asserting the tool never ran.
 	 *
-	 * Assistant turns and results on sibling branches are excluded: the clone
-	 * consumes only the root-to-active-leaf path.
+	 * A source whose process exit follows its last message is no longer running;
+	 * it keeps the resume recovery instead: startup warns about the pending
+	 * calls, then pairs them with process-exit results and the interrupted-turn
+	 * abort record.
+	 *
+	 * Sibling branches are excluded: only the root-to-active-leaf path is copied.
 	 */
 	static #repairForkedInterruptedTail(history: SessionEntry[], branch: readonly SessionEntry[]): void {
 		const leaf = branch.at(-1);
-		if (!leaf) return;
-		let assistant: AssistantMessage | undefined;
-		for (let i = branch.length - 1; i >= 0; i--) {
-			const entry = branch[i]!;
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				assistant = entry.message;
-				break;
-			}
-		}
-		if (!assistant) return;
-		const pairedResultIds = new Set<string>();
-		for (const entry of branch) {
-			if (entry.type === "message" && entry.message.role === "toolResult")
-				pairedResultIds.add(entry.message.toolCallId);
-		}
-		const dangling = assistant.content.filter(
-			(block): block is Extract<AssistantMessage["content"][number], { type: "toolCall" }> =>
-				block.type === "toolCall" && !pairedResultIds.has(block.id),
-		);
-		if (dangling.length === 0) return;
+		if (!leaf || sessionExitFollowsLastMessage(branch)) return;
+		const results = createInterruptedToolResults(branch, "fork");
+		if (results.length === 0) return;
 		const usedIds = new Set(history.map(entry => entry.id));
-		// Chain the synthetic results after the active leaf so they extend the
-		// selected branch without mutating or depending on sibling paths.
 		let parentId = leaf.id;
-		for (const call of dangling) {
+		for (const result of results) {
 			const id = generateId(usedIds);
 			usedIds.add(id);
 			const entry: SessionMessageEntry = {
@@ -4042,7 +4018,7 @@ export class SessionManager {
 				id,
 				parentId,
 				timestamp: nowIso(),
-				message: createSyntheticToolResultMessage(call, "aborted"),
+				message: result,
 			};
 			history.push(entry);
 			parentId = id;

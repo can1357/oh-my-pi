@@ -71,31 +71,56 @@ describe("auth-broker wire surface", () => {
 	let handle: AuthBrokerServerHandle | undefined;
 	let token = "";
 
-	beforeEach(async () => {
-		for (const key of ANTHROPIC_ENV) {
-			savedEnv[key] = process.env[key];
-			delete process.env[key];
-		}
-		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-wire-"));
-		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+	async function startFixture(nextStore: SqliteAuthCredentialStore): Promise<void> {
+		store = nextStore;
 		await store.saveOAuth("anthropic", mintOAuthCredential("a", Date.now() + 60_000));
 		storage = new AuthStorage(store);
 		await storage.credentials.reload();
-		token = "test-bearer";
 		handle = startAuthBroker({
 			storage,
 			bind: "127.0.0.1:0",
 			bearerTokens: [token],
 			disableRefresher: true,
 		});
+	}
+
+	async function closeFixture(): Promise<void> {
+		await handle?.close();
+		handle = undefined;
+		storage?.close();
+		storage = undefined;
+		store?.close();
+		store = undefined;
+	}
+
+	/**
+	 * Swaps the in-memory fixture for a file-backed one so a test can open a second
+	 * `Database` connection on the same file (external writer / `data_version`).
+	 */
+	async function useFileBackedFixture(): Promise<string> {
+		await closeFixture();
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-wire-"));
+		const dbPath = path.join(tempDir, "agent.db");
+		await startFixture(await SqliteAuthCredentialStore.open(dbPath));
+		return dbPath;
+	}
+
+	beforeEach(async () => {
+		for (const key of ANTHROPIC_ENV) {
+			savedEnv[key] = process.env[key];
+			delete process.env[key];
+		}
+		token = "test-bearer";
+		await startFixture(new SqliteAuthCredentialStore(new Database(":memory:")));
 	});
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
-		await handle?.close();
-		storage?.close();
-		store?.close();
-		await removeWithRetries(tempDir);
+		await closeFixture();
+		if (tempDir) {
+			await removeWithRetries(tempDir);
+			tempDir = "";
+		}
 		for (const key of ANTHROPIC_ENV) {
 			if (savedEnv[key] === undefined) delete process.env[key];
 			else process.env[key] = savedEnv[key];
@@ -245,8 +270,9 @@ describe("auth-broker wire surface", () => {
 	});
 
 	test("ignores external SQLite commits outside auth tables", async () => {
+		const dbPath = await useFileBackedFixture();
 		const generation = storage!.credentials.generation;
-		const db = new Database(path.join(tempDir, "agent.db"));
+		const db = new Database(dbPath);
 		try {
 			db.run("CREATE TABLE unrelated_state (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
 			db.run("INSERT INTO unrelated_state (value) VALUES ('changed')");
@@ -259,7 +285,8 @@ describe("auth-broker wire surface", () => {
 	});
 
 	test("does not double-bump after a local auth write with an unrelated external commit pending", async () => {
-		const db = new Database(path.join(tempDir, "agent.db"));
+		const dbPath = await useFileBackedFixture();
+		const db = new Database(dbPath);
 		try {
 			db.run("CREATE TABLE unrelated_state (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
 			db.run("INSERT INTO unrelated_state (value) VALUES ('changed')");
@@ -274,8 +301,9 @@ describe("auth-broker wire surface", () => {
 	});
 
 	test("preserves a pending external auth commit while acknowledging local changes", async () => {
+		const dbPath = await useFileBackedFixture();
 		const generation = storage!.credentials.generation;
-		const db = new Database(path.join(tempDir, "agent.db"));
+		const db = new Database(dbPath);
 		try {
 			db.run("UPDATE auth_credentials SET updated_at = updated_at + 1 WHERE provider = 'anthropic'");
 		} finally {
@@ -288,6 +316,7 @@ describe("auth-broker wire surface", () => {
 	});
 
 	test("projects Codex meter blocks for legacy clients and observes writes from another connection", async () => {
+		const dbPath = await useFileBackedFixture();
 		await handle!.close();
 		handle = undefined;
 		const credential = (
@@ -310,13 +339,15 @@ describe("auth-broker wire surface", () => {
 			blockScope: "spark",
 			blockedUntilMs: sparkBlockedUntilMs,
 		});
-		expect(
-			readRawCodexCredentialBlocks(path.join(tempDir, "agent.db"), credential.id).map(row => row.block_scope),
-		).toEqual(["chat", "shared", "spark"]);
+		expect(readRawCodexCredentialBlocks(dbPath, credential.id).map(row => row.block_scope)).toEqual([
+			"chat",
+			"shared",
+			"spark",
+		]);
 
 		const sparkUpdatedAtSec = Math.floor(Date.now() / 1000) - 20;
 		const chatUpdatedAtSec = sparkUpdatedAtSec + 10;
-		const db = new Database(path.join(tempDir, "agent.db"));
+		const db = new Database(dbPath);
 		try {
 			const updateTimestamp = db.prepare(
 				"UPDATE auth_credential_blocks SET updated_at = ? WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
@@ -327,7 +358,7 @@ describe("auth-broker wire surface", () => {
 			db.close();
 		}
 		await storage!.credentials.poll();
-		expect(readRawCodexCredentialBlocks(path.join(tempDir, "agent.db"), credential.id)).toEqual([
+		expect(readRawCodexCredentialBlocks(dbPath, credential.id)).toEqual([
 			{
 				block_scope: "chat",
 				blocked_until_ms: chatBlockedUntilMs,
@@ -404,7 +435,7 @@ describe("auth-broker wire surface", () => {
 			waitMs: 1000,
 		});
 		const updatedChatBlockedUntilMs = sparkBlockedUntilMs + 60_000;
-		const legacyWriter = new Database(path.join(tempDir, "agent.db"));
+		const legacyWriter = new Database(dbPath);
 		try {
 			legacyWriter
 				.prepare(
@@ -887,7 +918,7 @@ describe("auth-broker wire surface", () => {
 	});
 
 	test("SSE stream keepalive comment arrives on cadence", async () => {
-		const localStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "keepalive.db"));
+		const localStore = new SqliteAuthCredentialStore(new Database(":memory:"));
 		await localStore.saveOAuth("anthropic", mintOAuthCredential("k", Date.now() + 60_000));
 		const localStorage = new AuthStorage(localStore);
 		await localStorage.credentials.reload();
@@ -985,12 +1016,10 @@ describe("auth-broker wire surface", () => {
 
 describe("client_usage app column migration", () => {
 	test("pre-app broker DBs gain the app column; legacy rows stay queryable as unlabeled", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-migrate-"));
-		const dbPath = path.join(dir, "agent.db");
 		// Replicate the pre-app schema exactly as older brokers created it, plus
 		// one recorded legacy row — `CREATE TABLE IF NOT EXISTS` must skip it and
 		// the ALTER-based migration must add the column without losing the row.
-		const legacy = new Database(dbPath);
+		const legacy = new Database(":memory:");
 		legacy.run(`
 			CREATE TABLE clients (
 				install_id TEXT PRIMARY KEY,
@@ -1024,9 +1053,8 @@ describe("client_usage app column migration", () => {
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			[now, "legacy-install", "anthropic", "claude-x", 5, 100, 50, 10, 5, 2.5],
 		);
-		legacy.close();
 
-		const migrated = await SqliteAuthCredentialStore.open(dbPath);
+		const migrated = new SqliteAuthCredentialStore(legacy);
 		try {
 			migrated.recordClientUsage({
 				installId: "legacy-install",
@@ -1059,7 +1087,6 @@ describe("client_usage app column migration", () => {
 			});
 		} finally {
 			migrated.close();
-			await removeWithRetries(dir);
 		}
 	});
 });

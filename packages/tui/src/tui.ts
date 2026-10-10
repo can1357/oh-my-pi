@@ -29,13 +29,13 @@ import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
 import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
+import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "./terminal-multiplexer";
 import {
 	encodeKittyDeleteAllImages,
 	encodeKittyDeleteImage,
 	encodeKittyPlacementLine,
 	ImageProtocol,
 	isImageProtocolForced,
-	isInsideHerdr,
 	isInsideTerminalMultiplexer,
 	parseKittyDirectPlacementLine,
 	setCellDimensions,
@@ -44,7 +44,6 @@ import {
 	synchronizedOutputUserOverride,
 	TERMINAL,
 } from "./terminal-capabilities";
-import { classifyTerminalMultiplexer } from "./terminal-multiplexer";
 import { compositeLineAt } from "./render/composite";
 import {
 	Ellipsis,
@@ -1469,12 +1468,19 @@ export class TUI extends Container {
 		this.terminal.onPrivateModeReport?.((mode, supported, confirmed = true, status) => {
 			if (mode !== 2026 || !confirmed) return;
 			if (synchronizedOutputUserOverride() !== null) return;
-			// Herdr's Ghostty VTE honors DEC 2026 even when DECRQM is unanswered or
-			// reports unrecognized (status 0). Other confirmed unsupported reports
-			// still disable: status 4 is permanently reset, and a three-argument
-			// callback (`status` omitted) is a definitive unsupported from a
-			// custom Terminal that does not distinguish DECRPM codes.
-			if (!supported && isInsideHerdr() && status === 0) return;
+			// Some multiplexer VTEs (Herdr's Ghostty pane) honor DEC 2026 even when
+			// DECRQM is unanswered or reports unrecognized (status 0). Other
+			// confirmed unsupported reports still disable: status 4 is permanently
+			// reset, and a three-argument callback (`status` omitted) is a
+			// definitive unsupported from a custom Terminal that does not
+			// distinguish DECRPM codes.
+			if (
+				!supported &&
+				status === 0 &&
+				terminalMultiplexerSessions().some(multiplexer => multiplexer.honorsSynchronizedOutput)
+			) {
+				return;
+			}
 			this.#setSynchronizedOutput(supported);
 		});
 		// Icons painted before the Glyph Protocol registration landed may sit in
@@ -1786,7 +1792,7 @@ export class TUI extends Container {
 			resizeInPlaceOverride() !== false &&
 			this.#resizeScrollbackMode === "rebuild" &&
 			this.#synchronizedOutputEnabled &&
-			classifyTerminalMultiplexer() === "tmux"
+			classifyTerminalMultiplexerModule()?.altRestoreEndsSynchronizedOutput === true
 		);
 	}
 
@@ -2168,7 +2174,7 @@ export class TUI extends Container {
 				// an intact bottom anchor still need no replay or additional wait.
 				if (
 					this.#resizeScrollbackMode === "rebuild" &&
-					classifyTerminalMultiplexer() === "tmux" &&
+					classifyTerminalMultiplexerModule()?.growsBeforeSigwinch === true &&
 					!this.#resizeRepaintsInPlace() &&
 					this.#frameProvider?.beginHistoryReplay &&
 					this.#resizeBurstGrew &&
@@ -3393,7 +3399,7 @@ export class TUI extends Container {
 		// resize in rebuild mode): erase native history and the viewport,
 		// then repaint from row zero.
 		const destructiveReset = this.#clearScrollbackOnNextRender;
-		const compactReplay = destructiveReset && classifyTerminalMultiplexer() === "tmux";
+		const compactReplay = destructiveReset && classifyTerminalMultiplexerModule()?.expandsRepPadding === true;
 		if (destructiveReset) {
 			this.#providerViewportTop = 0;
 			this.#providerWindow = [];
@@ -3413,7 +3419,7 @@ export class TUI extends Container {
 			destructiveReset &&
 			this.#resizeScrollbackMode === "rebuild" &&
 			this.#synchronizedOutputEnabled &&
-			classifyTerminalMultiplexer() === "tmux";
+			classifyTerminalMultiplexerModule()?.expiresSynchronizedOutput === true;
 		let syncBytes = Buffer.byteLength(buffer);
 		const append = (sequence: string): void => {
 			buffer += sequence;
