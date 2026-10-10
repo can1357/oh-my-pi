@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Fixed the JTD-to-JSON-Schema converter emitting `$ref`s that cannot resolve: ref names are now escaped per JSON Pointer (`~` and `/`), and the JTD root `definitions` map is mapped to `$defs` so `#/$defs/` refs have a target ([#14826](https://github.com/can1357/oh-my-pi/pull/14826) by [@jchanghong023](https://github.com/jchanghong023)).
 - Fixed `/usage` (or clicking the status-line cost) while the usage dashboard was already open stacking a second dashboard on top; it now focuses the open one ([#15145](https://github.com/can1357/oh-my-pi/pull/15145) by [@H4vC](https://github.com/H4vC))
 - Fixed the custom-tool examples' full-documentation link opening a missing page ([#15076](https://github.com/can1357/oh-my-pi/pull/15076) by [@qingshungLI](https://github.com/qingshungLI))
 - Fixed the `/models` compaction limit preview and **Compacts at** row rounding fractional percentages (`12.5%` showed as `13%`) ([#15074](https://github.com/can1357/oh-my-pi/pull/15074) by [@H4vC](https://github.com/H4vC))
@@ -178,8 +179,6 @@
 - Added account pools for task agents, allowing an agent and its related work—including advisors, title generation, subagents, and resumed sessions—to use only specified OAuth accounts and fail rather than fall back to another account or an API key.
 - Added `omp usage accounts` to list OAuth account provider and identity keys without exposing tokens, making account-pool configuration easier.
 
-- Fixed `ask` questions in Tern covering the end of the transcript with a sheet that blocked scrolling, hiding the explanation the question was about; the question now sits in the composer's place, framed like the composer, below a transcript you can read and scroll while deciding ([#14812](https://github.com/can1357/oh-my-pi/pull/14812) by [@H4vC](https://github.com/H4vC))
-- Fixed the JTD-to-JSON-Schema converter emitting `$ref`s that cannot resolve: ref names are now escaped per JSON Pointer (`~` and `/`), and the JTD root `definitions` map is mapped to `$defs` so `#/$defs/` refs have a target ([#14826](https://github.com/can1357/oh-my-pi/pull/14826) by [@jchanghong023](https://github.com/jchanghong023)).
 ### Changed
 
 - Generated session titles now include their card icon and short code, so the `/resume` picker and session listings show this context; `title.icons` applies to newly generated titles.
