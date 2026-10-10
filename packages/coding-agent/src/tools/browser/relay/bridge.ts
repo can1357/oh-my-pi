@@ -3306,16 +3306,17 @@ export class RelayBridge {
 		if (method === "Page.frameNavigated") {
 			const frame = params?.frame;
 			if (frame && typeof frame === "object") {
-				if (!sourceSessionId && !("parentId" in frame)) tab.mainFrameNavigationGeneration++;
+				const isMainFrameNavigation = !sourceSessionId && !("parentId" in frame);
+				if (isMainFrameNavigation) tab.mainFrameNavigationGeneration++;
 				const frameId = "id" in frame && typeof frame.id === "string" ? frame.id : undefined;
 				const loaderId = "loaderId" in frame && typeof frame.loaderId === "string" ? frame.loaderId : undefined;
 				if (frameId !== undefined && sourceSessionId) tab.frameSessions.set(frameId, sourceSessionId);
 				if (frameId !== undefined && loaderId !== undefined) {
 					for (const scripts of tab.preloadScripts.values()) {
 						for (const script of scripts.values()) {
-							if (script.rootGeneration === tab.runtimeGeneration && script.frameLoaderIds) {
-								script.frameLoaderIds[frameId] = loaderId;
-							}
+							if (script.rootGeneration !== tab.runtimeGeneration) continue;
+							if (script.frameLoaderIds) script.frameLoaderIds[frameId] = loaderId;
+							if (isMainFrameNavigation) script.loaderId = loaderId;
 						}
 					}
 				}
