@@ -32,6 +32,7 @@ interface HistoryBatch {
 interface TerminalFramePlan {
   readonly history?: HistoryBatch;
   readonly viewport: readonly string[];
+  readonly pinBottom?: boolean;
 }
 ```
 
@@ -41,6 +42,12 @@ history batch contains finalized rows or a stable append-only head row. A
 emitted prefix of the active append-only head. Finality
 is therefore an application decision, never an inference from a row crossing
 the top of the terminal.
+
+`pinBottom` keeps a short viewport's last row on the screen's last row. The
+writer prepends blank rows only for the gap below history still on screen, so
+that history stays visible instead of scrolling into native scrollback to make
+room for padding. The composer sets it after an ask panel retired rows or a tall
+report closed.
 
 A history batch has a monotonic id. The TUI writes each accepted batch exactly
 once, then acknowledges that id to the provider. The provider retains a pending

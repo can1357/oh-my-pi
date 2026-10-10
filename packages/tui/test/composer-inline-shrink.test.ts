@@ -33,6 +33,7 @@ interface Harness {
 	/** Turn-scoped chrome between transcript and editor (loader, todo/subagent HUDs). */
 	hud: InlineWidget;
 	editor: Container;
+	transcript: TranscriptContainer;
 }
 
 function makeHarness(columns = COLUMNS, rows = ROWS, transcriptRows = TRANSCRIPT_ROWS): Harness {
@@ -55,7 +56,7 @@ function makeHarness(columns = COLUMNS, rows = ROWS, transcriptRows = TRANSCRIPT
 	editor.addChild(new Text("EDITOR", 0, 0));
 	composer.setRuntimeChildren([transcript, hud, editor], { transient: [editor] });
 	composer.start({ playWelcomeIntro: false });
-	return { terminal, scheduler, composer, widget, hud, editor };
+	return { terminal, scheduler, composer, widget, hud, editor, transcript };
 }
 
 /** Settle, grow the inline chrome, settle, shrink it back, settle. */
@@ -133,6 +134,73 @@ describe("composer inline shrink (#11007)", () => {
 		await h.scheduler.settle(h.terminal);
 		expect(row(`${TRANSCRIPT_PREFIX}0`)).toBe(0);
 		expect(row("EDITOR")).toBeLessThan(ROWS - 1);
+		h.composer.stop();
+	});
+
+	it("keeps rows an ask panel retires on screen above it instead of a blank band (#14570)", async () => {
+		const h = makeHarness(112, 54, 0);
+		const block = (tag: string, rows: number): Component => ({
+			render: () => Array.from({ length: rows }, (_, i) => `${tag} ${i}`),
+		});
+		const openAsk = (): AskDialogComponent => {
+			const dialog = new AskDialogComponent(
+				[
+					{
+						id: "q1",
+						question: "Is the recurring defect the duplicate rendering?",
+						options: [
+							{ label: "Duplicate", description: "Matches the earlier issue." },
+							{ label: "Clipped head", description: "Covered elsewhere." },
+							{ label: "New issue", description: "File it anyway." },
+						],
+					},
+				],
+				{ onSubmit: () => {}, onCancel: () => {}, onPrompt: () => Promise.resolve(undefined) },
+			);
+			h.editor.clear();
+			h.editor.addChild(dialog);
+			h.composer.ui.requestRender();
+			return dialog;
+		};
+		const closeAsk = (dialog: AskDialogComponent): void => {
+			dialog.dispose();
+			h.editor.clear();
+			h.editor.addChild(new Text("EDITOR", 0, 0));
+			h.composer.ui.requestRender();
+		};
+		const viewport = (): string[] => h.terminal.getViewport().map(row => Bun.stripANSI(row).trimEnd());
+		h.transcript.addChild(block("Response", 40));
+		closeAsk(openAsk());
+		await h.scheduler.settle(h.terminal);
+		h.transcript.addChild(block("Follow-up", 5));
+		h.composer.ui.requestRender();
+		await h.scheduler.settle(h.terminal);
+
+		// This ask retires the 40-row response. Those rows were on screen: they
+		// must stay there above the panel, not scroll away behind blank padding.
+		const dialog = openAsk();
+		await h.scheduler.settle(h.terminal);
+		const open = viewport();
+		expect(open[0]).toMatch(/^Response \d+$/);
+		expect(open).toContain("Response 39");
+		const question = open.findIndex(row => row.includes("Is the recurring defect"));
+		expect(question - open.indexOf("Follow-up 4")).toBe(2);
+
+		// Closing still pins the editor to the bottom row, and every row lands
+		// exactly once across native scrollback and the screen.
+		closeAsk(dialog);
+		await h.scheduler.settle(h.terminal);
+		const closed = viewport();
+		expect(closed.indexOf("EDITOR")).toBe(53);
+		expect(closed).toContain("Response 39");
+		const rows = h.terminal
+			.getScrollBuffer()
+			.map(row => Bun.stripANSI(row).trimEnd())
+			.filter(row => /^(Response|Follow-up) \d+$/.test(row));
+		expect(rows).toEqual([
+			...Array.from({ length: 40 }, (_, i) => `Response ${i}`),
+			...Array.from({ length: 5 }, (_, i) => `Follow-up ${i}`),
+		]);
 		h.composer.stop();
 	});
 
