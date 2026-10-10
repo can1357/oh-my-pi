@@ -19,6 +19,7 @@ import {
 	getLiveMessageId,
 	getLiveMessageProgress,
 	mapAgentSessionEventToAcpSessionUpdates,
+	mapIncomingAgentMessage,
 	prepareLiveAssistantMessage,
 } from "./acp-event-mapper";
 
@@ -39,12 +40,12 @@ interface ChildStream extends AcpLiveMessageState {
 	/** Whether the current turn streamed an assistant error to the client. */
 	turnErrorEmitted: boolean;
 	/**
-	 * Timestamp of the last assistant message of the most recent finished turn.
-	 * Its `message_end` can arrive after `agent_end`, even after the next run
-	 * starts; such late events are dropped because the end-of-turn fallback
-	 * already delivered that message.
+	 * Timestamps of assistant messages whose turn ended before their own
+	 * `message_end` was mapped. Their events can still arrive later, even after
+	 * further turns or runs; they are dropped, because the end-of-turn fallback
+	 * already handled them, until that `message_end` drains the entry.
 	 */
-	settledMessageTimestamp: number | undefined;
+	settledMessageTimestamps: Set<number>;
 	/** The child session's own cwd (its worktree for isolated runs), read from its registry ref. */
 	cwd: string | undefined;
 }
@@ -98,10 +99,34 @@ export class AcpSubagentStreams {
 
 	/** ACP session id of an omp agent in this session's tree, or `undefined` when it is not exposed. */
 	resolveAgentSessionId(agentId: string): string | undefined {
-		if (agentId === this.#session.getAgentId()) return this.#session.sessionId;
-		// Held-back announcements have not reached the client, so nothing may name the child yet.
-		if (this.#pending) return undefined;
-		return this.#children.get(agentId)?.sessionId;
+		// Held-back announcements have not reached the client, so direct root traffic may not name a child yet.
+		if (this.#pending && agentId !== this.#session.getAgentId()) return undefined;
+		return this.#routing.resolveAgentSessionId(agentId);
+	}
+
+	/**
+	 * Participant ids for notifications sent through {@link #deliver}. Those
+	 * share one ordered stream with the announcements, held back together, so
+	 * a known child may always be named.
+	 */
+	readonly #routing = {
+		resolveAgentSessionId: (agentId: string): string | undefined =>
+			agentId === this.#session.getAgentId() ? this.#session.sessionId : this.#children.get(agentId)?.sessionId,
+	};
+
+	/**
+	 * Report an agent message that reached the root outside an ACP prompt turn
+	 * (e.g. a detached child writing to the root), in order with child traffic.
+	 */
+	reportRootIncoming(message: { customType?: unknown; details?: unknown }): void {
+		for (const notification of mapIncomingAgentMessage(message, this.#session.sessionId, this.#routing)) {
+			this.#deliver(notification);
+		}
+	}
+
+	/** Release `unsubscribe` with this stream. */
+	track(unsubscribe: () => void): void {
+		this.#unsubscribers.push(unsubscribe);
 	}
 
 	/**
@@ -178,7 +203,7 @@ export class AcpSubagentStreams {
 			runs: 1,
 			awaitingAssignment: true,
 			turnErrorEmitted: false,
-			settledMessageTimestamp: undefined,
+			settledMessageTimestamps: new Set(),
 			cwd: undefined,
 			liveMessageId: undefined,
 			liveMessageProgress: undefined,
@@ -227,8 +252,9 @@ export class AcpSubagentStreams {
 		if (
 			(event.type === "message_start" || event.type === "message_update" || event.type === "message_end") &&
 			event.message.role === "assistant" &&
-			event.message.timestamp === child.settledMessageTimestamp
+			child.settledMessageTimestamps.has(event.message.timestamp)
 		) {
+			if (event.type === "message_end") child.settledMessageTimestamps.delete(event.message.timestamp);
 			return [];
 		}
 		if (event.type === "agent_start") child.turnErrorEmitted = false;
@@ -242,10 +268,16 @@ export class AcpSubagentStreams {
 			// Never fall back to the root cwd: an isolated child's relative paths would
 			// then name files in the parent workspace instead of its worktree.
 			cwd: child.cwd,
-			sessionMessages: this,
+			sessionMessages: this.#routing,
 		});
 		if (event.type === "tool_execution_end") child.toolArgsById.delete(event.toolCallId);
 		clearLiveAssistantMessageAfterEvent(child, event);
+		if (event.type === "agent_end") {
+			// The next turn (a reminder or follow-up) starts a new message; this
+			// turn's late events are recognized through `settledMessageTimestamps`.
+			child.liveMessageId = undefined;
+			child.liveMessageProgress = undefined;
+		}
 		if (event.type === "message_update" && event.assistantMessageEvent.type === "error" && notifications.length > 0) {
 			child.turnErrorEmitted = true;
 		}
@@ -266,7 +298,8 @@ export class AcpSubagentStreams {
 			(message): message is AssistantMessage => message.role === "assistant",
 		);
 		if (!lastAssistant) return [];
-		child.settledMessageTimestamp = lastAssistant.timestamp;
+		// The in-flight message's `message_end` has not been mapped: expect it late.
+		if (child.liveMessageProgress) child.settledMessageTimestamps.add(lastAssistant.timestamp);
 		const texts: string[] = [];
 		// A live message whose `message_end` has not been mapped yet still holds its progress.
 		const progress = child.liveMessageProgress;

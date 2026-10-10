@@ -1358,7 +1358,18 @@ export class AcpAgent implements Agent {
 	): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session, setToolUIContext);
 		if (this.#clientCapabilities?.subagents != null && subagentEventBus) {
-			record.subagents = new AcpSubagentStreams(this.#connection, session, subagentEventBus);
+			const subagents = new AcpSubagentStreams(this.#connection, session, subagentEventBus);
+			// Root IRC outside an ACP prompt turn (e.g. a detached child writing to the
+			// root, even from a `session_start` spawn) shares the child stream, so it is
+			// held back with that traffic until bootstrap and never precedes it.
+			subagents.track(
+				session.subscribe(event => {
+					if (event.type === "irc_message" && !isPromptTurnInFlight(record.promptTurn)) {
+						subagents.reportRootIncoming(event.message);
+					}
+				}),
+			);
+			record.subagents = subagents;
 		}
 		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
 		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
@@ -1398,21 +1409,6 @@ export class AcpAgent implements Agent {
 	}
 
 	async #handleLifetimeEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
-		if (event.type === "irc_message") {
-			// During an ACP prompt turn the prompt handler maps it; between turns
-			// (e.g. a detached child messaging the root) only this subscription sees it.
-			if (!record.subagents || isPromptTurnInFlight(record.promptTurn)) return;
-			for (const notification of mapIncomingAgentMessage(
-				event.message,
-				record.session.sessionId,
-				record.subagents,
-			)) {
-				await this.#connection.sessionUpdate(notification).catch(error => {
-					logger.warn("Failed to deliver ACP session message", { error: String(error) });
-				});
-			}
-			return;
-		}
 		if (event.type !== "thinking_level_changed" && event.type !== "model_changed") {
 			return;
 		}

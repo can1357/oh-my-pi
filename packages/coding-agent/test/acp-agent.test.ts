@@ -2083,28 +2083,39 @@ describe("ACP agent", () => {
 		}
 	});
 
-	it("reports an agent message that reaches the root between ACP prompt turns", async () => {
+	it("reports an agent message that reaches the root outside ACP prompt turns, held until bootstrap and sent once", async () => {
 		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: new EventBus() });
 		vi.useFakeTimers();
 		const { sessionId } = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
-		await advanceBootstrapGuard();
-		vi.useRealTimers();
 		const session = harness.findSession(sessionId)!;
-		for (const listener of session.listeners()) {
-			listener({
-				type: "irc_message",
-				message: {
-					role: "custom",
-					customType: "irc:incoming",
-					content: "<rendered IRC envelope>",
-					display: true,
-					details: { id: "m-idle", from: "Scout", message: "done in the background" },
-					attribution: "agent",
-					timestamp: 1,
-				},
-			} as AgentSessionEvent);
-		}
+		const deliverIrc = (id: string, text: string) => {
+			for (const listener of session.listeners()) {
+				listener({
+					type: "irc_message",
+					message: {
+						role: "custom",
+						customType: "irc:incoming",
+						content: "<rendered IRC envelope>",
+						display: true,
+						details: { id, from: "Scout", message: text },
+						attribution: "agent",
+						timestamp: 1,
+					},
+				} as AgentSessionEvent);
+			}
+		};
+		const sessionMessages = () =>
+			harness.updates.flatMap(n => (n.update.sessionUpdate === "session_message" ? [n.update.messageId] : []));
+		// e.g. a child spawned by a `session_start` extension, before the client knows the session id.
+		deliverIrc("m-early", "spawned at startup");
 		await Promise.resolve();
+		expect(sessionMessages()).toEqual([]);
+		await advanceBootstrapGuard();
+		await Promise.resolve();
+		vi.useRealTimers();
+		deliverIrc("m-idle", "done in the background");
+		await Promise.resolve();
+		expect(sessionMessages()).toEqual(["irc-in:m-early", "irc-in:m-idle"]);
 		expect(harness.updates.map(n => n.update)).toContainEqual({
 			sessionUpdate: "session_message",
 			messageId: "irc-in:m-idle",

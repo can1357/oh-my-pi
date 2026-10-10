@@ -326,6 +326,34 @@ describe("AcpSubagentStreams", () => {
 		expect(chunks[1]!.messageId).not.toBe(chunks[0]!.messageId);
 	});
 
+	it("drops every late event of turns already settled by the fallback, not just the latest", async () => {
+		registerAgent("Worker", ROOT_AGENT_ID);
+		const emit = (event: Record<string, unknown>) =>
+			bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, { id: "Worker", event: event as AgentSessionEvent });
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "started"));
+		const turnA = { role: "assistant", content: [{ type: "text", text: "A" }], stopReason: "stop", timestamp: 1 };
+		const turnB = { role: "assistant", content: [{ type: "text", text: "B" }], stopReason: "stop", timestamp: 2 };
+		for (const turn of [turnA, turnB]) {
+			emit({ type: "agent_start" });
+			emit({ type: "message_update", message: turn, assistantMessageEvent: { type: "thinking_delta", delta: "." } });
+			// The turn ends before its `message_end`.
+			emit({ type: "agent_end", messages: [turn] });
+		}
+		// Both late `message_end`s arrive after turn B settled.
+		emit({ type: "message_end", message: turnA });
+		emit({ type: "message_end", message: turnB });
+
+		// The announcement, then a thought and its fallback answer per turn.
+		const texts = (await delivered(5)).flatMap(n =>
+			n.update.sessionUpdate === "agent_message_chunk" && n.update.content.type === "text"
+				? [n.update.content.text]
+				: [],
+		);
+		await Promise.resolve();
+		expect(texts).toEqual(["A", "B"]);
+		expect(sent.filter(n => n.update.sessionUpdate === "agent_message_chunk")).toHaveLength(2);
+	});
+
 	it("holds back traffic until started, so nothing names the child before the client knows the root session", async () => {
 		const held: SessionNotification[] = [];
 		const pending = new AcpSubagentStreams(
