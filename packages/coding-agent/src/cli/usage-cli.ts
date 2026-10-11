@@ -33,28 +33,15 @@ import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
-import { resetAccountLockKey } from "../session/codex-auto-reset";
-import { checkCodexBalance, type ResetMarker, resetLockPath, withResetFence } from "../session/reset-fence";
-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
-import { reportMatchesStatus } from "../session/claude-auto-reset";
 import {
-	classifyResetExpiry,
-	type ResetExpiryWarning,
-	type ResetSpendVerdict,
-	resetSpendVerdict,
-} from "../session/reset-expiry";
-import { formatCodexUsageReportLabel, usageReportIdentity } from "../slash-commands/helpers/active-oauth-account";
-import { errorMessage } from "../slash-commands/helpers/parse";
-import {
-	describeRedeemOutcome,
-	formatResetProviderName,
-	formatResetUsageAccountLine,
-	normalizeResetProvider,
-	oneLine,
-	parseResetUsageTarget,
-	resolveResetUsageTarget,
-	toResetUsageAccount,
-} from "../slash-commands/helpers/reset-usage";
+	collapseSharedUsageReports,
+	formatLimitTitle,
+	summarizeUsageResetCredits,
+	usageAccountOrg,
+	usageResetExpiry,
+	usageWindowSuffix,
+} from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { formatCodexUsageReportLabel } from "../slash-commands/helpers/active-oauth-account";
 import {
 	accountIdentityLabel,
 	collectStoredAccounts,
@@ -302,14 +289,9 @@ function renderBar(limit: UsageLimit): string {
 
 /** Append the window label when the limit label doesn't already carry it. */
 function limitTitle(limit: UsageLimit): string {
-	let label = limit.label;
-	const tier = limit.scope.tier;
-	if (tier && !label.toLowerCase().includes(tier.toLowerCase())) label = `${label} (${tier})`;
-	const windowLabel = limit.window?.label ?? limit.scope.windowId;
-	if (!windowLabel) return label;
-	if (windowLabel.toLowerCase() === "quota window") return label;
-	if (label.toLowerCase().includes(windowLabel.toLowerCase())) return label;
-	return `${label} (${windowLabel})`;
+	const label = formatLimitTitle(limit);
+	const windowLabel = usageWindowSuffix(label, limit.window?.label ?? limit.scope.windowId);
+	return windowLabel ? `${label} (${windowLabel})` : label;
 }
 
 function reportAccountLabel(report: UsageReport, index: number): string {
@@ -364,7 +346,17 @@ function formatAccountHeader(
 	redaction?: Map<string, string>,
 ): string {
 	const status = aggregateStatus(report.limits);
-	let header = `${STATUS_COLOR[status]("●")} ${formatReportIdentity(report, peers, index, redaction)}`;
+	const icon = STATUS_COLOR[status]("●");
+	const label = reportAccountLabel(report, index);
+	let header = `${icon} ${chalk.bold(redaction?.get(label) ?? label)}`;
+	if (report.provider === "openai-codex") {
+		header = `${icon} ${formatQualifiedIdentity(report, peers, label, redaction)}`;
+	} else {
+		const org = usageAccountOrg(report);
+		if (org && org !== label) header += chalk.dim(` · ${redaction?.get(org) ?? org}`);
+		const plan = report.metadata?.planType;
+		if (typeof plan === "string" && plan.trim()) header += chalk.dim(` · plan: ${plan.trim()}`);
+	}
 	if (report.metadata?.daybreak === true) header += chalk.cyan(" · daybreak");
 	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 	if (resets && resets.bankedCount > 0) {
@@ -372,22 +364,13 @@ function formatAccountHeader(
 		if (resets.redeemableCount !== resets.bankedCount) {
 			header += chalk.dim(` · ${resets.redeemableCount} usable now`);
 		}
-		const expiring = classifyResetExpiry(report, nowMs);
-		if (expiring) {
-			const text = ` · ▲ ${formatExpiringResets(expiring, nowMs)}`;
-			header +=
-				expiring.tier === "imminent"
-					? chalk.red(text)
-					: chalk.yellow(`${text} (${new Date(expiring.expiresAtMs).toISOString().slice(0, 10)})`);
-		} else if (resets.soonestExpiry) {
-			const expiryMs = Date.parse(resets.soonestExpiry);
-			if (expiryMs > nowMs) {
-				header += chalk.dim(
-					` · soonest expires in ${formatDuration(expiryMs - nowMs)} (${resets.soonestExpiry.slice(0, 10)})`,
-				);
-			} else {
-				header += chalk.dim(` · expired (${resets.soonestExpiry.slice(0, 10)})`);
-			}
+		const expiry = usageResetExpiry(resets, nowMs);
+		if (expiry) {
+			header += chalk.dim(
+				expiry.remainingMs > 0
+					? ` · soonest expires in ${formatDuration(expiry.remainingMs)} (${expiry.date})`
+					: ` · expired (${expiry.date})`,
+			);
 		}
 		if (resets.redeemableCount === 0 && resets.unavailableReason) {
 			const reason = sanitizeText(resets.unavailableReason.replace(/[\r\n\t]+/g, " "));
