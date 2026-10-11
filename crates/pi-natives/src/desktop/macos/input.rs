@@ -64,6 +64,21 @@ impl MacInput {
 				let (pid, wid) = window_identity(&window)?;
 				match mode {
 					DeliveryMode::Background => {
+						// A sheet or popover is a window of its own, but its elements
+						// report the window it is attached to as theirs, so input for
+						// a point inside it goes to the attached window on top there.
+						let (window, wid) = match pressed_point(&event) {
+							Some(point) => {
+								let windows = capture.windows_of(pid)?;
+								match attached_at(wid, point, &windows, skylight::window_parent) {
+									Some(overlay) => (overlay.clone(), window_identity(overlay)?.1),
+									None => (window, wid),
+								}
+							},
+							None => (window, wid),
+						};
+						let in_overlay =
+							takes_overlay_focus(wid, ax::focused_window_id(pid), skylight::window_parent);
 						background_guard(&window, pid, &event)?;
 						let to = input_owner(
 							pid,
@@ -73,7 +88,16 @@ impl MacInput {
 						)?;
 						let entry_front = skylight::front_pid();
 						skylight::with_background_guard(pid, || {
-							background_pointer(&self.source, pid, wid, &window, event, entry_front, to)
+							background_pointer(
+								&self.source,
+								pid,
+								wid,
+								&window,
+								event,
+								entry_front,
+								to,
+								in_overlay,
+							)
 						})
 					},
 					DeliveryMode::Foreground => {
@@ -466,6 +490,49 @@ fn attached_under(
 		}
 	}
 	false
+}
+
+/// The window attached to `wid` (a sheet or popover, at any depth) that is
+/// topmost at the global `point`, from the application's `windows` in front
+/// to back order; `None` when `wid` itself, or anything not attached to it,
+/// is topmost there.
+fn attached_at(
+	wid: u32,
+	(x, y): (f64, f64),
+	windows: &[DesktopWindow],
+	parent_of: impl Fn(u32) -> Option<u32>,
+) -> Option<&DesktopWindow> {
+	let topmost = windows.iter().find(|window| {
+		let (left, upper) = (f64::from(window.x), f64::from(window.y));
+		(left..left + f64::from(window.width)).contains(&x)
+			&& (upper..upper + f64::from(window.height)).contains(&y)
+	})?;
+	let id = topmost.id.parse::<u32>().ok()?;
+	(id != wid && attached_under(id, parent_of, |parent| parent == wid)).then_some(topmost)
+}
+
+/// Where `event` presses, hovers or scrolls; a drag's first point.
+fn pressed_point(event: &PointerEvent) -> Option<(f64, f64)> {
+	match event {
+		PointerEvent::Click { x, y, .. }
+		| PointerEvent::Hold { x, y, .. }
+		| PointerEvent::Move { x, y }
+		| PointerEvent::Scroll { x, y, .. } => Some((*x, *y)),
+		PointerEvent::Drag { path, .. } => path.first().copied(),
+	}
+}
+
+/// Whether `wid` is a sheet or popover on `focused`, the application's
+/// reported focused window, or is that window itself while attached to
+/// another. Making such a window key with a press outside its frame would
+/// close a popover, or land in the window a sheet is attached to.
+fn takes_overlay_focus(
+	wid: u32,
+	focused: Option<u32>,
+	parent_of: impl Fn(u32) -> Option<u32>,
+) -> bool {
+	parent_of(wid).is_some()
+		&& (focused == Some(wid) || attached_under(wid, parent_of, |parent| Some(parent) == focused))
 }
 
 /// The error for keys that never would have reached `wid`; nothing was sent.
@@ -1000,7 +1067,11 @@ const fn button_types(
 
 /// Background pointer input for window `wid` of `pid`. The events go to `to`,
 /// the process and window that take the window's input ([`input_owner`]);
-/// making the window key still goes to its own application.
+/// making the window key still goes to its own application. `in_overlay`
+/// says `wid` is a sheet or popover on the application's focused window
+/// ([`takes_overlay_focus`]), so a left click sends only the activation,
+/// without the press outside its frame that would close a popover or reach
+/// the window the sheet is attached to.
 fn background_pointer(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -1009,10 +1080,11 @@ fn background_pointer(
 	event: PointerEvent,
 	entry_front: Option<libc::pid_t>,
 	(to, to_wid): (libc::pid_t, u32),
+	in_overlay: bool,
 ) -> CoreResult<()> {
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, .. } => {
-			if make_key_in_background(source, pid, wid, window, entry_front, false)? {
+			if make_key_in_background(source, pid, wid, window, entry_front, in_overlay)? {
 				still_behind_user(pid, wid)?;
 			}
 			background_left_click(source, to, to_wid, window, x, y, count)
@@ -2311,6 +2383,67 @@ mod tests {
 		};
 		assert!(attached_under(191, parents, |parent| parent == 177));
 		assert!(!attached_under(177, parents, |parent| parent == 177));
+	}
+
+	fn frame(id: u32, x: i32, y: i32, width: u32, height: u32) -> DesktopWindow {
+		DesktopWindow {
+			id: id.to_string(),
+			title: String::new(),
+			app: "Calendar".to_string(),
+			pid: Some(7),
+			x,
+			y,
+			width,
+			height,
+			focused: false,
+		}
+	}
+
+	#[test]
+	fn pointer_input_inside_a_popover_or_sheet_goes_to_that_window() {
+		// Calendar's event popover 25579 is attached to window 25567, and a
+		// second popover 25590 to it; panel 25600 is attached to nothing.
+		let parents = |id| match id {
+			25579 => Some(25567),
+			25590 => Some(25579),
+			_ => None,
+		};
+		let windows = [
+			frame(25590, 1350, 500, 50, 50),
+			frame(25579, 1200, 200, 326, 400),
+			frame(25600, 0, 0, 100, 100),
+			frame(25567, 0, 0, 1400, 900),
+		];
+		let at = |wid, point| attached_at(wid, point, &windows, parents).map(|w| w.id.as_str());
+		// The Repeat popup's centre inside the popover, which reports window
+		// 25567 as its AXWindow, and a point in the nested popover.
+		assert_eq!(at(25567, (1300.0, 330.0)), Some("25579"));
+		assert_eq!(at(25567, (1370.0, 520.0)), Some("25590"));
+		assert_eq!(at(25579, (1370.0, 520.0)), Some("25590"));
+		// The window itself, a window on top that is not attached to it, and a
+		// point outside every window keep the target.
+		assert_eq!(at(25567, (700.0, 600.0)), None);
+		assert_eq!(at(25579, (1300.0, 330.0)), None);
+		assert_eq!(at(25567, (50.0, 50.0)), None);
+		assert_eq!(at(25567, (3000.0, 50.0)), None);
+	}
+
+	#[test]
+	fn a_click_into_an_overlay_on_the_focused_window_skips_the_activating_press() {
+		// Calendar reports window 25567 as focused while its popover 25579 is
+		// open; Automator reports its Save sheet 25670 itself as focused.
+		let parents = |id| match id {
+			25579 => Some(25567),
+			25670 => Some(25656),
+			_ => None,
+		};
+		assert!(takes_overlay_focus(25579, Some(25567), parents));
+		assert!(takes_overlay_focus(25670, Some(25670), parents));
+		// A top-level window, and an overlay on a window that is not focused,
+		// are made key with the press as before.
+		assert!(!takes_overlay_focus(25567, Some(25567), parents));
+		assert!(!takes_overlay_focus(25579, Some(25656), parents));
+		assert!(!takes_overlay_focus(25579, None, parents));
 	}
 
 	#[test]

@@ -122,6 +122,15 @@ impl MacCapture {
 			.ok_or_else(missing)
 	}
 
+	/// `pid`'s on-screen normal-layer windows, front to back.
+	#[allow(clippy::unused_self, reason = "keeps discovery on the backend capture object")]
+	pub(super) fn windows_of(&self, pid: libc::pid_t) -> CoreResult<Vec<DesktopWindow>> {
+		let owner = u32::try_from(pid).map_err(|_| {
+			DesktopError::input_failed(format!("process id {pid} cannot own a window"))
+		})?;
+		window_snapshot(None, Some(owner))
+	}
+
 	pub(super) fn capture(
 		&self,
 		target: &Target,
