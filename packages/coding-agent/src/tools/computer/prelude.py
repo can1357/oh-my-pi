@@ -175,12 +175,20 @@ def _make_computer():
         async def _method(self, method, args, kwargs):
             return await self._root._method(f"{self._namespace}.{method}", args, kwargs)
 
-    class _Menu(_Namespace):
-        async def items(self, path=None):
-            return await self._method("items", (path,), {})
+    def _menu_path(method, segments, path):
+        if path is not None:
+            if segments:
+                raise TypeError(f"menu.{method}() takes the path positionally or as path=, not both")
+            return (path,)
+        # Send separate titles as one list so a trailing None reaches the worker instead of being trimmed.
+        return (list(segments),) if len(segments) > 1 else segments
 
-        async def select(self, path):
-            return await self._method("select", (path,), {})
+    class _Menu(_Namespace):
+        async def items(self, *segments, path=None):
+            return await self._method("items", _menu_path("items", segments, path), {})
+
+        async def select(self, *segments, path=None):
+            return await self._method("select", _menu_path("select", segments, path), {})
 
     class _Apps(_Namespace):
         async def list(self, options=None, **kwargs):

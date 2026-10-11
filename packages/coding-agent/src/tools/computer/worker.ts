@@ -204,14 +204,48 @@ function chordKeys(chord: string | string[]): string[] {
 		: chord;
 }
 
-function validateKeys(value: unknown, label: string, options?: { allowEmpty?: boolean }): asserts value is string[] {
-	if (
-		!Array.isArray(value) ||
-		(!options?.allowEmpty && value.length === 0) ||
-		value.some(key => typeof key !== "string" || !key.trim())
-	) {
+/** Keys and menu titles share one rule: an array of strings, none blank. */
+function isStringList(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every(item => typeof item === "string" && item.trim() !== "");
+}
+
+function validateKeys(value: unknown, label: string): asserts value is string[] {
+	if (!isStringList(value) || value.length === 0) {
 		throw new ToolError(`${label} requires a non-empty array of non-empty strings`);
 	}
+}
+
+function describeArgument(value: unknown): string {
+	if (value === null) return "null";
+	if (Array.isArray(value)) return "an array";
+	return typeof value === "string" ? JSON.stringify(value) : typeof value;
+}
+
+/** Names the helper and parameter in place of the native addon's conversion error, which names neither. */
+function validateString(value: unknown, call: string, options?: { nonEmpty?: boolean }): asserts value is string {
+	if (typeof value === "string" && (!options?.nonEmpty || value.trim())) return;
+	throw new ToolError(
+		`${call} requires ${options?.nonEmpty ? "a non-empty string" : "a string"}, got ${describeArgument(value)}`,
+	);
+}
+
+/** A menu path is one title, an array of titles, or the titles as separate arguments. */
+function menuPath(method: string, args: unknown[], options?: { allowEmpty?: boolean }): string[] {
+	const path: unknown[] = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
+	if (isStringList(path) && (options?.allowEmpty || path.length > 0)) return path;
+	let got = "no path";
+	if (args.length > 0) {
+		const shown = args.length === 1 ? args[0] : args;
+		try {
+			got = JSON.stringify(shown) ?? describeArgument(shown);
+		} catch {
+			// BigInt and cyclic values do not serialize; the type still tells the caller what it passed.
+			got = describeArgument(shown);
+		}
+	}
+	throw new ToolError(
+		`${method} requires a menu path of non-empty titles: "File", ["File", "Export…"] or "File", "Export…"; got ${got}`,
+	);
 }
 
 function validateHold(options: HoldOptions): void {
@@ -348,6 +382,7 @@ class El {
 	async setValue(value: string): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "setValue");
+		validateString(value, "setValue(value)");
 		await nativeCall(context.signal, () => this.#session.axSetValue(this.ref, value));
 	}
 
@@ -372,6 +407,7 @@ class El {
 	async perform(action: string): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "perform");
+		validateString(action, "perform(action)", { nonEmpty: true });
 		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action));
 	}
 
@@ -410,11 +446,13 @@ class El {
 /** `await ref("e5")` resolves the element; its methods chain on the handle and await the lookup first. */
 class ElRef implements PromiseLike<El> {
 	readonly ref: string;
+	readonly #getContext: RunContextAccessor;
 	readonly #lookup: () => Promise<El>;
 	#element?: Promise<El>;
 
-	constructor(ref: string, lookup: () => Promise<El>) {
+	constructor(ref: string, getContext: RunContextAccessor, lookup: () => Promise<El>) {
 		this.ref = ref;
+		this.#getContext = getContext;
 		this.#lookup = lookup;
 	}
 
@@ -444,6 +482,9 @@ class ElRef implements PromiseLike<El> {
 	}
 
 	async setValue(value: string): Promise<void> {
+		// Reject a read-only run or a bad argument before the ref lookup reaches the native addon.
+		guardRun(this.#getContext(), "setValue");
+		validateString(value, "setValue(value)");
 		await (await this.#resolve()).setValue(value);
 	}
 
@@ -460,6 +501,8 @@ class ElRef implements PromiseLike<El> {
 	}
 
 	async perform(action: string): Promise<void> {
+		guardRun(this.#getContext(), "perform");
+		validateString(action, "perform(action)", { nonEmpty: true });
 		await (await this.#resolve()).perform(action);
 	}
 
@@ -559,15 +602,20 @@ class Win {
 	async type(text: string, options?: InputOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "type");
+		validateString(text, "type(text)");
 		await nativeCall(context.signal, () => this.#session.typeText(this.id, text, pointerOptions(options)));
 	}
 
 	async press(chord: string | string[], options?: InputOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "press");
-		await nativeCall(context.signal, () =>
-			this.#session.keyChord(this.id, chordKeys(chord), pointerOptions(options)),
-		);
+		const keys = chordKeys(chord);
+		if (!isStringList(keys) || keys.length === 0) {
+			throw new ToolError(
+				`press(chord) requires a key chord such as "cmd+shift+p" or ["cmd", "shift", "p"], got ${describeArgument(chord)}`,
+			);
+		}
+		await nativeCall(context.signal, () => this.#session.keyChord(this.id, keys, pointerOptions(options)));
 	}
 
 	async holdKeys(keys: string[], options: HoldOptions): Promise<void> {
@@ -610,17 +658,20 @@ class Win {
 
 	get menu() {
 		return {
-			items: async (path?: string | string[]): Promise<MenuItem[]> => {
+			items: async (...path: string[] | [path?: string | string[]]): Promise<MenuItem[]> => {
 				const context = this.#getContext();
-				const segments = path === undefined ? undefined : typeof path === "string" ? [path] : path;
-				if (segments !== undefined) validateKeys(segments, "menu path", { allowEmpty: true });
+				// An omitted path, or one passed on as `undefined`, lists the top-level menus.
+				const segments =
+					path.length <= 1 && path[0] === undefined
+						? undefined
+						: menuPath("menu.items", path, { allowEmpty: true });
 				return await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
 			},
-			select: async (path: string[]): Promise<void> => {
+			select: async (...path: [string, ...string[]] | [string[]]): Promise<void> => {
 				const context = this.#getContext();
 				guardRun(context, "menu.select");
-				validateKeys(path, "menu path");
-				await nativeCall(context.signal, () => this.#session.menuSelect(this.id, path));
+				const segments = menuPath("menu.select", path);
+				await nativeCall(context.signal, () => this.#session.menuSelect(this.id, segments));
 			},
 		};
 	}
@@ -650,7 +701,8 @@ class Win {
 	}
 
 	ref(ref: string): ElRef {
-		return new ElRef(ref, async () => {
+		validateString(ref, "ref(ref)", { nonEmpty: true });
+		return new ElRef(ref, this.#getContext, async () => {
 			const { signal } = this.#getContext();
 			return new El(this.#session, this.#getContext, await nativeCall(signal, () => this.#session.axNode(ref)));
 		});
@@ -1050,6 +1102,7 @@ export class ComputerWorkerCore {
 				open: async (id: string, options?: ApplicationOpenOptions): Promise<Application> => {
 					const context = getContext();
 					guardRun(context, "apps.open");
+					validateString(id, "apps.open(id)", { nonEmpty: true });
 					return await nativeCall(context.signal, () => session.openApplication(id, options));
 				},
 			},
@@ -1133,11 +1186,13 @@ export class ComputerWorkerCore {
 				const node = await nativeCall(signal, () => session.axFocused());
 				return node ? el(node) : null;
 			},
-			ref: (ref: string): ElRef =>
-				new ElRef(ref, async () => {
+			ref: (ref: string): ElRef => {
+				validateString(ref, "ref(ref)", { nonEmpty: true });
+				return new ElRef(ref, getContext, async () => {
 					const { signal } = getContext();
 					return el(await nativeCall(signal, () => session.axNode(ref)));
-				}),
+				});
+			},
 			clipboard: {
 				read: async (): Promise<string> => {
 					const { signal } = getContext();
@@ -1152,6 +1207,7 @@ export class ComputerWorkerCore {
 				write: async (text: string): Promise<void> => {
 					const context = getContext();
 					guardRun(context, "clipboard.write");
+					validateString(text, "clipboard.write(text)");
 					// Clipboard access is part of the native desktop surface and remains
 					// outside the worker's readiness-only import graph.
 					const { copyToClipboard } = await import("../../utils/clipboard");
