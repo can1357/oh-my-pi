@@ -85,6 +85,7 @@ export class TodoTracker {
 	#reminderAwaitingProgress = false;
 	#mutationsSinceLastTouch = 0;
 	#midRunNudgeCount = 0;
+	readonly #changeListeners = new Set<(phases: TodoPhase[]) => void>();
 
 	constructor(host: TodoTrackerHost) {
 		this.#host = host;
@@ -95,9 +96,51 @@ export class TodoTracker {
 		return this.#clonePhases(this.#phases);
 	}
 
-	/** Replaces todo phases with a defensive clone. */
+	/** Replaces todo phases and observes every effective mutation, including RPC-only edits. */
 	setPhases(phases: TodoPhase[]): void {
-		this.#phases = this.#clonePhases(phases);
+		const next = this.#clonePhases(phases);
+		const previousPhases = this.#phases;
+		this.#phases = next;
+		if (this.#changeListeners.size === 0) {
+			return;
+		}
+		const unchanged =
+			next.length === previousPhases.length &&
+			next.every((phase, index) => {
+				const previous = previousPhases[index];
+				return (
+					phase.name === previous.name &&
+					phase.tasks.length === previous.tasks.length &&
+					phase.tasks.every((task, taskIndex) => {
+						const old = previous.tasks[taskIndex];
+						return (
+							task.content === old.content &&
+							task.status === old.status &&
+							task.blocker === old.blocker &&
+							task.details === old.details &&
+							(task.notes === old.notes ||
+								(task.notes !== undefined &&
+									old.notes !== undefined &&
+									task.notes.length === old.notes.length &&
+									task.notes.every((note, noteIndex) => note === old.notes![noteIndex])))
+						);
+					})
+				);
+			});
+		if (unchanged) return;
+		for (const listener of this.#changeListeners) {
+			try {
+				listener(this.#clonePhases(next));
+			} catch (error) {
+				logger.warn("Todo change observer failed", { error: String(error) });
+			}
+		}
+	}
+
+	/** Observe canonical state changes without exposing mutable tracker state. */
+	onChange(listener: (phases: TodoPhase[]) => void): () => void {
+		this.#changeListeners.add(listener);
+		return () => this.#changeListeners.delete(listener);
 	}
 
 	/** Rehydrates todo phases from the current transcript branch. */
@@ -353,11 +396,13 @@ export class TodoTracker {
 	#clonePhases(phases: TodoPhase[]): TodoPhase[] {
 		return phases.map(phase => ({
 			name: phase.name,
-			tasks: phase.tasks.map(task =>
-				task.blocker !== undefined
-					? { content: task.content, status: task.status, blocker: task.blocker }
-					: { content: task.content, status: task.status },
-			),
+			tasks: phase.tasks.map(task => ({
+				content: task.content,
+				status: task.status,
+				blocker: task.blocker,
+				...(task.details !== undefined ? { details: task.details } : {}),
+				...(task.notes !== undefined ? { notes: [...task.notes] } : {}),
+			})),
 		}));
 	}
 }

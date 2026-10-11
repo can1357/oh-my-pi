@@ -82,12 +82,17 @@ export type DaemonRpcResult =
 	| { op: "describe"; daemon: DaemonSnapshot; spec: DaemonSpec }
 	| { op: "shutdown" };
 
+/** Every parsed broker frame, including diagnostics that never enter owned delivery or acknowledgement. */
+export type DaemonWireFrame = DaemonWireMessage | DaemonObservationNotification;
+
 /** Authenticated request envelope used by socket clients. */
 export interface DaemonWireRequest {
 	id: string;
 	token: string;
 	owners?: string[];
 	detachedOwners?: string[];
+	/** Diagnostic owner scope for this socket, independent of owned completion delivery. */
+	observedOwners?: string[];
 	completionEvents?: boolean;
 	completionAcks?: string[];
 	completionUnsubscribes?: string[];
@@ -98,6 +103,12 @@ export interface DaemonWireRequest {
 
 /** Response envelope kept raw until matched with its pending operation. */
 export type DaemonWireResponse = { id: string; ok: true; result: unknown } | { id: string; ok: false; error: string };
+
+/** Non-consuming observation of a settled generation, including stops and restart backoff. */
+export interface DaemonObservationNotification {
+	event: "daemon-observed";
+	notification: DaemonCompletionNotification;
+}
 
 /** Unsolicited terminal completion sent to the socket that owns a daemon. */
 export interface DaemonCompletionNotification {
@@ -257,6 +268,8 @@ export function parseDaemonWireRequest(value: unknown): DaemonWireRequest {
 		owners: source.owners === undefined ? undefined : stringArray(source.owners, "request.owners"),
 		detachedOwners:
 			source.detachedOwners === undefined ? undefined : stringArray(source.detachedOwners, "request.detachedOwners"),
+		observedOwners:
+			source.observedOwners === undefined ? undefined : stringArray(source.observedOwners, "request.observedOwners"),
 		completionEvents:
 			source.completionEvents === undefined
 				? undefined
@@ -288,15 +301,25 @@ export function parseDaemonWireResponse(value: unknown): DaemonWireResponse {
 	throw new Error("response.ok must be a boolean");
 }
 
-/** Decode one broker response or unsolicited completion notification. */
-export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
+function parseDaemonCompletionNotification(value: unknown): DaemonCompletionNotification {
+	const source = record(value, "daemon completion");
+	if (source.event !== "daemon-completed") throw new Error("completion.event must be daemon-completed");
+	return {
+		event: "daemon-completed",
+		completionId: stringValue(source.completionId, "completion.id"),
+		owner: stringValue(source.owner, "completion.owner"),
+		daemon: parseDaemonSnapshot(source.daemon),
+	};
+}
+
+/** Decode one broker response, owned completion, or non-consuming diagnostic observation. */
+export function parseDaemonWireMessage(value: unknown): DaemonWireFrame {
 	const source = record(value, "daemon message");
-	if (source.event === "daemon-completed") {
+	if (source.event === "daemon-completed") return parseDaemonCompletionNotification(source);
+	if (source.event === "daemon-observed") {
 		return {
-			event: "daemon-completed",
-			completionId: stringValue(source.completionId, "completion.id"),
-			owner: stringValue(source.owner, "completion.owner"),
-			daemon: parseDaemonSnapshot(source.daemon),
+			event: "daemon-observed",
+			notification: parseDaemonCompletionNotification(source.notification),
 		};
 	}
 	return parseDaemonWireResponse(value);

@@ -12,6 +12,7 @@ import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
 
+import { awaitServiceObservationBarrier } from "./diagnostic-observers";
 import { cfgLaunchEnabled } from "../tools/settings";
 
 export interface ServiceReady {
@@ -104,7 +105,7 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
 	});
 }
 
-async function request(
+async function requestAfterObservation(
 	session: ToolSession,
 	operation: DaemonOperation,
 	signal?: AbortSignal,
@@ -118,6 +119,11 @@ async function request(
 		for (const daemon of result.daemons) if (daemon.owner === owner) track(session, daemon);
 	} else if ("daemon" in result) track(session, result.daemon);
 	return result;
+}
+
+async function request(...args: Parameters<typeof requestAfterObservation>): Promise<DaemonRpcResult> {
+	await awaitServiceObservationBarrier(serviceOwner(args[0]));
+	return requestAfterObservation(...args);
 }
 
 export async function listServices(session: ToolSession, signal?: AbortSignal): Promise<DaemonSnapshot[]> {

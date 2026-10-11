@@ -34,6 +34,72 @@ const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
 
+export const cfgStallRemindersEnabled = register({
+	id: "stallReminders.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Agent",
+		label: "Stall Assessment Reminders",
+		description: "Periodically ask the main agent to assess progress. Reports never cancel or revive work.",
+	},
+});
+
+function validateStallReminderInterval(value: unknown): number {
+	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+		throw new Error("stallReminders.intervalMinutes must be a positive finite number");
+	}
+	return value;
+}
+
+export const cfgStallRemindersIntervalMinutes = register({
+	id: "stallReminders.intervalMinutes",
+	type: "number",
+	default: 60,
+	validate: value => {
+		if (value !== undefined) validateStallReminderInterval(value);
+	},
+	normalize: validateStallReminderInterval,
+	ui: {
+		tab: "interaction",
+		group: "Agent",
+		label: "Stall Reminder Interval",
+		description: "Minutes between assessments. Any positive finite interval is configurable through config.",
+		options: [
+			{ value: "15", label: "15 minutes" },
+			{ value: "30", label: "30 minutes" },
+			{ value: "60", label: "60 minutes" },
+			{ value: "120", label: "120 minutes" },
+		],
+	},
+});
+
+export const cfgStallRemindersPolicy = register({
+	id: "stallReminders.policy",
+	type: "enum",
+	values: ["always", "unfinished-only"] as const,
+	default: "always",
+	ui: {
+		tab: "interaction",
+		group: "Agent",
+		label: "Stall Reminder Wake Policy",
+		description: "Always includes fully idle sessions; unfinished-only skips reports without unfinished work.",
+		options: [
+			{ value: "always", label: "Always" },
+			{ value: "unfinished-only", label: "Unfinished Work Only" },
+		],
+	},
+});
+
+export const cfgStallReminders = combine({
+	enabled: cfgStallRemindersEnabled,
+	intervalMinutes: cfgStallRemindersIntervalMinutes,
+	policy: cfgStallRemindersPolicy,
+});
+
+export type StallReminderSettings = SettingValueOf<typeof cfgStallReminders>;
+
 // Power assertions: macOS IOKit, Linux login1/ScreenSaver, Windows execution state.
 export const cfgPowerSleepPrevention = register({
 	id: "power.sleepPrevention",

@@ -61,6 +61,29 @@ omp config set startup.showSplash true
 
 This only controls the startup splash animation. It does not rerun setup or change setup state, and `startup.quiet: true` still suppresses all startup chrome including the splash.
 
+### Periodic stall assessments
+
+Stall reminders are opt-in. Enable them to send the main agent a periodic report of its work and subagents:
+
+```yaml
+stallReminders:
+  enabled: true
+  intervalMinutes: 60
+  policy: always
+```
+
+`intervalMinutes` controls the reporting interval (default: 60 minutes). `policy: always` wakes an idle main agent even when no unfinished work is visible; `unfinished-only` sends reports only while work remains. These settings are also available in `/settings`.
+
+Reports include open todos and todo closures since the previous report; active and idle agents, newly parked agents, their five most recent assistant turns, turn/tool-call totals, and measured active time; active background jobs and services, and completions since the previous report. Activity ages, pending result delivery, and lifecycle inconsistencies help distinguish waiting from stalled work. Historical active time that was not measured is identified as unavailable rather than inferred from wall-clock age.
+
+The reporting window advances only when a report is inserted into the agent's context, not when it is queued. At most one report waits for delivery. Reports carry their sampling timestamp; a delayed report is not a fresh snapshot. Assistant-turn and tool-call totals follow the current transcript branch and survive compaction.
+
+Service observations use an independent diagnostic registration. Enabling or clearing that scope does not claim completion delivery, acknowledge pending completions, or change service ownership.
+
+History excerpts exclude thinking, tool arguments, and tool-result bodies. Reports retain at most 512 transition events, limit sections to 100 rows, admit at most 100 complete agent-history sections, and stay within 64 KiB of UTF-8 text; omissions are counted explicitly. Unchanged historical parked/aborted agents are excluded. If the bounded transition ledger overflows, additional historical agent/status counts are reported as unknown. Unreadable sources and service-observation gaps are reported as unavailable coverage.
+
+The report asks the main agent to assess whether intervention is needed; the harness does not automatically cancel work or revive agents. Reports wait for a safe message boundary when the main agent is busy and cannot interrupt a blocked tool or provider call. Protocol restrictions, plan mode, and a deliberate user stop can defer autonomous idle turns. Turning reminders off or changing sessions clears the reporting window.
+
 ### Subcommands
 
 | Command                        | Effect                                                                                                                                                                                                                                                                                            |

@@ -23,6 +23,7 @@ import {
 	type AfterToolCallContext,
 	type AfterToolCallResult,
 	type Agent,
+	ASIDE_MESSAGE_DISCARD,
 	AgentBusyError,
 	type AgentEvent,
 	type AgentMessage,
@@ -33,6 +34,7 @@ import {
 	type AgentToolResult,
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
+	type CommittableAsideMessage,
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
@@ -431,6 +433,8 @@ import {
 } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
+import { StallReminderController } from "./stall-reminders";
+import { StallReportCollector } from "./stall-report";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
@@ -475,6 +479,7 @@ import {
 	cfgRetryUsageAwareFallback,
 	cfgSampling,
 	cfgSkillful,
+	cfgStallReminders,
 	cfgTierAdvisor,
 	cfgTierAnthropic,
 	cfgTierGoogle,
@@ -963,6 +968,10 @@ export class AgentSession implements SettingsScope {
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
+	#stallReminders: StallReminderController | undefined;
+	#stallReminderDeliveryScheduled = false;
+	#stallReminderDeliveryHoldDepth = 0;
+	#stallDiagnosticTurnGeneration: number | undefined;
 	#modelDiscoveryAbortController = new AbortController();
 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
 	#resetCoordinator: CodexAutoRedeemCoordinator;
@@ -1097,6 +1106,7 @@ export class AgentSession implements SettingsScope {
 			this.#sessionTransitionSettled = undefined;
 			this.#resolveSessionTransition = undefined;
 			resolve?.();
+			this.#stallReminders?.resume();
 		},
 	};
 	#promptSequence = 0;
@@ -1221,6 +1231,7 @@ export class AgentSession implements SettingsScope {
 		}
 		this.#scheduleQueuedMessageDrain();
 		this.#resumeStrandedIrcAsides();
+		this.#requestStallReminderDelivery();
 	}
 
 	/** IRC records that arrive after the loop's final aside poll — or while an abort skipped that
@@ -1696,6 +1707,7 @@ export class AgentSession implements SettingsScope {
 			hasBuiltInTool: name => this.hasBuiltInTool(name),
 			getPlanModeState: () => this.getPlanModeState(),
 			setPlanModeState: state => this.setPlanModeState(state),
+			holdStallReminderDelivery: () => this.holdStallReminderDelivery(),
 			getPlanReferencePath: () => this.getPlanReferencePath(),
 			setPlanProposalHandler: handler => this.setPlanProposalHandler(handler),
 			waitForSessionMessagePersistence: message => this.#waitForSessionMessagePersistence(message),
@@ -1999,6 +2011,8 @@ export class AgentSession implements SettingsScope {
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.
 			thunks.push(() => this.#todo.takeMidRunNudge());
+			const stallReminder = this.#stallReminders?.takeAside();
+			if (stallReminder) thunks.push(stallReminder);
 			const contextNotesReminder = this.#experimentalContextNotesReminder;
 			if (contextNotesReminder) {
 				this.#experimentalContextNotesReminder = undefined;
@@ -2465,11 +2479,41 @@ export class AgentSession implements SettingsScope {
 		this.#watchWorkspaceAndPowerSettings();
 		this.#watchSessionSettings();
 		this.#watchModelAvailabilitySettings();
+		if (this.#agentKind === "main") {
+			this.#stallReminders = new StallReminderController({
+				createCollector: () => new StallReportCollector(this),
+				requestDelivery: () => this.#requestStallReminderDelivery(),
+				shouldRetryDelivery: () =>
+					!this.isStreaming &&
+					!this.#isDisposed &&
+					this.#stallReminderDeliveryHoldDepth === 0 &&
+					!this.#planModeState?.enabled &&
+					!this.#advisors.autoResumeSuppressed &&
+					!this.#clientBridge?.deferAgentInitiatedTurns,
+			});
+			this.addDisposer(() => this.#stallReminders?.dispose());
+			cfgStallReminders.listen(this, next => this.#stallReminders?.configure(next));
+			this.#stallReminders.configure(cfgStallReminders.get(this.settings));
+		}
 	}
 
 	/** Registers teardown to run when this session is disposed (e.g. handle listeners bound to it). */
 	addDisposer(dispose: () => void): void {
 		this.#disposers.push(dispose);
+	}
+
+	/** Hold autonomous reminders across a host's complete async plan transition; active-turn asides remain available. */
+	holdStallReminderDelivery(): Disposable {
+		this.#stallReminderDeliveryHoldDepth++;
+		let disposed = false;
+		return {
+			[Symbol.dispose]: () => {
+				if (disposed) return;
+				disposed = true;
+				this.#stallReminderDeliveryHoldDepth--;
+				if (this.#stallReminderDeliveryHoldDepth === 0) this.#requestStallReminderDelivery();
+			},
+		};
 	}
 
 	/**
@@ -2636,6 +2680,28 @@ export class AgentSession implements SettingsScope {
 
 	get asyncJobManager(): AsyncJobManager | undefined {
 		return this.#asyncJobManager;
+	}
+
+	/** Owner-scoped tool context for opt-in stall-report service telemetry. */
+	getStallReportToolSession(): ToolSession | undefined {
+		return this.#evalToolSession;
+	}
+
+	/** True only while an idle reminder, not real work, owns the main turn. */
+	isStallDiagnosticTurn(): boolean {
+		return (
+			this.#stallDiagnosticTurnGeneration !== undefined &&
+			this.#stallDiagnosticTurnGeneration === this.#sessionGeneration
+		);
+	}
+
+	#finishStallDiagnosticTurn(): void {
+		const generation = this.#stallDiagnosticTurnGeneration;
+		if (generation === undefined) return;
+		this.#stallDiagnosticTurnGeneration = undefined;
+		if (generation === this.#sessionGeneration) {
+			this.sessionManager.appendCustomEntry("stall_diagnostic_turn", { state: "finished" });
+		}
 	}
 
 	getAgentId(): string | undefined {
@@ -4540,6 +4606,76 @@ export class AgentSession implements SettingsScope {
 			});
 	}
 
+	/** Idle reminders obey the same ownership constraints as other autonomous continuations. */
+	#canWakeStallReminder(): boolean {
+		return (
+			!this.#isDisposed &&
+			!this.#abortInProgress &&
+			this.#unsubscribeAgent !== undefined &&
+			this.#sessionTransitionDepth === 0 &&
+			this.#modeExitDrainSuppressionDepth === 0 &&
+			this.#stallReminderDeliveryHoldDepth === 0 &&
+			!this.isStreaming &&
+			!this.isBashRunning &&
+			!this.isEvalRunning &&
+			!this.isCompacting &&
+			!this.isGeneratingHandoff &&
+			!this.#planModeState?.enabled &&
+			!this.#advisors.autoResumeSuppressed &&
+			!this.#clientBridge?.deferAgentInitiatedTurns &&
+			!this.agent.hasQueuedMessages() &&
+			!this.#irc.hasPending()
+		);
+	}
+
+	#requestStallReminderDelivery(): void {
+		if (!this.#stallReminders?.hasPending || this.#stallReminderDeliveryScheduled) return;
+		if (!this.#canWakeStallReminder()) {
+			this.#stallReminders.retryBlockedDelivery();
+			return;
+		}
+		this.#stallReminderDeliveryScheduled = true;
+		this.#schedulePostPromptTask(
+			async signal => {
+				this.#stallReminderDeliveryScheduled = false;
+				if (signal.aborted) return;
+				if (!this.#canWakeStallReminder()) {
+					this.#stallReminders?.retryBlockedDelivery();
+					return;
+				}
+				const message: CommittableAsideMessage | null | undefined = this.#stallReminders?.takeAside()?.();
+				if (!message) return;
+				this.#resetPromptMaintenanceState();
+				this.#beginInFlight();
+				try {
+					this.sessionManager.appendCustomEntry("stall_diagnostic_turn", { state: "started" });
+					this.#stallDiagnosticTurnGeneration = this.#sessionGeneration;
+					// The authoritative internal prompt path also used by YieldQueue: no slash
+					// commands, template expansion, user attribution, steering, or tool abort.
+					await this.agent.prompt(message);
+				} catch (error) {
+					message[ASIDE_MESSAGE_DISCARD]?.(error instanceof Error ? error : new Error(String(error)));
+					logger.warn("Stall reminder idle delivery failed", { error: String(error) });
+				} finally {
+					try {
+						// Keep the finish marker after the diagnostic response's durable entry.
+						await this.#messageEndPersistenceTail;
+						this.#finishStallDiagnosticTurn();
+					} finally {
+						this.#endInFlight();
+					}
+				}
+			},
+			{
+				delayMs: 1,
+				generation: this.#promptGeneration,
+				onSkip: () => {
+					this.#stallReminderDeliveryScheduled = false;
+				},
+			},
+		);
+	}
+
 	#schedulePostPromptTask(
 		task: (signal: AbortSignal) => Promise<void>,
 		options?: { delayMs?: number; generation?: number; onSkip?: (reason: PostPromptSkipReason) => void },
@@ -5260,6 +5396,7 @@ export class AgentSession implements SettingsScope {
 
 	#beginSessionTransition(): Disposable {
 		if (this.#sessionTransitionDepth++ === 0) {
+			this.#stallReminders?.suspend();
 			const settled = Promise.withResolvers<void>();
 			this.#sessionTransitionSettled = settled.promise;
 			this.#resolveSessionTransition = settled.resolve;
@@ -6784,6 +6921,7 @@ export class AgentSession implements SettingsScope {
 	setClientBridge(bridge: ClientBridge | undefined): void {
 		this.#clientBridge = bridge;
 		this.#tools.refreshAcpPermissionGates();
+		this.#requestStallReminderDelivery();
 	}
 
 	#clearCheckpointRuntimeState(): void {
@@ -7745,6 +7883,7 @@ export class AgentSession implements SettingsScope {
 					// No await may separate ownership validation from publishing memory and policy.
 					if (!isCurrent() || !overrideIsCurrent()) return undefined;
 					if (basePreparation.commit?.() === false) return undefined;
+					if (isUserQueuedMessage(message)) this.#finishStallDiagnosticTurn();
 					if (result?.systemPrompt !== undefined) {
 						this.#tools.setTurnSystemPromptOverride(result.systemPrompt, basePreparation.systemPrompt);
 					} else {
@@ -8260,6 +8399,7 @@ export class AgentSession implements SettingsScope {
 			if (this.#modeExitDrainSuppressionDepth === 0) {
 				this.#scheduleIdleQueueDrain();
 				this.#resumeStrandedIrcAsides();
+				this.#requestStallReminderDelivery();
 			}
 		}
 	}
@@ -9163,6 +9303,11 @@ export class AgentSession implements SettingsScope {
 
 	getTodoPhases(): TodoPhase[] {
 		return this.#todo.phases;
+	}
+
+	/** Observe todo snapshots without polling while stall-report tracking is enabled. */
+	subscribeTodoChanges(listener: (phases: TodoPhase[]) => void): () => void {
+		return this.#todo.onChange(listener);
 	}
 
 	setTodoPhases(phases: TodoPhase[]): void {

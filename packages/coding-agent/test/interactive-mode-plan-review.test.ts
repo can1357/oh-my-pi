@@ -1,9 +1,12 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { Agent, AgentBusyError, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
+import { scheduler } from "node:timers/promises";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, AgentBusyError, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, Context, Usage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -17,12 +20,14 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgStallRemindersEnabled } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { StallReportCollector, type StallReport } from "@oh-my-pi/pi-coding-agent/session/stall-report";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
-import { formatNumber, TempDir } from "@oh-my-pi/pi-utils";
+import { formatNumber, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 import { cfgPlanAutosave, cfgPlanAutosaveDir } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 
@@ -130,6 +135,240 @@ describe("InteractiveMode plan review rendering", () => {
 		await currentSession?.dispose();
 		currentTempDir?.removeSync();
 		setKeybindings(KeybindingsManager.inMemory());
+	});
+
+	async function createStallReminderHarness() {
+		mode.stop();
+		await session.dispose();
+		const executionModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		const planModel = modelRegistry.find("anthropic", "claude-opus-4-5");
+		if (!executionModel || !planModel) throw new Error("Expected sonnet + opus to exist in registry");
+		const makeTool = (name: string): AgentTool => ({
+			name,
+			label: name,
+			description: `Test ${name}`,
+			parameters: type({}),
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		});
+		const readTool = makeTool("read");
+		const writeTool = makeTool("write");
+		const requests: Array<{
+			modelId: string;
+			tools: string[];
+			messages: Context["messages"];
+			diagnostic: boolean;
+		}> = [];
+		const providerCalled = Promise.withResolvers<void>();
+		const sampled = Promise.withResolvers<void>();
+		const reports: StallReport[] = [];
+		let collectCalls = 0;
+		let commits = 0;
+		const originalCollect = StallReportCollector.prototype.collect;
+		vi.spyOn(StallReportCollector.prototype, "collect").mockImplementation(
+			async function (this: StallReportCollector) {
+				collectCalls++;
+				const report = await originalCollect.call(this);
+				const commit = report.commit;
+				report.commit = () => {
+					commits++;
+					commit.call(report);
+				};
+				reports.push(report);
+				sampled.resolve();
+				return report;
+			},
+		);
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			"retry.enabled": false,
+			"plan.autosave": false,
+			"stallReminders.intervalMinutes": 0.0005,
+		});
+		settings.setModelRole("default", `${executionModel.provider}/${executionModel.id}`);
+		settings.setModelRole("plan", `${planModel.provider}/${planModel.id}`);
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model: executionModel,
+					systemPrompt: ["Test"],
+					tools: [readTool],
+					messages: [],
+				},
+				convertToLlm,
+				streamFn: (model, context) => {
+					requests.push({
+						modelId: model.id,
+						tools: (context.tools ?? []).map(tool => tool.name),
+						messages: [...context.messages],
+						diagnostic: session.isStallDiagnosticTurn(),
+					});
+					// Initial approved execution polls asides only after its first response.
+					// Keep opt-in alive until a provider request actually contains the report.
+					if (JSON.stringify(context.messages).includes("Periodic main-agent diagnostic assessment")) {
+						providerCalled.resolve();
+					}
+					const message = assistantWithUsage({
+						content: [{ type: "text", text: "Assessment complete." }],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+					});
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						stream.push({ type: "start", partial: message });
+						stream.push({ type: "done", reason: "stop", message });
+					});
+					return stream;
+				},
+			}),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map([
+				["read", readTool],
+				["write", writeTool],
+			]),
+			builtInToolNames: ["read", "write"],
+			memoryEnabled: false,
+		});
+		mode = new InteractiveMode(session, "test");
+		await mode.handlePlanModeCommand();
+		expect(session.model?.id).toBe(planModel.id);
+		expect(session.getActiveToolNames()).toEqual(["read", "write"]);
+		// Global fake timers parked this real collection/broker harness before collect().
+		// Keep platform I/O scheduling live and await its actual collection/idle signals.
+		cfgStallRemindersEnabled.override(settings, true);
+		await withTimeout(sampled.promise, 3_000, "plan-mode report was not collected");
+		await withTimeout(session.waitForIdle(), 3_000, "plan-mode report did not settle into its pending slot");
+		expect(requests).toHaveLength(0);
+		return {
+			executionModel,
+			planModel,
+			requests,
+			providerCalled,
+			reports,
+			get collectCalls() {
+				return collectCalls;
+			},
+			get commits() {
+				return commits;
+			},
+		};
+	}
+
+	it("parks a real reminder throughout blocked plan exit and wakes only on restored tools and model", async () => {
+		const h = await createStallReminderHarness();
+		const restoreStarted = Promise.withResolvers<void>();
+		const releaseRestore = Promise.withResolvers<void>();
+		const restoreTools = session.restoreNonMCPToolPresentation.bind(session);
+		vi.spyOn(session, "restoreNonMCPToolPresentation").mockImplementation(async (enabled, mounted) => {
+			restoreStarted.resolve();
+			await releaseRestore.promise;
+			await restoreTools(enabled, mounted);
+		});
+		const exit = mode.handlePlanModeCommand();
+		try {
+			await withTimeout(restoreStarted.promise, 3_000, "plan tool restoration did not start");
+			expect(session.getPlanModeState()).toBeUndefined();
+			expect(session.model?.id).toBe(h.planModel.id);
+			expect(session.getActiveToolNames()).toEqual(["read", "write"]);
+			// Exercise the real one-second retry boundary while host restoration is
+			// blocked; controller-only fake-clock arithmetic is covered separately.
+			await scheduler.wait(1_100);
+			await withTimeout(session.waitForIdle(), 3_000, "held plan exit started unsettled reminder work");
+			expect(h.requests).toHaveLength(0);
+			expect(h.collectCalls).toBe(1);
+			expect(h.commits).toBe(0);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		} finally {
+			releaseRestore.resolve();
+			await exit;
+		}
+		await withTimeout(h.providerCalled.promise, 3_000, "safe plan exit did not deliver its pending reminder");
+		cfgStallRemindersEnabled.override(session.settings, false);
+		await withTimeout(session.waitForIdle(), 3_000, "plan-exit reminder did not settle");
+		expect(h.requests).toHaveLength(1);
+		expect(h.requests[0]).toMatchObject({
+			modelId: h.executionModel.id,
+			tools: ["read"],
+			diagnostic: true,
+		});
+		expect(h.requests[0]!.messages).toContainEqual(
+			expect.objectContaining({
+				role: "developer",
+				content: [{ type: "text", text: h.reports[0]!.text }],
+			}),
+		);
+		expect(mode.planModeEnabled).toBe(false);
+		expect(mode.planModePaused).toBe(true);
+		expect(session.messages.some(message => message.role === "user")).toBe(false);
+		expect(h.commits).toBe(1);
+	});
+
+	it("keeps approval's outer hold through a blocked title write and delivers the reminder as an execution aside", async () => {
+		const h = await createStallReminderHarness();
+		const planFilePath = mode.planModePlanFilePath!;
+		const planContent = "# Plan\n\nImplement after the complete approval handoff.";
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			planContent,
+		);
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and keep context");
+		const titleStarted = Promise.withResolvers<void>();
+		const releaseTitle = Promise.withResolvers<void>();
+		const setSessionName = session.sessionManager.setSessionName.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "setSessionName").mockImplementation(async (name, source) => {
+			titleStarted.resolve();
+			await releaseTitle.promise;
+			return setSessionName(name, source);
+		});
+		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "REMINDER_HANDOFF" });
+		try {
+			await withTimeout(titleStarted.promise, 3_000, "approval title persistence did not start");
+			// The nested #exitPlanMode is already complete; only #approvePlan's
+			// outer scope prevents an autonomous reminder from taking this turn.
+			expect(session.getPlanModeState()).toBeUndefined();
+			expect(mode.planModeEnabled).toBe(false);
+			expect(session.model?.id).toBe(h.executionModel.id);
+			expect(session.getActiveToolNames()).toEqual(["read"]);
+			// Keep the real broker clock live while title persistence remains unresolved.
+			await scheduler.wait(1_100);
+			await withTimeout(session.waitForIdle(), 3_000, "held approval started unsettled reminder work");
+			expect(h.requests).toHaveLength(0);
+			expect(h.collectCalls).toBe(1);
+			expect(h.commits).toBe(0);
+		} finally {
+			releaseTitle.resolve();
+		}
+		await withTimeout(h.providerCalled.promise, 3_000, "approved execution did not reach the provider");
+		cfgStallRemindersEnabled.override(session.settings, false);
+		await approval;
+		await withTimeout(session.waitForIdle(), 3_000, "approved execution did not settle");
+		expect(h.requests).toHaveLength(2);
+		for (const request of h.requests) {
+			expect(request).toMatchObject({
+				modelId: h.executionModel.id,
+				tools: ["read"],
+				diagnostic: false,
+			});
+		}
+		expect(h.requests.at(-1)!.messages).toContainEqual(
+			expect.objectContaining({
+				role: "developer",
+				content: [{ type: "text", text: h.reports[0]!.text }],
+			}),
+		);
+		expect(JSON.stringify(h.requests.at(-1)!.messages)).toContain("Implement after the complete approval handoff.");
+		expect(session.sessionManager.getSessionName()).toBeTruthy();
+		expect(h.commits).toBe(1);
 	});
 
 	it("exits empty plan mode without confirmation", async () => {

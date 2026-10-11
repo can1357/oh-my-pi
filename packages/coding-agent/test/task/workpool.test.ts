@@ -13,6 +13,7 @@ import type { AgentDefinition } from "../../src/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { WorkPool, WorkPoolRegistry } from "../../src/task/workpool";
 import type { ToolSession } from "../../src/tools";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 const AGENT: AgentDefinition = {
 	name: "scout",
@@ -70,7 +71,10 @@ function makeSession(
 		displayName: "Main",
 		kind: "main",
 		status: "idle",
-		session: { emitIrcRelayObservation: (card: CustomMessage) => cards.push(card) } as unknown as AgentSession,
+		session: {
+			...createSessionDefaults(),
+			emitIrcRelayObservation: (card: CustomMessage) => cards.push(card),
+		} as unknown as AgentSession,
 	});
 	return session;
 }
@@ -219,16 +223,19 @@ describe("WorkPool dispatch", () => {
 			// Retained worker whose prompt rebuild throws after the runtime
 			// contract already flipped: pool-local drop alone would leave it
 			// messageable with a stale keyed declaration.
+			const defaults = createSessionDefaults();
 			AgentRegistry.global().register({
 				id: workerId,
 				displayName: workerId,
 				kind: "sub",
 				status: "idle",
 				session: {
+					...defaults,
 					setWorkPoolYieldItems: async () => {
 						throw new Error("prompt rebuild boom");
 					},
 					dispose: async () => {
+						await defaults.dispose();
 						disposed = true;
 					},
 				} as unknown as AgentSession,

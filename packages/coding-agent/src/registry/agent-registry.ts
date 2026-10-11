@@ -11,6 +11,7 @@
 
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
+import { ACTIVE_TIME_CUSTOM_TYPE, type ActiveTimeSummary, readActiveTime } from "../session/active-time";
 import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
 
 import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
@@ -67,6 +68,8 @@ export interface AgentRef {
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	/** Main transcript identity that owns this agent tree, when known. */
+	rootSessionId?: string;
 	status: AgentStatus;
 	/** Null exactly when parked/aborted. */
 	session: AgentSession | null;
@@ -79,6 +82,8 @@ export interface AgentRef {
 	history?: AgentHistorySummary;
 	/** Run lifecycle milestones (launch is {@link createdAt}). */
 	lifecycle?: AgentRunLifecycle;
+	/** Completed observed windows plus the current live window; retained while parked. */
+	activeTime?: ActiveTimeSummary;
 }
 
 export type AgentRefExpectation = AgentRef | AgentSession;
@@ -96,6 +101,7 @@ export interface RegisterInput {
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	rootSessionId?: string;
 	session: AgentSession | null;
 	sessionFile?: string | null;
 	status?: AgentStatus;
@@ -128,6 +134,7 @@ export class AgentRegistry {
 
 	readonly #refs = new Map<string, AgentRef>();
 	readonly #listeners = new Set<RegistryListener>();
+	readonly #sessionStatusSync = new WeakMap<AgentRef, { session: AgentSession; dispose: () => void }>();
 
 	#matchesExpected(ref: AgentRef, expected?: AgentRefExpectation): boolean {
 		return expected === undefined || ref === expected || ref.session === expected;
@@ -139,12 +146,15 @@ export class AgentRegistry {
 	}
 
 	register(input: RegisterInput): AgentRef {
+		const previous = this.#refs.get(input.id);
+		if (previous) this.#sessionStatusSync.get(previous)?.dispose();
 		const now = Date.now();
 		const ref: AgentRef = {
 			id: input.id,
 			displayName: input.displayName,
 			kind: input.kind,
 			parentId: input.parentId,
+			rootSessionId: input.rootSessionId,
 			status: input.status ?? "running",
 			session: input.session,
 			sessionFile: input.sessionFile ?? null,
@@ -261,8 +271,7 @@ export class AgentRegistry {
 	/**
 	 * Record a short activity gist for the work-aware roster. Display-only and
 	 * read on demand (`irc list`, peer roster), so it emits no event — keeping
-	 * the per-tool-call update rate off the registry listener path (same as
-	 * `attachSession`, which also bumps `lastActivity` without emitting). Only a
+	 * the per-tool-call update rate off the registry listener path. Only a
 	 * `running` agent has current work: a heartbeat for any other status is
 	 * dropped, so a late progress flush can't resurrect activity on a ref that
 	 * `setStatus` just cleared. Every running heartbeat refreshes `lastActivity`
@@ -293,15 +302,18 @@ export class AgentRegistry {
 		// closes the race between a parked reviver claiming the ref and finishing
 		// createAgentSession after an explicit kill.
 		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
+		if (ref.session !== session) this.#sessionStatusSync.get(ref)?.dispose();
 		ref.session = session;
 		if (sessionFile !== undefined) ref.sessionFile = sessionFile;
 		ref.lastActivity = Date.now();
+		this.#emit({ type: "metadata_changed", ref });
 		return true;
 	}
 
 	detachSession(id: string, expected?: AgentRefExpectation): boolean {
 		const ref = this.#refs.get(id);
 		if (!ref || !this.#matchesExpected(ref, expected)) return false;
+		this.#sessionStatusSync.get(ref)?.dispose();
 		ref.session = null;
 		return true;
 	}
@@ -309,6 +321,7 @@ export class AgentRegistry {
 	unregister(id: string, expected?: AgentRefExpectation): boolean {
 		const ref = this.#refs.get(id);
 		if (!ref || !this.#matchesExpected(ref, expected)) return false;
+		this.#sessionStatusSync.get(ref)?.dispose();
 		this.#refs.delete(id);
 		this.#emit({ type: "removed", ref });
 		return true;
@@ -339,12 +352,67 @@ export class AgentRegistry {
 		return ref.session?.isStreaming === true;
 	}
 
-	/** Mirror a session's authoritative run-state notifications into its owned registry ref. */
+	/**
+	 * Mirror authoritative run-state notifications and durably record true running
+	 * windows. SDK attachment installs this for every session; executor/revival
+	 * callers may repeat it without adding observers or counting a window twice.
+	 */
 	syncSessionStatus(id: string, session: AgentSession): () => void {
+		const ref = this.#refs.get(id);
+		if (!ref || ref.session !== session || session.isDisposed) return () => {};
+		const existing = this.#sessionStatusSync.get(ref);
+		if (existing?.session === session) return existing.dispose;
+		existing?.dispose();
+
+		let disposed = false;
+		const ownsSession = () => this.#refs.get(id) === ref && ref.session === session;
+		const transition = (running: boolean): boolean => {
+			const activeTime = ref.activeTime!;
+			if (running === (activeTime.runningSince !== undefined)) return false;
+			const now = Date.now();
+			ref.activeTime = running
+				? { ...activeTime, runningSince: now }
+				: {
+						durationMs: activeTime.durationMs + Math.max(0, now - activeTime.runningSince!),
+						historicalUnavailable: activeTime.historicalUnavailable,
+					};
+			// Store a distinct immutable snapshot: later live transitions must not
+			// mutate an earlier custom entry retained by the SessionManager.
+			session.sessionManager.appendCustomEntry(ACTIVE_TIME_CUSTOM_TYPE, { ...ref.activeTime });
+			return true;
+		};
+		const restore = () => {
+			ref.activeTime = readActiveTime(session.sessionManager.getBranch());
+			if (ref.kind === "main") ref.rootSessionId = session.sessionManager.getSessionId();
+			if (session.isStreaming) transition(true);
+			this.#emit({ type: "metadata_changed", ref });
+		};
 		const unsubscribe = session.subscribeRunState(status => {
+			if (disposed || !ownsSession()) return;
+			// The authoritative idle notification precedes prompt-wrapper unwind;
+			// isStreaming is only the initial observation, not a veto on this event.
+			const changed = transition(status === "running");
+			const previousStatus = ref.status;
 			this.setStatus(id, status, session);
+			if (changed && previousStatus === ref.status) this.#emit({ type: "metadata_changed", ref });
 		});
-		return unsubscribe;
+		const unregisterSessionChange = session.registerSessionChangeCallback(() => {
+			if (!disposed && ownsSession()) restore();
+		});
+		const dispose = () => {
+			if (disposed) return;
+			disposed = true;
+			unsubscribe();
+			unregisterSessionChange();
+			// Detach/park can precede AgentSession.dispose(). Finalize while the
+			// transcript and exact ref/session ownership are still available.
+			if (ownsSession() && transition(false)) this.#emit({ type: "metadata_changed", ref });
+			if (this.#sessionStatusSync.get(ref)?.dispose === dispose) this.#sessionStatusSync.delete(ref);
+		};
+		this.#sessionStatusSync.set(ref, { session, dispose });
+		session.addDisposer(dispose);
+		restore();
+		return dispose;
 	}
 
 	onChange(listener: RegistryListener): () => void {

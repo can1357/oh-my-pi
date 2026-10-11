@@ -351,6 +351,10 @@ class FakeAgentSession {
 		this.planModeState = state;
 	}
 
+	holdStallReminderDelivery(): Disposable {
+		return { [Symbol.dispose]() {} };
+	}
+
 	planProposalHandler: ((title: string) => Promise<unknown> | unknown) | undefined;
 
 	setPlanProposalHandler(handler: ((title: string) => Promise<unknown> | unknown) | null): void {
