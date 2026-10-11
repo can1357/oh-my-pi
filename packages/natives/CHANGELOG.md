@@ -32,6 +32,7 @@
 - Fixed macOS `win.menu.items` and `win.menu.select` treating commands such as Font Book's File ▸ New Collection as disabled while the app was in the background or had not yet caught up with an edit ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background keys, typing, clicks and scrolls into a system Open or Save panel, or the Go to Folder sheet it opens, being dropped while the call reported success; they now go to `openAndSavePanelService`, which draws the panel, and throw `BackgroundUnavailable` while it does not report focus there ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background clicks on a control in a popover or sheet, such as Calendar's event popover or Automator's Save sheet, closing the popover or landing in the window it is attached to; they now go to the popover or sheet, without the press that made the window key ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a macOS `menu` path or background `press()` on a popup in a system Open or Save panel, such as Automator's Save sheet Where: popup, failing with "its items could not be read" or "opened no menu", because the menu opens in `openAndSavePanelService` ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.7] - 2026-10-09
 
