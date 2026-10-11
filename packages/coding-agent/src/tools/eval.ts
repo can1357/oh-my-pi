@@ -10,7 +10,7 @@ import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
 import { formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
-import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
+import { formatJobLabel, raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
@@ -626,11 +626,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(
 			thresholdMs,
 			clampedCellTimeoutSec === undefined ? undefined : clampedCellTimeoutSec * 1000,
+			"runtime",
 		);
 		const startBackgrounded = autoBackgroundWaitMs === 0;
 
-		const rawLabel = params.title?.trim() || params.code.trim().split("\n", 1)[0] || "eval cell";
-		const label = rawLabel.length > 120 ? `${rawLabel.slice(0, 117)}...` : rawLabel;
+		const label = formatJobLabel(params.title?.trim() || params.code.trim().split("\n", 1)[0] || "eval cell");
 
 		let latestText = "";
 		let latestDetails: EvalToolDetails | undefined;
@@ -684,6 +684,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const backgroundStartResult = (extraNotice?: string) =>
 			this.#buildBackgroundStartResult(
 				jobId,
+				label,
 				cells,
 				languages,
 				notice,
@@ -736,6 +737,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	 */
 	#buildBackgroundStartResult(
 		jobId: string,
+		label: string,
 		cells: ResolvedEvalCell[],
 		languages: EvalLanguage[],
 		notice: string | undefined,
@@ -768,7 +770,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		if (extraNotice) {
 			lines.push(extraNotice, "");
 		}
-		lines.push(formatBackgroundNotice(jobId, timeoutSec));
+		lines.push(formatBackgroundNotice(jobId, timeoutSec, label));
 		return { content: [{ type: "text", text: lines.join("\n") }], details };
 	}
 

@@ -159,7 +159,39 @@ describe("bashToolRenderer", () => {
 		expect(rendered).not.toContain("Timeout:");
 	});
 
-	it("renders a backgrounded job as a static footer notice, with or without a stated deadline", async () => {
+	it("keeps sanitized service failure diagnostics outside the collapsed output window", () => {
+		const exitReason = `\x1b[31mspawn\r\n\t${os.homedir()}/missing ENOENT\x1b[0m`;
+		const component = bashToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: Array.from({ length: 30 }, (_, index) => `output-${index}`).join("\n") }],
+				details: {
+					service: {
+						name: "web",
+						state: "failed",
+						ready: false,
+						timedOut: false,
+						exitReason,
+						monitorStopped: "stream\r\n\tclosed",
+					},
+				},
+				isError: true,
+			},
+			{ expanded: false, isPartial: false },
+			uiTheme,
+			{ command: "missing", name: "web" },
+		);
+		const rendered = sanitizeText(component.render(160).join("\n"));
+		expect(rendered).toContain("Reason: spawn ~/missing ENOENT");
+		expect(rendered).toContain("Progress monitoring stopped: stream closed");
+		expect(rendered).not.toContain(os.homedir());
+		expect(rendered).not.toMatch(/[\r\t]/);
+		expect(rendered).toContain("output-29");
+		expect(rendered).not.toContain("output-0");
+		expect(rendered).toContain("Ready: no");
+		expect(rendered).not.toContain("Ready: timed out");
+	});
+
+	it("renders a backgrounded job as a static footer notice, with or without a stated deadline or label", async () => {
 		for (const [label, notice] of [
 			// Persisted by older versions, before the notice stated a deadline.
 			[
@@ -168,6 +200,7 @@ describe("bashToolRenderer", () => {
 			],
 			["deadline", formatBackgroundNotice("bash-42", 300)],
 			["deadline disabled", formatBackgroundNotice("bash-42", undefined)],
+			["deadline and label", formatBackgroundNotice("bash-42", 300, "sleep 30")],
 		] as const) {
 			const component = bashToolRenderer.renderResult(
 				{
@@ -189,6 +222,7 @@ describe("bashToolRenderer", () => {
 			expect(rendered, label).not.toContain("injected into the conversation");
 			expect(rendered, label).not.toContain("Do NOT poll");
 			expect(rendered, label).not.toContain("deadline");
+			expect(rendered, label).not.toContain("(sleep 30)");
 		}
 	});
 
