@@ -1,19 +1,21 @@
 // Run: bun packages/coding-agent/bench/memory-eval/run.ts <subcommand>
 //   run  --dataset <name> --engine <name> --protocol <name> [--cases N] [--out file]
 //   diff <a.json> <b.json>
+//   calibration-check <a.json> <b.json>   (a: py/upstream_run_a.py dump, b: run --protocol upstream-compat result)
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { loadDataset } from "./datasets";
+import { type CalibrationDump, compareCalibration, runUpstreamCompat } from "./compat";
+import { loadBeamUpstreamCompat, loadDataset } from "./datasets";
 import type { EngineAdapter, ProtocolName } from "./engine";
 import { mnemopiEngine } from "./engines/mnemopi";
-import { mnemosyneEngine } from "./engines/mnemosyne";
+import { mnemosyneEngine, type UpstreamCompatOps } from "./engines/mnemosyne";
 import { oracleEngine, randomEngine } from "./engines/sanity";
-import { buildResultFile, primaryMetric, type ResultFile, runCases } from "./runner";
+import { buildResultFile, primaryMetric, type ResultFile, type RunOutput, runCases } from "./runner";
 import { type BootstrapResult, pairedBootstrap, verdict } from "./stats";
-import type { DatasetName } from "./types";
+import type { DatasetName, ExcludedQuestion } from "./types";
 
 const CACHE_ROOT = path.join(os.homedir(), ".cache", "omp-memory-eval");
 const DATASETS: DatasetName[] = ["beam-100k", "beam-500k", "lme-s", "lme-s-dev"];
@@ -23,6 +25,7 @@ const REVISIONS = {
 	lme: "98d7416c24c778c2fee6e6f3006e7a073259d48f",
 };
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../..");
+const UPSTREAM_COMPAT_CONVERSATIONS = 3;
 
 function createEngine(name: string): EngineAdapter {
 	if (name === "mnemopi") {
@@ -43,6 +46,8 @@ function pick<T extends string>(value: string | undefined, allowed: readonly T[]
 	return found;
 }
 
+const hasCompatOps = (engine: EngineAdapter): engine is EngineAdapter & UpstreamCompatOps => "recallRaw" in engine;
+
 async function runCommand(argv: string[]): Promise<void> {
 	const { values } = parseArgs({
 		args: argv,
@@ -56,17 +61,34 @@ async function runCommand(argv: string[]): Promise<void> {
 	});
 	const dataset = pick(values.dataset, DATASETS, "dataset");
 	const protocol = pick(values.protocol, PROTOCOLS, "protocol");
-	if (protocol === "upstream-compat") throw new Error("upstream-compat is not supported by this command yet");
 	const engine = createEngine(values.engine ?? "");
 	const k = dataset.startsWith("beam") ? 10 : 50;
 
 	const startedAt = new Date().toISOString();
-	const { cases, excluded } = await loadDataset(dataset, path.join(CACHE_ROOT, "data"));
-	const selected = values.cases ? cases.slice(0, Number(values.cases)) : cases;
+	const dataDir = path.join(CACHE_ROOT, "data");
 	const storeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-"));
 	let result: ResultFile;
 	try {
-		const run = await runCases(engine, selected, protocol, k, storeRoot);
+		let run: RunOutput;
+		let excluded: ExcludedQuestion[] = [];
+		if (protocol === "upstream-compat") {
+			if (dataset !== "beam-100k" || !hasCompatOps(engine)) {
+				throw new Error("upstream-compat runs only with --engine mnemosyne --dataset beam-100k");
+			}
+			const count = Number(values.cases ?? UPSTREAM_COMPAT_CONVERSATIONS);
+			const questions = await runUpstreamCompat(engine, await loadBeamUpstreamCompat(dataDir, count));
+			// No warmup runs here; the store is a temp dir, not measured.
+			run = {
+				questions,
+				resources: { warmupMs: 0, ...(await engine.resources()), rssScope: engine.rssScope },
+				storeBytesMean: 0,
+			};
+		} else {
+			const loaded = await loadDataset(dataset, dataDir);
+			excluded = loaded.excluded;
+			const selected = values.cases ? loaded.cases.slice(0, Number(values.cases)) : loaded.cases;
+			run = await runCases(engine, selected, protocol, k, storeRoot);
+		}
 		result = buildResultFile(
 			{
 				dataset,
@@ -138,12 +160,24 @@ async function diffCommand(argv: string[]): Promise<void> {
 	console.log(`verdict: ${verdict(overall, perCategory)}`);
 }
 
+async function calibrationCheckCommand(argv: string[]): Promise<void> {
+	const [fileA, fileB] = argv;
+	if (!fileA || !fileB) throw new Error("usage: calibration-check <a.json> <b.json>");
+	const a: CalibrationDump = await Bun.file(fileA).json();
+	const b: ResultFile = await Bun.file(fileB).json();
+	const mismatches = compareCalibration(a, b);
+	for (const mismatch of mismatches) console.log(mismatch);
+	if (mismatches.length > 0) throw new Error(`calibration failed: ${mismatches.length} mismatches`);
+	console.log(`calibration ok: ${a.questions.length} questions identical, meanRecall ${a.meanRecall}`);
+}
+
 if (import.meta.main) {
 	const [subcommand, ...rest] = Bun.argv.slice(2);
 	try {
 		if (subcommand === "run") await runCommand(rest);
 		else if (subcommand === "diff") await diffCommand(rest);
-		else throw new Error("usage: run.ts <run|diff> ...");
+		else if (subcommand === "calibration-check") await calibrationCheckCommand(rest);
+		else throw new Error("usage: run.ts <run|diff|calibration-check> ...");
 	} catch (error) {
 		console.error(error instanceof Error ? error.message : String(error));
 		process.exit(1);
