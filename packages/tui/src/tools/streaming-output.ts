@@ -99,6 +99,17 @@ export interface OutputSinkOptions {
 	maxColumns?: number;
 	onChunk?: (chunk: string, stamp: number) => void;
 	/**
+	 * Synchronous inline body sampled at throttled emission, with its chunk
+	 * stamp. Mirror artifact flushing delays only `onChunk`, never this
+	 * immutable preview. No preview composition without a consumer.
+	 */
+	onPreview?: (text: string, stamp: number) => void;
+	/**
+	 * Mirror-only consumer fence, awaited after artifact flushing and before
+	 * `onChunk`. Does not delay inline preview or artifact persistence.
+	 */
+	chunkReady?: (stamp: number) => Promise<void> | undefined;
+	/**
 	 * Sampled when a chunk's first byte enters the sink and passed to the
 	 * matching (possibly delayed) `onChunk` call. Mirror mode and chunk
 	 * throttling can deliver a chunk after the caller has crossed a boundary;
@@ -955,6 +966,8 @@ export class OutputSink {
 	readonly #spillThreshold: number;
 	readonly #headLimit: number;
 	readonly #onChunk?: (chunk: string, stamp: number) => void;
+	readonly #onPreview?: (text: string, stamp: number) => void;
+	readonly #chunkReady?: (stamp: number) => Promise<void> | undefined;
 	readonly #chunkStamp?: () => number;
 	readonly #onChunkSettled?: (stamp: number) => void;
 	readonly #chunkThrottleMs: number;
@@ -987,6 +1000,8 @@ export class OutputSink {
 			headBytes = 0,
 			maxColumns = 0,
 			onChunk,
+			onPreview,
+			chunkReady,
 			chunkStamp,
 			onChunkSettled,
 			chunkThrottleMs = 0,
@@ -1000,6 +1015,8 @@ export class OutputSink {
 		this.#headLimit = Math.max(0, Math.min(headBytes, Math.floor(spillThreshold / 2)));
 		this.#maxColumns = Math.max(0, maxColumns);
 		this.#onChunk = onChunk;
+		this.#onPreview = onPreview;
+		this.#chunkReady = chunkReady;
 		this.#chunkStamp = chunkStamp;
 		this.#onChunkSettled = onChunkSettled;
 		this.#chunkThrottleMs = chunkThrottleMs;
@@ -1047,9 +1064,9 @@ export class OutputSink {
 	}
 
 	/**
-	 * Push a chunk of output. The buffer management and onChunk callback run
-	 * synchronously; onChunk fires after the chunk is stored, so {@link preview}
-	 * already includes it. File sink writes are deferred and serialized internally.
+	 * Push a chunk of output. Buffer management and emission previews run
+	 * synchronously after storage. Mirror-mode onChunk waits for artifact
+	 * flushing and the optional consumer fence; file writes remain serialized.
 	 *
 	 * `inline` substitutes a bounded representation for the in-memory buffer and
 	 * live preview while the complete chunk is mirrored to the artifact.
@@ -1069,7 +1086,7 @@ export class OutputSink {
 		// final pending chunk when the process exits before that timer fires.
 		// Live preview gets the inline (pre-cap) chunk so the TUI never lags behind
 		// what reached the in-memory sink — the column cap is for the persisted LLM view.
-		if (this.#onChunk && options?.emitInline !== false && inlineChunk.length > 0) {
+		if ((this.#onChunk || this.#onPreview) && options?.emitInline !== false && inlineChunk.length > 0) {
 			const now = Date.now();
 			if (now - this.#lastChunkTime >= this.#chunkThrottleMs) {
 				this.#emitPendingChunkWith(inlineChunk, now);
@@ -1519,10 +1536,16 @@ export class OutputSink {
 		if (this.#artifactWriteMode !== "mirror") {
 			try {
 				this.#onChunk?.(merged, stamp);
+				this.#onPreview?.(this.preview(), stamp);
 			} finally {
 				this.#onChunkSettled?.(stamp);
 			}
 			return;
+		}
+		try {
+			this.#onPreview?.(this.preview(), stamp);
+		} catch (error) {
+			this.#recordChunkDeliveryError(error);
 		}
 		const deliver = async () => {
 			try {
@@ -1530,6 +1553,8 @@ export class OutputSink {
 				// resumes, then flushArtifact makes it readable before model-facing progress.
 				await Promise.resolve();
 				await this.flushArtifact();
+				const ready = this.#chunkReady?.(stamp);
+				if (ready) await ready;
 				this.#onChunk?.(merged, stamp);
 			} catch (error) {
 				this.#recordChunkDeliveryError(error);
