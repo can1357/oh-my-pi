@@ -8,7 +8,7 @@ import type {
 	UsageReport,
 } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
-import { raceSignal } from "./abort";
+import { raceWithSignal } from "../utils/abort";
 import type { SessionAffinity } from "./affinity";
 import { credentialBlockScopesForRequest, providerTypeKey } from "./blocks";
 import type { CredentialBlocks } from "./blocks";
@@ -161,7 +161,7 @@ export class CredentialHealth implements HealthApi {
 
 				let report: UsageReport | null;
 				try {
-					report = await raceSignal(
+					report = await raceWithSignal(
 						this.#deps.usage.report(provider, entry.credential, {
 							baseUrl: options.baseUrl,
 							timeoutMs: this.#deps.usage.requestTimeoutMs,

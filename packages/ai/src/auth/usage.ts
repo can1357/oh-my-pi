@@ -19,7 +19,7 @@ import type {
 	UsageReport,
 } from "../usage";
 import { DEFAULT_USAGE_PROVIDERS } from "../usage/registry";
-import { raceSignal } from "./abort";
+import { raceWithSignal } from "../utils/abort";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialBlocks } from "./blocks";
 import type { KeyOverrides } from "./cascade";
@@ -778,7 +778,7 @@ export class UsageService implements UsageApi {
 				});
 				this.#usageReportsInFlight.set(overrideKey, shared);
 			}
-			const reports = await raceSignal(shared, options?.signal, "usage fetch aborted");
+			const reports = await raceWithSignal(shared, options?.signal, "usage fetch aborted");
 			if (reports) this.#deps.blocks.reconcileReports(reports);
 			if (!reports || this.#runtimeUsageProviderOverrides.size === 0) return reports;
 
@@ -818,7 +818,7 @@ export class UsageService implements UsageApi {
 		const cacheKey = `${this.#deps.cache.reportsKey(requests)}\0${usageCacheEpoch}`;
 
 		const inFlight = this.#usageReportsInFlight.get(cacheKey);
-		if (inFlight) return raceSignal(inFlight, options?.signal, "usage fetch aborted");
+		if (inFlight) return raceWithSignal(inFlight, options?.signal, "usage fetch aborted");
 
 		const promise = (async () => {
 			for (const request of requests) {
@@ -859,7 +859,7 @@ export class UsageService implements UsageApi {
 		});
 
 		this.#usageReportsInFlight.set(cacheKey, promise);
-		return raceSignal(promise, options?.signal, "usage fetch aborted");
+		return raceWithSignal(promise, options?.signal, "usage fetch aborted");
 	}
 
 	/**

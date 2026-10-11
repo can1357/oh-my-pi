@@ -5,7 +5,7 @@ import { claudeResetClearedBlockScopes, consumeClaudeResetCredit, listClaudeRese
 import { consumeCodexResetCredit, listCodexResetCredits, pickSoonestExpiringCredit } from "../usage/openai-codex-reset";
 import type { CredentialBlocks } from "./blocks";
 import { providerTypeKey } from "./blocks";
-import { raceSignal } from "./abort";
+import { raceWithSignal } from "../utils/abort";
 import { isUsageLimitReached } from "./usage-report";
 import type { OAuthAccounts } from "./oauth";
 import type { CredentialPool } from "./pool";
@@ -68,7 +68,7 @@ export class ResetCredits implements ResetsApi {
 			);
 			this.#listInFlight.set(key, pending);
 		}
-		return raceSignal(pending, options?.signal, "Reset discovery aborted");
+		return raceWithSignal(pending, options?.signal, "Reset discovery aborted");
 	}
 
 	async #listAccounts(

@@ -4,7 +4,7 @@ import { isUsageLimitOutcome } from "../error/rate-limit";
 import { extractProviderRetryHint } from "../utils/retry-after";
 import type { CredentialRankingContext, CredentialRankingStrategy } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
-import { raceSignal } from "./abort";
+import { raceWithSignal } from "../utils/abort";
 import {
 	ACCOUNT_POLICY_BLOCK_SCOPE,
 	AUTH_BLOCK_SCOPE,
@@ -262,7 +262,7 @@ export class RateLimits implements LimitsApi {
 		// authoritative window still counts as provider timing.
 		let reportResetAtMs: number | undefined;
 		if (target && routing.strategy) {
-			const report = await raceSignal(
+			const report = await raceWithSignal(
 				this.#deps.usage.report(provider, target.credential, options),
 				options?.signal,
 				"usage fetch aborted",
