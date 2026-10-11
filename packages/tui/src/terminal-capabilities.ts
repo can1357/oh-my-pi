@@ -781,6 +781,11 @@ export function setTerminalGlyphProtocol(supported: boolean): void {
 	TERMINAL.glyphProtocol = supported;
 }
 
+/** Override screen-to-scrollback clear support for targeted renderer tests. */
+export function setTerminalScreenToScrollback(enabled: boolean): void {
+	TERMINAL.supportsScreenToScrollback = enabled;
+}
+
 /**
  * Enable/disable OSC 66 text-sizing at runtime. The coding-agent calls this from
  * the `tui.textSizing` setting (gated on the terminal's static `supportsTextSizing`
@@ -1050,6 +1055,7 @@ export function encodeKittyDeleteAllImages(): string {
 export function encodeKittyDeletePlacement(imageId: number, placementId: number): string {
 	return wrapTmuxPassthroughIfNeeded(`\x1b_Ga=d,d=i,i=${imageId},p=${placementId},q=2\x1b\\`);
 }
+
 export function encodeITerm2(
 	base64Data: string,
 	options: {
@@ -1073,6 +1079,18 @@ export function encodeITerm2(
 	}
 
 	return `\x1b]1337;File=${params.join(";")}:${base64Data}\x07`;
+}
+
+export function calculateImageRows(
+	imageDimensions: ImageDimensions,
+	targetWidthCells: number,
+	cellDimensions: CellDimensions = { widthPx: 9, heightPx: 18 },
+): number {
+	const targetWidthPx = targetWidthCells * cellDimensions.widthPx;
+	const scale = targetWidthPx / imageDimensions.widthPx;
+	const scaledHeightPx = imageDimensions.heightPx * scale;
+	const rows = Math.ceil(scaledHeightPx / cellDimensions.heightPx);
+	return Math.max(1, rows);
 }
 
 function calculateImageFit(

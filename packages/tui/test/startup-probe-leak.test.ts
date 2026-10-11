@@ -21,7 +21,7 @@ class PromptFrame implements Component {
 
 describe("startup capability probes", () => {
 	withoutTerminalMultiplexer();
-	const PROBE_ENV = ["PI_TUI_GLYPH_PROTOCOL_PROBE", "PI_TUI_NATIVE", "PI_NO_GLYPH_PROTOCOL", "TERM_PROGRAM"] as const;
+	const PROBE_ENV = ["PI_TUI_GLYPH_PROTOCOL_PROBE", "PI_TUI_NATIVE", "PI_NO_GLYPH_PROTOCOL"] as const;
 	const previousEnv = new Map<string, string | undefined>();
 	let harness: ProcessTerminalRenderHarness | undefined;
 

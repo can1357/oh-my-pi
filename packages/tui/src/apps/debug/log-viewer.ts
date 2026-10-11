@@ -148,6 +148,11 @@ function parseLogEntries(logText: string): LogEntry[] {
 		}));
 }
 
+/** Split raw log text into nonempty entries. */
+export function splitLogText(logText: string): string[] {
+	return logText.split("\n").filter(line => line.length > 0);
+}
+
 /** Build sanitized clipboard text from selected log entries. */
 export function buildLogCopyPayload(lines: string[]): string {
 	return lines

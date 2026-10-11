@@ -59,6 +59,19 @@ export function keyHint(action: Keybinding, description: string): string {
 }
 
 /**
+ * Format a keybinding hint for app-level actions.
+ * Requires the KeybindingsManager instance.
+ *
+ * @param keybindings - KeybindingsManager instance
+ * @param action - App keybinding name (e.g., "app.interrupt", "app.editor.external")
+ * @param description - Description text
+ * @returns Formatted string with dim key and muted description
+ */
+export function appKeyHint(keybindings: KeybindingsManager, action: AppKeybinding, description: string): string {
+	return theme.fg("dim", appKey(keybindings, action)) + theme.fg("muted", ` ${description}`);
+}
+
+/**
  * Format a hint for fixed (non-configurable) keys, e.g. `rawKeyHint(["up", "down"], "navigate")`.
  * Alternatives render slash-separated (see {@link formatKeyHints}).
  */

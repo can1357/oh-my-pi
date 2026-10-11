@@ -8,6 +8,12 @@ import { colorLuma, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils/color";
 import { colorToAnsi } from "../../theme/color";
 import { theme } from "../../theme/theme";
 
+/** Decode a hex color into RGB channels. */
+export function hexChannels(hex: string): [number, number, number] {
+	const { r, g, b } = hexToRgb(hex);
+	return [r, g, b];
+}
+
 /** Linear blend of two hex colors (`t` = 0 → `a`, 1 → `b`). */
 export function mixHex(a: string, b: string, t: number): string {
 	const ca = hexToRgb(a);

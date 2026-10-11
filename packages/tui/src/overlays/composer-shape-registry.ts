@@ -48,6 +48,9 @@ export const BUILTIN_COMPOSER_SHAPES = [
 	},
 ] as const;
 
+/** Built-in composer ids used by tests and non-runtime consumers. */
+export const COMPOSER_SHAPE_VALUES = BUILTIN_COMPOSER_SHAPES.map(shape => shape.value);
+
 /** Visual composer style and selector copy registered by an extension. */
 export interface ComposerShapeDefinition {
 	label: string;
