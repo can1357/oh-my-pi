@@ -6,7 +6,7 @@ import type { Theme } from "../theme/theme";
 import type { Component } from "../tui";
 import { getPaddingX } from "../utils";
 import { truncateToVisualLines } from "../chrome/visual-truncate";
-import { getSixelLineMask, createSixelLineClassifier } from "./sixel";
+import { classifySixelRow, getSixelLineMask } from "./sixel";
 import { formatExpandHint, replaceTabs } from "./render-utils";
 
 /** Which side of an output stream remains visible when the pane is capped. */
@@ -157,10 +157,12 @@ export class OutputPane implements Component {
 	#options: OutputPaneOptions;
 	#lines: string[] = [];
 	#pendingCarriageReturn = false;
-	// Carries the DCS sequence state through streamed appends so a payload row
-	// that grew without its own start (the start arrived on an earlier row) is
-	// still recognized as a sixel row. Replaced wholesale by setLines.
-	#sixelClassifier = createSixelLineClassifier();
+	// DCS state that entered the row currently being appended to. A streamed row
+	// is re-classified every time a chunk grows it, so the classification is
+	// derived from this entry snapshot (idempotent per row) instead of advancing
+	// a shared classifier, which would reclassify a continuation row as plain
+	// text once its terminator had already been seen and clamp the payload.
+	#sixelRowState = false;
 	#text: Text;
 	#renderKey = "";
 	#native: NativeNode | undefined;
@@ -179,12 +181,17 @@ export class OutputPane implements Component {
 
 	/** Replace the complete output snapshot with caller-owned immutable rows. */
 	setLines(lines: readonly string[]): void {
-		// A fresh classifier: the incoming snapshot is a complete row stream, so
-		// sequence state must restart from its first row.
-		const classify = createSixelLineClassifier();
-		this.#sixelClassifier = classify;
+		// The snapshot is a complete row stream: sequence state restarts from its
+		// first row, and its last row's exit state stays in force so a later
+		// append that continues that row is still classified as payload.
+		let inSequence = false;
 		const normalizeLine = this.#options.normalizeLine;
-		const normalized = normalizeLine ? lines.map(line => (classify(line) ? line : normalizeLine(line))) : [...lines];
+		const normalized = lines.map(line => {
+			const row = classifySixelRow(line, inSequence);
+			inSequence = row.inSequenceAtExit;
+			return row.isSixel || normalizeLine === undefined ? line : normalizeLine(line);
+		});
+		this.#sixelRowState = inSequence;
 		this.#lines = this.#clampStoredLines(normalized);
 		this.#pendingCarriageReturn = false;
 		this.invalidate();
@@ -326,12 +333,21 @@ export class OutputPane implements Component {
 	#replaceTail(text: string): void {
 		const normalizeLine = this.#options.normalizeLine;
 		// A payload row keeps its bytes: clamping it would cut the DCS sequence.
-		const normalized = normalizeLine && !this.#sixelClassifier(text) ? normalizeLine(text) : text;
+		// The classification is derived from the state that entered this row, so
+		// it holds as the row grows across appends.
+		const isSixelRow = classifySixelRow(text, this.#sixelRowState).isSixel;
+		const normalized = normalizeLine && !isSixelRow ? normalizeLine(text) : text;
 		if (this.#lines.length === 0) this.#lines.push(normalized);
 		else this.#lines[this.#lines.length - 1] = normalized;
 	}
 
 	#startLine(): void {
+		// The row being closed is complete here (appends already landed on it), so
+		// its exit state is the state that enters the row that starts now.
+		const last = this.#lines[this.#lines.length - 1];
+		if (last !== undefined) {
+			this.#sixelRowState = classifySixelRow(last, this.#sixelRowState).inSequenceAtExit;
+		}
 		if (this.#lines.length === 0) this.#lines.push("");
 		this.#lines.push("");
 	}

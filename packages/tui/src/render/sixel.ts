@@ -23,6 +23,23 @@ export function containsSixelSequence(text: string): boolean {
 }
 
 /**
+ * Classifies one terminal row against the DCS state that entered it: a row is
+ * payload when a start marker opens a sequence on it or an earlier row left one
+ * open, and it stays payload until its terminator arrives. The exit state is
+ * derived from the same snapshot, so classifying a row repeatedly — a streamed
+ * row is re-read every time a chunk grows it — is idempotent.
+ */
+export function classifySixelRow(
+	row: string,
+	inSequenceAtEntry: boolean,
+): { isSixel: boolean; inSequenceAtExit: boolean } {
+	let open = inSequenceAtEntry;
+	if (containsSixelSequence(row)) open = true;
+	const terminated = open && (row.includes(SIXEL_END_SEQUENCE) || row.includes(SIXEL_END_BELL));
+	return { isSixel: open, inSequenceAtExit: terminated ? false : open };
+}
+
+/**
  * Row classifier for a piecewise row stream: reports whether each row belongs
  * to a DCS sequence and carries the in-sequence state across calls, so a
  * payload split over several rows (libsixel emits multi-row payloads) stays
@@ -32,10 +49,9 @@ export function containsSixelSequence(text: string): boolean {
 export function createSixelLineClassifier(): (line: string) => boolean {
 	let inSequence = false;
 	return (line: string) => {
-		if (containsSixelSequence(line)) inSequence = true;
-		const isSixelRow = inSequence;
-		if (inSequence && (line.includes(SIXEL_END_SEQUENCE) || line.includes(SIXEL_END_BELL))) inSequence = false;
-		return isSixelRow;
+		const row = classifySixelRow(line, inSequence);
+		inSequence = row.inSequenceAtExit;
+		return row.isSixel;
 	};
 }
 
@@ -51,6 +67,9 @@ export function getSixelLineMask(lines: readonly string[]): boolean[] {
 /** One segment of a raw terminal byte stream split at sixel boundaries. */
 export type RawSixelSegment = { kind: "text"; text: string } | { kind: "sixel"; payload: string };
 
+/** Split of one raw terminal chunk, fed once per chunk. */
+export type RawSixelExtractor = (chunk: string) => RawSixelSegment[];
+
 /** Returns true when the line contains a SIXEL start sequence. */
 export function isSixelLine(line: string): boolean {
 	return containsSixelSequence(line);
@@ -59,6 +78,30 @@ export function isSixelLine(line: string): boolean {
 // An unterminated DCS start is held back until its terminator arrives; this
 // bounds that hold so a terminator-less stream cannot grow without limit.
 const MAX_HELD_SIXEL_TAIL_CHARS = 8 * 1024 * 1024;
+// An introducer split by a chunk boundary is held back too; a fragment longer
+// than this can no longer complete `ESC P [0-9;]* q`.
+const MAX_SIXEL_INTRODUCER_CHARS = 64;
+
+/** Offset a trailing DCS introducer fragment starts at, or -1 when there is none. */
+function partialSixelIntroducerStart(text: string): number {
+	for (let index = 0; index < text.length; index++) {
+		if (text.charCodeAt(index) !== 0x1b) continue;
+		// A bare ESC can still become `ESC P … q` in the next chunk.
+		if (index + 1 >= text.length) return index;
+		if (text.charCodeAt(index + 1) !== 0x50 /* P */) continue;
+		let cursor = index + 2;
+		while (cursor < text.length) {
+			const code = text.charCodeAt(cursor);
+			if ((code < 0x30 || code > 0x39) && code !== 0x3b /* ; */) break;
+			cursor++;
+		}
+		// The text ends inside the parameter list. A complete introducer is
+		// matched by the sequence scan below; a DCS with another final byte
+		// belongs to another protocol and stays text.
+		if (cursor >= text.length && text.length - index <= MAX_SIXEL_INTRODUCER_CHARS) return index;
+	}
+	return -1;
+}
 
 /**
  * Splits a raw terminal byte stream into text segments and complete sixel
@@ -67,7 +110,7 @@ const MAX_HELD_SIXEL_TAIL_CHARS = 8 * 1024 * 1024;
  * used by PTY replay would consume every byte up to a stray terminator and
  * silently drop the rows in between.
  */
-export function createRawSixelExtractor(): (chunk: string) => RawSixelSegment[] {
+export function createRawSixelExtractor(): RawSixelExtractor {
 	let held = "";
 	return (chunk: string) => {
 		const buffer = held + chunk;
@@ -90,9 +133,33 @@ export function createRawSixelExtractor(): (chunk: string) => RawSixelSegment[] 
 			const tail = rest.slice(start);
 			held = tail.length > MAX_HELD_SIXEL_TAIL_CHARS ? "" : tail;
 		} else if (rest.length > 0) {
-			segments.push({ kind: "text", text: rest });
+			const partial = partialSixelIntroducerStart(rest);
+			if (partial < 0) {
+				segments.push({ kind: "text", text: rest });
+			} else {
+				// A parser seeing only this fragment opens a DCS string and
+				// swallows the payload that arrives with the next chunk.
+				if (partial > 0) segments.push({ kind: "text", text: rest.slice(0, partial) });
+				held = rest.slice(partial);
+			}
 		}
 		return segments;
+	};
+}
+
+/**
+ * Reports whether a chunk of a raw terminal stream carries DCS payload bytes.
+ * Those bytes must reach the terminal unmodified: a cap that cuts a payload
+ * also drops its terminator, which leaves the host terminal inside an open DCS
+ * string for the rest of the cell.
+ */
+export function createSixelPayloadGuard(): (chunk: string) => boolean {
+	let open = false;
+	return (chunk: string) => {
+		if (!isSixelPassthroughEnabled()) return false;
+		if (!open && !containsSixelSequence(chunk)) return false;
+		open = !chunk.includes(SIXEL_END_SEQUENCE) && !chunk.includes(SIXEL_END_BELL);
+		return true;
 	};
 }
 
