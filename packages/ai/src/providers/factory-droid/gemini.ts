@@ -15,12 +15,12 @@ import { notifyProviderResponse } from "../../utils/provider-response";
 import { dereferenceJsonSchema, normalizeSchemaForFactoryDroid, toolWireSchema } from "../../utils/schema";
 import {
 	extractGoogleErrorMessage,
+	googleStreamChunkError,
+	GoogleTextBlocks,
 	mapGoogleUsage,
 	mapStopReasonString,
 	nextToolCallId,
-	pushBlockEndEvent,
 	SKIP_THOUGHT_SIGNATURE,
-	startTextOrThinkingBlock,
 } from "../google-shared";
 import type { GenerateContentResponse, Part } from "../google-types";
 import { transformMessages } from "../transform-messages";
@@ -87,22 +87,22 @@ const FACTORY_DROID_BLOCK_REASONS: Record<string, true> = {
  * "unknown" bucket has no StopReason equivalent, so unknown terminators
  * surface as errors instead of masquerading as a clean stop.
  */
-function mapFactoryDroidFinishReason(reason: string | undefined): {
+function mapFactoryDroidFinishReason(reason: string): {
 	stopReason: "stop" | "length" | "error";
 	errorMessage?: string;
 } {
 	// mapStopReasonString already implements the CLI's outcome table
 	// (STOP→stop, MAX_TOKENS→length, everything else→error); the cast narrows
 	// its wide StopReason return to the three values it ever produces.
-	const stopReason = mapStopReasonString(reason ?? "") as "stop" | "length" | "error";
+	const stopReason = mapStopReasonString(reason) as "stop" | "length" | "error";
 	if (stopReason !== "error") return { stopReason };
-	if (reason && FACTORY_DROID_BLOCK_REASONS[reason]) {
+	if (FACTORY_DROID_BLOCK_REASONS[reason]) {
 		return { stopReason: "error", errorMessage: `Generation was blocked by content filters (${reason})` };
 	}
 	if (reason === "MALFORMED_FUNCTION_CALL") {
 		return { stopReason: "error", errorMessage: `Generation failed with finish reason: ${reason}` };
 	}
-	return { stopReason: "error", errorMessage: `Unknown finish reason: ${reason ?? "none"}` };
+	return { stopReason: "error", errorMessage: `Unknown finish reason: ${reason}` };
 }
 
 /** Transports whose outputs carry Gemini-verifiable signatures (Factory's own outputs are stamped google-generative-ai). */
@@ -115,7 +115,8 @@ const GOOGLE_APIS: Record<string, true> = {
 /**
  * Apply Factory's replay provenance before canonical normalization: only
  * signed, Google-origin thinking and Google-origin call signatures survive;
- * everything else is DROPPED (never demoted to visible text).
+ * everything else is DROPPED (never demoted to visible text). A text block
+ * keeps its signature only when this model signed it.
  *
  * Only Google-origin turns are stamped as the target, so `transformMessages`
  * keeps their surviving signatures verbatim instead of demoting/stripping them
@@ -128,6 +129,7 @@ const GOOGLE_APIS: Record<string, true> = {
 function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent">): Message {
 	if (message.role !== "assistant") return message;
 	const googleOrigin = GOOGLE_APIS[message.api] === true;
+	const sameModel = googleOrigin && message.provider === model.provider && message.model === model.id;
 	const content: AssistantMessage["content"] = [];
 	for (const block of message.content) {
 		if (block.type === "thinking") {
@@ -137,6 +139,8 @@ function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent"
 			}
 		} else if (block.type === "toolCall" && !googleOrigin && block.thoughtSignature) {
 			content.push({ ...block, thoughtSignature: undefined });
+		} else if (block.type === "text" && !sameModel && block.textSignature) {
+			content.push({ ...block, textSignature: undefined });
 		} else {
 			content.push(block);
 		}
@@ -153,7 +157,8 @@ function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent"
  *   redaction, malformed-call sanitation, missing/aborted tool results) after
  *   {@link adoptFactoryReplay} settled which reasoning may replay.
  * - User and developer turns become user contents; images ride as `inlineData`.
- * - Signed thinking replays as plain text parts carrying its signature.
+ * - Signed thinking replays as plain text parts carrying its signature, and
+ *   text carries the signature Gemini put on it.
  * - Tool calls replay as `functionCall` parts carrying their
  *   `thoughtSignature`; consecutive tool results group into ONE user content,
  *   because the proxy 400s when a call turn's response part count mismatches.
@@ -194,7 +199,7 @@ function toGeminiContents(
 			const parts: Part[] = [];
 			for (const block of message.content) {
 				if (block.type === "text" && block.text) {
-					parts.push({ text: block.text });
+					parts.push({ text: block.text, ...(block.textSignature && { thoughtSignature: block.textSignature }) });
 				} else if (block.type === "thinking" && block.thinkingSignature) {
 					parts.push({ text: block.thinking, thoughtSignature: block.thinkingSignature });
 				} else if (block.type === "toolCall") {
@@ -385,18 +390,11 @@ export function streamFactoryDroidGemini(
 
 			stream.push({ type: "start", partial: output });
 
-			let activeIndex = -1;
+			// Factory replays signed thinking as plain text, so summaries stay as received.
+			const textBlocks = new GoogleTextBlocks(output, stream, "verbatim");
 			let finishReason: string | undefined;
 			let blockReason: string | undefined;
 			const toolCallIndices: number[] = [];
-			const closeBlock = () => {
-				if (activeIndex < 0) return;
-				const block = output.content[activeIndex];
-				if (block.type === "thinking" || block.type === "text") {
-					pushBlockEndEvent(block, activeIndex, output, stream);
-				}
-				activeIndex = -1;
-			};
 
 			clearTimeout(firstEventTimer);
 			const chunks = iterateWithIdleTimeout(
@@ -414,6 +412,9 @@ export function streamFactoryDroidGemini(
 				},
 			);
 			for await (const chunk of chunks) {
+				// A server-declared error keeps its status and the same classification
+				// as the Google provider; only a stream that just stops is a premature close.
+				if (chunk.error) throw googleStreamChunkError(chunk.error, model.provider);
 				if (firstTokenTime === undefined && chunk.candidates?.[0]?.content?.parts?.some(part => part.text)) {
 					firstTokenTime = performance.now();
 				}
@@ -428,7 +429,7 @@ export function streamFactoryDroidGemini(
 				const parts = chunk.candidates?.[0]?.content?.parts ?? [];
 				for (const part of parts) {
 					if (part.functionCall) {
-						closeBlock();
+						textBlocks.close();
 						const contentIndex = output.content.length;
 						const wireName = part.functionCall.name || "";
 						const toolCall: ToolCall = {
@@ -449,41 +450,27 @@ export function streamFactoryDroidGemini(
 						});
 						continue;
 					}
-					if (typeof part.text !== "string") continue;
-					if (part.thought === true) {
-						if (activeIndex >= 0 && output.content[activeIndex].type !== "thinking") closeBlock();
-						if (activeIndex < 0) {
-							activeIndex = output.content.length;
-							startTextOrThinkingBlock(true, output, stream);
-						}
-						const block = output.content[activeIndex] as { thinking: string; thinkingSignature?: string };
-						// The CLI keeps the FIRST non-empty signature per block.
-						if (!block.thinkingSignature && part.thoughtSignature) {
-							block.thinkingSignature = part.thoughtSignature;
-						}
-						block.thinking += part.text;
-						stream.push({
-							type: "thinking_delta",
-							contentIndex: activeIndex,
-							delta: part.text,
-							partial: output,
-						});
-					} else if (part.text.length > 0) {
-						if (activeIndex >= 0 && output.content[activeIndex].type !== "text") closeBlock();
-						if (activeIndex < 0) {
-							activeIndex = output.content.length;
-							startTextOrThinkingBlock(false, output, stream);
-						}
-						const block = output.content[activeIndex] as { text: string };
-						block.text += part.text;
-						stream.push({ type: "text_delta", contentIndex: activeIndex, delta: part.text, partial: output });
-					}
+					textBlocks.push(part);
 				}
 			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime !== undefined) output.ttft = firstTokenTime - startTime;
 
-			closeBlock();
+			textBlocks.close();
+			// A stream that reaches EOF without a finishReason (and without a
+			// promptFeedback block) was truncated, even when it already carried
+			// functionCall parts; fail it as retryable instead of finishing the turn.
+			if (finishReason === undefined && !blockReason) {
+				// Worded like the other incomplete-stream errors so turn recovery
+				// continues a stream that already rendered text.
+				throw new AIError.ProviderResponseError(
+					"Factory Droid Gemini stream closed before a finish_reason was received",
+					{
+						provider: model.provider,
+						kind: "incomplete-stream",
+					},
+				);
+			}
 			for (const contentIndex of toolCallIndices) {
 				const toolCall = output.content[contentIndex] as ToolCall;
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
@@ -499,12 +486,12 @@ export function streamFactoryDroidGemini(
 				output.errorMessage = `Generation was blocked by content filters (${blockReason})`;
 				output.stopDetails = { type: "content_filter", category: blockReason };
 				stream.push({ type: "error", reason: "error", error: output });
-			} else {
+			} else if (finishReason !== undefined) {
 				const mapped = mapFactoryDroidFinishReason(finishReason);
 				output.stopReason = mapped.stopReason;
 				if (mapped.errorMessage) {
 					output.errorMessage = mapped.errorMessage;
-					if (mapped.stopReason === "error" && finishReason && FACTORY_DROID_BLOCK_REASONS[finishReason]) {
+					if (mapped.stopReason === "error" && FACTORY_DROID_BLOCK_REASONS[finishReason]) {
 						output.stopDetails = { type: "content_filter", category: finishReason };
 					}
 				}

@@ -8,6 +8,69 @@
    "expect":{"files":{"a.txt":"new\n","added.txt":"created\n"},"deleted":["remove.txt"],"writes":3}
   },
   {
+   "name":"context-free hunk takes the first of repeated lines",
+   "files":{"a.txt":"x\na\nx\nb\n"},
+   "rawInput":true,
+   "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-x\n+y\n*** End Patch"},
+   "expect":{"files":{"a.txt":"y\na\nx\nb\n"},"writes":1}
+  },
+  {
+   "name":"context-free hunks bind to successive repeated lines",
+   "files":{"a.txt":"x\na\nx\nb\n"},
+   "rawInput":true,
+   "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-x\n+y\n@@\n-x\n+z\n*** End Patch"},
+   "expect":{"files":{"a.txt":"y\na\nz\nb\n"},"writes":1}
+  },
+  {
+   "name":"first-match binding does not wrap behind the previous hunk",
+   "files":{"a.txt":"x\nx\nz\n"},
+   "rawInput":true,
+   "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-z\n+Z\n@@\n-x\n+y\n*** End Patch"},
+   "expect":{"files":{"a.txt":"x\nx\nz\n"},"error":"Found 2 occurrences in a.txt","writes":0}
+  },
+  {
+   "name":"ambiguous fuzzy hunk is rejected, not bound to the first candidate",
+   "files":{"a.txt":"const timeoutMs = 1000;\nother\nconst timeoutMs = 2000;\n"},
+   "rawInput":true,
+   "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-const timeoutMs = 3000;\n+const timeoutMs = 5000;\n@@\n-other\n+OTHER\n*** End Patch"},
+   "expect":{"files":{"a.txt":"const timeoutMs = 1000;\nother\nconst timeoutMs = 2000;\n"},"error":"Found 2 occurrences in a.txt","writes":0}
+  },
+  {
+   "name":"single ambiguous fuzzy hunk is rejected",
+   "files":{"a.txt":"const timeoutMs = 1000;\nother\nconst timeoutMs = 2000;\n"},
+   "rawInput":true,
+   "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-const timeoutMs = 3000;\n+const timeoutMs = 5000;\n*** End Patch"},
+   "expect":{"files":{"a.txt":"const timeoutMs = 1000;\nother\nconst timeoutMs = 2000;\n"},"error":"Found 2 occurrences in a.txt","writes":0}
+  },
+  {
+   "name":"single ambiguous fuzzy hunk is rejected when the better candidate comes later",
+   "files":{"a.txt":"const requestTimeoutMilliseconds = 1200;\nother\nconst requestTimeoutMilliseconds = 3001;\n"},
+   "rawInput":true,
+   "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-const requestTimeoutMilliseconds = 3000;\n+const requestTimeoutMilliseconds = 5000;\n*** End Patch"},
+   "expect":{"files":{"a.txt":"const requestTimeoutMilliseconds = 1200;\nother\nconst requestTimeoutMilliseconds = 3001;\n"},"error":"Found 2 occurrences in a.txt","writes":0}
+  },
+  {
+   "name":"single hunk repeated only after unicode normalization takes the first",
+   "files":{"a.txt":"title \u2013 one\nmid\ntitle \u2013 one\n"},
+   "rawInput":true,
+   "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-title - one\n+title - two\n*** End Patch"},
+   "expect":{"files":{"a.txt":"title - two\nmid\ntitle \u2013 one\n"},"writes":1}
+  },
+  {
+   "name":"single multi-line hunk repeated only after trimming takes the first",
+   "files":{"a.txt":"  a\n  b\nmid\n  a\n  b\n"},
+   "rawInput":true,
+   "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-a\n-b\n+c\n*** End Patch"},
+   "expect":{"files":{"a.txt":"  c\nmid\n  a\n  b\n"},"writes":1}
+  },
+  {
+   "name":"single hunk matching part of a line replaces only that part",
+   "files":{"a.txt":"function f() {\n    if (isEnabled(featureFlagName) && user.isAdmin()) {\n        run();\n    }\n}\n"},
+   "rawInput":true,
+   "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-isAdmin()\n+isOwner()\n*** End Patch"},
+   "expect":{"files":{"a.txt":"function f() {\n    if (isEnabled(featureFlagName) && user.isOwner()) {\n        run();\n    }\n}\n"},"writes":1}
+  },
+  {
    "name":"multi-file failure is atomic",
    "files":{"a.txt":"old\n","b.txt":"value\n"},
    "rawInput":true,

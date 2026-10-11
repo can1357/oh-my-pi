@@ -4,14 +4,16 @@ mod date;
 mod input;
 pub(super) mod permission;
 mod process;
+mod session;
 mod skylight;
 mod spaces;
 
 pub(super) use ax::menus;
 use image::RgbaImage;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+pub(super) use session::screen_state;
 
-use self::{ax::MacAx, capture::MacCapture, input::MacInput};
+use self::{ax::MacAx, capture::MacCapture, input::MacInput, session::DisplayAwake};
 use super::{
 	backend::{AxBackend, Backend, DeliveryMode, PointerEvent},
 	control::OperationToken,
@@ -19,22 +21,25 @@ use super::{
 	frame::FrameGeometry,
 	keys::KeyName,
 	types::{
-		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, Target,
+		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector,
+		ScreenState, Target,
 	},
 };
 
 pub struct MacosBackend {
-	capture: MacCapture,
-	input:   MacInput,
-	ax:      MacAx,
+	capture:       MacCapture,
+	input:         MacInput,
+	ax:            MacAx,
+	display_awake: DisplayAwake,
 }
 
 impl MacosBackend {
 	pub(crate) fn new(display: DisplaySelector) -> CoreResult<Self> {
 		Ok(Self {
-			capture: MacCapture::new(display),
-			input:   MacInput::new()?,
-			ax:      MacAx::new(),
+			capture:       MacCapture::new(display),
+			input:         MacInput::new()?,
+			ax:            MacAx::new(),
+			display_awake: DisplayAwake::default(),
 		})
 	}
 
@@ -59,6 +64,7 @@ impl Backend for MacosBackend {
 		} else {
 			0
 		};
+		let screen = session::screen_state(self.capture.selector());
 		DesktopCapabilities {
 			backend: "quartz".to_string(),
 			display_server: Some("Quartz WindowServer".to_string()),
@@ -76,6 +82,8 @@ impl Backend for MacosBackend {
 			input_permission: permission_label(permission::post_events()),
 			ax_permission: permission_label(ax_trusted),
 			display_count,
+			screen_locked: screen.locked,
+			display_asleep: screen.display_asleep,
 		}
 	}
 
@@ -85,6 +93,14 @@ impl Backend for MacosBackend {
 
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>> {
 		self.capture.windows()
+	}
+
+	fn screen_state(&mut self, display: Option<&DisplaySelector>) -> ScreenState {
+		session::screen_state(display.unwrap_or_else(|| self.capture.selector()))
+	}
+
+	fn keep_display_awake(&mut self, awake: bool) {
+		self.display_awake.set(awake);
 	}
 
 	fn capture(

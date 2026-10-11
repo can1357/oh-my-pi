@@ -13,6 +13,7 @@ import {
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgCompactionModelThresholds } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import {
+	describeModelCompactionPoint,
 	planModelCompactionPoint,
 	previewModelCompactionPoint,
 	resolveModelCompactionSettings,
@@ -323,6 +324,32 @@ describe("compaction.modelThresholds", () => {
 		expect(planModelCompactionPoint(settings, model, "0.5%", tiers)?.trigger).toMatchObject({ share: 1 });
 		// The reserve policy's share is the exact ratio, not a rounded percentage: 100k − 16,384 of 100k.
 		expect(planModelCompactionPoint(settings, model, "100k", tiers)?.trigger).toMatchObject({ share: 83.616 });
+	});
+
+	it("shows a fixed trigger at or past the window as capped at the window less its reserve", () => {
+		// A provider capping the window below the configured trigger (Factory serves Kimi K3 with 196,608).
+		const capped = { provider: "factory-droid", id: "kimi-k3", contextWindow: 196_608 } as Model;
+		const global = Settings.isolated({ "compaction.thresholdTokens": 300_000 });
+		const point = describeModelCompactionPoint(global, capped);
+		expect(point).toMatchObject({ tokens: 167_117, source: "global" });
+		expect(point.basis).toContain("capped by window");
+		const wide = { provider: "anthropic", id: "claude-opus-5-5", contextWindow: 1_000_000 } as Model;
+		expect(describeModelCompactionPoint(global, wide)).toMatchObject({ tokens: 300_000, basis: "fixed" });
+		// One token below the window is still the user's exact trigger.
+		const justBelow = Settings.isolated({ "compaction.thresholdTokens": 196_607 });
+		expect(describeModelCompactionPoint(justBelow, capped)).toMatchObject({ tokens: 196_607, basis: "fixed" });
+
+		// A prefix entry the model falls back to; an entry below the window stays exact.
+		const prefixed = Settings.isolated({ "compaction.modelThresholds": { "factory-droid/*": "f300000" } });
+		expect(planModelCompactionPoint(prefixed, capped, "", undefined)?.trigger).toEqual({
+			kind: "fixed",
+			tokens: 167_117,
+			cappedFrom: 300_000,
+		});
+		expect(planModelCompactionPoint(prefixed, capped, "f190k", undefined)?.trigger).toEqual({
+			kind: "fixed",
+			tokens: 190_000,
+		});
 	});
 
 	it("plans and saves a reset as the prefix entry the model falls back to", () => {

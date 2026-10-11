@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { type Env, polyphonicRecallEnabled } from "../config";
 import { closeQuietly, type DatabasePath, openDatabase } from "../db";
 import { backfillConsolidatedFacts, ensureVeracityConsolidator } from "./beam/consolidate";
@@ -759,11 +759,15 @@ export function polyphonicRecall(
 	topK = 10,
 	options: PolyphonicRecallOptions = {},
 ): PolyphonicMemoryResult[] {
-	return getPolyphonicEngine(beam).recall(
-		query,
-		options.queryEmbedding ?? null,
-		topK,
-		options.contextBudget ?? 4000,
-		options,
-	);
+	// Voice fan-out, graph walk and fusion run synchronously on the caller's event loop;
+	// label them so a stall is attributable.
+	return withLoopPhase("mnemopi.recall", () => {
+		return getPolyphonicEngine(beam).recall(
+			query,
+			options.queryEmbedding ?? null,
+			topK,
+			options.contextBudget ?? 4000,
+			options,
+		);
+	});
 }

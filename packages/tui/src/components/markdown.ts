@@ -1313,6 +1313,13 @@ function objectId(o: object): number {
 export interface DefaultTextStyle {
 	/** Foreground color function */
 	color?: (text: string) => string;
+	/**
+	 * The `color` foreground is prose-level: semantically-themed markdown spans
+	 * (headings, links) keep their own `md*` theme colors instead of being
+	 * painted over by it, while plain text runs still use `color`. Unset keeps
+	 * the historical behavior where `color` paints every run.
+	 */
+	proseFg?: boolean;
 	/** Background color function */
 	bgColor?: (text: string) => string;
 	/** Bold text */
@@ -1389,6 +1396,8 @@ export interface MarkdownTheme {
 interface InlineStyleContext {
 	applyText: (text: string) => string;
 	stylePrefix: string;
+	/** True when the context came from the component's own default style (vs. a caller-supplied one). */
+	isDefault?: boolean;
 }
 
 type ListToken = Token & {
@@ -3290,6 +3299,37 @@ export class Markdown implements Component {
 		return {
 			applyText: (text: string) => this.#applyDefaultStyle(text),
 			stylePrefix: this.#getDefaultStylePrefix(),
+			isDefault: true,
+		};
+	}
+
+	/**
+	 * Style context for semantically-themed spans (headings, links) under a
+	 * `proseFg` default style: plain runs keep the prose foreground, but the
+	 * span's own `md*` theme color must stay the innermost (winning) SGR, so
+	 * `applyText` keeps decorations (bold/italic/…) while dropping the
+	 * prose color. Non-`proseFg` styles and caller-supplied contexts pass
+	 * through unchanged.
+	 */
+	#proseFgExemptContext(styleContext: InlineStyleContext | undefined): InlineStyleContext | undefined {
+		// A caller-supplied context (blockquote identity styling) already governs
+		// this subtree and wins; exemption applies only to the component's own
+		// default style (undefined resolves to it downstream), and stays applied
+		// through nested recursion.
+		if (styleContext && !styleContext.isDefault) return styleContext;
+		if (!this.#defaultTextStyle?.color || !this.#defaultTextStyle?.proseFg) return styleContext;
+		const applyExceptColor = (text: string): string => {
+			let styled = text;
+			if (this.#defaultTextStyle?.bold) styled = this.#theme.bold(styled);
+			if (this.#defaultTextStyle?.italic) styled = this.#theme.italic(styled);
+			if (this.#defaultTextStyle?.strikethrough) styled = this.#theme.strikethrough(styled);
+			if (this.#defaultTextStyle?.underline) styled = this.#theme.underline(styled);
+			return styled;
+		};
+		return {
+			applyText: applyExceptColor,
+			stylePrefix: this.#getStylePrefix(applyExceptColor),
+			isDefault: true,
 		};
 	}
 
@@ -3321,7 +3361,7 @@ export class Markdown implements Component {
 			case "heading": {
 				const headingLevel = token.depth;
 				const headingPrefix = `${"#".repeat(headingLevel)} `;
-				const headingText = this.#renderInlineTokens(token.tokens || [], styleContext);
+				const headingText = this.#renderInlineTokens(token.tokens || [], this.#proseFgExemptContext(styleContext));
 				const headingPlainText = plainInlineTokens(token.tokens || []);
 				let styledHeading: string;
 				if (headingLevel === 1 && TERMINAL.textSizing) {
@@ -3639,7 +3679,10 @@ export class Markdown implements Component {
 
 				case "link": {
 					markHtmlItemWhenContent(token.text);
-					const linkText = this.#renderInlineTokens(token.tokens || [], resolvedStyleContext);
+					const linkText = this.#renderInlineTokens(
+						token.tokens || [],
+						this.#proseFgExemptContext(resolvedStyleContext),
+					);
 					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
 					const href = typeof token.href === "string" ? token.href : "";
 					const target = (href && this.#theme.resolveLink?.(href)) || href;

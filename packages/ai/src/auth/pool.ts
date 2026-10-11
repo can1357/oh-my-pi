@@ -642,11 +642,6 @@ export class CredentialPool implements CredentialsApi {
 		const index = entries.findIndex(entry => entry.id === credentialId);
 		if (index === -1) return false;
 		const remainingEntries = entries.filter((_entry, entryIndex) => entryIndex !== index);
-		this.#options.policies.validateFor(
-			provider,
-			remainingEntries.map(entry => entry.credential),
-		);
-
 		const deleted = await this.#store.deleteAuthCredential(credentialId, "deleted by user");
 		if (!deleted) return false;
 		this.replace(provider, remainingEntries);

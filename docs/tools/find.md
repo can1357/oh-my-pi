@@ -11,7 +11,7 @@
   - `packages/coding-agent/src/tools/jfind/lexical.ts` — native grep keyword index, IDF weights, file scoring
   - `packages/coding-agent/src/tools/jfind/tree.ts` — eligible file listing (deny lists, credential filter) and the tagged tree rendering
   - `packages/coding-agent/src/tools/jfind/passages.ts` — byte-bounded windows, sketches, heat-range merging
-  - `packages/coding-agent/src/tools/jfind/questions.ts` — the three judgment request shapes; question text in `packages/coding-agent/src/prompts/tools/find-*-question.md`
+  - `packages/coding-agent/src/tools/jfind/questions.ts` — the three judgment request shapes; question text in `packages/coding-agent/src/prompts/judge/find.json`
   - `packages/coding-agent/src/judgment/index.ts` — resolves the `judge` model role that answers every question
   - `packages/tui/src/tools/find.ts` — transcript renderer (score gauges, hyperlinked ranges, live phase progress) and the `FindToolDetails` type
 
@@ -61,7 +61,7 @@ Each judged phase drains through a dispatcher with 16 requests in flight before 
 
 ## Limits & Caps
 - Candidates judged by name: 128; files read: 20; windows per file: 24; window size: 8 KB; sketch: 384 B; passages verified: 40; sketch cutoff 0.45; hit threshold 0.20 (`packages/coding-agent/src/tools/jfind/cascade.ts`).
-- Native lexical scan timeout: 30 s. Native System One judgments use `TypeSafeJudge` (10 s per attempt, up to three attempts); the tool's 20 s wall budget can abort them earlier.
+- Native lexical scan timeout: 30 s. Native judgments use `NativeJudge` (10 s per attempt, up to three attempts); the tool's 20 s wall budget can abort them earlier.
 - Per-call wall-clock budget: `20_000ms` (`FIND_TIMEOUT_MS` in `packages/coding-agent/src/tools/jfind/index.ts`); hitting it raises `find timed out after 20.0s` instead of blocking the turn. The `omp find` CLI is not bounded this way.
 - Files over 4 MB are scanned by the lexical pass only up to the native grep cap and read only up to 4 MB (trimmed to the last full line).
 

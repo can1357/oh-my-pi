@@ -258,6 +258,10 @@
 			const details = await invoke("tabs", {});
 			return Array.isArray(details.value) ? details.value : [];
 		},
+		async targets(options) {
+			const details = await invoke("targets", validateOptions("browser.targets", options));
+			return Array.isArray(details.value) ? details.value : [];
+		},
 		async close(options) {
 			await invoke("close", validateOptions("browser.close", options));
 		},

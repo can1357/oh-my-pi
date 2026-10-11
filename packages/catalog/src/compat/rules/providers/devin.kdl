@@ -14,8 +14,8 @@ provider "devin" {
 	// bundle would misstate every other account's entitlements and leave zombie
 	// rows behind (see CREDENTIAL_SCOPED_PROVIDERS in generate-models.ts). Both
 	// SWE-1.6 lanes are verified live against `GetCliModelConfigs`; the
-	// seed's `default-model` (`swe-1-6`) must resolve synchronously at
-	// boot, before credential-scoped runtime discovery replaces the seed. Field
+	// seed's `default-model` (`swe-1-6`) must resolve synchronously at boot;
+	// discovery then replaces the seed and the account default it marks wins. Field
 	// shape mirrors `devinModelSpec` so seeded and discovered rows are
 	// indistinguishable downstream.
 	seed api="devin-agent" base-url="https://server.codeium.com" bundle="always" {

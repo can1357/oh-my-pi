@@ -1136,7 +1136,14 @@ const streamOpenAICompletionsOnce = (
 				// Same as appendText: leave toolCall blocks pending so index-only
 				// continuation deltas can still find them.
 				if (currentBlock?.type !== "toolCall") finishCurrentBlock(currentBlock);
-				const block: ThinkingContent = { type: "thinking", thinking: "", thinkingSignature: signature };
+				// The wire marks no summaries here; `portable-reasoning` vouches per
+				// family that this text is the full trace.
+				const block: ThinkingContent = {
+					type: "thinking",
+					thinking: "",
+					thinkingSignature: signature,
+					summary: false,
+				};
 				currentBlock = block;
 				pushContentBlock(block);
 				stream.push({ type: "thinking_start", contentIndex: blockIndex(block), partial: output });

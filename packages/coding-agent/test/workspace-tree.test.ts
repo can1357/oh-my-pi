@@ -196,29 +196,36 @@ describe("buildWorkspaceTree", () => {
 		expect(tree.agentsMdFiles).toEqual(["src/AGENTS.md"]);
 	});
 
-	it("renders prompt-cache-stable absolute mtimes (not render-time relative ages)", async () => {
+	it("keeps aligned metadata and absolute mtimes stable in the workspace prompt", async () => {
 		const cwd = await makeTempDir();
 		// Fixed mtime in the past so the absolute render is deterministic.
 		const fixedMtime = Date.UTC(2025, 0, 2, 3, 4, 0); // 2025-01-02 03:04 UTC
-		await writeFileWithMtime(path.join(cwd, "stable.txt"), "x", fixedMtime);
+		await writeFileWithMtime(path.join(cwd, "short.txt"), "x", fixedMtime);
+		await writeFileWithMtime(path.join(cwd, "much-longer-name.txt"), "ten bytes!", fixedMtime);
 
 		const first = await buildWorkspaceTree(cwd);
 		// A relative "ago" age would drift with the wall clock between builds;
 		// an absolute mtime must not. Two builds of an unchanged tree must be
 		// byte-identical so the system-prompt prefix stays cacheable.
 		const second = await buildWorkspaceTree(cwd);
+		const lines = first.rendered.split("\n");
+		const shortLine = lines.find(line => line.includes("short.txt")) ?? "";
+		const longLine = lines.find(line => line.includes("much-longer-name.txt")) ?? "";
 
 		expect(first.rendered).toBe(second.rendered);
-		expect(first.rendered).toContain("2025-01-02 03:04");
+		expect(shortLine).toMatch(/short\.txt\s+1B\s+2025-01-02 03:04$/u);
+		expect(longLine).toMatch(/much-longer-name\.txt\s+10B\s+2025-01-02 03:04$/u);
+		expect(shortLine.indexOf("1B")).toBe(longLine.indexOf("10B"));
+		expect(shortLine.indexOf("2025-01-02 03:04")).toBe(longLine.indexOf("2025-01-02 03:04"));
 		expect(first.rendered).not.toContain("ago");
 	});
 
-	it("keeps relative ages for buildDirectoryTree (tool output, not cached)", async () => {
+	it("keeps relative ages with compact directory metadata spacing", async () => {
 		const cwd = await makeTempDir();
 		await writeFileWithMtime(path.join(cwd, "recent.txt"), "x", Date.now() - 5 * 60_000);
 
 		const tree = await buildDirectoryTree(cwd, { maxDepth: 1 });
 
-		expect(tree.rendered).toContain("ago");
+		expect(tree.rendered).toMatch(/^\.\n  - recent\.txt 1B \d+[smhdw]+ ago$/u);
 	});
 });

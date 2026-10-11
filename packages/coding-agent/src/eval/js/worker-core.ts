@@ -305,6 +305,7 @@ export class WorkerCore {
 		if (this.#runtime) {
 			this.#runtime.setCwd(snapshot.cwd);
 			this.#runtime.setPackageRoot(snapshot.packageRoot);
+			this.#runtime.setLocalRoots(snapshot.localRoots);
 			return this.#runtime;
 		}
 		this.#runtime = new JsRuntime({

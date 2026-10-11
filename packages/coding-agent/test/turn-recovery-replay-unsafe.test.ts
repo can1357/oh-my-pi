@@ -15,6 +15,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createProviderErrorMessage } from "../../ai/src/providers/error-message";
+import { streamFactoryDroidGemini } from "../../ai/src/providers/factory-droid/gemini";
+import { captureFetch, gemini as factoryGemini } from "../../ai/test/helpers/factory-droid";
 
 const USAGE: Usage = {
 	input: 0,
@@ -48,9 +50,11 @@ function createHost(
 		messages?: readonly AgentMessage[];
 		lastModelChangeRole?: string;
 		modelRoles?: Record<string, string>;
+		shakeSucceeds?: boolean;
 	} = {},
 ): TurnRecoveryHost {
 	const settings = Settings.isolated({
+		"retry.baseDelayMs": 1,
 		...(options.fallbackChains ? { "retry.fallbackChains": options.fallbackChains } : {}),
 		...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
 	});
@@ -69,6 +73,9 @@ function createHost(
 		} as never,
 		sessionManager: {
 			getLastModelChangeRole: () => options.lastModelChangeRole,
+			getBranch: () => [],
+			getBranchView: () => [],
+			getSessionId: () => "test-session",
 		} as never,
 		persistedAssistantEntryId: () => undefined,
 		settings,
@@ -100,7 +107,7 @@ function createHost(
 		resetCurrentResponsesProviderSession: () => {},
 		maybeAutoRedeemReset: async () => ({ restored: false }),
 		runAutoCompaction: async () => ({ continuationScheduled: false }) as RecoveryCompactionResult,
-		shakeForRequestBodyReadTimeout: async () => false,
+		shakeForRequestBodyReadTimeout: async () => options.shakeSucceeds === true,
 		withBashBranchTransition: <T>(operation: () => T): T => operation(),
 	};
 }
@@ -319,6 +326,43 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		};
 		const recovery = new TurnRecovery(createHost(model, modelRegistry, { messages: [message] }));
 		expect(await recovery.handleResponsesRequestBodyReadTimeout(message)).toBe("not-applicable");
+	});
+
+	describe("full-replay timeout one-shot lifecycle", () => {
+		const timeoutTurn = (): AssistantMessage => ({
+			...makeMessage([], model),
+			api: "openai-responses" as const,
+			errorStatus: 408,
+			errorMessage: "Timed out reading request body.",
+			requestBodyReadTimeoutFullReplay: true,
+		});
+		const settledTurn = (content: AssistantMessage["content"]): AssistantMessage => ({
+			...makeMessage(content, model),
+			stopReason: "stop" as const,
+			errorMessage: undefined,
+		});
+
+		it("re-arms the recovery after an intervening turn that produced output", async () => {
+			const recovery = new TurnRecovery(createHost(model, modelRegistry, { shakeSucceeds: true }));
+			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-retry");
+			await recovery.onAssistantSettledSuccessfully(
+				settledTurn([{ type: "toolCall", id: "call-progress", name: "bash", arguments: { command: "pwd" } }]),
+			);
+			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-retry");
+		});
+
+		it("stays bound to one changed retry while the same prompt makes no progress", async () => {
+			const recovery = new TurnRecovery(createHost(model, modelRegistry, { shakeSucceeds: true }));
+			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-retry");
+			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-terminal");
+		});
+
+		it("does not re-arm on a settled turn that produced no output", async () => {
+			const recovery = new TurnRecovery(createHost(model, modelRegistry, { shakeSucceeds: true }));
+			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-retry");
+			await recovery.onAssistantSettledSuccessfully(settledTurn([]));
+			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-terminal");
+		});
 	});
 
 	it("does not replay a long OpenCode Go usage limit after committed text", () => {
@@ -1215,6 +1259,24 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				expect(new TurnRecovery(host).handleCommittedTextStreamStall(message)).toBe(true);
 				expect(continues).toEqual(["stream-stall-continue"]);
 			}
+		});
+
+		it("resumes a Factory Droid Gemini text stream that ends without a finish reason", async () => {
+			const truncated = JSON.stringify({
+				candidates: [{ content: { role: "model", parts: [{ text: "Here is the first half" }] } }],
+			});
+			const message = await streamFactoryDroidGemini(
+				factoryGemini(),
+				{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+				{
+					baseUrl: "https://api.factory.ai/api/llm/g/v1",
+					headers: { "x-api-provider": "google" },
+					fetch: captureFetch([], [truncated]),
+				},
+			).result();
+			const { host, continues } = continuationHost(message);
+			expect(new TurnRecovery(host).handleCommittedTextStreamStall(message)).toBe(true);
+			expect(continues).toEqual(["stream-stall-continue"]);
 		});
 
 		it("stops continuing past the per-prompt cap and resets on a new prompt", () => {

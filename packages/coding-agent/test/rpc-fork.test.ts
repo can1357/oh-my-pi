@@ -23,7 +23,7 @@ describe("RPC fork", () => {
 	beforeEach(async () => {
 		directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-fork-"));
 		client = new RpcClient({
-			command: [process.execPath, path.join(import.meta.dir, "fixtures", "fork-rpc-agent.ts")],
+			command: [process.execPath, path.join(import.meta.dir, "fixtures", "fork-rpc-agent.ts"), directory],
 			cwd: directory,
 			env: { PI_CODING_AGENT_DIR: directory, PI_NO_TITLE: "1" },
 		});

@@ -301,8 +301,13 @@ export class RelayBridge {
 		return this.#extensionGoneSince === null ? null : Date.now() - this.#extensionGoneSince;
 	}
 
+	/** Downstream CDP clients (omp browser sessions, puppeteer) connected right now. */
+	get cdpClientCount(): number {
+		return this.#conns.size;
+	}
+
 	/** Payload for `GET /json/version`. */
-	versionInfo(wsUrl: string): Record<string, string> {
+	versionInfo(wsUrl: string): Record<string, string | number> {
 		const info = this.#lastHello()?.info;
 		let hasCompatibleExtension = false;
 		for (const instance of this.#instances.values()) {
@@ -322,6 +327,7 @@ export class RelayBridge {
 			ompRelayVersion: VERSION,
 			ompRelayDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
 			ompExtensionDiscardedTabsProtocol: String(hasCompatibleExtension ? DISCARDED_TABS_PROTOCOL_VERSION : 0),
+			ompRelayCdpClients: this.#conns.size,
 		};
 	}
 
@@ -925,7 +931,9 @@ export class RelayBridge {
 					this.#replyError(conn, msg, "relay extension is not connected");
 					return;
 				}
-				const result = (await this.#rpc({ op: "createTab", url }, inst)) as { tab: TabSnapshot };
+				// CDP `background: true` creates the tab without selecting it; an extension that predates `active` ignores it.
+				const active = msg.params?.background === true ? false : undefined;
+				const result = (await this.#rpc({ op: "createTab", url, active }, inst)) as { tab: TabSnapshot };
 				this.#onTabUpsert(result.tab, inst.instanceId);
 				// Creating a tab is an explicit act of driving it.
 				const createdKey = tabKeyOf(inst.code, result.tab.tabId);

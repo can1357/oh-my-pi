@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { MCPConnectionTimeoutError, connectToServer, listTools } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { isRetriableConnectionError } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import type { JsonRpcMessage } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { withTimeout } from "@oh-my-pi/pi-utils";
 
 const encoder = new TextEncoder();
 let server: Bun.Server<undefined> | null = null;
@@ -29,6 +30,36 @@ describe("legacy MCP HTTP+SSE transport", () => {
 		});
 		await expect(connection).rejects.toBeInstanceOf(MCPConnectionTimeoutError);
 		await expect(connection).rejects.toThrow('Connection to MCP server "legacy-sse" timed out after 50ms');
+	});
+
+	it("aborts the endpoint wait on the caller signal when timeouts are disabled", async () => {
+		const streamRequested = Promise.withResolvers<void>();
+		const streamAborted = Promise.withResolvers<void>();
+		server = Bun.serve({
+			port: 0,
+			fetch(req) {
+				streamRequested.resolve();
+				req.signal.addEventListener("abort", () => streamAborted.resolve(), { once: true });
+				return new Response(new ReadableStream<Uint8Array>(), {
+					headers: { "Content-Type": "text/event-stream" },
+				});
+			},
+		});
+
+		const controller = new AbortController();
+		const connection = connectToServer(
+			"legacy-sse",
+			{ type: "sse", url: `http://127.0.0.1:${server.port}/mcp/sse`, timeout: 0 },
+			{ signal: controller.signal },
+		);
+		await streamRequested.promise;
+		controller.abort();
+		// Only the signal can end this: there is no endpoint event and no timeout.
+		await expect(withTimeout(connection, 2_000, "handshake ignored the abort")).rejects.toMatchObject({
+			name: "AbortError",
+		});
+		// The endpoint-wait GET itself is cancelled, not left open behind the rejection.
+		await withTimeout(streamAborted.promise, 2_000, "endpoint-wait request outlived the abort");
 	});
 
 	it("reads the endpoint event as a POST URL and receives JSON-RPC responses from the stream", async () => {

@@ -56,6 +56,13 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 
 	const read = async (path, opts, ...rest) => {
 		const options = optionsArg("read", opts, rest, ["offset", "limit"], "{ offset, limit }");
+		if (typeof path === "string" && /^artifact:\/\/\d+$/i.test(path)) {
+			const rawPath = withReadLineSelector(`${path}:raw`, options);
+			if (rawPath === null) return "";
+			const text = callHelper("hasRoot", path) ? await callHelper("read", path, options) : undefined;
+			// Another session's, or no artifacts dir was injected: the read tool searches every registered one.
+			return text ?? readToolText(rawPath);
+		}
 		if (shouldDelegateRead(path)) {
 			const toolPath = withReadLineSelector(path, options);
 			return toolPath === null ? "" : readToolText(toolPath);
