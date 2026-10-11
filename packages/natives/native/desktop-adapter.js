@@ -15,6 +15,7 @@ const REQUIRED_METHODS = [
 	"releaseControl",
 	"controlState",
 	"bringToCurrentSpace",
+	"axSelectText",
 ];
 
 /** Require the current desktop ABI; partial legacy emulation cannot preserve input ownership. */
