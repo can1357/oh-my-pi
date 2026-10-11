@@ -555,7 +555,7 @@ Ordinary completed appends update memory and local file storage synchronously on
 
 Before persisting entries:
 
-- Strings over 500,000 characters are truncated with `"[Session persistence truncated large content]"`, except signed/encrypted provider blocks, signature fields, validated Anthropic native web/tool-search history blocks, and Anthropic server-compaction replay carriers, which must remain byte-exact for replay.
+- Strings over 500,000 characters are truncated with `"[Session persistence truncated large content]"`, except signed/encrypted provider blocks, signature fields, validated Anthropic native web/tool-search history blocks, Anthropic server-compaction replay carriers, and Cursor server records (`cursorHistory` payloads), which must remain byte-exact for replay.
 - Transient `jsonlEvents` is removed.
 - If an object has both string `content` and numeric `lineCount`, line count is recomputed after truncation.
 - Image data URLs in `image_url` fields are always content-addressed in the blob store and replaced with `blob:sha256:<hash>`, regardless of length. Base64 payloads at least 1,024 characters are externalized in image `content` blocks, `images[]`, snapcompact `frames[]`, and image-generation results.

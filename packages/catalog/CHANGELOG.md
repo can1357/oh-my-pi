@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Enabled `supports-prompt-cache-key` for the `mistral` provider so openai-completions requests to `api.mistral.ai` carry the session's `prompt_cache_key`, increasing cache hits and reducing billed uncached input tokens on Mistral models ([#15079](https://github.com/can1357/oh-my-pi/pull/15079) by [@richardotomislav](https://github.com/richardotomislav))
+- Added `max-image-dimension` and `max-image-payload-bytes` compat axes so an Anthropic-compatible host whose image limits differ from the canonical API can override them instead of inheriting 8000px and 10 MB ([#10633](https://github.com/can1357/oh-my-pi/pull/10633) by [@aktanazat](https://github.com/aktanazat)).
+- Added OpenCode Zen's `jev-1.13` and `jev-1.13-free` judge models, routed to the System One judgment API (kind `judge`) instead of chat completions ([#14446](https://github.com/can1357/oh-my-pi/pull/14446) by [@jpds](https://github.com/jpds)).
+- Added the `session-header` compat axis; the `litellm` provider declares `x-litellm-session-id`, which carries the conversation session id independent of prompt caching ([#15096](https://github.com/can1357/oh-my-pi/pull/15096) by [@occ](https://github.com/occ))
+
+### Fixed
+
+- Fixed `openrouterDecisionsBaseUrl` deriving a malformed OpenRouter Decisions root when the chat `baseUrl` has a trailing slash (such as `.../api/v1/`); it now strips trailing slashes before mapping `/v1` to `/alpha`, and is exported so provider-wide `baseUrl` overrides can reuse it ([#14848](https://github.com/can1357/oh-my-pi/pull/14848) by [@jerryfane](https://github.com/jerryfane))
+- Fixed GPT-6.1 Sol Ultrafast usage being priced at the Standard rate; it now applies OpenAI's published premium: 6x on the OpenAI API and 8x included usage on Codex ([#15000](https://github.com/can1357/oh-my-pi/pull/15000) by [@eggpeat](https://github.com/eggpeat)).
+
 ## [18.8.8] - 2026-10-10
 
 ### Added

@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in JSON editing for free-form array settings, with credential settings kept masked in rows and editors ([#15252](https://github.com/can1357/oh-my-pi/pull/15252) by [@Shadorain](https://github.com/Shadorain)).
+- Added `Editor.prediction`, a callback whose text the editor shows as ghost text while the buffer is empty or a prefix of it; Tab or Right at line end inserts the rest without submitting ([#15137](https://github.com/can1357/oh-my-pi/pull/15137) by [@wolfiesch](https://github.com/wolfiesch))
+- Added an optional `assistantMessageText` theme token that colors assistant reply paragraph prose; unset or empty keeps the terminal default foreground ([#11204](https://github.com/can1357/oh-my-pi/issues/11204), [#11260](https://github.com/can1357/oh-my-pi/pull/11260) by [@oleg494](https://github.com/oleg494)).
+
+### Changed
+
+- Reduced the time to rebuild a long session's transcript on resume when it contains repeated `wait` polls or todo updates ([#13767](https://github.com/can1357/oh-my-pi/pull/13767) by [@sjawhar](https://github.com/sjawhar))
+- `OutputSink` summaries report the first and last line the column cap cut (`columnTruncatedRange`), and the column-cut notice names the `:raw` line selector of the artifact or file that returns a cut line whole ([#15279](https://github.com/can1357/oh-my-pi/pull/15279) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Native settings editors now display submission and validation errors instead of silently keeping the editor open ([#15252](https://github.com/can1357/oh-my-pi/pull/15252) by [@Shadorain](https://github.com/Shadorain)).
+- Fixed `/tree` stalling when opened on very long session histories ([#12527](https://github.com/can1357/oh-my-pi/pull/12527) by [@azain47](https://github.com/azain47)).
+- Fixed `/tree` exhausting memory on long sessions with many branch points ([#12622](https://github.com/can1357/oh-my-pi/pull/12622) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
+- Fixed extension statuses set via `ctx.ui.setStatus` losing their SGR colours and text styles under the status line; other escape sequences are still stripped ([#14500](https://github.com/can1357/oh-my-pi/pull/14500) by [@sandboiii](https://github.com/sandboiii))
+- Fixed the eval status list's `… N earlier` row to include status events dropped from long-running cells ([#14992](https://github.com/can1357/oh-my-pi/pull/14992) by [@azain47](https://github.com/azain47)).
+- Fixed the loop watchdog attributing `ui.loop-blocked` to work outside the late window or outweighed by unlabeled time. Named phases now include `phaseMs`; earlier work and unlabeled stalls remain `unknown`, including after a TUI restart ([#15019](https://github.com/can1357/oh-my-pi/pull/15019) by [@jaredlyon](https://github.com/jaredlyon)).
+- Fixed `ui.loop-blocked` reporting `unknown` when a terminal write blocks the event loop while the terminal drains (Windows, or when the output pump is unavailable); those stalls are now logged as `ui.terminal-write` ([#15029](https://github.com/can1357/oh-my-pi/pull/15029) by [@jaredlyon](https://github.com/jaredlyon)).
+- Fixed Agent Hub and status-line spend dropping cumulative subagent cost after compaction, parking, or follow-up turns while keeping nested task-result charges on child rows ([#15038](https://github.com/can1357/oh-my-pi/pull/15038) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Fixed dead keys on Windows Terminal 1.24 and earlier (US-International and similar layouts): `'` or `"` followed by Space now types the quote instead of a space, and a dead key followed by Enter or Tab types the quote instead of submitting or inserting a tab ([#15138](https://github.com/can1357/oh-my-pi/pull/15138) by [@davide-butera](https://github.com/davide-butera))
+- Fixed SIXEL auto-detection on terminals that advertise graphics through DA1 attribute 4 but do not answer XTSMGRAPHICS, including native Windows Terminal; SVG figures and inline images no longer require `PI_FORCE_IMAGE_PROTOCOL=sixel`. Terminals that answer both queries keep consuming the pending graphics reply after DA1 enables SIXEL, preventing probe bytes from reaching application input ([#15226](https://github.com/can1357/oh-my-pi/pull/15226) by [@pgkim42](https://github.com/pgkim42)).
+- Fixed user messages showing as empty blank padding bars and leaving moving OSC 133 prompt markers across terminal rows in the overflow transcript emergency layout ([#13835](https://github.com/can1357/oh-my-pi/issues/13835), [#14910](https://github.com/can1357/oh-my-pi/pull/14910) by [@twotnguyen](https://github.com/twotnguyen))
+
 ## [18.8.9] - 2026-10-10
 
 ### Breaking Changes

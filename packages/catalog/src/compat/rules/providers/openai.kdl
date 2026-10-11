@@ -176,8 +176,10 @@ provider "openai" {
 			cache-read 2.0
 			cache-write 25.0
 		}
-		// Ultrafast is Astra-only: $60/$6/$75/$300 per 1M short-context
-		// (6x the standard card), and the same 6x holds on the long-context tier.
+	}
+	// API Ultrafast is 6x the standard card on both context tiers: GPT-6 Astra
+	// $60/$6/$75/$300 and GPT-6.1 Sol $12/$0.60/$15/$60 per 1M short-context.
+	models "gpt-6-astra*" "gpt-6.1-sol*" {
 		service-tier-cost {
 			ultrafast 6
 		}

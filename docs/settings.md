@@ -2,7 +2,7 @@
 
 `omp` resolves settings from built-in defaults, a persistent global config file, optional project-local config, one-shot CLI overlays, and in-memory runtime overrides. Reach for project settings when one repository needs a different provider set, model role, tool policy, memory backend, or UI behavior than your global defaults — without touching your machine-wide configuration.
 
-Settings are stored as plain YAML mappings. Every key, its type, default, and enum values come from its setting definition (declared with `register(...)` next to the owning feature, e.g. `packages/coding-agent/src/tools/settings.ts`, and collected by `packages/coding-agent/src/config/all-settings.ts`). `omp config` exposes the complete schema; the interactive `/settings` panel exposes entries with supported UI editors. Some entries are conditional, and numbers or arrays without UI choices remain config-file-only.
+Settings are stored as plain YAML mappings. Every key, its type, default, and enum values come from its setting definition (declared with `register(...)` next to the owning feature, e.g. `packages/coding-agent/src/tools/settings.ts`, and collected by `packages/coding-agent/src/config/all-settings.ts`). `omp config` exposes the complete schema; the interactive `/settings` panel exposes entries with supported UI editors. Some entries are conditional; numbers and arrays without UI choices remain config-file-only unless the setting opts into the panel's JSON editor (such as `contextFiles.extra`).
 
 - For model/provider credentials, `.env` files, and the env-var table that resolves API keys, see [Providers](./providers.md).
 - For custom model definitions in `models.yml`, see [Models](./models.md).
@@ -888,7 +888,7 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 | `autoResume`           | boolean | `false`         | Auto-resume the most recent session in the cwd.                                                         |
 | `plan.enabled`         | boolean | `true`          | Enable plan mode.                                                                                       |
 | `plan.defaultOnStartup` | boolean | `false`         | Start each fresh interactive session in plan mode when plan mode is enabled. Print/JSON (`--print`) mode ignores this and prints a note; use `--plan-yolo` for a headless plan flow. |
-| `ask.timeout`          | number  | `0`             | Auto-select the recommended ask option after this many seconds; `0` disables automatic selection. |
+| `ask.timeout`          | number  | `0`             | Auto-select the recommended ask option after this many seconds; `0` disables automatic selection. Also bounds `cfg://` approval prompts; an unanswered approval denies the write instead of auto-selecting. |
 | `ask.notify`           | enum    | `on`            | `on`, `off`.                                                                                            |
 | `input.bareExitOnEmptySession` | boolean | `true` | Submitting exactly `exit`, `quit`, or `q` (case-insensitive) before the first message quits. |
 | `input.bareSlashCommands` | boolean | `false` | Run an exact command name without `/`; after session messages exist, Enter must be pressed twice to confirm. |

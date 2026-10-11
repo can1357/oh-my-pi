@@ -41,6 +41,9 @@ const VK_ESCAPE = 0x1b;
 const VK_SPACE = 0x20;
 const VK_PACKET = 0xe7;
 
+/** Keys encoded as fixed bytes that can still carry text a pending dead key composed. */
+const COMPOSABLE_FIXED_VKS = new Set([VK_BACK, VK_TAB, VK_RETURN, VK_ESCAPE, VK_SPACE]);
+
 /** Modifier and lock keys: their own presses produce no input. */
 const MODIFIER_VKS = new Set([
 	0x10, // VK_SHIFT
@@ -149,6 +152,11 @@ function encodeKey(record: KeyRecord): string | null {
 	const ctrl = (state & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) !== 0;
 	const mod = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0);
 	const text = uc === 0 ? "" : String.fromCharCode(uc);
+
+	// A pending dead key composes onto the next key: on US-International, `'` then
+	// Space arrives as a Space record carrying `'`, and `'` then Enter as an Enter
+	// record carrying `'` followed by one carrying `\r`. The carried text is the input.
+	if (!ctrl && !alt && uc > 0x20 && uc !== 0x7f && COMPOSABLE_FIXED_VKS.has(vk)) return text;
 
 	switch (vk) {
 		case VK_RETURN:

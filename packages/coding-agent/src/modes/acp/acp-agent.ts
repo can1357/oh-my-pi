@@ -447,6 +447,7 @@ export function createAcpExtensionUiContext(
 ): ExtensionUIContext {
 	const supportsForm = clientCapabilities?.elicitation?.form != null;
 	return {
+		supportsEditor: false,
 		select: async (title, options, dialogOptions) => {
 			if (!supportsForm) return undefined;
 			const value = await elicitFromAcpClient(

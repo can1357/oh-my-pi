@@ -18,6 +18,25 @@ export function setHeaderIfAbsent(headers: Record<string, string>, name: string,
 	headers[name] = value;
 }
 
+/**
+ * Label a request with the conversation id under the model's resolved
+ * `compat.sessionHeader` (KDL `session-header`). A header the caller or config
+ * already set wins; without a conversation id nothing is sent.
+ */
+export function applySessionHeader(
+	headers: Record<string, string> | Headers,
+	compat: object | undefined,
+	sessionId: string | undefined,
+): void {
+	const name = compat && "sessionHeader" in compat ? compat.sessionHeader : undefined;
+	if (typeof name !== "string" || !sessionId) return;
+	if (headers instanceof Headers) {
+		if (!headers.has(name)) headers.set(name, sessionId);
+		return;
+	}
+	setHeaderIfAbsent(headers, name, sessionId);
+}
+
 function setHeader(headers: Record<string, string>, name: string, value: string): void {
 	const normalizedName = name.toLowerCase();
 	for (const existingName in headers) {

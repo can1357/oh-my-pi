@@ -3298,8 +3298,8 @@ function openCodeModelManagerOptions(
 			},
 		},
 		...(apiKey && {
-			fetchDynamicModels: () =>
-				fetchOpenAICompatibleModels<Api>({
+			fetchDynamicModels: async () => {
+				const discovered = await fetchOpenAICompatibleModels<Api>({
 					api: "openai-completions",
 					provider: providerId,
 					baseUrl: discoveryBaseUrl,
@@ -3357,7 +3357,12 @@ function openCodeModelManagerOptions(
 						};
 					},
 					fetch: config?.fetch,
-				}),
+				});
+				if (!discovered) return null;
+				const seeds = seedModels(providerId).map(seed => ({ ...seed, baseUrl: basePath }));
+				const seedIds = new Set(seeds.map(seed => seed.id));
+				return [...discovered.filter(model => !seedIds.has(model.id)), ...seeds];
+			},
 		}),
 	};
 }
@@ -3450,8 +3455,9 @@ export interface OpenRouterModelManagerConfig {
  * OpenRouter's Decisions API lives at `/api/alpha`, a sibling of the `/api/v1`
  * chat root; derive it so a custom gateway base URL keeps both aligned.
  */
-function openrouterDecisionsBaseUrl(chatBaseUrl: string): string {
-	return chatBaseUrl.endsWith("/v1") ? `${chatBaseUrl.slice(0, -"/v1".length)}/alpha` : `${chatBaseUrl}/alpha`;
+export function openrouterDecisionsBaseUrl(chatBaseUrl: string): string {
+	const base = chatBaseUrl.replace(/\/+$/g, "");
+	return base.endsWith("/v1") ? `${base.slice(0, -"/v1".length)}/alpha` : `${base}/alpha`;
 }
 
 function mapOpenRouterThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {

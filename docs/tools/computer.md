@@ -46,7 +46,7 @@ The `computer` global exposes the desktop helpers directly. Each helper is one h
 const win = await computer.window({ app: "Code" });
 await win.screenshot();
 const tree = await win.ax({ maxDepth: 6 });
-await (await win.ref("e12")).press();
+await win.ref("e12").press();
 await computer.capabilities();
 await computer.close();
 ```
@@ -57,7 +57,7 @@ Python uses the same helper names; keyword arguments become the trailing options
 win = await computer.window(app="Code")
 await win.screenshot(silent=True)
 tree = await win.ax(maxDepth=6)
-await (await win.ref("e12")).press()
+await win.ref("e12").press()
 await win.click(120, 48, button="right")
 ```
 
@@ -75,7 +75,7 @@ The same surface is reachable as `computer.*` directly and as `desktop.*` inside
 
 ### Discovery
 
-- `desktop.windows({ app?, title? })` returns matching `DesktopWindow[]`; app/title matching is case-insensitive substring matching.
+- `desktop.windows({ app?, title? })` returns up to 48 matching `DesktopWindow[]`; app/title matching is case-insensitive substring matching.
 - `desktop.window(id | { id?, app?, title? })` returns one persistent window facade. An id may be a string or a number (`74` is the id `"74"`, never matched against app or title). Zero matches throw; multiple matches throw with the candidates.
 - `desktop.focusedWindow()` returns a window facade or `null`.
 - `desktop.displays()` returns `DesktopDisplay[]`.
@@ -113,7 +113,7 @@ Zoom requires a previous full capture of the same target. Its rectangle is in th
 
 ### Observation, menus, holds, and control
 
-- `win.observe({ silent?, all?, maxDepth? })` returns screenshot metadata plus `{ ax, nodeCount, truncated }`, normally emitting both image and AX text. Capture/AX failure restores the previous delivered coordinate frame.
+- `win.observe({ silent?, all?, maxDepth? })` returns screenshot metadata plus `{ ax, nodeCount, truncated }`, normally emitting both image and AX text. Capture/AX failure restores the previous delivered coordinate frame. When the AX text was emitted, the returned `ax` stays readable but is left out of the value's display, so a trailing `await win.observe()` shows the tree once: in JavaScript `ax` is non-enumerable (spread, `JSON.stringify` and `console.log` leave it out), and in Python the repr and `display()` omit it. A `silent: true` observation keeps `ax` everywhere; values returned from `computer.run` are unchanged.
 - `win.menu.items(path?)` lists `{ title, path, enabled, checked, hasSubmenu, shortcut? }[]`; `win.menu.select(path)` invokes one enabled unambiguous command in the target window's context.
 - `holdKeys(keys, { duration, takeover? })` and `holdMouse(x, y, { duration, button?, keys?, takeover? })` use seconds in `[0, 100]`. `drag` also accepts arbitrary `keys`. Held input is always released within the call.
 - `desktop.control.acquire({ reason })` needs live human confirmation, returns `{ active }`, and holds native task ownership between calls. `release()` revokes it; `state()` reads live state. Normal run retirement preserves an acquired grant, while interruption, task completion, and disposal revoke it. Omitted takeover follows that live grant; explicit false remains background.
@@ -125,7 +125,7 @@ Menu/app labels are untrusted data. A takeover grant does not authorize unrelate
 
 - `win.ax({ all?, maxDepth? }) -> string` returns the native textual accessibility tree with `[ref=eN]` references.
 - `win.find({ role?, title?, value?, limit? }) -> El[]` returns all native matches within the requested limit.
-- `await win.ref("e5") -> El` and `await desktop.ref("e5") -> El` resolve a live native reference.
+- `await win.ref("e5") -> El` and `await desktop.ref("e5") -> El` resolve a live native reference. The handle `ref()` returns also takes element methods directly, so `win.ref("e5").click()` needs no inner `await`.
 - `desktop.elementAt(x, y)` and `desktop.focusedElement()` return `El | null`.
 
 Each `ax()` line is `- role "label" [ref=eN]: "value"` followed by states. A label is the title, else the description; on macOS a window's unlabeled close, minimize, zoom and full-screen buttons take that name. Labels and values are quoted with `\n`, `\t`, `\"` and `\\` escapes. One longer than 200 characters plus the note that would replace the rest shows its first 200 characters and ends `… (+N chars; (await computer.ref("eN")).value())` (`.title` or `.description` for a label); that call returns it whole, and a script slices or searches it (`v.slice(-300)`, `v.indexOf(…)`, a regex) rather than printing all of it. `(focused)` marks the window's line when it is the focused window, and the element holding keyboard focus: on macOS only the application's focused element, since a focused table reports every cell focused. On macOS a line also shows `(selected)` on selected rows, cells, buttons and Finder file icons, `(settable)` on a date `setValue` can write (never inside web content, which `setValue` refuses; text fields go unmarked because an `AXValue` write often reads back without reaching the app, such as System Settings' computer name, Reminders' list names and Finder's file names), and `actions=` with the actions the element offers beyond its role: a control's press, a text field's confirm and cancel, and the scroll-into-view, context-menu, raise, page-scroll and hover actions nearly every element has go unlisted, except on a control without press, which lists all it has. `perform()` takes a listed name in any case, with or without its `AX` prefix. A date value reads as local ISO-8601 with its UTC offset (`2026-10-16T09:00:00-04:00`).
@@ -133,7 +133,7 @@ Each `ax()` line is `- role "label" [ref=eN]: "value"` followed by states. A lab
 `El` exposes snapshot fields `ref`, `role`, `nativeRole`, optional `title`/`description`, `enabled`, `focused`, and `childCount`, plus:
 
 - reads: `value()`, `bounds()`, `attributes()`, `actions()`, `parent()`, `children()`;
-- mutations: `setValue(value)`, `perform(action)`, `press()`, `click({ takeover? })`, and `focus()`.
+- mutations: `setValue(value)`, `perform(action)`, `press()`, `click({ button?, count?, modifiers?, takeover? })`, and `focus()`.
 
 On macOS, `setValue` on a date or time control (one whose `AXValue` is a date) takes ISO-8601: `YYYY-MM-DD` changes the day and keeps the control's time of day, `YYYY-MM-DDTHH:MM[:SS]` is local time, and a date-time followed by `Z` or `±HH:MM` is that exact instant. Anything else is refused before a write, naming these forms and the control's current date, as is a local time that daylight saving skips or repeats (add an offset to pick a repeated one).
 

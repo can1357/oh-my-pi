@@ -100,6 +100,8 @@ export type NativeDesktopSessionFactory = (
 ) => NativeDesktopSession | Promise<NativeDesktopSession>;
 
 type WindowFilter = { id?: string | number; app?: string; title?: string };
+/** Window listings are session-transcript payload; `window()` lookups search the whole native list. */
+const MAX_LISTED_WINDOWS = 48;
 type InputOptions = { takeover?: boolean };
 type ScreenshotOptions = { silent?: boolean };
 type ScreenshotResult = Pick<
@@ -371,7 +373,7 @@ class El {
 		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press"));
 	}
 
-	async click(options?: InputOptions): Promise<void> {
+	async click(options?: ClickOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "click");
 		await nativeCall(context.signal, () => this.#session.axClick(this.ref, pointerOptions(options)));
@@ -394,6 +396,83 @@ class El {
 		return (await nativeCall(signal, () => this.#session.axChildren(this.ref))).map(
 			node => new El(this.#session, this.#getContext, node),
 		);
+	}
+}
+
+/** `await ref("e5")` resolves the element; its methods chain on the handle and await the lookup first. */
+class ElRef implements PromiseLike<El> {
+	readonly ref: string;
+	readonly #lookup: () => Promise<El>;
+	#element?: Promise<El>;
+
+	constructor(ref: string, lookup: () => Promise<El>) {
+		this.ref = ref;
+		this.#lookup = lookup;
+	}
+
+	#resolve(): Promise<El> {
+		this.#element ??= this.#lookup();
+		return this.#element;
+	}
+
+	// oxlint-disable-next-line unicorn/no-thenable -- the handle is awaitable by design: `await ref("e5")` resolves the element.
+	then<A = El, B = never>(
+		onFulfilled?: ((element: El) => A | PromiseLike<A>) | null,
+		onRejected?: ((reason: unknown) => B | PromiseLike<B>) | null,
+	): Promise<A | B> {
+		return this.#resolve().then(onFulfilled, onRejected);
+	}
+
+	catch<B = never>(onRejected?: ((reason: unknown) => B | PromiseLike<B>) | null): Promise<El | B> {
+		return this.#resolve().catch(onRejected);
+	}
+
+	finally(onFinally?: (() => void) | null): Promise<El> {
+		return this.#resolve().finally(onFinally);
+	}
+
+	async value(): Promise<string | undefined> {
+		return (await this.#resolve()).value();
+	}
+
+	async setValue(value: string): Promise<void> {
+		await (await this.#resolve()).setValue(value);
+	}
+
+	async bounds(): Promise<{ x: number; y: number; width: number; height: number } | null> {
+		return (await this.#resolve()).bounds();
+	}
+
+	async attributes(): Promise<Record<string, string>> {
+		return (await this.#resolve()).attributes();
+	}
+
+	async actions(): Promise<string[]> {
+		return (await this.#resolve()).actions();
+	}
+
+	async perform(action: string): Promise<void> {
+		await (await this.#resolve()).perform(action);
+	}
+
+	async press(): Promise<void> {
+		await (await this.#resolve()).press();
+	}
+
+	async click(options?: ClickOptions): Promise<void> {
+		await (await this.#resolve()).click(options);
+	}
+
+	async focus(): Promise<void> {
+		await (await this.#resolve()).focus();
+	}
+
+	async parent(): Promise<El | null> {
+		return (await this.#resolve()).parent();
+	}
+
+	async children(): Promise<El[]> {
+		return (await this.#resolve()).children();
 	}
 }
 
@@ -562,9 +641,11 @@ class Win {
 		);
 	}
 
-	async ref(ref: string): Promise<El> {
-		const { signal } = this.#getContext();
-		return new El(this.#session, this.#getContext, await nativeCall(signal, () => this.#session.axNode(ref)));
+	ref(ref: string): ElRef {
+		return new ElRef(ref, async () => {
+			const { signal } = this.#getContext();
+			return new El(this.#session, this.#getContext, await nativeCall(signal, () => this.#session.axNode(ref)));
+		});
 	}
 }
 
@@ -968,9 +1049,9 @@ export class ComputerWorkerCore {
 			},
 			windows: async (filter?: WindowFilter): Promise<DesktopWindow[]> => {
 				const { signal } = getContext();
-				return (await nativeCall(signal, () => session.listWindows())).filter(window =>
-					matchesFilter(window, filter),
-				);
+				return (await nativeCall(signal, () => session.listWindows()))
+					.filter(window => matchesFilter(window, filter))
+					.slice(0, MAX_LISTED_WINDOWS);
 			},
 			window: async (selector: string | number | WindowFilter): Promise<Win> => {
 				const { signal } = getContext();
@@ -982,9 +1063,12 @@ export class ComputerWorkerCore {
 				if (matches.length === 0) throw new ToolError(`no window matches ${JSON.stringify(selector)}`);
 				if (matches.length > 1) {
 					const candidates = matches
+						.slice(0, MAX_LISTED_WINDOWS)
 						.map(window => `${window.id} ${window.app} ${JSON.stringify(window.title)}`)
 						.join("\n");
-					throw new ToolError(`multiple windows match ${JSON.stringify(selector)}:\n${candidates}`);
+					const omitted = matches.length - MAX_LISTED_WINDOWS;
+					const more = omitted > 0 ? `\n… ${omitted} more` : "";
+					throw new ToolError(`multiple windows match ${JSON.stringify(selector)}:\n${candidates}${more}`);
 				}
 				return makeWin(matches[0]!);
 			},
@@ -1014,10 +1098,11 @@ export class ComputerWorkerCore {
 				const node = await nativeCall(signal, () => session.axFocused());
 				return node ? el(node) : null;
 			},
-			ref: async (ref: string): Promise<El> => {
-				const { signal } = getContext();
-				return el(await nativeCall(signal, () => session.axNode(ref)));
-			},
+			ref: (ref: string): ElRef =>
+				new ElRef(ref, async () => {
+					const { signal } = getContext();
+					return el(await nativeCall(signal, () => session.axNode(ref)));
+				}),
 			clipboard: {
 				read: async (): Promise<string> => {
 					const { signal } = getContext();

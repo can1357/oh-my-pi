@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported `clipRecallContent`, which clips content the way recall previews are clipped ([#14656](https://github.com/can1357/oh-my-pi/pull/14656) by [@andrebrait](https://github.com/andrebrait))
+
+### Fixed
+
+- Fixed memory saves slowing down and the memory database growing quadratically with the number of stored memories, because any two memories mentioning a date or words like "today" were linked even when unrelated ([#15013](https://github.com/can1357/oh-my-pi/pull/15013) by [@tickernelz](https://github.com/tickernelz)).
+- Loop-watchdog stalls caused by Mnemopi retention, recall, fact write-back, embedding persistence, bank open, stats and consolidation are now logged under a `mnemopi.*` phase instead of `unknown` ([#15001](https://github.com/can1357/oh-my-pi/pull/15001) by [@jaredlyon](https://github.com/jaredlyon)).
+
 ## [18.8.8] - 2026-10-10
 
 ### Fixed

@@ -25,7 +25,6 @@ use super::{
 	ax,
 };
 
-const MAX_LISTED_WINDOWS: usize = 48;
 const MIN_WINDOW_EDGE: u32 = 16;
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -37,6 +36,16 @@ pub(super) fn capture_permission() -> bool {
 	// SAFETY: This non-prompting TCC preflight has no arguments and is available
 	// on supported macOS versions.
 	unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+fn require_capture_permission() -> CoreResult<()> {
+	if capture_permission() {
+		Ok(())
+	} else {
+		Err(DesktopError::permission_denied(
+			"macOS Screen Recording permission is not granted for this process",
+		))
+	}
 }
 
 pub(super) fn capture_available() -> bool {
@@ -55,11 +64,7 @@ impl MacCapture {
 
 	#[allow(clippy::unused_self, reason = "keeps discovery on the backend capture object")]
 	pub(super) fn displays(&self) -> CoreResult<Vec<DesktopDisplay>> {
-		if !capture_permission() {
-			return Err(DesktopError::permission_denied(
-				"macOS Screen Recording permission is not granted for this process",
-			));
-		}
+		require_capture_permission()?;
 		let monitors = Monitor::all().map_err(|error| {
 			DesktopError::capture_failed(format!("Quartz monitor enumeration failed: {error}"))
 		})?;
@@ -137,6 +142,7 @@ impl MacCapture {
 	}
 
 	fn capture_window(&self, id: &str) -> CoreResult<(RgbaImage, FrameGeometry)> {
+		require_capture_permission()?;
 		let mut window = self.window(id)?;
 		let window_id = id
 			.parse::<u32>()
@@ -266,12 +272,10 @@ type WindowDictionary = CFDictionary<CFString, CFType>;
 
 /// Reads each window from one immutable Quartz snapshot; individual xcap
 /// property getters would re-enumerate the whole desktop for every field.
+/// Window metadata needs no Screen Recording permission; without it, macOS
+/// leaves other applications' window titles empty and reports their sharing
+/// state as none, so that state filters windows only when capture is granted.
 fn window_snapshot(target: Option<u32>) -> CoreResult<Vec<DesktopWindow>> {
-	if !capture_permission() {
-		return Err(DesktopError::permission_denied(
-			"macOS Screen Recording permission is not granted for this process",
-		));
-	}
 	let options = if target.is_some() {
 		CGWindowListOption::OptionIncludingWindow
 	} else {
@@ -285,12 +289,15 @@ fn window_snapshot(target: Option<u32>) -> CoreResult<Vec<DesktopWindow>> {
 	let active_pid = NSWorkspace::sharedWorkspace()
 		.frontmostApplication()
 		.and_then(|app| u32::try_from(app.processIdentifier()).ok());
-	let mut result = Vec::with_capacity(snapshot.len().min(MAX_LISTED_WINDOWS));
+	let capture_granted = capture_permission();
+	let mut result = Vec::with_capacity(snapshot.len());
 	let mut active = Vec::new();
 	// SAFETY: This copy-rule snapshot remains alive and is never mutated.
 	for dictionary in unsafe { snapshot.iter_unchecked() } {
-		if result.len() == MAX_LISTED_WINDOWS {
-			break;
+		// SAFETY: The CoreGraphics key constant is process-lived.
+		let sharing = window_number(dictionary, unsafe { kCGWindowSharingState });
+		if capture_granted && matches!(sharing, None | Some(0)) {
+			continue;
 		}
 		let Some((id, window)) = window_metadata(dictionary) else {
 			continue;
@@ -346,7 +353,7 @@ fn window_metadata(dictionary: &WindowDictionary) -> Option<(u32, DesktopWindow)
 		let onscreen = window_value(dictionary, kCGWindowIsOnscreen)?
 			.downcast_ref::<CFBoolean>()?
 			.value();
-		if !onscreen || window_number(dictionary, kCGWindowSharingState)? == 0 {
+		if !onscreen {
 			return None;
 		}
 		let id = u32::try_from(window_number(dictionary, kCGWindowNumber)?).ok()?;

@@ -9,6 +9,7 @@ import { throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { type AriaSnapshotOptions, buildAriaSnapshotScript } from "./aria/aria-snapshot";
 import { clickElement, fillViaHandle, focusTextEntryTarget, pressKey } from "./interactions";
+import { readPageViewport } from "./launch";
 import { RunOutput } from "./run-output";
 import type { ScreenshotResult, SessionSnapshot } from "./tab-protocol";
 
@@ -372,6 +373,7 @@ export async function captureFrameScreenshot(
 	const handle = await untilAborted(signal, () => frame.$(normalizeSelector(selector)));
 	if (!handle) throw new ToolError(`frame.screenshot(${JSON.stringify(selector)}) matched no element`);
 	let buffer: Buffer;
+	let captureScale: number;
 	try {
 		await untilAborted(signal, () =>
 			handle.evaluate(element => {
@@ -381,6 +383,7 @@ export async function captureFrameScreenshot(
 				target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
 			}),
 		).catch(() => undefined);
+		captureScale = (await readPageViewport(frame.page(), signal)).deviceScaleFactor ?? 1;
 		const screenshotOptions: ElementScreenshotOptions = { type: "png", scrollIntoView: false };
 		buffer = (await untilAborted(signal, () => handle.screenshot(screenshotOptions))) as Buffer;
 	} finally {
@@ -417,6 +420,7 @@ export async function captureFrameScreenshot(
 			savedByteLength: savedBuffer.length,
 			dest,
 			resized,
+			capture: { area: "element", scale: captureScale },
 		}).join("\n"),
 	});
 	output.push({ type: "image", data: resized.data, mimeType: resized.mimeType });

@@ -198,6 +198,11 @@ export interface AgentSessionConfig {
 	initialRetryFallback?: InitialRetryFallbackState;
 	/** Skip retry.fallbackChains validation at construction; the host calls `validateRetryFallbackChains()` later. */
 	deferRetryFallbackValidation?: boolean;
+	/**
+	 * Override for the unexpected-stop judge verdict budget. Test seam so the
+	 * slow-verdict boundary runs in milliseconds; production never sets it.
+	 */
+	unexpectedStopJudgeTimeoutMs?: number;
 	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */
@@ -577,6 +582,8 @@ export interface EphemeralTurnOptions {
 	tools?: false;
 	/** Optional positive safe-integer output-token cap. Transports that omit or overwrite caller output limits reject this option before inference. On budget-thinking models a cap disables optional thinking (models that require it reject the cap). */
 	maxTokens?: number;
+	/** Run at the model's lowest effort when that keeps the prompt cache: the session thinks and the model takes per-message effort changes (recorded on its last reply). Otherwise the session's reasoning applies, since changing reasoning parameters forfeits the cache. */
+	minimizeEffort?: boolean;
 	/** Positive safe-integer UTF-8 byte cap. Reject before inference when the serialized post-transform, secret-obfuscated provider context exceeds it. Measured before `before_provider_request` hooks; payload replacements are not re-measured. */
 	maxContextBytes?: number;
 	/** Awaited in order; a delivery failure rejects the side turn and aborts the request. */

@@ -991,6 +991,86 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		expect(notice).toContain("Read artifact://77 for full output");
 	});
 
+	test("column-cap notice names a raw artifact line per cut line", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "output.log");
+		const sink = new OutputSink({ artifactPath, artifactId: "77", maxColumns: 8, spillThreshold: 100_000 });
+		const wideX = "x".repeat(50);
+		const wideY = "y".repeat(50);
+		// Split chunks so a cut line straddles a push boundary.
+		await sink.push(`a\n${wideX.slice(0, 20)}`);
+		await sink.push(`${wideX.slice(20)}\nb\n${wideY}\nc\n`);
+		const dumped = await sink.dump();
+		expect(dumped.columnTruncatedRange).toEqual({ first: 2, last: 4 });
+
+		const meta = outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get();
+		expect(formatOutputNotice(meta)).toContain(
+			"Some lines truncated to 8 bytes. Use artifact://77:raw:2-2 to read line 2 whole; cut lines run to line 4, each read the same way",
+		);
+		// The named lines are the cut lines, whole, in the artifact.
+		const artifactLines = (await Bun.file(artifactPath).text()).split("\n");
+		expect(artifactLines[1]).toBe(wideX);
+		expect(artifactLines[3]).toBe(wideY);
+	});
+
+	test("column-cap notice names one line, not a span a single read cannot return", async () => {
+		const dir = await createTempDir();
+		const sink = new OutputSink({
+			artifactPath: path.join(dir, "output.log"),
+			artifactId: "77",
+			maxColumns: 8,
+			spillThreshold: 100_000,
+		});
+		const lines = Array.from({ length: 8000 }, (_, i) => (i === 0 || i === 7999 ? "w".repeat(50) : `${i + 1}`));
+		await sink.push(`${lines.join("\n")}\n`);
+		const dumped = await sink.dump();
+		expect(dumped.columnTruncatedRange).toEqual({ first: 1, last: 8000 });
+
+		const notice = formatOutputNotice(outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get());
+		expect(notice).toContain("Use artifact://77:raw:1-1 to read line 1 whole; cut lines run to line 8000");
+		expect(notice).not.toContain(":raw:1-8000");
+	});
+
+	test("column-cap notice keeps the plain artifact pointer when the artifact is a head/tail sample", () => {
+		const meta = outputMeta()
+			.truncationFromSummary(
+				{
+					output: "x…",
+					truncated: false,
+					totalLines: 1,
+					totalBytes: 100,
+					outputLines: 1,
+					outputBytes: 4,
+					columnTruncatedLines: 1,
+					columnTruncatedRange: { first: 1, last: 1 },
+					columnMax: 8,
+					artifactId: "77",
+					artifactElidedBytes: 1024,
+				},
+				{ direction: "tail" },
+			)
+			.get();
+		const notice = formatOutputNotice(meta);
+		expect(notice).not.toContain(":raw:");
+		expect(notice).toContain("Read artifact://77 for a head/tail sample");
+	});
+
+	test("replace() withholds the cut-line range because the artifact keeps the original stream", async () => {
+		const dir = await createTempDir();
+		const sink = new OutputSink({
+			artifactPath: path.join(dir, "output.log"),
+			artifactId: "77",
+			maxColumns: 8,
+			spillThreshold: 100_000,
+		});
+		await sink.push("one\ntwo\n");
+		sink.replace("rewritten\n");
+		await sink.push(`${"z".repeat(50)}\n`);
+		const dumped = await sink.dump();
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.columnTruncatedRange).toBeUndefined();
+	});
+
 	test("multibyte line: cap counts UTF-8 bytes and the notice says bytes", async () => {
 		// Regression for #10888: a 385-char line is 770 UTF-8 bytes. A char cap of
 		// 768 would leave it untouched; the sink enforces bytes, so it trims. The

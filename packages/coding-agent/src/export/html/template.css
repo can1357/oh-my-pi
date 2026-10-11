@@ -604,6 +604,7 @@
 
     .assistant-text {
       padding: 0;
+      color: var(--assistantMessageText, var(--text));
     }
 
     /* Copy link button - appears on hover */

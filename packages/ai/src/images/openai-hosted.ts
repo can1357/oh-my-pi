@@ -10,6 +10,7 @@ import {
 import { readSseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { applySessionHeader } from "../providers/inference-headers";
 import {
 	errorMessage,
 	ImageApiError,
@@ -73,6 +74,7 @@ async function headers(
 	const result = new Headers(await modelHeaders(carrier, signal));
 	result.set("Content-Type", "application/json");
 	result.set("Authorization", `Bearer ${key}`);
+	applySessionHeader(result, carrier.compat, sessionId);
 	if (carrier.api === "openai-codex-responses" || carrier.provider === "openai-codex") {
 		const accountId = getCodexAccountId(key);
 		result.delete("x-api-key");

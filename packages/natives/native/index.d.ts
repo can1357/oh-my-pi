@@ -790,6 +790,14 @@ export interface ApplicationQuery {
 }
 
 /**
+ * Applies an `HDiffPatch` single-stream patch (HDIFFSF20, zstd or
+ * uncompressed) to `oldPath`, writing the result to `outPath` (created or
+ * truncated). Resolves to the result's size in bytes. Rejects on I/O failure,
+ * a damaged or unsupported patch, or a patch made for other old data.
+ */
+export declare function applyBinaryPatch(oldPath: string, patchPath: string, outPath: string): Promise<number>
+
+/**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
  * a promise.
  */
@@ -1925,6 +1933,11 @@ export interface GrepMatch {
   contextAfter?: Array<ContextLine>
   /** Whether the line was truncated. */
   truncated?: boolean
+  /**
+   * 1-indexed character column where the first match on a truncated line
+   * starts; the truncated `line` shows a window around it.
+   */
+  column?: number
   /** Per-file match count (count mode only). */
   matchCount?: number
 }
@@ -2368,6 +2381,11 @@ export interface Match {
   contextAfter?: Array<ContextLine>
   /** Whether the line was truncated. */
   truncated?: boolean
+  /**
+   * 1-indexed character column where the first match on a truncated line
+   * starts; the truncated `line` shows a window around it.
+   */
+  column?: number
 }
 
 /**

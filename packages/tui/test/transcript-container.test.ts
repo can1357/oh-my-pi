@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import {
 	TranscriptContainer,
 	type TranscriptStableRow,
@@ -579,6 +580,67 @@ describe("TranscriptContainer", () => {
 		expect(out).toEqual(["A3", "A4", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4"]);
 	});
 
+	it("renders user message text in emergency layout and omits OSC 133 prompt markers (issue 13835)", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["stuck tool"], false)); // pins retirement
+		for (let i = 0; i < 6; i++) transcript.addChild(new Block([`settled ${i}`], true));
+		const userMsg = new UserMessageComponent("is there a reason we haven't tested against the real device yet?");
+		transcript.addChild(userMsg);
+		transcript.addChild(new Block(["after 1"], true));
+		transcript.addChild(new Block(["after 2"], true));
+
+		const rendered = transcript.renderViewport(80, 5, frame);
+		expect(rendered).toHaveLength(5);
+		const userRow = rendered[2]!;
+		expect(userRow).toContain("is there a reason we haven't tested against the real device yet?");
+		expect(userRow).not.toContain("\x1b]133;A");
+		expect(userRow).not.toContain("\x1b]133;B");
+	});
+
+	it("recovers user message text as emergency row when behind viewport (issue 13835)", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["stuck tool"], false)); // pins retirement
+		const userMsg = new UserMessageComponent("first prompt behind viewport");
+		transcript.addChild(userMsg);
+		for (let i = 0; i < 10; i++) transcript.addChild(new Block([`settled ${i}`], true));
+
+		const rendered = transcript.renderViewport(80, 2, frame);
+		expect(rendered[0]).toContain("first prompt behind viewport");
+		expect(rendered[0]).not.toContain("\x1b]133;A");
+	});
+
+	it("UserMessageComponent emergency row renders first content line and omits shell integration", () => {
+		const userMsg = new UserMessageComponent("first line\nsecond line");
+		const row = userMsg.renderTranscriptBlockEmergencyRow(80);
+		expect(row).toBeDefined();
+		expect(row).toContain("first line");
+		expect(row).not.toContain("second line");
+		expect(row).not.toContain("\x1b]133;A");
+		expect(row).not.toContain("\x1b]133;B");
+	});
+
+	it("UserMessageComponent reuses measured lines under one-row allocation without duplicate child render", () => {
+		const userMsg = new UserMessageComponent("single render test");
+		userMsg.setTranscriptAllocation(1);
+		let superRenderCalls = 0;
+		const superProto = Object.getPrototypeOf(UserMessageComponent.prototype) as {
+			render: (width: number) => readonly string[];
+		};
+		const origSuperRender = superProto.render;
+		superProto.render = function (this: unknown, width: number) {
+			superRenderCalls++;
+			return origSuperRender.call(this, width);
+		};
+		try {
+			const rows = userMsg.render(80);
+			expect(rows).toHaveLength(1);
+			expect(rows[0]).toContain("single render test");
+			expect(superRenderCalls).toBe(1);
+		} finally {
+			superProto.render = origSuperRender;
+		}
+	});
+
 	it("keeps a completed assistant answer visible behind an active prefix", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(new Block(["stale active"], false));
@@ -629,6 +691,68 @@ describe("TranscriptContainer", () => {
 		expect(transcript.canRemoveBlock(settled)).toBe(false);
 		transcript.removeChild(settled);
 		expect(transcript.blockStates()).toEqual(["committed", "active"]);
+	});
+
+	it("removes live blocks behind a settled one without disturbing committed or settled bookkeeping", () => {
+		const transcript = new TranscriptContainer();
+		const committedA = new Block(["committed a"], true);
+		const committedB = new Block(["committed b"], true);
+		transcript.addChild(committedA);
+		transcript.addChild(committedB);
+		const commit = transcript.peekFinalizedBatch(80, 0);
+		expect(commit?.rows).toEqual(["committed a", "", "committed b", ""]);
+		transcript.acknowledgeFinalizedBatch(commit!.id);
+
+		const settled = new Block(["settled"], true);
+		const live = [1, 2, 3, 4, 5].map(n => new Block([`live ${n}`], false));
+		transcript.addChild(settled);
+		for (const block of live) transcript.addChild(block);
+		// Room for every live row: the finalized block settles and nothing is offered.
+		expect(transcript.peekFinalizedBatch(80, 20)).toBeUndefined();
+		expect(transcript.blockStates()).toEqual([
+			"committed",
+			"committed",
+			"settled",
+			"active",
+			"active",
+			"active",
+			"active",
+			"active",
+		]);
+
+		transcript.removeChild(live[0]!);
+		transcript.removeChild(live[4]!);
+
+		expect(transcript.blockStates()).toEqual(["committed", "committed", "settled", "active", "active", "active"]);
+		const expected = [committedA, committedB, settled, live[1]!, live[2]!, live[3]!];
+		expect(transcript.children).toHaveLength(expected.length);
+		expected.forEach((component, index) => expect(transcript.children[index]).toBe(component));
+
+		// Pressure retires the settled block next; committed rows are never offered again.
+		const retire = transcript.peekFinalizedBatch(80, 5);
+		expect(retire?.rows).toEqual(["settled", ""]);
+	});
+
+	it("refuses to remove an append-only block once its stable rows are offered or emitted", () => {
+		const transcript = new TranscriptContainer();
+		const block = new AppendBlock(["one", "two"], ["one"]);
+		transcript.addChild(block);
+
+		// Offered: the stable row is mid-write to native scrollback.
+		const append = transcript.peekFinalizedBatch(80, 0)!;
+		expect(append.rows).toEqual(["one"]);
+		transcript.removeChild(block);
+		expect(transcript.children).toHaveLength(1);
+		expect(transcript.children[0]).toBe(block);
+		expect(transcript.blockStates()).toEqual(["active"]);
+
+		// Emitted: the row is in scrollback, so the block can no longer be retracted.
+		transcript.acknowledgeFinalizedBatch(append.id);
+		expect(transcript.emittedStableRows()).toEqual([1]);
+		transcript.removeChild(block);
+		expect(transcript.children).toHaveLength(1);
+		expect(transcript.children[0]).toBe(block);
+		expect(transcript.blockStates()).toEqual(["active"]);
 	});
 
 	it("replays committed history without rewinding lifecycle state", () => {

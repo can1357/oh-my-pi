@@ -251,7 +251,7 @@ export interface AsyncJobFilter {
 export class AsyncJobManager {
 	static #instance: AsyncJobManager | undefined;
 
-	/** Process-global instance shared by internal URL protocol handlers and tools. */
+	/** Legacy pointer to the first live root; child routing uses the parent's scoped manager instead. */
 	static instance(): AsyncJobManager | undefined {
 		return AsyncJobManager.#instance;
 	}

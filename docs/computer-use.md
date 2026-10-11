@@ -44,7 +44,7 @@ const displays = await computer.displays();
 const win = await computer.window({ app: "Code" });
 await win.screenshot();
 const tree = await win.ax({ maxDepth: 6 });
-await (await win.ref("e12")).press();
+await win.ref("e12").press();
 await computer.capabilities();
 await computer.close();
 ```
@@ -56,7 +56,7 @@ displays = await computer.displays()
 win = await computer.window(app="Code")
 await win.screenshot(silent=True)
 tree = await win.ax(maxDepth=6)
-await (await win.ref("e12")).press()
+await win.ref("e12").press()
 await win.click(120, 48, button="right")
 ```
 
@@ -76,7 +76,7 @@ display(await computer.displays());
 display(await computer.capabilities());
 ```
 
-`computer.windows({ app?, title? })` returns window IDs, app/title, PID, logical bounds, and focus state. Select exactly one target with `computer.window(idOrFilter)`; an ambiguous filter throws and lists candidates. `computer.focusedWindow()` returns the current target or `null`.
+`computer.windows({ app?, title? })` returns window IDs, app/title, PID, logical bounds, and focus state for up to 48 matching windows. Select exactly one target with `computer.window(idOrFilter)`; an ambiguous filter throws and lists candidates. `computer.focusedWindow()` returns the current target or `null`.
 
 ### Applications and live display targets
 
@@ -131,8 +131,8 @@ await buttons[0].press();
 
 - `win.ax({ all?, maxDepth? })` returns a textual tree with `[ref=eN]` references; default depth is 24 and native snapshots visit at most 800 nodes.
 - `win.find({ role?, title?, value?, limit? })` matches case-insensitive substrings and returns up to `limit` elements (default 100, maximum 5000), from a walk bounded to 5000 nodes and depth 24.
-- `await win.ref("e5")`, `computer.elementAt(x, y)`, `computer.focusedElement()`, and `computer.ref("e5")` return live elements.
-- Elements expose `value`, `setValue`, `bounds`, `attributes`, `actions`, `perform`, `press`, `click`, `focus`, `parent`, and `children` operations.
+- `await win.ref("e5")`, `computer.elementAt(x, y)`, `computer.focusedElement()`, and `computer.ref("e5")` return live elements. The handle `ref()` returns also takes element methods directly: `await win.ref("e5").click({ count: 2 })`.
+- Elements expose `value`, `setValue`, `bounds`, `attributes`, `actions`, `perform`, `press`, `click({ button?, count?, modifiers? })`, `focus`, `parent`, and `children` operations.
 
 AX element actions need no screenshot. AX bounds and `computer.elementAt` use platform-native global desktop coordinates, not screenshot pixels: Windows uses physical desktop pixels; macOS uses logical points. Element clicks resolve the live element's owning window and refuse missing or ambiguous ownership rather than clicking an overlapping window. An element keeps the same reference across its window's AX snapshots and `find()` (desktop lookups such as `computer.focusedElement()` keep their own); a reference expires once its element is missing from the window's current and previous AX snapshots. An element whose role or label changes gets a new reference, and the old reference keeps naming the element it was read from until it expires the same way. On Windows, an element that takes over the UI Automation `RuntimeId` of one that is gone also gets a new reference, and an element whose `RuntimeId` cannot be read gets a new one on every read. The registry also caps references at 5000 and can evict a target's oldest generation earlier. Recover from `StaleRef` by taking a new AX snapshot and reacquiring the element.
 
@@ -170,7 +170,7 @@ Inside `computer.run`, `wait(milliseconds)` sleeps and `wait(predicate, { timeou
 
 | Platform                | Current backend                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| macOS x64/arm64         | ScreenCaptureKit in a persistent native event-loop worker on macOS 14+, in-process CoreGraphics on macOS 12/13, plus native AX and input. Grant Screen Recording for capture and Accessibility for input/AX, then restart the launching host.                                                                                                                                                                                                                                                                                      |
+| macOS x64/arm64         | ScreenCaptureKit in a persistent native event-loop worker on macOS 14+, in-process CoreGraphics on macOS 12/13, plus native AX and input. Grant Screen Recording for capture and Accessibility for input/AX, then restart the launching host. Without Screen Recording, other apps' window titles read as empty.                                                                                                                                                                                                                   |
 | Linux X11 x64/arm64     | X11 capture/input and AT-SPI accessibility. Requires a readable display plus RandR/XTEST.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | Linux Wayland x64/arm64 | RemoteDesktop portal or `LIBEI_SOCKET` input and AT-SPI accessibility. ScreenCast portal/PipeWire capture ships only in builds compiled with the `wayland-pipewire` Cargo feature; released binaries omit it, so `capabilities()` reports `capture: false` there. RemoteDesktop permission is requested lazily on first native input, is not persisted, and closes with the desktop session; read-only window/AX inspection does not request it. Compositor restrictions apply; background per-window native input is unavailable. |
 | Windows x64/arm64       | Native display/window capture, Win32 input, and UI Automation accessibility.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |

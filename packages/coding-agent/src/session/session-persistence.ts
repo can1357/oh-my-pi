@@ -191,10 +191,12 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	// carrier persists atomically with its summary and metadata — both as a
 	// message `providerPayload` (`type: "anthropicCompaction"`) and under the
 	// preserveData slot, whose object carries no `type` marker of its own.
+	// Cursor server records are addressed by the SHA-256 of their bytes and carry
+	// signed reasoning, so they persist atomically too.
 	if (
 		typeof obj === "object" &&
 		obj !== null &&
-		(("type" in obj && obj.type === "anthropicCompaction") ||
+		(("type" in obj && (obj.type === "anthropicCompaction" || obj.type === "cursorHistory")) ||
 			(key === "anthropicCompaction" && "content" in obj && typeof obj.content === "string"))
 	) {
 		return obj;
@@ -386,6 +388,7 @@ function isAtomicPersistenceNode(obj: object, key?: string): boolean {
 		}
 		if (
 			typed.type === "anthropicCompaction" ||
+			typed.type === "cursorHistory" ||
 			(key === "anthropicCompaction" && "content" in typed && typeof typed.content === "string")
 		)
 			return true;

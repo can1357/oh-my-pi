@@ -3,6 +3,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
+import { openrouterDecisionsBaseUrl } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { apiServesKind, modelKind, type ModelKind, runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -37,7 +38,8 @@ export interface ProviderOverride {
  * (docs/models.md): every model under the provider rides the auth-gateway,
  * so the gateway `baseUrl` follows the transport regardless of the model's
  * own API — a model must never end up pi-native on a catalog upstream host
- * (#2555).
+ * (#2555). An unscoped override names the OpenRouter `/api/v1` chat root, so
+ * Decisions models move to its `/api/alpha` sibling on the same host.
  */
 export function resolveProviderBaseUrl<TApi extends Api>(
 	modelApi: TApi,
@@ -47,6 +49,9 @@ export function resolveProviderBaseUrl<TApi extends Api>(
 	if (override?.baseUrl === undefined) return modelBaseUrl;
 	if (override.transport === "pi-native") return override.baseUrl;
 	if (override.baseUrlApis !== undefined && !override.baseUrlApis.includes(modelApi)) return modelBaseUrl;
+	if (override.baseUrlApis === undefined && modelApi === "openrouter-decisions") {
+		return openrouterDecisionsBaseUrl(override.baseUrl);
+	}
 	return override.baseUrl;
 }
 

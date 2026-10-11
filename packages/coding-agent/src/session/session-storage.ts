@@ -224,6 +224,31 @@ const writerRegistry = new FinalizationRegistry<number>(fd => {
 	}
 });
 
+/**
+ * Identity of the file `filePath` currently names, read through a descriptor.
+ * Handle and by-name stat can disagree for the same file (Windows FSLogix
+ * profile disks report different dev/ino), so identity checks compare
+ * descriptor to descriptor. Returns undefined when the path is missing.
+ */
+function statPathByHandle(filePath: string): fs.BigIntStats | undefined {
+	let fd: number;
+	try {
+		fd = fs.openSync(filePath, "r");
+	} catch (err) {
+		if (isEnoent(err)) return undefined;
+		throw err;
+	}
+	try {
+		return fs.fstatSync(fd, { bigint: true });
+	} finally {
+		try {
+			fs.closeSync(fd);
+		} catch {
+			// Read-only descriptor; nothing to roll back.
+		}
+	}
+}
+
 class FileSessionStorageWriter implements SessionStorageWriter {
 	#fd: number;
 	/** Identity of the file `#fd` is open on: fixed for the descriptor's lifetime, so read once per descriptor. */
@@ -275,18 +300,13 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	 * interleave, so re-open the live path when its identity changed.
 	 *
 	 * Returns the size of the descriptor the next write appends to: while the
-	 * path still names the held file, the one path `stat` serves both the
+	 * path still names the held file, the one path identity read serves both the
 	 * identity check and the append rollback point.
 	 */
 	#reopenIfReplaced(): number {
 		const held = this.#heldFile();
-		let live: fs.BigIntStats;
-		try {
-			live = fs.statSync(this.#fpath, { bigint: true });
-		} catch (err) {
-			if (isEnoent(err)) return fs.fstatSync(this.#fd).size;
-			throw err;
-		}
+		const live = statPathByHandle(this.#fpath);
+		if (!live) return fs.fstatSync(this.#fd).size;
 		if (live.ino === held.ino && live.dev === held.dev) return Number(live.size);
 		const nextFd = openCloexecSync(this.#fpath, SESSION_WRITE_FLAGS | fs.constants.O_APPEND);
 		writerRegistry.unregister(this);
@@ -310,13 +330,8 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	 */
 	#holdsLivePath(): boolean {
 		const held = this.#heldFile();
-		let live: fs.BigIntStats;
-		try {
-			live = fs.statSync(this.#fpath, { bigint: true });
-		} catch (err) {
-			if (isEnoent(err)) return true;
-			throw err;
-		}
+		const live = statPathByHandle(this.#fpath);
+		if (!live) return true;
 		return live.ino === held.ino && live.dev === held.dev;
 	}
 
@@ -812,13 +827,15 @@ export class FileSessionStorage implements SessionStorage {
 		// on the unlinked inode), in which case we hold nothing. Retry instead
 		// of entering the region unexclusively (hV-oE). The path still naming
 		// our inode proves the record is there (holders only ever create and
-		// unlink lock files), and comparing identities costs two stats instead
-		// of a full open/read/close. The descriptor stays open until after the
-		// comparison so the inode cannot be freed and its number reused by a
-		// successor's file; bigint keeps 64-bit Windows file IDs exact.
+		// unlink lock files). Both identities are read through descriptors:
+		// by-name stat can report a different dev/ino than the handle for the
+		// same file (Windows FSLogix profile disks). Our descriptor stays open
+		// until after the comparison so the inode cannot be freed and its number
+		// reused by a successor's file; bigint keeps 64-bit Windows file IDs exact.
 		try {
 			const held = fs.fstatSync(fd, { bigint: true });
-			const named = fs.statSync(lockPath, { bigint: true });
+			const named = statPathByHandle(lockPath);
+			if (!named) return false;
 			return held.ino === named.ino && held.dev === named.dev;
 		} catch {
 			// Removed under us: hold nothing, retry.

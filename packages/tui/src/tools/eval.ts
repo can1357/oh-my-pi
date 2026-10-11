@@ -71,6 +71,8 @@ export interface EvalCellResult {
 	durationMs?: number;
 	exitCode?: number;
 	statusEvents?: EvalStatusEvent[];
+	/** Discrete events dropped from the front of `statusEvents` (see {@link recordStatusEvent}). */
+	statusEventsElided?: number;
 	hasMarkdown?: boolean;
 }
 
@@ -80,6 +82,8 @@ export interface EvalToolDetails {
 	jsonOutputs?: unknown[];
 	images?: ImageContent[];
 	statusEvents?: EvalStatusEvent[];
+	/** Discrete events dropped from the front of `statusEvents` (see {@link recordStatusEvent}). */
+	statusEventsElided?: number;
 	isError?: boolean;
 	meta?: OutputMeta;
 	/** First backend that produced cells. Kept for transcript compatibility. */
@@ -196,10 +200,19 @@ export function statusEventKey(event: { op: string; [key: string]: unknown }): s
 }
 
 /**
+ * Discrete status events a log keeps. A cell polling a helper in a loop emits
+ * one event per call (hundreds of thousands), and every live update and the
+ * persisted tool result would otherwise carry them all.
+ */
+export const MAX_STATUS_EVENTS = 200;
+
+/** A status event list plus the count of discrete events dropped from its front. */
+export type StatusEventLog = Pick<EvalCellResult, "statusEvents" | "statusEventsElided">;
+
+/**
  * Append or replace a status event. Progress snapshots (see
  * {@link statusEventKey}) coalesce in place, preserving first-seen order; every
- * other op is a discrete action and simply appends. Keeps the persisted event
- * list bounded even when a subagent or batch emits hundreds of progress ticks.
+ * other op is a discrete action and simply appends.
  */
 export function upsertStatusEvent(events: EvalStatusEvent[], event: EvalStatusEvent): void {
 	const key = statusEventKey(event);
@@ -211,6 +224,24 @@ export function upsertStatusEvent(events: EvalStatusEvent[], event: EvalStatusEv
 		}
 	}
 	events.push(event);
+}
+
+/**
+ * {@link upsertStatusEvent} into a bounded log. Past {@link MAX_STATUS_EVENTS},
+ * the oldest discrete event is dropped and counted. Snapshots stay, since agent
+ * cards read them, and so does the newest committed `todo` result, which the
+ * session todo panel refreshes from. Renderers already show only the newest
+ * events behind an "… N earlier" row.
+ */
+export function recordStatusEvent(log: StatusEventLog, event: EvalStatusEvent): void {
+	const events = (log.statusEvents ??= []);
+	upsertStatusEvent(events, event);
+	if (events.length <= MAX_STATUS_EVENTS) return;
+	const keep = events.findLastIndex(e => e.op === "todo" && e.committed === true);
+	const oldest = events.findIndex((e, i) => i !== keep && statusEventKey(e) === undefined);
+	if (oldest < 0) return;
+	events.splice(oldest, 1);
+	log.statusEventsElided = (log.statusEventsElided ?? 0) + 1;
 }
 
 function eventString(value: unknown): string | undefined {
@@ -511,17 +542,20 @@ function formatStatusEventExpanded(event: EvalStatusEvent, theme: Theme): string
  * the live edge for `log()` progress loops) behind an "… N earlier" marker,
  * matching the code/output tail-window convention. Collapsed keeps a small
  * fixed window; expanded widens to the viewport-sized preview window.
+ * `elided` counts events already dropped from the log's front.
  */
-function renderStatusEvents(events: EvalStatusEvent[], theme: Theme, expanded: boolean): string[] {
-	if (events.length === 0) return [];
+function renderStatusEvents(events: EvalStatusEvent[], theme: Theme, expanded: boolean, elided = 0): string[] {
+	if (events.length === 0 && elided === 0) return [];
 
 	const max = expanded ? Math.max(10, previewWindowRows()) : 3;
-	const hidden = Math.max(0, events.length - max);
-	const visible = hidden > 0 ? events.slice(hidden) : events;
+	const shownFrom = Math.max(0, events.length - max);
+	const hidden = shownFrom + elided;
+	const visible = shownFrom > 0 ? events.slice(shownFrom) : events;
 
 	const lines: string[] = [];
 	if (hidden > 0) {
-		lines.push(`${theme.fg("dim", theme.tree.branch)} ${theme.fg("dim", `… ${hidden} earlier`)}`);
+		const glyph = visible.length > 0 ? theme.tree.branch : theme.tree.last;
+		lines.push(`${theme.fg("dim", glyph)} ${theme.fg("dim", `… ${hidden} earlier`)}`);
 	}
 	for (let i = 0; i < visible.length; i++) {
 		const isLast = i === visible.length - 1;
@@ -726,13 +760,17 @@ function evalOutputNodes(output: string, markdown: boolean, previewLines: number
 const RUN_STATUS_TAIL = 8;
 
 /**
- * A cell's status events (`omp.run.status`): all of them when expanded, else
- * the newest {@link RUN_STATUS_TAIL} after a muted `N earlier` line.
+ * A status log's events (`omp.run.status`): all kept ones when expanded, else
+ * the newest {@link RUN_STATUS_TAIL}, after a muted `N earlier` line that also
+ * counts events already dropped from the log's front.
  */
-function evalStatusSection(events: readonly EvalStatusEvent[], expanded: boolean): NativeNode | undefined {
-	if (events.length === 0) return undefined;
-	const hidden = expanded ? 0 : Math.max(0, events.length - RUN_STATUS_TAIL);
-	const lines = events.slice(hidden).map((event, i) => keyed(describeStatusEvent(event), `s${hidden + i}`));
+function evalStatusSection(log: StatusEventLog, expanded: boolean): NativeNode | undefined {
+	const events = log.statusEvents ?? [];
+	const elided = log.statusEventsElided ?? 0;
+	if (events.length === 0 && elided === 0) return undefined;
+	const shownFrom = expanded ? 0 : Math.max(0, events.length - RUN_STATUS_TAIL);
+	const hidden = shownFrom + elided;
+	const lines = events.slice(shownFrom).map((event, i) => keyed(describeStatusEvent(event), `s${hidden + i}`));
 	return node(
 		"col",
 		{ role: "omp.run.status", gap: "none" },
@@ -952,7 +990,7 @@ export const evalToolRenderer = {
 						bodies = {
 							key: bodyKey,
 							cells: displayCells.map(({ cell, code, language, agentEvents, otherEvents }, i) => {
-								const statusLines = renderStatusEvents(otherEvents, uiTheme, expanded);
+								const statusLines = renderStatusEvents(otherEvents, uiTheme, expanded, cell.statusEventsElided);
 								const outputContent = formatCellOutputLines(cell, expanded, previewLines, uiTheme, width);
 								const outputLines = [...outputContent.lines];
 								if (!expanded && outputContent.hiddenCount > 0) {
@@ -1046,6 +1084,7 @@ export const evalToolRenderer = {
 			statusEvents,
 			uiTheme,
 			options.renderContext?.expanded ?? options.expanded,
+			details?.statusEventsElided,
 		);
 
 		if (!combinedOutput && statusLines.length === 0) {
@@ -1205,9 +1244,10 @@ export const evalToolRenderer = {
 								cell.hasMarkdown === true && cell.status !== "error",
 								previewLines,
 							),
+
 							...(i === cellResults.length - 1 ? jsonNodes : []),
 						],
-						status: evalStatusSection(cell.statusEvents ?? [], expanded),
+						status: evalStatusSection(cell, expanded),
 						foot: state && {
 							state,
 							exitCode: cell.exitCode,
@@ -1235,7 +1275,7 @@ export const evalToolRenderer = {
 				...evalOutputNodes(stripOutputNotice(rawOutput, details?.meta).trimEnd(), false, previewLines),
 				...jsonNodes,
 			],
-			status: evalStatusSection(details?.statusEvents ?? [], expanded),
+			status: evalStatusSection(details ?? {}, expanded),
 			foot: { state, elapsedMs: options.elapsedMs, ...callFacts },
 		};
 		const runs: EvalCellRun[] =
