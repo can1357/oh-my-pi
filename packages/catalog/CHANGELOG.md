@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Fixed GLM-5.3-FlashX on Zhipu Coding Plan missing bundled context, image, and thinking-level metadata ([#15314](https://github.com/can1357/oh-my-pi/issues/15314)).
 - Fixed `openrouterDecisionsBaseUrl` deriving a malformed OpenRouter Decisions root when the chat `baseUrl` has a trailing slash (such as `.../api/v1/`); it now strips trailing slashes before mapping `/v1` to `/alpha`, and is exported so provider-wide `baseUrl` overrides can reuse it ([#14848](https://github.com/can1357/oh-my-pi/pull/14848) by [@jerryfane](https://github.com/jerryfane))
 - Fixed GPT-6.1 Sol Ultrafast usage being priced at the Standard rate; it now applies OpenAI's published premium: 6x on the OpenAI API and 8x included usage on Codex ([#15000](https://github.com/can1357/oh-my-pi/pull/15000) by [@eggpeat](https://github.com/eggpeat)).
 - Fixed GPT-6 Sol, GPT-6.1 Sol and GPT-6 Luna losing the prompt cache on every reasoning-effort change: like GPT-6 Astra they now carry the change as a `configuration_update` item (OpenRouter's GPT-6 rows keep request-level effort changes)
