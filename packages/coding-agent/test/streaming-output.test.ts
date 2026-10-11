@@ -478,6 +478,21 @@ describe("OutputSink", () => {
 		await sink.dispose();
 	});
 
+	test("samples spill previews before their synchronous chunk callback", async () => {
+		let preview = "";
+		const delivered: string[] = [];
+		const sink = new OutputSink({
+			onPreview: text => {
+				preview = text;
+			},
+			onChunk: () => delivered.push(preview),
+		});
+		sink.push("first");
+		sink.push("second");
+		await sink.dump();
+		expect(delivered).toEqual(["first", "firstsecond"]);
+	});
+
 	test("samples mirror previews synchronously with their emission stamps", async () => {
 		let stamp = 0;
 		const previews: Array<{ text: string; stamp: number }> = [];
