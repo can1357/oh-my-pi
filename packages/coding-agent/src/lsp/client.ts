@@ -1265,6 +1265,54 @@ export function endPendingDiskWrite(filePath: string): void {
 }
 
 /**
+ * Open documents no OMP operation has used for this long are closed before the next
+ * document opens. A server keeps the project of every open document loaded, and a
+ * TypeScript server drops a project whose documents are all closed when it handles
+ * the next open.
+ */
+const OPEN_FILE_IDLE_MS = 5 * 60 * 1000;
+
+/**
+ * Close documents no OMP operation has used within {@link OPEN_FILE_IDLE_MS}. Overlays
+ * ahead of disk and documents mid-open, sync or refresh stay open. Each close is queued
+ * before the caller's didOpen and bounded by the caller's `signal`, so a server that
+ * stops reading stdin is torn down as it would be for that didOpen.
+ */
+function closeIdleFiles(client: LspClient, signal?: AbortSignal): void {
+	const idleBefore = Date.now() - OPEN_FILE_IDLE_MS;
+	for (const [uri, info] of client.openFiles) {
+		if (info.lastUsedAt > idleBefore) continue;
+		if (pendingDiskWrites.has(uri) || fileOperationLocks.has(`${client.name}:${uri}`)) continue;
+		client.openFiles.delete(uri);
+		client.diagnostics.delete(uri);
+		(client.idleClosedFiles ??= new Map()).set(uri, info.version);
+		sendNotification(client, "textDocument/didClose", { textDocument: { uri } }, signal).catch(() => {
+			// The close never reached the server, which still has the document open.
+			if (client.openFiles.has(uri)) return;
+			client.idleClosedFiles?.delete(uri);
+			client.openFiles.set(uri, info);
+		});
+	}
+}
+
+/**
+ * Track a document the server just opened at `version`. A document closed for
+ * idleness is marked reopened, so diagnostics waits treat the empty publish that
+ * cleared its earlier life as provisional.
+ */
+function trackOpenedFile(client: LspClient, uri: string, languageId: string, version: number, content: string): void {
+	const reopened = client.idleClosedFiles?.delete(uri) === true;
+	client.openFiles.set(uri, {
+		version,
+		languageId,
+		syncedHash: documentSignature(content),
+		lastUsedAt: Date.now(),
+		reopenedAt: reopened ? Date.now() : undefined,
+	});
+	client.lastActivity = Date.now();
+}
+
+/**
  * Ensure a file is opened in the LSP client.
  * Sends didOpen notification if the file is not already tracked.
  */
@@ -1274,7 +1322,9 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 	const lockKey = `${client.name}:${uri}`;
 
 	// Check if file is already open
-	if (client.openFiles.has(uri)) {
+	const openFile = client.openFiles.get(uri);
+	if (openFile) {
+		openFile.lastUsedAt = Date.now();
 		return;
 	}
 
@@ -1304,6 +1354,8 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 		const languageId = client.config.languageId ?? detectLanguageId(filePath);
 		throwIfAborted(signal);
 
+		closeIdleFiles(client, signal);
+		const version = (client.idleClosedFiles?.get(uri) ?? 0) + 1;
 		await sendNotification(
 			client,
 			"textDocument/didOpen",
@@ -1311,15 +1363,14 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 				textDocument: {
 					uri,
 					languageId,
-					version: 1,
+					version,
 					text: content,
 				},
 			},
 			signal,
 		);
 
-		client.openFiles.set(uri, { version: 1, languageId, syncedHash: documentSignature(content) });
-		client.lastActivity = Date.now();
+		trackOpenedFile(client, uri, languageId, version, content);
 	})();
 
 	fileOperationLocks.set(lockKey, openPromise);
@@ -1341,8 +1392,9 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
  * text last sent to the server, pushes a `didChange` so the server's copy matches
  * the disk text the position was derived from. Untracked files fall through to
  * {@link ensureFileOpen}; unchanged files send nothing.
- * Returns `true` only when a `didChange` was pushed for a reconciled overlay — the
- * caller can then wait for fresh diagnostics, since the stale ones were dropped.
+ * Returns `true` when the caller should wait for fresh diagnostics because the stale
+ * ones were dropped: a `didChange` was pushed for a reconciled overlay, or a document
+ * closed for idleness was reopened.
  * A file with an in-flight OMP write ({@link beginPendingDiskWrite}) is skipped
  * entirely: its overlay leads disk, so reading disk back would revert the server
  * to pre-write content.
@@ -1354,10 +1406,13 @@ export async function reconcileFileFromDisk(
 ): Promise<boolean> {
 	throwIfAborted(signal);
 	const uri = fileToUri(filePath);
-	if (!client.openFiles.has(uri)) {
+	const openFile = client.openFiles.get(uri);
+	if (!openFile) {
+		const reopening = client.idleClosedFiles?.has(uri) === true;
 		await ensureFileOpen(client, filePath, signal);
-		return false;
+		return reopening && client.openFiles.has(uri);
 	}
+	openFile.lastUsedAt = Date.now();
 
 	// An in-flight OMP write has already synced newer (possibly formatted) text to
 	// the server ahead of committing it to disk; the on-disk file is the stale side,
@@ -1471,6 +1526,8 @@ export async function syncContent(
 			// Open file with provided content instead of reading from disk
 			const languageId = client.config.languageId ?? detectLanguageId(filePath);
 			throwIfAborted(signal);
+			closeIdleFiles(client, signal);
+			const version = (client.idleClosedFiles?.get(uri) ?? 0) + 1;
 			await sendNotification(
 				client,
 				"textDocument/didOpen",
@@ -1478,17 +1535,17 @@ export async function syncContent(
 					textDocument: {
 						uri,
 						languageId,
-						version: 1,
+						version,
 						text: content,
 					},
 				},
 				signal,
 			);
-			client.openFiles.set(uri, { version: 1, languageId, syncedHash: documentSignature(content) });
-			client.lastActivity = Date.now();
+			trackOpenedFile(client, uri, languageId, version, content);
 			return;
 		}
 
+		info.lastUsedAt = Date.now();
 		const version = ++info.version;
 		throwIfAborted(signal);
 		await sendNotification(
@@ -1531,6 +1588,7 @@ export async function notifySaved(client: LspClient, filePath: string, signal?: 
 	const uri = fileToUri(filePath);
 	const info = client.openFiles.get(uri);
 	if (!info) return; // File not open, nothing to notify
+	info.lastUsedAt = Date.now();
 
 	throwIfAborted(signal);
 	const text = saveIncludesText(client) ? await Bun.file(filePath).text() : undefined;
@@ -1594,7 +1652,7 @@ export async function notifyWorkspaceWatchedFiles(
 			if (clientChanges.length === 0) return;
 			await sendNotification(client, "workspace/didChangeWatchedFiles", { changes: clientChanges }, sendSignal);
 			if (clientChanges.every(change => change.type === FileChangeType.Changed)) return;
-			await Promise.all(Array.from(client.openFiles.keys(), uri => refreshFile(client, uriToFile(uri), sendSignal)));
+			await refreshOpenFiles(client, sendSignal);
 		}),
 	);
 	throwIfAborted(signal);
@@ -1610,6 +1668,25 @@ export async function notifyWorkspaceWatchedFiles(
  * Increments version, sends didChange and didSave notifications.
  */
 export async function refreshFile(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
+	await refreshDocument(client, filePath, "use", signal);
+}
+
+/**
+ * Re-send every open document after a change that can alter how it resolves. This is
+ * not a use: idle documents keep aging, and documents closed meanwhile stay closed.
+ */
+export async function refreshOpenFiles(client: LspClient, signal?: AbortSignal): Promise<void> {
+	await Promise.all(
+		Array.from(client.openFiles.keys(), uri => refreshDocument(client, uriToFile(uri), "resync", signal)),
+	);
+}
+
+async function refreshDocument(
+	client: LspClient,
+	filePath: string,
+	purpose: "use" | "resync",
+	signal?: AbortSignal,
+): Promise<void> {
 	throwIfAborted(signal);
 	const uri = fileToUri(filePath);
 	const lockKey = `${client.name}:${uri}`;
@@ -1628,9 +1705,10 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 		const info = client.openFiles.get(uri);
 
 		if (!info) {
-			await ensureFileOpen(client, filePath, signal);
+			if (purpose === "use") await ensureFileOpen(client, filePath, signal);
 			return;
 		}
+		if (purpose === "use") info.lastUsedAt = Date.now();
 
 		let content: string;
 		try {
