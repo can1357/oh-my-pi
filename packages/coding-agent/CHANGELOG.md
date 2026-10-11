@@ -42,6 +42,7 @@
 - Fixed `read`, `eval` and `bash` notices for lines cut at the column cap pointing back at the same capped view; they now name the `:raw:<line>-<line>` read that returns a cut line whole ([#15279](https://github.com/can1357/oh-my-pi/pull/15279) by [@will-bogusz](https://github.com/will-bogusz))
 ### Changed
 
+- Reduced startup memory usage in standalone binaries ([#15298](https://github.com/can1357/oh-my-pi/pull/15298) by [@iliaal](https://github.com/iliaal))
 - `omp update` on standalone binaries now downloads from Stencil's build service (build.stencil.so, overridable with `PI_BUILD_URL`) instead of GitHub releases, and fetches a small verified patch (about 6 MB instead of 200 MB) when updating from a recent version; compiled binaries also check it for the startup update notice
 - `install.sh` and `install.ps1` download the standalone binary from build.stencil.so and check its SHA-256 before installing; `--binary --ref` (`-Binary -Ref`) now takes a release tag such as `v18.8.9`. The Homebrew formula downloads from build.stencil.so too
 
