@@ -615,6 +615,27 @@ describe("wrapLeakedThinkingStream", () => {
 		expect(thinks(result).map(b => [b.thinking, b.thinkingSignature])).toEqual([["recovered reasoning", signature]]);
 	});
 
+	it("keeps a thinking block's summary state on every projection path", async () => {
+		const signature = JSON.stringify({ id: "rs_1", type: "reasoning", summary: [] });
+		const streamed = { type: "thinking" as const, thinking: "trace", summary: false };
+		const signedOnly = { type: "thinking" as const, thinking: "", thinkingSignature: signature, summary: true };
+		const terminal = { type: "thinking" as const, thinking: "late", thinkingSignature: signature, summary: false };
+		const { result } = await runWrapper(inner => {
+			inner.push({ type: "start", partial: msg() });
+			inner.push({ type: "thinking_delta", contentIndex: 0, delta: "trace", partial: msg({ content: [streamed] }) });
+			inner.push({ type: "thinking_end", contentIndex: 0, content: "trace", partial: msg({ content: [streamed] }) });
+			const withSigned = msg({ content: [streamed, signedOnly] });
+			inner.push({ type: "thinking_end", contentIndex: 1, content: "", partial: withSigned });
+			inner.push({ type: "done", reason: "stop", message: msg({ content: [streamed, signedOnly, terminal] }) });
+		});
+
+		expect(thinks(result).map(b => [b.thinking, b.summary])).toEqual([
+			["trace", false],
+			["", true],
+			["late", false],
+		]);
+	});
+
 	it("preserves native tool-call ids and streamed partial JSON while healing", async () => {
 		const inner = new AssistantMessageEventStream();
 		const out = wrapLeakedThinkingStream(inner);

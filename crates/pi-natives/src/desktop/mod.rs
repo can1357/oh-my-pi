@@ -24,7 +24,7 @@ use std::{
 		atomic::{AtomicUsize, Ordering},
 	},
 	thread::{self, JoinHandle},
-	time::Duration,
+	time::{Duration, Instant},
 };
 
 pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery};
@@ -44,6 +44,11 @@ use crate::task;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_mins(3);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long the display stays awake after the last desktop request. Releasing
+/// the assertion restarts the OS display-sleep countdown, so the display can
+/// sleep this long plus the user's display-sleep setting after the agent's
+/// last action, and never sooner while the agent keeps acting.
+const DISPLAY_AWAKE_GRACE: Duration = Duration::from_mins(5);
 
 enum Response {
 	Capabilities(DesktopCapabilities),
@@ -308,8 +313,37 @@ impl Request {
 		}
 	}
 
+	/// The request's target, for requests that name one.
+	const fn target(&self) -> Option<&Target> {
+		match self {
+			Self::Capture { target, .. }
+			| Self::CaptureRegion { target, .. }
+			| Self::Observe { target, .. }
+			| Self::MenuItems { target, .. }
+			| Self::MenuSelect { target, .. }
+			| Self::HoldKeys { target, .. }
+			| Self::HoldMouse { target, .. }
+			| Self::Click { target, .. }
+			| Self::MoveMouse { target, .. }
+			| Self::Drag { target, .. }
+			| Self::Scroll { target, .. }
+			| Self::TypeText { target, .. }
+			| Self::KeyChord { target, .. }
+			| Self::AxSnapshot { target, .. }
+			| Self::AxQuery { target, .. }
+			| Self::AxElementAt { target, .. } => Some(target),
+			_ => None,
+		}
+	}
+
 	const fn is_close(&self) -> bool {
 		matches!(self, Self::Close { .. })
+	}
+
+	/// Agent activity: everything except status reads and teardown keeps the
+	/// display awake, so captures and input see a lit, unlocked screen.
+	const fn is_activity(&self) -> bool {
+		!matches!(self, Self::Capabilities { .. } | Self::Close { .. })
 	}
 }
 
@@ -477,7 +511,11 @@ impl Worker {
 		token: &OperationToken,
 	) -> CoreResult<DesktopCapture> {
 		let selector = target.display_selector();
+		// Bracket the acquisition: a lock on either side marks the frame, so a
+		// later unlock during encoding cannot pass lock-screen pixels as the app.
+		let locked_before = self.backend()?.screen_state(None).locked;
 		let (image, mut geometry) = self.backend()?.capture(target, caps, selector.as_ref())?;
+		let screen_locked = locked_before || self.backend()?.screen_state(None).locked;
 		let source_width = image.width();
 		let source_height = image.height();
 		let layout = self.backend()?.displays()?;
@@ -508,6 +546,7 @@ impl Worker {
 			displays,
 			backend: capabilities.backend,
 			display_server: capabilities.display_server,
+			screen_locked,
 		})
 	}
 
@@ -548,8 +587,15 @@ impl Worker {
 			.frame_target()
 			.map(|target| target.key().to_string());
 		let previous = frame_key.as_ref().and_then(|key| self.frames.remove(key));
+		let activity = request.is_activity();
 		let result = std::panic::catch_unwind(AssertUnwindSafe(|| self.execute(&request, token)))
 			.unwrap_or_else(|_| Err(DesktopError::internal("native desktop worker panicked")));
+		let result = if activity {
+			let display = request.target().and_then(Target::display_selector);
+			self.explain_failure(result, display.as_ref())
+		} else {
+			result
+		};
 		let failed = result.is_err();
 		let delivered = request.reply(result);
 		if (failed || !delivered)
@@ -561,6 +607,65 @@ impl Worker {
 				self.frames.remove(&key);
 			}
 		}
+	}
+
+	/// A failure while the screen is locked or the display asleep names that
+	/// state, since it is the likeliest cause and the raw error does not say.
+	/// A request aimed at one display reports that display's sleep.
+	fn explain_failure<T>(
+		&mut self,
+		result: CoreResult<T>,
+		display: Option<&DisplaySelector>,
+	) -> CoreResult<T> {
+		result.map_err(|mut error| {
+			if let Ok(backend) = self.backend.as_mut()
+				&& let Some(note) = backend.screen_state(display).failure_note()
+			{
+				error.message = format!("{} ({note})", error.message);
+			}
+			error
+		})
+	}
+
+	fn keep_display_awake(&mut self, awake: bool) {
+		if let Ok(backend) = self.backend.as_mut() {
+			backend.keep_display_awake(awake);
+		}
+	}
+
+	/// Serves requests until close or disconnect. Each activity request holds
+	/// the display awake until `grace` passes with no further activity; the
+	/// hold is released before the loop returns.
+	fn serve(mut self, rx: &flume::Receiver<QueuedRequest>, grace: Duration) {
+		let mut awake_until: Option<Instant> = None;
+		loop {
+			let next = match awake_until {
+				Some(deadline) => rx.recv_deadline(deadline),
+				None => rx.recv().map_err(|_| flume::RecvTimeoutError::Disconnected),
+			};
+			let QueuedRequest { request, token } = match next {
+				Ok(queued) => queued,
+				Err(flume::RecvTimeoutError::Timeout) => {
+					self.keep_display_awake(false);
+					awake_until = None;
+					continue;
+				},
+				Err(flume::RecvTimeoutError::Disconnected) => break,
+			};
+			let close = request.is_close();
+			let activity = request.is_activity();
+			if activity {
+				self.keep_display_awake(true);
+			}
+			self.dispatch(request, &token);
+			if close {
+				break;
+			}
+			if activity {
+				awake_until = Some(Instant::now() + grace);
+			}
+		}
+		self.keep_display_awake(false);
 	}
 
 	fn execute(&mut self, request: &Request, token: &OperationToken) -> CoreResult<Response> {
@@ -688,10 +793,12 @@ impl Worker {
 				base.validate_region(region)?;
 				let selector = base.capture_selector();
 				token.check()?;
+				let locked_before = self.backend()?.screen_state(None).locked;
 				let (image, fresh) =
 					self
 						.backend()?
 						.capture(target, &CaptureCaps::default(), selector.as_ref())?;
+				let screen_locked = locked_before || self.backend()?.screen_state(None).locked;
 				let layout = self.backend()?.displays().map_err(|error| {
 					DesktopError::invalid_coordinate_frame(format!(
 						"could not validate captured display layout: {error}"
@@ -722,6 +829,7 @@ impl Worker {
 					displays,
 					backend: capabilities.backend,
 					display_server: capabilities.display_server,
+					screen_locked,
 				}))
 			},
 			Request::Click { target, x, y, options, .. } => {
@@ -966,6 +1074,15 @@ fn create_backend(_: DisplaySelector) -> CoreResult<Box<dyn Backend>> {
 	Err(DesktopError::capture_failed("desktop backend unavailable on this platform"))
 }
 
+/// Lock and display-sleep state of `selector`'s displays, read on the calling
+/// thread rather than through the session worker.
+#[cfg(target_os = "macos")]
+use macos::screen_state as read_screen_state;
+#[cfg(not(target_os = "macos"))]
+const fn read_screen_state(_: &DisplaySelector) -> ScreenState {
+	ScreenState { locked: false, display_asleep: false }
+}
+
 struct Lifecycle {
 	tx:     Option<flume::Sender<QueuedRequest>>,
 	done:   Option<flume::Receiver<()>>,
@@ -1011,14 +1128,7 @@ impl SessionCore {
 		let join = thread::Builder::new()
 			.name("omp-desktop-session".into())
 			.spawn(move || {
-				let mut worker = Worker::new(selector, caps);
-				while let Ok(QueuedRequest { request, token }) = rx.recv() {
-					let close = request.is_close();
-					worker.dispatch(request, &token);
-					if close {
-						break;
-					}
-				}
+				Worker::new(selector, caps).serve(&rx, DISPLAY_AWAKE_GRACE);
 				let _ = done_tx.send(());
 			})
 			.map_err(|e| {
@@ -1149,6 +1259,13 @@ impl DesktopSession {
 				.clone()
 				.unwrap_or_else(DesktopCapabilities::unavailable),
 		}
+	}
+
+	/// Lock and display-sleep state read on the calling thread, never queued
+	/// behind the worker, so it answers at once even while a request is stuck.
+	#[napi(getter)]
+	pub fn screen_state(&self) -> ScreenState {
+		read_screen_state(&self.core.selector)
 	}
 
 	#[napi]
@@ -1746,6 +1863,13 @@ mod capture_tests {
 		cancel_on_capabilities: Arc<Mutex<Option<CancellationSource>>>,
 		snapshot_error:         Arc<Mutex<bool>>,
 		cancel_on_snapshot:     Arc<Mutex<Option<CancellationSource>>>,
+		screen:                 Arc<Mutex<ScreenState>>,
+		/// Display selector each `screen_state` read was narrowed to.
+		screen_displays:        Arc<Mutex<Vec<Option<String>>>>,
+		/// Display-awake hold transitions, in order.
+		awake:                  Arc<Mutex<Vec<bool>>>,
+		/// Unlock the session on the next layout read, i.e. after the frame.
+		unlock_on_layout:       Arc<Mutex<bool>>,
 	}
 
 	impl FakeWaylandBackend {
@@ -1785,6 +1909,10 @@ mod capture_tests {
 				cancel_on_capabilities: Arc::new(Mutex::new(None)),
 				snapshot_error:         Arc::new(Mutex::new(false)),
 				cancel_on_snapshot:     Arc::new(Mutex::new(None)),
+				screen:                 Arc::new(Mutex::new(ScreenState::default())),
+				screen_displays:        Arc::new(Mutex::new(Vec::new())),
+				awake:                  Arc::new(Mutex::new(Vec::new())),
+				unlock_on_layout:       Arc::new(Mutex::new(false)),
 			}
 		}
 	}
@@ -1863,15 +1991,21 @@ mod capture_tests {
 			if let Some(source) = source {
 				source.cancel();
 			}
+			let screen = *self.screen.lock();
 			DesktopCapabilities {
 				backend: "wayland".to_string(),
 				display_server: Some("wayland".to_string()),
 				capture: true,
+				screen_locked: screen.locked,
+				display_asleep: screen.display_asleep,
 				..DesktopCapabilities::unavailable()
 			}
 		}
 
 		fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>> {
+			if std::mem::take(&mut *self.unlock_on_layout.lock()) {
+				*self.screen.lock() = ScreenState::default();
+			}
 			Ok(self.layout.lock().clone())
 		}
 
@@ -1883,6 +2017,21 @@ mod capture_tests {
 				.chain(self.window_present.then_some(&self.window))
 				.cloned()
 				.collect())
+		}
+
+		fn screen_state(&mut self, display: Option<&DisplaySelector>) -> ScreenState {
+			self
+				.screen_displays
+				.lock()
+				.push(display.map(|display| format!("{display:?}")));
+			*self.screen.lock()
+		}
+
+		fn keep_display_awake(&mut self, awake: bool) {
+			let mut log = self.awake.lock();
+			if log.last().copied().unwrap_or(false) != awake {
+				log.push(awake);
+			}
 		}
 
 		fn capture(
@@ -2024,6 +2173,168 @@ mod capture_tests {
 		)
 	}
 
+	fn send_and_wait(tx: &flume::Sender<QueuedRequest>, make: impl FnOnce(Reply) -> Request) {
+		let (reply, rx) = flume::bounded(1);
+		tx.send(QueuedRequest {
+			request: make(reply),
+			token:   CancellationSource::default().token(),
+		})
+		.unwrap();
+		let _ = rx
+			.recv_timeout(Duration::from_secs(5))
+			.expect("worker reply");
+	}
+
+	/// Waits for the hold transitions to reach `expected`, failing after a
+	/// deadline far beyond any grace the tests use.
+	fn wait_for_awake(awake: &Mutex<Vec<bool>>, expected: &[bool]) {
+		let deadline = Instant::now() + Duration::from_secs(30);
+		while awake.lock().as_slice() != expected {
+			assert!(
+				Instant::now() < deadline,
+				"hold transitions {:?}, expected {expected:?}",
+				awake.lock()
+			);
+			thread::sleep(Duration::from_millis(5));
+		}
+	}
+
+	#[test]
+	fn display_stays_awake_only_until_the_grace_after_the_last_activity() {
+		let backend = FakeWaylandBackend::new();
+		let awake = Arc::clone(&backend.awake);
+		let (tx, rx) = flume::unbounded();
+		let grace = Duration::from_millis(500);
+		let serving = thread::spawn(move || worker_with(backend).serve(&rx, grace));
+
+		send_and_wait(&tx, |reply| Request::Capabilities { reply });
+		assert!(awake.lock().is_empty(), "a status read must not hold the display awake");
+
+		// Prefix checks: a stalled test thread may legitimately see the release.
+		send_and_wait(&tx, |reply| Request::ListWindows { reply });
+		assert!(awake.lock().starts_with(&[true]), "activity holds the display awake");
+		wait_for_awake(&awake, &[true, false]);
+
+		send_and_wait(&tx, |reply| Request::ListWindows { reply });
+		assert!(awake.lock().starts_with(&[true, false, true]), "new activity holds it again");
+
+		send_and_wait(&tx, |reply| Request::Close { reply });
+		serving.join().unwrap();
+		assert_eq!(*awake.lock(), [true, false, true, false], "close releases the hold");
+	}
+
+	#[test]
+	fn disconnecting_releases_a_held_display() {
+		let backend = FakeWaylandBackend::new();
+		let awake = Arc::clone(&backend.awake);
+		let (tx, rx) = flume::unbounded();
+		let serving =
+			thread::spawn(move || worker_with(backend).serve(&rx, Duration::from_secs(3600)));
+		send_and_wait(&tx, |reply| Request::ListWindows { reply });
+		drop(tx);
+		serving.join().unwrap();
+		assert_eq!(*awake.lock(), [true, false]);
+	}
+
+	fn locked_capture_and_failure(screen: ScreenState) -> (bool, DesktopError) {
+		let backend = FakeWaylandBackend::new();
+		*backend.screen.lock() = screen;
+		let mut worker = worker_with(backend);
+		let token = CancellationSource::default().token();
+		let Ok(Response::Capture(capture)) =
+			worker.process(&capture_request(Target::Window(WAYLAND_ID.to_string())), &token)
+		else {
+			panic!("window capture");
+		};
+		// No frame for the desktop target yet, so the click fails.
+		let (reply, rx) = flume::bounded(1);
+		worker.dispatch(
+			Request::Click {
+				target: Target::Desktop,
+				x: 1.0,
+				y: 1.0,
+				options: ParsedPointerOptions::parse(None).unwrap(),
+				reply,
+			},
+			&token,
+		);
+		let Err(error) = rx.recv().unwrap() else {
+			panic!("click without a frame must fail")
+		};
+		(capture.screen_locked, error)
+	}
+
+	#[test]
+	fn a_failure_on_one_display_reads_that_displays_sleep_state() {
+		let backend = FakeWaylandBackend::new();
+		*backend.screen.lock() = ScreenState { locked: false, display_asleep: true };
+		let displays = Arc::clone(&backend.screen_displays);
+		let mut worker = worker_with(backend);
+		let token = CancellationSource::default().token();
+		let (reply, rx) = flume::bounded(1);
+		worker.dispatch(
+			Request::Click {
+				target: Target::Display("display:2".to_string()),
+				x: 1.0,
+				y: 1.0,
+				options: ParsedPointerOptions::parse(None).unwrap(),
+				reply,
+			},
+			&token,
+		);
+		let Err(error) = rx.recv().unwrap() else {
+			panic!("click without a frame must fail")
+		};
+		assert!(error.message.ends_with(" (the display is asleep)"), "{}", error.message);
+		assert_eq!(
+			displays.lock().last(),
+			Some(&Some(format!("{:?}", DisplaySelector::Id("2".into()))))
+		);
+	}
+
+	#[test]
+	fn captures_and_failures_report_a_locked_screen() {
+		let (locked, error) =
+			locked_capture_and_failure(ScreenState { locked: true, display_asleep: false });
+		assert!(locked, "the capture must carry the lock");
+		assert_eq!(error.code, ErrorCode::InvalidCoordinateFrame, "the error code is unchanged");
+		assert!(error.message.ends_with(" (the screen is locked)"), "{}", error.message);
+
+		let (_, asleep) =
+			locked_capture_and_failure(ScreenState { locked: true, display_asleep: true });
+		assert!(
+			asleep
+				.message
+				.ends_with(" (the screen is locked and the display is asleep)"),
+			"{}",
+			asleep.message
+		);
+	}
+
+	#[test]
+	fn a_frame_taken_while_locked_stays_marked_after_an_unlock_during_processing() {
+		let backend = FakeWaylandBackend::new();
+		*backend.screen.lock() = ScreenState { locked: true, display_asleep: false };
+		let unlock = Arc::clone(&backend.unlock_on_layout);
+		let screen = Arc::clone(&backend.screen);
+		let mut worker = worker_with(backend);
+		let token = CancellationSource::default().token();
+		*unlock.lock() = true;
+		let Ok(Response::Capture(full)) = worker.process(&capture_request(Target::Desktop), &token)
+		else {
+			panic!("desktop capture");
+		};
+		assert!(!screen.lock().locked, "the session unlocked after the frame");
+		assert!(full.screen_locked, "the frame was taken behind the lock screen");
+	}
+
+	#[test]
+	fn unlocked_captures_and_failures_carry_no_lock_note() {
+		let (locked, error) = locked_capture_and_failure(ScreenState::default());
+		assert!(!locked);
+		assert!(!error.message.contains("locked"), "{}", error.message);
+	}
+
 	#[test]
 	fn ax_click_targets_element_owner_despite_overlapping_or_snapshot_windows() {
 		let backend = overlapping_backend();
@@ -2076,6 +2387,19 @@ mod capture_tests {
 			session.core.lifecycle.lock().tx.is_none(),
 			"a busy getter must return the snapshot without starting or querying a worker"
 		);
+	}
+
+	#[test]
+	fn screen_state_never_queues_behind_a_stuck_request() {
+		let core = SessionCore::new(DisplaySelector::Active);
+		// A worker that never serves its queue, with a request outstanding and
+		// no capabilities snapshot: a queued read would wait out its timeout.
+		let (tx, stuck) = flume::unbounded();
+		core.lifecycle.lock().tx = Some(tx);
+		core.in_flight.store(1, Ordering::Release);
+		let session = DesktopSession { core };
+		let _ = session.screen_state();
+		assert!(stuck.is_empty(), "the screen-state read must not enter the worker queue");
 	}
 
 	#[test]

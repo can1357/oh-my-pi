@@ -139,8 +139,9 @@ export class AuthStorage {
 	/**
 	 * Apply new account routing policy (live `auth.accountPolicies` /
 	 * `retry.usageReservePct` change). Throws a configuration error, leaving the
-	 * active policy untouched, when the policy is malformed or does not match the
-	 * stored OAuth accounts.
+	 * active policy untouched, when a policy is malformed, a selector matches
+	 * several stored OAuth accounts, or two policies claim the same account; a
+	 * policy naming an absent account stays inactive and logs a warning.
 	 */
 	setAccountPolicies(config: { accountPolicies: AuthAccountPolicies; defaultReservePct: number }): void {
 		const pool = this.#modules.pool;
@@ -190,7 +191,6 @@ export class AuthStorage {
 		const refresher = new OAuthRefresher({
 			store,
 			pool,
-			policies,
 			override: options.refreshOAuthCredential,
 			overrideMints: options.refreshOAuthCredentialMints,
 		});

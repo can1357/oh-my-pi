@@ -1,5 +1,8 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import type { CaptureRegion, DesktopCapabilities } from "@oh-my-pi/pi-natives";
+import type { CaptureRegion, DesktopCapabilities, DesktopScreenState } from "@oh-my-pi/pi-natives";
+import { prompt } from "@oh-my-pi/pi-utils";
+import screenLockedCaptureNote from "../../prompts/tools/computer-screen-locked-capture.md" with { type: "text" };
+import screenStateTemplate from "../../prompts/tools/computer-screen-state.md" with { type: "text" };
 
 export { COMPUTER_WORKER_ARG } from "../../cli/worker-selectors";
 
@@ -34,6 +37,22 @@ export interface ComputerRunOk {
 	capabilities?: DesktopCapabilities;
 }
 
+/** Appended to a screenshot taken while the macOS lock screen is up. */
+export const SCREEN_LOCKED_CAPTURE_NOTE = prompt.render(screenLockedCaptureNote);
+
+/**
+ * Tells the model a run ended with the macOS screen locked or the session's
+ * display asleep, so lock-screen pixels and failed captures are not taken
+ * for the app's state. Input is never refused because of it.
+ */
+export function screenStateNotice(state: DesktopScreenState | undefined): string | undefined {
+	if (!state?.screenLocked && !state?.displayAsleep) return undefined;
+	return prompt.render(screenStateTemplate, {
+		screenLocked: state.screenLocked,
+		displayAsleep: state.displayAsleep,
+	});
+}
+
 /** Screenshot or zoom emitted during one computer run, with its full input coordinate frame. */
 export interface ComputerScreenshot {
 	path: string;
@@ -45,6 +64,8 @@ export interface ComputerScreenshot {
 	sourceWidth?: number;
 	sourceHeight?: number;
 	target: string;
+	/** The macOS lock screen was up: a display capture shows it, a window capture shows the window's last frame. */
+	screenLocked?: true;
 }
 
 /** Clone-safe error metadata returned across the worker boundary. */

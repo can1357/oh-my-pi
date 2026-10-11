@@ -210,6 +210,7 @@ describe("DeepInfra reasoning wire contract (oh-my-pi#9522)", () => {
 				type: "thinking",
 				thinking: '1. The user asks "What is 2+2?" Trivial arithmetic.',
 				thinkingSignature: "reasoning_content",
+				summary: false,
 			},
 			{ type: "text", text: "4" },
 		]);

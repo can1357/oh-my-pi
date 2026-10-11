@@ -36,6 +36,10 @@ provider "cursor" {
 				input-modalities "text" "image"
 				context-window-floor 1000000
 			}
+			// Cursor's agent protocol relays thinking opaquely, so it is not
+			// verified as K3's full trace: Cursor K3 turns are not carried to
+			// other K3 hosts (Cursor itself refuses foreign history).
+			portable-reasoning #false
 		}
 		family "k2.7-code" {
 			// Cursor advertised Kimi K2.7 Code Context window 262k.

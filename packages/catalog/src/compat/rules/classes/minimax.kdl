@@ -98,4 +98,14 @@ class "minimax" {
 	on "minimax-code" "minimax-code-cn" "wafer-serverless" {
 		reasoning-content-field "reasoning_content"
 	}
+	// M3 reasoning reaches omp as its plaintext trace on every host, and
+	// MiniMax asks agents to pass all earlier reasoning back.
+	family "m3" {
+		portable-reasoning #true
+		// residue: M3.1 Flash Preview classifies as family m3 (no revision is
+		// extracted), but it is a different model.
+		models "*m3.1*" {
+			portable-reasoning #false
+		}
+	}
 }

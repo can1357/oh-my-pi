@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
+import { Agent, type StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Context, FetchImpl, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -49,12 +49,12 @@ describe("one-shot side request state", () => {
 		for (const session of sessions.splice(0)) await session.dispose();
 	});
 
-	function createSession(sideStreamFn: StreamFn): AgentSession {
+	function createSession(sideStreamFn: StreamFn, sessionModel: Model<"openai-responses"> = model): AgentSession {
 		const session = new AgentSession({
 			agent: new Agent({
 				promptCacheKey: "main-cache",
 				initialState: {
-					model,
+					model: sessionModel,
 					systemPrompt: ["system prompt"],
 					messages: [{ role: "user", content: "Main question", timestamp: 1 }],
 					tools: [],
@@ -236,6 +236,69 @@ describe("one-shot side request state", () => {
 		);
 		const state = session.providerSessionState.get("openai-responses:openai") as ResponsesState;
 		expect(state.chains.size).toBe(0);
+	});
+
+	it("replays the main conversation's effort updates on side requests and minimizes effort as one more update", async () => {
+		const astra = getBundledModel("openai", "gpt-6-astra") as Model<"openai-responses">;
+		const bodies: Record<string, unknown>[] = [];
+		const fetch: FetchImpl = async (_url, init) => {
+			bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+			return response(`resp_${bodies.length}`);
+		};
+		const session = createSession(
+			(_model, context, options) =>
+				streamOpenAIResponses(astra, context, { ...options, apiKey: "test-key", statefulResponses: false, fetch }),
+			astra,
+		);
+		const main = (messages: Message[], reasoning: "high" | "medium") =>
+			streamOpenAIResponses(
+				astra,
+				{ systemPrompt: ["system prompt"], messages },
+				{
+					apiKey: "test-key",
+					sessionId: session.sessionId,
+					providerSessionState: session.providerSessionState,
+					statefulResponses: false,
+					reasoning,
+					fetch,
+				},
+			).result();
+		const first: Message = { role: "user", content: "Main question", timestamp: 1 };
+		const firstReply = await main([first], "high");
+		const second: Message = { role: "user", content: "Follow-up", timestamp: 2 };
+		const secondReply = await main([first, firstReply, second], "medium");
+		const history = [first, firstReply, second, secondReply];
+		session.agent.replaceMessages(history);
+		session.setThinkingLevel(ThinkingLevel.Medium);
+
+		await session.runEphemeralTurn({ promptText: "Side question" });
+		await session.runEphemeralTurn({ promptText: "Predict.", minimizeEffort: true });
+		await main([...history, { role: "user", content: "Third", timestamp: 3 }], "medium");
+
+		// Updates and user turns, in wire order; assistant output is irrelevant here.
+		const shape = (body: Record<string, unknown> | undefined) =>
+			(body?.input as { type?: string; role?: string; content?: unknown; reasoning?: { effort: string } }[]).flatMap(
+				item => {
+					if (item.type === "configuration_update") return [`update:${item.reasoning?.effort}`];
+					if (item.role !== "user") return [];
+					const [part] = item.content as { text: string }[];
+					return [`user:${part?.text}`];
+				},
+			);
+		const effort = (body: Record<string, unknown> | undefined) => (body?.reasoning as { effort?: string }).effort;
+		const [, mainFollowUp, side, minimized, mainNext] = bodies;
+		const prefix = shape(mainFollowUp);
+		expect(prefix).toContain("update:medium");
+		// Side requests keep the main request-level effort and its update, so they reuse its cached prefix.
+		for (const body of [side, minimized, mainNext]) {
+			expect(effort(body)).toBe("high");
+			expect(shape(body).slice(0, prefix.length)).toEqual(prefix);
+		}
+		// Each side request appends its no-tools reminder, then the prompt.
+		expect(shape(side).slice(prefix.length)).toEqual([expect.any(String), "user:Side question"]);
+		expect(shape(minimized).slice(prefix.length)).toEqual([expect.any(String), "update:low", "user:Predict."]);
+		// The minimized side request's update never reaches the main conversation.
+		expect(shape(mainNext).slice(prefix.length)).toEqual(["user:Third"]);
 	});
 
 	it("cleans up a rejected stream factory without masking its error when another provider cleanup throws", async () => {

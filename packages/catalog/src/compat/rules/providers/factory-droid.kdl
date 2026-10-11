@@ -111,6 +111,12 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=180000 max-tokens=32000
 		}
+		model "claude-haiku-5-5" name="Haiku 5.5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=872000 max-tokens=128000
+		}
 		model "claude-haiku-4-5-20251001" name="Haiku 4.5" {
 			reasoning #true
 			input "text" "image"
@@ -273,6 +279,12 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=1007232 max-tokens=32768
 		}
+		model "mistral-large-4" name="Mistral Large 4" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=524288 max-tokens=64000
+		}
 		model "mistral-medium-3.5" name="Mistral Medium 3.5" {
 			reasoning #true
 			input "text" "image"
@@ -400,7 +412,7 @@ provider "factory-droid" {
 	models "claude-fable-5.1" {
 		routing-family "anthropic"
 		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
-		region-upstreams-eu
+		region-upstreams-eu "vertex_anthropic"
 		credit-rates { input 4; output 5; cache-read 0.025 }
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #false
@@ -410,7 +422,7 @@ provider "factory-droid" {
 	models "claude-fable-5" {
 		routing-family "anthropic"
 		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
-		region-upstreams-eu
+		region-upstreams-eu "vertex_anthropic"
 		credit-rates { input 4; output 5 }
 		list-price-from "anthropic"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
@@ -439,7 +451,7 @@ provider "factory-droid" {
 	models "claude-opus-5" {
 		routing-family "anthropic"
 		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic" "azure_anthropic" "snowflake"
-		region-upstreams-eu "bedrock_anthropic"
+		region-upstreams-eu "vertex_anthropic" "bedrock_anthropic"
 		credit-rates { input 2 }
 		list-price-from "anthropic"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
@@ -458,7 +470,7 @@ provider "factory-droid" {
 	models "claude-opus-4-8" {
 		routing-family "anthropic"
 		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic" "azure_anthropic" "snowflake"
-		region-upstreams-eu "bedrock_anthropic"
+		region-upstreams-eu "vertex_anthropic" "bedrock_anthropic"
 		credit-rates { input 2 }
 		list-price-from "anthropic"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
@@ -477,7 +489,7 @@ provider "factory-droid" {
 	models "claude-opus-4-7" {
 		routing-family "anthropic"
 		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
-		region-upstreams-eu "bedrock_anthropic"
+		region-upstreams-eu "vertex_anthropic" "bedrock_anthropic"
 		credit-rates { input 2 }
 		list-price-from "anthropic"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
@@ -506,9 +518,10 @@ provider "factory-droid" {
 	models "claude-sonnet-5-5" {
 		routing-family "anthropic"
 		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic" "azure_anthropic"
-		credit-rates { input 0.8; output 5 }
+		credit-rates { input 0.8; output 5; cache-read 0.05 }
+		list-price-from "anthropic"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
-		thinking-requires-effort #true
+		thinking-requires-effort #false
 		thinking-default-level "high"
 		entitlement { feature-flag "claude_sonnet_5_5" }
 	}
@@ -540,6 +553,16 @@ provider "factory-droid" {
 		thinking-requires-effort #false
 		default-reasoning-off #true
 	}
+	models "claude-haiku-5-5" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic" "azure_anthropic"
+		credit-rates { input 0.04; output 5 }
+		list-price-from "anthropic"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "medium"
+		entitlement { feature-flag "claude_haiku_5_5" }
+	}
 	models "claude-haiku-4-5-20251001" {
 		routing-family "anthropic"
 		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
@@ -562,7 +585,7 @@ provider "factory-droid" {
 	}
 	models "gpt-6.1-sol" {
 		routing-family "openai"
-		upstream-rotation "openai"
+		upstream-rotation "openai" "bedrock_openai" "databricks"
 		region-upstreams-eu "openai"
 		credit-rates { input 0.8; output 5; cache-read 0.05 }
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
@@ -589,7 +612,6 @@ provider "factory-droid" {
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #false
 		thinking-default-level "medium"
-		entitlement { feature-flag "gpt_6_luna" }
 	}
 	models "gpt-5.6-sol" {
 		routing-family "openai"
@@ -749,6 +771,7 @@ provider "factory-droid" {
 	models "gemini-3.8-flash" {
 		routing-family "google"
 		upstream-rotation "google"
+		region-upstreams-eu "google"
 		credit-rates { input 0.6; output 5 }
 		list-price-from "google"
 		thinking-efforts "low" "medium" "high"
@@ -758,6 +781,7 @@ provider "factory-droid" {
 	models "gemini-3.7-flash" {
 		routing-family "google"
 		upstream-rotation "google"
+		region-upstreams-eu "google"
 		credit-rates { input 0.6; output 5 }
 		list-price-from "google"
 		thinking-efforts "low" "medium" "high"
@@ -767,6 +791,7 @@ provider "factory-droid" {
 	models "gemini-3.6-flash" {
 		routing-family "google"
 		upstream-rotation "google"
+		region-upstreams-eu "google"
 		credit-rates { input 0.6; output 5 }
 		list-price-from "google"
 		thinking-efforts "low" "medium" "high"
@@ -776,6 +801,7 @@ provider "factory-droid" {
 	models "gemini-3.5-flash" {
 		routing-family "google"
 		upstream-rotation "google"
+		region-upstreams-eu "google"
 		credit-rates { input 0.6 }
 		list-price-from "google"
 		thinking-efforts "minimal" "low" "medium" "high"
@@ -800,6 +826,19 @@ provider "factory-droid" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #false
 		thinking-default-level "high"
+	}
+	// Factory bills the Standard list-price ceiling, above the bundled Mistral
+	// row, so no list price is borrowed.
+	models "mistral-large-4" {
+		routing-family "factory"
+		upstream-rotation "mistral"
+		region-upstreams-us
+		region-upstreams-eu "mistral"
+		credit-rates { input 0.544; output 3.08; cache-read 0.103 }
+		thinking-efforts "high"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { feature-flag "mistral_large_4" }
 	}
 	models "mistral-medium-3.5" {
 		routing-family "factory"
@@ -889,7 +928,6 @@ provider "factory-droid" {
 		thinking-efforts "low" "high" "max"
 		thinking-requires-effort #false
 		thinking-default-level "high"
-		entitlement { feature-flag "deepseek_v4_1_flash" }
 	}
 	models "deepseek-v4-flash-0731" {
 		routing-family "factory"
@@ -999,7 +1037,8 @@ provider "factory-droid" {
 		// Native declares every Responses tool `strict: false`; the field must reach the wire.
 		supports-strict-mode #true
 	}
-	models "glm-*" "kimi-*" "deepseek-*" "nemotron-*" "inkling" "mistral-medium-3.5" "qwen3.8-max" "minimax-m3" {
+	models "glm-*" "kimi-*" "deepseek-*" "nemotron-*" "inkling" "mistral-medium-3.5" "mistral-large-4" "qwen3.8-max" \
+		"minimax-m3" {
 		clamp-output-to-model-max #true
 		completions-reasoning-mode "none"
 		completions-reasoning-history "omit"
@@ -1039,7 +1078,7 @@ provider "factory-droid" {
 	}
 	// The replay codec follows the selected route, including EU GLM routes.
 	on-upstream "mistral" {
-		models "glm-*" "mistral-medium-3.5" {
+		models "glm-*" "mistral-medium-3.5" "mistral-large-4" {
 			completions-reasoning-mode "effort"
 			completions-reasoning-history "omit"
 			mistral-reasoning-content-parts #true
@@ -1058,6 +1097,7 @@ provider "factory-droid" {
 	// Messages contract on every Factory Anthropic route: non-thinking-led
 	// history drops thinking, disabled thinking omits the field, and the effort
 	// beta rides only where the route requires it alongside output effort.
+	// Where disabled thinking is sent, replayed history drops its thinking.
 	on-api "anthropic-messages" {
 		strip-thinking-history #true
 		disabled-thinking "omit"
@@ -1072,6 +1112,12 @@ provider "factory-droid" {
 		on-upstream "snowflake" {
 			disabled-thinking "disabled"
 		}
+	}
+	// Adaptive models the registry marks `supportsDisabledThinking` send the
+	// explicit disabled form at Off on every upstream.
+	models "claude-sonnet-4-6" "claude-sonnet-5" "claude-opus-4-6" "claude-opus-4-7" "claude-opus-4-8" \
+		"claude-opus-4-8-fast" "claude-opus-5" "claude-opus-5-fast" "claude-haiku-5-5" {
+		disabled-thinking "disabled"
 	}
 	models "claude-*" "atlas-07-21" "aster-07-15" {
 		anthropic-thinking "adaptive-summarized"
@@ -1091,8 +1137,14 @@ provider "factory-droid" {
 		anthropic-thinking "budget-effort"
 	}
 	// Always-thinking models keep adaptive thinking on disabled turns, on every upstream.
-	models "claude-fable-5.1" "claude-opus-5-5" "claude-opus-5-5-fast" "claude-sonnet-5-5" {
+	models "claude-fable-5.1" "claude-opus-5-5" "claude-opus-5-5-fast" {
 		disabled-thinking "adaptive"
+	}
+	// Sonnet 5.5 rejects `disabled`: Off is `between_tools`, pinned to high
+	// effort because `between_tools` rejects xhigh and max.
+	models "claude-sonnet-5-5" {
+		disabled-thinking "between-tools"
+		between-tools-effort "high"
 	}
 	// Fast tiers are distinct SKUs served with `speed: "fast"`.
 	models "claude-opus-5-5-fast" "claude-opus-5-fast" "claude-opus-4-8-fast" {
@@ -1113,6 +1165,13 @@ provider "factory-droid" {
 	on-upstream "bedrock_anthropic" {
 		anthropic-tool-streaming-beta #true
 	}
+	// Azure Foundry enforces the preserved-thinking prefix check on Factory's
+	// account, so prefix-bound models (`thinking-prefix-binding`) ask it to drop
+	// stale signed blocks instead of failing. The other Anthropic upstreams
+	// predate default enforcement; the field would opt them into it.
+	on-upstream "azure_anthropic" {
+		supports-thinking-binding-controls #true
+	}
 	// xAI and Google sessions lock their upstream.
 	on-upstream "xai" "google" {
 		routing-session-lock #true
@@ -1131,6 +1190,11 @@ provider "factory-droid" {
 		on-upstream "bedrock_openai" "snowflake" {
 			reasoning-disable-mode "none-effort"
 		}
+	}
+	// GPT models whose ladder has an Off/None rung send the literal `none`
+	// tier on every upstream.
+	models "gpt-5.2" "gpt-5.6-sol" "gpt-5.6-sol-fast" "gpt-5.6-terra" "gpt-5.6-luna" "gpt-6-sol" "gpt-6-luna" {
+		reasoning-disable-mode "none-effort"
 	}
 	models "gpt-*" {
 		omit-max-output-tokens #true

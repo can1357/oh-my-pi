@@ -112,4 +112,14 @@ class "glm" {
 		thinking-efforts "low" "high" "max"
 		thinking-requires-effort #true
 	}
+	// GLM 5+ reasoning reaches omp as its plaintext trace on every host, and
+	// family plus revision pin the weights (glm-5.2, glm-5.3-flash, ...). GLM 4
+	// classifies too coarsely to carry: 4.0 also matches glm-4.5v and glm-4.6v.
+	revision ">=5" {
+		portable-reasoning #true
+		// residue: fine-tuned weights that classify as the base GLM revision.
+		models "*-uncensored" "*-cybersecurity" {
+			portable-reasoning #false
+		}
+	}
 }

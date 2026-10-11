@@ -35,6 +35,8 @@ export interface RelayUnavailableInfo {
 	extensionSeen: boolean;
 	/** Milliseconds this server has been listening. */
 	uptimeMs: number;
+	/** Downstream CDP clients connected to this relay. */
+	ompRelayCdpClients: number;
 	/** Milliseconds since the last connected extension went away; absent if none has connected yet. */
 	disconnectedMs?: number;
 }
@@ -120,6 +122,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 						error: "relay extension is not connected",
 						extensionSeen: bridge.extensionSeen,
 						uptimeMs: Date.now() - startedAt,
+						ompRelayCdpClients: bridge.cdpClientCount,
 						...(disconnectedMs === null ? {} : { disconnectedMs }),
 					};
 					return Response.json(info, { status: 503 });

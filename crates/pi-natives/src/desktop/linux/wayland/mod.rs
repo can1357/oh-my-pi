@@ -227,6 +227,8 @@ impl Backend for WaylandBackend {
 				"unavailable".to_string()
 			},
 			display_count: self.displays.len() as u32,
+			screen_locked: false,
+			display_asleep: false,
 		}
 	}
 

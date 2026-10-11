@@ -123,4 +123,12 @@ class "kimi" {
 			}
 		}
 	}
+	// K3 reasoning reaches omp as its plaintext trace on every host, and K3 was
+	// trained to read all of its earlier reasoning back (preserved thinking).
+	// A recall probe showed the reasoning slot of moonshot, factory-droid,
+	// openrouter and devin reaches the model, so K3 reasoning moves between
+	// those hosts natively instead of as visible `<think>` text.
+	family "k3" {
+		portable-reasoning #true
+	}
 }

@@ -70,7 +70,7 @@ describe("issue #1203 - MiniMax Coding Plan CN think tags", () => {
 		}).result();
 
 		expect(result.content).toEqual([
-			{ type: "thinking", thinking: "hidden reasoning", thinkingSignature: undefined },
+			{ type: "thinking", thinking: "hidden reasoning", thinkingSignature: undefined, summary: false },
 			{ type: "text", text: "visible answer" },
 		]);
 	});
@@ -138,7 +138,12 @@ describe("issue #1203 - MiniMax Coding Plan CN think tags", () => {
 		}).result();
 
 		expect(result.content).toEqual([
-			{ type: "thinking", thinking: "The user just said hi.", thinkingSignature: "reasoning_content" },
+			{
+				type: "thinking",
+				thinking: "The user just said hi.",
+				thinkingSignature: "reasoning_content",
+				summary: false,
+			},
 			{ type: "text", text: "Hello! How can I help?" },
 		]);
 	});

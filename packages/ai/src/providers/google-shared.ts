@@ -681,8 +681,9 @@ export function startTextOrThinkingBlock(
 	stream: AssistantMessageEventStream,
 	onBeforeStartEvent?: () => void,
 ): TextContent | ThinkingContent {
+	// Gemini returns thought summaries, never the raw thoughts.
 	const block: TextContent | ThinkingContent = isThinking
-		? { type: "thinking", thinking: "", thinkingSignature: undefined }
+		? { type: "thinking", thinking: "", thinkingSignature: undefined, summary: true }
 		: { type: "text", text: "" };
 	output.content.push(block);
 	onBeforeStartEvent?.();

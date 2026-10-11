@@ -10,6 +10,29 @@ export function codexUsagePlan(report: UsageReport): string | undefined {
 	return sanitizeText(plan.trim().replace(/[\r\n\t]+/g, " "));
 }
 
+/** OAuth identity a usage report is attributed to, from its metadata or its limits' scopes. */
+export function usageReportIdentity(report: UsageReport): OAuthAccountIdentity {
+	const metadata = report.metadata ?? {};
+	const read = (key: keyof OAuthAccountIdentity): string | undefined => {
+		const value = metadata[key];
+		return typeof value === "string" && value.length > 0 ? value : undefined;
+	};
+	const firstScoped = (key: "accountId" | "projectId" | "orgId"): string | undefined => {
+		for (const limit of report.limits) {
+			const value = limit.scope[key];
+			if (value) return value;
+		}
+		return undefined;
+	};
+	return {
+		email: read("email"),
+		accountId: read("accountId") ?? firstScoped("accountId"),
+		projectId: read("projectId") ?? firstScoped("projectId"),
+		orgId: read("orgId") ?? firstScoped("orgId"),
+		orgName: read("orgName"),
+	};
+}
+
 /** Qualify Codex identities only when two reports have the same email. */
 export function formatCodexUsageReportLabel(
 	report: UsageReport,

@@ -159,6 +159,12 @@ provider "openrouter" {
 		family "o-series" {
 			thinking-efforts "minimal" "low" "medium" "high"
 		}
+		// OpenRouter's Responses API does not document `configuration_update`
+		// input items (and serves `-pro` rows that would need pro mode, where the
+		// item is unsupported): GPT-6 effort changes stay on the request level.
+		revision ">=6 <7" {
+			supports-configuration-update #false
+		}
 	}
 	class "stepfun" {
 		family "step" {
