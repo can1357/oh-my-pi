@@ -76,18 +76,47 @@ describe("openai-codex-transcriptions transport", () => {
 
 	it("renames an upload whose extension the endpoint cannot decode after its declared container", async () => {
 		// The backend answers 500 for Ogg/Opus unless the upload is named `*.ogg`; `.oga` and bare names fail.
-		let uploaded: string | undefined;
+		const upload = async (fileName: string, mimeType: string): Promise<string | undefined> => {
+			let uploaded: string | undefined;
+			const fetchImpl: FetchImpl = async (_input, init) => {
+				const file = init?.body instanceof FormData ? init.body.get("file") : null;
+				uploaded = file instanceof File ? file.name : undefined;
+				return Response.json({ text: "ok" });
+			};
+			await transcribeAudio(
+				model,
+				{ audio: AUDIO, mimeType, fileName, responseFormat: "json" },
+				{ apiKey: codexToken("acct-1"), fetch: fetchImpl },
+			);
+			return uploaded;
+		};
+		expect(await upload("voice.oga", "audio/ogg")).toBe("audio.ogg");
+		// A decodable extension whose container contradicts the MIME type is renamed too: the decoder follows the name.
+		expect(await upload("clip.webm", "audio/ogg")).toBe("audio.ogg");
+		// Agreeing containers (including aliases) and unknown MIME types keep the caller's name.
+		expect(await upload("clip.mp3", "audio/mpeg")).toBe("clip.mp3");
+		expect(await upload("clip.mpeg", "audio/mpeg")).toBe("clip.mpeg");
+		expect(await upload("clip.m4a", "audio/mp4")).toBe("clip.m4a");
+		expect(await upload("clip.webm", "application/octet-stream")).toBe("clip.webm");
+	});
+
+	it("declares the token's workspace residency so a region-pinned workspace is not rejected", async () => {
+		const payload = btoa(
+			JSON.stringify({
+				"https://api.openai.com/auth": { chatgpt_account_id: "acct-1", chatgpt_data_residency: "us" },
+			}),
+		);
+		let residency: string | null | undefined;
 		const fetchImpl: FetchImpl = async (_input, init) => {
-			const file = init?.body instanceof FormData ? init.body.get("file") : null;
-			uploaded = file instanceof File ? file.name : undefined;
+			residency = new Headers(init?.headers).get("x-openai-internal-codex-residency");
 			return Response.json({ text: "ok" });
 		};
 		await transcribeAudio(
 			model,
-			{ audio: AUDIO, mimeType: "audio/ogg", fileName: "voice.oga", responseFormat: "json" },
-			{ apiKey: codexToken("acct-1"), fetch: fetchImpl },
+			{ audio: AUDIO, mimeType: "audio/wav", fileName: "dictation.wav", responseFormat: "json" },
+			{ apiKey: `header.${payload}.signature`, fetch: fetchImpl },
 		);
-		expect(uploaded).toBe("audio.ogg");
+		expect(residency).toBe("us");
 	});
 
 	it("never sends the Codex bearer to a plain-HTTP base URL override", async () => {

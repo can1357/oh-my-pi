@@ -1,6 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import {
+	applyCodexResidencyHeader,
 	CODEX_DESKTOP_ORIGINATOR,
 	CODEX_DESKTOP_USER_AGENT,
 	getCodexAccountId,
@@ -29,17 +30,24 @@ const DECODABLE_EXTENSIONS: Readonly<Record<string, true>> = {
 
 /**
  * The endpoint picks its decoder from the upload's file extension and answers `500 Error in ASR API` when the
- * extension is missing or unknown (`voice.oga`, `audio`), even for audio it can decode. Keep a decodable name;
- * otherwise name the file after the container its MIME type declares, and fall back to the caller's name when
- * the MIME type is unknown too.
+ * extension is missing or unknown (`voice.oga`, `audio`), even for audio it can decode. Keep a decodable name
+ * whose container agrees with the MIME type (`mp3`/`mpeg`, `m4a`/`mp4` share one MIME type); otherwise name the
+ * file after the container the MIME type declares, and fall back to the caller's name when the MIME type is
+ * unknown too.
  */
 function uploadFileName(request: TranscriptionRequest): string {
 	const name = request.fileName?.trim() || "audio";
 	const dot = name.lastIndexOf(".");
-	if (dot >= 0 && DECODABLE_EXTENSIONS[name.slice(dot + 1).toLowerCase()] === true) return name;
+	const extension = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
 	const mimeType = request.mimeType.split(";", 1)[0]?.trim().toLowerCase().replace("audio/x-", "audio/");
-	const extension = Object.entries(TRANSCRIPTION_AUDIO_MIME_TYPES).find(([, mime]) => mime === mimeType)?.[0];
-	return extension ? `audio.${extension}` : name;
+	const declared = Object.entries(TRANSCRIPTION_AUDIO_MIME_TYPES).find(([, mime]) => mime === mimeType)?.[0];
+	if (
+		DECODABLE_EXTENSIONS[extension] === true &&
+		(!declared || TRANSCRIPTION_AUDIO_MIME_TYPES[extension] === mimeType)
+	) {
+		return name;
+	}
+	return declared ? `audio.${declared}` : name;
 }
 
 /**
@@ -71,6 +79,8 @@ export async function transcribeOpenAICodex(
 			};
 			const accountId = getCodexAccountId(key);
 			if (accountId) headers[OPENAI_HEADERS.ACCOUNT_ID] = accountId;
+			// The backend 401s a region-pinned workspace unless the request declares its residency.
+			applyCodexResidencyHeader(headers, key);
 			const attempt = await fetchImpl(`${normalizeCodexBaseUrl(model.baseUrl)}/transcribe`, {
 				method: "POST",
 				headers,
