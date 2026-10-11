@@ -9,6 +9,10 @@
 
 - Fixed `RpcClient.stop()` occasionally waiting forever because the agent process was never signaled.
 
+### Fixed
+
+- Fixed `computer.apps.open` returning before the app had a window, or never giving a hidden running app one; it now returns the app's frontmost window as `window`, waiting up to 3 s on macOS ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.9.2] - 2026-10-11
 
 ### Fixed
