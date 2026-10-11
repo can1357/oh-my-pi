@@ -42,13 +42,14 @@ function asRole(role: string): EvalMessage["role"] {
 	return role;
 }
 
-/** Gold ids of a BEAM question: a list, or all values of a dict; null/absent gives none. */
+/** Raw gold id strings of a BEAM question: a list, or all values of a dict; null/absent gives none. */
 function beamGold(sourceChatIds: unknown): string[] {
-	if (Array.isArray(sourceChatIds)) return sourceChatIds.map(String);
-	if (sourceChatIds !== null && typeof sourceChatIds === "object") {
-		return Object.values(sourceChatIds).flatMap(v => (Array.isArray(v) ? v : [v]).map(String));
-	}
-	return [];
+	const values: unknown[] = Array.isArray(sourceChatIds)
+		? sourceChatIds
+		: sourceChatIds !== null && typeof sourceChatIds === "object"
+			? Object.values(sourceChatIds).flatMap(v => (Array.isArray(v) ? v : [v]))
+			: [];
+	return values.filter(v => v !== null && v !== undefined).map(String);
 }
 
 async function readBeam(dataDir: string, name: "beam-100k" | "beam-500k"): Promise<BeamConversation[]> {
@@ -73,10 +74,20 @@ function loadBeam(name: "beam-100k" | "beam-500k", conversations: BeamConversati
 		for (const [ability, list] of Object.entries(conv.probingQuestions)) {
 			list.forEach((q, i) => {
 				const questionId = `${conv.conversationId}:${ability}:${i}`;
-				const goldMessageIds = beamGold(q.source_chat_ids);
+				// Some entries are comma-joined strings such as "136,138".
+				const goldMessageIds = beamGold(q.source_chat_ids)
+					.flatMap(s => s.split(","))
+					.map(s => s.trim())
+					.filter(s => s !== "");
 				if (goldMessageIds.length === 0) {
 					excluded.push({ questionId, reason: "no-gold" });
 					return;
+				}
+				const dangling = goldMessageIds.find(id => !sessionOf.has(id));
+				if (dangling !== undefined) {
+					throw new Error(
+						`${name} case ${conv.conversationId} question ${questionId}: gold id "${dangling}" is not in the conversation`,
+					);
 				}
 				const goldSessionIds = new Set<string>();
 				for (const id of goldMessageIds) {
