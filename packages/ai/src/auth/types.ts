@@ -472,6 +472,13 @@ export interface ModelUsageHealthOptions {
 	baseUrl?: string;
 	reserveFraction: number;
 	signal?: AbortSignal;
+	/**
+	 * Evidence cutoff (epoch ms) for usage reports. When set, a report counts
+	 * only if `fetchedAt` is finite and strictly greater than this value;
+	 * older, equal, or non-finite evidence reads as unknown and cannot heal
+	 * blocks — existing credential blocks stay authoritative.
+	 */
+	usageAfter?: number;
 }
 
 /** Options controlling model, base URL, cancellation, and forced OAuth refresh in KeysApi.get. */

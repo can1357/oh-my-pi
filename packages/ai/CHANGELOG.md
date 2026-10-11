@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a usage-report freshness cutoff to model health queries, so callers can require quota evidence newer than a failure ([#15257](https://github.com/can1357/oh-my-pi/pull/15257) by [@joshuaswarren](https://github.com/joshuaswarren)).
 - Exported `matchesReplacementCredential` and `isSameOAuthAccount`, which tell whether storing a credential replaces an existing account row and whether two credentials belong to the same account ([#14901](https://github.com/can1357/oh-my-pi/pull/14901) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed

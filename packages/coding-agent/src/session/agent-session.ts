@@ -2225,9 +2225,10 @@ export class AgentSession implements SettingsScope {
 				this.#recovery.retryFallbackChainKeys(selector, model, options),
 			findRetryFallbackCandidates: (role, selector, model) =>
 				this.#recovery.findRetryFallbackCandidates(role, selector, model),
-			isRetryFallbackSelectorSuppressed: selector => this.#recovery.isRetryFallbackSelectorSuppressed(selector),
-			noteRetryFallbackCooldown: (selector, retryAfterMs, errorMessage) =>
-				this.#recovery.noteRetryFallbackCooldown(selector, retryAfterMs, errorMessage),
+			isRetryFallbackSelectorSuppressed: (selector, signal) =>
+				this.#recovery.isRetryFallbackSelectorSuppressed(selector, signal),
+			noteRetryFallbackCooldown: (selector, retryAfterMs, errorMessage, usageLimitFailureTime) =>
+				this.#recovery.noteRetryFallbackCooldown(selector, retryAfterMs, errorMessage, usageLimitFailureTime),
 			createCodexCompactionContext: createMaintenanceCodexCompactionContext,
 			sessionId: () => this.sessionId,
 			restrictOAuthAccounts: providerSessionId => this.#accountPoolScope?.restrict(providerSessionId),
@@ -4575,7 +4576,7 @@ export class AgentSession implements SettingsScope {
 		coalescedSources: Set<string>,
 	): Promise<AgentContinueOutcome> {
 		try {
-			const reverted = await this.#recovery.maybeRestoreRetryFallbackPrimary();
+			const reverted = await this.#recovery.maybeRestoreRetryFallbackPrimary(signal);
 			if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
 				return { status: "skipped", reason: "post-restore-unavailable" };
 			}
@@ -7770,8 +7771,8 @@ export class AgentSession implements SettingsScope {
 		this.#promptSetupAbortController = setupAbort;
 		try {
 			options?.onPromptAdmitted?.();
-			await this.#recovery.maybeRestoreRetryFallbackPrimary();
-			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
+			await this.#recovery.maybeRestoreRetryFallbackPrimary(setupAbort.signal);
+			if (!(await this.#runUsageAwarePreflightForNextModelCall(setupAbort.signal))) return false;
 			// Flush any pending bash messages before the new prompt
 			await this.#bash.flushPending();
 			this.#eval.flushPending();

@@ -30,7 +30,11 @@ import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import {
+	AgentSession,
+	PromptDroppedError,
+	type AgentSessionEvent,
+} from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	type ServingModel,
@@ -5634,6 +5638,131 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(primaryModel.id);
 		expect(session.thinkingLevel).toBeUndefined();
 	});
+
+	it("aborts an unresolved restore probe without swapping models or dispatching the prompt", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "usage limit exceeded retry-after-ms=60000",
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		await session.prompt("First prompt triggers fallback");
+		await session.waitForIdle();
+		expect(session.model?.id).toBe(fallbackModel.id);
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		expect(modelRegistry.isSelectorSuppressed(primarySelector)).toBe(true);
+
+		let probeSignal: AbortSignal | undefined;
+		const probeStarted = Promise.withResolvers<void>();
+		const releaseProbe = Promise.withResolvers<ModelUsageHealth>();
+		vi.spyOn(authStorage.health, "model").mockImplementation(async (_provider, options) => {
+			probeSignal = options.signal;
+			probeStarted.resolve();
+			return await releaseProbe.promise;
+		});
+
+		const promptPromise = session.prompt("Second prompt starts an abortable restore", { throwOnDrop: true });
+		await probeStarted.promise;
+		const aborted = session.abort();
+		releaseProbe.resolve({ state: "healthy", accounts: [] });
+		await aborted;
+		await expect(promptPromise).rejects.toThrow(PromptDroppedError);
+
+		expect(probeSignal?.aborted).toBe(true);
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+		expect(modelRegistry.isSelectorSuppressed(primarySelector)).toBe(true);
+	});
+
+	it.each(["usage", "credential"] as const)(
+		"cancels retry-candidate %s probes without switching or persisting a fallback",
+		async phase => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled cancellation models");
+			const primarySelector = primaryModel.provider + "/" + primaryModel.id;
+			const fallbackSelector = fallbackModel.provider + "/" + fallbackModel.id;
+			const requestedModels: string[] = [];
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.usageAwareFallback": false,
+				"retry.fallbackChains": { default: [fallbackSelector] },
+			});
+			settings.setModelRole("default", primarySelector);
+			const sessionManager = SessionManager.inMemory();
+			session = new AgentSession({
+				agent: createFallbackAgent(primaryModel, requestedModels),
+				sessionManager,
+				settings,
+				modelRegistry,
+			});
+			modelRegistry.suppressSelector(fallbackSelector, Date.now() + 60_000, Date.now() - 1);
+			const probeStarted = Promise.withResolvers<void>();
+			const releaseProbe = Promise.withResolvers<void>();
+			let probeSignal: AbortSignal | undefined;
+			vi.spyOn(authStorage.health, "model").mockImplementation(async (_provider, options) => {
+				if (phase === "usage") {
+					probeSignal = options.signal;
+					probeStarted.resolve();
+					await releaseProbe.promise;
+				}
+				return { state: "healthy", accounts: [] };
+			});
+			const getApiKey = modelRegistry.getApiKey.bind(modelRegistry);
+			vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async (model, sessionId, options) => {
+				if (phase === "credential" && model.id === fallbackModel.id) {
+					probeSignal = options?.signal;
+					probeStarted.resolve();
+					await releaseProbe.promise;
+				}
+				return getApiKey(model, sessionId, options);
+			});
+			const prompt = session.prompt("Cancel while selecting the retry model");
+			await probeStarted.promise;
+			const aborted = session.abort();
+			releaseProbe.resolve();
+			await aborted;
+			await prompt;
+
+			expect(session.model?.id).toBe(primaryModel.id);
+			expect(requestedModels).toEqual([primarySelector]);
+			expect(
+				sessionManager
+					.getBranch()
+					.filter(entry => entry.type === "model_change" && entry.model === fallbackSelector),
+			).toEqual([]);
+			expect(probeSignal?.aborted).toBe(true);
+		},
+	);
 
 	it("clamps a fallback selector's explicit thinking level to the session effort ceiling", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
