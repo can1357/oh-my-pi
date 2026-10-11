@@ -338,6 +338,7 @@ import { materializeImageChipLinks, UiHelpers } from "./utils/ui-helpers";
 import {
 	cfgAutocompleteMaxVisible,
 	cfgAutoResume,
+	cfgComposerPredictions,
 	cfgComposerShape,
 	cfgComposerTokenRate,
 	cfgDisplayCacheMissMarker,
@@ -432,6 +433,7 @@ const cfgLiveUiSettings = combine({
 	"compaction.idleTimeoutSeconds": cfgCompactionIdleTimeoutSeconds,
 	"recap.enabled": cfgRecapEnabled,
 	"recap.idleSeconds": cfgRecapIdleSeconds,
+	"composer.predictions": cfgComposerPredictions,
 	"compaction.enabled": cfgCompactionEnabled,
 	"compaction.methodOrder": cfgCompactionMethodOrder,
 	"display.hideToolActivity": cfgDisplayHideToolActivity,
@@ -1741,6 +1743,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor = this.composer.editor;
 		this.editor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		this.editor.placeholder = () => this.#composerHint();
+		this.editor.prediction = () => this.#eventController.composerPrediction.text;
 		this.editor.composerState = () => this.#composerNativeState();
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		this.editor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
@@ -3493,6 +3496,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#eventController.refreshIdleCompactionTimer();
 		}
 		if (any("recap.enabled", "recap.idleSeconds")) this.#eventController.refreshIdleRecapTimer();
+		if (any("composer.predictions")) {
+			if (next["composer.predictions"]) {
+				this.showWarning(
+					"Composer predictions on: every completed turn now sends one extra billed request to the session's model (counted in /stats).",
+				);
+			} else {
+				this.#eventController.composerPrediction.cancel();
+			}
+		}
 		if (any("compaction.enabled", "compaction.methodOrder")) {
 			this.statusLine.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 			this.ui.requestRender();
@@ -7144,6 +7156,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.viewportRowsProvider = () => this.ui.terminal.rows;
 		nextEditor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		nextEditor.placeholder = () => this.#composerHint();
+		nextEditor.prediction = () => this.#eventController.composerPrediction.text;
 		nextEditor.composerState = () => this.#composerNativeState();
 		nextEditor.attachmentChips = previousEditor.attachmentChips;
 		nextEditor.imageReferenceHyperlink = imageReferenceHyperlink;
