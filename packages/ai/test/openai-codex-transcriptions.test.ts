@@ -90,6 +90,20 @@ describe("openai-codex-transcriptions transport", () => {
 		expect(uploaded).toBe("audio.ogg");
 	});
 
+	it("never sends the Codex bearer to a plain-HTTP base URL override", async () => {
+		let target: string | undefined;
+		const fetchImpl: FetchImpl = async input => {
+			target = String(input);
+			return Response.json({ text: "ok" });
+		};
+		await transcribeAudio(
+			{ ...model, baseUrl: "http://chatgpt.com/backend-api" },
+			{ audio: AUDIO, mimeType: "audio/flac", fileName: "a.flac", responseFormat: "json" },
+			{ apiKey: codexToken("acct-1"), fetch: fetchImpl },
+		);
+		expect(target).toBe("https://chatgpt.com/backend-api/transcribe");
+	});
+
 	it("surfaces backend ASR failures as TranscriptionApiError with the upstream detail", async () => {
 		const fetchImpl: FetchImpl = async () => Response.json({ detail: "Error in ASR API" }, { status: 500 });
 		const failure = transcribeAudio(
