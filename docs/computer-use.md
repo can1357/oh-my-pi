@@ -130,7 +130,7 @@ await buttons[0].press();
 ```
 
 - `win.ax({ all?, maxDepth? })` returns a textual tree with `[ref=eN]` references; default depth is 24 and native snapshots visit at most 800 nodes.
-- `win.find({ role?, title?, value?, limit? })` matches case-insensitive substrings and returns an array of up to `limit` elements (default 100, maximum 5000), from a walk bounded to 5000 nodes and depth 24. Element methods called on the array itself throw an error saying to pick one first: `const [el] = await win.find(...)`, or `el = (await win.find(...))[0]` in Python.
+- `win.find({ role?, title?, value?, limit? })` matches case-insensitive substrings and returns an array of up to `limit` elements (default 100, maximum 5000), from a walk bounded to 5000 nodes and depth 24. Element methods and fields used on the array itself throw an error saying to pick one first: `const [el] = await win.find(...)`, or `el = (await win.find(...))[0]` in Python.
 - `await win.ref("e5")`, `computer.elementAt(x, y)`, `computer.focusedElement()`, and `computer.ref("e5")` return live elements. The handle `ref()` returns also takes element methods directly: `await win.ref("e5").click({ count: 2 })`.
 - Elements expose `value`, `setValue`, `bounds`, `attributes`, `actions`, `perform`, `press`, `click({ button?, count?, modifiers? })`, `doubleClick({ button?, modifiers? })`, `focus`, `parent`, and `children` operations.
 

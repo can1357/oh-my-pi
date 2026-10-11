@@ -1115,16 +1115,23 @@ describe("computer prelude", () => {
 			const misuse = await runInContext(
 				`(async () => {
 					const win = await computer.window(42);
-					try {
-						await (await win.find({ role: "button", title: "Run" })).press();
-					} catch (error) {
-						return error.message;
+					const found = await win.find({ role: "button", title: "Run" });
+					const messages = [];
+					for (const misuse of [() => found.press(), () => win.ref(found.ref)]) {
+						try {
+							await misuse();
+						} catch (error) {
+							messages.push(error.message);
+						}
 					}
+					return messages;
 				})()`,
 				realm,
 			);
-			expect(misuse).toContain("find() returns an array (length 1), not one element, so it has no press()");
-			expect(misuse).toContain("const [el] = await win.find(");
+			expect(misuse).toHaveLength(2);
+			expect(misuse[0]).toContain("find() returns an array (length 1), not one element, so it has no press()");
+			expect(misuse[0]).toContain("const [el] = await win.find(");
+			expect(misuse[1]).toContain("find() returns an array (length 1), not one element, so it has no ref;");
 		} finally {
 			await prelude.invoke({ action: "close" }, context);
 		}
@@ -1881,6 +1888,17 @@ describe("computer worker round trips", () => {
 		if (!misuse.ok) {
 			expect(misuse.error.message).toContain(
 				"find() returns an array (length 1), not one element, so it has no doubleClick()",
+			);
+		}
+		const fieldRead = await runWorker(
+			transport,
+			"find-field-read",
+			'(await (await desktop.window(42)).find({ role: "button" })).enabled',
+		);
+		expect(fieldRead.ok).toBe(false);
+		if (!fieldRead.ok) {
+			expect(fieldRead.error.message).toContain(
+				"find() returns an array (length 1), not one element, so it has no enabled;",
 			);
 		}
 

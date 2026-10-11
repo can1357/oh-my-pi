@@ -413,15 +413,26 @@ class El {
 	}
 }
 
-/** `find()`'s array answers element calls with how to pick one, instead of "is not a function". */
+const ELEMENT_FIELDS = ["ref", "role", "nativeRole", "title", "description", "enabled", "focused", "childCount"];
+
+/** `find()`'s array answers element field reads and calls with how to pick one, instead of `undefined` or "is not a function". */
 function foundElements(elements: El[]): El[] {
+	const pickOne = (member: string): TypeError =>
+		new TypeError(
+			`find() returns an array (length ${elements.length}), not one element, so it has no ${member}; pick one first: const [el] = await win.find(query)`,
+		);
 	for (const method of Object.getOwnPropertyNames(El.prototype)) {
 		if (method === "constructor") continue;
 		Object.defineProperty(elements, method, {
 			value: () => {
-				throw new TypeError(
-					`find() returns an array (length ${elements.length}), not one element, so it has no ${method}(); pick one first: const [el] = await win.find(query)`,
-				);
+				throw pickOne(`${method}()`);
+			},
+		});
+	}
+	for (const field of ELEMENT_FIELDS) {
+		Object.defineProperty(elements, field, {
+			get: () => {
+				throw pickOne(field);
 			},
 		});
 	}
