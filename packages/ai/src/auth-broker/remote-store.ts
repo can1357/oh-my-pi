@@ -25,7 +25,7 @@ import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { ClientUsageIdentity, ObservedUsageEntry, UsageReport } from "../usage";
-import { raceSignal } from "../auth/abort";
+import { raceWithSignal } from "../utils/abort";
 import { type AuthBrokerClient, AuthBrokerError, AuthBrokerStreamUnsupportedError } from "./client";
 import { compareCredentialBlockSnapshots } from "./protocol";
 import type {
@@ -1294,7 +1294,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 */
 	async fetchUsageReports(signal?: AbortSignal): Promise<UsageReport[] | null> {
 		this.#noteActivity();
-		const reports = await raceSignal(this.#loadUsageReports(), signal, "auth-broker request aborted");
+		const reports = await raceWithSignal(this.#loadUsageReports(), signal, "auth-broker request aborted");
 		if (!reports) return null;
 		return this.#filterUsageReports(this.#applyUsageOverlays(reports));
 	}
@@ -1314,7 +1314,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		signal?: AbortSignal,
 	): Promise<UsageReport | null> {
 		this.#noteActivity();
-		const reports = await raceSignal(this.#loadUsageReports(), signal, "auth-broker request aborted");
+		const reports = await raceWithSignal(this.#loadUsageReports(), signal, "auth-broker request aborted");
 		const visibleReports = reports ? this.#filterUsageReports(reports) : null;
 		const matched = visibleReports ? matchUsageReport(visibleReports, provider, credential) : null;
 		const overlay = this.#getActiveUsageOverlay(provider, credential);
@@ -1499,7 +1499,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		// one-shot run, a signal) sends what is still buffered on the way out. The
 		// wait is bounded: an unreachable broker must not stall the exit.
 		this.#cancelObservedUsageExitFlush ??= postmortem.register("auth-broker-observed-usage", () =>
-			raceSignal(
+			raceWithSignal(
 				this.#flushObservedUsage(),
 				AbortSignal.timeout(OBSERVED_USAGE_EXIT_FLUSH_MS),
 				"observed usage exit flush timed out",
