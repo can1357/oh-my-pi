@@ -98,4 +98,39 @@ for line in sys.stdin:
 			await engine.dispose();
 		}
 	});
+
+	it("passes dropped derived rows through and hides the per-run data dir", async () => {
+		const script = await stub(
+			"dropped.py",
+			`import json, os, sys
+HIT = {"engine_id": "r1", "tier": "working", "content": "alpha beta", "summary_of": []}
+DROPPED = {"tier": "memoria_source", "engine_id": "memoria_source_r2", "source_memory_id": "r2", "rank": 1}
+for line in sys.stdin:
+    req = json.loads(line)
+    op = req["op"]
+    if op == "remember":
+        result = ["r%d" % (i + 1) for i in range(len(req["params"]["items"]))]
+    elif op == "recall":
+        result = {"hits": [HIT], "dropped": [DROPPED]}
+    elif op == "describe":
+        result = {"MNEMOSYNE_DATA_DIR": os.environ["MNEMOSYNE_DATA_DIR"]}
+    elif op == "vector_count":
+        result = 1
+    elif op == "resources":
+        result = {"peak_rss_bytes": 2, "baseline_rss_bytes": 1}
+    else:
+        result = None
+    print(json.dumps({"id": req["id"], "result": result}), flush=True)
+`,
+		);
+		const engine = mnemosyneEngine({ python: "python3", script });
+		try {
+			const { questions } = await runCases(engine, [twoMessageCase], "standard", 10, tmp);
+			expect(questions[0].ranked.map(h => h.messageIds)).toEqual([["m1"]]);
+			expect(questions[0].dropped).toEqual([{ tier: "memoria_source", messageIds: ["m2"], rank: 1, gold: true }]);
+			expect((await engine.describe()).MNEMOSYNE_DATA_DIR).toBe("<temp>");
+		} finally {
+			await engine.dispose();
+		}
+	});
 });
