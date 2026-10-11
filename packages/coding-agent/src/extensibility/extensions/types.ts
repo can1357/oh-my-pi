@@ -653,6 +653,14 @@ export interface ExtensionContext {
 	hasPendingMessages(): boolean;
 	/** Gracefully shutdown and exit. */
 	shutdown(): void;
+	/**
+	 * Answer the open interactive plan review as if the operator picked `choice` in it.
+	 * `refine` needs non-empty `input.feedback`, which is sent as the next planning prompt.
+	 * `save` writes the plan under its default file name without the path prompt.
+	 * False when that review is not open, the choice is disabled or missing its feedback,
+	 * or the mode has no plan review.
+	 */
+	resolvePlanReview(reviewId: string, choice: PlanReviewChoice, input?: { feedback?: string }): boolean;
 	/** Identity of the agent this session runs: the top-level session or a subagent. */
 	agent: ExtensionAgentIdentity;
 	/**
@@ -1203,6 +1211,33 @@ export interface ToolApprovalResolvedEvent {
 	reason?: string;
 }
 
+/** Stable ids for the interactive plan review's choices; labels may change (keep's label carries a token count). */
+export type PlanReviewChoice = "execute" | "compact" | "keep" | "refine" | "save";
+/** A choice as displayed in the interactive plan review, delivered in display order by `plan_review_requested`. */
+export interface PlanReviewOption {
+	id: PlanReviewChoice;
+	label: string;
+	disabled: boolean;
+}
+/** The interactive plan review opened (interactive mode only). Resolve it with `ctx.resolvePlanReview`. */
+export interface PlanReviewRequestedEvent {
+	type: "plan_review_requested";
+	reviewId: string;
+	sessionId: string;
+	title: string;
+	planFilePath: string;
+	planContent: string;
+	options: PlanReviewOption[];
+}
+/** The plan review closed: a choice, or `undefined` when it was dismissed. */
+export interface PlanReviewResolvedEvent {
+	type: "plan_review_resolved";
+	reviewId: string;
+	sessionId: string;
+	choice: PlanReviewChoice | undefined;
+	by: "local" | "extension";
+}
+
 interface ToolCallEventBase {
 	type: "tool_call";
 	toolCallId: string;
@@ -1379,7 +1414,9 @@ export type ExtensionEvent =
 	| ToolCallEvent
 	| ToolResultEvent
 	| ToolApprovalRequestedEvent
-	| ToolApprovalResolvedEvent;
+	| ToolApprovalResolvedEvent
+	| PlanReviewRequestedEvent
+	| PlanReviewResolvedEvent;
 
 // ============================================================================
 // Event Results
@@ -1582,6 +1619,8 @@ export interface ExtensionAPI {
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 	on(event: "tool_approval_requested", handler: ExtensionHandler<ToolApprovalRequestedEvent>): void;
 	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;
+	on(event: "plan_review_requested", handler: ExtensionHandler<PlanReviewRequestedEvent>): void;
+	on(event: "plan_review_resolved", handler: ExtensionHandler<PlanReviewResolvedEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
@@ -2036,6 +2075,7 @@ export interface ExtensionContextActions {
 	abort: () => void;
 	hasPendingMessages: () => boolean;
 	shutdown: () => void;
+	resolvePlanReview?: (reviewId: string, choice: PlanReviewChoice, input?: { feedback?: string }) => boolean;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];

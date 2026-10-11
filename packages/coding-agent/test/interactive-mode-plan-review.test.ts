@@ -7,11 +7,20 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import type { HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import type {
+	Extension,
+	ExtensionContext,
+	ExtensionEvent,
+	PlanReviewRequestedEvent,
+	PlanReviewResolvedEvent,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { planSaveFileName } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autosave";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -65,6 +74,73 @@ function assistantWithUsage(overrides: Partial<AssistantMessage> = {}): Assistan
 
 function compactNumber(value: number): string {
 	return formatNumber(value).toLowerCase();
+}
+
+function observeExtensionEvents(session: AgentSession, onEvent?: (event: ExtensionEvent) => void): ExtensionEvent[] {
+	const events: ExtensionEvent[] = [];
+	const emit = (event: ExtensionEvent): Promise<void> => {
+		events.push(event);
+		onEvent?.(event);
+		return Promise.resolve();
+	};
+	Object.defineProperty(session, "extensionRunner", {
+		configurable: true,
+		get: () => ({ emit }),
+	});
+	return events;
+}
+
+function planReviewExtension(
+	name: string,
+	onEvent: (event: ExtensionEvent, ctx: ExtensionContext) => void | Promise<void>,
+): Extension {
+	const handle = async (...args: unknown[]): Promise<void> => {
+		await onEvent(args[0] as ExtensionEvent, args[1] as ExtensionContext);
+	};
+	const handlers: Extension["handlers"] = new Map();
+	handlers.set("plan_review_requested", [handle]);
+	handlers.set("plan_review_resolved", [handle]);
+	const extensionPath = `/test/${name}.ts`;
+	return {
+		path: extensionPath,
+		resolvedPath: extensionPath,
+		handlers,
+		tools: new Map(),
+		assistantThinkingRenderers: [],
+		fileWriteFallbackHandlers: [],
+		fileDeleteFallbackHandlers: [],
+		messageRenderers: new Map(),
+		composerShapes: new Map(),
+		commands: new Map(),
+		flags: new Map(),
+		shortcuts: new Map(),
+	};
+}
+
+/**
+ * An extension that records plan-review events and may answer each request
+ * through the `ctx` the runner hands its handler.
+ */
+function planReviewRecorder(
+	name: string,
+	answer?: (event: PlanReviewRequestedEvent, ctx: ExtensionContext) => void,
+): {
+	extension: Extension;
+	events: Array<PlanReviewRequestedEvent | PlanReviewResolvedEvent>;
+	resolved: Promise<PlanReviewResolvedEvent>;
+} {
+	const events: Array<PlanReviewRequestedEvent | PlanReviewResolvedEvent> = [];
+	const resolved = Promise.withResolvers<PlanReviewResolvedEvent>();
+	const extension = planReviewExtension(name, (event, ctx) => {
+		if (event.type === "plan_review_requested") {
+			events.push(event);
+			answer?.(event, ctx);
+		} else if (event.type === "plan_review_resolved") {
+			events.push(event);
+			resolved.resolve(event);
+		}
+	});
+	return { extension, events, resolved: resolved.promise };
 }
 
 describe("InteractiveMode plan review rendering", () => {
@@ -131,6 +207,23 @@ describe("InteractiveMode plan review rendering", () => {
 		currentTempDir?.removeSync();
 		setKeybindings(KeybindingsManager.inMemory());
 	});
+
+	/** Installs a real extension runner, initialized through the interactive mode's own context actions. */
+	async function loadExtensions(...extensions: Extension[]): Promise<ExtensionRunner> {
+		const runner = new ExtensionRunner(
+			extensions,
+			new ExtensionRuntime(),
+			tempDir.path(),
+			session.sessionManager,
+			modelRegistry,
+		);
+		Object.defineProperty(session, "extensionRunner", {
+			configurable: true,
+			get: () => runner,
+		});
+		await mode.initHooksAndCustomTools();
+		return runner;
+	}
 
 	it("exits empty plan mode without confirmation", async () => {
 		const planFilePath = "local://PLAN.md";
@@ -224,6 +317,432 @@ describe("InteractiveMode plan review rendering", () => {
 		// Each approval shows the current plan in the overlay, not a stale one.
 		expect(review.mock.calls[1]?.[0]).toContain("Second plan");
 		expect(review.mock.calls[1]?.[0]).not.toContain("First plan");
+	});
+
+	it("lets an extension approve the open review through the same execute path", async () => {
+		const planFilePath = "local://PLAN.md";
+		const planContent = "# Plan\n\nDo the thing.";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, planContent);
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 7320, contextWindow: 10000, percent: 73.2 });
+		const clear = vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		let answered: boolean | undefined;
+		const recorder = planReviewRecorder("remote", (event, ctx) => {
+			answered = ctx.resolvePlanReview(event.reviewId, "execute");
+		});
+		await loadExtensions(recorder.extension);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		const resolved = await recorder.resolved;
+
+		const requested = recorder.events.find(
+			(event): event is PlanReviewRequestedEvent => event.type === "plan_review_requested",
+		);
+		expect(answered).toBe(true);
+		expect(requested).toMatchObject({
+			sessionId: session.sessionManager.getSessionId(),
+			title: "PLAN",
+			planFilePath,
+			planContent,
+			options: [
+				{ id: "execute", label: "Approve and execute", disabled: false },
+				{ id: "compact", label: "Approve and compact context", disabled: false },
+				{ id: "keep", label: "Approve and keep context (~7.3k / 10k)", disabled: false },
+				{ id: "refine", label: "Refine plan", disabled: false },
+				{ id: "save", label: "Save and quit", disabled: false },
+			],
+		});
+		expect(resolved).toMatchObject({
+			reviewId: requested?.reviewId,
+			choice: "execute",
+			by: "extension",
+		});
+		expect(clear).toHaveBeenCalledTimes(1);
+		expect(prompt.mock.calls.find(isPlanApprovedCall)).toBeDefined();
+	});
+
+	it("keeps the review open when a remote answer is stale, disabled, or incomplete", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 9600, contextWindow: 10000, percent: 96 });
+		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const refused: boolean[] = [];
+		let stayedOpen = false;
+		let accepted: boolean | undefined;
+		const recorder = planReviewRecorder("remote", (event, ctx) => {
+			refused.push(
+				ctx.resolvePlanReview("wrong-review", "execute"),
+				ctx.resolvePlanReview(event.reviewId, "keep"),
+				ctx.resolvePlanReview(event.reviewId, "refine"),
+				ctx.resolvePlanReview(event.reviewId, "refine", { feedback: "   " }),
+			);
+			stayedOpen = mode.ui.hasOverlay();
+			accepted = ctx.resolvePlanReview(event.reviewId, "execute");
+		});
+		await loadExtensions(recorder.extension);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		await recorder.resolved;
+
+		const requested = recorder.events.find(
+			(event): event is PlanReviewRequestedEvent => event.type === "plan_review_requested",
+		);
+		expect(refused).toEqual([false, false, false, false]);
+		expect(stayedOpen).toBe(true);
+		expect(accepted).toBe(true);
+		expect(requested?.options.find(option => option.id === "keep")?.disabled).toBe(true);
+	});
+
+	it("sends remote refinement feedback verbatim as the next planning prompt", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		let answered: boolean | undefined;
+		const recorder = planReviewRecorder("remote", (event, ctx) => {
+			answered = ctx.resolvePlanReview(event.reviewId, "refine", { feedback: "  keep indentation\n" });
+		});
+		await loadExtensions(recorder.extension);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		const resolved = await recorder.resolved;
+
+		expect(answered).toBe(true);
+		expect(prompt).toHaveBeenCalledWith("  keep indentation\n");
+		expect(resolved).toMatchObject({ choice: "refine", by: "extension" });
+	});
+
+	it("reports a remote compact approval closed only once its overlay hides", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const compactStarted = Promise.withResolvers<void>();
+		const compactDone = Promise.withResolvers<"ok">();
+		vi.spyOn(mode, "handleCompactCommand").mockImplementation(() => {
+			compactStarted.resolve();
+			return compactDone.promise;
+		});
+		const resolved = Promise.withResolvers<PlanReviewResolvedEvent>();
+		const seen: string[] = [];
+		let overlayOpenWhenResolved: boolean | undefined;
+		await loadExtensions(
+			planReviewExtension("remote", (event, ctx) => {
+				if (event.type === "plan_review_requested") {
+					seen.push(event.type);
+					ctx.resolvePlanReview(event.reviewId, "compact");
+				} else if (event.type === "plan_review_resolved") {
+					seen.push(event.type);
+					overlayOpenWhenResolved = mode.ui.hasOverlay();
+					resolved.resolve(event);
+				}
+			}),
+		);
+
+		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		await compactStarted.promise;
+		// One macrotask turn drains every queued microtask, so a resolution emitted at the
+		// pick (rather than at the hide) would already have reached the handler.
+		await new Promise<void>(resolve => setImmediate(resolve));
+		expect(mode.ui.hasOverlay()).toBe(true);
+		expect(seen).toEqual(["plan_review_requested"]);
+
+		compactDone.resolve("ok");
+		await approval;
+
+		expect(await resolved.promise).toMatchObject({ choice: "compact", by: "extension" });
+		expect(overlayOpenWhenResolved).toBe(false);
+		expect(seen).toEqual(["plan_review_requested", "plan_review_resolved"]);
+	});
+
+	it("accepts only the first synchronous remote refinement", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		let answers: boolean[] = [];
+		const events = observeExtensionEvents(session, event => {
+			if (event.type !== "plan_review_requested") return;
+			answers = [
+				mode.resolvePlanReview(event.reviewId, "refine", { feedback: "FIRST choice" }),
+				mode.resolvePlanReview(event.reviewId, "refine", { feedback: "SECOND choice" }),
+			];
+		});
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		expect(answers).toEqual([true, false]);
+		expect(prompt).toHaveBeenCalledWith("FIRST choice");
+		expect(prompt).not.toHaveBeenCalledWith("SECOND choice");
+		expect(events.filter(event => event.type === "plan_review_resolved")).toHaveLength(1);
+		expect(events.find(event => event.type === "plan_review_resolved")).toMatchObject({
+			choice: "refine",
+			by: "extension",
+		});
+	});
+
+	it("rejects a synchronous remote refinement after a local pick", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
+			(component as PlanReviewOverlay).handleInput("\n");
+			return { hide: vi.fn() } as never;
+		});
+		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		let remoteAccepted: boolean | undefined;
+		const events = observeExtensionEvents(session, event => {
+			if (event.type === "plan_review_requested") {
+				remoteAccepted = mode.resolvePlanReview(event.reviewId, "refine", { feedback: "late feedback" });
+			}
+		});
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		expect(remoteAccepted).toBe(false);
+		expect(prompt).not.toHaveBeenCalledWith("late feedback");
+		expect(prompt.mock.calls.find(isPlanApprovedCall)).toBeDefined();
+		expect(events.find(event => event.type === "plan_review_resolved")).toMatchObject({
+			choice: "execute",
+			by: "local",
+		});
+	});
+
+	it("settles an open review once when preparing a session switch", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const opened = Promise.withResolvers<PlanReviewRequestedEvent>();
+		const settled = Promise.withResolvers<PlanReviewResolvedEvent>();
+		const events = observeExtensionEvents(session, event => {
+			if (event.type === "plan_review_requested") opened.resolve(event);
+			if (event.type === "plan_review_resolved") settled.resolve(event);
+		});
+
+		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		const requested = await opened.promise;
+		await mode.prepareSessionSwitch();
+		expect(mode.resolvePlanReview(requested.reviewId, "refine", { feedback: "too late" })).toBe(false);
+		await approval;
+		const resolved = await settled.promise;
+
+		expect(resolved).toMatchObject({ reviewId: requested.reviewId, choice: undefined, by: "local" });
+		expect(events.filter(event => event.type === "plan_review_resolved")).toHaveLength(1);
+		expect(prompt).not.toHaveBeenCalled();
+	});
+
+	it("settles a replaced review once without letting its continuation hide the replacement", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const firstOpened = Promise.withResolvers<PlanReviewRequestedEvent>();
+		const secondOpened = Promise.withResolvers<PlanReviewRequestedEvent>();
+		const firstSettled = Promise.withResolvers<PlanReviewResolvedEvent>();
+		const secondSettled = Promise.withResolvers<PlanReviewResolvedEvent>();
+		const requested: PlanReviewRequestedEvent[] = [];
+		const events = observeExtensionEvents(session, event => {
+			if (event.type === "plan_review_requested") {
+				requested.push(event);
+				if (requested.length === 1) firstOpened.resolve(event);
+				else if (requested.length === 2) secondOpened.resolve(event);
+				return;
+			}
+			if (event.type !== "plan_review_resolved") return;
+			if (event.reviewId === requested[0]?.reviewId) firstSettled.resolve(event);
+			if (event.reviewId === requested[1]?.reviewId) secondSettled.resolve(event);
+		});
+
+		const firstApproval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "FIRST" });
+		const first = await firstOpened.promise;
+		const secondApproval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "SECOND" });
+		await secondOpened.promise;
+		await firstApproval;
+		const firstResolution = await firstSettled.promise;
+
+		expect(firstResolution).toMatchObject({ reviewId: first.reviewId, choice: undefined, by: "local" });
+		expect(
+			events.filter(event => event.type === "plan_review_resolved" && event.reviewId === first.reviewId),
+		).toHaveLength(1);
+		expect(mode.ui.hasOverlay()).toBe(true);
+
+		await mode.prepareSessionSwitch();
+		await secondApproval;
+		await secondSettled.promise;
+	});
+
+	it("invalidates an open review when the interactive mode stops", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const opened = Promise.withResolvers<PlanReviewRequestedEvent>();
+		const settled = Promise.withResolvers<PlanReviewResolvedEvent>();
+		observeExtensionEvents(session, event => {
+			if (event.type === "plan_review_requested") opened.resolve(event);
+			if (event.type === "plan_review_resolved") settled.resolve(event);
+		});
+
+		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		const requested = await opened.promise;
+		mode.stop();
+		expect(mode.resolvePlanReview(requested.reviewId, "refine", { feedback: "after stop" })).toBe(false);
+		await approval;
+		expect(await settled.promise).toMatchObject({
+			reviewId: requested.reviewId,
+			choice: undefined,
+			by: "local",
+		});
+		expect(prompt).not.toHaveBeenCalled();
+	});
+
+	it("delivers a request to every extension before delivering its synchronous resolution", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		let accepted: boolean | undefined;
+		const delivered = Promise.withResolvers<void>();
+		const secondExtensionEvents: string[] = [];
+		const firstExtension = planReviewExtension("first", (event, ctx) => {
+			if (event.type === "plan_review_requested") {
+				accepted = ctx.resolvePlanReview(event.reviewId, "refine", { feedback: "split step 2" });
+			}
+		});
+		const secondExtension = planReviewExtension("second", event => {
+			if (event.type !== "plan_review_requested" && event.type !== "plan_review_resolved") return;
+			secondExtensionEvents.push(event.type);
+			if (event.type === "plan_review_resolved") delivered.resolve();
+		});
+		await loadExtensions(firstExtension, secondExtension);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		await delivered.promise;
+
+		expect(accepted).toBe(true);
+		expect(prompt).toHaveBeenCalledWith("split step 2");
+		expect(secondExtensionEvents).toEqual(["plan_review_requested", "plan_review_resolved"]);
+	});
+
+	it("saves a remotely chosen plan under the default name without a path prompt", async () => {
+		const planFilePath = "local://PLAN.md";
+		const planContent = "# Add hello txt\n\nWrite the file.";
+		const title = "Add hello txt";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, planContent);
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		const pathPrompt = vi.spyOn(mode, "showHookCustom");
+		const clear = vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+		let answered: boolean | undefined;
+		const recorder = planReviewRecorder("remote", (event, ctx) => {
+			answered = ctx.resolvePlanReview(event.reviewId, "save");
+		});
+		await loadExtensions(recorder.extension);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title });
+		const resolved = await recorder.resolved;
+
+		const destination = path.join(tempDir.path(), planSaveFileName(title));
+		expect(answered).toBe(true);
+		expect(pathPrompt).not.toHaveBeenCalled();
+		expect(await Bun.file(destination).text()).toBe(planContent);
+		expect(clear).toHaveBeenCalledTimes(1);
+		expect(resolved).toMatchObject({ choice: "save", by: "extension" });
+	});
+
+	it("reports a terminal plan-review pick as local", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
+			(component as PlanReviewOverlay).handleInput("\n");
+			return { hide: vi.fn() } as never;
+		});
+		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const events = observeExtensionEvents(session);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		const resolved = events.find((event): event is PlanReviewResolvedEvent => event.type === "plan_review_resolved");
+		expect(events.map(event => event.type)).toEqual(["plan_review_requested", "plan_review_resolved"]);
+		expect(resolved).toMatchObject({ choice: "execute", by: "local" });
 	});
 
 	it("restores dismissed annotations only when reopening the same plan", async () => {
