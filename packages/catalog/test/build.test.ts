@@ -1123,11 +1123,24 @@ describe("Responses configuration_update compat", () => {
 		});
 	}
 
-	it("turns supportsConfigurationUpdate on for gpt-6-astra on any host and leaves sibling ids off", () => {
-		// The class rule is keyed on the exact id, not on the host: a custom proxy
-		// serving gpt-6-astra gets the item, its gpt-6 neighbour never does.
-		expect(buildModel(astraProxySpec()).compat.supportsConfigurationUpdate).toBe(true);
-		expect(buildModel(astraProxySpec({ id: "gpt-6", name: "GPT-6" })).compat.supportsConfigurationUpdate).toBe(false);
+	it("turns supportsConfigurationUpdate on for the GPT-6 family on any host and leaves GPT-5.6 off", () => {
+		// The class rule is keyed on the GPT-6 revision, not on the host: a custom
+		// proxy serving any GPT-6 id gets the item, earlier generations never do.
+		for (const id of ["gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"]) {
+			expect(buildModel(astraProxySpec({ id, name: id })).compat.supportsConfigurationUpdate).toBe(true);
+		}
+		expect(
+			buildModel(astraProxySpec({ id: "gpt-5.6-sol", name: "GPT-5.6 Sol" })).compat.supportsConfigurationUpdate,
+		).toBe(false);
+	});
+
+	it("keeps OpenRouter's GPT-6 rows on request-level effort changes", () => {
+		const model = buildModel({
+			...astraProxySpec({ id: "openai/gpt-6-sol", name: "OpenAI: GPT-6 Sol" }),
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+		});
+		expect(model.compat.supportsConfigurationUpdate).toBe(false);
 	});
 
 	it("lets a spec-level compat override switch configuration_update off for a custom endpoint", () => {

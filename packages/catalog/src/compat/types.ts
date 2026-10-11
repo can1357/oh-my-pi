@@ -625,6 +625,8 @@ export interface CompiledSeedModel {
 	baseUrl: string;
 	reasoning: boolean;
 	input: ("text" | "image")[];
+	/** Wire model id sent upstream when it differs from the row id (`request-model-id`). */
+	requestModelId?: string;
 	supportsTools?: boolean;
 	cost: TokenCost;
 	contextWindow: number | null;

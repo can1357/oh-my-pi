@@ -29,7 +29,7 @@ import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
 import { readSessionHeaderId } from "../session/session-loader";
-import { FileSessionStorage, tryAcquireSessionLease } from "../session/session-storage";
+import { FileSessionStorage, SESSION_STAGING_RE, tryAcquireSessionLease } from "../session/session-storage";
 import {
 	cfgGcArchive,
 	cfgGcBlobs,
@@ -47,6 +47,7 @@ const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
 const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
 const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
+const SESSION_STAGING_GLOB = new Bun.Glob("**/.*.jsonl.*.tmp");
 const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["pending", "interrupted", "unknown"]);
 const DAY_MS = 86_400_000;
 const GC_WRITE_GRACE_MS = 5 * 60_000;
@@ -99,6 +100,10 @@ export interface ArchiveGcResult {
 	historyRowsDeleted: number;
 	statsRowsDeleted: number;
 	ftsRebuilt: boolean;
+	/** Session staging temps past the write grace, left by a killed or crashed writer. */
+	wouldDeleteTemps: number;
+	deletedTemps: number;
+	tempBytes: number;
 	errors: string[];
 }
 
@@ -404,13 +409,11 @@ async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionF
 }
 
 /**
- * Exact session files recorded in the persistent registry
- * (`<agentDir>/custom-session-files/*`, one marker per transcript whose
- * content is its absolute path). Recording files rather than parent
- * directories preserves `--session` paths outside the root-scan globs,
- * including names without a `.jsonl` suffix.
+ * Paths recorded in the persistent registry (`<agentDir>/custom-session-files/*`).
+ * A first save may leave only its staging temp, so the target need not exist
+ * when reclaiming crash leftovers.
  */
-async function collectRegisteredSessionFiles(registryDir: string): Promise<string[]> {
+async function collectRegisteredSessionPaths(registryDir: string): Promise<string[]> {
 	let entries: string[];
 	try {
 		entries = await fs.readdir(registryDir);
@@ -423,8 +426,6 @@ async function collectRegisteredSessionFiles(registryDir: string): Promise<strin
 		const recorded = (await readTextIfPresent(path.join(registryDir, entry))).trim();
 		if (!recorded) continue;
 		const sessionFile = path.resolve(recorded);
-		const stat = await statIfPresent(sessionFile);
-		if (!stat?.isFile()) continue;
 		files.set(normalizePathForComparison(sessionFile), sessionFile);
 	}
 	return [...files.values()];
@@ -559,7 +560,8 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	const sessionsRoot = getSessionsDir(options.agentDir);
 	const defaultRoots = [sessionsRoot, archiveSessionsRoot];
 	const exactSessionFiles = new Map<string, string>();
-	for (const file of await collectRegisteredSessionFiles(getCustomSessionFilesDir(options.agentDir))) {
+	for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))) {
+		if (!(await statIfPresent(file))?.isFile()) continue;
 		exactSessionFiles.set(normalizePathForComparison(file), file);
 	}
 	for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))) {
@@ -1670,7 +1672,69 @@ async function cleanupStatsRowsForArchivedSessions(
 	}
 }
 
-async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Promise<ArchiveGcResult> {
+/**
+ * Staging temps ({@link SESSION_STAGING_RE}) of `.jsonl` transcripts under
+ * `sessionsRoot`, plus those beside exact session files recorded elsewhere
+ * (`--session` paths, collab replicas).
+ */
+async function collectSessionStagingFiles(sessionsRoot: string, exactSessionFiles: string[]): Promise<string[]> {
+	const files = new Map<string, string>();
+	try {
+		for await (const name of SESSION_STAGING_GLOB.scan({ cwd: sessionsRoot, dot: true })) {
+			if (!SESSION_STAGING_RE.exec(path.basename(name))?.[1]?.endsWith(SESSION_SUFFIX)) continue;
+			const file = path.join(sessionsRoot, name);
+			files.set(normalizePathForComparison(file), file);
+		}
+	} catch (error) {
+		if (codeOf(error) !== "ENOENT") throw error;
+	}
+	for (const sessionFile of exactSessionFiles) {
+		const target = path.basename(sessionFile);
+		for (const file of await listFilesIfPresent(path.dirname(sessionFile))) {
+			if (SESSION_STAGING_RE.exec(path.basename(file))?.[1] === target) {
+				files.set(normalizePathForComparison(file), file);
+			}
+		}
+	}
+	return [...files.values()];
+}
+
+/**
+ * Count, and with `--apply` delete, session staging temps past the write
+ * grace. A live publish renames its temp away within milliseconds, so an
+ * older one was left by a killed or crashed writer and nothing will claim it.
+ */
+async function sweepSessionStagingFiles(
+	options: ResolvedGcOptions,
+	sessionsRoot: string,
+	registeredSessionPaths: string[],
+	result: ArchiveGcResult,
+): Promise<void> {
+	const exactSessionFiles = [
+		...registeredSessionPaths,
+		...(await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))),
+	];
+	const deleteBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
+	for (const file of await collectSessionStagingFiles(sessionsRoot, exactSessionFiles)) {
+		const stat = await statIfPresent(file);
+		if (!stat?.isFile() || stat.mtimeMs > deleteBeforeMs) continue;
+		result.wouldDeleteTemps += 1;
+		result.tempBytes += stat.size;
+		if (!options.apply) continue;
+		try {
+			await fs.unlink(file);
+			result.deletedTemps += 1;
+		} catch (error) {
+			if (codeOf(error) !== "ENOENT") result.errors.push(`${file}: ${errorMessage(error)}`);
+		}
+	}
+}
+
+async function runArchiveGc(
+	options: ResolvedGcOptions,
+	archiveRoot: string,
+	registeredSessionPaths: string[],
+): Promise<ArchiveGcResult> {
 	const sessionsRoot = getSessionsDir(options.agentDir);
 	const sessions = await listActiveSessions(sessionsRoot);
 	const cutoffMs = Date.now() - options.coldArchiveAfterDays * DAY_MS;
@@ -1684,6 +1748,9 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 		historyRowsDeleted: 0,
 		statsRowsDeleted: 0,
 		ftsRebuilt: false,
+		wouldDeleteTemps: 0,
+		deletedTemps: 0,
+		tempBytes: 0,
 		errors: [],
 	};
 	const candidates: ArchiveCandidate[] = [];
@@ -1725,6 +1792,8 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	}
 
 	result.wouldArchive = candidates.length;
+	// Before archiving moves transcripts away from the temps staged beside them.
+	await sweepSessionStagingFiles(options, sessionsRoot, registeredSessionPaths, result);
 	if (!options.apply) return result;
 
 	const archivedSessionIds: string[] = [];
@@ -2001,6 +2070,11 @@ function renderText(result: GcResult): string {
 			`sessions: ${result.archive.archived}/${result.archive.wouldArchive} archived, ${result.archive.historyRowsDeleted} history rows and ${result.archive.statsRowsDeleted} stats rows removed`,
 		);
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
+		if (result.archive.wouldDeleteTemps > 0) {
+			lines.push(
+				`session staging temps: ${result.archive.deletedTemps}/${result.archive.wouldDeleteTemps} files, ${formatBytes(result.archive.tempBytes)}`,
+			);
+		}
 		if (result.archive.errors.length > 0) lines.push(`session errors: ${result.archive.errors.length}`);
 	}
 	if (result.wal) {
@@ -2015,10 +2089,14 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
-		// Stale state first: pruned collab replicas then release their blobs to this run's sweep.
+		// Stale cleanup may prune a missing first-save target's registry marker.
+		const registeredSessionPaths = options.runArchive
+			? await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))
+			: [];
+		// Pruned collab replicas release their blobs to this run's sweep.
 		if (options.runStale) next.stale = await runStaleGc(options);
 		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
-		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot);
+		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);
 		if (options.runWal) next.wal = await runWalGc(options);
 		return next;
 	});

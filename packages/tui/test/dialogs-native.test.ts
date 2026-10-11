@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { setKeybindings, type Component, type TerminalFrameProvider, type TUI } from "@oh-my-pi/pi-tui";
+import { stripVTControlCharacters } from "node:util";
 import { md } from "@oh-my-pi/pi-tui/native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurfaceProvider } from "@oh-my-pi/pi-tui/native/node";
 import { AskDialogComponent, type ExtensionAskDialogQuestion } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
@@ -144,6 +145,69 @@ describe("dialogs under a native surface", () => {
 		expect(recommended?.node.p).toMatchObject({ label: [{ t: "Park them" }], value: [{ t: "Recommended" }] });
 		dialog.handleNativeEvent({ type: "action", key: "x", act: "cancel", mods: [] });
 		expect(onCancel).toHaveBeenCalledTimes(1);
+	});
+
+	it("ask: hiding (Alt+H or Hide) never answers; Enter or Show restores the same pending question", () => {
+		const onSubmit = vi.fn();
+		const onCancel = vi.fn();
+		const dialog = ask(onSubmit, onCancel);
+		const options = () => find(dialog.describe(CX), node => node.p?.role === "omp.ask.options");
+		const press = (act: string) => {
+			const button = find(dialog.describe(CX), node => node.p?.role === "omp.btn" && node.key === act);
+			if (!button) throw new Error(`no ${act} button`);
+			dialog.handleNativeEvent({ type: "action", key: button.path, act, mods: [] });
+		};
+
+		press("hide");
+		expect(options()).toBeUndefined();
+		expect(dialog.render(80)).toHaveLength(1);
+		// A Submit click left over from the expanded bar must not answer the hidden question.
+		dialog.handleNativeEvent({ type: "action", key: "x", act: "submit", mods: [] });
+		dialog.handleInput(ENTER);
+		expect(options()).toBeDefined();
+
+		dialog.handleInput("\x1bh");
+		expect(dialog.render(80)).toHaveLength(1);
+		press("show");
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(onCancel).not.toHaveBeenCalled();
+
+		dialog.handleInput(ENTER);
+		dialog.handleInput(ENTER);
+		dialog.handleInput(ENTER);
+		expect(onSubmit.mock.calls[0]?.[0].results.map((r: { selectedOptions: string[] }) => r.selectedOptions)).toEqual([
+			["Park them"],
+			["Yes"],
+		]);
+	});
+
+	it("ask: hidden while a draft owns input, Enter stays with the draft and only the hide key restores", () => {
+		let draft = "half-typed";
+		const routed: string[] = [];
+		const dialog = new AskDialogComponent(
+			QUESTIONS,
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: async () => undefined },
+			{
+				inputGuard: {
+					isBlocked: () => draft.length > 0,
+					handleInput: key => routed.push(key),
+					hint: "Finish or clear the current prompt to answer",
+				},
+			},
+		);
+		const line = () => stripVTControlCharacters(dialog.render(200).join("\n"));
+
+		dialog.handleInput("\x1bh");
+		expect(line()).toContain("Finish or clear the current prompt to answer");
+		expect(line()).not.toContain("/⏎ show");
+		dialog.handleInput(ENTER);
+		expect(routed).toEqual([ENTER]);
+		expect(dialog.render(200)).toHaveLength(1);
+
+		draft = "";
+		expect(line()).toContain("/⏎ show");
+		dialog.handleInput("\x1bh");
+		expect(dialog.render(200).length).toBeGreaterThan(1);
 	});
 
 	it("plan review: the title heading titles the sheet and is not repeated in the body; Copy copies what `c` does", () => {

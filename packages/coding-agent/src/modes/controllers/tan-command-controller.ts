@@ -131,9 +131,9 @@ export class TanCommandController {
 				// accumulated spend that session cost is otherwise derived from.
 				resetInheritedCost: true,
 				// The parent may be mid-turn: pair any tool call it left unresolved
-				// with a synthetic aborted result so the clone inherits a terminal
-				// transcript instead of rendering the parent's in-flight call as its
-				// own pending work (issue #11118).
+				// with an unknown-outcome result (the parent may still be running it)
+				// so the clone inherits a terminal transcript instead of rendering the
+				// parent's in-flight call as its own pending work (issue #11118).
 				repairInterruptedTail: true,
 			});
 
@@ -168,6 +168,7 @@ export class TanCommandController {
 								agentId: cloneId,
 								agentDisplayName: "tan",
 								parentTaskPrefix: cloneId,
+								asyncJobManager: manager,
 								parentAgentId: ownerId,
 								agentRegistry,
 								disableExtensionDiscovery: true,

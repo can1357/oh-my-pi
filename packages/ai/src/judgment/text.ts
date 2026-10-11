@@ -93,7 +93,15 @@ function renderStateField(key: string, value: JsonValue): string {
 	if (typeof value !== "object" || value === null) {
 		return `${open}${escapeXmlText(value === null ? "null" : String(value))}${close}`;
 	}
-	const yaml = YAML.stringify(value, null, 2).trimEnd();
+	const yaml = YAML.stringify(value, null, 2)
+		// Bun <=1.4.2 emits `key: ` before a nested block and puts an empty
+		// collection on its own line; 1.4.3 emits `key:` and `key: {}`. Pin the
+		// newer form so prompt bytes (and prompt-cache keys) do not depend on the
+		// Bun build. Values with edge whitespace are always quoted, so trimming
+		// line ends never alters data.
+		.replace(/[ \t]+$/gm, "")
+		.replace(/:\n +(\{\}|\[\])$/gm, ": $1")
+		.trimEnd();
 	return `${open}\n${escapeXmlText(yaml)}\n${close}`;
 }
 

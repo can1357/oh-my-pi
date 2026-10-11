@@ -219,10 +219,11 @@ pub fn format_apply_codex_patch_summary(
 
 fn as_patch_input(entry: &ApplyPatchEntry) -> PatchInput<'_> {
 	PatchInput {
-		path:   &entry.path,
-		op:     entry.op,
-		rename: entry.rename.as_deref(),
-		diff:   entry.diff.as_deref(),
+		path:        &entry.path,
+		op:          entry.op,
+		rename:      entry.rename.as_deref(),
+		diff:        entry.diff.as_deref(),
+		first_match: true,
 	}
 }
 
@@ -279,7 +280,7 @@ fn stage_entries(
 		}
 		groups.entry(entry.path.clone()).or_default().push(entry);
 	}
-	let engine = PatchEngine { allow_fuzzy, fuzzy_threshold: threshold };
+	let engine = PatchEngine { allow_fuzzy, fuzzy_threshold: threshold, first_match: true };
 	let mut staged = Vec::with_capacity(groups.len());
 	for path in order {
 		let group = &groups[&path];

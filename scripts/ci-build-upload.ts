@@ -8,9 +8,9 @@
 // Usage:
 //   bun scripts/ci-build-upload.ts <tag> <file>...    # all 8 release binaries
 //
-// Runs in ci.yml's `release_npm` job after the npm publish, on the binaries
-// this run built. Requests the job's GitHub OIDC token for audience
-// `build.stencil.so` (needs `permissions: id-token: write`); the service
+// Runs in ci.yml's `release_build` job (which npm and the Homebrew tap wait
+// for), on the binaries this run built. Requests the job's GitHub OIDC token
+// for audience `build.stencil.so` (needs `permissions: id-token: write`); the service
 // accepts it because release tag <tag> points at the run's commit. Declares
 // the build (version, channel, every file's target/size/sha256, and the version's
 // packages/coding-agent/CHANGELOG.md section as notes when it fits 16 KiB),

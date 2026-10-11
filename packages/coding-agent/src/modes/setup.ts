@@ -53,8 +53,8 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		},
 		modelSource,
 		getModels: () => ({
-			available: ctx.session.modelRegistry.getAvailable(),
-			all: ctx.session.modelRegistry.getAll(),
+			available: ctx.session.modelRegistry.getAvailable("all"),
+			all: ctx.session.modelRegistry.getAll("all"),
 			current: ctx.session.model,
 		}),
 		refreshModels: () => ctx.session.modelRegistry.refresh("online-if-uncached"),

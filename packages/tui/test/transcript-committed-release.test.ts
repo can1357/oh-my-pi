@@ -18,6 +18,7 @@ import { OutputPane } from "@oh-my-pi/pi-tui/render/output-pane";
 import { editToolRenderer } from "@oh-my-pi/pi-tui/tools/edit";
 import { renderMCPResult, setMcpRenderMarkdownResults } from "@oh-my-pi/pi-tui/tools/mcp";
 import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
+import { becomesCollectible } from "./gc";
 import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
 
 const frame = { tick: 0, now: 0 };
@@ -741,18 +742,6 @@ function previewHighlightedLines(renderState: object): WeakRef<object> {
 		if (Array.isArray(lines) && lines.length > 0) return new WeakRef(lines);
 	}
 	throw new Error("expected the streaming call render to keep highlighted preview rows");
-}
-
-/** Whether `target` becomes collectible within `deadlineMs`; a retained target never does. */
-async function becomesCollectible(target: WeakRef<object>, deadlineMs = 3_000): Promise<boolean> {
-	const deadline = performance.now() + deadlineMs;
-	do {
-		// WeakRef targets survive the job that created them; collect from a fresh turn and stack.
-		await Bun.sleep(0);
-		Bun.gc(true);
-		if (target.deref() === undefined) return true;
-	} while (performance.now() < deadline);
-	return false;
 }
 
 describe("Container.invalidate", () => {

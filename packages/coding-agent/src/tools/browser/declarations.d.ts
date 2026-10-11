@@ -13,7 +13,7 @@ interface BrowserAppOptions {
 	tern?: boolean;
 	/** Extra command-line arguments for a spawned executable. */
 	args?: string[];
-	/** URL/title substring used to select an attached tab. */
+	/** URL/title substring used to select an attached tab; inside Tern, adopts the user's browser block it matches (or whose id it is). */
 	target?: string;
 }
 
@@ -149,6 +149,30 @@ interface BrowserOpenOptions {
 	persist?: boolean;
 	/** Open timeout in seconds, excluding first-use browser installation. */
 	timeout?: number;
+}
+
+/** Options for listing the user's pages `app.target` can adopt. */
+interface BrowserTargetsOptions {
+	/** Browser selection as for `open` (e.g. `{ relay: true }`). */
+	app?: BrowserAppOptions;
+	/** Whole-operation timeout in seconds. */
+	timeout?: number;
+}
+
+/** One of the user's own pages `open({ app: { target } })` can adopt. */
+interface BrowserTarget {
+	/** The value to pass as `app.target`: a Tern block id, or a relay page's URL. */
+	target: string;
+	title: string;
+	url: string;
+	/** Whether the page is on screen (relay: the active tab of its window); omitted by older Terns. */
+	shown?: boolean;
+	/** Tern only: false for a picture-in-picture floating over another block. */
+	docked?: boolean;
+	/** Tern only: whether scripts drive the block; omitted by older Terns. */
+	driven?: boolean;
+	/** Tern only: the omp tab of this process holding the block. */
+	tab?: string;
 }
 
 /** Options for releasing managed browser tabs. */
@@ -1619,6 +1643,8 @@ declare const browser: {
 	tab(name?: string): BrowserTab;
 	/** List the session's managed browser tabs. */
 	tabs(): Promise<BrowserManagedTab[]>;
+	/** List the user's own pages `app.target` can adopt: Tern browser blocks inside a Tern pane, or Chrome tabs via the relay. */
+	targets(options?: BrowserTargetsOptions): Promise<BrowserTarget[]>;
 	/** Release one or all managed tabs. */
 	close(options?: BrowserCloseOptions): Promise<void>;
 };

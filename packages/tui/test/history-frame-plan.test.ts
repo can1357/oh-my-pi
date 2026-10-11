@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { withoutTerminalMultiplexer } from "./terminal-multiplexer-environment";
+import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import {
 	type Component,
 	CURSOR_MARKER,

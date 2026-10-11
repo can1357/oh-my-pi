@@ -38,6 +38,11 @@ export declare class DesktopSession {
    * behind it.
    */
   get capabilities(): DesktopCapabilities
+  /**
+   * Lock and display-sleep state read on the calling thread, never queued
+   * behind the worker, so it answers at once even while a request is stuck.
+   */
+  get screenState(): DesktopScreenState
   listDisplays(): Promise<Array<DesktopDisplay>>
   listWindows(): Promise<Array<DesktopWindow>>
   listApplications(options?: ApplicationQuery | undefined | null): Promise<Array<Application>>
@@ -795,6 +800,15 @@ export interface ApplicationQuery {
 }
 
 /**
+ * Applies an `HDiffPatch` single-stream patch to `oldPath`, writing `outPath`.
+ *
+ * Accepts HDIFFSF20 patches, zstd-compressed or uncompressed; `outPath` is
+ * created or truncated. Resolves to the result's size in bytes. Rejects on I/O
+ * failure, a damaged or unsupported patch, or a patch made for other old data.
+ */
+export declare function applyBinaryPatch(oldPath: string, patchPath: string, outPath: string): Promise<number>
+
+/**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
  * a promise.
  */
@@ -1262,6 +1276,16 @@ export interface DesktopCapabilities {
   inputPermission: string
   axPermission: string
   displayCount: number
+  /**
+   * The user session is locked (lock screen up). Only macOS detects this;
+   * other backends report `false`.
+   */
+  screenLocked: boolean
+  /**
+   * The display is asleep, so nothing can be captured until it wakes. Only
+   * macOS detects this; other backends report `false`.
+   */
+  displayAsleep: boolean
 }
 
 export interface DesktopCapture {
@@ -1287,6 +1311,12 @@ export interface DesktopCapture {
   displays: Array<DesktopDisplay>
   backend: string
   displayServer?: string
+  /**
+   * The user session was locked when this frame was taken: a display
+   * capture shows the lock screen, and a window capture shows the window's
+   * last frame behind it. Only macOS detects this; others report `false`.
+   */
+  screenLocked: boolean
 }
 
 export interface DesktopControlState {
@@ -1333,6 +1363,15 @@ export interface DesktopObservation {
 export interface DesktopPoint {
   x: number
   y: number
+}
+
+/**
+ * Lock and display-sleep state of the user session, read live per call.
+ * Only macOS detects either; other platforms report both as `false`.
+ */
+export interface DesktopScreenState {
+  screenLocked: boolean
+  displayAsleep: boolean
 }
 
 export interface DesktopSessionOptions {
@@ -1953,6 +1992,11 @@ export interface GrepMatch {
   contextAfter?: Array<ContextLine>
   /** Whether the line was truncated. */
   truncated?: boolean
+  /**
+   * 1-indexed character column where the first match on a truncated line
+   * starts; the truncated `line` shows a window around it.
+   */
+  column?: number
   /** Per-file match count (count mode only). */
   matchCount?: number
 }
@@ -2396,6 +2440,11 @@ export interface Match {
   contextAfter?: Array<ContextLine>
   /** Whether the line was truncated. */
   truncated?: boolean
+  /**
+   * 1-indexed character column where the first match on a truncated line
+   * starts; the truncated `line` shows a window around it.
+   */
+  column?: number
 }
 
 /**
@@ -3438,9 +3487,8 @@ export interface SummarySegment {
 }
 
 /**
- * Check if a language is supported for highlighting.
- * Returns true if the language has either direct support or a fallback
- * mapping.
+ * Check if a language resolves to a grammar (by name, extension or alias),
+ * i.e. whether `highlightCode` colors it rather than echoing it.
  */
 export declare function supportsLanguage(lang: string): boolean
 
