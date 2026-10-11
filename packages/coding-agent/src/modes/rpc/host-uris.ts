@@ -3,6 +3,7 @@ import { InternalUrlRouter } from "../../internal-urls";
 import type {
 	InternalResource,
 	InternalUrl,
+	InternalWriteResult,
 	ProtocolHandler,
 	ResolveContext,
 	SchemeSpec,
@@ -39,7 +40,7 @@ export function isRpcHostUriResult(value: unknown): value is RpcHostUriResult {
 class RpcHostUriProtocolHandler implements ProtocolHandler {
 	readonly scheme: string;
 	readonly spec: SchemeSpec;
-	readonly write?: (url: InternalUrl, content: string, context?: WriteContext) => Promise<void>;
+	readonly write?: ProtocolHandler["write"];
 	readonly #bridge: RpcHostUriBridge;
 
 	constructor(definition: RpcHostUriSchemeDefinition, bridge: RpcHostUriBridge) {
@@ -175,10 +176,18 @@ export class RpcHostUriBridge {
 		};
 	}
 
-	async requestWrite(_scheme: string, url: InternalUrl, content: string, context?: WriteContext): Promise<void> {
+	async requestWrite(
+		_scheme: string,
+		url: InternalUrl,
+		content: string,
+		context?: WriteContext,
+	): Promise<InternalWriteResult | void> {
 		const result = await this.#dispatch("write", url.href, content, context?.signal);
 		if (result.isError) {
 			throw new Error(result.error || result.content || `Host URI write failed for ${url.href}`);
+		}
+		if (typeof result.content === "string") {
+			return { content: [{ type: "text", text: result.content }] };
 		}
 	}
 

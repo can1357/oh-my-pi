@@ -1450,7 +1450,13 @@ For successful reads:
 }
 ```
 
-For successful writes, omit content:
+For successful writes, optionally send `content` as the write tool's result:
+
+```json
+{ "type": "host_uri_result", "id": "uri_1", "content": "Updated row 42; version 2" }
+```
+
+Empty `content` returns an empty text result; omitting it keeps the default write acknowledgement:
 
 ```json
 { "type": "host_uri_result", "id": "uri_1" }
