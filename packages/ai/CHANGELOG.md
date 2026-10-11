@@ -61,6 +61,8 @@
 
 ### Fixed
 
+- Fixed DeepSeek thinking-mode continuations sending an empty `reasoning_content` after cross-API history demoted the saved chain into a `<think>` block in assistant content, which DeepSeek rejects as `reasoning_content must be passed back` ([#15028](https://github.com/can1357/oh-my-pi/pull/15028) by [@yugasun](https://github.com/yugasun)).
+
 - Fixed Claude Haiku 5.5 requests silently enabling adaptive thinking when reasoning is off, on native Bedrock (main and helper calls) and the Anthropic API; conversations whose earlier effort controls rule out disabled thinking fall back to lowest-effort adaptive thinking instead of failing ([#14996](https://github.com/can1357/oh-my-pi/pull/14996) by [@bse-ai](https://github.com/bse-ai)).
 - Fixed `/session pin` being ignored when every stored account is quota-blocked, which routed the next request to a different exhausted account instead of the pinned one ([#14997](https://github.com/can1357/oh-my-pi/issues/14997)).
 - Fixed `minimax-code-cn` sessions staying pinned to a key whose Token Plan quota is exhausted (`用量上限` 429) instead of rotating to a sibling credential ([#15053](https://github.com/can1357/oh-my-pi/issues/15053)).

@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect";
 import { convertMessages } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { AssistantMessage, Model, ModelSpec, ThinkingContent, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -332,8 +331,55 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			const messages = convertMessages(model, { messages: [msg] }, compat);
 			const assistant = findOpenAICompletionAssistantWireMessage(messages);
 			expect(assistant).toBeDefined();
+			expect(assistant?.reasoning_content).toBe("Need to preserve cross-api reasoning.");
+			expect(assistant?.content).not.toContain("<think>");
+		});
+		it("keeps an unmarked literal think block in visible content", () => {
+			const model = deepseekModel({
+				provider: "opencode-go",
+				baseUrl: "https://opencode.ai/zen/go/v1",
+				id: "deepseek-v4-flash",
+			});
+			const compat = model.compat;
+			const msg = assistantToolCall(model, [
+				{ type: "text", text: "<think>\nvisible text\n</think>\nactual answer" },
+				{
+					type: "toolCall",
+					id: "toolu_literal_think",
+					name: "read",
+					arguments: { path: "README.md" },
+				},
+			]);
+			const messages = convertMessages(model, { messages: [msg] }, compat);
+			const assistant = findOpenAICompletionAssistantWireMessage(messages);
 			expect(assistant?.reasoning_content).toBe("");
-			expect(assistant?.content).toBe(renderDemotedThinking(model.id, "Need to preserve cross-api reasoning."));
+			expect(assistant?.content).toBe("<think>\nvisible text\n</think>\nactual answer");
+		});
+		it("replays interleaved demoted thinking blocks from either side of visible text", () => {
+			const model = deepseekModel({
+				provider: "opencode-go",
+				baseUrl: "https://opencode.ai/zen/go/v1",
+				id: "deepseek-v4-flash",
+			});
+			const compat = model.compat;
+			const msg = assistantToolCall(model, [
+				{ type: "thinking", thinking: "first", thinkingSignature: "sig_a" },
+				{ type: "text", text: "visible" },
+				{ type: "thinking", thinking: "second", thinkingSignature: "sig_b" },
+				{
+					type: "toolCall",
+					id: "toolu_interleaved",
+					name: "read",
+					arguments: { path: "README.md" },
+				},
+			]);
+			msg.api = "anthropic-messages";
+			msg.provider = "zai";
+			msg.model = "claude-compatible";
+			const messages = convertMessages(model, { messages: [msg] }, compat);
+			const assistant = findOpenAICompletionAssistantWireMessage(messages);
+			expect(assistant?.reasoning_content).toBe("first\nsecond");
+			expect(assistant?.content).toBe("visible");
 		});
 		it("falls through to empty-string when thinking block has opaque signature and empty text", () => {
 			const model = deepseekModel({
