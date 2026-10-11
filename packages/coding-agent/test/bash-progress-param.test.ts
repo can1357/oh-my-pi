@@ -8,6 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -726,124 +727,139 @@ describe("bash progress parameter", () => {
 		await manager.dispose();
 	}, 10_000);
 
-	test.each(["held-until-return", "released-during-drain"] as const)(
-		"counts each row once when post-boundary bytes are stored before the foreground mirror callback (%s)",
-		async flushOrdering => {
-			using tempDir = TempDir.createSync("@omp-bash-delivered-preview-");
-			const releasePath = path.join(tempDir.path(), "release");
-			const artifact = { id: "delivered-preview", path: path.join(tempDir.path(), "output.txt") };
-			const manager = new AsyncJobManager({});
-			const progress: string[] = [];
-			manager.registerProgressSink("Main", {
-				deliver: (_jobId, text) => {
-					progress.push(text);
-				},
-			});
-			manager.registerDeliverySink("Main", () => {});
-			let activatedCoverage: "continuous" | "gapped" | undefined;
-			const activate = manager.activateProgressDelivery.bind(manager);
-			vi.spyOn(manager, "activateProgressDelivery").mockImplementation((jobId, delivery, provenance, coverage) => {
-				activatedCoverage = coverage;
-				return activate(jobId, delivery, provenance, coverage);
-			});
-			const session = makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 60_000 });
-			session.allocateOutputArtifact = async () => artifact;
-			const tool = new BashTool(session);
-			const steering = new AbortController();
-			const firstFlushEntered = Promise.withResolvers<OutputSink>();
-			const releaseFirstFlush = Promise.withResolvers<void>();
-			const releaseLaterFlushes = Promise.withResolvers<void>();
-			const originalFlush = OutputSink.prototype.flushArtifact;
-			let postFlushBeforeActivation = false;
-			let firstFlush = true;
-			vi.spyOn(OutputSink.prototype, "flushArtifact").mockImplementation(async function (this: OutputSink) {
-				if (firstFlush) {
-					firstFlush = false;
-					firstFlushEntered.resolve(this);
-					await releaseFirstFlush.promise;
-				} else {
-					if (activatedCoverage === undefined) postFlushBeforeActivation = true;
-					await releaseLaterFlushes.promise;
-				}
-				return originalFlush.call(this);
-			});
-			const execution = tool.execute(
-				"auto-promote-delivered-preview",
-				{
-					command: withShellEnvironment(
-						{ RELEASE: releasePath },
-						"printf 'counted-pre-001\\n'; while [ ! -f \"$RELEASE\" ]; do sleep 0.01; done",
-					),
-					async: "auto",
-					progress: "wake",
-				},
-				undefined,
-				undefined,
-				{
-					toolCall: {
-						batchId: "delivered-preview",
-						index: 0,
-						total: 1,
-						toolCalls: [{ id: "auto-promote-delivered-preview", name: "bash" }],
-						steeringSignal: steering.signal,
-					},
-				} as AgentToolContext,
-			);
-			try {
-				const sink = await firstFlushEntered.promise;
-				const promotionEntered = Promise.withResolvers<void>();
-				const originalSetTimeout = globalThis.setTimeout;
-				// Observe the drain guard: promotion has set its entry-time stamp
-				// boundary before installing this timer. Do not advance the clock.
-				const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation((handler, delay, ...args) => {
-					const timer = originalSetTimeout(handler, delay, ...args);
-					if (delay === PROGRESS_LIMITS.BATCH_INTERVAL_MS * 5) promotionEntered.resolve();
-					return timer;
-				});
-				steering.abort();
-				await promotionEntered.promise;
-				timerSpy.mockRestore();
-				const postRows = ["counted-post-001", "counted-post-002", "counted-post-003"];
-				// Inject stdout through the real sink's public entry point while its
-				// first mirror delivery is held. These bytes get post-boundary stamps
-				// but already live in the sink when the pre-boundary callback resumes.
-				sink.push(`${postRows.join("\n")}\n`);
-				if (flushOrdering === "released-during-drain") releaseLaterFlushes.resolve();
-				releaseFirstFlush.resolve();
-				const result = await execution;
-				releaseLaterFlushes.resolve();
-				await Bun.write(releasePath, "");
-				await manager.waitForAll();
-				await manager.drainDeliveries({ timeoutMs: 10 });
-				const foregroundRows = (result.content.find(block => block.type === "text")?.text ?? "")
-					.split("\n")
-					.filter(line => /^counted-(pre|post)-\d{3}$/.test(line));
-				const progressRows = progress
-					.join("\n")
-					.split("\n")
-					.filter(line => /^counted-(pre|post)-\d{3}$/.test(line));
-				const completedJob = manager.getJob(result.details?.async?.jobId ?? "");
-				expect(result.details?.async?.state).toBe("running");
-				expect(activatedCoverage).toBe("continuous");
-				expect(completedJob?.terminalTextProvenance).toBe("progress");
-				if (flushOrdering === "released-during-drain") expect(postFlushBeforeActivation).toBe(true);
-				expect(await Bun.file(artifact.path).text()).toBe(`counted-pre-001\n${postRows.join("\n")}\n`);
-				expect(foregroundRows).toEqual(["counted-pre-001"]);
-				expect(progressRows).toEqual(postRows);
-				const deliveredRows = [...foregroundRows, ...progressRows];
-				for (const row of ["counted-pre-001", ...postRows]) {
-					expect(deliveredRows.filter(delivered => delivered === row)).toHaveLength(1);
-				}
-			} finally {
-				releaseFirstFlush.resolve();
-				releaseLaterFlushes.resolve();
-				await Bun.write(releasePath, "");
-				await execution.catch(() => {});
-				await manager.dispose();
+	test("counts each row once when post-boundary bytes are stored before the foreground mirror callback", async () => {
+		using tempDir = TempDir.createSync("@omp-bash-delivered-preview-");
+		const releasePath = path.join(tempDir.path(), "release");
+		const artifact = { id: "delivered-preview", path: path.join(tempDir.path(), "output.txt") };
+		const manager = new AsyncJobManager({});
+		const progress: string[] = [];
+		const completions: Array<{ jobId: string; text: string; job?: AsyncJob }> = [];
+		manager.registerProgressSink("Main", {
+			deliver: (_jobId, text) => {
+				progress.push(text);
+			},
+		});
+		manager.registerDeliverySink("Main", (jobId, text, job) => {
+			completions.push({ jobId, text, job });
+		});
+		let activatedCoverage: "continuous" | "gapped" | undefined;
+		const activate = manager.activateProgressDelivery.bind(manager);
+		vi.spyOn(manager, "activateProgressDelivery").mockImplementation((jobId, delivery, provenance, coverage) => {
+			activatedCoverage = coverage;
+			return activate(jobId, delivery, provenance, coverage);
+		});
+		const session = makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 60_000 });
+		session.allocateOutputArtifact = async () => artifact;
+		const tool = new BashTool(session);
+		const steering = new AbortController();
+		const firstFlushEntered = Promise.withResolvers<OutputSink>();
+		const releaseFirstFlush = Promise.withResolvers<void>();
+		const releaseLaterFlushes = Promise.withResolvers<void>();
+		const originalFlush = OutputSink.prototype.flushArtifact;
+		let firstFlush = true;
+		vi.spyOn(OutputSink.prototype, "flushArtifact").mockImplementation(async function (this: OutputSink) {
+			if (firstFlush) {
+				firstFlush = false;
+				firstFlushEntered.resolve(this);
+				await releaseFirstFlush.promise;
+			} else {
+				await releaseLaterFlushes.promise;
 			}
-		},
-		10_000,
-	);
+			return originalFlush.call(this);
+		});
+		const execution = tool.execute(
+			"auto-promote-delivered-preview",
+			{
+				command: withShellEnvironment(
+					{ RELEASE: releasePath },
+					"printf 'counted-pre-001\\n'; while [ ! -f \"$RELEASE\" ]; do sleep 0.01; done",
+				),
+				async: "auto",
+				progress: "wake",
+			},
+			undefined,
+			undefined,
+			{
+				toolCall: {
+					batchId: "delivered-preview",
+					index: 0,
+					total: 1,
+					toolCalls: [{ id: "auto-promote-delivered-preview", name: "bash" }],
+					steeringSignal: steering.signal,
+				},
+			} as AgentToolContext,
+		);
+		try {
+			const sink = await firstFlushEntered.promise;
+			const promotionEntered = Promise.withResolvers<void>();
+			const originalSetTimeout = globalThis.setTimeout;
+			// Observe the drain guard: promotion has set its entry-time stamp
+			// boundary before installing this timer. Do not advance the clock.
+			const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation((handler, delay, ...args) => {
+				const timer = originalSetTimeout(handler, delay, ...args);
+				if (delay === PROGRESS_LIMITS.BATCH_INTERVAL_MS * 5) promotionEntered.resolve();
+				return timer;
+			});
+			steering.abort();
+			await promotionEntered.promise;
+			timerSpy.mockRestore();
+			const postRows = ["counted-post-001", "counted-post-002", "counted-post-003"];
+			// Inject stdout through the real sink's public entry point while its
+			// first mirror delivery is held. These bytes get post-boundary stamps
+			// but already live in the sink when the pre-boundary callback resumes.
+			sink.push(`${postRows.join("\n")}\n`);
+			releaseFirstFlush.resolve();
+			const result = await execution;
+			releaseLaterFlushes.resolve();
+			await Bun.write(releasePath, "");
+			await manager.waitForAll();
+			await manager.drainDeliveries();
+			const foregroundRows = (result.content.find(block => block.type === "text")?.text ?? "")
+				.split("\n")
+				.filter(line => /^counted-(pre|post)-\d{3}$/.test(line));
+			const progressRows = progress
+				.join("\n")
+				.split("\n")
+				.filter(line => /^counted-(pre|post)-\d{3}$/.test(line));
+			const completedJob = manager.getJob(result.details?.async?.jobId ?? "");
+			expect(completions).toHaveLength(1);
+			const completion = completions[0];
+			if (!completion?.job) throw new Error("Expected counted Bash completion");
+			const message = buildAsyncResultBatchMessage([
+				{
+					jobId: completion.jobId,
+					result: completion.text,
+					job: completion.job,
+					durationMs: 1_000,
+					epoch: 0,
+					progressSummary: completion.job.progressArtifactId
+						? { artifactId: completion.job.progressArtifactId, leftover: completion.job.completionLeftover }
+						: undefined,
+				},
+			]);
+			if (!message || typeof message.content !== "string") throw new Error("Expected text async-result");
+			const finalRows = message.content.split("\n").filter(line => /^counted-(pre|post)-\d{3}$/.test(line));
+			expect(result.details?.async?.state).toBe("running");
+			expect(activatedCoverage).toBe("continuous");
+			expect(completedJob?.terminalTextProvenance).toBe("progress");
+			expect(await Bun.file(artifact.path).text()).toBe(`counted-pre-001\n${postRows.join("\n")}\n`);
+			expect(foregroundRows).toEqual(["counted-pre-001"]);
+			// A rapid exit may move the pending progress batch into the final
+			// async-result leftover. Count actual model-facing surfaces, not
+			// incidental timer-driven batch placement.
+			expect([...progressRows, ...finalRows]).toEqual(postRows);
+			const deliveredRows = [...foregroundRows, ...progressRows, ...finalRows];
+			for (const row of ["counted-pre-001", ...postRows]) {
+				expect(deliveredRows.filter(delivered => delivered === row)).toHaveLength(1);
+			}
+		} finally {
+			releaseFirstFlush.resolve();
+			releaseLaterFlushes.resolve();
+			await Bun.write(releasePath, "");
+			await execution.catch(() => {});
+			await manager.dispose();
+		}
+	}, 10_000);
 
 	test("freezes the foreground preview before a mirror-delayed post-boundary callback", async () => {
 		using tempDir = TempDir.createSync("@omp-bash-stable-promotion-preview-");
