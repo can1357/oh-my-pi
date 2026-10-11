@@ -69,6 +69,11 @@ export class BashExecutionComponent extends Container {
 	#blockVersion = 0;
 	#displayDirty = false;
 	#chunkGate = false;
+	// True while the retained lines are only a tail window of a longer live
+	// stream (STREAMING_LINE_CAP dropped earlier rows). A replay or a completed
+	// run seeds its full output and clears this, so the collapsed footer knows
+	// whether expanding can actually deliver the lines it counts.
+	#liveTruncated = false;
 	#contentContainer: Container;
 	#outputPane: OutputPane;
 	#headerText: Text;
@@ -245,6 +250,9 @@ export class BashExecutionComponent extends Container {
 		// Cap stored lines during streaming to avoid unbounded memory growth
 		if (this.#outputLines.length > STREAMING_LINE_CAP) {
 			this.#outputLines = this.#outputLines.slice(-STREAMING_LINE_CAP);
+			// The rows above the cap are gone, not merely hidden behind the
+			// collapsed preview: the footer must not advertise ctrl+o for them.
+			this.#liveTruncated = true;
 		}
 
 		this.#displayDirty = true;
@@ -334,6 +342,9 @@ export class BashExecutionComponent extends Container {
 		while (rows.length > 0 && rows[rows.length - 1] === "") rows.pop();
 		const base = theme.getFgAnsi("muted");
 		this.#outputLines = rows.map(row => (row ? styleTerminalRow(row, base) : ""));
+		// The final read spans the whole scrollback; a mid-stream refresh only
+		// reads the tail window, so rows above it are not in the block yet.
+		this.#liveTruncated = !full && startRow > 0;
 		this.#displayDirty = true;
 		this.#outputVersion++;
 	}
@@ -451,6 +462,9 @@ export class BashExecutionComponent extends Container {
 				artifactError: this.#artifactError,
 				hiddenLineCount,
 				suppressHiddenCount: hasSixelOutput,
+				// A live tail window cannot deliver the rows the cap dropped, so the
+				// footer must not advertise ctrl+o as a route to them.
+				expandRecoversHidden: !this.#liveTruncated,
 			});
 			if (footer) this.#contentContainer.addChild(footer);
 		}
@@ -473,6 +487,10 @@ export class BashExecutionComponent extends Container {
 	#setOutput(output: string): void {
 		const clean = sanitizeWithOptionalSixelPassthrough(output, sanitizeText);
 		this.#outputLines = clean ? this.#clampLinesPreservingSixel(clean.split("\n")) : [];
+		// A complete snapshot replaces the streaming tail window: what the cap
+		// dropped while streaming is irrelevant now, so the footer's hidden count
+		// is the true total and every line it counts survives expansion.
+		this.#liveTruncated = false;
 		this.#outputVersion++;
 	}
 
