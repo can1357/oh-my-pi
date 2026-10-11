@@ -1070,6 +1070,118 @@ describe("computer prelude", () => {
 		}
 	});
 
+	it("double-clicks JavaScript elements and names the element call made on find()'s array", async () => {
+		const session = toolSession();
+		const native = new RefCallSession();
+		const prelude = workerPrelude(session, native);
+		const context = { session, toolCallId: "element-shape-js" };
+		const realm = createContext({
+			__omp_display__: () => {},
+			__omp_prelude__: async (_name: string, parameters: unknown) => {
+				const result = await prelude.invoke(parameters, context);
+				return { text: "", details: result.details };
+			},
+		});
+		runInContext(prelude.javascript, realm);
+		try {
+			const shape = await runInContext(
+				`(async () => {
+					const win = await computer.window(42);
+					await win.ref("e1").doubleClick({ button: "right" });
+					await (await win.ref("e1")).doubleClick({ count: 3 });
+					const found = await win.find({ role: "button" });
+					await found[0].doubleClick();
+					await computer.run(async ({ desktop }) => {
+						await desktop.ref("e1").doubleClick();
+						const [el] = await (await desktop.window(42)).find({ role: "button" });
+						await el.doubleClick();
+					});
+					return { json: JSON.stringify(found), keys: Object.keys(found), spread: [...found].length };
+				})()`,
+				realm,
+			);
+			expect({ ...shape, json: JSON.parse(shape.json) }).toEqual({
+				json: [expect.objectContaining({ ref: "e1", role: "button" })],
+				keys: ["0"],
+				spread: 1,
+			});
+			expect(native.axCalls.filter(call => (call as unknown[])[0] === "axClick")).toEqual([
+				["axClick", "e1", { button: "right", count: 2 }],
+				["axClick", "e1", { count: 2 }],
+				["axClick", "e1", { count: 2 }],
+				["axClick", "e1", { count: 2 }],
+				["axClick", "e1", { count: 2 }],
+			]);
+			const misuse = await runInContext(
+				`(async () => {
+					const win = await computer.window(42);
+					const found = await win.find({ role: "button", title: "Run" });
+					const messages = [];
+					for (const misuse of [() => found.press(), () => win.ref(found.ref)]) {
+						try {
+							await misuse();
+						} catch (error) {
+							messages.push(error.message);
+						}
+					}
+					return messages;
+				})()`,
+				realm,
+			);
+			expect(misuse).toHaveLength(2);
+			expect(misuse[0]).toContain("find() returns an array (length 1), not one element, so it has no press()");
+			expect(misuse[0]).toContain("const [el] = await win.find(");
+			expect(misuse[1]).toContain("find() returns an array (length 1), not one element, so it has no ref;");
+		} finally {
+			await prelude.invoke({ action: "close" }, context);
+		}
+	});
+
+	it("double-clicks Python elements and names the element attribute read on find()'s list", async () => {
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
+		const native = new RefCallSession();
+		const prelude = workerPrelude(session, native);
+		definitions = [prelude];
+		try {
+			const result = await executePython(
+				[
+					"import copy",
+					"win = await computer.window(42)",
+					'await win.ref("e1").doubleClick(button="right")',
+					'found = await win.find({"role": "button"})',
+					"await found[0].doubleClick()",
+					"try:",
+					"    await found.press()",
+					"except AttributeError as error:",
+					"    print(error)",
+					"print(hasattr(found, 'click'), hasattr(found, 'nope'))",
+					"print([element.ref for element in found], found)",
+					"print(type(copy.copy(found)).__name__, type(copy.deepcopy(found)).__name__)",
+				].join("\n"),
+				{
+					cwd: process.cwd(),
+					sessionId: `computer-element-shape-py-${crypto.randomUUID()}`,
+					toolSession: session,
+					kernelMode: "per-call",
+				},
+			);
+			expect(result.exitCode).toBe(0);
+			const lines = result.output.trim().split("\n");
+			expect(lines[0]).toContain("find() returns a list (length 1), not one element, so it has no press");
+			expect(lines[0]).toContain("el = (await win.find(query))[0]");
+			expect(lines[1]).toBe("False False");
+			expect(lines[2]).toStartWith("['e1'] [<");
+			expect(lines[3]).toBe("list list");
+			expect(native.axCalls.filter(call => (call as unknown[])[0] === "axClick")).toEqual([
+				["axClick", "e1", { button: "right", count: 2 }],
+				["axClick", "e1", { count: 2 }],
+			]);
+		} finally {
+			await prelude.invoke({ action: "close" }, { session, toolCallId: "element-shape-py-close" });
+		}
+	});
+
 	it("treats text-only Python host responses as unavailable capabilities", async () => {
 		const calls: unknown[] = [];
 		let definitions: readonly EvalPreludeDefinition[] = [];
@@ -1740,6 +1852,71 @@ describe("computer worker round trips", () => {
 		);
 		expect(clicked.ok).toBe(true);
 		expect(native.clickCount).toBe(1);
+	});
+
+	it("returns find() results as plain arrays whose element calls name the pick, and gates element doubleClick as exec", async () => {
+		const transport = new MemoryTransport();
+		const axClicks: unknown[] = [];
+		new ComputerWorkerCore(
+			transport,
+			() =>
+				new (class extends FakeNativeSession {
+					override async axClick(ref: string, opts?: PointerOptions | null): Promise<void> {
+						axClicks.push([ref, opts]);
+					}
+				})(),
+		);
+
+		const found = await runWorker(
+			transport,
+			"call-find",
+			renderComputerCall([
+				{ method: "window", args: ["42"] },
+				{ method: "find", args: [{ role: "button" }] },
+			]),
+			true,
+		);
+		expect(found.ok).toBe(true);
+		if (found.ok) expect(found.payload.returnValue).toEqual([expect.objectContaining({ ref: "e1", role: "button" })]);
+
+		const misuse = await runWorker(
+			transport,
+			"find-misuse",
+			'await (await (await desktop.window(42)).find({ role: "button" })).doubleClick()',
+		);
+		expect(misuse.ok).toBe(false);
+		if (!misuse.ok) {
+			expect(misuse.error.message).toContain(
+				"find() returns an array (length 1), not one element, so it has no doubleClick()",
+			);
+		}
+		const fieldRead = await runWorker(
+			transport,
+			"find-field-read",
+			'(await (await desktop.window(42)).find({ role: "button" })).enabled',
+		);
+		expect(fieldRead.ok).toBe(false);
+		if (!fieldRead.ok) {
+			expect(fieldRead.error.message).toContain(
+				"find() returns an array (length 1), not one element, so it has no enabled;",
+			);
+		}
+
+		const doubleClick = [
+			{ method: "ref", args: ["e1"] },
+			{ method: "doubleClick", args: [] },
+		];
+		const blocked = await runWorker(transport, "call-double-click-ro", renderComputerCall(doubleClick), true);
+		expect(blocked.ok).toBe(false);
+		expect(axClicks).toEqual([]);
+		const clicked = await runWorker(
+			transport,
+			"call-double-click",
+			renderComputerCall(doubleClick),
+			isReadOnlyComputerCall(doubleClick),
+		);
+		expect(clicked.ok).toBe(true);
+		expect(axClicks).toEqual([["e1", { count: 2 }]]);
 	});
 
 	it("applies the current read-only policy to a retained writable window", async () => {

@@ -124,14 +124,14 @@ Menu/app labels are untrusted data. A takeover grant does not authorize unrelate
 ### Accessibility
 
 - `win.ax({ all?, maxDepth? }) -> string` returns the native textual accessibility tree with `[ref=eN]` references.
-- `win.find({ role?, title?, value?, limit? }) -> El[]` returns all native matches within the requested limit.
+- `win.find({ role?, title?, value?, limit? }) -> El[]` returns all native matches within the requested limit as an array; calling an element method or reading an element field on the array itself throws a `TypeError` that says to pick one first (`const [el] = await win.find(...)`).
 - `await win.ref("e5") -> El` and `await desktop.ref("e5") -> El` resolve a live native reference. The handle `ref()` returns also takes element methods directly, so `win.ref("e5").click()` needs no inner `await`.
 - `desktop.elementAt(x, y)` and `desktop.focusedElement()` return `El | null`.
 
 `El` exposes snapshot fields `ref`, `role`, `nativeRole`, optional `title`/`description`, `enabled`, `focused`, and `childCount`, plus:
 
 - reads: `value()`, `bounds()`, `attributes()`, `actions()`, `parent()`, `children()`;
-- mutations: `setValue(value)`, `perform(action)`, `press()`, `click({ button?, count?, modifiers?, takeover? })`, and `focus()`.
+- mutations: `setValue(value)`, `perform(action)`, `press()`, `click({ button?, count?, modifiers?, takeover? })`, `doubleClick({ button?, modifiers?, takeover? })`, and `focus()`.
 
 On macOS, `setValue` on a date or time control (one whose `AXValue` is a date) takes ISO-8601: `YYYY-MM-DD` changes the day and keeps the control's time of day, `YYYY-MM-DDTHH:MM[:SS]` is local time, and a date-time followed by `Z` or `±HH:MM` is that exact instant. Anything else is refused before a write, naming these forms and the control's current date, as is a local time that daylight saving skips or repeats (add an offset to pick a repeated one).
 

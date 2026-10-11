@@ -387,6 +387,12 @@ class El {
 		await nativeCall(context.signal, () => this.#session.axClick(this.ref, pointerOptions(options)));
 	}
 
+	async doubleClick(options?: Omit<ClickOptions, "count">): Promise<void> {
+		const context = this.#getContext();
+		guardRun(context, "doubleClick");
+		await nativeCall(context.signal, () => this.#session.axClick(this.ref, pointerOptions({ ...options, count: 2 })));
+	}
+
 	async focus(): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "focus");
@@ -405,6 +411,32 @@ class El {
 			node => new El(this.#session, this.#getContext, node),
 		);
 	}
+}
+
+const ELEMENT_FIELDS = ["ref", "role", "nativeRole", "title", "description", "enabled", "focused", "childCount"];
+
+/** `find()`'s array answers element field reads and calls with how to pick one, instead of `undefined` or "is not a function". */
+function foundElements(elements: El[]): El[] {
+	const pickOne = (member: string): TypeError =>
+		new TypeError(
+			`find() returns an array (length ${elements.length}), not one element, so it has no ${member}; pick one first: const [el] = await win.find(query)`,
+		);
+	for (const method of Object.getOwnPropertyNames(El.prototype)) {
+		if (method === "constructor") continue;
+		Object.defineProperty(elements, method, {
+			value: () => {
+				throw pickOne(`${method}()`);
+			},
+		});
+	}
+	for (const field of ELEMENT_FIELDS) {
+		Object.defineProperty(elements, field, {
+			get: () => {
+				throw pickOne(field);
+			},
+		});
+	}
+	return elements;
 }
 
 /** `await ref("e5")` resolves the element; its methods chain on the handle and await the lookup first. */
@@ -469,6 +501,10 @@ class ElRef implements PromiseLike<El> {
 
 	async click(options?: ClickOptions): Promise<void> {
 		await (await this.#resolve()).click(options);
+	}
+
+	async doubleClick(options?: Omit<ClickOptions, "count">): Promise<void> {
+		await (await this.#resolve()).doubleClick(options);
 	}
 
 	async focus(): Promise<void> {
@@ -644,8 +680,10 @@ class Win {
 
 	async find(query: AxQuery): Promise<El[]> {
 		const { signal } = this.#getContext();
-		return (await nativeCall(signal, () => this.#session.axQuery(this.id, query))).map(
-			node => new El(this.#session, this.#getContext, node),
+		return foundElements(
+			(await nativeCall(signal, () => this.#session.axQuery(this.id, query))).map(
+				node => new El(this.#session, this.#getContext, node),
+			),
 		);
 	}
 
