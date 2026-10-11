@@ -42,3 +42,5 @@ $R calibration-check $O/calib-a.json $O/calib-b.json
 ```
 
 Set `MEMORY_EVAL_DEBUG_SCORES=<file.jsonl>` for both runs to append the score, tier and id of every returned memory per question. A reordering whose scores are equal is a tie; Mnemosyne's recency decay reads the wall clock, so scores can also differ between runs by about 1e-4.
+
+`calibration-check` can exit 1 on equal-score ties or recency near-ties; check those reorderings with `MEMORY_EVAL_DEBUG_SCORES`.

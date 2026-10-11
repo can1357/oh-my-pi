@@ -63,6 +63,13 @@ const conversations: UpstreamCompatConversation[] = [
 ];
 
 describe("runUpstreamCompat", () => {
+	it("aborts when no vectors exist after ingest", async () => {
+		const fake = fakeEngine();
+		fake.engine.vectorCount = async () => 0;
+		await expect(runUpstreamCompat(fake.engine, conversations)).rejects.toThrow("embeddings unavailable");
+		expect(fake.consolidated).toEqual([]);
+	});
+
 	it("ingests like upstream: one store, non-blank messages, global ids, source bench", async () => {
 		const fake = fakeEngine();
 		await runUpstreamCompat(fake.engine, conversations);
