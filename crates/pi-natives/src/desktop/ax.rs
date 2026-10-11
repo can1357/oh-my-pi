@@ -523,10 +523,10 @@ fn shown_actions(props: &AxProps) -> Option<String> {
 	let role = props.role.as_str();
 	let mut names = Vec::with_capacity(props.actions.len());
 	for action in &props.actions {
-		if action.starts_with("Name:") {
+		let Some(name) = action.strip_prefix("AX") else {
 			continue;
-		}
-		names.push(action.strip_prefix("AX")?);
+		};
+		names.push(name);
 	}
 	if !pressable(role) || names.contains(&"Press") {
 		names.retain(|name| {
@@ -752,24 +752,44 @@ pub fn register_node(
 	registry: &mut AxRegistry,
 	target: &str,
 	handle: AxHandle,
+	focus: &mut AppFocus,
 ) -> CoreResult<AxNode> {
-	let props = node_props(backend, &handle)?;
+	let props = node_props(backend, &handle, focus)?;
 	let generation = registry.current_generation(target);
 	let reference = registry.register(backend, target, generation, handle, &props);
 	Ok(node_to_napi(reference, props))
 }
 
-/// Whether `handle` holds focus: it is its application's focused element when
-/// the backend reports one, else its own flag says so.
+/// Whether `handle` holds focus: its own flag says so and, when the backend
+/// reports the application's focused element, it is that element. A focused
+/// table reports every cell focused.
 fn focused_in(focus: Option<&AxHandle>, handle: &AxHandle, own: bool) -> bool {
-	focus.map_or(own, |focus| focus == handle)
+	own && focus.is_none_or(|focus| focus == handle)
+}
+
+/// The application's focused element for one request: read once, and only
+/// when an element reports itself focused, so reads of unfocused elements
+/// cost no extra round trip to the app.
+#[derive(Default)]
+pub struct AppFocus(Option<Option<AxHandle>>);
+
+impl AppFocus {
+	fn get(&mut self, backend: &mut dyn AxBackend, handle: &AxHandle) -> Option<&AxHandle> {
+		self.0.get_or_insert_with(|| backend.focused_within(handle)).as_ref()
+	}
 }
 
 /// An element's props, its `focused` decided by [`focused_in`].
-pub fn node_props(backend: &mut dyn AxBackend, handle: &AxHandle) -> CoreResult<AxProps> {
+pub fn node_props(
+	backend: &mut dyn AxBackend,
+	handle: &AxHandle,
+	focus: &mut AppFocus,
+) -> CoreResult<AxProps> {
 	let mut props = backend.props(handle)?;
-	let focus = backend.focused_within(handle);
-	props.focused = focused_in(focus.as_ref(), handle, props.focused);
+	if props.focused {
+		let focus = focus.get(backend, handle).cloned();
+		props.focused = focused_in(focus.as_ref(), handle, true);
+	}
 	Ok(props)
 }
 pub fn element_at_node(
@@ -782,7 +802,7 @@ pub fn element_at_node(
 	let Some(handle) = backend.element_at(x, y)? else {
 		return Ok(None);
 	};
-	register_node(backend, registry, target, handle).map(Some)
+	register_node(backend, registry, target, handle, &mut AppFocus::default()).map(Some)
 }
 
 pub fn ax_press(backend: &mut dyn AxBackend, handle: &AxHandle) -> CoreResult<()> {
@@ -862,6 +882,8 @@ mod tests {
 		bounds_reads:   u32,
 		/// The application's focused element.
 		focus:          Option<u64>,
+		/// Application-focus reads made.
+		focus_reads:    u32,
 		/// Nodes whose value `setValue` can write.
 		settable:       HashSet<u64>,
 		/// Settability checks made.
@@ -966,6 +988,7 @@ mod tests {
 		}
 
 		fn focused_within(&mut self, _: &AxHandle) -> Option<AxHandle> {
+			self.focus_reads += 1;
 			self.focus.map(|id| self.handle(id))
 		}
 
@@ -1371,11 +1394,20 @@ mod tests {
 		})
 		.unwrap();
 		assert_eq!(found.iter().map(|node| node.focused).collect::<Vec<_>>(), [false, true]);
+		// Single-element reads share one app-focus read per request, and an
+		// element that does not report itself focused needs none.
 		let mut registry = AxRegistry::default();
-		let (a, b) = (m.handle(3), m.handle(4));
-		let a = register_node(&mut m, &mut registry, "w", a).unwrap();
-		let b = register_node(&mut m, &mut registry, "w", b).unwrap();
+		let (a, b, outline) = (m.handle(3), m.handle(4), m.handle(2));
+		m.focus_reads = 0;
+		let mut focus = AppFocus::default();
+		let a = register_node(&mut m, &mut registry, "w", a, &mut focus).unwrap();
+		let b = register_node(&mut m, &mut registry, "w", b, &mut focus).unwrap();
 		assert_eq!((a.focused, b.focused), (false, true));
+		assert_eq!(m.focus_reads, 1);
+		let outline =
+			register_node(&mut m, &mut registry, "w", outline, &mut AppFocus::default()).unwrap();
+		assert!(!outline.focused);
+		assert_eq!(m.focus_reads, 1);
 		// Without an application focus, an element's own flag stands.
 		m.focus = None;
 		let text = tree(&mut m);
@@ -1454,7 +1486,7 @@ mod tests {
 				(1, p("window", Some("Title"))),
 				(2, with("button", "Save", &["AXPress", "AXShowMenu"])),
 				(3, with("button", "Search", &["AXShowMenu", "AXScrollToVisible"])),
-				(4, with("image", "a.pdf", &["AXOpen", "AXShowMenu"])),
+				(4, with("image", "a.pdf", &["AXOpen", "SomeVendorAction", "AXShowMenu"])),
 				(5, with("statictext", "Yoga", &["AXPress", "AXShowMenu", "AXScrollToVisible"])),
 				(6, with("textfield", "Name", &["AXConfirm", "AXCancel", "Name:Delete\nTarget:0x0"])),
 				(7, with("popover", "Details", &["AXCancel"])),

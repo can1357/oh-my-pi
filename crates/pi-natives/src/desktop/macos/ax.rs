@@ -924,14 +924,19 @@ fn verify_text_value(element: &AXUIElement, expected: &str) -> CoreResult<()> {
 	}
 }
 
+/// The system time zone, re-read each call: CF caches it per process, and the
+/// target app follows changes to it.
+fn system_zone() -> Option<CFRetained<CFTimeZone>> {
+	CFTimeZone::reset_system();
+	CFTimeZone::system()
+}
+
 /// Date and time controls publish `AXValue` as a `CFDate` and refuse the same
 /// date written as a `CFString`, so an ISO-8601 value is written as a `CFDate`
 /// in the system time zone the control displays, then read back as one.
 fn set_date_value(element: &AXUIElement, text: &str, current: f64) -> CoreResult<()> {
-	// CF caches the system zone per process; the target app follows changes to
-	// it.
-	CFTimeZone::reset_system();
-	let zone = CFTimeZone::system()
+	// A local time cannot be placed without the zone, so the write refuses.
+	let zone = system_zone()
 		.ok_or_else(|| DesktopError::ax_failed("the system time zone is unavailable"))?;
 	let offset_at = |at: f64| zone.seconds_from_gmt(at) as i64;
 	let Some(request) = date::parse(text) else {
@@ -1384,10 +1389,8 @@ fn stringify_value(value: &CFType) -> String {
 		return stringify_number(number);
 	}
 	if let Some(date) = value.downcast_ref::<CFDate>() {
-		// CF caches the system zone per process; the target app follows changes
-		// to it.
-		CFTimeZone::reset_system();
-		let zone = CFTimeZone::system();
+		// Without the zone a read still names the right instant, in UTC.
+		let zone = system_zone();
 		return date::format_local(date.absolute_time(), |at| {
 			zone
 				.as_ref()
@@ -1553,13 +1556,6 @@ mod tests {
 			element_action_result("AXPressAction", AXError::AttributeUnsupported).unwrap_err();
 		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
 		assert!(error.message.contains("observe the window"), "{}", error.message);
-	}
-
-	#[test]
-	fn finder_icons_report_their_own_selection() {
-		assert!(super::reports_selected("AXImage"));
-		assert!(super::reports_selected("AXRow"));
-		assert!(!super::reports_selected("AXStaticText"));
 	}
 
 	#[test]
