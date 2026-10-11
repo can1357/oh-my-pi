@@ -30,7 +30,14 @@ import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import {
+	collapseSharedUsageReports,
+	formatLimitTitle,
+	summarizeUsageResetCredits,
+	usageAccountOrg,
+	usageResetExpiry,
+	usageWindowSuffix,
+} from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { formatCodexUsageReportLabel } from "../slash-commands/helpers/active-oauth-account";
 import {
 	accountIdentityLabel,
@@ -269,14 +276,9 @@ function renderBar(limit: UsageLimit): string {
 
 /** Append the window label when the limit label doesn't already carry it. */
 function limitTitle(limit: UsageLimit): string {
-	let label = limit.label;
-	const tier = limit.scope.tier;
-	if (tier && !label.toLowerCase().includes(tier.toLowerCase())) label = `${label} (${tier})`;
-	const windowLabel = limit.window?.label ?? limit.scope.windowId;
-	if (!windowLabel) return label;
-	if (windowLabel.toLowerCase() === "quota window") return label;
-	if (label.toLowerCase().includes(windowLabel.toLowerCase())) return label;
-	return `${label} (${windowLabel})`;
+	const label = formatLimitTitle(limit);
+	const windowLabel = usageWindowSuffix(label, limit.window?.label ?? limit.scope.windowId);
+	return windowLabel ? `${label} (${windowLabel})` : label;
 }
 
 function reportAccountLabel(report: UsageReport, index: number): string {
@@ -318,10 +320,8 @@ function formatAccountHeader(
 	if (report.provider === "openai-codex") {
 		header = `${icon} ${formatQualifiedIdentity(report, peers, label, redaction)}`;
 	} else {
-		const metaOrgName = report.metadata?.orgName;
-		const metaOrgId = report.metadata?.orgId;
-		const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
-		if (typeof org === "string" && org && org !== label) header += chalk.dim(` · ${redaction?.get(org) ?? org}`);
+		const org = usageAccountOrg(report);
+		if (org && org !== label) header += chalk.dim(` · ${redaction?.get(org) ?? org}`);
 		const plan = report.metadata?.planType;
 		if (typeof plan === "string" && plan.trim()) header += chalk.dim(` · plan: ${plan.trim()}`);
 	}
@@ -332,15 +332,13 @@ function formatAccountHeader(
 		if (resets.redeemableCount !== resets.bankedCount) {
 			header += chalk.dim(` · ${resets.redeemableCount} usable now`);
 		}
-		if (resets.soonestExpiry) {
-			const expiryMs = Date.parse(resets.soonestExpiry);
-			if (expiryMs > nowMs) {
-				header += chalk.dim(
-					` · soonest expires in ${formatDuration(expiryMs - nowMs)} (${resets.soonestExpiry.slice(0, 10)})`,
-				);
-			} else {
-				header += chalk.dim(` · expired (${resets.soonestExpiry.slice(0, 10)})`);
-			}
+		const expiry = usageResetExpiry(resets, nowMs);
+		if (expiry) {
+			header += chalk.dim(
+				expiry.remainingMs > 0
+					? ` · soonest expires in ${formatDuration(expiry.remainingMs)} (${expiry.date})`
+					: ` · expired (${expiry.date})`,
+			);
 		}
 		if (resets.redeemableCount === 0 && resets.unavailableReason) {
 			const reason = sanitizeText(resets.unavailableReason.replace(/[\r\n\t]+/g, " "));

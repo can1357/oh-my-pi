@@ -96,7 +96,10 @@ import { setSessionTerminalTitle } from "../../utils/title-generator";
 import {
 	collapseSharedUsageReports,
 	formatLimitTitle,
-	summarizeUsageResetCredits,
+	resolveUsageAccountIdentity,
+	usageAccountOrg,
+	usageResetCreditView,
+	usageWindowSuffix,
 } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "@oh-my-pi/pi-tui/prompt/usage-amounts";
 import type { UnavailableUsageAccount } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
@@ -2260,22 +2263,6 @@ function resolveProviderUsageTotal(reports: UsageReport[]): number {
 		.reduce((sum, value) => sum + value, 0);
 }
 
-function formatWindowSuffix(label: string, windowLabel: string, uiTheme: Theme): string {
-	const normalizedLabel = label.toLowerCase();
-	const normalizedWindow = windowLabel.toLowerCase();
-	if (normalizedWindow === "quota window") return "";
-	if (normalizedLabel.includes(normalizedWindow)) return "";
-	return uiTheme.fg("dim", `(${windowLabel})`);
-}
-
-/** ` (org)` suffix for providers whose orgName is an organization. */
-function orgSuffix(report: UsageReport): string {
-	const orgName = report.metadata?.orgName;
-	const orgId = report.metadata?.orgId;
-	const org = typeof orgName === "string" && orgName ? orgName : typeof orgId === "string" ? orgId : undefined;
-	return org ? ` (${org})` : "";
-}
-
 /** Keep the existing TUI `(plan)` layout while using the live Codex usage plan. */
 function formatCodexTuiLabel(report: UsageReport, peers: readonly UsageReport[], base: string): string {
 	const identity = formatCodexUsageReportLabel(report, peers, base, undefined, false);
@@ -2289,37 +2276,19 @@ function formatAccountLabel(
 	peers: readonly UsageReport[],
 	index: number,
 ): string {
-	const codex = report.provider === "openai-codex";
-	const email = report.metadata?.email;
-	if (typeof email === "string" && email)
-		return codex ? formatCodexTuiLabel(report, peers, email) : `${email}${orgSuffix(report)}`;
-	const accountId =
-		typeof report.metadata?.accountId === "string" && report.metadata.accountId
-			? report.metadata.accountId
-			: limit.scope.accountId || undefined;
-	if (accountId) return codex ? formatCodexTuiLabel(report, peers, accountId) : `${accountId}${orgSuffix(report)}`;
-	const projectId =
-		typeof report.metadata?.projectId === "string" && report.metadata.projectId
-			? report.metadata.projectId
-			: limit.scope.projectId || undefined;
-	const base = typeof projectId === "string" && projectId ? projectId : `account ${index + 1}`;
-	return codex ? formatCodexTuiLabel(report, peers, base) : base;
+	const { identity, orgQualifies } = resolveUsageAccountIdentity(report, limit, index);
+	if (report.provider === "openai-codex") return formatCodexTuiLabel(report, peers, identity);
+	if (!orgQualifies) return identity;
+	const org = usageAccountOrg(report);
+	return org ? `${identity} (${org})` : identity;
 }
 
 function formatUnlimitedReportLabel(report: UsageReport, peers: readonly UsageReport[], index: number): string {
-	const email = report.metadata?.email;
-	if (typeof email === "string" && email)
-		return report.provider === "openai-codex"
-			? formatCodexTuiLabel(report, peers, email)
-			: `${email}${orgSuffix(report)}`;
-	const accountId = report.metadata?.accountId;
-	if (typeof accountId === "string" && accountId)
-		return report.provider === "openai-codex"
-			? formatCodexTuiLabel(report, peers, accountId)
-			: `${accountId}${orgSuffix(report)}`;
-	const projectId = report.metadata?.projectId;
-	const base = typeof projectId === "string" && projectId ? projectId : `account ${index + 1}`;
-	return report.provider === "openai-codex" ? formatCodexTuiLabel(report, peers, base) : base;
+	const { identity, orgQualifies } = resolveUsageAccountIdentity(report, undefined, index);
+	if (report.provider === "openai-codex") return formatCodexTuiLabel(report, peers, identity);
+	if (!orgQualifies) return identity;
+	const org = usageAccountOrg(report);
+	return org ? `${identity} (${org})` : identity;
 }
 
 function formatResetShort(limit: UsageLimit, nowMs: number): string | undefined {
@@ -2630,24 +2599,14 @@ export function renderUsageReports(
 
 		const resetAccountLines: string[] = [];
 		for (const report of providerReports) {
-			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
-			if (!resets || resets.bankedCount <= 0) continue;
-			const identityLabel =
-				typeof report.metadata?.email === "string" && report.metadata.email
-					? report.metadata.email
-					: typeof report.metadata?.accountId === "string" && report.metadata.accountId
-						? report.metadata.accountId
-						: "account";
-			const orgName = report.metadata?.orgName;
-			const orgId = report.metadata?.orgId;
-			const orgLabel =
-				typeof orgName === "string" && orgName ? orgName : typeof orgId === "string" ? orgId : undefined;
+			const resets = usageResetCreditView(report, nowMs);
+			if (!resets) continue;
 			const rawLabel =
 				provider === "openai-codex"
-					? formatCodexTuiLabel(report, providerReports, identityLabel)
-					: orgLabel && orgLabel !== identityLabel
-						? `${identityLabel} (${orgLabel})`
-						: identityLabel;
+					? formatCodexTuiLabel(report, providerReports, resets.identity)
+					: resets.org
+						? `${resets.identity} (${resets.org})`
+						: resets.identity;
 			const label = sanitizeText(rawLabel.replace(/[\r\n\t]+/g, " "));
 			const activeOrg = activeAccount?.orgId;
 			const reportOrg = typeof report.metadata?.orgId === "string" ? report.metadata.orgId : undefined;
@@ -2664,14 +2623,14 @@ export function renderUsageReports(
 			resetAccountLines.push(
 				`    • ${label}: ${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}${availability}${isActive ? " (active)" : ""}`,
 			);
-			if (resets.soonestExpiry) {
-				const expiryMs = Date.parse(resets.soonestExpiry);
-				const remaining = expiryMs - nowMs;
-				const expiryDate = resets.soonestExpiry.slice(0, 10);
-				if (remaining > 0) {
-					resetAccountLines.push(`        soonest expires in ${formatDuration(remaining)} (${expiryDate})`);
+			const expiry = resets.expiry;
+			if (expiry) {
+				if (expiry.remainingMs > 0) {
+					resetAccountLines.push(
+						`        soonest expires in ${formatDuration(expiry.remainingMs)} (${expiry.date})`,
+					);
 				} else {
-					resetAccountLines.push(`        expired (${expiryDate})`);
+					resetAccountLines.push(`        expired (${expiry.date})`);
 				}
 			}
 			if (resets.redeemableCount === 0 && resets.unavailableReason) {
@@ -2730,7 +2689,8 @@ export function renderUsageReports(
 			const status = resolveAggregateStatus(sortedLimits);
 			const statusIcon = resolveStatusIcon(status, uiTheme);
 
-			const windowSuffix = formatWindowSuffix(group.label, group.windowLabel, uiTheme);
+			const windowLabel = usageWindowSuffix(group.label, group.windowLabel);
+			const windowSuffix = windowLabel ? uiTheme.fg("dim", `(${windowLabel})`) : "";
 			lines.push(`${statusIcon} ${uiTheme.bold(group.label)} ${windowSuffix}`.trim());
 			const accountLabels = formatAccountHeaderRow(
 				sortedLimits,
