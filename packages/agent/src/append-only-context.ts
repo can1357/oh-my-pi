@@ -145,12 +145,9 @@ export class StablePrefix {
 		// every live tool description a second time (`normalizeTools` reads
 		// the same getters inside takeSnapshot). `prev === null` skips the
 		// check entirely — there is nothing to compare against.
-		let toolKeys: readonly string[] | undefined;
-		if (prev !== null) {
-			toolKeys = (context.tools ?? []).map(tool => toolKeyForPrefix(tool));
-			if (this.#fastPathHit(context, options, toolKeys)) {
-				return false;
-			}
+		const toolKeys = (context.tools ?? []).map(tool => toolKeyForPrefix(tool));
+		if (prev !== null && this.#fastPathHit(context, options, toolKeys)) {
+			return false;
 		}
 		const snapshot = takeSnapshot(context, options);
 		this.#recordFastPathKey(context, options, toolKeys);
@@ -178,12 +175,11 @@ export class StablePrefix {
 		// rather than concatenating the whole prompt just to compare it.
 		const liveSegments = context.systemPrompt;
 		const cachedSegments = this.#lastPromptSegments;
-		if (
-			cachedSegments === undefined ||
-			cachedSegments.length !== liveSegments.length ||
-			cachedSegments.some((segment, index) => segment !== liveSegments[index])
-		) {
+		if (cachedSegments === undefined || cachedSegments.length !== liveSegments.length) {
 			return false;
+		}
+		for (let i = 0; i < cachedSegments.length; i++) {
+			if (cachedSegments[i] !== liveSegments[i]) return false;
 		}
 		const recorded = this.#lastToolKey;
 		if (recorded === undefined || recorded.length !== toolKeys.length) {
@@ -197,15 +193,11 @@ export class StablePrefix {
 		return true;
 	}
 
-	#recordFastPathKey(
-		context: AgentContext,
-		options: BuildOptions,
-		renderedToolKeys?: readonly string[],
-	): void {
+	#recordFastPathKey(context: AgentContext, options: BuildOptions, renderedToolKeys: readonly string[]): void {
 		this.#lastPromptSegments = [...context.systemPrompt];
 		this.#lastIntentTracing = options.intentTracing;
 		this.#lastPruneToolDescriptions = options.pruneToolDescriptions;
-		this.#lastToolKey = renderedToolKeys ?? (context.tools ?? []).map(tool => toolKeyForPrefix(tool));
+		this.#lastToolKey = renderedToolKeys;
 	}
 
 	/** Force rebuild on the next `build()` call. */
