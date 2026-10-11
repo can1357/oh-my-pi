@@ -138,6 +138,7 @@ async function spawnKeptAliveChild() {
 			index: 0,
 			id: AGENT_ID,
 			parentAgentId: PARENT_ID,
+			asyncJobManager: manager,
 			modelOverride: "mock/mock-model",
 			authStorage,
 			modelRegistry,

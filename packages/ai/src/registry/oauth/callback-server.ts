@@ -62,6 +62,11 @@ function isAddressInUse(error: unknown): boolean {
 	return error instanceof Error && /EADDRINUSE|in use/i.test(error.message);
 }
 
+/** Keep JSON data inside the template's script element; JSON.parse restores the original text. */
+function serializeCallbackState(state: unknown): string {
+	return JSON.stringify(state).replaceAll("<", "\\u003c");
+}
+
 /**
  * Whether this host exposes an IPv6 loopback (`::1`) the companion listener can
  * bind. A kernel with IPv6 disabled (`ipv6.disable=1`) lists no internal IPv6
@@ -590,7 +595,7 @@ export abstract class OAuthCallbackFlow {
 		}
 
 		return new Response(
-			(templateHtml as unknown as string).replaceAll("__OAUTH_STATE__", JSON.stringify(resultState)),
+			(templateHtml as unknown as string).replaceAll("__OAUTH_STATE__", () => serializeCallbackState(resultState)),
 			{
 				status: resultState.ok ? 200 : 500,
 				headers: { "Content-Type": "text/html" },

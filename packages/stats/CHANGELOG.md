@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the stats dashboard serving index.html at /favicon.ico; it now returns the omp icon (image/x-icon), so dashboard tabs and bookmarks show a real icon ([#15162](https://github.com/can1357/oh-my-pi/pull/15162) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Changed

@@ -77,16 +77,6 @@ provider "openai-codex" {
 			cache-read 1.0
 			cache-write 0
 		}
-		service-tier-cost {
-			flex 0.5
-			priority 2.5
-			// Ultrafast is Astra-only. This table uses OpenAI's included-usage
-			// multipliers for Codex: Ultrafast 8x and Fast 2.5x Standard (purchased
-			// credits / Enterprise pay-as-you-go bill 6x and 2x instead). See
-			// https://learn.chatgpt.com/docs/agent-configuration/speed and
-			// https://learn.chatgpt.com/docs/pricing.
-			ultrafast 8
-		}
 		limits-patch {
 			context-window 272000
 		}
@@ -116,6 +106,18 @@ provider "openai-codex" {
 			context-window 272000
 		}
 		max-context-window 922000
+	}
+	// Codex Ultrafast ships on GPT-6 Astra and GPT-6.1 Sol. This table uses
+	// OpenAI's included-usage multipliers for Codex: Ultrafast 8x and Fast 2.5x
+	// Standard (purchased credits / Enterprise pay-as-you-go bill 6x and 2x
+	// instead). See https://learn.chatgpt.com/docs/agent-configuration/speed
+	// and https://learn.chatgpt.com/docs/pricing.
+	models "gpt-6-astra" "gpt-6-astra-wm" "gpt-6.1-sol" "gpt-6.1-sol-wm" {
+		service-tier-cost {
+			flex 0.5
+			priority 2.5
+			ultrafast 8
+		}
 	}
 	models "gpt-6-luna" "gpt-6-luna-wm" {
 		cost-patch {

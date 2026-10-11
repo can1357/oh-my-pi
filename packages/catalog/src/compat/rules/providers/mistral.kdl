@@ -24,7 +24,11 @@ provider "mistral" {
 		}
 	}
 
-	thinking-mode "effort"
+	// Mistral's chat-completions endpoint derives cache affinity from the
+	// top-level `prompt_cache_key` (https://docs.mistral.ai/studio/conversations/advanced/prompt-caching);
+	// without it, requests only hit replica-local implicit cache. Same shape as
+	// the kimi-code rule (#6049).
+	supports-prompt-cache-key #true
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 	}

@@ -4401,6 +4401,10 @@ function planAnthropicToolControls(
 			declaredSet.add(name);
 			deferred.add(name);
 		}
+		// The API rejects a declaration whose tools are all deferred (a tool-less
+		// conversation gaining tools, or a resume that kept none of the loaded
+		// ones), so load them all and let the controls below replay availability.
+		if (declared.every(name => deferred.has(name))) deferred.clear();
 		// The chain starts from what the top-level declaration makes active, so a
 		// rewritten history converges on the current roster instead of trusting a
 		// record whose earlier controls were summarized away.

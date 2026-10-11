@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import * as vm from "node:vm";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { createHelpers } from "../../src/eval/js/shared/helpers";
 import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
 
 /**
@@ -202,6 +205,58 @@ describe("eval js read() URI delegation", () => {
 				name: "read",
 				args: { path: "mcp://server/resource:10-14" },
 			},
+		]);
+	});
+
+	function loadArtifactPrelude(artifacts: string | undefined) {
+		const roots: Record<string, string> = artifacts === undefined ? {} : { artifact: artifacts };
+		const calls: Array<{ name: string; args: unknown }> = [];
+		const sandbox = loadPrelude(async (name, args) => {
+			calls.push({ name, args });
+			return { text: "from the read tool" };
+		});
+		sandbox.__omp_helpers__ = createHelpers({
+			cwd: () => process.cwd(),
+			env: new Map(),
+			localRoots: () => roots,
+			emitStatus: () => {},
+		});
+		return { calls, sandbox };
+	}
+
+	it("returns an empty string for artifact:// reads with a non-positive limit", async () => {
+		using tmp = TempDir.createSync("@eval-prelude-artifact-limit-");
+		await Bun.write(path.join(tmp.path(), "12.eval.log"), "first\nsecond\nthird\n");
+		const { calls, sandbox } = loadArtifactPrelude(tmp.path());
+
+		expect(await vm.runInContext(`read("artifact://12", { limit: 0 })`, sandbox)).toBe("");
+		expect(await vm.runInContext(`read("artifact://12", { limit: -1 })`, sandbox)).toBe("");
+		expect(await vm.runInContext(`read("artifact://7", { limit: 0 })`, sandbox)).toBe("");
+		expect(calls).toEqual([]);
+	});
+
+	it("asks the read tool for an artifact another session holds", async () => {
+		using tmp = TempDir.createSync("@eval-prelude-artifact-fallback-");
+		const { calls, sandbox } = loadArtifactPrelude(tmp.path());
+
+		expect(await vm.runInContext(`read("artifact://7")`, sandbox)).toBe("from the read tool");
+		expect(await vm.runInContext(`read("artifact://7", { offset: 2, limit: 2 })`, sandbox)).toBe(
+			"from the read tool",
+		);
+		expect(calls).toEqual([
+			{ name: "read", args: { path: "artifact://7:raw" } },
+			{ name: "read", args: { path: "artifact://7:raw:2-3" } },
+		]);
+	});
+
+	it("asks the read tool for the raw view when no artifacts dir was injected", async () => {
+		const { calls, sandbox } = loadArtifactPrelude(undefined);
+
+		expect(await vm.runInContext(`read("artifact://12")`, sandbox)).toBe("from the read tool");
+		expect(await vm.runInContext(`read("artifact://12:raw:1-1")`, sandbox)).toBe("from the read tool");
+		expect(calls).toEqual([
+			{ name: "read", args: { path: "artifact://12:raw" } },
+			{ name: "read", args: { path: "artifact://12:raw:1-1" } },
 		]);
 	});
 });
