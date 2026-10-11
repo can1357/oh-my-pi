@@ -66,7 +66,7 @@ export interface TerminalSessionPrepaint {
 
 export interface TerminalSessionPrepaintOptions {
 	/** Whether cached settings permit a potentially expensive current-project transcript scan. */
-	readonly canAutoResume?: (cacheCwd: string) => boolean;
+	readonly canAutoResume?: (cacheCwd: string, movedToCwd?: string) => boolean;
 }
 
 /** Resolve the newest canonical project-local target `continueRecent()` will choose. */
@@ -116,10 +116,11 @@ export function resolveTerminalSessionPrepaint(
 	// cross-cwd breadcrumb, even while the old cwd still exists. A moved project's
 	// project-scoped cache remains keyed by its prior path, so either row may
 	// authorize this scan.
-	const mayScanCurrentProject = canAutoResume(resolvedCwd) || (looksLikeMovedProject && canAutoResume(breadcrumbCwd));
+	const mayScanCurrentProject =
+		canAutoResume(resolvedCwd) || (looksLikeMovedProject && canAutoResume(breadcrumbCwd, resolvedCwd));
 	const currentSessionFile = mayScanCurrentProject ? resolveCurrentProjectSession(resolvedCwd) : undefined;
 	if (currentSessionFile) return { cacheCwd: resolvedCwd, sessionFile: currentSessionFile };
-	if (breadcrumbCwdExists || !looksLikeMovedProject || !canAutoResume(breadcrumbCwd)) return undefined;
+	if (breadcrumbCwdExists || !looksLikeMovedProject || !canAutoResume(breadcrumbCwd, resolvedCwd)) return undefined;
 	return { cacheCwd: breadcrumbCwd, sessionFile: breadcrumbSessionFile };
 }
 
@@ -161,7 +162,11 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 	const terminalSession = options.sessionFile
 		? { cacheCwd: cwd, sessionFile: options.sessionFile }
 		: resolveTerminalSessionPrepaint(cwd, {
-				canAutoResume: cacheCwd => allowSessionUsage && cache?.cachedAutoResume(cacheCwd) === true,
+				canAutoResume: (cacheCwd, movedToCwd) =>
+					allowSessionUsage &&
+					(movedToCwd
+						? cache?.rebaseMovedProjectAutoResume(cacheCwd, movedToCwd)
+						: cache?.cachedAutoResume(cacheCwd)) === true,
 			});
 	const cached = cache
 		? cache.read(terminalSession?.cacheCwd ?? cwd, {

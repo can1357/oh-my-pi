@@ -166,6 +166,16 @@ function cachedAutoResumeIsFresh(value: CachedAutoResume | undefined): value is 
 	return value.sources.every(source => JSON.stringify(snapshotSource(source.path)) === JSON.stringify(source));
 }
 
+function rebaseMovedProjectSource(
+	source: CachedSourceSnapshot,
+	previousCwd: string,
+	currentCwd: string,
+): CachedSourceSnapshot {
+	const relative = path.relative(previousCwd, source.path);
+	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return source;
+	return { ...source, path: path.resolve(currentCwd, relative) };
+}
+
 function parseUiState(
 	value: unknown,
 ): { preferences: ComposerPreferences; theme: ComposerThemePreferences } | undefined {
@@ -373,6 +383,43 @@ export class ComposerCache {
 		}
 		if (own) return cachedAutoResumeIsFresh(own) ? own.value : undefined;
 		return cachedAutoResumeIsFresh(global) ? global.value : undefined;
+	}
+
+	/** Rebase a proven moved project's source identities so its prior cache row remains usable. */
+	rebaseMovedProjectAutoResume(previousCwd: string, currentCwd: string): boolean | undefined {
+		const previousProject = path.resolve(previousCwd);
+		const currentProject = path.resolve(currentCwd);
+		let own: CachedAutoResume | undefined;
+		let global: CachedAutoResume | undefined;
+		try {
+			for (const row of this.#select.all(previousProject, ANY_PROJECT)) {
+				this.#known.set(`${row.project}\0${row.kind}`, row.value);
+				if (row.kind !== "auto-resume") continue;
+				const parsed = parseCachedAutoResume(parseJson(row.value));
+				if (row.project === previousProject) own = parsed;
+				else global = parsed;
+			}
+		} catch (error) {
+			logger.debug("composer cache moved-project auto-resume read failed", { error: String(error) });
+			return undefined;
+		}
+		if (!own) return cachedAutoResumeIsFresh(global) ? global.value : undefined;
+		const rebased: CachedAutoResume = own.sources
+			? {
+					...own,
+					sources: own.sources.map(source => rebaseMovedProjectSource(source, previousProject, currentProject)),
+				}
+			: own;
+		if (!cachedAutoResumeIsFresh(rebased)) return undefined;
+		const json = JSON.stringify(rebased);
+		try {
+			this.#upsert.run(previousProject, "auto-resume", json);
+			this.#known.set(`${previousProject}\0auto-resume`, json);
+			return rebased.value;
+		} catch (error) {
+			logger.debug("composer cache moved-project auto-resume write failed", { error: String(error) });
+			return undefined;
+		}
 	}
 
 	/** Resolved theme and composer settings for the next prepaint. */

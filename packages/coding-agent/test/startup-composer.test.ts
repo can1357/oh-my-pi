@@ -27,6 +27,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SESSION_RESUMABILITY_PREFIX_BYTES } from "@oh-my-pi/pi-coding-agent/session/session-resumability";
 import { sessionDirForCwd, writeTerminalBreadcrumb } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { getAgentDir, getProjectDir, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
@@ -577,6 +578,48 @@ describe("startup composer terminal session identity", () => {
 		}
 	});
 
+	it("does not treat a compaction title extending beyond the live prefix as resumable", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-compaction-prefix-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		setAgentDir(agentDir);
+		const sessions = sessionDirForCwd(project);
+		const olderSessionFile = path.join(sessions, "2026-01-01T00-00-00_old.jsonl");
+		const truncatedCompactionFile = path.join(sessions, "2026-01-02T00-00-00_compaction.jsonl");
+		fs.mkdirSync(sessions, { recursive: true });
+		fs.writeFileSync(
+			olderSessionFile,
+			`${JSON.stringify({ type: "session", id: "old", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "resumable work" },
+			})}\n`,
+		);
+		fs.writeFileSync(
+			truncatedCompactionFile,
+			`${JSON.stringify({ type: "session", id: "new", cwd: project })}\n${JSON.stringify({
+				type: "compaction",
+				shortSummary: "x".repeat(SESSION_RESUMABILITY_PREFIX_BYTES),
+			})}\n`,
+		);
+		fs.utimesSync(olderSessionFile, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+		fs.utimesSync(truncatedCompactionFile, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
+		delete process.env.TMUX_PANE;
+		try {
+			expect(resolveTerminalSessionPrepaint(project)).toEqual({
+				cacheCwd: project,
+				sessionFile: olderSessionFile,
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("reuses the prior project cache row when the breadcrumb project moved", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-moved-project-"));
 		const agentDir = path.join(root, "agent");
@@ -592,7 +635,11 @@ describe("startup composer terminal session identity", () => {
 		try {
 			writeTerminalBreadcrumb(originalProject, sessionFile);
 			fs.renameSync(originalProject, movedProject);
-			expect(resolveTerminalSessionPrepaint(movedProject)).toEqual({
+			expect(
+				resolveTerminalSessionPrepaint(movedProject, {
+					canAutoResume: (cacheCwd, movedToCwd) => cacheCwd === originalProject && movedToCwd === movedProject,
+				}),
+			).toEqual({
 				cacheCwd: originalProject,
 				sessionFile,
 			});

@@ -221,6 +221,24 @@ describe("composer startup cache", () => {
 		cache.close();
 	});
 
+	it("rebases project-scoped auto-resume sources after a proven project move", async () => {
+		const previousProject = path.join(root, "project");
+		const currentProject = path.join(root, "renamed-project");
+		const projectConfig = path.join(previousProject, ".omp", "config.yml");
+		await Bun.write(projectConfig, "autoResume: true\n");
+		const cache = ComposerCache.open(dbPath);
+		cache.writeAutoResume(previousProject, true, true, [projectConfig]);
+
+		await fs.rename(previousProject, currentProject);
+		expect(cache.cachedAutoResume(previousProject)).toBeUndefined();
+		expect(cache.rebaseMovedProjectAutoResume(previousProject, currentProject)).toBeTrue();
+		expect(cache.cachedAutoResume(previousProject)).toBeTrue();
+
+		await Bun.write(path.join(currentProject, ".omp", "config.yml"), "autoResume: false\n");
+		expect(cache.cachedAutoResume(previousProject)).toBeUndefined();
+		cache.close();
+	});
+
 	it("refreshes zero-turn layout while preserving resumable-session facts", () => {
 		const project = path.join(root, "project");
 		const sessionFile = path.join(root, "sessions", "resumable.jsonl");

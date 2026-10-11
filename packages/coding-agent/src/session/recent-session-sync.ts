@@ -36,7 +36,7 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 		const decoder = new TextDecoder();
 		let pending = "";
 		let lineStartByte = 0;
-		const inspect = (line: string, withinPrefix: boolean): boolean => {
+		const inspect = (line: string, fullyWithinPrefix: boolean): boolean => {
 			let entry: unknown;
 			try {
 				entry = JSON.parse(line);
@@ -51,14 +51,14 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 				shortSummary?: unknown;
 				message?: { role?: unknown; content?: unknown };
 			};
-			if (withinPrefix && record.type === "session" && typeof record.timestamp === "string") {
+			if (fullyWithinPrefix && record.type === "session" && typeof record.timestamp === "string") {
 				const timestamp = new Date(record.timestamp);
 				if (Number.isFinite(timestamp.getTime())) created = timestamp;
 			}
-			if (withinPrefix && record.type === "session") hasHeader = true;
+			if (fullyWithinPrefix && record.type === "session") hasHeader = true;
 			if (hasHeader && hasPrefixDisplayMessage) hasResumableContent = true;
 			if (
-				withinPrefix &&
+				fullyWithinPrefix &&
 				!isSessionResumabilityEmpty({
 					assistantTurns: 0,
 					title:
@@ -87,7 +87,8 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 			let newline = pending.indexOf("\n");
 			while (newline >= 0) {
 				const rawLine = pending.slice(0, newline);
-				if (inspect(rawLine.trim(), lineStartByte < SESSION_RESUMABILITY_PREFIX_BYTES)) {
+				const lineEndByte = lineStartByte + Buffer.byteLength(rawLine);
+				if (inspect(rawLine.trim(), lineEndByte <= SESSION_RESUMABILITY_PREFIX_BYTES)) {
 					return { created, resumable: true };
 				}
 				lineStartByte += Buffer.byteLength(`${rawLine}\n`);
@@ -97,7 +98,7 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 		}
 		pending += decoder.decode();
 		if (pending.trim().length > 0) {
-			inspect(pending.trim(), lineStartByte < SESSION_RESUMABILITY_PREFIX_BYTES);
+			inspect(pending.trim(), lineStartByte + Buffer.byteLength(pending) <= SESSION_RESUMABILITY_PREFIX_BYTES);
 		}
 		return { created, resumable: hasHeader && hasResumableContent };
 	} catch {

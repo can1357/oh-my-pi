@@ -2409,12 +2409,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				void this.#handleGoalSessionEvent(event);
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
-			this.settings.onGlobalChange([cfgAutoResume], () => {
-				sharedComposerCache()?.writeGlobalAutoResume(
-					this.settings.globalValue(cfgAutoResume) ?? cfgAutoResume.default,
-					this.settings.settingCacheSourcePaths("global"),
-				);
-			}),
+			this.settings.onGlobalChange([cfgAutoResume], () => this.#syncGlobalAutoResumeCacheAfterPersistence()),
 			this.settings.onProjectChange([cfgAutoResume], () => this.#syncAutoResumeCache()),
 		);
 		this.#syncAutoResumeCache();
@@ -3638,7 +3633,20 @@ export class InteractiveMode implements InteractiveModeContext {
 			cfgAutoResume.get(this.settings),
 			cacheScope === "project",
 			this.settings.settingCacheSourcePaths(cacheScope),
+			cacheScope === "global" ? this.settings.settingCacheSourcePaths("project") : [],
 		);
+	}
+
+	#syncGlobalAutoResumeCacheAfterPersistence(): void {
+		void this.settings
+			.flush()
+			.then(() => {
+				sharedComposerCache()?.writeGlobalAutoResume(
+					this.settings.globalValue(cfgAutoResume) ?? cfgAutoResume.default,
+					this.settings.settingCacheSourcePaths("global"),
+				);
+			})
+			.catch(error => logger.warn("Failed to persist Auto Resume composer cache", { error: String(error) }));
 	}
 
 	#syncStatusLineSettings(): void {
