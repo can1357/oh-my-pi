@@ -2,7 +2,7 @@
 
 `omp` resolves settings from built-in defaults, a persistent global config file, optional project-local config, one-shot CLI overlays, and in-memory runtime overrides. Reach for project settings when one repository needs a different provider set, model role, tool policy, memory backend, or UI behavior than your global defaults — without touching your machine-wide configuration.
 
-Settings are stored as plain YAML mappings. Every key, its type, default, and enum values come from its setting definition (declared with `register(...)` next to the owning feature, e.g. `packages/coding-agent/src/tools/settings.ts`, and collected by `packages/coding-agent/src/config/all-settings.ts`). `omp config` exposes the complete schema; the interactive `/settings` panel exposes entries with supported UI editors. Some entries are conditional, and numbers or arrays without UI choices remain config-file-only.
+Settings are stored as plain YAML mappings. Every key, its type, default, and enum values come from its setting definition (declared with `register(...)` next to the owning feature, e.g. `packages/coding-agent/src/tools/settings.ts`, and collected by `packages/coding-agent/src/config/all-settings.ts`). `omp config` exposes the complete schema; the interactive `/settings` panel exposes entries with supported UI editors. Some entries are conditional; numbers and arrays without UI choices remain config-file-only unless the setting opts into the panel's JSON editor (such as `contextFiles.extra`).
 
 - For model/provider credentials, `.env` files, and the env-var table that resolves API keys, see [Providers](./providers.md).
 - For custom model definitions in `models.yml`, see [Models](./models.md).
@@ -773,7 +773,7 @@ memory:
 | `compaction.methodOrder`      | array   | `remote, snapcompact, handoff, shake, soft` | Ordered fallbacks. `remote` uses provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta); unavailable or failed methods advance. |
 | `compaction.thresholdPercent` | number  | `-1`                                     | Percent-of-context trigger; `-1` = reserve-based default.                                                                                                                                                                                 |
 | `compaction.thresholdTokens`  | number  | `-1`                                     | Fixed token trigger when `> 0`.                                                                                                                                                                                                           |
-| `compaction.modelThresholds`  | record  | `{}`                                     | Per-model compaction trigger keyed by `provider/model-id` or a `*`-terminated prefix (`deepseek/*`): a token count (`90000`) or a percentage (`"80%"`). See below. |
+| `compaction.modelThresholds`  | record  | `{}`                                     | Per-model compaction limit keyed by `provider/model-id` or a `*`-terminated prefix (`deepseek/*`): a token base the compaction policy scales (`90000`), a fixed token trigger (`"f90000"`), or a percentage of the window (`"80%"`). See below. |
 | `compaction.modelThresholdsEnabled` | boolean | `true`                             | Whether `compaction.modelThresholds` applies. Subagents with a `task.agentCompactionThresholdOverrides` entry run with it off. |
 | `task.agentCompactionThresholdOverrides` | record | `{}` | Exact-name task/eval agent → compaction trigger: a positive token count (`90000`) or a percentage string (`"80%"`). See below. |
 | `compaction.reserveTokens`    | number  | _(unset)_                                | Absolute reserve floor. When unset, the effective reserve is the larger of `16384` and 15% of the context window; if that default would leave no practical small-window budget, it falls back to the 15% reserve.                         |
@@ -784,11 +784,11 @@ memory:
 | `autolearn.autoContinue`      | boolean | `false`       | After an eligible primary stop, run a private capture turn (uses extra tokens). Off keeps only standing guidance; no hidden reminder is inserted into the next turn. Aborted, plan-mode, and goal-loop turns are skipped.                                                                                                           |
 | `autolearn.minToolCalls`      | number  | `5`           | Minimum completed tool calls in a primary turn before automatic capture is eligible.                                                                                                                                                                               |
 
-A positive `compaction.thresholdTokens` wins over `thresholdPercent` and is clamped below the context window. Otherwise, a positive percentage is clamped to 1–99%; non-positive percentages use the reserve-based threshold.
+A positive `compaction.thresholdTokens` wins over `thresholdPercent`. A fixed trigger (this or an `f` model entry) at or past the model's context window, for example where a provider caps the window lower, compacts at the window less the reserve, like the reserve-based default; the `/models` preview marks it `capped by window`. Otherwise, a positive percentage is clamped to 1–99%; non-positive percentages use the reserve-based threshold.
 
 `compaction` has additional tuning keys (idle compaction, supersede/drop heuristics) visible in `omp config list`. See [Compaction](./compaction.md) for the full strategy reference.
 
-Per-model compaction triggers replace both `compaction.threshold*` settings for the models they match. The `/models` preview shows each model's trigger; to set one, select a role or fallback row in the **Roles** view and press `k` (or click **Compaction limit**), then type `90000`, `90k`, `1M`, or `80%` (empty input resets). That writes the exact `provider/model-id` key to the global config. By hand:
+Per-model compaction limits apply to the models they match. A token count is the base the usual policy scales: omp treats it as the model's window when computing the threshold, so with defaults it compacts at the base minus the reserve (85% for bases above ~109k) and with `compaction.thresholdPercent: 80` at 80% of it; a global `compaction.thresholdTokens` does not apply to that model. Prefix the count with `f` (`f400k`, stored as `"f400000"`) to make it the exact trigger instead. A percentage entry replaces both `compaction.threshold*` settings and scales the real window. Requests and overflow handling still use the real window. The `/models` preview shows where each model compacts; to set a limit, select a role or fallback row in the **Roles** view and press `k` (or click **Compaction limit**), then type `400k`, `f400k`, `1M`, or `80%` (empty input resets). That writes the exact `provider/model-id` key to the global config. By hand:
 
 ```yaml
 compaction:
@@ -796,14 +796,16 @@ compaction:
   modelThresholds:
     "deepseek/*": 90000
     "openrouter/anthropic/*": "60%"
-    anthropic/claude-opus-5.5: 150000
+    anthropic/claude-opus-5.5: 150000 # base: compacts at 80% of 150k
+    openai/gpt-5.6-terra: "f400000" # fixed: compacts at exactly 400k
 ```
 
 - An exact `provider/model-id` key wins; otherwise the longest matching `*`-terminated prefix applies. `*` is only allowed at the end, and every key needs a `provider/` part.
-- Entry values follow the same rules as `task.agentCompactionThresholdOverrides` below; `null` clears a lower-layer entry.
+- Entry values are parsed like `task.agentCompactionThresholdOverrides` below (`null` clears a lower-layer entry), plus the `"fN"` fixed form; an agent entry's token count is always the exact trigger, and the `f` prefix is not accepted there.
 - The trigger follows the active model: switching models, context promotion, and advisors each use their own model's entry.
 - A `task.agentCompactionThresholdOverrides` entry outranks model entries for that agent, including entries added while it runs.
 - The hub refuses an edit when the project config sets the same model key; change it in the project config instead.
+- A token base larger than the model's standard window, or a fixed trigger at or past it, opts that model into its extended window (the window `extendedContext` would give it, including long-context pricing tiers) without turning `extendedContext` on. A base is the window size you want, so it opens the extended window even when its scaled trigger lands inside the standard one (a `300k` base on a 272K model compacts at 255K but runs on the larger window, keeping the reserve as headroom); use a base at or below the standard window, or an `f` trigger below it, to stay on the standard window. The hub warns first and saves on a second Enter; it rejects a base larger than the largest window the model can run with, and a fixed trigger at or past it. A subagent whose `task.agentCompactionThresholdOverrides` entry applies ignores model entries, so it keeps the standard window.
 
 Per-agent compaction triggers for task/eval subagents. This keeps the main session at 40,000 tokens while `scout` compacts at 80% of its window and `task` at 90,000 tokens:
 
@@ -990,7 +992,7 @@ Every schema path not individually tabulated in this catalog is explicitly defer
 - Agent behavior and safety: `ask.*`, `dev.*`, `eval.*`, `features.*`, `goal.*`, `loop.*`, `model.loopGuard.*`, `model.toolCallLoopGuard.*`, `prewalk.*`, `recap.*`, `sharpshooter.*`, `task.*`, `tools.*`, and `vault.*`.
 - Execution and content: `commit.*`, `completion.*`, `edit.*`, `error.*`, `extensionHandlers.*`, `generate_image.*`, `git.*`, `images.*`, `live.*`, `paste.*`, `power.*`, `read.*`, `shellMinimizer.*`, `speech.*`, `terminal.*`, and `title.*`.
 - Interface and startup: `composer.*`, `display.*`, `input.*`, `marketplace.*`, `spelling.*`, `statusLine.*`, `startup.*`, `stt.*`, `tui.*`, `ttsr.*`, and `update.*`.
-- Discovery, sharing, and auth: `auth.*`, `browser.*`, `claudeResets.*`, `codexResets.*`, `collab.*`, `commands.*`, `gc.*`, `ida.*`, `mcp.*`, `share.*`, `skills.*`, `stream.*`, and `telemetry.*`.
+- Discovery, sharing, and auth: `auth.*`, `browser.*`, `claudeResets.*`, `codexResets.*`, `collab.*`, `commands.*`, `contextFiles.*`, `gc.*`, `ida.*`, `mcp.*`, `share.*`, `skills.*`, `stream.*`, and `telemetry.*`. `contextFiles.extra` is documented in [Context files](./context-files.md#extra-filenames).
 - Ungrouped keys: `setupVersion`, `proseOnlyThinking`, `omitThinking`, `externalThinking`, `includeWorkspaceTree`, `autocompleteMaxVisible`, `emojiAutocomplete`, `disabledExtensions`, `inlineToolDescriptors`, and `treeFilterMode`.
 
 These settings follow the same schema-defined type and default rules shown above.

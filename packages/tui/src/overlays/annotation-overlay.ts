@@ -13,7 +13,7 @@ import {
 } from "../index";
 import { compositeLineAt } from "../render/composite";
 import { wrapLiteralLine } from "../utils";
-import { appKey, editorKey } from "../chrome/keybinding-hints";
+import { editorKey } from "../chrome/keybinding-hints";
 import { formatKeyHint, formatKeyHints, type KeybindingsManager } from "../app-keybindings";
 import type { Keybinding } from "../keybindings";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
@@ -38,7 +38,7 @@ import {
 	topBorder,
 	topBorderSplit,
 } from "../chrome/overlay-box";
-import { matchesAppExternalEditor } from "../keybinding-matchers";
+import { appExternalEditorKey, matchesAppExternalEditor } from "../keybinding-matchers";
 import type { KeyName } from "../key-hint-format";
 import { item, keyed, node, row as rowNode, span, text } from "../native/describe";
 import { leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
@@ -70,6 +70,8 @@ export interface AnnotationOverlayCallbacks {
 	onWarning?(message: string): void;
 	/** Open the draft in the host's editor and invoke `commit` with its result. */
 	onAnnotationExternalEditor?(draft: string, commit: (text: string | null) => void): void | Promise<void>;
+	/** Open the current source in the host's editor. The overlay stays open. */
+	onExternalEditor?(): void | Promise<void>;
 }
 
 export interface CodeReviewOverlayCallbacks extends AnnotationOverlayCallbacks {
@@ -147,7 +149,8 @@ function sanitizeStatusText(text: string): string {
 		.trim();
 }
 
-function splitTextLines(text: string): string[] {
+/** Splits a text source into the overlay's 1-based annotatable lines. */
+export function splitTextLines(text: string): string[] {
 	return text.split(/\r\n|\n|\r/);
 }
 
@@ -171,6 +174,8 @@ export class AnnotationOverlay implements Focusable {
 	#editingAnnotationIndex: number | undefined;
 	#annotationChooser: AnnotationChooser | undefined;
 	#externalOperation = false;
+	/** Set once {@link replaceTextSource} runs; the paste result then carries the edited text. */
+	#textSourceEdited = false;
 	#finished = false;
 	#annotations: CommittedAnnotation[] = [];
 	#textAnnotations: CommittedTextAnnotation[] = [];
@@ -306,6 +311,61 @@ export class AnnotationOverlay implements Focusable {
 		return this.#textAnnotations.map(entry => ({ ...entry.annotation }));
 	}
 
+	/** Repo-relative path of the diff file under the cursor, if this is a code review. */
+	reviewFilePath(): string | undefined {
+		const file = this.#files[this.#fileIndex];
+		if (!file) return undefined;
+		return file.newPath ?? file.oldPath ?? file.path;
+	}
+
+	/** Current text-source bytes, including edits applied by {@link replaceTextSource}. */
+	textSourceText(): string | undefined {
+		return this.#textSource?.text;
+	}
+
+	/**
+	 * Replace the text under review. Line notes whose quote still sits on the
+	 * same row stay; a quote that moved to exactly one row is retargeted;
+	 * every other line note is dropped. Returns how many were dropped.
+	 */
+	replaceTextSource(text: string): number {
+		if (!this.#textSource) return 0;
+		this.#textSource = { ...this.#textSource, text };
+		this.#textSourceEdited = true;
+		this.#textLines = splitTextLines(text);
+		this.#viewportDriven = false;
+		this.#sourceIndex = Math.min(this.#sourceIndex, Math.max(0, this.#textLines.length - 1));
+		let dropped = 0;
+		const kept: CommittedTextAnnotation[] = [];
+		for (const entry of this.#textAnnotations) {
+			if (entry.annotation.scope !== "line") {
+				kept.push(entry);
+				continue;
+			}
+			const quote = entry.annotation.quote;
+			if (this.#textLines[entry.sourceIndex] === quote) {
+				kept.push(entry);
+				continue;
+			}
+			const matches = this.#textLines.flatMap((line, index) => (line === quote ? [index] : []));
+			const only = matches.length === 1 ? matches[0] : undefined;
+			if (only !== undefined) {
+				kept.push({
+					sourceIndex: only,
+					annotation: { ...entry.annotation, line: only + 1 },
+				});
+				continue;
+			}
+			dropped++;
+		}
+		this.#textAnnotations = kept;
+		// Earlier snapshots hold notes anchored to the old text; undo must not resurrect them.
+		this.#undoStack = [];
+		this.#annotationRev++;
+		this.#nativeBody = undefined;
+		return dropped;
+	}
+
 	handleInput(data: string): void {
 		if (this.#finished || this.#externalOperation) return;
 		if (this.#annotationChooser) {
@@ -326,6 +386,10 @@ export class AnnotationOverlay implements Focusable {
 		}
 		if (this.#keybindings.matches(data, "tui.select.cancel")) {
 			this.#escape();
+			return;
+		}
+		if (this.#callbacks.onExternalEditor && matchesAppExternalEditor(data)) {
+			void this.#openSourceEditor();
 			return;
 		}
 		if (data === "A" && (this.#focus === "files" || this.#focus === "diff")) {
@@ -514,6 +578,7 @@ export class AnnotationOverlay implements Focusable {
 			this.#finish({
 				action: "paste",
 				annotations: this.getTextAnnotations(),
+				...(this.#textSourceEdited ? { editedText: this.#textSource.text } : {}),
 			});
 		} else {
 			this.#finish({
@@ -832,6 +897,22 @@ export class AnnotationOverlay implements Focusable {
 		}
 	}
 
+	async #openSourceEditor(): Promise<void> {
+		const openEditor = this.#callbacks.onExternalEditor;
+		if (this.#externalOperation || !openEditor) return;
+		this.#externalOperation = true;
+		try {
+			await openEditor();
+		} catch (error) {
+			this.#callbacks.onWarning?.(
+				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		} finally {
+			this.#externalOperation = false;
+			this.#tui.requestRender(true);
+		}
+	}
+
 	#annotationCount(fileIndex: number): number {
 		let count = 0;
 		for (const entry of this.#annotations) if (entry.fileIndex === fileIndex) count++;
@@ -1091,8 +1172,7 @@ export class AnnotationOverlay implements Focusable {
 				`${editorKey("tui.input.newLine")} newline`,
 				`${this.#key("tui.select.cancel")} cancel`,
 			];
-			const externalEditorKey = appKey(this.#keybindings, "app.editor.external");
-			if (externalEditorKey) hints.push(`${externalEditorKey} editor`);
+			hints.push(`${formatKeyHint(appExternalEditorKey())} editor`);
 			return [caption, ...this.#editor.render(width), this.#theme.fg("dim", hints.join(" · "))];
 		}
 		return [this.#theme.fg("dim", this.#helpText())];
@@ -1143,7 +1223,8 @@ export class AnnotationOverlay implements Focusable {
 				: this.#focus === "diff"
 					? `${upDown} line · ${formatKeyHint("shift")} faster · ${this.#key("tui.select.pageUp")}/${this.#key("tui.select.pageDown")} · ${formatKeyHints(["g", "shift+g"])} ends · ${formatKeyHint("a")} line note · ${formatKeyHint("shift+a")} ${this.#textSource ? "text" : "file"} note · ${editNote}`
 					: `${upDown} select · ${confirm} confirm`;
-		return `${focusHelp} · ${formatKeyHint("u")} undo · ${formatKeyHint("tab")} regions · ${this.#key("tui.select.cancel")} cancel`;
+		const editorHint = this.#callbacks.onExternalEditor ? ` · ${formatKeyHint(appExternalEditorKey())} editor` : "";
+		return `${focusHelp} · ${formatKeyHint("u")} undo · ${formatKeyHint("tab")} regions${editorHint} · ${this.#key("tui.select.cancel")} cancel`;
 	}
 
 	#ensureCursorVisible(renderedRowBySource: readonly number[]): boolean {
@@ -1523,7 +1604,7 @@ export class AnnotationOverlay implements Focusable {
 						this.#hint("tui.input.submit", "save"),
 						this.#hint("tui.input.newLine", "newline"),
 						this.#hint("tui.select.cancel", "cancel"),
-						this.#hint("app.editor.external", "editor"),
+						{ keys: [appExternalEditorKey()], label: "editor" },
 					],
 					"annotateHints",
 				),
@@ -1549,6 +1630,7 @@ export class AnnotationOverlay implements Focusable {
 							editNote,
 						]
 					: [upDown("select"), this.#hint("tui.select.confirm", "confirm")];
+		if (this.#callbacks.onExternalEditor) hints.push({ keys: [appExternalEditorKey()], label: "editor" });
 		hints.push(key("u", "undo"), key("tab", "regions"), this.#hint("tui.select.cancel", "cancel"));
 		return [hintsRow(hints)];
 	}

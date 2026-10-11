@@ -44,7 +44,7 @@ const displays = await computer.displays();
 const win = await computer.window({ app: "Code" });
 await win.screenshot();
 const tree = await win.ax({ maxDepth: 6 });
-await (await win.ref("e12")).press();
+await win.ref("e12").press();
 await computer.capabilities();
 await computer.close();
 ```
@@ -56,7 +56,7 @@ displays = await computer.displays()
 win = await computer.window(app="Code")
 await win.screenshot(silent=True)
 tree = await win.ax(maxDepth=6)
-await (await win.ref("e12")).press()
+await win.ref("e12").press()
 await win.click(120, 48, button="right")
 ```
 
@@ -131,12 +131,16 @@ await buttons[0].press();
 
 - `win.ax({ all?, maxDepth? })` returns a textual tree with `[ref=eN]` references; default depth is 24 and native snapshots visit at most 800 nodes.
 - `win.find({ role?, title?, value?, limit? })` matches case-insensitive substrings and returns up to `limit` elements (default 100, maximum 5000), from a walk bounded to 5000 nodes and depth 24.
-- `await win.ref("e5")`, `computer.elementAt(x, y)`, `computer.focusedElement()`, and `computer.ref("e5")` return live elements.
-- Elements expose `value`, `setValue`, `bounds`, `attributes`, `actions`, `perform`, `press`, `click`, `focus`, `parent`, and `children` operations.
+- `await win.ref("e5")`, `computer.elementAt(x, y)`, `computer.focusedElement()`, and `computer.ref("e5")` return live elements. The handle `ref()` returns also takes element methods directly: `await win.ref("e5").click({ count: 2 })`.
+- Elements expose `value`, `setValue`, `bounds`, `attributes`, `actions`, `perform`, `press`, `click({ button?, count?, modifiers? })`, `focus`, `parent`, and `children` operations.
 
 AX element actions need no screenshot. AX bounds and `computer.elementAt` use platform-native global desktop coordinates, not screenshot pixels: Windows uses physical desktop pixels; macOS uses logical points. Element clicks resolve the live element's owning window and refuse missing or ambiguous ownership rather than clicking an overlapping window. An element keeps the same reference across its window's AX snapshots and `find()` (desktop lookups such as `computer.focusedElement()` keep their own); a reference expires once its element is missing from the window's current and previous AX snapshots. An element whose role or label changes gets a new reference, and the old reference keeps naming the element it was read from until it expires the same way. On Windows, an element that takes over the UI Automation `RuntimeId` of one that is gone also gets a new reference, and an element whose `RuntimeId` cannot be read gets a new one on every read. The registry also caps references at 5000 and can evict a target's oldest generation earlier. Recover from `StaleRef` by taking a new AX snapshot and reacquiring the element.
 
 On macOS, `press()` requires the element to advertise `AXPress` in `actions()`; unsupported actions throw `AxFailed` even if the application would silently accept the request. Use `el.click()` for a coordinate click when the control has no press action.
+
+On macOS, a reference whose element the application has since removed throws `StaleRef` from every element operation, without waiting for the snapshots to expire it.
+
+On macOS, `press()`, `perform()` and `raise()` throw `AxUnconfirmed` when the action was requested but the app did not reply in time or messaging failed, for example because the action opened a modal dialog. The action may already have taken effect, so observe the window before repeating it.
 
 On macOS, native text fields support verified whole-value replacement and exact-window selected-text insertion, including when an app has multiple windows. Web-content or unidentifiable AX value writes refuse before mutation rather than trusting stale accessibility echoes. On Linux, generic `press()` selects an advertised activation action, never an arbitrary first action. On Windows, known self-activating UIA hosts may require explicit takeover coordinate input; background automation does not disable another application's windows or mutate their styles.
 

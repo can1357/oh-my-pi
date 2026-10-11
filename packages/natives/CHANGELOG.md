@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Sped up external commands in the embedded shell on Linux (glibc 2.29+) by spawning them without copying the host's memory (~9 ms → ~0.8 ms per launch at ~450 MB RSS) ([#14847](https://github.com/can1357/oh-my-pi/issues/14847), [#14858](https://github.com/can1357/oh-my-pi/pull/14858) by [@farnoy](https://github.com/farnoy))
+- Reduced macOS computer-use screenshot latency by about 35 ms per window capture; a machine holding thousands of off-screen windows no longer takes seconds per screenshot ([#15291](https://github.com/can1357/oh-my-pi/pull/15291) by [@will-bogusz](https://github.com/will-bogusz))
+### Added
+
+- Added `applyBinaryPatch(oldPath, patchPath, outPath)`, which applies an HDiffPatch single-stream delta patch (zstd or uncompressed) to a file
+
+## [18.8.8] - 2026-10-10
+
+### Changed
+
+- Reduced macOS accessibility-tree latency for `ax()` without changing its text output: each element's children are read once, and its bounds, which the tree never shows, are no longer read ([#15159](https://github.com/can1357/oh-my-pi/pull/15159) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed macOS computer use reporting `AxFailed` instead of `StaleRef` for a ref whose element the app had removed ([#15156](https://github.com/can1357/oh-my-pi/pull/15156) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS `el.press()` and `el.perform()` reporting `AxFailed` when the app did not answer in time, such as a press that opens a modal dialog; they now report `AxUnconfirmed` ([#15156](https://github.com/can1357/oh-my-pi/pull/15156) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.8.7] - 2026-10-09
+
 ### Added
 
 - Added `wasmGrammarFor` for tree-sitter grammars loaded as WebAssembly on demand from `<natives dir>/grammars`, and `missingGrammars` on `astGrep`/`astEdit` results naming languages skipped because their grammar is not installed.

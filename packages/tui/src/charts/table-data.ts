@@ -45,7 +45,10 @@ export interface NumberCell {
 	readonly toFigure?: string;
 	/** `a–b`: `b`, in the same base units. */
 	readonly upper?: number;
-	/** `a/b`: `b`. */
+	/**
+	 * `a/b`: `b`. {@link analyzeTable} reads a score (`12/12`, `154/160`) as the
+	 * percent of `b` reached; a pair (`85 / 147` under `Edit / read calls`) keeps `a`.
+	 */
 	readonly denominator?: number;
 }
 
@@ -77,6 +80,8 @@ export interface TableColumn {
 	readonly unit: string;
 	/** Numeric cells disagree on dimension (a metric-per-row table). */
 	readonly mixed: boolean;
+	/** Numeric cells are mostly scores out of a total (`12/12`), read as percent of it. */
+	readonly scores: boolean;
 	/** Every numeric data cell holds the same value: an echoed setting, not a measure. */
 	readonly constant: boolean;
 	/** Share of numeric cells written with an explicit sign. */
@@ -220,7 +225,7 @@ export function parseCell(markdown: string): Cell {
 	const text = plain.text.replace(MARKS, "").replace(/\s+/g, " ").trim();
 	const emphasis = plain.emphasis;
 	const other = (kind: OtherCell["kind"]): OtherCell => ({ kind, text: plain.text, emphasis });
-	if (MISSING[text.toLowerCase()]) return other("missing");
+	if (Object.hasOwn(MISSING, text.toLowerCase())) return other("missing");
 	if (DATE.test(text)) return other("date");
 	if (TIME.test(text)) return other("time");
 	if (VERSION.test(text)) return other("version");
@@ -257,7 +262,7 @@ export function parseCell(markdown: string): Cell {
 	let dim: Dimension = groups.cur ? "currency" : "count";
 	let factor = 1;
 	if (unit) {
-		const known = CASED_UNITS[unit] ?? UNITS[unit.toLowerCase()];
+		const known = knownUnit(unit);
 		if (known) {
 			[dim, factor] = known;
 		} else if (unit.includes("/")) {
@@ -274,7 +279,7 @@ export function parseCell(markdown: string): Cell {
 	if (groups.cur) unit = groups.cur;
 	// `24–72 h`: the unit after the range's end applies to its start too.
 	const range = RANGE_TAIL.exec(rest);
-	const rangeUnit = range?.[2] ? (CASED_UNITS[range[2]] ?? UNITS[range[2].toLowerCase()]) : undefined;
+	const rangeUnit = range?.[2] ? knownUnit(range[2]) : undefined;
 	if (!unit && rangeUnit) {
 		[dim, factor] = rangeUnit;
 		unit = range![2]!;
@@ -314,14 +319,26 @@ function toNumber(written: string): number {
 /** Factor of a unit written after the second number of a range or transition; the first number's when absent. */
 function tailFactor(unit: string | undefined, fallback: number): number {
 	if (!unit) return fallback;
-	const known = CASED_UNITS[unit] ?? UNITS[unit.toLowerCase()];
-	return known ? known[1] : fallback;
+	return knownUnit(unit)?.[1] ?? fallback;
+}
+
+/** Dimension and base factor of `unit`, cased spellings first; own keys only, so `constructor` is no unit. */
+function knownUnit(unit: string): readonly [Dimension, number] | undefined {
+	if (Object.hasOwn(CASED_UNITS, unit)) return CASED_UNITS[unit];
+	const lower = unit.toLowerCase();
+	return Object.hasOwn(UNITS, lower) ? UNITS[lower] : undefined;
 }
 
 /** Read a table's columns and rows for charting. Cells are the raw Markdown of each cell. */
 export function analyzeTable(header: readonly string[], rows: readonly (readonly string[])[]): TableAnalysis {
-	const parsed = rows.map(row => header.map((_, index) => parseCell(row[index] ?? "")));
-	const draft = header.map((cell, index) => readColumn(index, plainCell(cell).text, parsed));
+	const headers = header.map(cell => plainCell(cell).text);
+	const parsed = rows.map(row => {
+		const cells = headers.map((_, index) => parseCell(row[index] ?? ""));
+		// `Edit / read calls | 85 / 147`: a spaced slash in the row's name pairs two values.
+		const paired = cells.some(cell => cell.kind === "text" && PAIR_SLASH.test(cell.text));
+		return cells.map((cell, index) => (paired || PAIR_SLASH.test(headers[index]!) ? cell : asScore(cell)));
+	});
+	const draft = headers.map((text, index) => readColumn(index, text, parsed));
 	const labels = draft.filter(column => column.role === "label" || column.role === "temporal");
 	const label =
 		labels[0] ?? draft.find(column => column.role === "sequence") ?? draft.find(column => column.role === "index");
@@ -337,6 +354,22 @@ export function analyzeTable(header: readonly string[], rows: readonly (readonly
 }
 
 type DraftColumn = Omit<TableColumn, "constant">;
+
+/** A spaced slash naming two values (`p50 / p95`, `median / max`) rather than a path or a score. */
+const PAIR_SLASH = /\S \/ \S/;
+
+/**
+ * A whole-number `a/b` with `a ≤ b` as the percent of `b` it reached; any
+ * other cell unchanged, a list like `327 / 333 / 339` included.
+ */
+function asScore(cell: Cell): Cell {
+	if (!isNumber(cell) || cell.dim !== "fraction" || !cell.denominator) return cell;
+	const { value, denominator } = cell;
+	if (!Number.isInteger(value) || !Number.isInteger(denominator) || value > denominator) return cell;
+	const after = cell.text.indexOf(cell.figure);
+	if (after < 0 || /^\s*\//.test(cell.text.slice(after + cell.figure.length))) return cell;
+	return { ...cell, dim: "percent", value: (100 * value) / denominator };
+}
 
 function readColumn(index: number, header: string, parsed: readonly (readonly Cell[])[]): DraftColumn {
 	const cells = resolveMinutes(parsed.map(row => row[index]!));
@@ -358,6 +391,7 @@ function readColumn(index: number, header: string, parsed: readonly (readonly Ce
 	for (const group of dims.values()) if (group.length > dominant.length) dominant = group;
 	const dim = dominant[0]?.dim;
 	const mixed = numbers.length > 0 && dominant.length / numbers.length < 0.8;
+	const scored = numbers.filter(cell => cell.dim === "percent" && cell.denominator !== undefined).length;
 	const unit = dim === "currency" || dim === "rate" ? (dominant[0]?.unit ?? "") : "";
 
 	const trimmed = header.trim();
@@ -385,6 +419,7 @@ function readColumn(index: number, header: string, parsed: readonly (readonly Ce
 		dim,
 		unit,
 		mixed,
+		scores: numbers.length > 0 && scored / numbers.length >= 0.8,
 		signedShare: numbers.length ? numbers.filter(cell => cell.signed).length / numbers.length : 0,
 		arrowShare: numbers.length ? numbers.filter(cell => cell.to !== undefined).length / numbers.length : 0,
 	};

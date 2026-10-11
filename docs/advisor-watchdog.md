@@ -64,6 +64,8 @@ retry:
 
 This follows the same rules as the primary's fallback: `retry.enabled` and `retry.modelFallback` must be on, candidates still cooling down, without credentials, or incompatible with native advisor history are skipped, and `retry.fallbackRevertPolicy: cooldown-expiry` returns the advisor to its primary model once the cooldown ends. Credential rotation is attempted before switching models. Short usage-limit blocks can instead be waited out within `retry.maxDelayMs` and the retry budget; longer/exhausted blocks pause the advisor.
 
+A classifier refusal by the advisor's primary model (for example Anthropic's `Refusal (cyber)`) is treated as a judgment of the reviewed content rather than a model failure: it puts no cooldown on that model and pins the advisor to its fallback. The pin lasts until a compaction (the session's or the advisor's own), a handoff, or a new conversation replaces that content; the next review then retries the primary under `retry.fallbackRevertPolicy`. A fallback model that refuses is skipped with the usual cooldown and does not pin, so a primary that only failed for another reason still returns once its cooldown ends.
+
 `tier.advisor` controls service tier for all advisors. It defaults to `none` (standard processing); `inherit` follows the primary's live per-family tier, including `/fast` changes. Concrete values (`auto`, `default`, `flex`, `scale`, `priority`, `ultrafast`) are applied only when the advisor model's provider family supports them.
 
 ### Default advisor settings

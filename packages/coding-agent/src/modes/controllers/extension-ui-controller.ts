@@ -41,6 +41,7 @@ import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../sessi
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
+import { launchTerminal } from "../../subprocess/terminal-launch";
 
 const MAX_WIDGET_LINES = 10;
 
@@ -55,6 +56,18 @@ function guestAskHelpText(enterAction: string, extra = ""): string {
 const ASK_OTHER_OPTION = "Other (type your own)";
 const ASK_CHAT_OPTION = "Chat about this";
 const ASK_NEXT_OPTION = "Next →";
+
+function withTerminalLauncher(uiContext: ExtensionUIContext, hasUI: boolean): ExtensionUIContext {
+	if (!hasUI || uiContext.openTerminal) return uiContext;
+	const descriptors = Object.getOwnPropertyDescriptors(uiContext);
+	descriptors.openTerminal = {
+		configurable: true,
+		enumerable: true,
+		value: launchTerminal,
+		writable: true,
+	};
+	return Object.create(Object.getPrototypeOf(uiContext), descriptors) as ExtensionUIContext;
+}
 
 async function editDialogExternally(text: string): Promise<string | null> {
 	const command = getEditorCommand();
@@ -125,6 +138,7 @@ export class ExtensionUiController {
 		// Create and set hook & tool UI context
 		const uiContext: ExtensionUIContext = {
 			timeoutStartsOnPresentation: true,
+			supportsEditor: true,
 			select: (title, options, dialogOptions) => this.showCollabAwareSelector(title, options, dialogOptions),
 			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
 			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
@@ -166,8 +180,9 @@ export class ExtensionUiController {
 			getToolsExpanded: () => this.ctx.toolOutputExpanded,
 			setToolsExpanded: expanded => this.ctx.setToolsExpanded(expanded),
 		};
-		this.ctx.setToolUIContext(uiContext, true);
-		this.#toolUIContext = uiContext;
+		const enrichedUiContext = withTerminalLauncher(uiContext, true);
+		this.ctx.setToolUIContext(enrichedUiContext, true);
+		this.#toolUIContext = enrichedUiContext;
 		this.ctx.session.setUsageFallbackConfirmer?.((confirmation, signal) => {
 			const reserve =
 				confirmation.remainingPercent === undefined
@@ -317,7 +332,7 @@ export class ExtensionUiController {
 			},
 		};
 
-		extensionRunner.initialize(actions, contextActions, commandActions, uiContext, "tui");
+		extensionRunner.initialize(actions, contextActions, commandActions, enrichedUiContext, "tui");
 
 		// Subscribe to extension errors
 		extensionRunner.onError((error: ExtensionError) => {
@@ -541,7 +556,8 @@ export class ExtensionUiController {
 			},
 		};
 
-		extensionRunner.initialize(actions, contextActions, commandActions, uiContext, "tui");
+		const runnerUiContext = withTerminalLauncher(uiContext, _hasUI);
+		extensionRunner.initialize(actions, contextActions, commandActions, runnerUiContext, "tui");
 		this.#syncExtensionComposerShapes();
 	}
 
@@ -1011,6 +1027,7 @@ export class ExtensionUiController {
 					checkedIndices: dialogOptions?.checkedIndices,
 					markableCount: dialogOptions?.markableCount,
 					maxVisible,
+					inline: dialogOptions?.inline,
 					slider: extra?.slider,
 				},
 			);
@@ -1036,7 +1053,11 @@ export class ExtensionUiController {
 	/**
 	 * Show a confirmation dialog for hooks.
 	 */
-	async showHookConfirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean> {
+	async showHookConfirm(
+		title: string,
+		message: string,
+		dialogOptions?: InteractiveSelectorDialogOptions,
+	): Promise<boolean> {
 		const result = await this.showHookSelector(`${title}\n${message}`, ["Yes", "No"], dialogOptions);
 		return result === "Yes";
 	}

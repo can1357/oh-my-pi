@@ -96,6 +96,7 @@ rust_shared_library(
         "src/utok/claude/testdata/*.json",
         "src/desktop/linux/wayland/testdata/*.xkb",
         "fixtures/*.json",
+        "fixtures/hpatch/*",
     ]) + select({
         "@platforms//os:macos": [
             ":applefm_bridge",

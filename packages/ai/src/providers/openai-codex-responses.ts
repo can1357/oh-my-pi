@@ -2637,11 +2637,17 @@ class CodexStreamProcessor {
 		}
 
 		if (item.type === "function_call") {
+			const partial = block?.type === "toolCall" ? block[kStreamingPartialJson] : undefined;
 			const toolCall: ToolCall = {
 				type: "toolCall",
 				id: encodeResponsesToolCallId(item.call_id, item.id),
 				name: item.name,
-				arguments: parseToolCallArguments(item.arguments),
+				// An empty terminal item falls back to what `.delta`/`.done` already delivered.
+				arguments: item.arguments
+					? parseToolCallArguments(item.arguments)
+					: block?.type === "toolCall" && !partial
+						? block.arguments
+						: parseToolCallArguments(partial),
 			};
 			item.arguments = replayableToolCallArguments(item.arguments, toolCall.arguments);
 			if (block?.type === "toolCall") {
@@ -3360,7 +3366,14 @@ export async function prewarmOpenAICodexResponses(
 	model: Model<"openai-codex-responses">,
 	options?: Pick<
 		OpenAICodexResponsesOptions,
-		"apiKey" | "headers" | "sessionId" | "signal" | "preferWebsockets" | "providerSessionState" | "responsesLite"
+		| "apiKey"
+		| "headers"
+		| "sessionId"
+		| "signal"
+		| "preferWebsockets"
+		| "providerSessionState"
+		| "responsesLite"
+		| "serviceTier"
 	>,
 ): Promise<void> {
 	const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
@@ -3385,6 +3398,10 @@ export async function prewarmOpenAICodexResponses(
 	const codexClientVersion = CODEX_CLIENT_VERSION;
 	const requestIdentity = createCodexCompatibilityIdentity(metadataSession);
 	const attestation = await getCodexAttestationHeader(accountId);
+	const routedRequest: Pick<RequestBody, "model" | "service_tier"> = {
+		model: model.requestModelId ?? model.id,
+	};
+	applyOpenAIServiceTier(routedRequest, options?.serviceTier, model);
 	const headers = logger.time(
 		"prewarmCodex:createHeaders",
 		createCodexHeaders,
@@ -3399,6 +3416,7 @@ export async function prewarmOpenAICodexResponses(
 		responsesLite,
 		requestIdentity,
 		attestation,
+		routedRequest,
 	);
 	await logger.time(
 		"prewarmCodex:establishWs",

@@ -2423,6 +2423,176 @@ describe("advisor", () => {
 			expect(rendered).toContain("elided");
 			expect(leakedSecretPieces(rendered, secret)).toEqual([]);
 		});
+
+		it("redacts one-line command previews before truncating them", async () => {
+			// Both secrets start inside the ~120-char preview and end past its cut.
+			const toolSecret = distinctSecret(120);
+			const userSecret = distinctSecret(240).slice(120);
+			const obfuscator = new SecretObfuscator([
+				{ type: "plain", content: toolSecret },
+				{ type: "plain", content: userSecret },
+			]);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const messages: AgentMessage[] = [
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "bash",
+							arguments: {
+								command: `cd /srv/app/releases/current && env DEPLOY_TOKEN=${toolSecret} ./deploy.sh`,
+							},
+						},
+					],
+					timestamp: 1,
+				} as unknown as AgentMessage,
+				{
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "bash",
+					content: "deployed",
+					isError: false,
+					timestamp: 2,
+				} as unknown as AgentMessage,
+				{
+					role: "bashExecution",
+					command: `curl -sS https://api.example.com/v1/rotate -H "Authorization: Bearer ${userSecret}"`,
+					output: "rotated",
+					exitCode: 0,
+					cancelled: false,
+					truncated: false,
+					timestamp: 3,
+				} as unknown as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, { snapshotMessages: () => messages, obfuscator });
+
+			runtime.onTurnEnd();
+			await runtime.waitForCatchup(1_000, 1);
+
+			const rendered = promptText(promptInputs[0]);
+			expect(rendered).toContain("→ bash(cd /srv/app/releases/current && env DEPLOY_TOKEN=");
+			expect(rendered).toContain("→ user-bash! curl -sS https://api.example.com/v1/rotate");
+			expect(leakedSecretPieces(rendered, toolSecret)).toEqual([]);
+			expect(leakedSecretPieces(rendered, userSecret)).toEqual([]);
+		});
+
+		it("redacts preview secrets that cross the cut at a space or run past any fixed window", async () => {
+			// Reviewer repros: a two-word plain secret straddling the cut, a regex
+			// secret longer than 8 KiB starting inside the visible part, a regex
+			// whose lookahead context lies past the cut (the secret itself fits),
+			// and a short replacement that pulls a later secret into view.
+			const spaced = "SECRETONE SECRETTWO";
+			const longToken = `tok_${"z".repeat(9 * 1024)}`;
+			const pulledIn = `SECRET_${"b".repeat(200)}`;
+			const obfuscator = new SecretObfuscator([
+				{ type: "plain", content: spaced },
+				{ type: "plain", content: pulledIn },
+				{ type: "regex", content: "tok_[a-z0-9]+" },
+				{ type: "regex", content: "LOOKSECRET(?= LOOKTAIL)" },
+				{ type: "regex", content: "A{100}(?= x{40}END)", mode: "replace", replacement: "[redacted]" },
+			]);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const messages: AgentMessage[] = [
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "bash",
+							arguments: { command: `${"p".repeat(110)}${spaced} suffix` },
+						},
+						{
+							type: "toolCall",
+							id: "c2",
+							name: "bash",
+							arguments: { command: `${"r".repeat(109)}LOOKSECRET LOOKTAIL suffix` },
+						},
+					],
+					timestamp: 1,
+				} as unknown as AgentMessage,
+				{
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "bash",
+					content: "ok",
+					isError: false,
+					timestamp: 2,
+				} as unknown as AgentMessage,
+				{
+					role: "toolResult",
+					toolCallId: "c2",
+					toolName: "bash",
+					content: "ok",
+					isError: false,
+					timestamp: 2,
+				} as unknown as AgentMessage,
+				{
+					role: "bashExecution",
+					command: `${"q".repeat(100)} ${longToken}`,
+					output: "",
+					exitCode: 0,
+					timestamp: 3,
+				} as unknown as AgentMessage,
+				{
+					role: "bashExecution",
+					command: `${"A".repeat(100)} ${"x".repeat(40)}END ${pulledIn} suffix`,
+					output: "",
+					exitCode: 0,
+					timestamp: 4,
+				} as unknown as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, { snapshotMessages: () => messages, obfuscator });
+
+			runtime.onTurnEnd();
+			await runtime.waitForCatchup(1_000, 1);
+
+			const rendered = promptText(promptInputs[0]);
+			expect(rendered).toContain(`→ bash(${"p".repeat(110)}`);
+			expect(rendered).toContain(`→ user-bash! ${"q".repeat(100)}`);
+			expect(rendered).not.toContain("SECRETONE");
+			expect(rendered).not.toContain("LOOKSECRET");
+			expect(rendered).not.toContain("tok_zzz");
+			expect(rendered).not.toContain("SECRET_b");
+		});
+
+		it("redacts user execution sources in advisor history before cutting their previews", async () => {
+			const secret = distinctSecret(80);
+			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const prefix = "x".repeat(103);
+			agent.state.messages.push(
+				{
+					role: "bashExecution",
+					command: `echo ${prefix}${secret}`,
+					exitCode: 0,
+					timestamp: 1,
+				} as unknown as AgentMessage,
+				{
+					role: "pythonExecution",
+					code: `print("${prefix}${secret}")`,
+					exitCode: 0,
+					timestamp: 2,
+				} as unknown as AgentMessage,
+			);
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => [{ role: "user", content: "review the execution", timestamp: 3 } as AgentMessage],
+				obfuscator,
+			});
+
+			runtime.onTurnEnd();
+			await runtime.waitForCatchup(1_000, 1);
+
+			const bash = agent.state.messages[0] as AgentMessage & { command: string };
+			const python = agent.state.messages[1] as AgentMessage & { code: string };
+			expect(leakedSecretPieces(bash.command, secret)).toEqual([]);
+			expect(leakedSecretPieces(python.code, secret)).toEqual([]);
+		});
 		it("does not scan tool-call arguments hidden by the primary-argument preview", async () => {
 			const obfuscator = new SecretObfuscator([
 				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },

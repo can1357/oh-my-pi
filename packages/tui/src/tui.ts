@@ -29,13 +29,13 @@ import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
 import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
+import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "./terminal-multiplexer";
 import {
 	encodeKittyDeleteAllImages,
 	encodeKittyDeleteImage,
 	encodeKittyPlacementLine,
 	ImageProtocol,
 	isImageProtocolForced,
-	isInsideHerdr,
 	isInsideTerminalMultiplexer,
 	parseKittyDirectPlacementLine,
 	setCellDimensions,
@@ -44,7 +44,6 @@ import {
 	synchronizedOutputUserOverride,
 	TERMINAL,
 } from "./terminal-capabilities";
-import { classifyTerminalMultiplexer } from "./terminal-multiplexer";
 import { compositeLineAt } from "./render/composite";
 import {
 	Ellipsis,
@@ -196,6 +195,10 @@ export interface TUIStartOptions {
 	 * Paint without owning stdin: the terminal stays in cooked mode (kernel
 	 * echo + line editing at the hardware cursor) until {@link TUI.enableInput}
 	 * switches to raw input and replays the kernel-buffered keystrokes.
+	 *
+	 * A terminal expected to speak TSP needs raw input from the start, so it
+	 * gets it; its keystrokes are held instead (TSP events and the cell-size
+	 * reply still apply) until {@link TUI.releaseHeldInput} replays them.
 	 */
 	deferInput?: boolean;
 }
@@ -991,6 +994,17 @@ export class TUI extends Container {
 	#cancelPostmortemRestore?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
 	#inputDeferred = false;
+	/**
+	 * Keystrokes held since a TSP `deferInput` start, replayed by
+	 * releaseHeldInput(); undefined when not holding.
+	 */
+	#heldInput: string[] | undefined;
+	/**
+	 * The component focused when holding began. Only its keystrokes are held:
+	 * a dialog that takes focus meanwhile (a startup hook's select or confirm)
+	 * gets its input live.
+	 */
+	#heldFocus: Component | null = null;
 	// Always-on event-loop lag probe. The high default threshold keeps it quiet;
 	// it only logs `ui.loop-blocked` (with the current loop phase) when a frame
 	// budget is genuinely starved. Armed in start(), disarmed in stop().
@@ -1435,6 +1449,12 @@ export class TUI extends Container {
 		// `hello` query must go out now to confirm the surface.
 		const nativeExpected = this.terminal.tspExpected === true;
 		this.#inputDeferred = options?.deferInput === true && !nativeExpected;
+		// A restart (a startup dialog's external editor stops and restarts the
+		// TUI) keeps an existing hold: those keys still belong to the editor.
+		if (options?.deferInput === true && nativeExpected) {
+			this.#heldInput = [];
+			this.#heldFocus = this.#focusedComponent;
+		}
 		this.#watchdog.start();
 		this.#ghosttyInitialImageDelayDone = false;
 		this.#ghosttyImageReadyAtMs = this.#renderScheduler.now() + TUI.#GHOSTTY_INITIAL_IMAGE_DELAY_MS;
@@ -1448,12 +1468,19 @@ export class TUI extends Container {
 		this.terminal.onPrivateModeReport?.((mode, supported, confirmed = true, status) => {
 			if (mode !== 2026 || !confirmed) return;
 			if (synchronizedOutputUserOverride() !== null) return;
-			// Herdr's Ghostty VTE honors DEC 2026 even when DECRQM is unanswered or
-			// reports unrecognized (status 0). Other confirmed unsupported reports
-			// still disable: status 4 is permanently reset, and a three-argument
-			// callback (`status` omitted) is a definitive unsupported from a
-			// custom Terminal that does not distinguish DECRPM codes.
-			if (!supported && isInsideHerdr() && status === 0) return;
+			// Some multiplexer VTEs (Herdr's Ghostty pane) honor DEC 2026 even when
+			// DECRQM is unanswered or reports unrecognized (status 0). Other
+			// confirmed unsupported reports still disable: status 4 is permanently
+			// reset, and a three-argument callback (`status` omitted) is a
+			// definitive unsupported from a custom Terminal that does not
+			// distinguish DECRPM codes.
+			if (
+				!supported &&
+				status === 0 &&
+				terminalMultiplexerSessions().some(multiplexer => multiplexer.honorsSynchronizedOutput)
+			) {
+				return;
+			}
 			this.#setSynchronizedOutput(supported);
 		});
 		// Icons painted before the Glyph Protocol registration landed may sit in
@@ -1462,6 +1489,13 @@ export class TUI extends Container {
 			if (!supported || this.#stopped) return;
 			this.invalidate();
 			this.requestRender(true);
+		});
+		this.terminal.onSixelSupport?.(supported => {
+			if (!supported || this.#stopped || this.#nativeLive || this.terminal.tspExpected) return;
+			if (isImageProtocolForced()) return;
+			// Keep consuming an already-requested XTSMGRAPHICS reply until it
+			// arrives or times out, even though DA1 has established support.
+			this.#enableSixelProtocol();
 		});
 		this.terminal.onTspHello?.(hello => this.#onTspHello(hello));
 		this.terminal.start(
@@ -1765,7 +1799,7 @@ export class TUI extends Container {
 			resizeInPlaceOverride() !== false &&
 			this.#resizeScrollbackMode === "rebuild" &&
 			this.#synchronizedOutputEnabled &&
-			classifyTerminalMultiplexer() === "tmux"
+			classifyTerminalMultiplexerModule()?.altRestoreEndsSynchronizedOutput === true
 		);
 	}
 
@@ -2147,7 +2181,7 @@ export class TUI extends Container {
 				// an intact bottom anchor still need no replay or additional wait.
 				if (
 					this.#resizeScrollbackMode === "rebuild" &&
-					classifyTerminalMultiplexer() === "tmux" &&
+					classifyTerminalMultiplexerModule()?.growsBeforeSigwinch === true &&
 					!this.#resizeRepaintsInPlace() &&
 					this.#frameProvider?.beginHistoryReplay &&
 					this.#resizeBurstGrew &&
@@ -2273,6 +2307,32 @@ export class TUI extends Container {
 		this.requestRender(true);
 	}
 
+	/**
+	 * Replay the keystrokes held since a TSP `deferInput` start through the
+	 * normal input path, then deliver input live. Call once the app's key
+	 * handlers are installed so a hotkey pressed during startup still fires.
+	 * Only keys typed while the start-time focus owner had focus are held. The
+	 * hold survives a stop/start until released. Idempotent; no-op when nothing
+	 * is held.
+	 */
+	releaseHeldInput(): void {
+		const held = this.#heldInput;
+		if (held === undefined) return;
+		this.#heldInput = undefined;
+		if (this.#stopped) return;
+		for (const data of held) this.#handleInput(data);
+	}
+
+	/**
+	 * Hand held-key ownership from `previous` to `next` when the app replaces
+	 * the component focused at start (a swapped-in custom editor), so keys
+	 * typed into the replacement stay queued behind the held ones instead of
+	 * overtaking them. No-op unless `previous` owns the held keys.
+	 */
+	replaceHeldFocus(previous: Component, next: Component): void {
+		if (this.#heldInput !== undefined && this.#heldFocus === previous) this.#heldFocus = next;
+	}
+
 	addStartListener(listener: StartListener): () => void {
 		this.#startListeners.add(listener);
 		return () => {
@@ -2296,17 +2356,19 @@ export class TUI extends Container {
 		// PI_FORCE_IMAGE_PROTOCOL choice — including its `off` kill switch — wins
 		// over the probe.
 		if (TERMINAL.imageProtocol) return;
+		// A Tern surface (live, or about to open optimistically at start) sends
+		// images through TSP; this also keeps held startup input free of probe
+		// listeners.
+		if (this.#nativeLive || this.terminal.tspExpected) return;
 		if (isImageProtocolForced()) return;
 		if (!process.stdin.isTTY || !process.stdout.isTTY) return;
 
 		this.#clearSixelProbeState();
 		this.#sixelProbePendingGraphics = true;
 		this.#sixelProbeUnsubscribe = this.addInputListener(data => this.#handleSixelProbeInput(data));
-		// XTSMGRAPHICS item 2 reports the terminal's maximum SIXEL geometry. DA1
-		// attribute 4 advertises SIXEL as well, but ProcessTerminal swallows every
-		// `CSI ? … c` reply for the whole session so a late one cannot leak into the
-		// composer (#8542): those bytes never reach an input listener, so this probe
-		// cannot read them.
+		// XTSMGRAPHICS item 2 reports the maximum SIXEL geometry. DA1 attribute 4
+		// arrives through onSixelSupport instead: ProcessTerminal consumes the
+		// reply bytes so they cannot leak into application input.
 		this.terminal.write("\x1b[?2;1;0S");
 		this.#sixelProbeTimeout = setTimeout(() => {
 			this.#finishSixelProbe(false);
@@ -2390,7 +2452,11 @@ export class TUI extends Container {
 
 	#finishSixelProbe(supported: boolean): void {
 		this.#clearSixelProbeState();
-		if (!supported || TERMINAL.imageProtocol) return;
+		if (supported) this.#enableSixelProtocol();
+	}
+
+	#enableSixelProtocol(): void {
+		if (TERMINAL.imageProtocol) return;
 
 		setTerminalImageProtocol(ImageProtocol.Sixel);
 		this.#queryCellSize();
@@ -2781,6 +2847,11 @@ export class TUI extends Container {
 		}
 		if (data.length === 0) return;
 
+		if (this.#heldInput !== undefined && this.#focusedComponent === this.#heldFocus) {
+			this.#holdInput(data);
+			return;
+		}
+
 		// If focused component is an overlay, verify it's still visible (visibility can change due to
 		// terminal resize or visible() callback). Runs before the capture preflight below, which must
 		// target the effective focus owner, not a hidden overlay.
@@ -2858,6 +2929,18 @@ export class TUI extends Container {
 			focused.handleInput(data);
 			this.requestRender();
 		}
+	}
+
+	/**
+	 * Queue a keystroke typed before the app installed its key handlers; input
+	 * listeners see it once, on replay. The cell-size reply is a terminal report,
+	 * consumed now. Ctrl+C/Ctrl+D release the queue so a stalled startup stays
+	 * interruptible.
+	 */
+	#holdInput(data: string): void {
+		if (this.#consumeCellSizeResponse(data)) return;
+		this.#heldInput!.push(data);
+		if (matchesKey(data, "ctrl+c") || matchesKey(data, "ctrl+d")) this.releaseHeldInput();
 	}
 
 	#consumeCellSizeResponse(data: string): boolean {
@@ -3325,7 +3408,7 @@ export class TUI extends Container {
 		// resize in rebuild mode): erase native history and the viewport,
 		// then repaint from row zero.
 		const destructiveReset = this.#clearScrollbackOnNextRender;
-		const compactReplay = destructiveReset && classifyTerminalMultiplexer() === "tmux";
+		const compactReplay = destructiveReset && classifyTerminalMultiplexerModule()?.expandsRepPadding === true;
 		if (destructiveReset) {
 			this.#providerViewportTop = 0;
 			this.#providerWindow = [];
@@ -3345,7 +3428,7 @@ export class TUI extends Container {
 			destructiveReset &&
 			this.#resizeScrollbackMode === "rebuild" &&
 			this.#synchronizedOutputEnabled &&
-			classifyTerminalMultiplexer() === "tmux";
+			classifyTerminalMultiplexerModule()?.expiresSynchronizedOutput === true;
 		let syncBytes = Buffer.byteLength(buffer);
 		const append = (sequence: string): void => {
 			buffer += sequence;

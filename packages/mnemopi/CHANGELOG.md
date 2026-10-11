@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- Fixed memory saves slowing down and the memory database growing quadratically with the number of stored memories, because any two memories mentioning a date or words like "today" were linked even when unrelated ([#15013](https://github.com/can1357/oh-my-pi/pull/15013) by [@tickernelz](https://github.com/tickernelz)).
+
+## [18.8.8] - 2026-10-10
+
+### Fixed
+
+- Fixed long retained transcripts exhausting local memory extraction models by limiting each extraction input to 8192 characters while keeping the opening context and newest turns ([#14956](https://github.com/can1357/oh-my-pi/issues/14956)).
+
+## [18.8.7] - 2026-10-09
+
+### Fixed
+
 - Fixed proactive linking freezing the host for seconds per stored memory on large banks; a memory's graph links are now written in one commit instead of one per link ([#14998](https://github.com/can1357/oh-my-pi/issues/14998)).
 
 ## [18.8.5] - 2026-10-08

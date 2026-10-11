@@ -190,7 +190,7 @@ If the runner does not emit `done` within 5s of the interrupt (`INTERRUPT_ESCALA
 
 ### stdin behavior
 
-Interactive stdin is not supported: the runner's stdin is the host's NDJSON control channel, not a user-input stream. `input()` cannot be answered through Eval and may block until cancellation. Built-in pip and shell magics give their child processes `DEVNULL` stdin so they cannot consume control frames.
+Interactive stdin is not supported: the host's NDJSON control channel arrives on the runner's original stdin, which the runner moves to a private descriptor at startup before pointing fd 0 at the null device. `input()` and `sys.stdin` reads in user code see immediate EOF, as does every process started without an explicit stdin, so none of them can consume control frames. Built-in pip and shell magics also pass `DEVNULL` explicitly.
 
 ## Output capture and rendering
 

@@ -46,7 +46,7 @@ The `computer` global exposes the desktop helpers directly. Each helper is one h
 const win = await computer.window({ app: "Code" });
 await win.screenshot();
 const tree = await win.ax({ maxDepth: 6 });
-await (await win.ref("e12")).press();
+await win.ref("e12").press();
 await computer.capabilities();
 await computer.close();
 ```
@@ -57,7 +57,7 @@ Python uses the same helper names; keyword arguments become the trailing options
 win = await computer.window(app="Code")
 await win.screenshot(silent=True)
 tree = await win.ax(maxDepth=6)
-await (await win.ref("e12")).press()
+await win.ref("e12").press()
 await win.click(120, 48, button="right")
 ```
 
@@ -113,7 +113,7 @@ Zoom requires a previous full capture of the same target. Its rectangle is in th
 
 ### Observation, menus, holds, and control
 
-- `win.observe({ silent?, all?, maxDepth? })` returns screenshot metadata plus `{ ax, nodeCount, truncated }`, normally emitting both image and AX text. Capture/AX failure restores the previous delivered coordinate frame.
+- `win.observe({ silent?, all?, maxDepth? })` returns screenshot metadata plus `{ ax, nodeCount, truncated }`, normally emitting both image and AX text. Capture/AX failure restores the previous delivered coordinate frame. When the AX text was emitted, the returned `ax` stays readable but is left out of the value's display, so a trailing `await win.observe()` shows the tree once: in JavaScript `ax` is non-enumerable (spread, `JSON.stringify` and `console.log` leave it out), and in Python the repr and `display()` omit it. A `silent: true` observation keeps `ax` everywhere; values returned from `computer.run` are unchanged.
 - `win.menu.items(path?)` lists `{ title, path, enabled, checked, hasSubmenu, shortcut? }[]`; `win.menu.select(path)` invokes one enabled unambiguous command in the target window's context.
 - `holdKeys(keys, { duration, takeover? })` and `holdMouse(x, y, { duration, button?, keys?, takeover? })` use seconds in `[0, 100]`. `drag` also accepts arbitrary `keys`. Held input is always released within the call.
 - `desktop.control.acquire({ reason })` needs live human confirmation, returns `{ active }`, and holds native task ownership between calls. `release()` revokes it; `state()` reads live state. Normal run retirement preserves an acquired grant, while interruption, task completion, and disposal revoke it. Omitted takeover follows that live grant; explicit false remains background.
@@ -125,15 +125,17 @@ Menu/app labels are untrusted data. A takeover grant does not authorize unrelate
 
 - `win.ax({ all?, maxDepth? }) -> string` returns the native textual accessibility tree with `[ref=eN]` references.
 - `win.find({ role?, title?, value?, limit? }) -> El[]` returns all native matches within the requested limit.
-- `await win.ref("e5") -> El` and `await desktop.ref("e5") -> El` resolve a live native reference.
+- `await win.ref("e5") -> El` and `await desktop.ref("e5") -> El` resolve a live native reference. The handle `ref()` returns also takes element methods directly, so `win.ref("e5").click()` needs no inner `await`.
 - `desktop.elementAt(x, y)` and `desktop.focusedElement()` return `El | null`.
 
 `El` exposes snapshot fields `ref`, `role`, `nativeRole`, optional `title`/`description`, `enabled`, `focused`, and `childCount`, plus:
 
 - reads: `value()`, `bounds()`, `attributes()`, `actions()`, `parent()`, `children()`;
-- mutations: `setValue(value)`, `perform(action)`, `press()`, `click({ takeover? })`, and `focus()`.
+- mutations: `setValue(value)`, `perform(action)`, `press()`, `click({ button?, count?, modifiers?, takeover? })`, and `focus()`.
 
 On macOS, `setValue` on a date or time control (one whose `AXValue` is a date) takes ISO-8601: `YYYY-MM-DD` changes the day and keeps the control's time of day, `YYYY-MM-DDTHH:MM[:SS]` is local time, and a date-time followed by `Z` or `±HH:MM` is that exact instant. Anything else is refused before a write, naming these forms and the control's current date, as is a local time that daylight saving skips or repeats (add an offset to pick a repeated one).
+
+On macOS, a ref whose element the app has since removed throws `StaleRef` from every element operation, without waiting for the snapshots to expire it.
 
 On macOS, `setValue(value)` on a popup button (`popupbutton`) chooses the menu option titled exactly `value`: it opens a closed menu, presses the option, and confirms the choice by reading the popup's value back. No match, or several options with that title, throws with the available option titles, and a menu the call opened is closed again.
 
@@ -177,10 +179,12 @@ Native errors are surfaced as `ToolError` text prefixed by the stable code name:
 
 - `PermissionDenied`, `CaptureFailed`, `InputFailed`, `BackgroundUnavailable`, `InputBusy`, `Cancelled`
 - `WindowNotFound`, `InvalidTarget`, `InvalidKey`, `InvalidCoordinateFrame`
-- `StaleRef`, `AxUnsupported`, `AxFailed`, `Timeout`, `Closed`, `Internal`
+- `StaleRef`, `AxUnsupported`, `AxFailed`, `AxUnconfirmed`, `Timeout`, `Closed`, `Internal`
 - `Unsupported`, `SpaceUnsupported`, `SpaceMoveDenied`
 
 Prelude/worker errors include `Computer session is closed`, `Computer worker is busy`, `Timed out starting computer worker`, `Computer code execution timed out after <ms>ms`, read-only mutation errors, and the worker-restart message above.
+
+`AxUnconfirmed` (macOS) means an AX action was requested but its outcome could not be confirmed: the app did not reply in time or messaging failed, for example because the action opened a modal dialog. It may already have taken effect, so observe the window before repeating it.
 
 `InputBusy` means another native operation owns input/focus and no input was sent. On macOS a listen-only, operation-scoped Escape monitor cancels physical Escape but ignores synthetic events. An unavailable monitor refuses input with `PermissionDenied`. `Cancelled` may follow partial input or an atomic OS/AX operation: cancellation cannot undo effects already delivered.
 

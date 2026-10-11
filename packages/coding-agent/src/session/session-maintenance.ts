@@ -463,7 +463,8 @@ export interface SessionMaintenanceHost {
 	resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void;
 	resetPlanReference(): void;
 	syncTodoPhasesFromBranch(): void;
-	resetAdvisorRuntimes(reason?: string): void;
+	/** `compacted` marks a rewrite that replaced history with a summary. */
+	resetAdvisorRuntimes(reason?: string, options?: { compacted?: boolean }): void;
 	/** Re-aligns advisors after an in-place prune their own contexts already cover (no re-prime). */
 	rebaseAdvisorPrefix(reason: string): void;
 	rebaseAfterCompaction(): void;
@@ -2442,7 +2443,7 @@ export class SessionMaintenance {
 		// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 		// the plan from disk and re-injects it on the next turn (issue #1246).
 		this.#host.resetPlanReference();
-		this.#host.resetAdvisorRuntimes(args.advisorResetReason);
+		this.#host.resetAdvisorRuntimes(args.advisorResetReason, { compacted: true });
 		this.#host.syncTodoPhasesFromBranch();
 		if (args.codexCompaction) {
 			this.#host.resetCodexProviderAfterCompaction(args.codexCompaction);
@@ -3056,7 +3057,8 @@ export class SessionMaintenance {
 			contextWindow > 0 &&
 			cfgContextPromotionEnabled.get(this.#host.settings)
 		) {
-			const failedModel = this.#host.modelRegistry.find(assistantMessage.provider, assistantMessage.model);
+			const foundModel = this.#host.modelRegistry.find(assistantMessage.provider, assistantMessage.model);
+			const failedModel = foundModel && this.#host.modelRegistry.fitContextWindow(foundModel, this.#host.settings);
 			const failedWindow = failedModel?.contextWindow ?? 0;
 			const promotionTarget = failedModel
 				? resolveContextPromotionConfiguredTarget(failedModel, this.#host.modelRegistry.getAvailable())
@@ -3375,7 +3377,9 @@ export class SessionMaintenance {
 		const availableModels = this.#host.modelRegistry.getAvailable();
 		if (availableModels.length === 0) return undefined;
 
-		const candidate = resolveContextPromotionConfiguredTarget(currentModel, availableModels);
+		const configured = resolveContextPromotionConfiguredTarget(currentModel, availableModels);
+		// Judge the window this session would actually run the target with.
+		const candidate = configured && this.#host.modelRegistry.fitContextWindow(configured, this.#host.settings);
 		if (!candidate) return undefined;
 		if (modelsAreEqual(candidate, currentModel)) return undefined;
 		if (candidate.contextWindow == null || candidate.contextWindow <= contextWindow) return undefined;
@@ -3393,6 +3397,11 @@ export class SessionMaintenance {
 		availableModels: Model[],
 		filter?: (model: Model) => boolean,
 	): Model[] {
+		// Shared catalog rows carry the registry's extended-window opt-ins; judge
+		// and compact with the window this session's settings select.
+		const registry = this.#host.modelRegistry;
+		const settings = this.#host.settings;
+		availableModels = availableModels.map(model => registry.fitContextWindow(model, settings));
 		const candidates: Model[] = [];
 		const seen = new Set<string>();
 
@@ -4216,7 +4225,7 @@ export class SessionMaintenance {
 		// and advisor cursors / todo phases were derived from the replaced
 		// history.
 		this.#host.resetPlanReference();
-		this.#host.resetAdvisorRuntimes("compaction-rescue");
+		this.#host.resetAdvisorRuntimes("compaction-rescue", { compacted: true });
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		// Extensions must see the entry that is now active, not (only) the one

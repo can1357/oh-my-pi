@@ -336,6 +336,7 @@ import { materializeImageChipLinks, UiHelpers } from "./utils/ui-helpers";
 
 import {
 	cfgAutocompleteMaxVisible,
+	cfgComposerPredictions,
 	cfgComposerShape,
 	cfgComposerTokenRate,
 	cfgDisplayCacheMissMarker,
@@ -429,6 +430,7 @@ const cfgLiveUiSettings = combine({
 	"compaction.idleTimeoutSeconds": cfgCompactionIdleTimeoutSeconds,
 	"recap.enabled": cfgRecapEnabled,
 	"recap.idleSeconds": cfgRecapIdleSeconds,
+	"composer.predictions": cfgComposerPredictions,
 	"compaction.enabled": cfgCompactionEnabled,
 	"compaction.methodOrder": cfgCompactionMethodOrder,
 	"display.hideToolActivity": cfgDisplayHideToolActivity,
@@ -1738,6 +1740,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor = this.composer.editor;
 		this.editor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		this.editor.placeholder = () => this.#composerHint();
+		this.editor.prediction = () => this.#eventController.composerPrediction.text;
 		this.editor.composerState = () => this.#composerNativeState();
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		this.editor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
@@ -2498,6 +2501,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			// replay with the newly detected palette.
 			onTerminalAppearanceChange(mode, appearanceRefreshWasRequested ? {} : undefined);
 		});
+
+		// Keys pressed while a Tern startup loaded were held until hooks ran, the
+		// session mode settled, the draft was restored and every subscription
+		// above was installed. They replay into the restored draft, never over
+		// it, a startup shortcut (Alt+P, Ctrl+G, extension shortcuts) acts on the
+		// final mode, editor contents and observed session, and a held Enter
+		// still meets the bootstrap submit gate lifted just below.
+		this.ui.releaseHeldInput();
 
 		// Everything is wired: subscriptions observe agent events, the session
 		// mode is reconciled, and the submit handler is installed. Lift the
@@ -3462,6 +3473,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#eventController.refreshIdleCompactionTimer();
 		}
 		if (any("recap.enabled", "recap.idleSeconds")) this.#eventController.refreshIdleRecapTimer();
+		if (any("composer.predictions") && !next["composer.predictions"]) {
+			this.#eventController.composerPrediction.cancel();
+		}
 		if (any("compaction.enabled", "compaction.methodOrder")) {
 			this.statusLine.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 			this.ui.requestRender();
@@ -3679,7 +3693,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editor.borderColor = theme.getPythonModeBorderColor();
 		} else if (vimMode === "visual" || vimMode === "visual-line") {
 			this.editor.borderColor = (str: string) => theme.fg("warning", str);
-		} else if (vimMode === "normal") {
+		} else if (vimMode === "normal" || vimMode === "replace") {
 			this.editor.borderColor = (str: string) => theme.fg("accent", str);
 		} else if (vimMode === "insert") {
 			// Insert gets its own colour rather than falling through to the session accent: with Normal
@@ -7080,6 +7094,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.viewportRowsProvider = () => this.ui.terminal.rows;
 		nextEditor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		nextEditor.placeholder = () => this.#composerHint();
+		nextEditor.prediction = () => this.#eventController.composerPrediction.text;
 		nextEditor.composerState = () => this.#composerNativeState();
 		nextEditor.attachmentChips = previousEditor.attachmentChips;
 		nextEditor.imageReferenceHyperlink = imageReferenceHyperlink;
@@ -7096,6 +7111,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
+		// A swap during startup keeps the bootstrap submit gate until init lifts it.
+		nextEditor.disableSubmit = previousEditor.disableSubmit;
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(nextEditor));
 		this.editor = nextEditor;
 		this.composer.setEditor(nextEditor);
@@ -7612,6 +7629,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleDumpAllCommand();
 	}
 
+	async handleDumpAnonCommand(): Promise<void> {
+		return this.#commandController.handleDumpAnonCommand();
+	}
+
 	handleAdvisorDumpCommand(isRaw?: boolean) {
 		return this.#commandController.handleAdvisorDumpCommand(isRaw);
 	}
@@ -7696,12 +7717,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#commandController.handleDeleteCommand();
 	}
 
-	async handleForkCommand(): Promise<void> {
+	async handleForkCommand(placement?: "pane" | "window"): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
-		await this.#btwController.dispose();
-		this.#omfgController.dispose();
-		this.#cleanseController.dispose();
-		await this.#commandController.handleForkCommand();
+		if (!placement) {
+			await this.#btwController.dispose();
+			this.#omfgController.dispose();
+			this.#cleanseController.dispose();
+		}
+		await this.#commandController.handleForkCommand(placement);
 	}
 
 	async handleMoveCommand(targetPath?: string): Promise<void> {
@@ -7992,8 +8015,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		await runProviderSetupWizard(this);
 	}
 
-	showHookConfirm(title: string, message: string): Promise<boolean> {
-		return this.#extensionUiController.showHookConfirm(title, message);
+	showHookConfirm(title: string, message: string, dialogOptions?: InteractiveSelectorDialogOptions): Promise<boolean> {
+		return this.#extensionUiController.showHookConfirm(title, message, dialogOptions);
 	}
 
 	// Input handling
