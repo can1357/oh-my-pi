@@ -28,7 +28,7 @@ use std::{
 };
 
 pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery};
-use ax::{AxRegistry, register_node};
+use ax::{AppFocus, AxRegistry, register_node};
 use backend::{Backend, DeliveryMode, MouseButton, PointerEvent};
 use control::{CancellationSource, InputLease, OperationToken};
 use error::{CoreResult, DesktopError};
@@ -839,7 +839,7 @@ impl Worker {
 							.map_err(|error| error.clone())?
 							.ax()
 							.ok_or_else(DesktopError::ax_unsupported)?;
-						Some(register_node(ax, registry, "desktop", h)?)
+						Some(register_node(ax, registry, "desktop", h, &mut AppFocus::default())?)
 					},
 					None => None,
 				};
@@ -847,7 +847,7 @@ impl Worker {
 			},
 			Request::AxNode { reference, .. } => {
 				let h = self.registry.resolve(reference)?;
-				let props = self.ax()?.props(&h)?;
+				let props = ax::node_props(self.ax()?, &h, &mut AppFocus::default())?;
 				Ok(Response::Node(Some(ax::node_to_napi(reference.clone(), props))))
 			},
 			Request::AxAttributes { reference, .. } => {
@@ -869,6 +869,7 @@ impl Worker {
 				let target = self.registry.target(reference)?;
 				let handles = self.ax()?.children(&h)?;
 				let mut nodes = Vec::with_capacity(handles.len());
+				let mut focus = AppFocus::default();
 				for h in handles {
 					let (backend, registry) = (&mut self.backend, &mut self.registry);
 					let ax = backend
@@ -876,7 +877,7 @@ impl Worker {
 						.map_err(|error| error.clone())?
 						.ax()
 						.ok_or_else(DesktopError::ax_unsupported)?;
-					nodes.push(register_node(ax, registry, &target, h)?);
+					nodes.push(register_node(ax, registry, &target, h, &mut focus)?);
 				}
 				Ok(Response::Nodes(nodes))
 			},
@@ -892,7 +893,7 @@ impl Worker {
 							.map_err(|error| error.clone())?
 							.ax()
 							.ok_or_else(DesktopError::ax_unsupported)?;
-						Some(register_node(ax, registry, &target, h)?)
+						Some(register_node(ax, registry, &target, h, &mut AppFocus::default())?)
 					},
 					None => None,
 				};
@@ -1821,6 +1822,8 @@ mod capture_tests {
 				bounds:      Some(AxBounds { x: 10.0, y: 10.0, width: 20.0, height: 20.0 }),
 				actions:     Vec::new(),
 				child_count: 0,
+				selected:    false,
+				role_name:   None,
 			})
 		}
 
@@ -2016,7 +2019,8 @@ mod capture_tests {
 			.map_err(|error| error.clone())?
 			.ax()
 			.ok_or_else(DesktopError::ax_unsupported)?;
-		let reference = register_node(ax, registry, origin, AxHandle::Test(1))?.ref_;
+		let reference =
+			register_node(ax, registry, origin, AxHandle::Test(1), &mut AppFocus::default())?.ref_;
 		let (reply, _rx) = flume::bounded(1);
 		worker.process(
 			&Request::AxClick { reference, options: ParsedPointerOptions::parse(None)?, reply },

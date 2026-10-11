@@ -5,17 +5,22 @@
 ### Added
 
 - Added `applyBinaryPatch(oldPath, patchPath, outPath)`, which applies an HDiffPatch single-stream delta patch (zstd or uncompressed) to a file
+- Added to macOS `ax()` lines what an element can do: `(selected)`, `(settable)` on dates `setValue` can write, `actions=` for actions beyond its role's press, names for a window's close, minimize, zoom and full-screen buttons, and dates in local time ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
 - Sped up external commands in the embedded shell on Linux (glibc 2.29+) by spawning them without copying the host's memory (~9 ms → ~0.8 ms per launch at ~450 MB RSS) ([#14847](https://github.com/can1357/oh-my-pi/issues/14847), [#14858](https://github.com/can1357/oh-my-pi/pull/14858) by [@farnoy](https://github.com/farnoy))
 - Reduced macOS computer-use screenshot latency by about 35 ms per window capture; a machine holding thousands of off-screen windows no longer takes seconds per screenshot ([#15291](https://github.com/can1357/oh-my-pi/pull/15291) by [@will-bogusz](https://github.com/will-bogusz))
 - `grep()` and `search()` cut a matching line wider than `maxColumns` around its first match, marking each cut side with `...`, and report that match's character column in `column` ([#15278](https://github.com/can1357/oh-my-pi/pull/15278) by [@will-bogusz](https://github.com/will-bogusz))
+- Sped up macOS accessibility reads (`ax()`, `find()` and single-element reads) by fetching each element's attributes in one round trip to the app ([#15275](https://github.com/can1357/oh-my-pi/pull/15275) by [@will-bogusz](https://github.com/will-bogusz))
+- `ax()` lines show 200 characters of a long label or value instead of 80, keep newlines as `\n`, and end a cut value with how much was cut and the `value()` call that reads it whole ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
 - Fixed macOS window listing, `ax()`, `find()` and element clicks refusing without Screen Recording permission, which now only screenshots and display listing need (without it, other apps' window titles are blank), and missing windows behind the 48 frontmost ([#15158](https://github.com/can1357/oh-my-pi/pull/15158) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS `menu.items()` and `menu.select()` failing with `AxFailed` on menus that hold an item whose title cannot be read, such as the Tags row in Finder's File menu and a row of Preview's Tools menu; such items are now skipped like separators ([#15223](https://github.com/can1357/oh-my-pi/pull/15223) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS `ax()` marking every cell of a focused table or sidebar `(focused)`; it now marks only the element holding the app's keyboard focus ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS `perform()` reporting a followed Preview PDF link or an opened Finder item as failed: an attribute error the app answers to an action now reports the outcome as unconfirmed ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.8] - 2026-10-10
 

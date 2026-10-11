@@ -210,4 +210,13 @@ pub trait AxBackend {
 	fn alive(&mut self, _h: &AxHandle) -> bool {
 		true
 	}
+	/// The element that holds keyboard focus inside `root`'s application,
+	/// when the backend reads focus per application rather than per element.
+	fn focused_within(&mut self, _root: &AxHandle) -> Option<AxHandle> {
+		None
+	}
+	/// Whether `setValue` can write the element's value.
+	fn value_settable(&mut self, _h: &AxHandle) -> bool {
+		false
+	}
 }

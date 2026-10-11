@@ -33,8 +33,8 @@ pub(super) enum DateRequest {
 
 /// Parses `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM[:SS[.fraction]]` and either
 /// date-time followed by `Z` or `±HH:MM`. `T` may be a space, and the offset
-/// may be `±HHMM` after a space: the form the accessibility tree prints for a
-/// date (`2026-09-28 04:00:00 +0000`) is written back unchanged. `None` for
+/// may be `±HHMM` after a space, so CF's own description of a date
+/// (`2026-09-28 04:00:00 +0000`) is written back unchanged. `None` for
 /// anything else, including a day or time that does not exist.
 pub(super) fn parse(text: &str) -> Option<DateRequest> {
 	let text = text.trim();
