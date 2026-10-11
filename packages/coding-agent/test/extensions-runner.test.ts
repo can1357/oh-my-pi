@@ -2237,10 +2237,13 @@ describe("ExtensionRunner", () => {
 					settled = true;
 					return messages;
 				});
-				for (let tick = 0; tick < 200 && !settled; tick++) {
+				// Bounded: a regression that never settles must fail the test, not
+				// hang the suite in a microtask/timer spin.
+				for (let tick = 0; tick < 10_000 && !settled; tick++) {
 					await Promise.resolve();
 					vi.advanceTimersByTime(1);
 				}
+				expect(settled).toBe(true);
 				const transformed = await emitted;
 
 				expect(process.env.MC_PROBE_REPORTED).toBe("120");

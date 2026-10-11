@@ -130,6 +130,8 @@ export interface ToolCallPreflight {
 }
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
+/** Signed 32-bit `setTimeout` limit; larger delays overflow to 1 ms under Bun. */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
 
 function throwUnsupportedServiceTierAction(): never {
@@ -174,8 +176,13 @@ export function handlerTimeoutForEvent(eventType: string): number {
  */
 export function baseHandlerTimeoutForEvent(eventType: string, settings?: Settings): number {
 	if (eventType !== "tool_call") return handlerTimeoutForEvent(eventType);
-	return normalizeHandlerTimeout(
-		(settings ? cfgExtensionHandlersToolCallTimeoutMs.get(settings) : undefined) ?? extensionHandlerTimeoutMs,
+	// emitToolCall arms its watchdog with exactly this number, so it must stay
+	// inside the signed 32-bit timer limit or Bun overflows the delay to 1 ms.
+	return Math.min(
+		normalizeHandlerTimeout(
+			(settings ? cfgExtensionHandlersToolCallTimeoutMs.get(settings) : undefined) ?? extensionHandlerTimeoutMs,
+		),
+		MAX_TIMER_DELAY_MS,
 	);
 }
 
@@ -192,7 +199,7 @@ export function configuredHandlerTimeoutCeiling(settings?: Settings): number {
 		normalizeHandlerTimeout(
 			(settings ? cfgExtensionHandlersTimeoutMs.get(settings) : undefined) ?? extensionHandlerTimeoutMs,
 		),
-		2_147_483_647,
+		MAX_TIMER_DELAY_MS,
 	);
 }
 
@@ -1923,9 +1930,14 @@ export class ExtensionRunner {
 		agent?: ExtensionAgentIdentity,
 	): Promise<ToolCallEventResult | undefined> {
 		const ctx = this.createContext(undefined, undefined, agent);
-		const timeoutMs = normalizeHandlerTimeout(
-			(this.settings ? cfgExtensionHandlersToolCallTimeoutMs.get(this.settings) : undefined) ??
-				extensionHandlerTimeoutMs,
+		// Same clamp as baseHandlerTimeoutForEvent so the dispatched watchdog and
+		// the reported budget cannot disagree at the timer-limit boundary.
+		const timeoutMs = Math.min(
+			normalizeHandlerTimeout(
+				(this.settings ? cfgExtensionHandlersToolCallTimeoutMs.get(this.settings) : undefined) ??
+					extensionHandlerTimeoutMs,
+			),
+			MAX_TIMER_DELAY_MS,
 		);
 		let result: ToolCallEventResult | undefined;
 		const aggregated = { input: undefined as ToolCallEventResult["input"], additionalContext: [] as string[] };

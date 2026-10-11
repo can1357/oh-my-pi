@@ -1025,11 +1025,17 @@ export async function discoverAuthStorage(
 
 /**
  * Discover extensions from cwd.
+ *
+ * @param cwd Working directory; defaults to the project dir.
+ * @param settings Settings whose `extensionHandlers.timeoutMs` governs the
+ *   reported handler budgets. Omitting it makes the public wrapper resolve with
+ *   the built-in default, so pass the session's instance when the result feeds
+ *   `preloadedExtensions` and the session sets that key.
  */
-export async function discoverExtensions(cwd?: string): Promise<LoadExtensionsResult> {
+export async function discoverExtensions(cwd?: string, settings?: Settings): Promise<LoadExtensionsResult> {
 	const resolvedCwd = cwd ?? getProjectDir();
 
-	return discoverAndLoadExtensions([], resolvedCwd);
+	return discoverAndLoadExtensions([], resolvedCwd, undefined, undefined, {}, settings);
 }
 
 type ExtensionDiscoveryOptions = Pick<
