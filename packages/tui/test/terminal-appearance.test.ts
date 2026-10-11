@@ -380,6 +380,32 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.stop();
 	});
 
+	// Herdr classifies before tmux, but the refresh follows whichever session
+	// caches OSC 11; a multiplexer without a cache keeps the refresh direct.
+	it.each([
+		["tmux nested inside a Herdr pane", "/tmp/tmux-1000/default,1234,0", true],
+		["a Herdr pane without tmux", undefined, false],
+	] as const)("routes an explicit refresh inside %s by the caching session", (_label, tmux, passthrough) => {
+		const originalHerdrPane = Bun.env.HERDR_PANE_ID;
+		Bun.env.HERDR_PANE_ID = "w1:p1";
+		if (tmux !== undefined) Bun.env.TMUX = tmux;
+		try {
+			const { terminal, writes, queryCount } = setupTerminal();
+			process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+			for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+			const before = queryCount();
+			terminal.refreshAppearance?.();
+			terminal.stop();
+
+			expect(writes.includes("\x1bPtmux;\x1b\x1b]11;?\x07\x1b\\")).toBe(passthrough);
+			// A cache refresh defers its direct read; a direct refresh queries now.
+			expect(queryCount()).toBe(passthrough ? before : before + 1);
+		} finally {
+			if (originalHerdrPane === undefined) delete Bun.env.HERDR_PANE_ID;
+			else Bun.env.HERDR_PANE_ID = originalHerdrPane;
+		}
+	});
+
 	it("reads tmux's refreshed cache without passing a DA1 reply through tmux", () => {
 		vi.useFakeTimers();
 		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";

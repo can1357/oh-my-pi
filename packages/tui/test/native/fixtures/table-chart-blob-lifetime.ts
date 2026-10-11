@@ -6,6 +6,7 @@ import {
 	splitTableCharts,
 	type TableChart,
 } from "../../../src/chat/table-chart";
+import { becomesCollectible, collectGarbage } from "../../gc";
 import { prepareSvg } from "../../../src/chat/svg-source";
 import { svgFigurePalette } from "../../../src/chat/svg-figure";
 import { getNativeBlob } from "../../../src/native/blobs";
@@ -50,19 +51,11 @@ function snapshot(found: TableChart, key: string): { id: string; reference: Weak
 }
 
 async function collect(): Promise<void> {
-	for (let i = 0; i < 3; i++) {
-		await Bun.sleep(0);
-		Bun.gc(true);
-	}
+	for (let i = 0; i < 3; i++) await collectGarbage();
 }
 
 async function released(reference: WeakRef<Uint8Array>, message: string): Promise<void> {
-	const deadline = performance.now() + 3_000;
-	do {
-		await collect();
-		if (reference.deref() === undefined) return;
-	} while (performance.now() < deadline);
-	assert.equal(reference.deref() === undefined, true, message);
+	assert.equal(await becomesCollectible(reference), true, message);
 }
 
 function fillCache(): void {

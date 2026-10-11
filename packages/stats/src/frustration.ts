@@ -16,7 +16,7 @@
  * using the judge the omp host registered through `startServer`. Standalone
  * `omp-stats` has none and only shows the regex fallback.
  */
-import type { ChoiceQuestion, Judge, Model, ScoreQuestion } from "@oh-my-pi/pi-ai";
+import { type Judge, judgeQuestions, type Model } from "@oh-my-pi/pi-ai";
 import { compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/compat/revision";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -32,6 +32,7 @@ import {
 	type PendingProse,
 	upsertFrustrationVerdicts,
 } from "./db";
+import questionFile from "./prompts/judge/frustration.json" with { type: "json" };
 import type {
 	FrustrationDashboardStats,
 	FrustrationEstimate,
@@ -47,37 +48,13 @@ export interface StatsJudge extends Judge {
 /** Lazily resolves the host judge on first estimate/run so `omp stats` startup stays fast. */
 export type StatsJudgeProvider = () => Promise<StatsJudge>;
 
-/** Where the user's annoyance is aimed. */
-export type FrustrationTarget = "assistant" | "other" | "none";
-
 /**
- * The two questions asked about every prose text, in ONE judge request.
+ * The two questions asked about every prose text, in ONE judge request:
+ * `annoyed` (four levels) and `target` (`assistant`, `other`, or `none`).
  * The cost constants below were measured with exactly these strings; changing
  * them invalidates both the estimate and every cached verdict's meaning.
  */
-export const FRUSTRATION_QUESTIONS: { annoyed: ScoreQuestion; target: ChoiceQuestion<FrustrationTarget> } = {
-	annoyed: {
-		type: "score",
-		instructions:
-			"A user typed this message to an AI coding assistant (code blocks and markup were removed). Rate how frustrated or annoyed the user sounds. Judge tone and wording only (caps, swearing, 'again', 'why did you', 'stop', 'wtf', exasperation), not task difficulty. Plain instructions or questions are neutral.",
-		criteria: [
-			"neutral / no frustration",
-			"mild irritation or impatience",
-			"clearly annoyed or exasperated",
-			"angry, hostile, or swearing",
-		],
-	},
-	target: {
-		type: "choice",
-		instructions: "If the user sounds annoyed, what is the annoyance aimed at?",
-		criteria: {
-			assistant:
-				"the AI's own behavior in this session: what it did, wrote, ignored, repeated, took too long on, or misunderstood (incl. reacting to its output with 'wtf', 'no', 'stop', 'again', 'why did you')",
-			other: "build tools, third-party libraries/services, pre-existing code or tests, the user's own past design, other people, or general product/UX feedback about the thing being built",
-			none: "not annoyed: a plain question, instruction, design musing, or casual chat",
-		},
-	},
-};
+export const FRUSTRATION_QUESTIONS = judgeQuestions(questionFile);
 
 /** Per-request input-token overhead of {@link FRUSTRATION_QUESTIONS}, measured on jev-1.13. */
 const REQUEST_OVERHEAD_TOKENS = 561;

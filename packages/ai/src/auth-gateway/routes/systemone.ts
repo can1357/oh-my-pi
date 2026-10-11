@@ -4,16 +4,17 @@
  *
  * Same bearer auth, model resolution, broker credential lookup, and a/b/c
  * credential rotation as the chat routes, dispatched through
- * {@link TypeSafeJudge} — pi-ai's client for this wire — so 401 rotation and
- * 429/529 backoff match omp's own judgments. A judgment is one JSON
- * round-trip: no stream, no provider session state. TypeSafe reports tokens
- * only, so the cost is priced from the catalog model for the response header
- * and the broker's observed-usage ledger.
+ * {@link NativeJudge} — pi-ai's client for every judgment API, which
+ * translates to the resolved model's own wire (OpenAI Decisions, Workers AI)
+ * — so 401 rotation and 429/529 backoff match omp's own judgments. A judgment
+ * is one JSON round-trip: no stream, no provider session state. Most judgment
+ * APIs report tokens only, so the cost is priced from the catalog model for the
+ * response header and the broker's observed-usage ledger.
  */
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../../error/gateway";
-import { isJudgmentApi, TypeSafeJudge } from "../../judgment/typesafe";
+import { createNativeJudge, isJudgmentApi } from "../../judgment/native";
 import * as systemOne from "../../providers/systemone-server";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
@@ -75,7 +76,7 @@ export async function handleSystemOne(
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return systemOne.formatError(apiKey.status, apiKey.type, apiKey.message);
 
-	const judge = new TypeSafeJudge({
+	const judge = createNativeJudge(model, {
 		apiKey: buildGatewayApiKeyResolver(
 			bootOpts.storage,
 			model,
@@ -85,10 +86,6 @@ export async function handleSystemOne(
 			"systemone",
 			peer,
 		),
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		baseUrl: model.baseUrl,
 		fetch: bootOpts.fetch,
 	});
 
@@ -103,7 +100,14 @@ export async function handleSystemOne(
 	});
 
 	try {
-		const result = await judge.judge(parsed.request, { signal: controller.signal });
+		const result = await judge.judge(parsed.request, {
+			signal: controller.signal,
+			// A split judgment that fails still billed the chunks that succeeded.
+			onPartialUsage: usage => {
+				if (usage.cost.total === 0) calculateCost(model, usage);
+				recordGatewayUsage(bootOpts.storage, model, client, usage);
+			},
+		});
 		// Encode before pricing: the body's `cost` means "upstream billed this"
 		// (OpenRouter), while the header and ledger carry the catalog estimate
 		// when the upstream reported tokens only (TypeSafe).

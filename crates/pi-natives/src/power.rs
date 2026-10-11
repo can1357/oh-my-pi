@@ -30,7 +30,7 @@ pub struct PowerAssertionOptions {
 }
 
 #[cfg(target_os = "macos")]
-mod platform {
+pub(crate) mod platform {
 	use std::{
 		ffi::{CString, c_char, c_void},
 		ptr,

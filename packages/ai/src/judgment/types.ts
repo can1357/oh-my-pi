@@ -7,7 +7,7 @@
  * — about one {@link JudgmentState}. Every question in a request sees the same
  * state and is answered independently, so callers batch independent questions
  * into one call. The shape mirrors TypeSafe's System One API so the native
- * backend ({@link TypeSafeJudge}) forwards requests verbatim, while the text
+ * backend ({@link NativeJudge}) forwards requests verbatim, while the text
  * bridge ({@link TextJudge}) renders the same questions into keyword prompts
  * for an ordinary chat model.
  */
@@ -83,7 +83,7 @@ export interface JudgmentRequest<Q extends Questions = Questions> {
 }
 
 export interface JudgmentResult<Q extends Questions = Questions> {
-	/** Transport that produced the answers (`typesafe`, or the chat model's api). */
+	/** Transport that produced the answers (a judgment api such as `typesafe`, or the chat model's api). */
 	api: string;
 	provider: string;
 	model: string;

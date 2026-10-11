@@ -1,11 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import * as path from "node:path";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { loadSkillsFromDir } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import { withTimeout } from "@oh-my-pi/pi-utils";
 
 function createMockManager(opts: {
 	servers?: string[];
@@ -13,10 +19,11 @@ function createMockManager(opts: {
 	readResult?: MCPResourceReadResult | undefined;
 	readError?: Error;
 	ensureResources?: (name: string) => Promise<void>;
+	waitForPendingConnections?: () => Promise<void>;
 }) {
 	return {
 		getConnectedServers: () => opts.servers ?? [],
-		waitForPendingConnections: async () => {},
+		waitForPendingConnections: async () => opts.waitForPendingConnections?.(),
 		getServerResources: (name: string) => opts.resources?.get(name),
 		ensureServerResources: async (name: string) => opts.ensureResources?.(name),
 		readServerResource: async (_name: string, _uri: string) => {
@@ -105,6 +112,30 @@ describe("McpProtocolHandler", () => {
 		const resource = await router.resolve("mcp://test://doc");
 		expect(resource.content).toBe("hello world");
 		expect(resource.notes).toEqual(["MCP server: my-server"]);
+	});
+
+	it("cancels a resource read the server never answers", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("slow", { resources: [{ uri: "test://slow", name: "slow" }], templates: [] });
+		const readStarted = Promise.withResolvers<void>();
+		const manager = createMockManager({ servers: ["slow"], resources });
+		// Like a transport request: pending until the server answers or the caller's signal aborts it.
+		manager.readServerResource = (_name, _uri, options) => {
+			readStarted.resolve();
+			const { promise, reject } = Promise.withResolvers<undefined>();
+			options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
+			return promise;
+		};
+		MCPManager.setInstance(manager);
+		const controller = new AbortController();
+
+		const reading = InternalUrlRouter.instance().resolve("mcp://test://slow", { signal: controller.signal });
+		await readStarted.promise;
+		controller.abort();
+		// A lost signal leaves the read pending forever; fail instead of hanging the suite.
+		await expect(withTimeout(reading, 2_000, "read ignored cancellation")).rejects.toMatchObject({
+			name: "AbortError",
+		});
 	});
 
 	it("preserves a literal semicolon in an exact MCP resource URI", async () => {
@@ -485,5 +516,236 @@ describe("McpProtocolHandler", () => {
 		const router = InternalUrlRouter.instance();
 
 		await expect(router.resolve("mcp://test://anything")).rejects.toThrow("(none)");
+	});
+});
+
+describe("skill:// falls back to an MCP resource with the same URI", () => {
+	const skillUri = "skill://figma/figma-use/SKILL.md";
+	const mcpText = "---\nname: figma-use\n---\nMANDATORY";
+	let tmpDirs: string[] = [];
+
+	beforeEach(() => {
+		MCPManager.resetForTests();
+		InternalUrlRouter.resetForTests();
+		tmpDirs = [];
+	});
+
+	afterEach(async () => {
+		MCPManager.resetForTests();
+		InternalUrlRouter.resetForTests();
+		await Promise.all(tmpDirs.map(dir => fs.rm(dir, { recursive: true, force: true })));
+		tmpDirs = [];
+	});
+
+	function figmaManager(text = mcpText) {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("figma", {
+			resources: [{ uri: skillUri, name: "figma-use" }],
+			templates: [],
+		});
+		return createMockManager({
+			servers: ["figma"],
+			resources,
+			readResult: { contents: [{ uri: skillUri, text }] },
+		});
+	}
+
+	function textOf(result: AgentToolResult<ReadToolDetails>): string {
+		return result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+	}
+
+	it("applies line/raw selectors to MCP skill text through ReadTool", async () => {
+		MCPManager.setInstance(figmaManager("L1\nL2\nL3\nL4"));
+		const result = await new ReadTool(createToolSession()).execute("read-skill-range", {
+			path: `${skillUri}:2-3:raw`,
+		});
+		const text = textOf(result);
+		expect(text).toContain("L2\nL3");
+		expect(text).not.toContain("L1");
+		expect(text).not.toContain("L4");
+	});
+
+	it("reads a skill resource while its only MCP server is still connecting", async () => {
+		const servers: string[] = [];
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		MCPManager.setInstance(
+			createMockManager({
+				servers,
+				resources,
+				waitForPendingConnections: async () => {
+					servers.push("figma");
+				},
+				ensureResources: async () => {
+					resources.set("figma", { resources: [{ uri: skillUri, name: "figma-use" }], templates: [] });
+				},
+				readResult: { contents: [{ uri: skillUri, text: "L1\nL2\nL3\nL4" }] },
+			}),
+		);
+		const result = await new ReadTool(createToolSession()).execute("read-connecting-skill", {
+			path: `${skillUri}:2-3:raw`,
+		});
+		const text = textOf(result);
+		expect(text).toContain("L2\nL3");
+		expect(text).not.toContain("L1");
+		expect(text).not.toContain("L4");
+	});
+
+	it("requires explicit MCP routing for skill URI templates", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("figma", {
+			resources: [],
+			templates: [{ uriTemplate: "skill://{+path}", name: "all-skills" }],
+		});
+		MCPManager.setInstance(
+			createMockManager({
+				servers: ["figma"],
+				resources,
+				readResult: { contents: [{ uri: skillUri, text: "template instruction" }] },
+			}),
+		);
+		const read = new ReadTool(createToolSession());
+		await expect(read.execute("read-template-skill", { path: skillUri })).rejects.toThrow("Unknown skill: figma");
+		const result = await read.execute("read-explicit-template", { path: `mcp://${skillUri}` });
+		expect(textOf(result)).toContain("template instruction");
+	});
+
+	it("keeps Unknown skill when neither local nor MCP advertises the URI", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("figma", { resources: [], templates: [] });
+		MCPManager.setInstance(createMockManager({ servers: ["figma"], resources }));
+		const router = InternalUrlRouter.instance();
+
+		await expect(router.resolve("skill://nope", { skills: [] })).rejects.toThrow(/Unknown skill: nope/);
+		await expect(router.resolve("skill://nope", { skills: [] })).rejects.toThrow(/Available: none/);
+
+		const target = await router.target("skill://nope", { skills: [] });
+		expect(target?.kind).toBe("resource");
+
+		MCPManager.resetForTests();
+		InternalUrlRouter.resetForTests();
+		const bare = InternalUrlRouter.instance();
+		await expect(bare.target("skill://nope", { skills: [] })).rejects.toThrow(/Unknown skill: nope/);
+	});
+
+	it("prefers a loaded local skill over an MCP resource with the same URI", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skill-mcp-fallback-"));
+		tmpDirs.push(tmp);
+		const skillDir = path.join(tmp, "figma");
+		await fs.mkdir(path.join(skillDir, "figma-use"), { recursive: true });
+		await Bun.write(path.join(skillDir, "SKILL.md"), "---\nname: figma\ndescription: local\n---\n# figma\n");
+		await Bun.write(path.join(skillDir, "figma-use", "SKILL.md"), "local copy");
+
+		const { skills } = await loadSkillsFromDir({ dir: tmp, source: "test" });
+		expect(skills.some(s => s.name === "figma")).toBe(true);
+
+		MCPManager.setInstance(figmaManager("mcp copy"));
+		const router = InternalUrlRouter.instance();
+
+		const resource = await router.resolve(skillUri, { skills });
+		expect(resource.content).toBe("local copy");
+		expect(resource.notes ?? []).not.toContain("MCP server: figma");
+	});
+
+	it("reports Unknown skill to local-file actions without contacting MCP", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("figma", { resources: [{ uri: skillUri, name: "figma-use" }], templates: [] });
+		let contacted = false;
+		MCPManager.setInstance(
+			createMockManager({
+				servers: ["figma"],
+				resources,
+				readResult: { contents: [{ uri: skillUri, text: mcpText }] },
+				waitForPendingConnections: async () => {
+					contacted = true;
+				},
+			}),
+		);
+		const router = InternalUrlRouter.instance();
+
+		// `%load` and plan-mode writes need a local file; an advertised resource cannot back them.
+		await expect(router.requireLocal(skillUri, "load", { skills: [] })).rejects.toThrow("Unknown skill: figma");
+		await expect(router.requireLocal("skill://nope", "load", { skills: [] })).rejects.toThrow("Unknown skill: nope");
+		expect(contacted).toBe(false);
+	});
+
+	it("keeps read result limits for MCP skill text, unlike local skill instructions", async () => {
+		const lines = Array.from({ length: 20_000 }, (_, index) => `L${index + 1}`);
+		MCPManager.setInstance(figmaManager(lines.join("\n")));
+		const result = await new ReadTool(createToolSession()).execute("read-skill-limits", { path: skillUri });
+		const text = textOf(result);
+		expect(text).toContain("L1\n");
+		expect(text).not.toContain("L20000");
+	});
+
+	it("reports Unknown skill for an :img read instead of the selector error", async () => {
+		MCPManager.setInstance(figmaManager());
+		await expect(
+			new ReadTool(createToolSession()).execute("read-skill-img", { path: "skill://nope/x.svg:img" }),
+		).rejects.toThrow("Unknown skill: nope");
+	});
+
+	it("keeps Unknown skill when deferred MCP startup fails", async () => {
+		MCPManager.setDeferredInstance(async () => {
+			throw new Error("auth storage locked");
+		});
+		const router = InternalUrlRouter.instance();
+		await expect(router.resolve("skill://nope", { skills: [] })).rejects.toThrow("Unknown skill: nope");
+		// The startup error itself is what an explicit MCP read reports.
+		await expect(router.resolve(`mcp://${skillUri}`)).rejects.toThrow("auth storage locked");
+	});
+
+	it("stops waiting for connecting servers when the read is cancelled mid-wait", async () => {
+		let waiting = Promise.withResolvers<void>();
+		MCPManager.setInstance(
+			createMockManager({
+				servers: [],
+				// Like a server stuck in its handshake: the wait never settles on its own.
+				waitForPendingConnections: () => {
+					waiting.resolve();
+					return Promise.withResolvers<void>().promise;
+				},
+			}),
+		);
+		const router = InternalUrlRouter.instance();
+		for (const uri of ["skill://nope", `mcp://${skillUri}`]) {
+			waiting = Promise.withResolvers<void>();
+			const controller = new AbortController();
+			const reading = router.resolve(uri, { skills: [], signal: controller.signal });
+			await waiting.promise;
+			controller.abort();
+			await expect(withTimeout(reading, 2_000, "read ignored cancellation")).rejects.toMatchObject({
+				name: "AbortError",
+			});
+		}
+	});
+
+	it("runs the deferred MCP loader once and installs its manager for later reads", async () => {
+		let loads = 0;
+		MCPManager.setDeferredInstance(async () => {
+			loads++;
+			return figmaManager();
+		});
+		const router = InternalUrlRouter.instance();
+
+		expect((await router.resolve(skillUri, { skills: [] })).content).toBe(mcpText);
+		expect((await router.resolve(`mcp://${skillUri}`)).content).toBe(mcpText);
+		expect(loads).toBe(1);
+	});
+
+	it("reads through the replacement loader, not a manager whose loader was replaced mid-load", async () => {
+		const stale = Promise.withResolvers<MCPManager>();
+		const staleStarted = Promise.withResolvers<void>();
+		MCPManager.setDeferredInstance(() => {
+			staleStarted.resolve();
+			return stale.promise;
+		});
+		const router = InternalUrlRouter.instance();
+		const staleRead = router.resolve(skillUri, { skills: [] });
+		await staleStarted.promise;
+
+		MCPManager.setDeferredInstance(async () => figmaManager("replacement"));
+		stale.resolve(figmaManager("stale"));
+		expect((await staleRead).content).toBe("stale");
+		expect((await router.resolve(skillUri, { skills: [] })).content).toBe("replacement");
 	});
 });

@@ -17,7 +17,9 @@ pub fn engine_for(
 ) -> Box<dyn ModeEngine> {
 	match mode {
 		EditMode::Replace => Box::new(replace::ReplaceEngine { allow_fuzzy, fuzzy_threshold }),
-		EditMode::Patch => Box::new(patch::PatchEngine { allow_fuzzy, fuzzy_threshold }),
+		EditMode::Patch => {
+			Box::new(patch::PatchEngine { allow_fuzzy, fuzzy_threshold, first_match: false })
+		},
 		EditMode::ApplyPatch => {
 			Box::new(apply_patch::ApplyPatchEngine { allow_fuzzy, fuzzy_threshold })
 		},

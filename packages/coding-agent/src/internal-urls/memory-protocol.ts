@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isEnoent, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { getMemoryRoot } from "../memories";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionState } from "../mnemopi/state";
 import memoryDoc from "../prompts/internal-urls/memory.md" with { type: "text" };
@@ -288,30 +288,32 @@ function tryResolveMnemopiMemory(id: string): MnemopiScopedMemoryHit | null {
  * having to reconstruct it from the recall preview.
  */
 function renderMnemopiMemory(url: InternalUrl, hit: MnemopiScopedMemoryHit): InternalResource {
-	const { row, bank, store } = hit;
-	const meta = row.metadata == null ? "" : `metadata: ${JSON.stringify(row.metadata)}\n`;
-	const header =
-		"---\n" +
-		`id: ${row.id}\n` +
-		`bank: ${bank}\n` +
-		`store: ${store}\n` +
-		(row.memory_type ? `memory_type: ${row.memory_type}\n` : "") +
-		(row.source ? `source: ${row.source}\n` : "") +
-		(row.timestamp ? `timestamp: ${row.timestamp}\n` : "") +
-		(row.created_at ? `created_at: ${row.created_at}\n` : "") +
-		(row.importance != null ? `importance: ${row.importance}\n` : "") +
-		(row.veracity ? `veracity: ${row.veracity}\n` : "") +
-		(row.session_id ? `session_id: ${row.session_id}\n` : "") +
-		meta +
-		"---\n\n";
-	const content = `${header}${row.content}`;
-	return {
-		url: url.href,
-		content,
-		contentType: "text/markdown",
-		size: Buffer.byteLength(content, "utf-8"),
-		notes: [],
-	};
+	return withLoopPhase("mnemopi.read", () => {
+		const { row, bank, store } = hit;
+		const meta = row.metadata == null ? "" : `metadata: ${JSON.stringify(row.metadata)}\n`;
+		const header =
+			"---\n" +
+			`id: ${row.id}\n` +
+			`bank: ${bank}\n` +
+			`store: ${store}\n` +
+			(row.memory_type ? `memory_type: ${row.memory_type}\n` : "") +
+			(row.source ? `source: ${row.source}\n` : "") +
+			(row.timestamp ? `timestamp: ${row.timestamp}\n` : "") +
+			(row.created_at ? `created_at: ${row.created_at}\n` : "") +
+			(row.importance != null ? `importance: ${row.importance}\n` : "") +
+			(row.veracity ? `veracity: ${row.veracity}\n` : "") +
+			(row.session_id ? `session_id: ${row.session_id}\n` : "") +
+			meta +
+			"---\n\n";
+		const content = `${header}${row.content}`;
+		return {
+			url: url.href,
+			content,
+			contentType: "text/markdown",
+			size: Buffer.byteLength(content, "utf-8"),
+			notes: [],
+		};
+	});
 }
 
 /**

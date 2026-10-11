@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { becomesCollectible } from "../../gc";
 import { Image, ImageBudget } from "../../../src/components/image";
 import { base64ImageNode, getNativeBlob } from "../../../src/native/blobs";
 import { SnapcompactShapePreview } from "../../../src/overlays/snapcompact-shape-preview";
@@ -64,14 +65,7 @@ async function discard(): Promise<{ reference: WeakRef<Uint8Array>; harness: Tsp
 
 await initTheme(false);
 const { reference, harness } = await discard();
-const deadline = performance.now() + 3_000;
-let collected = false;
-do {
-	// A dereferenced WeakRef target remains live until the next event-loop turn.
-	await Bun.sleep(0);
-	Bun.gc(true);
-	collected = reference.deref() === undefined;
-} while (!collected && performance.now() < deadline);
+const collected = await becomesCollectible(reference);
 harness.stop();
 assert.equal(collected, true, "discarded native image bytes are still retained after their component was removed");
 process.stdout.write("verified\n");

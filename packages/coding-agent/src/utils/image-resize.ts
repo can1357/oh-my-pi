@@ -426,13 +426,44 @@ export function formatDimensionNote(result: ResizedImage): string | undefined {
 	return `[Image: original ${result.originalWidth}x${result.originalHeight}, displayed at ${result.width}x${result.height}. Multiply coordinates by ${scale.toFixed(2)} to map to original image.]`;
 }
 
-/** Format screenshot metadata and coordinate mapping for tool output. */
+/** What a browser screenshot covers, which sets the CSS pixel space its image coordinates map to. */
+export type ScreenshotArea = "viewport" | "page" | "element";
+
+const SCREENSHOT_AREA_TARGET: Record<ScreenshotArea, string> = {
+	viewport: "viewport CSS pixels for tab.clickAt",
+	page: "CSS pixels from the page's top-left corner (tab.clickAt takes viewport pixels)",
+	element: "CSS pixels from the element's top-left corner",
+};
+
+/**
+ * Map displayed screenshot coordinates to the CSS pixels the page and `tab.clickAt` use: the capture
+ * holds `scale` image pixels per CSS pixel before any resize, or `undefined` when it could not be read.
+ */
+function formatScreenshotCoordinateNote(
+	resized: ResizedImage,
+	capture: { area: ScreenshotArea; scale: number | undefined },
+): string | undefined {
+	if (!resized.originalWidth || !resized.width) return undefined;
+	if (capture.scale === undefined || !(capture.scale > 0)) {
+		return `[Image: original ${resized.originalWidth}x${resized.originalHeight}, displayed at ${resized.width}x${resized.height}. Its scale to CSS pixels could not be read; target elements by selector or id rather than tab.clickAt.]`;
+	}
+	const factor = (resized.originalWidth / resized.width / capture.scale).toFixed(2);
+	if (factor === "1.00") return undefined;
+	const scale = `capture scale ${Number(capture.scale.toFixed(2))}`;
+	const size = resized.wasResized
+		? `original ${resized.originalWidth}x${resized.originalHeight} at ${scale}, displayed at ${resized.width}x${resized.height}`
+		: `${resized.width}x${resized.height} at ${scale}`;
+	return `[Image: ${size}. Multiply image coordinates by ${factor} to get ${SCREENSHOT_AREA_TARGET[capture.area]}.]`;
+}
+
+/** Format browser screenshot metadata and the image-to-CSS-pixel mapping for tool output. */
 export function formatScreenshot(opts: {
 	saveFullRes: boolean;
 	savedMimeType: string;
 	savedByteLength: number;
 	dest: string;
 	resized: ResizedImage;
+	capture: { area: ScreenshotArea; scale: number | undefined };
 }): string[] {
 	const lines = ["Screenshot captured"];
 	if (opts.saveFullRes) {
@@ -449,9 +480,9 @@ export function formatScreenshot(opts: {
 	if (opts.resized.decodeFailed) {
 		lines.push("Resize: image decoder failed; using original image bytes");
 	}
-	const dimensionNote = formatDimensionNote(opts.resized);
-	if (dimensionNote) {
-		lines.push(dimensionNote);
+	const coordinateNote = formatScreenshotCoordinateNote(opts.resized, opts.capture);
+	if (coordinateNote) {
+		lines.push(coordinateNote);
 	}
 	return lines;
 }

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.9.0] - 2026-10-11
+
+### Fixed
+
+- Fixed the stats dashboard favicon so dashboard tabs and bookmarks display the OMP icon correctly.
+
 ## [18.8.0] - 2026-10-07
 
 ### Changed

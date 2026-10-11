@@ -301,7 +301,7 @@ fn production_apply_patch_parser_parity() {
 
 #[test]
 fn streaming_matcher_parity() {
-	let patch = PatchEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 };
+	let patch = PatchEngine { allow_fuzzy: true, fuzzy_threshold: 0.95, first_match: false };
 	let no_path = patch.inspect(&ArgSnapshot::default());
 	assert!(no_path.paths.is_empty(), "returns undefined when no path is present");
 	let patch_args = ArgSnapshot {

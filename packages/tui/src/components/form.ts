@@ -96,6 +96,10 @@ class OptionalText implements Component {
 		this.#text = new StyledText("", style, token);
 	}
 
+	get value(): string {
+		return this.#value;
+	}
+
 	describe(cx: DescribeContext): NativeNode {
 		return this.#value ? this.#text.describe(cx) : this.#hidden;
 	}
@@ -197,6 +201,10 @@ export class FormField implements Component, Focusable, MouseRoutable {
 
 	get focused(): boolean {
 		return this.#focused;
+	}
+
+	get hasError(): boolean {
+		return this.#error.value !== "";
 	}
 
 	get debugChildren(): readonly Component[] {

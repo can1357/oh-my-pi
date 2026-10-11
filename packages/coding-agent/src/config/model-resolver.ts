@@ -67,6 +67,8 @@ function isKnownProvider(provider: string): provider is KnownProvider {
 
 /**
  * Pick the first auto-selectable provider-default model in availability order.
+ * A provider's default is the model its discovery marks as the account default
+ * (`isProviderDefault`), else its bundled `default-model`.
  *
  * When `hasConcreteCredential` is supplied and at least one available model
  * belongs to a provider with a concrete credential, the candidate pool is
@@ -102,18 +104,18 @@ export function pickDefaultAvailableModel(
 					});
 					return concrete.length > 0 ? concrete : autoSelectable;
 				})();
-	const firstDefault = models.find(
-		model => isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
+	const accountDefaultProviders = new Set(
+		models.filter(model => model.isProviderDefault).map(model => model.provider),
 	);
+	const isDefaultForProvider = (model: Model<Api>): boolean =>
+		accountDefaultProviders.has(model.provider)
+			? model.isProviderDefault === true
+			: isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id;
+	const firstDefault = models.find(isDefaultForProvider);
 	if (!firstDefault) return models[0];
 
 	const providerPriority = buildModelProviderPriorityRank();
-	const sharedDefaultMatches = models.filter(
-		model =>
-			model.id === firstDefault.id &&
-			isKnownProvider(model.provider) &&
-			DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
-	);
+	const sharedDefaultMatches = models.filter(model => model.id === firstDefault.id && isDefaultForProvider(model));
 	return [...sharedDefaultMatches].sort((a, b) => {
 		const aRank = providerPriority.get(a.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;
 		const bRank = providerPriority.get(b.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;
@@ -1142,7 +1144,7 @@ export function rolePriorityDefaults(role: string): string[] {
 
 /** Resolve aliases inside a configured pattern list without leaking cycles to model matching. */
 function resolveNestedRolePatterns(
-	value: string,
+	value: string | string[],
 	roleDefaults: string[],
 	settings: ModelRoleLookup | undefined,
 	visited: Set<string>,
@@ -1205,7 +1207,11 @@ function resolveConfiguredRolePattern(
 
 	const configured = settings?.getModelRole(role)?.trim();
 	const configuredDefault = settings?.getModelRole(DEFAULT_MODEL_ROLE)?.trim();
-	const roleDefaults = isModelRole(role) ? rolePriorityDefaults(role) : [];
+	// Built-in defaults chain to other roles (judge: `@tiny`, `@smol`, `@default`). Left unexpanded, the
+	// matcher reads them as literal ids and `@default` fuzzy-matches Vertex ids like `claude-opus-4-8@default`.
+	const roleDefaults = isModelRole(role)
+		? resolveNestedRolePatterns(rolePriorityDefaults(role), [], settings, visited)
+		: [];
 	const configuredFallback = isModelRole(role) ? ROLE_CONFIGURED_FALLBACK[role] : undefined;
 	const fallbackPatterns =
 		configured ||

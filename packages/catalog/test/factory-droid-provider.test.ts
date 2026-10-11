@@ -184,6 +184,25 @@ describe("Factory Droid model builder", () => {
 		const unknown = buildFactoryDroidModel(syntheticModel({ listPriceFrom: { provider: "nope", modelId: "x" } }));
 		expect(unknown.cost).toEqual(zeroCost);
 	});
+
+	it("builds Haiku 5.5 with an Off rung and Anthropic's list price on the Standard pool", () => {
+		const model = buildFactoryDroidModel(registryModel("claude-haiku-5-5"));
+		expect(model.thinking).toMatchObject({
+			mode: "anthropic-adaptive",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			requiresEffort: false,
+			defaultLevel: Effort.Medium,
+		});
+		expect(model.cost).toEqual(getBundledModel("anthropic", "claude-haiku-5-5").cost);
+		expect(quotaTierFor("factory-droid", "claude-haiku-5-5")).toBe("standard");
+	});
+
+	it("builds Mistral Large 4 on the Core pool without borrowing the lower Mistral list price", () => {
+		const model = buildFactoryDroidModel(registryModel("mistral-large-4"));
+		expect(model.thinking).toMatchObject({ efforts: [Effort.High], requiresEffort: false });
+		expect(model.cost).toEqual(zeroCost);
+		expect(quotaTierFor("factory-droid", "mistral-large-4")).toBe("core");
+	});
 });
 
 describe("Factory Droid route policy scoping", () => {
@@ -247,7 +266,7 @@ describe("Factory Droid offline seed", () => {
 		expect(models.some(model => model.id === "kimi-k3")).toBe(false);
 		const opus = models.find(model => model.id === "claude-opus-5");
 		expect(opus?.baseUrl).toBe("https://api.eu.factory.ai/api/llm/a");
-		expect(opus?.factoryDroidApiProviders).toEqual(["bedrock_anthropic"]);
+		expect(opus?.factoryDroidApiProviders).toEqual(["vertex_anthropic", "bedrock_anthropic"]);
 	});
 });
 
@@ -403,6 +422,20 @@ describe("Factory Droid discovery gates", () => {
 		expect(glm?.factoryDroidRoutingSource).toBeUndefined();
 	});
 
+	it("keeps live gpt-6.1-sol routing through Bedrock and Databricks", async () => {
+		const models = await discover({
+			routing: { version: 1, models: { "gpt-6.1-sol": ["bedrock_openai", "databricks", "openai"] } },
+		});
+		const sol = models?.find(model => model.id === "gpt-6.1-sol");
+		expect(sol?.factoryDroidApiProviders).toEqual(["bedrock_openai", "databricks", "openai"]);
+	});
+
+	it("lists GPT-6 Luna and DeepSeek V4.1 Flash without their retired flags", async () => {
+		const ids = await discoverIds({ flags: { gpt_6_luna: false, deepseek_v4_1_flash: false } });
+		expect(ids).toContain("gpt-6-luna");
+		expect(ids).toContain("deepseek-v4.1-flash");
+	});
+
 	it("keeps global overrides restrictive without removing the EU Mistral route", async () => {
 		const endpoints = {
 			flags: {},
@@ -486,15 +519,22 @@ describe("Factory Droid EU region", () => {
 		expect(urls[0]).toBe("https://api.eu.factory.ai/api/feature-flags");
 		expect(urls[1]).toBe("https://api.eu.factory.ai/api/organization/managed-settings");
 
-		// Hidden for EU: Droid Core (fireworks/baseten-only), Gemini (google-only),
-		// grok (xai-only), and fable-5 (explicit empty EU override).
+		// Hidden for EU: Droid Core (fireworks/baseten-only), Gemini Pro (google
+		// outside the EU table, no override) and grok (xai-only).
 		expect(ids).not.toContain("kimi-k3");
 		expect(ids).not.toContain("gemini-3.1-pro-preview");
 		expect(ids).not.toContain("grok-4.5");
-		expect(ids).not.toContain("claude-fable-5");
-		// Available with region-resolved rotations and EU wire URLs.
+		// Available with region-resolved rotations and EU wire URLs; per-model
+		// overrides may name upstreams the EU table omits.
 		const opus5 = models!.find(model => model.id === "claude-opus-5")!;
-		expect(opus5.factoryDroidApiProviders).toEqual(["bedrock_anthropic"]);
+		expect(opus5.factoryDroidApiProviders).toEqual(["vertex_anthropic", "bedrock_anthropic"]);
+		// Once policy approves the opt-in Fable, the EU serves it on Vertex.
+		const approved = await discover({ modelPolicy: { allowAllFactoryModels: true } }, { region: "eu" });
+		expect(approved?.find(model => model.id === "claude-fable-5")?.factoryDroidApiProviders).toEqual([
+			"vertex_anthropic",
+		]);
+		const flash = models!.find(model => model.id === "gemini-3.8-flash")!;
+		expect(flash.factoryDroidApiProviders).toEqual(["google"]);
 		expect(opus5.baseUrl).toBe("https://api.eu.factory.ai/api/llm/a");
 		const sonnet = models!.find(model => model.id === "claude-sonnet-4-5-20250929")!;
 		expect(sonnet.factoryDroidApiProviders).toEqual(["vertex_anthropic", "bedrock_anthropic"]);

@@ -405,6 +405,15 @@ export function webModelManagerOptions(): ModelManagerOptions<"web-search"> {
 	};
 }
 
+/** Cloudflare Workers AI judges: the authored Clef rows; the account id resolves per request. */
+export function cloudflareWorkersAiModelManagerOptions(): ModelManagerOptions<"workers-ai-systemone"> {
+	return {
+		providerId: "cloudflare-workers-ai",
+		cacheProviderId: resolveModelCacheProviderId("cloudflare-workers-ai"),
+		staticModels: seedModels<"workers-ai-systemone">("cloudflare-workers-ai"),
+	};
+}
+
 /** Credentials and endpoint overrides for the TypeSafe catalog manager. */
 export interface TypeSafeModelManagerConfig {
 	apiKey?: string;

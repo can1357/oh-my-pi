@@ -605,6 +605,21 @@ export interface StreamOptions {
 	 */
 	providerSessionState?: Map<string, ProviderSessionState>;
 	/**
+	 * Session a side request branches from, so it can read the parent's cached
+	 * prefix. Providers that keep per-conversation request controls (OpenAI
+	 * `configuration_update` effort baselines) plan the request against a copy
+	 * of that session's controls, never changing the parent's state; the Codex
+	 * backend also routes it with the parent's cache affinity (session headers).
+	 */
+	parentSessionId?: string;
+	/**
+	 * Run at the model's lowest effort where the transport carries the change as
+	 * a per-message control that keeps the cached prefix (Anthropic per-message
+	 * effort, OpenAI `configuration_update`). Elsewhere the requested effort
+	 * applies unchanged: changing request-level reasoning forfeits the cache.
+	 */
+	minimizeEffort?: boolean;
+	/**
 	 * Source of user steering a provider may deliver into the response it is
 	 * streaming (OpenAI Responses `response.steer` over the Codex WebSocket).
 	 * Providers without mid-response input ignore it; unclaimed steering stays
@@ -867,6 +882,17 @@ export interface ThinkingContent {
 	thinking: string;
 	thinkingSignature?: string; // e.g., for OpenAI responses, the reasoning item ID
 	itemId?: string; // item.id from output_item.added, used to match output_item.done
+	/**
+	 * `true`: `thinking` is a provider-written summary of the model's reasoning
+	 * (OpenAI Responses `summary_text`, Gemini thought summaries). `false`: the
+	 * wire delivered it as the reasoning itself, not marked as a summary
+	 * (chat-completions reasoning fields, Responses `reasoning_text`, Devin
+	 * `thinking`); whether that is the full trace is vouched for per family by
+	 * the catalog's `portable-reasoning`. Unset when provenance is unknown,
+	 * including turns recorded before parsers set it. Only `false` blocks
+	 * replay natively on another host.
+	 */
+	summary?: boolean;
 }
 
 export interface RedactedThinkingContent {
@@ -1112,7 +1138,27 @@ export interface AnthropicCompactionFiles {
 	after: number;
 }
 
-export type ProviderPayload = OpenAIResponsesHistoryPayload | AnthropicMessagePayload | AnthropicCompactionPayload;
+/**
+ * Records Cursor's server wrote into the client's conversation store for one
+ * assistant turn: the `rootPromptMessagesJson` entries after the user's message,
+ * reasoning signatures and redacted reasoning included. Written and read by the
+ * Cursor provider, which sends them back unchanged to the wire model that produced them.
+ */
+export interface CursorHistoryPayload {
+	type: "cursorHistory";
+	/** Wire route the records were written under, as sent (requested model, details id, max mode, parameters). */
+	wireRoute: string;
+	/** Digest of the turn's opening user message, content and paired tool results when recorded; a rewritten turn rebuilds instead. */
+	digest: string;
+	/** Record bytes (UTF-8 JSON) in conversation order; each blob id is the SHA-256 of its bytes. */
+	records: string[];
+}
+
+export type ProviderPayload =
+	| OpenAIResponsesHistoryPayload
+	| AnthropicMessagePayload
+	| AnthropicCompactionPayload
+	| CursorHistoryPayload;
 
 /** Provider-reported rewrite applied to request content before inference. */
 export interface ProviderInputTransformation {

@@ -1,8 +1,16 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { Database } from "bun:sqlite";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import {
+	AuthStorage,
+	type OAuthCredential,
+	SqliteAuthCredentialStore,
+	type UsageReport,
+	type UsageResetCredit,
+} from "@oh-my-pi/pi-ai";
+import { AuthBrokerClient, RemoteAuthCredentialStore, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { __resetDirsFromEnvForTests, setAgentDir, TempDir, withFileLock } from "@oh-my-pi/pi-utils";
 import {
 	buildRedactionMap,
 	collectHistoryIdentityStrings,
@@ -11,9 +19,13 @@ import {
 	formatUsageHistory,
 	runUsageCommand,
 	type UsagePolicyDiagnosticsOptions,
+	type UsageResetExpiryOptions,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+import { resetAccountLockKey } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
+import { formatResetExpiryNotice } from "@oh-my-pi/pi-coding-agent/session/reset-expiry";
+import { resetLockPath } from "@oh-my-pi/pi-coding-agent/session/reset-fence";
 import {
 	collectUnreportedAccounts,
 	type UsageAccountIdentity,
@@ -61,6 +73,96 @@ function makeLimit(opts: {
 
 function makeReport(provider: string, email: string, limits: UsageReport["limits"], notes?: string[]): UsageReport {
 	return { provider, fetchedAt: Date.now(), limits, ...(notes ? { notes } : {}), metadata: { email } };
+}
+
+function codexResetReport(opts: {
+	nowMs: number;
+	accountId: string;
+	email?: string;
+	weeklyUsed: number;
+	expiresInMs: number[];
+}): UsageReport {
+	return {
+		provider: "openai-codex",
+		fetchedAt: opts.nowMs,
+		limits: [
+			makeLimit({
+				id: "openai-codex:primary",
+				label: "5 hours",
+				provider: "openai-codex",
+				usedFraction: 0.1,
+				durationMs: FIVE_HOURS,
+				windowId: "5h",
+			}),
+			makeLimit({
+				id: "openai-codex:secondary",
+				label: "7 days",
+				provider: "openai-codex",
+				usedFraction: opts.weeklyUsed,
+				durationMs: SEVEN_DAYS,
+				windowId: "7d",
+			}),
+		],
+		metadata: {
+			email: opts.email ?? "codex@example.test",
+			accountId: opts.accountId,
+			orgId: opts.accountId,
+			planType: "team",
+		},
+		resetCredits: {
+			availableCount: opts.expiresInMs.length,
+			credits: opts.expiresInMs.map(ms => ({
+				expiresAt: new Date(opts.nowMs + ms).toISOString(),
+				status: "available",
+			})),
+		},
+	};
+}
+
+/** A Cedar grant clearing the 5h and weekly windows, spendable now unless overridden. */
+function cedarGrant(
+	nowMs: number,
+	id: string,
+	expiresInMs: number,
+	overrides: Partial<UsageResetCredit> = {},
+): UsageResetCredit {
+	return {
+		id,
+		program: "cedar_ember",
+		remainingCount: 1,
+		usable: true,
+		requiresLimit: false,
+		clears: ["anthropic:5h", "anthropic:7d"],
+		blocking: [],
+		usedFractions: {},
+		expiresAt: new Date(nowMs + expiresInMs).toISOString(),
+		status: "available",
+		...overrides,
+	};
+}
+
+/** Claude usage whose first grant is the server-selected one; every grant's remaining resets count as banked. */
+function claudeResetReport(nowMs: number, usage: Record<string, number>, grants: UsageResetCredit[]): UsageReport {
+	const selected = grants[0];
+	return {
+		provider: "anthropic",
+		fetchedAt: nowMs,
+		limits: Object.entries(usage).map(([id, usedFraction]) =>
+			makeLimit({ id, label: id, usedFraction, durationMs: id === "anthropic:5h" ? FIVE_HOURS : SEVEN_DAYS }),
+		),
+		metadata: { email: "claude@example.test", accountId: "claude-account", orgId: "claude-org" },
+		resetCredits: {
+			availableCount: grants.reduce((sum, grant) => sum + (grant.remainingCount ?? 0), 0),
+			redeemableCount: selected?.usable ? (selected.remainingCount ?? 0) : 0,
+			nextCreditId: selected?.id,
+			eligible: true,
+			credits: grants,
+		},
+	};
+}
+
+function resetExpiryOptions(overrides: Record<string, unknown> = {}): UsageResetExpiryOptions {
+	return { settings: Settings.isolated(overrides), accounts: () => [] };
 }
 
 describe("buildRedactionMap", () => {
@@ -1106,6 +1208,253 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("unavailable: weekly cooldown");
 	});
 
+	it.each([
+		{ name: "highlights a reset exactly 7 days out", expiresInMs: SEVEN_DAYS, used: 0.5, tier: "soon", due: "7d" },
+		{ name: "keeps a reset just past 7 days plain", expiresInMs: SEVEN_DAYS + 60_000, used: 0.5, due: "7d" },
+		{
+			name: "raises the banner exactly 24 hours out",
+			expiresInMs: 24 * HOUR,
+			used: 0.5,
+			tier: "imminent",
+			due: "1d",
+		},
+		{
+			name: "only highlights a reset just past 24 hours",
+			expiresInMs: 24 * HOUR + 60_000,
+			used: 0.5,
+			tier: "soon",
+			due: "1d",
+		},
+		{ name: "escalates an account at 25% used", expiresInMs: 6 * HOUR, used: 0.25, tier: "imminent", due: "6h" },
+		{ name: "keeps an account below 25% used plain", expiresInMs: 6 * HOUR, used: 0.24, due: "6h" },
+	])("$name", ({ expiresInMs, used, tier, due }) => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const report = codexResetReport({
+			nowMs: now,
+			accountId: "ws-team",
+			weeklyUsed: used,
+			expiresInMs: [expiresInMs],
+		});
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], now, undefined, [], undefined, resetExpiryOptions()),
+		);
+		const date = new Date(now + expiresInMs).toISOString().slice(0, 10);
+		if (tier === undefined) {
+			expect(text).toContain(`soonest expires in ${due} (${date})`);
+			expect(text).not.toContain("▲");
+		} else if (tier === "soon") {
+			expect(text).toContain(`▲ 1 expires in ${due} (${date})`);
+			expect(text).not.toContain("within 24h");
+		} else {
+			expect(text).toContain(`▲ 1 expires in ${due}`);
+			expect(text).not.toContain(`▲ 1 expires in ${due} (`);
+			expect(text).toContain("▲ 1 saved reset expires within 24h");
+			expect(text).toContain(`7 days (7d) ${Math.round(used * 100)}% used`);
+		}
+	});
+
+	it("measures a Claude grant only against the windows it clears", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		// The Opus weekly cap is nearly spent, but this grant does not clear it.
+		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.2, "anthropic:7d:opus": 0.9 }, [
+			cedarGrant(now, "cedar", 6 * HOUR),
+		]);
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], now, undefined, [], undefined, resetExpiryOptions()),
+		);
+		expect(text).toContain("soonest expires in 6h");
+		expect(text).not.toContain("▲");
+	});
+
+	it("warns about a later Claude grant when the soonest one clears only a quiet window", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.8 }, [
+			cedarGrant(now, "juniper", 1 * HOUR, { program: "juniper_tide", clears: ["anthropic:5h"] }),
+			cedarGrant(now, "cedar", 6 * HOUR, { clears: ["anthropic:7d"] }),
+		]);
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], now, undefined, [], undefined, resetExpiryOptions()),
+		);
+		expect(text).toContain("▲ 1 saved reset expires within 24h");
+		expect(text).toContain("1 expires in 6h");
+		expect(text).toContain("anthropic:7d 80% used");
+	});
+
+	it.each([
+		{ name: "the account is not eligible", inventory: { eligible: false } },
+		{ name: "nothing is redeemable", inventory: { redeemableCount: 0 } },
+		{ name: "the server selected another grant", inventory: { nextCreditId: "other" } },
+	])("offers no spend command when $name", ({ inventory }) => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const base = claudeResetReport(now, { "anthropic:5h": 0.6 }, [cedarGrant(now, "cedar", 6 * HOUR)]);
+		const report = { ...base, resetCredits: { ...base.resetCredits!, ...inventory } };
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], now, undefined, [], undefined, resetExpiryOptions()),
+		);
+		expect(text).toContain("▲ 1 saved reset expires within 24h");
+		expect(text).not.toContain("/usage reset");
+	});
+
+	it("strips terminal controls and line breaks from the account in the TUI notice", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const base = claudeResetReport(now, { "anthropic:5h": 0.6 }, [cedarGrant(now, "cedar", 6 * HOUR)]);
+		const report = { ...base, metadata: { email: "evil\u001b[2J\n\tname@example.test" } };
+		const notice = formatResetExpiryNotice([report], now);
+		expect(notice).toBe("Saved Claude reset on evil name@example.test expires in 6h · /usage");
+	});
+
+	it("does not count a later Claude grant that clears only a quiet window", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.8 }, [
+			cedarGrant(now, "cedar", 1 * HOUR, { clears: ["anthropic:7d"] }),
+			cedarGrant(now, "juniper", 6 * HOUR, { program: "juniper_tide", clears: ["anthropic:5h"] }),
+		]);
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], now, undefined, [], undefined, resetExpiryOptions()),
+		);
+		expect(text).toContain("▲ 1 saved reset expires within 24h");
+		expect(text).toContain("1 expires in 1h");
+	});
+
+	it("cuts a long account in the TUI notice without splitting a character", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const base = claudeResetReport(now, { "anthropic:5h": 0.6 }, [cedarGrant(now, "cedar", 6 * HOUR)]);
+		const report = { ...base, metadata: { email: `${"a".repeat(78)}😀😀@example.test` } };
+		const notice = formatResetExpiryNotice([report], now)!;
+		expect(notice.isWellFormed()).toBe(true);
+		expect(notice).toContain("…");
+		expect(notice).toEndWith(" expires in 6h · /usage");
+	});
+
+	it.each([
+		{
+			mode: "yes",
+			verdict: "→ an open interactive omp session spends it by its last 5 min if eligible then",
+			lost: false,
+		},
+		{ mode: "unset", verdict: "→ an open interactive omp session asks before spending it", lost: false },
+		{ mode: "no", verdict: "→ not spent automatically", lost: true },
+	])("says what codexResets.autoRedeem=$mode does with an expiring reset", ({ mode, verdict, lost }) => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const report = codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 1, expiresInMs: [6 * HOUR] });
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(
+				[report],
+				[],
+				now,
+				undefined,
+				[],
+				undefined,
+				resetExpiryOptions({ "codexResets.autoRedeem": mode }),
+			),
+		);
+		expect(text).toContain(`${verdict}  (codexResets.autoRedeem: ${mode})\n`);
+		expect(text.includes("within 24h and will be lost")).toBe(lost);
+		expect(text).toContain(lost ? "spend it:  /usage reset" : "or now:  /usage reset");
+	});
+
+	it("decides each provider's expiring reset by its own setting", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const reports = [
+			codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 1, expiresInMs: [6 * HOUR] }),
+			claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, [cedarGrant(now, "cedar", 3 * HOUR)]),
+		];
+		const options = resetExpiryOptions({ "codexResets.autoRedeem": "yes", "claudeResets.autoRedeem": "no" });
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now, undefined, [], undefined, options));
+		expect(text).toContain("▲ 2 saved resets expire within 24h\n");
+		expect(text).toContain("(codexResets.autoRedeem: yes)");
+		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeem: no)");
+	});
+
+	it.each([
+		{
+			name: "an unavailable grant behind the selected one",
+			grants: (now: number) => [
+				cedarGrant(now, "selected", 20 * 24 * HOUR),
+				cedarGrant(now, "behind", 6 * HOUR, { remainingCount: 2, usable: false, status: "unavailable" }),
+			],
+			header: "✦ 3 saved resets · 1 usable now · ▲ 2 expire, soonest in 6h",
+			title: "▲ 2 saved resets expire within 24h\n",
+			eligibleNow: false,
+		},
+		{
+			name: "a paused grant",
+			grants: (now: number) => [cedarGrant(now, "paused", 6 * HOUR, { usable: false, status: "paused" })],
+			header: "✦ 1 saved reset · 0 usable now · ▲ 1 expires in 6h",
+			title: "▲ 1 saved reset expires within 24h\n",
+			eligibleNow: false,
+		},
+		{
+			name: "the selected grant among several",
+			grants: (now: number) => [
+				cedarGrant(now, "selected", 6 * HOUR),
+				cedarGrant(now, "next", 10 * HOUR, { usable: false, status: "unavailable" }),
+				cedarGrant(now, "later", 30 * 24 * HOUR, { usable: false, status: "unavailable" }),
+			],
+			header: "✦ 3 saved resets · 1 usable now · ▲ 2 expire, soonest in 6h",
+			title: "▲ 2 saved resets expire within 24h\n",
+			eligibleNow: true,
+		},
+	])("counts $name among the expiring Claude resets", ({ grants, header, title, eligibleNow }) => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.5 }, grants(now));
+		const options = resetExpiryOptions({ "claudeResets.autoRedeem": "yes" });
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], now, undefined, [], undefined, options));
+		expect(text).toContain(header);
+		expect(text).toContain(title);
+		expect(text).toContain(
+			`→ an open interactive omp session spends it by its last 5 min if eligible then  (claudeResets.autoRedeem: yes)${eligibleNow ? "" : " · not eligible now"}\n`,
+		);
+		// Only a reset the provider lets omp spend now gets a command that spends it.
+		expect(text.includes("/usage reset")).toBe(eligibleNow);
+	});
+
+	it.each<{
+		name: string;
+		usage: Record<string, number>;
+		grant: Partial<UsageResetCredit>;
+		fetchedAgoMs: number;
+		eligibleNow: boolean;
+	}>([
+		{
+			name: "keeps the spend conditional when the exhausted window that makes a grant usable may reset first",
+			usage: { "anthropic:5h": 1, "anthropic:7d": 0.5 },
+			grant: { requiresLimit: true },
+			fetchedAgoMs: 0,
+			eligibleNow: true,
+		},
+		{
+			name: "marks a grant not eligible now, not lost, while a window it does not clear is exhausted",
+			usage: { "anthropic:5h": 0.5, "anthropic:7d": 0.5, "anthropic:7d:sonnet": 1 },
+			grant: {},
+			fetchedAgoMs: 0,
+			eligibleNow: false,
+		},
+		{
+			name: "leaves eligibility unmarked on a report too old for the planner",
+			usage: { "anthropic:5h": 0.5, "anthropic:7d": 0.5, "anthropic:7d:sonnet": 1 },
+			grant: {},
+			fetchedAgoMs: 20 * 60_000,
+			eligibleNow: true,
+		},
+	])("$name", ({ usage, grant, fetchedAgoMs, eligibleNow }) => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const report = {
+			...claudeResetReport(now, usage, [cedarGrant(now, "cedar", 6 * HOUR, grant)]),
+			fetchedAt: now - fetchedAgoMs,
+		};
+		const options = resetExpiryOptions({
+			"claudeResets.autoRedeem": "yes",
+			"claudeResets.salvageHorizonHours": 0,
+		});
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], now, undefined, [], undefined, options));
+		const verdict =
+			"→ an open interactive omp session spends it by its last 5 min if eligible then  (claudeResets.autoRedeem: yes)";
+		expect(text).toContain(eligibleNow ? `${verdict}\n` : `${verdict} · not eligible now\n`);
+		expect(text).not.toContain("will be lost");
+		expect(text).toContain("or now:  /usage reset");
+	});
+
 	it("deduplicates identical per-limit notes across accounts sharing a window", () => {
 		const note = "Overage requests: 5";
 		const reports = [
@@ -1321,5 +1670,596 @@ describe("omp usage accounts", () => {
 			vi.restoreAllMocks();
 			authStorage.close();
 		}
+	});
+});
+
+describe("omp usage reset", () => {
+	interface ResetRequest {
+		method: string;
+		path: string;
+		bearer: string | null;
+		body?: Record<string, unknown>;
+	}
+	const soon = new Date(Date.now() + 2 * 24 * HOUR).toISOString();
+	const late = new Date(Date.now() + 20 * 24 * HOUR).toISOString();
+	const oauth = (access: string, identity: Partial<OAuthCredential>): OAuthCredential => ({
+		type: "oauth",
+		access,
+		refresh: `refresh-${access}`,
+		expires: Date.now() + HOUR,
+		...identity,
+	});
+
+	let requests: ResetRequest[];
+	/** Codex consume answer; an Error stands in for a dropped connection, `stall` for one that never answers. */
+	let codexConsume: { status: number; body: unknown } | Error | "stall";
+	/** Codex listing faults by bearer: `unavailable` fails upstream, `stall` never answers. */
+	let codexListFaults: Record<string, "unavailable" | "stall">;
+	/** Title Anthropic gives the Claude grant. */
+	let claudeGrantLabel: string;
+	let authStorage: AuthStorage;
+	let stdout: string;
+	let stderr: string;
+	/** Settles once the command has listed the Codex accounts. */
+	let listed: PromiseWithResolvers<void>;
+	let tempDir: TempDir;
+	const originalEnv = {
+		PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+		OMP_PROFILE: process.env.OMP_PROFILE,
+		PI_PROFILE: process.env.PI_PROFILE,
+	};
+
+	/** A response that never arrives; it rejects once the request's signal aborts. */
+	const stall = (init?: RequestInit): Promise<Response> => {
+		const stalled = Promise.withResolvers<Response>();
+		init?.signal?.addEventListener("abort", () => stalled.reject(init.signal?.reason));
+		return stalled.promise;
+	};
+
+	/** Codex and Claude reset endpoints: `codex-team` banks two credits, `codex-spare` none, Claude one grant. */
+	const handleReset = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+		const url = new URL(String(input));
+		const method = init?.method ?? "GET";
+		const bearer = new Headers(init?.headers).get("authorization");
+		const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+		requests.push({ method, path: url.pathname, bearer, ...(body ? { body } : {}) });
+		if (url.pathname.endsWith("/wham/rate-limit-reset-credits/consume")) {
+			if (codexConsume instanceof Error) throw codexConsume;
+			if (codexConsume === "stall") return stall(init);
+			return Response.json(codexConsume.body, { status: codexConsume.status });
+		}
+		if (url.pathname.endsWith("/wham/rate-limit-reset-credits")) {
+			listed.resolve();
+			const fault = bearer ? codexListFaults[bearer] : undefined;
+			if (fault === "unavailable") return new Response("upstream unavailable", { status: 503 });
+			if (fault === "stall") return stall(init);
+			const credits =
+				bearer === "Bearer codex-team" || bearer === "Bearer broker-codex"
+					? [
+							{ id: "credit-late", status: "available", expires_at: late },
+							{
+								id: "credit-soon",
+								status: "available",
+								expires_at: soon,
+								description: "Banked for dev@example.test",
+							},
+						]
+					: [];
+			return Response.json({ credits, available_count: credits.length });
+		}
+		if (url.pathname.endsWith("/reset_rate_limits")) {
+			return Response.json({ result: "reset", resets_left: 0, cleared: ["five_hour"] });
+		}
+		if (url.pathname.endsWith("/api/oauth/usage")) {
+			return Response.json({
+				five_hour: { utilization: 100, resets_at: new Date(Date.now() + 2 * HOUR).toISOString() },
+				seven_day: { utilization: 40, resets_at: new Date(Date.now() + 72 * HOUR).toISOString() },
+				cedar_ember: {
+					eligible: true,
+					at_limit: true,
+					exhausted: ["five_hour"],
+					next_grant_id: "saved-reset",
+					grants: [
+						{
+							id: "saved-reset",
+							label: claudeGrantLabel,
+							resets_total: 1,
+							resets_left: 1,
+							starts_at: new Date(Date.now() - HOUR).toISOString(),
+							ends_at: soon,
+							clears: ["five_hour"],
+							paused: false,
+							usable_now: true,
+							use_requires_limit: true,
+							percent_used: { five_hour: 100 },
+							blocking: [],
+						},
+					],
+				},
+			});
+		}
+		return new Response("not found", { status: 404 });
+	};
+	const usageFetch = Object.assign(handleReset, { preconnect: fetch.preconnect });
+
+	const consumes = () => requests.filter(request => request.method === "POST");
+
+	beforeEach(async () => {
+		requests = [];
+		listed = Promise.withResolvers<void>();
+		tempDir = TempDir.createSync("@omp-usage-reset-");
+		setAgentDir(tempDir.path());
+		codexConsume = { status: 200, body: { code: "reset" } };
+		codexListFaults = {};
+		claudeGrantLabel = "Reset for dev@example.test (Acme Corp)";
+		authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), { usageFetch });
+		await authStorage.credentials.set("openai-codex", [
+			oauth("codex-team", { email: "dev@example.test", accountId: "acct-team" }),
+			oauth("codex-spare", { email: "spare@example.test", accountId: "acct-spare" }),
+		]);
+		await authStorage.credentials.set(
+			"anthropic",
+			oauth("claude-max", { email: "dev@example.test", orgId: "org-claude", orgName: "Acme Corp" }),
+		);
+		vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated());
+		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		stdout = "";
+		stderr = "";
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			stdout += String(chunk);
+			return true;
+		});
+		vi.spyOn(process.stderr, "write").mockImplementation(chunk => {
+			stderr += String(chunk);
+			return true;
+		});
+		process.exitCode = 0;
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		process.exitCode = 0;
+		for (const [key, value] of Object.entries(originalEnv)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		__resetDirsFromEnvForTests();
+		tempDir.removeSync();
+	});
+
+	function codexTeamLockPath(): string {
+		const lockKey = resetAccountLockKey({ provider: "openai-codex", accountId: "acct-team" });
+		if (!lockKey) throw new Error("expected a reset lock key");
+		return resetLockPath(lockKey);
+	}
+
+	function credentialIds() {
+		const [team, spare] = authStorage.oauth.accounts("openai-codex").map(account => account.credentialId);
+		const [claude] = authStorage.oauth.accounts("anthropic").map(account => account.credentialId);
+		return { team, spare, claude };
+	}
+
+	it("lists every stored Codex and Claude account by credential id and spends nothing", async () => {
+		const { team, spare, claude } = credentialIds();
+		await runUsageCommand({ action: "reset", noExtensions: true });
+
+		const text = stripVTControlCharacters(stdout);
+		expect(text).toContain(`[Codex · openai-codex/${team}]: 2 saved, 2 usable now, expires ${soon}`);
+		expect(text).toContain(`spare@example.test [Codex · openai-codex/${spare}]: 0 saved, 0 usable now`);
+		expect(text).toContain(`dev@example.test · Acme Corp [Claude · anthropic/${claude}]: 1 saved, 1 usable now`);
+		expect(text).toContain("omp usage reset <provider>/<credential id>");
+		expect(consumes()).toEqual([]);
+		expect(process.exitCode).toBe(0);
+	});
+
+	it("prints credential ids, credit ids and expiries as JSON", async () => {
+		const { team, spare, claude } = credentialIds();
+		await runUsageCommand({ action: "reset", json: true, noExtensions: true });
+
+		const { accounts } = JSON.parse(stdout) as {
+			accounts: Array<{
+				provider: string;
+				credentialId: number;
+				redeemableCount: number;
+				nextCreditId?: string;
+				soonestExpiry?: string;
+				credits: Array<{ id: string; expiresAt?: string }>;
+			}>;
+		};
+		expect(
+			accounts.map(account => [
+				account.provider,
+				account.credentialId,
+				account.redeemableCount,
+				account.nextCreditId,
+				account.soonestExpiry,
+				account.credits.map(credit => [credit.id, credit.expiresAt]),
+			]),
+		).toEqual([
+			[
+				"openai-codex",
+				team,
+				2,
+				undefined,
+				soon,
+				[
+					["credit-late", late],
+					["credit-soon", soon],
+				],
+			],
+			["openai-codex", spare, 0, undefined, undefined, []],
+			["anthropic", claude, 1, "saved-reset", soon, [["saved-reset", soon]]],
+		]);
+		expect(consumes()).toEqual([]);
+	});
+
+	it("lists only the --provider alias's accounts", async () => {
+		const { claude } = credentialIds();
+		await runUsageCommand({ action: "reset", provider: "claude", json: true, noExtensions: true });
+
+		const { accounts } = JSON.parse(stdout) as { accounts: Array<{ provider: string; credentialId: number }> };
+		expect(accounts.map(account => [account.provider, account.credentialId])).toEqual([["anthropic", claude]]);
+		expect(requests.some(request => request.path.includes("/wham/"))).toBe(false);
+	});
+
+	const identities = ["dev@example.test", "spare@example.test", "acct-team", "org-claude", "Acme Corp"];
+
+	it.each([
+		["text", false],
+		["JSON", true],
+	])("masks account identities in the --redact %s listing and keeps credential ids", async (_format, json) => {
+		const { team } = credentialIds();
+		await runUsageCommand({ action: "reset", json, redact: true, noExtensions: true });
+
+		for (const identity of identities) expect(stdout).not.toContain(identity);
+		expect(stripVTControlCharacters(stdout)).toContain(json ? `"credentialId": ${team}` : `openai-codex/${team}`);
+	});
+
+	it("spends on the stored account, not the masked label, under --redact", async () => {
+		const { team } = credentialIds();
+		await runUsageCommand({ action: "reset", target: `codex/${team}`, redact: true, noExtensions: true });
+
+		for (const identity of identities) expect(stdout).not.toContain(identity);
+		expect(stripVTControlCharacters(stdout)).toContain("Reset applied for de* (Codex)");
+		expect(consumes().map(request => [request.bearer, request.body?.account_id])).toEqual([
+			["Bearer codex-team", "acct-team"],
+		]);
+	});
+
+	it("masks identities inside a failed spend's reason under --redact", async () => {
+		codexConsume = new Error("socket to dev@example.test closed");
+		const { team } = credentialIds();
+		await runUsageCommand({ action: "reset", target: `codex/${team}`, redact: true, noExtensions: true });
+
+		for (const identity of identities) expect(stderr).not.toContain(identity);
+		expect(stripVTControlCharacters(stderr)).toContain("couldn't confirm whether the reset applied");
+		expect(process.exitCode).toBe(1);
+	});
+
+	it.each([
+		[
+			"another letter case",
+			{ email: "Dev@Example.test", orgName: "acme corp" },
+			"Reset for dev@example.test (Acme Corp)",
+			"Reset for De* (ac*)",
+		],
+		["non-ASCII letters", { email: "dev@example.test", orgName: "İstanbul" }, "Reset for İstanbul", "Reset for İs*"],
+		[
+			"the lowercase form of non-ASCII letters",
+			{ email: "dev@example.test", orgName: "İstanbul" },
+			"Reset for i\u0307stanbul",
+			"Reset for İs*",
+		],
+	])("masks an identity written in %s inside provider text under --redact", async (_case, identity, label, title) => {
+		claudeGrantLabel = label;
+		await authStorage.credentials.set("anthropic", oauth("claude-case", { ...identity, orgId: "org-case" }));
+		await runUsageCommand({ action: "reset", provider: "claude", json: true, redact: true, noExtensions: true });
+
+		const { accounts } = JSON.parse(stdout) as { accounts: Array<{ credits: Array<{ title?: string }> }> };
+		expect(accounts.map(account => account.credits.map(credit => credit.title))).toEqual([[title]]);
+	});
+
+	/** Organizations named like the `codex` alias (inside `openai-codex`) and like the Claude grant id. */
+	async function storeIdentitiesMatchingIds(): Promise<void> {
+		await authStorage.credentials.set("openai-codex", [
+			oauth("codex-team", { email: "dev@example.test", accountId: "acct-team", orgName: "codex" }),
+		]);
+		await authStorage.credentials.set(
+			"anthropic",
+			oauth("claude-max", { email: "dev@example.test", orgId: "org-overlap", orgName: "saved-reset" }),
+		);
+	}
+
+	it("spends under --redact when an account's identity matches a provider id", async () => {
+		await storeIdentitiesMatchingIds();
+		const { team } = credentialIds();
+		await runUsageCommand({ action: "reset", target: `codex/${team}`, redact: true, noExtensions: true });
+
+		expect(stripVTControlCharacters(stdout)).toContain("Reset applied for de* · co* (Codex)");
+		expect(consumes().map(request => [request.bearer, request.body?.account_id])).toEqual([
+			["Bearer codex-team", "acct-team"],
+		]);
+		expect(process.exitCode).toBe(0);
+	});
+
+	it("keeps spend targets canonical in a --redact text listing when identities match them", async () => {
+		await storeIdentitiesMatchingIds();
+		const { team, claude } = credentialIds();
+		await runUsageCommand({ action: "reset", redact: true, noExtensions: true });
+
+		const text = stripVTControlCharacters(stdout);
+		expect(text).toContain(`de* · co* [Codex · openai-codex/${team}]`);
+		expect(text).toContain(`de* · sa* [Claude · anthropic/${claude}]`);
+	});
+
+	it("keeps provider, credit and grant ids canonical in a --redact JSON listing when identities match them", async () => {
+		await storeIdentitiesMatchingIds();
+		const { team, claude } = credentialIds();
+		await runUsageCommand({ action: "reset", json: true, redact: true, noExtensions: true });
+
+		const { accounts } = JSON.parse(stdout) as {
+			accounts: Array<{
+				provider: string;
+				credentialId: number;
+				orgName?: string;
+				nextCreditId?: string;
+				credits: Array<{ id: string; expiresAt?: string }>;
+			}>;
+		};
+		expect(
+			accounts.map(account => [
+				account.provider,
+				account.credentialId,
+				account.orgName,
+				account.nextCreditId,
+				account.credits.map(credit => [credit.id, credit.expiresAt]),
+			]),
+		).toEqual([
+			[
+				"openai-codex",
+				team,
+				"co*",
+				undefined,
+				[
+					["credit-late", late],
+					["credit-soon", soon],
+				],
+			],
+			["anthropic", claude, "sa*", "saved-reset", [["saved-reset", soon]]],
+		]);
+	});
+
+	it("refuses to spend on an account whose login cannot be fenced", async () => {
+		await authStorage.credentials.set("anthropic", oauth("claude-anon", { orgId: "org-anon" }));
+		const { claude } = credentialIds();
+		await runUsageCommand({ action: "reset", target: `claude/${claude}`, noExtensions: true });
+
+		expect(consumes()).toEqual([]);
+		expect(stripVTControlCharacters(stderr)).toContain("no account id or email to fence the spend");
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("waits for a session holding the account's reset lock and spends nothing after its reset", async () => {
+		const { team } = credentialIds();
+		const lockPath = codexTeamLockPath();
+		let run: Promise<void> | undefined;
+		await withFileLock(lockPath, async () => {
+			run = runUsageCommand({ action: "reset", target: `codex/${team}`, noExtensions: true });
+			await listed.promise;
+			await Bun.write(lockPath, `reset:${Date.now()}`);
+		});
+		await run;
+
+		expect(consumes()).toEqual([]);
+		expect(stripVTControlCharacters(stderr)).toContain("another omp process spent a saved reset on this account");
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("spends the named Codex account's soonest-expiring credit", async () => {
+		const { team } = credentialIds();
+		await runUsageCommand({ action: "reset", target: `codex/${team}`, noExtensions: true });
+
+		expect(stripVTControlCharacters(stdout)).toContain("Reset applied for dev@example.test (Codex)");
+		expect(consumes().map(request => [request.path, request.bearer, request.body?.credit_id])).toEqual([
+			["/backend-api/wham/rate-limit-reset-credits/consume", "Bearer codex-team", "credit-soon"],
+		]);
+		expect(process.exitCode).toBe(0);
+	});
+
+	it("spends the listed Claude grant through the claude alias", async () => {
+		const { claude } = credentialIds();
+		await runUsageCommand({ action: "reset", target: `claude/${claude}`, noExtensions: true });
+
+		expect(stripVTControlCharacters(stdout)).toContain("Reset applied for dev@example.test · Acme Corp (Claude)");
+		expect(consumes().map(request => [request.path, request.bearer, request.body?.grant_id])).toEqual([
+			["/api/organizations/org-claude/reset_rate_limits", "Bearer claude-max", "saved-reset"],
+		]);
+		expect(process.exitCode).toBe(0);
+	});
+
+	it.each([
+		["codex/active", "no account is active"],
+		["gemini/1", 'Unknown reset provider "gemini"'],
+		["codex/999", 'No stored account matches "codex/999"'],
+		["codex", "Choose an account with `omp usage reset <provider>/<credential id>`"],
+	])("refuses %s without spending", async (target, message) => {
+		await runUsageCommand({ action: "reset", target, noExtensions: true });
+
+		expect(stripVTControlCharacters(stderr)).toContain(message);
+		expect(stdout).toBe("");
+		expect(consumes()).toEqual([]);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("refuses an account with no usable reset without spending", async () => {
+		const { spare } = credentialIds();
+		await runUsageCommand({ action: "reset", target: `codex/${spare}`, noExtensions: true });
+
+		expect(stripVTControlCharacters(stderr)).toContain(
+			"spare@example.test [Codex]: no saved resets usable right now",
+		);
+		expect(consumes()).toEqual([]);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("names a failed listing instead of reporting no usable resets", async () => {
+		codexListFaults = { "Bearer codex-spare": "unavailable" };
+		const { spare } = credentialIds();
+		await runUsageCommand({ action: "reset", target: `codex/${spare}`, noExtensions: true });
+
+		expect(stripVTControlCharacters(stderr)).toContain(
+			"spare@example.test [Codex]: saved resets unavailable (Failed to load saved resets)",
+		);
+		expect(consumes()).toEqual([]);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("stops waiting on a Codex listing that never answers", async () => {
+		codexListFaults = { "Bearer codex-team": "stall" };
+		const timeout = AbortSignal.timeout.bind(AbortSignal);
+		vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => timeout(Math.min(ms, 50)));
+		const { team } = credentialIds();
+		await runUsageCommand({ action: "reset", target: `codex/${team}`, noExtensions: true });
+
+		expect(stripVTControlCharacters(stderr)).toContain("saved resets unavailable (Failed to load saved resets)");
+		expect(consumes()).toEqual([]);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it.each([
+		["the credit was already redeemed", { status: 200, body: { code: "already_redeemed" } }, "already redeemed"],
+		["nothing is constrained", { status: 200, body: { code: "nothing_to_reset" } }, "nothing to reset right now"],
+		["the provider errors", { status: 500, body: {} }, "reset was not confirmed (http_500)"],
+		["the connection drops", new Error("socket hang up"), "couldn't confirm whether the reset applied"],
+	])("exits nonzero when %s", async (_name, answer, message) => {
+		codexConsume = answer;
+		const { team } = credentialIds();
+		await runUsageCommand({ action: "reset", target: `codex/${team}`, noExtensions: true });
+
+		expect(stripVTControlCharacters(stderr)).toContain(message);
+		expect(stdout).toBe("");
+		expect(consumes()).toHaveLength(1);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("stops waiting on a consume that never answers and reports the spend unconfirmed", async () => {
+		codexConsume = "stall";
+		const timeout = AbortSignal.timeout.bind(AbortSignal);
+		vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => timeout(Math.min(ms, 50)));
+		const { team } = credentialIds();
+		await runUsageCommand({ action: "reset", target: `codex/${team}`, noExtensions: true });
+
+		expect(stripVTControlCharacters(stderr)).toContain("couldn't confirm whether the reset applied");
+		expect(consumes()).toHaveLength(1);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("spends on an auth-broker client with the broker's token from this process", async () => {
+		const brokerStore = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const brokerStorage = new AuthStorage(brokerStore);
+		await brokerStorage.credentials.set(
+			"openai-codex",
+			oauth("broker-codex", { email: "fleet@example.test", accountId: "acct-fleet" }),
+		);
+		const handle = startAuthBroker({
+			storage: brokerStorage,
+			bind: "127.0.0.1:0",
+			bearerTokens: ["reset-bearer"],
+			disableRefresher: true,
+		});
+		const client = new AuthBrokerClient({ url: handle.url, token: "reset-bearer" });
+		const initial = await client.fetchSnapshot();
+		if (initial.status !== 200) throw new Error("expected a broker snapshot");
+		const remote = new RemoteAuthCredentialStore({
+			client,
+			initialSnapshot: initial.snapshot,
+			streamSnapshots: false,
+		});
+		const clientStorage = new AuthStorage(remote, { usageFetch });
+		try {
+			await clientStorage.credentials.reload();
+			vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(clientStorage);
+			const [account] = clientStorage.oauth.accounts("openai-codex");
+			await runUsageCommand({ action: "reset", target: `codex/${account?.credentialId}`, noExtensions: true });
+
+			expect(stripVTControlCharacters(stdout)).toContain("Reset applied for fleet@example.test (Codex)");
+			expect(consumes().map(request => [request.bearer, request.body?.credit_id])).toEqual([
+				["Bearer broker-codex", "credit-soon"],
+			]);
+		} finally {
+			clientStorage.close();
+			remote.close();
+			await handle.close();
+			brokerStorage.close();
+			brokerStore.close();
+		}
+	});
+});
+
+describe("omp usage saved-reset expiry banner", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	/** Two Codex workspaces under one email, each with a reset expiring within 24 hours. */
+	async function runWithTwoWorkspaces(redact: boolean): Promise<{ lines: string[]; ids: Record<string, number> }> {
+		const authStorage = createInMemoryAuthStorage();
+		const workspace = (accountId: string) => ({
+			type: "oauth" as const,
+			access: `access-${accountId}`,
+			refresh: `refresh-${accountId}`,
+			expires: Date.now() + HOUR,
+			email: "dev@example.com",
+			accountId,
+			orgId: accountId,
+		});
+		await authStorage.credentials.set("openai-codex", [workspace("ws-pro"), workspace("ws-team")]);
+		const ids: Record<string, number> = {};
+		for (const account of authStorage.oauth.accounts("openai-codex")) ids[account.accountId!] = account.credentialId;
+		const now = Date.now();
+		// Reports arrive in the opposite order to the stored accounts, so a positional match would swap them.
+		vi.spyOn(authStorage.usage, "reports").mockResolvedValue([
+			codexResetReport({
+				nowMs: now,
+				accountId: "ws-team",
+				email: "dev@example.com",
+				weeklyUsed: 1,
+				expiresInMs: [6 * HOUR],
+			}),
+			codexResetReport({
+				nowMs: now,
+				accountId: "ws-pro",
+				email: "dev@example.com",
+				weeklyUsed: 0.5,
+				expiresInMs: [3 * HOUR],
+			}),
+		]);
+		vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated());
+		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		const output: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			output.push(String(chunk));
+			return true;
+		});
+		await runUsageCommand({ noExtensions: true, redact });
+		return { lines: stripVTControlCharacters(output.join("")).split("\n"), ids };
+	}
+
+	it("names the stored credential of each same-email Codex workspace", async () => {
+		const { lines, ids } = await runWithTwoWorkspaces(false);
+		expect(ids["ws-pro"]).not.toBe(ids["ws-team"]);
+		expect(lines).toContain("▲ 2 saved resets expire within 24h");
+		for (const workspace of ["ws-team", "ws-pro"]) {
+			const entry = lines.findIndex(line => line.includes(`· ${workspace} ·`) && line.includes("expires in"));
+			expect(entry).toBeGreaterThan(-1);
+			expect(lines[entry + 2]).toContain(`/usage reset openai-codex/${ids[workspace]} `);
+		}
+	});
+
+	it("masks the banner's account identities under --redact", async () => {
+		const { lines } = await runWithTwoWorkspaces(true);
+		const text = lines.join("\n");
+		expect(text).toContain("▲ 2 saved resets expire within 24h");
+		expect(text).not.toMatch(/dev@example\.com|ws-pro|ws-team/);
 	});
 });

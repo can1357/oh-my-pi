@@ -1,5 +1,5 @@
 use objc2_application_services::{AXError, AXUIElement};
-use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFType};
+use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFString, CFType};
 
 use super::{
 	MacAx, copy_attribute, copy_attribute_result, copy_bool, copy_element, copy_required_string,
@@ -40,7 +40,10 @@ pub(crate) fn select(window: &DesktopWindow, path: &[String]) -> CoreResult<()> 
 		}
 		// Re-read the chosen command after all path/provider queries. A menu may
 		// validate itself in response to a key-window change.
-		require_command(&describe(element, &actual_path, pid)?)?;
+		let item = describe(element, &actual_path, pid)?.ok_or_else(|| {
+			DesktopError::ax_failed("menu command lost its title; nothing was dispatched")
+		})?;
+		require_command(&item)?;
 		require_key_context(pid, wid)?;
 		control::check()?;
 		perform_action(element, "AXPress").map_err(|error| {
@@ -140,12 +143,10 @@ fn children(
 	for child in children {
 		control::check()?;
 		if matches!(copy_required_string(&child, "AXRole")?.as_str(), "AXMenuItem" | "AXMenuBarItem")
+			&& let Some(item) = describe(&child, path, pid)?
 		{
-			let item = describe(&child, path, pid)?;
-			if !item.title.is_empty() {
-				elements.push(child);
-				items.push(item);
-			}
+			elements.push(child);
+			items.push(item);
 		}
 	}
 	Ok((elements, items))
@@ -202,25 +203,49 @@ fn submenu(element: &AXUIElement) -> CoreResult<Option<CFRetained<AXUIElement>>>
 	Ok(menu)
 }
 
+/// Describes a menu item, or `None` when it has no title to match: a separator
+/// (empty title) or a custom-view item such as the Tags row in Finder's File
+/// menu, which exposes no `AXTitle` at all.
 fn describe(
 	element: &AXUIElement,
 	parent: &[String],
 	pid: libc::pid_t,
-) -> CoreResult<DesktopMenuItem> {
+) -> CoreResult<Option<DesktopMenuItem>> {
 	if element_pid(element)? != pid {
 		return Err(DesktopError::ax_failed("menu item belongs to a different application"));
 	}
-	let title = copy_required_string(element, "AXTitle")?;
+	let title = title(copy_attribute_result(element, "AXTitle"))?;
+	if title.is_empty() {
+		return Ok(None);
+	}
 	let mut path = parent.to_vec();
 	path.push(title.clone());
-	Ok(DesktopMenuItem {
+	Ok(Some(DesktopMenuItem {
 		title,
 		path,
 		enabled: copy_bool(element, "AXEnabled").unwrap_or(false),
 		checked: copy_string(element, "AXMenuItemMarkChar").is_some_and(|mark| !mark.is_empty()),
 		has_submenu: submenu(element)?.is_some(),
 		shortcut: shortcut(element),
-	})
+	}))
+}
+
+/// A menu item's `AXTitle`, empty when the item has none: AX reports a missing
+/// title as no value or an unsupported attribute rather than an empty string,
+/// and a few items fail the read outright (a row of Preview's Tools menu
+/// answers kAXErrorFailure). Such an item cannot be matched by title, so it is
+/// skipped rather than failing the whole menu.
+fn title(value: Result<Option<CFRetained<CFType>>, AXError>) -> CoreResult<String> {
+	match value {
+		Ok(Some(value)) => value
+			.downcast::<CFString>()
+			.map(|value| value.to_string())
+			.map_err(|_| DesktopError::ax_failed("AXTitle was not a string")),
+		Ok(None) | Err(AXError::NoValue | AXError::AttributeUnsupported | AXError::Failure) => {
+			Ok(String::new())
+		},
+		Err(error) => Err(super::ax_error(error, "copying AXTitle failed")),
+	}
 }
 
 fn shortcut(element: &AXUIElement) -> Option<String> {
@@ -243,4 +268,33 @@ fn shortcut(element: &AXUIElement) -> Option<String> {
 	}
 	shortcut.push_str(&key);
 	Some(shortcut)
+}
+
+#[cfg(test)]
+mod tests {
+	use objc2_application_services::AXError;
+	use objc2_core_foundation::{CFNumber, CFRetained, CFString, CFType};
+
+	use super::title;
+	use crate::desktop::error::ErrorCode;
+
+	#[test]
+	fn items_without_a_title_read_as_untitled_instead_of_failing_the_menu() {
+		// Finder's File > Tags row answers AXTitle with kAXErrorNoValue (-25212).
+		assert_eq!(title(Err(AXError::NoValue)).unwrap(), "");
+		assert_eq!(title(Err(AXError::AttributeUnsupported)).unwrap(), "");
+		// One row of Preview's Tools menu answers kAXErrorFailure (-25200).
+		assert_eq!(title(Err(AXError::Failure)).unwrap(), "");
+		assert_eq!(title(Ok(None)).unwrap(), "");
+	}
+
+	#[test]
+	fn titled_items_keep_their_title_and_other_failures_still_fail() {
+		let open = CFRetained::<CFType>::from(CFString::from_str("Open"));
+		assert_eq!(title(Ok(Some(open))).unwrap(), "Open");
+		let number = CFRetained::<CFType>::from(CFNumber::new_i32(1));
+		assert_eq!(title(Ok(Some(number))).unwrap_err().code, ErrorCode::AxFailed);
+		assert_eq!(title(Err(AXError::CannotComplete)).unwrap_err().code, ErrorCode::AxFailed);
+		assert_eq!(title(Err(AXError::InvalidUIElement)).unwrap_err().code, ErrorCode::StaleRef);
+	}
 }

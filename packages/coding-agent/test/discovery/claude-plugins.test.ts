@@ -12,7 +12,7 @@ import {
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
-import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, logger, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 
 describe("parseClaudePluginsRegistry", () => {
@@ -99,6 +99,39 @@ describe("listClaudePluginRoots", () => {
 		const result = await listClaudePluginRoots(tempDir);
 		expect(result.roots).toEqual([]);
 		expect(result.warnings).toEqual([]);
+	});
+
+	test("logs registry warnings once per cached computation", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		const registryPath = path.join(pluginsDir, "installed_plugins.json");
+		await fs.writeFile(registryPath, "not json");
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		const first = await listClaudePluginRoots(tempDir);
+		const second = await listClaudePluginRoots(tempDir);
+
+		expect(first.warnings).toEqual([`Failed to parse Claude Code plugin registry: ${registryPath}`]);
+		expect(second).toBe(first);
+		expect(warnSpy.mock.calls.filter(([message]) => message === first.warnings[0])).toHaveLength(1);
+	});
+
+	test("logs registry warnings once for concurrent callers", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		const registryPath = path.join(pluginsDir, "installed_plugins.json");
+		await fs.writeFile(registryPath, "not json");
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		const results = await Promise.all([
+			listClaudePluginRoots(tempDir),
+			listClaudePluginRoots(tempDir),
+			listClaudePluginRoots(tempDir),
+		]);
+
+		const message = `Failed to parse Claude Code plugin registry: ${registryPath}`;
+		for (const result of results) expect(result.warnings).toEqual([message]);
+		expect(warnSpy.mock.calls.filter(([m]) => m === message)).toHaveLength(1);
 	});
 
 	test("parses plugin with user scope", async () => {

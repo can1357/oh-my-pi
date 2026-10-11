@@ -56,8 +56,13 @@ export interface HistoryFormatOptions {
 	 * evidence returned by primary tools without admitting unbounded output.
 	 */
 	expandToolIO?: boolean;
-	/** Transform expanded tool input/output before any byte or line truncation. */
-	transformExpandedToolIO?: (text: string) => string;
+	/**
+	 * Transform tool input/output — expanded bodies and one-line previews —
+	 * before any byte, line or character truncation. The advisor passes its
+	 * secret redaction here: a cut through a secret leaves a fragment that no
+	 * later whole-transcript pass can recognize.
+	 */
+	transformExpandedToolIO?: ToolIOTransform;
 	/**
 	 * Chunked rendering support: a caller formatting one logical transcript in
 	 * several calls (the advisor's chunked delta render) passes a result index
@@ -112,8 +117,34 @@ function oneLine(text: string, max = PRIMARY_ARG_MAX): string {
 	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
-export function formatExecutionSourcePreview(source: string): string {
-	return oneLine(source);
+/**
+ * Redaction applied to tool I/O before any cut. With `redactionPrefixEnd`
+ * (see `SecretObfuscator.redactionPrefixEnd`) one-line previews redact only a
+ * prefix ending at a clean cut point, whose redaction matches the whole
+ * text's, so hidden text mints nothing; without it they redact the whole text.
+ */
+export interface ToolIOTransform {
+	(text: string): string;
+	redactionPrefixEnd?: (text: string, limit: number) => number;
+}
+
+/**
+ * {@link oneLine}, redacting with `transform` before the cut: a cut inside a
+ * secret leaves a fragment no later pass can recognize. Only the redacted
+ * prefix is ever shown, so a replacement shorter than its secret cannot pull
+ * unredacted text from past the prefix into view.
+ */
+function previewLine(text: string, transform?: ToolIOTransform, max = PRIMARY_ARG_MAX): string {
+	if (!transform) return oneLine(text, max);
+	const flat = text.replace(/\s+/g, " ").trim();
+	if (flat.length <= max || !transform.redactionPrefixEnd) return oneLine(transform(flat), max);
+	const end = transform.redactionPrefixEnd(flat, max - 1);
+	const redacted = transform(flat.slice(0, end));
+	return end < flat.length || redacted.length > max ? `${redacted.slice(0, max - 1)}…` : redacted;
+}
+
+export function formatExecutionSourcePreview(source: string, transform?: ToolIOTransform): string {
+	return previewLine(source, transform);
 }
 
 /** Join the text blocks of a string-or-blocks content field. Images become `[image]`. */
@@ -141,35 +172,43 @@ function primaryArgValue(value: unknown): string {
 }
 
 /** Pick the most informative scalar argument of a tool call. */
-export function formatToolCallPrimaryArg(name: string, args: Record<string, unknown> | undefined): string {
+export function formatToolCallPrimaryArg(
+	name: string,
+	args: Record<string, unknown> | undefined,
+	transform?: ToolIOTransform,
+): string {
+	return previewLine(primaryArgText(name, args), transform);
+}
+
+function primaryArgText(name: string, args: Record<string, unknown> | undefined): string {
 	if (!args || typeof args !== "object") return "";
 	// Advisor note is the most informative summary; preserve severity too.
 	if (name === "advise") {
 		const note = typeof args.note === "string" ? args.note : "";
 		const severity = typeof args.severity === "string" ? args.severity : "";
-		if (note && severity) return oneLine(`${severity}: ${note}`);
-		if (note) return oneLine(note);
-		if (severity) return oneLine(severity);
+		if (note && severity) return `${severity}: ${note}`;
+		if (note) return note;
+		if (severity) return severity;
 	}
 	if (name === "grep") {
 		const pattern = primaryArgValue(args.pattern);
 		const paths = primaryArgValue(args.path) || primaryArgValue(args.paths);
-		if (pattern && paths) return oneLine(`${pattern} @ ${paths}`);
-		if (pattern) return oneLine(pattern);
-		if (paths) return oneLine(paths);
+		if (pattern && paths) return `${pattern} @ ${paths}`;
+		if (pattern) return pattern;
+		if (paths) return paths;
 	}
 	if (name === "glob") {
 		const paths = primaryArgValue(args.path) || primaryArgValue(args.paths);
-		if (paths) return oneLine(paths);
+		if (paths) return paths;
 	}
 	if (name === "ast_grep") {
 		const pattern = primaryArgValue(args.pat);
-		if (pattern) return oneLine(pattern);
+		if (pattern) return pattern;
 	}
 	for (const key of PRIMARY_ARG_KEYS) {
 		const value = args[key];
 		const summary = primaryArgValue(value);
-		if (summary) return oneLine(summary);
+		if (summary) return summary;
 	}
 	// Fallback: first non-intent string arg, then a compact JSON of the args.
 	const rest: Record<string, unknown> = {};
@@ -177,21 +216,24 @@ export function formatToolCallPrimaryArg(name: string, args: Record<string, unkn
 	for (const key in args) {
 		if (key === INTENT_FIELD) continue;
 		const value = args[key];
-		if (typeof value === "string" && value.length > 0) return oneLine(value);
+		if (typeof value === "string" && value.length > 0) return value;
 		rest[key] = value;
 		restCount++;
 	}
 	if (restCount === 0) return "{}";
 	try {
-		return oneLine(JSON.stringify(rest));
+		return JSON.stringify(rest);
 	} catch {
 		return "";
 	}
 }
 
-export function formatToolCallIntentPreview(args: Record<string, unknown> | undefined): string | undefined {
+export function formatToolCallIntentPreview(
+	args: Record<string, unknown> | undefined,
+	transform?: ToolIOTransform,
+): string | undefined {
 	const intent = args?.[INTENT_FIELD];
-	return typeof intent === "string" && intent.trim() ? oneLine(intent, 80) : undefined;
+	return typeof intent === "string" && intent.trim() ? previewLine(intent, transform, 80) : undefined;
 }
 
 export function formatToolResultErrorPreview(content: string | readonly (TextContent | ImageContent)[]): string {
@@ -306,9 +348,9 @@ function toolCallLine(
 	includeToolIntent?: boolean,
 	expandEditDiffs?: boolean,
 	expandToolIO?: boolean,
-	transformExpandedToolIO?: (text: string) => string,
+	transformExpandedToolIO?: ToolIOTransform,
 ): string {
-	const head = `→ ${name}(${formatToolCallPrimaryArg(name, args)})`;
+	const head = `→ ${name}(${formatToolCallPrimaryArg(name, args, transformExpandedToolIO)})`;
 	const rawResultText = result ? contentToText(result.content) : undefined;
 	const visibleResultText =
 		rawResultText === undefined ? undefined : (transformExpandedToolIO?.(rawResultText) ?? rawResultText);
@@ -349,7 +391,7 @@ function toolCallLine(
 		if (sections.length > 0) base = `${base}\n${sections.join("\n")}`;
 	}
 
-	const formattedIntent = includeToolIntent ? formatToolCallIntentPreview(args) : undefined;
+	const formattedIntent = includeToolIntent ? formatToolCallIntentPreview(args, transformExpandedToolIO) : undefined;
 	if (formattedIntent) return `// ${formattedIntent}\n${base}`;
 	return base;
 }
@@ -362,6 +404,7 @@ function executionLine(
 	kind: "bash" | "python",
 	source: string,
 	msg: BashExecutionMessage | PythonExecutionMessage,
+	transform?: ToolIOTransform,
 ): string {
 	const status = msg.cancelled
 		? "cancelled"
@@ -369,7 +412,7 @@ function executionLine(
 			? `error · exit ${msg.exitCode}`
 			: "ok";
 	const lines = lineCount(msg.output);
-	const sourcePreview = formatExecutionSourcePreview(source);
+	const sourcePreview = formatExecutionSourcePreview(source, transform);
 	return `→ user-${kind}! ${sourcePreview} ⇒ ${status} · ${lines} ${lines === 1 ? "line" : "lines"}`;
 }
 
@@ -405,16 +448,16 @@ const LEGACY_IMAGE_ATTACHMENT_INDEX = /`\[Image #(\d+)\]`/;
 const LEGACY_IMAGE_ATTACHMENT_PATH = /^Source path: `(.+)`$/m;
 
 /** One-liner for custom/hook messages: `[irc] A → B: body…`. */
-function customOneLiner(msg: CustomMessage | HookMessage): string {
+function customOneLiner(msg: CustomMessage | HookMessage, transform?: ToolIOTransform): string {
 	const details = (msg.details ?? {}) as Record<string, unknown>;
 	const str = (key: string): string => (typeof details[key] === "string" ? (details[key] as string) : "");
 	switch (msg.customType) {
 		case "irc:incoming":
-			return `[irc] ${str("from") || "?"} → me: ${oneLine(str("message"))}`;
+			return `[irc] ${str("from") || "?"} → me: ${previewLine(str("message"), transform)}`;
 		case "irc:relay":
-			return `[irc] ${str("from") || "?"} → ${str("to") || "?"}: ${oneLine(str("body"))}`;
+			return `[irc] ${str("from") || "?"} → ${str("to") || "?"}: ${previewLine(str("body"), transform)}`;
 		case "irc:workpool":
-			return `[pool] ${str("pool")} → ${str("to") || "?"}: ${oneLine(str("body"))}`;
+			return `[pool] ${str("pool")} → ${str("to") || "?"}: ${previewLine(str("body"), transform)}`;
 		case "async-result": {
 			const jobs = Array.isArray(details.jobs) && details.jobs.length > 0 ? details.jobs : [details];
 			const labels = jobs
@@ -423,7 +466,7 @@ function customOneLiner(msg: CustomMessage | HookMessage): string {
 					return typeof j.label === "string" && j.label ? j.label : typeof j.jobId === "string" ? j.jobId : "job";
 				})
 				.join(", ");
-			return `[async-result] ${oneLine(labels)}`;
+			return `[async-result] ${previewLine(labels, transform)}`;
 		}
 		case "image-attachment": {
 			// The notice body is model-facing boilerplate; its path would be cut by `oneLine`.
@@ -436,7 +479,7 @@ function customOneLiner(msg: CustomMessage | HookMessage): string {
 			return `[image-attachment] Image #${index}: ${path}`;
 		}
 		default:
-			return `[${msg.customType}] ${oneLine(contentToText(msg.content))}`;
+			return `[${msg.customType}] ${previewLine(contentToText(msg.content), transform)}`;
 	}
 }
 
@@ -567,7 +610,7 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 			case "bashExecution": {
 				const bashMsg = msg as BashExecutionMessage;
 				if (bashMsg.excludeFromContext) break;
-				const bashLine = executionLine("bash", bashMsg.command, bashMsg);
+				const bashLine = executionLine("bash", bashMsg.command, bashMsg, opts?.transformExpandedToolIO);
 				if (opts?.watchedRoles) {
 					pushWatchedRole("**user**:", bashLine);
 				} else {
@@ -579,7 +622,7 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 			case "pythonExecution": {
 				const pythonMsg = msg as PythonExecutionMessage;
 				if (pythonMsg.excludeFromContext) break;
-				const pythonLine = executionLine("python", pythonMsg.code, pythonMsg);
+				const pythonLine = executionLine("python", pythonMsg.code, pythonMsg, opts?.transformExpandedToolIO);
 				if (opts?.watchedRoles) {
 					pushWatchedRole("**user**:", pythonLine);
 				} else {
@@ -609,26 +652,32 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 						);
 					}
 				} else {
-					lines.push(customOneLiner(custom), "");
+					lines.push(customOneLiner(custom, opts?.transformExpandedToolIO), "");
 				}
 				lastWatchedLabel = undefined;
 				break;
 			}
 			case "branchSummary": {
 				const branchMsg = msg as BranchSummaryMessage;
-				lines.push(`[branch] from ${branchMsg.fromId}: ${oneLine(branchMsg.summary)}`, "");
+				lines.push(
+					`[branch] from ${branchMsg.fromId}: ${previewLine(branchMsg.summary, opts?.transformExpandedToolIO)}`,
+					"",
+				);
 				lastWatchedLabel = undefined;
 				break;
 			}
 			case "compactionSummary": {
 				const compactMsg = msg as CompactionSummaryMessage;
-				lines.push(`[compaction] ${oneLine(compactMsg.summary)}`, "");
+				lines.push(`[compaction] ${previewLine(compactMsg.summary, opts?.transformExpandedToolIO)}`, "");
 				lastWatchedLabel = undefined;
 				break;
 			}
 			case "fileMention": {
 				const fileMsg = msg as FileMentionMessage;
-				lines.push(`[file-mention] ${oneLine(fileMsg.files.map(f => f.path).join(", "))}`, "");
+				lines.push(
+					`[file-mention] ${previewLine(fileMsg.files.map(f => f.path).join(", "), opts?.transformExpandedToolIO)}`,
+					"",
+				);
 				lastWatchedLabel = undefined;
 				break;
 			}

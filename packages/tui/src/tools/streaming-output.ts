@@ -52,6 +52,12 @@ export interface OutputSummary {
 	columnDroppedBytes?: number;
 	/** Number of distinct lines that hit the per-line column cap. */
 	columnTruncatedLines?: number;
+	/**
+	 * 1-indexed first and last lines the column cap cut, numbered as in the
+	 * artifact. Absent when the numbering cannot match the artifact (an inline
+	 * substitute was capped, or `replace()` rewrote the buffer).
+	 */
+	columnTruncatedRange?: { first: number; last: number };
 	/** Configured per-line column cap in effect (UTF-8 bytes), when > 0. */
 	columnMax?: number;
 	/** Artifact ID for internal URL access (artifact://<id>) when truncated */
@@ -901,6 +907,10 @@ export class OutputSink {
 	#columnEllipsisAdded = false;
 	#columnDroppedBytes = 0;
 	#columnTruncatedLines = 0;
+	#columnFirstCutLine = 0;
+	#columnLastCutLine = 0;
+	/** Set once a cut line's number may not match the artifact; the range is then withheld. */
+	#columnCutLinesUnmapped = false;
 	#file?: {
 		path: string;
 		artifactId?: string;
@@ -1044,6 +1054,9 @@ export class OutputSink {
 	#store(chunk: string, inlineChunk: string, substituted: boolean): void {
 		const rawBytes = Buffer.byteLength(chunk, "utf-8");
 		this.#totalBytes += rawBytes;
+		// Line the chunk starts on, as numbered in the artifact; 0 when the capped
+		// inline text is a substitute whose lines do not map onto the artifact.
+		const firstLine = substituted ? 0 : this.#totalLines + 1;
 
 		if (chunk.length > 0) {
 			this.#sawData = true;
@@ -1054,7 +1067,7 @@ export class OutputSink {
 		// Per-line column cap. State persists across chunks so a mid-line split
 		// still respects the budget. Operates on the inline chunk; the complete
 		// chunk is mirrored to the artifact before any cap is applied.
-		const capped = this.#maxColumns > 0 ? this.#applyColumnCap(inlineChunk) : inlineChunk;
+		const capped = this.#maxColumns > 0 ? this.#applyColumnCap(inlineChunk, firstLine) : inlineChunk;
 		const cappedBytes = capped === inlineChunk ? inlineBytes : Buffer.byteLength(capped, "utf-8");
 		const cappedThisChunk = cappedBytes < inlineBytes;
 		if (substituted) this.#truncated = true;
@@ -1102,12 +1115,13 @@ export class OutputSink {
 	 * cap; subsequent bytes are skipped until the next `\n`. State persists
 	 * across calls so a long line split across chunks still produces one marker.
 	 */
-	#applyColumnCap(chunk: string): string {
+	#applyColumnCap(chunk: string, firstLine: number): string {
 		if (chunk.length === 0) return chunk;
 		if (!this.#columnEllipsisAdded && this.#fitsColumnCap(chunk)) return chunk;
 		const max = this.#maxColumns;
 		const parts: string[] = [];
 		let cursor = 0;
+		let line = firstLine;
 		while (cursor < chunk.length) {
 			const nlIdx = chunk.indexOf(NL, cursor);
 			const segEnd = nlIdx === -1 ? chunk.length : nlIdx;
@@ -1138,6 +1152,12 @@ export class OutputSink {
 						parts.push(ELLIPSIS);
 						this.#columnDroppedBytes += segBytes - keptBytes;
 						this.#columnTruncatedLines++;
+						if (line > 0) {
+							if (this.#columnFirstCutLine === 0) this.#columnFirstCutLine = line;
+							this.#columnLastCutLine = line;
+						} else {
+							this.#columnCutLinesUnmapped = true;
+						}
 						this.#currentLineBytes += keptBytes + ellipsisBytes;
 						this.#columnEllipsisAdded = true;
 					}
@@ -1148,6 +1168,7 @@ export class OutputSink {
 			this.#currentLineBytes = 0;
 			this.#columnEllipsisAdded = false;
 			cursor = nlIdx + 1;
+			if (line > 0) line++;
 		}
 		return parts.join("");
 	}
@@ -1436,6 +1457,8 @@ export class OutputSink {
 		this.#columnEllipsisAdded = false;
 		this.#columnDroppedBytes = 0;
 		this.#columnTruncatedLines = 0;
+		// The artifact keeps the replaced stream, so later line numbers no longer match it.
+		this.#columnCutLinesUnmapped = true;
 		this.#pendingChunk = "";
 		this.#pendingCarriageReturn = false;
 	}
@@ -1602,6 +1625,10 @@ export class OutputSink {
 			columnDroppedBytes: this.#columnDroppedBytes > 0 ? this.#columnDroppedBytes : undefined,
 			columnTruncatedLines: this.#columnTruncatedLines > 0 ? this.#columnTruncatedLines : undefined,
 			columnMax: this.#columnTruncatedLines > 0 ? this.#maxColumns : undefined,
+			columnTruncatedRange:
+				this.#columnFirstCutLine > 0 && !this.#columnCutLinesUnmapped
+					? { first: this.#columnFirstCutLine, last: this.#columnLastCutLine }
+					: undefined,
 			artifactId: this.#artifactError ? undefined : this.#file?.artifactId,
 			artifactElidedBytes:
 				this.#artifactError || !this.#file?.artifactId || this.#artifactElidedBytes === 0
