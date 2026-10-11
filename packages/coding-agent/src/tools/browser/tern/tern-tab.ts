@@ -93,6 +93,7 @@ import {
 	type ScreenshotChangeResult,
 	type ScreenshotHistory,
 	type ScreenshotOptions,
+	screenshotArea,
 	screenshotQuality,
 	screenshotScope,
 	screenshotThreshold,
@@ -1758,12 +1759,18 @@ export class TernTab implements InProcessRunTab {
 
 	// ─── Screenshots, PDF ─────────────────────────────────────────────────
 
-	/** Capture raw image bytes: viewport, full page, or an element (optionally in a frame). */
+	/** Capture raw image bytes: viewport, full page, or an element (optionally in a frame), at `scale` image pixels per CSS pixel (default: the viewport's). */
 	async captureBytes(
-		opts: { selector?: string | TernSelector; fullPage?: boolean; format: "png" | "jpeg"; quality?: number },
+		opts: {
+			selector?: string | TernSelector;
+			fullPage?: boolean;
+			format: "png" | "jpeg";
+			quality?: number;
+			scale?: number;
+		},
 		frame: FramePath = null,
 	): Promise<Buffer> {
-		const scale = this.#viewport.deviceScaleFactor ?? 1;
+		const scale = opts.scale ?? this.#viewport.deviceScaleFactor ?? 1;
 		const fields: Record<string, unknown> = { scale, format: opts.format };
 		if (opts.format === "jpeg") fields.quality = opts.quality ?? 80;
 		if (opts.selector !== undefined) {
@@ -1813,8 +1820,9 @@ export class TernTab implements InProcessRunTab {
 		}
 		let comparison: Buffer;
 		let buffer: Buffer;
+		const scale = this.#viewport.deviceScaleFactor ?? 1;
 		try {
-			const capture = { selector: opts.selector, fullPage: opts.fullPage };
+			const capture = { selector: opts.selector, fullPage: opts.fullPage, scale };
 			comparison = await this.captureBytes({ ...capture, format: "png" }, frame);
 			buffer =
 				format === "png"
@@ -1869,6 +1877,7 @@ export class TernTab implements InProcessRunTab {
 				savedByteLength: savedBuffer.length,
 				dest,
 				resized,
+				capture: { area: screenshotArea(opts), scale },
 			});
 			if (opts.annotate) lines.push(formatScreenshotLegend(legend));
 			context.output.push({ type: "text", text: lines.join("\n") });

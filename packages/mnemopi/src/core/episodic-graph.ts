@@ -571,17 +571,12 @@ export class EpisodicGraph {
 						this.addEdge(edge);
 						edges.push(edge);
 					}
-					const contextualScore = Math.max(
-						lexicalScore,
-						entityScore,
-						this.temporalContextScore(memoryId, otherId),
-					);
-					if (!wroteCtxEdge && contextualScore >= minLinkScore) {
+					if (!wroteCtxEdge && entityScore >= minLinkScore) {
 						const ctxEdge = {
 							source: memoryId,
 							target: otherId,
 							edgeType: "ctx",
-							weight: contextualScore,
+							weight: entityScore,
 							timestamp,
 						};
 						this.addEdge(ctxEdge);
@@ -734,18 +729,6 @@ export class EpisodicGraph {
 		const left = lowerSet(leftRows.flatMap(row => [row.subject, row.object]));
 		const right = lowerSet(rightRows.flatMap(row => [row.subject, row.object]));
 		return Math.round(overlapScore(left, right) * 1000) / 1000;
-	}
-
-	private temporalContextScore(sourceMemoryId: string, targetMemoryId: string): number {
-		const left = this.db.query("SELECT time_scope FROM gists WHERE memory_id = ?").get(sourceMemoryId) as {
-			time_scope: string | null;
-		} | null;
-		if (left?.time_scope === null || left?.time_scope === undefined) return 0;
-		const right = this.db.query("SELECT time_scope FROM gists WHERE memory_id = ?").get(targetMemoryId) as {
-			time_scope: string | null;
-		} | null;
-		if (right?.time_scope === null || right?.time_scope === undefined) return 0;
-		return left.time_scope === right.time_scope ? DEFAULT_LINK_THRESHOLD : 0;
 	}
 
 	private memoryFeatures(memoryId: string): Set<string> {

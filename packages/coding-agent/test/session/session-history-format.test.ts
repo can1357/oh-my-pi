@@ -429,4 +429,87 @@ describe("formatSessionHistoryMarkdown", () => {
 		expect(mid).toContain(`\`\`\`diff\n${midDiff}\n\`\`\``);
 		expect(mid).not.toContain("elided");
 	});
+	it("transforms one-line tool previews before truncating them", () => {
+		const secret = `SECRET_${"x".repeat(80)}`;
+		const transform = (text: string): string => text.replace(secret, "[redacted]");
+		const output = formatSessionHistoryMarkdown(
+			[
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "bash",
+							arguments: {
+								command: `${"p".repeat(100)}${secret}`,
+								[INTENT_FIELD]: `${"i".repeat(65)}${secret}`,
+							},
+						},
+					],
+					timestamp: 1,
+				},
+			],
+			{ includeToolIntent: true, transformExpandedToolIO: transform },
+		);
+
+		expect(output).toContain("[redacted]");
+		expect(output).not.toContain(secret.slice(0, 16));
+	});
+
+	it("transforms execution-source previews before truncating them", () => {
+		const secret = `SECRET_${"x".repeat(80)}`;
+		const output = formatSessionHistoryMarkdown(
+			[
+				{
+					role: "bashExecution",
+					command: `${"p".repeat(100)}${secret}`,
+					output: "",
+					exitCode: 0,
+					timestamp: 1,
+				},
+			],
+			{ transformExpandedToolIO: text => text.replace(secret, "[redacted]") },
+		);
+
+		expect(output).toContain("[redacted]");
+		expect(output).not.toContain(secret.slice(0, 16));
+	});
+
+	it("redacts secrets that cross the preview cut at a space or past 8 KiB", () => {
+		// Reviewer repro: a two-word secret straddling the 120-char cut, plus a
+		// single token longer than any fixed scan window.
+		const spaced = "SECRETONE SECRETTWO";
+		const long = `LONGSECRET_${"z".repeat(9 * 1024)}`;
+		const transform = (text: string): string => text.replaceAll(spaced, "[redacted]").replaceAll(long, "[redacted]");
+		const output = formatSessionHistoryMarkdown(
+			[
+				{
+					role: "bashExecution",
+					command: `${"p".repeat(105)}${spaced} suffix`,
+					output: "",
+					exitCode: 0,
+					timestamp: 1,
+				},
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "bash",
+							arguments: { command: `${"p".repeat(105)}${spaced} suffix` },
+						},
+						{ type: "toolCall", id: "c2", name: "bash", arguments: { command: `${"q".repeat(100)}${long}` } },
+					],
+					timestamp: 2,
+				},
+			],
+			{ transformExpandedToolIO: transform },
+		);
+
+		expect(output).not.toContain("SECRETONE");
+		expect(output).not.toContain("LONGSECRET");
+		expect(output.match(/\[redacted\]/g)).toHaveLength(3);
+	});
 });

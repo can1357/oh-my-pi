@@ -212,6 +212,7 @@ export function createPersistedSubagentReviverFactory(
 							? init.agent
 							: ref.displayName,
 					parentTaskPrefix: ref.id,
+					asyncJobManager: ctx.session.asyncJobManager,
 					parentAgentId: ref.parentId,
 					oauthAccountPools,
 					expectedAgentRef: expectedRef,
