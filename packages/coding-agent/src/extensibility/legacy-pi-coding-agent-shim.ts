@@ -1346,6 +1346,19 @@ export class DefaultResourceLoader implements ResourceLoader {
 			extensionFactories: this.#state.extensionFactories,
 		};
 	}
+
+	/**
+	 * @internal — reload only the extension set under an overriding settings
+	 * instance, updating the cached result. Callers use this when the session's
+	 * settings differ from the loader's, so `setHandlerTimeout` reports and the
+	 * runner's enforcement share one ceiling. Extensions have not served any
+	 * request at this point, so rebinding is safe.
+	 */
+	async __reloadExtensionsUnder(settings: Settings): Promise<LoadExtensionsResult> {
+		const result = await this.#loadExtensions(settings);
+		this.#extensionsResult = result;
+		return result;
+	}
 }
 
 /**
@@ -1421,6 +1434,25 @@ export async function createAgentSession(
 		rest.preloadedPreparedExtensions === undefined &&
 		rest.preloadedExtensionPaths === undefined
 	) {
+		// A caller-supplied settings override wins over the loader's: extensions
+		// already bound under the loader's instance would report
+		// `setHandlerTimeout` budgets from the wrong ceiling while the session's
+		// runner enforces the override. Reloading is safe here — no request has
+		// been served — and only touches extensions, not the other resources.
+		const overrideSettings = rest.settings ?? rest.settingsManager;
+		if (
+			overrideSettings !== undefined &&
+			loader instanceof DefaultResourceLoader &&
+			state.settingsPromise !== undefined
+		) {
+			const loaderSettings = await state.settingsPromise;
+			const effective = await (typeof overrideSettings === "object" && "then" in overrideSettings
+				? overrideSettings
+				: Promise.resolve(overrideSettings));
+			if (effective !== loaderSettings) {
+				state.extensionsResult = await loader.__reloadExtensionsUnder(effective);
+			}
+		}
 		forwarded.preloadedExtensions = state.extensionsResult;
 	}
 

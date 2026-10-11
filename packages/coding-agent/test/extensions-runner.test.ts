@@ -1953,10 +1953,11 @@ describe("ExtensionRunner", () => {
 					settled = true;
 					return result;
 				});
-				for (let tick = 0; tick < 200 && !settled; tick++) {
+				for (let tick = 0; tick < 10_000 && !settled; tick++) {
 					await Promise.resolve();
 					vi.advanceTimersByTime(1);
 				}
+				expect(settled).toBe(true);
 
 				// No key, no request: the fail-open passthrough is unchanged, killed
 				// at the built-in base.
@@ -2014,10 +2015,11 @@ describe("ExtensionRunner", () => {
 					settled = true;
 					return result;
 				});
-				for (let tick = 0; tick < 200 && !settled; tick++) {
+				for (let tick = 0; tick < 10_000 && !settled; tick++) {
 					await Promise.resolve();
 					vi.advanceTimersByTime(1);
 				}
+				expect(settled).toBe(true);
 
 				// Fail-open passthrough is unchanged: the capped handler is dropped.
 				expect(await emitted).toEqual(messages);
@@ -2300,10 +2302,11 @@ describe("ExtensionRunner", () => {
 						settled = true;
 						return result;
 					});
-				for (let tick = 0; tick < 200 && !settled; tick++) {
+				for (let tick = 0; tick < 10_000 && !settled; tick++) {
 					await Promise.resolve();
 					vi.advanceTimersByTime(1);
 				}
+				expect(settled).toBe(true);
 
 				// The 30 ms handler wait sits under the 40 ms configured cap, so the
 				// gate passes. A handler returning nothing aggregates to `undefined`

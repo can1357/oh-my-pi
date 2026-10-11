@@ -1930,15 +1930,9 @@ export class ExtensionRunner {
 		agent?: ExtensionAgentIdentity,
 	): Promise<ToolCallEventResult | undefined> {
 		const ctx = this.createContext(undefined, undefined, agent);
-		// Same clamp as baseHandlerTimeoutForEvent so the dispatched watchdog and
-		// the reported budget cannot disagree at the timer-limit boundary.
-		const timeoutMs = Math.min(
-			normalizeHandlerTimeout(
-				(this.settings ? cfgExtensionHandlersToolCallTimeoutMs.get(this.settings) : undefined) ??
-					extensionHandlerTimeoutMs,
-			),
-			MAX_TIMER_DELAY_MS,
-		);
+		// The same helper the reporting path uses, so the dispatched watchdog and
+		// the advertised budget cannot disagree at the timer-limit boundary.
+		const timeoutMs = baseHandlerTimeoutForEvent("tool_call", this.settings);
 		let result: ToolCallEventResult | undefined;
 		const aggregated = { input: undefined as ToolCallEventResult["input"], additionalContext: [] as string[] };
 

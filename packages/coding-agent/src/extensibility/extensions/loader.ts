@@ -40,6 +40,7 @@ import { getAllPluginExtensionPaths } from "../plugins/loader";
 import { resolvePath, withHostGuard } from "../utils";
 import type { Settings } from "../../config/settings";
 import {
+	MAX_TIMER_DELAY_MS,
 	baseHandlerTimeoutForEvent,
 	configuredHandlerTimeoutCeiling,
 	fallbackHandlerTimeout,
@@ -282,8 +283,11 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	setHandlerTimeout(event: ExtensionEvent["type"], timeoutMs: number | undefined): number {
 		// Validate before touching stored state, so a rejected call leaves the
 		// previous request in place.
-		if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2_147_483_647)) {
-			throw new RangeError("Handler timeout must be a positive integer no greater than 2147483647ms");
+		if (
+			timeoutMs !== undefined &&
+			(!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMER_DELAY_MS)
+		) {
+			throw new RangeError(`Handler timeout must be a positive integer no greater than ${MAX_TIMER_DELAY_MS}ms`);
 		}
 		if (!Object.hasOwn(EXTENSION_EVENT_NAMES, event)) {
 			throw new RangeError(
