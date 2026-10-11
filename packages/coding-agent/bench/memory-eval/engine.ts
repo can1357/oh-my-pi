@@ -18,6 +18,16 @@ export interface RecallHit {
 	summaryOf: string[];
 }
 
+/** A row the engine returned but the harness does not rank (a derived tier such as `memoria_source`). */
+export interface DroppedRow {
+	tier: string;
+	engineId: string;
+	/** The working row a derived row was built from, when the engine says so. */
+	sourceMemoryId: string | null;
+	/** 0-based position in the engine's raw result list. */
+	rank: number;
+}
+
 export interface EngineOpenOptions {
 	storeDir: string;
 	protocol: ProtocolName;
@@ -33,6 +43,8 @@ export interface EngineAdapter {
 	vectorCount(): Promise<number>;
 	sleep(): Promise<void>;
 	recall(question: EvalQuestion, k: number): Promise<RecallHit[]>;
+	/** Rows the last `recall` returned but did not rank; engines that never drop rows omit this. */
+	lastDropped?(): DroppedRow[];
 	close(): Promise<void>;
 	dispose(): Promise<void>;
 	/** Starts the engine and embeds the one string "warmup" (a no-op for fts-only), so the runner can time process start, import and model load. */
