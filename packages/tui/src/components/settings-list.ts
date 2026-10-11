@@ -346,6 +346,8 @@ export class SettingsList implements Component {
 			return { row: id, option: component.selectList.getSelectedItem()?.value };
 		}
 		if (component instanceof TextFormField) {
+			// Native inline text editing has no error slot; show the form until corrected.
+			if (component.hasError) return null;
 			const draft = component.getValue();
 			return {
 				row: id,

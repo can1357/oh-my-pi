@@ -154,7 +154,7 @@ import type {
 	ToolInfo,
 	TreePreparation,
 } from "../extensibility/extensions";
-import { emitSessionShutdownEvent, TOP_LEVEL_AGENT } from "../extensibility/extensions";
+import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } from "../extensibility/extensions";
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
@@ -205,6 +205,7 @@ import {
 	obfuscateProviderContext,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
@@ -405,7 +406,13 @@ import type { BuildSessionContextOptions, SessionContext } from "./session-conte
 import { buildSessionContext, getRestorableSessionModels, isTranscriptEntry } from "./session-context";
 import type { CacheWarmer, CacheWarmingMode, CacheWarmingStatus } from "./cache-warmer";
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { formatSessionDumpText, formatSubagentDumpText, type SessionDumpArchive } from "./session-dump-format";
+import { anonymizeSessionTranscripts } from "./session-anonymizer";
+import {
+	formatSessionDumpText,
+	formatSubagentDumpText,
+	type SessionDumpArchive,
+	type SessionDumpLiveState,
+} from "./session-dump-format";
 import { collectSubSessions, type SubSession } from "./sub-sessions";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
@@ -492,6 +499,8 @@ import {
 import { cfgTaskBatch, cfgTaskDisabledAgents } from "../task/settings";
 import {
 	cfgBranchSummaryReserveTokens,
+	cfgCompactionModelThresholds,
+	cfgCompactionModelThresholdsEnabled,
 	cfgExtendedContext,
 	cfgWorkspaceAdditionalDirectories,
 } from "./context-settings";
@@ -702,6 +711,58 @@ export function powerAssertionOptions(mode: "off" | "idle" | "display" | "system
 	};
 }
 
+/**
+ * Snapshot a live subagent for `/dump all`: registry status/heartbeat, the
+ * partial assistant message still streaming (never persisted until
+ * `message_end`), and tool calls dispatched but not finished.
+ */
+function captureLiveDumpState(ref: AgentRef): SessionDumpLiveState | undefined {
+	const session = ref.session;
+	if (!session) return undefined;
+	const state = session.agent.state;
+	let streamMessage = state.streamMessage;
+	const obfuscator = session.obfuscator;
+	if (streamMessage?.role === "assistant" && obfuscator?.hasSecrets()) {
+		streamMessage = { ...streamMessage, content: deobfuscateAssistantContent(obfuscator, streamMessage.content) };
+	}
+	// Tools run after their assistant message ends, so pending calls live in the newest
+	// persisted assistant turns; scan backwards and stop once every pending id is named.
+	const toolNames = new Map<string, string>();
+	const messages = state.messages;
+	for (let i = messages.length - 1; i >= 0 && toolNames.size < state.pendingToolCalls.size; i--) {
+		const message = messages[i];
+		if (message.role !== "assistant") continue;
+		for (const block of message.content) {
+			if (block.type === "toolCall" && state.pendingToolCalls.has(block.id)) toolNames.set(block.id, block.name);
+		}
+	}
+	return {
+		status: ref.status,
+		capturedAt: Date.now(),
+		lastActivity: ref.lastActivity,
+		activity: ref.activity,
+		busy: session.isStreaming,
+		streamMessage,
+		pendingToolCalls: [...state.pendingToolCalls].map(id => `${toolNames.get(id) ?? "unknown"} (${id})`),
+	};
+}
+
+/**
+ * Why {@link AgentSession.runEphemeralTurn} would reject a `maxTokens` cap on `model`, or
+ * `undefined` when it honors one.
+ */
+function ephemeralMaxTokensRejection(model: Model): string | undefined {
+	const thinking = model.thinking;
+	const budgetThinking = thinking?.mode === "budget" || thinking?.mode === "anthropic-budget-effort";
+	if (budgetThinking && thinking.requiresEffort && !thinking.suppressWhenOff) {
+		return "requires budget thinking and cannot preserve maxTokens for ephemeral turns";
+	}
+	// Do not silently start an unbounded request when discovery or transport
+	// policy says the output limit will be omitted or overwritten.
+	if (!supportsOutputTokenLimit(model)) return "does not support maxTokens for ephemeral turns";
+	return undefined;
+}
+
 export class AgentSession implements SettingsScope {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -870,18 +931,9 @@ export class AgentSession implements SettingsScope {
 
 	readonly #eval: EvalRunner;
 	readonly #evalToolSession: ToolSession | undefined;
-	/**
-	 * AsyncJobManager owned by this session (top-level only). Subagents leave
-	 * this undefined and **MUST NOT** dispose the global instance on teardown.
-	 */
+	/** Manager owned by this top-level session; subagents borrow but never dispose it. */
 	readonly #ownedAsyncJobManager: AsyncJobManager | undefined;
-	/**
-	 * AsyncJobManager scoped to this session for introspection/cancellation.
-	 *
-	 * This differs from `#ownedAsyncJobManager`: subagents can inherit a parent
-	 * manager for their own owner id, while secondary top-level sessions are left
-	 * undefined to avoid reading the primary's jobs.
-	 */
+	/** Manager of this session's root, used for its own job queries and deliveries. */
 	readonly #asyncJobManager: AsyncJobManager | undefined;
 	/** Clears this session's owner delivery sink registration; set when a manager + agent id exist. */
 	#unregisterAsyncDeliverySink: (() => void) | undefined;
@@ -2312,7 +2364,7 @@ export class AgentSession implements SettingsScope {
 				this.#todo.syncFromBranch();
 				this.#modelMentions.syncFromBranch();
 			},
-			resetAdvisorRuntimes: (reason?: string) => this.#advisors.resetAllRuntimes(reason),
+			resetAdvisorRuntimes: (reason, options) => this.#advisors.resetAllRuntimes(reason, options),
 			rebaseAdvisorPrefix: reason => this.#advisors.rebaseDeliveredPrefixes(reason),
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
@@ -2371,10 +2423,13 @@ export class AgentSession implements SettingsScope {
 		cfgProviderAppendOnlyContext.listen(this, () => this.#syncAppendOnlyContext(this.model));
 		cfgModelRoles.listen(this, () => this.#advisors.reconcileModelRoles());
 		// Re-derive the active model's effective context window when the
-		// extended-context setting flips at runtime: the registry re-clamps (or
-		// restores) premium long-context windows, and the live model object must
+		// extended-context setting flips at runtime, or a per-model compaction
+		// point moves past (or back inside) a standard window or is switched on/off: the registry
+		// re-clamps (or restores) extended windows, and the live model object must
 		// follow so compaction thresholds and context display react immediately.
-		cfgExtendedContext.listen(this, () => this.#reapplyExtendedContextPolicy());
+		cfgExtendedContext.listen(this, () => this.#reapplyContextWindowPolicy());
+		cfgCompactionModelThresholds.listen(this, () => this.#reapplyContextWindowPolicy());
+		cfgCompactionModelThresholdsEnabled.listen(this, () => this.#reapplyContextWindowPolicy());
 		cfgBrowserEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("browser.enabled", enabled));
 		cfgComputerEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("computer.enabled", enabled));
 		cfgRatchetEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("ratchet.enabled", enabled));
@@ -5917,7 +5972,10 @@ export class AgentSession implements SettingsScope {
 
 	async #refreshLazyLocalContext(model: Model): Promise<void> {
 		try {
-			const refreshed = await this.#modelRegistry.refreshSelectedModelMetadata(model);
+			const refreshed = this.#modelRegistry.fitContextWindow(
+				await this.#modelRegistry.refreshSelectedModelMetadata(model),
+				this.settings,
+			);
 			const current = this.model;
 			// Skip if the user switched models mid-stream, or the runtime window
 			// matches what the session already holds.
@@ -8044,6 +8102,9 @@ export class AgentSession implements SettingsScope {
 			},
 			getSystemPrompt: () => this.systemPrompt,
 			runEphemeralTurn: args => this.runEphemeralTurn(args),
+			// The SDK always builds a runner (which receives the annotations factory); this runner-less
+			// context only exists for directly constructed sessions, which have no `/annotate` wiring.
+			annotations: UNAVAILABLE_ANNOTATIONS,
 			setInterval: (callback, ms, ...args) => this.#fallbackTimers().setInterval(callback, ms, ...args),
 			setTimeout: (callback, ms, ...args) => this.#fallbackTimers().setTimeout(callback, ms, ...args),
 			clearTimer: timer => this.#fallbackTimers().clear(timer),
@@ -10564,22 +10625,32 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Rebuild the model catalog after an `extendedContext` toggle and rebind the
-	 * active model when its effective context window changed. Same-model rebinds
-	 * skip provider-session resets (`modelsAreEqual` sees no change), so this
-	 * only refreshes metadata consumers (compaction thresholds, context display).
+	 * Rebuild the model catalog after an `extendedContext` toggle or a
+	 * `compaction.modelThresholds` edit and rebind the active model when its
+	 * effective context window changed. Same-model rebinds skip provider-session
+	 * resets (`modelsAreEqual` sees no change), so this only refreshes metadata
+	 * consumers (compaction thresholds, context display).
 	 */
-	async #reapplyExtendedContextPolicy(): Promise<void> {
+	async #reapplyContextWindowPolicy(): Promise<void> {
+		// Refit the bound row right away (the agent's model resolver applies this
+		// session's settings to its known tiers), so a prompt started before the
+		// catalog rebuild settles already runs with the new window.
+		const previousModel = this.model;
+		if (previousModel) this.agent.setModel(previousModel);
 		try {
 			await this.#modelRegistry.reapplyModelPolicies();
 			const currentModel = this.model;
 			if (!currentModel || this.#isDisposed) return;
-			const updated = this.#modelRegistry.find(currentModel.provider, currentModel.id);
-			if (updated && updated.contextWindow !== currentModel.contextWindow) {
+			const found = this.#modelRegistry.find(currentModel.provider, currentModel.id);
+			const updated = found && this.#modelRegistry.fitContextWindow(found, this.settings);
+			// Compare against the window bound before the refit so dependent state
+			// still reconciles once even though the refit already moved the row.
+			const baseline = previousModel && modelsAreEqual(previousModel, currentModel) ? previousModel : currentModel;
+			if (updated && updated.contextWindow !== baseline.contextWindow) {
 				await this.#setModelWithProviderSessionReset(updated);
 			}
 		} catch (error) {
-			logger.warn("extended-context policy reapply failed", { error: String(error) });
+			logger.warn("context-window policy reapply failed", { error: String(error) });
 		}
 	}
 
@@ -10648,11 +10719,16 @@ export class AgentSession implements SettingsScope {
 
 	#resetCurrentResponsesProviderSession(reason: string): void {
 		const currentModel = this.model;
-		if (currentModel?.api !== "openai-responses" && currentModel?.api !== "openai-codex-responses") {
+		if (currentModel?.api === "openai-responses") {
+			// Keep the closed record: it rebuilds history from message content until
+			// the next success, while a fresh one on a host without connection
+			// binding would resend the native items the server just refused.
+			this.#providerSessionState.get(`openai-responses:${currentModel.provider}`)?.close();
+		} else if (currentModel?.api === "openai-codex-responses") {
+			this.#closeProviderSessionsForModelSwitch(currentModel, currentModel);
+		} else {
 			return;
 		}
-
-		this.#closeProviderSessionsForModelSwitch(currentModel, currentModel);
 		this.agent.appendOnlyContext?.invalidateForModelChange();
 		logger.debug("Reset Responses provider session after stale replay error", {
 			provider: currentModel.provider,
@@ -10915,6 +10991,19 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Whether {@link runEphemeralTurn} would honor a `maxTokens` cap on the current model without
+	 * otherwise changing the request. On budget-thinking models a cap forces thinking off; when the
+	 * session thinks, that changes the thinking parameters, which providers key their prompt caches
+	 * on. Callers whose cap is optional send one only when this holds.
+	 */
+	ephemeralMaxTokensPreservesRequest(): boolean {
+		const model = this.model;
+		if (!model || ephemeralMaxTokensRejection(model)) return false;
+		const budgetThinking = model.thinking?.mode === "budget" || model.thinking?.mode === "anthropic-budget-effort";
+		return !budgetThinking || shouldDisableReasoning(this.thinkingLevel);
+	}
+
+	/**
 	 * Run a single ephemeral side-channel turn against this session's current
 	 * model + system prompt + history. The main turn's tool catalog is sent
 	 * to preserve the prompt cache unless `tools: false` is requested. The
@@ -10951,24 +11040,33 @@ export class AgentSession implements SettingsScope {
 				throw new Error(`${field} must be a positive safe integer.`);
 			}
 		}
+		const sessionEffort = toReasoningEffort(this.thinkingLevel);
+		// Providers key prompt caches on reasoning parameters, so a lower effort is free only where
+		// the request keeps them and carries the change as a per-message control. Anthropic records
+		// the effort it kept on responses from models that take such controls; without that record
+		// on this model's last reply the change would rewrite the top-level effort.
+		const lastReply = this.messages.findLast(message => message.role === "assistant");
+		const lowestEffort =
+			args.minimizeEffort &&
+			sessionEffort !== undefined &&
+			lastReply?.role === "assistant" &&
+			lastReply.provider === model.provider &&
+			lastReply.model === model.id &&
+			lastReply.requestControls?.effort !== undefined
+				? model.thinking?.efforts[0]
+				: undefined;
 		const cappedBudgetThinking =
 			args.maxTokens !== undefined &&
 			(model.thinking?.mode === "budget" || model.thinking?.mode === "anthropic-budget-effort");
-		if (cappedBudgetThinking && model.thinking?.requiresEffort && !model.thinking.suppressWhenOff) {
+		const maxTokensRejection = args.maxTokens !== undefined ? ephemeralMaxTokensRejection(model) : undefined;
+		if (maxTokensRejection) {
 			throw new Error(
-				`Model ${modelDescription} requires budget thinking and cannot preserve maxTokens for ephemeral turns. Omit the cap or use a model that supports output limits.`,
+				`Model ${modelDescription} ${maxTokensRejection}. Omit the cap or use a model that supports output limits.`,
 			);
 		}
 		if (args.tools === false && requiresNativeTools(model)) {
 			throw new Error(
 				`Model ${modelDescription} does not support tools: false for ephemeral turns because its transport requires native tools.`,
-			);
-		}
-		// Do not silently start an unbounded request when discovery or transport
-		// policy says the output limit will be omitted or overwritten.
-		if (args.maxTokens !== undefined && !supportsOutputTokenLimit(model)) {
-			throw new Error(
-				`Model ${modelDescription} does not support maxTokens for ephemeral turns. Omit the cap or use a model that supports output limits.`,
 			);
 		}
 		assertEphemeralTurnReady();
@@ -11022,7 +11120,7 @@ export class AgentSession implements SettingsScope {
 				promptCacheKey: this.agent.promptCacheKey ?? this.agent.sessionId,
 				preferWebsockets: this.preferWebsockets,
 				providerSessionState: this.#providerSessionState,
-				reasoning: toReasoningEffort(this.thinkingLevel),
+				reasoning: lowestEffort ?? sessionEffort,
 				// Budget-thinking transports can raise explicit caps to make room for their
 				// default thinking budget. A side turn's cap is a hard resource boundary.
 				disableReasoning: shouldDisableReasoning(this.thinkingLevel) || cappedBudgetThinking,
@@ -13074,9 +13172,11 @@ export class AgentSession implements SettingsScope {
 	 * {@link formatSessionAsText} transcript), `llm-request.json` (the
 	 * {@link dumpLlmRequestToTmpDir} payload), and one `subagents/<path>.md` per
 	 * persisted subagent transcript stored next to the session file, nested
-	 * subagents included. Subagents with no messages are skipped. A subagent
-	 * discovery failure still writes the main dump and is reported in
-	 * `subagentError`.
+	 * subagents included. Subagents still live in this process also carry their
+	 * registry status, last activity, pending tool calls, and the in-flight
+	 * assistant turn that is not persisted yet. Subagents with no messages and
+	 * no in-flight turn are skipped. A subagent discovery failure still writes
+	 * the main dump and is reported in `subagentError`.
 	 *
 	 * The archive persists on disk and may contain raw context/secrets.
 	 *
@@ -13102,16 +13202,26 @@ export class AgentSession implements SettingsScope {
 			subagentError = error instanceof Error ? error.message : String(error);
 			logger.warn("Failed to collect subagent transcripts for dump", { sessionFile, error: subagentError });
 		}
+		const liveByFile = new Map<string, AgentRef>();
+		for (const ref of AgentRegistry.global().list()) {
+			if (ref.session && ref.sessionFile) liveByFile.set(path.resolve(ref.sessionFile), ref);
+		}
+		const subagentRoot = sessionFile?.endsWith(".jsonl") ? sessionFile.slice(0, -6) : undefined;
 		let subagentCount = 0;
 		for (const [key, sub] of Object.entries(subSessions)) {
 			const context = deobfuscateSessionContext(buildSessionContext(sub.entries, sub.leafId), this.#obfuscator);
-			if (context.messages.length === 0) continue;
+			const liveRef = subagentRoot
+				? liveByFile.get(path.resolve(path.join(subagentRoot, ...key.split("/")) + ".jsonl"))
+				: undefined;
+			const live = liveRef ? captureLiveDumpState(liveRef) : undefined;
+			if (context.messages.length === 0 && !live?.streamMessage) continue;
 			const text = formatSubagentDumpText({
 				key,
 				messages: context.messages,
 				model: context.models.default,
 				thinkingLevel: context.thinkingLevel,
 				aborted: sub.aborted,
+				live,
 			});
 			entries.push([`subagents/${key}.md`, `${text}\n`]);
 			subagentCount++;
@@ -13119,6 +13229,35 @@ export class AgentSession implements SettingsScope {
 		const filePath = path.join(os.tmpdir(), `omp-dump-${Snowflake.next()}.zip`);
 		await writeArchive(filePath, "zip", entries);
 		return { path: filePath, files: entries.map(([name]) => name), subagentCount, subagentError };
+	}
+
+	/**
+	 * Write `/dump anon` to an auto-named zip in `os.tmpdir()`: `session.jsonl`
+	 * and one `subagents/<path>.jsonl` per persisted subagent, anonymized with one
+	 * shared token table (see {@link anonymizeSessionTranscripts}).
+	 *
+	 * @returns the archive path and member names, or `undefined` when the main
+	 * session has no messages.
+	 */
+	async dumpAnonymizedArchiveToTmpDir(): Promise<SessionDumpArchive | undefined> {
+		if (this.messages.length === 0) return undefined;
+		const result = await anonymizeSessionTranscripts({
+			header: this.sessionManager.getHeader(),
+			entries: this.sessionManager.getEntries(),
+			sessionFile: this.sessionManager.getSessionFile(),
+			malformedRecords: this.sessionManager.loadedMalformedRecords,
+		});
+		const filePath = path.join(os.tmpdir(), `omp-dump-anon-${Snowflake.next()}.zip`);
+		await writeArchive(filePath, "zip", result.files);
+		return {
+			path: filePath,
+			files: result.files.map(([name]) => name),
+			subagentCount: result.subagentCount,
+			subagentError: result.subagentError,
+			anonymized: true,
+			malformed: result.malformed,
+			unreadable: result.unreadable,
+		};
 	}
 
 	/**
@@ -13245,7 +13384,8 @@ export class AgentSession implements SettingsScope {
 		// switched models while discovery was in flight.
 		const current = this.model;
 		if (!current || !modelsAreEqual(current, boundAtStartup)) return;
-		const refreshed = this.#modelRegistry.find(current.provider, current.id);
+		const found = this.#modelRegistry.find(current.provider, current.id);
+		const refreshed = found && this.#modelRegistry.fitContextWindow(found, this.settings);
 		if (!refreshed || refreshed.contextWindow === current.contextWindow) return;
 		this.agent.setModel(refreshed);
 		await this.#reconcileModelDependentState(current, refreshed);

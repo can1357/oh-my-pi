@@ -19,12 +19,7 @@ export default class Update extends Command {
 		stable: Flags.boolean({ description: "Switch back to the stable channel", default: false }),
 	};
 
-	static examples = [
-		"omp update",
-		"omp update --check",
-		"omp update --canary",
-		"# If GitHub rate-limits release metadata, set GITHUB_TOKEN or GH_TOKEN\n  GITHUB_TOKEN=... omp update",
-	];
+	static examples = ["omp update", "omp update --check", "omp update --canary"];
 
 	async run(): Promise<void> {
 		const { flags } = await this.parse(Update);

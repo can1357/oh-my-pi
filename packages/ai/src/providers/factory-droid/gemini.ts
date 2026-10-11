@@ -15,6 +15,7 @@ import { notifyProviderResponse } from "../../utils/provider-response";
 import { dereferenceJsonSchema, normalizeSchemaForFactoryDroid, toolWireSchema } from "../../utils/schema";
 import {
 	extractGoogleErrorMessage,
+	googleStreamChunkError,
 	mapGoogleUsage,
 	mapStopReasonString,
 	nextToolCallId,
@@ -87,22 +88,22 @@ const FACTORY_DROID_BLOCK_REASONS: Record<string, true> = {
  * "unknown" bucket has no StopReason equivalent, so unknown terminators
  * surface as errors instead of masquerading as a clean stop.
  */
-function mapFactoryDroidFinishReason(reason: string | undefined): {
+function mapFactoryDroidFinishReason(reason: string): {
 	stopReason: "stop" | "length" | "error";
 	errorMessage?: string;
 } {
 	// mapStopReasonString already implements the CLI's outcome table
 	// (STOP→stop, MAX_TOKENS→length, everything else→error); the cast narrows
 	// its wide StopReason return to the three values it ever produces.
-	const stopReason = mapStopReasonString(reason ?? "") as "stop" | "length" | "error";
+	const stopReason = mapStopReasonString(reason) as "stop" | "length" | "error";
 	if (stopReason !== "error") return { stopReason };
-	if (reason && FACTORY_DROID_BLOCK_REASONS[reason]) {
+	if (FACTORY_DROID_BLOCK_REASONS[reason]) {
 		return { stopReason: "error", errorMessage: `Generation was blocked by content filters (${reason})` };
 	}
 	if (reason === "MALFORMED_FUNCTION_CALL") {
 		return { stopReason: "error", errorMessage: `Generation failed with finish reason: ${reason}` };
 	}
-	return { stopReason: "error", errorMessage: `Unknown finish reason: ${reason ?? "none"}` };
+	return { stopReason: "error", errorMessage: `Unknown finish reason: ${reason}` };
 }
 
 /** Transports whose outputs carry Gemini-verifiable signatures (Factory's own outputs are stamped google-generative-ai). */
@@ -414,6 +415,9 @@ export function streamFactoryDroidGemini(
 				},
 			);
 			for await (const chunk of chunks) {
+				// A server-declared error keeps its status and the same classification
+				// as the Google provider; only a stream that just stops is a premature close.
+				if (chunk.error) throw googleStreamChunkError(chunk.error, model.provider);
 				if (firstTokenTime === undefined && chunk.candidates?.[0]?.content?.parts?.some(part => part.text)) {
 					firstTokenTime = performance.now();
 				}
@@ -484,6 +488,20 @@ export function streamFactoryDroidGemini(
 			if (firstTokenTime !== undefined) output.ttft = firstTokenTime - startTime;
 
 			closeBlock();
+			// A stream that reaches EOF without a finishReason (and without a
+			// promptFeedback block) was truncated, even when it already carried
+			// functionCall parts; fail it as retryable instead of finishing the turn.
+			if (finishReason === undefined && !blockReason) {
+				// Worded like the other incomplete-stream errors so turn recovery
+				// continues a stream that already rendered text.
+				throw new AIError.ProviderResponseError(
+					"Factory Droid Gemini stream closed before a finish_reason was received",
+					{
+						provider: model.provider,
+						kind: "incomplete-stream",
+					},
+				);
+			}
 			for (const contentIndex of toolCallIndices) {
 				const toolCall = output.content[contentIndex] as ToolCall;
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
@@ -499,12 +517,12 @@ export function streamFactoryDroidGemini(
 				output.errorMessage = `Generation was blocked by content filters (${blockReason})`;
 				output.stopDetails = { type: "content_filter", category: blockReason };
 				stream.push({ type: "error", reason: "error", error: output });
-			} else {
+			} else if (finishReason !== undefined) {
 				const mapped = mapFactoryDroidFinishReason(finishReason);
 				output.stopReason = mapped.stopReason;
 				if (mapped.errorMessage) {
 					output.errorMessage = mapped.errorMessage;
-					if (mapped.stopReason === "error" && finishReason && FACTORY_DROID_BLOCK_REASONS[finishReason]) {
+					if (mapped.stopReason === "error" && FACTORY_DROID_BLOCK_REASONS[finishReason]) {
 						output.stopDetails = { type: "content_filter", category: finishReason };
 					}
 				}

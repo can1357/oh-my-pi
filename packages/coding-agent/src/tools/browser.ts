@@ -415,6 +415,8 @@ async function openOnKind(
 	const deadlineStart = performance.now();
 	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const openSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+	// The step in flight when the deadline fires; a timeout names it.
+	let stage = `launching or connecting to the browser (${describeKind(kind)})`;
 	try {
 		const browser = await untilAborted(openSignal, () =>
 			acquireBrowser(kind, {
@@ -440,6 +442,7 @@ async function openOnKind(
 		// rolling the fresh browser back on failure.
 		holdBrowser(browser);
 		let result: AcquireTabResult;
+		stage = `opening tab ${JSON.stringify(name)}`;
 		try {
 			const initScripts = await untilAborted(openSignal, () =>
 				resolveInitScriptSources(params.init_scripts, session.cwd),
@@ -453,7 +456,9 @@ async function openOnKind(
 					params.user_agent !== undefined ||
 					params.ignore_https_errors === true)
 			) {
+				stage = `closing tab ${JSON.stringify(name)} to reopen it`;
 				await untilAborted(openSignal, () => releaseTab(name, { kill: false, timeoutMs }));
+				stage = `opening tab ${JSON.stringify(name)}`;
 			}
 			result = await untilAborted(openSignal, () =>
 				acquireTab(name, browser, {
@@ -508,13 +513,15 @@ async function openOnKind(
 			`URL: ${url}`,
 			title ? `Title: ${title}` : null,
 			...notes,
+			result.note,
 		].filter((line): line is string => typeof line === "string");
 		return toolResult(details).text(lines.join("\n")).done();
 	} catch (error) {
 		// Caller cancellation stays a ToolAbortError; the requested timeout
-		// becomes a timeout ToolError; anything else passes through unchanged.
+		// becomes a timeout ToolError naming the stalled step; anything else
+		// passes through unchanged.
 		if (signal?.aborted) throw error instanceof ToolAbortError ? error : new ToolAbortError();
-		if (timeoutSignal.aborted) throw new ToolError(`Browser open timed out after ${timeoutMs}ms`);
+		if (timeoutSignal.aborted) throw new ToolError(`Browser open timed out after ${timeoutMs}ms while ${stage}`);
 		throw error;
 	}
 }

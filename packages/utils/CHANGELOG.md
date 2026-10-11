@@ -2,9 +2,39 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Renamed `takeRecentLoopPhase()` to `takeLoopPhaseAttribution()`, which returns `LoopPhaseAttribution` (`{ label, ms }`) instead of a string, returns `undefined` unless a window was armed with `resetLoopPhaseWindow()`, and names a label only when it outweighs unlabeled time ([#15019](https://github.com/can1357/oh-my-pi/pull/15019) by [@jaredlyon](https://github.com/jaredlyon)).
+
+### Changed
+
+- Sped up streaming JSON string scanning for long tool-argument payloads by bulk-skipping ordinary characters ([#14297](https://github.com/can1357/oh-my-pi/pull/14297) by [@abilliontokens](https://github.com/abilliontokens)).
+
+### Fixed
+
+- Fixed archive extraction failing on Windows without the symlink privilege: symlink entries now degrade to a directory junction or an in-archive file copy instead of failing the whole archive with `EPERM`, dangling links that cannot be copied are skipped instead of aborting, and directory symlink entries are extracted instead of being skipped ([#14820](https://github.com/can1357/oh-my-pi/pull/14820) by [@jchanghong023](https://github.com/jchanghong023)).
+
+## [18.8.9] - 2026-10-10
+
+### Added
+
+- Added `hueDistance`, the angular distance between two OKLCH hues
+
+## [18.8.8] - 2026-10-10
+
+### Fixed
+
+- Fixed `formatDuration` printing `60.0s` for durations just under a minute; they now read `1m` ([#15121](https://github.com/can1357/oh-my-pi/pull/15121) by [@H4vC](https://github.com/H4vC))
+
+## [18.8.7] - 2026-10-09
+
 ### Added
 
 - Added `getNativeGrammarsDir()`, where the native addon loads downloaded tree-sitter grammars from (`~/.omp/natives/grammars`).
+
+### Fixed
+
+- Fixed the virtual terminal misreading private CSI sequences such as kitty keyboard `CSI < u` and modifyOtherKeys `CSI > 4;1 m` as cursor restores or text styling, which garbled replayed PTY output.
 
 ## [18.8.1] - 2026-10-07
 

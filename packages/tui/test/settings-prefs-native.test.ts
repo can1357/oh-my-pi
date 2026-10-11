@@ -61,6 +61,13 @@ const ENTRIES: SettingsDisplayEntry[] = [
 			],
 		},
 	},
+	{
+		path: "providers.tokens",
+		type: "array",
+		defaultValue: [],
+		credential: true,
+		ui: { tab: "providers", label: "Tokens", description: "", editor: "json" },
+	},
 ];
 
 interface Harness {
@@ -256,6 +263,25 @@ describe("settings as a native prefs page", () => {
 		send(selector, { type: "change", key: "", item: "shell.path", value: "/bin/fish" });
 		expect(values.get("shell.path")).toBe("/bin/fish");
 		expect(prefs(selector).props.editing).toBeNull();
+	});
+
+	it("masks credential arrays in rows and drafts without saving mask glyphs", () => {
+		const { selector, values } = harness({ "providers.tokens": ["private-token"] });
+		send(selector, { type: "action", key: "", act: "page", value: "providers", mods: [] });
+		const control = row(prefs(selector).props, "providers.tokens").control;
+		expect(JSON.stringify(control)).not.toContain("private-token");
+		expect(Bun.stripANSI(selector.render(120).join("\n"))).not.toContain("private-token");
+
+		send(selector, { type: "activate", key: "", item: "providers.tokens" });
+		expect(prefs(selector).props.editing?.draft).toMatch(/^•+$/);
+		expect(Bun.stripANSI(selector.render(120).join("\n"))).not.toContain("private-token");
+		selector.handleInput("\x01");
+		selector.handleInput("\x0b");
+		for (const character of '["replacement-token"]') selector.handleInput(character);
+		expect(prefs(selector).props.editing?.draft).toMatch(/^•+$/);
+		expect(Bun.stripANSI(selector.render(120).join("\n"))).not.toContain("replacement-token");
+		selector.handleInput(ENTER);
+		expect(values.get("providers.tokens")).toEqual(["replacement-token"]);
 	});
 
 	it("applies a reordered multiselect as the submenu would", () => {

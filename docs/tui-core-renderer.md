@@ -151,6 +151,15 @@ partial replies until their terminator and must not leak probe bytes as user
 input. New probes need a typed sentinel owner and byte-by-byte split-reply
 coverage.
 
+SIXEL discovery accepts either a positive XTSMGRAPHICS geometry reply or DA1
+attribute 4. `ProcessTerminal.onSixelSupport` publishes and caches the DA1
+advertisement while consuming the reply bytes and preserving sentinel ownership.
+A missing DA1 attribute does not reject support reported by XTSMGRAPHICS.
+Selecting SIXEL from DA1 does not end a pending XTSMGRAPHICS query: its input
+consumer remains until the graphics reply arrives or the probe times out.
+Explicit `PI_FORCE_IMAGE_PROTOCOL` choices, including `none`/`off`, take priority;
+native TSP surfaces keep their own image transport.
+
 ### Native rendering (Tern Surface Protocol)
 
 `ProcessTerminal` also sends the TSP `hello` query (APC `tsp`) behind a `tsp`
@@ -167,7 +176,21 @@ sent as `icon` spans. Each surface receives omp's resolved theme (`t`: every
 theme token as hex, dark and light variants) after `o` and before its first
 frame, and again when the resolved palette changes. The first row paint waits
 up to 300 ms for the probe. Direct Tern sessions optimistically open a surface
-immediately and fall back to rows if the terminal does not confirm it. The
+immediately and fall back to rows if the terminal does not confirm it. Such a
+session needs raw input from the start, so a `deferInput` start holds the
+keystrokes meant for the component focused at start instead of leaving the tty
+cooked; a dialog that takes focus meanwhile (a startup hook's select or confirm)
+gets its input live, and the hold survives the TUI stop/start of an external
+editor opened from such a dialog. A swapped-in custom editor inherits the hold
+through `Composer.setEditor()` (`TUI.replaceHeldFocus()`), so its keys queue
+behind the held ones, and it keeps the startup submit gate. The cell-size reply
+is still consumed on arrival, and the sixel probe is skipped on a TSP terminal,
+so no probe listener sees held keys. `InteractiveMode.init()` calls
+`TUI.releaseHeldInput()` after startup hooks, mode reconcile, draft restore and
+every session subscription, just before lifting the submit gate: held keys edit
+the restored draft instead of racing it, a startup shortcut acts on the final,
+observed session, and a held Enter is still ignored. Ctrl+C/Ctrl+D release the
+queue early. The
 debug socket's `doc` op returns the reference document
 (every sent frame applied by `native/apply.ts`), and `tsp` returns recent frames.
 

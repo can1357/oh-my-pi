@@ -1,5 +1,5 @@
 import { TERMINAL } from "../terminal-capabilities";
-import { hexToOklch, oklchCusp, oklchToHex, relativeLuminance } from "@oh-my-pi/pi-utils";
+import { hexToOklch, hueDistance, oklchCusp, oklchToHex, relativeLuminance } from "@oh-my-pi/pi-utils";
 
 /**
  * Derive a stable 32-bit hash from a string using djb2.
@@ -48,12 +48,6 @@ function accentLuminanceCap(surfaceLuminance: number): number {
 const MIN_HUE_DISTANCE = 10;
 /** OKLCH chroma threshold below which hue is meaningless (near-gray). */
 const MIN_CHROMA_FOR_HUE = 0.03;
-
-/** Angular distance between two hue values (0-360). */
-function hueDistance(a: number, b: number): number {
-	const d = Math.abs(a - b);
-	return Math.min(d, 360 - d);
-}
 
 /**
  * Parse OKLCH hue (0-360) from a hex color string.

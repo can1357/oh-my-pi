@@ -503,6 +503,7 @@ function detectOpenAICompat(
 		supportsDeveloperRole: isOpenAIHost || isAzureHost,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
 		supportsReasoningEffort: !isGrok && !d.isXiaomiMimo && (!(d.isZai || d.isZhipu) || supportsZaiReasoningEffort),
+		trustExplicitThinkingOnly: undefined,
 		// API-conditional: this completions-only Copilot exclusion cannot be a
 		// provider rule without changing Copilot Responses rows.
 		supportsReasoningParams: provider !== "github-copilot",
@@ -732,6 +733,7 @@ function resolveOpenAIResponsesPolicy(
 			hostMatchesUrl(baseUrl, "openrouter") ||
 			hostMatchesUrl(baseUrl, "deepseekFamily"),
 		supportsReasoningEffort: !isXaiHost,
+		trustExplicitThinkingOnly: undefined,
 		supportsLongPromptCacheRetention: isOpenAIUrl,
 		supportsPromptCacheBreakpoints,
 		promptCacheBreakpointTtl: supportsPromptCacheBreakpoints ? "30m" : undefined,
@@ -793,6 +795,7 @@ function resolveOpenAIResponsesPolicy(
 			(LOCAL_OPENAI_COMPAT_PROVIDERS[backendProvider] === true || hasLocalLoopbackBaseUrl(baseUrl)),
 		supportsObfuscationOptOut: isOpenAIUrl || provider === "openai",
 		storeResponses: false,
+		connectionBoundNativeHistory: false,
 		officialEndpoint: isOfficialOpenAIEndpoint(provider, baseUrl),
 		harmonyLeakMitigation: false,
 		rejectRootObjectUnion: false,
@@ -855,6 +858,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
 		storeResponses: compat.storeResponses,
+		connectionBoundNativeHistory: compat.connectionBoundNativeHistory,
 		supportsAllTurnsReasoningContext: compat.supportsAllTurnsReasoningContext,
 		supportsConfigurationUpdate: compat.supportsConfigurationUpdate,
 		supportsSteering: compat.supportsSteering,

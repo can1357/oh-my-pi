@@ -399,6 +399,12 @@ export function oklchCusp(h: number): { l: number; c: number } {
 	return { l: lCusp, c: lCusp * sCusp };
 }
 
+/** Angular distance between two hues in degrees (0–180), wrapping at 360. */
+export function hueDistance(a: number, b: number): number {
+	const d = Math.abs(a - b) % 360;
+	return Math.min(d, 360 - d);
+}
+
 /** Slack allowed on linear channels before a color counts as out of sRGB gamut. */
 const GAMUT_EPSILON = 1e-4;
 

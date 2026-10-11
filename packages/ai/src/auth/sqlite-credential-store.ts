@@ -235,7 +235,11 @@ function resolveRowCredentialIdentityKey(provider: string, row: AuthRow): string
 	return credential?.type === "oauth" ? resolveCredentialIdentityKey(provider, credential) : null;
 }
 
-function matchesReplacementCredential(
+/**
+ * Whether upserting `incoming` replaces the active row holding `existing` (stored
+ * under `existingIdentityKey`) instead of inserting a new row beside it.
+ */
+export function matchesReplacementCredential(
 	provider: string,
 	existing: AuthCredential | null,
 	existingIdentityKey: string | null,
@@ -304,6 +308,23 @@ function matchesReplacementCredential(
 		if (existingIdentifiers?.includes(identifier)) return true;
 	}
 	return false;
+}
+
+/**
+ * Whether two OAuth credentials belong to the same account of the same organization,
+ * whichever identity key each is stored under. The email decides when both carry one;
+ * otherwise a matching account id does, unless it is the organization's own id (a
+ * ChatGPT workspace id shared by every member). Project ids are shared between users
+ * (every consumer Antigravity login has the same one) and never count.
+ */
+export function isSameOAuthAccount(a: OAuthCredential, b: OAuthCredential): boolean {
+	const orgId = normalizeStoredAccountId(a.orgId);
+	if (orgId !== normalizeStoredAccountId(b.orgId)) return false;
+	const emailA = normalizeStoredEmail(a.email);
+	const emailB = normalizeStoredEmail(b.email);
+	if (emailA !== null && emailB !== null) return emailA === emailB;
+	const accountId = normalizeStoredAccountId(a.accountId);
+	return accountId !== null && accountId !== orgId && accountId === normalizeStoredAccountId(b.accountId);
 }
 
 function extractOAuthCredentialIdentifiers(credential: OAuthCredential): string[] {

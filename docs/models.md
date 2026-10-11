@@ -110,6 +110,9 @@ Custom `models` entries can set their own `baseUrl`; otherwise they inherit the 
 For built-in models, a provider `baseUrl` override is scoped to the effective APIs of custom models
 that inherit it, or to the provider's `api` for an override-only configuration. Without either
 scope it applies provider-wide. `transport: pi-native` always applies the gateway URL provider-wide.
+An unscoped OpenRouter `baseUrl` names the `/api/v1` chat root, so OpenRouter Decisions (judge)
+models use its `/api/alpha` sibling on the same host, e.g. a `.../api/v1` relay serves judges at
+`.../api/alpha/decisions`.
 
 `preferWebsockets` (on a model or `modelOverrides` entry) controls whether Codex requests prefer
 the WebSocket transport. `omitMaxOutputTokens` omits the model-derived output cap.
@@ -616,7 +619,7 @@ When a bare id matches models from multiple providers, preference order is:
 1. explicit CLI provider+model
 2. first scoped model (if not resuming)
 3. saved default provider/model
-4. known provider defaults (e.g. OpenAI/Anthropic/etc.) among available models
+4. known provider defaults (e.g. OpenAI/Anthropic/etc.) among available models; a provider whose discovery marks the account's default model (`isProviderDefault`, e.g. Devin) uses it in place of its bundled `default-model`
 5. first available model
 
 The automatic fallback first restricts the pool to providers with concrete credentials (including

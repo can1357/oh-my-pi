@@ -1,6 +1,7 @@
 # macOS signing & notarization
 
-The compiled macOS `omp` binaries shipped on GitHub Releases can be signed with a
+The compiled macOS `omp` binaries (served by build.stencil.so and attached to
+GitHub Releases) can be signed with a
 **Developer ID Application** certificate and **notarized** by Apple. This makes
 them eligible for Gatekeeper acceptance when the notarization ticket is
 available. The repository also maintains a Homebrew tap; formula installs
@@ -33,12 +34,13 @@ script signs with the Developer ID and notarizes; with none, it signs ad hoc
 3. `release_smoke` runs each binary on its own hardware (`macos-15-intel`,
    `macos-15`) before anything publishes: `codesign --verify --strict`,
    then `--version` and `--smoke-test` under the final signature, which is the
-   hardened-runtime launch check.
-4. `release_github_verify` re-downloads the published arm64 asset, runs
-   `codesign --verify --strict` and both launch checks, and—when signing secrets
-   are configured—also asserts that the signature is not ad-hoc.
-5. For non-canary releases, `release_brew` regenerates and pushes the tap formula
-   after published-binary verification. It skips when
+   hardened-runtime launch check. When signing secrets are configured it also
+   asserts that the signature is not ad-hoc. `release_github` and
+   `release_build` (build.stencil.so) publish these same artifacts, so nothing
+   re-verifies the published assets.
+4. For non-canary releases, `release_brew` regenerates and pushes the tap formula,
+   pointing at the build.stencil.so downloads, once `release_build` has
+   published them. It skips when
    `HOMEBREW_TAP_DEPLOY_KEY` is absent; that secret is separate from signing.
 
 ### Why the entitlements are mandatory
@@ -64,7 +66,7 @@ A bare Mach-O executable **cannot be stapled** (`stapler` only supports
 `.app`/`.pkg`/`.dmg`). The binary is genuinely notarized — the notary service
 returns `Accepted` and the ticket exists on Apple's servers keyed to its cdhash — but
 the ticket must be fetched online rather than read from the executable.
-`release_github_verify` reports `spctl -a -t exec -vv` for visibility but does
+`release_smoke` reports `spctl -a -t exec -vv` for visibility but does
 not gate the release on it: an unstapled bare binary can produce a non-zero
 assessment when the online ticket is unavailable, which is not by itself a
 signing or credential failure.

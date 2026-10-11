@@ -16,7 +16,7 @@ import {
 	type ToolCall,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -4434,7 +4434,7 @@ describe("AgentSession retry fallback", () => {
 		await session.waitForIdle();
 
 		expect(closeSpy).toHaveBeenCalledTimes(1);
-		expect(session.providerSessionState.has("openai-responses:openai")).toBe(false);
+		expect(session.providerSessionState.has("openai-responses:openai")).toBe(true);
 		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
 		expect(fallbackAppliedEvents).toHaveLength(0);
 		expect(retryStartEvents).toHaveLength(1);
@@ -4515,7 +4515,7 @@ describe("AgentSession retry fallback", () => {
 		await session.waitForIdle();
 
 		expect(closeSpy).toHaveBeenCalledTimes(1);
-		expect(session.providerSessionState.has("openai-responses:openai")).toBe(false);
+		expect(session.providerSessionState.has("openai-responses:openai")).toBe(true);
 		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
 		expect(fallbackAppliedEvents).toHaveLength(0);
 		expect(retryStartEvents).toHaveLength(1);
@@ -6419,6 +6419,182 @@ describe("AgentSession retry fallback", () => {
 		expect(retryEndEvents).toEqual([expect.objectContaining({ success: true, attempt: 1 })]);
 		expect(session.isRetrying).toBe(false);
 		expect(getLastAssistantMessage(session).stopReason).toBe("stop");
+	});
+
+	describe("when a retry saga's session write throws", () => {
+		// Once SessionManager has recorded a disk failure (a full disk, an
+		// unwritable transcript), rewriteEntries rejects on every call, and a
+		// retry saga rewrites the attempts it annotates on its way out: the
+		// give-up after an exhausted budget and the close of a successful retry.
+		// The "rewrite" rows reproduce that failure. appendMessage records its
+		// own write failures instead of throwing, so the "error-turn" rows inject
+		// a throw there to cover every other exit of the saga. The saga must
+		// close anyway and publish the auto_retry_end its branch publishes when
+		// the write succeeds. Left open, the in-flight prompt() hangs behind the
+		// pending promise as in #5382, `isStreaming` stays true, and every later
+		// message, such as an extension's wake-up, is queued as a steer that
+		// never drains. A successful retry's prompt() is released elsewhere, but
+		// its subscribers never see the auto_retry_end that ends the saga.
+		const transientError = "overloaded_error: provider returned error 503";
+		const delivery = "DELIVERY-1 from an extension";
+
+		type FailingWrite =
+			// The transcript rewrite that annotates the attempts the saga retried.
+			| "rewrite"
+			// The append of an empty error turn.
+			| "error-turn"
+			// The same append, failing only once the saga announced its first
+			// retry, so the attempt before it still records.
+			| "error-turn-after-first-retry";
+
+		async function expectSagaClosesDespiteFailedWrite(scenario: {
+			responses: MockResponse[];
+			settings: Record<string, unknown>;
+			failingWrite: FailingWrite;
+			end: { success: boolean; attempt: number; finalError?: unknown };
+		}): Promise<void> {
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				// The coding-agent converter turns the extension message into model
+				// input, as it does in a real session.
+				convertToLlm,
+				streamFn: (requestedModel, context, options) => {
+					mock.push(scenario.responses[mock.calls.length] ?? { content: ["Woke for the delivery."] });
+					return mock.stream(requestedModel, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				...scenario.settings,
+			});
+			settings.setModelRole("default", `${model.provider}/${model.id}`);
+			const sessionManager = SessionManager.inMemory();
+			session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+			const { retryEndEvents } = trackRetryEvents(session);
+
+			let failedWrites = 0;
+			if (scenario.failingWrite === "rewrite") {
+				vi.spyOn(sessionManager, "rewriteEntries").mockImplementation(async () => {
+					failedWrites++;
+					throw new Error("EACCES: permission denied, open 'session.jsonl.tmp'");
+				});
+			} else {
+				let armed = scenario.failingWrite === "error-turn";
+				session.subscribe(event => {
+					if (event.type === "auto_retry_start") armed = true;
+				});
+				const appendMessage = sessionManager.appendMessage.bind(sessionManager);
+				vi.spyOn(sessionManager, "appendMessage").mockImplementation(message => {
+					if (armed && message.role === "assistant" && message.stopReason === "error") {
+						failedWrites++;
+						throw new RangeError("Out of memory");
+					}
+					return appendMessage(message);
+				});
+			}
+
+			await session.prompt("Fail, then settle the retry saga");
+
+			expect(failedWrites).toBeGreaterThan(0);
+			expect(session.isRetrying).toBe(false);
+			expect(session.isStreaming).toBe(false);
+			expect(retryEndEvents).toEqual([expect.objectContaining(scenario.end)]);
+
+			const callsBeforeDelivery = mock.calls.length;
+			await session.sendCustomMessage(
+				{ customType: "test-delivery", content: delivery, display: true, attribution: "agent" },
+				{ deliverAs: "steer", triggerTurn: true },
+			);
+			await session.waitForIdle();
+			expect(mock.calls).toHaveLength(callsBeforeDelivery + 1);
+			expect(JSON.stringify(mock.calls.at(-1)?.context.messages)).toContain(delivery);
+			expect(getLastAssistantMessage(session).content).toEqual([{ type: "text", text: "Woke for the delivery." }]);
+		}
+
+		it("closes a saga that exhausted its retry budget", async () => {
+			await expectSagaClosesDespiteFailedWrite({
+				responses: [{ throw: transientError }, { throw: transientError }],
+				settings: { "retry.maxRetries": 1, "retry.modelFallback": false },
+				failingWrite: "rewrite",
+				end: { success: false, attempt: 1, finalError: transientError },
+			});
+		});
+
+		it("closes a saga whose retry succeeded", async () => {
+			await expectSagaClosesDespiteFailedWrite({
+				responses: [{ throw: transientError }, { content: ["Recovered after one retry."] }],
+				settings: { "retry.maxRetries": 1, "retry.modelFallback": false },
+				failingWrite: "rewrite",
+				end: { success: true, attempt: 1 },
+			});
+		});
+
+		it("closes a saga that ended on a classifier refusal", async () => {
+			await expectSagaClosesDespiteFailedWrite({
+				responses: [
+					{ throw: transientError },
+					{
+						stopReason: "error",
+						stopDetails: { type: "refusal", category: "cyber", explanation: "Classifier declined." },
+						errorMessage: "Refusal (cyber): Classifier declined this retried turn.",
+					},
+				],
+				settings: { "retry.maxRetries": 2 },
+				failingWrite: "error-turn-after-first-retry",
+				end: { success: false, attempt: 1, finalError: "Refusal (cyber): Classifier declined this retried turn." },
+			});
+		});
+
+		it("closes a saga whose hard error found no fallback to switch to", async () => {
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!fallbackModel) throw new Error("Expected bundled OpenAI test model to exist");
+			const getApiKey = modelRegistry.getApiKey.bind(modelRegistry);
+			vi.spyOn(modelRegistry, "getApiKey").mockImplementation((requestedModel, sessionId) =>
+				requestedModel.provider === fallbackModel.provider
+					? Promise.resolve(undefined)
+					: getApiKey(requestedModel, sessionId),
+			);
+			await expectSagaClosesDespiteFailedWrite({
+				responses: [{ throw: transientError }, { throw: "unrecoverable model quirk" }],
+				settings: {
+					"retry.maxRetries": 3,
+					"retry.fallbackChains": { "anthropic/*": [`${fallbackModel.provider}/${fallbackModel.id}`] },
+				},
+				failingWrite: "error-turn-after-first-retry",
+				end: { success: false, attempt: 1, finalError: "unrecoverable model quirk" },
+			});
+		});
+
+		it("closes a saga whose provider asked to wait past retry.maxDelayMs", async () => {
+			await expectSagaClosesDespiteFailedWrite({
+				responses: [
+					{
+						throw: '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}} retry-after=11180.0005',
+					},
+				],
+				settings: { "retry.maxDelayMs": 100 },
+				failingWrite: "error-turn",
+				end: {
+					success: false,
+					attempt: 1,
+					finalError: expect.stringMatching(/^Provider requested \d+ms wait, exceeds retry\.maxDelayMs \(100ms\)/),
+				},
+			});
+		});
+
+		it("closes a saga that could not record the attempt it was about to retry", async () => {
+			await expectSagaClosesDespiteFailedWrite({
+				responses: [{ throw: transientError }],
+				settings: { "retry.maxRetries": 1, "retry.modelFallback": false },
+				failingWrite: "error-turn",
+				end: { success: false, attempt: 1, finalError: transientError },
+			});
+		});
 	});
 
 	// `session.servingModel` is what the Agent Hub row reads for a live or

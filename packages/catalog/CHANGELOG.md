@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Added
+
+- Enabled `supports-prompt-cache-key` for the `mistral` provider so openai-completions requests to `api.mistral.ai` carry the session's `prompt_cache_key`, increasing cache hits and reducing billed uncached input tokens on Mistral models ([#15079](https://github.com/can1357/oh-my-pi/pull/15079) by [@richardotomislav](https://github.com/richardotomislav))
+
+### Fixed
+
+- Fixed `openrouterDecisionsBaseUrl` deriving a malformed OpenRouter Decisions root when the chat `baseUrl` has a trailing slash (such as `.../api/v1/`); it now strips trailing slashes before mapping `/v1` to `/alpha`, and is exported so provider-wide `baseUrl` overrides can reuse it ([#14848](https://github.com/can1357/oh-my-pi/pull/14848) by [@jerryfane](https://github.com/jerryfane))
+- Fixed GPT-6.1 Sol Ultrafast usage being priced at the Standard rate; it now applies OpenAI's published premium: 6x on the OpenAI API and 8x included usage on Codex ([#15000](https://github.com/can1357/oh-my-pi/pull/15000) by [@eggpeat](https://github.com/eggpeat)).
+
+## [18.8.8] - 2026-10-10
+
+### Added
+
+- Added the `connection-bound-native-history` rule axis for Responses hosts that reject native history items from an earlier connection, set for GitHub Copilot ([#15148](https://github.com/can1357/oh-my-pi/pull/15148) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed Devin's discovered models not marking the account's default model, the one Devin's own CLI starts the account on (SWE-2 High on Pro, SWE-1.6 Slow on Free); when it is an effort lane of a family, the family starts at that effort. Cursor's discovered models no longer carry that marker, so Cursor keeps its existing startup selection ([#15115](https://github.com/can1357/oh-my-pi/pull/15115) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.8.7] - 2026-10-09
+
+### Added
+
+- Added built-in CoralBricks support with `/login`, live model discovery, per-model reasoning levels and off controls, and bundled offline fallbacks. ([#14146](https://github.com/can1357/oh-my-pi/pull/14146) by [@ryan-brosas](https://github.com/ryan-brosas))
+- Added `gen:models --provider <id>` to update one provider without changing other providers' catalog snapshots. ([#14146](https://github.com/can1357/oh-my-pi/pull/14146) by [@ryan-brosas](https://github.com/ryan-brosas))
+
 ### Fixed
 
 - Fixed Claude Haiku 5.5 thinking Off to request explicitly disabled thinking on every host serving its adaptive thinking ([#14996](https://github.com/can1357/oh-my-pi/pull/14996) by [@bse-ai](https://github.com/bse-ai)).

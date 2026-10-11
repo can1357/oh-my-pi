@@ -9,10 +9,10 @@ import type {
 	ToolRenderer,
 } from "./renderer";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { ansi, code as codeNode, compact, keyed, md, node, span, text } from "../native/describe";
+import { compact, keyed, md, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { plainText } from "../native/spans";
-import { footnoteText, resultText } from "./native-view";
+import { resultText, runBox, runFoot, type RunFootInput, runInput, runOutput, type RunState } from "./native-view";
 import { renderAgentTreeRow } from "./agent-tree";
 import { truncateToVisualLines } from "../chrome/visual-truncate";
 import { getMarkdownTheme, type Theme } from "../theme/theme";
@@ -71,6 +71,8 @@ export interface EvalCellResult {
 	durationMs?: number;
 	exitCode?: number;
 	statusEvents?: EvalStatusEvent[];
+	/** Discrete events dropped from the front of `statusEvents` (see {@link recordStatusEvent}). */
+	statusEventsElided?: number;
 	hasMarkdown?: boolean;
 }
 
@@ -80,6 +82,8 @@ export interface EvalToolDetails {
 	jsonOutputs?: unknown[];
 	images?: ImageContent[];
 	statusEvents?: EvalStatusEvent[];
+	/** Discrete events dropped from the front of `statusEvents` (see {@link recordStatusEvent}). */
+	statusEventsElided?: number;
 	isError?: boolean;
 	meta?: OutputMeta;
 	/** First backend that produced cells. Kept for transcript compatibility. */
@@ -196,10 +200,19 @@ export function statusEventKey(event: { op: string; [key: string]: unknown }): s
 }
 
 /**
+ * Discrete status events a log keeps. A cell polling a helper in a loop emits
+ * one event per call (hundreds of thousands), and every live update and the
+ * persisted tool result would otherwise carry them all.
+ */
+export const MAX_STATUS_EVENTS = 200;
+
+/** A status event list plus the count of discrete events dropped from its front. */
+export type StatusEventLog = Pick<EvalCellResult, "statusEvents" | "statusEventsElided">;
+
+/**
  * Append or replace a status event. Progress snapshots (see
  * {@link statusEventKey}) coalesce in place, preserving first-seen order; every
- * other op is a discrete action and simply appends. Keeps the persisted event
- * list bounded even when a subagent or batch emits hundreds of progress ticks.
+ * other op is a discrete action and simply appends.
  */
 export function upsertStatusEvent(events: EvalStatusEvent[], event: EvalStatusEvent): void {
 	const key = statusEventKey(event);
@@ -211,6 +224,24 @@ export function upsertStatusEvent(events: EvalStatusEvent[], event: EvalStatusEv
 		}
 	}
 	events.push(event);
+}
+
+/**
+ * {@link upsertStatusEvent} into a bounded log. Past {@link MAX_STATUS_EVENTS},
+ * the oldest discrete event is dropped and counted. Snapshots stay, since agent
+ * cards read them, and so does the newest committed `todo` result, which the
+ * session todo panel refreshes from. Renderers already show only the newest
+ * events behind an "… N earlier" row.
+ */
+export function recordStatusEvent(log: StatusEventLog, event: EvalStatusEvent): void {
+	const events = (log.statusEvents ??= []);
+	upsertStatusEvent(events, event);
+	if (events.length <= MAX_STATUS_EVENTS) return;
+	const keep = events.findLastIndex(e => e.op === "todo" && e.committed === true);
+	const oldest = events.findIndex((e, i) => i !== keep && statusEventKey(e) === undefined);
+	if (oldest < 0) return;
+	events.splice(oldest, 1);
+	log.statusEventsElided = (log.statusEventsElided ?? 0) + 1;
 }
 
 function eventString(value: unknown): string | undefined {
@@ -511,17 +542,20 @@ function formatStatusEventExpanded(event: EvalStatusEvent, theme: Theme): string
  * the live edge for `log()` progress loops) behind an "… N earlier" marker,
  * matching the code/output tail-window convention. Collapsed keeps a small
  * fixed window; expanded widens to the viewport-sized preview window.
+ * `elided` counts events already dropped from the log's front.
  */
-function renderStatusEvents(events: EvalStatusEvent[], theme: Theme, expanded: boolean): string[] {
-	if (events.length === 0) return [];
+function renderStatusEvents(events: EvalStatusEvent[], theme: Theme, expanded: boolean, elided = 0): string[] {
+	if (events.length === 0 && elided === 0) return [];
 
 	const max = expanded ? Math.max(10, previewWindowRows()) : 3;
-	const hidden = Math.max(0, events.length - max);
-	const visible = hidden > 0 ? events.slice(hidden) : events;
+	const shownFrom = Math.max(0, events.length - max);
+	const hidden = shownFrom + elided;
+	const visible = shownFrom > 0 ? events.slice(shownFrom) : events;
 
 	const lines: string[] = [];
 	if (hidden > 0) {
-		lines.push(`${theme.fg("dim", theme.tree.branch)} ${theme.fg("dim", `… ${hidden} earlier`)}`);
+		const glyph = visible.length > 0 ? theme.tree.branch : theme.tree.last;
+		lines.push(`${theme.fg("dim", glyph)} ${theme.fg("dim", `… ${hidden} earlier`)}`);
 	}
 	for (let i = 0; i < visible.length; i++) {
 		const isLast = i === visible.length - 1;
@@ -694,89 +728,108 @@ function splitConsoleTables(output: string): EvalOutputPart[] {
 	return parts;
 }
 
-/** One cell's output: markdown, else terminal text with any `console.table` blocks as tables. */
-function evalOutputNodes(output: string, markdown: boolean, running: boolean, error: boolean): NativeNode[] {
+/**
+ * One cell's outputs: markdown, else terminal text (following its tail,
+ * clamped to the last `previewLines` while folded) with any `console.table`
+ * blocks as tables.
+ */
+function evalOutputNodes(output: string, markdown: boolean, previewLines: number): NativeNode[] {
 	if (output.trim().length === 0) return [];
-	if (markdown && !error) return [md(output)];
-	const tone = error ? "error" : undefined;
-	return splitConsoleTables(output).map(part =>
+	if (markdown) return [keyed(md(output), "output")];
+	return splitConsoleTables(output).map((part, i) =>
 		part.kind === "text"
-			? ansi(part.text, { follow: running, tone, role: "omp.tool.eval.output" })
-			: node("table", {
-					// Node's index column header is noise in a real table.
-					cols: part.head.map((head, i) => ({ id: `c${i}`, head: head === "(index)" ? "" : head })),
-					rows: part.rows.map((cells, r) => ({
-						id: `r${r}`,
-						cells: Object.fromEntries(cells.map((cell, i) => [`c${i}`, cell])),
-					})),
-					role: "omp.tool.eval.table",
-				}),
+			? runOutput(part.text, { role: "omp.tool.eval.output", previewLines, key: i === 0 ? "output" : `output-${i}` })
+			: node(
+					"table",
+					{
+						// Node's index column header is noise in a real table.
+						cols: part.head.map((head, c) => ({ id: `c${c}`, head: head === "(index)" ? "" : head })),
+						rows: part.rows.map((cells, r) => ({
+							id: `r${r}`,
+							cells: Object.fromEntries(cells.map((cell, c) => [`c${c}`, cell])),
+						})),
+						role: "omp.tool.eval.table",
+					},
+					undefined,
+					`table-${i}`,
+				),
 	);
 }
 
-/** Inputs of one eval cell section. */
-interface EvalCellSection {
+/** Status lines a folded cell keeps: the newest ones. */
+const RUN_STATUS_TAIL = 8;
+
+/**
+ * A status log's events (`omp.run.status`): all kept ones when expanded, else
+ * the newest {@link RUN_STATUS_TAIL}, after a muted `N earlier` line that also
+ * counts events already dropped from the log's front.
+ */
+function evalStatusSection(log: StatusEventLog, expanded: boolean): NativeNode | undefined {
+	const events = log.statusEvents ?? [];
+	const elided = log.statusEventsElided ?? 0;
+	if (events.length === 0 && elided === 0) return undefined;
+	const shownFrom = expanded ? 0 : Math.max(0, events.length - RUN_STATUS_TAIL);
+	const hidden = shownFrom + elided;
+	const lines = events.slice(shownFrom).map((event, i) => keyed(describeStatusEvent(event), `s${hidden + i}`));
+	return node(
+		"col",
+		{ role: "omp.run.status", gap: "none" },
+		compact<NativeNode>([hidden > 0 && keyed(text([span(`${hidden} earlier`, "muted")]), "earlier"), ...lines]),
+		"status",
+	);
+}
+
+/** The foot state of a cell, or undefined while it has not started. */
+function evalCellState(status: EvalCellResult["status"], cancelled: boolean): RunState | undefined {
+	switch (status) {
+		case "pending":
+			return undefined;
+		case "running":
+			return cancelled ? "cancelled" : "running";
+		case "complete":
+			return "done";
+		case "error":
+			return "failed";
+	}
+}
+
+/** Inputs of one eval cell box. */
+interface EvalCellRun {
 	readonly language: EvalLanguage;
 	readonly code: string;
 	readonly title?: string;
-	readonly status?: EvalCellResult["status"];
-	readonly durationMs?: number;
-	readonly output?: readonly NativeChild[];
+	readonly outputs?: readonly NativeChild[];
+	readonly status?: NativeNode;
+	/** Omitted while the cell has not started. */
+	readonly foot?: RunFootInput;
 }
 
 /**
- * A notebook cell: a gutter mark beside the input (←, muted until the cell
- * runs, omp's thinking starburst while it does) and beside its output (→).
- * Only multi-cell calls repeat titles; marks never invent execution counts.
+ * A notebook cell as one run box: the caption (multi-cell calls only), the
+ * source, its outputs, status lines and foot. A failed cell tints its box.
  */
-function evalCellSection(cell: EvalCellSection, index: number, total: number): NativeNode {
-	let head: TspSpan[] | undefined;
+function evalCellBox(cell: EvalCellRun, index: number, total: number): NativeNode {
+	let caption: NativeNode | undefined;
 	if (total > 1) {
-		head = [span(`${index + 1}/${total}`, "muted")];
+		const spans: TspSpan[] = [span(`${index + 1}/${total}`, "muted")];
 		const title = plainText(cell.title ?? "").trim();
-		if (title) head.push(span(` ${title}`, "toolTitle"));
-		if (cell.status === "error") head.push(span(" · failed", "error"));
-		if (cell.durationMs !== undefined) head.push(span(` · ${(cell.durationMs / 1000).toFixed(2)}s`, "muted"));
+		if (title) spans.push(span(` ${title}`, "toolTitle"));
+		caption = keyed(text(spans, { role: "omp.run.caption" }), "caption");
 	}
-	const inputMark =
-		cell.status === "running"
-			? node("spinner", { style: "starburst", role: "omp.tool.eval.prompt", aria: "Running" })
-			: node("icon", {
-					name: "arrow-left",
-					role: "omp.tool.eval.prompt",
-					aria: "Input",
-					tone: !cell.status || cell.status === "pending" ? "muted" : undefined,
-				});
-	return node(
-		"col",
-		{
-			role: "omp.tool.eval.cell",
-			tone: cell.status === "error" ? "error" : cell.status === "running" ? "pending" : undefined,
-		},
-		compact<NativeChild>([
-			head ? text(head, { role: "omp.tool.eval.caption" }) : undefined,
-			node(
-				"row",
-				{ role: "omp.tool.eval.input", align: "start" },
-				[
-					inputMark,
-					keyed(codeNode(cell.code, { lang: languageForHighlighter(cell.language), numbers: false }), "code"),
-				],
-				"input",
-			),
-			cell.output?.length
-				? node(
-						"row",
-						{ role: "omp.tool.eval.result", align: "start" },
-						[
-							node("icon", { name: "arrow-right", role: "omp.tool.eval.prompt", aria: "Output" }),
-							node("col", { role: "omp.tool.eval.outputs" }, cell.output),
-						],
-						"output",
-					)
-				: undefined,
-		]),
-		`cell-${index}`,
+	return runBox(
+		[
+			caption,
+			cell.code.trim().length > 0 &&
+				runInput(cell.code, {
+					role: "omp.tool.eval.input",
+					lang: languageForHighlighter(cell.language),
+					wrap: false,
+				}),
+			...(cell.outputs ?? []),
+			cell.status,
+			cell.foot && runFoot(cell.foot),
+		],
+		{ key: `cell-${index}`, tone: cell.foot?.state === "failed" ? "error" : undefined },
 	);
 }
 
@@ -937,7 +990,7 @@ export const evalToolRenderer = {
 						bodies = {
 							key: bodyKey,
 							cells: displayCells.map(({ cell, code, language, agentEvents, otherEvents }, i) => {
-								const statusLines = renderStatusEvents(otherEvents, uiTheme, expanded);
+								const statusLines = renderStatusEvents(otherEvents, uiTheme, expanded, cell.statusEventsElided);
 								const outputContent = formatCellOutputLines(cell, expanded, previewLines, uiTheme, width);
 								const outputLines = [...outputContent.lines];
 								if (!expanded && outputContent.hiddenCount > 0) {
@@ -1031,6 +1084,7 @@ export const evalToolRenderer = {
 			statusEvents,
 			uiTheme,
 			options.renderContext?.expanded ?? options.expanded,
+			details?.statusEventsElided,
 		);
 
 		if (!combinedOutput && statusLines.length === 0) {
@@ -1129,16 +1183,20 @@ export const evalToolRenderer = {
 		};
 	},
 
-	describeCall(args: EvalRenderArgs, _options: RenderResultOptions): NativeToolView {
+	describeCall(args: EvalRenderArgs, options: RenderResultOptions): NativeToolView {
 		const cells = getRenderCells(args);
+		// No foot until the call starts; then the first cell runs (before any result names it).
+		const startFoot: RunFootInput | undefined = options.executionStarted
+			? { state: options.cancelled ? "cancelled" : "running", elapsedMs: options.elapsedMs }
+			: undefined;
 		return {
 			tool: evalToolHead(
 				cells[0]?.title,
 				cells.map(cell => cell.language),
 				cells.length,
 			),
-			body: cells.map((cell, i) => evalCellSection(cell, i, cells.length)),
-			preview: { lines: EVAL_DEFAULT_PREVIEW_LINES },
+			body: cells.map((cell, i) => evalCellBox({ ...cell, foot: i === 0 ? startFoot : undefined }, i, cells.length)),
+			preview: "children",
 		};
 	},
 
@@ -1149,82 +1207,90 @@ export const evalToolRenderer = {
 	): NativeToolView {
 		const details = result.details;
 		const isPartial = options.isPartial === true;
+		const cancelled = options.cancelled === true;
+		const expanded = options.renderContext?.expanded ?? options.expanded;
 		const previewLines = options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES;
 		const jsonNodes = (details?.jsonOutputs ?? []).map((value, index) =>
 			keyed(describeJsonTree(value, { hiddenRootKeys: [] }), `display-${index}`),
 		);
-		// A notice and truncation go to one quiet final line (a background job is a head badge).
-		const footer = footnoteText(compact([details?.notice]), details?.meta);
+		// The call's notice and truncation join the last run's foot facts (a background job is a head badge).
+		const callFacts = { facts: compact([details?.notice]), meta: details?.meta };
 		const cellResults = details?.cells;
-		let cells: NativeNode[];
-		let head: NativeToolHead;
 		if (cellResults && cellResults.length > 0) {
 			const languages = cellResults.map(cell => cell.language ?? details?.language ?? "python");
-			head = evalToolHead(cellResults[0]!.title, languages, cellResults.length, details);
-			cells = cellResults.map((cell, i) => {
+			const states = cellResults.map(cell => evalCellState(cell.status, cancelled));
+			// A cell that never started has no foot to carry the call's facts: the last one that ran does.
+			const factsIndex = states.findLastIndex(state => state !== undefined);
+			let earlierMs = 0;
+			const cells = cellResults.map((cell, i) => {
 				const language = languages[i]!;
-				return evalCellSection(
+				const state = states[i];
+				// A running cell's clock is the call's minus the cells that finished before it.
+				const elapsedMs =
+					state === "running" || state === "cancelled"
+						? options.elapsedMs === undefined
+							? undefined
+							: Math.max(0, options.elapsedMs - earlierMs)
+						: cell.durationMs;
+				earlierMs += cell.durationMs ?? 0;
+				return evalCellBox(
 					{
 						language,
 						code: formatEvalCodeForDisplay(cell.code, language),
 						title: cell.title,
-						status: cell.status,
-						durationMs: cell.durationMs,
-						output: [
+						outputs: [
 							...evalOutputNodes(
 								cell.output,
-								cell.hasMarkdown === true,
-								cell.status === "running",
-								cell.status === "error",
+								cell.hasMarkdown === true && cell.status !== "error",
+								previewLines,
 							),
-							...(cell.statusEvents ?? []).map(describeStatusEvent),
+
 							...(i === cellResults.length - 1 ? jsonNodes : []),
 						],
+						status: evalStatusSection(cell, expanded),
+						foot: state && {
+							state,
+							exitCode: cell.exitCode,
+							elapsedMs,
+							...(i === factsIndex ? callFacts : {}),
+						},
 					},
 					i,
 					cellResults.length,
 				);
 			});
-		} else {
-			// No per-cell results (older details): the call's cells, with the whole output under the last.
-			const argCells = getRenderCells(args);
-			const languages = details?.languages ?? (details?.language ? [details.language] : []);
-			head = evalToolHead(
+			return {
+				tool: evalToolHead(cellResults[0]!.title, languages, cellResults.length, details),
+				body: cells,
+				preview: "children",
+			};
+		}
+		// No per-cell results (older details): the call's cells, the whole output and foot under the last.
+		const argCells = getRenderCells(args);
+		const languages = details?.languages ?? (details?.language ? [details.language] : []);
+		const rawOutput = options.renderContext?.output ?? resultText(result).trimEnd();
+		const state: RunState = cancelled ? "cancelled" : isPartial ? "running" : result.isError ? "failed" : "done";
+		const last: Omit<EvalCellRun, "language" | "code" | "title"> = {
+			outputs: [
+				...evalOutputNodes(stripOutputNotice(rawOutput, details?.meta).trimEnd(), false, previewLines),
+				...jsonNodes,
+			],
+			status: evalStatusSection(details ?? {}, expanded),
+			foot: { state, elapsedMs: options.elapsedMs, ...callFacts },
+		};
+		const runs: EvalCellRun[] =
+			argCells.length > 0
+				? argCells.map((cell, i) => (i === argCells.length - 1 ? { ...cell, ...last } : cell))
+				: [{ language: languages[0] ?? "python", code: "", ...last }];
+		return {
+			tool: evalToolHead(
 				argCells[0]?.title,
 				argCells.length > 0 ? argCells.map(cell => cell.language) : languages,
 				argCells.length,
 				details,
-			);
-			const rawOutput = options.renderContext?.output ?? resultText(result).trimEnd();
-			const output = [
-				...evalOutputNodes(
-					stripOutputNotice(rawOutput, details?.meta).trimEnd(),
-					false,
-					isPartial,
-					result.isError === true,
-				),
-				...(details?.statusEvents ?? []).map(describeStatusEvent),
-				...jsonNodes,
-			];
-			cells =
-				argCells.length > 0
-					? argCells.map((cell, i) =>
-							evalCellSection(
-								{
-									...cell,
-									status: isPartial ? "running" : result.isError ? "error" : "complete",
-									output: i === argCells.length - 1 ? output : undefined,
-								},
-								i,
-								argCells.length,
-							),
-						)
-					: output;
-		}
-		return {
-			tool: head,
-			body: compact<NativeChild>([...cells, footer]),
-			preview: { lines: previewLines },
+			),
+			body: runs.map((run, i) => evalCellBox(run, i, runs.length)),
+			preview: "children",
 		};
 	},
 

@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
+import type { ScreenshotResult } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import { TernElementHandle, TernTab, userSourceFunction } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/tern-tab";
 import { TernSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/wire";
+import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "./tern-fake-daemon";
 
 interface FakePage {
@@ -386,5 +391,44 @@ describe("TernTab", () => {
 			/resourceType image: only the page's fetch and xhr requests can be routed/,
 		);
 		expect(fake.requests.length).toBe(before);
+	});
+});
+
+describe("TernTab screenshots", () => {
+	it("states the coordinate scale the capture was taken at, not one set while it ran", async () => {
+		const captureAsked = Promise.withResolvers<number>();
+		daemon = await startFakeDaemon((op, id) => {
+			if (op.op !== "capture") return { ok: {} };
+			captureAsked.resolve(id);
+			return null;
+		});
+		client = new TernSocketClient({ socketPath: daemon.socketPath });
+		const tab = new TernTab({
+			client,
+			block: 7,
+			name: "main",
+			viewport: { width: 1200, height: 700, deviceScaleFactor: 1 },
+		});
+		const output = new RunOutput();
+		const screenshots: ScreenshotResult[] = [];
+		tab.setRunContext({
+			timeoutMs: 5_000,
+			signal: new AbortController().signal,
+			session: { cwd: os.tmpdir() },
+			output,
+			screenshots,
+		});
+		const shot = tab.screenshot();
+		const captureId = await captureAsked.promise;
+		await tab.setViewport({ width: 1200, height: 700, deviceScaleFactor: 2 });
+		daemon.answer(captureId, { ok: { data: encodeRawPng(new Uint8Array(1200 * 700 * 3), 1200, 700, 3).toBase64() } });
+		await shot;
+		const text = output
+			.finish()
+			.flatMap(block => (block.type === "text" ? [block.text] : []))
+			.join("\n");
+		expect(daemon.requests.find(request => request.op.op === "capture")?.op.scale).toBe(1);
+		expect(text).toContain("by 1.17 to get viewport CSS pixels for tab.clickAt");
+		for (const saved of screenshots) await fs.rm(saved.dest);
 	});
 });

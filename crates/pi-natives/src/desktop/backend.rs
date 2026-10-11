@@ -3,7 +3,7 @@ use std::time::Duration;
 use image::RgbaImage;
 
 use super::{
-	ax::{AxHandle, AxProps},
+	ax::{AxHandle, AxProps, WalkBounds},
 	control::OperationToken,
 	error::{CoreResult, DesktopError},
 	frame::FrameGeometry,
@@ -188,6 +188,15 @@ pub trait AxBackend {
 	fn window_id(&mut self, h: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String>;
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps>;
 	fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>>;
+	/// Reads an element and its children for a tree walk, letting a backend
+	/// share one children read and skip bounds the walk does not need.
+	fn walk_node(
+		&mut self,
+		h: &AxHandle,
+		_bounds: WalkBounds,
+	) -> CoreResult<(AxProps, Vec<AxHandle>)> {
+		Ok((self.props(h)?, self.children(h)?))
+	}
 	fn parent(&mut self, h: &AxHandle) -> CoreResult<Option<AxHandle>>;
 	fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()>;
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()>;
