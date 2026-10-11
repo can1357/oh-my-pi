@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Improved append-only context caching so a turn with an unchanged system prompt skips rejoining the prompt and renders per-tool cache keys once per build, making repeat turns faster ([#15218](https://github.com/can1357/oh-my-pi/pull/15218) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.8.8] - 2026-10-10
 
 ### Added
