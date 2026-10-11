@@ -150,8 +150,10 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 			return proc;
 		}
 		dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "mnemosyne-data-"));
+		// Parent MNEMOSYNE_* settings (recall weights, prefixes, ...) would silently change ranking or embeddings.
+		const inherited = Object.entries(Bun.env).filter(([key]) => !key.startsWith("MNEMOSYNE_"));
 		proc = new PythonProcess(python, script, {
-			...Bun.env,
+			...Object.fromEntries(inherited),
 			MNEMOSYNE_DATA_DIR: dataDir,
 			MNEMOSYNE_FASTEMBED_CACHE_DIR: path.join(CACHE_ROOT, "fastembed"),
 			MNEMOSYNE_EMBEDDING_MODEL: EMBEDDING_MODEL,

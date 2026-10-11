@@ -71,4 +71,31 @@ describe("mnemosyne client", () => {
 		await expect(engine.open(twoMessageCase, { storeDir: tmp, protocol: "fts-only" })).rejects.toThrow("fts-only");
 		await engine.dispose();
 	});
+
+	it("does not pass the parent's MNEMOSYNE_* variables to the engine process", async () => {
+		// Answers every request with the MNEMOSYNE_* variables of its own environment.
+		const script = await stub(
+			"env.py",
+			`import json, os, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    env = {k: v for k, v in os.environ.items() if k.startswith("MNEMOSYNE_")}
+    print(json.dumps({"id": req["id"], "result": env}), flush=True)
+`,
+		);
+		const saved = process.env.MNEMOSYNE_VEC_WEIGHT;
+		process.env.MNEMOSYNE_VEC_WEIGHT = "0.9";
+		const engine = mnemosyneEngine({ python: "python3", script });
+		try {
+			await engine.warmup("standard");
+			const info = await engine.describe();
+			expect(info.MNEMOSYNE_VEC_WEIGHT).toBeUndefined();
+			expect(info.MNEMOSYNE_LLM_ENABLED).toBe("false");
+			expect(info.MNEMOSYNE_EMBEDDING_MODEL).toBe("BAAI/bge-small-en-v1.5");
+		} finally {
+			if (saved === undefined) delete process.env.MNEMOSYNE_VEC_WEIGHT;
+			else process.env.MNEMOSYNE_VEC_WEIGHT = saved;
+			await engine.dispose();
+		}
+	});
 });
