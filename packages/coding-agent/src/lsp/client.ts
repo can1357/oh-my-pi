@@ -1283,14 +1283,17 @@ function closeIdleFiles(client: LspClient, signal?: AbortSignal): void {
 	for (const [uri, info] of client.openFiles) {
 		if (info.lastUsedAt > idleBefore) continue;
 		if (pendingDiskWrites.has(uri) || fileOperationLocks.has(`${client.name}:${uri}`)) continue;
+		const diagnostics = client.diagnostics.get(uri);
 		client.openFiles.delete(uri);
 		client.diagnostics.delete(uri);
 		(client.idleClosedFiles ??= new Map()).set(uri, info.version);
 		sendNotification(client, "textDocument/didClose", { textDocument: { uri } }, signal).catch(() => {
-			// The close never reached the server, which still has the document open.
+			// The close never reached the server, which still has the document open and
+			// will not republish its diagnostics.
 			if (client.openFiles.has(uri)) return;
 			client.idleClosedFiles?.delete(uri);
 			client.openFiles.set(uri, info);
+			if (diagnostics && !client.diagnostics.has(uri)) client.diagnostics.set(uri, diagnostics);
 		});
 	}
 }

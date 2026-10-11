@@ -966,7 +966,7 @@ describe("lsp regressions", () => {
 		}
 	});
 
-	it("keeps tracking an idle document whose close never reached the server", async () => {
+	it("keeps tracking an idle document and its diagnostics when its close never reached the server", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-aborted-");
 		try {
 			const server = installHandshakeLsp();
@@ -974,6 +974,8 @@ describe("lsp regressions", () => {
 			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
 			const stalePath = await openDocument(client, "stale.ts");
 			ageDocument(client, stalePath, PAST_DOCUMENT_IDLE_MS);
+			const staleDiagnostics = { diagnostics: [], version: 1 };
+			client.diagnostics.set(fileToUri(stalePath), staleDiagnostics);
 
 			const controller = new AbortController();
 			const opening = lspClient.syncContent(
@@ -987,6 +989,8 @@ describe("lsp regressions", () => {
 
 			expect(server.received.some(message => message.method === "textDocument/didClose")).toBe(false);
 			expect(client.openFiles.has(fileToUri(stalePath))).toBe(true);
+			// The server still has the document open and will not publish it again.
+			expect(client.diagnostics.get(fileToUri(stalePath))).toBe(staleDiagnostics);
 		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
