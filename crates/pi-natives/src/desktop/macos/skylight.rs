@@ -446,7 +446,8 @@ impl SwitchSignals {
 			(unsafe { get_key_focus(&mut psn, &mut status) } == 0).then_some(psn)
 		});
 		let signals = Self::new(buttons, last_click, flags, last_chord, key_focus);
-		match *sampled.front.lock() {
+		let front_since = *sampled.front.lock();
+		match front_since {
 			Some((front, at)) => signals.with_front_since(front, at),
 			None => signals,
 		}
