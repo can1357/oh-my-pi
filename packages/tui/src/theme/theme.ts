@@ -400,6 +400,13 @@ export async function setColorBlindMode(enabled: boolean): Promise<void> {
 	notifyThemeChange({ ephemeral: true });
 }
 
+/**
+ * Get the current color blind mode setting.
+ */
+export function getColorBlindMode(): boolean {
+	return currentColorBlindMode;
+}
+
 export function onThemeChange(callback: (event: ThemeChangeEvent) => void): () => void {
 	onThemeChangeCallback = callback;
 	return () => {

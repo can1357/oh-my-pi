@@ -72,10 +72,6 @@
 
 - Tern draws each bash run, eval cell and `!`/`$` run as one box: the command or code, its output, status lines and a foot with state, time and facts; images sit below the box and the bash head shows the intent instead of the command
 
-### Changed
-
-- Removed the unrun `bench/` tree (no runner, never typechecked), 31 exported symbols with no consumers anywhere in the monorepo, three demo files parked in `test/`, and the duplicated terminal-multiplexer test helper.
-
 ### Fixed
 
 - Fixed the Agents hub Time column rewinding and freezing for running subagents between progress updates ([#15140](https://github.com/can1357/oh-my-pi/pull/15140) by [@H4vC](https://github.com/H4vC))

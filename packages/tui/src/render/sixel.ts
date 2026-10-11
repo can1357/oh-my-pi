@@ -41,6 +41,11 @@ export function getSixelLineMask(lines: readonly string[]): boolean[] {
 	});
 }
 
+/** Returns true when the line contains a SIXEL start sequence. */
+export function isSixelLine(line: string): boolean {
+	return containsSixelSequence(line);
+}
+
 /**
  * Sanitizes text while preserving embedded SIXEL sequences when passthrough is enabled.
  */

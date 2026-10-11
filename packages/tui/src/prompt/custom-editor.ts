@@ -373,6 +373,11 @@ export function extractBracketedImagePastePaths(data: string): string[] | undefi
 	return payload === undefined ? undefined : extractImagePastePathsFromText(payload);
 }
 
+export function extractBracketedImagePastePath(data: string): string | undefined {
+	const paths = extractBracketedImagePastePaths(data);
+	return paths?.length === 1 ? paths[0] : undefined;
+}
+
 /**
  * Return a single previewable file path when `text` is exactly one explicit
  * image (`.png`, `.jpg`/`.jpeg`, `.gif`, `.webp`) or video path. Used by the
