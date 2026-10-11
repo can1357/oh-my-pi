@@ -2,16 +2,23 @@ import { describe, expect, it } from "bun:test";
 import { Agent, type AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Model, Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
-import { enforceStrictSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import {
+	enforceStrictSchema,
+	findStrictToolSchemaViolation,
+	validateJsonSchemaValue,
+} from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { buildWorkPoolOutputSchema } from "../../src/task/workpool-yield";
 import { yieldSectionShapes } from "../../src/task/yield-assembly";
+import type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
@@ -724,7 +731,7 @@ describe("YieldTool", () => {
 			},
 		});
 
-		expect(shapes.get("blockers")).toBe("array");
+		expect(shapes.shapes.get("blockers")).toBe("array");
 	});
 
 	it("rejects missing success data unless a yield type requests last-turn mode", async () => {
@@ -1082,16 +1089,11 @@ describe("YieldTool", () => {
 		);
 		const dataSchema = getDataSchema(tool.parameters as unknown as Record<string, unknown>);
 		expect(tool.strict).toBe(true);
-		expect(Array.isArray(dataSchema.anyOf)).toBe(true);
-
-		const variants = dataSchema.anyOf as Array<Record<string, unknown>>;
-		const objectVariant = variants.find(variant => variant.type === "object");
-		const nullVariant = variants.find(variant => variant.type === "null");
-
-		expect(objectVariant).toBeDefined();
-		expect((objectVariant as Record<string, unknown>).properties).toEqual({ name: { type: "string" } });
-		expect((objectVariant as Record<string, unknown>).required).toEqual(["name"]);
-		expect(nullVariant).toEqual({ type: "null" });
+		const strictDataSchema = enforceStrictSchema(dataSchema);
+		expect(validateJsonSchemaValue(strictDataSchema, { name: "valid" }).success).toBe(true);
+		expect(validateJsonSchemaValue(strictDataSchema, null).success).toBe(true);
+		expect(validateJsonSchemaValue(strictDataSchema, { name: 7 }).success).toBe(false);
+		expect(validateJsonSchemaValue(strictDataSchema, {}).success).toBe(false);
 	});
 
 	it("converts mixed JTD and JSON Schema output definitions into provider-valid schemas", async () => {
@@ -1234,11 +1236,11 @@ describe("YieldTool", () => {
 		// $defs should NOT be in parameters — refs are inlined
 		expect(parametersRecord.$defs).toBeUndefined();
 		const dataSchema = getDataSchema(parametersRecord);
-		// The inlined anyOf[0] should be the A definition (not a $ref)
-		const anyOfVariants = dataSchema.anyOf as Array<Record<string, unknown>>;
-		expect(anyOfVariants).toBeDefined();
-		expect(anyOfVariants[0].$ref).toBeUndefined();
-		expect(toRecord(anyOfVariants[0].properties).kind).toBeDefined();
+		// Section variants wrap the complete inlined union in the first data branch.
+		const fullSchema = toRecord((dataSchema.anyOf as unknown[])[0]);
+		const fullVariants = fullSchema.anyOf as Array<Record<string, unknown>>;
+		expect(fullVariants[0].$ref).toBeUndefined();
+		expect(toRecord(fullVariants[0].properties).kind).toBeDefined();
 
 		const toolDefinition: Tool = {
 			name: tool.name,
@@ -1681,4 +1683,219 @@ describe("YieldTool", () => {
 			} as never),
 		).rejects.toThrow("Output does not match schema");
 	});
+});
+
+describe("yield Responses wire fixtures", () => {
+	const responsesModel = getBundledModel<"openai-responses">("openai", "gpt-5-mini");
+	const codexModel = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.6-sol");
+	if (!responsesModel || !codexModel) throw new Error("Missing bundled fixture models");
+
+	interface WireStep {
+		type: string[];
+		data: unknown;
+		rejected?: boolean;
+	}
+	interface WireFixture {
+		name: string;
+		outputSchema: unknown;
+		steps: WireStep[];
+		whole: unknown;
+		afterReset?: WireStep[];
+		item?: { label: string; data: unknown };
+	}
+	const root = (properties: Record<string, unknown>) => ({
+		type: "object",
+		properties,
+		required: Object.keys(properties),
+		additionalProperties: false,
+	});
+	const rows = { type: "array", items: { type: "array", items: { type: "string" } } };
+	const nullableScalar = Object.freeze({ x: null });
+	const fixtures: WireFixture[] = [
+		{
+			name: "preserves an already valid mixed nullable scalar before item normalization",
+			outputSchema: root({
+				mixed: {
+					anyOf: [
+						{
+							type: "array",
+							items: {
+								type: "object",
+								properties: { x: { type: "string" } },
+								additionalProperties: false,
+							},
+						},
+						{
+							type: "object",
+							properties: { x: { type: ["string", "null"] } },
+							required: ["x"],
+							additionalProperties: false,
+						},
+					],
+				},
+			}),
+			steps: [{ type: ["mixed"], data: nullableScalar }],
+			whole: { mixed: nullableScalar },
+		},
+		{
+			name: "accepts heterogeneous shifted batches and first batches through both actual converters",
+			outputSchema: root({
+				sequence: {
+					type: "array",
+					prefixItems: [{ type: "string" }, { type: "integer" }],
+					items: { type: "integer" },
+				},
+			}),
+			steps: [
+				{ type: ["sequence"], data: "head" },
+				{ type: ["sequence"], data: [7, 8] },
+			],
+			afterReset: [
+				{ type: ["sequence"], data: ["head", 7] },
+				{ type: ["sequence"], data: 8 },
+			],
+			whole: { sequence: ["head", 7, 8] },
+		},
+		{
+			name: "accepts first and later homogeneous prefix batches",
+			outputSchema: root({
+				sequence: {
+					type: "array",
+					prefixItems: [{ type: "string" }, { type: "string" }],
+					items: { type: "string" },
+				},
+			}),
+			steps: [
+				{ type: ["sequence"], data: ["a"] },
+				{ type: ["sequence"], data: ["b", "c"] },
+			],
+			whole: { sequence: ["a", "b", "c"] },
+		},
+		{
+			name: "keeps an omitted items schema open only after the declared prefix",
+			outputSchema: root({ sequence: { type: "array", prefixItems: [{ type: "string" }] } }),
+			steps: [
+				{ type: ["sequence"], data: "head" },
+				{ type: ["sequence"], data: { extra: 1 } },
+			],
+			whole: { sequence: ["head", { extra: 1 }] },
+		},
+		{
+			name: "retains the actual offset gate for a false tail",
+			outputSchema: root({
+				sequence: {
+					type: "array",
+					prefixItems: [{ type: "string" }, { type: "integer" }],
+					items: false,
+				},
+			}),
+			steps: [
+				{ type: ["sequence"], data: "head" },
+				{ type: ["sequence"], data: 7 },
+				{ type: ["sequence"], data: 8, rejected: true },
+			],
+			whole: { sequence: ["head", 7] },
+		},
+		{
+			name: "preserves a nested array as one item before appending a batch",
+			outputSchema: root({ rows }),
+			item: { label: "rows", data: ["a", "b"] },
+			steps: [
+				{ type: ["rows"], data: ["a", "b"] },
+				{ type: ["rows"], data: [["c"], ["d"]] },
+			],
+			whole: { rows: [["a", "b"], ["c"], ["d"]] },
+		},
+		{
+			name: "converts and validates independent multi-label mapping values",
+			outputSchema: root({ rows, note: { type: "string" } }),
+			item: { label: "rows", data: ["a", "b"] },
+			steps: [
+				{ type: ["rows", "note"], data: { rows: ["a", "b"], note: "ok" } },
+				{ type: ["rows", "note"], data: { rows: [["c"], ["d"]], note: "done" } },
+			],
+			whole: { rows: [["a", "b"], ["c"], ["d"]], note: "done" },
+		},
+	];
+
+	for (const fixture of fixtures) {
+		it(fixture.name, async () => {
+			const tool = new YieldTool(createSession({ outputSchema: fixture.outputSchema }));
+			const quarantined: Array<{ toolName: string; schemaPath: string }> = [];
+			const responses = convertTools([tool], true, responsesModel, (toolName, schemaPath) => {
+				quarantined.push({ toolName, schemaPath });
+			});
+			const codex = convertOpenAICodexResponsesTools([tool], codexModel);
+			expect(quarantined).toEqual([]);
+			expect(responses).toHaveLength(1);
+			expect(codex).toHaveLength(1);
+			expect(validateJsonSchemaValue(fixture.outputSchema, fixture.whole)).toEqual({ success: true, issues: [] });
+			if (fixture.item) {
+				const { validator } = buildOutputValidator(fixture.outputSchema);
+				if (!validator) throw new Error("Missing constrained fixture validator");
+				expect(validator.isSectionItem(fixture.item.label, fixture.item.data, 0)).toBe(true);
+			}
+
+			for (const payload of [...responses, ...codex]) {
+				if (payload.type !== "function") throw new Error("Expected yield function payload");
+				expect(payload.name).toBe("yield");
+				expect(findStrictToolSchemaViolation(payload.parameters)).toBeNull();
+				const parameters = toRecord(payload.parameters);
+				expect(parameters.type).toBe("object");
+				for (const keyword of ["allOf", "anyOf", "oneOf", "enum", "const", "not"]) {
+					expect(parameters[keyword]).toBeUndefined();
+				}
+
+				let callIndex = 0;
+				const submit = async (data: unknown, type?: string | string[], rejected = false) => {
+					const args: ToolCall["arguments"] =
+						payload.strict === true
+							? { type: type ?? null, data, error: null }
+							: type === undefined
+								? { data }
+								: { type, data };
+					// Assert the emitted wire schema itself accepts the unmodified arguments,
+					// independently of the execution path's normalization and coercion.
+					expect(validateJsonSchemaValue(payload.parameters, args)).toEqual({ success: true, issues: [] });
+					const call: ToolCall = {
+						type: "toolCall",
+						id: `wire-${callIndex++}`,
+						name: tool.name,
+						arguments: args,
+					};
+					const validated = validateToolArguments(tool, call);
+					expect(validated.data).toEqual(data);
+					if (rejected) {
+						await expect(tool.execute(call.id, validated)).rejects.toThrow("does not match schema");
+						return undefined;
+					}
+					const result = await tool.execute(call.id, validated);
+					if (!result.details) throw new Error("Missing yield details");
+					expect(result.details.status).toBe("success");
+					expect(result.details.schemaOverridden).toBeUndefined();
+					expect(result.details.data).toEqual(data);
+					return result.details;
+				};
+				const exercise = async (steps: WireStep[]) => {
+					tool.resetTurnState();
+					const yielded: YieldItem[] = [];
+					for (const step of steps) {
+						const details = await submit(step.data, step.type, step.rejected);
+						if (details) yielded.push(details);
+					}
+					const assembled = assembleYieldResult(yielded, undefined, yieldSectionShapes(fixture.outputSchema));
+					expect(assembled?.data).toEqual(fixture.whole);
+					expect(assembled?.schemaOverridden).toBe(false);
+					expect(validateJsonSchemaValue(fixture.outputSchema, assembled?.data)).toEqual({
+						success: true,
+						issues: [],
+					});
+					await submit(fixture.whole);
+				};
+				await exercise(fixture.steps);
+				if (fixture.afterReset) await exercise(fixture.afterReset);
+			}
+			expect(nullableScalar).toEqual({ x: null });
+		});
+	}
 });

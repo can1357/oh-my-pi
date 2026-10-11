@@ -18,12 +18,23 @@ import {
 	sanitizeSchemaForStrictMode,
 	tryEnforceStrictSchema,
 } from "@oh-my-pi/pi-ai/utils/schema";
+import {
+	isYieldSectionBatch,
+	resolveYieldSectionValue,
+	type YieldSectionShapes,
+} from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import { prompt } from "@oh-my-pi/pi-utils";
 import yieldDescription from "../prompts/tools/yield.md" with { type: "text" };
 import { subprocessToolRegistry } from "../task/subprocess-tool-registry";
+import { yieldSectionShapes } from "../task/yield-assembly";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { ToolSession } from ".";
-import { buildOutputValidator, formatAllValidationIssues } from "./output-schema-validator";
+import {
+	buildOutputValidator,
+	buildSectionInputSchemas,
+	buildSectionSchemas,
+	formatAllValidationIssues,
+} from "./output-schema-validator";
 
 const YIELD_FORMAT_HINT = 'Submit success as {"data":<your output>} or failure as {"error":"message"}.';
 
@@ -185,26 +196,19 @@ function formatYieldLabels(labels: readonly string[]): string {
 }
 
 /**
- * Expand a plain-object `data` schema into a strict union that ALSO accepts each
- * top-level section value (and array element) on its own. Agents that yield
- * incrementally (`type: ["findings"]`, `type: ["confidence"]`, …) submit one
- * section per call, so `data` is a single finding object or a lone verdict value
- * — never the full output object. Without this, strict-mode providers constrain
- * `data` to the whole schema and reject/—under constrained decoding—forbid the
- * partial. Every branch is a typed sub-schema, so strict representability holds;
- * the full-output object stays the first (terminal) branch. The assembled whole
- * is still validated against the full schema at finalization. Non-object / loose
- * schemas are returned unchanged.
+ * Parameter data admits the full terminal output, direct section items/batches,
+ * and multi-label mappings. Properties from composition branches participate too.
+ * Runtime validation still distinguishes terminal and incremental submissions.
  */
 function withSectionVariants(dataSchema: Record<string, unknown>): Record<string, unknown> {
-	if (dataSchema.type !== "object") return dataSchema;
-	const props = dataSchema.properties;
-	if (props === null || typeof props !== "object") return dataSchema;
-	const propRecord = props as Record<string, unknown>;
+	const sectionSchemas = buildSectionSchemas(dataSchema);
+	if (sectionSchemas.size === 0) return dataSchema;
 	const { description, ...fullWithoutDescription } = dataSchema;
 	const branches: unknown[] = [];
 	const seen = new Set<string>();
 	const add = (schema: unknown): void => {
+		if (schema === false) return;
+		if (schema === true) schema = {};
 		if (schema === null || typeof schema !== "object") return;
 		const key = JSON.stringify(schema);
 		if (seen.has(key)) return;
@@ -212,15 +216,20 @@ function withSectionVariants(dataSchema: Record<string, unknown>): Record<string
 		branches.push(schema);
 	};
 	add(fullWithoutDescription);
-	for (const name in propRecord) {
-		const prop = propRecord[name];
+	const mappingProperties: Record<string, unknown> = {};
+	for (const [name, prop] of sectionSchemas) {
 		add(prop);
-		if (prop !== null && typeof prop === "object") {
-			const propObj = prop as Record<string, unknown>;
-			if (propObj.type === "array") add(propObj.items);
-		}
+		const variants = buildSectionInputSchemas(prop);
+		for (const variant of variants) add(variant);
+		mappingProperties[name] = variants.length > 0 ? { anyOf: [prop, ...variants] } : prop;
 	}
 	if (branches.length <= 1) return dataSchema;
+	add({
+		type: "object",
+		properties: mappingProperties,
+		required: [],
+		additionalProperties: false,
+	});
 	return description !== undefined ? { description, anyOf: branches } : { anyOf: branches };
 }
 
@@ -294,9 +303,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	lenientArgValidation = true;
 
 	readonly #validate?: (value: unknown) => JsonSchemaValidationResult;
-	readonly #validateSection?: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
+	readonly #validateSection?: ReadonlyMap<string, (value: unknown, offset?: number) => JsonSchemaValidationResult>;
 	readonly #normalizeData?: (value: unknown) => unknown;
-	readonly #normalizeSection?: (label: string, value: unknown) => unknown;
+	readonly #normalizeSection?: (label: string, value: unknown, offset?: number) => unknown;
+	readonly #sectionShapes?: YieldSectionShapes;
 	#rejectUnknownSections = false;
 	#knownSectionLabels: readonly string[] = [];
 	#isKnownSection?: (label: string) => boolean;
@@ -304,6 +314,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	#schemaValidationFailures = 0;
 	#emptyResultFailures = 0;
 	#hasIncrementalSections = false;
+	#sectionArrayLengths?: Map<string, number>;
 	readonly #session: ToolSession;
 	readonly #parameters: TSchema;
 	#workPoolBatchKey = "";
@@ -328,8 +339,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	constructor(session: ToolSession) {
 		let validate: ((value: unknown) => JsonSchemaValidationResult) | undefined;
 		let normalizeData: ((value: unknown) => unknown) | undefined;
-		let normalizeSection: ((label: string, value: unknown) => unknown) | undefined;
-		let validateSection: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult> | undefined;
+		let normalizeSection: ((label: string, value: unknown, offset?: number) => unknown) | undefined;
+		let validateSection:
+			| ReadonlyMap<string, (value: unknown, offset?: number) => JsonSchemaValidationResult>
+			| undefined;
 		let rejectUnknownSections = false;
 		let knownSectionLabels: readonly string[] = [];
 		let isKnownSection: ((label: string) => boolean) | undefined;
@@ -356,15 +369,18 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				: `Structured output matching the schema:\n${schemaHint}`;
 			let sanitizedSchema: Record<string, unknown> | undefined;
 			if (!schemaError && normalizedSchema !== undefined) {
-				const strictProbe = tryEnforceStrictSchema(normalizedSchema);
+				const expandedSchema = withSectionVariants(
+					dereferenceJsonSchema(normalizedSchema) as Record<string, unknown>,
+				);
+				const strictProbe = tryEnforceStrictSchema(expandedSchema);
 				if (strictProbe.strict) {
 					if (validator) {
 						normalizeData = value => validator.normalize(value);
-						normalizeSection = (label, value) => validator.normalizeSection(label, value);
+						normalizeSection = (label, value, offset) => validator.normalizeSection(label, value, offset);
 					}
-					sanitizedSchema = sanitizeSchemaForStrictMode(normalizedSchema);
+					sanitizedSchema = sanitizeSchemaForStrictMode(expandedSchema);
 				} else {
-					sanitizedSchema = normalizedSchema;
+					sanitizedSchema = expandedSchema;
 					this.#schemaStrict = false;
 				}
 			} else if (!schemaError && normalized === true) {
@@ -381,7 +397,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				if (hasUnresolvedRefs(resolved)) {
 					throw new Error("schema contains unresolved $ref after dereferencing");
 				}
-				dataSchema = withSectionVariants(resolved);
+				dataSchema = resolved;
 			} else {
 				this.#schemaStrict = false;
 				dataSchema = looseRecordSchema(
@@ -411,6 +427,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		this.#knownSectionLabels = knownSectionLabels;
 		this.#isKnownSection = isKnownSection;
 		this.#parameters = parameters;
+		if (validate) this.#sectionShapes = yieldSectionShapes(session.outputSchema);
 	}
 
 	/**
@@ -427,6 +444,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		this.#hasIncrementalSections = false;
 		this.#schemaValidationFailures = 0;
 		this.#emptyResultFailures = 0;
+		this.#sectionArrayLengths?.clear();
 	}
 
 	#workPoolItems(): readonly WorkPoolYieldItem[] {
@@ -468,10 +486,12 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			yieldType = parseYieldType(raw.type);
 		}
 		let useLastTurn = errorMessage === undefined && data === undefined && yieldType !== undefined;
+		let lastAssistantPayload: string | undefined;
 		// Incremental array-typed sections carry partial data (one finding, one
 		// field) that cannot satisfy the full output schema; the assembled result
 		// is validated as a whole at finalization (executor finalizeSubprocessOutput).
-		const isIncremental = Array.isArray(yieldType) && yieldType.length > 0;
+		const incrementalLabels = Array.isArray(yieldType) && yieldType.length > 0 ? yieldType : undefined;
+		const isIncremental = incrementalLabels !== undefined;
 
 		if (errorMessage !== undefined && data !== undefined) {
 			throw new Error("yield cannot contain both data and error");
@@ -506,13 +526,13 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		// would otherwise be accepted as a typed last-turn incremental yield, then a sibling
 		// section's MAX_SCHEMA_RETRIES override flips schemaOverridden in finalization and the
 		// stale section rides along untouched.
-		if (status === "success" && isIncremental && workPoolItemId === undefined) {
-			const unknownLabels = this.#unknownIncrementalLabels(yieldType as string[]);
+		if (status === "success" && incrementalLabels && workPoolItemId === undefined) {
+			const unknownLabels = this.#unknownIncrementalLabels(incrementalLabels);
 			if (unknownLabels.length > 0) {
 				const validLabels =
 					this.#knownSectionLabels.length > 0 ? formatYieldLabels(this.#knownSectionLabels) : "none";
 				throw new Error(
-					`Section ${formatYieldLabels(yieldType as string[])} uses unknown incremental yield label(s): ${formatYieldLabels(unknownLabels)}. Resubmit with one of the schema's labels: ${validLabels}.`,
+					`Section ${formatYieldLabels(incrementalLabels)} uses unknown incremental yield label(s): ${formatYieldLabels(unknownLabels)}. Resubmit with one of the schema's labels: ${validLabels}.`,
 				);
 			}
 		}
@@ -543,6 +563,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		) {
 			const resolveReport = !isIncremental && this.#session.getYieldReportText;
 			const lastTurnText = resolveReport ? resolveReport(toolCallId) : this.#session.getLastAssistantText?.();
+			lastAssistantPayload = lastTurnText;
 			if (lastTurnText === undefined || lastTurnText.trim().length === 0) {
 				this.#emptyResultFailures++;
 				if (this.#emptyResultFailures > MAX_EMPTY_RESULT_RETRIES) {
@@ -570,21 +591,33 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				useLastTurn = false;
 			}
 		}
-		const normalizeData = (value: unknown): unknown =>
-			workPoolItemId !== undefined
-				? value
-				: Array.isArray(yieldType) && yieldType.length === 1
-					? (this.#normalizeSection?.(yieldType[0], value) ?? value)
-					: !isIncremental
-						? (this.#normalizeData?.(value) ?? value)
-						: value;
+		const normalizeData = (value: unknown): unknown => {
+			if (workPoolItemId !== undefined) return value;
+			if (!incrementalLabels) return this.#normalizeData?.(value) ?? value;
+			const labels = incrementalLabels;
+			if (labels.length === 1) {
+				const label = labels[0];
+				return this.#normalizeSection?.(label, value, this.#sectionArrayLengths?.get(label) ?? 0) ?? value;
+			}
+			if (!isPlainRecord(value) || !labels.every(label => Object.hasOwn(value, label))) return value;
+			let normalized: Record<string, unknown> | undefined;
+			for (const label of labels) {
+				const section = resolveYieldSectionValue(value, labels, label, this.#sectionShapes);
+				const result =
+					this.#normalizeSection?.(label, section, this.#sectionArrayLengths?.get(label) ?? 0) ?? section;
+				if (result === section) continue;
+				normalized ??= { ...value };
+				normalized[label] = result;
+			}
+			return normalized ?? value;
+		};
 		if (status === "success" && data !== undefined) data = normalizeData(data);
 		if (status === "success" && !useLastTurn) {
 			const validateData = (value: unknown): JsonSchemaValidationResult | undefined =>
 				workPoolItemId !== undefined
 					? undefined
-					: isIncremental
-						? this.#validateIncrementalSection(yieldType as string[], value)
+					: incrementalLabels
+						? this.#validateIncrementalSection(incrementalLabels, value)
 						: this.#validate
 							? this.#validate(value)
 							: undefined;
@@ -616,7 +649,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 						remaining > 0
 							? ` Call yield again with the corrected shape — ${remaining} retry attempt(s) remain before the schema constraint is dropped.`
 							: " Call yield again with the corrected shape — this is the final retry before the schema constraint is dropped.";
-					const scope = isIncremental ? `Section ${formatYieldLabels(yieldType as string[])}` : "Output";
+					const scope = incrementalLabels ? `Section ${formatYieldLabels(incrementalLabels)}` : "Output";
 					throw new Error(
 						`${scope} does not match schema: ${formatAllValidationIssues(sectionFailure.issues)}.${retryHint}`,
 					);
@@ -634,7 +667,26 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		}
 
 		this.#emptyResultFailures = 0;
-		if (status === "success" && isIncremental) this.#hasIncrementalSections = true;
+		if (status === "success" && isIncremental) {
+			this.#hasIncrementalSections = true;
+			if (incrementalLabels && workPoolItemId === undefined && this.#sectionShapes) {
+				const payload = useLastTurn ? lastAssistantPayload : data;
+				for (const label of incrementalLabels) {
+					if (this.#sectionShapes.shapes.get(label) !== "array") continue;
+					const value = resolveYieldSectionValue(payload, incrementalLabels, label, this.#sectionShapes);
+					const offset = this.#sectionArrayLengths?.get(label) ?? 0;
+					const array = this.#sectionShapes.acceptsArray?.(label, value, offset) !== false;
+					const length = array
+						? offset +
+							(isYieldSectionBatch(value, label, this.#sectionShapes.acceptsItem, offset) ? value.length : 1)
+						: Array.isArray(value)
+							? value.length
+							: 0;
+					this.#sectionArrayLengths ??= new Map();
+					this.#sectionArrayLengths.set(label, length);
+				}
+			}
+		}
 		let workPoolComplete = false;
 		let completedWorkPoolItem: WorkPoolYieldItem | undefined;
 		let remainingWorkPoolItems: readonly WorkPoolYieldItem[] = [];
@@ -690,12 +742,22 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	 * handled separately by `#unknownIncrementalLabels` and never reach this validator.
 	 */
 	#validateIncrementalSection(labels: string[], data: unknown): JsonSchemaValidationResult | undefined {
+		if (
+			this.#validate &&
+			labels.length > 1 &&
+			(!isPlainRecord(data) || !labels.every(label => Object.hasOwn(data, label)))
+		) {
+			throw new Error("Multi-label schema sections require an object mapping each label to its own value");
+		}
 		const subValidators = this.#validateSection;
 		if (!subValidators || subValidators.size === 0) return undefined;
 		for (const label of labels) {
 			const sub = subValidators.get(label);
 			if (!sub) continue;
-			const parsed = sub(data);
+			const parsed = sub(
+				resolveYieldSectionValue(data, labels, label, this.#sectionShapes),
+				this.#sectionArrayLengths?.get(label) ?? 0,
+			);
 			if (!parsed.success) return parsed;
 		}
 		return undefined;
