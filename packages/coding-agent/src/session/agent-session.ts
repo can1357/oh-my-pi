@@ -1106,7 +1106,8 @@ export class AgentSession implements SettingsScope {
 	 *  incremented, so `isStreaming` alone cannot tell a host that a submission is admitted. */
 	#admittedSubmissionCount = 0;
 	#admittedSubmissionsSettled: PromiseWithResolvers<void> | undefined;
-	#ircResumeAfterAdmissionScheduled = false;
+	/** A stranded-aside resume deferred until admitted submissions settle; waitForIdle() waits for it. */
+	#ircResumeAfterAdmission: Promise<void> | undefined;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
 	// Internal extension hooks and post-emit work (auto-retry, auto-compaction, todo
 	// checks in #handleAgentEvent) still fire on the original schedule — only the
@@ -1279,16 +1280,17 @@ export class AgentSession implements SettingsScope {
 			return;
 		}
 		if (this.hasAdmittedSubmission) {
-			if (!this.#ircResumeAfterAdmissionScheduled) {
-				this.#ircResumeAfterAdmissionScheduled = true;
-				void this.waitForAdmittedSubmissions().then(() => {
-					// Let prompt()'s callers settle attribution before a peer starts a fresh turn.
-					setImmediate(() => {
-						this.#ircResumeAfterAdmissionScheduled = false;
-						this.#resumeStrandedIrcAsides();
-					});
-				});
-			}
+			// Let prompt()'s callers settle attribution before a peer starts a fresh turn.
+			this.#ircResumeAfterAdmission ??= this.waitForAdmittedSubmissions().then(
+				() =>
+					new Promise<void>(resolve =>
+						setImmediate(() => {
+							this.#ircResumeAfterAdmission = undefined;
+							this.#resumeStrandedIrcAsides();
+							resolve();
+						}),
+					),
+			);
 			return;
 		}
 		// A pooled yield contract means a pool turn owns this worker (installed,
@@ -6349,6 +6351,10 @@ export class AgentSession implements SettingsScope {
 			// rewriting entries before it publishes auto_retry_end.
 			await this.#drainInFlightEventHandlers();
 			await this.#waitForPostPromptRecovery();
+			if (this.#ircResumeAfterAdmission) {
+				await this.#ircResumeAfterAdmission;
+				continue;
+			}
 			if (!this.agent.state.isStreaming && this.#inFlightEventHandlers.size === 0) return;
 		}
 	}
