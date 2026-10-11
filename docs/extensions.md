@@ -286,6 +286,34 @@ Also exposed:
 - `pi.typebox` (legacy TypeBox-compatible shim)
 - `pi.pi` (package exports)
 
+### Handler budgets (`pi.setHandlerTimeout`)
+
+Every dispatched handler runs under a watchdog budget: 30,000 ms by default, 2,000 ms
+for `session_shutdown`, and `extensionHandlers.toolCallTimeoutMs` for `tool_call`. An
+extension can request a different budget for **one of its own events** without
+changing any other extension's:
+
+```ts
+// A context transform that legitimately needs longer than the default.
+const enforced = pi.setHandlerTimeout("context", 60_000);
+if (enforced < 60_000) {
+  pi.logger.warn(`context budget capped at ${enforced}ms; raise extensionHandlers.timeoutMs`);
+}
+pi.on("context", async event => transformWithin(enforced, event));
+```
+
+A request is not a grant. The host enforces `min(timeoutMs, extensionHandlers.timeoutMs)`,
+and that ceiling defaults to the same 30,000 ms as the base budget — so an extension can
+always **shorten** its own budget, and can only **lengthen** it as far as a user has
+authorised by setting `extensionHandlers.timeoutMs`. The fail-closed `tool_call` watchdog
+therefore stays outside extension control, and the call returns the enforced number so a
+plugin can detect a clamp instead of being silently cut off mid-pass.
+
+- `undefined` restores the host default for that event; repeated calls replace the request.
+- `session_shutdown` and `tool_call` stay additionally within their existing per-event caps; only the duration changes, never the policy (`tool_call` still fails closed).
+- A non-positive, non-integer, or unknown event name throws `RangeError` and leaves the previous request untouched.
+- The budget measures active work **only for `tool_call`**: dialog waits pause it there and nowhere else, so a `context` or `input` handler that opens `ctx.ui.select()` is still charged wall-clock time.
+
 ### Runtime setting overrides
 
 Settings are addressed through typed registry handles (see "Definitions" in [config-usage.md](./config-usage.md#definitions-srcconfigregistryts)); the string-path `settings.get`/`set`/`override` methods were removed in 18.3. Extensions resolve a handle by id with `lookup(id)` (and enumerate them with `all()`) from the `@oh-my-pi/pi-coding-agent/config/registry` subpath, then pass `pi.pi.settings` as the scope:
@@ -1254,7 +1282,7 @@ Provide `renderCall` / `renderResult` on `registerTool` definitions for custom t
 
 - Session actions are unavailable during extension load; registration methods, `getFlag`, and `exec` are available.
 - `tool_call` errors and timeouts block execution (fail-closed). Its budget is `extensionHandlers.toolCallTimeoutMs` (default 30,000 ms), paused during extension UI waits.
-- Most dispatched handlers have a 30-second budget; `session_shutdown` handlers run concurrently with a 2-second budget. Timing out stops waiting and cancels handler UI, but cannot undo arbitrary extension side effects.
+- Most dispatched handlers have a 30-second budget; `session_shutdown` handlers run concurrently with a 2-second budget. An extension can request a different budget for one of its own events via [`pi.setHandlerTimeout`](#handler-budgets-pisethandlertimeout), which the host clamps to `extensionHandlers.timeoutMs` (default 30,000 ms), so lengthening one requires user configuration. Timing out stops waiting and cancels handler UI, but cannot undo arbitrary extension side effects. Budgets count active work only for `tool_call`, where extension UI dialog waits pause them.
 - Command name conflicts with built-ins are skipped with diagnostics.
 - Reserved shortcuts are ignored (`ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+k`, `ctrl+p`, `ctrl+l`, `ctrl+o`, `ctrl+t`, `ctrl+g`, `ctrl+q`, `alt+m`, `shift+tab`, `shift+ctrl+p`, `alt+enter`, `escape`, `enter`).
 - Treat `ctx.reload()` as terminal for the current command handler frame.

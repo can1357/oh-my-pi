@@ -104,7 +104,7 @@ import type {
 	UserPythonEventResult,
 } from "./types";
 
-import { cfgExtensionHandlersToolCallTimeoutMs } from "../settings";
+import { cfgExtensionHandlersTimeoutMs, cfgExtensionHandlersToolCallTimeoutMs } from "../settings";
 
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
@@ -162,8 +162,38 @@ export function testSetSessionShutdownHandlerTimeoutMs(timeoutMs: number): void 
 
 /** Per-event handler budget. Defaults to the generic cap; `session_shutdown`
  *  uses its own short cap so teardown stays prompt. */
-function handlerTimeoutForEvent(eventType: string): number {
+export function handlerTimeoutForEvent(eventType: string): number {
 	return eventType === "session_shutdown" ? sessionShutdownHandlerTimeoutMs : extensionHandlerTimeoutMs;
+}
+
+/**
+ * Resolve the budget a handler actually gets when its extension requested one
+ * via `pi.setHandlerTimeout`.
+ *
+ * The user's `extensionHandlers.timeoutMs` is the ceiling: a self-declaration
+ * can always shorten a budget and can only lengthen it as far as a human has
+ * authorised, so no extension can switch off the #3948 watchdog on its own.
+ * `session_shutdown` and `tool_call` stay additionally bounded by `baseMs`,
+ * their per-event policy cap (the 2 s teardown budget, and the user's
+ * `extensionHandlers.toolCallTimeoutMs` for the fail-closed pre-execution gate).
+ *
+ * @param eventType Event discriminant, used for the per-event caps.
+ * @param requestedMs Value the extension passed to `setHandlerTimeout`.
+ * @param baseMs Budget the dispatch site would have used without a request.
+ * @param settings Active settings; absent falls back to the built-in ceiling.
+ * @returns Milliseconds the watchdog will enforce.
+ */
+export function resolveHandlerTimeoutMs(
+	eventType: string,
+	requestedMs: number,
+	baseMs: number,
+	settings?: Settings,
+): number {
+	const ceiling = normalizeHandlerTimeout(
+		(settings ? cfgExtensionHandlersTimeoutMs.get(settings) : undefined) ?? extensionHandlerTimeoutMs,
+	);
+	const capped = Math.min(requestedMs, ceiling);
+	return eventType === "session_shutdown" || eventType === "tool_call" ? Math.min(capped, baseMs) : capped;
 }
 
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
@@ -1514,6 +1544,14 @@ export class ExtensionRunner {
 		onFailure?: (kind: "timeout" | "error", message: string) => R,
 		outerSignal?: AbortSignal,
 	): Promise<R | undefined> {
+		// A per-extension request is resolved here, at the one choke point every
+		// dispatch path shares, so no call site has to know about it. Absent a
+		// request the call-site budget passes through untouched.
+		const requestedMs = ext.handlerTimeouts?.get(event.type);
+		const effectiveTimeoutMs =
+			requestedMs === undefined
+				? timeoutMs
+				: resolveHandlerTimeoutMs(event.type, requestedMs, timeoutMs, this.settings);
 		// `session_stop` carries its own signal on the event; `tool_call` receives
 		// the outer dispatch signal (loop request or wrapper execute) so an abort
 		// while a handler awaits a human dialog cancels the dialog and settles the
@@ -1555,7 +1593,7 @@ export class ExtensionRunner {
 						}
 						return result;
 					},
-					timeoutMs,
+					effectiveTimeoutMs,
 					signal,
 				),
 			);
@@ -1566,11 +1604,11 @@ export class ExtensionRunner {
 		}
 		if (handlerResult === EXTENSION_HANDLER_ABORTED) return undefined;
 		if (handlerResult === EXTENSION_HANDLER_TIMEOUT) {
-			const error = `handler timed out after ${timeoutMs}ms`;
+			const error = `handler timed out after ${effectiveTimeoutMs}ms`;
 			logger.warn("Extension handler timed out", {
 				extensionPath: ext.path,
 				event: event.type,
-				timeoutMs,
+				timeoutMs: effectiveTimeoutMs,
 			});
 			this.emitError({
 				extensionPath: ext.path,

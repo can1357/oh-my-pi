@@ -160,3 +160,22 @@ export const cfgExtensionHandlersToolCallTimeoutMs = register({
 			"Positive finite active-work timeout for extension tool_call handlers; invalid values use 30000ms, and time awaiting OMP-owned dialogs does not count",
 	},
 });
+
+/**
+ * Ceiling for every extension handler budget, including a value an extension
+ * asks for via `pi.setHandlerTimeout`. It stays at the 30 s default so the
+ * watchdog cannot be talked out of existence from extension code: raising a
+ * handler budget above it requires a user to set this key.
+ */
+export const cfgExtensionHandlersTimeoutMs = register({
+	id: "extensionHandlers.timeoutMs",
+	type: "number",
+	default: 30_000,
+	ui: {
+		tab: "tools",
+		group: "Extensions",
+		label: "Handler Timeout Ceiling (ms)",
+		description:
+			"Upper bound for extension handler budgets, including values requested via pi.setHandlerTimeout; invalid values use 30000ms",
+	},
+});

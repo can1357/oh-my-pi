@@ -75,6 +75,11 @@
 - Fixed `grep` showing only the first 512 bytes of a long matching line, so a match further in never appeared; it now shows the part around the match, with `...` on cut sides and the match's `[col N]` ([#15278](https://github.com/can1357/oh-my-pi/pull/15278) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed snapcompact archives being sized from the context window, which could leave the context over a low compaction trigger right after compacting; archives now take half the room left under the trigger ([#14345](https://github.com/can1357/oh-my-pi/pull/14345) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a usage-limited session with an account pool (such as a task agent under `task.agentAccountPools`) spending a saved reset to restore an account outside its pool, which it cannot use; resets about to expire are still salvaged on every account ([#15135](https://github.com/can1357/oh-my-pi/pull/15135) by [@will-bogusz](https://github.com/will-bogusz))
+### Changed
+
+- `omp update` on standalone binaries now downloads from Stencil's build service (build.stencil.so, overridable with `PI_BUILD_URL`) instead of GitHub releases, and fetches a small verified patch (about 6 MB instead of 200 MB) when updating from a recent version; compiled binaries also check it for the startup update notice
+- `install.sh` and `install.ps1` download the standalone binary from build.stencil.so and check its SHA-256 before installing; `--binary --ref` (`-Binary -Ref`) now takes a release tag such as `v18.8.9`. The Homebrew formula downloads from build.stencil.so too
+- Added `pi.setHandlerTimeout(event, ms)` so one extension can request its own handler budget for one event, resolved as `min(request, extensionHandlers.timeoutMs)` against the new ceiling setting; the call returns the enforced budget so a plugin can detect a clamp, and no extension can lengthen a budget past what a user configured ([#15295](https://github.com/can1357/oh-my-pi/pull/15295) by [@randomvariable](https://github.com/randomvariable); addresses [#15290](https://github.com/can1357/oh-my-pi/issues/15290), [#11286](https://github.com/can1357/oh-my-pi/issues/11286)).
 
 ## [18.8.9] - 2026-10-10
 

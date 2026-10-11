@@ -1588,6 +1588,35 @@ export interface ExtensionAPI {
 	on(event: "user_python", handler: ExtensionHandler<UserPythonEvent, UserPythonEventResult>): void;
 	on(event: "mcp_notification", handler: ExtensionHandler<McpNotificationEvent>): void;
 
+	/**
+	 * Requests a different execution budget for one event of THIS extension only.
+	 *
+	 * The host enforces `min(timeoutMs, ceiling)` where the ceiling is
+	 * `extensionHandlers.timeoutMs` (default 30,000 ms): a request can always
+	 * shorten a budget and can only lengthen it as far as a user has authorised,
+	 * so no extension can switch off the watchdog by itself. `session_shutdown`
+	 * and `tool_call` stay additionally within their existing per-event caps —
+	 * the 2 s teardown budget, and the fail-closed
+	 * `extensionHandlers.toolCallTimeoutMs` gate.
+	 *
+	 * Returns the budget the host will actually enforce, computed from the settings
+	 * the loader was given at registration time. Compare it against your own deadline:
+	 * a value below `timeoutMs` means the ceiling has not been raised, so the extension
+	 * should shorten its work or tell the user which setting to change.
+	 *
+	 * Only `tool_call` treats the budget as active-work time. Dialog waits pause it
+	 * there and nowhere else, so a handler for any other event that opens an
+	 * `ctx.ui.*` dialog is still charged wall-clock time.
+	 *
+	 * @param timeoutMs Positive integer milliseconds, or `undefined` to restore
+	 *   the host default for this event.
+	 * @returns Effective budget in milliseconds.
+	 * @throws RangeError If `event` is not a dispatchable event name, or
+	 *   `timeoutMs` is not a positive integer up to 2147483647. A rejected call
+	 *   leaves any previous request untouched.
+	 */
+	setHandlerTimeout(event: ExtensionEvent["type"], timeoutMs: number | undefined): number;
+
 	// =========================================================================
 	// Tool Registration
 	// =========================================================================
@@ -2069,6 +2098,8 @@ export interface Extension {
 	resolvedPath: string;
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
+	/** Per-event budgets requested via `setHandlerTimeout`; absent = host default. */
+	handlerTimeouts?: Map<string, number>;
 	tools: Map<string, RegisteredTool<any, any>>;
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];

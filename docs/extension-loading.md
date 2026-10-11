@@ -338,7 +338,11 @@ emitted as extension errors instead of crashing the runner loop. Most dispatched
 handlers have a 30-second budget; `session_shutdown` handlers run concurrently
 with a 2-second budget. `tool_call` uses
 `extensionHandlers.toolCallTimeoutMs` (default 30,000 ms), pauses that budget while
-waiting for extension UI dialogs, and fails closed on an error or timeout.
+waiting for extension UI dialogs, and fails closed on an error or timeout. An
+extension may request a different budget for one of its own events via
+`pi.setHandlerTimeout`; the host clamps the request to `extensionHandlers.timeoutMs`
+(default 30,000 ms), so raising a budget requires user configuration, and only
+`tool_call` pauses its budget for dialog waits.
 Raw detached callbacks remain outside this isolation; use the managed timers
 described in [Extensions](./extensions.md#background-work-ctxsetinterval--ctxsettimeout).
 

@@ -1845,6 +1845,283 @@ describe("ExtensionRunner", () => {
 			warnSpy.mockRestore();
 		});
 
+		it("raises a context budget past the default only when the user's ceiling allows it, leaving siblings at the default", async () => {
+			const budgetedPath = path.join(tempDir.path(), "ceiling-raised-context.ts");
+			const siblingPath = path.join(tempDir.path(), "ceiling-default-sibling-context.ts");
+			fs.writeFileSync(
+				budgetedPath,
+				`
+					export default function(pi) {
+						pi.setHandlerTimeout("context", 60_000);
+						pi.on("context", async event => {
+							const { promise: budgeted, resolve: releaseBudgeted } = Promise.withResolvers();
+							setTimeout(releaseBudgeted, 50);
+							await budgeted;
+							return { messages: [...event.messages, { role: "user", content: "opted-in", timestamp: 2 }] };
+						});
+					}
+				`,
+			);
+			fs.writeFileSync(
+				siblingPath,
+				`
+					export default function(pi) {
+						pi.on("context", async () => await Promise.withResolvers().promise);
+					}
+				`,
+			);
+
+			const loaded = await loadTestExtensions([budgetedPath, siblingPath]);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				Settings.isolated({ "extensionHandlers.timeoutMs": 60_000 }),
+			);
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			// The default budget stays far below what the opted-in handler needs, so a
+			// pass can only come from the raised ceiling and not from an unlucky base.
+			testSetExtensionHandlerTimeoutMs(10);
+
+			vi.useFakeTimers();
+			try {
+				let settled = false;
+				const emitted = runner.emitContext([{ role: "user", content: "hello", timestamp: 1 }]).then(messages => {
+					settled = true;
+					return messages;
+				});
+				for (let tick = 0; tick < 200 && !settled; tick++) {
+					await Promise.resolve();
+					vi.advanceTimersByTime(1);
+				}
+				const transformed = await emitted;
+
+				expect(transformed).toHaveLength(2);
+				const appended = transformed[1] as Extract<AgentMessage, { role: "user" }>;
+				expect(appended.content).toBe("opted-in");
+				// The sibling keeps the 10 ms default and is the only one reported.
+				expect(warnSpy).toHaveBeenCalledWith("Extension handler timed out", {
+					extensionPath: siblingPath,
+					event: "context",
+					timeoutMs: 10,
+				});
+				expect(warnSpy.mock.calls.filter(call => call[1]?.extensionPath === budgetedPath)).toEqual([]);
+			} finally {
+				vi.useRealTimers();
+				warnSpy.mockRestore();
+			}
+		});
+
+		it("caps a request above the configured ceiling instead of honouring it", async () => {
+			const extensionPath = path.join(tempDir.path(), "ceiling-capped-context.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.setHandlerTimeout("context", 60_000);
+						pi.on("context", async () => {
+							const { promise, resolve } = Promise.withResolvers();
+							setTimeout(resolve, 50);
+							await promise;
+						});
+					}
+				`,
+			);
+
+			const loaded = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				Settings.isolated({ "extensionHandlers.timeoutMs": 20 }),
+			);
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError(error => {
+				errors.push(error);
+			});
+			// A base above the ceiling isolates the cap: without ceiling enforcement the
+			// 50 ms wait would complete inside the 10 s base.
+			testSetExtensionHandlerTimeoutMs(10_000);
+
+			vi.useFakeTimers();
+			try {
+				const messages: AgentMessage[] = [{ role: "user", content: "hello", timestamp: 1 }];
+				let settled = false;
+				const emitted = runner.emitContext(messages).then(result => {
+					settled = true;
+					return result;
+				});
+				for (let tick = 0; tick < 200 && !settled; tick++) {
+					await Promise.resolve();
+					vi.advanceTimersByTime(1);
+				}
+
+				// Fail-open passthrough is unchanged: the capped handler is dropped.
+				expect(await emitted).toEqual(messages);
+				expect(errors).toContainEqual({
+					extensionPath,
+					event: "context",
+					error: "handler timed out after 20ms",
+				});
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("returns the enforced budget so an extension can detect an unraised ceiling", async () => {
+			const extensionPath = path.join(tempDir.path(), "budget-probe-context.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						process.env.MC_PROBE_RAISE = String(pi.setHandlerTimeout("context", 60_000));
+						process.env.MC_PROBE_SHORTEN = String(pi.setHandlerTimeout("context", 5));
+						process.env.MC_PROBE_SHUTDOWN = String(pi.setHandlerTimeout("session_shutdown", 60_000));
+						process.env.MC_PROBE_RESET = String(pi.setHandlerTimeout("context", undefined));
+					}
+				`,
+			);
+
+			// The ceiling before any user setting is the default budget itself.
+			testSetExtensionHandlerTimeoutMs(25);
+			testSetSessionShutdownHandlerTimeoutMs(3);
+			const loaded = await loadTestExtensions([extensionPath]);
+			try {
+				// Lengthening is refused down to the ceiling, shortening is honoured, and
+				// teardown never exceeds its own cap. Reset reports the host default.
+				expect(process.env.MC_PROBE_RAISE).toBe("25");
+				expect(process.env.MC_PROBE_SHORTEN).toBe("5");
+				expect(process.env.MC_PROBE_SHUTDOWN).toBe("3");
+				expect(process.env.MC_PROBE_RESET).toBe("25");
+				// Reset clears only the named event: the context request is gone while
+				// the untouched session_shutdown request remains, so a plugin cannot
+				// restore one budget by resetting another.
+				expect([...(loaded.extensions[0].handlerTimeouts ?? new Map())]).toEqual([["session_shutdown", 60_000]]);
+			} finally {
+				delete process.env.MC_PROBE_RAISE;
+				delete process.env.MC_PROBE_SHORTEN;
+				delete process.env.MC_PROBE_SHUTDOWN;
+				delete process.env.MC_PROBE_RESET;
+			}
+		});
+
+		it("rejects invalid budgets and unknown event names without touching stored state", async () => {
+			const extensionPath = path.join(tempDir.path(), "budget-validation.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						const probe = [];
+						for (const invalid of [0, -5, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2147483648]) {
+							try {
+								pi.setHandlerTimeout("context", invalid);
+								probe.push("accepted:" + invalid);
+							} catch (error) {
+								probe.push(error instanceof RangeError ? "range" : "wrong:" + error);
+							}
+						}
+						try {
+							pi.setHandlerTimeout("contxt", 60);
+							probe.push("accepted-bogus-name");
+						} catch (error) {
+							probe.push(error instanceof RangeError ? "unknown-event" : "wrong:" + error);
+						}
+						pi.setHandlerTimeout("context", 60);
+						pi.setHandlerTimeout("context", 45);
+						process.env.MC_PROBE_VALIDATION = probe.join(",");
+					}
+				`,
+			);
+
+			const loaded = await loadTestExtensions([extensionPath]);
+			try {
+				expect(process.env.MC_PROBE_VALIDATION).toBe(
+					[
+						"range",
+						"range",
+						"range",
+						"range",
+						"range",
+						"range",
+						// A mistyped event must fail loudly: storing it would report success
+						// while granting nothing, and a typo in a budget is invisible.
+						"unknown-event",
+					].join(","),
+				);
+				// Every rejected call was a no-op; the last valid write wins.
+				expect([...(loaded.extensions[0].handlerTimeouts ?? new Map())]).toEqual([["context", 45]]);
+			} finally {
+				delete process.env.MC_PROBE_VALIDATION;
+			}
+		});
+
+		it("reports the same budget it will enforce when loader and runner share one settings instance", async () => {
+			const extensionPath = path.join(tempDir.path(), "consistent-budget-context.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						process.env.MC_PROBE_REPORTED = String(pi.setHandlerTimeout("context", 60_000));
+						pi.on("context", async event => {
+							const started = performance.now();
+							const { promise, resolve } = Promise.withResolvers();
+							setTimeout(resolve, 30);
+							await promise;
+							process.env.MC_PROBE_ACTUAL = String(Math.round(performance.now() - started));
+							return { messages: [...event.messages, { role: "user", content: "served", timestamp: 2 }] };
+						});
+					}
+				`,
+			);
+
+			// One Settings instance feeds both the loader (which answers the API call)
+			// and the runner (which enforces the watchdog). A request above the ceiling
+			// must be reported as the ceiling, not as the unrelated 10 ms base.
+			const settings = Settings.isolated({ "extensionHandlers.timeoutMs": 120 });
+			const loaded = await loadExtensions([extensionPath], tempDir.path(), undefined, settings);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				settings,
+			);
+			testSetExtensionHandlerTimeoutMs(10);
+
+			vi.useFakeTimers();
+			try {
+				let settled = false;
+				const emitted = runner.emitContext([{ role: "user", content: "hello", timestamp: 1 }]).then(messages => {
+					settled = true;
+					return messages;
+				});
+				for (let tick = 0; tick < 200 && !settled; tick++) {
+					await Promise.resolve();
+					vi.advanceTimersByTime(1);
+				}
+				const transformed = await emitted;
+
+				expect(process.env.MC_PROBE_REPORTED).toBe("120");
+				// Enforcement agreed with the reported figure: the 30 ms wait survived the
+				// 10 ms base because the shared ceiling allowed the raise.
+				expect(Number(process.env.MC_PROBE_ACTUAL)).toBeGreaterThanOrEqual(30);
+				const appended = transformed[transformed.length - 1] as Extract<AgentMessage, { role: "user" }>;
+				expect(appended.content).toBe("served");
+			} finally {
+				vi.useRealTimers();
+				delete process.env.MC_PROBE_REPORTED;
+				delete process.env.MC_PROBE_ACTUAL;
+			}
+		});
+
 		it("falls back to the default tool_call timeout for invalid configured values", async () => {
 			const extensionPath = path.join(tempDir.path(), "invalid-timeout-tool-call.ts");
 			fs.writeFileSync(
