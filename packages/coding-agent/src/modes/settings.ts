@@ -876,20 +876,6 @@ export const cfgComposerRecallClearedDrafts = register({
 	},
 });
 
-export const cfgComposerPredictions = register({
-	id: "composer.predictions",
-	type: "boolean",
-	default: false,
-	ui: {
-		tab: "interaction",
-		group: "Input",
-		label: "Composer Predictions",
-		get description() {
-			return `After a completed turn, ask the active model to predict your next message and show it as ghost text in the empty composer; ${formatKeyHint("tab")} inserts it without sending. Extra usage: every completed turn sends one more billed request over the whole conversation (counted in /stats)`;
-		},
-	},
-});
-
 export const cfgDoubleEscapeAction = register({
 	id: "doubleEscapeAction",
 	type: "enum",
@@ -1006,6 +992,20 @@ export const cfgSpellingAutocomplete = register({
 				? [{ value: "apple" as const, label: "Apple", description: "macOS dictionary completions" }]
 				: []),
 		],
+	},
+});
+
+export const cfgComposerPredictions = register({
+	id: "composer.predictions",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Composer Predictions",
+		get description() {
+			return `After a completed turn, ask the active model to predict your next message and show it as ghost text in the empty composer; ${formatKeyHint("tab")} or ${formatKeyHint("right")} inserts it without sending. Extra usage: every completed turn sends one more billed request over the whole conversation (counted in /stats)`;
+		},
 	},
 });
 
