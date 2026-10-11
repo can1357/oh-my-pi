@@ -123,7 +123,17 @@ class Engine:
 		return memory_id
 
 	def op_recall_raw(self, params):
-		return [row["content"] for row in self.beam.recall(params["query"], top_k=params["k"])[: params["k"]]]
+		rows = self.beam.recall(params["query"], top_k=params["k"])[: params["k"]]
+		debug_path = os.environ.get("MEMORY_EVAL_DEBUG_SCORES")
+		if debug_path:
+			# Calibration debugging only: lets a reordering between Run A and Run B be told apart from a tie.
+			debug_rows = [
+				{"score": row.get("score"), "tier": row.get("tier"), "id": row["id"], "content": row["content"][:60]}
+				for row in rows
+			]
+			with open(debug_path, "a", encoding="utf-8") as debug_file:
+				debug_file.write(json.dumps({"query": params["query"], "rows": debug_rows}) + "\n")
+		return [row["content"] for row in rows]
 
 
 def main():
