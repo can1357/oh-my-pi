@@ -25,7 +25,12 @@ const REVISIONS = {
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../..");
 
 function createEngine(name: string): EngineAdapter {
-	if (name === "mnemopi") return mnemopiEngine();
+	if (name === "mnemopi") {
+		// Mnemopi runs in this process and reads MNEMOPI_* itself, so they cannot be scrubbed: refuse instead.
+		const set = Object.keys(Bun.env).filter(key => key.startsWith("MNEMOPI_") && Bun.env[key]);
+		if (set.length > 0) throw new Error(`refusing to run mnemopi with MNEMOPI_* set: ${set.join(", ")}`);
+		return mnemopiEngine();
+	}
 	if (name === "mnemosyne") return mnemosyneEngine();
 	if (name === "oracle") return oracleEngine();
 	if (name === "random") return randomEngine();
