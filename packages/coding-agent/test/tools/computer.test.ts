@@ -2073,6 +2073,7 @@ describe("expanded computer APIs", () => {
 					"await win.menu.select('File', 'Save')",
 					"await win.menu.select(path=['File', 'Save'])",
 					"print((await win.menu.items(path='File'))[0]['path'])",
+					"try:\n    await win.menu.select('File', None)\nexcept Exception as error:\n    print('select-none:', error)",
 					"obs = await win.observe(silent=True)",
 					"await win.click(60, 30)",
 					"monitor = await computer.display('display-1')",
@@ -2093,6 +2094,8 @@ describe("expanded computer APIs", () => {
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toContain("1 display-1 False");
 			expect(result.output).toContain("['File', 'Save']");
+			expect(result.output).toContain("select-none: menu.select requires a menu path");
+			expect(result.output).toContain('got ["File",null]');
 			expect(native.controlActive).toBe(false);
 			expect(native.operations.filter(operation => operation.startsWith("menu:"))).toEqual([
 				"menu:42:File/Save",
@@ -2138,6 +2141,7 @@ describe("expanded computer APIs", () => {
 				["select()", "no path"],
 				['select(["File"], "Save")', '[["File"],"Save"]'],
 				['select("File", "")', '["File",""]'],
+				['select("File", undefined)', '["File",null]'],
 			]) {
 				await expect(
 					runInContext(`(async () => (await computer.window(42)).menu.${call})()`, realm),

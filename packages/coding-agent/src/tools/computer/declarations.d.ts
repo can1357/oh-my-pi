@@ -269,7 +269,7 @@ interface ComputerWindow extends ComputerInputTarget {
 		/** Inspect a menu path without activating the application. */
 		items(...path: string[] | [path?: string | string[]]): Promise<ComputerMenuItem[]>;
 		/** Select one unambiguous enabled command using the window's native menu context. */
-		select(...path: string[] | [string[]]): Promise<void>;
+		select(...path: [string, ...string[]] | [string[]]): Promise<void>;
 	};
 	/** Formatted accessibility tree as one string, one node per line with `[ref=eN]` tags. */
 	ax(options?: ComputerAxOptions): Promise<string>;

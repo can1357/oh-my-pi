@@ -176,11 +176,12 @@ def _make_computer():
             return await self._root._method(f"{self._namespace}.{method}", args, kwargs)
 
     def _menu_path(method, segments, path):
-        if path is None:
-            return segments
-        if segments:
-            raise TypeError(f"menu.{method}() takes the path positionally or as path=, not both")
-        return (path,)
+        if path is not None:
+            if segments:
+                raise TypeError(f"menu.{method}() takes the path positionally or as path=, not both")
+            return (path,)
+        # Send separate titles as one list so a trailing None reaches the worker instead of being trimmed.
+        return (list(segments),) if len(segments) > 1 else segments
 
     class _Menu(_Namespace):
         async def items(self, *segments, path=None):

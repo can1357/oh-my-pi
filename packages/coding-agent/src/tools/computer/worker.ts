@@ -667,7 +667,7 @@ class Win {
 						: menuPath("menu.items", path, { allowEmpty: true });
 				return await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
 			},
-			select: async (...path: string[] | [string[]]): Promise<void> => {
+			select: async (...path: [string, ...string[]] | [string[]]): Promise<void> => {
 				const context = this.#getContext();
 				guardRun(context, "menu.select");
 				const segments = menuPath("menu.select", path);

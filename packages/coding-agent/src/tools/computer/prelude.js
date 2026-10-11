@@ -138,8 +138,11 @@
 		defineValueMethods(win, windowValueMethods, via);
 		for (const [namespace, methods] of [["menu", ["items", "select"]]]) {
 			const nested = {};
+			// Separate menu titles travel as one array, so a trailing undefined title is not trimmed away.
 			for (const method of methods)
-				defineMethod(nested, method, (...args) => callValue(via(step(`${namespace}.${method}`, args))));
+				defineMethod(nested, method, (...args) =>
+					callValue(via(step(`${namespace}.${method}`, args.length > 1 ? [args] : args))),
+				);
 			defineMethod(win, namespace, Object.freeze(nested));
 		}
 		defineMethod(win, "find", async query => (await callValue(via(step("find", [query])))).map(makeElement));
