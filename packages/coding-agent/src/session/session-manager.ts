@@ -773,8 +773,7 @@ interface SessionFileBody {
  * truncates oversized strings, and externalizes image payloads to
  * content-addressed `blob:sha256:` refs (so the same payload always projects
  * to the same ref). A line is therefore valid exactly while every field value
- * it was derived from still holds, which the snapshots below check by
- * identity — one comparison per field, no JSON walk.
+ * it was derived from still holds, which the snapshots below check:
  *
  * `rewriteEntries()` announces an in-place update with a global `#bodyRevision`
  * bump that cannot say *which* entry moved (it bumps on every prune pass, hot
@@ -784,10 +783,22 @@ interface SessionFileBody {
  *   repository makes to a persisted entry: a re-parented `parentId`, a stamped
  *   `warning`, a replaced `message`, rewritten `content`/`prunedAt`
  *   (prune/shake/strip-images), and `retryRecovery`.
- * - `messageFields` + `version` — the message's own field values plus its
- *   `messageEstimateVersion` owner-invalidation tag, so a mutation that writes
- *   through to a nested state the shallow snapshot cannot see (a `usage.cost`
- *   recompute, a `details` rewrite) still invalidates.
+ * - `message` — a deep value stamp of the message's whole JSON graph, which is
+ *   what makes the entry half sound. An in-place nested write such as
+ *   `message.content[0].data = newBase64` keeps the entry, the message, the
+ *   `content` array, and every block object identity unchanged, so identity
+ *   snapshots at any depth still compare equal — yet the projection reads a
+ *   different payload and would mint a different `blob:sha256:` ref. The stamp
+ *   compares the payload values themselves, so a nested write misses and the
+ *   line is re-projected instead of restoring the previous image on reload.
+ *   Leaves compare by value, so an equal-valued replacement still hits (the
+ *   projected line is byte-identical).
+ * - `version` — the message's `messageEstimateVersion` owner-invalidation tag.
+ *   The writers that mutate persisted message content in place (prune's
+ *   `blankToolResult`, shake's `applyShakeRegion`, `stripImagesFromMessage`)
+ *   are contractually required to bump it, which invalidates the line before
+ *   the stamp is even consulted; the stamp is the backstop for any nested write
+ *   that forgets to.
  */
 interface CachedEntryLine {
 	line: string;
@@ -795,10 +806,108 @@ interface CachedEntryLine {
 	bytes: number;
 	/** The entry's own field values when the line was produced. */
 	fields: Record<string, unknown>;
-	/** The message's own field values when the line was produced. */
-	messageFields: Record<string, unknown> | undefined;
+	/**
+	 * Deep value stamp of `entry.message` when the line was produced (see
+	 * {@link messageValueStamp}). Absent on the direct, uncached path for
+	 * non-message entries, which never reach the WeakMap.
+	 */
+	message?: unknown[];
 	/** {@link messageEstimateVersion} of the entry's message, or 0 when it has none. */
 	version: number;
+}
+
+/**
+ * Structural markers for {@link messageValueStamp} — JSON values carry no type
+ * tag of their own, and a leaf number must never compare equal to a marker.
+ */
+const STAMP_OBJECT = Symbol("stamp.object");
+const STAMP_ARRAY = Symbol("stamp.array");
+const STAMP_END = Symbol("stamp.end");
+
+/**
+ * Flatten `value`'s JSON graph — the graph `stringifyJson` in {@link #lineFor}
+ * projects — into `out` as structure markers, own keys, and leaf values, never
+ * object identity. Used by the entry-line memo to see nested mutation that
+ * identity checks cannot: the graph is walked once when the line is produced
+ * and re-walked (versus the stamp, not against the serialized bytes) whenever
+ * the line is considered for reuse.
+ *
+ * Values that `JSON.stringify` would replace are stamped as their projected
+ * output instead of their live shape — a `toJSON()` object as its serialized
+ * value, `undefined` as the `null` (in arrays) or dropped key (in objects) it
+ * emits — so the stamp tracks exactly the bytes the line was built from.
+ */
+function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
+	if (value === null || typeof value !== "object") {
+		out.push(value);
+		return out;
+	}
+	// Duck-type read of JSON's own serializer hook; TypeScript has no structural
+	// expression for "serializes through toJSON".
+	const serializer = value as { toJSON?: () => unknown };
+	if (typeof serializer.toJSON === "function") {
+		out.push(serializer.toJSON.call(value));
+		return out;
+	}
+	if (Array.isArray(value)) {
+		out.push(STAMP_ARRAY);
+		for (const item of value) messageValueStamp(item, out);
+	} else {
+		const fields = value as Record<string, unknown>;
+		out.push(STAMP_OBJECT);
+		for (const key of Object.keys(fields)) {
+			out.push(key);
+			messageValueStamp(fields[key], out);
+		}
+	}
+	out.push(STAMP_END);
+	return out;
+}
+
+/**
+ * Whether `stamp` (from {@link messageValueStamp}) still describes `value`.
+ * Compares structure, keys, and leaf values in one lockstep walk with early
+ * exit — an unchanged graph never re-serializes, and the first differing leaf
+ * stops the walk. Object identity is never trusted: two structurally equal
+ * graphs compare equal (their projected lines are byte-identical), and a leaf
+ * swapped for a different-typed value falls out of the marker comparison.
+ */
+function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
+	let index = 0;
+	const match = (live: unknown): boolean => {
+		const expected = stamp[index++];
+		// A `toJSON` node was stamped as its projected value — a single leaf
+		// (see {@link messageValueStamp}) — so compare that projection here
+		// instead of recursing, which would consume a second stamp entry.
+		if (live !== null && typeof live === "object") {
+			// Duck-type read of JSON's own serializer hook.
+			const serializer = live as { toJSON?: () => unknown };
+			if (typeof serializer.toJSON === "function") {
+				return serializer.toJSON.call(live) === expected;
+			}
+		}
+		if (expected === STAMP_OBJECT || expected === STAMP_ARRAY) {
+			if (live === null || typeof live !== "object") return false;
+			if (Array.isArray(live) !== (expected === STAMP_ARRAY)) return false;
+			if (Array.isArray(live)) {
+				for (const item of live) if (!match(item)) return false;
+			} else {
+				const fields = live as Record<string, unknown>;
+				for (const key of Object.keys(fields)) {
+					if (stamp[index++] !== key) return false;
+					if (!match(fields[key])) return false;
+				}
+			}
+			return stamp[index++] === STAMP_END;
+		}
+		// NaN never equals itself, but JSON renders it `null` for every path,
+		// so a NaN leaf describes the same line either way.
+		return (
+			expected === live ||
+			(typeof expected === "number" && Number.isNaN(expected) && typeof live === "number" && Number.isNaN(live))
+		);
+	};
+	return match(value) && index === stamp.length;
 }
 
 /** Own enumerable field values of `obj`, for shallow change detection. */
@@ -926,7 +1035,9 @@ export class SessionManager {
 	/**
 	 * Serialized line per entry, reused until that entry changes (see
 	 * {@link #bodyLineFor}). Weak, so replaced or released entries drop their
-	 * cached bytes with the entries themselves.
+	 * cached bytes with the entries themselves. Dropped wholesale by
+	 * {@link #forgetEntryLines} when a failed write forces the blob memo to be
+	 * forgotten, so no cached line can outlive the blob refs it embeds.
 	 */
 	#entryLines = new WeakMap<SessionEntry, CachedEntryLine>();
 	#sessionFile: string | undefined;
@@ -1090,12 +1201,30 @@ export class SessionManager {
 		for (const observer of this.#persistenceErrorCallbacks) this.#invokePersistenceObserver(observer, error);
 	}
 
+	/**
+	 * Drop every memoized entry line. Called wherever the image memo is
+	 * forgotten (see {@link forgetExternalizedImages}): a cached line embeds
+	 * `blob:sha256:` refs minted for the blobs that line referenced, and once a
+	 * write failed those blobs are unreferenced on disk and collectable by
+	 * `omp gc`. Reusing the line on the recovery rewrite would publish a ref
+	 * whose blob no longer exists, so the next rewrite must re-project every
+	 * entry through `prepareEntryForPersistence` and re-mint the refs.
+	 *
+	 * The whole memo goes, not the touched entries: a WeakMap cannot enumerate
+	 * which entries a failed body touched, and this runs only on failure —
+	 * recovery is already paying for a full rewrite.
+	 */
+	#forgetEntryLines(): void {
+		this.#entryLines = new WeakMap<SessionEntry, CachedEntryLine>();
+	}
+
 	#noteDiskFailure(errorLike: unknown): Error {
 		const error = toError(errorLike);
 		if (!this.#diskFailure) this.#diskFailure = error;
 		// A line that failed to land leaves its blob refs unreferenced on disk,
 		// so the next persist must re-check those blobs instead of trusting the memo.
 		forgetExternalizedImages(this.#blobs);
+		this.#forgetEntryLines();
 
 		if (!this.#diskFailureLogged) {
 			this.#diskFailureLogged = true;
@@ -1370,6 +1499,7 @@ export class SessionManager {
 		const error = new SessionPersistenceIndeterminateError(operationError, recoveryErrors);
 		this.#diskFailure = error;
 		forgetExternalizedImages(this.#blobs);
+		this.#forgetEntryLines();
 		if (!this.#diskFailureLogged) {
 			this.#diskFailureLogged = true;
 			logger.error("Session persistence became indeterminate.", {
@@ -1560,7 +1690,8 @@ export class SessionManager {
 			cached !== undefined &&
 			cached.version === messageEstimateVersion(message) &&
 			shallowFieldsUnchanged(cached.fields, entry) &&
-			shallowFieldsUnchanged(cached.messageFields!, message)
+			cached.message !== undefined &&
+			stampMatches(cached.message, message)
 		) {
 			return cached;
 		}
@@ -1569,7 +1700,7 @@ export class SessionManager {
 			line,
 			bytes: Buffer.byteLength(line, "utf8"),
 			fields: shallowFieldValues(entry),
-			messageFields: shallowFieldValues(message),
+			message: messageValueStamp(message),
 			version: messageEstimateVersion(message),
 		};
 		this.#entryLines.set(entry, memo);
