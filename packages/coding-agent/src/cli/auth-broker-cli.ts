@@ -19,10 +19,13 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import {
 	type AuthCredential,
+	type AuthCredentialSnapshotEntry,
 	AuthStorage,
 	getEnvApiKey,
 	getOAuthProviders,
+	isSameOAuthAccount,
 	listProvidersWithEnvKey,
+	matchesReplacementCredential,
 	type OAuthCredential,
 	type OAuthProvider,
 	PROVIDER_REGISTRY,
@@ -546,58 +549,26 @@ function credentialIdentity(provider: string, credential: AuthCredential): strin
 }
 
 /**
- * Build the set of "identities already on the broker" so re-runs are idempotent.
- * For OAuth, identity = email|accountId|projectId, each org-qualified when the
- * row carries an organization (one Anthropic email can hold a Team seat AND a
- * personal Max plan — those must migrate as two rows). A row with NO base
- * identity but an orgId (login recovered neither email nor account) is marked
- * by the org alone, so re-running migrate does not re-upload a stale refresh
- * token over the broker's newer one. For api_key, we collapse to a single
- * marker per provider (broker has no concept of "multiple api keys per
- * provider with different identities"; upsert would coalesce them).
+ * Whether the broker already holds this credential, so re-runs are idempotent.
+ * An OAuth row is held when uploading it would replace a broker row (the store's
+ * own identity match), so no upload overwrites the broker's newer refresh token,
+ * or when a broker row is the same account stored under another identity key, so
+ * no upload duplicates it. API keys collapse to a single one per provider.
  */
-function indexBrokerSnapshot(snapshot: {
-	credentials: Array<{
-		provider: string;
-		credential: { type: string; email?: string; accountId?: string; projectId?: string; orgId?: string };
-	}>;
-}): Map<string, Set<string>> {
-	const out = new Map<string, Set<string>>();
-	for (const entry of snapshot.credentials) {
-		const ids = out.get(entry.provider) ?? new Set<string>();
-		if (entry.credential.type === "api_key") {
-			ids.add("@api_key");
-		} else {
-			const orgSuffix = entry.credential.orgId ? `|org:${entry.credential.orgId}` : "";
-			if (entry.credential.email) ids.add(`email:${entry.credential.email}${orgSuffix}`);
-			if (entry.credential.accountId) ids.add(`accountId:${entry.credential.accountId}${orgSuffix}`);
-			if (entry.credential.projectId) ids.add(`projectId:${entry.credential.projectId}${orgSuffix}`);
-			if (
-				!entry.credential.email &&
-				!entry.credential.accountId &&
-				!entry.credential.projectId &&
-				entry.credential.orgId
-			) {
-				ids.add(`org:${entry.credential.orgId}`);
-			}
-		}
-		out.set(entry.provider, ids);
-	}
-	return out;
-}
-
-function brokerAlreadyHas(existing: Map<string, Set<string>>, provider: string, credential: AuthCredential): boolean {
-	const ids = existing.get(provider);
-	if (!ids) return false;
-	if (credential.type === "api_key") return ids.has("@api_key");
-	const orgSuffix = credential.orgId ? `|org:${credential.orgId}` : "";
-	if (credential.email && ids.has(`email:${credential.email}${orgSuffix}`)) return true;
-	if (credential.accountId && ids.has(`accountId:${credential.accountId}${orgSuffix}`)) return true;
-	if (credential.projectId && ids.has(`projectId:${credential.projectId}${orgSuffix}`)) return true;
-	if (!credential.email && !credential.accountId && !credential.projectId && credential.orgId) {
-		return ids.has(`org:${credential.orgId}`);
-	}
-	return false;
+function brokerAlreadyHas(
+	existing: readonly AuthCredentialSnapshotEntry[],
+	provider: string,
+	credential: AuthCredential,
+): boolean {
+	return existing.some(entry => {
+		if (entry.provider !== provider) return false;
+		if (credential.type === "api_key") return entry.credential.type === "api_key";
+		return (
+			entry.credential.type === "oauth" &&
+			(matchesReplacementCredential(provider, entry.credential, entry.identityKey, credential) ||
+				isSameOAuthAccount(entry.credential, credential))
+		);
+	});
 }
 
 async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
@@ -616,7 +587,7 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 	const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
 	const snapshotResult = await client.fetchSnapshot();
 	if (snapshotResult.status !== 200) throw new Error("Auth broker returned no snapshot");
-	const existing = indexBrokerSnapshot(snapshotResult.snapshot);
+	const existing = snapshotResult.snapshot.credentials;
 
 	const plan: MigratePlanEntry[] = [];
 	const skipped: MigrateSkip[] = [];

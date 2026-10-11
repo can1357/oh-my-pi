@@ -533,6 +533,25 @@ describe("provider catalog grammar", () => {
 		).toThrow(/directive `kind-apis` has a malformed value/);
 	});
 
+	test("seed request-model-id becomes the row's requestModelId; duplicates and non-strings are rejected", () => {
+		const seeded = (axes: string) =>
+			compileProviders(
+				src(provider("p", ['\tdefault-model "m"', seed('api="openai-decisions" base-url="https://x"', axes)])),
+			);
+		expect(seeded('\t\t\trequest-model-id "wire-m"').p.seed?.models[0]).toMatchObject({
+			id: "m",
+			api: "openai-decisions",
+			requestModelId: "wire-m",
+		});
+		expect(seeded("").p.seed?.models[0]).not.toHaveProperty("requestModelId");
+		expect(() => seeded('\t\t\trequest-model-id "a"\n\t\t\trequest-model-id "b"')).toThrow(
+			/directive `request-model-id` has a malformed value/,
+		);
+		expect(() => seeded("\t\t\trequest-model-id #true")).toThrow(
+			/directive `request-model-id` has a malformed value/,
+		);
+	});
+
 	test("seed APIs reject values outside the known and runner API sets", () => {
 		expect(() =>
 			compileProviders(src(provider("p", ['\tdefault-model "m"', seed('api="not-an-api" base-url="https://x"')]))),

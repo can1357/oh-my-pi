@@ -216,6 +216,14 @@ Content type:
 
 No fallback search is performed for missing assets.
 
+MCP-advertised skills:
+
+- When no loaded skill owns the name in a `skill://` URL, `read` serves the resource an MCP server advertises under exactly that URI (for example Figma's `skill://figma/figma-use/SKILL.md`), like `mcp://skill://…` but with line selectors. Ownership is decided on the normalized URL as above, so a loaded bare or namespaced skill always wins; URI templates are matched only through an explicit `mcp://`.
+- The read waits for MCP servers that are still connecting or listing their resources, exactly as an `mcp://` read does, before reporting `Unknown skill`; the wait is bounded by the MCP connect/request timeouts and ends when the read is cancelled.
+- Actions that need a local file (`%load`, plan-mode write checks, the `:img` selector) report `Unknown skill` without contacting MCP.
+- MCP-served text keeps `read`'s normal result limits; only local skill files read whole.
+- `omp read` starts MCP servers only when a read reaches an MCP resource, so reading a local skill never spawns them.
+
 ## Skills vs AGENTS.md, commands, tools, hooks
 
 ### Skills vs AGENTS.md

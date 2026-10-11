@@ -11,7 +11,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getModelPricingStatus, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import type { ModelKind, ModelPricingStatus } from "@oh-my-pi/pi-catalog/types";
+import { modelKind, type ModelKind, type ModelPricingStatus } from "@oh-my-pi/pi-catalog/types";
 import type { Component } from "../tui";
 import { FuzzyCorpus, fuzzyRank } from "../fuzzy";
 import { Input } from "../components/input";
@@ -263,6 +263,22 @@ export function resolveRoleAssignments(
 	return roles;
 }
 
+/**
+ * Role-resolution pool for a `--models`/`enabledModels` scope: the scoped
+ * models plus every available non-chat runner (judge, search, image, …). The
+ * scope only filters chat models (it feeds Ctrl+P cycling) and runtime role
+ * resolution ignores it for other kinds, so displayed role assignments must too.
+ * Shared by the /models hub and the session picker.
+ */
+export function scopedRolePool(scoped: ReadonlyArray<Model>, registry: ModelBrowserRegistry): Model[] {
+	const pool = [...scoped];
+	for (const model of registry.getAvailable("all")) {
+		if (modelKind(model) === "chat" || scoped.some(entry => modelsAreEqual(entry, model))) continue;
+		pool.push(model);
+	}
+	return pool;
+}
+
 /** Wrap raw models into browser items. */
 export function buildBrowserItems(models: ReadonlyArray<Model>): ModelBrowserItem[] {
 	return models.map(model => ({
@@ -387,8 +403,16 @@ export interface SessionModelScope {
 
 /** Catalog inputs a {@link SessionModelScope} is derived from. */
 interface SessionModelScopeInputs {
+	/** Chat models listed as picker rows. */
 	models: ReadonlyArray<Model>;
+	/** Catalog that configured role values resolve against. */
 	allModels: ReadonlyArray<Model>;
+	/**
+	 * Available models of every kind that unconfigured roles auto-select from,
+	 * as at runtime; a chat-only pool would pin `judge` on a chat model while
+	 * the session judges with an available native judge.
+	 */
+	roleModels: ReadonlyArray<Model>;
 	error: string | undefined;
 }
 
@@ -396,21 +420,32 @@ function readSessionModelScopeInputs(
 	registry: ModelBrowserRegistry,
 	scopedModels: ReadonlyArray<Model>,
 ): SessionModelScopeInputs {
-	if (scopedModels.length > 0) return { models: scopedModels, allModels: scopedModels, error: undefined };
+	if (scopedModels.length > 0) {
+		let roleModels: ReadonlyArray<Model>;
+		let error: string | undefined;
+		try {
+			roleModels = scopedRolePool(scopedModels, registry);
+		} catch (cause) {
+			error = cause instanceof Error ? cause.message : String(cause);
+			roleModels = scopedModels;
+		}
+		return { models: scopedModels, allModels: roleModels, roleModels, error };
+	}
 	const loadError = registry.getError();
 	let error = loadError ? String(loadError) : undefined;
-	let models: ReadonlyArray<Model>;
+	let roleModels: ReadonlyArray<Model>;
 	try {
-		models = registry.getAvailable();
+		roleModels = registry.getAvailable("all");
 	} catch (cause) {
 		error = cause instanceof Error ? cause.message : String(cause);
-		models = [];
+		roleModels = [];
 	}
-	return { models, allModels: registry.getAll("all"), error };
+	const models = roleModels.filter(model => modelKind(model) === "chat");
+	return { models, allModels: registry.getAll("all"), roleModels, error };
 }
 
 function scopeFromInputs(settings: ModelBrowserSource, inputs: SessionModelScopeInputs): SessionModelScope {
-	const roles = resolveRoleAssignments(settings, inputs.allModels, inputs.models);
+	const roles = resolveRoleAssignments(settings, inputs.allModels, inputs.roleModels);
 	const mruOrder = settings.mruOrder;
 	const items = buildBrowserItems(inputs.models);
 	sortModelItems(items, { roles, mruOrder });
@@ -455,6 +490,7 @@ export class SessionModelScopeCache {
 			inputs.error === cachedInputs.error &&
 			sameItems(inputs.models, cachedInputs.models) &&
 			sameItems(inputs.allModels, cachedInputs.allModels) &&
+			sameItems(inputs.roleModels, cachedInputs.roleModels) &&
 			sameItems(this.#settings.mruOrder, cached.mruOrder)
 		) {
 			return cached;

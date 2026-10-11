@@ -26,6 +26,14 @@ export interface RenderResultOptions {
 	 * Streamed `xd://` previews stay queued until this is set.
 	 */
 	executionStarted?: boolean;
+	/**
+	 * Milliseconds since this call began executing (`tool_execution_start`),
+	 * or its total once settled; undefined before it starts. Native describe
+	 * hooks only.
+	 */
+	elapsedMs?: number;
+	/** The call was abandoned without a final result (turn aborted, sealed). Native describe hooks only. */
+	cancelled?: boolean;
 }
 
 /** Render options for a result, plus the tool-specific context the transcript threads through. */
@@ -90,6 +98,8 @@ export interface NativeToolHead {
 	readonly targetKind?: TspToolProps["targetKind"];
 	/** Language for `command` targets. */
 	readonly lang?: string;
+	/** The raw command line the head's Copy command button copies (set implicitly by a `command` target). */
+	readonly command?: string;
 	/** `file://` link for path targets. */
 	readonly href?: string;
 	/** Short facts after the target (`+8 −1`, `5 matches · 2 files`). */
@@ -117,8 +127,11 @@ export interface NativeToolView {
 	readonly body?: readonly NativeChild[];
 	/** Tone override; the frame otherwise derives it from the call status. */
 	readonly tone?: TspTone;
-	/** Body clamp while collapsed; `{tail}` keeps the end (terminal output). Defaults to the transcript's preview size. */
-	readonly preview?: TspPreview | { readonly tail: number } | "none";
+	/**
+	 * Body clamp while collapsed; `{tail}` keeps the end (terminal output). Defaults to the transcript's preview size.
+	 * `children`: the body stays whole while collapsed and its own `ansi`/`code` previews clamp instead.
+	 */
+	readonly preview?: TspPreview | { readonly tail: number } | "none" | "children";
 	/** Starts expanded whatever the transcript's expand state (the todo checklist); the user can still fold it. */
 	readonly open?: boolean;
 	/** Render frameless (`frame:"inline"`): a head line plus a disclosed body. */

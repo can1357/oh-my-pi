@@ -59,6 +59,14 @@ describe("resolveBrowserKind with Tern", () => {
 		expect(resolveBrowserKind({ action: "open" }, session({ "browser.tern": false }), cmuxEnv).kind).toBe("cmux");
 	});
 
+	it("app.target adopts in Tern even with the browser.tern setting off, unless app.tern:false", () => {
+		const settings = session({ "browser.tern": false });
+		expect(resolveBrowserKind({ action: "open", app: { target: "github" } }, settings, cmuxEnv)).toEqual(TERN);
+		expect(
+			resolveBrowserKind({ action: "open", app: { target: "github", tern: false } }, settings, cmuxEnv).kind,
+		).toBe("cmux");
+	});
+
 	it("app.tern:true forces Tern over settings and errors outside Tern", () => {
 		expect(
 			resolveBrowserKind(

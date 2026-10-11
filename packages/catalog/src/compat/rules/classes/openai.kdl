@@ -49,10 +49,12 @@ class "openai" {
 		delegation-bias "restrained"
 		supports-steering #true
 	}
-	// GPT-6 Astra changes reasoning effort mid-conversation through a
+	// The GPT-6 family changes reasoning effort mid-conversation through a
 	// `configuration_update` input item so the request-level effort (and the
-	// cached prompt prefix) stays put; every other SKU 400s on the item type.
-	models "gpt-6-astra" {
+	// cached prompt prefix) stays put. OpenAI's reasoning guide ("Change
+	// reasoning mid-conversation") documents it for the family, and Codex's
+	// `/models` reports `supports_reasoning_effort_updates` on every GPT-6 SKU.
+	revision ">=6 <7" {
 		supports-configuration-update #true
 	}
 	// Codex SKUs: the advertised 400K figure includes the output budget; the

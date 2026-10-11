@@ -1,15 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import { renderFormula } from "./ci-update-brew-formula";
 
-const SUMS = {
-	"omp-darwin-arm64": "darwin_arm64_sha",
-	"omp-darwin-x64": "darwin_x64_sha",
-	"omp-linux-arm64": "linux_arm64_sha",
-	"omp-linux-x64": "linux_x64_sha",
+const BASE = "https://build.stencil.so/d/omp/20261010-171748-fa5ff4a";
+const FILES = {
+	macosArm: { url: `${BASE}/omp-darwin-arm64`, sha256: "darwin_arm64_sha" },
+	macosIntel: { url: `${BASE}/omp-darwin-x64`, sha256: "darwin_x64_sha" },
+	linuxArm: { url: `${BASE}/omp-linux-arm64`, sha256: "linux_arm64_sha" },
+	linuxIntel: { url: `${BASE}/omp-linux-x64`, sha256: "linux_x64_sha" },
 };
 
 describe("renderFormula", () => {
-	const formula = renderFormula("15.12.1", SUMS);
+	const formula = renderFormula("18.8.9", FILES);
 
 	// Regression: bare-binary URLs must opt out of Homebrew's UnpackStrategy.
 	// Without `using: :nounzip` the default CurlDownloadStrategy nests the file
@@ -18,12 +19,9 @@ describe("renderFormula", () => {
 	it("attaches `using: :nounzip` to every per-platform url stanza", () => {
 		const matches = formula.match(/using: :nounzip/g) ?? [];
 		expect(matches).toHaveLength(4);
-		for (const arch of ["omp-darwin-arm64", "omp-darwin-x64", "omp-linux-arm64", "omp-linux-x64"]) {
-			expect(formula).toMatch(
-				new RegExp(
-					`url "https://github\\.com/[^"]+/${arch}",\\s+using: :nounzip\\s+sha256 "${SUMS[arch as keyof typeof SUMS]}"`,
-				),
-			);
+		for (const key in FILES) {
+			const file = FILES[key as keyof typeof FILES];
+			expect(formula).toContain(`url "${file.url}",\n          using: :nounzip\n      sha256 "${file.sha256}"`);
 		}
 	});
 

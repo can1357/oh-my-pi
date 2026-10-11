@@ -32,6 +32,16 @@ export const LBRACKET = 0x5b;
 export const RBRACKET = 0x5d;
 const U = 0x75;
 
+/**
+ * Minimum remaining string length for bulk-skipping ordinary characters in
+ * {@link JsonLexer.string} with two engine `indexOf` scans (nearest quote or
+ * backslash) instead of one `charCodeAt` per character. Below this the
+ * `indexOf` setup costs more than the per-char loop on quote-dense input;
+ * long string runs — the multi-KB tool-argument payloads that dominate
+ * streaming re-parses — scan several times faster above it.
+ */
+const STRING_BULK_SCAN_MIN = 32;
+
 /** Valid chars after `\` in a strict JSON escape: `" \ / b f n r t u`. */
 export const VALID_ESCAPE_CHAR = new Uint8Array(128);
 for (const ch of '"\\/bfnrtu') VALID_ESCAPE_CHAR[ch.charCodeAt(0)] = 1;
@@ -176,6 +186,17 @@ const enum QuoteLook {
  */
 export class JsonLexer {
 	pos: number;
+	/**
+	 * Shared across {@link string} calls: `src` has no backslash in
+	 * `[#backslashFrom, #backslashAt)` and `#backslashAt` is a backslash or
+	 * `src.length`. An escape-free run can extend past its string's closing
+	 * quote to the end of the document, so searching per string would rescan
+	 * the same tail for every sibling string (quadratic on objects with many
+	 * short values). `src` is immutable, so the range never goes stale; a
+	 * cursor outside it (e.g. a rollback) re-searches.
+	 */
+	#backslashFrom = 0;
+	#backslashAt = -1;
 
 	constructor(
 		readonly src: string,
@@ -218,7 +239,40 @@ export class JsonLexer {
 		// malformed structure fails loudly instead of silently swallowing
 		// commas/colons or sibling members.
 		const lenient = quote === SQUOTE || this.mode === "streaming";
+		// Any delimiter code unit, not just `"`/`'`; a value above 0xFFFF matches
+		// no code unit, so such a string never closes.
+		const quoteChar = String.fromCharCode(quote);
+		// Next quote / backslash at or after the cursor, cached across iterations
+		// and re-searched only once the cursor passes them, so every character is
+		// scanned at most once per kind and the bulk path stays linear even on
+		// escape-dense input (re-searching the far closing quote after each
+		// escape would be quadratic). `n` means "none before end of input". The
+		// backslash search result is shared across calls via `#backslashAt`.
+		let nextQuote = quoteChar.charCodeAt(0) === quote ? -1 : n;
+		let nextBackslash = -1;
 		while (i < n) {
+			// Bulk-skip a run of ordinary characters: jump to the nearest quote or
+			// backslash instead of one `charCodeAt` per character. Only entered on
+			// an ordinary character, so back-to-back escapes never pay an `indexOf`;
+			// short tails keep the per-char loop. Landing on a special char falls
+			// through to the unchanged handling below, so tokens are identical.
+			const c0 = s.charCodeAt(i);
+			if (c0 !== BACKSLASH && c0 !== quote && n - i > STRING_BULK_SCAN_MIN) {
+				if (nextQuote < i) {
+					const q = s.indexOf(quoteChar, i);
+					nextQuote = q === -1 ? n : q;
+				}
+				if (nextBackslash < i) {
+					if (i < this.#backslashFrom || i > this.#backslashAt) {
+						const b = s.indexOf("\\", i);
+						this.#backslashFrom = i;
+						this.#backslashAt = b === -1 ? n : b;
+					}
+					nextBackslash = this.#backslashAt;
+				}
+				i = nextQuote < nextBackslash ? nextQuote : nextBackslash;
+				if (i >= n) break;
+			}
 			const cc = s.charCodeAt(i);
 			if (cc !== BACKSLASH && cc !== quote) {
 				i++;

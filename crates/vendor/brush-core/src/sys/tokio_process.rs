@@ -27,5 +27,18 @@ pub(crate) fn spawn(command: std::process::Command) -> std::io::Result<Child> {
 		use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 		command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
 	}
-	command.spawn()
+	match command.spawn() {
+		#[cfg(unix)]
+		Err(error) if error.raw_os_error() == Some(libc::ENOEXEC) => {
+			// posix_spawn does not provide execvp's shell fallback for executable
+			// text without a shebang. Retry through std's original fork path.
+			// SAFETY: the hook only returns Ok; it performs no allocation or I/O
+			// in the forked child and preserves the command's existing setup.
+			unsafe {
+				command.pre_exec(|| Ok(()));
+			}
+			command.spawn()
+		},
+		result => result,
+	}
 }

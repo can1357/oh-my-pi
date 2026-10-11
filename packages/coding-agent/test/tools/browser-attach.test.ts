@@ -856,6 +856,78 @@ describe("pickElectronTarget relay path", () => {
 		expect(second.pageSpy).not.toHaveBeenCalled();
 	});
 
+	it("waits for a just-opened tab to reach /json before failing the matcher", async () => {
+		const opened = {
+			id: "PAGE_NEW",
+			type: "page",
+			title: "",
+			url: "https://example.com/?omp-probe=new",
+			active: "false",
+			discarded: "false",
+		};
+		let served = 0;
+		relay.reload({ fetch: () => Response.json(++served === 1 ? RELAY_ENTRIES : [...RELAY_ENTRIES, opened]) });
+		const openedPage = makePage([() => {}], opened.url).page;
+		const target = makeTarget("PAGE_NEW", openedPage);
+
+		const picked = await pickElectronTarget(makeBrowser([target.target]), { relayJson, matcher: "omp-probe=new" });
+
+		expect(picked).toBe(openedPage);
+		expect(served).toBe(2);
+	});
+
+	it("names the missing tab and what to pass when no tab ever matches", async () => {
+		const error = await rejectionOf(pickElectronTarget(makeBrowser([]), { relayJson, matcher: "omp-probe=none" }));
+
+		expect(error).toBeInstanceOf(Error);
+		const message = (error as Error).message;
+		expect(message).toContain('No page target matched "omp-probe=none" after waiting 2s for a newly opened tab');
+		expect(message).toContain("omit it to use the active tab");
+		expect(message).toContain("- Docs  https://docs.example.com");
+	});
+
+	it("waits for Puppeteer to see a tab that /json already lists", async () => {
+		const cartPage = makePage([() => {}], RELAY_ENTRIES[1]!.url).page;
+		const late = makeTarget("PAGE11", cartPage);
+		const targets: Array<Target & { _targetId: string }> = [];
+		const browser = Object.assign(makeBrowser(targets), {
+			waitForTarget: async (predicate: (target: Target) => boolean) => {
+				targets.push(late.target);
+				return targets.find(predicate);
+			},
+		});
+
+		expect(await pickElectronTarget(browser, { relayJson, matcher: "whole foods" })).toBe(cartPage);
+	});
+
+	it("tells the model to retry when Puppeteer never sees the selected tab", async () => {
+		const browser = Object.assign(makeBrowser([]), {
+			waitForTarget: async () => {
+				throw Object.assign(new Error("Waiting for target failed"), { name: "TimeoutError" });
+			},
+		});
+
+		const error = await rejectionOf(pickElectronTarget(browser, { relayJson, matcher: "whole foods" }));
+
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toMatch(/^Selected tab did not become available.*retry, or reopen it/);
+	});
+
+	it("falls back to target enumeration at once when /json lists no pages", async () => {
+		let served = 0;
+		relay.reload({
+			fetch: () => {
+				served++;
+				return Response.json([]);
+			},
+		});
+		const cartPage = fakePage({ url: "https://example.com/cart", title: "Cart" });
+		const cart = makeTarget("PAGE_CART", cartPage);
+
+		expect(await pickElectronTarget(makeBrowser([cart.target]), { relayJson, matcher: "cart" })).toBe(cartPage);
+		expect(served).toBe(1);
+	});
+
 	it("does not adopt another live tab when the selected tab is unreadable", async () => {
 		const other = makeTarget("PAGE10", fakePage({ url: "https://docs.example.com", title: "Docs" }));
 		const unreadable = makeTarget("PAGE11", {

@@ -3,15 +3,15 @@
  * `tui.autoGraph`). {@link splitTableCharts} cuts a Markdown block after each
  * top-level table that gets a chart; {@link lookupTableChart} plans, builds
  * and draws that chart — locally under `always`, through the host's
- * model-backed {@link TableChartPlanner} for multi-series tables under
- * `smart` — and caches it per table source. {@link TableChartFigure} shows it
+ * model-backed {@link TableChartPlanner} under `smart` for the tables
+ * {@link shouldJudge} picks — and caches it per table source. {@link TableChartFigure} shows it
  * as a rasterized terminal image; {@link describeTableChart} hands a TSP
  * terminal the SVG itself. Both resolve the figure tokens against the live
  * theme, so a chart follows theme switches like the prose around it.
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Token, Tokens } from "@oh-my-pi/pi-utils/marked";
-import { type ChartPlan, buildChart, planChart, worthCharting } from "../charts/chart-plan";
+import { type ChartPlan, buildChart, planChart, shouldJudge, worthCharting } from "../charts/chart-plan";
 import { chartAlt, renderChartSvg } from "../charts/chart-svg";
 import { analyzeTable, type TableAnalysis } from "../charts/table-data";
 import type { ImageBudget } from "../components/image";
@@ -25,13 +25,14 @@ import { SvgFigure, svgFigurePalette } from "./svg-figure";
 import { prepareSvg } from "./svg-source";
 
 /**
- * `smart`: a model picks the kind and columns of multi-series tables;
+ * `smart`: a model refines the local guess where meaning decides (kind,
+ * columns, row names, ordering, polarity, focus, title; see {@link shouldJudge});
  * `always`: the local best guess charts every table it reads as numeric;
  * `off`: tables stay tables.
  */
 export type TableChartMode = "smart" | "always" | "off";
 
-/** A multi-series table the host's planner picks a chart for. */
+/** A table the host's planner picks a chart for ({@link shouldJudge}). */
 export interface TableChartRequest {
 	/** The table's Markdown source. */
 	readonly markdown: string;
@@ -176,12 +177,7 @@ function chartEntry(table: Tokens.Table): ChartEntry {
 		table.rows.map(row => row.map(cell => cell.text)),
 	);
 	const guess = planChart(analysis);
-	const smart =
-		guess !== undefined &&
-		chartMode === "smart" &&
-		chartPlanner !== undefined &&
-		analysis.measures.length >= 2 &&
-		analysis.rows.length >= 3;
+	const smart = chartMode === "smart" && chartPlanner !== undefined && shouldJudge(analysis, guess);
 	const entry: ChartEntry = { analysis, guess, smart };
 	if (!smart) entry.chart = guess ? drawChart(analysis, guess, true) : null;
 	charts.set(key, entry);

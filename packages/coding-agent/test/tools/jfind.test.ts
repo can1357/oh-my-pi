@@ -218,7 +218,7 @@ describe("jfind cascade", () => {
 	it("verifies only sketched passages, reports merged ranges, and runs waves in parallel", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-"));
 		try {
-			// Enough files to need three filename batches (> 128 would be truncated).
+			// 72 files, so two 64-question filename batches (> 128 would be truncated).
 			for (let i = 0; i < 70; i++) {
 				await Bun.write(path.join(dir, "pkg", `filler${i}.ts`), `export const filler${i} = ${i};\n`);
 			}

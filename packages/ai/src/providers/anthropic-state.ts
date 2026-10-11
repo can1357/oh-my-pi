@@ -5,6 +5,8 @@ import { isFoundryEnabled } from "../utils/foundry";
 
 /** Root key for Anthropic's per-session provider state. */
 export const ANTHROPIC_PROVIDER_SESSION_STATE_KEY = "anthropic-messages";
+/** Caller-map anchor for session-scoped opaque injected clients. */
+export const ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY = "anthropic-opaque-clients";
 
 /** Normalize an Anthropic base URL to its origin path without `/v1`. */
 export function normalizeAnthropicBaseUrl(baseUrl?: string): string | undefined {
@@ -39,6 +41,10 @@ export function clearAnthropicFastModeFallback(
 	for (const [key, value] of providerSessionState) {
 		if (key !== ANTHROPIC_PROVIDER_SESSION_STATE_KEY && !key.startsWith(prefix)) continue;
 		Object.assign(value, { fastModeDisabled: false });
+	}
+	const anchor = providerSessionState.get(ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY);
+	if (anchor && "fastModeRearmGeneration" in anchor && typeof anchor.fastModeRearmGeneration === "number") {
+		anchor.fastModeRearmGeneration++;
 	}
 }
 

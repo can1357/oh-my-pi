@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { becomesCollectible, collectGarbage } from "../../gc";
 import { base64ImageNode, getNativeBlob } from "../../../src/native/blobs";
 import type { NativeNode } from "../../../src/native/node";
 import { settleNative } from "../../../src/native/settle";
@@ -28,19 +29,11 @@ function observeBytes(id: string): WeakRef<Uint8Array> {
 }
 
 async function collect(): Promise<void> {
-	for (let index = 0; index < 6; index++) {
-		await Bun.sleep(0);
-		Bun.gc(true);
-	}
+	for (let index = 0; index < 6; index++) await collectGarbage();
 }
 
 async function expectReleased(reference: WeakRef<Uint8Array>): Promise<void> {
-	const deadline = performance.now() + 3_000;
-	do {
-		await Bun.sleep(0);
-		Bun.gc(true);
-		if (reference.deref() === undefined) return;
-	} while (performance.now() < deadline);
+	if (await becomesCollectible(reference)) return;
 	assert.fail("the backend retained image bytes after their pending delivery ended");
 }
 
