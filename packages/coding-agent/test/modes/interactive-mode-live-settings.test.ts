@@ -89,7 +89,7 @@ describe("InteractiveMode live settings", () => {
 	it("upgrades an unconfigured unicode status bar after Glyph Protocol confirmation", async () => {
 		await theme.setSymbolPreset("unicode");
 		reportGlyphProtocol(true);
-		expect(theme.theme.getSymbolPreset()).toBe("nerd");
+		expect(theme.getSymbolPresetOverride()).toBe("nerd");
 	});
 
 	it("routes /settings hide-thinking changes through the shared display resync", async () => {
