@@ -74,7 +74,7 @@ import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
-import { isSettingsInitialized, Settings, settings } from "../config/settings";
+import { isSettingsInitialized, settingCacheScope, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
 	AutocompleteProviderFactory,
@@ -140,6 +140,7 @@ import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-s
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
+import { terminalBreadcrumbMatchesSessionSync } from "../session/session-paths";
 import {
 	canAutoCreateWorktree,
 	planWorktreeExit,
@@ -337,6 +338,7 @@ import { materializeImageChipLinks, UiHelpers } from "./utils/ui-helpers";
 import {
 	askTimeoutMs,
 	cfgAutocompleteMaxVisible,
+	cfgAutoResume,
 	cfgComposerPredictions,
 	cfgComposerShape,
 	cfgComposerTokenRate,
@@ -413,6 +415,7 @@ import {
  * them (`InteractiveMode.#applyUiSettingChanges`) so a bulk reload rebuilds the transcript once.
  */
 const cfgLiveUiSettings = combine({
+	autoResume: cfgAutoResume,
 	showHardwareCursor: cfgShowHardwareCursor,
 	"tui.maxInlineImages": cfgTuiMaxInlineImages,
 	"tui.resizeScrollback": cfgTuiResizeScrollback,
@@ -2419,7 +2422,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				void this.#handleGoalSessionEvent(event);
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
+			this.settings.onGlobalChange([cfgAutoResume], () => this.#syncGlobalAutoResumeCacheAfterPersistence()),
+			this.settings.onProjectChange([cfgAutoResume], () => this.#syncAutoResumeCache()),
 		);
+		this.#syncAutoResumeCache();
 		// Cache the live model for the next status-bar prepaint: init-time
 		// reconciliations (#reconcileModeFromSession, #enterPlanMode for
 		// plan.defaultOnStartup) can change the model before this subscription
@@ -3459,6 +3465,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		let rebuildChat = false;
 		let resetDisplay = false;
 
+		if (any("autoResume")) {
+			const cacheScope = settingCacheScope(cfgAutoResume.provenance(this.settings));
+			if (cacheScope) {
+				sharedComposerCache()?.writeAutoResume(
+					this.sessionManager.getCwd(),
+					cfgAutoResume.get(this.settings),
+					cacheScope === "project",
+					this.settings.settingCacheSourcePaths(cacheScope),
+				);
+			}
+		}
+
 		if (
 			any(
 				"showHardwareCursor",
@@ -3620,6 +3638,30 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (rebuildChat || resetDisplay) this.ui.resetDisplay();
 	}
 
+	#syncAutoResumeCache(): void {
+		const cacheScope = settingCacheScope(cfgAutoResume.provenance(this.settings));
+		if (!cacheScope) return;
+		sharedComposerCache()?.writeAutoResume(
+			this.sessionManager.getCwd(),
+			cfgAutoResume.get(this.settings),
+			cacheScope === "project",
+			this.settings.settingCacheSourcePaths(cacheScope),
+			cacheScope === "global" ? this.settings.settingCacheSourcePaths("project") : [],
+		);
+	}
+
+	#syncGlobalAutoResumeCacheAfterPersistence(): void {
+		void this.settings
+			.flush()
+			.then(() => {
+				sharedComposerCache()?.writeGlobalAutoResume(
+					this.settings.globalValue(cfgAutoResume) ?? cfgAutoResume.default,
+					this.settings.settingCacheSourcePaths("global"),
+				);
+			})
+			.catch(error => logger.warn("Failed to persist Auto Resume composer cache", { error: String(error) }));
+	}
+
 	#syncStatusLineSettings(): void {
 		this.statusLine.updateSettings({
 			preset: cfgStatusLinePreset.get(settings),
@@ -3659,8 +3701,17 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * state) so the next launch renders it at first paint; see `createStartupStatusLine`.
 	 */
 	#persistComposerStatus(): void {
-		if (!this.sessionManager.getSessionFile()) return;
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (!sessionFile) return;
+		// A durable zero-turn `/new` boundary is skipped by continueRecent() in a
+		// different terminal. Keep the prior non-empty session's model, thinking,
+		// compaction, accent, and usage facts aligned with the retained identity.
+		const preserveSessionStatus =
+			!this.sessionManager.getSessionName()?.trim() &&
+			!this.sessionManager.getEntries().some(entry => entry.type === "message") &&
+			!terminalBreadcrumbMatchesSessionSync(this.sessionManager.getCwd(), sessionFile);
 		const model = this.session.model;
+		const usage = this.sessionManager.getUsageStatistics();
 		// Recover the border's ANSI wrapper by coloring a sentinel and splitting around it.
 		const marker = "\0";
 		const colored = this.editor.borderColor(marker);
@@ -3681,13 +3732,26 @@ export class InteractiveMode implements InteractiveModeContext {
 				autoThinking: this.session.isAutoThinking,
 				fastMode: this.session.isFastModeActive(),
 				usingSubscription: model ? this.session.modelRegistry.isUsingOAuth(model) : false,
+				contextPercent: this.session.getContextUsage()?.percent,
+				tokenBreakdown: {
+					input: usage.input,
+					output: usage.output,
+					cacheWrite: usage.cacheWrite,
+					orchestrationInput: usage.orchestrationInput,
+					orchestrationOutput: usage.orchestrationOutput,
+				},
 				autoCompactEnabled: this.session.autoCompactionEnabled,
 				compactionBoundaries: model?.contextWindow
 					? statusLineHost.computeCompactionBoundaries(this.session, model.contextWindow, model)
 					: null,
 			},
 		};
-		sharedComposerCache()?.writeStatus(this.sessionManager.getCwd(), status);
+		const cache = sharedComposerCache();
+		if (preserveSessionStatus) {
+			cache?.writeStatusPreservingSession(this.sessionManager.getCwd(), status);
+		} else {
+			cache?.writeStatus(this.sessionManager.getCwd(), status, sessionFile);
+		}
 	}
 
 	#handleSessionAccentInputsChanged(): void {

@@ -6,6 +6,7 @@ import { SPINNER_ADVANCE_MS, TERMINAL } from "../index";
 import {
 	formatDuration,
 	formatNumber,
+	getActiveProfile,
 	getProjectDir,
 	normalizePathForComparison,
 	relativePathWithinNormalizedRoot,
@@ -27,7 +28,7 @@ import {
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span } from "../native/describe";
 import { thinkingLevelToken } from "../theme/theme-class";
-import type { StatusLineSession } from "./host";
+import type { StatusLineSession, StatusLineTokenBreakdown } from "./host";
 import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
 
 export type { SegmentContext } from "./types";
@@ -100,6 +101,14 @@ function clampPathLength(pwd: string, maxLen: number): string {
 function leadingGlyph(display: string): string {
 	const space = display.indexOf(" ");
 	return space === -1 ? display : display.slice(0, space);
+}
+
+export function formatCompactContextPercent(percent: number | null | undefined): string {
+	if (percent === null || percent === undefined) return "?";
+	if (percent === 0) return "0%";
+	if (percent > 0 && percent < 1) return `${percent.toFixed(1)}%`;
+	if (Number.isInteger(percent)) return `${percent}%`;
+	return `${percent.toFixed(1)}%`;
 }
 
 /**
@@ -618,6 +627,24 @@ const pathSegment: StatusLineSegment = {
 	},
 };
 
+const profileSegment: StatusLineSegment = {
+	id: "profile",
+	render(_ctx) {
+		const profile = getActiveProfile();
+		if (!profile) return { content: "", visible: false };
+
+		const label = truncateToWidth(sanitizeStatusText(profile), TRUNCATE_LENGTHS.SHORT - 2);
+		const content = `p:${label}`;
+		return { content: theme.fg("accent", content), visible: true };
+	},
+	describe(_ctx) {
+		const profile = getActiveProfile();
+		if (!profile) return null;
+		const label = truncateToWidth(sanitizeStatusText(profile), TRUNCATE_LENGTHS.SHORT - 2);
+		return segView([span(`p:${label}`, "accent")]);
+	},
+};
+
 /** A path as its dim parent directories and its strong leaf. */
 function pathSpans(value: string): TspSpan[] {
 	const slash = value.lastIndexOf("/", value.length - 2);
@@ -728,15 +755,51 @@ const tokenInSegment: StatusLineSegment = singleStatSegment("token_in", "input",
 
 const tokenOutSegment: StatusLineSegment = singleStatSegment("token_out", "output", "output", "statusLineOutput");
 
+function tokenTotalBreakdown(
+	usage: StatusLineTokenBreakdown,
+	formatValue: (value: number) => string = formatNumber,
+): string | null {
+	const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = usage;
+	const parts: string[] = [];
+	const inTotal = input + cacheWrite;
+	const orchTotal = orchestrationInput + orchestrationOutput;
+	if (inTotal > 0) parts.push(`in:${formatValue(inTotal)}`);
+	if (output > 0) parts.push(`out:${formatValue(output)}`);
+	if (orchTotal > 0) parts.push(`orch:${formatValue(orchTotal)}`);
+	return parts.length > 0 ? parts.join(" ") : null;
+}
+
+function maskedTokenValue(value: number): string {
+	const formatted = formatNumber(value);
+	return `…${" ".repeat(Math.max(0, Bun.stringWidth(formatted) - 1))}`;
+}
+
 const tokenTotalSegment: StatusLineSegment = {
 	id: "token_total",
 	render(ctx) {
 		// Excludes cacheRead: that field re-reads the full cached context every
 		// turn, making the cumulative sum N×context_size. Orchestration cache read
 		// follows the same rule; orchestration input/output remain in the total so
-		// provider-side service work is preserved without labeling it prompt input.
+		// provider-side service work is preserved (surfaced under its own orch:
+		// label in the breakdown rather than folded into in:/out:).
 		const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = ctx.usageStats;
 		const total = input + output + cacheWrite + orchestrationInput + orchestrationOutput;
+
+		if (ctx.options.token_total?.breakdown === true) {
+			if (!total && ctx.session.startupTokenBreakdown) {
+				const widthHint = tokenTotalBreakdown(ctx.session.startupTokenBreakdown);
+				const masked = tokenTotalBreakdown(ctx.session.startupTokenBreakdown, maskedTokenValue);
+				if (!widthHint || !masked) return { content: "", visible: false };
+				return {
+					content: theme.fg("statusLineSpend", masked),
+					visible: true,
+					widthHint: theme.fg("statusLineSpend", widthHint),
+				};
+			}
+			const breakdown = tokenTotalBreakdown(ctx.usageStats);
+			if (!breakdown) return { content: "", visible: false };
+			return { content: theme.fg("statusLineSpend", breakdown), visible: true };
+		}
 		if (!total) return { content: "", visible: false };
 
 		const content = formatMetric({
@@ -748,6 +811,14 @@ const tokenTotalSegment: StatusLineSegment = {
 	describe(ctx) {
 		const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = ctx.usageStats;
 		const total = input + output + cacheWrite + orchestrationInput + orchestrationOutput;
+		if (ctx.options.token_total?.breakdown === true) {
+			if (!total && ctx.session.startupTokenBreakdown) {
+				const masked = tokenTotalBreakdown(ctx.session.startupTokenBreakdown, maskedTokenValue);
+				return masked ? segView([span(masked, "statusLineSpend")], "tokens") : null;
+			}
+			const breakdown = tokenTotalBreakdown(ctx.usageStats);
+			return breakdown ? segView([span(breakdown, "statusLineSpend")], "tokens") : null;
+		}
 		if (!total) return null;
 		return segView([span(formatNumber(total), "statusLineSpend")], "tokens");
 	},
@@ -850,23 +921,37 @@ const contextPctSegment: StatusLineSegment = {
 						: theme.fg(color, theme.icon.auto)
 			}`;
 		}
-		// A known window with unknown usage (startup prepaint) shows the window alone.
-		const text = theme.fg(
-			color,
-			pct === null && window > 0 ? formatNumber(window) : formatContextUsage(pct, window, ctx.contextTokens),
-		);
-		const content = withIcon(theme.icon.context, `${text}${autoIcon}`);
+		const compact = ctx.options.context_pct?.compact === true;
+		const display = compact
+			? `ctx:${formatCompactContextPercent(pct)}`
+			: pct === null && window > 0
+				? formatNumber(window)
+				: formatContextUsage(pct, window, ctx.contextTokens);
+		const text = theme.fg(color, display);
+		const startupPercent = ctx.session.startupContextPercent;
+		const startupDisplay =
+			compact && pct === null ? `ctx:${formatCompactContextPercent(startupPercent ?? 100)}` : undefined;
+		const startupPadding = startupDisplay ? " ".repeat(Math.max(0, startupDisplay.length - display.length)) : "";
+		const content = compact
+			? `${text}${startupPadding}${autoIcon}`
+			: withIcon(theme.icon.context, `${text}${autoIcon}`);
+		const widthHint = startupDisplay ? `${theme.fg(color, startupDisplay)}${autoIcon}` : undefined;
 
-		return { content, visible: true };
+		return { content, visible: true, widthHint };
 	},
 	describe(ctx) {
 		const pct = ctx.contextPercent;
 		const window = ctx.contextWindow;
 		const level = getContextUsageLevel(pct ?? 0, window);
 		const color = getContextUsageThemeColor(level);
+		const compact = ctx.options.context_pct?.compact === true;
 		const spans: TspSpan[] = [
 			span(
-				pct === null && window > 0 ? formatNumber(window) : formatContextUsage(pct, window, ctx.contextTokens),
+				compact
+					? `ctx:${formatCompactContextPercent(pct)}`
+					: pct === null && window > 0
+						? formatNumber(window)
+						: formatContextUsage(pct, window, ctx.contextTokens),
 				color,
 			),
 		];
@@ -880,7 +965,7 @@ const contextPctSegment: StatusLineSegment = {
 				spans.push(span(` ${theme.icon.auto}`, speculation === "armed" ? accentToken(ctx, "accent") : color));
 			}
 		}
-		return segView(spans, "context", getContextUsageTone(level));
+		return segView(spans, compact ? undefined : "context", getContextUsageTone(level));
 	},
 };
 
@@ -1292,6 +1377,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	status: statusSegment,
 	model: modelSegment,
 	mode: modeSegment,
+	profile: profileSegment,
 	path: pathSegment,
 	git: gitSegment,
 	pr: prSegment,

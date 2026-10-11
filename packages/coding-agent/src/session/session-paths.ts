@@ -380,6 +380,25 @@ export function parseTerminalBreadcrumb(content: string): ParsedTerminalBreadcru
 }
 
 /**
+ * Resolve a breadcrumb's recorded session file to its interactive root. Subagent
+ * (and other artifact) sessions live inside a parent session's artifacts dir —
+ * `<parent>.jsonl` strips its suffix to `<parent>/`, and a child writes
+ * `<parent>/<agentId>.jsonl`. Normalize that identity before comparing or
+ * resuming it.
+ */
+export function resolveBreadcrumbToInteractiveRoot(sessionFile: string): string {
+	let current = path.resolve(sessionFile);
+	// Walk up while the containing dir is itself a session's artifacts dir
+	// (`<dir>.jsonl` exists). Capped to defend against pathological layouts.
+	for (let depth = 0; depth < 8; depth++) {
+		const parentSessionFile = `${path.dirname(current)}.jsonl`;
+		if (!fs.existsSync(parentSessionFile)) return current;
+		current = parentSessionFile;
+	}
+	return current;
+}
+
+/**
  * Storage facts about the writing session manager that decide whether the
  * custom-files registry can usefully record its transcript.
  *
@@ -495,6 +514,37 @@ export interface TerminalBreadcrumb {
 	cwdIdentity?: CwdIdentity;
 }
 
+/** Resolve and validate a parsed breadcrumb against the current filesystem. */
+function validateTerminalBreadcrumb(parsed: ParsedTerminalBreadcrumb | null): TerminalBreadcrumb | null {
+	if (!parsed) return null;
+	const { cwd, fresh, cwdIdentity } = parsed;
+	const sessionFile = path.resolve(cwd, parsed.sessionFile);
+	const stat = fs.statSync(sessionFile, { throwIfNoEntry: false });
+	const exists = stat?.isFile() === true;
+	return exists || fresh ? { cwd, sessionFile, exists, fresh, cwdIdentity } : null;
+}
+
+/** Synchronous breadcrumb read for first-frame paths that cannot await the session graph. */
+export function readTerminalBreadcrumbEntrySync(): TerminalBreadcrumb | null {
+	const terminalId = getTerminalId();
+	if (!terminalId) return null;
+
+	try {
+		const breadcrumbFile = path.join(getTerminalSessionsDir(), terminalId);
+		return validateTerminalBreadcrumb(parseTerminalBreadcrumb(fs.readFileSync(breadcrumbFile, "utf8")));
+	} catch (err) {
+		if (!isEnoent(err)) logger.debug("Terminal breadcrumb read failed", { err });
+		return null;
+	}
+}
+
+/** Whether the current terminal breadcrumb authoritatively names this cwd/session pair. */
+export function terminalBreadcrumbMatchesSessionSync(cwd: string, sessionFile: string): boolean {
+	const breadcrumb = readTerminalBreadcrumbEntrySync();
+	if (!breadcrumb || path.resolve(breadcrumb.cwd) !== path.resolve(cwd)) return false;
+	return resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile) === path.resolve(cwd, sessionFile);
+}
+
 /**
  * Read the raw terminal breadcrumb for the current terminal.
  * Returns the recorded cwd + session file regardless of whether the recorded
@@ -512,18 +562,9 @@ export async function readTerminalBreadcrumbEntry(): Promise<TerminalBreadcrumb 
 
 	try {
 		const breadcrumbFile = path.join(getTerminalSessionsDir(), terminalId);
-		const parsed = parseTerminalBreadcrumb(await Bun.file(breadcrumbFile).text());
-		if (!parsed) return null;
-		const { cwd: breadcrumbCwd, sessionFile, fresh, cwdIdentity } = parsed;
-
-		const stat = fs.statSync(sessionFile, { throwIfNoEntry: false });
-		const exists = stat?.isFile() === true;
-		// A materialized target resumes normally; a missing target is honored only
-		// for a never-written lazy fresh-session boundary.
-		if (exists || fresh) return { cwd: breadcrumbCwd, sessionFile, exists, fresh, cwdIdentity };
+		return validateTerminalBreadcrumb(parseTerminalBreadcrumb(await Bun.file(breadcrumbFile).text()));
 	} catch (err) {
 		if (!isEnoent(err)) logger.debug("Terminal breadcrumb read failed", { err });
-		// Breadcrumb doesn't exist or is corrupt — fall through
+		return null;
 	}
-	return null;
 }

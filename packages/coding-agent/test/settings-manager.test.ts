@@ -24,6 +24,7 @@ import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 import {
+	cfgAutoResume,
 	cfgSymbolPreset,
 	cfgDisplayShowTokenUsage,
 	cfgAskTimeout,
@@ -1474,6 +1475,67 @@ describe("Settings", () => {
 	});
 
 	describe("handle listeners", () => {
+		it("reports a project change masked by an equal global value", async () => {
+			await writeSettings({ autoResume: true });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const overlay = settings.overlay();
+			let effectiveChanges = 0;
+			let projectChanges = 0;
+			const stopEffective = cfgAutoResume.listen(overlay, () => {
+				effectiveChanges++;
+			});
+			const stopProject = overlay.onProjectChange([cfgAutoResume], () => {
+				projectChanges++;
+			});
+
+			try {
+				await fsp.mkdir(getProjectAgentDir(projectDir), { recursive: true });
+				await Bun.write(
+					path.join(getProjectAgentDir(projectDir), "config.yml"),
+					YAML.stringify({ autoResume: true }, null, 2),
+				);
+				await settings.reloadFromDisk();
+
+				expect(cfgAutoResume.get(overlay)).toBeTrue();
+				expect(cfgAutoResume.provenance(overlay)).toBe("project");
+				expect(effectiveChanges).toBe(0);
+				expect(projectChanges).toBe(1);
+			} finally {
+				stopEffective();
+				stopProject();
+			}
+		});
+
+		it("reports a global change masked by an equal project override", async () => {
+			await writeSettings({ autoResume: true });
+			await Bun.write(
+				path.join(getProjectAgentDir(projectDir), "config.yml"),
+				YAML.stringify({ autoResume: true }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			let effectiveChanges = 0;
+			let globalChanges = 0;
+			const stopEffective = cfgAutoResume.listen(settings, () => {
+				effectiveChanges++;
+			});
+			const stopGlobal = settings.onGlobalChange([cfgAutoResume], () => {
+				globalChanges++;
+			});
+
+			try {
+				cfgAutoResume.set(settings, false);
+				await tick();
+
+				expect(cfgAutoResume.get(settings)).toBeTrue();
+				expect(settings.globalValue(cfgAutoResume)).toBeFalse();
+				expect(effectiveChanges).toBe(0);
+				expect(globalChanges).toBe(1);
+			} finally {
+				stopEffective();
+				stopGlobal();
+			}
+		});
+
 		it("isolates a throwing listener so the rest still receive the value", async () => {
 			const isolated = Settings.isolated();
 			const received: string[] = [];

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
@@ -7,7 +9,7 @@ import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, settingCacheScope, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { Composer, type ComposerPreferences } from "@oh-my-pi/pi-tui/prompt/composer";
@@ -15,14 +17,19 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import {
 	applyStartupComposerPreferences,
 	beginStartupComposer,
+	canReusePrepaintSessionUsage,
 	ComposerLease,
+	resolveTerminalSessionPrepaint,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
 } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SESSION_RESUMABILITY_PREFIX_BYTES } from "@oh-my-pi/pi-coding-agent/session/session-resumability";
+import { sessionDirForCwd, writeTerminalBreadcrumb } from "@oh-my-pi/pi-coding-agent/session/session-paths";
+import { getAgentDir, getProjectDir, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./collab/helpers/in-memory-relay";
 import { createTestSession } from "./utilities";
@@ -44,6 +51,660 @@ import {
 	cfgTuiMaxInlineImages,
 	cfgTuiResizeScrollback,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
+describe("startup composer terminal session identity", () => {
+	it("selects the newest nonempty transcript instead of the last cache writer", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-newest-session-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		setAgentDir(agentDir);
+		const sessions = sessionDirForCwd(project);
+		const olderSessionFile = path.join(sessions, "2026-01-01T00-00-00_old.jsonl");
+		const newerSessionFile = path.join(sessions, "2026-01-02T00-00-00_new.jsonl");
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		fs.mkdirSync(sessions, { recursive: true });
+		for (const [file, id] of [
+			[olderSessionFile, "old"],
+			[newerSessionFile, "new"],
+		] as const) {
+			fs.writeFileSync(
+				file,
+				`${JSON.stringify({ type: "session", id, cwd: project })}\n${JSON.stringify({
+					type: "message",
+					message: { role: "user", content: `${id} work` },
+				})}\n`,
+			);
+		}
+		fs.utimesSync(olderSessionFile, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+		fs.utimesSync(newerSessionFile, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
+		process.env.TMUX_PANE = "%startup-newest-session";
+		try {
+			expect(resolveTerminalSessionPrepaint(project)).toEqual({
+				cacheCwd: project,
+				sessionFile: newerSessionFile,
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("maps a recoverable backup to the primary session live resume will restore", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-session-backup-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		setAgentDir(agentDir);
+		const sessions = sessionDirForCwd(project);
+		const primary = path.join(sessions, "2026-01-02T00-00-00_new.jsonl");
+		const backup = `${primary}.123.bak`;
+		fs.mkdirSync(project);
+		fs.mkdirSync(sessions, { recursive: true });
+		fs.writeFileSync(
+			backup,
+			`${JSON.stringify({ type: "session", id: "new", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "recoverable work" },
+			})}\n`,
+		);
+		try {
+			expect(resolveTerminalSessionPrepaint(project)?.sessionFile).toBe(primary);
+		} finally {
+			setAgentDir(originalAgentDir);
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("breaks equal session mtimes with the header creation time used by live resume", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-session-created-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		setAgentDir(agentDir);
+		const sessions = sessionDirForCwd(project);
+		const olderSessionFile = path.join(sessions, "z-older.jsonl");
+		const newerSessionFile = path.join(sessions, "a-newer.jsonl");
+		fs.mkdirSync(project);
+		fs.mkdirSync(sessions, { recursive: true });
+		for (const [file, id, timestamp] of [
+			[olderSessionFile, "old", "2026-01-01T00:00:00Z"],
+			[newerSessionFile, "new", "2026-01-02T00:00:00Z"],
+		] as const) {
+			fs.writeFileSync(
+				file,
+				`${JSON.stringify({ type: "session", id, timestamp, cwd: project })}\n${JSON.stringify({
+					type: "message",
+					message: { role: "user", content: `${id} work` },
+				})}\n`,
+			);
+			fs.utimesSync(file, new Date("2026-02-01T00:00:00Z"), new Date("2026-02-01T00:00:00Z"));
+		}
+		try {
+			expect(resolveTerminalSessionPrepaint(project)?.sessionFile).toBe(newerSessionFile);
+		} finally {
+			setAgentDir(originalAgentDir);
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("reads past a fixed title slot before ranking equal-mtime sessions", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-slotted-created-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		setAgentDir(agentDir);
+		const sessions = sessionDirForCwd(project);
+		const olderSessionFile = path.join(sessions, "z-older.jsonl");
+		const newerSessionFile = path.join(sessions, "a-newer.jsonl");
+		fs.mkdirSync(project);
+		fs.mkdirSync(sessions, { recursive: true });
+		for (const [file, id, timestamp] of [
+			[olderSessionFile, "old", "2026-01-01T00:00:00Z"],
+			[newerSessionFile, "new", "2026-01-02T00:00:00Z"],
+		] as const) {
+			fs.writeFileSync(
+				file,
+				`${JSON.stringify({ type: "title", v: 1, title: `${id} title` })}\n${JSON.stringify({
+					type: "session",
+					id,
+					timestamp,
+					cwd: project,
+				})}\n`,
+			);
+			fs.utimesSync(file, new Date("2026-02-01T00:00:00Z"), new Date("2026-02-01T00:00:00Z"));
+		}
+		try {
+			expect(resolveTerminalSessionPrepaint(project)?.sessionFile).toBe(newerSessionFile);
+		} finally {
+			setAgentDir(originalAgentDir);
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("uses the cached current-project session when a new terminal has no breadcrumb", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-fallback-session-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		setAgentDir(agentDir);
+		const sessionFile = path.join(sessionDirForCwd(project), "session.jsonl");
+		fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+		fs.writeFileSync(
+			sessionFile,
+			`${JSON.stringify({ type: "session", id: "cached", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "cached work" },
+			})}\n`,
+		);
+		process.env.TMUX_PANE = "%startup-fallback-session";
+		try {
+			expect(resolveTerminalSessionPrepaint(project)).toEqual({
+				cacheCwd: project,
+				sessionFile,
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not scan a new terminal's history when cached auto-resume is unusable", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-no-auto-resume-scan-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		setAgentDir(agentDir);
+		process.env.TMUX_PANE = "%startup-no-auto-resume-scan";
+		try {
+			const scan = vi.spyOn(fs, "readdirSync");
+			try {
+				expect(resolveTerminalSessionPrepaint(project, { canAutoResume: () => false })).toBeUndefined();
+				expect(scan).not.toHaveBeenCalled();
+			} finally {
+				scan.mockRestore();
+			}
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("honors a fresh missing breadcrumb before scanning a different cwd", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-fresh-cross-cwd-"));
+		const agentDir = path.join(root, "agent");
+		const projectA = path.join(root, "project-a");
+		const projectB = path.join(root, "project-b");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(projectA);
+		fs.mkdirSync(projectB);
+		setAgentDir(agentDir);
+		process.env.TMUX_PANE = "%startup-fresh-cross-cwd";
+		const sessionB = path.join(sessionDirForCwd(projectB), "session-b.jsonl");
+		fs.mkdirSync(path.dirname(sessionB), { recursive: true });
+		fs.writeFileSync(
+			sessionB,
+			`${JSON.stringify({ type: "session", id: "b", cwd: projectB })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "project b work" },
+			})}\n`,
+		);
+		try {
+			writeTerminalBreadcrumb(projectA, path.join(root, "missing-a.jsonl"), true);
+			expect(resolveTerminalSessionPrepaint(projectB)).toBeUndefined();
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("uses the canonical session directory instead of a custom cache-writer directory", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-canonical-session-dir-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const customSessionFile = path.join(root, "custom", "custom.jsonl");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		fs.mkdirSync(path.dirname(customSessionFile));
+		process.env.TMUX_PANE = "%startup-canonical-session-dir";
+		setAgentDir(agentDir);
+		const canonicalSessionFile = path.join(sessionDirForCwd(project), "canonical.jsonl");
+		fs.mkdirSync(path.dirname(canonicalSessionFile), { recursive: true });
+		for (const [file, id] of [
+			[canonicalSessionFile, "canonical"],
+			[customSessionFile, "custom"],
+		] as const) {
+			fs.writeFileSync(
+				file,
+				`${JSON.stringify({ type: "session", id, cwd: project })}\n${JSON.stringify({
+					type: "message",
+					message: { role: "user", content: `${id} work` },
+				})}\n`,
+			);
+		}
+		try {
+			expect(resolveTerminalSessionPrepaint(project)?.sessionFile).toBe(canonicalSessionFile);
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("prefers the current project for a cross-cwd breadcrumb while the prior cwd still exists", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-cross-cwd-"));
+		const agentDir = path.join(root, "agent");
+		const projectA = path.join(root, "project-a");
+		const projectB = path.join(root, "project-b");
+		const sessionA = path.join(root, "session-a.jsonl");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(projectA);
+		fs.mkdirSync(projectB);
+		fs.writeFileSync(sessionA, `${JSON.stringify({ type: "session", id: "a", cwd: projectA })}\n`);
+		setAgentDir(agentDir);
+		process.env.TMUX_PANE = "%startup-cross-cwd";
+		const sessionB = path.join(sessionDirForCwd(projectB), "session-b.jsonl");
+		fs.mkdirSync(path.dirname(sessionB), { recursive: true });
+		fs.writeFileSync(
+			sessionB,
+			`${JSON.stringify({ type: "session", id: "b", cwd: projectB })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "project b work" },
+			})}\n`,
+		);
+		try {
+			writeTerminalBreadcrumb(projectA, sessionA);
+			expect(resolveTerminalSessionPrepaint(projectB)).toEqual({ cacheCwd: projectB, sessionFile: sessionB });
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("selects a newer developer-only transcript like the live recent-session selector", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-developer-stub-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		process.env.TMUX_PANE = "%startup-developer-stub";
+		setAgentDir(agentDir);
+		const sessions = sessionDirForCwd(project);
+		const resumable = path.join(sessions, "resumable.jsonl");
+		const developerStub = path.join(sessions, "developer-stub.jsonl");
+		fs.mkdirSync(sessions, { recursive: true });
+		fs.writeFileSync(
+			resumable,
+			`${JSON.stringify({ type: "session", id: "resumable", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "real work" },
+			})}\n`,
+		);
+		fs.writeFileSync(
+			developerStub,
+			`${JSON.stringify({ type: "session", id: "stub", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "developer", content: "persisted reminder" },
+			})}\n`,
+		);
+		fs.utimesSync(resumable, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+		fs.utimesSync(developerStub, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
+		try {
+			expect(resolveTerminalSessionPrepaint(project)?.sessionFile).toBe(developerStub);
+			const live = await SessionManager.continueRecent(project);
+			try {
+				expect(live.getSessionFile()).toBe(developerStub);
+			} finally {
+				await live.close();
+			}
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("skips display intent that begins beyond the live recent-session prefix", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-bounded-prefix-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		process.env.TMUX_PANE = "%startup-bounded-prefix";
+		setAgentDir(agentDir);
+		const sessions = sessionDirForCwd(project);
+		const resumable = path.join(sessions, "resumable.jsonl");
+		const pending = path.join(sessions, "pending.jsonl");
+		fs.mkdirSync(sessions, { recursive: true });
+		fs.writeFileSync(
+			resumable,
+			`${JSON.stringify({ type: "session", id: "resumable", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "real work" },
+			})}\n`,
+		);
+		fs.writeFileSync(
+			pending,
+			`${JSON.stringify({ type: "session", id: "pending", cwd: project })}\n${JSON.stringify({
+				type: "custom",
+				customType: "todo_state",
+				data: "x".repeat(5_000),
+			})}\n${JSON.stringify({
+				type: "message",
+				message: { role: "developer", content: "persisted reminder" },
+			})}\n`,
+		);
+		fs.utimesSync(resumable, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+		fs.utimesSync(pending, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
+		try {
+			expect(resolveTerminalSessionPrepaint(project)?.sessionFile).toBe(resumable);
+			const live = await SessionManager.continueRecent(project);
+			try {
+				expect(live.getSessionFile()).toBe(resumable);
+			} finally {
+				await live.close();
+			}
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("ignores display text beyond the prefix on a line that starts inside it", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-prefix-line-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		process.env.TMUX_PANE = "%startup-prefix-line";
+		setAgentDir(agentDir);
+		const sessions = sessionDirForCwd(project);
+		const resumable = path.join(sessions, "resumable.jsonl");
+		const imageFirst = path.join(sessions, "image-first.jsonl");
+		fs.mkdirSync(sessions, { recursive: true });
+		fs.writeFileSync(
+			resumable,
+			`${JSON.stringify({ type: "session", id: "resumable", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "real work" },
+			})}\n`,
+		);
+		fs.writeFileSync(
+			imageFirst,
+			`${JSON.stringify({ type: "session", id: "image-first", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: {
+					role: "user",
+					content: [
+						{ type: "image", data: "x".repeat(5_000) },
+						{ type: "text", text: "late text" },
+					],
+				},
+			})}\n`,
+		);
+		fs.utimesSync(resumable, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+		fs.utimesSync(imageFirst, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
+		try {
+			expect(resolveTerminalSessionPrepaint(project)?.sessionFile).toBe(resumable);
+			const live = await SessionManager.continueRecent(project);
+			try {
+				expect(live.getSessionFile()).toBe(resumable);
+			} finally {
+				await live.close();
+			}
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("normalizes an artifact breadcrumb to the interactive parent session", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-artifact-breadcrumb-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const parentSessionFile = path.join(root, "2026-01-01T00-00-00_parent.jsonl");
+		const artifactDir = parentSessionFile.slice(0, -".jsonl".length);
+		const childSessionFile = path.join(artifactDir, "agent.jsonl");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		fs.mkdirSync(artifactDir);
+		fs.writeFileSync(parentSessionFile, `${JSON.stringify({ type: "session", id: "parent", cwd: project })}\n`);
+		fs.writeFileSync(childSessionFile, `${JSON.stringify({ type: "session", id: "child", cwd: project })}\n`);
+		process.env.TMUX_PANE = "%startup-artifact-breadcrumb";
+		setAgentDir(agentDir);
+		try {
+			writeTerminalBreadcrumb(project, childSessionFile);
+			expect(resolveTerminalSessionPrepaint(project)).toEqual({
+				cacheCwd: project,
+				sessionFile: parentSessionFile,
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not scan session history when a same-project breadcrumb is authoritative", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-breadcrumb-no-scan-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const sessionFile = path.join(root, "session.jsonl");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		fs.writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: "current", cwd: project })}\n`);
+		process.env.TMUX_PANE = "%startup-breadcrumb-no-scan";
+		setAgentDir(agentDir);
+		try {
+			writeTerminalBreadcrumb(project, sessionFile);
+			const scan = vi.spyOn(fs, "readdirSync");
+			try {
+				expect(resolveTerminalSessionPrepaint(project)).toEqual({ cacheCwd: project, sessionFile });
+				expect(scan).not.toHaveBeenCalled();
+			} finally {
+				scan.mockRestore();
+			}
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("skips a cached empty /new stub when a different terminal will resume an older transcript", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-nonempty-session-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		setAgentDir(agentDir);
+		const sessions = sessionDirForCwd(project);
+		const olderSessionFile = path.join(sessions, "2026-01-01T00-00-00_old.jsonl");
+		const emptySessionFile = path.join(sessions, "2026-01-02T00-00-00_empty.jsonl");
+		fs.mkdirSync(sessions, { recursive: true });
+		fs.writeFileSync(
+			olderSessionFile,
+			`${JSON.stringify({ type: "session", id: "old", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "pre-new work" },
+			})}\n`,
+		);
+		fs.writeFileSync(emptySessionFile, `${JSON.stringify({ type: "session", id: "empty", cwd: project })}\n`);
+		fs.utimesSync(olderSessionFile, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+		fs.utimesSync(emptySessionFile, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
+		process.env.TMUX_PANE = "%startup-nonempty-session";
+		try {
+			expect(resolveTerminalSessionPrepaint(project)).toEqual({
+				cacheCwd: project,
+				sessionFile: olderSessionFile,
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not treat a compaction title extending beyond the live prefix as resumable", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-compaction-prefix-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		setAgentDir(agentDir);
+		const sessions = sessionDirForCwd(project);
+		const olderSessionFile = path.join(sessions, "2026-01-01T00-00-00_old.jsonl");
+		const truncatedCompactionFile = path.join(sessions, "2026-01-02T00-00-00_compaction.jsonl");
+		fs.mkdirSync(sessions, { recursive: true });
+		fs.writeFileSync(
+			olderSessionFile,
+			`${JSON.stringify({ type: "session", id: "old", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "resumable work" },
+			})}\n`,
+		);
+		fs.writeFileSync(
+			truncatedCompactionFile,
+			`${JSON.stringify({ type: "session", id: "new", cwd: project })}\n${JSON.stringify({
+				type: "compaction",
+				shortSummary: "x".repeat(SESSION_RESUMABILITY_PREFIX_BYTES),
+			})}\n`,
+		);
+		fs.utimesSync(olderSessionFile, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+		fs.utimesSync(truncatedCompactionFile, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
+		delete process.env.TMUX_PANE;
+		try {
+			expect(resolveTerminalSessionPrepaint(project)).toEqual({
+				cacheCwd: project,
+				sessionFile: olderSessionFile,
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("reuses the prior project cache row when the breadcrumb project moved", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-moved-project-"));
+		const agentDir = path.join(root, "agent");
+		const originalProject = path.join(root, "project");
+		const movedProject = path.join(root, "renamed-project");
+		const sessionFile = path.join(root, "session.jsonl");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(originalProject);
+		fs.writeFileSync(sessionFile, "{}\n");
+		process.env.TMUX_PANE = "%startup-moved-project";
+		setAgentDir(agentDir);
+		try {
+			writeTerminalBreadcrumb(originalProject, sessionFile);
+			fs.renameSync(originalProject, movedProject);
+			expect(
+				resolveTerminalSessionPrepaint(movedProject, {
+					canAutoResume: (cacheCwd, movedToCwd) => cacheCwd === originalProject && movedToCwd === movedProject,
+				}),
+			).toEqual({
+				cacheCwd: originalProject,
+				sessionFile,
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("prefers a current-project session over a moved-project breadcrumb", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-moved-project-current-"));
+		const agentDir = path.join(root, "agent");
+		const originalProject = path.join(root, "project");
+		const movedProject = path.join(root, "renamed-project");
+		const oldSessionFile = path.join(root, "old-session.jsonl");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(originalProject);
+		fs.writeFileSync(oldSessionFile, "{}\n");
+		process.env.TMUX_PANE = "%startup-moved-project-current";
+		setAgentDir(agentDir);
+		try {
+			const currentSessionFile = path.join(sessionDirForCwd(movedProject), "current-session.jsonl");
+			fs.mkdirSync(path.dirname(currentSessionFile), { recursive: true });
+			fs.writeFileSync(
+				currentSessionFile,
+				`${JSON.stringify({ type: "session", id: "current", cwd: movedProject })}\n${JSON.stringify({
+					type: "message",
+					message: { role: "user", content: "current project work" },
+				})}\n`,
+			);
+			writeTerminalBreadcrumb(originalProject, oldSessionFile);
+			fs.renameSync(originalProject, movedProject);
+			expect(resolveTerminalSessionPrepaint(movedProject)).toEqual({
+				cacheCwd: movedProject,
+				sessionFile: currentSessionFile,
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("startup settings cache scope", () => {
+	it("caches only persisted auto-resume settings", () => {
+		expect(settingCacheScope("default")).toBe("global");
+		expect(settingCacheScope("global")).toBe("global");
+		expect(settingCacheScope("project")).toBe("project");
+		expect(settingCacheScope("env")).toBeUndefined();
+		expect(settingCacheScope("runtime")).toBeUndefined();
+		expect(settingCacheScope("overlay")).toBeUndefined();
+	});
+
+	it("rejects cached session usage when launch-local config overlays are present", () => {
+		expect(canReusePrepaintSessionUsage(true)).toBeTrue();
+		expect(canReusePrepaintSessionUsage(true, ["", "/tmp/launch.yml"].join(path.delimiter))).toBeFalse();
+		expect(canReusePrepaintSessionUsage(false, "/tmp/launch.yml")).toBeFalse();
+		expect(canReusePrepaintSessionUsage(true, undefined, "/tmp/custom-sessions")).toBeFalse();
+	});
+});
 
 class CountingTerminal extends VirtualTerminal {
 	starts = 0;
@@ -730,6 +1391,7 @@ describe("Composer prepaint", () => {
 		await terminal.waitForRender(() => terminal.getViewport().some(row => Bun.stripANSI(row).includes("v9.9.9")));
 
 		applyStartupComposerPreferences({
+			autoResume: false,
 			quiet: true,
 			composerShape: "box",
 			showHardwareCursor: config.showHardwareCursor,
@@ -777,7 +1439,7 @@ describe("Composer prepaint", () => {
 		expect(terminal.startOptions?.deferInput).toBeTrue();
 		expect(terminal.inputEnables).toBe(0);
 
-		applyStartupComposerPreferences({ ...config, theme: {} });
+		applyStartupComposerPreferences({ ...config, theme: {}, autoResume: false });
 		expect(terminal.inputEnables).toBe(1);
 
 		// Adoption after preferences must not double-enable…

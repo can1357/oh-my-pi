@@ -10,6 +10,8 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { orderedSettings } from "../config/all-settings";
 import { type AnySetting, lookup } from "../config/registry";
 import { Settings, settings } from "../config/settings";
+import { cfgAutoResume } from "../modes/settings";
+import { sharedComposerCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { initXdg } from "./commands/init-xdg";
 
@@ -296,6 +298,7 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 	try {
 		def.setting.set(settings, def.setting.parse(value));
 		await settings.flush();
+		syncAutoResumeCache(def.setting);
 	} catch (err) {
 		console.error(chalk.red(String(err)));
 		process.exit(1);
@@ -319,6 +322,15 @@ function globalValue(setting: AnySetting): unknown {
 	let value: unknown = settings.getGlobalSettings();
 	for (const segment of setting.segments) value = isRecord(value) ? value[segment] : undefined;
 	return value;
+}
+
+/** Keep one-shot config writes coherent with the next launch's speculative status-line cache. */
+function syncAutoResumeCache(setting: AnySetting): void {
+	if (setting !== cfgAutoResume) return;
+	sharedComposerCache()?.writeGlobalAutoResume(
+		settings.globalValue(cfgAutoResume) ?? cfgAutoResume.default,
+		settings.settingCacheSourcePaths("global"),
+	);
 }
 
 /** Where the effective value comes from when it is not the global config (or the default), if anywhere. */
@@ -377,6 +389,7 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 		// Remove the key rather than writing the default, so later default changes still apply.
 		def.setting.unset(settings);
 		await settings.flush();
+		syncAutoResumeCache(def.setting);
 	} catch (err) {
 		console.error(chalk.red(String(err)));
 		process.exit(1);

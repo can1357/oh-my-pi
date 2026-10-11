@@ -39,10 +39,13 @@ export interface StatusLineSegmentOptions {
 	model?: { showThinkingLevel?: boolean };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
+	token_total?: { breakdown?: boolean };
+	context_pct?: { compact?: boolean };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
 }
 
 export interface StatusLineSettings {
+	gitEnabled?: boolean;
 	preset?: StatusLinePreset;
 	leftSegments?: StatusLineSegmentId[];
 	rightSegments?: StatusLineSegmentId[];
@@ -219,6 +222,8 @@ export interface StatusResetExpiry {
 export interface RenderedSegment {
 	content: string; // The segment text (may include ANSI color codes)
 	visible: boolean; // Whether to render (e.g., git hidden when not in repo)
+	/** Alternate content whose display width must be reserved without painting it. */
+	widthHint?: string;
 }
 
 /**

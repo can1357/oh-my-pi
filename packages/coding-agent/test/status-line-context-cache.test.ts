@@ -397,6 +397,7 @@ describe("StatusLineComponent context breakdown", () => {
 			cfgStatusLinePreset.clearOverride(settings);
 		}
 	});
+
 	it("keeps embedded context on the gauge while the session is unnamed", () => {
 		// Regression: a fresh session has no title, so `session_name` is
 		// invisible and the right group is empty. The gauge must still bridge to

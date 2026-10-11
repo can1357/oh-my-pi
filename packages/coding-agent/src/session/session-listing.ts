@@ -9,6 +9,14 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { computeDefaultSessionDir } from "./session-paths";
+import { compareSessionRecency } from "./recent-session-sync";
+import {
+	extractFirstDisplayMessageFromPrefix,
+	extractSessionStringProperty,
+	isSessionResumabilityEmpty,
+	sanitizeSessionName,
+	SESSION_RESUMABILITY_PREFIX_BYTES,
+} from "./session-resumability";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
 
@@ -64,7 +72,7 @@ export interface RecentSessionInfo {
 	timeAgo: string;
 }
 
-const SESSION_LIST_PREFIX_BYTES = 4096;
+const SESSION_LIST_PREFIX_BYTES = SESSION_RESUMABILITY_PREFIX_BYTES;
 /**
  * Tail window read to derive {@link SessionStatus}. Large enough to capture a
  * typical final assistant turn (thinking + text); when the final message exceeds
@@ -110,14 +118,6 @@ function getSessionScanCache(storage: SessionStorage): SessionScanCache {
 	const holder = storage as StorageWithScanCache;
 	if (!holder[kScanCache]) holder[kScanCache] = new LRUCache({ max: SESSION_SCAN_CACHE_MAX });
 	return holder[kScanCache];
-}
-
-function sanitizeSessionName(value: string | undefined): string | undefined {
-	if (!value) return undefined;
-	const firstLine = value.split(/\r?\n/)[0] ?? "";
-	const stripped = firstLine.replace(/[\x00-\x1F\x7F]/g, "");
-	const trimmed = stripped.trim();
-	return trimmed.length > 0 ? trimmed : undefined;
 }
 
 /** Format a time difference as a human-readable string */
@@ -220,55 +220,6 @@ function statusFromTailMessage(message: TailMessage): SessionStatus {
 	}
 }
 
-function decodeJsonStringFragment(value: string): string {
-	const safeValue = value.endsWith("\\") ? value.slice(0, -1) : value;
-	try {
-		return JSON.parse(`"${safeValue}"`) as string;
-	} catch {
-		return safeValue
-			.replace(/\\n/g, "\n")
-			.replace(/\\r/g, "\r")
-			.replace(/\\t/g, "\t")
-			.replace(/\\"/g, '"')
-			.replace(/\\\\/g, "\\");
-	}
-}
-
-function extractStringProperty(source: string, name: string, startIndex = 0): string | undefined {
-	const propertyIndex = source.indexOf(`"${name}"`, startIndex);
-	if (propertyIndex === -1) return undefined;
-
-	const colonIndex = source.indexOf(":", propertyIndex + name.length + 2);
-	if (colonIndex === -1) return undefined;
-
-	let valueIndex = colonIndex + 1;
-	while (valueIndex < source.length) {
-		const char = source.charCodeAt(valueIndex);
-		if (char !== 32 && char !== 9 && char !== 10 && char !== 13) break;
-		valueIndex++;
-	}
-	if (source.charCodeAt(valueIndex) !== 34) return undefined;
-
-	const valueStart = valueIndex + 1;
-	let escaped = false;
-	for (let i = valueStart; i < source.length; i++) {
-		const char = source.charCodeAt(i);
-		if (escaped) {
-			escaped = false;
-			continue;
-		}
-		if (char === 92) {
-			escaped = true;
-			continue;
-		}
-		if (char === 34) {
-			return decodeJsonStringFragment(source.slice(valueStart, i));
-		}
-	}
-
-	return decodeJsonStringFragment(source.slice(valueStart));
-}
-
 function countRoleMarkers(content: string, role: "assistant" | "user" | "message"): number {
 	const key = role === "message" ? '"type"' : '"role"';
 	const want = role === "message" ? "message" : role;
@@ -279,7 +230,7 @@ function countRoleMarkers(content: string, role: "assistant" | "user" | "message
 		if (keyIndex === -1) break;
 		const colonIndex = content.indexOf(":", keyIndex + key.length);
 		if (colonIndex === -1) break;
-		const value = extractStringProperty(content, role === "message" ? "type" : "role", keyIndex);
+		const value = extractSessionStringProperty(content, role === "message" ? "type" : "role", keyIndex);
 		if (value === want) count++;
 		index = colonIndex + 1;
 	}
@@ -292,23 +243,6 @@ function countMessageMarkers(content: string): number {
 
 function countAssistantMarkers(content: string): number {
 	return countRoleMarkers(content, "assistant");
-}
-
-function extractFirstDisplayMessageFromPrefix(content: string): string | undefined {
-	let fallback: string | undefined;
-	let index = content.indexOf('"role"');
-
-	while (index !== -1) {
-		const role = extractStringProperty(content, "role", index);
-		const text = extractStringProperty(content, "content", index) ?? extractStringProperty(content, "text", index);
-		if (text) {
-			if (role === "user") return text;
-			if (!fallback && (role === "developer" || role === "assistant")) fallback = text;
-		}
-		index = content.indexOf('"role"', index + 6);
-	}
-
-	return fallback;
 }
 
 interface SessionListHeader {
@@ -344,16 +278,16 @@ function sessionListHeaderFromRecord(
 }
 
 function parseSessionListHeaderLine(line: string, titleOverride?: string | null): SessionListHeader | undefined {
-	if (extractStringProperty(line, "type") !== "session") return undefined;
-	const id = extractStringProperty(line, "id");
+	if (extractSessionStringProperty(line, "type") !== "session") return undefined;
+	const id = extractSessionStringProperty(line, "id");
 	if (!id) return undefined;
 	return {
 		type: "session",
 		id,
-		cwd: extractStringProperty(line, "cwd"),
-		title: titleOverride === null ? undefined : (titleOverride ?? extractStringProperty(line, "title")),
-		parentSession: extractStringProperty(line, "parentSession"),
-		timestamp: extractStringProperty(line, "timestamp"),
+		cwd: extractSessionStringProperty(line, "cwd"),
+		title: titleOverride === null ? undefined : (titleOverride ?? extractSessionStringProperty(line, "title")),
+		parentSession: extractSessionStringProperty(line, "parentSession"),
+		timestamp: extractSessionStringProperty(line, "timestamp"),
 	};
 }
 
@@ -373,8 +307,8 @@ function parseSessionListHeader(
 	for (const rawLine of content.split(/\r?\n/)) {
 		const line = rawLine.trim();
 		if (!line) continue;
-		if (firstNonEmpty && extractStringProperty(line, "type") === "title") {
-			slotTitle = normalizeTitleOverride(extractStringProperty(line, "title"));
+		if (firstNonEmpty && extractSessionStringProperty(line, "type") === "title") {
+			slotTitle = normalizeTitleOverride(extractSessionStringProperty(line, "title"));
 			firstNonEmpty = false;
 			continue;
 		}
@@ -538,12 +472,7 @@ async function collectSessionsFromFiles(
 					)
 				).flat();
 
-	sessions.sort(
-		(a, b) =>
-			b.modified.getTime() - a.modified.getTime() ||
-			b.created.getTime() - a.created.getTime() ||
-			b.path.localeCompare(a.path),
-	);
+	sessions.sort(compareSessionRecency);
 	return sessions;
 }
 
@@ -683,11 +612,7 @@ export async function listAllSessions(
  * ACP, `resolveResumableSession`) keeps the unfiltered scan.
  */
 export function isEmptySession(session: SessionInfo): boolean {
-	if (session.status !== undefined && session.status !== "pending" && session.status !== "unknown") return false;
-	if ((session.assistantTurns ?? 1) > 0) return false;
-	if (sanitizeSessionName(session.title)) return false;
-	if (sanitizeSessionName(session.firstMessage === "(no messages)" ? undefined : session.firstMessage)) return false;
-	return true;
+	return isSessionResumabilityEmpty(session);
 }
 
 /** Picker-facing view of a session list: empties dropped, pinned sessions kept. */

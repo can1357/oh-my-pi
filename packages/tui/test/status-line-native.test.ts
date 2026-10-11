@@ -48,6 +48,64 @@ function facts(line: StatusLineComponent): { key: string; props: TspProps<"seg">
 }
 
 describe("native composer facts", () => {
+	it("applies compact context formatting to native facts and meter", () => {
+		setNativeRendering(true);
+		const line = createStartupStatusLine({
+			settings: {
+				preset: "custom",
+				leftSegments: ["context_pct"],
+				rightSegments: [],
+				segmentOptions: { context_pct: { compact: true } },
+			},
+			gitEnabled: false,
+			model: {
+				id: "native-model",
+				name: "Native",
+				provider: "test",
+				api: "test",
+				contextWindow: 100_000,
+			} as Parameters<typeof createStartupStatusLine>[0]["model"],
+			autoThinking: false,
+			fastMode: false,
+			usingSubscription: false,
+			contextPercent: 9.1,
+			autoCompactEnabled: false,
+			compactionBoundaries: null,
+		});
+
+		try {
+			const preview = line.describePreview();
+			const contextSegment = (preview.c ?? []).filter(isNode).find(child => child.key === "context_pct");
+			const contextJson = JSON.stringify(contextSegment);
+			expect(contextJson).not.toContain('"icon"');
+			expect(contextJson).toContain("ctx:?");
+			const meter = line.describeComposerFacts().context;
+			const meterJson = JSON.stringify(meter);
+			expect(meterJson).toContain('"label":"ctx:?   "');
+			expect(meterJson).not.toContain("ctx:9.1%");
+			expect(meterJson).not.toContain('"total"');
+		} finally {
+			line.dispose();
+		}
+	});
+
+	it("reserves representative live width when no cached context percentage exists", () => {
+		setNativeRendering(true);
+		const line = statusLine({
+			preset: "custom",
+			leftSegments: ["context_pct"],
+			rightSegments: [],
+			segmentOptions: { context_pct: { compact: true } },
+		});
+
+		try {
+			const meterJson = JSON.stringify(line.describeComposerFacts().context);
+			expect(meterJson).toContain('"label":"ctx:?   "');
+		} finally {
+			line.dispose();
+		}
+	});
+
 	it("keeps the configured segments without another home, outer edges dropping last", () => {
 		setNativeRendering(true);
 		const segs = facts(

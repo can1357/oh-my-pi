@@ -44,7 +44,7 @@ describe("composer startup cache", () => {
 		const status = statusFor(ThinkingLevel.High);
 
 		const writer = ComposerCache.open(dbPath);
-		writer.writeUi(project, preferences, theme);
+		writer.writeUi(project, preferences, theme, false);
 		writer.writeStatus(project, status);
 		writer.close();
 
@@ -63,6 +63,231 @@ describe("composer startup cache", () => {
 
 		expect(cache.read(path.join(root, "a")).status?.statusLine.thinkingLevel).toBe(ThinkingLevel.Low);
 		expect(cache.read(path.join(root, "fresh")).status?.statusLine.thinkingLevel).toBe(ThinkingLevel.High);
+		cache.close();
+	});
+
+	it("reuses session usage only for the exact session being resumed", () => {
+		const project = path.join(root, "project");
+		const sessionFile = path.join(root, "sessions", "session-a.jsonl");
+		const status = statusFor(ThinkingLevel.High);
+		const statusWithUsage: ComposerStatusCache = {
+			...status,
+			statusLine: {
+				...status.statusLine,
+				contextPercent: 37.5,
+				tokenBreakdown: {
+					input: 25_000,
+					output: 500,
+					cacheWrite: 100,
+					orchestrationInput: 250,
+					orchestrationOutput: 50,
+				},
+			},
+		};
+
+		const cache = ComposerCache.open(dbPath);
+		cache.writeStatus(project, statusWithUsage, sessionFile);
+		expect(cache.cachedSessionFile(project)).toBe(sessionFile);
+		expect(cache.cachedSessionFile(path.join(root, "fresh"))).toBeUndefined();
+
+		const fresh = cache.read(project).status?.statusLine;
+		expect(fresh?.thinkingLevel).toBe(ThinkingLevel.High);
+		expect(fresh?.contextPercent).toBeUndefined();
+		expect(fresh?.tokenBreakdown).toBeUndefined();
+		cache.writeUi(project, COMPOSER_DEFAULTS, {}, true);
+		const resumed = cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine;
+		expect(resumed?.contextPercent).toBe(37.5);
+		expect(resumed?.tokenBreakdown).toEqual(statusWithUsage.statusLine.tokenBreakdown);
+		const otherTerminal = cache.read(project, {
+			allowSessionUsage: true,
+			sessionFile: path.join(root, "sessions", "session-b.jsonl"),
+		}).status?.statusLine;
+		expect(otherTerminal?.contextPercent).toBeUndefined();
+		expect(otherTerminal?.tokenBreakdown).toBeUndefined();
+		cache.writeUi(project, COMPOSER_DEFAULTS, {}, false);
+		const disabled = cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine;
+		expect(disabled?.contextPercent).toBeUndefined();
+		expect(disabled?.tokenBreakdown).toBeUndefined();
+		const fallback = cache.read(path.join(root, "fresh")).status?.statusLine;
+		expect(fallback?.thinkingLevel).toBe(ThinkingLevel.High);
+		expect(fallback?.contextPercent).toBeUndefined();
+		expect(fallback?.tokenBreakdown).toBeUndefined();
+		cache.close();
+	});
+
+	it("updates live auto-resume intent without replacing the cached UI snapshot", () => {
+		const project = path.join(root, "project");
+		const otherProject = path.join(root, "other-project");
+		const sessionFile = path.join(root, "sessions", "session.jsonl");
+		const otherSessionFile = path.join(root, "sessions", "other-session.jsonl");
+		const preferences = { ...COMPOSER_DEFAULTS, composerShape: "rail" };
+		const otherPreferences = { ...COMPOSER_DEFAULTS, composerShape: "box" };
+		const theme = { symbolPreset: "ascii" as const, colorBlindMode: true };
+		const status = statusFor(ThinkingLevel.High);
+		const statusWithUsage: ComposerStatusCache = {
+			...status,
+			statusLine: { ...status.statusLine, contextPercent: 42 },
+		};
+		const cache = ComposerCache.open(dbPath);
+		cache.writeUi(project, preferences, theme, true);
+		cache.writeStatus(project, statusWithUsage, sessionFile);
+		cache.writeUi(otherProject, otherPreferences, theme, true, true);
+		cache.writeStatus(otherProject, statusWithUsage, otherSessionFile);
+
+		cache.writeAutoResume(project, false);
+		expect(cache.cachedAutoResume(project)).toBeFalse();
+		expect(cache.read(project)).toMatchObject({ preferences, theme });
+		expect(cache.read(otherProject)).toMatchObject({ preferences: otherPreferences, theme });
+		expect(
+			cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine.contextPercent,
+		).toBeUndefined();
+		expect(
+			cache.read(otherProject, { allowSessionUsage: true, sessionFile: otherSessionFile }).status?.statusLine
+				.contextPercent,
+		).toBe(42);
+		expect(
+			cache.read(path.join(root, "fresh"), { allowSessionUsage: true, sessionFile: otherSessionFile }).status
+				?.statusLine.contextPercent,
+		).toBeUndefined();
+
+		cache.writeAutoResume(project, true);
+		expect(cache.cachedAutoResume(project)).toBeTrue();
+		expect(cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine.contextPercent).toBe(42);
+		expect(
+			cache.read(otherProject, { allowSessionUsage: true, sessionFile: otherSessionFile }).status?.statusLine
+				.contextPercent,
+		).toBe(42);
+		cache.close();
+	});
+
+	it("refreshes inherited auto-resume intent without masking a project override", () => {
+		const project = path.join(root, "project");
+		const otherProject = path.join(root, "other-project");
+		const cache = ComposerCache.open(dbPath);
+		cache.writeAutoResume(project, true, true);
+		cache.writeGlobalAutoResume(true);
+
+		cache.writeGlobalAutoResume(false);
+
+		expect(cache.cachedAutoResume(project)).toBeTrue();
+		expect(cache.cachedAutoResume(otherProject)).toBeFalse();
+		cache.close();
+	});
+
+	it("rejects cached auto-resume intent after its config source changes on disk", async () => {
+		const project = path.join(root, "project");
+		const sessionFile = path.join(root, "sessions", "session.jsonl");
+		const configFile = path.join(root, "config.yml");
+		await Bun.write(configFile, "autoResume: true\n");
+		const cache = ComposerCache.open(dbPath);
+		cache.writeStatus(
+			project,
+			{
+				...statusFor(ThinkingLevel.Low),
+				statusLine: { ...statusFor(ThinkingLevel.Low).statusLine, contextPercent: 42 },
+			},
+			sessionFile,
+		);
+		cache.writeAutoResume(project, true, false, [configFile]);
+
+		expect(cache.cachedAutoResume(project)).toBeTrue();
+		expect(cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine.contextPercent).toBe(42);
+
+		await Bun.write(configFile, "autoResume: false\n");
+		expect(cache.cachedAutoResume(project)).toBeUndefined();
+		expect(
+			cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine.contextPercent,
+		).toBeUndefined();
+		cache.writeGlobalAutoResume(true);
+		await Bun.write(configFile, "autoResume: true\n");
+		cache.writeAutoResume(project, true, true, [configFile]);
+		await Bun.write(configFile, "autoResume: false\n");
+		expect(cache.cachedAutoResume(project)).toBeUndefined();
+		cache.close();
+	});
+
+	it("rejects inherited auto-resume when the first project override appears", async () => {
+		const project = path.join(root, "project");
+		const globalConfig = path.join(root, "agent", "config.yml");
+		const projectConfig = path.join(project, ".omp", "config.yml");
+		await Bun.write(globalConfig, "autoResume: true\n");
+		const cache = ComposerCache.open(dbPath);
+		cache.writeAutoResume(project, true, false, [globalConfig], [projectConfig]);
+
+		expect(cache.cachedAutoResume(project)).toBeTrue();
+		await Bun.write(projectConfig, "autoResume: false\n");
+
+		expect(cache.cachedAutoResume(project)).toBeUndefined();
+		cache.close();
+	});
+
+	it("rebases project-scoped auto-resume sources after a proven project move", async () => {
+		const previousProject = path.join(root, "project");
+		const currentProject = path.join(root, "renamed-project");
+		const projectConfig = path.join(previousProject, ".omp", "config.yml");
+		await Bun.write(projectConfig, "autoResume: true\n");
+		const cache = ComposerCache.open(dbPath);
+		cache.writeAutoResume(previousProject, true, true, [projectConfig]);
+
+		await fs.rename(previousProject, currentProject);
+		expect(cache.cachedAutoResume(previousProject)).toBeUndefined();
+		expect(cache.rebaseMovedProjectAutoResume(previousProject, currentProject)).toBeTrue();
+		expect(cache.cachedAutoResume(previousProject)).toBeTrue();
+
+		await Bun.write(path.join(currentProject, ".omp", "config.yml"), "autoResume: false\n");
+		expect(cache.cachedAutoResume(previousProject)).toBeUndefined();
+		cache.close();
+	});
+
+	it("refreshes zero-turn layout while preserving resumable-session facts", () => {
+		const project = path.join(root, "project");
+		const sessionFile = path.join(root, "sessions", "resumable.jsonl");
+		const cached = statusFor(ThinkingLevel.Low);
+		const cachedWithUsage: ComposerStatusCache = {
+			...cached,
+			statusLine: {
+				...cached.statusLine,
+				contextPercent: 37.5,
+				tokenBreakdown: {
+					input: 25_000,
+					output: 500,
+					cacheWrite: 100,
+					orchestrationInput: 250,
+					orchestrationOutput: 50,
+				},
+			},
+		};
+		const refreshedBase = statusFor(ThinkingLevel.High);
+		const refreshed: ComposerStatusCache = {
+			borderColor: { prefix: "new", suffix: "border" },
+			statusLine: {
+				...refreshedBase.statusLine,
+				settings: { leftSegments: ["path"], contextLine: "off" },
+				gitEnabled: false,
+				autoThinking: true,
+				fastMode: true,
+				autoCompactEnabled: false,
+				compactionBoundaries: null,
+			},
+		};
+		const cache = ComposerCache.open(dbPath);
+		cache.writeUi(project, COMPOSER_DEFAULTS, {}, true);
+		cache.writeStatus(project, cachedWithUsage, sessionFile);
+
+		cache.writeStatusPreservingSession(project, refreshed);
+
+		expect(cache.cachedSessionFile(project)).toBe(sessionFile);
+		const resumed = cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine;
+		expect(resumed?.settings).toEqual(refreshed.statusLine.settings);
+		expect(resumed?.gitEnabled).toBeFalse();
+		expect(resumed?.thinkingLevel).toBe(ThinkingLevel.Low);
+		expect(resumed?.autoThinking).toBeFalse();
+		expect(resumed?.fastMode).toBeFalse();
+		expect(resumed?.autoCompactEnabled).toBeTrue();
+		expect(resumed?.compactionBoundaries).toEqual(cached.statusLine.compactionBoundaries);
+		expect(resumed?.contextPercent).toBe(37.5);
+		expect(resumed?.tokenBreakdown).toEqual(cachedWithUsage.statusLine.tokenBreakdown);
+		expect(cache.read(project).status?.borderColor).toEqual(cached.borderColor);
 		cache.close();
 	});
 
@@ -143,7 +368,7 @@ describe("composer startup cache", () => {
 			'import * as path from "node:path";',
 			`import { ComposerCache } from ${JSON.stringify(composerCacheModule)};`,
 			"const cache = ComposerCache.open();",
-			`cache.writeUi(${JSON.stringify(project)}, {}, {});`,
+			`cache.writeUi(${JSON.stringify(project)}, {}, {}, false);`,
 			"cache.close();",
 			`const expected = path.join(${JSON.stringify(xdgCache)}, "omp", "cache", "composer.db");`,
 			"process.stdout.write(String(await Bun.file(expected).exists()));",

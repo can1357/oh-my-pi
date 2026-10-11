@@ -30,7 +30,7 @@ import type { SymbolPreset } from "../theme/theme";
 import { isWordCompletionMethod } from "./word-completion";
 
 /** Bump whenever any payload format changes; older stores are cleared on open. */
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 9;
 /** Project key of rows that serve every project lacking its own. */
 const ANY_PROJECT = "";
 
@@ -45,8 +45,23 @@ CREATE TABLE IF NOT EXISTS entries (
 ) WITHOUT ROWID;
 `;
 
-/** Every kind is mirrored under {@link ANY_PROJECT} as the fallback for projects without their own row. */
-type EntryKind = "ui" | "status";
+/** Speculative composer cache payload kinds. */
+type EntryKind = "auto-resume" | "ui" | "status";
+
+interface CachedAutoResume {
+	readonly value: boolean;
+	readonly projectScoped: boolean;
+	readonly sources?: readonly CachedSourceSnapshot[];
+}
+
+interface CachedSourceSnapshot {
+	readonly path: string;
+	readonly kind: "file" | "missing" | "unreadable";
+	readonly mtimeNs?: string;
+	readonly ctimeNs?: string;
+	readonly inode?: string;
+	readonly size?: string;
+}
 
 /** Theme inputs cached from the last resolved settings load for stable prepaint colors. */
 export interface ComposerThemePreferences {
@@ -61,6 +76,13 @@ export interface ComposerStartupCache {
 	readonly preferences?: ComposerPreferences;
 	readonly theme?: ComposerThemePreferences;
 	readonly status?: ComposerStatusCache;
+}
+
+export interface ComposerCacheReadOptions {
+	/** Permit reuse of layout hints when cached settings will auto-resume the producing session. */
+	readonly allowSessionUsage?: boolean;
+	/** Session file the current terminal breadcrumb will resume, when known. */
+	readonly sessionFile?: string;
 }
 
 function parseJson(value: string | undefined): unknown {
@@ -82,6 +104,76 @@ function parseStatus(value: unknown): ComposerStatusCache | undefined {
 	const { prefix, suffix } = rawBorderColor;
 	if (typeof prefix !== "string" || typeof suffix !== "string") return undefined;
 	return { borderColor: { prefix, suffix }, statusLine };
+}
+
+function parseCachedStatus(
+	value: unknown,
+): { status: ComposerStatusCache; sessionFile: string | undefined } | undefined {
+	if (!isRecord(value)) return undefined;
+	const status = parseStatus(value.status);
+	if (!status || (value.sessionFile !== undefined && typeof value.sessionFile !== "string")) return undefined;
+	return { status, sessionFile: value.sessionFile };
+}
+
+function parseCachedAutoResume(value: unknown): CachedAutoResume | undefined {
+	if (!isRecord(value) || typeof value.value !== "boolean" || typeof value.projectScoped !== "boolean") {
+		return undefined;
+	}
+	if (value.sources !== undefined) {
+		if (!Array.isArray(value.sources) || !value.sources.every(isCachedSourceSnapshot)) return undefined;
+		return { value: value.value, projectScoped: value.projectScoped, sources: value.sources };
+	}
+	return { value: value.value, projectScoped: value.projectScoped };
+}
+
+function isCachedSourceSnapshot(value: unknown): value is CachedSourceSnapshot {
+	if (!isRecord(value) || typeof value.path !== "string") return false;
+	if (value.kind === "missing" || value.kind === "unreadable") return true;
+	return (
+		value.kind === "file" &&
+		typeof value.mtimeNs === "string" &&
+		typeof value.ctimeNs === "string" &&
+		typeof value.inode === "string" &&
+		typeof value.size === "string"
+	);
+}
+
+function snapshotSource(sourcePath: string): CachedSourceSnapshot {
+	const resolved = path.resolve(sourcePath);
+	try {
+		const stat = fs.statSync(resolved, { bigint: true, throwIfNoEntry: false });
+		if (!stat?.isFile()) return { path: resolved, kind: "missing" };
+		return {
+			path: resolved,
+			kind: "file",
+			mtimeNs: stat.mtimeNs.toString(),
+			ctimeNs: stat.ctimeNs.toString(),
+			inode: stat.ino.toString(),
+			size: stat.size.toString(),
+		};
+	} catch {
+		return { path: resolved, kind: "unreadable" };
+	}
+}
+
+function snapshotSources(sourcePaths: readonly string[]): CachedSourceSnapshot[] {
+	return [...new Set(sourcePaths.map(sourcePath => path.resolve(sourcePath)))].sort().map(snapshotSource);
+}
+
+function cachedAutoResumeIsFresh(value: CachedAutoResume | undefined): value is CachedAutoResume {
+	if (!value) return false;
+	if (!value.sources) return true;
+	return value.sources.every(source => JSON.stringify(snapshotSource(source.path)) === JSON.stringify(source));
+}
+
+function rebaseMovedProjectSource(
+	source: CachedSourceSnapshot,
+	previousCwd: string,
+	currentCwd: string,
+): CachedSourceSnapshot {
+	const relative = path.relative(previousCwd, source.path);
+	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return source;
+	return { ...source, path: path.resolve(currentCwd, relative) };
 }
 
 function parseUiState(
@@ -206,8 +298,11 @@ export class ComposerCache {
 		return openSqliteDatabaseSync(dbPath, db => new ComposerCache(db), { recoverCorruption: true });
 	}
 
-	/** Everything cached for `cwd`, with any-project rows as fallback for shared kinds. Never throws. */
-	read(cwd: string): ComposerStartupCache {
+	/**
+	 * Everything cached for `cwd`, with any-project rows as fallback for shared kinds. Never throws.
+	 * Fresh sessions omit the previous session's usage so their first frame does not reserve stale segments.
+	 */
+	read(cwd: string, options: ComposerCacheReadOptions = {}): ComposerStartupCache {
 		const project = path.resolve(cwd);
 		const own: Partial<Record<EntryKind, string>> = {};
 		const anyProject: Partial<Record<EntryKind, string>> = {};
@@ -220,21 +315,238 @@ export class ComposerCache {
 			logger.debug("composer cache read failed", { error: String(error) });
 		}
 		const ui = parseUiState(parseJson(own.ui)) ?? parseUiState(parseJson(anyProject.ui));
+		const ownAutoResume = parseCachedAutoResume(parseJson(own["auto-resume"]));
+		const globalAutoResume = parseCachedAutoResume(parseJson(anyProject["auto-resume"]));
+		const autoResume = ownAutoResume
+			? cachedAutoResumeIsFresh(ownAutoResume)
+				? ownAutoResume.value
+				: undefined
+			: cachedAutoResumeIsFresh(globalAutoResume)
+				? globalAutoResume.value
+				: undefined;
+		const cachedStatus = parseCachedStatus(parseJson(own.status)) ?? parseCachedStatus(parseJson(anyProject.status));
+		const canReuseSessionUsage =
+			options.allowSessionUsage &&
+			autoResume === true &&
+			options.sessionFile !== undefined &&
+			cachedStatus?.sessionFile === options.sessionFile;
+		const status =
+			cachedStatus && !canReuseSessionUsage
+				? {
+						...cachedStatus.status,
+						statusLine: {
+							...cachedStatus.status.statusLine,
+							contextPercent: undefined,
+							tokenBreakdown: undefined,
+						},
+					}
+				: cachedStatus?.status;
 		return {
 			preferences: ui?.preferences,
 			theme: ui?.theme,
-			status: parseStatus(parseJson(own.status)) ?? parseStatus(parseJson(anyProject.status)),
+			status,
 		};
 	}
 
+	/** Exact session identity most recently cached for this project; shared fallback rows never qualify. */
+	cachedSessionFile(cwd: string): string | undefined {
+		const project = path.resolve(cwd);
+		try {
+			const row = this.#select
+				.all(project, project)
+				.find(entry => entry.project === project && entry.kind === "status");
+			if (!row) return undefined;
+			this.#known.set(`${row.project}\0${row.kind}`, row.value);
+			return parseCachedStatus(parseJson(row.value))?.sessionFile;
+		} catch (error) {
+			logger.debug("composer cache session identity read failed", { error: String(error) });
+			return undefined;
+		}
+	}
+
+	/** Persisted auto-resume intent applicable to this project, before the settings graph loads. */
+	cachedAutoResume(cwd: string): boolean | undefined {
+		const project = path.resolve(cwd);
+		let own: CachedAutoResume | undefined;
+		let global: CachedAutoResume | undefined;
+		try {
+			for (const row of this.#select.all(project, ANY_PROJECT)) {
+				this.#known.set(`${row.project}\0${row.kind}`, row.value);
+				if (row.kind !== "auto-resume") continue;
+				const parsed = parseCachedAutoResume(parseJson(row.value));
+				if (row.project === project) own = parsed;
+				else global = parsed;
+			}
+		} catch (error) {
+			logger.debug("composer cache auto-resume read failed", { error: String(error) });
+			return undefined;
+		}
+		if (own) return cachedAutoResumeIsFresh(own) ? own.value : undefined;
+		return cachedAutoResumeIsFresh(global) ? global.value : undefined;
+	}
+
+	/** Rebase a proven moved project's source identities so its prior cache row remains usable. */
+	rebaseMovedProjectAutoResume(previousCwd: string, currentCwd: string): boolean | undefined {
+		const previousProject = path.resolve(previousCwd);
+		const currentProject = path.resolve(currentCwd);
+		let own: CachedAutoResume | undefined;
+		let global: CachedAutoResume | undefined;
+		try {
+			for (const row of this.#select.all(previousProject, ANY_PROJECT)) {
+				this.#known.set(`${row.project}\0${row.kind}`, row.value);
+				if (row.kind !== "auto-resume") continue;
+				const parsed = parseCachedAutoResume(parseJson(row.value));
+				if (row.project === previousProject) own = parsed;
+				else global = parsed;
+			}
+		} catch (error) {
+			logger.debug("composer cache moved-project auto-resume read failed", { error: String(error) });
+			return undefined;
+		}
+		if (!own) return cachedAutoResumeIsFresh(global) ? global.value : undefined;
+		const rebased: CachedAutoResume = own.sources
+			? {
+					...own,
+					sources: own.sources.map(source => rebaseMovedProjectSource(source, previousProject, currentProject)),
+				}
+			: own;
+		if (!cachedAutoResumeIsFresh(rebased)) return undefined;
+		const json = JSON.stringify(rebased);
+		try {
+			this.#upsert.run(previousProject, "auto-resume", json);
+			this.#known.set(`${previousProject}\0auto-resume`, json);
+			return rebased.value;
+		} catch (error) {
+			logger.debug("composer cache moved-project auto-resume write failed", { error: String(error) });
+			return undefined;
+		}
+	}
+
 	/** Resolved theme and composer settings for the next prepaint. */
-	writeUi(cwd: string, preferences: ComposerPreferences, theme: ComposerThemePreferences): void {
+	writeUi(
+		cwd: string,
+		preferences: ComposerPreferences,
+		theme: ComposerThemePreferences,
+		autoResume?: boolean,
+		autoResumeProjectScoped = false,
+	): void {
 		this.#putShared(cwd, "ui", { preferences, theme });
+		if (autoResume !== undefined) this.writeAutoResume(cwd, autoResume, autoResumeProjectScoped);
+	}
+
+	/** Refresh the live auto-resume setting without replacing the cached UI snapshot. */
+	writeAutoResume(
+		cwd: string,
+		autoResume: boolean,
+		projectScoped = false,
+		sourcePaths: readonly string[] = [],
+		projectSourcePaths: readonly string[] = [],
+	): void {
+		const project = path.resolve(cwd);
+		const globalValue: CachedAutoResume = {
+			value: autoResume,
+			projectScoped: false,
+			sources: sourcePaths.length > 0 ? snapshotSources(sourcePaths) : undefined,
+		};
+		const ownValue: CachedAutoResume = projectScoped
+			? { ...globalValue, projectScoped: true }
+			: {
+					...globalValue,
+					sources:
+						sourcePaths.length + projectSourcePaths.length > 0
+							? snapshotSources([...sourcePaths, ...projectSourcePaths])
+							: undefined,
+				};
+		const ownJson = JSON.stringify(ownValue);
+		const globalJson = JSON.stringify(globalValue);
+		const ownKey = `${project}\0auto-resume`;
+		const globalKey = `${ANY_PROJECT}\0auto-resume`;
+		try {
+			if (projectScoped) {
+				if (this.#known.get(ownKey) === ownJson) return;
+				this.#upsert.run(project, "auto-resume", ownJson);
+				this.#known.set(ownKey, ownJson);
+				return;
+			}
+			// Keep a project-specific inherited snapshot so creating the first local
+			// override invalidates speculation. Its global source snapshots also make
+			// it stale when inherited intent changes, so it cannot mask the shared row.
+			this.#db.transaction(() => {
+				this.#upsert.run(project, "auto-resume", ownJson);
+				this.#upsert.run(ANY_PROJECT, "auto-resume", globalJson);
+			})();
+			this.#known.set(ownKey, ownJson);
+			this.#known.set(globalKey, globalJson);
+		} catch (error) {
+			logger.debug("composer cache write failed", { kind: "auto-resume", error: String(error) });
+		}
+	}
+
+	/** Refresh inherited intent without deleting a project's explicit override row. */
+	writeGlobalAutoResume(autoResume: boolean, sourcePaths: readonly string[] = []): void {
+		const value: CachedAutoResume = {
+			value: autoResume,
+			projectScoped: false,
+			sources: sourcePaths.length > 0 ? snapshotSources(sourcePaths) : undefined,
+		};
+		const json = JSON.stringify(value);
+		const globalKey = `${ANY_PROJECT}\0auto-resume`;
+		if (this.#known.get(globalKey) === json) return;
+		try {
+			this.#upsert.run(ANY_PROJECT, "auto-resume", json);
+			this.#known.set(globalKey, json);
+		} catch (error) {
+			logger.debug("composer cache write failed", { kind: "auto-resume", error: String(error) });
+		}
 	}
 
 	/** Status-bar inputs for the next prepaint's startup status line. */
-	writeStatus(cwd: string, status: ComposerStatusCache): void {
-		this.#putShared(cwd, "status", status);
+	writeStatus(cwd: string, status: ComposerStatusCache, sessionFile?: string): void {
+		this.#putShared(
+			cwd,
+			"status",
+			{ status, sessionFile: sessionFile === undefined ? undefined : path.resolve(cwd, sessionFile) },
+			{
+				status: {
+					...status,
+					statusLine: {
+						...status.statusLine,
+						// Usage belongs to one session. The shared fallback must never
+						// make another project reserve its usage-only segments.
+						contextPercent: undefined,
+						tokenBreakdown: undefined,
+					},
+				},
+			},
+		);
+	}
+
+	/** Refresh global layout inputs while retaining all facts owned by the last resumable session. */
+	writeStatusPreservingSession(cwd: string, status: ComposerStatusCache): void {
+		const project = path.resolve(cwd);
+		let previous: { status: ComposerStatusCache; sessionFile: string | undefined } | undefined;
+		try {
+			const row = this.#select
+				.all(project, project)
+				.find(entry => entry.project === project && entry.kind === "status");
+			if (row) {
+				this.#known.set(`${row.project}\0${row.kind}`, row.value);
+				previous = parseCachedStatus(parseJson(row.value));
+			}
+		} catch (error) {
+			logger.debug("composer cache session status read failed", { error: String(error) });
+		}
+		const next = previous
+			? {
+					...previous.status,
+					statusLine: {
+						...previous.status.statusLine,
+						settings: status.statusLine.settings,
+						gitEnabled: status.statusLine.gitEnabled,
+					},
+				}
+			: status;
+		this.writeStatus(cwd, next, previous?.sessionFile);
 	}
 
 	close(): void {
@@ -246,21 +558,23 @@ export class ComposerCache {
 
 	/**
 	 * Best-effort upsert of this project's row plus the any-project fallback row,
-	 * atomically: a failed write only costs the next launch its speculation.
+	 * atomically. Callers may omit project-local data from the fallback value. A
+	 * failed write only costs the next launch its speculation.
 	 */
-	#putShared(cwd: string, kind: EntryKind, value: unknown): void {
+	#putShared(cwd: string, kind: EntryKind, value: unknown, fallbackValue: unknown = value): void {
 		const project = path.resolve(cwd);
 		const json = JSON.stringify(value);
+		const fallbackJson = JSON.stringify(fallbackValue);
 		const ownKey = `${project}\0${kind}`;
 		const anyKey = `${ANY_PROJECT}\0${kind}`;
-		if (this.#known.get(ownKey) === json && this.#known.get(anyKey) === json) return;
+		if (this.#known.get(ownKey) === json && this.#known.get(anyKey) === fallbackJson) return;
 		try {
 			this.#db.transaction(() => {
 				this.#upsert.run(project, kind, json);
-				this.#upsert.run(ANY_PROJECT, kind, json);
+				this.#upsert.run(ANY_PROJECT, kind, fallbackJson);
 			})();
 			this.#known.set(ownKey, json);
-			this.#known.set(anyKey, json);
+			this.#known.set(anyKey, fallbackJson);
 		} catch (error) {
 			logger.debug("composer cache write failed", { kind, error: String(error) });
 		}

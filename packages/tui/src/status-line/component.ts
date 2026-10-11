@@ -7,7 +7,7 @@ import {
 } from "@oh-my-pi/pi-ai/usage/google-antigravity";
 import { getNextTimeBasedPricingTransition } from "@oh-my-pi/pi-catalog/models";
 import type { Model, ModelCost } from "@oh-my-pi/pi-catalog/types";
-import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
+import type { VcsGitRepo, VcsLinkedWorktree, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
@@ -38,7 +38,7 @@ import {
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
 import { summarizeUsageResetCredits } from "../overlays/usage-display";
 import { getPreset } from "./presets";
-import { describeSegment, renderSegment, type SegmentContext } from "./segments";
+import { describeSegment, formatCompactContextPercent, renderSegment, type SegmentContext } from "./segments";
 import type { TspMeterMark, TspProps } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import { col, node, span } from "../native/describe";
@@ -509,7 +509,16 @@ interface WorktreeContext {
  * resolve to the shared `foo.git` dir, so a trailing `.git` is stripped.
  */
 function resolveWorktreeContext(cwd: string): WorktreeContext | null {
-	const worktree = vcs.git(cwd)?.linkedWorktree();
+	let worktree: VcsLinkedWorktree | null | undefined;
+	try {
+		worktree = vcs.git(cwd)?.linkedWorktree();
+	} catch {
+		// The linked-worktree decoration is optional chrome. If the current
+		// process is still running against an older pi-natives surface that lacks
+		// the newer VCS entrypoints, fail closed and keep the rest of the status
+		// line rendering instead of turning path/git segments into a hard crash.
+		return null;
+	}
 	if (!worktree) return null;
 	const base = path.basename(worktree.primaryRoot);
 	const projectName = base.endsWith(".git") ? base.slice(0, -4) : base;
@@ -559,26 +568,42 @@ function hasNonContextSegment(segments: readonly StatusLineSegmentId[]): boolean
 	return false;
 }
 
-function removeContextSegments(parts: string[], segments: StatusLineSegmentId[]): void {
+function removeContextSegments(
+	parts: string[],
+	segments: StatusLineSegmentId[],
+	widthHints: (string | undefined)[],
+): void {
 	let writeIndex = 0;
 	for (let readIndex = 0; readIndex < segments.length; readIndex++) {
 		const segment = segments[readIndex];
 		if (isContextSegment(segment)) continue;
 		parts[writeIndex] = parts[readIndex];
 		segments[writeIndex] = segment;
+		widthHints[writeIndex] = widthHints[readIndex];
 		writeIndex++;
 	}
 	parts.length = writeIndex;
 	segments.length = writeIndex;
+	widthHints.length = writeIndex;
 }
 
 function formatEmbeddedContextPercent(percent: number): string {
 	return `${percent > 0 && percent < 1 ? percent.toFixed(1) : Math.round(percent)}%`;
 }
 
-/** Gap width the embedded gauge needs for its labels; an unknown percent (`null`) shows the window label alone. */
-function embeddedContextGaugeMinWidth(percent: number | null, contextWindow: number): number {
-	const percentWidth = percent === null ? 0 : formatEmbeddedContextPercent(percent).length + 2;
+function embeddedContextGaugeMinWidth(
+	percent: number | null,
+	contextWindow: number,
+	compact: boolean,
+	showWindow: boolean,
+): number {
+	const percentLabel = compact
+		? `ctx:${formatCompactContextPercent(percent)}`
+		: percent === null
+			? ""
+			: formatEmbeddedContextPercent(percent);
+	if (!showWindow) return percentLabel.length;
+	const percentWidth = percentLabel.length === 0 ? 0 : percentLabel.length + 2;
 	return percentWidth + formatNumber(contextWindow).length + 2;
 }
 
@@ -839,10 +864,23 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			return this.#activeRepoCache;
 		}
 
-		const projectRepository = vcs.repo(projectDir);
+		let projectRepository: VcsRepo | null = null;
+		try {
+			projectRepository = vcs.repo(projectDir);
+		} catch {
+			// Repository chrome is optional. Older native addons and partial test
+			// stubs may not expose discovery yet, so keep non-VCS segments usable.
+		}
 		const activeRepo = projectRepository ? null : this.host.resolveActiveRepo(projectDir);
 		const effectiveGitCwd = activeRepo?.repoRoot ?? projectDir;
-		const repository = projectRepository ?? (activeRepo ? vcs.repo(effectiveGitCwd) : null);
+		let repository = projectRepository;
+		if (!repository && activeRepo) {
+			try {
+				repository = vcs.repo(effectiveGitCwd);
+			} catch {
+				repository = null;
+			}
+		}
 		// Presentation follows a second detector whose only policy difference
 		// is preferring jj on equal-root ties (see detect_for_display);
 		// automation keeps `repository` above. A failed display lookup (or a
@@ -875,7 +913,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (cache.repository) return cache.repository;
 		const now = Date.now();
 		if (now - cache.repositoryCheckedAt >= WATCHER_FAILURE_POLL_TTL_MS) {
-			cache.repository = vcs.repo(cache.effectiveGitCwd);
+			try {
+				cache.repository = vcs.repo(cache.effectiveGitCwd);
+			} catch {
+				cache.repository = null;
+			}
 			cache.repositoryCheckedAt = now;
 		}
 		// Still absent: re-probe on the bounded interval so a later `git init` shows up.
@@ -948,7 +990,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	}
 
 	updateSettings(settings: StatusLineSettings): void {
-		this.#settings = settings;
+		this.#settings = { gitEnabled: this.#settings.gitEnabled, ...settings };
 		this.#effectiveSettings = undefined;
 		this.#invalidateStatusLineRenderCache();
 		if (this.#onBranchChange) this.#setupGitWatcher();
@@ -2950,6 +2992,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 		// Collect visible segment contents
 		const leftParts: string[] = [];
+		const leftWidthHints: (string | undefined)[] = [];
 		const leftSegIds: StatusLineSegmentId[] = [];
 		const leftSegmentIds = layout === "plain-right" ? [] : effectiveSettings.leftSegments;
 		for (const segId of leftSegmentIds) {
@@ -2959,11 +3002,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				leftParts.push(rendered.content);
+				leftWidthHints.push(rendered.widthHint);
 				leftSegIds.push(segId);
 			}
 		}
 
 		const rightParts: string[] = [];
+		const rightWidthHints: (string | undefined)[] = [];
 		const rightSegIds: StatusLineSegmentId[] = [];
 		const rightSegmentIds = layout === "plain-left" ? [] : effectiveSettings.rightSegments;
 		for (const segId of rightSegmentIds) {
@@ -2972,6 +3017,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				rightParts.push(rendered.content);
+				rightWidthHints.push(rendered.widthHint);
 				rightSegIds.push(segId);
 			}
 		}
@@ -2982,24 +3028,48 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			ctx.contextWindow > 0 &&
 			(hasContextSegment(leftSegIds) || hasContextSegment(rightSegIds)) &&
 			(hasNonContextSegment(leftSegIds) || hasNonContextSegment(rightSegIds));
+		const embedCompactContext =
+			embedContext &&
+			ctx.options.context_pct?.compact === true &&
+			(leftSegIds.includes("context_pct") || rightSegIds.includes("context_pct"));
+		const showEmbeddedContextWindow =
+			embedContext &&
+			(!embedCompactContext || leftSegIds.includes("context_total") || rightSegIds.includes("context_total"));
 		if (embedContext) {
-			removeContextSegments(leftParts, leftSegIds);
-			removeContextSegments(rightParts, rightSegIds);
+			removeContextSegments(leftParts, leftSegIds, leftWidthHints);
+			removeContextSegments(rightParts, rightSegIds, rightWidthHints);
 		}
 
 		if (layout !== "plain-left") {
 			const runningBackgroundJobs = this.runningBackgroundJobCount();
 			if (runningBackgroundJobs > 0) {
 				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
+				rightWidthHints.unshift(undefined);
 			}
-			if (subagentBadge) rightParts.unshift(subagentBadge);
+			if (subagentBadge) {
+				rightParts.unshift(subagentBadge);
+				rightWidthHints.unshift(undefined);
+			}
 		}
 		const topFillWidth = Math.max(0, width);
 		// These arrays are local to this render; overflow handling can mutate them.
 		const left = leftParts;
 		const right = rightParts;
-		const leftWidths = left.map(part => visibleWidth(part));
-		const rightWidths = right.map(part => visibleWidth(part));
+		const leftWidths = left.map((part, index) =>
+			Math.max(visibleWidth(part), visibleWidth(leftWidthHints[index] ?? "")),
+		);
+		const rightWidths = right.map((part, index) =>
+			Math.max(visibleWidth(part), visibleWidth(rightWidthHints[index] ?? "")),
+		);
+		// Startup placeholders budget against their cached live width. Emit that
+		// reserved width too so the opposite group stays fixed on the first live
+		// frame: left parts grow toward the gap, while right parts grow away from it.
+		for (let index = 0; index < left.length; index++) {
+			left[index] += padding(leftWidths[index] - visibleWidth(left[index]));
+		}
+		for (let index = 0; index < right.length; index++) {
+			right[index] = padding(rightWidths[index] - visibleWidth(right[index])) + right[index];
+		}
 
 		const leftSepWidth = separators.leftSepWidth;
 		const rightSepWidth = separators.rightSepWidth;
@@ -3027,18 +3097,35 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// handling, so the gauge must reserve enough room for both labels. Without
 		// this budget a long path/session title can leave a one-cell gap: the
 		// context segment is gone, and the gauge silently omits its labels too.
+		const embeddedContextPercent =
+			ctx.contextPercent ?? ctx.session.startupContextPercent ?? (embedCompactContext ? 100 : null);
 		const embeddedContextWidth = embedContext
-			? embeddedContextGaugeMinWidth(ctx.contextPercent, ctx.contextWindow)
+			? embeddedContextGaugeMinWidth(
+					embeddedContextPercent,
+					ctx.contextWindow,
+					embedCompactContext,
+					showEmbeddedContextWindow,
+				)
 			: 0;
-		const minimumGapWidth = (): number => {
-			if (!embeddedContextWidth) return left.length > 0 && right.length > 0 ? 1 : 0;
-			// If the labels cannot coexist with the last surviving segment, fall
-			// back to the original one-cell gauge instead of dropping the entire
-			// status line. At this width the labels cannot render either way.
-			if (left.length + right.length === 1 && leftWidth + rightWidth + embeddedContextWidth > topFillWidth) {
-				return 1;
-			}
-			return embeddedContextWidth;
+		const embeddedContextPercentWidth = embedContext
+			? embeddedContextGaugeMinWidth(embeddedContextPercent, ctx.contextWindow, embedCompactContext, false)
+			: 0;
+		// A default (non-compact) gauge may fall back to its short percentage-only
+		// label when both context labels cannot coexist with the final ordinary
+		// segment. Do not drop that last segment merely to satisfy the larger
+		// two-label reservation; the remaining gap can still show the percentage.
+		const minimumGapWidth = () => {
+			const ordinaryWidth = leftWidth + rightWidth;
+			const ordinaryCount = left.length + right.length;
+			const embeddedPercentCannotFit = embeddedContextPercentWidth > topFillWidth;
+			const preserveLastOrdinarySegment =
+				ordinaryCount === 1 &&
+				ordinaryWidth + embeddedContextWidth > topFillWidth &&
+				(!embedCompactContext || embeddedContextWidth > topFillWidth) &&
+				(ordinaryWidth + embeddedContextPercentWidth <= topFillWidth || embeddedPercentCannotFit);
+			if (!preserveLastOrdinarySegment && embeddedContextWidth > 0) return embeddedContextWidth;
+			if (preserveLastOrdinarySegment) return embeddedPercentCannotFit ? 0 : 1;
+			return left.length > 0 && right.length > 0 ? 1 : 0;
 		};
 		const totalWidth = () => leftWidth + rightWidth + minimumGapWidth();
 
@@ -3150,13 +3237,23 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 		const leftGroup = renderGroup(left, "left");
 		const rightGroup = renderGroup(right, "right");
-		if (!leftGroup && !rightGroup) return "";
+		if (!leftGroup && !rightGroup) {
+			if (!embedContext || topFillWidth === 0) return "";
+			return this.#buildContextGaugeFill(
+				topFillWidth,
+				ctx,
+				effectiveSettings,
+				embedContext,
+				embedCompactContext,
+				showEmbeddedContextWindow,
+			);
+		}
 
 		if (topFillWidth === 0 || (plain && (left.length === 0 || right.length === 0))) {
 			return leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup;
 		}
 
-		const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
+		const gapWidth = Math.max(0, topFillWidth - leftWidth - rightWidth);
 		if (plain) {
 			// Standalone composers: no gauge line between the groups, just air.
 			return leftGroup + padding(gapWidth) + rightGroup;
@@ -3165,7 +3262,18 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// `session_name`, emptying the default preset's right group) the gauge
 		// runs to the border edge instead of disappearing, so embedded context
 		// labels don't fall back to a context chip until the session is titled.
-		return leftGroup + this.#buildContextGaugeFill(gapWidth, ctx, effectiveSettings, embedContext) + rightGroup;
+		return (
+			leftGroup +
+			this.#buildContextGaugeFill(
+				gapWidth,
+				ctx,
+				effectiveSettings,
+				embedContext,
+				embedCompactContext,
+				showEmbeddedContextWindow,
+			) +
+			rightGroup
+		);
 	}
 
 	/**
@@ -3183,6 +3291,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		ctx: SegmentContext,
 		effectiveSettings: EffectiveStatusLineSettings,
 		embedContext: boolean,
+		embedCompactContext: boolean,
+		showEmbeddedContextWindow: boolean,
 	): string {
 		const sessionName =
 			effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
@@ -3201,31 +3311,67 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		let percentLabel = "";
 		let windowLabel = "";
 		let percentStart = -1;
+		let percentPlacementWidth = 0;
 		let windowStart = -1;
+		let renderWindowLabel = false;
 		let scaleWidth = gapWidth;
 		// >100%: usage anchored past the active window (e.g. model switch to a
 		// smaller window). The bar clamps full, but the embedded label breaks
 		// past the window label — `──200K─120%` with the percent in error color.
-		const percentOverflow = pct !== null && pct > 100;
+		const placementPercent = embedCompactContext && pct === null ? (ctx.session.startupContextPercent ?? null) : pct;
+		const percentOverflow = placementPercent !== null && placementPercent > 100;
 		if (embedContext) {
-			const candidatePercent = pct === null ? "" : formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
-			const candidateWindow = formatNumber(ctx.contextWindow);
-			if (gapWidth >= embeddedContextGaugeMinWidth(pct, ctx.contextWindow)) {
+			const livePercent = embedCompactContext
+				? `ctx:${formatCompactContextPercent(percentOverflow ? pct : pct === null ? null : clampedPct)}`
+				: pct === null
+					? ""
+					: formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
+			const liveWindow = showEmbeddedContextWindow ? formatNumber(ctx.contextWindow) : "";
+			const placementPercentLabel = embedCompactContext
+				? `ctx:${formatCompactContextPercent(placementPercent)}`
+				: livePercent;
+			const candidatePercent = livePercent.padEnd(placementPercentLabel.length, horizontal);
+			const candidateWindow = liveWindow;
+			const minimumLabelWidth = embeddedContextGaugeMinWidth(
+				placementPercent,
+				ctx.contextWindow,
+				embedCompactContext,
+				showEmbeddedContextWindow,
+			);
+			if (gapWidth >= minimumLabelWidth) {
 				percentLabel = candidatePercent;
-				windowLabel = candidateWindow;
-				if (percentOverflow) {
-					percentStart = gapWidth - percentLabel.length;
-					windowStart = percentStart - 1 - windowLabel.length;
+				percentPlacementWidth = placementPercentLabel.length;
+				if (!showEmbeddedContextWindow) {
+					if (percentOverflow) percentStart = gapWidth - percentPlacementWidth;
 				} else {
-					windowStart = gapWidth - windowLabel.length - 1;
+					renderWindowLabel = true;
+					windowLabel = candidateWindow;
+					if (percentOverflow) {
+						percentStart = gapWidth - percentPlacementWidth;
+						windowStart = percentStart - 1 - liveWindow.length;
+					} else {
+						windowStart = gapWidth - liveWindow.length - 1;
+					}
+					scaleWidth = windowStart;
 				}
-				scaleWidth = windowStart;
+			} else if (gapWidth >= placementPercentLabel.length) {
+				// The compact percentage is the primary readout. Keep it when an
+				// explicitly configured context total cannot share the narrow gauge.
+				percentLabel = candidatePercent;
+				percentPlacementWidth = placementPercentLabel.length;
+				if (percentOverflow) percentStart = gapWidth - percentPlacementWidth;
 			}
 		}
 
 		// At least one accent cell: a fresh session still shows the session-accent
 		// line starting at the left instead of a fully dim bar.
 		const usedCount = Math.min(scaleWidth, Math.max(1, Math.round((clampedPct / 100) * scaleWidth)));
+		const clampedPlacementPercent =
+			placementPercent === null ? clampedPct : Math.min(100, Math.max(0, placementPercent));
+		const placementUsedCount = Math.min(
+			scaleWidth,
+			Math.max(1, Math.round((clampedPlacementPercent / 100) * scaleWidth)),
+		);
 		const unusedColor = theme.getFgAnsi("border");
 
 		// Boundary markers are only meaningful when auto-compaction can fire and
@@ -3246,15 +3392,18 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 
 		if (percentLabel && percentStart < 0) {
-			const maxStart = scaleWidth - percentLabel.length - 1;
-			const preferredStart = Math.min(maxStart, Math.max(1, usedCount));
+			const minStart = renderWindowLabel ? 1 : 0;
+			const maxStart = renderWindowLabel
+				? scaleWidth - percentPlacementWidth - 1
+				: scaleWidth - percentPlacementWidth;
+			const preferredStart = Math.min(maxStart, Math.max(minStart, placementUsedCount));
 			const overlapsBoundary = (start: number): boolean => {
-				const end = start + percentLabel.length;
+				const end = start + percentPlacementWidth;
 				return (speculationIdx >= start && speculationIdx < end) || (thresholdIdx >= start && thresholdIdx < end);
 			};
 			for (let distance = 0; distance <= maxStart; distance++) {
 				const left = preferredStart - distance;
-				if (left >= 1 && !overlapsBoundary(left)) {
+				if (left >= minStart && !overlapsBoundary(left)) {
 					percentStart = left;
 					break;
 				}
@@ -3264,6 +3413,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					percentStart = right;
 					break;
 				}
+			}
+			// Every candidate slot collides with a boundary marker (narrow gauge,
+			// marker sits in the only legal range). The context percentage is the
+			// primary readout, so keep it visible and let it overwrite the marker
+			// cell — the render loop already draws the percent label ahead of the
+			// speculation/threshold glyphs — rather than showing no percentage.
+			if (percentStart < 0 && maxStart >= minStart) {
+				percentStart = preferredStart;
 			}
 		}
 
@@ -3282,7 +3439,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// Emit runs, not cells: each stretch of plain rule between markers and
 		// labels is one `repeat`, and color escapes change only at run edges.
 		// Precedence per cell: percent label > threshold > speculation > window label.
-		const percentEnd = percentStart >= 0 ? percentStart + percentLabel.length : -1;
+		const percentEnd = percentStart >= 0 ? percentStart + percentPlacementWidth : -1;
 		const windowEnd = windowStart >= 0 ? windowStart + windowLabel.length : -1;
 		let out = "\x1b[49m";
 		let activeColor = "";
@@ -3616,6 +3773,16 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 		const pct = ctx.contextPercent;
 		const window = ctx.contextWindow;
+		const compactContext = ctx.options.context_pct?.compact === true && segments.includes("context_pct");
+		const compactContextLabel = `ctx:${formatCompactContextPercent(pct)}`;
+		const startupCompactContextLabel =
+			compactContext && pct === null
+				? `ctx:${formatCompactContextPercent(ctx.session.startupContextPercent ?? 100)}`
+				: undefined;
+		const nativeCompactContextLabel = startupCompactContextLabel
+			? compactContextLabel.padEnd(startupCompactContextLabel.length)
+			: compactContextLabel;
+		const showContextWindow = !compactContext || segments.includes("context_total");
 		const boundaries = ctx.autoCompactEnabled ? this.#compactionBoundaries(window) : null;
 		const lines = [
 			pct === null ? "Context usage unknown" : `Context ${Math.round(pct)}% used`,
@@ -3659,8 +3826,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					? { parts: [{ value: speculationAt }, { value: used - speculationAt, token: "accent" }] }
 					: {}),
 				...(marks.length > 0 ? { marks } : {}),
-				...(pct === null ? {} : { label: `${Math.round(pct)}%` }),
-				...(window > 0 ? { total: formatNumber(window) } : {}),
+				...(compactContext
+					? { label: nativeCompactContextLabel }
+					: pct === null
+						? {}
+						: { label: `${Math.round(pct)}%` }),
+				...(showContextWindow && window > 0 ? { total: formatNumber(window) } : {}),
 				title: lines.join("\n"),
 				actions: { click: "status.context" },
 			},
