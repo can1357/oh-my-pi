@@ -74,6 +74,9 @@ const EXACT_LONG_MIN_REPEATED_CHARS = 1024;
 /** Char cap for an unterminated segment; forces a flush so a wall-of-text loop
  *  (no blank lines / headings) still segments. */
 const SEGMENT_CHAR_CAP = 700;
+/** Blank-line (plus any run of following whitespace) that terminates a segment.
+ *  Non-global, so `exec` never advances a shared lastIndex. */
+const SEGMENT_BOUNDARY_RE = /\n\s*\n/;
 /** Normalized-length floor below which a segment is ignored (too short to be a
  *  meaningful paragraph; bare headings must not trip detection). */
 const SEGMENT_MIN_NORM_CHARS = 60;
@@ -169,10 +172,13 @@ export class ThinkingLoopDetector {
 		// 1. Exact suffix cycles. Scan at a bounded cadence rather than doing
 		// quadratic work for every token-sized delta.
 		this.#tail += delta;
-		if (this.#tail.length > EXACT_TAIL_WINDOW) this.#tail = this.#tail.slice(-EXACT_TAIL_WINDOW);
 		this.#exactScannedAt += delta.length;
 		if (this.#exactScannedAt >= EXACT_CHECK_STRIDE || delta.length >= EXACT_CHECK_STRIDE) {
 			this.#exactScannedAt = 0;
+			// Trim only here, on the cadence the detector actually scans at: between
+			// scans the tail is bounded by the stride plus one delta, so the
+			// window copy no longer runs per streamed delta.
+			if (this.#tail.length > EXACT_TAIL_WINDOW) this.#tail = this.#tail.slice(-EXACT_TAIL_WINDOW);
 			const exact = detectExactSuffixCycle(this.#tail);
 			if (exact) {
 				const [unit, times] = exact;
@@ -185,7 +191,7 @@ export class ThinkingLoopDetector {
 		// 2. Near-duplicate paragraph loop. Append, then drain completed segments.
 		this.#pending += delta;
 		while (true) {
-			const boundary = /\n\s*\n/.exec(this.#pending);
+			const boundary = SEGMENT_BOUNDARY_RE.exec(this.#pending);
 			let raw: string;
 			if (boundary) {
 				raw = this.#pending.slice(0, boundary.index);
@@ -321,6 +327,22 @@ export class ThinkingLoopDetector {
  */
 export const GEMINI_HEADER_RUNAWAY_THRESHOLD = 36;
 
+/** Bound on the unterminated partial line held between deltas. A reasoning-summary
+ *  title is a short markdown heading or bold run, so a partial this long cannot
+ *  complete into a header; the cap keeps a newline-free run from growing a buffer
+ *  that is re-scanned (and re-copied) on every delta. Well above any real title,
+ *  far below the point where retaining it would help detection. The head the cap
+ *  drops is folded into `#head` while the line streams, so the line is still
+ *  judged whole — see {@link foldPartialLineHead}. */
+const GEMINI_HEADER_PARTIAL_LINE_CAP = 512;
+
+/** Closing `\*{2,3}` of a whole-line bold run — the end of the line, which is the
+ *  one part the tail cap always keeps. */
+const BOLD_RUN_CLOSER_RE = /\*{2,3}$/;
+
+/** `\s`: what trims a line, and what `\S` excludes. */
+const WHITESPACE_RE = /\s/;
+
 /**
  * True when a single trimmed line is a Gemini reasoning-summary title: a markdown
  * ATX heading (`## …`) or a whole-line bold / bold-italic run (`**Title**`,
@@ -330,6 +352,100 @@ export const GEMINI_HEADER_RUNAWAY_THRESHOLD = 36;
  */
 export function isReasoningSummaryHeader(line: string): boolean {
 	return /^#{1,6}[ \t]+\S/.test(line) || /^\*{2,3}.+\*{2,3}$/.test(line);
+}
+
+/**
+ * Opening marker of one unterminated line, folded a character at a time as the
+ * line streams: `run` counts the leading `#`/`*` chars, and `gap` records the
+ * `[ \t]+` run that separates a hash heading from its title text. Whitespace is
+ * normalized the way the trimmed line needs it — leading whitespace is dropped,
+ * and a run of spaces/tabs after the hashes collapses onto the single `[ \t]+`
+ * that `#{1,6}[ \t]+\S` needs — so the state stays a few fields wide however
+ * long the line runs.
+ */
+interface PartialLineHead {
+	/** Fold phase. `atx`, `bold`, and `plain` are terminal verdicts. */
+	phase: "start" | "hashes" | "stars" | "atx" | "bold" | "plain";
+	/** Leading `#` (1-6) or `*` (1-3) run counted so far. */
+	run: number;
+	/** `[ \t]+` has followed the hash run — only the `\S` is still missing. */
+	gap: boolean;
+}
+
+/**
+ * Fold one character of an unterminated line into its opening marker.
+ *
+ * The marker must be settled while its characters are still in hand:
+ * {@link GEMINI_HEADER_PARTIAL_LINE_CAP} keeps only the tail of a long
+ * unterminated line, which drops exactly the `# `/`**` that makes it a title.
+ * Deciding as the line arrives is what keeps a title's verdict independent of
+ * where the chunk boundaries fall — against a tail-only buffer the same line is a
+ * title when it arrives whole and stops being one once it is split.
+ */
+function foldPartialLineHead(head: PartialLineHead, ch: string): void {
+	switch (head.phase) {
+		case "atx":
+		case "bold":
+		case "plain":
+			return;
+		case "start":
+			// Leading whitespace is trimmed away before the line is judged.
+			if (WHITESPACE_RE.test(ch)) return;
+			if (ch === "#") {
+				head.phase = "hashes";
+				head.run = 1;
+			} else if (ch === "*") {
+				head.phase = "stars";
+				head.run = 1;
+			} else {
+				head.phase = "plain";
+			}
+			return;
+		case "hashes":
+			if (head.gap) {
+				// `[ \t]+` may keep running; `\S` settles the heading, and any other
+				// whitespace char is not `\S`, so the run is already over.
+				if (ch === " " || ch === "\t") return;
+				head.phase = WHITESPACE_RE.test(ch) ? "plain" : "atx";
+				return;
+			}
+			if (ch === "#") {
+				if (head.run < 6) head.run++;
+				else head.phase = "plain";
+				return;
+			}
+			if (ch === " " || ch === "\t") {
+				head.gap = true;
+				return;
+			}
+			head.phase = "plain";
+			return;
+		case "stars":
+			// The opener is complete once a second star lands; the character after it
+			// is the `.+` body, so only the closer — the line's tail — is still
+			// missing.
+			if (ch === "*") {
+				if (head.run < 3) head.run++;
+				else head.phase = "bold";
+				return;
+			}
+			head.phase = head.run >= 2 ? "bold" : "plain";
+			return;
+	}
+}
+
+/**
+ * True when a completed line is a reasoning-summary title.
+ *
+ * With its head intact the line is judged whole, exactly as it was before the
+ * tail cap existed. Once {@link GEMINI_HEADER_PARTIAL_LINE_CAP} has cut the head
+ * off, the verdict comes from the folded opening marker plus the retained tail:
+ * an ATX heading is settled by the marker alone, and a whole-line bold run also
+ * needs the line to end on `\*{2,3}` — the tail, which the cap never cuts.
+ */
+function isSummaryTitleLine(line: string, head: PartialLineHead, headCut: boolean): boolean {
+	if (!headCut) return isReasoningSummaryHeader(line);
+	return head.phase === "atx" || (head.phase === "bold" && BOLD_RUN_CLOSER_RE.test(line));
 }
 
 /**
@@ -344,6 +460,12 @@ export function isReasoningSummaryHeader(line: string): boolean {
 export class GeminiHeaderRunDetector {
 	/** Thinking text not yet split into completed lines. */
 	#pending = "";
+	/** Opening marker of the unterminated partial line, folded as it streams. */
+	#head: PartialLineHead = { phase: "start", run: 0, gap: false };
+	/** The held partial line has been cut back to
+	 *  {@link GEMINI_HEADER_PARTIAL_LINE_CAP}, so its head survives only in
+	 *  `#head`. */
+	#headCut = false;
 	/** Summary-title lines seen in the current run. */
 	#count = 0;
 	/** Latches after the first threshold hit so each run fires at most once. */
@@ -353,17 +475,60 @@ export class GeminiHeaderRunDetector {
 	push(delta: string): boolean {
 		if (this.#fired || !delta) return false;
 		this.#pending += delta;
-		let nl = this.#pending.indexOf("\n");
+		// Where this delta starts inside `#pending`; everything before it has
+		// already been folded into the opening marker of the line under
+		// construction.
+		let unfolded = this.#pending.length - delta.length;
+		// Drain complete lines by index offset: one tail slice for the whole delta
+		// instead of a re-copy of the remainder per line found.
+		let start = 0;
+		let nl = this.#pending.indexOf("\n", start);
 		while (nl !== -1) {
-			const line = this.#pending.slice(0, nl).trim();
-			this.#pending = this.#pending.slice(nl + 1);
-			if (line !== "" && isReasoningSummaryHeader(line) && ++this.#count >= GEMINI_HEADER_RUNAWAY_THRESHOLD) {
+			// Settle the line's opening marker before judging it: the cap below cuts
+			// the head off a long line, so by completion a title's `# `/`**` lives
+			// only in `#head`.
+			this.#foldHead(unfolded, nl);
+			const line = this.#pending.slice(start, nl).trim();
+			const headCut = this.#headCut;
+			this.#headCut = false;
+			const title = line !== "" && isSummaryTitleLine(line, this.#head, headCut);
+			this.#resetHead();
+			start = nl + 1;
+			unfolded = nl + 1;
+			if (title && ++this.#count >= GEMINI_HEADER_RUNAWAY_THRESHOLD) {
 				this.#fired = true;
 				return true;
 			}
-			nl = this.#pending.indexOf("\n");
+			nl = this.#pending.indexOf("\n", start);
+		}
+		this.#foldHead(unfolded, this.#pending.length);
+		if (start > 0) this.#pending = this.#pending.slice(start);
+		// Bound the held partial line: a title this long cannot complete into a
+		// header, so hold only its tail rather than rescan (and re-copy) a growing
+		// buffer on every delta. The head the cut drops is already folded into
+		// `#head`, so the line is still judged whole.
+		if (this.#pending.length > GEMINI_HEADER_PARTIAL_LINE_CAP) {
+			this.#pending = this.#pending.slice(-GEMINI_HEADER_PARTIAL_LINE_CAP);
+			this.#headCut = true;
 		}
 		return false;
+	}
+
+	/** Fold the characters of `#pending` in `[from, to)` the opening-marker fold
+	 *  has not seen yet. Stops at the character that settles the verdict, so a
+	 *  line that is not a title costs one character look per delta. */
+	#foldHead(from: number, to: number): void {
+		const head = this.#head;
+		while (from < to && head.phase !== "atx" && head.phase !== "bold" && head.phase !== "plain") {
+			foldPartialLineHead(head, this.#pending[from++]);
+		}
+	}
+
+	/** Re-arm the opening marker for the next line. */
+	#resetHead(): void {
+		this.#head.phase = "start";
+		this.#head.run = 0;
+		this.#head.gap = false;
 	}
 
 	/** Number of summary titles counted in the current run (for the reminder/log). */
@@ -374,6 +539,8 @@ export class GeminiHeaderRunDetector {
 	/** Re-arm for a fresh reasoning block: clears the buffer, count, and latch. */
 	reset(): void {
 		this.#pending = "";
+		this.#headCut = false;
+		this.#resetHead();
 		this.#count = 0;
 		this.#fired = false;
 	}
