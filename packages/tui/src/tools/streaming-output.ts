@@ -1537,8 +1537,8 @@ export class OutputSink {
 		this.#pendingChunk = "";
 		if (this.#artifactWriteMode !== "mirror") {
 			try {
-				this.#onChunk?.(merged, stamp);
 				this.#onPreview?.(this.preview(), stamp);
+				this.#onChunk?.(merged, stamp);
 			} finally {
 				this.#onChunkSettled?.(stamp);
 			}
