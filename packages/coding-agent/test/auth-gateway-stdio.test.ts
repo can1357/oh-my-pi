@@ -25,4 +25,24 @@ describe("auth-gateway stdio model selectors", () => {
 	it("offers nothing when no entry resolves", () => {
 		expect(selectorCandidates("@commit", Settings.isolated({}), registry)).toEqual([]);
 	});
+
+	it("resolves runner-kind models that the chat-only registry view hides", () => {
+		const dictation = getBundledModel("openai-codex", "codex-transcribe")!;
+		const kindRegistry = {
+			getAll: (kind = "chat") => (kind === "all" ? [...models, dictation] : models),
+			getAvailable: (kind = "chat") => (kind === "all" ? [...models, dictation] : models),
+		};
+		expect(selectorCandidates(key(dictation), Settings.isolated({}), kindRegistry)).toEqual([dictation]);
+	});
+
+	it("prefers the chat model when the chat view and the full catalog both match a selector", () => {
+		const dictation = getBundledModel("openai-codex", "codex-transcribe")!;
+		// A runner that shares the chat model's bare id and sorts ahead of it in the full catalog.
+		const runner = { ...dictation, id: mini.id };
+		const registryWithRunner = {
+			getAll: (kind = "chat") => (kind === "all" ? [runner, mini] : [mini]),
+			getAvailable: (kind = "chat") => (kind === "all" ? [runner, mini] : [mini]),
+		};
+		expect(selectorCandidates(mini.id, Settings.isolated({}), registryWithRunner)).toEqual([mini]);
+	});
 });
