@@ -37,12 +37,11 @@
     "@oh-my-pi/pi-agent-core": "catalog:",
     "@oh-my-pi/pi-coding-agent": "catalog:",
     "@oh-my-pi/pi-utils": "catalog:",
-    "diff": "catalog:",
     "@oh-my-pi/pi-natives": "catalog:",
-    "prettier": "catalog:",
     "regexp-tree": "catalog:",
     "@oh-my-pi/pi-ai": "catalog:",
-    "@oh-my-pi/pi-tui": "catalog:"
+    "@oh-my-pi/pi-tui": "catalog:",
+    "prettier": "catalog:"
   },
   "devDependencies": {
     "@types/babel__generator": "catalog:",
