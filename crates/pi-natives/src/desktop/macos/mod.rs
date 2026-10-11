@@ -3,11 +3,16 @@ mod capture;
 mod date;
 mod input;
 mod process;
+#[allow(dead_code, reason = "shared with the input-release helper, which uses the rest")]
+mod release;
+mod release_guard;
+mod route;
 mod session;
 mod skylight;
 mod spaces;
 
 pub(super) use ax::menus;
+pub(super) use capture::application_windows;
 use image::RgbaImage;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
 pub(super) use session::screen_state;
@@ -123,7 +128,27 @@ impl Backend for MacosBackend {
 	) -> CoreResult<()> {
 		token.check()?;
 		Self::require_input_permission()?;
-		self.input.pointer(target, event, mode, &self.capture)
+		release_guard::scope(presses(&event) && shares_hid_route(target, mode), || {
+			self.input.pointer(target, event, None, mode, &self.capture)
+		})
+	}
+
+	fn pointer_menu(
+		&mut self,
+		target: &Target,
+		event: PointerEvent,
+		path: &[String],
+		_frame: &FrameGeometry,
+		mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<()> {
+		token.check()?;
+		Self::require_input_permission()?;
+		release_guard::scope(presses(&event) && shares_hid_route(target, mode), || {
+			self
+				.input
+				.pointer(target, event, Some(path), mode, &self.capture)
+		})
 	}
 
 	fn type_text(
@@ -135,7 +160,9 @@ impl Backend for MacosBackend {
 	) -> CoreResult<()> {
 		token.check()?;
 		Self::require_input_permission()?;
-		self.input.type_text(target, text, mode, &self.capture)
+		release_guard::scope(shares_hid_route(target, mode), || {
+			self.input.type_text(target, text, mode, &self.capture)
+		})
 	}
 
 	fn key_chord(
@@ -147,7 +174,9 @@ impl Backend for MacosBackend {
 	) -> CoreResult<()> {
 		token.check()?;
 		Self::require_input_permission()?;
-		self.input.key_chord(target, keys, mode, &self.capture)
+		release_guard::scope(shares_hid_route(target, mode), || {
+			self.input.key_chord(target, keys, mode, &self.capture)
+		})
 	}
 
 	fn hold_keys(
@@ -160,9 +189,11 @@ impl Backend for MacosBackend {
 	) -> CoreResult<()> {
 		token.check()?;
 		Self::require_input_permission()?;
-		self
-			.input
-			.hold_keys(target, keys, duration, mode, &self.capture)
+		release_guard::scope(shares_hid_route(target, mode), || {
+			self
+				.input
+				.hold_keys(target, keys, duration, mode, &self.capture)
+		})
 	}
 
 	fn menu_items(
@@ -182,7 +213,8 @@ impl Backend for MacosBackend {
 	) -> CoreResult<()> {
 		token.check()?;
 		Self::require_input_permission()?;
-		menus::select(window, path)
+		// The window's activating click is the only input a menu command posts.
+		release_guard::scope(false, || menus::select(window, path))
 	}
 
 	fn bring_to_current_space(&mut self, id: &str, token: &OperationToken) -> CoreResult<()> {
@@ -220,6 +252,21 @@ impl Backend for MacosBackend {
 	fn ax(&mut self) -> Option<&mut dyn AxBackend> {
 		Some(&mut self.ax)
 	}
+}
+
+/// Whether `event` presses a button, which its release helper must know of.
+const fn presses(event: &PointerEvent) -> bool {
+	matches!(
+		event,
+		PointerEvent::Click { .. } | PointerEvent::Drag { .. } | PointerEvent::Hold { .. }
+	)
+}
+
+/// Whether input to `target` in `mode` posts on the HID route, which the
+/// user's own keyboard and mouse share.
+const fn shares_hid_route(target: &Target, mode: DeliveryMode) -> bool {
+	matches!(target, Target::Desktop | Target::Display(_))
+		|| matches!(mode, DeliveryMode::Foreground)
 }
 
 fn permission_label(granted: bool) -> String {

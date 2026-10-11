@@ -9,7 +9,7 @@ use std::{
 
 use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFString, CFType};
 
-use super::skylight;
+use super::{route, skylight};
 use crate::desktop::{
 	control,
 	error::{CoreResult, DesktopError, ErrorCode},
@@ -41,19 +41,19 @@ struct SpaceSpi {
 }
 
 static SPI: LazyLock<Option<SpaceSpi>> = LazyLock::new(|| {
-	skylight::ensure_skylight_loaded()?;
+	route::load_skylight()?;
 	Some(SpaceSpi {
-		connection:     skylight::symbol(c"SLSMainConnectionID")
-			.or_else(|| skylight::symbol(c"CGSMainConnectionID"))?,
-		active:         skylight::symbol(c"SLSGetActiveSpace")
-			.or_else(|| skylight::symbol(c"CGSGetActiveSpace"))?,
-		copy_spaces:    skylight::symbol(c"SLSCopySpacesForWindows")?,
-		move_windows:   skylight::symbol(c"SLSMoveWindowsToManagedSpace")?,
-		window_owner:   skylight::symbol(c"SLSGetWindowOwner")?,
-		connection_pid: skylight::symbol(c"SLSConnectionGetPID")?,
-		space_type:     skylight::symbol(c"SLSSpaceGetType")?,
-		copy_displays:  skylight::symbol(c"SLSCopyManagedDisplays")?,
-		display_space:  skylight::symbol(c"SLSManagedDisplayGetCurrentSpace")?,
+		connection:     route::symbol(c"SLSMainConnectionID")
+			.or_else(|| route::symbol(c"CGSMainConnectionID"))?,
+		active:         route::symbol(c"SLSGetActiveSpace")
+			.or_else(|| route::symbol(c"CGSGetActiveSpace"))?,
+		copy_spaces:    route::symbol(c"SLSCopySpacesForWindows")?,
+		move_windows:   route::symbol(c"SLSMoveWindowsToManagedSpace")?,
+		window_owner:   route::symbol(c"SLSGetWindowOwner")?,
+		connection_pid: route::symbol(c"SLSConnectionGetPID")?,
+		space_type:     route::symbol(c"SLSSpaceGetType")?,
+		copy_displays:  route::symbol(c"SLSCopyManagedDisplays")?,
+		display_space:  route::symbol(c"SLSManagedDisplayGetCurrentSpace")?,
 	})
 });
 
