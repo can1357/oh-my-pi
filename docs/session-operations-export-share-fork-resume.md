@@ -35,6 +35,7 @@ This document describes operator-visible behavior for session export, sharing, c
 | `--resume`                              | CLI startup picker           | Yes after session creation                    | Opens selected existing session file (picker opens in current-folder scope; the global list is preloaded only for the empty-everything early exit and instant Tab switching) | None                |
 | `--resume <id\|path>`                   | CLI startup                  | Yes after session creation                    | Opens existing session; a missing recorded cwd may be re-rooted into the current directory | None                                                                                |
 | `/restart`                              | Interactive slash command    | Yes (process relaunches)                      | Keeps configuration flags; resumes a materialized session, otherwise starts fresh          | None                                                                                |
+| `/update`                               | Interactive slash command    | No (child runs `omp update`)                 | Unchanged; optional `/restart` resumes a materialized session                          | Replaces the on-PATH omp install                                                    |
 | `--continue`                            | CLI startup                  | Yes after session creation                    | Opens terminal breadcrumb or most-recent session; creates new one if none exists           | None                                                                                |
 
 ## Export and dump
@@ -474,6 +475,14 @@ an in-memory or never-materialized session restarts fresh.
 
 POSIX uses process-image replacement when available. Windows or a failed exec
 falls back to spawning the replacement with inherited terminal streams.
+
+## In-session update
+
+`/update` is TUI-only. It runs `omp update --check` in a child process and asks `Update omp 18.8.7 → 18.9.0?` as a single-keypress prompt (`y` / `n`; Esc cancels). On `y` it runs the same in-place installer as `omp update`, again in a child so a failure cannot exit the session. It replaces the `omp` currently selected on `PATH` (binary, bun, npm, Homebrew, or mise). An already-current or externally managed install is reported from the check and never prompts. Refusals the updater only detects while installing (Nix, canary on Homebrew or mise) are reported after the first `y` and do not offer a restart.
+
+Flags: `--check` (report only, no prompt), `--force`, and `--canary` / `--stable`. `--plugins` is not accepted; use `/plugins`.
+
+After a successful install a second `y` / `n` prompt offers a restart that resumes a session that exists on disk; `n` keeps the old process running. The restart always relaunches the `omp` PATH entry the updater replaced, not this process's own entry point, so a source checkout, a different `omp` earlier on PATH, a Homebrew Cellar path, or a bun/npm launcher the standalone binary took over all land on the new install. The entry is not resolved through symlinks, so shims that pick the tool from `argv[0]` (mise) still launch omp. The prompt is skipped if a turn started while the install ran.
 
 ## How session switching actually mutates runtime state
 
