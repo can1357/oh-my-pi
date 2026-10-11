@@ -7,6 +7,7 @@ use std::{
 };
 
 use super::{CoreResult, DesktopError, EmergencyStop};
+use crate::desktop::macos::permission;
 
 pub(crate) const SYNTHETIC_EVENT_TAG: i64 = 0x7069_6465_736b;
 const SOURCE_USER_DATA: u32 = 42;
@@ -115,7 +116,15 @@ pub(super) struct EscapeMonitor {
 }
 
 impl EscapeMonitor {
+	/// Without event-listening access the tap is still created but never sees
+	/// a key, so that case fails here instead of starting a blind monitor. The
+	/// caller discards the error, so it skips the responsible-app lookup.
 	pub(super) fn start(emergency: EmergencyStop) -> CoreResult<Self> {
+		if !permission::listen_events() {
+			return Err(DesktopError::permission_denied(
+				"macOS event-listening access (Input Monitoring) is not granted",
+			));
+		}
 		let (ready, receive) = flume::bounded(1);
 		let worker = thread::Builder::new()
 			.name("desktop-escape".into())
@@ -196,10 +205,7 @@ impl EscapeMonitor {
 			})?;
 		let Some((run_loop, stop_source)) = receive.recv().ok().flatten() else {
 			let _ = worker.join();
-			return Err(DesktopError::permission_denied(
-				"cannot monitor emergency Escape; macOS Accessibility/Input Monitoring permission is \
-				 required before input",
-			));
+			return Err(DesktopError::input_failed("cannot create the emergency Escape event tap"));
 		};
 		Ok(Self { thread: Some(worker), run_loop, stop_source })
 	}

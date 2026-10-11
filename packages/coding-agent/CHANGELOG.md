@@ -6,6 +6,10 @@
 
 - Added hiding a pending `ask` question without answering it: `Alt+H` (`app.ask.hide`) or the Hide button in Tern collapses the dialog to one line; the same key, `Enter`, or Show brings it back ([#15400](https://github.com/can1357/oh-my-pi/pull/15400) by [@H4vC](https://github.com/H4vC))
 
+### Changed
+
+- The `computer` tool prompt now says physical Escape stops only takeover input, so background input keeps running while the user presses Escape in their own app ([#15176](https://github.com/can1357/oh-my-pi/pull/15176) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.9.2] - 2026-10-11
 
 ### Fixed
