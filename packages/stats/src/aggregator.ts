@@ -64,6 +64,10 @@ const SYNC_BATCH_FILES = 512;
 const SYNC_BATCH_ROWS = 8192;
 const SYNC_METADATA_FILES = 128;
 const SYNC_INLINE_READS = 8;
+// How long a pooled worker stays warm between sync runs. A watcher-driven sync
+// per edit is the hot case, so a generous window keeps those spawn-free, while a
+// CLI run that ends afterwards drops the pool with the process.
+const STATS_SYNC_WORKER_IDLE_MS = 10_000;
 
 /**
  * Serialize stats ingestion and archive reconciliation across processes.
@@ -130,6 +134,10 @@ interface WorkerHandle {
 	busy: boolean;
 	resolve: ((res: ParseSessionResult) => void) | null;
 	reject: ((err: Error) => void) | null;
+	/** Set by `onerror`: a dead worker can never answer another dispatch, so it is reaped. */
+	dead: boolean;
+	/** Identity of the parent env this worker was spawned under; see {@link pooledWorkerEnv}. */
+	envIdentity: string;
 }
 
 /**
@@ -138,18 +146,31 @@ interface WorkerHandle {
  * re-enter that entry with a worker argv selector; otherwise (standalone
  * omp-stats, bun test, SDK embedding) load the worker module directly, so this
  * package keeps zero runtime dependency on `@oh-my-pi/pi-coding-agent`.
+ *
+ * `env` is an explicit snapshot for a worker that may outlive the sync run that
+ * spawned it — see {@link pooledWorkerEnv}. Omit it (as the smoke probe does) to
+ * inherit the parent environment at spawn time.
  */
-function createSyncWorker(): Worker {
+function createSyncWorker(env?: Record<string, string>): Worker {
+	const options: { type: "module"; env?: Record<string, string> } = { type: "module" };
+	if (env) options.env = env;
 	const hostEntry = workerHostEntry();
 	if (hostEntry) {
-		return new Worker(hostEntry, { type: "module", argv: ["__omp_worker_stats_sync"] });
+		return new Worker(hostEntry, { ...options, argv: ["__omp_worker_stats_sync"] });
 	}
-	return new Worker(new URL("./sync-worker.ts", import.meta.url).href, { type: "module" });
+	return new Worker(new URL("./sync-worker.ts", import.meta.url).href, options);
 }
 
-function spawnWorker(): WorkerHandle {
-	const worker = createSyncWorker();
-	const handle: WorkerHandle = { worker, busy: false, resolve: null, reject: null };
+function spawnWorker(parentEnv: PooledWorkerEnv): WorkerHandle {
+	const worker = createSyncWorker(parentEnv.env);
+	const handle: WorkerHandle = {
+		worker,
+		busy: false,
+		resolve: null,
+		reject: null,
+		dead: false,
+		envIdentity: parentEnv.identity,
+	};
 	worker.onmessage = (event: MessageEvent<SyncWorkerResponse>) => {
 		const { resolve, reject } = handle;
 		handle.resolve = null;
@@ -168,6 +189,8 @@ function spawnWorker(): WorkerHandle {
 		resolve(data.result);
 	};
 	worker.onerror = (event: ErrorEvent) => {
+		// An error response keeps the worker usable; a runtime error does not.
+		handle.dead = true;
 		const { reject } = handle;
 		handle.resolve = null;
 		handle.reject = null;
@@ -190,6 +213,105 @@ function dispatch(handle: WorkerHandle, request: SyncWorkerRequest): Promise<Par
 }
 
 /**
+ * Parent environment snapshot for a worker that may outlive the sync run that
+ * spawned it. Bun's worker `env` option replaces the environment rather than
+ * merging with the parent's, so a pooled worker must carry a copy to boot with
+ * the values it was given.
+ *
+ * The copy doubles as the documented opt-in boundary for anything reading
+ * `process.env` inside a worker: a worker is its own runtime, so it resolves
+ * env-backed paths once at spawn time and never sees a later parent mutation.
+ * A sync worker calls `getSessionsDir()` when it classifies a transcript, so a
+ * worker reused after `process.env` changed would keep classifying against the
+ * old directory. The `identity` is how the pool notices that.
+ */
+interface PooledWorkerEnv {
+	env: Record<string, string>;
+	/** Order-independent identity of the whole parent environment. */
+	identity: string;
+}
+
+function pooledWorkerEnv(): PooledWorkerEnv {
+	const entries: [string, string][] = [];
+	// Sorted so the identity does not move with `process.env` iteration order.
+	for (const key of Object.keys(process.env).sort()) {
+		const value = process.env[key];
+		if (value !== undefined) entries.push([key, value]);
+	}
+	return { env: Object.fromEntries(entries), identity: JSON.stringify(entries) };
+}
+
+/**
+ * Idle workers kept warm across sync runs. Draining parses is spawn-bound: every
+ * `new Worker` re-enters the CLI entrypoint and re-evaluates the module graph,
+ * so one drain used to pay that 8 times over no matter how often it ran. A
+ * pooled worker is checked out per lane and returned here when the run ends,
+ * until it has been idle for {@link STATS_SYNC_WORKER_IDLE_MS} or the parent
+ * environment it was spawned under no longer matches.
+ *
+ * Idles are `unref`'d: a referenced worker holds the parent thread open even
+ * with no work in flight (measured on Bun 1.4.3: an idle referenced worker
+ * stalls an otherwise ready exit), so a pooled worker must not pin a process on
+ * its way out. An unref'd worker still delivers in-flight replies — the pending
+ * message keeps the loop alive — so nothing is re-`ref`'d on checkout.
+ */
+const warmPool: WorkerHandle[] = [];
+let idleEvictTimer: NodeJS.Timeout | null = null;
+
+function armIdleEviction(): void {
+	if (idleEvictTimer !== null || warmPool.length === 0) return;
+	idleEvictTimer = setTimeout(() => {
+		idleEvictTimer = null;
+		for (const handle of warmPool.splice(0)) handle.worker.terminate();
+	}, STATS_SYNC_WORKER_IDLE_MS);
+	idleEvictTimer.unref?.();
+}
+
+/**
+ * Take an idle pooled worker, or spawn a fresh one when none is warm. Only a
+ * worker still matching the current parent environment is reusable — see
+ * {@link pooledWorkerEnv} — and a worker that died while idle is discarded here,
+ * since its `onerror` had no in-flight dispatch to reject.
+ */
+function acquireWorker(): WorkerHandle {
+	const parentEnv = pooledWorkerEnv();
+	while (true) {
+		const pooled = warmPool.pop();
+		if (pooled === undefined) return spawnWorker(parentEnv);
+		if (pooled.dead || pooled.envIdentity !== parentEnv.identity) {
+			pooled.worker.terminate();
+			continue;
+		}
+		return pooled;
+	}
+}
+
+/** Return a lane's worker to the pool, discarding it when the run failed. */
+function releaseWorker(handle: WorkerHandle, discard: boolean): void {
+	if (discard || handle.dead) {
+		handle.worker.terminate();
+		return;
+	}
+	warmPool.push(handle);
+	handle.worker.unref();
+	armIdleEviction();
+}
+
+/**
+ * Test seam: terminate every idle pooled worker and cancel idle eviction.
+ * A module-level pool would otherwise leak live worker threads from one `bun test`
+ * file into the next (Bun shares module state across files in a run), where a
+ * `globalThis.Worker` spy asserts a spawn that never happened.
+ */
+export function __resetStatsSyncWorkerPool(): void {
+	if (idleEvictTimer !== null) {
+		clearTimeout(idleEvictTimer);
+		idleEvictTimer = null;
+	}
+	for (const handle of warmPool.splice(0)) handle.worker.terminate();
+}
+
+/**
  * Smoke test: spawns one sync worker, pings it, asserts the pong response,
  * then terminates. Used by `omp --smoke-test` so the install-method CI jobs
  * catch the silent worker-load failure that hit compiled binaries in #1011
@@ -204,6 +326,10 @@ function dispatch(handle: WorkerHandle, request: SyncWorkerRequest): Promise<Par
  * motivated the darwin serial default in the first place.
  *
  * Rejects on transport error, error response, or timeout.
+ *
+ * Always spawns its own worker outside the sync warm pool (and inherits the
+ * parent environment rather than a snapshot): its whole job is to prove a fresh
+ * spawn still loads, which is exactly what a pooled worker would no longer test.
  */
 export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: number } = {}): Promise<void> {
 	if (process.platform === "darwin") return;
@@ -240,7 +366,10 @@ export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: n
  * `workers: 1` pipelines file reads and parses inline, committing in discovery order.
  * Larger pools fan parsing out across workers
  * (one in-flight job per worker) while DB writes and offset bookkeeping stay on
- * the calling thread. Bounded batches commit rows and cursors atomically without
+ * the calling thread. Workers are kept warm between runs: a pool worker is
+ * checked out per lane and returned idle (unref'd, evicted after 10s) when the
+ * drain ends, so the common watcher-driven sync pays no spawn at all.
+ * Bounded batches commit rows and cursors atomically without
  * holding a database transaction open during file I/O.
  * `onProgress` fires once per completed file (skipped files included so the
  * bar walks at a steady rate).
@@ -447,9 +576,10 @@ async function syncAllSessionsLocked(
 
 	const poolSize = Math.min(files.length, requestedWorkers);
 
-	const handles: WorkerHandle[] = [];
+	const checkedOut: WorkerHandle[] = [];
 
-	// Each lane spawns its worker on its first real parse, so unchanged transcripts cost no worker.
+	// Each lane takes a warm pool worker on its first real parse, so unchanged
+	// transcripts cost no worker and a warm worker survives the run.
 	async function drain(): Promise<void> {
 		let handle: WorkerHandle | null = null;
 		try {
@@ -458,8 +588,8 @@ async function syncAllSessionsLocked(
 				if (idx >= files.length) return;
 				const parsed = await prepareFile(idx, (file, fromOffset, parserState, replay) => {
 					if (!handle) {
-						handle = spawnWorker();
-						handles.push(handle);
+						handle = acquireWorker();
+						checkedOut.push(handle);
 					}
 					return dispatch(handle, { sessionFile: file, fromOffset, parserState, replay });
 				});
@@ -478,7 +608,9 @@ async function syncAllSessionsLocked(
 			if (result.status === "rejected") throw result.reason;
 		}
 	} finally {
-		for (const handle of handles) handle.worker.terminate();
+		// Return the lane's workers instead of terminating them: the pool keeps
+		// them warm for the next run, unref'd so an idle exit stays prompt.
+		for (const handle of checkedOut) releaseWorker(handle, failed);
 	}
 
 	return finish();
