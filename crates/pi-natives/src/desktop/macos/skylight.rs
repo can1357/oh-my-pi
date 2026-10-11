@@ -570,24 +570,25 @@ impl BackgroundFocusLease {
 		now: Instant,
 	) -> FocusDecision {
 		self.user.observe(signals, front, now);
-		// The target came forward right after a user switch: the user picked it.
-		// Otherwise it activated itself, even while the user kept typing.
+		// An app came forward right after a user switch: the user picked it.
+		// Otherwise the action brought it, whether the target activated itself
+		// or asked another app to open something, as Finder's ⌘O does with
+		// TextEdit, even while the user kept typing.
 		let picked = now
 			.checked_sub(USER_SWITCH_WINDOW)
 			.and_then(|start| self.user.since(start))
 			.is_some();
 		if self.disarmed
-			|| (front != self.previous && front != self.target)
 			|| (front == self.previous && key.is_some_and(|key| key != self.key))
-			|| (front == self.target && picked)
+			|| (front != self.previous && picked)
 		{
 			self.disarmed = true;
 			return FocusDecision::Disarm;
 		}
-		if front == self.target {
-			FocusDecision::Restore
-		} else {
+		if front == self.previous {
 			FocusDecision::Observe
+		} else {
+			FocusDecision::Restore
 		}
 	}
 
@@ -608,10 +609,11 @@ impl BackgroundFocusLease {
 
 /// Contains asynchronous self-activation during background input and its
 /// bounded post-action settle, without a process-lived observer or run loop.
-/// A third app, a changed prior key window, or the target coming forward right
-/// after a click, a ⌘/⌃ chord or a Spotlight-style panel permanently disarms
-/// the lease; typing does not. Only the addressed target can be sent back
-/// behind the original front app; unrelated activations are never undone.
+/// The target, or a third app the action brings forward (Finder's ⌘O opening
+/// a document in `TextEdit`), is sent back behind the original front app. A
+/// changed prior key window, or any app coming forward right after a click, a
+/// ⌘/⌃ chord or a Spotlight-style panel, permanently disarms the lease; typing
+/// does not.
 pub(super) fn with_background_guard<T>(
 	pid: pid_t,
 	action: impl FnOnce() -> CoreResult<T>,
@@ -684,10 +686,15 @@ pub(super) fn with_background_guard<T>(
 						FocusDecision::Restore => {
 							// Re-check immediately before changing focus: an AX probe
 							// may have raced a newer application or user switch.
-							if front_process(spi.get_front).is_some_and(|front| front.psn == target) {
+							let brought = front.psn;
+							if front_process(spi.get_front).is_some_and(|front| front.psn == brought) {
 								let now = Instant::now();
-								match lease.observe(target, None, SwitchSignals::read(spi, now, chord), now)
-								{
+								match lease.observe(
+									brought,
+									None,
+									SwitchSignals::read(spi, now, chord),
+									now,
+								) {
 									FocusDecision::Disarm => return Ok(()),
 									FocusDecision::Observe => {},
 									FocusDecision::Restore => {
@@ -1136,14 +1143,67 @@ mod tests {
 	fn user_focus_changes_permanently_disarm_background_restoration() {
 		let t0 = Instant::now();
 		let idle = input(0, NO_MODIFIERS);
+		// The user clicks a third app forward.
 		let mut guard = lease_at(t0, None);
 		assert_eq!(guard.observe(TARGET, None, idle, t0), FocusDecision::Restore);
-		assert_eq!(guard.observe(THIRD, None, idle, t0 + ms(10)), FocusDecision::Disarm);
+		assert_eq!(
+			guard.observe(THIRD, None, input(1, NO_MODIFIERS), t0 + ms(10)),
+			FocusDecision::Disarm
+		);
 		assert_eq!(guard.observe(TARGET, None, idle, t0 + ms(20)), FocusDecision::Disarm);
 
 		let mut guard = lease_at(t0, None);
 		assert_eq!(guard.observe(PREVIOUS, Some(43), idle, t0 + ms(10)), FocusDecision::Disarm);
 		assert_eq!(guard.observe(TARGET, None, idle, t0 + ms(20)), FocusDecision::Disarm);
+	}
+
+	#[test]
+	fn a_third_app_the_action_brings_forward_is_sent_back_like_the_target() {
+		// Finder's ⌘O opens a file in TextEdit, which comes forward 100-220 ms
+		// later while the user types on, with no click, chord or panel.
+		let t0 = Instant::now();
+		for flags in [NO_MODIFIERS, SHIFT, OPTION] {
+			let mut guard = lease_at(t0, None);
+			assert_eq!(
+				guard.observe(PREVIOUS, Some(42), input(0, flags), t0 + ms(10)),
+				FocusDecision::Observe
+			);
+			assert_eq!(
+				guard.observe(THIRD, None, input(0, flags), t0 + ms(220)),
+				FocusDecision::Restore,
+				"flags {flags:#x}"
+			);
+			assert_eq!(
+				guard.observe(PREVIOUS, Some(42), input(0, flags), t0 + ms(240)),
+				FocusDecision::Observe
+			);
+		}
+		// The third app holding the keyboard as it comes forward is no panel.
+		let mut guard = lease_at(t0, None);
+		assert_eq!(
+			guard.observe(THIRD, None, keyboard_in(THIRD), t0 + ms(20)),
+			FocusDecision::Restore
+		);
+		// A third app the user ⌘-Tabs or Spotlights to stays.
+		let mut guard = lease_at(t0, None);
+		assert_eq!(
+			guard.observe(PREVIOUS, Some(42), input(0, COMMAND), t0 + ms(100)),
+			FocusDecision::Observe
+		);
+		assert_eq!(
+			guard.observe(THIRD, None, input(0, NO_MODIFIERS), t0 + ms(113)),
+			FocusDecision::Disarm
+		);
+		let mut guard = lease_at(t0, None);
+		let spotlight = ProcessSerialNumber { high: 0, low: 10 };
+		assert_eq!(
+			guard.observe(PREVIOUS, Some(42), keyboard_in(spotlight), t0 + ms(100)),
+			FocusDecision::Observe
+		);
+		assert_eq!(
+			guard.observe(THIRD, None, keyboard_in(THIRD), t0 + ms(116)),
+			FocusDecision::Disarm
+		);
 	}
 
 	#[test]
