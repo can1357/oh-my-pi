@@ -41,6 +41,8 @@ export async function runUpstreamCompat(
 			}
 		}
 		for (let i = 0; i < items.length; i += REMEMBER_BATCH) await engine.remember(items.slice(i, i + REMEMBER_BATCH));
+		// Without vectors the FTS-only fallback would make the calibration pass vacuously.
+		if ((await engine.vectorCount()) <= 0) throw new Error(`embeddings unavailable for ${engine.name}`);
 
 		const rows = await engine.oldestWorking(CONSOLIDATE_ROWS);
 		if (rows.length > 0) {
@@ -89,6 +91,7 @@ export async function runUpstreamCompat(
 	}
 }
 
+// Means are averages of identical per-question floats; only summation order can differ.
 const MEAN_TOLERANCE = 1e-9;
 
 /** Mismatches between Run A's dump and Run B's result file, paired by position. Empty means calibrated. */
