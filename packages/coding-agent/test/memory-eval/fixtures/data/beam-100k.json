@@ -19,7 +19,8 @@
 				{ "question": "q dict", "source_chat_ids": { "first_statement": [0], "second_statement": [4] } }
 			],
 			"abstention": [{ "question": "q null", "source_chat_ids": null }],
-			"summarization": [{ "question": "q empty", "source_chat_ids": [] }]
+			"summarization": [{ "question": "q empty", "source_chat_ids": [] }],
+			"event_ordering": [{ "question": "q joined", "source_chat_ids": { "order": " 3, 5 " } }]
 		}
 	}
 ]
