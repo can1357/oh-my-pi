@@ -78,6 +78,7 @@ export async function runUpstreamCompat(
 					questionId: `${conversation}:${index}`,
 					category: "upstream-compat",
 					ranked: [],
+					dropped: [],
 					metrics: { "compat.recall@10": compatRecall(rankedContents, goldContents, TOP_K) },
 					latencyMs,
 					compat: { question: q.text, rankedContents, goldContents },
