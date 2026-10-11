@@ -1643,6 +1643,27 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		return message.usage;
 	};
 
+	/** Fold one billed model call into the run's returned usage and live cost. */
+	const accumulateUsage = (usage: Record<string, unknown>): void => {
+		const costRecord = isRecord(usage.cost) ? usage.cost : undefined;
+		hasUsage = true;
+		accumulatedUsage.input += getNumberField(usage, "input") ?? 0;
+		accumulatedUsage.output += getNumberField(usage, "output") ?? 0;
+		accumulatedUsage.cacheRead += getNumberField(usage, "cacheRead") ?? 0;
+		accumulatedUsage.cacheWrite += getNumberField(usage, "cacheWrite") ?? 0;
+		accumulatedUsage.totalTokens += getNumberField(usage, "totalTokens") ?? 0;
+		accumulatedUsage.reasoningTokens =
+			(accumulatedUsage.reasoningTokens ?? 0) + (getNumberField(usage, "reasoningTokens") ?? 0);
+		if (costRecord) {
+			accumulatedUsage.cost.input += getNumberField(costRecord, "input") ?? 0;
+			accumulatedUsage.cost.output += getNumberField(costRecord, "output") ?? 0;
+			accumulatedUsage.cost.cacheRead += getNumberField(costRecord, "cacheRead") ?? 0;
+			accumulatedUsage.cost.cacheWrite += getNumberField(costRecord, "cacheWrite") ?? 0;
+			accumulatedUsage.cost.total += getNumberField(costRecord, "total") ?? 0;
+			progress.cost = accumulatedUsage.cost.total;
+		}
+	};
+
 	// Hysteresis: let the tail grow to 2x the cap before trimming, so the
 	// 8KB slice copy runs once per ~8KB of output instead of on every token
 	// once the cap is reached. refreshRecentOutput() re-applies the exact cap.
@@ -2041,25 +2062,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const messageUsage = getMessageUsage(event.message) || eventUsage;
 				if (isRecord(messageUsage)) {
 					// Only count assistant messages (not tool results, etc.)
-					if (role === "assistant") {
-						const costRecord = isRecord(messageUsage.cost) ? messageUsage.cost : undefined;
-						hasUsage = true;
-						accumulatedUsage.input += getNumberField(messageUsage, "input") ?? 0;
-						accumulatedUsage.output += getNumberField(messageUsage, "output") ?? 0;
-						accumulatedUsage.cacheRead += getNumberField(messageUsage, "cacheRead") ?? 0;
-						accumulatedUsage.cacheWrite += getNumberField(messageUsage, "cacheWrite") ?? 0;
-						accumulatedUsage.totalTokens += getNumberField(messageUsage, "totalTokens") ?? 0;
-						accumulatedUsage.reasoningTokens =
-							(accumulatedUsage.reasoningTokens ?? 0) + (getNumberField(messageUsage, "reasoningTokens") ?? 0);
-						if (costRecord) {
-							accumulatedUsage.cost.input += getNumberField(costRecord, "input") ?? 0;
-							accumulatedUsage.cost.output += getNumberField(costRecord, "output") ?? 0;
-							accumulatedUsage.cost.cacheRead += getNumberField(costRecord, "cacheRead") ?? 0;
-							accumulatedUsage.cost.cacheWrite += getNumberField(costRecord, "cacheWrite") ?? 0;
-							accumulatedUsage.cost.total += getNumberField(costRecord, "total") ?? 0;
-							progress.cost = accumulatedUsage.cost.total;
-						}
-					}
+					if (role === "assistant") accumulateUsage(messageUsage);
 					// Accumulate tokens for progress display
 					progress.tokens += getUsageTokens(messageUsage);
 					// Track latest per-turn context size so the UI can show
@@ -2137,7 +2140,17 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			progress.contextWindow = contextWindow;
 			scheduleProgress(true);
 		};
-		return session.subscribe(event => {
+		// Off-transcript model calls (judgments, auto-thinking, cache warming)
+		// reach the child's ledger without an assistant `message_end`; count the
+		// ones recorded while this run is attached so keep-alive turns and
+		// revived runs each report only their own spend.
+		const stopUsage = session.subscribeModelUsage(entry => {
+			if (resolved || !isRecord(entry.usage)) return;
+			accumulateUsage(entry.usage);
+			progress.tokens += getUsageTokens(entry.usage);
+			scheduleProgress();
+		});
+		const stopEvents = session.subscribe(event => {
 			emitSubagentEvent(event);
 			publishAdvisorState(session);
 			publishServingModel();
@@ -2181,6 +2194,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				}
 			}
 		});
+		return () => {
+			stopEvents();
+			stopUsage();
+		};
 	};
 
 	const captureSalvage = (session: AgentSession): void => {

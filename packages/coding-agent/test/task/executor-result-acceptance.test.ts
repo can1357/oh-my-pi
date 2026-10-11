@@ -148,6 +148,7 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 		},
 		trackIrcReply: () => {},
 		subscribeRunState: () => () => {},
+		subscribeModelUsage: () => () => {},
 		asyncJobManager: options?.asyncJobManager,
 	};
 	return {

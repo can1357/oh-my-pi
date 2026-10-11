@@ -958,6 +958,7 @@ export class SessionManager {
 	#sessionNameChangedCallbacks = new Set<() => void>();
 	#persistenceErrorCallbacks = new Set<(error: Error) => void>();
 	#persistenceNoticeCallbacks = new Set<(notice: SessionPersistenceNotice) => void>();
+	#modelUsageCallbacks = new Set<(entry: ModelUsageEntry) => void>();
 	/** Every notice raised so far, replayed to each later subscriber. */
 	#persistenceNotices: SessionPersistenceNotice[] = [];
 	/**
@@ -3262,6 +3263,20 @@ export class SessionManager {
 	}
 
 	/**
+	 * Subscribe to off-transcript model usage recorded by {@link appendModelUsage}
+	 * (judgments, auto-thinking, cache warming, …). These calls never surface as
+	 * assistant messages, so run-scoped accountants such as the task executor's
+	 * subagent monitor observe them here. Only entries recorded after
+	 * subscribing are delivered; loaded or replicated history is not.
+	 */
+	onModelUsage(cb: (entry: ModelUsageEntry) => void): () => void {
+		this.#modelUsageCallbacks.add(cb);
+		return () => {
+			this.#modelUsageCallbacks.delete(cb);
+		};
+	}
+
+	/**
 	 * Set the session display name.
 	 * @param source "user" for explicit renames; "auto" for generated titles.
 	 *   Auto titles are ignored once the user has set a name.
@@ -3404,6 +3419,15 @@ export class SessionManager {
 		};
 		this.#recordEntry(entry);
 		if (activeLeafId !== owner.parentId) this.#index.setLeaf(activeLeafId);
+		if (this.#index.has(entry.id)) {
+			for (const cb of this.#modelUsageCallbacks) {
+				try {
+					cb(entry);
+				} catch (err) {
+					logger.warn("Model usage observer failed", { error: String(err) });
+				}
+			}
+		}
 		return entry.id;
 	}
 

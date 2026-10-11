@@ -246,6 +246,7 @@ describe("handleRpcCancelSubagent", () => {
 			setIrcWakeTurnObserver: () => {},
 			trackIrcReply: () => {},
 			subscribeRunState: () => () => {},
+			subscribeModelUsage: () => () => {},
 			addDisposer: () => {},
 		} as unknown as AgentSession;
 		AgentRegistry.global().register({
