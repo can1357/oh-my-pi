@@ -1349,18 +1349,16 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	/**
 	 * @internal — reload only the extension set under an overriding settings
-	 * instance, updating the cached result. Callers use this when the session's
-	 * settings differ from the loader's, so `setHandlerTimeout` reports and the
-	 * runner's enforcement share one ceiling. Extensions have not served any
-	 * request at this point, so rebinding is safe.
+	 * instance. The shared cache stays bound to the loader's own settings, so a
+	 * later session that forwards the loader's settings keeps a coherent pair;
+	 * the returned result is per-call and the caller owns forwarding it.
 	 */
 	async __reloadExtensionsUnder(settings: Settings): Promise<LoadExtensionsResult> {
 		const result = await this.#loadExtensions(settings);
 		// Mirror reload(): the caller's override callback injects or filters the
 		// extension set, so the rebound result must pass through it too, or an
 		// override silently vanishes on this path.
-		this.#extensionsResult = this.#options.extensionsOverride ? this.#options.extensionsOverride(result) : result;
-		return this.#extensionsResult;
+		return this.#options.extensionsOverride ? this.#options.extensionsOverride(result) : result;
 	}
 }
 

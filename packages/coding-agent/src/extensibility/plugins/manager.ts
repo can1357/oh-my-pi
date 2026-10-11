@@ -450,7 +450,10 @@ export class PluginManager {
 			// return must reflect the ceiling the user configured — not the
 			// built-in default — or an extension that refuses to load under a
 			// lower budget rolls back an installation the user already authorised.
-			const settings = this.#settings ?? (await Settings.init({ cwd: this.#cwd }));
+			// loadIsolated keeps this off the global singleton: project B's
+			// validation must read project B's settings, not whichever project
+			// initialised the process first.
+			const settings = this.#settings ?? (await Settings.loadIsolated({ cwd: this.#cwd }));
 			const result = await loadExtensions(loadable, this.#cwd, undefined, settings);
 			for (const failure of result.errors) {
 				errors.push(`${failure.path}: ${failure.error}`);
