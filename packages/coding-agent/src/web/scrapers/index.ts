@@ -1,7 +1,8 @@
 /**
  * Web Fetch Special Handlers Index
  *
- * Exports all special handlers for site-specific content extraction.
+ * Builds the specialHandler list for site-specific content extraction and re-exports the
+ * published handler surface for the `web/scrapers` package subpath.
  */
 import { handleArtifactHub } from "./artifacthub";
 import { handleArxiv } from "./arxiv";
