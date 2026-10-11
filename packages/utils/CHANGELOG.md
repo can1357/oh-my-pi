@@ -61,6 +61,8 @@
 ## [18.10.0] - 2026-10-12
 
 ### Added
+- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3; `MIN_BUN_VERSION` derives from this package's `engines.bun`, so consumers now reject older runtimes at startup ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Renamed `takeRecentLoopPhase()` to `takeLoopPhaseAttribution()`, which returns `LoopPhaseAttribution` (`{ label, ms }`) instead of a string, returns `undefined` unless a window was armed with `resetLoopPhaseWindow()`, and names a label only when it outweighs unlabeled time ([#15019](https://github.com/can1357/oh-my-pi/pull/15019) by [@jaredlyon](https://github.com/jaredlyon)).
 
 - Added `getMnemopiEmbedRuntimeDir()` for the shared mnemopi embedding server endpoints and logs.
 
