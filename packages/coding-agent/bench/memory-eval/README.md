@@ -44,3 +44,50 @@ $R calibration-check $O/calib-a.json $O/calib-b.json
 Set `MEMORY_EVAL_DEBUG_SCORES=<file.jsonl>` for both runs to append the score, tier and id of every returned memory per question. A reordering whose scores are equal is a tie; Mnemosyne's recency decay reads the wall clock, so scores can also differ between runs by about 1e-4.
 
 `calibration-check` can exit 1 on equal-score ties or recency near-ties; check those reorderings with `MEMORY_EVAL_DEBUG_SCORES`.
+
+## Running
+
+```sh
+R="bun packages/coding-agent/bench/memory-eval/run.ts"; O=~/.cache/omp-memory-eval/results
+$R run --dataset <beam-100k|beam-500k|lme-s|lme-s-dev> --engine <mnemopi|mnemosyne|oracle|random> --protocol <standard|fts-only|with-sleep|upstream-compat> [--cases N] [--out file]
+$R diff a.json b.json
+$R calibration-check calib-a.json calib-b.json
+```
+
+`run` writes `~/.cache/omp-memory-eval/results/<dataset>.<engine>.<protocol>.<time>.json` unless `--out` is given, and prints the aggregate, per-category means, `fallbackRate`, `droppedRows` and `droppedGoldRows`. `oracle` (recall must be 1) and `random` are sanity engines. `upstream-compat` runs only with `--engine mnemosyne --dataset beam-100k` (see the calibration section).
+
+Mnemosyne also returns derived rows (`memoria`, `memoria_source`, `associative`, `fact`). They are not ranked (the spec ranks working and episodic rows), but every one is recorded per question under `dropped` with its tier, rank in Mnemosyne's raw list and the message ids behind its `source_memory_id`. `droppedGoldRows` counts those that map to a gold message.
+
+Memory: Mnemosyne's baseline and peak resident set size come from the engine process's own `/proc/self/status` (`VmRSS` after imports, `VmHWM`; Linux only). Mnemopi and the sanity engines run in the harness process and report its RSS (`rssScope: "harness-process"`).
+
+### Comparing two runs
+
+`diff a.json b.json` prints both configs (engine, protocol, k, git commit) and a paired bootstrap of the primary metric, where every difference is **b − a**. It exits 1 unless both files have the same dataset, protocol, `k` and question ids (no duplicates), a finite primary metric on every question, and are not `upstream-compat` results.
+
+### Environment guard
+
+Mnemopi runs in the harness process and reads its configuration from the environment, so `run --engine mnemopi` refuses to start while any `MNEMOPI_*` or `OPENROUTER_BASE_URL` (which can route its embeddings to an API) is set. Mnemosyne's child process never inherits the parent's `MNEMOSYNE_*`.
+
+Never run real engines under `bun test`: with `NODE_ENV=test` Mnemopi's local embeddings are disabled. The tests use fakes and stub engine scripts.
+
+## LongMemEval check against the official evaluator (Layer 0 check 4)
+
+```sh
+V=~/.cache/omp-memory-eval/venv-lme/bin/python; P=packages/coding-agent/bench/memory-eval/py
+$R run --dataset lme-s-dev --engine oracle --protocol standard --out $O/lme-oracle.json
+$V $P/lme_official_check.py $O/lme-oracle.json                      # exit 0 iff every metric matches within 1e-12
+$V $P/lme_official_check.py $O/lme-oracle.json --oracle-from-cases  # official oracle ranking on our loaded cases
+```
+
+## LongMemEval dev subset
+
+`lme-dev-subset.json` holds the 100 question ids behind `--dataset lme-s-dev`. Regenerate it (deterministic) with `~/.cache/omp-memory-eval/venv-engine/bin/python packages/coding-agent/bench/memory-eval/py/make_dev_subset.py`.
+
+## Embedding parity (Layer 0)
+
+Mnemopi and Mnemosyne must embed alike. Embed 50 BEAM messages with fastembed, then embed the same texts through Mnemopi and compare; the second step exits 1 if any cosine is below 0.99.
+
+```sh
+~/.cache/omp-memory-eval/venv-engine/bin/python packages/coding-agent/bench/memory-eval/py/embed_parity.py
+bun packages/coding-agent/bench/memory-eval/embed-parity.ts ~/.cache/omp-memory-eval/parity-py.json
+```

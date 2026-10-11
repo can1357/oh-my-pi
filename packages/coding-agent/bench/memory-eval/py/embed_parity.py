@@ -2,7 +2,7 @@
 
 Run with venv-engine's python: embed_parity.py [out.json]  (default ~/.cache/omp-memory-eval/parity-py.json)
 
-The output holds the texts and vectors; a throwaway `bun -e` embeds the same texts through Mnemopi's provider and
+The output holds the texts and vectors; ../embed-parity.ts embeds the same texts through Mnemopi's provider and
 compares them per text by cosine similarity (both engines must share an embedding model).
 """
 
