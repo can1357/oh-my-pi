@@ -9,6 +9,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { loadDataset } from "./datasets";
 import type { EngineAdapter, ProtocolName } from "./engine";
 import { mnemopiEngine } from "./engines/mnemopi";
+import { mnemosyneEngine } from "./engines/mnemosyne";
 import { oracleEngine, randomEngine } from "./engines/sanity";
 import { buildResultFile, primaryMetric, type ResultFile, runCases } from "./runner";
 import { type BootstrapResult, pairedBootstrap, verdict } from "./stats";
@@ -25,9 +26,10 @@ const REPO_ROOT = path.resolve(import.meta.dir, "../../../..");
 
 function createEngine(name: string): EngineAdapter {
 	if (name === "mnemopi") return mnemopiEngine();
+	if (name === "mnemosyne") return mnemosyneEngine();
 	if (name === "oracle") return oracleEngine();
 	if (name === "random") return randomEngine();
-	throw new Error(`engine "${name}" is not available in this build (known: mnemopi, oracle, random)`);
+	throw new Error(`engine "${name}" is not available in this build (known: mnemopi, mnemosyne, oracle, random)`);
 }
 
 function pick<T extends string>(value: string | undefined, allowed: readonly T[], flag: string): T {
