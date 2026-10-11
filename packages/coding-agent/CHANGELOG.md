@@ -17,6 +17,7 @@
 - Fixed a failed progress preview delivery leaving its mirrored output artifact unfinalized.
 - Service monitors are released at every conversation boundary, including same-id `/clear`; retained service completion survives a session switch or exit, but not reset or a new session.
 - Fixed a supervised process's progress arriving out of order after its monitor was retuned between `wake` and `ambient`: output sampled before the switch now stays ahead of later output instead of landing behind it — or on a later turn — when the process completes.
+- Fixed async Bash promotion returning post-boundary rows in the foreground preview and then delivering them again as progress; preview snapshots now follow their emission boundary without adding a second output buffer.
 
 ## [18.14.1] - 2026-10-31
 
