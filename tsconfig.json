@@ -1,26 +1,10 @@
 {
-	"extends": "./packages/tsconfig.workspace.json",
-	"compilerOptions": {
-		"allowImportingTsExtensions": true,
-		"jsx": "react-jsx",
-		"lib": ["ES2024", "DOM", "DOM.Iterable", "DOM.AsyncIterable"],
-		"types": ["bun", "assets", "react", "react-dom"]
-	},
-	"include": [
-		"packages/*/src",
-		"packages/*/test",
-		"packages/*/tests",
-		"packages/*/scripts",
-		"packages/*/bench",
-		"packages/*/bin",
-		"packages/*/native",
-		"packages/*/extension",
-		"scripts"
-	],
-	"exclude": [
-		"packages/omptype/test/ark",
-		"packages/metaharness/src/tb",
-		"**/node_modules",
-		"**/dist"
+	"references": [
+		{
+			"path": "./packages/tsconfig.workspace.json"
+		},
+		{
+			"path": "./tsconfig.tools.json"
+		}
 	]
 }
