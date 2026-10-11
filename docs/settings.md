@@ -650,6 +650,8 @@ Computer settings and the active model's coordinate-safe image limits are read f
 bash:
   enabled: true
   allowCompoundCommands: false
+  asyncAuto:
+    inlineGraceMs: 1000
   autoBackground:
     enabled: true
     thresholdMs: 60000
@@ -675,9 +677,10 @@ lsp:
 | `bash.enabled`                    | boolean | `true`    | Enable the bash tool.                                                                                                                                       |
 | `bash.allowCompoundCommands`      | boolean | `false`   | Evaluate flat, literal `&&` chains per segment; unmatched segments inherit normal bash approval policy and mode.                                            |
 | `bash.gitGuard`                   | boolean | `false`   | For checkouts shared by concurrent agents: refuse `git stash` (except `list`/`show`), `reset --hard`, `reset` to another commit, and `checkout`/`switch`/working-tree `restore` unless a merge or rebase conflict is being resolved. Unstaging stays allowed. Enforced by the embedded shell's `git` builtin, so it sees expanded commands and the real cwd; services, client terminals, `pty` calls, and git started by path or through another program are not guarded. |
+| `bash.asyncAuto.inlineGraceMs`    | number  | `1000`    | How long explicit `async: "auto"` calls stay inline before the same process promotes to a background job. Commands finishing within the grace return inline; longer ones promote and any `progress` delivery starts then. `0` promotes immediately. A command `timeout` at or below the grace plus a 1 s buffer never promotes (it runs inline to completion). Raise it (e.g. `5000`) when typical builds/tests finish in a few seconds and you prefer inline results; lower it when turns should never block. |
 | `launch.enabled`                  | boolean | `true`    | Enable named `bash` services and `proc://` supervision for shared long-running project processes; there is no separate launch tool.                                                                                           |
 | `bash.autoBackground.enabled`     | boolean | `true`   | Auto-background long-running commands.                                                                                                                      |
-| `bash.autoBackground.thresholdMs` | number  | `60000`   | Threshold before auto-backgrounding.                                                                                                                        |
+| `bash.autoBackground.thresholdMs` | number  | `60000`   | Threshold before auto-backgrounding unmarked Bash calls.                                                                                                    |
 | `bash.direnv` | enum | `auto` | `auto` loads an allowed repository `.envrc` into the embedded bash session; `off` disables integration. It never bypasses `direnv allow`. |
 | `bash.direnvLoadTimeoutMs` | number | `30000` | Maximum wait for initial `direnv export`; a timeout leaves the session without the direnv environment. |
 | `eval.py`                         | boolean | `true`    | Python eval backend. `PI_PY=0` disables for the process.                                                                                                    |
