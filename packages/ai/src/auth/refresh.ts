@@ -5,7 +5,6 @@ import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import { raceSignal } from "./abort";
 import { authCredentialEquals, type CredentialPool, credentialDisabledEvent } from "./pool";
-import type { AccountPolicies } from "./policy";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import { hasRefreshLeases, type AuthCredentialStore } from "./store";
 import {
@@ -91,7 +90,6 @@ export function mergeRefreshedCredential<T extends OAuthCredential>(current: T, 
 export interface OAuthRefresherDeps {
 	store: AuthCredentialStore;
 	pool: CredentialPool;
-	policies: AccountPolicies;
 	override?: AuthStorageOptions["refreshOAuthCredential"];
 	overrideMints?: AuthStorageOptions["refreshOAuthCredentialMints"];
 }
@@ -430,7 +428,6 @@ export class OAuthRefresher {
 			await this.#deps.pool.reload();
 			return "cas-lost";
 		}
-		this.#deps.policies.validateFor(provider, this.#deps.pool.credentials(provider));
 		return "disabled";
 	}
 

@@ -4,8 +4,14 @@ interface ComputerInputOptions {
 	takeover?: boolean;
 }
 
+/** Item path in a menu that a call opens, matched like `win.menu.select`, e.g. `["Add to", "Fonts"]`. */
+interface ComputerMenuOptions {
+	/** The call opens the menu, presses this item and returns with the menu closed; without it, a macOS background menu is closed and the call throws `InputFailed` listing its items. */
+	menu?: string[];
+}
+
 /** Options for pointer clicks. */
-interface ComputerClickOptions extends ComputerInputOptions {
+interface ComputerClickOptions extends ComputerInputOptions, ComputerMenuOptions {
 	button?: "left" | "right" | "middle";
 	count?: number;
 	modifiers?: string[];
@@ -143,6 +149,8 @@ interface ComputerScreenshotResult {
 	coordinateHeight: number;
 	/** Captured rectangle in the full screenshot coordinate frame; absent for full screenshots. */
 	region?: CaptureRegion;
+	/** macOS lock screen was up: a display capture shows it; a window capture shows that window's last frame. */
+	screenLocked?: true;
 }
 
 /** Native desktop backend and permission state. */
@@ -169,6 +177,10 @@ interface ComputerCapabilities {
 	menus: boolean;
 	heldInput: boolean;
 	spaces: boolean;
+	/** macOS lock screen is up: captures show it, and keystrokes, takeover and AX actions fail until someone unlocks. */
+	screenLocked: boolean;
+	/** macOS session display is asleep (the display id the session was opened on, else every display): nothing can be captured or clicked there until it wakes. */
+	displayAsleep: boolean;
 }
 
 /** Live accessibility element resolved from a snapshot ref; expired refs throw `StaleRef`. */
@@ -188,14 +200,39 @@ interface ComputerElement {
 	bounds(): Promise<ComputerBounds | null>;
 	attributes(): Promise<Record<string, string>>;
 	actions(): Promise<string[]>;
-	perform(action: string): Promise<void>;
+	perform(action: string, options?: ComputerMenuOptions): Promise<void>;
 	/** Perform the element's native press action; needs no screenshot. */
-	press(): Promise<void>;
-	/** Click the element's center with native input. */
-	click(options?: ComputerInputOptions): Promise<void>;
+	press(options?: ComputerMenuOptions): Promise<void>;
+	/** Click the element's center with native input; `count: 2` double-clicks. */
+	click(options?: ComputerClickOptions): Promise<void>;
+	doubleClick(options?: Omit<ComputerClickOptions, "count">): Promise<void>;
 	focus(): Promise<void>;
 	parent(): Promise<ComputerElement | null>;
 	children(): Promise<ComputerElement[]>;
+}
+
+/** `ref()` result: `await` it for the element, or call element methods on it directly (`win.ref("e5").click()`). */
+interface ComputerElementRef
+	extends
+		PromiseLike<ComputerElement>,
+		Pick<
+			ComputerElement,
+			| "value"
+			| "setValue"
+			| "bounds"
+			| "attributes"
+			| "actions"
+			| "perform"
+			| "press"
+			| "click"
+			| "doubleClick"
+			| "focus"
+			| "parent"
+			| "children"
+		> {
+	readonly ref: string;
+	catch<T = never>(onRejected?: ((reason: unknown) => T | PromiseLike<T>) | null): Promise<ComputerElement | T>;
+	finally(onFinally?: (() => void) | null): Promise<ComputerElement>;
 }
 
 /** Native input helpers shared by the desktop root and window handles; `x`/`y` are pixels in the most recent full screenshot of the same target, never zoom pixels. */
@@ -235,16 +272,17 @@ interface ComputerWindow extends ComputerInputTarget {
 	bringToCurrentSpace(): Promise<void>;
 	/** Emit one full screenshot and AX snapshot without exposing a partial failed observation. */
 	observe(options?: ComputerScreenshotOptions & ComputerAxOptions): Promise<ComputerObservationResult>;
+	/** Menu paths take one title, an array of titles, or the titles as separate arguments: `select("File", "Export…")`. */
 	readonly menu: {
-		/** Inspect a menu path without activating the application. */
-		items(path?: string | string[]): Promise<ComputerMenuItem[]>;
+		/** Inspect a menu path; on macOS the items validate in the window's menu context, as `select` sees them. */
+		items(...path: string[] | [path?: string | string[]]): Promise<ComputerMenuItem[]>;
 		/** Select one unambiguous enabled command using the window's native menu context. */
-		select(path: string[]): Promise<void>;
+		select(...path: [string, ...string[]] | [string[]]): Promise<void>;
 	};
 	/** Formatted accessibility tree as one string, one node per line with `[ref=eN]` tags. */
 	ax(options?: ComputerAxOptions): Promise<string>;
 	find(query: ComputerAxQuery): Promise<ComputerElement[]>;
-	ref(ref: string): Promise<ComputerElement>;
+	ref(ref: string): ComputerElementRef;
 }
 
 /** Desktop helpers shared by the direct `computer` facade and the `desktop` object inside `computer.run`. */
@@ -255,8 +293,15 @@ interface ComputerDesktop extends ComputerInputTarget {
 	readonly apps: {
 		/** Discover native application identities without requiring capture permission. */
 		list(options?: ComputerApplicationQuery): Promise<ComputerApplication[]>;
-		/** Launch an exact identity/path or unique name; deliberate activation is opt-in. */
-		open(idOrNameOrNativeAppPath: string, options?: { activate?: boolean }): Promise<ComputerApplication>;
+		/**
+		 * Launch an exact identity/path or unique name; deliberate activation is opt-in. Returns the app with
+		 * `window`, its frontmost window: on macOS a running app without one is shown in the background, and the
+		 * first window gets up to 3 s to appear; null if none did (always null elsewhere).
+		 */
+		open(
+			idOrNameOrNativeAppPath: string,
+			options?: { activate?: boolean },
+		): Promise<ComputerApplication & { window: ComputerWindow | null }>;
 	};
 	readonly control: {
 		/** Requires a live human UI confirmation; headless/refused requests never acquire. */
@@ -273,7 +318,7 @@ interface ComputerDesktop extends ComputerInputTarget {
 	/** Element under a global desktop coordinate. */
 	elementAt(x: number, y: number): Promise<ComputerElement | null>;
 	focusedElement(): Promise<ComputerElement | null>;
-	ref(ref: string): Promise<ComputerElement>;
+	ref(ref: string): ComputerElementRef;
 	readonly clipboard: {
 		read(): Promise<string>;
 		write(text: string): Promise<void>;

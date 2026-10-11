@@ -7,14 +7,17 @@ mod process;
 mod release;
 mod release_guard;
 mod route;
+mod session;
 mod skylight;
 mod spaces;
 
 pub(super) use ax::menus;
+pub(super) use capture::application_windows;
 use image::RgbaImage;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+pub(super) use session::screen_state;
 
-use self::{ax::MacAx, capture::MacCapture, input::MacInput};
+use self::{ax::MacAx, capture::MacCapture, input::MacInput, session::DisplayAwake};
 use super::{
 	backend::{AxBackend, Backend, DeliveryMode, PointerEvent},
 	control::OperationToken,
@@ -22,22 +25,25 @@ use super::{
 	frame::FrameGeometry,
 	keys::KeyName,
 	types::{
-		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, Target,
+		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector,
+		ScreenState, Target,
 	},
 };
 
 pub struct MacosBackend {
-	capture: MacCapture,
-	input:   MacInput,
-	ax:      MacAx,
+	capture:       MacCapture,
+	input:         MacInput,
+	ax:            MacAx,
+	display_awake: DisplayAwake,
 }
 
 impl MacosBackend {
 	pub(crate) fn new(display: DisplaySelector) -> CoreResult<Self> {
 		Ok(Self {
-			capture: MacCapture::new(display),
-			input:   MacInput::new()?,
-			ax:      MacAx::new(),
+			capture:       MacCapture::new(display),
+			input:         MacInput::new()?,
+			ax:            MacAx::new(),
+			display_awake: DisplayAwake::default(),
 		})
 	}
 
@@ -64,6 +70,7 @@ impl Backend for MacosBackend {
 		} else {
 			0
 		};
+		let screen = session::screen_state(self.capture.selector());
 		DesktopCapabilities {
 			backend: "quartz".to_string(),
 			display_server: Some("Quartz WindowServer".to_string()),
@@ -81,6 +88,8 @@ impl Backend for MacosBackend {
 			input_permission: permission_label(input_permission),
 			ax_permission: permission_label(input_permission),
 			display_count,
+			screen_locked: screen.locked,
+			display_asleep: screen.display_asleep,
 		}
 	}
 
@@ -90,6 +99,14 @@ impl Backend for MacosBackend {
 
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>> {
 		self.capture.windows()
+	}
+
+	fn screen_state(&mut self, display: Option<&DisplaySelector>) -> ScreenState {
+		session::screen_state(display.unwrap_or_else(|| self.capture.selector()))
+	}
+
+	fn keep_display_awake(&mut self, awake: bool) {
+		self.display_awake.set(awake);
 	}
 
 	fn capture(
@@ -111,12 +128,26 @@ impl Backend for MacosBackend {
 	) -> CoreResult<()> {
 		token.check()?;
 		Self::require_input_permission()?;
-		let presses = matches!(
-			event,
-			PointerEvent::Click { .. } | PointerEvent::Drag { .. } | PointerEvent::Hold { .. }
-		);
-		release_guard::scope(presses && shares_hid_route(target, mode), || {
-			self.input.pointer(target, event, mode, &self.capture)
+		release_guard::scope(presses(&event) && shares_hid_route(target, mode), || {
+			self.input.pointer(target, event, None, mode, &self.capture)
+		})
+	}
+
+	fn pointer_menu(
+		&mut self,
+		target: &Target,
+		event: PointerEvent,
+		path: &[String],
+		_frame: &FrameGeometry,
+		mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<()> {
+		token.check()?;
+		Self::require_input_permission()?;
+		release_guard::scope(presses(&event) && shares_hid_route(target, mode), || {
+			self
+				.input
+				.pointer(target, event, Some(path), mode, &self.capture)
 		})
 	}
 
@@ -221,6 +252,14 @@ impl Backend for MacosBackend {
 	fn ax(&mut self) -> Option<&mut dyn AxBackend> {
 		Some(&mut self.ax)
 	}
+}
+
+/// Whether `event` presses a button, which its release helper must know of.
+const fn presses(event: &PointerEvent) -> bool {
+	matches!(
+		event,
+		PointerEvent::Click { .. } | PointerEvent::Drag { .. } | PointerEvent::Hold { .. }
+	)
 }
 
 /// Whether input to `target` in `mode` posts on the HID route, which the

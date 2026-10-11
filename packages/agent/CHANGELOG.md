@@ -2,9 +2,19 @@
 
 ## [Unreleased]
 
+## [18.9.2] - 2026-10-11
+
+### Changed
+
+- Improved context caching for repeat turns, reducing redundant prompt processing and making subsequent turns faster when the system prompt is unchanged.
+
+## [18.9.0] - 2026-10-11
+
 ### Fixed
 
-- Fixed OpenAI V1 remote compaction re-attaching a prior Anthropic native payload after a successful compact ([#15041](https://github.com/can1357/oh-my-pi/pull/15041) by [@PaleRoses](https://github.com/PaleRoses))
+- Fixed stale queue updates when queued steering is adopted, withdrawn, or added to the transcript, ensuring queue listeners consistently receive the latest state.
+
+## [18.8.8] - 2026-10-10
 
 ### Added
 
@@ -13,7 +23,9 @@
 
 ### Fixed
 
+- Fixed OpenAI V1 remote compaction re-attaching a prior Anthropic native payload after a successful compact ([#15041](https://github.com/can1357/oh-my-pi/pull/15041) by [@PaleRoses](https://github.com/PaleRoses))
 - Fixed `resolveThresholdTokens()` clamping a positive `thresholdTokens` to `baseWindowTokens`; a fixed threshold is checked against the real window, and the base only rescales the percentage and reserve policies ([#15074](https://github.com/can1357/oh-my-pi/pull/15074) by [@H4vC](https://github.com/H4vC))
+- Fixed `resolveThresholdTokens()` clamping a fixed `thresholdTokens` at or past the context window to one token below it, so compaction fired only after the next request overflowed; it now clamps to the window less the reserve ([#15146](https://github.com/can1357/oh-my-pi/pull/15146) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.6] - 2026-10-08
 

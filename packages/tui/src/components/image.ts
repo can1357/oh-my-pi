@@ -57,7 +57,6 @@ export function renderForScrollback<T>(render: () => T): T {
 
 const EMPTY_IDS: readonly number[] = [];
 const EMPTY_TRANSMITS: readonly string[] = [];
-const EMPTY_STALE_EPOCHS: ReadonlyArray<{ imageId: number; lastEpoch: number }> = [];
 const SAVE_CURSOR = "\x1b7";
 const RESTORE_CURSOR = "\x1b8";
 // Direct placements reserve height with leading zero-width rows. Keep them
@@ -71,25 +70,6 @@ export function imageMaxColumns(width: number): number {
 
 /** Default count of inline images kept as live graphics before older ones fall back to text. */
 export const DEFAULT_MAX_INLINE_IMAGES = 8;
-
-/** Per-image direct-placement emit state tracked by {@link ImageBudget}. */
-interface PlacementEmitState {
-	widthPx: number;
-	heightPx: number;
-	/** Current placement-id (`p=`) generation. */
-	epoch: number;
-	/** First frame row the current epoch's last emit attached cells to. */
-	lastAttachTopFrameRow: number | undefined;
-	/**
-	 * Whether any cell attached by the current epoch's last emit has entered
-	 * native scrollback. Set by {@link ImageBudget.observeCommitWatermark}
-	 * comparing each frame's raw commit target against the attach top —
-	 * era-local comparisons, so a divergence recommit that rewinds and
-	 * re-advances the ledger is detected the moment it re-crosses the attach
-	 * top, and a stale pre-rewind peak can never re-trigger.
-	 */
-	cellsArchived: boolean;
-}
 
 /** A surface the renderer paints frames on. */
 type Surface = "screen" | "alt";
@@ -222,22 +202,8 @@ export class ImageBudget {
 	 * fullscreen overlay keeps its placements and is restored from cache on exit.
 	 */
 	#liveIds: Record<Surface, Set<number>> = { screen: new Set(), alt: new Set() };
-	/**
-	 * Per-image direct-placement emit state: source pixel geometry for the
-	 * renderer's clipped source rectangle, plus the placement-id epoch (see
-	 * {@link resolvePlacementEmit}). Entries deliberately live as long as the
-	 * terminal's own placement registry for the image — they are the ledger the
-	 * destructive-clear sweep uses to delete every registry entry an image ever
-	 * placed — and die with it on demotion purge (`d=I`) or full cleanup.
-	 */
-	#placementState = new Map<number, PlacementEmitState>();
-	/**
-	 * States with an un-archived live attach top — the only ones a frame's
-	 * commit watermark can affect. {@link observeCommitWatermark} runs every
-	 * rendered frame, so it scans this set (bounded by concurrently live
-	 * placements) instead of every image ever registered.
-	 */
-	#watchedPlacements = new Set<PlacementEmitState>();
+	/** Source pixel dimensions for clipping direct placements at the viewport edge. */
+	#placementGeometry = new Map<number, ImageDimensions>();
 	/** Ids whose owner replaced them for good ({@link release}); retired once no frame shows them. */
 	#released = new Set<number>();
 
@@ -480,7 +446,7 @@ export class ImageBudget {
 		// terminal, so cancel it instead of transmitting then purging.
 		if (!this.#pendingTransmits[this.#surface].delete(imageId)) this.#purgeIds.push(imageId);
 		this.#transmitted[this.#surface].delete(imageId);
-		if (!this.#isTransmitted(imageId)) this.#deletePlacementState(imageId);
+		if (!this.#isTransmitted(imageId)) this.#placementGeometry.delete(imageId);
 		this.#forgetKeyForId(imageId);
 		return true;
 	}
@@ -523,8 +489,7 @@ export class ImageBudget {
 		this.#resetPurgeIds = [];
 		this.#keyToId.clear();
 		this.#idToKey.clear();
-		this.#placementState.clear();
-		this.#watchedPlacements.clear();
+		this.#placementGeometry.clear();
 		this.#released.clear();
 		for (const surface of SURFACES) this.#liveIds[surface].clear();
 		return [...ids];
@@ -541,115 +506,18 @@ export class ImageBudget {
 	 * the image is purged from the terminal store.
 	 */
 	registerPlacementGeometry(imageId: number, widthPx: number, heightPx: number): void {
-		const state = this.#placementState.get(imageId);
-		if (state) {
-			state.widthPx = widthPx;
-			state.heightPx = heightPx;
-			return;
-		}
-		this.#placementState.set(imageId, {
-			widthPx,
-			heightPx,
-			epoch: 1,
-			lastAttachTopFrameRow: undefined,
-			cellsArchived: false,
-		});
-	}
-
-	/**
-	 * Record this frame's native-scrollback commit target (the frame-row count
-	 * that is committed once the frame's writes land). Called once per rendered
-	 * frame — including frames that emit no placements — so an epoch whose rows
-	 * commit while its line is never rewritten is still flagged before the next
-	 * re-emission.
-	 */
-	observeCommitWatermark(committedTo: number): void {
-		if (committedTo < 0 || this.#watchedPlacements.size === 0) return;
-		for (const state of this.#watchedPlacements) {
-			if (state.lastAttachTopFrameRow !== undefined && committedTo > state.lastAttachTopFrameRow) {
-				// Latched: the flag only clears when the next emit consumes it,
-				// so the state needs no further per-frame scans until then.
-				state.cellsArchived = true;
-				this.#watchedPlacements.delete(state);
-			}
+		const geometry = this.#placementGeometry.get(imageId);
+		if (geometry) {
+			geometry.widthPx = widthPx;
+			geometry.heightPx = heightPx;
+		} else {
+			this.#placementGeometry.set(imageId, { widthPx, heightPx });
 		}
 	}
 
-	/**
-	 * End the physical-row coordinate epoch after observing its final commit
-	 * watermark. Placement ids and latched archive state survive, but attachment
-	 * rows do not: the next placement emit records them in the new-width frame.
-	 */
-	beginPlacementCoordinateEpoch(): void {
-		for (const state of this.#placementState.values()) state.lastAttachTopFrameRow = undefined;
-		this.#watchedPlacements.clear();
-	}
-
-	/**
-	 * Resolve the placement id and geometry for a direct-placement emit whose
-	 * topmost attached cell sits at `attachTopFrameRow` — the first frame row
-	 * the placement covers, i.e. the block's first *visible* row, not its
-	 * origin (-1 when the writer has no frame-space position: alt-screen,
-	 * resize, ConPTY-truncated replays). `committedTo` is this frame's commit
-	 * target in the same frame-row space (-1 when unknown).
-	 *
-	 * Invariant: a placement id may be re-used (Kitty replace strips that id's
-	 * cells everywhere, scrollback included) only while none of the cells it
-	 * attached have entered native scrollback. The epoch — the `p=` id —
-	 * advances exactly when the archived flag says otherwise; rewrites with no
-	 * commit progression keep replacing the same id in place.
-	 */
-	resolvePlacementEmit(
-		imageId: number,
-		attachTopFrameRow: number,
-		committedTo: number,
-	): { placementId: number; widthPx: number; heightPx: number } | null {
-		const state = this.#placementState.get(imageId);
-		if (!state) return null;
-		// Frames that commit as they write (seam/full-paint chunk passes) pass
-		// their own commit target; fold it in before deciding, so a commit that
-		// lands in the same frame as the re-emission still advances the epoch.
-		if (committedTo >= 0 && state.lastAttachTopFrameRow !== undefined && committedTo > state.lastAttachTopFrameRow) {
-			state.cellsArchived = true;
-			this.#watchedPlacements.delete(state);
-		}
-		if (state.cellsArchived) {
-			state.epoch += 1;
-			state.cellsArchived = false;
-			state.lastAttachTopFrameRow = undefined;
-		}
-		if (attachTopFrameRow >= 0) {
-			state.lastAttachTopFrameRow = attachTopFrameRow;
-			this.#watchedPlacements.add(state);
-		}
-		return { placementId: state.epoch, widthPx: state.widthPx, heightPx: state.heightPx };
-	}
-
-	/**
-	 * Restart every placement epoch after a destructive history clear (`CSI 3 J`
-	 * full paint). The clear destroys all placement cells — scrollback rows are
-	 * gone and the replay rewrites the viewport — so no archive remains to
-	 * protect. Reverting to epoch 1 lets the replay recreate every visible
-	 * placement after the terminal-wide cleanup.
-	 */
-	resetPlacementEpochs(): ReadonlyArray<{ imageId: number; lastEpoch: number }> {
-		let stale: Array<{ imageId: number; lastEpoch: number }> | undefined;
-		for (const [imageId, state] of this.#placementState) {
-			stale ??= [];
-			stale.push({ imageId, lastEpoch: state.epoch });
-			state.epoch = 1;
-			state.lastAttachTopFrameRow = undefined;
-			state.cellsArchived = false;
-		}
-		this.#watchedPlacements.clear();
-		return stale ?? EMPTY_STALE_EPOCHS;
-	}
-
-	#deletePlacementState(imageId: number): void {
-		const state = this.#placementState.get(imageId);
-		if (!state) return;
-		this.#watchedPlacements.delete(state);
-		this.#placementState.delete(imageId);
+	/** Source dimensions used by the frame writer to clip a direct placement. */
+	getPlacementGeometry(imageId: number): ImageDimensions | undefined {
+		return this.#placementGeometry.get(imageId);
 	}
 
 	/**

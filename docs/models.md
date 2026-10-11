@@ -110,6 +110,9 @@ Custom `models` entries can set their own `baseUrl`; otherwise they inherit the 
 For built-in models, a provider `baseUrl` override is scoped to the effective APIs of custom models
 that inherit it, or to the provider's `api` for an override-only configuration. Without either
 scope it applies provider-wide. `transport: pi-native` always applies the gateway URL provider-wide.
+An unscoped OpenRouter `baseUrl` names the `/api/v1` chat root, so OpenRouter Decisions (judge)
+models use its `/api/alpha` sibling on the same host, e.g. a `.../api/v1` relay serves judges at
+`.../api/alpha/decisions`.
 
 `preferWebsockets` (on a model or `modelOverrides` entry) controls whether Codex requests prefer
 the WebSocket transport. `omitMaxOutputTokens` omits the model-derived output cap.
@@ -140,8 +143,10 @@ override matching model tags. These fields do not configure the Anthropic Messag
 - `google-vertex`
 - `typesafe`
 - `openrouter-decisions`
+- `openai-decisions`
+- `workers-ai-systemone`
 
-`typesafe` and `openrouter-decisions` are judgment APIs, not chat transports: a model declared with one answers System One judgment requests (`{baseUrl}/v1/systemone` and `{baseUrl}/decisions` respectively) and is selected by the `judge` model role. Its `headers` carry gateway routing or custom authentication headers for that traffic.
+`typesafe`, `openrouter-decisions`, `openai-decisions`, and `workers-ai-systemone` are judgment APIs, not chat transports: a model declared with one answers judgment requests and is selected by the `judge` model role. `typesafe` posts TypeSafe's System One body to `{baseUrl}/v1/systemone` (any System One server: TypeSafe, OpenJEV, Kev, self-hosted Clef); `openrouter-decisions` posts the same body to `{baseUrl}/decisions`; `openai-decisions` translates questions and answers to OpenAI's Decisions API at `{baseUrl}/decisions` (the bundled `openai/gpt-6-luna-decisions` row sends the wire model `gpt-6-luna`); `workers-ai-systemone` posts the System One body to Cloudflare Workers AI at `{baseUrl}/{model id}`, where `<account>` in the base URL is filled from the stored credential's account id or `CLOUDFLARE_ACCOUNT_ID`. Its `headers` carry gateway routing or custom authentication headers for that traffic.
 
 A model or `modelOverrides` entry may also use a runner API, which serves one model `kind`; `RUNNER_API_KINDS` in `packages/catalog/src/types.ts` lists them (for example `openai-images` serves `image`, `openai-embeddings` serves `embedding`, `openai-speech` serves `tts`). `web-search` is built in and cannot be named here, so neither can `kind: search`. `kind` defaults to the api's kind (`chat` for chat transports), and an explicit `kind` must be one its api serves. Chat transports serve `chat` and `tiny` (small models for the `tiny`, `memory`, and `judge` roles); those that `generate_image` runs (`openai-responses`, `openai-codex-responses`, `google-generative-ai`, `google-gemini-cli`) also serve `image`: on `openai-responses`, the image is generated through the Responses `image_generation` tool, carried by a GPT-5+ chat model on the same provider, instead of `/images/generations`. This moves discovered gateway models to the image role:
 
@@ -616,7 +621,7 @@ When a bare id matches models from multiple providers, preference order is:
 1. explicit CLI provider+model
 2. first scoped model (if not resuming)
 3. saved default provider/model
-4. known provider defaults (e.g. OpenAI/Anthropic/etc.) among available models
+4. known provider defaults (e.g. OpenAI/Anthropic/etc.) among available models; a provider whose discovery marks the account's default model (`isProviderDefault`, e.g. Devin) uses it in place of its bundled `default-model`
 5. first available model
 
 The automatic fallback first restricts the pool to providers with concrete credentials (including
@@ -901,8 +906,14 @@ drops override keys the resolved shape does not declare.
 
 The same `compat` slot accepts `promptCacheMode` (`none`, `automatic`, or `explicit`),
 `supportsLongPromptCacheRetention`, `promptCacheMinimumTokens`,
-`promptCacheMaximumCheckpoints`, and `supportsForcedToolChoice` (forced `any`/`tool` choices
-fall back to `auto` when `false`; built in for Claude Opus/Sonnet 5.5) for Bedrock models.
+`promptCacheMaximumCheckpoints`, `supportsForcedToolChoice` (forced `any`/`tool` choices
+fall back to `auto` when `false`; built in for Claude Opus/Sonnet 5.5), and
+`supportsThinkingBindingControls` for Bedrock models. Prefix-bound Claude models (Fable 5.1+,
+Opus/Sonnet/Haiku 5.5) send `thinking.block_binding`, the `thinking-binding-controls-2026-08-01`
+beta and the `/input_transformations` response path by default; set
+`supportsThinkingBindingControls: false` for a gateway or region that rejects them. Local
+prefix-binding safeguards stay on, and a prefix-mismatch rejection is retried once with
+bound thinking stripped.
 
 By default `bedrock-converse-stream` requests go to `bedrock-runtime.{region}.amazonaws.com`.
 An explicit per-request region or a model ARN's region wins. Otherwise an ambient region from

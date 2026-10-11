@@ -1540,6 +1540,11 @@ export class Settings {
 		return this.#agentDir;
 	}
 
+	/** Resolved absolute paths of the config overlays supplied to this instance. */
+	getConfigFiles(): readonly string[] {
+		return [...this.#configFiles];
+	}
+
 	/**
 	 * Monotonic revision for consumers caching derived effective settings.
 	 * Changes after every merged-layer or cwd-scope rebuild, including overlays

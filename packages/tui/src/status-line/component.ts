@@ -27,7 +27,7 @@ import type {
 } from "./host";
 import type { Editor } from "../components/editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
-import { sanitizeStatusText } from "../chrome/shared";
+import { sanitizeHookStatusText, sanitizeStatusText } from "../chrome/shared";
 import { getThemeEpoch, theme } from "../theme";
 import { type CompactionBoundaries, EMPTY_STRING_PARTS, getToolSchemaMetadataRevision } from "./context-usage";
 import {
@@ -56,6 +56,7 @@ import type {
 	StatusLineSegmentOptions,
 	StatusLineSeparatorStyle,
 	StatusLineSettings,
+	StatusResetExpiry,
 } from "./types";
 
 /** What a click on a native status segment asks omp to open. */
@@ -83,9 +84,9 @@ const PINNED_NATIVE_PRIORITY = 1000;
 /**
  * Segments a TSP terminal shows outside the composer's facts: the model chip,
  * the context hairline and usage text (context, cost), Tern's pane header
- * (path, git), the tab title (session name, PR), the HUD pills (subagents),
- * the editor (vim) and the brand (`pi`; while focus-proxied, the viewed agent
- * is the composer's viewing header).
+ * (path), the tab title (session name, PR), the HUD pills (subagents), the
+ * editor (vim) and the brand (`pi`; while focus-proxied, the viewed agent is
+ * the composer's viewing header).
  */
 const COMPOSER_HOMED_SEGMENTS: Partial<Record<StatusLineSegmentId, true>> = {
 	pi: true,
@@ -94,7 +95,6 @@ const COMPOSER_HOMED_SEGMENTS: Partial<Record<StatusLineSegmentId, true>> = {
 	context_total: true,
 	cost: true,
 	path: true,
-	git: true,
 	pr: true,
 	session_name: true,
 	subagents: true,
@@ -788,6 +788,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			expiryHours?: number;
 			expired?: boolean;
 			unavailableReason?: string;
+			expiring?: StatusResetExpiry;
 		};
 	} | null = null;
 	#cachedUsageContextKey: string | null = null;
@@ -800,6 +801,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#latestAppliedUsageRefreshSequence = 0;
 	#codexResetSnapshots = new Map<string, CodexResetUsageSnapshot>();
 	#onCodexResetFireworks: ((event: CodexResetFireworksEvent) => void) | undefined;
+	#onResetExpiryNotice: ((notice: string) => void) | undefined;
+	/** Conversations already warned about expiring saved resets: later refreshes stay quiet. */
+	#resetExpiryNoticedSessions = new Set<string>();
 	// Context-usage memo. The status line redraws on every agent event, so the
 	// hot path must not recompute context tokens unless an input changed.
 	// `getContextUsage()` anchors on the last assistant's real prompt-token
@@ -1203,6 +1207,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#onCodexResetFireworks = handler;
 	}
 
+	/** Set the callback that presents the first pool-wide saved-reset expiry warning, or clear it with `undefined`. */
+	setResetExpiryNoticeHandler(handler: ((notice: string) => void) | undefined): void {
+		this.#onResetExpiryNotice = handler;
+	}
+
 	setHookStatus(key: string, text: string | undefined): void {
 		if (text === undefined) {
 			if (!this.#hookStatuses.delete(key)) return;
@@ -1272,6 +1281,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#stopPricingTimer();
 		this.#clearUsageStartTimer();
 		this.#onCodexResetFireworks = undefined;
+		this.#onResetExpiryNotice = undefined;
 		this.#codexResetSnapshots.clear();
 		this.#retireGitWatcher();
 	}
@@ -2026,6 +2036,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#invalidateStatusLineRenderCache();
 			this.#onBranchChange?.();
 		}
+		this.#noticeResetExpiry(session, reports);
 		if (!resetSnapshot) return;
 		const contextKey = this.#formatUsageContextKey(activeProvider, activeIdentity);
 		const previous = this.#codexResetSnapshots.get(contextKey);
@@ -2033,6 +2044,33 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (!previous || !this.host.codexResetFireworksEnabled()) return;
 		const event = detectCodexResetFireworks(previous, resetSnapshot);
 		if (event) this.#onCodexResetFireworks?.(event);
+	}
+
+	#noticeResetExpiry(session: TSession, reports: unknown): void {
+		// A focused subagent's view is not a conversation the user started; warn in their own.
+		if (
+			this.#focusedAgentId !== undefined ||
+			!this.#onResetExpiryNotice ||
+			!this.host.resetExpiryNotice ||
+			!Array.isArray(reports)
+		) {
+			return;
+		}
+		const sessionId = session.sessionManager.getSessionId();
+		if (this.#resetExpiryNoticedSessions.has(sessionId)) return;
+		// fetchUsageReports supplies normalized rows; keep only entries shaped like reports.
+		const usageReports = reports.filter(
+			(report): report is UsageReport =>
+				!!report &&
+				typeof report === "object" &&
+				"provider" in report &&
+				"limits" in report &&
+				Array.isArray(report.limits),
+		);
+		const notice = this.host.resetExpiryNotice(usageReports, Date.now());
+		if (!notice) return;
+		this.#resetExpiryNoticedSessions.add(sessionId);
+		this.#onResetExpiryNotice(notice);
 	}
 
 	#observeLateUsageRefresh(session: TSession, reportsPromise: Promise<unknown>, sequence: number): void {
@@ -2141,6 +2179,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			expiryHours?: number;
 			expired?: boolean;
 			unavailableReason?: string;
+			expiring?: StatusResetExpiry;
 		};
 	} | null {
 		if (!Array.isArray(reports)) return null;
@@ -2258,7 +2297,16 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					? resetReports.find(report => reportMatchesExactIdentity(report, context.identity))
 					: undefined;
 		const resetSummary = summarizeUsageResetCredits(resetReport?.resetCredits, now);
-		const resetExpiryMs = resetSummary?.soonestExpiry ? Date.parse(resetSummary.soonestExpiry) - now : undefined;
+		const expiring =
+			resetSummary && resetSummary.bankedCount > 0 && resetReport
+				? this.host.classifyResetExpiry?.(resetReport, now)
+				: undefined;
+		// The highlighted countdown is the warned reset's, not an earlier one that is not worth warning about.
+		const resetExpiryMs = expiring
+			? expiring.expiresAtMs - now
+			: resetSummary?.soonestExpiry
+				? Date.parse(resetSummary.soonestExpiry) - now
+				: undefined;
 		const resetCredits =
 			resetSummary && resetSummary.bankedCount > 0
 				? {
@@ -2270,6 +2318,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 								: undefined,
 						expired: resetExpiryMs !== undefined && resetExpiryMs <= 0,
 						unavailableReason: resetSummary.unavailableReason,
+						expiring,
 					}
 				: undefined;
 		if (!selectedGroup) return resetCredits ? { resetCredits } : null;
@@ -3519,13 +3568,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#buildComposerFacts(effectiveSettings: EffectiveStatusLineSettings, nowMs: number): ComposerFacts {
 		const { leftSegments, rightSegments } = effectiveSettings;
 		const segments = [...leftSegments, ...rightSegments];
-		// Tern's pane header shows the path and branch from the pane's cwd; only the PR is looked up here.
+		// Tern's pane header shows the path from the pane's cwd; the branch sits by the model chip.
+		const gitEnabled = this.#gitEnabled();
 		const ctx = this.#buildSegmentContext(
 			0,
 			effectiveSettings.segmentOptions,
 			false,
-			false,
-			this.#gitEnabled() && hasPrSegment(segments),
+			gitEnabled && hasGitSegment(segments),
+			gitEnabled && hasPrSegment(segments),
 			nowMs,
 		);
 		const pr = ctx.git.pr ?? undefined;
@@ -3543,8 +3593,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				if (!view) return;
 				const props: TspProps<"seg"> = {
 					role: "omp.composer.fact",
-					priority: statusSegmentPriority(side, index, ids.length),
+					priority:
+						(PINNED_NATIVE_SEGMENTS[id] === true ? PINNED_NATIVE_PRIORITY : 0) +
+						statusSegmentPriority(side, index, ids.length),
 				};
+				const action = NATIVE_SEGMENT_ACTIONS[id];
+				if (action) props.actions = { click: action };
 				facts.push(describeSeg(id, props, view, dim));
 			});
 		};
@@ -3752,7 +3806,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 		const showHooks = this.#settings.showHookStatus ?? true;
 		if (showHooks && this.#sortedHookStatuses.length > 0) {
-			lines.push(...this.#sortedHookStatuses.map(text => truncateToWidth(sanitizeStatusText(text), width)));
+			lines.push(...this.#sortedHookStatuses.map(text => truncateToWidth(sanitizeHookStatusText(text), width)));
 		}
 		return lines;
 	}

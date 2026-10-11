@@ -421,7 +421,6 @@ describe("fetchCursorUsableModels", () => {
 				cursorPrice: 2.5,
 				cursorRequiresDataRetention: false,
 				cursorSupportsSandboxing: true,
-				isProviderDefault: true,
 				// The prose sentence only: no HTML, bold title, or context line.
 				description: "Anthropic's earlier flagship model, great for difficult tasks.",
 				thinking: {
@@ -489,7 +488,6 @@ describe("fetchCursorUsableModels", () => {
 		expect(rebuiltLane?.supportsTools).toBe(true);
 		expect(rebuiltLane?.cursorModelRoutes).toEqual(lane?.cursorModelRoutes);
 		expect(rebuiltLane?.thinking?.effortRouting).toEqual(lane?.thinking?.effortRouting);
-		expect(rebuiltLane?.isProviderDefault).toBe(true);
 	});
 
 	it("prices rich lanes from the KDL rate card and leaves uncovered lanes unpriced", async () => {
@@ -668,7 +666,6 @@ describe("fetchCursorUsableModels", () => {
 					contextWindow: 123_456,
 					input: ["text", "image"],
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					isProviderDefault: true,
 				}),
 			]);
 		} finally {

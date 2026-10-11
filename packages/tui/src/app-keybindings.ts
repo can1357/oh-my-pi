@@ -37,6 +37,7 @@ interface AppKeybindings {
 	"app.model.selectTemporary": true;
 	"app.tools.expand": true;
 	"app.tools.toggleVisibility": true;
+	"app.ask.hide": true;
 	"app.editor.external": true;
 	"app.message.followUp": true;
 	"app.retry": true;
@@ -137,6 +138,10 @@ export const KEYBINDINGS = {
 	"app.tools.toggleVisibility": {
 		defaultKeys: "ctrl+shift+o",
 		description: "Show or hide tool activity",
+	},
+	"app.ask.hide": {
+		defaultKeys: "alt+h",
+		description: "Hide or show a pending ask dialog",
 	},
 	"app.editor.external": {
 		defaultKeys: "ctrl+g",

@@ -3,14 +3,15 @@ use std::time::Duration;
 use image::RgbaImage;
 
 use super::{
-	ax::{AxHandle, AxProps},
+	ax::{AxHandle, AxProps, WalkBounds},
 	control::OperationToken,
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	frame::FrameGeometry,
 	keys::KeyName,
 	menus::DesktopMenuItem,
 	types::{
-		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, Target,
+		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector,
+		ScreenState, Target,
 	},
 };
 
@@ -104,6 +105,15 @@ pub trait Backend: Send {
 	fn capabilities(&mut self) -> DesktopCapabilities;
 	fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>>;
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>>;
+	/// Live lock and display-sleep state; `display` narrows the sleep check to
+	/// the display a request targets, else the session's. Backends that cannot
+	/// tell report both as false.
+	fn screen_state(&mut self, _display: Option<&DisplaySelector>) -> ScreenState {
+		ScreenState::default()
+	}
+	/// Hold (`true`) or release (`false`) the platform's prevent-idle-display-
+	/// sleep assertion. Idempotent; backends without one ignore it.
+	fn keep_display_awake(&mut self, _awake: bool) {}
 	/// Explicit display keyboard input must establish the focused surface's
 	/// real global monitor, not infer it from window-relative coordinates.
 	fn focused_keyboard_window(&mut self) -> CoreResult<DesktopWindow> {
@@ -137,6 +147,22 @@ pub trait Backend: Send {
 		mode: DeliveryMode,
 		token: &OperationToken,
 	) -> CoreResult<()>;
+	/// [`Self::pointer`] for a click that opens a menu, then chooses the item
+	/// at `path` in that menu before returning.
+	fn pointer_menu(
+		&mut self,
+		_target: &Target,
+		_ev: PointerEvent,
+		_path: &[String],
+		_frame: &FrameGeometry,
+		_mode: DeliveryMode,
+		_token: &OperationToken,
+	) -> CoreResult<()> {
+		Err(DesktopError::new(
+			ErrorCode::Unsupported,
+			"choosing a menu item in the click that opens the menu is available only on macOS",
+		))
+	}
 	fn type_text(
 		&mut self,
 		target: &Target,
@@ -188,8 +214,25 @@ pub trait AxBackend {
 	fn window_id(&mut self, h: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String>;
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps>;
 	fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>>;
+	/// Reads an element and its children for a tree walk, letting a backend
+	/// share one children read and skip bounds the walk does not need.
+	fn walk_node(
+		&mut self,
+		h: &AxHandle,
+		_bounds: WalkBounds,
+	) -> CoreResult<(AxProps, Vec<AxHandle>)> {
+		Ok((self.props(h)?, self.children(h)?))
+	}
 	fn parent(&mut self, h: &AxHandle) -> CoreResult<Option<AxHandle>>;
 	fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()>;
+	/// [`Self::perform`] for an action that opens a menu, then chooses the item
+	/// at `path` in that menu before returning.
+	fn perform_menu(&mut self, _h: &AxHandle, _action: &str, _path: &[String]) -> CoreResult<()> {
+		Err(DesktopError::new(
+			ErrorCode::Unsupported,
+			"choosing a menu item in the action that opens the menu is available only on macOS",
+		))
+	}
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()>;
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()>;
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>>;

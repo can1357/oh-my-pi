@@ -5,6 +5,7 @@ import { AttachmentChipsBand } from "../../../src/prompt/attachment-chips";
 import { chipLabel } from "../../../src/prompt/composer-attachments";
 import { CustomEditor } from "../../../src/prompt/custom-editor";
 import { getEditorTheme, initTheme } from "../../../src/theme/theme";
+import { becomesCollectible, collectGarbage } from "../../gc";
 import { TspHarness } from "../tsp-harness";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
@@ -40,18 +41,11 @@ function deleteLastChip(editor: CustomEditor): void {
 }
 
 async function collect(): Promise<void> {
-	for (let i = 0; i < 3; i++) {
-		await Bun.sleep(0);
-		Bun.gc(true);
-	}
+	for (let i = 0; i < 3; i++) await collectGarbage();
 }
 
 async function waitForCollection(reference: WeakRef<Uint8Array>): Promise<void> {
-	const deadline = performance.now() + 3_000;
-	do {
-		await collect();
-		if (reference.deref() === undefined) return;
-	} while (performance.now() < deadline);
+	await becomesCollectible(reference);
 }
 
 function replay(harness: TspHarness, id: string, data: string): void {

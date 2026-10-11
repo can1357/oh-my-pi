@@ -25,7 +25,6 @@ use super::{
 	ax,
 };
 
-const MAX_LISTED_WINDOWS: usize = 48;
 const MIN_WINDOW_EDGE: u32 = 16;
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -37,6 +36,16 @@ pub(super) fn capture_permission() -> bool {
 	// SAFETY: This non-prompting TCC preflight has no arguments and is available
 	// on supported macOS versions.
 	unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+fn require_capture_permission() -> CoreResult<()> {
+	if capture_permission() {
+		Ok(())
+	} else {
+		Err(DesktopError::permission_denied(
+			"macOS Screen Recording permission is not granted for this process",
+		))
+	}
 }
 
 pub(super) fn capture_available() -> bool {
@@ -53,13 +62,13 @@ impl MacCapture {
 		Self { selector }
 	}
 
+	pub(super) const fn selector(&self) -> &DisplaySelector {
+		&self.selector
+	}
+
 	#[allow(clippy::unused_self, reason = "keeps discovery on the backend capture object")]
 	pub(super) fn displays(&self) -> CoreResult<Vec<DesktopDisplay>> {
-		if !capture_permission() {
-			return Err(DesktopError::permission_denied(
-				"macOS Screen Recording permission is not granted for this process",
-			));
-		}
+		require_capture_permission()?;
 		let monitors = Monitor::all().map_err(|error| {
 			DesktopError::capture_failed(format!("Quartz monitor enumeration failed: {error}"))
 		})?;
@@ -105,21 +114,21 @@ impl MacCapture {
 	// no selector state.
 	#[allow(clippy::unused_self, reason = "keeps discovery on the backend capture object")]
 	pub(super) fn windows(&self) -> CoreResult<Vec<DesktopWindow>> {
-		window_snapshot(None)
+		window_snapshot(None, None)
 	}
 
 	#[allow(clippy::unused_self, reason = "keeps discovery on the backend capture object")]
 	pub(super) fn window(&self, id: &str) -> CoreResult<DesktopWindow> {
-		let missing = || {
-			DesktopError::window_not_found(format!(
-				"window '{id}' was not found; it may be closed or minimized"
-			))
-		};
-		let id = id.parse::<u32>().map_err(|_| missing())?;
-		window_snapshot(Some(id))?
-			.into_iter()
-			.next()
-			.ok_or_else(missing)
+		window_by_id(id)
+	}
+
+	/// `pid`'s on-screen normal-layer windows, front to back.
+	#[allow(clippy::unused_self, reason = "keeps discovery on the backend capture object")]
+	pub(super) fn windows_of(&self, pid: libc::pid_t) -> CoreResult<Vec<DesktopWindow>> {
+		let owner = u32::try_from(pid).map_err(|_| {
+			DesktopError::input_failed(format!("process id {pid} cannot own a window"))
+		})?;
+		window_snapshot(None, Some(owner))
 	}
 
 	pub(super) fn capture(
@@ -137,6 +146,7 @@ impl MacCapture {
 	}
 
 	fn capture_window(&self, id: &str) -> CoreResult<(RgbaImage, FrameGeometry)> {
+		require_capture_permission()?;
 		let mut window = self.window(id)?;
 		let window_id = id
 			.parse::<u32>()
@@ -262,16 +272,35 @@ impl MacCapture {
 	}
 }
 
+/// Window `id` as the window list reports it.
+pub(super) fn window_by_id(id: &str) -> CoreResult<DesktopWindow> {
+	let missing = || {
+		DesktopError::window_not_found(format!(
+			"window '{id}' was not found; it may be closed or minimized"
+		))
+	};
+	let id = id.parse::<u32>().map_err(|_| missing())?;
+	window_snapshot(Some(id), None)?
+		.into_iter()
+		.next()
+		.ok_or_else(missing)
+}
+
+/// The windows `pid` has on screen at the normal window layer, front to back,
+/// as `windows()` lists them; its status items and other system-layer
+/// surfaces are left out.
+pub(in crate::desktop) fn application_windows(pid: u32) -> CoreResult<Vec<DesktopWindow>> {
+	window_snapshot(None, Some(pid))
+}
+
 type WindowDictionary = CFDictionary<CFString, CFType>;
 
 /// Reads each window from one immutable Quartz snapshot; individual xcap
 /// property getters would re-enumerate the whole desktop for every field.
-fn window_snapshot(target: Option<u32>) -> CoreResult<Vec<DesktopWindow>> {
-	if !capture_permission() {
-		return Err(DesktopError::permission_denied(
-			"macOS Screen Recording permission is not granted for this process",
-		));
-	}
+/// Window metadata needs no Screen Recording permission; without it, macOS
+/// leaves other applications' window titles empty and reports their sharing
+/// state as none, so that state filters windows only when capture is granted.
+fn window_snapshot(target: Option<u32>, owner: Option<u32>) -> CoreResult<Vec<DesktopWindow>> {
 	let options = if target.is_some() {
 		CGWindowListOption::OptionIncludingWindow
 	} else {
@@ -285,16 +314,26 @@ fn window_snapshot(target: Option<u32>) -> CoreResult<Vec<DesktopWindow>> {
 	let active_pid = NSWorkspace::sharedWorkspace()
 		.frontmostApplication()
 		.and_then(|app| u32::try_from(app.processIdentifier()).ok());
-	let mut result = Vec::with_capacity(snapshot.len().min(MAX_LISTED_WINDOWS));
+	let capture_granted = capture_permission();
+	let mut result = Vec::with_capacity(snapshot.len());
 	let mut active = Vec::new();
 	// SAFETY: This copy-rule snapshot remains alive and is never mutated.
 	for dictionary in unsafe { snapshot.iter_unchecked() } {
-		if result.len() == MAX_LISTED_WINDOWS {
-			break;
+		// SAFETY: The CoreGraphics key constant is process-lived.
+		let sharing = window_number(dictionary, unsafe { kCGWindowSharingState });
+		if capture_granted && matches!(sharing, None | Some(0)) {
+			continue;
 		}
 		let Some((id, window)) = window_metadata(dictionary) else {
 			continue;
 		};
+		if owner.is_some() && window.pid != owner {
+			continue;
+		}
+		// SAFETY: The CoreGraphics key constant is process-lived.
+		if owner.is_some() && window_number(dictionary, unsafe { kCGWindowLayer }) != Some(0) {
+			continue;
+		}
 		if window.pid.is_some() && window.pid == active_pid {
 			active.push(id);
 		}
@@ -352,6 +391,47 @@ pub(super) fn menu_windows(pid: libc::pid_t) -> Option<Vec<u32>> {
 	Some(menus)
 }
 
+/// Frame of on-screen window `id` in global points, or `None` once it is gone.
+/// Bounds need no Screen Recording permission.
+pub(super) fn window_frame(id: u32) -> Option<CGRect> {
+	let snapshot = CGWindowListCopyWindowInfo(CGWindowListOption::OptionIncludingWindow, id)?;
+	// SAFETY: CoreGraphics returns an immutable array of dictionaries whose
+	// documented window keys are CFStrings and whose values are CFTypes.
+	let snapshot = unsafe { CFRetained::cast_unchecked::<CFArray<WindowDictionary>>(snapshot) };
+	// SAFETY: This copy-rule snapshot remains alive and is never mutated.
+	let dictionary = unsafe { snapshot.iter_unchecked() }.next()?;
+	// SAFETY: The CoreGraphics key constants are process-lived. Typed
+	// downcasts reject absent or malformed window metadata.
+	unsafe {
+		if window_number(dictionary, kCGWindowNumber)? != i64::from(id) {
+			return None;
+		}
+		let bounds = window_value(dictionary, kCGWindowBounds)?.downcast_ref::<CFDictionary>()?;
+		let mut rect = CGRect::default();
+		CGRectMakeWithDictionaryRepresentation(Some(bounds), &mut rect).then_some(rect)
+	}
+}
+
+/// Whether `pid` owns an on-screen window in the normal window layer, from
+/// Quartz's window list; owner and layer need no Screen Recording permission.
+/// `None` when the list cannot be read.
+pub(super) fn has_onscreen_window(pid: libc::pid_t) -> Option<bool> {
+	let snapshot = CGWindowListCopyWindowInfo(
+		CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+		0,
+	)?;
+	// SAFETY: CoreGraphics returns an immutable array of dictionaries whose
+	// documented window keys are CFStrings and whose values are CFTypes.
+	let snapshot = unsafe { CFRetained::cast_unchecked::<CFArray<WindowDictionary>>(snapshot) };
+	let pid = i64::from(pid);
+	// SAFETY: This copy-rule snapshot remains alive and is never mutated; the
+	// CoreGraphics key constants are process-lived.
+	Some(unsafe { snapshot.iter_unchecked() }.any(|dictionary| unsafe {
+		window_number(dictionary, kCGWindowOwnerPID) == Some(pid)
+			&& window_number(dictionary, kCGWindowLayer) == Some(0)
+	}))
+}
+
 fn window_value<'a>(dictionary: &'a WindowDictionary, key: &CFString) -> Option<&'a CFType> {
 	// SAFETY: All callers borrow an immutable copy-rule Quartz snapshot.
 	unsafe { dictionary.get_unchecked(key) }
@@ -379,7 +459,7 @@ fn window_metadata(dictionary: &WindowDictionary) -> Option<(u32, DesktopWindow)
 		let onscreen = window_value(dictionary, kCGWindowIsOnscreen)?
 			.downcast_ref::<CFBoolean>()?
 			.value();
-		if !onscreen || window_number(dictionary, kCGWindowSharingState)? == 0 {
+		if !onscreen {
 			return None;
 		}
 		let id = u32::try_from(window_number(dictionary, kCGWindowNumber)?).ok()?;

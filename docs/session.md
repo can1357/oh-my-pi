@@ -555,7 +555,7 @@ Ordinary completed appends update memory and local file storage synchronously on
 
 Before persisting entries:
 
-- Strings over 500,000 characters are truncated with `"[Session persistence truncated large content]"`, except signed/encrypted provider blocks, signature fields, validated Anthropic native web/tool-search history blocks, and Anthropic server-compaction replay carriers, which must remain byte-exact for replay.
+- Strings over 500,000 characters are truncated with `"[Session persistence truncated large content]"`, except signed/encrypted provider blocks, signature fields, validated Anthropic native web/tool-search history blocks, Anthropic server-compaction replay carriers, and Cursor server records (`cursorHistory` payloads), which must remain byte-exact for replay.
 - Transient `jsonlEvents` is removed.
 - If an object has both string `content` and numeric `lineCount`, line count is recomputed after truncation.
 - Image data URLs in `image_url` fields are always content-addressed in the blob store and replaced with `blob:sha256:<hash>`, regardless of length. Base64 payloads at least 1,024 characters are externalized in image `content` blocks, `images[]`, snapcompact `frames[]`, and image-generation results.
@@ -579,6 +579,8 @@ Implementations and adapters:
 ### Manual storage maintenance
 
 `omp gc` previews maintenance by default; `--apply` is required to sweep unreferenced blobs, archive eligible cold sessions, checkpoint database WALs, or prune stale state. Storage maintenance is separate from model-context compaction.
+
+The sessions phase also removes transcript rewrite temps (`.<name>.jsonl.<snowflake>.tmp`, and the same pattern beside registered `--session` files) once they are past the 5-minute write grace. A live rewrite renames its temp into place within milliseconds, so an older one was left by a killed or crashed writer.
 
 The stale-state phase is opt-in: it runs only with `--stale` or when `gc.stale` is enabled (default off), so an unqualified `omp gc --apply` never deletes reports or replicas. It removes `custom-session-files` markers and terminal breadcrumbs whose session file no longer exists once they are a day old (a lazy session's marker names a transcript that is written only on its first turn). A breadcrumb recorded as a fresh `/new` boundary is always kept: `--continue` honors it before its transcript exists, and it is rewritten when the session materializes or replaced by the terminal's next session. For the default agent dir — or a custom agent dir named `agent`, whose parent is treated as the config root — it also expires debug report bundles (`reports/*.tar.gz`) and collab guest replicas (`collab/*.jsonl` plus their artifact directories and custom-session marker) that are both outside the newest `gc.staleRetainNewest` (default 20) and older than `gc.staleRetainDays` (default 30). A replica that a terminal breadcrumb points at, or that a running guest holds open, is kept. Stale state is pruned before the blob sweep, so blobs referenced only by an expired replica are swept in the same run.
 

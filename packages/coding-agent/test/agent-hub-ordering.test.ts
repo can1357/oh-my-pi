@@ -883,7 +883,9 @@ describe("Agent hub row ordering", () => {
 			expect(rendered).toContain("0/2 measured");
 			expect(renderedRosterEntry(hub, "Incomplete", 160)).toMatch(/usage\s+·/);
 			expect(renderedRosterEntry(hub, "NonFinite", 160)).toMatch(/usage\s+·/);
-			expect(getSessionStats).not.toHaveBeenCalled();
+			// The live session is read for cumulative cost, but its stats must not
+			// backfill usage for a row whose observer progress is incomplete.
+			expect(getSessionStats).toHaveBeenCalled();
 		} finally {
 			hub.dispose();
 		}

@@ -2,6 +2,83 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `app.ask.hide` keybinding (default `Alt+H`) and Hide/Show actions on `AskDialogComponent`, which collapse the dialog to a single line while its question stays pending ([#15400](https://github.com/can1357/oh-my-pi/pull/15400) by [@H4vC](https://github.com/H4vC))
+
+## [18.9.2] - 2026-10-11
+
+### Added
+
+- Added native TSP rendering support for Tern terminal sessions running inside tmux, with automatic session detection and safe title-setting behavior.
+
+### Fixed
+
+- Improved responsiveness when inserting assistant messages after tool calls in long transcripts.
+
+## [18.9.1] - 2026-10-11
+
+### Fixed
+
+- Fixed inline charts and images leaving overlapping copies over text when moved, resized, replaced, or hidden, while preserving images in scrollback.
+
+## [18.9.0] - 2026-10-11
+
+### Added
+
+- Added opt-in JSON editing for free-form array settings while keeping credential values masked; settings editors now surface submission and validation errors.
+- Added ghost-text predictions to the editor via the new `Editor.prediction` callback. Press Tab or Right at the end of a line to accept the suggested text without submitting.
+- Expanded table-chart support with stacked, waterfall, timeline, dots, range, slope, butterfly, bullet, ladder, histogram, and stat charts, including error whiskers, share bars, status matrices, and richer before/after visualizations.
+- Added richer table-chart planning and presentation controls, including titles, ordering, grouping, shading, normalization, reference lines, polarity, rivals, focus rows, and model-driven selection for smart mode. Charts now identify key findings, highlight best values and changes, and adapt scales and labels for clearer comparisons.
+- Added the optional `assistantMessageText` theme token for coloring assistant reply prose while preserving the terminal default when unset or empty.
+- Added optional status-line support for showing saved usage resets that expire soon and warning once per conversation when a reset expires within 24 hours.
+
+### Changed
+
+- Improved table-chart planning to prefer waterfall charts over share bars for complex data sets and enforce segment limits for share-chart legibility
+- Reduced the time required to rebuild long sessions on resume, particularly sessions with repeated wait polls or todo updates.
+- Output summaries now identify the first and last lines omitted by column limits, and truncation notices point to the `:raw` selector for retrieving complete lines.
+
+### Fixed
+
+- Fixed session model selection and setup displaying role chips for roles that resolve to a non-chat runner rather than the model used by the session.
+- Improved table-chart parsing and rendering across repeated labels, grouped and paired values, percentages, units, currency, durations, model sizes, links, identifiers, and sparse or side-by-side tables. Charts now avoid duplicate or misleading plots and preserve meaningful comparisons.
+- Fixed table-chart scaling for outliers, stacked groups, zeros, logarithmic shading, and values spanning multiple orders of magnitude.
+- Fixed `/tree` stalling or using excessive memory when opened on long sessions with many branch points.
+- Fixed extension status messages losing SGR colors and text styles in the status line.
+- Fixed the eval status list omitting status events discarded from long-running cells.
+- Fixed loop-blocked diagnostics to attribute stalls to the correct work phase or terminal writes instead of reporting misleading unknown causes.
+- Fixed Agent Hub and status-line spending totals losing cumulative subagent costs after compaction, parking, or follow-up turns.
+- Fixed dead-key input on older Windows Terminal versions so quotes are entered correctly with Space, Enter, and Tab.
+- Fixed SIXEL graphics detection on terminals, including native Windows Terminal, so SVG figures and inline images work without forcing a graphics protocol.
+- Fixed overflow transcript rendering so user messages no longer appear as blank padding bars or leave stray prompt markers across terminal rows.
+
+## [18.8.9] - 2026-10-10
+
+### Breaking Changes
+
+- Removed the `isInsideTmux()`, `isInsideZellij()`, and `isInsideHerdr()` exports; use `hasTerminalMultiplexerSession("tmux" | "zellij" | "herdr", env)` instead ([#13620](https://github.com/can1357/oh-my-pi/pull/13620) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+
+### Added
+
+- `classifyTerminalMultiplexer()` reports `"orca"` inside Orca terminals while `isInsideTerminalMultiplexer()` stays false there, so Orca keeps the direct-terminal render path; `TERMINAL_MULTIPLEXER_ENV_KEYS` lists every environment variable multiplexer detection reads ([#13620](https://github.com/can1357/oh-my-pi/pull/13620) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Added `terminalMultiplexerSessions()`, `terminalMultiplexerForTerm()`, `classifyTerminalMultiplexerModule()`, and `routeTerminalMultiplexerNotification()`, driven by one multiplexer registry that now owns notification routing and per-multiplexer capability overrides ([#13620](https://github.com/can1357/oh-my-pi/pull/13620) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Added `change` and `progress` table-chart kinds with `ChartSpec.baseline` and `TableColumn.scores`: a before/after table whose rows have their own units charts each metric as a factor of the baseline column (rows without two numbers are named in the caption), and `analyzeTable` reads whole-number scores (`12/12`, `154/160`) as the percent of their total, keeping `a / b` pairs and lists as written
+
+### Changed
+
+- `StatusLineComponent.describeComposerFacts()` includes the configured `git` segment among the composer's facts (branch and status, the `status.git` click action, pinned so it outlasts the other facts) instead of leaving the branch to Tern's pane header ([#15220](https://github.com/can1357/oh-my-pi/pull/15220) by [@H4vC](https://github.com/H4vC))
+- Small-multiple table charts with more than three panels and at most six categories draw as bands of per-metric panels with a color legend, and `worthCharting` counts their panels like categories
+- Table charts take the look of Apple's charts and Tern: a UI sans, hairline gridlines, rounded bars and cells, smooth lines over a soft area fill, dot legends, left-aligned category labels that never run off the edge, and axes labeled in one unit (`0, 5k, 10k`)
+- Line charts whose series differ 8× or more in size stack panels on their own axes instead of flattening the smaller lines, and their end labels no longer overlap
+- SVG figure series colors `--c1`…`--c6` are an even-weight palette led by the theme accent's hue instead of syntax colors
+
+### Fixed
+
+- Fixed `parseCell` throwing on table cells such as `3 constructor` or `2 valueOf calls`, and reading a `constructor` cell as a missing value
+
+## [18.8.8] - 2026-10-10
+
 ### Breaking Changes
 
 - `ModelHubCallbacks.onCompactionPointChange` now receives a `confirmed` flag and returns a `CompactionPointChangeResult` (`{ kind: "error" }` or `{ kind: "confirm" }`) instead of an error string; a `confirm` result shows a warning that a second Enter on the same input accepts ([#15048](https://github.com/can1357/oh-my-pi/pull/15048) by [@H4vC](https://github.com/H4vC))
@@ -14,8 +91,14 @@
 - Added Vim find and till motions (`f`, `F`, `t`, `T`) in the prompt editor, with `;` and `,` to repeat them ([#15100](https://github.com/can1357/oh-my-pi/pull/15100) by [@Shadorain](https://github.com/Shadorain))
 - Added Vim replace (`r`, `R`) in the prompt editor ([#15100](https://github.com/can1357/oh-my-pi/pull/15100) by [@Shadorain](https://github.com/Shadorain))
 - Added Vim bracket and quote matching (`%`), paragraph motions (`{`, `}`), line join (`J`), and indent (`>>`, `<<`) in the prompt editor ([#15100](https://github.com/can1357/oh-my-pi/pull/15100) by [@Shadorain](https://github.com/Shadorain))
+- Added an external-editor key (Ctrl+G by default) to the annotation overlay for the note draft and, when the host provides `onExternalEditor`, the source being annotated; an edited text source is returned as `editedText` on the paste result ([#15151](https://github.com/can1357/oh-my-pi/pull/15151) by [@Shadorain](https://github.com/Shadorain))
 - Added `TUI.releaseHeldInput()`: on a terminal expected to speak TSP, a `deferInput` start now holds keystrokes (TSP events and the cell-size reply still apply; Ctrl+C/Ctrl+D release early) until the app calls it once its session is wired; such terminals also skip the sixel probe ([#15120](https://github.com/can1357/oh-my-pi/pull/15120) by [@H4vC](https://github.com/H4vC))
 - Added `TUI.replaceHeldFocus(previous, next)`, which `Composer.setEditor()` calls so a swapped-in editor inherits held startup keys; only keys for the start-time focus owner are now held, and a dialog that takes focus gets its input live ([#15122](https://github.com/can1357/oh-my-pi/pull/15122) by [@H4vC](https://github.com/H4vC))
+- Added `RenderResultOptions.elapsedMs` and `cancelled`, `NativeToolHead.command` and `NativeToolView.preview: "children"` for native describe hooks
+
+### Changed
+
+- Tern draws each bash run, eval cell and `!`/`$` run as one box: the command or code, its output, status lines and a foot with state, time and facts; images sit below the box and the bash head shows the intent instead of the command
 
 ### Fixed
 
@@ -2776,287 +2859,4 @@
 - Fixed numbered list items showing "1." for all items when code blocks break list continuity
 - Fixed width overflow protection in overlay compositing to prevent TUI crashes
 
-## [4.7.0] - 2026-01-12
-
-### Fixed
-
-- Remove trailing space padding from Text, Markdown, and TruncatedText components when no background color is set (fixes copied text including unwanted whitespace)
-
-## [4.6.0] - 2026-01-12
-
-### Added
-
-- Add fuzzy matching module (`fuzzyMatch`, `fuzzyFilter`) for command autocomplete
-- Add `getExpandedText()` to editor for expanding paste markers
-- Add backslash+enter newline fallback for terminals without Kitty protocol
-
-### Fixed
-
-- Remove Kitty protocol query timeout that caused shift+enter delays
-- Add bracketed paste check to prevent false key release/repeat detection
-- Rendering optimizations: only re-render changed lines
-- Refactor input component to use keybindings manager
-
-## [4.4.4] - 2026-01-11
-
-### Fixed
-
-- Fixed Ctrl+Enter sequences to insert new lines in the editor
-
-## [4.2.1] - 2026-01-11
-
-### Changed
-
-- Improved file autocomplete to show directory listing when typing `@` with no query, and fall back to prefix matching when fuzzy search returns no results
-
-### Fixed
-
-- Fixed editor redraw glitch when canceling autocomplete suggestions
-- Fixed `fd` tool detection to automatically find `fd` or `fdfind` in PATH when not explicitly configured
-
-## [4.1.0] - 2026-01-10
-
-### Added
-
-- Added persistent prompt history storage support via `setHistoryStorage()` method, allowing history to be saved and restored across sessions
-
-## [4.0.0] - 2026-01-10
-
-### Added
-
-- `EditorComponent` interface for custom editor implementations
-- `StdinBuffer` class to split batched stdin into individual sequences
-- Overlay compositing via `TUI.showOverlay()` and `TUI.hideOverlay()` for `ctx.ui.custom()` with `{ overlay: true }`
-- Kitty keyboard protocol flag 2 support for key release events (`isKeyRelease()`, `isKeyRepeat()`, `KeyEventType`)
-- `setKittyProtocolActive()`, `isKittyProtocolActive()` for Kitty protocol state management
-- `kittyProtocolActive` property on Terminal interface to query Kitty protocol state
-- `Component.wantsKeyRelease` property to opt-in to key release events (default false)
-- Input component `onEscape` callback for handling escape key presses
-
-### Changed
-
-- Terminal startup now queries Kitty protocol support before enabling event reporting
-- Default editor `newLine` binding now uses `shift+enter` only
-
-### Fixed
-
-- Key presses no longer dropped when batched with other events over SSH
-- TUI now filters out key release events by default, preventing double-processing of keys
-- `matchesKey()` now correctly matches Kitty protocol sequences for unmodified letter keys
-- Crash when pasting text with trailing whitespace exceeding terminal width through Markdown rendering
-
-## [3.32.0] - 2026-01-08
-
-### Fixed
-
-- Fixed text wrapping allowing long whitespace tokens to exceed line width
-
-## [3.20.0] - 2026-01-06
-
-### Added
-
-- Added `isCapsLock` helper function for detecting Caps Lock key press via Kitty protocol
-- Added `isCtrlY` helper function for detecting Ctrl+Y keyboard input
-- Added configurable editor keybindings with typed key identifiers and action matching
-- Added word-wrapped editor rendering for long lines
-
-### Changed
-
-- Settings list descriptions now wrap to the available width instead of truncating
-
-### Fixed
-
-- Fixed Shift+Enter detection in legacy terminals that send ESC+CR sequence
-
-## [3.15.1] - 2026-01-05
-
-### Fixed
-
-- Fixed editor cursor blinking by allowing terminal cursor positioning when enabled.
-
-## [3.15.0] - 2026-01-05
-
-### Added
-
-- Added `inputCursor` symbol for customizing the text input cursor character
-- Added `symbols` property to `EditorTheme`, `MarkdownTheme`, and `SelectListTheme` interfaces for component-level symbol customization
-- Added `SymbolTheme` interface for customizing UI symbols including cursors, borders, spinners, and box-drawing characters
-- Added support for custom spinner frames in the Loader component
-
-## [3.9.1337] - 2026-01-04
-
-### Added
-
-- Added `setTopBorder()` method to Editor component for displaying custom status content in the top border
-- Added `getWidth()` method to TUI class for retrieving terminal width
-- Added rounded corner box-drawing characters to Editor component borders
-
-### Changed
-
-- Changed Editor component to use proper box borders with vertical side borders instead of horizontal-only borders
-- Changed cursor style from block to thin blinking bar (▏) at end of line
-
-## [1.500.0] - 2026-01-03
-
-### Added
-
-- Added `getText()` method to Text component for retrieving current text content
-
-## [1.337.1] - 2026-01-02
-
-### Added
-
-- TabBar component for horizontal tab navigation
-- Emergency terminal restore to prevent corrupted state on crashes
-- Overhauled UI with welcome screen and powerline footer
-- Theme-configurable HTML export colors
-- `ctx.ui.theme` getter for styling status text with theme colors
-
-### Changed
-
-- Forked to @oh-my-pi scope with unified versioning across all packages
-
-### Fixed
-
-- Strip OSC 8 hyperlink sequences in `visibleWidth()`
-- Crash on Unicode format characters in `visibleWidth()`
-- Markdown code block syntax highlighting
-
-## [1.337.0] - 2026-01-02
-
-Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mono](https://github.com/badlogic/pi-mono).
-
-## [1.5.0] - 2026-01-03
-
-### Added
-
-- Added `getText()` method to Text component for retrieving current text content
-
-## [0.50.0] - 2026-01-26
-
-### Added
-
-- Added `fullRedraws` readonly property to TUI class for tracking full screen redraws
-- Added `PI_TUI_WRITE_LOG` environment variable to capture raw ANSI output for debugging
-
-### Fixed
-
-- Fixed appended lines not being committed to scrollback, causing earlier content to be overwritten when viewport fills ([#954](https://github.com/badlogic/pi-mono/issues/954))
-- Slash command menu now only triggers when the editor input is otherwise empty ([#904](https://github.com/badlogic/pi-mono/issues/904))
-- Center-anchored overlays now stay vertically centered when resizing the terminal taller after a shrink ([#950](https://github.com/badlogic/pi-mono/pull/950) by [@nicobailon](https://github.com/nicobailon))
-- Fixed editor multi-line insertion handling and lastAction tracking ([#945](https://github.com/badlogic/pi-mono/pull/945) by [@Perlence](https://github.com/Perlence))
-- Fixed editor word wrapping to reserve a cursor column ([#934](https://github.com/badlogic/pi-mono/pull/934) by [@Perlence](https://github.com/Perlence))
-- Fixed editor word wrapping to use single-pass backtracking for whitespace handling ([#924](https://github.com/badlogic/pi-mono/pull/924) by [@Perlence](https://github.com/Perlence))
-- Fixed Kitty image ID allocation and cleanup to prevent image ID collisions between modules
-
-## [0.49.3] - 2026-01-22
-
-### Added
-
-- `codeBlockIndent` property on `MarkdownTheme` to customize code block content indentation (default: 2 spaces) ([#855](https://github.com/badlogic/pi-mono/pull/855) by [@terrorobe](https://github.com/terrorobe))
-- Added Alt+Delete as hotkey for delete word forwards ([#878](https://github.com/badlogic/pi-mono/pull/878) by [@Perlence](https://github.com/Perlence))
-
-### Changed
-
-- Fuzzy matching now scores consecutive matches higher and penalizes gaps more heavily for better relevance ([#860](https://github.com/badlogic/pi-mono/pull/860) by [@mitsuhiko](https://github.com/mitsuhiko))
-
-### Fixed
-
-- Autolinked emails no longer display redundant `(mailto:...)` suffix in markdown output ([#888](https://github.com/badlogic/pi-mono/pull/888) by [@terrorobe](https://github.com/terrorobe))
-- Fixed viewport tracking and cursor positioning for overlays and content shrink scenarios
-- Autocomplete now allows searches with `/` characters (e.g., `folder1/folder2`) ([#882](https://github.com/badlogic/pi-mono/pull/882) by [@richardgill](https://github.com/richardgill))
-- Directory completions for `@` file attachments no longer add trailing space, allowing continued autocomplete into subdirectories
-
-## [0.49.1] - 2026-01-18
-
-### Added
-
-- Added undo support to Editor with Ctrl+- hotkey. Undo coalesces consecutive word characters into one unit (fish-style). ([#831](https://github.com/badlogic/pi-mono/pull/831) by [@Perlence](https://github.com/Perlence))
-- Added legacy terminal support for Ctrl+symbol keys (Ctrl+\, Ctrl+], Ctrl+-) and their Ctrl+Alt variants. ([#831](https://github.com/badlogic/pi-mono/pull/831) by [@Perlence](https://github.com/Perlence))
-
-## [0.49.0] - 2026-01-17
-
-### Added
-
-- Added `showHardwareCursor` getter and setter to control cursor visibility while keeping IME positioning active. ([#800](https://github.com/badlogic/pi-mono/pull/800) by [@ghoulr](https://github.com/ghoulr))
-- Added Emacs-style kill ring editing with yank and yank-pop keybindings. ([#810](https://github.com/badlogic/pi-mono/pull/810) by [@Perlence](https://github.com/Perlence))
-- Added legacy Alt+letter handling and Alt+D delete word forward support in the editor keymap. ([#810](https://github.com/badlogic/pi-mono/pull/810) by [@Perlence](https://github.com/Perlence))
-
-## [0.48.0] - 2026-01-16
-
-### Added
-
-- `EditorOptions` with optional `paddingX` for horizontal content padding, plus `getPaddingX()`/`setPaddingX()` methods ([#791](https://github.com/badlogic/pi-mono/pull/791) by [@ferologics](https://github.com/ferologics))
-
-### Changed
-
-- Hardware cursor is now disabled by default for better terminal compatibility. Set `PI_HARDWARE_CURSOR=1` to enable (replaces `PI_NO_HARDWARE_CURSOR=1` which disabled it).
-
-### Fixed
-
-- Decode Kitty CSI-u printable sequences in the editor so shifted symbol keys (e.g., `@`, `?`) work in terminals that enable Kitty keyboard protocol ([#779](https://github.com/badlogic/pi-mono/pull/779) by [@iamd3vil](https://github.com/iamd3vil))
-
-## [0.47.0] - 2026-01-16
-
-### Breaking Changes
-
-- `Editor` constructor now requires `TUI` as first parameter: `new Editor(tui, theme)`. This enables automatic vertical scrolling when content exceeds terminal height. ([#732](https://github.com/badlogic/pi-mono/issues/732))
-
-### Added
-
-- Hardware cursor positioning for IME support in `Editor` and `Input` components. The terminal cursor now follows the text cursor position, enabling proper IME candidate window placement for CJK input. ([#719](https://github.com/badlogic/pi-mono/pull/719))
-- `Focusable` interface for components that need hardware cursor positioning. Implement `focused: boolean` and emit `CURSOR_MARKER` in render output when focused.
-- `CURSOR_MARKER` constant and `isFocusable()` type guard exported from the package
-- Editor now supports Page Up/Down keys (Fn+Up/Down on MacBook) for scrolling through large content ([#732](https://github.com/badlogic/pi-mono/issues/732))
-- Expanded keymap coverage for terminal compatibility: added support for Home/End keys in tmux, additional modifier combinations, and improved key sequence parsing ([#752](https://github.com/badlogic/pi-mono/pull/752) by [@richardgill](https://github.com/richardgill))
-
-### Fixed
-
-- Editor no longer corrupts terminal display when text exceeds screen height. Content now scrolls vertically with indicators showing lines above/below the viewport. Max height is 30% of terminal (minimum 5 lines). ([#732](https://github.com/badlogic/pi-mono/issues/732))
-- `visibleWidth()` and `extractAnsiCode()` now handle APC escape sequences (`ESC _ ... BEL`), fixing width calculation and string slicing for strings containing cursor markers
-- SelectList now handles multi-line descriptions by replacing newlines with spaces ([#728](https://github.com/badlogic/pi-mono/pull/728) by [@richardgill](https://github.com/richardgill))
-
-## [0.46.0] - 2026-01-15
-
-### Fixed
-
-- Keyboard shortcuts (Ctrl+C, Ctrl+D, etc.) now work on non-Latin keyboard layouts (Russian, Ukrainian, Bulgarian, etc.) in terminals supporting Kitty keyboard protocol with alternate key reporting ([#718](https://github.com/badlogic/pi-mono/pull/718) by [@dannote](https://github.com/dannote))
-
-## [0.45.6] - 2026-01-13
-
-### Added
-
-- `OverlayOptions` API for overlay positioning and sizing with CSS-like values: `width`, `maxHeight`, `row`, `col` accept numbers (absolute) or percentage strings (e.g., `"50%"`). Also supports `minWidth`, `anchor`, `offsetX`, `offsetY`, `margin`. ([#667](https://github.com/badlogic/pi-mono/pull/667) by [@nicobailon](https://github.com/nicobailon))
-- `OverlayOptions.visible` callback for responsive overlays - receives terminal dimensions, return false to hide ([#667](https://github.com/badlogic/pi-mono/pull/667) by [@nicobailon](https://github.com/nicobailon))
-- `showOverlay()` now returns `OverlayHandle` with `hide()`, `setHidden(boolean)`, `isHidden()` for programmatic visibility control ([#667](https://github.com/badlogic/pi-mono/pull/667) by [@nicobailon](https://github.com/nicobailon))
-- New exported types: `OverlayAnchor`, `OverlayHandle`, `OverlayMargin`, `OverlayOptions`, `SizeValue` ([#667](https://github.com/badlogic/pi-mono/pull/667) by [@nicobailon](https://github.com/nicobailon))
-- `truncateToWidth()` now accepts optional `pad` parameter to pad result with spaces to exactly `maxWidth` ([#667](https://github.com/badlogic/pi-mono/pull/667) by [@nicobailon](https://github.com/nicobailon))
-
-### Fixed
-
-- Overlay compositing crash when rendered lines exceed terminal width due to complex ANSI/OSC sequences (e.g., hyperlinks in subagent output) ([#667](https://github.com/badlogic/pi-mono/pull/667) by [@nicobailon](https://github.com/nicobailon))
-
-## [0.44.0] - 2026-01-12
-
-### Added
-
-- `SettingsListOptions` with `enableSearch` for fuzzy filtering in `SettingsList` ([#643](https://github.com/badlogic/pi-mono/pull/643) by [@ninlds](https://github.com/ninlds))
-- `pageUp` and `pageDown` key support with `selectPageUp`/`selectPageDown` editor actions ([#662](https://github.com/badlogic/pi-mono/pull/662) by [@aliou](https://github.com/aliou))
-
-### Fixed
-
-- Numbered list items showing "1." for all items when code blocks break list continuity ([#660](https://github.com/badlogic/pi-mono/pull/660) by [@ogulcancelik](https://github.com/ogulcancelik))
-
-## [0.43.0] - 2026-01-11
-
-### Added
-
-- `fuzzyFilter()` and `fuzzyMatch()` utilities for fuzzy text matching
-- Slash command autocomplete now uses fuzzy matching instead of prefix matching
-
-### Fixed
-
-- Cursor now moves to end of content on exit, preventing status line from being overwritten ([#629](https://github.com/badlogic/pi-mono/pull/629) by [@tallshort](https://github.com/tallshort))
-- Reset ANSI styles after each rendered line to prevent style leakage
-
-Older entries are archived in [packages/tui/CHANGELOG.md@4787659281ba](https://github.com/can1357/oh-my-pi/blob/4787659281ba47f5a3707bbf5ee61742e9373c42/packages/tui/CHANGELOG.md).
+Older entries are archived in [packages/tui/CHANGELOG.md@60347ef0f214](https://github.com/can1357/oh-my-pi/blob/60347ef0f214fa63df596d143477268da3f0c904/packages/tui/CHANGELOG.md).

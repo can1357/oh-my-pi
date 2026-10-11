@@ -202,8 +202,18 @@ export interface SegmentContext {
 			expiryHours?: number;
 			expired?: boolean;
 			unavailableReason?: string;
+			expiring?: StatusResetExpiry;
 		};
 	} | null;
+}
+
+/** How close an account's saved resets are to expiring, when it is worth a warning. */
+export interface StatusResetExpiry {
+	/** `soon`: within 7 days; `imminent`: within 24 hours. */
+	tier: "soon" | "imminent";
+	count: number;
+	/** Expiry of the reset the warning is about (epoch ms); it can be later than the soonest banked one. */
+	expiresAtMs: number;
 }
 
 export interface RenderedSegment {
@@ -227,8 +237,8 @@ export interface SegmentView {
 
 /**
  * The status line's facts for the native composer. A TSP terminal shows no
- * status strip: the tab title carries the session, the pane header the path
- * and branch, and the composer the rest.
+ * status strip: the tab title carries the session, the pane header the path,
+ * and the composer the rest (the git branch among its facts).
  */
 export interface ComposerFacts {
 	/**

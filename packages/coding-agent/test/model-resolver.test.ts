@@ -964,6 +964,20 @@ describe("role priorities and chains", () => {
 		expect(resolveModelFromSettings({ settings, availableModels: [chat, image] })).toBe(chat);
 	});
 
+	test("judge defaults follow the @tiny/@smol/@default roles instead of matching Vertex `@default` ids", () => {
+		const vertex = roleChainModel("google-vertex", "claude-opus-4-8@default");
+		const small = roleChainModel("local", "qwen-small");
+		const big = roleChainModel("local", "big");
+		const settings = Settings.isolated({ modelRoles: { tiny: "local/qwen-small", default: "local/big" } });
+
+		const chain = resolveRoleChain("judge", settings, [vertex, small, big]);
+
+		expect(chain.map(candidate => formatModelStringWithRouting(candidate.model))).toEqual([
+			"local/qwen-small",
+			"local/big",
+		]);
+	});
+
 	test("memory inherits configured tiny without kind roles inheriting configured default", () => {
 		const tiny = roleChainModel("local", "tiny-model");
 		const defaultModel = roleChainModel("local", "default-model");
