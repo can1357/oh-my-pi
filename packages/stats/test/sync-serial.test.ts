@@ -1,16 +1,48 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
+import { __resetStatsSyncWorkerPool, syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { getOverallStats } from "@oh-my-pi/omp-stats/rollup";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-sync-serial-");
 
+// The sync worker pool is module state, and Bun shares module state across the
+// test files of a single `bun test` run. Reset before and after so neither a
+// leaked warm worker from another file nor one from a test above can be reused
+// here, where `globalThis.Worker` spies assert whether a spawn happened.
+beforeEach(() => {
+	__resetStatsSyncWorkerPool();
+});
+
 afterEach(() => {
+	__resetStatsSyncWorkerPool();
 	vi.restoreAllMocks();
 });
+
+/**
+ * Install a `globalThis.Worker` spy that still builds real workers.
+ *
+ * A bare `vi.spyOn(globalThis, "Worker")` is not constructible: Bun's mock
+ * forwards to the native constructor without `new.target`, so every
+ * construction shape the pool can use - `new C(...)`, `Reflect.construct(C, args)`,
+ * `Reflect.construct(C, args, C)` - dies with `ERR_ILLEGAL_CONSTRUCTOR` once the
+ * spy is installed. Capturing the native constructor before spying and building
+ * through it keeps the spy's call counting (so "did a spawn happen" stays the
+ * assertion) while the pool spawns and reuses genuinely functional workers.
+ *
+ * Tests that assert *no* spawn can keep the bare spy: an unexpected spawn there
+ * throws instead of silently constructing, which is the stricter signal.
+ */
+function spyOnWorkerSpawns() {
+	const NativeWorker = globalThis.Worker;
+	return vi
+		.spyOn(globalThis, "Worker")
+		.mockImplementation((url: string | URL, options?: { type: "module"; env?: Record<string, string> }) =>
+			new NativeWorker(url, options),
+		);
+}
 
 async function writeSessionFile(options?: { includeCost?: boolean }): Promise<void> {
 	const sessionDir = path.join(getSessionsDir(), "--tmp--sync-serial");
@@ -131,5 +163,26 @@ describe("stats sync serial mode", () => {
 
 		await expect(syncAllSessions({ workers: 2 })).rejects.toBe(workerProbe);
 		expect(workerSpy).toHaveBeenCalled();
+	});
+
+	// The warm pool is what keeps a watcher-driven sync free of spawns, so it
+	// needs coverage on the spawn count of back-to-back runs. Skipped on darwin,
+	// where `syncAllSessions` stays on the serial parser and the worker spawn
+	// surface is the documented macOS abort.
+	it.skipIf(process.platform === "darwin")("reuses the pooled worker on the next sync run", async () => {
+		const sessionFile = path.join(getSessionsDir(), "--tmp--sync-serial", "session.jsonl");
+		await writeSessionFile();
+		const firstRun = spyOnWorkerSpawns();
+		await syncAllSessions({ workers: 2, files: [sessionFile] });
+		expect(firstRun.mock.calls.length).toBeGreaterThan(0);
+		firstRun.mockRestore();
+
+		// Track the transcript again so the second run has real parse work to hand
+		// a pooled worker; an unchanged file would parse nothing at all.
+		await fs.appendFile(sessionFile, "\n");
+		const secondRun = spyOnWorkerSpawns();
+		await syncAllSessions({ workers: 2, files: [sessionFile] });
+
+		expect(secondRun).not.toHaveBeenCalled();
 	});
 });
