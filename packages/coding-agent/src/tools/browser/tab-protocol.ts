@@ -87,11 +87,6 @@ export type WorkerInitPayload =
 			/** Restore focus emulation when recycling an OMP-owned tab, never a borrowed user tab. */
 			emulateFocus?: boolean;
 			/**
-			 * Whether the worker may raise this tab before capturing a screenshot. Unset
-			 * behaves as `true`; the supervisor clears it for browsers we did not launch.
-			 */
-			activateForScreenshot?: boolean;
-			/**
 			 * The user drives this browser (connected, relay): downloads keep its one browser-wide folder and real file
 			 * names, since the user's own downloads land there too. Unset means an OMP-launched browser.
 			 */

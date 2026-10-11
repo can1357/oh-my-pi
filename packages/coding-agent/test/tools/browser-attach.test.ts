@@ -21,7 +21,6 @@ import {
 	pickElectronTarget,
 	probeCdpStatus,
 	resolveSpawnArgs,
-	shouldPreserveConnectedBrowserFocus,
 	waitForCdp,
 	waitForMainFrame,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
@@ -323,11 +322,6 @@ describe("pickElectronTarget", () => {
 		} as unknown as Browser;
 
 		await expect(pickElectronTarget(browser, { preferVisible: true })).resolves.toBe(first);
-	});
-
-	test("preserves connected-browser focus only for automatic target selection", () => {
-		expect(shouldPreserveConnectedBrowserFocus()).toBe(true);
-		expect(shouldPreserveConnectedBrowserFocus("example.com")).toBe(false);
 	});
 
 	test("rejects websocket cdp_url values with an actionable diagnostic", () => {
