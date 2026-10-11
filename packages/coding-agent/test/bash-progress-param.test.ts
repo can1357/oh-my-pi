@@ -726,113 +726,124 @@ describe("bash progress parameter", () => {
 		await manager.dispose();
 	}, 10_000);
 
-	test("counts each row once when post-boundary bytes are stored before the foreground mirror callback", async () => {
-		using tempDir = TempDir.createSync("@omp-bash-delivered-preview-");
-		const releasePath = path.join(tempDir.path(), "release");
-		const artifact = { id: "delivered-preview", path: path.join(tempDir.path(), "output.txt") };
-		const manager = new AsyncJobManager({});
-		const progress: string[] = [];
-		manager.registerProgressSink("Main", {
-			deliver: (_jobId, text) => {
-				progress.push(text);
-			},
-		});
-		manager.registerDeliverySink("Main", () => {});
-		let activatedCoverage: "continuous" | "gapped" | undefined;
-		const activate = manager.activateProgressDelivery.bind(manager);
-		vi.spyOn(manager, "activateProgressDelivery").mockImplementation((jobId, delivery, provenance, coverage) => {
-			activatedCoverage = coverage;
-			return activate(jobId, delivery, provenance, coverage);
-		});
-		const session = makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 60_000 });
-		session.allocateOutputArtifact = async () => artifact;
-		const tool = new BashTool(session);
-		const steering = new AbortController();
-		const firstFlushEntered = Promise.withResolvers<OutputSink>();
-		const releaseFirstFlush = Promise.withResolvers<void>();
-		const releaseLaterFlushes = Promise.withResolvers<void>();
-		const originalFlush = OutputSink.prototype.flushArtifact;
-		let firstFlush = true;
-		vi.spyOn(OutputSink.prototype, "flushArtifact").mockImplementation(async function (this: OutputSink) {
-			if (firstFlush) {
-				firstFlush = false;
-				firstFlushEntered.resolve(this);
-				await releaseFirstFlush.promise;
-			} else {
-				await releaseLaterFlushes.promise;
-			}
-			return originalFlush.call(this);
-		});
-		const execution = tool.execute(
-			"auto-promote-delivered-preview",
-			{
-				command: withShellEnvironment(
-					{ RELEASE: releasePath },
-					"printf 'counted-pre-001\\n'; while [ ! -f \"$RELEASE\" ]; do sleep 0.01; done",
-				),
-				async: "auto",
-				progress: "wake",
-			},
-			undefined,
-			undefined,
-			{
-				toolCall: {
-					batchId: "delivered-preview",
-					index: 0,
-					total: 1,
-					toolCalls: [{ id: "auto-promote-delivered-preview", name: "bash" }],
-					steeringSignal: steering.signal,
+	test.each(["held-until-return", "released-during-drain"] as const)(
+		"counts each row once when post-boundary bytes are stored before the foreground mirror callback (%s)",
+		async flushOrdering => {
+			using tempDir = TempDir.createSync("@omp-bash-delivered-preview-");
+			const releasePath = path.join(tempDir.path(), "release");
+			const artifact = { id: "delivered-preview", path: path.join(tempDir.path(), "output.txt") };
+			const manager = new AsyncJobManager({});
+			const progress: string[] = [];
+			manager.registerProgressSink("Main", {
+				deliver: (_jobId, text) => {
+					progress.push(text);
 				},
-			} as AgentToolContext,
-		);
-		try {
-			const sink = await firstFlushEntered.promise;
-			const promotionEntered = Promise.withResolvers<void>();
-			const originalSetTimeout = globalThis.setTimeout;
-			// Observe the drain guard: promotion has set its entry-time stamp
-			// boundary before installing this timer. Do not advance the clock.
-			const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation((handler, delay, ...args) => {
-				const timer = originalSetTimeout(handler, delay, ...args);
-				if (delay === PROGRESS_LIMITS.BATCH_INTERVAL_MS * 5) promotionEntered.resolve();
-				return timer;
 			});
-			steering.abort();
-			await promotionEntered.promise;
-			timerSpy.mockRestore();
-			const postRows = ["counted-post-001", "counted-post-002", "counted-post-003"];
-			// Inject stdout through the real sink's public entry point while its
-			// first mirror delivery is held. These bytes get post-boundary stamps
-			// but already live in the sink when the pre-boundary callback resumes.
-			sink.push(`${postRows.join("\n")}\n`);
-			releaseFirstFlush.resolve();
-			const result = await execution;
-			releaseLaterFlushes.resolve();
-			await Bun.write(releasePath, "");
-			await manager.waitForAll();
-			await manager.drainDeliveries({ timeoutMs: 10 });
-			const foregroundRows = (result.content.find(block => block.type === "text")?.text ?? "")
-				.split("\n")
-				.filter(line => /^counted-(pre|post)-\d{3}$/.test(line));
-			const progressRows = progress.join("\n").split("\n").filter(line => /^counted-(pre|post)-\d{3}$/.test(line));
-			const completedJob = manager.getJob(result.details?.async?.jobId ?? "");
-			expect(result.details?.async?.state).toBe("running");
-			expect(activatedCoverage).toBe("continuous");
-			expect(completedJob?.terminalTextProvenance).toBe("progress");
-			expect(await Bun.file(artifact.path).text()).toBe(`counted-pre-001\n${postRows.join("\n")}\n`);
-			expect(foregroundRows).toEqual(["counted-pre-001"]);
-			expect(progressRows).toEqual(postRows);
-			const deliveredRows = [...foregroundRows, ...progressRows];
-			for (const row of ["counted-pre-001", ...postRows]) {
-				expect(deliveredRows.filter(delivered => delivered === row)).toHaveLength(1);
+			manager.registerDeliverySink("Main", () => {});
+			let activatedCoverage: "continuous" | "gapped" | undefined;
+			const activate = manager.activateProgressDelivery.bind(manager);
+			vi.spyOn(manager, "activateProgressDelivery").mockImplementation((jobId, delivery, provenance, coverage) => {
+				activatedCoverage = coverage;
+				return activate(jobId, delivery, provenance, coverage);
+			});
+			const session = makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 60_000 });
+			session.allocateOutputArtifact = async () => artifact;
+			const tool = new BashTool(session);
+			const steering = new AbortController();
+			const firstFlushEntered = Promise.withResolvers<OutputSink>();
+			const releaseFirstFlush = Promise.withResolvers<void>();
+			const releaseLaterFlushes = Promise.withResolvers<void>();
+			const originalFlush = OutputSink.prototype.flushArtifact;
+			let postFlushBeforeActivation = false;
+			let firstFlush = true;
+			vi.spyOn(OutputSink.prototype, "flushArtifact").mockImplementation(async function (this: OutputSink) {
+				if (firstFlush) {
+					firstFlush = false;
+					firstFlushEntered.resolve(this);
+					await releaseFirstFlush.promise;
+				} else {
+					if (activatedCoverage === undefined) postFlushBeforeActivation = true;
+					await releaseLaterFlushes.promise;
+				}
+				return originalFlush.call(this);
+			});
+			const execution = tool.execute(
+				"auto-promote-delivered-preview",
+				{
+					command: withShellEnvironment(
+						{ RELEASE: releasePath },
+						"printf 'counted-pre-001\\n'; while [ ! -f \"$RELEASE\" ]; do sleep 0.01; done",
+					),
+					async: "auto",
+					progress: "wake",
+				},
+				undefined,
+				undefined,
+				{
+					toolCall: {
+						batchId: "delivered-preview",
+						index: 0,
+						total: 1,
+						toolCalls: [{ id: "auto-promote-delivered-preview", name: "bash" }],
+						steeringSignal: steering.signal,
+					},
+				} as AgentToolContext,
+			);
+			try {
+				const sink = await firstFlushEntered.promise;
+				const promotionEntered = Promise.withResolvers<void>();
+				const originalSetTimeout = globalThis.setTimeout;
+				// Observe the drain guard: promotion has set its entry-time stamp
+				// boundary before installing this timer. Do not advance the clock.
+				const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation((handler, delay, ...args) => {
+					const timer = originalSetTimeout(handler, delay, ...args);
+					if (delay === PROGRESS_LIMITS.BATCH_INTERVAL_MS * 5) promotionEntered.resolve();
+					return timer;
+				});
+				steering.abort();
+				await promotionEntered.promise;
+				timerSpy.mockRestore();
+				const postRows = ["counted-post-001", "counted-post-002", "counted-post-003"];
+				// Inject stdout through the real sink's public entry point while its
+				// first mirror delivery is held. These bytes get post-boundary stamps
+				// but already live in the sink when the pre-boundary callback resumes.
+				sink.push(`${postRows.join("\n")}\n`);
+				if (flushOrdering === "released-during-drain") releaseLaterFlushes.resolve();
+				releaseFirstFlush.resolve();
+				const result = await execution;
+				releaseLaterFlushes.resolve();
+				await Bun.write(releasePath, "");
+				await manager.waitForAll();
+				await manager.drainDeliveries({ timeoutMs: 10 });
+				const foregroundRows = (result.content.find(block => block.type === "text")?.text ?? "")
+					.split("\n")
+					.filter(line => /^counted-(pre|post)-\d{3}$/.test(line));
+				const progressRows = progress
+					.join("\n")
+					.split("\n")
+					.filter(line => /^counted-(pre|post)-\d{3}$/.test(line));
+				const completedJob = manager.getJob(result.details?.async?.jobId ?? "");
+				expect(result.details?.async?.state).toBe("running");
+				expect(activatedCoverage).toBe("continuous");
+				expect(completedJob?.terminalTextProvenance).toBe("progress");
+				if (flushOrdering === "released-during-drain") expect(postFlushBeforeActivation).toBe(true);
+				expect(await Bun.file(artifact.path).text()).toBe(`counted-pre-001\n${postRows.join("\n")}\n`);
+				expect(foregroundRows).toEqual(["counted-pre-001"]);
+				expect(progressRows).toEqual(postRows);
+				const deliveredRows = [...foregroundRows, ...progressRows];
+				for (const row of ["counted-pre-001", ...postRows]) {
+					expect(deliveredRows.filter(delivered => delivered === row)).toHaveLength(1);
+				}
+			} finally {
+				releaseFirstFlush.resolve();
+				releaseLaterFlushes.resolve();
+				await Bun.write(releasePath, "");
+				await execution.catch(() => {});
+				await manager.dispose();
 			}
-		} finally {
-			releaseFirstFlush.resolve();
-			releaseLaterFlushes.resolve();
-			await Bun.write(releasePath, "");
-			await execution.catch(() => {});
-			await manager.dispose();
-		}
-	}, 10_000);
+		},
+		10_000,
+	);
 
 	test("freezes the foreground preview before a mirror-delayed post-boundary callback", async () => {
 		using tempDir = TempDir.createSync("@omp-bash-stable-promotion-preview-");
