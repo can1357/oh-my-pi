@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added a report to `computer` Eval cells that send desktop input: once the apps go quiet, the cell ends with what changed in each touched window since the model's last tree of it ([#15280](https://github.com/can1357/oh-my-pi/pull/15280) by [@will-bogusz](https://github.com/will-bogusz))
+- Added a report to `computer` Eval cells that send desktop input: once the apps go quiet, the cell ends with what changed in each touched window since the model's last tree of it, the window that took the focus when a touched one closed, and the opened app's window after `apps.open` ([#15280](https://github.com/can1357/oh-my-pi/pull/15280) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `ctx.annotations` so extensions can submit or collect `/annotate` feedback on text and diffs ([#15260](https://github.com/can1357/oh-my-pi/pull/15260) by [@Shadorain](https://github.com/Shadorain)).
 - Added **Extra Context Files** to `/settings` → **Context** so custom instruction filenames can be configured without editing YAML ([#15252](https://github.com/can1357/oh-my-pi/pull/15252) by [@Shadorain](https://github.com/Shadorain)).
 

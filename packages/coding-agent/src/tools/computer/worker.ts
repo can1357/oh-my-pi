@@ -41,6 +41,7 @@ import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
+	appWindow,
 	type AxReadOptions,
 	type CellKey,
 	desktopPoint,
@@ -57,6 +58,7 @@ import {
 	renderUnreadable,
 	reportNote,
 	type SettleOutcome,
+	type TouchedWindow,
 	WEB_AREA_ROW,
 	windowAt,
 } from "./observation";
@@ -777,9 +779,11 @@ class InputObserver {
 	 * input. Desktop-root input (`root`) is recorded on the window it reaches:
 	 * the topmost window under `root.point` (pixels of the root target's latest
 	 * screenshot), or the focused window for keys; it stays unattributed when
-	 * that is unknown. `pidOf` names a process the input started (an app launch),
-	 * whose settling the next read waits for too. Concurrent inputs dispatch in
-	 * call order, each after the reads that precede the one before it.
+	 * that is unknown. `opens` names what an app launch opened: the process,
+	 * whose settling the next read waits for too, and its window when known;
+	 * that input is reported on the app's window, never the focused one.
+	 * Concurrent inputs dispatch in call order, each after the reads that
+	 * precede the one before it.
 	 */
 	async input<T>(
 		scope: CellScope,
@@ -787,7 +791,7 @@ class InputObserver {
 		dispatch: () => Promise<T>,
 		options?: {
 			root?: { target: string; point?: { x: number; y: number } };
-			pidOf?: (result: T) => number | undefined;
+			opens?: (result: T) => { pid?: number; window?: InputWindow };
 		},
 	): Promise<T> {
 		const previous = this.#dispatched;
@@ -810,15 +814,21 @@ class InputObserver {
 				const at = root.point && desktopPoint(this.#rootDisplays.get(root.target) ?? [], root.point);
 				if (!root.point || at) window = await this.windowReached(signal, at, roster);
 			}
-			const pid = this.ledger.noteInput(cell, window);
+			let pid: number | undefined;
+			if (options?.opens) this.ledger.noteAppInput(cell);
+			else pid = this.ledger.noteInput(cell, window);
 			unsettled = this.#unsettled ??= { pids: new Set(), cells: new Set(), endedAt: Date.now() };
 			unsettled.cells.add(cell);
 			if (pid !== undefined) unsettled.pids.add(pid);
 			const call = nativeCall(signal, dispatch);
 			markDispatched();
 			const result = await call;
-			const started = options?.pidOf?.(result);
-			if (started !== undefined) unsettled.pids.add(started);
+			if (options?.opens) {
+				const opened = options.opens(result);
+				const started = opened.window?.pid ?? opened.pid;
+				if (started !== undefined) unsettled.pids.add(started);
+				this.ledger.noteOpened(cell, opened);
+			}
 			return result;
 		} catch (error) {
 			if (window && !(error instanceof ToolAbortError)) this.ledger.noteFailure(cell, window);
@@ -1209,11 +1219,47 @@ export class ComputerWorkerCore {
 		 * model's.
 		 */
 		const sections: Array<{ text: string } | { text: string; whole: string; leftOut: string; shown: Shown }> = [];
+		// Only `apps.open` input leaves both empty: whatever it opened is its app's, read below by pid.
+		const windowInput = pending.touched.length > 0 || pending.unattributed > 0;
 		if (focused) ledger.attributeToFocused(pending, focused);
 		else if (pending.unattributed > 0) sections.push({ text: reportNote({ noFocusedWindow: true }) });
 		const latest = pending.outcome?.latest;
 		const unwatchedMs = latest && !latest.watched ? latest.sinceInputMs : undefined;
+		// A sheet, popover or chooser that left the list hands its app's focus on, usually to its parent: the next
+		// step is there, so that window is read right after the line naming the one that went.
+		const successors = new Map<string, DesktopWindow>();
+		const claimed = new Set<string>();
+		if (roster) {
+			for (const touched of pending.touched) {
+				if (roster.some(candidate => candidate.id === touched.id)) continue;
+				const pid = touched.pid ?? pending.rosterBefore?.find(candidate => candidate.id === touched.id)?.pid;
+				const next = pid === undefined ? undefined : appWindow(roster, pid);
+				if (!next || claimed.has(next.id)) continue;
+				successors.set(touched.id, next);
+				claimed.add(next.id);
+			}
+		}
+		const queue: TouchedWindow[] = [];
 		for (const touched of pending.touched) {
+			if (claimed.has(touched.id)) continue;
+			queue.push(touched);
+			const next = successors.get(touched.id);
+			if (next) {
+				const own = pending.touched.find(candidate => candidate.id === next.id);
+				queue.push({ ...(own ?? ledger.entry(next)), after: touched.id });
+			}
+		}
+		const reported = new Set(queue.map(touched => touched.id));
+		// An app the cell opened is shown on its own window, never on the user's focused one.
+		if (roster) {
+			for (const pid of pending.opened) {
+				const window = appWindow(roster, pid);
+				if (!window || reported.has(window.id)) continue;
+				reported.add(window.id);
+				queue.push(ledger.entry(window));
+			}
+		}
+		for (const touched of queue) {
 			const window = roster?.find(candidate => candidate.id === touched.id);
 			if (roster && !window) {
 				sections.push({ text: renderGone(touched) });
@@ -1233,13 +1279,13 @@ export class ComputerWorkerCore {
 			} else if (read.error !== undefined) sections.push({ text: renderUnreadable(touched, window, read.error) });
 			else sections.push({ text: reportNote({ budgetSpent: JSON.stringify(touched.id) }) });
 		}
-		const reported = new Set(pending.touched.map(touched => touched.id));
 		// A window the input opened and focused holds the model's next step, and it has no tree of it.
 		const opened =
 			focused &&
 			pending.rosterBefore &&
 			!reported.has(focused.id) &&
-			!pending.rosterBefore.some(window => window.id === focused.id)
+			!pending.rosterBefore.some(window => window.id === focused.id) &&
+			(windowInput || (focused.pid !== undefined && pending.pids.has(focused.pid)))
 				? focused
 				: undefined;
 		if (opened) {
@@ -1440,7 +1486,7 @@ export class ComputerWorkerCore {
 					const context = getContext();
 					guardRun(context, "apps.open");
 					return await observer.input(context, undefined, () => session.openApplication(id, options), {
-						pidOf: application => application.pid ?? undefined,
+						opens: application => ({ pid: application.pid ?? undefined }),
 					});
 				},
 			},

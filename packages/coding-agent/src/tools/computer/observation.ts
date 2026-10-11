@@ -66,8 +66,12 @@ export interface InputWindow {
 /** One window a settling cell sent input to, or whose ref a call failed on. */
 export interface TouchedWindow {
 	id: string;
+	/** Its process, when known; a closed window's app is where its focus went. */
+	pid?: number;
 	/** Carries input whose window was unknown: shown because this window had focus at settle time. */
 	focused?: boolean;
+	/** Id of a touched window that left the window list during the cell: this window of its app took the focus. */
+	after?: string;
 	/** Tree the model last received for this window, if any. */
 	baseline?: string;
 	/** Options of that read. */
@@ -104,6 +108,8 @@ export interface PendingSettle {
 	touched: TouchedWindow[];
 	/** Processes the cell sent window input to; their new windows are reported. */
 	pids: Set<number>;
+	/** Processes `apps.open` returned without naming a window; each one's focused window is read back. */
+	opened: Set<number>;
 	/**
 	 * Inputs whose window is unknown (the roster could not be read, or no
 	 * listed window was under the pointer). They are shown on the focused window.
@@ -372,6 +378,7 @@ interface CellState {
 	/** `ax()`/`observe()` reads the cell made, per window; they count as shown once the cell's output carries them. */
 	reads: Map<string, CellReads>;
 	pids: Set<number>;
+	opened: Set<number>;
 	unattributed: number;
 	inputs: number;
 	rosterBefore?: DesktopWindow[];
@@ -401,6 +408,7 @@ export class ObservationLedger {
 				touched: new Map(),
 				reads: new Map(),
 				pids: new Set(),
+				opened: new Set(),
 				unattributed: 0,
 				inputs: 0,
 				rosterClaimed: false,
@@ -557,6 +565,30 @@ export class ObservationLedger {
 		if (window) this.#touch(this.#cell(cell), window.id);
 	}
 
+	/**
+	 * The cell is opening an application: input that reaches no window, so
+	 * it is not shown on the focused one. What it opened is reported through
+	 * `noteOpened` once the call returns.
+	 */
+	noteAppInput(cell: CellKey): void {
+		this.#cell(cell).inputs++;
+	}
+
+	/**
+	 * An `apps.open` of the cell returned: its window is reported like a
+	 * window the cell sent input to, or, when the call named no window, the
+	 * process's focused window at settle time.
+	 */
+	noteOpened(cell: CellKey, opened: { pid?: number; window?: InputWindow }): void {
+		const state = this.#cell(cell);
+		const pid = opened.window?.pid ?? opened.pid;
+		if (pid !== undefined) state.pids.add(pid);
+		if (opened.window) {
+			if (pid !== undefined) this.#record(opened.window.id).pid = pid;
+			this.#touch(state, opened.window.id);
+		} else if (pid !== undefined) state.opened.add(pid);
+	}
+
 	#touch(state: CellState, id: string): void {
 		this.#readsBeforeInput(state, id);
 		state.touched.set(id, ++this.#sequence);
@@ -612,11 +644,12 @@ export class ObservationLedger {
 		if (state.inputs === 0 && state.touched.size === 0) return undefined;
 		const touched: TouchedWindow[] = [...state.touched.keys()].map(id => {
 			const record = this.#windows.get(id);
-			return { id, baseline: record?.shown, options: { ...record?.options } };
+			return { id, pid: record?.pid, baseline: record?.shown, options: { ...record?.options } };
 		});
 		return {
 			touched,
 			pids: state.pids,
+			opened: state.opened,
 			unattributed: state.unattributed,
 			rosterBefore: state.rosterBefore,
 			outcome: state.outcome,
@@ -639,13 +672,13 @@ export class ObservationLedger {
 			own.focused = true;
 			return;
 		}
+		pending.touched.push({ ...this.entry(window), focused: true });
+	}
+
+	/** A listed window to read back, against the model's last tree of it. */
+	entry(window: DesktopWindow): TouchedWindow {
 		const record = this.#windows.get(window.id);
-		pending.touched.push({
-			id: window.id,
-			focused: true,
-			baseline: record?.shown,
-			options: { ...record?.options },
-		});
+		return { id: window.id, pid: window.pid, baseline: record?.shown, options: { ...record?.options } };
 	}
 
 	/**
@@ -662,10 +695,24 @@ export class ObservationLedger {
 
 /**
  * `window "42" Code "main.ts"`, or `window "42"` when the roster did not list
- * it, then `(focused)` when input whose window was unknown is shown on it.
+ * it, then `(focused)` when input whose window was unknown is shown on it, or
+ * which window that left the list it took the focus from.
  */
 function windowName(window: DesktopWindow | undefined, touched: TouchedWindow): string {
-	return `window ${window ? windowLabel(window) : JSON.stringify(touched.id)}${touched.focused ? " (focused)" : ""}`;
+	const label = window ? windowLabel(window) : JSON.stringify(touched.id);
+	const after =
+		touched.after === undefined ? "" : ` (now focused in place of window ${JSON.stringify(touched.after)})`;
+	return `window ${label}${touched.focused ? " (focused)" : ""}${after}`;
+}
+
+/**
+ * The window of process `pid` that has its focus: the focused window when
+ * the process is the active app, else its frontmost listed window (native
+ * window lists run front to back), which is the one a background app keeps
+ * focused.
+ */
+export function appWindow(roster: readonly DesktopWindow[], pid: number): DesktopWindow | undefined {
+	return roster.find(window => window.pid === pid && window.focused) ?? roster.find(window => window.pid === pid);
 }
 
 /** One touched window, re-read after the cell. */

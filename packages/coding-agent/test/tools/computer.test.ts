@@ -2562,18 +2562,69 @@ describe("computer cell settlement", () => {
 		);
 	});
 
-	it("waits for a launched app to go quiet and reports the window focused at settle time", async () => {
+	it("reports apps.open on the opened app's window, never the user's focused one, and waits for the app", async () => {
 		const transport = new MemoryTransport();
 		const native = new EditableWindowSession();
 		new ComputerWorkerCore(transport, () => native);
+		// The user's terminal is in front; the editor (pid 123, what `openApplication` returns) is behind it.
+		const terminal: DesktopWindow = { ...windowFixture, id: "9", app: "Terminal", title: "zsh", pid: 999 };
+		native.windows = [terminal, { ...windowFixture, focused: false }];
 
 		await readCell(transport, "read");
+		// While the app launches, the user opens and focuses another terminal window: not the launch's doing.
+		native.openApplication = async () => {
+			native.windows = [
+				{ ...terminal, id: "10" },
+				{ ...terminal, focused: false },
+				{ ...windowFixture, focused: false },
+			];
+			return (await native.listApplications())[0]!;
+		};
 		await runWorker(transport, "open", 'await desktop.apps.open("test.editor")');
+		// The roster line names the new focused window, as for any cell; its tree is not read.
 		expect(await settleWorker(transport, "settle-open")).toBe(
-			'window "42" Code "Editor" (focused): no change since your last tree',
+			'window "42" Code "Editor": no change since your last tree\n\nnew window "10" Terminal "zsh" 40×20 (focused)',
 		);
 		// The launch result's process is watched although the input had no window.
 		expect(native.quietWaits).toEqual([[123]]);
+	});
+
+	it("follows a touched sheet that closed with its app's window that took the focus, diffed against the model's tree", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+		const parent: DesktopWindow = { ...windowFixture, focused: false };
+		const sheet: DesktopWindow = { ...windowFixture, id: "43", title: "Sort", width: 30, height: 12, focused: true };
+		native.windows = [sheet, parent];
+
+		await readCell(transport, "read");
+		const sheetRead = await runWorker(transport, "read-sheet", 'return await (await desktop.window("43")).ax()');
+		if (!sheetRead.ok) throw new Error("sheet read failed");
+		const sheetTree = String(sheetRead.payload.returnValue);
+		expect(await settleWorker(transport, "read-sheet-settle", sheetTree)).toBeUndefined();
+		// Pressing the sheet's button closes it and changes the parent behind it.
+		native.axPerform = async () => {
+			native.editing = true;
+			native.windows = [{ ...parent, focused: true }];
+		};
+		// The cell sends the parent a key first, so it is queued before the sheet; it still reads after the sheet's line.
+		await runWorker(
+			transport,
+			"press",
+			'await (await desktop.window("42")).press("shift"); await (await desktop.ref("e3")).press()',
+		);
+		expect(await settleWorker(transport, "settle-press")).toBe(
+			[
+				'window "43" is gone from the window list (closed, minimized or off screen)',
+				"",
+				'window "42" Code "Editor" (now focused in place of window "43"): 3 changes since your last tree',
+				'    + button "Done" [ref=e6] (in e2)',
+				'    + textfield "Phone" [ref=e7]: "555" (in e2)',
+				"removed: e3",
+				"",
+				'focus moved to window "42" Code "Editor"',
+			].join("\n"),
+		);
 	});
 
 	it.each([
