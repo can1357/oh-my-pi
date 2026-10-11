@@ -13,7 +13,7 @@ import type { EngineAdapter, ProtocolName } from "./engine";
 import { mnemopiEngine } from "./engines/mnemopi";
 import { mnemosyneEngine, type UpstreamCompatOps } from "./engines/mnemosyne";
 import { oracleEngine, randomEngine } from "./engines/sanity";
-import { buildResultFile, primaryMetric, type ResultFile, type RunOutput, runCases } from "./runner";
+import { buildResultFile, primaryMetric, type ResultFile, type RunConfig, type RunOutput, runCases } from "./runner";
 import { type BootstrapResult, pairedBootstrap, verdict } from "./stats";
 import type { DatasetName, ExcludedQuestion } from "./types";
 
@@ -29,9 +29,14 @@ const UPSTREAM_COMPAT_CONVERSATIONS = 3;
 
 function createEngine(name: string): EngineAdapter {
 	if (name === "mnemopi") {
-		// Mnemopi runs in this process and reads MNEMOPI_* itself, so they cannot be scrubbed: refuse instead.
-		const set = Object.keys(Bun.env).filter(key => key.startsWith("MNEMOPI_") && Bun.env[key]);
-		if (set.length > 0) throw new Error(`refusing to run mnemopi with MNEMOPI_* set: ${set.join(", ")}`);
+		// Mnemopi runs in this process and reads these itself, so they cannot be scrubbed: refuse instead.
+		// OPENROUTER_BASE_URL is the one non-MNEMOPI_ variable that can route its embeddings to an API.
+		const set = Object.keys(Bun.env).filter(
+			key => (key.startsWith("MNEMOPI_") || key === "OPENROUTER_BASE_URL") && Bun.env[key],
+		);
+		if (set.length > 0) {
+			throw new Error(`refusing to run mnemopi with MNEMOPI_* or OPENROUTER_BASE_URL set: ${set.join(", ")}`);
+		}
 		return mnemopiEngine();
 	}
 	if (name === "mnemosyne") return mnemosyneEngine();
@@ -115,25 +120,57 @@ async function runCommand(argv: string[]): Promise<void> {
 	console.log(`aggregate: ${JSON.stringify(result.aggregate, null, 2)}`);
 	console.log(`perCategory: ${JSON.stringify(result.perCategory, null, 2)}`);
 	console.log(`fallbackRate: ${result.fallbackRate}`);
+	console.log(`droppedRows: ${result.droppedRows}`);
+	console.log(`droppedGoldRows: ${result.droppedGoldRows}`);
 	console.log(`wrote ${out}`);
 }
 
 const fmt = (b: BootstrapResult): string =>
 	`meanDiff ${b.meanDiff.toFixed(4)} CI [${b.ciLow.toFixed(4)}, ${b.ciHigh.toFixed(4)}] wins ${b.wins} ties ${b.ties} losses ${b.losses}`;
 
+const describeConfig = (label: string, c: RunConfig): string =>
+	`${label}: engine ${c.engine} protocol ${c.protocol} k ${c.k} gitCommit ${c.gitCommit}`;
+
+function uniqueQuestionIds(label: string, file: ResultFile): Set<string> {
+	const ids = new Set<string>();
+	for (const q of file.questions) {
+		if (ids.has(q.questionId)) throw new Error(`${label}: duplicate question id ${q.questionId}`);
+		ids.add(q.questionId);
+	}
+	return ids;
+}
+
+function assertFiniteMetric(label: string, file: ResultFile, metric: string): void {
+	const bad = file.questions.find(q => !Number.isFinite(q.metrics[metric]));
+	if (bad)
+		throw new Error(`${label}: question ${bad.questionId} has no finite ${metric} (got ${bad.metrics[metric]})`);
+}
+
 async function diffCommand(argv: string[]): Promise<void> {
 	const [fileA, fileB] = argv;
 	if (!fileA || !fileB) throw new Error("usage: diff <a.json> <b.json>");
 	const a: ResultFile = await Bun.file(fileA).json();
 	const b: ResultFile = await Bun.file(fileB).json();
+	console.log(describeConfig("a", a.config));
+	console.log(describeConfig("b", b.config));
+	if (a.config.protocol === "upstream-compat" || b.config.protocol === "upstream-compat") {
+		throw new Error("upstream-compat results have no primary metric to diff");
+	}
 	if (a.config.dataset !== b.config.dataset) {
 		throw new Error(`dataset differs: ${a.config.dataset} vs ${b.config.dataset}`);
 	}
-	const idsA = a.questions.map(q => q.questionId);
-	const idsB = b.questions.map(q => q.questionId);
-	if (idsA.length !== idsB.length || idsA.some(id => !idsB.includes(id))) {
+	if (a.config.protocol !== b.config.protocol) {
+		throw new Error(`protocol differs: ${a.config.protocol} vs ${b.config.protocol}`);
+	}
+	if (a.config.k !== b.config.k) throw new Error(`k differs: ${a.config.k} vs ${b.config.k}`);
+	const idsA = uniqueQuestionIds("a", a);
+	const idsB = uniqueQuestionIds("b", b);
+	if (idsA.size !== idsB.size || [...idsA].some(id => !idsB.has(id))) {
 		throw new Error("question sets differ between the two result files");
 	}
+	const metric = primaryMetric(a.config.dataset);
+	assertFiniteMetric("a", a, metric);
+	assertFiniteMetric("b", b, metric);
 	const bById = new Map(b.questions.map(q => [q.questionId, q]));
 	const pairs = a.questions.map(qa => ({ a: qa, b: bById.get(qa.questionId)! }));
 
@@ -142,7 +179,6 @@ async function diffCommand(argv: string[]): Promise<void> {
 	).length;
 	console.log(`identical rankings: ${identical} / ${pairs.length}`);
 
-	const metric = primaryMetric(a.config.dataset);
 	const overall = pairedBootstrap(
 		pairs.map(p => p.a.metrics[metric]),
 		pairs.map(p => p.b.metrics[metric]),
