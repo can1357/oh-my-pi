@@ -12,11 +12,14 @@ import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 function session(manager?: AsyncJobManager, agentId = "Main", launch = false): ToolSession {
 	return {
 		cwd: process.cwd(),
+		hasUI: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
 		settings: Settings.isolated({ "launch.enabled": launch }),
 		agentRegistry: AgentRegistry.global(),
 		asyncJobManager: manager,
 		getAgentId: () => agentId,
-	} as unknown as ToolSession;
+	};
 }
 
 describe("wait", () => {
@@ -144,12 +147,14 @@ describe("wait", () => {
 	});
 
 	test("a hung daemon broker does not fail the wait; the job result still arrives", async () => {
-		const hungBroker = {
+		const hungBroker: DaemonBrokerClient = {
+			projectDir: process.cwd(),
+			close: () => {},
 			request: async () => {
 				throw new Error("Daemon list request timed out");
 			},
 			onCompletion: () => () => {},
-		} as unknown as DaemonBrokerClient;
+		};
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(hungBroker);
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const { promise, resolve } = Promise.withResolvers<string>();
@@ -158,5 +163,20 @@ describe("wait", () => {
 		resolve("build complete");
 		const result = await waiting;
 		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "build complete" });
+	});
+
+	test("a completion consumed by wait cannot sustain or appear in a second wait", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		try {
+			const id = manager.register("bash", "finished once", async () => "owned result", { ownerId: "Main" });
+			await manager.waitForAll();
+			const tool = new WaitTool(session(manager));
+			const first = await tool.execute("consume-completion", {});
+			expect(first.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "owned result" });
+			expect(manager.isJobResultConsumed(id)).toBe(true);
+			await expect(tool.execute("already-consumed", {})).rejects.toThrow("Nothing to wait for");
+		} finally {
+			await manager.dispose();
+		}
 	});
 });

@@ -168,7 +168,21 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	async request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult> {
 		if (this.#closed) throw new Error("Daemon broker client is closed");
 		if (signal?.aborted) throw new Error("Daemon broker request aborted");
-		await this.#connect();
+		const connecting = this.#connect();
+		if (signal) {
+			const aborted = Promise.withResolvers<never>();
+			const onAbort = () => aborted.reject(new Error("Daemon broker request aborted"));
+			signal.addEventListener("abort", onAbort, { once: true });
+			if (signal.aborted) onAbort();
+			try {
+				// One caller's cancellation must not tear down the shared connection.
+				await Promise.race([connecting, aborted.promise]);
+			} finally {
+				signal.removeEventListener("abort", onAbort);
+			}
+		} else await connecting;
+		if (signal?.aborted) throw new Error("Daemon broker request aborted");
+		if (this.#closed) throw new Error("Daemon broker client is closed");
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) throw new Error("Daemon broker socket is unavailable");
 
@@ -188,25 +202,33 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			const abort = (): void => {
 				if (!this.#pending.delete(id)) return;
 				clearTimeout(timer);
+				pending.removeAbort?.();
 				reject(new Error("Daemon broker request aborted"));
 			};
 			signal.addEventListener("abort", abort, { once: true });
 			pending.removeAbort = () => signal.removeEventListener("abort", abort);
 		}
 		this.#pending.set(id, pending);
-		socket.write(
-			`${JSON.stringify({
-				id,
-				token: this.#token,
-				owners: [...this.#completionSinks.keys()],
-				detachedOwners: [...this.#preservedCompletionOwners],
-				completionEvents: true,
-				completionUnsubscribes,
-				completionReplays,
-				completionSubscriptionId: this.#completionSubscriptionId,
-				operation,
-			})}\n`,
-		);
+		try {
+			socket.write(
+				`${JSON.stringify({
+					id,
+					token: this.#token,
+					owners: [...this.#completionSinks.keys()],
+					detachedOwners: [...this.#preservedCompletionOwners],
+					completionEvents: true,
+					completionUnsubscribes,
+					completionReplays,
+					completionSubscriptionId: this.#completionSubscriptionId,
+					operation,
+				})}\n`,
+			);
+		} catch (error) {
+			this.#pending.delete(id);
+			clearTimeout(timer);
+			pending.removeAbort?.();
+			reject(error instanceof Error ? error : new Error(String(error)));
+		}
 		const result = await promise;
 		for (const owner of completionUnsubscribes) {
 			if (!this.#completionSinks.has(owner)) this.#completionUnsubscribes.delete(owner);
@@ -296,10 +318,12 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			// process-owned lease selects one winner before any candidate touches
 			// the socket.
 		}
+		if (this.#closed) throw new Error("Daemon broker client is closed");
 		this.#spawnBroker();
 		const deadline = Date.now() + CONNECT_TIMEOUT_MS;
 		let lastError: Error | undefined;
 		while (Date.now() < deadline) {
+			if (this.#closed) throw new Error("Daemon broker client is closed");
 			try {
 				this.#bindSocket(await openSocket(this.#endpoint, 250));
 				return;
@@ -334,6 +358,10 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	#bindSocket(socket: net.Socket): void {
+		if (this.#closed) {
+			socket.destroy();
+			throw new Error("Daemon broker client is closed");
+		}
 		this.#socket = socket;
 		this.#buffer = "";
 		socket.setEncoding("utf8");
@@ -342,7 +370,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			// The close handler rejects pending requests with one stable error.
 		});
 		socket.on("close", () => {
-			if (this.#socket === socket) this.#socket = undefined;
+			if (this.#socket !== socket) return;
+			this.#socket = undefined;
 			this.#rejectPending(new Error("Daemon broker connection closed"));
 			this.#scheduleCompletionReconnect();
 		});
