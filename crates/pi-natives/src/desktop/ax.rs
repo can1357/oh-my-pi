@@ -775,7 +775,10 @@ pub struct AppFocus(Option<Option<AxHandle>>);
 
 impl AppFocus {
 	fn get(&mut self, backend: &mut dyn AxBackend, handle: &AxHandle) -> Option<&AxHandle> {
-		self.0.get_or_insert_with(|| backend.focused_within(handle)).as_ref()
+		self
+			.0
+			.get_or_insert_with(|| backend.focused_within(handle))
+			.as_ref()
 	}
 }
 
