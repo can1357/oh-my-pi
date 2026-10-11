@@ -1,7 +1,8 @@
 /**
  * Web Fetch Special Handlers Index
  *
- * Builds the specialHandler list for site-specific content extraction.
+ * Builds the specialHandler list for site-specific content extraction and re-exports the
+ * published handler surface for the `web/scrapers` package subpath.
  */
 import { handleArtifactHub } from "./artifacthub";
 import { handleArxiv } from "./arxiv";
@@ -25,7 +26,7 @@ import { handleDocsRs } from "./docs-rs";
 import { handleFdroid } from "./fdroid";
 import { handleFirefoxAddons } from "./firefox-addons";
 import { handleFlathub } from "./flathub";
-import { handleGitHub } from "./github";
+import { fetchGitHubApi, handleGitHub } from "./github";
 import { handleGitHubGist } from "./github-gist";
 import { handleGitLab } from "./gitlab";
 import { handleGoPkg } from "./go-pkg";
@@ -79,6 +80,87 @@ import { handleW3c } from "./w3c";
 import { handleWikidata } from "./wikidata";
 import { handleWikipedia } from "./wikipedia";
 import { handleYouTube } from "./youtube";
+
+export type { RenderResult, SpecialHandler } from "./types";
+
+export {
+	fetchGitHubApi,
+	handleArtifactHub,
+	handleArxiv,
+	handleAur,
+	handleBiorxiv,
+	handleBluesky,
+	handleBrew,
+	handleCheatSh,
+	handleChocolatey,
+	handleChooseALicense,
+	handleCisaKev,
+	handleClojars,
+	handleCoinGecko,
+	handleCratesIo,
+	handleCrossref,
+	handleDevTo,
+	handleDiscogs,
+	handleDiscourse,
+	handleDockerHub,
+	handleDocsRs,
+	handleFdroid,
+	handleFirefoxAddons,
+	handleFlathub,
+	handleGitHub,
+	handleGitHubGist,
+	handleGitLab,
+	handleGoPkg,
+	handleHackage,
+	handleHackerNews,
+	handleHex,
+	handleHuggingFace,
+	handleIacr,
+	handleJetBrainsMarketplace,
+	handleLemmy,
+	handleLobsters,
+	handleMastodon,
+	handleMaven,
+	handleMDN,
+	handleMetaCPAN,
+	handleMusicBrainz,
+	handleNpm,
+	handleNuGet,
+	handleNvd,
+	handleOllama,
+	handleOpenCorporates,
+	handleOpenLibrary,
+	handleOpenVsx,
+	handleOrcid,
+	handleOsv,
+	handlePackagist,
+	handlePubDev,
+	handlePubMed,
+	handlePyPI,
+	handleRawg,
+	handleReadTheDocs,
+	handleReddit,
+	handleRepology,
+	handleRfc,
+	handleRubyGems,
+	handleSearchcode,
+	handleSecEdgar,
+	handleSemanticScholar,
+	handleSnapcraft,
+	handleSourcegraph,
+	handleSpdx,
+	handleSpotify,
+	handleStackOverflow,
+	handleTerraform,
+	handleTldr,
+	handleTwitter,
+	handleVimeo,
+	handleVscodeMarketplace,
+	handleW3c,
+	handleWikidata,
+	handleWikipedia,
+	handleYouTube,
+};
 
 export const specialHandlers: SpecialHandler[] = [
 	// Git hosting
