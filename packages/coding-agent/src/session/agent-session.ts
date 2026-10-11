@@ -188,6 +188,7 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "../memory-backend/recall-entry";
+import type { MemoryBackendStartReason } from "../memory-backend/types";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { MAGIC_KEYWORDS, type MagicKeywordContext, type MagicKeywordId } from "../modes/magic-keywords";
@@ -7515,7 +7516,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Apply the backend; cwd rebinding can skip Mnemopi auto-retention while still draining writes. */
-	applyMemoryBackend(options: { retainMnemopi?: boolean } = {}): Promise<void> {
+	applyMemoryBackend(options: { retainMnemopi?: boolean; reason?: MemoryBackendStartReason } = {}): Promise<void> {
 		if (!this.memoryEnabled) return Promise.resolve();
 		return this.#memory.applyMemoryBackend(options);
 	}
@@ -7523,6 +7524,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Resolves once every memory-setting edit so far, and the backend transitions it started, has settled. */
 	settleMemoryBackend(): Promise<void> {
 		return this.#memory.settle();
+	}
+
+	/**
+	 * Apply the paired decision backend alone, leaving the selected store running.
+	 * For a cwd move that cannot run a full apply, and for a live pairing toggle,
+	 * which must not restart the store and reset its retain and recall state.
+	 */
+	applyPairedMemoryBackend(reason: MemoryBackendStartReason): Promise<void> {
+		if (!this.memoryEnabled) return Promise.resolve();
+		return this.#memory.applyPairedMemoryBackend(reason);
 	}
 
 	/** Rebuilds the stable base prompt, optionally discarding a stale asynchronous rebuild. */
