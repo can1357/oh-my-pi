@@ -35,6 +35,17 @@ describe("auth-gateway stdio model selectors", () => {
 		expect(selectorCandidates(key(dictation), Settings.isolated({}), kindRegistry)).toEqual([dictation]);
 	});
 
+	it("uses the first comma entry that resolves, even when it is a runner and a later entry is chat", () => {
+		const dictation = getBundledModel("openai-codex", "codex-transcribe")!;
+		const kindRegistry = {
+			getAll: (kind = "chat") => (kind === "all" ? [...models, dictation] : models),
+			getAvailable: (kind = "chat") => (kind === "all" ? [...models, dictation] : models),
+		};
+		expect(selectorCandidates(`${key(dictation)},${key(mini)}`, Settings.isolated({}), kindRegistry)).toEqual([
+			dictation,
+		]);
+	});
+
 	it("prefers the chat model when the chat view and the full catalog both match a selector", () => {
 		const dictation = getBundledModel("openai-codex", "codex-transcribe")!;
 		// A runner that shares the chat model's bare id and sorts ahead of it in the full catalog.
