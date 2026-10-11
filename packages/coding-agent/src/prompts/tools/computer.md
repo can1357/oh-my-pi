@@ -11,7 +11,7 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
 - `holdKeys(keys, {duration, takeover?})` and `holdMouse(x, y, {button?, duration, keys?, takeover?})` hold input for 0–100 seconds and release it on every exit. `drag(points, {keys?, modifiers?, takeover?})` supports Space-drag and other held-key gestures. Do not invent cross-call key-down/button-down state.
 - `computer.control.acquire({reason})` requires live human confirmation for task-scoped foreground control; denial/headless execution never grants it. While acquired, omitted takeover defaults to foreground; explicit `takeover: false` stays background. Use `control.release()` in `finally`; interruption, task completion and disposal also revoke. `control.state()` reads the live grant. This is not authorization for consequential external effects.
 - On macOS, `win.bringToCurrentSpace()` moves that window without switching the user's Space or activating the app; take a fresh screenshot afterward. OS refusal is explicit—never change security settings as a workaround.
-- `win.ax()` returns a formatted TEXT tree — one STRING, one node per line with `[ref=eN]` tags; NEVER iterate or `.map` it. `await win.ref("e5")`, `win.find(…)`, `computer.elementAt`, `computer.focusedElement`, `computer.ref` return live `ComputerElement` handles with `ref`, `role`, `nativeRole`, `title`, `description`, `enabled`, `focused`, `childCount` and helpers `value`, `setValue`, `bounds`, `attributes`, `actions`, `perform`, `press`, `click`, `focus`, `parent`, `children`.
+- `win.ax()` returns a formatted TEXT tree — one STRING, one node per line with `[ref=eN]` tags; NEVER iterate or `.map` it. `await win.ref("e5")`, `win.find(…)`, `computer.elementAt`, `computer.focusedElement`, `computer.ref` return live `ComputerElement` handles with `ref`, `role`, `nativeRole`, `title`, `description`, `enabled`, `focused`, `childCount` and helpers `value`, `setValue`, `bounds`, `attributes`, `actions`, `perform`, `press`, `click({button?, count?, modifiers?})`, `focus`, `parent`, `children`. `ref("e5")` helpers chain without an inner await: `await win.ref("e5").click({count: 2})`.
 - JavaScript `await computer.run(fnOrCode, { args?, read_only?, timeout? })` runs a multi-step function or code string. Functions receive `{ desktop, wait, assert }`; `desktop` has the same helpers as `computer`; cell closures are not captured. Plain data, functions, and `RegExp` values are supported in `args`. Group predictable actions and their verification in one run; stop and inspect when the outcome is uncertain.
 - Python helpers use the same names with keyword arguments becoming the trailing options object (`await win.click(10, 20, button="right")`); `win.raise_()` replaces the keyword `raise`. Python `computer.run(code, read_only=…, timeout=…)` accepts a JavaScript code string only.
 - Approval: inspection helpers (`windows`, `screenshot`, `ax`, `find`, `value`, `bounds`, `clipboard.read`, …) need read approval; input and mutation helpers need exec approval. `computer.run` uses `read_only: true` for the read tier, which also blocks facade mutation.
@@ -40,7 +40,7 @@ await computer.run(async ({ desktop, wait }) => {
 win = await computer.window(app="Code")
 await win.screenshot(silent=True)
 tree = await win.ax(maxDepth=6)
-await (await win.ref("e12")).press()
+await win.ref("e12").press()
 await win.click(120, 48, button="right")
 ```
 </examples>

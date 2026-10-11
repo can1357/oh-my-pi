@@ -76,7 +76,7 @@ describe("python prelude", () => {
 		expect(lines[1]).toBe("True []");
 	});
 
-	it("appends line selectors to delegated URI paths", async () => {
+	it("appends line selectors to delegated URI paths, reading a bare artifact raw", async () => {
 		const requests: unknown[] = [];
 		const server = Bun.serve({
 			hostname: "127.0.0.1",
@@ -110,7 +110,7 @@ describe("python prelude", () => {
 					session: "test-session",
 					run: null,
 					name: "read",
-					args: { path: "artifact://21:3-4" },
+					args: { path: "artifact://21:raw:3-4" },
 				},
 				{
 					session: "test-session",
@@ -118,6 +118,45 @@ describe("python prelude", () => {
 					name: "read",
 					args: { path: "mcp://server/resource:10-14" },
 				},
+			]);
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it("reads an artifact from this session's dir, else raw through the read tool; empty for limit <= 0", async () => {
+		const requests: unknown[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				requests.push(await request.json());
+				return Response.json({ ok: true, value: { text: "from the read tool" } });
+			},
+		});
+		using artifacts = TempDir.createSync("@omp-py-prelude-artifacts-");
+		await Bun.write(artifacts.join("12.eval.log"), "first\nsecond\nthird\n");
+
+		try {
+			const result = await runPrelude(
+				[
+					`print(repr(read("artifact://12", offset=2, limit=1)))`,
+					`print([read("artifact://12", limit=0), read("artifact://12", limit=-1), read("artifact://7", limit=0)])`,
+					`print(read("artifact://7"), "|", read("artifact://7", offset=2, limit=2))`,
+				].join("\n"),
+				{
+					PI_EVAL_LOCAL_ROOTS: JSON.stringify({ artifact: artifacts.path() }),
+					PI_TOOL_BRIDGE_URL: server.url.toString(),
+					PI_TOOL_BRIDGE_TOKEN: "test-token",
+					PI_TOOL_BRIDGE_SESSION: "test-session",
+				},
+			);
+
+			expect(result.stderr).toBe("");
+			expect(result.stdout).toBe("'second\\n'\n['', '', '']\nfrom the read tool | from the read tool\n");
+			expect(requests).toMatchObject([
+				{ name: "read", args: { path: "artifact://7:raw" } },
+				{ name: "read", args: { path: "artifact://7:raw:2-3" } },
 			]);
 		} finally {
 			server.stop(true);

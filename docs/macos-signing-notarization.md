@@ -1,6 +1,7 @@
 # macOS signing & notarization
 
-The compiled macOS `omp` binaries shipped on GitHub Releases can be signed with a
+The compiled macOS `omp` binaries (served by build.stencil.so and attached to
+GitHub Releases) can be signed with a
 **Developer ID Application** certificate and **notarized** by Apple. This makes
 them eligible for Gatekeeper acceptance when the notarization ticket is
 available. The repository also maintains a Homebrew tap; formula installs
@@ -34,10 +35,12 @@ script signs with the Developer ID and notarizes; with none, it signs ad hoc
    `macos-15`) before anything publishes: `codesign --verify --strict`,
    then `--version` and `--smoke-test` under the final signature, which is the
    hardened-runtime launch check. When signing secrets are configured it also
-   asserts that the signature is not ad-hoc. `release_github` publishes these
-   same artifacts, so nothing re-verifies the published assets.
-4. For non-canary releases, `release_brew` regenerates and pushes the tap formula
-   once the GitHub release is published. It skips when
+   asserts that the signature is not ad-hoc. `release_github` and
+   `release_build` (build.stencil.so) publish these same artifacts, so nothing
+   re-verifies the published assets.
+4. For non-canary releases, `release_brew` regenerates and pushes the tap formula,
+   pointing at the build.stencil.so downloads, once `release_build` has
+   published them. It skips when
    `HOMEBREW_TAP_DEPLOY_KEY` is absent; that secret is separate from signing.
 
 ### Why the entitlements are mandatory

@@ -24,6 +24,12 @@ function shellQuote(value: string): string {
 }
 
 async function runCell(code: string): Promise<RunnerFrame[]> {
+	const [frames] = await runCells([code]);
+	return frames;
+}
+
+/** Runs each cell on one runner, sending the next request only after the previous cell's done frame. */
+async function runCells(codes: string[]): Promise<RunnerFrame[][]> {
 	const proc = Bun.spawn([pythonPath, "-u", runnerPath], {
 		cwd: repoRoot,
 		stdin: "pipe",
@@ -39,7 +45,6 @@ async function runCell(code: string): Promise<RunnerFrame[]> {
 	const reader = proc.stdout.getReader();
 	const decoder = new TextDecoder();
 	let pending = "";
-	const frames: RunnerFrame[] = [];
 
 	async function readFrame(): Promise<RunnerFrame> {
 		while (true) {
@@ -61,12 +66,17 @@ async function runCell(code: string): Promise<RunnerFrame[]> {
 	}
 
 	try {
-		proc.stdin.write(encoder.encode(`${JSON.stringify({ id: "r1", code })}\n`));
-		proc.stdin.flush();
-		while (true) {
-			const frame = await readFrame();
-			frames.push(frame);
-			if (frame.type === "done") break;
+		const results: RunnerFrame[][] = [];
+		for (const [index, code] of codes.entries()) {
+			proc.stdin.write(encoder.encode(`${JSON.stringify({ id: `r${index + 1}`, code })}\n`));
+			proc.stdin.flush();
+			const frames: RunnerFrame[] = [];
+			while (true) {
+				const frame = await readFrame();
+				frames.push(frame);
+				if (frame.type === "done") break;
+			}
+			results.push(frames);
 		}
 		proc.stdin.write(encoder.encode(`${JSON.stringify({ type: "exit" })}\n`));
 		proc.stdin.end();
@@ -74,7 +84,7 @@ async function runCell(code: string): Promise<RunnerFrame[]> {
 		if (exitCode !== 0) {
 			throw new Error(`Python runner exited ${exitCode}: ${await stderr}`);
 		}
-		return frames;
+		return results;
 	} finally {
 		try {
 			reader.releaseLock();
@@ -167,6 +177,29 @@ describe("Python runner shell output streaming", () => {
 		expect(stdout).toContain("read=''");
 		expect(stdout).toContain("return=0");
 	});
+
+	it("gives processes started by plain user code EOF on stdin instead of the control channel", async () => {
+		// Without an explicit stdin, a child inherits the runner's fd 0. That
+		// must not be the host's control pipe, which stays open for the
+		// kernel's whole life: a stdin-reading child (e.g. `omp -p`) would block
+		// until the timeout below, or steal frames meant for the runner.
+		const child = "import sys; print('read=' + repr(sys.stdin.read()))";
+		const [first, second] = await runCells([
+			[
+				"import subprocess, sys",
+				`proc = subprocess.run([sys.executable, "-c", ${JSON.stringify(child)}], capture_output=True, text=True, timeout=10)`,
+				"print(proc.stdout, end='')",
+			].join("\n"),
+			"print('second request served')",
+		]);
+
+		expect(first.filter(frame => frame.type === "stdout").map(frame => frame.data)).toEqual(["read=''\n"]);
+		expect(first.at(-1)?.status).toBe("ok");
+		expect(second.filter(frame => frame.type === "stdout").map(frame => frame.data)).toEqual([
+			"second request served\n",
+		]);
+		expect(second.at(-1)?.status).toBe("ok");
+	}, 30_000);
 
 	it("streams newline-free %%bash output without waiting for EOF", async () => {
 		const child = [

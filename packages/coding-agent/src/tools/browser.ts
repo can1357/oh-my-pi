@@ -513,6 +513,7 @@ async function openOnKind(
 			`URL: ${url}`,
 			title ? `Title: ${title}` : null,
 			...notes,
+			result.note,
 		].filter((line): line is string => typeof line === "string");
 		return toolResult(details).text(lines.join("\n")).done();
 	} catch (error) {

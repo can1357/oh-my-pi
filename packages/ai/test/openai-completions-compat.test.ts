@@ -98,6 +98,7 @@ function zaiGlm52Model(): Model<"openai-completions"> {
 
 const alibabaQwen38Flash = getBundledModel<"openai-completions">("alibaba-token-plan", "qwen3.8-flash");
 const alibabaTokenPlanApiKey = serializeAlibabaTokenPlanCredential("sk-sp-test", "session_id=test");
+const mistralSmallLatest = getBundledModel<"openai-completions">("mistral", "mistral-small-latest");
 
 function kimiZaiModel(): Model<"openai-completions"> {
 	return buildModel({
@@ -117,6 +118,8 @@ async function captureOpenAICompletionsPayload(
 		apiKey?: string;
 		reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 		temperature?: number;
+		sessionId?: string;
+		cacheRetention?: "none" | "short" | "long";
 	},
 ): Promise<unknown> {
 	const { promise, resolve } = Promise.withResolvers<unknown>();
@@ -2821,5 +2824,26 @@ describe("grammar tool-schema normalization (issue #5914)", () => {
 		const properties = toObject(toolParameters(payload, "task").properties);
 		// Off the grammar path the open field keeps the normalized bare boolean.
 		expect(properties?.outputSchema).toBe(true);
+	});
+});
+
+describe("mistral prompt_cache_key regression (#15079)", () => {
+	it("sends the session-stable prompt_cache_key on Mistral chat-completions requests", async () => {
+		expect(mistralSmallLatest.compat.supportsPromptCacheKey).toBe(true);
+		const payload = await captureOpenAICompletionsPayload(mistralSmallLatest, undefined, {
+			sessionId: "regression-session-15079",
+		});
+		const payloadObject = toObject(payload);
+		// Catalog rule + baked row must both survive regeneration for this to hold.
+		expect(payloadObject?.prompt_cache_key).toBe("regression-session-15079");
+	});
+
+	it("omits prompt_cache_key when cache retention is disabled", async () => {
+		const payload = await captureOpenAICompletionsPayload(mistralSmallLatest, undefined, {
+			sessionId: "regression-session-15079",
+			cacheRetention: "none",
+		});
+		const payloadObject = toObject(payload);
+		expect(payloadObject === null || !("prompt_cache_key" in payloadObject)).toBe(true);
 	});
 });

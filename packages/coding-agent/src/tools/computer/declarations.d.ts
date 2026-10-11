@@ -191,11 +191,34 @@ interface ComputerElement {
 	perform(action: string): Promise<void>;
 	/** Perform the element's native press action; needs no screenshot. */
 	press(): Promise<void>;
-	/** Click the element's center with native input. */
-	click(options?: ComputerInputOptions): Promise<void>;
+	/** Click the element's center with native input; `count: 2` double-clicks. */
+	click(options?: ComputerClickOptions): Promise<void>;
 	focus(): Promise<void>;
 	parent(): Promise<ComputerElement | null>;
 	children(): Promise<ComputerElement[]>;
+}
+
+/** `ref()` result: `await` it for the element, or call element methods on it directly (`win.ref("e5").click()`). */
+interface ComputerElementRef
+	extends
+		PromiseLike<ComputerElement>,
+		Pick<
+			ComputerElement,
+			| "value"
+			| "setValue"
+			| "bounds"
+			| "attributes"
+			| "actions"
+			| "perform"
+			| "press"
+			| "click"
+			| "focus"
+			| "parent"
+			| "children"
+		> {
+	readonly ref: string;
+	catch<T = never>(onRejected?: ((reason: unknown) => T | PromiseLike<T>) | null): Promise<ComputerElement | T>;
+	finally(onFinally?: (() => void) | null): Promise<ComputerElement>;
 }
 
 /** Native input helpers shared by the desktop root and window handles; `x`/`y` are pixels in the most recent full screenshot of the same target, never zoom pixels. */
@@ -244,7 +267,7 @@ interface ComputerWindow extends ComputerInputTarget {
 	/** Formatted accessibility tree as one string, one node per line with `[ref=eN]` tags. */
 	ax(options?: ComputerAxOptions): Promise<string>;
 	find(query: ComputerAxQuery): Promise<ComputerElement[]>;
-	ref(ref: string): Promise<ComputerElement>;
+	ref(ref: string): ComputerElementRef;
 }
 
 /** Desktop helpers shared by the direct `computer` facade and the `desktop` object inside `computer.run`. */
@@ -273,7 +296,7 @@ interface ComputerDesktop extends ComputerInputTarget {
 	/** Element under a global desktop coordinate. */
 	elementAt(x: number, y: number): Promise<ComputerElement | null>;
 	focusedElement(): Promise<ComputerElement | null>;
-	ref(ref: string): Promise<ComputerElement>;
+	ref(ref: string): ComputerElementRef;
 	readonly clipboard: {
 		read(): Promise<string>;
 		write(text: string): Promise<void>;

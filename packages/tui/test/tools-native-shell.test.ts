@@ -299,6 +299,38 @@ describe("eval native run boxes", () => {
 		expect(spansText(allLines[0])).toContain("n=0");
 	});
 
+	it("counts status events dropped from a cell's log in the earlier line", () => {
+		const statusLines = (expanded: boolean) => {
+			const [box] = nodes(
+				evalToolRenderer.describeResult(
+					{
+						content: [{ type: "text", text: "" }],
+						details: {
+							cells: [
+								cell({
+									statusEvents: Array.from({ length: 10 }, (_, i) => ({ op: "step", n: i })),
+									statusEventsElided: 500,
+								}),
+							],
+						},
+					},
+					{ expanded, isPartial: false },
+				).body,
+			);
+			return nodes(nodes(box?.c).find(child => role(child) === "omp.run.status")?.c).map(spansText);
+		};
+
+		const folded = statusLines(false);
+		expect(folded).toHaveLength(9);
+		expect(folded[0]).toBe("502 earlier");
+		expect(folded[1]).toContain("n=2");
+
+		const expanded = statusLines(true);
+		expect(expanded).toHaveLength(11);
+		expect(expanded[0]).toBe("500 earlier");
+		expect(expanded[1]).toContain("n=0");
+	});
+
 	it("puts older details' whole output and foot under the call's last cell", () => {
 		const view = evalToolRenderer.describeResult(
 			{ content: [{ type: "text", text: "a\nb" }], isError: true },

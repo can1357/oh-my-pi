@@ -646,13 +646,16 @@ export async function applyViewport(
 	});
 }
 
-/** The emulated viewport, else the window's own: connected and visible browsers emulate none. */
+/**
+ * The emulated viewport, else the window's own: connected and visible browsers emulate none, and an
+ * emulated scale of 0 keeps the window's own device scale.
+ */
 export async function readPageViewport(
 	page: Page,
 	signal?: AbortSignal,
 ): Promise<{ width: number; height: number; deviceScaleFactor?: number }> {
 	const emulated = page.viewport();
-	if (emulated) return emulated;
+	if (emulated && emulated.deviceScaleFactor !== 0) return emulated;
 	return await untilAborted(signal, () =>
 		page.evaluate(() => {
 			const win = globalThis as unknown as { innerWidth: number; innerHeight: number; devicePixelRatio: number };
