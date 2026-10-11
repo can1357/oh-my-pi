@@ -110,6 +110,33 @@ describe("native backend", () => {
 		expect(h.errors).toEqual([]);
 	});
 
+	it("keeps the leading part of a non-text prop too large for any frame instead of leaving it blank", async () => {
+		const diffText = `--- a\n+++ b\n${"+line\n".repeat(5 * 1024 * 1024)}`;
+		const rows = Array.from({ length: 300_000 }, (_, i) => ({ id: `r${i}`, cells: { a: "x".repeat(100) } }));
+		const diff = new Probe(node("diff", { text: diffText }));
+		const table = new Probe(node("table", { cols: [{ id: "a", head: "A" }], rows }));
+		harness = await TspHarness.start(
+			tui => {
+				tui.addChild(diff);
+				tui.addChild(table);
+			},
+			{ maxFrameBytes: 24 * 1024 * 1024 },
+		);
+		const h = harness;
+		const diffProps = h.byId(nativeComponentId(diff))?.p;
+		const sentDiff = diffProps && "text" in diffProps ? diffProps.text : undefined;
+		if (typeof sentDiff !== "string") throw new Error("diff text missing");
+		const kept = sentDiff.slice(0, sentDiff.lastIndexOf("\n… [truncated"));
+		expect(kept.length).toBeGreaterThan(20 * 1024 * 1024);
+		expect(diffText.startsWith(kept)).toBe(true);
+		const tableProps = h.byId(nativeComponentId(table))?.p;
+		const sentRows = tableProps && "rows" in tableProps ? tableProps.rows : undefined;
+		if (!Array.isArray(sentRows)) throw new Error("table rows missing");
+		expect(sentRows.length).toBeGreaterThan(100_000);
+		expect(sentRows).toEqual(rows.slice(0, sentRows.length));
+		expect(h.errors).toEqual([]);
+	});
+
 	it("keeps the surface when the terminal rejects a single op", async () => {
 		const block = new Probe(md("kept"));
 		harness = await TspHarness.start(tui => tui.addChild(block));

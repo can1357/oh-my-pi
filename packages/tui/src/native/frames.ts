@@ -12,6 +12,11 @@ export const MAX_FRAME_BYTES = 24 * 1024 * 1024;
 
 const TEXT_KINDS: ReadonlySet<string> = new Set(TSP_TEXT_KINDS);
 
+/** Ends a prop value cut to fit one frame, so the cut reads as one. */
+const TRUNCATED_MARK = "\n… [truncated: too large for one Tern frame]";
+/** Room in an op for everything around its one large value (op name, id, key, quotes, mark). */
+const OP_OVERHEAD_BYTES = 1024;
+
 /** An op with its encoded JSON size in bytes. */
 export interface SizedOp {
 	readonly op: TspOp;
@@ -23,19 +28,70 @@ function sized(op: TspOp): SizedOp {
 }
 
 /**
- * Cut `text` into pieces of at most `units` UTF-16 code units, never between
- * a surrogate pair. JSON encodes a code unit in at most 6 bytes.
+ * End of the piece of `text` that starts at `at` and holds at most `units`
+ * UTF-16 code units, never between a surrogate pair. JSON encodes a code
+ * unit in at most 6 bytes.
  */
+function pieceEnd(text: string, at: number, units: number): number {
+	const end = Math.min(text.length, at + units);
+	const last = text.charCodeAt(end - 1);
+	return end < text.length && end - at > 1 && last >= 0xd800 && last <= 0xdbff ? end - 1 : end;
+}
+
 function textPieces(text: string, units: number): string[] {
 	const pieces: string[] = [];
 	for (let at = 0; at < text.length;) {
-		let end = Math.min(text.length, at + units);
-		const last = text.charCodeAt(end - 1);
-		if (end < text.length && end - at > 1 && last >= 0xd800 && last <= 0xdbff) end--;
+		const end = pieceEnd(text, at, units);
 		pieces.push(text.slice(at, end));
 		at = end;
 	}
 	return pieces;
+}
+
+/** Code units of the longest prefix of `text` whose JSON string encoding takes at most `bytes`. */
+function fittingPrefix(text: string, bytes: number): number {
+	let used = 2; // quotes
+	let i = 0;
+	while (i < text.length) {
+		const c = text.charCodeAt(i);
+		let cost = 3;
+		let width = 1;
+		if (c === 0x22 || c === 0x5c || c === 0x08 || c === 0x09 || c === 0x0a || c === 0x0c || c === 0x0d) cost = 2;
+		else if (c < 0x20) cost = 6;
+		else if (c < 0x80) cost = 1;
+		else if (c < 0x800) cost = 2;
+		else if (c >= 0xd800 && c <= 0xdfff) {
+			const next = text.charCodeAt(i + 1);
+			// A well-formed pair is 4 UTF-8 bytes; JSON escapes a lone surrogate as `\uXXXX`.
+			if (c <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+				cost = 4;
+				width = 2;
+			} else cost = 6;
+		}
+		if (used + cost > bytes) break;
+		used += cost;
+		i += width;
+	}
+	return i;
+}
+
+/**
+ * The longest leading part of a prop value that one `set` can carry within
+ * `budget`: a string's prefix (marked as cut), or an array's first elements.
+ * Undefined when no part fits (an object, or a first element over budget).
+ */
+function truncatedValue(value: unknown, budget: number): unknown {
+	if (typeof value === "string")
+		return value.slice(0, fittingPrefix(value, budget - OP_OVERHEAD_BYTES)) + TRUNCATED_MARK;
+	if (!Array.isArray(value)) return undefined;
+	let bytes = OP_OVERHEAD_BYTES;
+	let count = 0;
+	for (const item of value) {
+		bytes += Buffer.byteLength(JSON.stringify(item) ?? "null", "utf8") + 1;
+		if (bytes > budget) break;
+		count++;
+	}
+	return count > 0 ? value.slice(0, count) : undefined;
 }
 
 /**
@@ -43,12 +99,12 @@ function textPieces(text: string, units: number): string[] {
  * ops with the same effect: an `add` adds its node bare, then sets its props
  * (the primary text of a text kind by `text` appends) and adds its children;
  * `text` and `splice` send their string in pieces; a `set` sends one key at
- * a time. A single prop value that still cannot fit is dropped with a
- * warning, so the frame stays deliverable.
+ * a time. A single prop value no op can carry whole (a `diff`'s `text`, a
+ * `table`'s `rows`) is cut to its longest leading part that fits, with a
+ * warning; only a value with no such part (an object) is dropped.
  */
 export function boundOps(ops: readonly TspOp[], budget: number): SizedOp[] {
-	// Room for the op's JSON around its text piece (op name, id, quotes).
-	const units = Math.max(1, Math.floor((budget - 1024) / 6));
+	const units = Math.max(1, Math.floor((budget - OP_OVERHEAD_BYTES) / 6));
 	const out: SizedOp[] = [];
 	const push = (op: TspOp): void => {
 		const entry = sized(op);
@@ -101,7 +157,15 @@ export function boundOps(ops: readonly TspOp[], budget: number): SizedOp[] {
 					for (const key in props) push(["set", id, { [key]: props[key] }]);
 					return;
 				}
-				logger.warn("TSP: prop too large for one frame; dropped", { id, key: only, bytes: entry.bytes });
+				if (only === undefined) return;
+				const value = truncatedValue(props[only], budget);
+				const cut = value === undefined ? undefined : sized(["set", id, { [only]: value }]);
+				if (cut && cut.bytes <= budget) {
+					logger.warn("TSP: prop too large for one frame; truncated", { id, key: only, bytes: entry.bytes });
+					out.push(cut);
+				} else {
+					logger.warn("TSP: prop too large for one frame; dropped", { id, key: only, bytes: entry.bytes });
+				}
 				return;
 			}
 			default:
