@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { getThemeByName, setThemeInstance } from "../src/theme";
+import { getThemeByName } from "../src/theme";
 import type { DefaultToolRenderInput } from "../src/tools/default-renderer";
 import { describeDefaultToolExecution, formatDefaultToolExecution } from "../src/tools/default-renderer";
 import type { RenderResultOptions } from "../src/tools/renderer";
@@ -21,7 +21,6 @@ describe("generic fallback card", () => {
 	it("expands past 12 lines — Ctrl+O reveals the whole output", async () => {
 		const theme = await getThemeByName("dark");
 		if (!theme) throw new Error("theme unavailable");
-		setThemeInstance(theme);
 		// 40 numbered rows: well past both the 12-row expanded cap and the 4-row collapsed window.
 		const rows = Array.from({ length: 40 }, (_, i) => `row-${i}`);
 
@@ -36,8 +35,7 @@ describe("generic fallback card", () => {
 		expect(expanded).not.toMatch(/more lines/);
 	});
 
-	it("keeps a >64 KiB result whole in the native view — no pre-slice before the terminal clamp", async () => {
-		await getThemeByName("dark");
+	it("keeps a >64 KiB result whole in the native view — no pre-slice before the terminal clamp", () => {
 		// 100 KiB of newline-joined text: past the old 64 KiB construction-time cut.
 		const rows = Array.from({ length: 4096 }, (_, i) => `line-${i}-${"x".repeat(20)}`);
 		const output = `${rows.join("\n")}\n`;
@@ -55,5 +53,22 @@ describe("generic fallback card", () => {
 		expect(text).toBe(output.trimEnd());
 		expect(text?.length).toBeGreaterThan(64 * 1024);
 		expect(text?.endsWith(`line-4095-${"x".repeat(20)}`)).toBe(true);
+	});
+
+	it("routes JSON by size — the tree below 64 KiB, the lossless raw text above it", () => {
+		// describeJsonTree clips every string scalar at 2,000 chars and the whole tree
+		// at 200 rows, so a payload past that budget could never expand to as much as
+		// the raw view shows; it has to keep the raw path instead of the tree.
+		const small = JSON.stringify({ query: "tokyo", hits: [1, 2, 3] });
+		const smallChild = (describeDefaultToolExecution(mcpResult(small, true)).body ?? [])[0];
+		expect(smallChild !== undefined && "k" in smallChild && smallChild.k).toBe("tree");
+
+		const large = JSON.stringify({ blob: "x".repeat(100 * 1024) });
+		expect(large.length).toBeGreaterThan(64 * 1024);
+		const largeChild = (describeDefaultToolExecution(mcpResult(large, true)).body ?? [])[0];
+		expect(largeChild !== undefined && "k" in largeChild && largeChild.k).toBe("ansi");
+		const props = largeChild && "k" in largeChild ? largeChild.p : undefined;
+		const text = props && "text" in props ? props.text : undefined;
+		expect(text).toBe(large);
 	});
 });
