@@ -2039,7 +2039,12 @@ describe("ExtensionRunner", () => {
 					export default function(pi) {
 						process.env.MC_PROBE_RAISE = String(pi.setHandlerTimeout("context", 60_000));
 						process.env.MC_PROBE_SHORTEN = String(pi.setHandlerTimeout("context", 5));
-						process.env.MC_PROBE_SHUTDOWN = String(pi.setHandlerTimeout("session_shutdown", 60_000));
+						process.env.MC_PROBE_SHUTDOWN = String(pi.setHandlerTimeout("session_shutdown", 1));
+						pi.on("session_shutdown", async () => {
+							const { promise, resolve } = Promise.withResolvers();
+							setTimeout(resolve, 50);
+							await promise;
+						});
 						process.env.MC_PROBE_RESET = String(pi.setHandlerTimeout("context", undefined));
 					}
 				`,
@@ -2049,18 +2054,47 @@ describe("ExtensionRunner", () => {
 			testSetExtensionHandlerTimeoutMs(25);
 			testSetSessionShutdownHandlerTimeoutMs(3);
 			const loaded = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError(error => {
+				errors.push(error);
+			});
 			try {
 				// Lengthening is refused down to the ceiling, shortening is honoured, and
 				// teardown never exceeds its own cap. Reset reports the host default.
 				expect(process.env.MC_PROBE_RAISE).toBe("25");
 				expect(process.env.MC_PROBE_SHORTEN).toBe("5");
-				expect(process.env.MC_PROBE_SHUTDOWN).toBe("3");
+				expect(process.env.MC_PROBE_SHUTDOWN).toBe("1");
 				expect(process.env.MC_PROBE_RESET).toBe("25");
-				// Reset clears only the named event: the context request is gone while
-				// the untouched session_shutdown request remains, so a plugin cannot
-				// restore one budget by resetting another.
-				expect([...(loaded.extensions[0].handlerTimeouts ?? new Map())]).toEqual([["session_shutdown", 60_000]]);
+
+				// Reset isolation through dispatch, not storage: resetting `context`
+				// must leave the shutdown request in force, so the watchdog kills the
+				// 50 ms teardown handler at its retained 1 ms request — not at the
+				// 3 ms cap a no-request handler would get.
+				vi.useFakeTimers();
+				let settled = false;
+				const shutdown = runner.emit({ type: "session_shutdown" }).then(() => {
+					settled = true;
+				});
+				for (let tick = 0; tick < 10_000 && !settled; tick++) {
+					await Promise.resolve();
+					vi.advanceTimersByTime(1);
+				}
+				expect(settled).toBe(true);
+				await shutdown;
+				expect(errors).toContainEqual({
+					extensionPath,
+					event: "session_shutdown",
+					error: "handler timed out after 1ms",
+				});
 			} finally {
+				vi.useRealTimers();
 				delete process.env.MC_PROBE_RAISE;
 				delete process.env.MC_PROBE_SHORTEN;
 				delete process.env.MC_PROBE_SHUTDOWN;
