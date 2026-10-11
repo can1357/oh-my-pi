@@ -169,6 +169,18 @@ export function handlerTimeoutForEvent(eventType: string): number {
 }
 
 /**
+ * Events whose budgets exist for policy rather than convenience:
+ * `session_shutdown` (fire-and-forget teardown latency) and `tool_call`
+ * (the fail-closed pre-execution gate, #3948). The fallback key never moves
+ * their budgets, and a `setHandlerTimeout` request stays additionally within
+ * the event's own cap. One predicate for reporting, dispatch, and validation,
+ * so a new capped event cannot fork the copies.
+ */
+export function isPolicyCappedEvent(eventType: string): boolean {
+	return eventType === "session_shutdown" || eventType === "tool_call";
+}
+
+/**
  * The budget a dispatch path would use for this event under `settings` before
  * any `setHandlerTimeout` request. `tool_call` reads the user's
  * `extensionHandlers.toolCallTimeoutMs` (`emitToolCall` enforces exactly this),
@@ -212,7 +224,7 @@ export function configuredHandlerTimeoutCeiling(settings?: Settings): number {
  * pre-execution), not convenience.
  */
 export function fallbackHandlerTimeout(eventType: string, baseMs: number, settings?: Settings): number {
-	if (eventType === "session_shutdown" || eventType === "tool_call") return baseMs;
+	if (isPolicyCappedEvent(eventType)) return baseMs;
 	return Math.max(baseMs, configuredHandlerTimeoutCeiling(settings));
 }
 
@@ -1598,7 +1610,6 @@ export class ExtensionRunner {
 		// request the user's fallback key still raises the call-site budget when
 		// it is set above the built-in default (#11331's global fallback role).
 		const requestedMs = ext.handlerTimeouts?.get(event.type);
-		const policyCapped = event.type === "session_shutdown" || event.type === "tool_call";
 		const finalTimeoutMs =
 			requestedMs === undefined
 				? fallbackHandlerTimeout(event.type, timeoutMs, this.settings)
@@ -1606,7 +1617,7 @@ export class ExtensionRunner {
 						requestedMs,
 						configuredHandlerTimeoutCeiling(this.settings),
 						baseHandlerTimeoutForEvent(event.type, this.settings),
-						policyCapped,
+						isPolicyCappedEvent(event.type),
 					);
 		// `session_stop` carries its own signal on the event; `tool_call` receives
 		// the outer dispatch signal (loop request or wrapper execute) so an abort

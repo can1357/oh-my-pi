@@ -1356,8 +1356,11 @@ export class DefaultResourceLoader implements ResourceLoader {
 	 */
 	async __reloadExtensionsUnder(settings: Settings): Promise<LoadExtensionsResult> {
 		const result = await this.#loadExtensions(settings);
-		this.#extensionsResult = result;
-		return result;
+		// Mirror reload(): the caller's override callback injects or filters the
+		// extension set, so the rebound result must pass through it too, or an
+		// override silently vanishes on this path.
+		this.#extensionsResult = this.#options.extensionsOverride ? this.#options.extensionsOverride(result) : result;
+		return this.#extensionsResult;
 	}
 }
 

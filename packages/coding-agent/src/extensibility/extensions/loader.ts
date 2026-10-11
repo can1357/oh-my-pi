@@ -44,6 +44,7 @@ import {
 	baseHandlerTimeoutForEvent,
 	configuredHandlerTimeoutCeiling,
 	fallbackHandlerTimeout,
+	isPolicyCappedEvent,
 	resolveHandlerTimeoutMs,
 } from "./runner";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
@@ -306,7 +307,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			timeoutMs,
 			configuredHandlerTimeoutCeiling(this.settings),
 			baseMs,
-			event === "session_shutdown" || event === "tool_call",
+			isPolicyCappedEvent(event),
 		);
 		logger.info("Extension handler budget requested", {
 			extensionPath: this.extension.path,

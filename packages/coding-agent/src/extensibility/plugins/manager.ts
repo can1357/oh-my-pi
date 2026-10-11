@@ -13,6 +13,7 @@ import {
 	normalizePathForComparison,
 } from "@oh-my-pi/pi-utils";
 import { JSONC } from "bun";
+import { Settings } from "../../config/settings";
 import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { loadExtensions } from "../extensions/loader";
 import { refreshBunGitCache } from "./bun-git-cache";
@@ -147,9 +148,11 @@ interface RuntimePackageJson {
 export class PluginManager {
 	#runtimeConfig: PluginRuntimeConfig | null = null;
 	#cwd: string;
+	#settings?: Settings;
 
-	constructor(cwd: string = getProjectDir()) {
+	constructor(cwd: string = getProjectDir(), settings?: Settings) {
 		this.#cwd = cwd;
+		this.#settings = settings;
 	}
 
 	// ==========================================================================
@@ -443,7 +446,12 @@ export class PluginManager {
 		}
 
 		if (loadable.length > 0) {
-			const result = await loadExtensions(loadable, this.#cwd);
+			// Validation exercises the extension factory, so `setHandlerTimeout`'s
+			// return must reflect the ceiling the user configured — not the
+			// built-in default — or an extension that refuses to load under a
+			// lower budget rolls back an installation the user already authorised.
+			const settings = this.#settings ?? (await Settings.init({ cwd: this.#cwd }));
+			const result = await loadExtensions(loadable, this.#cwd, undefined, settings);
 			for (const failure of result.errors) {
 				errors.push(`${failure.path}: ${failure.error}`);
 			}
