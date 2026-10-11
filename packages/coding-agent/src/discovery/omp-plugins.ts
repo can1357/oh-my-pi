@@ -34,6 +34,8 @@ import {
 	createSourceMeta,
 	expandEnvVarsDeep,
 	loadFilesFromDir,
+	FILTER_KEYS,
+	parseMCPToolFilters,
 	parseRequestIdFormat,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -279,6 +281,8 @@ interface RawMcpServer {
 	enabled?: boolean;
 	timeout?: number;
 	requestIdFormat?: unknown;
+	enabledTools?: unknown;
+	disabledTools?: unknown;
 	instructions?: unknown;
 	command?: string;
 	args?: string[];
@@ -315,10 +319,11 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			logger.warn(`[omp-plugins] Invalid JSON in ${mcpPath}`);
 			continue;
 		}
-		const servers = expandEnvVarsDeep(parsed.mcpServers, {
+		const pluginRootEnv = {
 			CLAUDE_PLUGIN_ROOT: root.path,
 			OMP_PLUGIN_ROOT: root.path,
-		});
+		};
+		const servers = expandEnvVarsDeep(parsed.mcpServers, pluginRootEnv, FILTER_KEYS);
 		if (!servers || typeof servers !== "object" || Array.isArray(servers)) continue;
 
 		for (const [serverName, serverCfg] of Object.entries(servers)) {
@@ -330,10 +335,9 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			}
 			// Root relative command/cwd at the plugin's config directory, not the
 			// session cwd (MCP stdio spawning resolves relative values there).
+			// Expansion ran before path rooting, so a placeholder resolving to an
+			// absolute path is not mistaken for a relative one.
 			const rooted = resolvePluginStdioPaths({ command: cfg.command, cwd: cfg.cwd }, root.path);
-			// Report a dropped value, as the native and standalone loaders do: a
-			// typo would otherwise silently revert the id encoding or re-enable
-			// the server's instructions.
 			const requestIdFormat = parseRequestIdFormat(cfg.requestIdFormat);
 			if (requestIdFormat === undefined && cfg.requestIdFormat != null) {
 				logger.warn(
@@ -351,6 +355,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				...(cfg.enabled !== undefined && { enabled: cfg.enabled }),
 				...(cfg.timeout !== undefined && { timeout: cfg.timeout }),
 				...(requestIdFormat !== undefined && { requestIdFormat }),
+				...parseMCPToolFilters(serverName, cfg),
 				...(instructions !== undefined && { instructions }),
 				...(rooted.command !== undefined && { command: rooted.command }),
 				...(cfg.args !== undefined && { args: cfg.args }),

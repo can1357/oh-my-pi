@@ -10,6 +10,7 @@ import { describeMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "./
 import { createHttpTransport } from "./transports/http";
 import { LegacySseConnectionTimeoutError, createSseTransport } from "./transports/sse";
 import { createStdioTransport } from "./transports/stdio";
+import { applyMCPToolFilterWithDiagnostics } from "./tool-filter";
 import type {
 	MCPGetPromptParams,
 	MCPGetPromptResult,
@@ -247,10 +248,14 @@ export async function listTools(
 		cursor = result.nextCursor;
 	} while (cursor);
 
-	// Cache tools
-	connection.tools = allTools;
+	// Filter advertised tools at reception boundary
+	const { filtered, diagnostics } = applyMCPToolFilterWithDiagnostics(connection.name, allTools, connection.config);
 
-	return allTools;
+	// Cache tools
+	connection.tools = filtered;
+	connection.lastFilterDiagnostics = diagnostics;
+
+	return filtered;
 }
 
 /**

@@ -10,6 +10,7 @@ import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readMCPConfigFile } from "./config-writer";
+import { filterMCPTools } from "./tool-filter";
 import type { MCPConfigFile, MCPServerConfig } from "./types";
 
 /** Options for loading MCP configs */
@@ -47,6 +48,8 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		instructions: server.instructions,
 		auth: server.auth,
 		oauth: server.oauth,
+		enabledTools: server.enabledTools,
+		disabledTools: server.disabledTools,
 	};
 
 	if (transport === "stdio") {
@@ -247,6 +250,13 @@ export function extractExaApiKey(config: MCPServerConfig): string | undefined {
 /** Exa MCP tools already covered by the native Exa integration. */
 const NATIVE_EXA_MCP_TOOLS: Record<string, true> = { web_search_exa: true };
 
+// Case-sensitive: MCP tool names are case-sensitive and the native integration
+// provides only the lowercase spelling, so `WEB_SEARCH_EXA` is a distinct,
+// non-native tool and keeps the server mounted.
+function isNativeExaMcpTool(toolName: string): boolean {
+	return NATIVE_EXA_MCP_TOOLS[toolName] === true;
+}
+
 /**
  * Parse the comma-separated `tools` restriction from an Exa MCP config.
  * Returns `null` when the config does not restrict its tool set.
@@ -281,6 +291,32 @@ function getRequestedExaMcpTools(config: MCPServerConfig): string[] | null {
 	return tools.length > 0 ? tools : null;
 }
 
+/**
+ * Does this Exa server still contribute a tool the native integration lacks?
+ *
+ * The server is mounted for the tools native Exa does not provide, so it is
+ * kept exactly when the configured filters leave at least one of them
+ * reachable.
+ */
+function keepsExaMCPServer(config: MCPServerConfig): boolean {
+	const requested = getRequestedExaMcpTools(config);
+	const allowlist = config.enabledTools ?? [];
+	if (requested) {
+		const effective = filterMCPTools({
+			toolNames: requested,
+			enabledTools: allowlist,
+			disabledTools: config.disabledTools,
+		}).allowed;
+		return effective.some(tool => !isNativeExaMcpTool(tool));
+	}
+	if (allowlist.length === 0) {
+		const denylist = config.disabledTools ?? [];
+		if (denylist.length === 0) return false;
+		return true;
+	}
+	return allowlist.some(entry => !isNativeExaMcpTool(entry));
+}
+
 /** Result of filtering Exa MCP servers */
 export interface ExaFilterResult {
 	/** Configs with Exa servers removed */
@@ -306,19 +342,17 @@ export function filterExaMCPServers(
 	const exaApiKeys: string[] = [];
 
 	for (const [name, config] of Object.entries(configs)) {
+		let keep = true;
 		if (isExaMCPServer(name, config)) {
-			// Extract API key for the native Exa integration even when the MCP
-			// server is kept below for its extra tools.
+			// Extract the API key for the native Exa integration even when the
+			// MCP server is dropped below.
 			const apiKey = extractExaApiKey(config);
 			if (apiKey) {
 				exaApiKeys.push(apiKey);
 			}
-			const requested = getRequestedExaMcpTools(config);
-			const hasExtraTools = requested?.some(tool => !NATIVE_EXA_MCP_TOOLS[tool.toLowerCase()]) ?? false;
-			if (!hasExtraTools) {
-				continue;
-			}
+			keep = keepsExaMCPServer(config);
 		}
+		if (!keep) continue;
 		filtered[name] = config;
 		if (sources[name]) {
 			filteredSources[name] = sources[name];

@@ -17,6 +17,7 @@ import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
+import type { MCPServer } from "../capability/mcp";
 import {
 	MAIN_AGENT_RULE_NAME,
 	parseRuleAgents,
@@ -174,12 +175,106 @@ export function parseBoolean(value: unknown): boolean | undefined {
 }
 
 /**
+ * Coerce an MCP `enabled` value: booleans pass through, "true"/"1" and
+ * "false"/"0" (any case) coerce, everything else warns and stays undefined
+ * (fail-open). Takes the loader's already-expanded value — no second expansion
+ * pass, so a resolved value containing `${...}` is not resolved twice.
+ */
+export function parseMCPEnabled(serverName: string, value: unknown): boolean | undefined {
+	if (value === undefined || value === null) return undefined;
+	if (typeof value === "boolean") return value;
+	if (typeof value === "string") {
+		const lower = value.toLowerCase();
+		if (lower === "false" || lower === "0") return false;
+		if (lower === "true" || lower === "1") return true;
+		logger.warn(`MCP server "${serverName}": invalid enabled value "${value}", ignoring`);
+		return undefined;
+	}
+	logger.warn(`MCP server "${serverName}": invalid enabled type ${typeof value}, ignoring`);
+	return undefined;
+}
+
+/**
+ * Coerce an MCP `timeout` value: finite non-negative numbers and numeric
+ * strings pass; anything else warns and stays undefined (fail-open). Takes
+ * the loader's already-expanded value (see `parseMCPEnabled`).
+ */
+export function parseMCPTimeout(serverName: string, value: unknown): number | undefined {
+	if (value === undefined || value === null) return undefined;
+	if (typeof value === "number") {
+		if (Number.isFinite(value) && value >= 0) return value;
+		logger.warn(`MCP server "${serverName}": invalid timeout ${value}, ignoring`);
+		return undefined;
+	}
+	if (typeof value === "string") {
+		const parsed = Number(value);
+		if (value.length > 0 && Number.isFinite(parsed) && parsed >= 0) return parsed;
+		logger.warn(`MCP server "${serverName}": invalid timeout "${value}", ignoring`);
+		return undefined;
+	}
+	logger.warn(`MCP server "${serverName}": invalid timeout type ${typeof value}, ignoring`);
+	return undefined;
+}
+
+/**
  * Parse an MCP `requestIdFormat` value. Unrecognized values are dropped so a typo
  * degrades to the default integer ids rather than reaching a transport.
  */
 export function parseRequestIdFormat(value: unknown): MCPRequestIdFormat | undefined {
 	if (value === "string" || value === "number") return value;
 	return undefined;
+}
+/**
+ * Parse and validate an MCP `enabledTools` / `disabledTools` value: a strict
+ * array of non-empty strings. Strings are rejected (not CSV-split) so glob
+ * entries with commas like `"{create,delete}_*"` survive intact. Warns when
+ * the configured value is not a valid filter: non-array values (a typo like
+ * `"tool_a, tool_b"` or an object) would otherwise be silently dropped and
+ * the server would contribute ALL tools — the opposite of the allowlist
+ * intent, with no diagnostic. An empty array (`[]`) is valid and filters
+ * nothing (fail-open): it degrades to `undefined`, the same as an absent
+ * field, so the server contributes every tool. To exclude every tool, use
+ * `"*"` in `disabledTools`.
+ *
+ * Invalid values degrade to `undefined` (filter off) so a typo never breaks
+ * an otherwise usable server; the warning is the diagnostic.
+ */
+export function parseMCPToolFilterEntry(serverName: string, value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) {
+		if (value !== undefined) {
+			logger.warn(`MCP server "${serverName}": invalid tool filter value ${JSON.stringify(value)}, ignoring`);
+		}
+		return undefined;
+	}
+	const filtered = value.filter((item): item is string => typeof item === "string" && item.length > 0);
+	if (filtered.length === 0 && value.length > 0) {
+		// A non-empty array with no valid members degrades to "filter off"
+		// exactly like a non-array value: the server contributes EVERY tool —
+		// the allowlist's fail-open direction, so warn like the non-array case.
+		logger.warn(`MCP server "${serverName}": tool filter array has no valid entries, ignoring`, {
+			value,
+		});
+		return undefined;
+	}
+	return filtered.length > 0 ? filtered : undefined;
+}
+
+/**
+ * Parse both per-server tool filters in one step, for spreading into an
+ * `MCPServer` object: `...parseMCPToolFilters(name, config)`. Undefined
+ * members are omitted, so the spread adds only configured filters.
+ */
+export const FILTER_KEYS: ReadonlySet<string> = new Set(["enabledTools", "disabledTools"]);
+export function parseMCPToolFilters(
+	serverName: string,
+	config: { enabledTools?: unknown; disabledTools?: unknown },
+): Pick<MCPServer, "enabledTools" | "disabledTools"> {
+	const enabledTools = parseMCPToolFilterEntry(serverName, config.enabledTools);
+	const disabledTools = parseMCPToolFilterEntry(serverName, config.disabledTools);
+	return {
+		...(enabledTools !== undefined && { enabledTools }),
+		...(disabledTools !== undefined && { disabledTools }),
+	};
 }
 
 /**
@@ -560,8 +655,15 @@ function expandEnvVars(value: string, extraEnv?: Record<string, string>): string
 
 /**
  * Recursively expand environment variables in an object.
+ *
+ * `exclude` names server-config fields (tool filters) that stay literal:
+ * both callers pass the `mcpServers` map, so each child object is expanded
+ * as a server config with only its direct excluded fields skipped. A server
+ * _named_ `enabledTools`, or a nested `headers`/`env` key of that name,
+ * keeps its documented expansion — the exclusion never applies below the
+ * server-config level.
  */
-export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>): T {
+export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>, exclude?: ReadonlySet<string>): T {
 	if (typeof obj === "string") {
 		return expandEnvVars(obj, extraEnv) as T;
 	}
@@ -571,11 +673,28 @@ export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>):
 	if (obj !== null && typeof obj === "object") {
 		const result: Record<string, unknown> = {};
 		for (const [key, value] of Object.entries(obj)) {
-			result[key] = expandEnvVarsDeep(value, extraEnv);
+			if (exclude && value !== null && typeof value === "object" && !Array.isArray(value)) {
+				result[key] = expandServerConfig(value as Record<string, unknown>, extraEnv, exclude);
+			} else {
+				result[key] = expandEnvVarsDeep(value, extraEnv);
+			}
 		}
 		return result as T;
 	}
 	return obj;
+}
+
+/** Expand one server config, leaving excluded fields (tool filters) literal. */
+function expandServerConfig(
+	config: Record<string, unknown>,
+	extraEnv: Record<string, string> | undefined,
+	exclude: ReadonlySet<string>,
+): Record<string, unknown> {
+	const result: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(config)) {
+		result[key] = exclude.has(key) ? value : expandEnvVarsDeep(value, extraEnv);
+	}
+	return result;
 }
 
 /**

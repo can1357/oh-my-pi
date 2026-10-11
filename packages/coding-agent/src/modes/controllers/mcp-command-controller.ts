@@ -5,7 +5,7 @@
  */
 import * as path from "node:path";
 import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
-import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { clearCache as clearFsCache } from "../../capability/fs";
@@ -58,7 +58,7 @@ import type {
 	MCPServerConfig,
 	MCPServerConnection,
 } from "../../mcp/types";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { urlHyperlinkAlways } from "@oh-my-pi/pi-tui/render";
 import { copyToClipboard } from "../../utils/clipboard";
 import { isTimeoutError } from "../../utils/fetch-timeout";
@@ -1756,6 +1756,19 @@ export class MCPCommandController {
 				`  Tools: ${tools.length}`,
 			];
 
+			// Surface filter diagnostics: report excluded tool count and unmatched allowlist entries.
+			const diagnostics = connection.lastFilterDiagnostics;
+			if (diagnostics && (diagnostics.excluded > 0 || diagnostics.unmatched.length > 0)) {
+				lines.push("");
+				lines.push(`  Filter: excluded ${diagnostics.excluded} tool${diagnostics.excluded === 1 ? "" : "s"}.`);
+				for (const entry of diagnostics.unmatched) {
+					const sanitized = truncateToWidth(
+						replaceTabs(sanitizeText(entry)).replace(/[\r\n]+/g, " "),
+						TRUNCATE_LENGTHS.CONTENT,
+					);
+					lines.push(`    • "${sanitized}" matched no advertised tool (allowed list)`);
+				}
+			}
 			// Show tool names if there are any
 			if (tools.length > 0 && tools.length <= 10) {
 				lines.push("");

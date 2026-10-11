@@ -31,6 +31,7 @@ import type {
 	MCPToolCallResult,
 	MCPToolDefinition,
 } from "./types";
+import { sanitizeNamePart } from "./name-sanitize";
 import type { MCPContent } from "@oh-my-pi/pi-tui/tools/mcp";
 
 /** Reconnect callback: tears down a stale connection, optionally authorizing first. */
@@ -396,15 +397,6 @@ async function reconnectWithAbort(
  * "puppeteer_screenshot"), strips the redundant prefix to produce
  * "mcp__puppeteer_screenshot" instead of "mcp__puppeteer_puppeteer_screenshot".
  */
-function sanitizeMCPToolNamePart(value: string, fallback: string, keepDigits: boolean): string {
-	const sanitized = value
-		.toLowerCase()
-		.replace(keepDigits ? /[^a-z0-9_]+/g : /[^a-z_]+/g, "_")
-		.replace(/_+/g, "_")
-		.replace(/^_+|_+$/g, "");
-
-	return sanitized.length > 0 ? sanitized : fallback;
-}
 
 /**
  * Shared mint pipeline. `keepDigits` selects the sanitizer variant: the
@@ -414,8 +406,8 @@ function sanitizeMCPToolNamePart(value: string, fallback: string, keepDigits: bo
  * if the prefix-strip or cap rules change, the legacy alias changes with them.
  */
 function mintMCPToolName(serverName: string, toolName: string, keepDigits: boolean): string {
-	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server", keepDigits);
-	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool", keepDigits);
+	const sanitizedServerName = sanitizeNamePart(serverName, "server", { domain: "mint", keepDigits });
+	const sanitizedToolName = sanitizeNamePart(toolName, "tool", { domain: "mint", keepDigits });
 
 	// Strip redundant server name prefix from tool name if present
 	const prefixWithUnderscore = `${sanitizedServerName}_`;
@@ -533,7 +525,7 @@ export function canonicalMCPToolNameCandidates(name: string): string[] {
 	}
 	// The whole-suffix candidate has no boundary, so there is no minted fallback
 	// shape to reproduce: a suffix that sanitizes away is a dead end.
-	const sanitizedSuffix = sanitizeMCPToolNamePart(suffix, "", true);
+	const sanitizedSuffix = sanitizeNamePart(suffix, "", { domain: "mint", keepDigits: true });
 	if (sanitizedSuffix.length > 0) {
 		add(capMCPToolNameLength(`${MCP_TOOL_NAME_PREFIX}${sanitizedSuffix}`));
 	}

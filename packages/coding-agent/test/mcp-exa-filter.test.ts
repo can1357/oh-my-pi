@@ -97,4 +97,93 @@ describe("Exa MCP filtering", () => {
 
 		expect(Object.keys(result.configs)).toEqual(["exa"]);
 	});
+
+	test("keeps an unrestricted exa server whose allowlist selects a non-native tool", () => {
+		const configs: Record<string, MCPServerConfig> = {
+			exa: { type: "http", url: "https://mcp.exa.ai/mcp", enabledTools: ["web_fetch_exa"] },
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(Object.keys(result.configs)).toEqual(["exa"]);
+	});
+
+	test("filters an unrestricted exa server whose allowlist selects only native tools", () => {
+		const configs: Record<string, MCPServerConfig> = {
+			exa: { type: "http", url: "https://mcp.exa.ai/mcp", enabledTools: ["web_search_exa"] },
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(result.configs).toEqual({});
+	});
+
+	test("keeps an unrestricted exa server whose allowlist contains a glob", () => {
+		for (const glob of ["web_*", "web_search_*", "web_search_ex[a]", "*"]) {
+			const configs: Record<string, MCPServerConfig> = {
+				exa: { type: "http", url: "https://mcp.exa.ai/mcp", enabledTools: [glob] },
+			};
+			const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+			expect(Object.keys(result.configs)).toEqual(["exa"]);
+		}
+	});
+
+	test("keeps an exa server restricted only by a denylist", () => {
+		for (const disabledTools of [["web_search_exa"], ["*"], ["web_*"]]) {
+			const configs: Record<string, MCPServerConfig> = {
+				exa: { type: "http", url: "https://mcp.exa.ai/mcp", disabledTools },
+			};
+			const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+			expect(Object.keys(result.configs)).toEqual(["exa"]);
+		}
+	});
+
+	test("drops an exa server whose requested tools and filters leave no non-native tool", () => {
+		const cases: Record<string, MCPServerConfig> = {
+			nativeRequestedWithExtraAllow: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp?tools=web_search_exa",
+				enabledTools: ["web_fetch_exa"],
+			},
+			extraRequestedWithNativeAllow: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp?tools=web_fetch_exa",
+				enabledTools: ["web_search_exa"],
+			},
+			extraRequestedWithExtraDenied: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa",
+				disabledTools: ["web_fetch_exa"],
+			},
+		};
+		const result = filterExaMCPServers(cases, {
+			nativeRequestedWithExtraAllow: SOURCE,
+			extraRequestedWithNativeAllow: SOURCE,
+			extraRequestedWithExtraDenied: SOURCE,
+		});
+
+		expect(result.configs).toEqual({});
+	});
+
+	test("keeps an exa server whose requested tools and filters leave a non-native tool", () => {
+		const configs: Record<string, MCPServerConfig> = {
+			exa: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa",
+				disabledTools: ["web_search_exa"],
+			},
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(Object.keys(result.configs)).toEqual(["exa"]);
+	});
+
+	test("keeps a differently-cased native name, which the native integration does not provide", () => {
+		const configs: Record<string, MCPServerConfig> = {
+			exa: { type: "http", url: "https://mcp.exa.ai/mcp", enabledTools: ["WEB_SEARCH_EXA"] },
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(Object.keys(result.configs)).toEqual(["exa"]);
+	});
 });

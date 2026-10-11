@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added per-server `enabledTools`/`disabledTools` MCP tool filtering (literal names or globs, applied at reception so session, `/mcp test`, and cache agree) ([#6299](https://github.com/can1357/oh-my-pi/issues/6299))
 - `computer` elements gain `doubleClick()`, and using an element method or field on the array `win.find(…)` returns, in JavaScript, Python or `computer.run`, says to pick one element first instead of failing with "is not a function" or reading `undefined` ([#15312](https://github.com/can1357/oh-my-pi/pull/15312) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
