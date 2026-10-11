@@ -228,7 +228,7 @@ const GATEWAY_MODEL_KINDS: readonly ModelKind[] = [
 ];
 
 /**
- * Every registry model of a kind the gateway can route, bundled catalog order within each kind. `availableOnly`
+ * Every registry model of a kind the gateway can route (on-device `local-inference` runners excluded), bundled catalog order within each kind. `availableOnly`
  * restricts to models with usable auth (`getAvailable`) instead of the whole catalog (`getAll`).
  */
 export function gatewayRoutableModels(
@@ -237,7 +237,10 @@ export function gatewayRoutableModels(
 ): Model<Api>[] {
 	const models: Model<Api>[] = [];
 	for (const kind of GATEWAY_MODEL_KINDS) {
-		models.push(...(availableOnly ? registry.getAvailable(kind) : registry.getAll(kind)));
+		for (const model of availableOnly ? registry.getAvailable(kind) : registry.getAll(kind)) {
+			// On-device runners have no gateway route: every request for one answers 400.
+			if (model.api !== "local-inference") models.push(model);
+		}
 	}
 	return models;
 }
