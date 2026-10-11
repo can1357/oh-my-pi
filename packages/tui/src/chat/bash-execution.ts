@@ -16,7 +16,13 @@ import type { TruncationMeta } from "../tools/output-meta";
 import { resolveImageOptions } from "../render/render-utils";
 import { OutputPane } from "../render/output-pane";
 import { loadXtermTerminal, readTerminalRows, styleTerminalRow } from "../tools/terminal-output";
-import { getSixelLineMask, isSixelPassthroughEnabled, sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
+import {
+	createRawSixelExtractor,
+	getSixelLineMask,
+	isSixelPassthroughEnabled,
+	sanitizeWithOptionalSixelPassthrough,
+	type RawSixelSegment,
+} from "../render/sixel";
 import {
 	buildExecutionFrame,
 	buildStatusFooter,
@@ -43,6 +49,20 @@ const CHUNK_THROTTLE_MS = 50;
 const PTY_SCROLLBACK_ROWS = 4096;
 // Caps the unwritten PTY chunk backlog while xterm.write drains.
 const MAX_PTY_QUEUE_CHUNKS = 512;
+// Sixel payloads are retained for the final full replay read; this bounds the
+// retained set so a long PTY stream cannot grow it without limit.
+const MAX_PTY_SIXEL_SPANS = 256;
+
+/** One queued PTY replay unit: raw bytes, or a sixel payload held out of the vterm. */
+type PtyQueueUnit =
+	| { kind: "text"; text: string }
+	| { kind: "sixel"; payload: string; row: number };
+
+/** A sixel payload retained with the replay row it was emitted on. */
+interface PtySixelSpan {
+	row: number;
+	payload: string;
+}
 let nextBashExecutionId = 0;
 
 /** PTY size for `!` commands: the execution frame's inner content area. */
@@ -78,10 +98,14 @@ export class BashExecutionComponent extends Container {
 	#ptyMode = false;
 	#ptyTerminal?: XtermTerminalType;
 	#ptyLoadStarted = false;
-	#ptyQueue: string[] = [];
+	#ptyQueue: PtyQueueUnit[] = [];
 	#ptyWriting = false;
 	#ptyRefreshQueued = false;
 	#ptyReplayFinalized = false;
+	// Sixel passthrough: payloads are pulled out of the raw byte stream (the
+	// vterm swallows DCS strings) and stitched back onto their replay rows.
+	#ptySixelExtractor?: () => RawSixelSegment[];
+	#ptySixelSpans: PtySixelSpan[] = [];
 	#images: readonly ImageContent[] = [];
 	#showImages = true;
 	readonly #instanceId = nextBashExecutionId++;
@@ -255,13 +279,28 @@ export class BashExecutionComponent extends Container {
 		if (this.#status !== "running" && !this.#ptyWriting && this.#ptyQueue.length === 0) return;
 		this.#ptyMode = true;
 		this.#ptyReplayFinalized = false;
-		this.#ptyQueue.push(chunk);
+		if (isSixelPassthroughEnabled()) {
+			// Sixel never enters the vterm: it swallows DCS strings, so the payload
+			// would vanish from the replay rows. It is extracted here and stitched
+			// back onto the row it was emitted on in #refreshPtyLines.
+			this.#ptySixelExtractor ??= createRawSixelExtractor();
+			for (const segment of this.#ptySixelExtractor(chunk)) {
+				this.#ptyQueue.push(
+					segment.kind === "sixel"
+						? { kind: "sixel", payload: segment.payload, row: -1 }
+						: { kind: "text", text: segment.text },
+				);
+			}
+		} else {
+			this.#ptyQueue.push({ kind: "text", text: chunk });
+		}
 		if (this.#ptyQueue.length > MAX_PTY_QUEUE_CHUNKS) {
 			const firstPending = this.#ptyWriting ? 1 : 0;
 			this.#ptyQueue.splice(firstPending, this.#ptyQueue.length - firstPending - MAX_PTY_QUEUE_CHUNKS);
 			// A dropped chunk can split an in-flight DCS/OSC string; a stray string
 			// terminator is a no-op in the ground state but resynchronizes the parser.
-			this.#ptyQueue[firstPending] = `\u001b\\${this.#ptyQueue[firstPending]}`;
+			const next = this.#ptyQueue[firstPending];
+			if (next?.kind === "text") next.text = `\u001b\\${next.text}`;
 		}
 		if (!this.#ptyLoadStarted) {
 			this.#ptyLoadStarted = true;
@@ -283,14 +322,32 @@ export class BashExecutionComponent extends Container {
 	#drainPtyQueue(): void {
 		const terminal = this.#ptyTerminal;
 		if (!terminal || this.#ptyWriting) return;
-		const chunk = this.#ptyQueue.shift();
-		if (chunk === undefined) {
+		const unit = this.#ptyQueue.shift();
+		if (unit === undefined) {
 			if (this.#status !== "running") this.#finalizePtyOutput();
 			return;
 		}
+		if (unit.kind === "sixel") {
+			// The row is anchored by the preceding text write; a leading payload
+			// (nothing written yet) belongs to the cursor's row.
+			const row = unit.row >= 0 ? unit.row : terminal.buffer.active.baseY + terminal.buffer.active.cursorY;
+			this.#ptySixelSpans.push({ row, payload: unit.payload });
+			if (this.#ptySixelSpans.length > MAX_PTY_SIXEL_SPANS) this.#ptySixelSpans.shift();
+			// No write follows the payload, so the pending refresh (queued by the
+			// preceding text write) already ran without it.
+			this.#schedulePtyRefresh();
+			this.#drainPtyQueue();
+			return;
+		}
 		this.#ptyWriting = true;
-		terminal.write(chunk, () => {
+		terminal.write(unit.text, () => {
 			this.#ptyWriting = false;
+			// A payload queued behind this text belongs to the row the cursor
+			// now sits on: the vterm consumed the sequence without moving it.
+			const next = this.#ptyQueue[0];
+			if (next?.kind === "sixel" && next.row < 0) {
+				next.row = terminal.buffer.active.baseY + terminal.buffer.active.cursorY;
+			}
 			this.#schedulePtyRefresh();
 			this.#drainPtyQueue();
 		});
@@ -319,11 +376,39 @@ export class BashExecutionComponent extends Container {
 		const buffer = terminal.buffer.active;
 		const startRow = full ? 0 : Math.max(0, buffer.length - STREAMING_LINE_CAP);
 		const rows = readTerminalRows(terminal, startRow, buffer.length - startRow);
-		while (rows.length > 0 && rows[rows.length - 1] === "") rows.pop();
+		const spansByRow = this.#collectPtySixelSpans(startRow, buffer.length);
+		const lastPayloadRow = spansByRow.size > 0 ? Math.max(...spansByRow.keys()) : -1;
+		// Trailing blank rows are trimmed, but never past a row carrying a
+		// payload — an image is frequently the last thing a command emits.
+		let end = rows.length;
+		while (end > lastPayloadRow + 1 && end > 0 && rows[end - 1] === "") end--;
+		end = Math.max(end, lastPayloadRow + 1);
 		const base = theme.getFgAnsi("muted");
-		this.#outputLines = rows.map(row => (row ? styleTerminalRow(row, base) : ""));
+		this.#outputLines = Array.from({ length: end }, (_, index) => {
+			const row = index < rows.length ? rows[index]! : "";
+			const payload = spansByRow.get(index);
+			const styled = row ? styleTerminalRow(row, base) : "";
+			// Payload rows are emitted raw: the DCS bytes must survive the
+			// sanitize/styling pass so the terminal can rasterize the image.
+			return payload === undefined ? styled : `${styled}${payload}`;
+		});
 		this.#displayDirty = true;
 		this.#outputVersion++;
+	}
+
+	/** Groups retained payloads by replay row, keyed relative to `startRow`. */
+	#collectPtySixelSpans(startRow: number, rowCount: number): Map<number, string> {
+		const spansByRow = new Map<number, string>();
+		for (const span of this.#ptySixelSpans) {
+			// Front-trimming of an over-long scrollback shifts absolute row
+			// indices; a stale anchor clamps onto the last retained row so the
+			// payload is still emitted instead of lost.
+			const index = Math.min(span.row, rowCount - 1) - startRow;
+			// Above the streaming window: the final full read picks it up.
+			if (index < 0) continue;
+			spansByRow.set(index, `${spansByRow.get(index) ?? ""}${span.payload}`);
+		}
+		return spansByRow;
 	}
 
 	/** Final full-scrollback read; the terminal is disposed once lines are snapshotted. */

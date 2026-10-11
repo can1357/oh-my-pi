@@ -6,7 +6,7 @@ import type { Theme } from "../theme/theme";
 import type { Component } from "../tui";
 import { getPaddingX } from "../utils";
 import { truncateToVisualLines } from "../chrome/visual-truncate";
-import { getSixelLineMask } from "./sixel";
+import { getSixelLineMask, createSixelLineClassifier } from "./sixel";
 import { formatExpandHint, replaceTabs } from "./render-utils";
 
 /** Which side of an output stream remains visible when the pane is capped. */
@@ -157,6 +157,10 @@ export class OutputPane implements Component {
 	#options: OutputPaneOptions;
 	#lines: string[] = [];
 	#pendingCarriageReturn = false;
+	// Carries the DCS sequence state through streamed appends so a payload row
+	// that grew without its own start (the start arrived on an earlier row) is
+	// still recognized as a sixel row. Replaced wholesale by setLines.
+	#sixelClassifier = createSixelLineClassifier();
 	#text: Text;
 	#renderKey = "";
 	#native: NativeNode | undefined;
@@ -175,8 +179,12 @@ export class OutputPane implements Component {
 
 	/** Replace the complete output snapshot with caller-owned immutable rows. */
 	setLines(lines: readonly string[]): void {
+		// A fresh classifier: the incoming snapshot is a complete row stream, so
+		// sequence state must restart from its first row.
+		const classify = createSixelLineClassifier();
+		this.#sixelClassifier = classify;
 		const normalizeLine = this.#options.normalizeLine;
-		const normalized = normalizeLine ? lines.map(line => normalizeLine(line)) : [...lines];
+		const normalized = normalizeLine ? lines.map(line => (classify(line) ? line : normalizeLine(line))) : [...lines];
 		this.#lines = this.#clampStoredLines(normalized);
 		this.#pendingCarriageReturn = false;
 		this.invalidate();
@@ -317,7 +325,8 @@ export class OutputPane implements Component {
 
 	#replaceTail(text: string): void {
 		const normalizeLine = this.#options.normalizeLine;
-		const normalized = normalizeLine ? normalizeLine(text) : text;
+		// A payload row keeps its bytes: clamping it would cut the DCS sequence.
+		const normalized = normalizeLine && !this.#sixelClassifier(text) ? normalizeLine(text) : text;
 		if (this.#lines.length === 0) this.#lines.push(normalized);
 		else this.#lines[this.#lines.length - 1] = normalized;
 	}
