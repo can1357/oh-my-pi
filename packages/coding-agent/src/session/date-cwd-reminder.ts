@@ -11,6 +11,7 @@
  * for the lifetime of a session/day and refresh automatically at midnight.
  */
 import type { Context, Message, UserMessage } from "@oh-my-pi/pi-ai";
+import { formatLocalCalendarDate } from "@oh-my-pi/pi-tui/chrome/local-date";
 import { prompt } from "@oh-my-pi/pi-utils";
 import dateCwdReminderTemplate from "../prompts/system/date-cwd-reminder.md" with { type: "text" };
 
@@ -40,6 +41,11 @@ export function isDateCwdReminderControl(message: Message): boolean {
 	return reminderControls.has(message);
 }
 
+/** Extracts the historical calendar date (`YYYY-MM-DD`) from a user message timestamp. */
+function historicalDateOf(message: UserMessage): string {
+	return formatLocalCalendarDate(new Date(message.timestamp));
+}
+
 /**
  * Keeps volatile date/cwd reminders append-only across provider requests.
  *
@@ -58,29 +64,65 @@ export class DateCwdReminderInjector {
 	transform(context: Context, date: string, cwd: string): Context {
 		if (!context.systemPrompt || context.systemPrompt.length === 0 || context.messages.length === 0) return context;
 		const reminder = renderDateCwdReminder(date, cwd);
-		const messages = this.#inject(context.messages, reminder);
+		const messages = this.#inject(context.messages, reminder, cwd);
 		return messages === context.messages ? context : { ...context, messages };
 	}
 
-	#inject(messages: Message[], reminder: string): Message[] {
+	#inject(messages: Message[], reminder: string, cwd: string): Message[] {
 		const firstUser = messages.find((message): message is UserMessage => message.role === "user");
 		if (!firstUser) return messages;
 		if (this.#root !== firstUser) {
-			// A new first user turn: a compaction summary or a different conversation.
-			// Turns kept from the earlier history must keep the reminders they were
-			// sent with, or their bytes change under signed thinking; reminders on
-			// turns that are gone are dropped. The new root gets the current reminder.
+			const isFresh = this.#root === undefined;
 			const present = new Set<Message>(messages);
 			for (const message of this.#injections.keys()) {
 				if (!present.has(message)) this.#injections.delete(message);
 			}
 			this.#controls = this.#controls.filter(control => present.has(control.anchor));
 			this.#root = firstUser;
-			this.#currentReminder = reminder;
-			if (!this.#injections.has(firstUser) && !messageStartsWithReminder(firstUser, reminder)) {
-				this.#injections.set(firstUser, injectReminder(firstUser, reminder));
+
+			if (isFresh) {
+				const firstUserIndex = messages.indexOf(firstUser);
+				const isHistorical = messages.slice(firstUserIndex + 1).some(message => message.role === "assistant");
+				if (isHistorical) {
+					const rootReminder = renderDateCwdReminder(historicalDateOf(firstUser), cwd);
+					this.#currentReminder = rootReminder;
+					if (!this.#injections.has(firstUser) && !messageStartsWithReminder(firstUser, rootReminder)) {
+						this.#injections.set(firstUser, injectReminder(firstUser, rootReminder));
+					}
+					const lastAssistantIndex = messages.findLastIndex(message => message.role === "assistant");
+					let lastInjectedReminder = rootReminder;
+					for (let i = 0; i <= lastAssistantIndex; i++) {
+						const msg = messages[i]!;
+						this.#seen.add(msg);
+						if (msg.role === "user") {
+							const msgReminder = renderDateCwdReminder(historicalDateOf(msg), cwd);
+							if (msgReminder !== lastInjectedReminder) {
+								if (!this.#injections.has(msg) && !messageStartsWithReminder(msg, msgReminder)) {
+									this.#injections.set(msg, injectReminder(msg, msgReminder));
+								}
+								lastInjectedReminder = msgReminder;
+							}
+						}
+					}
+					this.#currentReminder = lastInjectedReminder;
+				} else {
+					this.#currentReminder = reminder;
+					if (!this.#injections.has(firstUser) && !messageStartsWithReminder(firstUser, reminder)) {
+						this.#injections.set(firstUser, injectReminder(firstUser, reminder));
+					}
+				}
+			} else {
+				// Compaction or conversation switch on an active injector:
+				// Retained turns keep whatever reminder they were sent with.
+				// The new root (e.g. compaction summary) gets the current reminder.
+				this.#currentReminder = reminder;
+				if (!this.#injections.has(firstUser) && !messageStartsWithReminder(firstUser, reminder)) {
+					this.#injections.set(firstUser, injectReminder(firstUser, reminder));
+				}
 			}
-		} else if (this.#currentReminder !== reminder) {
+		}
+
+		if (this.#currentReminder !== reminder) {
 			let newUser: UserMessage | undefined;
 			for (let index = messages.length - 1; index >= 0; index--) {
 				const candidate = messages[index]!;
