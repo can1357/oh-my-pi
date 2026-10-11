@@ -267,7 +267,7 @@ interface ComputerWindow extends ComputerInputTarget {
 	/** Menu paths take one title, an array of titles, or the titles as separate arguments: `select("File", "Export…")`. */
 	readonly menu: {
 		/** Inspect a menu path without activating the application. */
-		items(...path: string[] | [string[]]): Promise<ComputerMenuItem[]>;
+		items(...path: string[] | [path?: string | string[]]): Promise<ComputerMenuItem[]>;
 		/** Select one unambiguous enabled command using the window's native menu context. */
 		select(...path: string[] | [string[]]): Promise<void>;
 	};

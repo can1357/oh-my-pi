@@ -2071,6 +2071,8 @@ describe("expanded computer APIs", () => {
 					"items = await win.menu.items('File')",
 					"await win.menu.select(items[0]['path'])",
 					"await win.menu.select('File', 'Save')",
+					"await win.menu.select(path=['File', 'Save'])",
+					"print((await win.menu.items(path='File'))[0]['path'])",
 					"obs = await win.observe(silent=True)",
 					"await win.click(60, 30)",
 					"monitor = await computer.display('display-1')",
@@ -2090,8 +2092,10 @@ describe("expanded computer APIs", () => {
 			);
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toContain("1 display-1 False");
+			expect(result.output).toContain("['File', 'Save']");
 			expect(native.controlActive).toBe(false);
 			expect(native.operations.filter(operation => operation.startsWith("menu:"))).toEqual([
+				"menu:42:File/Save",
 				"menu:42:File/Save",
 				"menu:42:File/Save",
 			]);
@@ -2140,6 +2144,26 @@ describe("expanded computer APIs", () => {
 				).rejects.toThrow(`menu.select ${forms}; got ${got}`);
 			}
 			expect(native.operations).toHaveLength(2);
+
+			// Worker-side code may pass an optional path on as `undefined`, or a value JSON cannot show.
+			const transport = new MemoryTransport();
+			new ComputerWorkerCore(transport, () => native);
+			const root = await runWorker(
+				transport,
+				"menu-undefined",
+				"return (await (await desktop.window(42)).menu.items(undefined))[0].path",
+			);
+			expect(root.ok ? root.payload.returnValue : root.error).toEqual(["Save"]);
+			for (const [code, got] of [
+				["menu.select(1n)", "bigint"],
+				["menu.select((() => { const path = []; path.push(path); return path; })())", "an array"],
+			]) {
+				const result = await runWorker(transport, `menu-${got}`, `await (await desktop.window(42)).${code}`);
+				expect(result.ok ? undefined : result.error).toMatchObject({
+					isToolError: true,
+					message: `menu.select ${forms}; got ${got}`,
+				});
+			}
 		} finally {
 			await prelude.invoke({ action: "close" }, context);
 		}
@@ -2194,6 +2218,33 @@ describe("expanded computer APIs", () => {
 		]) {
 			const result = await runWorker(transport, `argument-${code}`, code);
 			expect(result.ok ? undefined : result.error).toMatchObject({ isToolError: true, message });
+		}
+		// A read-only run still reports the read-only refusal first.
+		const readOnly = await runWorker(transport, "argument-read-only", 'await desktop.ref("e1").setValue()', true);
+		expect(readOnly.ok ? undefined : readOnly.error.message).toBe(
+			"read-only run: 'setValue' requires read_only: false",
+		);
+		// The JavaScript facade's direct ref call checks the argument before the ref lookup too.
+		const session = toolSession();
+		const prelude = workerPrelude(session, native);
+		const context = { session, toolCallId: "argument-facade" };
+		const realm = createContext({
+			__omp_display__: () => {},
+			__omp_prelude__: async (_name: string, parameters: unknown) => {
+				const result = await prelude.invoke(parameters, context);
+				return { text: "", details: result.details };
+			},
+		});
+		runInContext(prelude.javascript, realm);
+		try {
+			await expect(runInContext('computer.ref("e1").setValue()', realm)).rejects.toThrow(
+				"setValue(value) requires a string, got undefined",
+			);
+			await expect(runInContext('computer.ref("e1").perform()', realm)).rejects.toThrow(
+				"perform(action) requires a non-empty string, got undefined",
+			);
+		} finally {
+			await prelude.invoke({ action: "close" }, context);
 		}
 		expect(native.calls).toEqual([]);
 	});

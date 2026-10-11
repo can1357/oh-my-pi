@@ -233,7 +233,16 @@ function menuPath(method: string, args: unknown[], options?: { allowEmpty?: bool
 	) {
 		return path;
 	}
-	const got = args.length === 0 ? "no path" : JSON.stringify(args.length === 1 ? args[0] : args);
+	let got = "no path";
+	if (args.length > 0) {
+		const shown = args.length === 1 ? args[0] : args;
+		try {
+			got = JSON.stringify(shown) ?? describeArgument(shown);
+		} catch {
+			// BigInt and cyclic values do not serialize; the type still tells the caller what it passed.
+			got = describeArgument(shown);
+		}
+	}
 	throw new ToolError(
 		`${method} requires a menu path of non-empty titles: "File", ["File", "Export…"] or "File", "Export…"; got ${got}`,
 	);
@@ -437,11 +446,13 @@ class El {
 /** `await ref("e5")` resolves the element; its methods chain on the handle and await the lookup first. */
 class ElRef implements PromiseLike<El> {
 	readonly ref: string;
+	readonly #getContext: RunContextAccessor;
 	readonly #lookup: () => Promise<El>;
 	#element?: Promise<El>;
 
-	constructor(ref: string, lookup: () => Promise<El>) {
+	constructor(ref: string, getContext: RunContextAccessor, lookup: () => Promise<El>) {
 		this.ref = ref;
+		this.#getContext = getContext;
 		this.#lookup = lookup;
 	}
 
@@ -471,7 +482,8 @@ class ElRef implements PromiseLike<El> {
 	}
 
 	async setValue(value: string): Promise<void> {
-		// Reject a bad argument before the ref lookup reaches the native addon.
+		// Reject a read-only run or a bad argument before the ref lookup reaches the native addon.
+		guardRun(this.#getContext(), "setValue");
 		validateString(value, "setValue(value)");
 		await (await this.#resolve()).setValue(value);
 	}
@@ -489,6 +501,7 @@ class ElRef implements PromiseLike<El> {
 	}
 
 	async perform(action: string): Promise<void> {
+		guardRun(this.#getContext(), "perform");
 		validateString(action, "perform(action)", { nonEmpty: true });
 		await (await this.#resolve()).perform(action);
 	}
@@ -645,9 +658,13 @@ class Win {
 
 	get menu() {
 		return {
-			items: async (...path: string[] | [string[]]): Promise<MenuItem[]> => {
+			items: async (...path: string[] | [path?: string | string[]]): Promise<MenuItem[]> => {
 				const context = this.#getContext();
-				const segments = path.length === 0 ? undefined : menuPath("menu.items", path, { allowEmpty: true });
+				// An omitted path, or one passed on as `undefined`, lists the top-level menus.
+				const segments =
+					path.length <= 1 && path[0] === undefined
+						? undefined
+						: menuPath("menu.items", path, { allowEmpty: true });
 				return await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
 			},
 			select: async (...path: string[] | [string[]]): Promise<void> => {
@@ -685,7 +702,7 @@ class Win {
 
 	ref(ref: string): ElRef {
 		validateString(ref, "ref(ref)", { nonEmpty: true });
-		return new ElRef(ref, async () => {
+		return new ElRef(ref, this.#getContext, async () => {
 			const { signal } = this.#getContext();
 			return new El(this.#session, this.#getContext, await nativeCall(signal, () => this.#session.axNode(ref)));
 		});
@@ -1171,7 +1188,7 @@ export class ComputerWorkerCore {
 			},
 			ref: (ref: string): ElRef => {
 				validateString(ref, "ref(ref)", { nonEmpty: true });
-				return new ElRef(ref, async () => {
+				return new ElRef(ref, getContext, async () => {
 					const { signal } = getContext();
 					return el(await nativeCall(signal, () => session.axNode(ref)));
 				});

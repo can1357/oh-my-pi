@@ -36,7 +36,7 @@ describe("renderComputerCall", () => {
 				{ method: "ref", args: ["e5"] },
 				{ method: "setValue", args: ["todo"] },
 			]),
-		).toBe('return await (await desktop.ref("e5")).setValue("todo");');
+		).toBe('return await desktop.ref("e5").setValue("todo");');
 	});
 
 	it("classifies read-only chains by the terminal helper", () => {
