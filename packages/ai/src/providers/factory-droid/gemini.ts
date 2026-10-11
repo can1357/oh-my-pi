@@ -16,12 +16,11 @@ import { dereferenceJsonSchema, normalizeSchemaForFactoryDroid, toolWireSchema }
 import {
 	extractGoogleErrorMessage,
 	googleStreamChunkError,
+	GoogleTextBlocks,
 	mapGoogleUsage,
 	mapStopReasonString,
 	nextToolCallId,
-	pushBlockEndEvent,
 	SKIP_THOUGHT_SIGNATURE,
-	startTextOrThinkingBlock,
 } from "../google-shared";
 import type { GenerateContentResponse, Part } from "../google-types";
 import { transformMessages } from "../transform-messages";
@@ -116,7 +115,8 @@ const GOOGLE_APIS: Record<string, true> = {
 /**
  * Apply Factory's replay provenance before canonical normalization: only
  * signed, Google-origin thinking and Google-origin call signatures survive;
- * everything else is DROPPED (never demoted to visible text).
+ * everything else is DROPPED (never demoted to visible text). A text block
+ * keeps its signature only when this model signed it.
  *
  * Only Google-origin turns are stamped as the target, so `transformMessages`
  * keeps their surviving signatures verbatim instead of demoting/stripping them
@@ -129,6 +129,7 @@ const GOOGLE_APIS: Record<string, true> = {
 function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent">): Message {
 	if (message.role !== "assistant") return message;
 	const googleOrigin = GOOGLE_APIS[message.api] === true;
+	const sameModel = googleOrigin && message.provider === model.provider && message.model === model.id;
 	const content: AssistantMessage["content"] = [];
 	for (const block of message.content) {
 		if (block.type === "thinking") {
@@ -138,6 +139,8 @@ function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent"
 			}
 		} else if (block.type === "toolCall" && !googleOrigin && block.thoughtSignature) {
 			content.push({ ...block, thoughtSignature: undefined });
+		} else if (block.type === "text" && !sameModel && block.textSignature) {
+			content.push({ ...block, textSignature: undefined });
 		} else {
 			content.push(block);
 		}
@@ -154,7 +157,8 @@ function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent"
  *   redaction, malformed-call sanitation, missing/aborted tool results) after
  *   {@link adoptFactoryReplay} settled which reasoning may replay.
  * - User and developer turns become user contents; images ride as `inlineData`.
- * - Signed thinking replays as plain text parts carrying its signature.
+ * - Signed thinking replays as plain text parts carrying its signature, and
+ *   text carries the signature Gemini put on it.
  * - Tool calls replay as `functionCall` parts carrying their
  *   `thoughtSignature`; consecutive tool results group into ONE user content,
  *   because the proxy 400s when a call turn's response part count mismatches.
@@ -195,7 +199,7 @@ function toGeminiContents(
 			const parts: Part[] = [];
 			for (const block of message.content) {
 				if (block.type === "text" && block.text) {
-					parts.push({ text: block.text });
+					parts.push({ text: block.text, ...(block.textSignature && { thoughtSignature: block.textSignature }) });
 				} else if (block.type === "thinking" && block.thinkingSignature) {
 					parts.push({ text: block.thinking, thoughtSignature: block.thinkingSignature });
 				} else if (block.type === "toolCall") {
@@ -386,18 +390,11 @@ export function streamFactoryDroidGemini(
 
 			stream.push({ type: "start", partial: output });
 
-			let activeIndex = -1;
+			// Factory replays signed thinking as plain text, so summaries stay as received.
+			const textBlocks = new GoogleTextBlocks(output, stream, "verbatim");
 			let finishReason: string | undefined;
 			let blockReason: string | undefined;
 			const toolCallIndices: number[] = [];
-			const closeBlock = () => {
-				if (activeIndex < 0) return;
-				const block = output.content[activeIndex];
-				if (block.type === "thinking" || block.type === "text") {
-					pushBlockEndEvent(block, activeIndex, output, stream);
-				}
-				activeIndex = -1;
-			};
 
 			clearTimeout(firstEventTimer);
 			const chunks = iterateWithIdleTimeout(
@@ -432,7 +429,7 @@ export function streamFactoryDroidGemini(
 				const parts = chunk.candidates?.[0]?.content?.parts ?? [];
 				for (const part of parts) {
 					if (part.functionCall) {
-						closeBlock();
+						textBlocks.close();
 						const contentIndex = output.content.length;
 						const wireName = part.functionCall.name || "";
 						const toolCall: ToolCall = {
@@ -453,41 +450,13 @@ export function streamFactoryDroidGemini(
 						});
 						continue;
 					}
-					if (typeof part.text !== "string") continue;
-					if (part.thought === true) {
-						if (activeIndex >= 0 && output.content[activeIndex].type !== "thinking") closeBlock();
-						if (activeIndex < 0) {
-							activeIndex = output.content.length;
-							startTextOrThinkingBlock(true, output, stream);
-						}
-						const block = output.content[activeIndex] as { thinking: string; thinkingSignature?: string };
-						// The CLI keeps the FIRST non-empty signature per block.
-						if (!block.thinkingSignature && part.thoughtSignature) {
-							block.thinkingSignature = part.thoughtSignature;
-						}
-						block.thinking += part.text;
-						stream.push({
-							type: "thinking_delta",
-							contentIndex: activeIndex,
-							delta: part.text,
-							partial: output,
-						});
-					} else if (part.text.length > 0) {
-						if (activeIndex >= 0 && output.content[activeIndex].type !== "text") closeBlock();
-						if (activeIndex < 0) {
-							activeIndex = output.content.length;
-							startTextOrThinkingBlock(false, output, stream);
-						}
-						const block = output.content[activeIndex] as { text: string };
-						block.text += part.text;
-						stream.push({ type: "text_delta", contentIndex: activeIndex, delta: part.text, partial: output });
-					}
+					textBlocks.push(part);
 				}
 			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime !== undefined) output.ttft = firstTokenTime - startTime;
 
-			closeBlock();
+			textBlocks.close();
 			// A stream that reaches EOF without a finishReason (and without a
 			// promptFeedback block) was truncated, even when it already carried
 			// functionCall parts; fail it as retryable instead of finishing the turn.

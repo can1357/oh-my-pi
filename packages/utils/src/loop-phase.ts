@@ -56,6 +56,16 @@ export function currentLoopPhase(): string | undefined {
 	return stack[stack.length - 1];
 }
 
+/** Run `fn` under `label`. For an async `fn`, only its synchronous prefix (up to its first await) is labeled; label each continuation separately. */
+export function withLoopPhase<T>(label: string, fn: () => T): T {
+	pushLoopPhase(label);
+	try {
+		return fn();
+	} finally {
+		popLoopPhase();
+	}
+}
+
 /** Arm an attribution window starting at `start` (a deadline on `now`'s clock). Called with no arguments it disarms and clears. */
 export function resetLoopPhaseWindow(start = Number.POSITIVE_INFINITY, now: () => number = defaultClock): void {
 	windowStart = segmentStart = start;

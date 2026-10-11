@@ -39,7 +39,7 @@ import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments"
 import { ToolAbortError } from "./tool-errors";
 
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
-import { cfgAskNotify, cfgAskTimeout } from "../modes/settings";
+import { cfgAskNotify, askTimeoutMs } from "../modes/settings";
 import { renderAttachmentSourceNotice } from "../session/attachment-source-notice";
 import { cfgSpeechEnabled } from "../tts/settings";
 import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
@@ -741,9 +741,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		// Determine timeout based on settings and plan mode
 		const planModeEnabled = this.session.getPlanModeState?.()?.enabled ?? false;
-		// `ask.timeout` is in seconds (0 = disabled); convert to ms
-		const timeoutSeconds = cfgAskTimeout.get(this.session.settings);
-		const settingsTimeout = timeoutSeconds === 0 ? null : timeoutSeconds * 1000;
+		const settingsTimeout = askTimeoutMs(this.session.settings) ?? null;
 		const timeout = planModeEnabled ? null : settingsTimeout;
 
 		// Send notification if waiting and not suppressed

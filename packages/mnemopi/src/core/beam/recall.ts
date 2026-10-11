@@ -1,3 +1,4 @@
+import { popLoopPhase, pushLoopPhase, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { normalizedRecallWeights, polyphonicRecallEnabled, temporalHalflifeHours } from "../../config";
 import { hasCjk, matchesWordForm } from "../../util/regex";
 import { embedQuery } from "../embeddings";
@@ -923,35 +924,37 @@ export async function recall(
 		const derived = query.length > 0 ? await embedQuery(query) : null;
 		temporalOptions.queryEmbedding = derived === null ? null : Array.from(derived);
 	}
-	let weights = normalizedRecallWeights(
-		options.vecWeight ?? beam.config.vecWeight,
-		options.ftsWeight ?? beam.config.ftsWeight,
-		options.importanceWeight ?? beam.config.importanceWeight,
-	);
-	if (options.useIntent === true) {
-		const intent = classifyIntent(query);
-		weights = adjustWeights(weights[0], weights[1], weights[2], intent);
-	}
-	const useSynonyms = options.useSynonyms !== false;
-	const tokens = expandedTokens(query, useSynonyms);
-	const tokenGroups = expandedTokenGroups(query, useSynonyms);
-	const candidates = collectMemoryCandidates(beam, query, topK, temporalOptions);
-	const scored: RecallResult[] = [];
-	for (const candidate of candidates) {
-		const result = scoreCandidate(candidate, tokens, tokenGroups, weights, temporalOptions);
-		if (result !== null) scored.push(result);
-	}
-	scored.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
-	let finalResults = dedupCrossTierSummaryLinks(beam, dedupeResults(scored));
-	if (query.length > 0 && tokens.length >= 4 && finalResults.length > topK)
-		finalResults = diversifyByCoverage(finalResults, tokens, topK);
-	if (options.useMmr === true && finalResults.length > 1) {
-		finalResults = rerankRecallResults(finalResults, options.mmrLambda ?? 0.7, topK);
-	} else {
-		finalResults = finalResults.slice(0, topK);
-	}
-	if (temporalOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, temporalOptions);
-	return finalResults;
+	return withLoopPhase("mnemopi.recall", () => {
+		let weights = normalizedRecallWeights(
+			options.vecWeight ?? beam.config.vecWeight,
+			options.ftsWeight ?? beam.config.ftsWeight,
+			options.importanceWeight ?? beam.config.importanceWeight,
+		);
+		if (options.useIntent === true) {
+			const intent = classifyIntent(query);
+			weights = adjustWeights(weights[0], weights[1], weights[2], intent);
+		}
+		const useSynonyms = options.useSynonyms !== false;
+		const tokens = expandedTokens(query, useSynonyms);
+		const tokenGroups = expandedTokenGroups(query, useSynonyms);
+		const candidates = collectMemoryCandidates(beam, query, topK, temporalOptions);
+		const scored: RecallResult[] = [];
+		for (const candidate of candidates) {
+			const result = scoreCandidate(candidate, tokens, tokenGroups, weights, temporalOptions);
+			if (result !== null) scored.push(result);
+		}
+		scored.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+		let finalResults = dedupCrossTierSummaryLinks(beam, dedupeResults(scored));
+		if (query.length > 0 && tokens.length >= 4 && finalResults.length > topK)
+			finalResults = diversifyByCoverage(finalResults, tokens, topK);
+		if (options.useMmr === true && finalResults.length > 1) {
+			finalResults = rerankRecallResults(finalResults, options.mmrLambda ?? 0.7, topK);
+		} else {
+			finalResults = finalResults.slice(0, topK);
+		}
+		if (temporalOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, temporalOptions);
+		return finalResults;
+	});
 }
 
 function diversifyByCoverage(
@@ -1034,37 +1037,44 @@ export async function recallEnhanced(
 	let cache: QueryCache<RecallResult> | null = null;
 	let token = "";
 	let scope = "";
-	if (cacheEnabled) {
-		beam.caches.queryCache ??= new QueryCache<RecallResult>({
-			maxSize: ENHANCED_RECALL_CACHE_MAX_ENTRIES,
-			ttlSeconds: ENHANCED_RECALL_CACHE_TTL_SECONDS,
-		});
-		cache = beam.caches.queryCache;
-		// Explicit hooks invalidate on this beam's own writes; the token also catches writes
-		// no hook covers (sleep, graph ingest) and commits from other connections.
-		token = databaseWriteToken(beam);
-		if (beam.caches.queryCacheToken !== token) {
-			cache.invalidate();
-			beam.caches.queryCacheToken = token;
+	pushLoopPhase("mnemopi.recall");
+	try {
+		if (cacheEnabled) {
+			beam.caches.queryCache ??= new QueryCache<RecallResult>({
+				maxSize: ENHANCED_RECALL_CACHE_MAX_ENTRIES,
+				ttlSeconds: ENHANCED_RECALL_CACHE_TTL_SECONDS,
+			});
+			cache = beam.caches.queryCache;
+			// Explicit hooks invalidate on this beam's own writes; the token also catches writes
+			// no hook covers (sleep, graph ingest) and commits from other connections.
+			token = databaseWriteToken(beam);
+			if (beam.caches.queryCacheToken !== token) {
+				cache.invalidate();
+				beam.caches.queryCacheToken = token;
+			}
+			scope = enhancedRecallCacheScope(beam, topK, options, polyphonic);
+			const cached = cache.get(query, queryEmbedding, scope);
+			if (cached !== null) {
+				const results = structuredClone(cached) as RecallResult[];
+				if (countRecalls) countRecallsKeepingCache(beam, results, runOptions, token);
+				return results;
+			}
 		}
-		scope = enhancedRecallCacheScope(beam, topK, options, polyphonic);
-		const cached = cache.get(query, queryEmbedding, scope);
-		if (cached !== null) {
-			const results = structuredClone(cached) as RecallResult[];
-			if (countRecalls) countRecallsKeepingCache(beam, results, runOptions, token);
-			return results;
-		}
+	} finally {
+		popLoopPhase();
 	}
 
 	const results = polyphonic
 		? await polyphonicRecallEnhanced(beam, query, topK, runOptions)
 		: await linearRecallEnhanced(beam, query, topK, runOptions);
-	// A write committed while recall awaited may be missing from this ranking: skip the
-	// put and keep the stale token so the next lookup starts from an empty cache.
-	const cacheable = cache !== null && databaseWriteToken(beam) === token;
-	if (cacheable) cache?.put(query, structuredClone(results), queryEmbedding, scope);
-	if (countRecalls) countRecallsKeepingCache(beam, results, runOptions, cacheable ? token : null);
-	return results;
+	return withLoopPhase("mnemopi.recall", () => {
+		// A write committed while recall awaited may be missing from this ranking: skip the
+		// put and keep the stale token so the next lookup starts from an empty cache.
+		const cacheable = cache !== null && databaseWriteToken(beam) === token;
+		if (cacheable) cache?.put(query, structuredClone(results), queryEmbedding, scope);
+		if (countRecalls) countRecallsKeepingCache(beam, results, runOptions, cacheable ? token : null);
+		return results;
+	});
 }
 
 async function linearRecallEnhanced(
@@ -1084,14 +1094,16 @@ async function linearRecallEnhanced(
 		...enhancedOptions,
 		updateRecallCounts: false,
 	});
-	if (options.includeFacts === true) {
-		const facts = factRecall(beam, query, factRecallLimit(topK));
-		results.push(...facts);
-	}
-	results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
-	const finalResults = rerankRecallResults(results, options.mmrLambda ?? 0.7, topK);
-	if (enhancedOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, enhancedOptions);
-	return finalResults;
+	return withLoopPhase("mnemopi.recall", () => {
+		if (options.includeFacts === true) {
+			const facts = factRecall(beam, query, factRecallLimit(topK));
+			results.push(...facts);
+		}
+		results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+		const finalResults = rerankRecallResults(results, options.mmrLambda ?? 0.7, topK);
+		if (enhancedOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, enhancedOptions);
+		return finalResults;
+	});
 }
 
 /**

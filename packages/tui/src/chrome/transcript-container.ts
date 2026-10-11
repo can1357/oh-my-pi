@@ -1201,6 +1201,14 @@ export class TranscriptContainer extends Container {
 				continue;
 			}
 			this.#setAllocation(candidate.entry.component, 1, frame);
+			const emergency = (
+				candidate.entry.component as Component & FinalizableBlock
+			).renderTranscriptBlockEmergencyRow?.(width);
+			if (emergency !== undefined) {
+				output.push(emergency);
+				owners.push(candidate.entry.component);
+				continue;
+			}
 			const rendered = this.#renderEntry(candidate.entry, width).slice(
 				this.#projectedEmittedRowCount(candidate.entry, candidate.index, width),
 			);

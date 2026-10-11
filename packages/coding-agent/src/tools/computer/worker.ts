@@ -100,6 +100,8 @@ export type NativeDesktopSessionFactory = (
 ) => NativeDesktopSession | Promise<NativeDesktopSession>;
 
 type WindowFilter = { id?: string | number; app?: string; title?: string };
+/** Window listings are session-transcript payload; `window()` lookups search the whole native list. */
+const MAX_LISTED_WINDOWS = 48;
 type InputOptions = { takeover?: boolean };
 type ScreenshotOptions = { silent?: boolean };
 type ScreenshotResult = Pick<
@@ -1047,9 +1049,9 @@ export class ComputerWorkerCore {
 			},
 			windows: async (filter?: WindowFilter): Promise<DesktopWindow[]> => {
 				const { signal } = getContext();
-				return (await nativeCall(signal, () => session.listWindows())).filter(window =>
-					matchesFilter(window, filter),
-				);
+				return (await nativeCall(signal, () => session.listWindows()))
+					.filter(window => matchesFilter(window, filter))
+					.slice(0, MAX_LISTED_WINDOWS);
 			},
 			window: async (selector: string | number | WindowFilter): Promise<Win> => {
 				const { signal } = getContext();
@@ -1061,9 +1063,12 @@ export class ComputerWorkerCore {
 				if (matches.length === 0) throw new ToolError(`no window matches ${JSON.stringify(selector)}`);
 				if (matches.length > 1) {
 					const candidates = matches
+						.slice(0, MAX_LISTED_WINDOWS)
 						.map(window => `${window.id} ${window.app} ${JSON.stringify(window.title)}`)
 						.join("\n");
-					throw new ToolError(`multiple windows match ${JSON.stringify(selector)}:\n${candidates}`);
+					const omitted = matches.length - MAX_LISTED_WINDOWS;
+					const more = omitted > 0 ? `\n… ${omitted} more` : "";
+					throw new ToolError(`multiple windows match ${JSON.stringify(selector)}:\n${candidates}${more}`);
 				}
 				return makeWin(matches[0]!);
 			},

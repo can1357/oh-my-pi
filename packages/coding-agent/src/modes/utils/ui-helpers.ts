@@ -127,6 +127,7 @@ function waitForImmediate(): Promise<void> {
 type QueuedMessages = {
 	steering: string[];
 	followUp: string[];
+	liveSteered: number;
 };
 type AddMessageOptions = {
 	imageLinks?: readonly (string | undefined)[];

@@ -5,7 +5,7 @@
  */
 import * as path from "node:path";
 import * as url from "node:url";
-import { getProjectDir, logger, withTimeout } from "@oh-my-pi/pi-utils";
+import { getProjectDir, logger, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import { describeMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "./timeout";
 import { createHttpTransport } from "./transports/http";
 import { LegacySseConnectionTimeoutError, createSseTransport } from "./transports/sse";
@@ -70,7 +70,7 @@ async function defaultRequestHandler(method: string, _params: unknown): Promise<
 /**
  * Create a transport for the given server config.
  */
-async function createTransport(config: MCPServerConfig): Promise<MCPTransport> {
+async function createTransport(config: MCPServerConfig, signal?: AbortSignal): Promise<MCPTransport> {
 	const serverType = config.type ?? "stdio";
 
 	switch (serverType) {
@@ -79,7 +79,7 @@ async function createTransport(config: MCPServerConfig): Promise<MCPTransport> {
 		case "http":
 			return createHttpTransport(config as MCPHttpServerConfig);
 		case "sse":
-			return createSseTransport(config as MCPSseServerConfig);
+			return createSseTransport(config as MCPSseServerConfig, signal);
 		default:
 			throw new Error(`Unknown server type: ${serverType}`);
 	}
@@ -156,12 +156,14 @@ export async function connectToServer(
 		onRequest?: (method: string, params: unknown) => Promise<unknown>;
 	},
 ): Promise<MCPServerConnection> {
+	// `withTimeout` rejects a pre-aborted signal without observing `connect()`; never start one.
+	options?.signal?.throwIfAborted();
 	const timeoutMs = resolveMCPTimeoutMs(config.timeout);
 	const timeoutError = new MCPConnectionTimeoutError(name, timeoutMs);
 	let transport: MCPTransport | undefined;
 
 	const connect = async (): Promise<MCPServerConnection> => {
-		transport = await createTransport(config);
+		transport = await createTransport(config, options?.signal);
 		if (options?.onNotification) {
 			transport.onNotification = options.onNotification;
 		}
@@ -198,12 +200,14 @@ export async function connectToServer(
 	};
 
 	try {
+		// Race the whole handshake against the signal: the steps after `initialize` (the
+		// initialized notification, the SSE listener) do not observe it themselves.
 		if (!isMCPTimeoutEnabled(timeoutMs)) {
-			return await connect();
+			return await untilAborted(options?.signal, connect());
 		}
 		return await withTimeout(connect(), timeoutMs, timeoutError, options?.signal);
 	} catch (error) {
-		// If withTimeout rejected (timeout/abort) while connect() was still pending,
+		// If the timeout or the signal won while connect() was still pending,
 		// the transport may be alive with an open SSE listener. Close it.
 		if (transport) {
 			void transport.close().catch(() => {});

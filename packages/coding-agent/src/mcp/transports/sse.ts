@@ -84,14 +84,18 @@ export class LegacySseTransport implements MCPTransport {
 		return this.#config.url;
 	}
 
-	async connect(): Promise<void> {
+	/** `signal` cancels only the wait for the endpoint event; an established stream outlives it. */
+	async connect(signal?: AbortSignal): Promise<void> {
 		if (this.#connected) return;
 		if (this.#sseConnection) return;
 
 		if (this.#lifecycleController.signal.aborted) {
 			this.#lifecycleController = new AbortController();
 		}
+		signal?.throwIfAborted();
 		const connection = new AbortController();
+		const onAbort = () => connection.abort(signal?.reason);
+		signal?.addEventListener("abort", onAbort, { once: true });
 		const timeout = resolveMCPTimeoutMs(this.#config.timeout);
 		const operation = createMCPTimeout(timeout, this.#operationSignal(connection.signal));
 		const endpointReady = Promise.withResolvers<void>();
@@ -126,6 +130,8 @@ export class LegacySseTransport implements MCPTransport {
 				throw new LegacySseConnectionTimeoutError(timeout);
 			}
 			throw error;
+		} finally {
+			signal?.removeEventListener("abort", onAbort);
 		}
 	}
 
@@ -399,8 +405,11 @@ export class LegacySseTransport implements MCPTransport {
 }
 
 /** Create and connect a legacy HTTP+SSE transport. */
-export async function createSseTransport(config: MCPSseServerConfig): Promise<LegacySseTransport> {
+export async function createSseTransport(
+	config: MCPSseServerConfig,
+	signal?: AbortSignal,
+): Promise<LegacySseTransport> {
 	const transport = new LegacySseTransport(config);
-	await transport.connect();
+	await transport.connect(signal);
 	return transport;
 }

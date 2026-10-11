@@ -39,6 +39,8 @@ Selecting Mnemopi makes these discoverable tools available:
 
 Read the full content and metadata for a recalled result with `read memory://<memory-id>` before replacing it; clipped recall previews are not safe update payloads. The optional `learn` tool is also able to retain into Mnemopi when `autolearn.enabled: true`.
 
+The first-turn recall is part of the transcript's history and is stored in the session file as a `memory_recall` entry. Resuming, switching to, or forking the session sends that block unchanged instead of recalling again, so the system prompt (and the provider prompt cache built on it) stays the same across processes. If a recalled memory was since deleted, invalidated, expired, or its recall preview changed (including by `/memory clear` or `memory_edit`), the next turn started from a prompt carries a one-time hidden note listing what changed; the original block is not rewritten. The session recalls afresh after a context reset, from a different memory database, and on a branch that edits the first prompt. Recalled text stays in the session file even after the memory is deleted from the store.
+
 ## Settings
 
 | Setting                       | Default            | Description                                                                                                                                                                                                                                                                            |
