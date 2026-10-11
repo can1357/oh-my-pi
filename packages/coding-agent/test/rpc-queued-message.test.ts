@@ -18,7 +18,7 @@ describe("RPC queued-message editing", () => {
 	let directory: string;
 
 	/** `script` selects a scripted first model call; see the fixture's QUEUED_RPC_SCRIPT. */
-	function createClient(script?: "internal-steer" | "live-steer"): RpcClient {
+	function createClient(script?: "internal-steer" | "live-steer" | "todo-error"): RpcClient {
 		return new RpcClient({
 			command: [process.execPath, path.join(import.meta.dir, "fixtures", "queued-message-rpc-agent.ts")],
 			cwd: directory,
@@ -227,6 +227,51 @@ describe("RPC queued-message editing", () => {
 		} finally {
 			unsubscribeResults();
 			unsubscribe();
+		}
+	}, 30_000);
+
+	test("settles steered prompts after a failed todo leaves next-turn context pending", async () => {
+		client = createClient("todo-error");
+		await client.start();
+		const todoFailed = Promise.withResolvers<void>();
+		const settled = Promise.withResolvers<void>();
+		const results: RpcPromptResultFrame[] = [];
+		const unsubscribeEvents = client.onEvent(event => {
+			if (event.type === "message_end" && event.message.role === "toolResult" && event.message.toolName === "todo") {
+				if (event.message.isError) todoFailed.resolve();
+			}
+		});
+		const unsubscribeSession = client.onSessionSettled(() => settled.resolve());
+		const unsubscribeResults = client.onPromptResult(result => results.push(result));
+		try {
+			const firstId = await client.prompt("call todo");
+			await withTimeout(todoFailed.promise, 10_000, "Todo did not fail");
+			const steerId = await client.prompt("continue after the todo error", undefined, "steer");
+			await withTimeout(settled.promise, 10_000, "Steered turn never settled after failed todo");
+			const state = await client.getState();
+			expect(state).toMatchObject({
+				isStreaming: false,
+				isSettled: true,
+				queuedMessageCount: 0,
+				queuedMessages: { steering: [], followUp: [] },
+			});
+			expect(results.map(result => result.id).sort()).toEqual([firstId, steerId].sort());
+			const nextSettled = Promise.withResolvers<void>();
+			const unsubscribeNext = client.onSessionSettled(() => nextSettled.resolve());
+			try {
+				await client.prompt("new explicit turn");
+				await withTimeout(nextSettled.promise, 10_000, "Next explicit turn did not settle");
+				const messages = await client.getMessages();
+				expect(
+					messages.some(message => message.role === "custom" && message.customType === "todo-error-reminder"),
+				).toBe(true);
+			} finally {
+				unsubscribeNext();
+			}
+		} finally {
+			unsubscribeEvents();
+			unsubscribeSession();
+			unsubscribeResults();
 		}
 	}, 30_000);
 
