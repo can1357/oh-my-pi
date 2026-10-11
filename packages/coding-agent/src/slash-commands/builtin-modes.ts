@@ -33,6 +33,7 @@ import { handleSecurityCommand } from "./helpers/security";
 import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
 
 import {
+	cfgComputerBackgroundFallback,
 	cfgComputerDisplay,
 	cfgComputerEnabled,
 	cfgComputerMaxHeight,
@@ -216,11 +217,12 @@ function formatComputerUseStatus(session: AgentSession): string {
 		display: cfgComputerDisplay.get(session.settings),
 		maxWidth: cfgComputerMaxWidth.get(session.settings),
 		maxHeight: cfgComputerMaxHeight.get(session.settings),
+		backgroundFallback: cfgComputerBackgroundFallback.get(session.settings),
 	};
 	return [
 		`Computer use: ${enabled ? "enabled" : "disabled"}`,
 		`prelude: ${active ? "active" : "inactive"}`,
-		`configured: display=${configured.display}, maxWidth=${configured.maxWidth}, maxHeight=${configured.maxHeight}`,
+		`configured: display=${configured.display}, maxWidth=${configured.maxWidth}, maxHeight=${configured.maxHeight}, backgroundFallback=${configured.backgroundFallback}`,
 	].join(" · ");
 }
 

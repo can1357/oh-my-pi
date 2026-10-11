@@ -1,11 +1,17 @@
 /** Options shared by every native input helper. */
 interface ComputerInputOptions {
-	/** Omit for background input, or foreground takeover while control is acquired. Explicit false always stays background. */
+	/** Omit: background input (foreground while control is acquired); when the background route is unavailable, the tool reruns the call in takeover or refuses, per the user's setting, and says which. true: take over now, unless the user's setting refuses. false: background only, never rerun. */
 	takeover?: boolean;
 }
 
+/** Item path in a menu that a call opens, matched like `win.menu.select`, e.g. `["Add to", "Fonts"]`. */
+interface ComputerMenuOptions {
+	/** The call opens the menu, presses this item and returns with the menu closed; without it, a macOS background menu is closed and the call throws `InputFailed` listing its items. */
+	menu?: string[];
+}
+
 /** Options for pointer clicks. */
-interface ComputerClickOptions extends ComputerInputOptions {
+interface ComputerClickOptions extends ComputerInputOptions, ComputerMenuOptions {
 	button?: "left" | "right" | "middle";
 	count?: number;
 	modifiers?: string[];
@@ -194,12 +200,13 @@ interface ComputerElement {
 	bounds(): Promise<ComputerBounds | null>;
 	attributes(): Promise<Record<string, string>>;
 	actions(): Promise<string[]>;
-	perform(action: string): Promise<void>;
+	perform(action: string, options?: ComputerMenuOptions): Promise<void>;
 	/** Perform the element's native press action; needs no screenshot. */
-	press(): Promise<void>;
+	press(options?: ComputerMenuOptions): Promise<void>;
 	/** Click the element's center with native input; `count: 2` double-clicks. */
 	click(options?: ComputerClickOptions): Promise<void>;
 	doubleClick(options?: Omit<ComputerClickOptions, "count">): Promise<void>;
+	/** Off macOS this moves the user's keyboard focus; refused there under the user's `refuse` setting. */
 	focus(): Promise<void>;
 	parent(): Promise<ComputerElement | null>;
 	children(): Promise<ComputerElement[]>;
@@ -261,6 +268,7 @@ interface ComputerWindow extends ComputerInputTarget {
 	readonly pid?: number;
 	readonly bounds: ComputerBounds;
 	readonly focused: boolean;
+	/** Brings the window's app forward and takes the user's keyboard; refused under the user's `refuse` setting. */
 	raise(): Promise<void>;
 	/** Move this macOS window to the current Space without switching Spaces; recapture afterward. */
 	bringToCurrentSpace(): Promise<void>;
@@ -268,7 +276,7 @@ interface ComputerWindow extends ComputerInputTarget {
 	observe(options?: ComputerScreenshotOptions & ComputerAxOptions): Promise<ComputerObservationResult>;
 	/** Menu paths take one title, an array of titles, or the titles as separate arguments: `select("File", "Export…")`. */
 	readonly menu: {
-		/** Inspect a menu path without activating the application. */
+		/** Inspect a menu path; on macOS the items validate in the window's menu context, as `select` sees them. */
 		items(...path: string[] | [path?: string | string[]]): Promise<ComputerMenuItem[]>;
 		/** Select one unambiguous enabled command using the window's native menu context. */
 		select(...path: [string, ...string[]] | [string[]]): Promise<void>;
@@ -287,11 +295,19 @@ interface ComputerDesktop extends ComputerInputTarget {
 	readonly apps: {
 		/** Discover native application identities without requiring capture permission. */
 		list(options?: ComputerApplicationQuery): Promise<ComputerApplication[]>;
-		/** Launch an exact identity/path or unique name; deliberate activation is opt-in. */
-		open(idOrNameOrNativeAppPath: string, options?: { activate?: boolean }): Promise<ComputerApplication>;
+		/**
+		 * Launch an exact identity/path or unique name; deliberate activation is opt-in and refused under the user's `refuse`
+		 * setting. Returns the app with
+		 * `window`, its frontmost window: on macOS a running app without one is shown in the background, and the
+		 * first window gets up to 3 s to appear; null if none did (always null elsewhere).
+		 */
+		open(
+			idOrNameOrNativeAppPath: string,
+			options?: { activate?: boolean },
+		): Promise<ComputerApplication & { window: ComputerWindow | null }>;
 	};
 	readonly control: {
-		/** Requires a live human UI confirmation; headless/refused requests never acquire. */
+		/** Requires a live human UI confirmation; headless/refused requests never acquire, and the user's `refuse` setting refuses it. */
 		acquire(options: { reason: string }): Promise<{ active: boolean }>;
 		/** Revoke foreground permission and release native task ownership. */
 		release(): Promise<void>;

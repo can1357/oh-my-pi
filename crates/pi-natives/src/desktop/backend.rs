@@ -5,7 +5,7 @@ use image::RgbaImage;
 use super::{
 	ax::{AxHandle, AxProps, WalkBounds},
 	control::OperationToken,
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	frame::FrameGeometry,
 	keys::KeyName,
 	menus::DesktopMenuItem,
@@ -21,12 +21,18 @@ use super::{
 /// unsupported routes refuse, and detected focus side effects surface as
 /// potentially delivered input. `Foreground` is the explicit `takeover: true`
 /// escalation: it activates the target and restores state where the OS allows,
-/// without overwriting a newer user focus choice.
+/// without overwriting a newer user focus choice. `ForegroundReturnFocus`
+/// (`takeover` with `returnFocus`) is the host's own rerun of a refused
+/// background action: it hands focus back to the user's app even when the user
+/// typed or clicked meanwhile, and leaves it only on a third app the user
+/// switched to. Backends that cannot tell the two apart treat it as
+/// `Foreground`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeliveryMode {
 	#[default]
 	Background,
 	Foreground,
+	ForegroundReturnFocus,
 }
 
 impl DeliveryMode {
@@ -35,6 +41,14 @@ impl DeliveryMode {
 			Self::Foreground
 		} else {
 			Self::Background
+		}
+	}
+
+	/// Upgrades a foreground mode to return focus; background stays background.
+	pub(crate) const fn returning_focus(self, return_focus: bool) -> Self {
+		match self {
+			Self::Foreground if return_focus => Self::ForegroundReturnFocus,
+			mode => mode,
 		}
 	}
 }
@@ -147,6 +161,22 @@ pub trait Backend: Send {
 		mode: DeliveryMode,
 		token: &OperationToken,
 	) -> CoreResult<()>;
+	/// [`Self::pointer`] for a click that opens a menu, then chooses the item
+	/// at `path` in that menu before returning.
+	fn pointer_menu(
+		&mut self,
+		_target: &Target,
+		_ev: PointerEvent,
+		_path: &[String],
+		_frame: &FrameGeometry,
+		_mode: DeliveryMode,
+		_token: &OperationToken,
+	) -> CoreResult<()> {
+		Err(DesktopError::new(
+			ErrorCode::Unsupported,
+			"choosing a menu item in the click that opens the menu is available only on macOS",
+		))
+	}
 	fn type_text(
 		&mut self,
 		target: &Target,
@@ -209,6 +239,14 @@ pub trait AxBackend {
 	}
 	fn parent(&mut self, h: &AxHandle) -> CoreResult<Option<AxHandle>>;
 	fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()>;
+	/// [`Self::perform`] for an action that opens a menu, then chooses the item
+	/// at `path` in that menu before returning.
+	fn perform_menu(&mut self, _h: &AxHandle, _action: &str, _path: &[String]) -> CoreResult<()> {
+		Err(DesktopError::new(
+			ErrorCode::Unsupported,
+			"choosing a menu item in the action that opens the menu is available only on macOS",
+		))
+	}
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()>;
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()>;
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>>;

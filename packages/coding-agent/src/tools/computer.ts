@@ -18,6 +18,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { clampTimeout } from "./tool-timeouts";
 
 import {
+	cfgComputerBackgroundFallback,
 	cfgComputerDisplay,
 	cfgComputerEnabled,
 	cfgComputerMaxHeight,
@@ -254,6 +255,7 @@ function buildComputerSnapshot(session: ToolSession, readOnly: boolean): Compute
 			: configuredMaxHeight,
 		display: cfgComputerDisplay.get(session.settings),
 		readOnly,
+		backgroundFallback: cfgComputerBackgroundFallback.get(session.settings),
 	};
 }
 

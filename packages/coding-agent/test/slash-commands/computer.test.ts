@@ -4,13 +4,21 @@ import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-c
 import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 function acpRuntime(
-	options: { enabled?: boolean; available?: boolean; display?: string; maxWidth?: number; maxHeight?: number } = {},
+	options: {
+		enabled?: boolean;
+		available?: boolean;
+		display?: string;
+		maxWidth?: number;
+		maxHeight?: number;
+		backgroundFallback?: "takeover" | "refuse";
+	} = {},
 ) {
 	const settings = Settings.isolated({
 		"computer.enabled": options.enabled ?? false,
 		"computer.display": options.display ?? "active",
 		"computer.maxWidth": options.maxWidth ?? 1920,
 		"computer.maxHeight": options.maxHeight ?? 1200,
+		...(options.backgroundFallback ? { "computer.backgroundFallback": options.backgroundFallback } : {}),
 	});
 	const getEvalPreludes = vi.fn(() =>
 		cfgComputerEnabled.get(settings) && options.available !== false ? [{ name: "computer" }] : [],
@@ -27,7 +35,7 @@ function acpRuntime(
 }
 
 const enabledStatus =
-	"Computer use: enabled · prelude: active · configured: display=active, maxWidth=1920, maxHeight=1200";
+	"Computer use: enabled · prelude: active · configured: display=active, maxWidth=1920, maxHeight=1200, backgroundFallback=takeover";
 
 describe("/computer slash command", () => {
 	it("toggles a disabled session on without persisting", async () => {
@@ -65,10 +73,16 @@ describe("/computer slash command", () => {
 	});
 
 	it("reports configured values", async () => {
-		const h = acpRuntime({ enabled: true, display: "display-2", maxWidth: 1600, maxHeight: 900 });
+		const h = acpRuntime({
+			enabled: true,
+			display: "display-2",
+			maxWidth: 1600,
+			maxHeight: 900,
+			backgroundFallback: "refuse",
+		});
 		await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/computer status", h.runtime]);
 		expect(h.output).toHaveBeenCalledWith(
-			"Computer use: enabled · prelude: active · configured: display=display-2, maxWidth=1600, maxHeight=900",
+			"Computer use: enabled · prelude: active · configured: display=display-2, maxWidth=1600, maxHeight=900, backgroundFallback=refuse",
 		);
 	});
 

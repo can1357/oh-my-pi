@@ -14,6 +14,8 @@ export interface ComputerSessionSnapshot {
 	captureMaxHeight: number;
 	display: string;
 	readOnly: boolean;
+	/** `computer.backgroundFallback`: what a refused background input call does. */
+	backgroundFallback: "takeover" | "refuse";
 }
 
 /** Reply envelope for a session tool invoked by desktop JavaScript. */

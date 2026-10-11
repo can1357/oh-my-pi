@@ -664,6 +664,34 @@ export const cfgComputerMaxHeight = register({
 	},
 });
 
+export const cfgComputerBackgroundFallback = register({
+	id: "computer.backgroundFallback",
+	type: "enum",
+	values: ["takeover", "refuse"] as const,
+	default: "takeover",
+	ui: {
+		tab: "tools",
+		group: "Computer",
+		label: "Computer Background Fallback",
+		description:
+			"What window input does when its background route is unavailable: rerun it in takeover and return focus to your app (macOS; elsewhere plain takeover), or refuse, which also keeps the agent from taking the foreground itself",
+		options: [
+			{
+				value: "takeover",
+				label: "Takeover",
+				description:
+					"Briefly bring the target forward for that one call, then return focus to your app (on macOS even if you kept typing)",
+			},
+			{
+				value: "refuse",
+				label: "Refuse",
+				description:
+					"Fail the call; nothing takes over, and the agent's own takeover, raise, activating open and desktop input are refused too",
+			},
+		],
+	},
+});
+
 export const cfgImagesQuestionTimeoutMs = register({
 	id: "images.questionTimeoutMs",
 	type: "number",

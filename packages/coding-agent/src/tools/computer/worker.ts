@@ -17,10 +17,12 @@ import type {
 	DesktopCapabilities,
 	DesktopCapture,
 	DesktopDisplay,
+	DesktopFocusReturn,
 	DesktopPoint,
 	DesktopScreenState,
 	DesktopSessionOptions,
 	DesktopWindow,
+	OpenedApplication,
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
@@ -48,6 +50,9 @@ import {
 } from "./protocol";
 import { describeWindowMiss } from "./window-miss";
 
+/** A native input call; resolves to its takeover focus report when it took over. */
+type InputCall = Promise<DesktopFocusReturn | null | void>;
+
 /** Native desktop operations consumed by the script runtime. */
 export interface NativeDesktopSession {
 	readonly capabilities: DesktopCapabilities;
@@ -64,7 +69,7 @@ export interface NativeDesktopSession {
 	cancel(): void;
 	retire(): void;
 	listApplications(options?: ApplicationQuery): Promise<Application[]>;
-	openApplication(id: string, options?: ApplicationOpenOptions): Promise<Application>;
+	openApplication(id: string, options?: ApplicationOpenOptions): Promise<OpenedApplication>;
 	menuItems(target: string, path?: string[]): Promise<MenuItem[]>;
 	menuSelect(target: string, path: string[]): Promise<void>;
 	observe(
@@ -72,18 +77,18 @@ export interface NativeDesktopSession {
 		caps?: { maxWidth?: number; maxHeight?: number },
 		options?: AxOptions,
 	): Promise<NativeObservation>;
-	holdKeys(target: string, keys: string[], options: NativeHoldOptions): Promise<void>;
-	holdMouse(target: string, x: number, y: number, options: NativeHoldOptions): Promise<void>;
+	holdKeys(target: string, keys: string[], options: NativeHoldOptions): InputCall;
+	holdMouse(target: string, x: number, y: number, options: NativeHoldOptions): InputCall;
 	acquireControl(): Promise<DesktopControlState>;
 	releaseControl(): void;
 	controlState(): DesktopControlState;
 	bringToCurrentSpace(windowId: string): Promise<void>;
-	click(target: string, x: number, y: number, opts?: PointerOptions | null): Promise<void>;
-	moveMouse(target: string, x: number, y: number, opts?: PointerOptions | null): Promise<void>;
-	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): Promise<void>;
-	scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | null): Promise<void>;
-	typeText(target: string, text: string, opts?: PointerOptions | null): Promise<void>;
-	keyChord(target: string, keys: string[], opts?: PointerOptions | null): Promise<void>;
+	click(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
+	moveMouse(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
+	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): InputCall;
+	scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | null): InputCall;
+	typeText(target: string, text: string, opts?: PointerOptions | null): InputCall;
+	keyChord(target: string, keys: string[], opts?: PointerOptions | null): InputCall;
 	raiseWindow(windowId: string): Promise<void>;
 	axSnapshot(target: string, opts?: AxSnapshotOptions | null): Promise<{ text: string }>;
 	axQuery(target: string, query: AxQuery): Promise<AxNode[]>;
@@ -93,10 +98,10 @@ export interface NativeDesktopSession {
 	axAttributes(ref: string): Promise<Array<[string, string]>>;
 	axChildren(ref: string): Promise<AxNode[]>;
 	axParent(ref: string): Promise<AxNode | null | undefined>;
-	axPerform(ref: string, action: string): Promise<void>;
+	axPerform(ref: string, action: string, menu?: string[] | null): Promise<void>;
 	axSetValue(ref: string, value: string): Promise<void>;
 	axFocus(ref: string): Promise<void>;
-	axClick(ref: string, opts?: PointerOptions | null): Promise<void>;
+	axClick(ref: string, opts?: PointerOptions | null): InputCall;
 	close(): Promise<void>;
 }
 
@@ -114,12 +119,13 @@ type ScreenshotResult = Pick<
 	ComputerScreenshot,
 	"path" | "width" | "height" | "coordinateWidth" | "coordinateHeight" | "region" | "screenLocked"
 >;
-type ClickOptions = InputOptions & { button?: string; count?: number; modifiers?: string[] };
+type MenuOptions = { menu?: string[] };
+type ClickOptions = InputOptions & MenuOptions & { button?: string; count?: number; modifiers?: string[] };
 type DragOptions = InputOptions & { modifiers?: string[]; keys?: string[] };
 type ScrollOptions = InputOptions & { dx?: number; dy?: number };
 type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
 type HoldOptions = Pick<NativeHoldOptions, "duration" | "takeover">;
-type HoldMouseOptions = NativeHoldOptions;
+type HoldMouseOptions = Pick<NativeHoldOptions, "duration" | "button" | "keys" | "takeover">;
 type ObservationResult = ScreenshotResult & { ax: string; nodeCount: number; truncated: boolean };
 
 type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
@@ -184,15 +190,27 @@ async function nativeCall<T>(signal: AbortSignal, call: () => T | Promise<T>): P
 	}
 }
 
+/**
+ * Native pointer options, each read once from the model's object, so the
+ * `refuse` check and the native call see the same `takeover`.
+ */
 function pointerOptions(options?: ClickOptions | DragOptions | InputOptions): PointerOptions {
+	const { button, count, modifiers, keys, menu, takeover }: Partial<ClickOptions & DragOptions> = options ?? {};
 	const mapped: PointerOptions = {};
-	if (!options) return mapped;
-	if ("button" in options && options.button !== undefined) mapped.button = options.button;
-	if ("count" in options && options.count !== undefined) mapped.count = options.count;
-	if ("modifiers" in options && options.modifiers !== undefined) mapped.modifiers = options.modifiers;
-	if ("keys" in options && options.keys !== undefined) mapped.keys = options.keys;
-	if (options.takeover !== undefined) mapped.takeover = options.takeover;
+	if (button !== undefined) mapped.button = button;
+	if (count !== undefined) mapped.count = count;
+	if (modifiers !== undefined) mapped.modifiers = modifiers;
+	if (keys !== undefined) mapped.keys = keys;
+	if (menu !== undefined) mapped.menu = menuOption({ menu });
+	if (takeover !== undefined) mapped.takeover = takeover;
 	return mapped;
+}
+
+/** The item path of a `menu` option, checked before anything is sent. */
+function menuOption(options?: MenuOptions): string[] | undefined {
+	if (options?.menu === undefined) return undefined;
+	validateKeys(options.menu, "menu path");
+	return options.menu;
 }
 
 function chordKeys(chord: string | string[]): string[] {
@@ -285,6 +303,116 @@ function matchesFilter(window: DesktopWindow, filter?: WindowFilter): boolean {
 function guardRun(context: ComputerRunContext, method: string): void {
 	if (context.readOnly) throw new ToolError(`read-only run: '${method}' requires read_only: false`);
 	throwIfAborted(context.signal);
+}
+
+/** Native options for the tool's own takeover rerun of a refused background call. */
+type Fallback = { takeover: true; returnFocus: true };
+const FALLBACK: Fallback = { takeover: true, returnFocus: true };
+const BACKGROUND_UNAVAILABLE = "BackgroundUnavailable: ";
+/** A refusal's closing "nothing was sent", true of the refused background attempt only. */
+const UNSENT_CLAUSE = /(?:;|,? so) (?:nothing|no input) was sent$/;
+const RAISE_ROUTE = "Background input and screenshots reach a covered window, so no raise is needed.";
+
+/**
+ * Under `computer.backgroundFallback: "refuse"` the user's setting beats the
+ * model: a call that would bring an application forward or drive the user's
+ * own pointer or keyboard is refused before anything is sent. `effect` says
+ * what the call would do; `route` names the background way to the same end.
+ */
+function refuseForeground(context: ComputerRunContext, call: string, effect: string, route: string): void {
+	if (context.snapshot.backgroundFallback !== "refuse") return;
+	throw new ToolError(
+		`${BACKGROUND_UNAVAILABLE}${call} would ${effect}, and the user's computer.backgroundFallback setting is "refuse", which keeps the agent in the background; nothing was sent. ${route}`,
+	);
+}
+
+/** App names by pid from the window list, empty when the listing fails. */
+async function appNames(session: NativeDesktopSession, signal: AbortSignal): Promise<Map<number, string>> {
+	try {
+		const windows = await nativeCall(signal, () => session.listWindows());
+		return new Map(windows.flatMap(window => (window.pid === undefined ? [] : [[window.pid, window.app]])));
+	} catch (error) {
+		if (error instanceof ToolAbortError) throw error;
+		return new Map();
+	}
+}
+
+/**
+ * Says where focus ended after a fallback takeover, from native's
+ * WindowServer reading taken when the takeover finished.
+ */
+async function focusReport(
+	session: NativeDesktopSession,
+	signal: AbortSignal,
+	report: DesktopFocusReturn | null | void,
+	target?: number,
+): Promise<string> {
+	if (!report || report.frontPid == null) return "focus was not confirmed afterwards";
+	const { frontPid, previousPid, handedBack } = report;
+	const names = await appNames(session, signal);
+	const name = (pid: number) => names.get(pid) ?? `pid ${pid}`;
+	const front = name(frontPid);
+	if (previousPid == null) return `focus is on ${front}`;
+	if (frontPid === previousPid) return handedBack ? `focus returned to ${front}` : `focus is on ${front}`;
+	const user = name(previousPid);
+	if (handedBack) return `focus was handed back to ${user}, but ${front} is now front`;
+	if (frontPid === target) return `focus stayed on ${front}; it did not return to ${user}`;
+	return `focus is on ${front}; it did not return to ${user}`;
+}
+
+/**
+ * Sends one window input call. A model-supplied `takeover: true` is refused
+ * under `computer.backgroundFallback: "refuse"`. When the background route
+ * throws `BackgroundUnavailable` and the call did not set `takeover`, the
+ * setting decides: `takeover` reruns that call in takeover, handing focus back
+ * to the user's app, and reports it in the run output; `refuse` fails without
+ * taking over.
+ */
+async function sendInput(
+	session: NativeDesktopSession,
+	context: ComputerRunContext,
+	method: string,
+	takeover: boolean | undefined,
+	send: (fallback?: Fallback) => InputCall,
+	target?: number,
+): Promise<void> {
+	if (takeover === true) {
+		refuseForeground(
+			context,
+			`${method} with takeover: true`,
+			"bring its application to the front and take the user's keyboard and pointer",
+			"Call it without takeover: window input runs in the background.",
+		);
+	}
+	try {
+		await nativeCall(context.signal, () => send());
+		return;
+	} catch (error) {
+		if (takeover !== undefined || !(error instanceof ToolError) || !error.message.startsWith(BACKGROUND_UNAVAILABLE))
+			throw error;
+		const reason = error.message.slice(BACKGROUND_UNAVAILABLE.length);
+		if (context.snapshot.backgroundFallback === "refuse") {
+			throw new ToolError(
+				`${error.message}; the user's computer.backgroundFallback setting is "refuse", which keeps the agent in the background, so no takeover happened`,
+			);
+		}
+		if (!session.capabilities.takeover) {
+			throw new ToolError(`${error.message}; this desktop backend has no takeover, so no takeover happened`);
+		}
+		let report: DesktopFocusReturn | null | void;
+		try {
+			report = await nativeCall(context.signal, () => send(FALLBACK));
+		} catch (rerun) {
+			if (rerun instanceof ToolAbortError) throw rerun;
+			const message = rerun instanceof Error ? rerun.message : String(rerun);
+			throw new ToolError(`${method} fell back to takeover because ${reason}, and the takeover failed: ${message}`);
+		}
+		const focus = await focusReport(session, context.signal, report, target);
+		context.output.push({
+			type: "text",
+			text: `${method} ran in takeover because ${reason.replace(UNSENT_CLAUSE, "")}; the input was delivered, and ${focus}`,
+		});
+	}
 }
 
 async function captureScreenshot(
@@ -404,34 +532,61 @@ class El {
 		return (await nativeCall(signal, () => this.#session.axNode(this.ref))).actions ?? [];
 	}
 
-	async perform(action: string): Promise<void> {
+	async perform(action: string, options?: MenuOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "perform");
 		validateString(action, "perform(action)", { nonEmpty: true });
-		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action));
+		// The names native `axPerform` runs as `AXRaise` (its `action_name` mapping).
+		if (action.trim().toLowerCase() === "raise" || action === "AXRaise") {
+			refuseForeground(
+				context,
+				`perform(${JSON.stringify(action)})`,
+				"bring the window's application to the front",
+				RAISE_ROUTE,
+			);
+		}
+		const menu = menuOption(options);
+		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action, menu));
 	}
 
-	async press(): Promise<void> {
+	async press(options?: MenuOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "press");
-		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press"));
+		const menu = menuOption(options);
+		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press", menu));
 	}
 
 	async click(options?: ClickOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "click");
-		await nativeCall(context.signal, () => this.#session.axClick(this.ref, pointerOptions(options)));
+		const native = pointerOptions(options);
+		await sendInput(this.#session, context, "click", native.takeover, fallback =>
+			this.#session.axClick(this.ref, { ...native, ...fallback }),
+		);
 	}
 
 	async doubleClick(options?: Omit<ClickOptions, "count">): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "doubleClick");
-		await nativeCall(context.signal, () => this.#session.axClick(this.ref, pointerOptions({ ...options, count: 2 })));
+		const native = { ...pointerOptions(options), count: 2 };
+		await sendInput(this.#session, context, "doubleClick", native.takeover, fallback =>
+			this.#session.axClick(this.ref, { ...native, ...fallback }),
+		);
 	}
 
 	async focus(): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "focus");
+		// macOS sets AXFocused inside the app without activating it; Windows
+		// (UIA SetFocus) and Linux (AT-SPI grab_focus) move keyboard focus.
+		if (this.#session.capabilities.backend !== "quartz") {
+			refuseForeground(
+				context,
+				"focus()",
+				"move the user's keyboard focus to this element",
+				"Use setValue(), press() or another AX action, which need no focus.",
+			);
+		}
 		await nativeCall(context.signal, () => this.#session.axFocus(this.ref));
 	}
 
@@ -532,14 +687,14 @@ class ElRef implements PromiseLike<El> {
 		return (await this.#resolve()).actions();
 	}
 
-	async perform(action: string): Promise<void> {
+	async perform(action: string, options?: MenuOptions): Promise<void> {
 		guardRun(this.#getContext(), "perform");
 		validateString(action, "perform(action)", { nonEmpty: true });
-		await (await this.#resolve()).perform(action);
+		await (await this.#resolve()).perform(action, options);
 	}
 
-	async press(): Promise<void> {
-		await (await this.#resolve()).press();
+	async press(options?: MenuOptions): Promise<void> {
+		await (await this.#resolve()).press(options);
 	}
 
 	async click(options?: ClickOptions): Promise<void> {
@@ -595,79 +750,157 @@ class Win {
 		return captureScreenshot(this.#session, this.#getContext, this.id, options, region);
 	}
 
-	async click(x: number, y: number, options?: ClickOptions): Promise<void> {
+	/**
+	 * `guardRun` for an input call. Under `refuse`, input to the desktop or a
+	 * display target is refused: it drives the user's own pointer and keyboard.
+	 */
+	#guardInput(method: string): ComputerRunContext {
 		const context = this.#getContext();
-		guardRun(context, "click");
-		await nativeCall(context.signal, () => this.#session.click(this.id, x, y, pointerOptions(options)));
+		guardRun(context, method);
+		if (this.id === "desktop" || this.id.startsWith("display:")) {
+			refuseForeground(
+				context,
+				`${method} on the ${this.id} target`,
+				"drive the user's own pointer and keyboard",
+				"Send it to a window handle from computer.window(...), which takes input in the background.",
+			);
+		}
+		return context;
+	}
+
+	async click(x: number, y: number, options?: ClickOptions): Promise<void> {
+		const context = this.#guardInput("click");
+		const native = pointerOptions(options);
+		await sendInput(
+			this.#session,
+			context,
+			"click",
+			native.takeover,
+			fallback => this.#session.click(this.id, x, y, { ...native, ...fallback }),
+			this.pid,
+		);
 	}
 
 	async doubleClick(x: number, y: number, options?: Omit<ClickOptions, "count">): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "doubleClick");
-		await nativeCall(context.signal, () =>
-			this.#session.click(this.id, x, y, pointerOptions({ ...options, count: 2 })),
+		const context = this.#guardInput("doubleClick");
+		const native = { ...pointerOptions(options), count: 2 };
+		await sendInput(
+			this.#session,
+			context,
+			"doubleClick",
+			native.takeover,
+			fallback => this.#session.click(this.id, x, y, { ...native, ...fallback }),
+			this.pid,
 		);
 	}
 
 	async move(x: number, y: number): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "move");
-		await nativeCall(context.signal, () => this.#session.moveMouse(this.id, x, y, pointerOptions()));
+		const context = this.#guardInput("move");
+		await sendInput(
+			this.#session,
+			context,
+			"move",
+			undefined,
+			fallback => this.#session.moveMouse(this.id, x, y, { ...fallback }),
+			this.pid,
+		);
 	}
 
 	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "drag");
-		await nativeCall(context.signal, () =>
-			this.#session.drag(
-				this.id,
-				points.map(([x, y]) => ({ x, y })),
-				pointerOptions(options),
-			),
+		const context = this.#guardInput("drag");
+		const native = pointerOptions(options);
+		await sendInput(
+			this.#session,
+			context,
+			"drag",
+			native.takeover,
+			fallback =>
+				this.#session.drag(
+					this.id,
+					points.map(([x, y]) => ({ x, y })),
+					{ ...native, ...fallback },
+				),
+			this.pid,
 		);
 	}
 
 	async scroll(x: number, y: number, options: ScrollOptions = {}): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "scroll");
-		await nativeCall(context.signal, () =>
-			this.#session.scroll(this.id, x, y, options.dx ?? 0, options.dy ?? 0, pointerOptions(options)),
+		const context = this.#guardInput("scroll");
+		const dx = options.dx ?? 0;
+		const dy = options.dy ?? 0;
+		const native = pointerOptions(options);
+		await sendInput(
+			this.#session,
+			context,
+			"scroll",
+			native.takeover,
+			fallback => this.#session.scroll(this.id, x, y, dx, dy, { ...native, ...fallback }),
+			this.pid,
 		);
 	}
 
 	async type(text: string, options?: InputOptions): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "type");
+		const context = this.#guardInput("type");
 		validateString(text, "type(text)");
-		await nativeCall(context.signal, () => this.#session.typeText(this.id, text, pointerOptions(options)));
+		const native = pointerOptions(options);
+		await sendInput(
+			this.#session,
+			context,
+			"type",
+			native.takeover,
+			fallback => this.#session.typeText(this.id, text, { ...native, ...fallback }),
+			this.pid,
+		);
 	}
 
 	async press(chord: string | string[], options?: InputOptions): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "press");
+		const context = this.#guardInput("press");
 		const keys = chordKeys(chord);
 		if (!isStringList(keys) || keys.length === 0) {
 			throw new ToolError(
 				`press(chord) requires a key chord such as "cmd+shift+p" or ["cmd", "shift", "p"], got ${describeArgument(chord)}`,
 			);
 		}
-		await nativeCall(context.signal, () => this.#session.keyChord(this.id, keys, pointerOptions(options)));
+		const native = pointerOptions(options);
+		await sendInput(
+			this.#session,
+			context,
+			"press",
+			native.takeover,
+			fallback => this.#session.keyChord(this.id, keys, { ...native, ...fallback }),
+			this.pid,
+		);
 	}
 
 	async holdKeys(keys: string[], options: HoldOptions): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "holdKeys");
-		validateHold(options);
+		const context = this.#guardInput("holdKeys");
+		// One read of each option, so the `refuse` check and the native call agree.
+		const { duration, takeover } = { ...options };
+		validateHold({ duration, takeover });
 		validateKeys(keys, "keys");
-		await nativeCall(context.signal, () => this.#session.holdKeys(this.id, keys, options));
+		await sendInput(
+			this.#session,
+			context,
+			"holdKeys",
+			takeover,
+			fallback => this.#session.holdKeys(this.id, keys, { duration, takeover, ...fallback }),
+			this.pid,
+		);
 	}
 
 	async holdMouse(x: number, y: number, options: HoldMouseOptions): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "holdMouse");
-		validateHold(options);
-		if (options.keys !== undefined) validateKeys(options.keys, "keys");
-		await nativeCall(context.signal, () => this.#session.holdMouse(this.id, x, y, options));
+		const context = this.#guardInput("holdMouse");
+		const { duration, button, keys, takeover } = { ...options };
+		validateHold({ duration, takeover });
+		if (keys !== undefined) validateKeys(keys, "keys");
+		await sendInput(
+			this.#session,
+			context,
+			"holdMouse",
+			takeover,
+			fallback => this.#session.holdMouse(this.id, x, y, { duration, button, keys, takeover, ...fallback }),
+			this.pid,
+		);
 	}
 
 	async observe(options?: ScreenshotOptions & AxOptions): Promise<ObservationResult> {
@@ -721,6 +954,7 @@ class Win {
 	async raise(): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "raise");
+		refuseForeground(context, "raise()", "bring the window's application to the front", RAISE_ROUTE);
 		await nativeCall(context.signal, () => this.#session.raiseWindow(this.id));
 	}
 
@@ -884,6 +1118,9 @@ export class ComputerWorkerCore {
 			throwIfAborted(signal);
 			const session = await this.#ensureSession(message.session);
 			throwIfAborted(signal);
+			// Under `refuse` no foreground control stands, including a grant the
+			// model acquired before the user chose `refuse`.
+			if (message.session.backgroundFallback === "refuse" && session.controlState().active) session.releaseControl();
 			const runtime = this.#ensureRuntime(message.session);
 			runtime.setCwd(message.session.cwd);
 			const desktop = this.#createDesktopScope(session);
@@ -1137,17 +1374,37 @@ export class ComputerWorkerCore {
 					const { signal } = getContext();
 					return await nativeCall(signal, () => session.listApplications(options));
 				},
-				open: async (id: string, options?: ApplicationOpenOptions): Promise<Application> => {
+				open: async (
+					id: string,
+					options?: ApplicationOpenOptions,
+				): Promise<Application & { window: Win | null }> => {
 					const context = getContext();
 					guardRun(context, "apps.open");
 					validateString(id, "apps.open(id)", { nonEmpty: true });
-					return await nativeCall(context.signal, () => session.openApplication(id, options));
+					// One read of each option, so the `refuse` check and the native call agree.
+					const open = { ...options };
+					if (open.activate === true) {
+						refuseForeground(
+							context,
+							"apps.open with activate: true",
+							"bring the application to the front",
+							"Call apps.open without activate, which opens the application behind the user's.",
+						);
+					}
+					const opened = await nativeCall(context.signal, () => session.openApplication(id, open));
+					return { ...opened.application, window: opened.window ? makeWin(opened.window) : null };
 				},
 			},
 			control: {
 				acquire: async (options: { reason: string }): Promise<{ active: boolean }> => {
 					const context = getContext();
 					guardRun(context, "control.acquire");
+					refuseForeground(
+						context,
+						"control.acquire",
+						"hand the agent foreground control of the desktop",
+						"Window input needs no control; it runs in the background.",
+					);
 					strictObject(options, ["reason"], "control.acquire");
 					if (typeof options.reason !== "string" || !options.reason.trim())
 						throw new ToolError("control.acquire requires a non-empty reason");
