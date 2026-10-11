@@ -139,6 +139,8 @@ export interface LocateOptions {
 	directory?: boolean;
 	/** Return the path even when the entry does not exist yet (write/bash targets). Never creates anything. */
 	create?: boolean;
+	/** The caller needs a local file (`%load`, plan-mode write checks): report a miss now instead of deferring it to a remote resolve. */
+	localOnly?: boolean;
 }
 
 /**
@@ -196,6 +198,8 @@ export interface InternalResource {
 	 * resources. Mutable resources (e.g. local://) behave like editable files.
 	 */
 	immutable?: boolean;
+	/** Overrides {@link SchemeSpec.unbounded} for this resource (an MCP resource read through `skill://`). */
+	unbounded?: boolean;
 	/**
 	 * True when the resource is a directory listing rather than file content.
 	 * `search` refuses to grep such a resource when it has no `sourcePath` — a

@@ -3548,7 +3548,7 @@ export declare namespace ResponseInputItem {
 	}
 	/**
 	 * Changes reasoning effort for subsequent responses without touching the
-	 * request-level `reasoning.effort` (GPT-6 Astra). Must not be adjacent to
+	 * request-level `reasoning.effort` (GPT-6 family). Must not be adjacent to
 	 * another `configuration_update`.
 	 */
 	interface ConfigurationUpdate {

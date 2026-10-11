@@ -192,6 +192,7 @@ describe("CoralBricks wire contract", () => {
 				type: "thinking",
 				thinking: '1. The user asks "What is 2+2?"',
 				thinkingSignature: "reasoning_content",
+				summary: false,
 			},
 			{ type: "text", text: "4" },
 		]);

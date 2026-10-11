@@ -10,6 +10,10 @@ provider "github-copilot" {
 	// tool schemas and does not support the context-management beta or field.
 	disable-strict-tools #true
 	supports-context-management #false
+	// Responses items from an earlier connection answer `401 input item does
+	// not belong to this connection`: a resumed session rebuilds prior turns
+	// until its first response.
+	connection-bound-native-history #true
 	class "anthropic" {
 		revision ">=4 <4.6" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"

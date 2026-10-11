@@ -113,6 +113,12 @@ export class SessionAffinity implements SessionsApi {
 		return credential !== undefined && this.allows(provider, sessionId, credential);
 	}
 
+	permits(provider: string, sessionId: string, credentialId: number): boolean {
+		if (!this.isRestricted(provider, sessionId)) return true;
+		const entry = this.#pool.entries(provider).find(candidate => candidate.id === credentialId);
+		return entry !== undefined && this.allows(provider, sessionId, entry.credential);
+	}
+
 	/** Bounded per-provider session map, created on first use. */
 	static #sessionsFor<V>(maps: Map<string, LRUCache<string, V>>, provider: string): LRUCache<string, V> {
 		let sessions = maps.get(provider);

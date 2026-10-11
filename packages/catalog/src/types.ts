@@ -51,6 +51,8 @@ export const RUNNER_APIS = [
 	"web-search",
 	"typesafe",
 	"openrouter-decisions",
+	"openai-decisions",
+	"workers-ai-systemone",
 	"openai-images",
 	"openrouter-images",
 	"xai-tts",
@@ -65,6 +67,8 @@ export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "loc
 	"web-search": "search",
 	typesafe: "judge",
 	"openrouter-decisions": "judge",
+	"openai-decisions": "judge",
+	"workers-ai-systemone": "judge",
 	"openai-images": "image",
 	"openrouter-images": "image",
 	"xai-tts": "tts",
@@ -456,6 +460,8 @@ export interface OpenAICompat {
 	extraBody?: Record<string, unknown>;
 	/** Request-session header that should mirror the normalized prompt-cache key. Default: unset. */
 	promptCacheSessionHeader?: "x-grok-conv-id";
+	/** Request header carrying the conversation session id, independent of prompt caching. Default: unset. */
+	sessionHeader?: "x-litellm-session-id";
 	/** Whether chat-completions payloads should include provider-specific prompt-cache markers. */
 	cacheControlFormat?: "anthropic" | undefined;
 	/**
@@ -539,8 +545,8 @@ export interface OpenAICompat {
 	/**
 	 * Whether the Responses endpoint accepts `configuration_update` input items
 	 * that change `reasoning.effort` mid-conversation while the request-level
-	 * effort stays pinned for prompt caching (GPT-6 Astra). Default:
-	 * rule-detected (`true` for `gpt-6-astra` on any host, `false` otherwise).
+	 * effort stays pinned for prompt caching (GPT-6 family). Default:
+	 * rule-detected (`true` for GPT-6 models on any host, `false` otherwise).
 	 * Set `false` for custom `openai-responses` / `openai-codex-responses`
 	 * endpoints that reject the item type with HTTP 400; effort changes are then
 	 * sent as the top-level `reasoning.effort`.
@@ -738,12 +744,31 @@ export interface AnthropicCompat {
 	injectClaudeCodeInstruction?: boolean;
 	/** Strip image inputs before encoding (text-only serving of a multimodal id). */
 	stripImageInput?: boolean;
+	/**
+	 * Largest width or height a single image block may carry. The canonical
+	 * Anthropic API rejects anything larger with `At least one of the image
+	 * dimensions exceed max allowed size: 8000 pixels`, and the rejection
+	 * poisons every retry and model fallback because the block stays in
+	 * context, so the request builder downscales to this value first. Hosts
+	 * with a different image contract override it. Default: 8000.
+	 */
+	maxImageDimension?: number;
+	/**
+	 * Largest base64 payload a single image block may carry, in bytes. The
+	 * canonical Anthropic API measures the encoded string, not the decoded
+	 * bytes (`image exceeds 10 MB maximum: 14012300 bytes > 10485760 bytes`),
+	 * and an image inside {@link maxImageDimension} can still cross it, so
+	 * payload size is clamped on its own. Hosts with a different image
+	 * contract override it. Default: 10485760.
+	 */
+	maxImagePayloadBytes?: number;
 	/** Thinking-loop watchdog guard family applied to streamed reasoning. */
 	thinkingLoopGuard?: "gemini" | "deepseek" | "xai";
 	/**
 	 * Drop the enabled `thinking` config and replayed thinking blocks when the
 	 * conversation is not thinking-led (a proxy contract for non-interleaved
-	 * budget models). Default: false.
+	 * budget models), and replay history without thinking blocks on every turn
+	 * that sends `thinking: { type: "disabled" }`. Default: false.
 	 */
 	stripThinkingHistory?: boolean;
 	/**
@@ -753,10 +778,15 @@ export interface AnthropicCompat {
 	effortBeta?: boolean;
 	/**
 	 * Wire form of a disabled-thinking turn: omit the field, send
-	 * `{ type: "disabled" }`, or keep adaptive thinking. Unset keeps the
-	 * direct-provider behavior.
+	 * `{ type: "disabled" }`, keep adaptive thinking, or send
+	 * `{ type: "between_tools" }`. Unset keeps the direct-provider behavior.
 	 */
-	disabledThinking?: "omit" | "disabled" | "adaptive";
+	disabledThinking?: "omit" | "disabled" | "adaptive" | "between-tools";
+	/**
+	 * `output_config.effort` pinned on a `between_tools` turn. Unset leaves
+	 * the turn's effort untouched.
+	 */
+	betweenToolsEffort?: "low" | "medium" | "high";
 	/** The model is a fast-mode SKU: send `speed: "fast"` with the fast-mode beta. Default: false. */
 	fastMode?: boolean;
 }
@@ -803,6 +833,14 @@ export interface BedrockCompat {
 	 * choices to `auto` when this is false. Default: true.
 	 */
 	supportsForcedToolChoice?: boolean;
+	/**
+	 * Whether the endpoint accepts thinking-binding controls (`thinking.block_binding`,
+	 * the `thinking-binding-controls-2026-08-01` beta and the `/input_transformations`
+	 * response path) on prefix-bound models. Only consulted when
+	 * `thinking.prefixBinding` is set; `false` omits the controls while keeping the
+	 * local prefix-binding safeguards. Default: true.
+	 */
+	supportsThinkingBindingControls?: boolean;
 }
 
 /** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
@@ -818,6 +856,8 @@ export interface ResolvedBedrockCompat {
 	/** See {@link BedrockCompat.supportsSamplingParams}. */
 	supportsSamplingParams?: boolean;
 	supportsForcedToolChoice: boolean;
+	/** See {@link BedrockCompat.supportsThinkingBindingControls}. */
+	supportsThinkingBindingControls: boolean;
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms for hosts with no keepalive
 	 * events; 0 disables the idle watchdog. Undefined defers to
@@ -910,6 +950,7 @@ export interface ResolvedOpenAISharedCompat {
 	emptyLengthFinishIsContextError: boolean;
 	usesOpenAIToolCallIdLimit: boolean;
 	promptCacheSessionHeader?: OpenAICompat["promptCacheSessionHeader"];
+	sessionHeader?: OpenAICompat["sessionHeader"];
 	/**
 	 * Whether this model accepts explicit OpenAI prompt-cache breakpoints.
 	 * Built catalog models always materialize this false-by-default value;
@@ -990,6 +1031,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "emptyLengthFinishIsContextError"
 			| "usesOpenAIToolCallIdLimit"
 			| "promptCacheSessionHeader"
+			| "sessionHeader"
 			| "supportsPromptCacheBreakpoints"
 			| "promptCacheBreakpointTtl"
 			| "openRouterRouting"
@@ -1047,8 +1089,8 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	/**
 	 * Whether a `configuration_update` input item may change `reasoning.effort`
 	 * mid-conversation while the request-level effort stays byte-stable for
-	 * prompt caching. Rule-owned: GPT-6 Astra only; every other model rejects
-	 * the item type with 400.
+	 * prompt caching. Rule-owned: the GPT-6 family; earlier models do not
+	 * support the item type.
 	 */
 	supportsConfigurationUpdate: boolean;
 	/**
@@ -1074,6 +1116,13 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 * `PI_MUSE_STORE_RESPONSES`); stored runs retain prompts and outputs on the provider.
 	 */
 	storeResponses: boolean;
+	/**
+	 * Whether the host binds native history items (`encrypted_content`, item
+	 * ids) to the connection that issued them, so a new process must rebuild
+	 * prior turns from message content until its first successful response.
+	 * Rule-owned: GitHub Copilot.
+	 */
+	connectionBoundNativeHistory: boolean;
 	streamIdleTimeoutMs?: number;
 	vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
 	/** The model sits behind Vercel AI Gateway's Responses endpoint. */
@@ -1107,18 +1156,34 @@ export type ResolvedAnthropicCompat = Required<
 		| "bedrockMessagesApi"
 		| "effortBeta"
 		| "disabledThinking"
+		| "betweenToolsEffort"
 		| "stripThinkingHistory"
 		| "fastMode"
+		| "maxImageDimension"
+		| "maxImagePayloadBytes"
 	>
 > & {
 	/** Effort-beta override; undefined keeps the transport's legacy heuristic. */
 	effortBeta?: AnthropicCompat["effortBeta"];
 	/** Disabled-thinking wire form; undefined keeps the direct-provider behavior. */
 	disabledThinking?: AnthropicCompat["disabledThinking"];
-	/** Strip thinking history on non-thinking-led turns; undefined behaves as false. */
+	/** Effort pinned on `between_tools` turns; undefined leaves effort untouched. */
+	betweenToolsEffort?: AnthropicCompat["betweenToolsEffort"];
+	/** Strip thinking history on non-thinking-led and disabled-thinking turns; undefined behaves as false. */
 	stripThinkingHistory?: AnthropicCompat["stripThinkingHistory"];
 	/** Fast-mode SKU; undefined behaves as false. */
 	fastMode?: AnthropicCompat["fastMode"];
+	/**
+	 * Largest width or height a single image block may carry. Undefined defers
+	 * to the canonical Anthropic API limit applied by the request builder.
+	 */
+	maxImageDimension?: number;
+	/**
+	 * Largest base64 image payload a single block may carry, in bytes.
+	 * Undefined defers to the canonical Anthropic API limit applied by the
+	 * request builder.
+	 */
+	maxImagePayloadBytes?: number;
 	/** Thinking-loop watchdog guard family applied to streamed reasoning. */
 	thinkingLoopGuard?: AnthropicCompat["thinkingLoopGuard"];
 	/**
@@ -1618,7 +1683,7 @@ export interface Model<TApi extends Api = Api> {
 	isNew?: boolean;
 	/** Upstream marks this model as beta / preview quality. */
 	isBeta?: boolean;
-	/** Authenticated provider catalog marks this as the account's default model. */
+	/** Authenticated catalog marks this as the account's default; the startup pick prefers it over `default-model`. */
 	isProviderDefault?: boolean;
 	/** Upstream marks this model as one of its recommended picks. */
 	isRecommended?: boolean;

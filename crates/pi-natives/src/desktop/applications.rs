@@ -5,7 +5,10 @@ use std::path::Path;
 
 use napi_derive::napi;
 
-use super::error::{CoreResult, DesktopError};
+use super::{
+	error::{CoreResult, DesktopError},
+	types::DesktopWindow,
+};
 
 #[cfg(target_os = "linux")]
 #[path = "linux/applications.rs"]
@@ -42,6 +45,15 @@ pub struct ApplicationQuery {
 #[derive(Clone, Debug, Default)]
 pub struct ApplicationOpenOptions {
 	pub activate: Option<bool>,
+}
+
+/// An opened application and the window it shows. On macOS `window` is its
+/// frontmost window once one is on screen; other platforms report none.
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct OpenedApplication {
+	pub application: Application,
+	pub window:      Option<DesktopWindow>,
 }
 
 pub(crate) const fn supported() -> bool {
@@ -104,7 +116,7 @@ fn unique<'a>(
 	Ok(first)
 }
 
-pub(crate) fn open(input: &str, options: ApplicationOpenOptions) -> CoreResult<Application> {
+pub(crate) fn open(input: &str, options: ApplicationOpenOptions) -> CoreResult<OpenedApplication> {
 	if input.is_empty() || input.contains('\0') {
 		return Err(DesktopError::invalid_target(
 			"application identity must be nonempty and contain no NUL",
@@ -132,7 +144,12 @@ pub(crate) fn open(input: &str, options: ApplicationOpenOptions) -> CoreResult<A
 				))
 			})?
 		};
-		platform::open(app, options.activate.unwrap_or(false))
+		let activate = options.activate.unwrap_or(false);
+		#[cfg(target_os = "macos")]
+		return platform::open(app, activate);
+		#[cfg(not(target_os = "macos"))]
+		return platform::open(app, activate)
+			.map(|application| OpenedApplication { application, window: None });
 	}
 	#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 	{

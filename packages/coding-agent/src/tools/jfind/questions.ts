@@ -7,13 +7,13 @@
  * match the reference implementation (which serializes through sorted maps);
  * judgment quality was benchmarked against that exact layout.
  */
-import type { JsonValue, NoulQuestion } from "@oh-my-pi/pi-ai";
-import { prompt } from "@oh-my-pi/pi-utils";
-import nameQuestionTemplate from "../../prompts/tools/find-name-question.md" with { type: "text" };
-import passageQuestionTemplate from "../../prompts/tools/find-passage-question.md" with { type: "text" };
-import sketchQuestionTemplate from "../../prompts/tools/find-sketch-question.md" with { type: "text" };
+import { type JsonValue, judgeQuestions, type NoulQuestion, renderQuestion } from "@oh-my-pi/pi-ai";
+import questionFile from "../../prompts/judge/find.json" with { type: "json" };
 import { type Passage, plainContent } from "./passages";
 import { type FileEntry, renderTree } from "./tree";
+
+/** One template per request shape; its rubric rides in the state's `criteria`. */
+const QUESTIONS = judgeQuestions(questionFile);
 
 /** A judgment request: JSON state plus noul questions keyed by entry. */
 export interface Request {
@@ -72,10 +72,7 @@ export function nameBatch(project: string, query: string, entries: readonly File
 	entries.forEach((entry, i) => {
 		const key = entryKey(i);
 		const name = entry.rel.slice(entry.rel.lastIndexOf("/") + 1);
-		questions[key] = {
-			type: "noul",
-			instructions: prompt.render(nameQuestionTemplate, { key, name, query }).trim(),
-		};
+		questions[key] = renderQuestion(QUESTIONS.name, { key, name, query });
 	});
 	return {
 		state: {
@@ -110,7 +107,7 @@ export function sketchBatch(query: string, cards: readonly SketchCard[]): Reques
 		const key = passageKey(k);
 		files[card.fileKey] = card.rel;
 		passages[key] = [card.fileKey, card.sketch];
-		questions[key] = { type: "noul", instructions: prompt.render(sketchQuestionTemplate, { key }).trim() };
+		questions[key] = renderQuestion(QUESTIONS.sketch, { key });
 	});
 	return {
 		state: { criteria: SKETCH_CRITERIA, files: sorted(files), passages, search: query },
@@ -125,10 +122,7 @@ export function passageBatch(query: string, rel: string, passages: readonly Pass
 	passages.forEach((passage, k) => {
 		const key = passageKey(k);
 		entries[key] = plainContent(passage);
-		questions[key] = {
-			type: "noul",
-			instructions: prompt.render(passageQuestionTemplate, { key, query }).trim(),
-		};
+		questions[key] = renderQuestion(QUESTIONS.passage, { key, query });
 	});
 	return {
 		state: { criteria: PASSAGE_CRITERIA, file: rel, passages: entries, search: query },

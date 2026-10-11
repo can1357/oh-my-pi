@@ -14,6 +14,7 @@ const session = {
 		onPersistenceError: () => () => {},
 		onPersistenceNotice: () => () => {},
 	},
+	disableStopTimeTodoReminders() {},
 	setTextOutputCommitted() {},
 	async prompt() {
 		process.kill(process.pid, "SIGTERM");

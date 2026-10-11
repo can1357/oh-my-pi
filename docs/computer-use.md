@@ -44,7 +44,7 @@ const displays = await computer.displays();
 const win = await computer.window({ app: "Code" });
 await win.screenshot();
 const tree = await win.ax({ maxDepth: 6 });
-await (await win.ref("e12")).press();
+await win.ref("e12").press();
 await computer.capabilities();
 await computer.close();
 ```
@@ -56,7 +56,7 @@ displays = await computer.displays()
 win = await computer.window(app="Code")
 await win.screenshot(silent=True)
 tree = await win.ax(maxDepth=6)
-await (await win.ref("e12")).press()
+await win.ref("e12").press()
 await win.click(120, 48, button="right")
 ```
 
@@ -76,11 +76,13 @@ display(await computer.displays());
 display(await computer.capabilities());
 ```
 
-`computer.windows({ app?, title? })` returns window IDs, app/title, PID, logical bounds, and focus state. Select exactly one target with `computer.window(idOrFilter)`; an ambiguous filter throws and lists candidates. `computer.focusedWindow()` returns the current target or `null`.
+`computer.windows({ app?, title? })` returns window IDs, app/title, PID, logical bounds, and focus state for up to 48 matching windows. Select exactly one target with `computer.window(idOrFilter)`; an ambiguous filter throws and lists candidates. `computer.focusedWindow()` returns the current target or `null`.
 
 ### Applications and live display targets
 
-`computer.apps.list({ query?, runningOnly? })` returns native application IDs, names, paths, running state, and an observed PID when available. `computer.apps.open(idOrNameOrNativeAppPath, { activate? })` resolves an exact ID/path before a unique case-insensitive name; ambiguous names fail. Deliberate activation defaults off, but an application can still request focus itself.
+`computer.apps.list({ query?, runningOnly? })` returns native application IDs, names, paths, running state, and an observed PID when available. `computer.apps.open(idOrNameOrNativeAppPath, { activate? })` resolves an exact ID/path before a unique case-insensitive name; ambiguous names fail. It returns the application with `window`: its frontmost window as a window handle, or `null` when none appeared. Deliberate activation defaults off, but an application can still request focus itself.
+
+On macOS, `apps.open` waits up to 3 seconds for a launched application's first window. A running application that shows a window is not opened again, since Launch Services would send it the reopen event, which Notes and Contacts answer by coming to the front. One without a window on screen is shown behind the user's app: a hidden application (AppleScript launches applications hidden) is unhidden through AX, and any other gets Launch Services' reopen event without activation. Other platforms return `window: null`.
 
 `await computer.display(id | "active" | "all")` selects a live monitor target without rewriting configuration or resetting the worker. Each target owns its screenshot frame. `"active"` is resolved again for each full screenshot; subsequent input and zoom remain pinned to the delivered frame. Display-targeted keyboard input refuses a focused window on another monitor.
 
@@ -114,7 +116,13 @@ Window input defaults to background routes that do not move the user's pointer o
 
 Applications and window managers can react to background events by changing focus; background support is conditional, not an isolation boundary. macOS sends a target that brings itself to the front, or another app the action brings forward (Finder's ⌘O opening a file in TextEdit), back behind the user's application during a bounded observation window, even while the user types. If within 250 ms before that the user clicked anywhere, including in their own application, held ⌘ or ⌃, or typed into Spotlight or another app's panel, the app that came forward is treated as the user's choice and left in front. X11 detects focus changes and disables reuse of the affected virtual input pair rather than stealing focus back. A partial-delivery or restoration error means the action may already have happened: inspect its effects before retrying, including with takeover. A successful native enqueue alone does not prove an application acted.
 
-On macOS, background key presses, key-event typing (native text fields take AX insertion instead), held keys, left clicks and menu actions make the target window key only within its own application, which then considers itself active; the user's application stays frontmost and keeps keyboard focus. Input into an application that did not consider itself active is sent once it reports the activation: a document app records an AX edit only when it handles the next event, and a ⌘S queued right behind that event froze TextEdit and Script Editor. Keystrokes into an application with several windows are sent once it reports the target as its focused window, and otherwise throw `BackgroundUnavailable`; so does any of these actions on a non-key window of the frontmost application, or on a window whose application comes to the front before the input is sent.
+On macOS, background key presses, key-event typing (native text fields take AX insertion instead), held keys, left clicks and menu actions make the target window key only within its own application, which then considers itself active; the user's application stays frontmost and keeps keyboard focus. Input into an application that did not consider itself active is sent once it reports the activation: a document app records an AX edit only when it handles the next event, and a ⌘S queued right behind that event froze TextEdit and Script Editor. Keystrokes are sent once the application reports the target as its focused window, or, when it reports no focused window, the target is its only window; otherwise they throw `BackgroundUnavailable`. A sheet or panel attached to the target, such as Finder's Go to Folder, is a focused window of its own: typing and keys for the target throw `InvalidTarget` naming it instead of landing in it, and keys addressed to the sheet itself go out in the background, although its application leaves it out of its accessibility windows. `BackgroundUnavailable` also covers any of these actions on a non-key window of the frontmost application, or on a window whose application comes to the front before the input is sent.
+
+When keyboard focus sits in an overlay window attached to the target, such as Finder's inline rename field or a popover, background keys post only the activation, without the press that makes the target key, which would end that editing and send the keys elsewhere. The same holds with the popover itself as the target: Reminders reports the window its details popover is attached to as focused, so keys for the popover go out once the focused element is in it.
+
+A sheet's or popover's controls report the window it is attached to as their own, so element clicks aim at that window. Background clicks, hovers and scrolls at a point where a sheet or popover attached to the target is topmost go to that sheet or popover instead. When it sits on the application's focused window, a left click posts only the activation, without the press outside its frame that would close a popover or land in the window a sheet is attached to.
+
+A system Open or Save panel, and the Go to Folder sheet it opens, is a window of the app that showed it, but `openAndSavePanelService` draws its content and takes its input; keys and clicks posted to the app are dropped. On macOS, background keys, typing, clicks and scrolls for such a window go to that service once it reports focus in the panel, and throw `BackgroundUnavailable`, with nothing sent, while it does not.
 
 A macOS background shortcut with a modifier throws `InputFailed` when its application stops answering accessibility requests right after it: the shortcut was sent, but whether it took effect is unknown. Inspect the application before retrying.
 
@@ -134,19 +142,23 @@ await buttons[0].press();
 ```
 
 - `win.ax({ all?, maxDepth? })` returns a textual tree with `[ref=eN]` references; default depth is 24 and native snapshots visit at most 800 nodes.
-- `win.find({ role?, title?, value?, limit? })` matches case-insensitive substrings and returns up to `limit` elements (default 100, maximum 5000), from a walk bounded to 5000 nodes and depth 24.
-- `await win.ref("e5")`, `computer.elementAt(x, y)`, `computer.focusedElement()`, and `computer.ref("e5")` return live elements.
-- Elements expose `value`, `setValue`, `bounds`, `attributes`, `actions`, `perform`, `press`, `click`, `focus`, `parent`, and `children` operations.
+- `win.find({ role?, title?, value?, limit? })` matches case-insensitive substrings and returns an array of up to `limit` elements (default 100, maximum 5000), from a walk bounded to 5000 nodes and depth 24. Element methods and fields used on the array itself throw an error saying to pick one first: `const [el] = await win.find(...)`, or `el = (await win.find(...))[0]` in Python.
+- `await win.ref("e5")`, `computer.elementAt(x, y)`, `computer.focusedElement()`, and `computer.ref("e5")` return live elements. The handle `ref()` returns also takes element methods directly: `await win.ref("e5").click({ count: 2 })`.
+- Elements expose `value`, `setValue`, `bounds`, `attributes`, `actions`, `perform`, `press`, `click({ button?, count?, modifiers? })`, `doubleClick({ button?, modifiers? })`, `focus`, `parent`, and `children` operations.
 
 AX element actions need no screenshot. AX bounds and `computer.elementAt` use platform-native global desktop coordinates, not screenshot pixels: Windows uses physical desktop pixels; macOS uses logical points. Element clicks resolve the live element's owning window and refuse missing or ambiguous ownership rather than clicking an overlapping window. An element keeps the same reference across its window's AX snapshots and `find()` (desktop lookups such as `computer.focusedElement()` keep their own); a reference expires once its element is missing from the window's current and previous AX snapshots. An element whose role or label changes gets a new reference, and the old reference keeps naming the element it was read from until it expires the same way. On Windows, an element that takes over the UI Automation `RuntimeId` of one that is gone also gets a new reference, and an element whose `RuntimeId` cannot be read gets a new one on every read. The registry also caps references at 5000 and can evict a target's oldest generation earlier. Recover from `StaleRef` by taking a new AX snapshot and reacquiring the element.
 
 On macOS, `press()` requires the element to advertise `AXPress` in `actions()`; unsupported actions throw `AxFailed` even if the application would silently accept the request. Use `el.click()` for a coordinate click when the control has no press action.
 
+On macOS, a reference whose element the application has since removed throws `StaleRef` from every element operation, without waiting for the snapshots to expire it.
+
+On macOS, `press()`, `perform()` and `raise()` throw `AxUnconfirmed` when the action was requested but the app did not reply in time or messaging failed, for example because the action opened a modal dialog. The action may already have taken effect, so observe the window before repeating it.
+
 On macOS, native text fields support verified whole-value replacement and exact-window selected-text insertion, including when an app has multiple windows. Web-content or unidentifiable AX value writes refuse before mutation rather than trusting stale accessibility echoes. On Linux, generic `press()` selects an advertised activation action, never an arbitrary first action. On Windows, known self-activating UIA hosts may require explicit takeover coordinate input; background automation does not disable another application's windows or mutate their styles.
 
 ## Menus, held input, and task control
 
-Use `win.menu.items()` for top-level menus, `win.menu.items("File")` for a submenu, and `win.menu.select(["File", "Export…"])` to invoke a command. Matching prefers exact titles, otherwise compares case-insensitively while ignoring a trailing ellipsis. Selection rechecks enabled state and refuses ambiguous paths; it does not guess keyboard shortcuts.
+Use `win.menu.items()` for top-level menus, `win.menu.items("File")` for a submenu, and `win.menu.select(["File", "Export…"])` to invoke a command. Matching prefers exact titles, otherwise compares case-insensitively while ignoring a trailing ellipsis. Selection rechecks enabled state and refuses ambiguous paths; it does not guess keyboard shortcuts. On macOS both make the window key within its own application first, while the user's application stays frontmost, and give the application up to 1.5 s to revalidate its menus: a read right after the application took the activation waits for its items to change, and a command that reads disabled waits to become enabled, so a background application reports its commands as it would in front.
 
 `holdKeys(keys, { duration, takeover? })` and `holdMouse(x, y, { button?, duration, keys?, takeover? })` hold input for 0–100 seconds. `drag(points, { keys?, modifiers?, takeover? })` supports gestures such as Space-drag. Every call releases attempted keys/buttons on success, error, and cancellation; no pressed state survives into another call.
 
@@ -170,7 +182,7 @@ Inside `computer.run`, `wait(milliseconds)` sleeps and `wait(predicate, { timeou
 
 | Platform                | Current backend                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| macOS x64/arm64         | ScreenCaptureKit in a persistent native event-loop worker on macOS 14+, in-process CoreGraphics on macOS 12/13, plus native AX and input. Grant Screen Recording for capture and Accessibility for input/AX, then restart the launching host.                                                                                                                                                                                                                                                                                      |
+| macOS x64/arm64         | ScreenCaptureKit in a persistent native event-loop worker on macOS 14+, in-process CoreGraphics on macOS 12/13, plus native AX and input. Grant Screen Recording for capture and Accessibility for input/AX, then restart the launching host. Without Screen Recording, other apps' window titles read as empty.                                                                                                                                                                                                                   |
 | Linux X11 x64/arm64     | X11 capture/input and AT-SPI accessibility. Requires a readable display plus RandR/XTEST.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | Linux Wayland x64/arm64 | RemoteDesktop portal or `LIBEI_SOCKET` input and AT-SPI accessibility. ScreenCast portal/PipeWire capture ships only in builds compiled with the `wayland-pipewire` Cargo feature; released binaries omit it, so `capabilities()` reports `capture: false` there. RemoteDesktop permission is requested lazily on first native input, is not persisted, and closes with the desktop session; read-only window/AX inspection does not request it. Compositor restrictions apply; background per-window native input is unavailable. |
 | Windows x64/arm64       | Native display/window capture, Win32 input, and UI Automation accessibility.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -181,6 +193,19 @@ The optional Wayland PipeWire backend refreshes portal stream geometry before co
 X11 background input uses an independent XI2 pointer/keyboard and requires writable `/dev/uinput`, working udev/libinput hotplug, and a compatible toolkit/window manager. Core-only clients and popup grabs may require AX or takeover. Windows uses physical screen coordinates throughout capture, AX and input, converting only at the target window's DPI-aware message boundary; mixed-DPI monitor origins are never divided by individual display scales.
 
 Inspect `computer.capabilities()` rather than assuming capture, input, AX, or permission state. On Wayland, input reports `prompt-or-granted` before first native input without opening a RemoteDesktop session. Released builds are compiled without the `wayland-pipewire` feature, so `capabilities()` reports `capture: false`; where the feature is present, a missing portal/PipeWire feature or denied RemoteDesktop portal is reported as a capture/input/permission failure rather than falling back to X11.
+
+### macOS display sleep and the lock screen
+
+While the agent uses the desktop, the macOS session holds a `PreventUserIdleDisplaySleep` power assertion, shown by `pmset -g assertions` as "oh-my-pi computer tool is operating the desktop". Every desktop call except `capabilities()` holds or renews it; it is released five minutes after the last call, or when the session closes. Releasing it restarts the system's display-sleep countdown, so the display, and an idle lock tied to it, can arrive no sooner than five minutes plus your display-sleep setting after the agent's last action.
+
+The assertion does not wake a display that is already asleep or unlock a locked screen. `capabilities()` reports `screenLocked` and `displayAsleep`, a screenshot taken behind the lock screen carries `screenLocked: true` and a note, any failed call names the state, and a run that ends locked or asleep starts with a `Note:` line. Input is never refused because of the lock; measured on macOS 26, it behaves as follows:
+
+| State | Screenshots | Background click | Keystrokes, takeover, AX actions |
+| --- | --- | --- | --- |
+| Locked, display on | A display capture shows the lock screen; a window capture shows the window's last frame behind it. | Reaches the app behind the lock screen. | Fail: apps expose no AX windows or elements while locked. |
+| Locked, display asleep | Fail: no active displays. | Fails: no display layout. | Fail, as above. |
+
+No agent input reached the lock screen's password field.
 
 ## Safety and troubleshooting
 

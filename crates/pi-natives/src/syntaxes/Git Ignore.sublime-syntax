@@ -1,0 +1,107 @@
+%YAML 1.2
+---
+# Derived from sublimehq/Packages@759d6eed "Git Formats/Git Ignore.sublime-syntax",
+# with the contexts it uses from "Git Common.sublime-syntax" inlined (that
+# file's pretty-format contexts need the Git Config syntax). Sublime Text
+# Packages license: permission to copy, use, modify, sell and distribute is
+# granted provided this notice appears in all copies; provided "as is"
+# without express or implied warranty.
+#
+# Syntax based on documentation here: https://git-scm.com/docs/gitignore
+
+name: Git Ignore
+file_extensions:
+  - exclude               # .git/info/exclude
+  - gitignore             # *.gitignore
+  - .gitignore            # ~/.gitignore
+  - dockerignore
+  - .dockerignore
+scope: text.git.ignore
+
+contexts:
+
+  main:
+    - include: comments
+    - match: '!|(?=\S)'   # optional pattern negation
+      scope: keyword.operator.logical.path.fnmatch.git.ignore
+      push: [pattern-content, fnmatch-start]
+
+  pattern-content:
+    - meta_scope: string.unquoted.git.ignore entity.name.pattern.git.ignore
+    - match: $
+      pop: true
+    - include: fnmatch-body
+
+  comments:
+    - match: ([#;]).*\n?
+      scope: comment.line.git
+      captures:
+        1: punctuation.definition.comment.git
+
+  fnmatch-start:
+    - match: '[A-Za-z](:)(?=/)'
+      captures:
+        1: punctuation.separator.drive.fnmatch.git
+      pop: true
+    - match: ~(?=/)
+      scope: variable.language.environment.home.fnmatch.git
+      pop: true
+    - include: fnmatch-dir-pattern
+
+  fnmatch-body:
+    - match: \[
+      scope: keyword.control.char-class.begin.fnmatch.git
+      push:
+        - fnmatch-char-class-body
+        - fnmatch-char-class-start
+        - fnmatch-char-class-operator
+    - match: '/'
+      scope: punctuation.separator.path.fnmatch.git
+      push: fnmatch-dir-pattern
+    - match: \.(?!.*[./])
+      scope: punctuation.separator.path.extension.fnmatch.git
+    - match: '[*?]'
+      scope: keyword.operator.path.asterisk.fnmatch.git
+    - match: '\\[^$*?]'
+      scope: constant.character.escape.path.fnmatch.git
+    - match: \$\w+
+      scope: variable.language.environment.other.fnmatch.git
+    - match: ':'
+      scope: invalid.illegal.separator.drive.fnmatch.git
+    - match: '\\(?=\s)'
+      scope: invalid.illegal.escape.path.fnmatch.git
+
+  fnmatch-dir-pattern:
+    - match: \.\.(?=/)
+      scope: constant.language.path.parent.fnmatch.git
+      pop: true
+    - match: \.(?=/)
+      scope: constant.language.path.self.fnmatch.git
+      pop: true
+    - match: ''
+      pop: true
+
+  fnmatch-char-class-operator:
+    - match: '[!^]?'
+      scope: keyword.operator.logical.fnmatch.git
+      pop: true
+
+  fnmatch-char-class-start:
+    - match: \]?
+      scope: constant.character.char-class.fnmatch.git
+      pop: true
+
+  fnmatch-char-class-body:
+    - meta_scope: meta.char-class.fnmatch.git
+    - match: \]
+      scope: keyword.control.char-class.end.fnmatch.git
+      pop: true
+    - match: $\n?
+      scope: invalid.illegal.unexpected.eol.fnmatch.git
+      pop: true
+    - match: '\\\]'
+      scope: constant.character.escape.char-class.fnmatch.git
+    - match: '[*?]'
+      scope: invalid.illegal.unexpected.char-class.fnmatch.git
+    - match: \S
+      scope: constant.character.char-class.fnmatch.git

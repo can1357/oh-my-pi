@@ -14,6 +14,7 @@ use std::{
 use core_graphics::{event::CGEvent, geometry::CGPoint};
 use foreign_types::ForeignType;
 use libc::pid_t;
+use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFType};
 use parking_lot::Mutex;
 
 use super::{
@@ -21,7 +22,7 @@ use super::{
 		control,
 		error::{CoreResult, DesktopError},
 	},
-	ax,
+	ax, capture,
 };
 
 const EVENT_RECORD_LENGTH: usize = 248;
@@ -545,7 +546,8 @@ enum FocusDecision {
 struct BackgroundFocusLease {
 	previous: ProcessSerialNumber,
 	target:   ProcessSerialNumber,
-	key:      u32,
+	/// The user's key window; `None` when the front app showed no window.
+	key:      Option<u32>,
 	user:     UserSwitchWatch,
 	disarmed: bool,
 }
@@ -554,7 +556,7 @@ impl BackgroundFocusLease {
 	fn new(
 		previous: ProcessSerialNumber,
 		target: ProcessSerialNumber,
-		key: u32,
+		key: Option<u32>,
 		signals: SwitchSignals,
 		now: Instant,
 	) -> Self {
@@ -579,7 +581,7 @@ impl BackgroundFocusLease {
 			.and_then(|start| self.user.since(start))
 			.is_some();
 		if self.disarmed
-			|| (front == self.previous && key.is_some_and(|key| key != self.key))
+			|| (front == self.previous && key.is_some_and(|key| Some(key) != self.key))
 			|| (front != self.previous && picked)
 		{
 			self.disarmed = true;
@@ -639,12 +641,16 @@ pub(super) fn with_background_guard<T>(
 			"cannot resolve the background target process; retry with takeover:true or use ax actions",
 		)
 	})?;
-	let previous_key = previous.pid.and_then(ax::key_window_id).ok_or_else(|| {
-		DesktopError::background_unavailable(
-			"cannot establish the user's key window for background focus restoration; retry with \
-			 takeover:true or use ax actions",
-		)
-	})?;
+	let previous_key = previous
+		.pid
+		.and_then(restoration_key)
+		.ok_or_else(|| {
+			DesktopError::background_unavailable(
+				"cannot establish the user's key window for background focus restoration; retry with \
+				 takeover:true or use ax actions",
+			)
+		})?
+		.window();
 	let now = Instant::now();
 	let last_chord = Mutex::new(None);
 	let mut lease = BackgroundFocusLease::new(
@@ -698,13 +704,11 @@ pub(super) fn with_background_guard<T>(
 									FocusDecision::Disarm => return Ok(()),
 									FocusDecision::Observe => {},
 									FocusDecision::Restore => {
-										set_front(spi, previous.psn, previous_key)?;
+										set_front(spi, previous.psn, previous_key.unwrap_or(0))?;
 										restored = true;
-										if !post_record(
-											spi.post_record,
-											previous.psn,
-											&focus_record(previous_key),
-										) {
+										if let Some(key) = previous_key
+											&& !post_record(spi.post_record, previous.psn, &focus_record(key))
+										{
 											return Err(DesktopError::input_failed(
 												"background key-window restoration was rejected",
 											));
@@ -780,6 +784,51 @@ fn set_front(spi: &ForegroundSpi, psn: ProcessSerialNumber, wid: u32) -> CoreRes
 	Ok(())
 }
 
+/// What the user's front application gets back after input elsewhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UserKey {
+	Window(u32),
+	/// It provably shows no window, as Finder after a click on the desktop or
+	/// an app that just closed its last window: only the front process is
+	/// restored.
+	Windowless,
+}
+
+impl UserKey {
+	const fn window(self) -> Option<u32> {
+		match self {
+			Self::Window(id) => Some(id),
+			Self::Windowless => None,
+		}
+	}
+}
+
+/// The front application `pid`'s [`UserKey`]; `None` when neither its key
+/// window nor its windowlessness can be established.
+fn restoration_key(pid: pid_t) -> Option<UserKey> {
+	restorable_key(
+		ax::key_window_id(pid),
+		|| ax::window_records(pid).map(|records| records.iter().any(|record| record.id.is_some())),
+		|| capture::has_onscreen_window(pid),
+	)
+}
+
+/// [`restoration_key`]'s decision: an app with no key window counts as
+/// windowless only when both its accessibility windows (Finder's unmappable
+/// desktop entry aside) and `WindowServer`'s on-screen list show none of its
+/// windows. An unreadable answer from either refuses.
+fn restorable_key(
+	key: Option<u32>,
+	ax_lists_window: impl FnOnce() -> Option<bool>,
+	shows_window: impl FnOnce() -> Option<bool>,
+) -> Option<UserKey> {
+	if let Some(key) = key {
+		return Some(UserKey::Window(key));
+	}
+	(ax_lists_window() == Some(false) && shows_window() == Some(false))
+		.then_some(UserKey::Windowless)
+}
+
 /// Makes `wid` the frontmost key window, runs `action`, then restores the
 /// previous front process (or, within one process, its previous key window).
 ///
@@ -815,11 +864,13 @@ pub(super) fn with_foreground<T>(
 			"cannot identify the previous application for takeover restoration; no input was sent",
 		)
 	})?;
-	let previous_key = ax::key_window_id(previous_pid).ok_or_else(|| {
-		DesktopError::input_failed(
-			"cannot identify the previous key window for takeover restoration; no input was sent",
-		)
-	})?;
+	let previous_key = restoration_key(previous_pid)
+		.ok_or_else(|| {
+			DesktopError::input_failed(
+				"cannot identify the previous key window for takeover restoration; no input was sent",
+			)
+		})?
+		.window();
 	let restore = |preparation_failed: bool| {
 		if control::user_activity() != activity {
 			return Ok(());
@@ -841,7 +892,11 @@ pub(super) fn with_foreground<T>(
 		{
 			return Ok(());
 		}
-		set_front(spi, previous.psn, previous_key)?;
+		set_front(spi, previous.psn, previous_key.unwrap_or(0))?;
+		// A previous app that showed no window gets only its front status back.
+		let Some(previous_key) = previous_key else {
+			return Ok(());
+		};
 		// Returning to an app often reinstates its original key window by
 		// itself. Re-making an already-key Chromium window can clear the user's
 		// renderer focus, just as reactivating an already-key input target can.
@@ -889,6 +944,98 @@ pub(super) fn front_window_context() -> Option<(pid_t, u32)> {
 	let spi = FOREGROUND.as_ref()?;
 	let pid = front_process(spi.get_front)?.pid?;
 	Some((pid, ax::key_window_id(pid)?))
+}
+
+type SLSWindowQueryWindowsFn = unsafe extern "C" fn(i32, &CFArray, u32) -> *mut CFType;
+type SLSWindowQueryResultCopyWindowsFn = unsafe extern "C" fn(&CFType) -> *mut CFType;
+type SLSWindowIteratorAdvanceFn = unsafe extern "C" fn(&CFType) -> bool;
+type SLSWindowIteratorGetIdFn = unsafe extern "C" fn(&CFType) -> u32;
+
+#[derive(Clone, Copy)]
+struct WindowQuerySpi {
+	connection: CGSMainConnectionIDFn,
+	query:      SLSWindowQueryWindowsFn,
+	windows:    SLSWindowQueryResultCopyWindowsFn,
+	advance:    SLSWindowIteratorAdvanceFn,
+	window_id:  SLSWindowIteratorGetIdFn,
+	parent_id:  SLSWindowIteratorGetIdFn,
+}
+
+static WINDOW_QUERY: LazyLock<Option<WindowQuerySpi>> = LazyLock::new(|| {
+	ensure_skylight_loaded()?;
+	Some(WindowQuerySpi {
+		connection: symbol(c"CGSMainConnectionID")?,
+		query:      symbol(c"SLSWindowQueryWindows")?,
+		windows:    symbol(c"SLSWindowQueryResultCopyWindows")?,
+		advance:    symbol(c"SLSWindowIteratorAdvance")?,
+		window_id:  symbol(c"SLSWindowIteratorGetWindowID")?,
+		parent_id:  symbol(c"SLSWindowIteratorGetParentID")?,
+	})
+});
+
+/// The window `wid` is a child of in `WindowServer`, such as the window a
+/// sheet or an inline editor's overlay is attached to; `None` for a top-level
+/// window or when the query is unavailable.
+pub(super) fn window_parent(wid: u32) -> Option<u32> {
+	let spi = WINDOW_QUERY.as_ref()?;
+	let number = CFNumber::new_i64(i64::from(wid));
+	let windows = CFArray::from_objects(&[&*number]);
+	// SAFETY: The no-argument connection query has its exact signature.
+	let connection = unsafe { (spi.connection)() } as i32;
+	// SAFETY: `windows` holds one CFNumber window id and outlives the call; the
+	// result is a create-rule object or null.
+	let query = retained(unsafe { (spi.query)(connection, windows.as_opaque(), 0) })?;
+	// SAFETY: `query` is a live window query; the result is create-rule or null.
+	let iterator = retained(unsafe { (spi.windows)(&query) })?;
+	// SAFETY: `iterator` stays retained across every iterator call.
+	while unsafe { (spi.advance)(&iterator) } {
+		// SAFETY: As above; the iterator was advanced onto a window.
+		if unsafe { (spi.window_id)(&iterator) } == wid {
+			// SAFETY: As above.
+			return Some(unsafe { (spi.parent_id)(&iterator) }).filter(|&parent| parent != 0);
+		}
+	}
+	None
+}
+
+type SLSConnectionGetPIDFn = unsafe extern "C" fn(u32, *mut pid_t) -> i32;
+
+#[derive(Clone, Copy)]
+struct WindowOwnerSpi {
+	connection: CGSMainConnectionIDFn,
+	owner:      SLSGetWindowOwnerFn,
+	pid:        SLSConnectionGetPIDFn,
+}
+
+static WINDOW_OWNER: LazyLock<Option<WindowOwnerSpi>> = LazyLock::new(|| {
+	ensure_skylight_loaded()?;
+	Some(WindowOwnerSpi {
+		connection: symbol(c"CGSMainConnectionID")?,
+		owner:      symbol(c"SLSGetWindowOwner")?,
+		pid:        symbol(c"SLSConnectionGetPID")?,
+	})
+});
+
+/// The process that owns window `wid` in `WindowServer`, including the
+/// windows a remote-view service keeps off the window list, such as the one
+/// `openAndSavePanelService` draws an application's Open panel in.
+pub(super) fn window_owner_pid(wid: u32) -> Option<pid_t> {
+	let spi = WINDOW_OWNER.as_ref()?;
+	let mut owner = 0u32;
+	// SAFETY: The connection query takes no arguments, and `owner` is writable
+	// for the exact window-owner signature.
+	if unsafe { (spi.owner)((spi.connection)(), wid, &mut owner) } != 0 || owner == 0 {
+		return None;
+	}
+	let mut pid: pid_t = 0;
+	// SAFETY: `pid` is writable for the exact connection-pid signature.
+	(unsafe { (spi.pid)(owner, &mut pid) } == 0 && pid > 0).then_some(pid)
+}
+
+/// Takes ownership of a create-rule `CFType` pointer, which may be null.
+fn retained(pointer: *mut CFType) -> Option<CFRetained<CFType>> {
+	// SAFETY: Every caller passes the +1 result of a copy or create call.
+	ptr::NonNull::new(pointer).map(|pointer| unsafe { CFRetained::from_raw(pointer) })
 }
 
 /// Whether the target already is the key window of the front process.
@@ -1095,7 +1242,7 @@ mod tests {
 	/// `last_click`.
 	fn lease_at(start: Instant, last_click: Option<Instant>) -> BackgroundFocusLease {
 		let signals = SwitchSignals::new([0; 6], last_click, NO_MODIFIERS, None, None);
-		BackgroundFocusLease::new(PREVIOUS, TARGET, 42, signals, start)
+		BackgroundFocusLease::new(PREVIOUS, TARGET, Some(42), signals, start)
 	}
 
 	#[test]
@@ -1374,6 +1521,37 @@ mod tests {
 		// Nothing was restored, or another app is in front.
 		assert!(!lease_at(t0, None).reactivated(false, TARGET, idle, t0 + ms(10)));
 		assert!(!lease_at(t0, None).reactivated(true, THIRD, idle, t0 + ms(10)));
+	}
+
+	#[test]
+	fn a_window_appearing_in_a_windowless_front_app_is_a_user_focus_change() {
+		// Finder in front after a click on the desktop: no key window to restore.
+		let t0 = Instant::now();
+		let idle = input(0, NO_MODIFIERS);
+		let lease = || BackgroundFocusLease::new(PREVIOUS, TARGET, None, idle, t0);
+		let mut guard = lease();
+		assert_eq!(guard.observe(PREVIOUS, None, idle, t0 + ms(10)), FocusDecision::Observe);
+		assert_eq!(guard.observe(TARGET, None, idle, t0 + ms(20)), FocusDecision::Restore);
+
+		// The user opened a Finder window meanwhile: hands off.
+		let mut guard = lease();
+		assert_eq!(guard.observe(PREVIOUS, Some(43), idle, t0 + ms(10)), FocusDecision::Disarm);
+		assert_eq!(guard.observe(TARGET, None, idle, t0 + ms(20)), FocusDecision::Disarm);
+	}
+
+	#[test]
+	fn only_a_provably_windowless_front_app_is_restored_without_a_key_window() {
+		let unread = || -> Option<bool> { panic!("a known key window needs no window scan") };
+		assert_eq!(restorable_key(Some(42), unread, unread), Some(UserKey::Window(42)));
+		// TextEdit after closing its last document; Finder after a desktop click
+		// lists only its unmappable desktop, which counts as no window.
+		assert_eq!(restorable_key(None, || Some(false), || Some(false)), Some(UserKey::Windowless));
+		// Windows that AX or WindowServer reports, or an unreadable answer,
+		// refuse.
+		assert_eq!(restorable_key(None, || Some(true), || Some(false)), None);
+		assert_eq!(restorable_key(None, || Some(false), || Some(true)), None);
+		assert_eq!(restorable_key(None, || None, || Some(false)), None);
+		assert_eq!(restorable_key(None, || Some(false), || None), None);
 	}
 
 	#[test]

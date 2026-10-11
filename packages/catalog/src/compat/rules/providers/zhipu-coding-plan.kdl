@@ -5,6 +5,16 @@ provider "zhipu-coding-plan" {
 	env "ZHIPU_API_KEY"
 	dynamic-models-authoritative #true
 	discovery label="Zhipu Coding Plan"
+	// The coding-plan upstream snapshot omits FlashX although the served SKU
+	// has the same limits and mandatory-thinking ladder as GLM-5.3-Flash.
+	seed api="openai-completions" base-url="https://open.bigmodel.cn/api/coding/paas/v4" bundle="always" {
+		model "glm-5.3-flashx" name="GLM-5.3-FlashX" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=131072
+		}
+	}
 
 	// Replaces the Zhipu provider thinking-format branch.
 	thinking-format "zai"

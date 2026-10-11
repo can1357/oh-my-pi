@@ -64,10 +64,40 @@ impl MacInput {
 				let (pid, wid) = window_identity(&window)?;
 				match mode {
 					DeliveryMode::Background => {
+						// A sheet or popover is a window of its own, but its elements
+						// report the window it is attached to as theirs, so input for
+						// a point inside it goes to the attached window on top there.
+						let (window, wid) = match pressed_point(&event) {
+							Some(point) => {
+								let windows = capture.windows_of(pid)?;
+								match attached_at(wid, point, &windows, skylight::window_parent) {
+									Some(overlay) => (overlay.clone(), window_identity(overlay)?.1),
+									None => (window, wid),
+								}
+							},
+							None => (window, wid),
+						};
+						let in_overlay =
+							takes_overlay_focus(wid, ax::focused_window_id(pid), skylight::window_parent);
 						background_guard(&window, pid, &event)?;
+						let to = input_owner(
+							pid,
+							wid,
+							ax::focused_window_content(pid, wid),
+							ax::focused_window_id,
+						)?;
 						let entry_front = skylight::front_pid();
 						skylight::with_background_guard(pid, || {
-							background_pointer(&self.source, pid, wid, &window, event, entry_front)
+							background_pointer(
+								&self.source,
+								pid,
+								wid,
+								&window,
+								event,
+								entry_front,
+								to,
+								in_overlay,
+							)
 						})
 					},
 					DeliveryMode::Foreground => {
@@ -102,8 +132,8 @@ impl MacInput {
 						if !process::is_terminal(pid) && ax::insert_native_text(pid, wid, text)? {
 							return Ok(());
 						}
-						with_background_keyboard(&self.source, pid, wid, &window, || {
-							background_type(&self.source, pid, text)
+						with_background_keyboard(&self.source, pid, wid, &window, |to, guard| {
+							background_type(&self.source, to, text, guard)
 						})
 					},
 					DeliveryMode::Foreground => {
@@ -159,8 +189,8 @@ impl MacInput {
 								"modifier flags on routed chords",
 							));
 						}
-						with_background_keyboard(&self.source, pid, wid, &window, || {
-							background_chord(&self.source, pid, keys)
+						with_background_keyboard(&self.source, pid, wid, &window, |to, guard| {
+							background_chord(&self.source, to, keys, guard)
 						})?;
 						confirm_shortcut_answered(&window, keys, || {
 							control::wait(SHORTCUT_REPLY_DELAY)?;
@@ -201,11 +231,13 @@ impl MacInput {
 						if process::is_screen_sharing(pid) {
 							return Err(screen_sharing_refusal(&window, "held keys"));
 						}
-						with_background_keyboard(&self.source, pid, wid, &window, || {
+						with_background_keyboard(&self.source, pid, wid, &window, |to, guard| {
 							with_held_keys(
 								&self.source,
 								keys,
-								|event| skylight::post_keyboard(pid, event),
+								|event| {
+									post_guarded(event, guard, |event| skylight::post_keyboard(to, event))
+								},
 								|| control::wait(duration),
 							)
 						})
@@ -248,9 +280,10 @@ fn screen_sharing_refusal(window: &DesktopWindow, dropped: &str) -> DesktopError
 
 /// Why process-scoped background keystrokes could reach a window other than
 /// the target.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum KeyboardConflict {
-	/// The target is not among the process's accessibility windows, so no
+	/// The target is not among the process's accessibility windows, is not
+	/// its focused window, and is not attached to one of its windows, so no
 	/// claim about its key status can be proven.
 	Unmapped,
 	/// Other windows of the process could be the key window.
@@ -258,50 +291,139 @@ enum KeyboardConflict {
 }
 
 /// Background keyboard delivery to window `wid`: inside the self-activation
-/// guard, makes `wid` its application's key window, then runs `deliver`.
+/// guard, makes `wid` its application's key window, then runs `deliver` with
+/// the process to post the keys to and a check to run before every press.
 ///
 /// macOS posts key events to a *process*, which hands them to whichever window
-/// it treats as key; unlike pointer events they carry no window id. When the
-/// process has other windows that could be key, keys are sent only once the
-/// application reports `wid` as its focused window. Candidates come from the
-/// process's accessibility windows, not `WindowServer`'s list, which also holds
-/// the per-window compositor surfaces of Chromium, Electron, and `WebKit` apps.
+/// it treats as key; unlike pointer events they carry no window id. Keys are
+/// sent only once the application reports keyboard focus in `wid`, or, when
+/// it reports no focused window, `wid` is the only window that could be key.
+/// A sheet or panel the application reports as focused is a window of its
+/// own even while attached to `wid`, so it never stands in for `wid`.
+/// Candidates come from the process's accessibility windows, not
+/// `WindowServer`'s list, which also holds the per-window compositor surfaces
+/// of Chromium, Electron, and `WebKit` apps. `AXWindows` omits sheets and
+/// panels such as Finder's Go to Folder; such a target counts as a window of
+/// the process while it is the focused window or attached to a listed one.
+/// Keys for a system Open or Save panel go to the process that draws its
+/// content ([`key_process`]). Before every press the application's focused
+/// window must still be the one that proved this ([`keys_still_reach`]).
 fn with_background_keyboard<T>(
 	source: &CGEventSource,
 	pid: libc::pid_t,
 	wid: u32,
 	window: &DesktopWindow,
-	deliver: impl FnOnce() -> CoreResult<T>,
+	deliver: impl FnOnce(libc::pid_t, &dyn Fn() -> CoreResult<()>) -> CoreResult<T>,
 ) -> CoreResult<T> {
-	let conflict = ax::window_records(pid)
-		.map_or(Some(KeyboardConflict::Unmapped), |records| keyboard_conflict(wid, &records));
+	let conflict = ax::window_records(pid).map_or(Some(KeyboardConflict::Unmapped), |records| {
+		keyboard_conflict(wid, &records, || {
+			ax::focused_window_id(pid) == Some(wid)
+				|| attached_under(wid, skylight::window_parent, |parent| {
+					records.iter().any(|record| record.id == Some(parent))
+				})
+		})
+	});
 	if conflict == Some(KeyboardConflict::Unmapped) {
 		return Err(DesktopError::background_unavailable(format!(
-			"window {wid} is not among its application's accessibility windows, so background \
-			 keystrokes cannot be proven to reach it; retry with takeover:true or use ax actions",
+			"window {wid} is not among its application's accessibility windows, is not its focused \
+			 window, and is not attached to one of its windows, so background keystrokes cannot be \
+			 proven to reach it; retry with takeover:true or use ax actions",
 		)));
 	}
+	let focus = ax::key_focus(pid);
+	// The target cannot become key while a window attached to it has focus,
+	// so waiting for that would only delay the same refusal.
+	let destination = focus.destination(pid, wid, skylight::window_parent);
+	if let ax::KeyDestination::Other(Some(other)) = destination
+		&& attached_under(other, skylight::window_parent, |parent| parent == wid)
+	{
+		return Err(key_refusal(wid, destination, conflict, skylight::window_parent));
+	}
+	let in_overlay = focus.in_overlay_of(wid, skylight::window_parent);
 	let entry_front = skylight::front_pid();
 	skylight::with_background_guard(pid, || {
-		let prepared = make_key_in_background(source, pid, wid, window, entry_front)?;
-		if let Some(KeyboardConflict::Siblings(siblings)) = conflict
-			&& !await_key_window(pid, wid)?
-		{
-			return Err(DesktopError::background_unavailable(format!(
-				"window {wid} shares its application with {siblings} other window(s) and did not \
-				 become its key window, so background keystrokes could reach another window; retry \
-				 with takeover:true or use ax actions",
-			)));
-		}
+		let prepared = make_key_in_background(source, pid, wid, window, entry_front, in_overlay)?;
+		let (to, focus) = await_key_destination(pid, wid, conflict)?;
+		let to = key_process(
+			to,
+			wid,
+			&focus,
+			|| ax::focused_window_content(pid, wid),
+			ax::focused_window_id,
+		)?;
 		if prepared {
 			still_behind_user(pid, wid)?;
 		}
-		deliver()
+		deliver(to, &|| keys_still_reach(wid, conflict, focus.window, || ax::focused_window(pid)))
 	})
 }
 
-fn keyboard_conflict(wid: u32, records: &[ax::AxWindowRecord]) -> Option<KeyboardConflict> {
-	if !records.iter().any(|record| record.id == Some(wid)) {
+/// Before a background press: keys posted to the process now still reach
+/// `wid`. The application's focused window must be `proven`, the one it
+/// reported when delivery began, or `wid`; once the user or the application
+/// makes another window key, including one opened since, the press would land
+/// there. A focused window no longer reported proves nothing while a sibling
+/// could take the keys.
+fn keys_still_reach(
+	wid: u32,
+	conflict: Option<KeyboardConflict>,
+	proven: ax::FocusedWindow,
+	focused: impl FnOnce() -> ax::FocusedWindow,
+) -> CoreResult<()> {
+	let now = focused();
+	if now == proven
+		|| now == ax::FocusedWindow::Id(wid)
+		|| (now == ax::FocusedWindow::Unreported && conflict.is_none())
+	{
+		return Ok(());
+	}
+	Err(DesktopError::input_failed(format!(
+		"window {wid} stopped being its application's key window during background input; keys sent \
+		 before that may already have landed, and nothing more was sent; inspect the window before \
+		 retrying",
+	)))
+}
+
+/// Posts `event`, first running `guard` when it presses a key or modifier;
+/// releases always go out so nothing stays held.
+fn post_guarded(
+	event: &CGEvent,
+	guard: impl FnOnce() -> CoreResult<()>,
+	post: impl FnOnce(&CGEvent) -> CoreResult<()>,
+) -> CoreResult<()> {
+	if is_key_press(event) {
+		guard()?;
+	}
+	post(event)
+}
+
+/// Whether `event` presses a key: a key-down, or a modifier change that sets
+/// the flag of the modifier key it names.
+fn is_key_press(event: &CGEvent) -> bool {
+	match event.get_type() {
+		CGEventType::KeyDown => true,
+		CGEventType::FlagsChanged => {
+			let flag = match event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) {
+				56 | 60 => CGEventFlags::CGEventFlagShift,
+				58 | 61 => CGEventFlags::CGEventFlagAlternate,
+				59 | 62 => CGEventFlags::CGEventFlagControl,
+				54 | 55 => CGEventFlags::CGEventFlagCommand,
+				_ => return false,
+			};
+			event.get_flags().contains(flag)
+		},
+		_ => false,
+	}
+}
+
+/// `outside_list` tells whether a target missing from `records` still is a
+/// window of the process, such as a focused or attached sheet.
+fn keyboard_conflict(
+	wid: u32,
+	records: &[ax::AxWindowRecord],
+	outside_list: impl FnOnce() -> bool,
+) -> Option<KeyboardConflict> {
+	if !records.iter().any(|record| record.id == Some(wid)) && !outside_list() {
 		return Some(KeyboardConflict::Unmapped);
 	}
 	// A minimized window cannot be key; an unreadable state could be. An entry
@@ -311,6 +433,212 @@ fn keyboard_conflict(wid: u32, records: &[ax::AxWindowRecord]) -> Option<Keyboar
 		.filter(|record| record.id != Some(wid) && record.minimized != Some(true))
 		.count();
 	(siblings > 0).then_some(KeyboardConflict::Siblings(siblings))
+}
+
+/// What background keyboard delivery does with where keys would go now.
+#[derive(Debug, PartialEq, Eq)]
+enum KeyRoute {
+	/// Post the keys to this process.
+	Deliver(libc::pid_t),
+	/// Not yet proven; read again until the deadline.
+	Wait,
+}
+
+/// Keys go out once they would reach `wid`. When the application reports no
+/// focused window at all, the target being its only possible key window is
+/// the remaining proof; another reported focused window never is.
+const fn key_route(
+	pid: libc::pid_t,
+	destination: ax::KeyDestination,
+	conflict: Option<KeyboardConflict>,
+) -> KeyRoute {
+	match (destination, conflict) {
+		(ax::KeyDestination::Target(to), _) => KeyRoute::Deliver(to),
+		(ax::KeyDestination::Unreported, None) => KeyRoute::Deliver(pid),
+		_ => KeyRoute::Wait,
+	}
+}
+
+/// Waits until keystrokes posted now would reach `wid`, which the
+/// application handles [`make_key_in_background`]'s events to establish, and
+/// returns the process to post them to with the focus that proved it.
+fn await_key_destination(
+	pid: libc::pid_t,
+	wid: u32,
+	conflict: Option<KeyboardConflict>,
+) -> CoreResult<(libc::pid_t, ax::KeyFocus)> {
+	let deadline = Instant::now() + KEY_WINDOW_TIMEOUT;
+	loop {
+		let focus = ax::key_focus(pid);
+		let destination = focus.destination(pid, wid, skylight::window_parent);
+		if let KeyRoute::Deliver(to) = key_route(pid, destination, conflict) {
+			return Ok((to, focus));
+		}
+		if Instant::now() >= deadline {
+			return Err(key_refusal(wid, destination, conflict, skylight::window_parent));
+		}
+		control::wait(KEY_WINDOW_POLL)?;
+	}
+}
+
+/// The process to post background keys for window `wid` of `pid` to, once
+/// `focus` shows they would reach `wid`: [`input_owner`] of the window's
+/// `content`. A focused element that maps to `wid` itself shows the window's
+/// own process holds the focus, so the content is read only when it does not.
+fn key_process(
+	pid: libc::pid_t,
+	wid: u32,
+	focus: &ax::KeyFocus,
+	content: impl FnOnce() -> ax::WindowContent,
+	focused_window_of: impl FnOnce(libc::pid_t) -> Option<u32>,
+) -> CoreResult<libc::pid_t> {
+	if focus.window != ax::FocusedWindow::Id(wid) || focus.element_maps_to(wid) {
+		return Ok(pid);
+	}
+	input_owner(pid, wid, content(), focused_window_of).map(|(to, _)| to)
+}
+
+/// The process and window that take background input for window `wid` of
+/// `pid`, given who draws it (`content`).
+///
+/// A system Open or Save panel, and the Go to Folder sheet it opens, is a
+/// window of the application that asked for it, but `openAndSavePanelService`
+/// draws its content in a window of its own, at the same frame and off
+/// `WindowServer`'s window list, and handles its input: keys and clicks posted
+/// to the application are dropped without an error. Input for such a window
+/// goes to the drawing process and its window once that process reports focus
+/// there (`focused_window_of`), and refuses while it does not.
+fn input_owner(
+	pid: libc::pid_t,
+	wid: u32,
+	content: ax::WindowContent,
+	focused_window_of: impl FnOnce(libc::pid_t) -> Option<u32>,
+) -> CoreResult<(libc::pid_t, u32)> {
+	match content {
+		ax::WindowContent::Own => Ok((pid, wid)),
+		ax::WindowContent::Remote { pid: owner, window }
+			if focused_window_of(owner) == Some(window) =>
+		{
+			Ok((owner, window))
+		},
+		ax::WindowContent::Remote { pid: owner, window } => {
+			Err(DesktopError::background_unavailable(format!(
+				"window {wid} shows content drawn by process {owner}, such as a system Open or Save \
+				 panel, and that process does not report focus in its window {window}, so background \
+				 input would be dropped; nothing was sent; retry with takeover:true or use ax actions",
+			)))
+		},
+	}
+}
+
+/// Most windows deep a chain of sheets attached to sheets is followed.
+const MAX_ATTACHED_DEPTH: usize = 4;
+
+/// Whether `window` is attached, directly or through other attached windows,
+/// to a window `is_ancestor` accepts, as `parent_of` reports `WindowServer`'s
+/// parents.
+fn attached_under(
+	window: u32,
+	parent_of: impl Fn(u32) -> Option<u32>,
+	is_ancestor: impl Fn(u32) -> bool,
+) -> bool {
+	let mut current = window;
+	for _ in 0..MAX_ATTACHED_DEPTH {
+		match parent_of(current) {
+			Some(parent) if is_ancestor(parent) => return true,
+			Some(parent) => current = parent,
+			None => return false,
+		}
+	}
+	false
+}
+
+/// The window attached to `wid` (a sheet or popover, at any depth) that is
+/// topmost at the global `point`, from the application's `windows` in front
+/// to back order; `None` when `wid` itself, or anything not attached to it,
+/// is topmost there.
+fn attached_at(
+	wid: u32,
+	(x, y): (f64, f64),
+	windows: &[DesktopWindow],
+	parent_of: impl Fn(u32) -> Option<u32>,
+) -> Option<&DesktopWindow> {
+	let topmost = windows.iter().find(|window| {
+		let (left, upper) = (f64::from(window.x), f64::from(window.y));
+		(left..left + f64::from(window.width)).contains(&x)
+			&& (upper..upper + f64::from(window.height)).contains(&y)
+	})?;
+	let id = topmost.id.parse::<u32>().ok()?;
+	(id != wid && attached_under(id, parent_of, |parent| parent == wid)).then_some(topmost)
+}
+
+/// Where `event` presses, hovers or scrolls; a drag's first point.
+fn pressed_point(event: &PointerEvent) -> Option<(f64, f64)> {
+	match event {
+		PointerEvent::Click { x, y, .. }
+		| PointerEvent::Hold { x, y, .. }
+		| PointerEvent::Move { x, y }
+		| PointerEvent::Scroll { x, y, .. } => Some((*x, *y)),
+		PointerEvent::Drag { path, .. } => path.first().copied(),
+	}
+}
+
+/// Whether `wid` is a sheet or popover on `focused`, the application's
+/// reported focused window, or is that window itself while attached to
+/// another. Making such a window key with a press outside its frame would
+/// close a popover, or land in the window a sheet is attached to.
+fn takes_overlay_focus(
+	wid: u32,
+	focused: Option<u32>,
+	parent_of: impl Fn(u32) -> Option<u32>,
+) -> bool {
+	parent_of(wid).is_some()
+		&& (focused == Some(wid) || attached_under(wid, parent_of, |parent| Some(parent) == focused))
+}
+
+/// The error for keys that never would have reached `wid`; nothing was sent.
+///
+/// A window with a sheet or panel attached cannot become key while that
+/// window holds focus, in the background or in takeover, so that case names
+/// the attached window instead of asking for a takeover that would fail.
+fn key_refusal(
+	wid: u32,
+	destination: ax::KeyDestination,
+	conflict: Option<KeyboardConflict>,
+	parent_of: impl Fn(u32) -> Option<u32>,
+) -> DesktopError {
+	match destination {
+		ax::KeyDestination::Other(Some(other))
+			if attached_under(other, parent_of, |parent| parent == wid) =>
+		{
+			DesktopError::invalid_target(format!(
+				"window {wid} has window {other} (a sheet, panel or popover) attached and focused, \
+				 which takes every keystroke sent to its application, so window {wid} cannot receive \
+				 keys in the background or in takeover; nothing was sent; send them to window \
+				 {other}, or close it first",
+			))
+		},
+		ax::KeyDestination::Other(other) => {
+			let focused =
+				other.map_or_else(|| "an unidentified window".to_owned(), |id| format!("window {id}"));
+			DesktopError::background_unavailable(format!(
+				"window {wid} did not become its application's key window, and {focused} still is, so \
+				 background keystrokes would reach that window; nothing was sent; retry with \
+				 takeover:true or use ax actions",
+			))
+		},
+		ax::KeyDestination::Target(_) | ax::KeyDestination::Unreported => {
+			let siblings = match conflict {
+				Some(KeyboardConflict::Siblings(siblings)) => siblings,
+				_ => 0,
+			};
+			DesktopError::background_unavailable(format!(
+				"window {wid} shares its application with {siblings} other window(s) and did not \
+				 become its key window, so background keystrokes could reach another window; nothing \
+				 was sent; retry with takeover:true or use ax actions",
+			))
+		},
+	}
 }
 
 /// After a background shortcut with a modifier, fails when `stopped_answering`
@@ -530,6 +858,13 @@ fn front_target(
 /// began; a target that has come forward since then refuses, because the
 /// user may have just picked the window that would receive the input.
 ///
+/// `focus_in_overlay` says the caller has seen the application's keyboard
+/// focus in an overlay window attached to `wid`, such as Finder's inline
+/// rename field or a popover: the target then counts as the frontmost
+/// application's key window, and in a background application the activation
+/// goes out without the press, which would make `wid` key and so end that
+/// overlay's editing.
+///
 /// Returns whether the activation step ran. The user can bring the target app
 /// forward at any moment, which would turn the step into a key-window switch
 /// in the app they type into, so the front process is re-read before the
@@ -540,8 +875,16 @@ pub(super) fn make_key_in_background(
 	wid: u32,
 	window: &DesktopWindow,
 	entry_front: Option<libc::pid_t>,
+	focus_in_overlay: bool,
 ) -> CoreResult<bool> {
-	match front_target(entry_front, skylight::front_pid(), pid, wid, || ax::focused_window_id(pid)) {
+	let focused = || {
+		if focus_in_overlay {
+			Some(wid)
+		} else {
+			ax::focused_window_id(pid)
+		}
+	};
+	match front_target(entry_front, skylight::front_pid(), pid, wid, focused) {
 		FrontTarget::Background => {},
 		FrontTarget::Key => return Ok(false),
 		FrontTarget::CameForward => {
@@ -588,6 +931,9 @@ pub(super) fn make_key_in_background(
 		|| control::wait(KEY_WINDOW_POLL),
 	)?;
 	still_behind_user(pid, wid)?;
+	if focus_in_overlay {
+		return Ok(true);
+	}
 	let (location, local) = activating_press(window);
 	let press = |event_type: CGEventType, number: i64| -> CoreResult<()> {
 		let event = mouse_event(source, event_type, location, CGMouseButton::Left)?;
@@ -780,6 +1126,13 @@ const fn button_types(
 	}
 }
 
+/// Background pointer input for window `wid` of `pid`. The events go to `to`,
+/// the process and window that take the window's input ([`input_owner`]);
+/// making the window key still goes to its own application. `in_overlay`
+/// says `wid` is a sheet or popover on the application's focused window
+/// ([`takes_overlay_focus`]), so a left click sends only the activation,
+/// without the press outside its frame that would close a popover or reach
+/// the window the sheet is attached to.
 fn background_pointer(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -787,20 +1140,22 @@ fn background_pointer(
 	window: &DesktopWindow,
 	event: PointerEvent,
 	entry_front: Option<libc::pid_t>,
+	(to, to_wid): (libc::pid_t, u32),
+	in_overlay: bool,
 ) -> CoreResult<()> {
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, .. } => {
-			if make_key_in_background(source, pid, wid, window, entry_front)? {
+			if make_key_in_background(source, pid, wid, window, entry_front, in_overlay)? {
 				still_behind_user(pid, wid)?;
 			}
-			background_left_click(source, pid, wid, window, x, y, count)
+			background_left_click(source, to, to_wid, window, x, y, count)
 		},
 		PointerEvent::Click { x, y, button, count, .. } => {
-			background_button_click(source, pid, wid, window, x, y, button, count)
+			background_button_click(source, to, to_wid, window, x, y, button, count)
 		},
-		PointerEvent::Move { x, y } => post_hover(source, pid, wid, window, x, y, click_group_id()),
+		PointerEvent::Move { x, y } => post_hover(source, to, to_wid, window, x, y, click_group_id()),
 		PointerEvent::Scroll { x, y, dx, dy } => {
-			background_scroll(source, pid, wid, window, x, y, dx, dy)
+			background_scroll(source, to, to_wid, window, x, y, dx, dy)
 		},
 		PointerEvent::Drag { .. } | PointerEvent::Hold { .. } => {
 			Err(DesktopError::background_unavailable(format!(
@@ -1020,8 +1375,15 @@ fn click_group_id() -> i64 {
 		.into()
 }
 
-fn background_type(source: &CGEventSource, pid: libc::pid_t, text: &str) -> CoreResult<()> {
-	type_text(source, text, |event| skylight::post_keyboard(pid, event))
+fn background_type(
+	source: &CGEventSource,
+	pid: libc::pid_t,
+	text: &str,
+	guard: &dyn Fn() -> CoreResult<()>,
+) -> CoreResult<()> {
+	type_text(source, text, |event| {
+		post_guarded(event, guard, |event| skylight::post_keyboard(pid, event))
+	})
 }
 
 fn global_type(source: &CGEventSource, text: &str) -> CoreResult<()> {
@@ -1188,8 +1550,15 @@ fn post_bare_keys(transitions: &[(u16, bool)]) -> CoreResult<()> {
 	skylight::after_cleanup(result, cleanup)
 }
 
-fn background_chord(source: &CGEventSource, pid: libc::pid_t, keys: &[KeyName]) -> CoreResult<()> {
-	key_chord(source, keys, |event| skylight::post_keyboard(pid, event))
+fn background_chord(
+	source: &CGEventSource,
+	pid: libc::pid_t,
+	keys: &[KeyName],
+	guard: &dyn Fn() -> CoreResult<()>,
+) -> CoreResult<()> {
+	key_chord(source, keys, |event| {
+		post_guarded(event, guard, |event| skylight::post_keyboard(pid, event))
+	})
 }
 
 fn global_chord(source: &CGEventSource, keys: &[KeyName]) -> CoreResult<()> {
@@ -2020,6 +2389,72 @@ mod tests {
 	}
 
 	#[test]
+	fn background_keys_stop_once_another_window_becomes_key() {
+		use crate::desktop::error::ErrorCode;
+		let source = source().expect("event source");
+		let focused = std::cell::Cell::new(ax::FocusedWindow::Id(7));
+		let siblings = Some(KeyboardConflict::Siblings(1));
+		let guard = || keys_still_reach(7, siblings, ax::FocusedWindow::Id(7), || focused.get());
+		let mut typed = Vec::new();
+		let result = type_text(&source, "ab", |event| {
+			post_guarded(event, guard, |event| {
+				// The user picks a sibling window right after a is typed.
+				if matches!(event.get_type(), CGEventType::KeyUp) {
+					focused.set(ax::FocusedWindow::Id(9));
+				}
+				typed.push(event.get_type() as u32);
+				Ok(())
+			})
+		});
+		let error = result.unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert!(error.message.contains("may already have landed"), "{}", error.message);
+		assert_eq!(typed, [CGEventType::KeyDown as u32, CGEventType::KeyUp as u32]);
+		// Space is never pressed once a sibling is key; the releases still go
+		// out, so nothing stays held.
+		focused.set(ax::FocusedWindow::Id(7));
+		let mut held = Vec::new();
+		let result = with_held_keys(
+			&source,
+			&[KeyName::Shift, KeyName::Space],
+			|event| {
+				post_guarded(event, guard, |event| {
+					focused.set(ax::FocusedWindow::Id(9));
+					held.push(shift_transition(event));
+					Ok(())
+				})
+			},
+			|| panic!("a refused press must not run the hold"),
+		);
+		assert_eq!(result.unwrap_err().code, ErrorCode::InputFailed);
+		assert_eq!(held, [
+			SHIFT_SPACE_TRANSITIONS[0],
+			SHIFT_SPACE_TRANSITIONS[2],
+			SHIFT_SPACE_TRANSITIONS[3]
+		]);
+	}
+
+	#[test]
+	fn background_keys_continue_while_the_focus_that_proved_them_holds() {
+		let id = ax::FocusedWindow::Id;
+		let unreported = ax::FocusedWindow::Unreported;
+		let siblings = Some(KeyboardConflict::Siblings(1));
+		// Reminders reports the window under its details popover 25579 as
+		// focused while the popover takes the keys.
+		assert!(keys_still_reach(25579, siblings, id(25567), || id(25567)).is_ok());
+		assert!(keys_still_reach(25579, siblings, id(25567), || id(25579)).is_ok());
+		assert!(keys_still_reach(25579, siblings, id(25567), || id(25600)).is_err());
+		// Finder reports no focused window while its rename field has focus.
+		assert!(keys_still_reach(7, siblings, unreported, || unreported).is_ok());
+		assert!(keys_still_reach(7, siblings, unreported, || id(9)).is_err());
+		assert!(keys_still_reach(7, siblings, id(7), || unreported).is_err());
+		assert!(keys_still_reach(7, siblings, id(7), || ax::FocusedWindow::Unmapped).is_err());
+		// A lone window: one opened during the input stops it once key.
+		assert!(keys_still_reach(7, None, id(7), || id(9)).is_err());
+		assert!(keys_still_reach(7, None, id(7), || unreported).is_ok());
+	}
+
+	#[test]
 	fn event_source_never_suppresses_local_input() {
 		let source = source().expect("Quartz event source");
 		// SAFETY: `source` remains live for both CoreGraphics getter calls.
@@ -2042,18 +2477,22 @@ mod tests {
 
 	#[test]
 	fn keyboard_destination_counts_only_windows_that_can_be_key() {
-		assert_eq!(keyboard_conflict(10, &[record(10, Some(false))]), None);
-		assert_eq!(keyboard_conflict(10, &[record(10, Some(false)), record(11, Some(true))]), None);
+		let listed_only = || false;
+		assert_eq!(keyboard_conflict(10, &[record(10, Some(false))], listed_only), None);
 		assert_eq!(
-			keyboard_conflict(10, &[
-				record(10, Some(false)),
-				record(11, None),
-				record(12, Some(false))
-			]),
+			keyboard_conflict(10, &[record(10, Some(false)), record(11, Some(true))], listed_only),
+			None
+		);
+		assert_eq!(
+			keyboard_conflict(
+				10,
+				&[record(10, Some(false)), record(11, None), record(12, Some(false))],
+				listed_only
+			),
 			Some(KeyboardConflict::Siblings(2)),
 		);
 		assert_eq!(
-			keyboard_conflict(10, &[record(11, Some(false))]),
+			keyboard_conflict(10, &[record(11, Some(false))], listed_only),
 			Some(KeyboardConflict::Unmapped),
 		);
 	}
@@ -2063,9 +2502,180 @@ mod tests {
 		// Finder lists its desktop in AXWindows with no window id.
 		let desktop = ax::AxWindowRecord { id: None, minimized: None };
 		assert_eq!(
-			keyboard_conflict(10, &[record(10, Some(false)), desktop]),
+			keyboard_conflict(10, &[record(10, Some(false)), desktop], || false),
 			Some(KeyboardConflict::Siblings(1)),
 		);
+	}
+
+	#[test]
+	fn a_sheet_outside_ax_windows_is_a_window_of_its_application() {
+		// Finder's Go to Folder sheet 41740 is attached to window 41732 and
+		// missing from AXWindows, which lists the window, another one and the
+		// desktop: keys for the sheet wait until it is the focused window.
+		let desktop = ax::AxWindowRecord { id: None, minimized: None };
+		let records = [record(41732, Some(false)), record(35240, Some(false)), desktop];
+		assert_eq!(keyboard_conflict(41740, &records, || true), Some(KeyboardConflict::Siblings(3)),);
+		assert_eq!(keyboard_conflict(41740, &records, || false), Some(KeyboardConflict::Unmapped));
+		// A sheet opened on a sheet: 191 on 186 on listed window 177.
+		let parents = |id| match id {
+			191 => Some(186),
+			186 => Some(177),
+			_ => None,
+		};
+		assert!(attached_under(191, parents, |parent| parent == 177));
+		assert!(!attached_under(177, parents, |parent| parent == 177));
+	}
+
+	fn frame(id: u32, x: i32, y: i32, width: u32, height: u32) -> DesktopWindow {
+		DesktopWindow {
+			id: id.to_string(),
+			title: String::new(),
+			app: "Calendar".to_string(),
+			pid: Some(7),
+			x,
+			y,
+			width,
+			height,
+			focused: false,
+		}
+	}
+
+	#[test]
+	fn pointer_input_inside_a_popover_or_sheet_goes_to_that_window() {
+		// Calendar's event popover 25579 is attached to window 25567, and a
+		// second popover 25590 to it; panel 25600 is attached to nothing.
+		let parents = |id| match id {
+			25579 => Some(25567),
+			25590 => Some(25579),
+			_ => None,
+		};
+		let windows = [
+			frame(25590, 1350, 500, 50, 50),
+			frame(25579, 1200, 200, 326, 400),
+			frame(25600, 0, 0, 100, 100),
+			frame(25567, 0, 0, 1400, 900),
+		];
+		let at = |wid, point| attached_at(wid, point, &windows, parents).map(|w| w.id.as_str());
+		// The Repeat popup's centre inside the popover, which reports window
+		// 25567 as its AXWindow, and a point in the nested popover.
+		assert_eq!(at(25567, (1300.0, 330.0)), Some("25579"));
+		assert_eq!(at(25567, (1370.0, 520.0)), Some("25590"));
+		assert_eq!(at(25579, (1370.0, 520.0)), Some("25590"));
+		// The window itself, a window on top that is not attached to it, and a
+		// point outside every window keep the target.
+		assert_eq!(at(25567, (700.0, 600.0)), None);
+		assert_eq!(at(25579, (1300.0, 330.0)), None);
+		assert_eq!(at(25567, (50.0, 50.0)), None);
+		assert_eq!(at(25567, (3000.0, 50.0)), None);
+	}
+
+	#[test]
+	fn a_click_into_an_overlay_on_the_focused_window_skips_the_activating_press() {
+		// Calendar reports window 25567 as focused while its popover 25579 is
+		// open; Automator reports its Save sheet 25670 itself as focused.
+		let parents = |id| match id {
+			25579 => Some(25567),
+			25670 => Some(25656),
+			_ => None,
+		};
+		assert!(takes_overlay_focus(25579, Some(25567), parents));
+		assert!(takes_overlay_focus(25670, Some(25670), parents));
+		// A top-level window, and an overlay on a window that is not focused,
+		// are made key with the press as before.
+		assert!(!takes_overlay_focus(25567, Some(25567), parents));
+		assert!(!takes_overlay_focus(25579, Some(25656), parents));
+		assert!(!takes_overlay_focus(25579, None, parents));
+	}
+
+	#[test]
+	fn keys_wait_while_the_application_reports_another_focused_window() {
+		// Finder's Go to Folder sheet 41740 is attached to window 41732 and is
+		// Finder's focused window; keys posted to Finder land in the sheet.
+		let sheet = ax::KeyDestination::Other(Some(41740));
+		assert_eq!(key_route(7, sheet, None), KeyRoute::Wait);
+		assert_eq!(key_route(7, sheet, Some(KeyboardConflict::Siblings(3))), KeyRoute::Wait);
+		assert_eq!(key_route(7, ax::KeyDestination::Other(None), None), KeyRoute::Wait);
+		assert_eq!(key_route(7, ax::KeyDestination::Target(7), None), KeyRoute::Deliver(7));
+		// No focused window reported: only a lone window proves the destination.
+		assert_eq!(key_route(7, ax::KeyDestination::Unreported, None), KeyRoute::Deliver(7));
+		assert_eq!(
+			key_route(7, ax::KeyDestination::Unreported, Some(KeyboardConflict::Siblings(1))),
+			KeyRoute::Wait,
+		);
+	}
+
+	#[test]
+	fn keys_for_a_window_behind_its_own_sheet_name_the_sheet() {
+		use crate::desktop::error::ErrorCode;
+		let parents = |id| match id {
+			41740 => Some(41732),
+			191 => Some(186),
+			186 => Some(177),
+			_ => None,
+		};
+		let sheet = key_refusal(41732, ax::KeyDestination::Other(Some(41740)), None, parents);
+		assert_eq!(sheet.code, ErrorCode::InvalidTarget);
+		assert!(sheet.message.contains("send them to window 41740"));
+		// A sheet opened on another sheet still blocks the window under both.
+		let nested = key_refusal(177, ax::KeyDestination::Other(Some(191)), None, parents);
+		assert_eq!(nested.code, ErrorCode::InvalidTarget);
+		// A focused window that is not attached can still be replaced in
+		// takeover.
+		let sibling = key_refusal(41732, ax::KeyDestination::Other(Some(35240)), None, parents);
+		assert_eq!(sibling.code, ErrorCode::BackgroundUnavailable);
+		assert!(sibling.message.contains("window 35240 still is"));
+	}
+
+	#[test]
+	fn keys_for_a_system_panel_go_to_the_process_that_draws_it() {
+		use crate::desktop::error::ErrorCode;
+		let focus = |window, element, mapped| ax::KeyFocus {
+			window:         ax::FocusedWindow::Id(window),
+			element_window: Some(element),
+			element_mapped: mapped,
+		};
+		let unread = || -> ax::WindowContent { panic!("focus in the window itself proves the host") };
+		let unasked = |_| -> Option<u32> { panic!("no other process is involved") };
+		// TextEdit (pid 7581) reports its Open panel 554 as focused; the focused
+		// list is in window 556 of openAndSavePanelService (pid 7592), which
+		// reports that window focused.
+		let open = focus(554, 556, true);
+		let drawn = |window| move || ax::WindowContent::Remote { pid: 7592, window };
+		assert_eq!(key_process(7581, 554, &open, drawn(556), |_| Some(556)).unwrap(), 7592);
+		// Its Go to Folder sheet 561: the path field maps to no window, so the
+		// ascent ends at the sheet, and the service draws it in window 559.
+		let go_to = focus(561, 561, false);
+		assert_eq!(key_process(7581, 561, &go_to, drawn(559), |_| Some(559)).unwrap(), 7592);
+		// While the service reports focus in another window, nothing is sent.
+		let error = key_process(7581, 554, &open, drawn(556), |_| Some(559))
+			.expect_err("keys the service would not take must refuse");
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert!(error.message.contains("process 7592"));
+		// A window drawn by its own process keeps the keys.
+		assert_eq!(key_process(7581, 554, &open, || ax::WindowContent::Own, unasked).unwrap(), 7581);
+		// A focused element in the window itself, or Finder's rename overlay
+		// while Finder reports no focused window, never reads the content.
+		assert_eq!(key_process(7581, 543, &focus(543, 543, true), unread, unasked).unwrap(), 7581);
+		let rename = ax::KeyFocus {
+			window:         ax::FocusedWindow::Unreported,
+			element_window: Some(41743),
+			element_mapped: true,
+		};
+		assert_eq!(key_process(7, 41732, &rename, unread, unasked).unwrap(), 7);
+	}
+
+	#[test]
+	fn pointer_input_for_a_system_panel_goes_to_the_window_that_draws_it() {
+		use crate::desktop::error::ErrorCode;
+		// Clicks for TextEdit's Save sheet 1362 go to openAndSavePanelService
+		// (pid 16472) stamped with its window 1363, which it reports focused.
+		let drawn = ax::WindowContent::Remote { pid: 16472, window: 1363 };
+		assert_eq!(input_owner(16467, 1362, drawn, |_| Some(1363)).unwrap(), (16472, 1363));
+		let error = input_owner(16467, 1362, drawn, |_| None)
+			.expect_err("a click the service would not take must refuse before anything is sent");
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		let unasked = |_| -> Option<u32> { panic!("no other process is involved") };
+		assert_eq!(input_owner(16467, 1337, ax::WindowContent::Own, unasked).unwrap(), (16467, 1337));
 	}
 
 	#[test]
