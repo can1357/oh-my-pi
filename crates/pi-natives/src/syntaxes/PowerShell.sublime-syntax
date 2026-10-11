@@ -1,0 +1,1567 @@
+# Vendored from https://github.com/SublimeText/PowerShell/blob/2938700b586aeaa9c1d2dc0c04a1cc569ff3c24e/PowerShell.sublime-syntax
+# Source: SublimeText/PowerShell, MIT license.
+# Copyright (c) 2011-2015 Guillermo López-Anglada
+#               2020-2025 Michael Lyons
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+%YAML 1.2
+---
+# http://www.sublimetext.com/docs/syntax.html
+# https://learn.microsoft.com/en-us/powershell/
+name: PowerShell
+scope: source.powershell
+version: 2
+
+file_extensions:
+  - ps1
+  - psm1
+  - psd1
+
+first_line_match: |-
+  (?x:
+    ^\#!.*{{shebang_language}}
+  | ^\# \s* -\*- [^*]* mode: \s* powershell [^*]* -\*-
+  )
+
+contexts:
+  prototype:
+    - include: regions
+    - include: comments
+
+  main:
+    - meta_include_prototype: false
+    - match: ''
+      push: [statements, script-param-block, imports, shebang]
+
+  shebang:
+    - meta_include_prototype: false
+    - match: ^\s*(\#!)
+      captures:
+        1: punctuation.definition.comment.powershell
+      set: shebang-body
+    - include: else-pop
+
+  shebang-body:
+    - meta_include_prototype: false
+    - meta_scope: comment.line.shebang.powershell
+    - match: '{{shebang_language}}'
+      scope: constant.language.shebang.powershell
+    - include: pop-eol
+
+  imports:
+    - include: using-directives
+    - include: else-pop
+
+  script-param-block:
+    - include: attributes
+    - include: param-block
+    - include: else-pop
+
+  statements:
+    - include: classes
+    - include: functions
+    - include: workflows
+    - include: desired-state-configurations
+
+    - match: \B\.(?= )
+      scope: keyword.operator.source.powershell
+      push:
+        - include: commands-quoted
+        - include: else-pop
+    - match: \&
+      scope: keyword.operator.call.powershell
+      push:
+        - include: commands-quoted
+        - include: else-pop
+
+    - include: flow
+    - include: expressions
+
+  expressions:
+    - include: expressions-without-commands
+    - include: commands
+
+  expressions-without-commands:
+    # Meta
+    - include: labels
+    - include: requires-directives
+
+    - include: escape-sequences
+
+    # Statements that may return values
+    - include: exceptions
+    - include: loops
+    - include: conditionals
+
+    # Normal code
+    - include: types
+    - include: strings
+    - include: numbers
+    - include: constants
+    - include: variables
+
+    - include: hashtables
+    - include: arrays
+
+    - include: data-blocks
+    - include: script-blocks
+    - include: groups
+    - include: subexpressions
+
+    - include: future-reserved-words
+
+    - include: operators
+
+  future-reserved-words:
+    # https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_reserved_words
+    - match: \b(?i:define|from){{kebab_break}}
+      scope: keyword.control.powershell
+    - match: \b(?i:var){{kebab_break}}
+      scope: keyword.declaration.variable.powershell
+
+###[ EXCEPTIONS ]##############################################################
+
+  exceptions:
+    - match: \b(?i:throw){{kebab_break}}
+      scope: keyword.control.exception.raise.powershell
+    - match: \b(?i:try){{kebab_break}}
+      scope: keyword.control.exception.try.powershell
+    - match: \b(?i:catch|trap){{kebab_break}}
+      scope: keyword.control.exception.catch.powershell
+    - match: \b(?i:finally){{kebab_break}}
+      scope: keyword.control.exception.finally.powershell
+
+###[ LOOPS ]###################################################################
+
+  loops:
+    - match: \b(?i:for|foreach(?!-object)){{kebab_break}}
+      scope: keyword.control.loop.for.powershell
+    - match: \b(?i:do){{kebab_break}}
+      scope: keyword.control.loop.do-while.powershell
+    - match: \b(?i:while){{kebab_break}}
+      scope: keyword.control.loop.while.powershell
+    - match: \b(?i:until){{kebab_break}}
+      scope: keyword.control.loop.repeat-until.powershell
+
+###[ FLOW ]####################################################################
+
+  flow:
+    - match: \b(?i:break){{kebab_break}}
+      scope: keyword.control.flow.break.powershell
+    - match: \b(?i:continue){{kebab_break}}
+      scope: keyword.control.flow.continue.powershell
+    - match: \b(?i:exit){{kebab_break}}
+      scope: keyword.control.flow.exit.powershell
+    - match: \b(?i:return){{kebab_break}}
+      scope: keyword.control.flow.return.powershell
+
+###[ CONDITIONALS ]############################################################
+
+  conditionals:
+    - match: \b(?i:if){{kebab_break}}
+      scope: keyword.control.conditional.if.powershell
+    - match: \b(?i:elseif){{kebab_break}}
+      scope: keyword.control.conditional.elseif.powershell
+    - match: \b(?i:else){{kebab_break}}
+      scope: keyword.control.conditional.else.powershell
+    - match: \b(?i:switch){{kebab_break}}
+      scope: keyword.control.conditional.switch.powershell
+      push: in-command
+    - match: \b(?i:default){{kebab_break}}
+      scope: keyword.control.conditional.default.powershell
+    - match: \b(?i:where(?!-object)){{kebab_break}}
+      scope: keyword.control.conditional.select.powershell
+
+###[ GROUPS ]##################################################################
+
+  groups:
+    - match: \(
+      scope: punctuation.section.group.begin.powershell
+      push: inside-group
+
+  inside-group:
+    - meta_scope: meta.group.powershell
+    - match: \)
+      scope: punctuation.section.group.end.powershell
+      set: members
+    # TODO: Move this to a foreach (X in Y) construct
+    - match: \b(?i:in){{kebab_break}}
+      scope: keyword.control.loop.in.powershell
+    - include: attributes
+    - include: expressions
+
+  arrays:
+    - match: (@)(\()
+      captures:
+        1: keyword.other.array.begin.powershell
+        2: punctuation.section.group.begin.powershell
+      push: [members, inside-array]
+
+  inside-array:
+    - meta_scope: meta.group.array-expression.powershell
+    - match: \)
+      scope: punctuation.section.group.end.powershell
+      pop: 1
+    - include: expressions
+
+  hashtables:
+    - match: (@)(\{)
+      captures:
+        1: keyword.other.hashtable.begin.powershell
+        2: punctuation.section.braces.begin.powershell
+      push: [members, inside-hashtable]
+
+  inside-hashtable:
+    - meta_scope: meta.hashtable.powershell
+    - match: \}
+      scope: punctuation.section.braces.end.powershell
+      pop: 1
+    - match: \b(({{single_quote}}){{identifier_simple}}({{single_quote}}))\s*(=)\s*
+      captures:
+        1: meta.mapping.key.powershell string.quoted.single.powershell
+        2: punctuation.definition.string.begin.powershell
+        3: punctuation.definition.string.end.powershell
+        4: punctuation.separator.key-value.powershell
+    - match: \b(({{double_quote}}){{identifier_simple}}({{double_quote}}))\s*(=)\s*
+      captures:
+        1: meta.mapping.key.powershell string.quoted.double.powershell
+        2: punctuation.definition.string.begin.powershell
+        3: punctuation.definition.string.end.powershell
+        4: punctuation.separator.key-value.powershell
+    - match: \b({{identifier_simple}})\s*(=)\s*
+      captures:
+        1: meta.mapping.key.powershell string.unquoted.powershell
+        2: punctuation.separator.key-value.powershell
+    - include: expressions
+
+  subexpressions:
+    - match: (\$)(\()
+      captures:
+        1: keyword.other.variable.definition.powershell
+        2: punctuation.section.group.begin.powershell
+      push: inside-subexpression
+
+  inside-subexpression:
+    - meta_scope: meta.group.complex.subexpression.powershell
+    - match: \)
+      scope: punctuation.section.group.end.powershell
+      pop: 1
+    - include: expressions
+
+  script-blocks:
+    - match: (%)?(\{)
+      captures:
+        1: keyword.control.loop.for.powershell
+        2: punctuation.section.braces.begin.powershell
+      push: [members, inside-script-block]
+
+  inside-script-block:
+    - meta_scope: meta.block.powershell
+    - match: \}
+      scope: punctuation.section.braces.end.powershell
+      pop: 1
+    - include: param-block
+    - include: statements
+
+###[ COMMANDS ]################################################################
+
+  commands:
+    - include: commands-verb-noun
+    - include: commands-reserved
+    - include: script-invocation
+    - include: command-freeform
+
+  commands-verb-noun:
+    # The "Verb-Noun" pattern
+    - match: |-
+        (?x:
+          (?:[.\w\\/:-]*[\\/])?              # Path stuff
+          {{command_verbs}}                  # Approved verbs
+          \-\w+?                             # Any "noun"
+          (?:\.(?i:exe|cmd|bat|ps1))?\b      # More path stuff
+        )
+      scope: meta.function-call.powershell support.function.powershell
+      push: in-command
+
+  commands-reserved:
+    # Builtin cmdlets with reserved verbs
+    - match: \b(?i:(?:ForEach|Where|Sort|Tee)-Object)\b
+      scope: meta.function-call.powershell support.function.powershell
+      push: in-command
+
+  script-invocation:
+    - match: \b(?i:[a-z]:)?[\w.\\/-]+\.(?i:exe|com|cmd|bat|ps1)\b
+      scope: meta.function-call.powershell variable.function.powershell
+      push: in-command
+
+  commands-quoted:
+    - match: (?={{single_quote}})
+      push: [in-command, single-quoted-command-string]
+    - match: (?={{double_quote}})
+      push: [in-command, double-quoted-command-string]
+
+  single-quoted-command-string:
+    - match: '{{single_quote}}'
+      scope: punctuation.definition.string.begin.powershell
+      push: inside-single-quoted-command-string
+    - include: immediately-pop
+
+  inside-single-quoted-command-string:
+    - meta_include_prototype: false
+    - meta_scope: meta.string.powershell string.quoted.single.powershell meta.function-call.powershell variable.function.powershell
+    - match: '{{single_quote}}{2}'
+      scope: constant.character.escape.powershell
+    - match: '{{single_quote}}'
+      scope: punctuation.definition.string.end.powershell
+      pop: 1
+    - include: path-punctuation
+
+  double-quoted-command-string:
+    - match: '{{double_quote}}'
+      scope: punctuation.definition.string.begin.powershell
+      push: inside-double-quoted-command-string
+    - include: immediately-pop
+
+  inside-double-quoted-command-string:
+    - meta_include_prototype: false
+    - meta_scope: meta.string.interpolated.powershell string.quoted.double.powershell meta.function-call.powershell variable.function.powershell
+    - match: '{{double_quote}}{2}'
+      scope: constant.character.escape.powershell
+    - match: '{{double_quote}}'
+      scope: punctuation.definition.string.end.powershell
+      pop: 1
+    - include: escape-sequences
+    - include: string-interpolations
+    - include: path-punctuation
+
+  command-freeform:
+    - match: '{{identifier_function}}'
+      scope: meta.function-call.powershell variable.function.powershell
+      push: in-command
+
+  in-command:
+    - meta_content_scope: meta.function-call.arguments.powershell
+    - include: pop-end-of-command
+    - include: stop-parsing-token
+    - include: redirection
+    - include: cli-parameters
+    - include: expressions-without-commands
+    - match: (?=\S)
+      push: inside-unquoted-string
+
+  inside-unquoted-string:
+    - meta_include_prototype: false
+    - meta_scope: meta.string.powershell string.unquoted.powershell
+    - match: $|(?=[\s#|>;,()}"'])
+      pop: 1
+    - match: \{
+      push: inside-unquoted-string-brace
+    - include: path-punctuation
+    - include: escape-sequences
+    - include: string-wildcards
+
+  inside-unquoted-string-brace:
+    - meta_include_prototype: false
+    - match: \}
+      pop: 1
+    - include: inside-unquoted-string
+
+  pop-end-of-command:
+    - include: line-continuations
+    - include: pop-eol
+    - match: (?=[)}])
+      pop: 1
+    - include: pop-terminator
+    - include: pop-pipe
+
+  pop-terminator:
+    - match: ';'
+      scope: punctuation.terminator.statement.powershell
+      pop: 1
+
+  pop-pipe:
+    - match: (?:(\|)|(\|\||&&))\s*\n
+      captures:
+        1: keyword.operator.pipe.powershell
+        2: keyword.operator.pipe.conditional.powershell
+      push:
+        - match: ^
+          pop: 2
+    - match: \|\||&&
+      scope: keyword.operator.pipe.conditional.powershell
+      pop: 1
+    - match: \|
+      scope: keyword.operator.pipe.powershell
+      pop: 1
+
+  cli-parameters:
+    # Flags/Options/Parameters
+    - match: \B((--?|[/+])\p{L}(?:[\w-]*\w)?)([=:])?
+      scope:
+      captures:
+        1: variable.parameter.option.powershell
+        2: punctuation.definition.parameter.powershell
+        3: keyword.operator.assignment.powershell
+
+  stop-parsing-token:
+    - match: \B--%\B
+      scope: keyword.control.stop-parsing.powershell
+      set:
+        - meta_include_prototype: false
+        - meta_scope: meta.function-call.arguments.powershell
+        - meta_content_scope: string.unquoted.powershell
+        - include: pop-before-eol
+        - include: pop-pipe
+
+###[ DIRECTIVES ]##############################################################
+
+  requires-directives:
+    - match: (#)((?i:requires))\s
+      captures:
+        1: punctuation.definition.keyword.powershell
+        2: keyword.control.import.require.powershell
+      push:
+        - meta_scope: meta.requires.powershell
+        - include: pop-eol
+        - include: hashtables
+        - match: (-)(?i:Modules|PSSnapin|RunAsAdministrator|ShellId|Version)
+          scope: variable.parameter.option.powershell
+          captures:
+            1: punctuation.definition.variable.powershell
+        - match: ','
+          scope: punctuation.separator.powershell
+
+  using-directives:
+    - match: \b(?i)using(?=\s)
+      scope: keyword.control.import.powershell
+      push: inside-using
+
+  inside-using:
+    - match: \bnamespace(?=\s)
+      scope: keyword.control.import.powershell
+      set: inside-using-namespace
+    - match: \bmodule(?=\s)
+      scope: keyword.control.import.powershell
+      set: inside-using-module
+    - include: else-pop
+
+  inside-using-namespace:
+    - include: pop-eol
+    - match: '{{identifier_csharp}}(\.)'
+      scope: meta.path.powershell
+      captures:
+        1: punctuation.accessor.dot.powershell
+    - match: '{{identifier_csharp}}'
+      scope: meta.path.powershell
+
+  inside-using-module:
+    - include: pop-eol
+    - match: '{{identifier_csharp}}(\.)'
+      scope: meta.path.powershell
+      captures:
+        1: punctuation.accessor.dot.powershell
+    - match: '{{identifier_csharp}}'
+      scope: meta.path.powershell support.type.powershell
+
+###[ CLASSES ]#################################################################
+
+  classes:
+    - match: \b(?i)class(?=\s)
+      scope: keyword.declaration.class.powershell
+      push: [class-body, class-parents, class-name]
+
+  class-name:
+    - match: '{{identifier_simple}}'
+      scope: entity.name.class.powershell
+      pop: 1
+    - include: else-pop
+
+  class-parents:
+    - match: ':'
+      scope: punctuation.separator.type.powershell
+      push: inside-class-parents
+    - include: else-pop
+
+  inside-class-parents:
+    - include: comma-separators
+    - match: '{{identifier_simple}}'
+      scope: entity.other.inherited-class.powershell
+    - include: else-pop
+
+  class-body:
+    - meta_scope: meta.class.powershell
+    - match: \{
+      scope: punctuation.section.block.begin.powershell
+      push: inside-class-body
+    - include: else-pop
+
+  inside-class-body:
+    - match: \}
+      scope: punctuation.section.block.end.powershell
+      pop: 1
+    - match: \b(?i:hidden|static)\b
+      scope: storage.modifier.powershell
+    - include: attributes
+    - include: types-without-members
+    - include: variables-without-members
+    - match: (?={{identifier_simple}})
+      push: [function-body, function-inline-params, function-name]
+
+###[ FUNCTIONS ]###############################################################
+
+  functions:
+    - match: ^\s*(?i)(function|filter)(?=\s)
+      captures:
+        1: keyword.declaration.function.powershell
+      push: [function-body, function-inline-params, function-name]
+
+  function-name:
+    - match: (?:(global|local|script|private):)?({{identifier_function}})
+      captures:
+        1: storage.modifier.scope.powershell
+        2: entity.name.function.powershell
+    - match: (?=[{(])
+      pop: 1
+
+  function-inline-params:
+    - match: \(
+      scope: punctuation.section.parameters.begin.powershell
+      push: inside-function-inline-params
+    - include: else-pop
+
+  inside-function-inline-params:
+    - match: \)
+      scope: punctuation.section.parameters.end.powershell
+      pop: 1
+    - include: comma-separators
+    - include: types
+    - match: (\$){{identifier_simple}}
+      scope: variable.parameter.powershell
+      captures:
+        1: punctuation.definition.variable.begin.powershell
+    - include: assignment-normal
+
+  function-body:
+    - meta_scope: meta.function.powershell
+    - match: \{
+      scope: punctuation.section.block.begin.powershell
+      push: inside-function-body
+    - include: else-pop
+
+  inside-function-body:
+    - match: \}
+      scope: punctuation.section.block.end.powershell
+      pop: 2
+
+    - include: param-block
+
+    - match: \b(?i:Begin|Process|End|Clean){{kebab_break}}
+      scope: keyword.context.block.powershell
+      push: expect-function-context
+
+    - include: attributes
+    - include: workflow-execution-contexts
+    - include: statements
+
+  param-block:
+    - match: \b(?i:(?:Dynamic)?Param){{kebab_break}}
+      scope: keyword.declaration.parameter.powershell  # This scope is not standard
+      push: expect-param-context
+
+  expect-function-context:
+    - meta_scope: meta.block.powershell
+    - match: \{
+      scope: punctuation.section.block.begin.powershell
+      push: inside-function-context
+    - include: else-pop
+
+  inside-function-context:
+    - match: \}
+      scope: punctuation.section.block.end.powershell
+      pop: 2
+    - include: workflow-execution-contexts
+    - include: statements
+
+  expect-param-context:
+    - match: \(
+      scope: punctuation.section.block.begin.powershell
+      push: inside-param-context
+    - include: else-pop
+
+  inside-param-context:
+    - meta_scope: meta.block.parameters.powershell
+    - match: \)
+      scope: punctuation.section.block.end.powershell
+      pop: 2
+    - include: comma-separators
+    - include: attributes
+    - include: types-without-members
+    - include: variables-without-members
+    - include: literals
+    - include: assignment-normal
+
+  attributes:
+    - match: (\[)\s*(ValidatePattern)
+      captures:
+        1: punctuation.definition.annotation.begin.powershell
+        2: variable.annotation.powershell
+      push: inside-attribute
+      with_prototype:
+        - include: regex-strings
+    - match: (\[)\s*({{attributes}})
+      captures:
+        1: punctuation.definition.annotation.begin.powershell
+        2: variable.annotation.powershell
+      push: inside-attribute
+
+  inside-attribute:
+    - meta_scope: meta.annotation.powershell
+    - match: \]
+      scope: punctuation.definition.annotation.end.powershell
+      pop: 1
+    - match: \(
+      scope: punctuation.section.group.begin.powershell
+      push: inside-attribute-parameters
+
+  inside-attribute-parameters:
+    - match: \)
+      scope: punctuation.section.group.end.powershell
+      pop: 1
+    - match: ({{attribute_parameters}})\s*(=)?
+      captures:
+        1: variable.parameter.attribute.powershell
+        2: keyword.operator.assignment.powershell
+    - include: expressions
+
+###[ WORKFLOWS ]###############################################################
+
+  workflows:
+    - match: ^\s*(?i)(workflow)(?=\s)
+      captures:
+        1: keyword.declaration.function.powershell
+      push: [function-body, function-name]
+
+  workflow-body:
+    - meta_scope: meta.function.powershell
+    - match: \{
+      scope: punctuation.section.block.begin.powershell
+      push: inside-workflow-body
+      with_prototype:
+        - include: workflow-execution-contexts
+    - include: else-pop
+
+  inside-workflow-body:
+    - match: \}
+      scope: punctuation.section.block.end.powershell
+      pop: 2
+    - include: statements
+
+  workflow-execution-contexts:
+    - match: \b(?i:inlinescript){{kebab_break}}
+      scope: keyword.control.context.powershell
+      push: expect-function-context
+    - match: \b(?i:parallel|sequence){{kebab_break}}
+      scope: keyword.control.flow.powershell
+      push: expect-function-context
+
+###[ DESIRED STATE CONFIGURATIONS ]############################################
+
+  desired-state-configurations:
+    - match: ^\s*(?i)(configuration)(?=\s)
+      captures:
+        1: keyword.declaration.function.powershell
+      push:
+        - desired-state-configuration-body
+        - desired-state-configuration-name
+
+  desired-state-configuration-name:
+    - match: '{{identifier_function}}'
+      scope: entity.name.function.powershell
+    - match: (?=[{(])
+      pop: 1
+
+  desired-state-configuration-body:
+    - meta_scope: meta.function.powershell
+    - match: \{
+      scope: punctuation.section.block.begin.powershell
+      push: inside-desired-state-configuration-body
+    - include: else-pop
+
+  inside-desired-state-configuration-body:
+    - match: \}
+      scope: punctuation.section.block.end.powershell
+      pop: 2
+
+    - match: \b(?i:Param){{kebab_break}}
+      scope: keyword.declaration.parameter.powershell  # This scope is not standard
+      push: expect-param-context
+
+    - match: \b(?i:Node){{kebab_break}}
+      scope: keyword.context.block.powershell
+      push: expect-node-context
+
+    - include: attributes
+
+  expect-node-context:
+    - match: \{
+      scope: punctuation.section.block.begin.powershell
+      push: inside-node-context
+    - include: expressions
+    - include: else-pop
+
+  inside-node-context:
+    - match: \}
+      scope: punctuation.section.block.end.powershell
+      pop: 2
+    - match: \b((?i:WindowsFeature))\s+({{identifier_csharp}})
+      captures:
+        1: keyword.other.powershell
+        2: entity.name.label.powershell
+    - include: expressions
+
+###[ VARIABLES ]###############################################################
+
+  variables:
+    - match: '{{var_lookahead}}'
+      push: [members, expect-variable]
+
+  variables-without-members:
+    - match: '{{var_lookahead}}'
+      push: [expect-variable]
+
+  expect-variable:
+    - match: (\$|@){{var_constants}}
+      scope: support.constant.variable.powershell
+      captures:
+        1: punctuation.definition.variable.powershell
+    - match: (\$|@){{var_language}}
+      scope: variable.language.powershell
+      captures:
+        1: punctuation.definition.variable.powershell
+    - match: (\$)(\{)
+      captures:
+        1: punctuation.definition.variable.powershell
+        2: punctuation.section.interpolation.begin.powershell
+      push: inside-variable-special-char
+    - match: (\$|@)
+      captures:
+        1: punctuation.definition.variable.powershell
+        2: punctuation.section.interpolation.begin.powershell
+      push: inside-variable-simple
+    - include: immediately-pop
+
+  inside-variable-simple:
+    - meta_include_prototype: false
+    - meta_scope: variable.other.readwrite.powershell
+    - match: ({{var_scope_mod}})(:)
+      captures:
+        1: storage.modifier.scope.powershell
+        2: punctuation.accessor.colon.powershell
+    - match: ({{identifier_simple}})(:)
+      captures:
+        1: support.variable.drive.powershell
+        2: punctuation.accessor.colon.powershell
+    - match: '{{identifier_simple}}'
+    - include: immediately-pop
+
+  inside-variable-special-char:
+    - meta_include_prototype: false
+    - meta_scope: variable.other.readwrite.powershell
+    - match: '`.'
+      scope: constant.character.escape.powershell
+    - match: \}
+      scope: punctuation.section.interpolation.end.powershell
+      pop: 1
+    - match: ({{var_scope_mod}})(:)
+      captures:
+        1: storage.modifier.scope.powershell
+        2: punctuation.accessor.colon.powershell
+    - match: ({{identifier_simple}})(:)
+      captures:
+        1: support.variable.drive.powershell
+        2: punctuation.accessor.colon.powershell
+
+  members:
+    - match: (?=\.\.)
+      pop: 1
+    - match: \?\.(?=\$?{{identifier_simple}})
+      scope: punctuation.accessor.null-coalescing.powershell
+    - match: \??\.(?=\$?{{identifier_simple}})
+      scope: punctuation.accessor.dot.powershell
+    - match: ::(?={{identifier_simple}})
+      scope: punctuation.accessor.double-colon.powershell
+    - match: (new)(\()
+      captures:
+        1: meta.function-call.powershell support.function.constructor.powershell
+        2: meta.function-call.arguments.powershell punctuation.section.arguments.begin.powershell
+      push: inside-function-call-arguments
+    - match: ({{identifier_simple}})(\()
+      captures:
+        1: meta.function-call.powershell variable.function.powershell
+        2: meta.function-call.arguments.powershell punctuation.section.arguments.begin.powershell
+      push: inside-function-call-arguments
+    - match: '{{identifier_simple}}'
+      scope: variable.other.member.powershell
+    - match: (\?)(\[)
+      captures:
+        1: punctuation.accessor.null-coalescing.powershell
+        2: punctuation.section.brackets.begin.powershell
+      push: inside-indexer
+    - match: \[
+      scope: punctuation.section.brackets.begin.powershell
+      push: inside-indexer
+    - include: immediately-pop
+
+  inside-function-call-arguments:
+    - meta_content_scope: meta.function-call.arguments.powershell
+    - match: \)
+      scope: meta.function-call.arguments.powershell punctuation.section.arguments.end.powershell
+      pop: 1
+    - include: expressions
+
+  inside-indexer:
+    - meta_scope: meta.brackets.indexer.powershell
+    - match: \]
+      scope: punctuation.section.brackets.end.powershell
+      pop: 1
+    - include: expressions
+
+###[ TYPES ]###################################################################
+
+  types:
+    - match: \[
+      scope: punctuation.section.brackets.begin.powershell
+      push: [members, inside-type]
+
+  types-without-members:
+    - match: \[
+      scope: punctuation.section.brackets.begin.powershell
+      push: inside-type
+
+  inside-type:
+    - meta_include_prototype: false
+    - match: \]
+      scope: punctuation.section.brackets.end.powershell
+      pop: 1
+    - match: \b(?:in|out|ref)\b
+      scope: storage.modifier.powershell
+    - match: \p{L}[\p{L}\p{N}]+(\.)
+      scope: meta.generic-name.powershell
+      captures:
+        1: punctuation.accessor.dot.powershell
+    - match: '{{builtin_types}}'
+      scope: storage.type.powershell
+    - match: \p{L}[\p{L}\p{N}]+
+      scope: support.type.powershell
+    - include: types-without-members
+    - match: \,
+      scope: punctuation.separator.sequence.powershell
+    - match: \+
+      scope: punctuation.accessor.plus.powershell
+
+###[ OPERATORS ]###############################################################
+
+  operators:
+    - include: operator-words
+    - include: operator-symbols
+
+  operator-words:
+    # RegExp context
+    - match: (-)(?i:[ic]?(?:not)?(?:match)){{operator_break}}
+      scope: keyword.operator.logical.powershell
+      captures:
+        1: punctuation.definition.keyword.powershell
+      push: expect-regex-string
+    - match: (-)(?i:replace){{operator_break}}
+      scope: keyword.operator.string.powershell
+      captures:
+        1: punctuation.definition.keyword.powershell
+      push: expect-regex-string
+
+    - match: (-)(?i:as){{operator_break}}
+      scope: keyword.operator.cast.powershell
+      captures:
+        1: punctuation.definition.keyword.powershell
+    - match: (-)(?i:[ic]?(?:eq|ne|[gl][te])){{operator_break}}
+      scope: keyword.operator.comparison.powershell
+      captures:
+        1: punctuation.definition.keyword.powershell
+    - match: (-)(?i:[ic]?(?:not)?(?:like|contains|in)){{operator_break}}
+      scope: keyword.operator.logical.powershell
+      captures:
+        1: punctuation.definition.keyword.powershell
+    - match: (-)(?i:join|split){{operator_break}}
+      scope: keyword.operator.string.powershell
+      captures:
+        1: punctuation.definition.keyword.powershell
+    - match: (-)(?i:is(?:not)?){{operator_break}}
+      scope: keyword.operator.logical.powershell
+      captures:
+        1: punctuation.definition.keyword.powershell
+    - match: (-)(?i:and|or|not|xor){{operator_break}}
+      scope: keyword.operator.logical.powershell
+      captures:
+        1: punctuation.definition.keyword.powershell
+    - match: (-)(?i:band|bor|bnot|bxor|sh[lr]){{operator_break}}
+      scope: keyword.operator.bitwise.powershell
+      captures:
+        1: punctuation.definition.keyword.powershell
+    - match: (-)(?i:f){{operator_break}}
+      scope: keyword.operator.string-format.powershell
+      captures:
+        1: punctuation.definition.keyword.powershell
+
+  operator-symbols:
+    # Pipes
+    - match: \|\||&&
+      scope: keyword.operator.pipe.conditional.powershell
+    - match: \|
+      scope: keyword.operator.pipe.powershell
+
+    # Assignment with context
+    - include: assignment-normal
+    - match: (?:[+/*%-]|\?\?)=
+      scope: keyword.operator.assignment.augmented.powershell
+      push: in-assignment
+    # Assignment same context
+    - match: (?:\+\+|--)(?![ \t]*\d|[[:alpha:]])
+      scope: keyword.operator.assignment.powershell
+
+    # Heuristically guess the context with lookaheads
+    # Mostly to avoid matching CLI parameters
+    - match: '[+-](?=\.?\d)'
+      scope: keyword.operator.unary.powershell
+    - match: '[/+](?![[:alpha:]])'
+      scope: keyword.operator.arithmetic.powershell
+    - match: -(?![[:alpha:]-])
+      scope: keyword.operator.arithmetic.powershell
+    - match: \*(?!\.?[[:alpha:]])
+      scope: keyword.operator.arithmetic.powershell
+    - match: \.\.(?=\-?\d|\(|\$)
+      scope: keyword.operator.range.powershell
+    # Exclude foreach shortcut
+    - match: '%(?!\s*\{)'
+      scope: keyword.operator.arithmetic.powershell
+
+    - match: \!
+      scope: keyword.operator.logical.powershell
+    - match: \?\?
+      scope: keyword.operator.null-coalescing.powershell
+    - match: '[?:]'
+      scope: keyword.operator.ternary.powershell
+    - match: ;
+      scope: punctuation.terminator.statement.powershell
+    - include: comma-separators
+    - match: '&'
+      scope: keyword.operator.background.powershell
+
+  assignment-normal:
+    - match: =
+      scope: keyword.operator.assignment.powershell
+      push: in-assignment
+
+  in-assignment:
+    - include: pop-end-of-command
+    # INFO: Someday maybe we can nix the workflow stuff
+    - include: workflow-execution-contexts
+    - include: expressions
+
+  redirection:
+    # https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_redirection
+    - match: ([2-6*])(>&)(1)
+      captures:
+        1: constant.numeric.decimal.file-descriptor.powershell
+        2: keyword.operator.redirection.powershell
+        3: constant.numeric.decimal.file-descriptor.powershell
+    - match: ([1-6*])(>>?)
+      captures:
+        1: constant.numeric.decimal.file-descriptor.powershell
+        2: keyword.operator.redirection.powershell
+    - match: '>>?'
+      scope: keyword.operator.redirection.powershell
+    # - match: <+
+    #   scope: invalid.illegal.powershell
+
+###[ DATA BLOCK ]##############################################################
+
+  data-blocks:
+    - match: \b(?i:data){{kebab_break}}
+      scope: keyword.control.context.powershell
+      push: [data-block-body, data-block-name]
+
+  data-block-name:
+    - match: '{{identifier_simple}}'
+      scope: entity.name.section.powershell
+      pop: 1
+    - include: else-pop
+
+  data-block-body:
+    - meta_scope: meta.block.data.powershell
+    - match: \{
+      scope: punctuation.section.block.begin.powershell
+      push: inside-data-block
+    - include: else-pop
+
+  inside-data-block:
+    - match: \}
+      scope: punctuation.section.block.end.powershell
+      pop: 2
+    # Data sections use a subset of Pwsh, but we don't distinguish yet.
+    - include: statements
+
+###[ CONSTANTS ]###############################################################
+
+  constants:
+    - match: (?i)(\$)True\b
+      scope: constant.language.boolean.true.powershell
+      captures:
+        1: punctuation.definition.variable.powershell
+    - match: (?i)(\$)False\b
+      scope: constant.language.boolean.false.powershell
+      captures:
+        1: punctuation.definition.variable.powershell
+    - match: (?i)(\$)Null\b
+      scope: constant.language.null.powershell
+      captures:
+        1: punctuation.definition.variable.powershell
+
+###[ LITERALS ]################################################################
+
+  literals:
+    - include: strings
+    - include: numbers
+
+  strings:
+    - include: double-quoted-strings
+    - include: single-quoted-strings
+    - include: double-quoted-heredoc-strings
+    - include: single-quoted-heredoc-strings
+
+  expect-regex-string:
+    - include: regex-strings
+    - include: comma-separators
+    - include: else-pop
+    - include: pop-eol
+
+  regex-strings:
+    - match: '{{single_quote}}'
+      scope:  meta.string.powershell string.quoted.single.powershell punctuation.definition.string.begin.powershell
+      embed: scope:source.regexp
+      embed_scope: meta.string.powershell source.regexp.embedded
+      escape: ({{single_quote}})
+      escape_captures:
+        1:  meta.string.powershell string.quoted.single.powershell punctuation.definition.string.end.powershell
+
+  single-quoted-strings:
+    - match: '{{single_quote}}'
+      scope: punctuation.definition.string.begin.powershell
+      push: inside-single-quoted-string
+
+  inside-single-quoted-string:
+    - meta_include_prototype: false
+    - meta_scope: meta.string.powershell string.quoted.single.powershell
+    - match: '{{single_quote}}{2}'
+      scope: constant.character.escape.powershell
+    - match: '{{single_quote}}'
+      scope: punctuation.definition.string.end.powershell
+      pop: 1
+    - include: single-quoted-string-placeholders
+
+  double-quoted-strings:
+    - match: '{{double_quote}}'
+      scope: punctuation.definition.string.begin.powershell
+      push: inside-double-quoted-string
+
+  inside-double-quoted-string:
+    - meta_include_prototype: false
+    - meta_scope: meta.string.interpolated.powershell string.quoted.double.powershell
+    - match: '{{double_quote}}{2}'
+      scope: constant.character.escape.powershell
+    - match: '{{double_quote}}'
+      scope: punctuation.definition.string.end.powershell
+      pop: 1
+    - include: escape-sequences
+    - include: string-interpolations
+    - include: double-quoted-string-placeholders
+
+  single-quoted-heredoc-strings:
+    - match: \@{{single_quote}}(?=$)
+      scope: punctuation.definition.string.begin.powershell
+      push:
+        - inside-single-quoted-heredoc-string
+        - inside-single-quoted-heredoc-string.syntax
+
+  inside-single-quoted-heredoc-string.syntax:
+    - meta_include_prototype: false
+    - match: (?={{csharp_indicator}})
+      set: scope:source.cs.embedded.powershell
+      with_prototype:
+        - match: (?={{no_indent}}{{single_quote}}@)
+          pop: 1
+        - match: '{{single_quote}}{2}'
+          scope: constant.character.escape.powershell
+    - include: else-pop
+
+  inside-single-quoted-heredoc-string:
+    - meta_include_prototype: false
+    - meta_scope: meta.string.powershell string.quoted.single.heredoc.powershell
+    - match: '{{no_indent}}({{single_quote}}@)'
+      captures:
+        1: punctuation.definition.string.end.powershell
+      pop: 1
+    - match: '{{single_quote}}{2}'
+      scope: constant.character.escape.powershell
+    - include: single-quoted-string-placeholders
+
+  double-quoted-heredoc-strings:
+    - match: \@{{double_quote}}(?=$)
+      scope: punctuation.definition.string.begin.powershell
+      push:
+        - inside-double-quoted-heredoc-string
+        - inside-double-quoted-heredoc-string.syntax
+
+  inside-double-quoted-heredoc-string:
+    - meta_include_prototype: false
+    - meta_scope: meta.string.interpolated.powershell string.quoted.double.heredoc.powershell
+    - match: '{{no_indent}}({{double_quote}}@)'
+      captures:
+        1: punctuation.definition.string.end.powershell
+      pop: 1
+    - include: escape-sequences
+    - include: string-interpolations
+    - include: double-quoted-string-placeholders
+
+  inside-double-quoted-heredoc-string.syntax:
+    - meta_include_prototype: false
+    - match: (?={{csharp_indicator}})
+      set: scope:source.cs.embedded.powershell
+      with_prototype:
+        - match: (?={{no_indent}}{{double_quote}}@)
+          pop: 1
+        - include: escape-sequences
+    - include: else-pop
+
+  string-interpolations:
+    - match: \$\(
+      scope: punctuation.section.interpolation.begin.powershell
+      push:
+        - clear_scopes: 1
+        - meta_include_prototype: false
+        - meta_scope: meta.interpolation.powershell
+        - meta_content_scope: source.powershell.embedded
+        - match: \)
+          scope: punctuation.section.interpolation.end.powershell
+          pop: 1
+        - include: expressions
+    - match: (?=\$)
+      push:
+        - clear_scopes: 1
+        - meta_include_prototype: false
+        - meta_scope: meta.interpolation.powershell
+        - include: variables-without-members
+        - include: immediately-pop
+
+  double-quoted-string-placeholders:
+    - match: \{\{|\}\}
+      scope: constant.character.escape.powershell
+    - match: (\{)(\d+)
+      captures:
+        1: punctuation.definition.placeholder.begin.powershell
+        2: meta.number.integer.decimal.powershell constant.numeric.value.powershell
+      push: inside-double-quoted-string-placeholder
+
+  inside-double-quoted-string-placeholder:
+    - meta_include_prototype: false
+    - meta_scope: constant.other.placeholder.powershell
+    - match: \}
+      scope: punctuation.definition.placeholder.end.powershell
+      pop: 1
+    - match: (?={{double_quote}})
+      pop: 1
+    - match: ':'
+      scope: punctuation.separator.format-spec.powershell
+      push: inside-double-quoted-string-placeholder-formatspec
+    - include: string-placeholder-separators
+    - include: string-placeholder-numbers
+
+  inside-double-quoted-string-placeholder-formatspec:
+    - meta_include_prototype: false
+    - meta_content_scope: meta.format-spec.powershell constant.other.format-spec.powershell
+    - match: \}
+      scope: punctuation.definition.placeholder.end.powershell
+      pop: 2
+    - match: '{{double_quote}}{2}'
+      scope: constant.character.escape.powershell
+    - match: (?={{double_quote}})
+      pop: 2
+    - include: escape-sequences
+    - include: string-placeholder-separators
+
+  single-quoted-string-placeholders:
+    - match: \{\{|\}\}
+      scope: constant.character.escape.powershell
+    - match: (\{)(\d+)
+      captures:
+        1: punctuation.definition.placeholder.begin.powershell
+        2: meta.number.integer.decimal.powershell constant.numeric.value.powershell
+      push: inside-single-quoted-string-placeholder
+
+  inside-single-quoted-string-placeholder:
+    - meta_include_prototype: false
+    - meta_scope: constant.other.placeholder.powershell
+    - match: \}
+      scope: punctuation.definition.placeholder.end.powershell
+      pop: 1
+    - match: (?={{single_quote}})
+      pop: 1
+    - match: ':'
+      scope: punctuation.separator.format-spec.powershell
+      push: inside-single-quoted-string-placeholder-formatspec
+    - include: string-placeholder-separators
+    - include: string-placeholder-numbers
+
+  inside-single-quoted-string-placeholder-formatspec:
+    - meta_include_prototype: false
+    - meta_content_scope: meta.format-spec.powershell constant.other.format-spec.powershell
+    - match: \}
+      scope: punctuation.definition.placeholder.end.powershell
+      pop: 2
+    - match: '{{single_quote}}{2}'
+      scope: constant.character.escape.powershell
+    - match: (?={{single_quote}})
+      pop: 2
+    - include: escape-sequences
+    - include: string-placeholder-separators
+
+  string-placeholder-numbers:
+    - match: \d+
+      scope: meta.number.integer.decimal.powershell constant.numeric.value.powershell
+
+  string-placeholder-separators:
+    - match: '[,;]'
+      scope: punctuation.separator.powershell
+
+  string-wildcards:
+    - match: \*
+      scope: constant.other.wildcard.asterisk.powershell
+    - match: \?
+      scope: constant.other.wildcard.questionmark.powershell
+
+  numbers:
+    # Binary numbers
+    - match: (0[bB])([01]*)({{int_suffix}}?{{unit_suffix}}?)
+      scope: meta.number.integer.binary.powershell
+      captures:
+        1: constant.numeric.base.powershell
+        2: constant.numeric.value.powershell
+        3: constant.numeric.suffix.powershell
+      push: members
+    # Hexadecimal numbers
+    - match: (0[xX])(\h*)({{int_suffix}}?{{unit_suffix}}?)
+      scope: meta.number.integer.hexadecimal.powershell
+      captures:
+        1: constant.numeric.base.powershell
+        2: constant.numeric.value.powershell
+        3: constant.numeric.suffix.powershell
+      push: members
+    # Floats
+    - match: |-
+        (?x)
+        (
+        # .10 .10e5
+         (\.)\d+{{dec_exponent}}?
+        # 1.2 1.2e-3 1.e2 1e2
+        | \d+ (?: (\.) \d+ {{dec_exponent}}? | (\.)? {{dec_exponent}} )
+        )
+        ( {{float_suffix}}? {{unit_suffix}}? )
+        |
+        # 10.l 10.lGB 10.GB
+        ( \d+ (\.) )
+        ( {{float_suffix}} {{unit_suffix}}? | {{unit_suffix}} )
+      scope: meta.number.float.decimal.powershell
+      captures:
+        1: constant.numeric.value.powershell
+        2: punctuation.separator.decimal.powershell
+        3: punctuation.separator.decimal.powershell
+        4: punctuation.separator.decimal.powershell
+        5: constant.numeric.suffix.powershell
+        6: constant.numeric.value.powershell
+        7: punctuation.separator.decimal.powershell
+        8: constant.numeric.suffix.powershell
+      push: members
+    # "Decimal" numbers
+    - match: (\d+)({{dec_suffix}}{{unit_suffix}}?)
+      scope: meta.number.float.decimal.powershell
+      captures:
+        1: constant.numeric.value.powershell
+        2: constant.numeric.suffix.powershell
+      push: members
+    # Integers
+    - match: (\d+)({{int_suffix}}?{{unit_suffix}}?)
+      scope: meta.number.integer.decimal.powershell
+      captures:
+        1: constant.numeric.value.powershell
+        2: constant.numeric.suffix.powershell
+      push: members
+
+###[ LABELS ]##################################################################
+
+  labels:
+    - match: ^\s*((:){{identifier_simple}})
+      captures:
+        1: entity.name.label.powershell
+        2: punctuation.definition.label.powershell
+
+  regions:
+    - match: ^\s*(#)\s*(region\b)(?:\s*(\S.*))?(\s*\n?)
+      captures:
+        1: punctuation.definition.preprocessor.powershell
+        2: keyword.control.directive.region.powershell
+        3: entity.name.section.powershell
+        4: meta.fold.block.begin.powershell
+    - match: ^\s*(#)\s*(endregion\b)(?:\s*(\S.*))?\s*\n?
+      captures:
+        1: meta.fold.block.end.powershell punctuation.definition.preprocessor.powershell
+        2: keyword.control.directive.endregion.powershell
+        3: variable.other.section.powershell
+
+###[ COMMENTS ]################################################################
+
+  comments:
+    - include: comment-block
+    - include: comment-line
+
+  comment-block:
+    - match: <#
+      scope: punctuation.definition.comment.block.begin.powershell
+      push:
+        - meta_scope: comment.block.powershell
+        - match: '#>'
+          scope: punctuation.definition.comment.block.end.powershell
+          pop: 1
+        - include: comment-embedded-docs
+
+  comment-embedded-docs:
+    # https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_comment_based_help
+    - match: ^\s*(\.)(?i:(Parameter)\s+([a-z0-9-_]+))
+      scope: comment.documentation.embedded.powershell
+      captures:
+        1: punctuation.definition.keyword.documentation.powershell
+        2: keyword.other.documentation.param.powershell
+        3: variable.parameter.powershell
+    - match: ^\s*(\.)(?i:(ForwardHelpTargetName|ExternalHelp|Link)\s+([a-z0-9-_:/.&]+))
+      scope: comment.documentation.embedded.powershell
+      captures:
+        1: punctuation.definition.keyword.documentation.powershell
+        2: keyword.other.documentation.powershell
+        3: markup.underline.link.powershell
+    - match: ^\s*(\.)(?i:(ForwardHelpCategory)\s+({{doc_fwdhelp_cat}}))
+      scope: comment.documentation.embedded.powershell
+      captures:
+        1: punctuation.definition.keyword.documentation.powershell
+        2: keyword.other.documentation.powershell
+        3: support.type.powershell
+    - match: ^\s*(\.)({{doc}})
+      scope: comment.documentation.embedded.powershell
+      captures:
+        1: punctuation.definition.keyword.documentation.powershell
+        2: keyword.other.documentation.powershell
+
+  comment-line:
+    - match: '#(?!(?i:requires|(?:end)?region)\b)'
+      scope: punctuation.definition.comment.powershell
+      push:
+        - meta_scope: comment.line.powershell
+        - include: pop-eol
+        - include: comment-embedded-docs
+
+###[ COMPONENTS ]##############################################################
+
+  path-punctuation:
+    - match: ':(?=[\\/])'
+      scope: punctuation.separator.path.powershell
+    - match: \.\.(?=[\\/])
+      scope: constant.other.path.parent.powershell
+    - match: \.(?=[\\/])
+      scope: constant.other.path.self.powershell
+    - match: ~(?=[\\/])
+      scope: variable.language.tilde.powershell
+    - match: '[\\/]+'
+      scope: punctuation.separator.path.powershell
+
+  line-continuations:
+    - match: (`)\n
+      captures:
+        1: punctuation.separator.continuation.line.powershell
+      push: line-continuation-body
+    - match: '`(\s+)\n'
+      captures:
+        1: invalid.illegal.unexpected-whitespace.powershell
+
+  line-continuation-body:
+    - match: ^(?!\s*#)
+      pop: 1
+
+  comma-separators:
+    - match: ','
+      scope: punctuation.separator.sequence.powershell
+
+  escape-sequences:
+    - match: '`(?:[0abenfrvt$`]|{{single_quote}}|{{double_quote}})'
+      scope: constant.character.escape.powershell
+    - match: '`u\{\h+\}'
+      scope: constant.character.escape.powershell
+
+  pop-eol:
+    - match: $\n?
+      pop: 1
+
+  pop-before-eol:
+    - match: (?=$)
+      pop: 1
+
+  immediately-pop:
+    - match: ''
+      pop: 1
+
+  else-pop:
+    - match: (?=\S)
+      pop: 1
+
+###############################################################################
+
+variables:
+  kebab_break: (?![\w-])
+  operator_break: (?![[:alpha:]]|-\d)
+  builtin_types: |-
+    \b(?x:
+      void | null | object | bool | char | string
+    | int (?:32|64)? | long | byte | float | double | decimal
+    | array | hashtable
+    )\b
+  shebang_language: \b(?:pwsh|powershell)\b
+
+  # Indentation and whitespace patterns
+  no_indent: ^
+
+  # Attributes
+  attributes: |-
+    \b(?xi:
+      CmdletBinding | Alias | OutputType | Parameter
+    | Validate
+      (?: Count | NotNull (?:OrEmpty)? | Range | Pattern | Length | Set | Script)
+    | Allow (?: Null | Empty (?: Collection | String ))
+    )\b
+  attribute_parameters: |-
+    \b(?xi:
+      Mandatory | ValueFromPipeline (?:ByPropertyName)?
+    | ValueFromRemainingArguments | Position(?:alBinding)?
+    | (?:Default)? ParameterSetName | SupportsShouldProcess | SupportsPaging
+    | HelpUri | ConfirmImpact | HelpMessage
+    )\b
+
+  # Numbers
+  dec_exponent: (?:[eE][-+]?\d*)
+  dec_suffix: '[dD]'
+  float_suffix: '[dDlL]'
+  int_suffix: (?i:u[lsy]?|[lnsy])
+  unit_suffix: (?i:[kmgtp]b\b)
+
+  # Variables
+  # https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_variables
+  identifier_simple: '[\p{L}\p{Nd}_?]+'
+  identifier_special: '[^}]*[^}`]'
+  identifier_function: '[\p{L}_][\p{L}\p{Nd}_.-]*\b'
+  identifier_csharp: '[\p{L}_][\p{L}\p{Nd}_]*'
+  var_lookahead: |-
+    (?x: (?=
+      \$[$^{]
+    | [$@]{{identifier_simple}}
+    ))
+  # https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_automatic_variables
+  var_constants: |-
+    \b(?xi:
+      (?:
+        ExecutionContext | Host | Home | IsCoreCLR | IsLinux | IsWindows
+      | IsMacOS | PID | Profile | PsCommandPath | PsHome | PsScriptRoot
+      | PsUiCulture | PsVersionTable | ShellID
+      )
+    )\b
+  var_language: |-
+    (?xi:
+      [$^?]
+    | \b(?:
+        _ | Args | ConsoleFileName | Error | Event | EventArgs
+      | EventSubscriber | ForEach | Input | LastExitCode | Matches
+      | MyInvocation | NestedPromptLevel | PsBoundParameters | PsCmdlet
+      | PsCulture | PsDebugContext | PsItem | Pwd | Sender | SourceArgs
+      | SourceEventArgs | StackTrace | Switch | This
+      | (?:
+          Confirm | Debug | ErrorAction | Information | Progress                   # *Preference
+        | Verbose | Warning | WhatIf
+        ) Preference
+      | Maximum (?: Alias | Drive | Error | Function | History | Variable ) Count  # Maximum*Count
+      | Log (?: Command | Engine | Provider ) (?: Health | Lifecycle ) Event       # Log*Event
+      | PsNativeCommand (?: ArgumentPassing | UseErrorActionPreference )           # PsNativeCommand*
+      | PsDebugContext | PsDefaultParameterValues | PsEmailServer
+      | PsModuleAutoloadingPreference | PsSenderInfo
+      | PsSession (?: ApplicationName | ConfigurationName | Option )               # PsSession*
+      | ErrorView | FormatEnumerationLimit | OFS | OutputEncoding
+      )\b
+    )
+  var_scope_mod: (?i:global|local|private|script|using|workflow)
+
+  # The "Approved Verbs" list
+  # https://learn.microsoft.com/en-us/powershell/scripting/developer/cmdlet/approved-verbs-for-windows-powershell-commands
+  command_verbs: |-
+    \b(?xi:
+      # Common verbs
+      Add | Clear | Close | Copy | Enter | Exit | Find | Format | Get | Hide
+    | Join | Lock | Move | New | Open | Optimize | Pop | Push | Redo | Remove
+    | Rename | Reset | Resize | Search | Select | Set | Show | Skip | Split
+    | Step | Switch | Undo | Unlock | Watch
+      # Communications verbs
+    | Connect | Disconnect | Read | Receive | Send | Write
+      # Data verbs
+    | Backup | Checkpoint | Compare | Compress | Convert | ConvertFrom
+    | ConvertTo | Dismount | Edit | Expand | Export | Group | Import
+    | Initialize | Limit | Merge | Mount | Out | Publish | Restore | Save
+    | Sync | Unpublish | Update
+      # Diagnostic verbs
+    | Debug | Measure | Ping | Repair | Resolve | Test | Trace
+      # Lifecycle verbs
+    | Approve | Assert | Build | Complete | Confirm | Deny | Deploy | Disable
+    | Enable | Install | Invoke | Register | Request | Restart | Resume | Start
+    | Stop | Submit | Suspend | Uninstall | Unregister | Wait
+      # Security verbs
+    | Block | Grant | Protect | Revoke | Unblock | Unprotect
+      # Other verbs
+    | Use
+    )\b
+
+  # Documentation
+  doc: |-
+    (?xi:
+      Component | Description | Example | ExternalHelp | ForwardHelpCategory
+    | ForwardHelpTargetName | Functionality | Inputs | Link | Notes | Outputs
+    | Parameter | RemoteHelpRunSpace | Role | Synopsis
+    )
+  doc_fwdhelp_cat: |-
+    (?x:
+      Alias | Cmdlet | HelpFile | Function | Provider | General | FAQ
+    | Glossary | ScriptCommand | ExternalScript | Filter | All
+    )
+
+  # Strings
+  single_quote: "['‘’‚]"
+  double_quote: '["“”„]'
+  csharp_indicator: |-
+    (?x: \s* (?:
+      using\s+System[.;]
+    | public\s+class\s+
+    | \[DllImport\b
+    ))

@@ -41,6 +41,10 @@
 - Fixed the built-in `jq`'s `halt_error` printing its message to stdout; like jq, it now goes to stderr ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
 - Shrank the native addon by about 77 MB: only 17 common tree-sitter grammars are linked in, and the other 39 languages load WebAssembly grammars from the grammar directory, treated as unsupported until installed.
 
+### Fixed
+
+- PowerShell, `ps1`, and `pwsh` code blocks now receive syntax colors; languages without a bundled grammar no longer claim highlighting support ([#15008](https://github.com/can1357/oh-my-pi/issues/15008)).
+
 ## [18.8.4] - 2026-10-08
 
 ### Fixed

@@ -3,6 +3,7 @@ use syntect::parsing::{SyntaxDefinition, SyntaxSet};
 const EXTRA_SYNTAXES: &[(&str, &str)] = &[
 	("Julia", include_str!("Julia.sublime-syntax")),
 	("Nix", include_str!("Nix.sublime-syntax")),
+	("PowerShell", include_str!("PowerShell.sublime-syntax")),
 	("Mermaid", include_str!("Mermaid.sublime-syntax")),
 	("TypeScript", include_str!("TypeScript.sublime-syntax")),
 	("TypeScriptReact", include_str!("TypeScriptReact.sublime-syntax")),

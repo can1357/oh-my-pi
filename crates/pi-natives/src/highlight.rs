@@ -200,7 +200,7 @@ const LANG_ALIASES: &[(&[&str], &str)] = &[
 	(&["cs", "csharp"], "C#"),
 	(&["php"], "PHP"),
 	(&["sh", "bash", "zsh", "shell"], "Bash"),
-	(&["ps1", "powershell"], "PowerShell"),
+	(&["ps1", "powershell", "pwsh"], "PowerShell"),
 	(&["html", "htm", "vue", "svelte"], "HTML"),
 	(&["astro"], "Astro"),
 	(&["css"], "CSS"),
@@ -241,14 +241,6 @@ fn find_alias(lang: &str) -> Option<&'static str> {
 		.iter()
 		.find(|(aliases, _)| aliases.iter().any(|a| lang.eq_ignore_ascii_case(a)))
 		.map(|(_, target)| *target)
-}
-
-/// Check if language is in the alias table.
-#[inline]
-fn is_known_alias(lang: &str) -> bool {
-	LANG_ALIASES
-		.iter()
-		.any(|(aliases, _)| aliases.iter().any(|a| lang.eq_ignore_ascii_case(a)))
 }
 
 /// Compute the color index for a single scope (uncached).
@@ -704,23 +696,16 @@ impl HighlightStream {
 	}
 }
 
-/// Check if a language is supported for highlighting.
-/// Returns true if the language has either direct support or a fallback
-/// mapping.
+/// Check whether a language resolves to a bundled grammar.
 #[napi]
 pub fn supports_language(lang: JsString) -> Result<bool> {
 	Ok(supports_language_impl(&js::utf8(lang)?))
 }
 
 fn supports_language_impl(lang: &str) -> bool {
-	if is_known_alias(lang) {
-		return true;
-	}
-
-	// Fall back to direct syntax lookup
-	let ss = get_syntax_set();
-	find_syntax(ss, lang).is_some()
+	find_syntax(get_syntax_set(), lang).is_some()
 }
+
 /// Get list of supported languages.
 #[napi]
 pub fn get_supported_languages() -> Vec<String> {
@@ -830,6 +815,23 @@ mod tests {
 			highlight_into(chunk, ss, &mut parse_state, &mut scope_stack, &pal, &mut chunked);
 		}
 		assert_eq!(chunked, whole);
+	}
+
+	#[test]
+	fn highlights_powershell_fences() {
+		let code = "Write-Host \"hello\" # greeting\n";
+		let colors = test_colors();
+		for lang in ["powershell", "ps1", "pwsh"] {
+			assert!(supports_language_impl(lang), "{lang} should resolve to PowerShell");
+			let out = highlight_code_impl(code, Some(lang), &colors);
+			assert!(out.contains("<s>hello"), "{lang} lost string highlighting: {out}");
+			assert!(out.contains("<c> greeting"), "{lang} lost comment highlighting: {out}");
+		}
+	}
+
+	#[test]
+	fn does_not_advertise_aliases_without_bundled_grammars() {
+		assert!(!supports_language_impl("graphql"), "GraphQL has no bundled grammar");
 	}
 
 	#[test]
