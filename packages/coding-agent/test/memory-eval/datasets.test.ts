@@ -16,18 +16,28 @@ describe("datasets", () => {
 			"beam-c1-1",
 			"beam-c1-1",
 		]);
-		expect(cases[0].questions.map(q => q.goldMessageIds)).toEqual([["1"], ["0", "4"]]);
-		expect(cases[0].questions.map(q => q.goldSessionIds)).toEqual([["beam-c1-0"], ["beam-c1-0", "beam-c1-1"]]);
+		expect(cases[0].questions.map(q => q.goldMessageIds)).toEqual([["1"], ["0", "4"], ["3", "5"]]);
+		expect(cases[0].questions.map(q => q.goldSessionIds)).toEqual([
+			["beam-c1-0"],
+			["beam-c1-0", "beam-c1-1"],
+			["beam-c1-1"],
+		]);
 		expect(cases[0].questions.map(q => q.questionId)).toEqual([
 			"c1:information_extraction:0",
 			"c1:contradiction_resolution:0",
+			"c1:event_ordering:0",
 		]);
 		expect(excluded.map(e => e.reason)).toEqual(["no-gold", "no-gold"]);
 	});
 	it("upstream-compat keeps empty messages and only dict gold", async () => {
 		const [conv] = await loadBeamUpstreamCompat(fixtureDir, 3);
 		expect(conv.messages).toEqual(["alpha", "", "gamma", "delta", "epsilon", "zeta"]);
-		expect(conv.questions.map(q => q.goldIndices)).toEqual([[], [0, 4], [], []]);
+		expect(conv.questions.map(q => q.goldIndices)).toEqual([[], [0, 4], [], [], []]);
+	});
+	it("beam throws on a gold id absent from the conversation", async () => {
+		await expect(loadDataset("beam-100k", path.join(import.meta.dir, "fixtures", "dangling"))).rejects.toThrow(
+			'case c9 question c9:event_ordering:0: gold id "7"',
+		);
 	});
 	it("lme indexes user turns with official ids", async () => {
 		const { cases, excluded } = await loadDataset("lme-s", fixtureDir);
