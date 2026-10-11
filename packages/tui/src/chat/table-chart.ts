@@ -81,6 +81,11 @@ export function setTableCharts(mode: TableChartMode, planner?: TableChartPlanner
 	charts.clear();
 }
 
+/** How assistant tables currently become charts. */
+export function tableChartMode(): TableChartMode {
+	return chartMode;
+}
+
 /** Whether `markdown` may hold a table {@link splitTableCharts} would chart. */
 export function hasChartTable(markdown: string): boolean {
 	return chartMode !== "off" && markdown.includes("|") && DELIMITER_ROW.test(markdown);
