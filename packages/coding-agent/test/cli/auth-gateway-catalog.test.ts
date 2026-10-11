@@ -161,6 +161,8 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		expect(listed.find(model => model.id === "codex-transcribe")?.provider).toBe("openai-codex");
 		// Uncredentialed providers' runners stay out.
 		expect(listed.some(model => model.provider === "openai" && modelKind(model) === "stt")).toBe(false);
+		// Always-available on-device runners (local/whisper-*, local/kokoro) would always answer 400.
+		expect(listed.some(model => model.api === "local-inference")).toBe(false);
 	});
 });
 
