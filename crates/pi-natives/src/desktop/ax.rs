@@ -771,14 +771,18 @@ fn focused_in(focus: Option<&AxHandle>, handle: &AxHandle, own: bool) -> bool {
 /// when an element reports itself focused, so reads of unfocused elements
 /// cost no extra round trip to the app.
 #[derive(Default)]
-pub struct AppFocus(Option<Option<AxHandle>>);
+pub struct AppFocus {
+	read:  bool,
+	focus: Option<AxHandle>,
+}
 
 impl AppFocus {
 	fn get(&mut self, backend: &mut dyn AxBackend, handle: &AxHandle) -> Option<&AxHandle> {
-		self
-			.0
-			.get_or_insert_with(|| backend.focused_within(handle))
-			.as_ref()
+		if !self.read {
+			self.focus = backend.focused_within(handle);
+			self.read = true;
+		}
+		self.focus.as_ref()
 	}
 }
 
