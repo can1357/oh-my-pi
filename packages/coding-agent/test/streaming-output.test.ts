@@ -478,6 +478,112 @@ describe("OutputSink", () => {
 		await sink.dispose();
 	});
 
+	test("samples mirror previews synchronously with their emission stamps", async () => {
+		let stamp = 0;
+		const previews: Array<{ text: string; stamp: number }> = [];
+		const chunks: string[] = [];
+		const sink = new OutputSink({
+			artifactWriteMode: "mirror",
+			chunkStamp: () => stamp,
+			onPreview: (text, stamp) => previews.push({ text, stamp }),
+			onChunk: chunk => chunks.push(chunk),
+		});
+		sink.push("before\n");
+		stamp = 1;
+		sink.push("after\n");
+		expect(previews).toEqual([
+			{ text: "before\n", stamp: 0 },
+			{ text: "before\nafter\n", stamp: 1 },
+		]);
+		expect(chunks).toEqual([]);
+		await sink.dump();
+		expect(chunks).toEqual(["before\n", "after\n"]);
+		expect(previews).toHaveLength(2);
+	});
+
+	test("does not compose emission previews without a preview consumer", async () => {
+		const sink = new OutputSink({ artifactWriteMode: "mirror", onChunk() {} });
+		const preview = vi.spyOn(sink, "preview");
+		try {
+			sink.push("one");
+			sink.push("two");
+			await sink.dump();
+			expect(preview).not.toHaveBeenCalled();
+		} finally {
+			preview.mockRestore();
+		}
+	});
+
+	test("does not queue preview windows behind a blocked mirror flush", async () => {
+		const releaseFlush = Promise.withResolvers<void>();
+		let previewCount = 0;
+		let latestPreview = "";
+		const chunks: string[] = [];
+		const sink = new OutputSink({
+			artifactWriteMode: "mirror",
+			spillThreshold: 16,
+			onPreview: text => {
+				previewCount++;
+				latestPreview = text;
+				expect(byteLength(text)).toBeLessThanOrEqual(16);
+			},
+			onChunk: chunk => chunks.push(chunk),
+		});
+		const originalFlush = sink.flushArtifact.bind(sink);
+		const flush = vi.spyOn(sink, "flushArtifact").mockImplementation(async () => {
+			await releaseFlush.promise;
+			return originalFlush();
+		});
+		for (let index = 0; index < 128; index++) sink.push("x");
+		const dumping = sink.dump();
+		try {
+			expect(previewCount).toBe(128);
+			expect(latestPreview).toBe("x".repeat(16));
+			expect(chunks).toEqual([]);
+			releaseFlush.resolve();
+			await dumping;
+			expect(chunks).toHaveLength(128);
+			expect(previewCount).toBe(128);
+		} finally {
+			releaseFlush.resolve();
+			await dumping;
+			flush.mockRestore();
+		}
+	});
+
+	test("fences future mirror chunks without blocking prior chunk settlement or previews", async () => {
+		let stamp = 0;
+		const releaseFuture = Promise.withResolvers<void>();
+		const priorSettled = Promise.withResolvers<void>();
+		const chunks: string[] = [];
+		const previews: string[] = [];
+		const sink = new OutputSink({
+			artifactWriteMode: "mirror",
+			chunkStamp: () => stamp,
+			chunkReady: stamp => (stamp === 1 ? releaseFuture.promise : undefined),
+			onPreview: text => previews.push(text),
+			onChunk: chunk => chunks.push(chunk),
+			onChunkSettled: stamp => {
+				if (stamp === 0) priorSettled.resolve();
+			},
+		});
+		sink.push("before\n");
+		stamp = 1;
+		sink.push("after\n");
+		const dumping = sink.dump();
+		try {
+			await priorSettled.promise;
+			expect(chunks).toEqual(["before\n"]);
+			expect(previews).toEqual(["before\n", "before\nafter\n"]);
+			releaseFuture.resolve();
+			await dumping;
+			expect(chunks).toEqual(["before\n", "after\n"]);
+		} finally {
+			releaseFuture.resolve();
+			await dumping;
+		}
+	});
+
 	test("mirror mode delivers and settles chunks with their entry stamps", async () => {
 		let stamp = 0;
 		const deliveries: Array<{ chunk: string; stamp: number }> = [];
