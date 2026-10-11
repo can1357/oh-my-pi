@@ -13,6 +13,7 @@
 - Added `omp usage reset`, which lists every Codex and Claude account's saved rate-limit resets by credential id (`--json` adds credit ids and expiries), and `omp usage reset <provider>/<credential id>`, which spends one without a session, from scripts and auth-broker clients too ([#15132](https://github.com/can1357/oh-my-pi/pull/15132) by [@will-bogusz](https://github.com/will-bogusz))
 - Added saved-reset expiry warnings for accounts with real usage: `omp usage` highlights Codex and Claude resets expiring within 7 days and lists those due within 24 hours with whether an interactive session will spend them and the `/usage reset` target, and the TUI warns once per conversation ([#15134](https://github.com/can1357/oh-my-pi/pull/15134) by [@will-bogusz](https://github.com/will-bogusz))
 - On macOS the `computer` tool keeps the display awake while the agent acts, and says when the screen is locked or the display asleep: in `capabilities()`, on screenshots, on errors and at the top of the run result, instead of passing off lock-screen or failed captures ([#15188](https://github.com/can1357/oh-my-pi/pull/15188) by [@will-bogusz](https://github.com/will-bogusz))
+- `computer` elements gain `doubleClick()`, and calling an element method on the array `win.find(…)` returns, in JavaScript, Python or `computer.run`, says to pick one element first instead of failing with "is not a function"
 
 ### Changed
 

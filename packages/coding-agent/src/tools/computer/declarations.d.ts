@@ -199,6 +199,7 @@ interface ComputerElement {
 	press(): Promise<void>;
 	/** Click the element's center with native input; `count: 2` double-clicks. */
 	click(options?: ComputerClickOptions): Promise<void>;
+	doubleClick(options?: Omit<ComputerClickOptions, "count">): Promise<void>;
 	focus(): Promise<void>;
 	parent(): Promise<ComputerElement | null>;
 	children(): Promise<ComputerElement[]>;
@@ -218,6 +219,7 @@ interface ComputerElementRef
 			| "perform"
 			| "press"
 			| "click"
+			| "doubleClick"
 			| "focus"
 			| "parent"
 			| "children"

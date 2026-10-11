@@ -72,6 +72,7 @@
 		"perform",
 		"press",
 		"click",
+		"doubleClick",
 		"focus",
 	];
 	const desktopValueMethods = [
@@ -116,6 +117,17 @@
 		const snapshot = await callValue(chain);
 		return snapshot ? makeElement(snapshot) : null;
 	};
+	// `find()`'s array answers element calls with how to pick one, instead of "is not a function".
+	const foundElements = elements => {
+		for (const method of [...elementValueMethods, "parent", "children"]) {
+			defineMethod(elements, method, () => {
+				throw new TypeError(
+					`find() returns an array (length ${elements.length}), not one element, so it has no ${method}(); pick one first: const [el] = await win.find(query)`,
+				);
+			});
+		}
+		return elements;
+	};
 	// `await ref("e5")` resolves the element; `ref("e5").click()` sends the element call
 	// directly, so the lookup runs only when the handle itself is awaited.
 	const makeRef = ref => {
@@ -142,7 +154,9 @@
 				defineMethod(nested, method, (...args) => callValue(via(step(`${namespace}.${method}`, args))));
 			defineMethod(win, namespace, Object.freeze(nested));
 		}
-		defineMethod(win, "find", async query => (await callValue(via(step("find", [query])))).map(makeElement));
+		defineMethod(win, "find", async query =>
+			foundElements((await callValue(via(step("find", [query])))).map(makeElement)),
+		);
 		// A non-silent observe() already printed its tree; `ax` stays readable but is left out
 		// of display, spread and serialization, so a trailing `await win.observe()` shows it once.
 		defineMethod(win, "observe", async options => {
