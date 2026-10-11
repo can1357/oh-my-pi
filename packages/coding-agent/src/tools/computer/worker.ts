@@ -204,8 +204,13 @@ function chordKeys(chord: string | string[]): string[] {
 		: chord;
 }
 
+/** Keys and menu titles share one rule: an array of strings, none blank. */
+function isStringList(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every(item => typeof item === "string" && item.trim() !== "");
+}
+
 function validateKeys(value: unknown, label: string): asserts value is string[] {
-	if (!Array.isArray(value) || value.length === 0 || value.some(key => typeof key !== "string" || !key.trim())) {
+	if (!isStringList(value) || value.length === 0) {
 		throw new ToolError(`${label} requires a non-empty array of non-empty strings`);
 	}
 }
@@ -227,12 +232,7 @@ function validateString(value: unknown, call: string, options?: { nonEmpty?: boo
 /** A menu path is one title, an array of titles, or the titles as separate arguments. */
 function menuPath(method: string, args: unknown[], options?: { allowEmpty?: boolean }): string[] {
 	const path: unknown[] = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
-	if (
-		(options?.allowEmpty || path.length > 0) &&
-		path.every((segment): segment is string => typeof segment === "string" && segment.trim() !== "")
-	) {
-		return path;
-	}
+	if (isStringList(path) && (options?.allowEmpty || path.length > 0)) return path;
 	let got = "no path";
 	if (args.length > 0) {
 		const shown = args.length === 1 ? args[0] : args;
@@ -610,7 +610,7 @@ class Win {
 		const context = this.#getContext();
 		guardRun(context, "press");
 		const keys = chordKeys(chord);
-		if (!Array.isArray(keys) || keys.length === 0 || keys.some(key => typeof key !== "string" || !key.trim())) {
+		if (!isStringList(keys) || keys.length === 0) {
 			throw new ToolError(
 				`press(chord) requires a key chord such as "cmd+shift+p" or ["cmd", "shift", "p"], got ${describeArgument(chord)}`,
 			);
