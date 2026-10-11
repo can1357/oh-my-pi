@@ -1,4 +1,3 @@
-import { scheduler } from "node:timers/promises";
 import {
 	$flag,
 	cloneJsonTree,
@@ -39,6 +38,7 @@ import {
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
+import { waitForRetry } from "../utils/retry-wait";
 import {
 	adaptSchemaForStrict,
 	findStrictToolSchemaViolation,
@@ -248,8 +248,7 @@ export async function pollOpenAIResponsesResultForCompletion(args: {
 		if (attempt > 0) {
 			if (Date.now() + OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS >= deadline) return undefined;
 			try {
-				if (args.wait) await args.wait(OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS, args.signal);
-				else await scheduler.wait(OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS, { signal: args.signal });
+				await waitForRetry(args.wait, OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS, args.signal);
 			} catch {
 				return undefined;
 			}
@@ -1246,11 +1245,11 @@ const streamOpenAIResponsesOnce = (
 					firstTokenTime = undefined;
 					nativeOutputItems.length = 0;
 
-					if (options?.providerRetryWait) {
-						await options.providerRetryWait(OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS, options.signal);
-					} else {
-						await scheduler.wait(OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS, { signal: options?.signal });
-					}
+					await waitForRetry(
+						options?.providerRetryWait,
+						OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS,
+						options?.signal,
+					);
 					if (abortTracker.wasCallerAbort()) throw new AIError.AbortError();
 					openaiStream = await openResponsesStreamWithFallbacks();
 				}

@@ -2,7 +2,6 @@ import * as fs from "node:fs/promises";
 import http2 from "node:http2";
 import { cursorModelParameters } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { isCursorMaxModeWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
-import { scheduler } from "node:timers/promises";
 import { classifyModel, collapseVariantId } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type {
 	ConversationStep,
@@ -226,6 +225,7 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
+import { waitForRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
 import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
 import { CONNECT_END_STREAM_FLAG, ConnectFrameDecoder, frameConnectMessage } from "./connect-frame";
@@ -1650,11 +1650,7 @@ function streamCursorWithWireMode(
 				});
 				let retryDelayCompleted = false;
 				try {
-					if (options?.providerRetryWait) {
-						await options.providerRetryWait(delayMs, options.signal);
-					} else {
-						await scheduler.wait(delayMs, { signal: options?.signal });
-					}
+					await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
 					retryDelayCompleted = !options?.signal?.aborted;
 				} catch (waitError) {
 					error = waitError;

@@ -1,5 +1,4 @@
 import * as fs from "node:fs";
-import { scheduler } from "node:timers/promises";
 import * as tls from "node:tls";
 import { isAnthropicSigningProxyUrl, isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { hostMatchesUrl, isVertexRawPredictUrl } from "@oh-my-pi/pi-catalog/hosts";
@@ -20,6 +19,7 @@ import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
+import { waitForRetry } from "../utils/retry-wait";
 import { getEnvApiKey } from "../env-api-key";
 import { OUTPUT_FALLBACK_BUFFER } from "../stream";
 import type {
@@ -3196,11 +3196,7 @@ const streamAnthropicOnce = (
 										attempt: fallbackCreditTransientRetries,
 									},
 								);
-								if (options?.providerRetryWait) {
-									await options.providerRetryWait(500, options.signal);
-								} else {
-									await scheduler.wait(500, { signal: options?.signal });
-								}
+								await waitForRetry(options?.providerRetryWait, 500, options?.signal);
 								resetStreamOutputState();
 								continue;
 							}
@@ -3427,11 +3423,7 @@ const streamAnthropicOnce = (
 								attempt: slowWaitAttempts,
 							});
 							if (slowRetry.delayMs > 0) {
-								if (options?.providerRetryWait) {
-									await options.providerRetryWait(slowRetry.delayMs, options.signal);
-								} else {
-									await scheduler.wait(slowRetry.delayMs, { signal: options?.signal });
-								}
+								await waitForRetry(options?.providerRetryWait, slowRetry.delayMs, options?.signal);
 							}
 							resetStreamOutputState();
 							continue;
@@ -3469,11 +3461,7 @@ const streamAnthropicOnce = (
 						throw streamFailure;
 					}
 					const delayMs = headerDelayMs !== undefined ? Math.max(headerDelayMs, backoffDelayMs) : backoffDelayMs;
-					if (options?.providerRetryWait) {
-						await options.providerRetryWait(delayMs, options.signal);
-					} else {
-						await scheduler.wait(delayMs, { signal: options?.signal });
-					}
+					await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
 					output.content.length = 0;
 					output.model = model.id;
 					output.responseId = undefined;
