@@ -42,6 +42,7 @@ export interface RequestDebugSession {
 	readonly requestPath: string;
 	readonly responsePath: string;
 	openResponseLog(statusLine: string, headers?: RequestDebugHeaders): Promise<RequestDebugResponseLog>;
+	updateRequestBody(body: unknown): Promise<void>;
 	wrapResponse(response: Response): Promise<Response>;
 }
 
@@ -107,6 +108,15 @@ class FileRequestDebugSession implements RequestDebugSession {
 		this.requestPath = requestPath;
 		this.responsePath = responsePath;
 		this.#overwriteResponseLog = overwriteResponseLog;
+	}
+
+	async updateRequestBody(body: unknown): Promise<void> {
+		const requestDump = (await Bun.file(this.requestPath).json()) as Record<string, unknown>;
+		delete requestDump.bodyText;
+		delete requestDump.bodyBase64;
+		delete requestDump.bodyUnavailable;
+		requestDump.body = body;
+		await Bun.write(this.requestPath, `${JSON.stringify(requestDump, null, 2)}\n`);
 	}
 
 	async openResponseLog(statusLine: string, headers?: RequestDebugHeaders): Promise<RequestDebugResponseLog> {
