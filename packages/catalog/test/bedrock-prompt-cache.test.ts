@@ -84,7 +84,11 @@ describe("Bedrock prompt-cache compat", () => {
 				minimumTokens: 4096,
 				supportsLongRetention: true,
 			},
-			{ id: "anthropic.claude-opus-4-6-v1", minimumTokens: 4096, supportsLongRetention: false },
+			{
+				id: "anthropic.claude-opus-4-6-v1",
+				minimumTokens: 4096,
+				supportsLongRetention: false,
+			},
 			{ id: "global.anthropic.claude-opus-4-7", minimumTokens: 4096, supportsLongRetention: true },
 			{ id: "us.anthropic.claude-opus-4-8", minimumTokens: 4096, supportsLongRetention: true },
 			{
@@ -110,6 +114,7 @@ describe("Bedrock prompt-cache compat", () => {
 				// bedrockSpec is reasoning:true → keepalive-free idle floor applies
 				// (900s for the adaptive-thinking family, 600s otherwise).
 				streamIdleTimeoutMs: expectsAdaptiveDisplay(id) ? 900_000 : 600_000,
+				supportsThinkingBindingControls: false,
 			});
 		}
 	});
@@ -149,7 +154,11 @@ describe("Bedrock prompt-cache compat", () => {
 			"jp.amazon.nova-2-lite-v1:0",
 			"global.amazon.nova-2-lite-v1:0",
 		] as const) {
-			expect(buildModel(bedrockSpec({ id })).compat).toEqual({ ...expected, streamIdleTimeoutMs: 600_000 });
+			expect(buildModel(bedrockSpec({ id })).compat).toEqual({
+				...expected,
+				supportsThinkingBindingControls: false,
+				streamIdleTimeoutMs: 600_000,
+			});
 		}
 	});
 

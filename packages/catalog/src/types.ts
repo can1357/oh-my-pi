@@ -604,6 +604,11 @@ export interface BedrockCompat {
 	 * `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` alias, then the 300s default.
 	 */
 	streamIdleTimeoutMs?: number;
+	/**
+	 * Whether the endpoint accepts thinking binding controls (block_binding and the
+	 * thinking-binding-controls beta) on models with prefixBinding enabled.
+	 */
+	supportsThinkingBindingControls?: boolean;
 }
 
 /** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
@@ -619,6 +624,7 @@ export interface ResolvedBedrockCompat {
 	 * `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` alias, then the 300s default.
 	 */
 	streamIdleTimeoutMs?: number;
+	supportsThinkingBindingControls?: boolean;
 }
 
 /**

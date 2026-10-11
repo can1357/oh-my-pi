@@ -77,6 +77,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsLongPromptCacheRetention?": "boolean",
 		"promptCacheMinimumTokens?": "number >= 0",
 		"promptCacheMaximumCheckpoints?": "number >= 0",
+		"supportsThinkingBindingControls?": "boolean",
 	});
 
 	// Provider-level overrides can target bundled models whose API is not repeated

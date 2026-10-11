@@ -774,6 +774,7 @@ describe("model thinking derivation", () => {
 		expect(vertex.thinking?.prefixBinding).toBe(true);
 		expect(bedrock.thinking?.prefixBinding).toBe(true);
 		expect(direct.compat.supportsThinkingBindingControls).toBe(true);
+		expect(bedrock.compat.supportsThinkingBindingControls).toBe(true);
 		expect(direct.compat.supportsMidConversationToolChanges).toBe(true);
 		expect(direct.compat.supportsPerMessageEffort).toBe(true);
 		expect(direct.compat.supportsTurnScopedSystem).toBe(true);

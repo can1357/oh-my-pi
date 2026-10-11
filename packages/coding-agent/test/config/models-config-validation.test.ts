@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { validateProviderConfiguration } from "@oh-my-pi/pi-coding-agent/config/models-config";
+import { getModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema-bundle";
 
 const models = [{ id: "grok-4", api: "openai-completions" as const }];
 const baseUrl = "https://api.example.invalid/v1";
@@ -31,5 +32,25 @@ describe("validateProviderConfiguration (models-config auth)", () => {
 				"models-config",
 			),
 		).not.toThrow();
+	});
+
+	test("schema accepts Bedrock compat.supportsThinkingBindingControls override", () => {
+		const schema = getModelsConfigSchema();
+		const result = schema({
+			providers: {
+				"amazon-bedrock": {
+					models: [
+						{
+							id: "us.anthropic.claude-fable-5-1",
+							api: "bedrock-converse-stream",
+							compat: {
+								supportsThinkingBindingControls: false,
+							},
+						},
+					],
+				},
+			},
+		});
+		expect("summary" in (result as object)).toBe(false);
 	});
 });

@@ -205,7 +205,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-mid-conversation-system": wire("supportsMidConversationSystem", ["anthropic"]),
 	"supports-mid-conversation-tool-changes": wire("supportsMidConversationToolChanges", ["anthropic"]),
 	"supports-per-message-effort": wire("supportsPerMessageEffort", ["anthropic"]),
-	"supports-thinking-binding-controls": wire("supportsThinkingBindingControls", ["anthropic"]),
+	"supports-thinking-binding-controls": wire("supportsThinkingBindingControls", ["anthropic", "bedrock"]),
 	"supports-turn-scoped-system": wire("supportsTurnScopedSystem", ["anthropic"]),
 
 	// ── wire: bedrock-converse-stream ──

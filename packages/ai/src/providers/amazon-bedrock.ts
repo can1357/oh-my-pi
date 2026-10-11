@@ -410,16 +410,17 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			let toolConfig = toolPlan.toolConfig;
 			const sentinelInjected = toolPlan.sentinelInjected;
 			let additionalModelRequestFields = buildAdditionalModelRequestFields(model, options);
-			const prefixMismatchBehavior = model.thinking?.prefixBinding
-				? (options.anthropicPrefixMismatchBehavior ?? "drop_block")
-				: undefined;
+			const prefixMismatchBehavior =
+				model.thinking?.prefixBinding && model.compat?.supportsThinkingBindingControls
+					? (options.anthropicPrefixMismatchBehavior ?? "drop_block")
+					: undefined;
 
 			// Bedrock rejects thinking + forced tool_choice. Fable's adaptive
 			// thinking cannot be disabled, so downgrade its forced choice instead.
-			if (toolConfig?.toolChoice && additionalModelRequestFields) {
+			if (toolConfig?.toolChoice && (additionalModelRequestFields || model.thinking?.prefixBinding)) {
 				const tc = toolConfig.toolChoice;
 				if (tc.any || tc.tool) {
-					if (prefixMismatchBehavior) toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
+					if (model.thinking?.prefixBinding) toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
 					else additionalModelRequestFields = undefined;
 				}
 			}
