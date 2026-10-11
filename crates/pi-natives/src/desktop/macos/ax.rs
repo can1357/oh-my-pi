@@ -669,7 +669,21 @@ fn verify_text_value(element: &AXUIElement, sent: &str, expected: &str) -> CoreR
 }
 
 fn is_secure(element: &AXUIElement) -> bool {
-	copy_string(element, "AXSubrole").as_deref() == Some("AXSecureTextField")
+	secure_subrole(copy_attribute_result(element, "AXSubrole").map(|value| {
+		value
+			.and_then(|value| value.downcast::<CFString>().ok())
+			.map(|value| value.to_string())
+	}))
+}
+
+/// A subrole that could not be read counts as secure, so a timeout never lets
+/// a password into an error; a field without one is not secure.
+fn secure_subrole(read: Result<Option<String>, AXError>) -> bool {
+	match read {
+		Ok(subrole) => subrole.as_deref() == Some("AXSecureTextField"),
+		Err(AXError::NoValue | AXError::AttributeUnsupported) => false,
+		Err(_) => true,
+	}
 }
 
 /// Exact equality is the verdict: a field that shows a rewritten value has
@@ -806,24 +820,29 @@ fn replace_native_text(element: &AXUIElement, text: &str) -> CoreResult<bool> {
 	// An unfocused Cocoa field has no field editor, so it publishes no
 	// settable selection until it is focused. Focus is borrowed only when the
 	// element that holds it is known, so it can be handed back.
+	let pid = element_pid(element)?;
 	let previous = if copy_bool(element, "AXFocused") == Some(true) {
 		None
 	} else {
-		let pid = element_pid(element)?;
-		if !may_borrow_focus(skylight::front_pid(), pid) {
-			return Ok(false);
-		}
 		let Some(owner) =
 			probe_application(pid).and_then(|app| copy_element(&app, "AXFocusedUIElement"))
 		else {
 			return Ok(false);
 		};
+		// Checked after the probes, which can block, and right before focusing.
+		if !may_borrow_focus(skylight::front_pid(), pid) {
+			return Ok(false);
+		}
 		if focus_element(element) != AXError::Success {
 			return Ok(false);
 		}
 		Some(owner)
 	};
-	if !select_whole_value(element) {
+	// The user may have brought the app forward meanwhile: a borrowed caret is
+	// theirs again, so nothing is inserted.
+	if !select_whole_value(element)
+		|| (previous.is_some() && !may_borrow_focus(skylight::front_pid(), pid))
+	{
 		// Nothing was written: hand focus back before the `AXValue` fallback.
 		if let Some(previous) = previous {
 			let error = focus_element(&previous);
@@ -1295,7 +1314,7 @@ mod tests {
 
 	use super::{
 		AttachedCandidate, ax_result, element_action_result, may_borrow_focus,
-		replace_utf16_selection, select_attached, stringify_value, text_readback,
+		replace_utf16_selection, secure_subrole, select_attached, stringify_value, text_readback,
 	};
 	use crate::desktop::error::ErrorCode;
 
@@ -1385,6 +1404,16 @@ mod tests {
 			assert!(error.message.contains("secure"), "{}", error.message);
 		}
 		assert!(text_readback("hunter2", "hunter2", Some("hunter2"), true).is_ok());
+	}
+
+	#[test]
+	fn an_unreadable_subrole_counts_as_secure() {
+		assert!(secure_subrole(Ok(Some("AXSecureTextField".to_owned()))));
+		assert!(!secure_subrole(Ok(Some("AXSearchField".to_owned()))));
+		assert!(!secure_subrole(Ok(None)));
+		assert!(!secure_subrole(Err(AXError::NoValue)));
+		assert!(!secure_subrole(Err(AXError::AttributeUnsupported)));
+		assert!(secure_subrole(Err(AXError::CannotComplete)));
 	}
 
 	#[test]
