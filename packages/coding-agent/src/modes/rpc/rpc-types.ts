@@ -851,7 +851,7 @@ export interface RpcHostUriResult {
 	type: "host_uri_result";
 	id: string;
 	/**
-	 * Required for successful `read` results. Ignored for `write` success.
+	 * Required for successful `read` results. On `write` success, replaces the default acknowledgement.
 	 * Set on errors when a textual explanation accompanies `isError`.
 	 */
 	content?: string;

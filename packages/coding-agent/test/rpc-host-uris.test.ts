@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
-import { RpcHostUriBridge } from "@oh-my-pi/pi-coding-agent/modes/rpc/host-uris";
+import { isRpcHostUriResult, RpcHostUriBridge } from "@oh-my-pi/pi-coding-agent/modes/rpc/host-uris";
 import type { RpcHostUriCancelRequest, RpcHostUriRequest } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 
 const router = InternalUrlRouter.instance();
 
@@ -23,6 +26,91 @@ function recordOutput(): {
 }
 
 describe("RpcHostUriBridge", () => {
+	it.each([
+		{ name: "host response text verbatim", content: ' \t{"id":42,"status":"保存済み"}\r\nversion=2\n' },
+		{ name: "an explicitly empty host response", content: "" },
+		{ name: "the legacy acknowledgement when content is omitted", content: undefined },
+		{ name: "the legacy acknowledgement for a null host response", content: null },
+	])("returns $name through the write tool", async ({ content }) => {
+		const bridge = new RpcHostUriBridge(frame => {
+			if (frame.type !== "host_uri_request") throw new Error("Expected host_uri_request frame");
+			expect(frame.operation).toBe("write");
+			expect(frame.url).toBe("db://users/42");
+			expect(frame.content).toBe("name=Bob");
+			const response = { type: "host_uri_result", id: frame.id, content };
+			if (!isRpcHostUriResult(response)) throw new Error("Expected host_uri_result frame");
+			bridge.handleResult(response);
+		});
+		try {
+			bridge.setSchemes([{ scheme: "db", writable: true }]);
+			const tool = new WriteTool({
+				cwd: process.cwd(),
+				hasUI: false,
+				enableLsp: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				settings: Settings.isolated(),
+			});
+			const result = await tool.execute("write-host-uri", { path: "db://users/42", content: "name=Bob" });
+			expect(result.content).toEqual([
+				{ type: "text", text: content ?? "Successfully wrote 8 bytes to db://users/42" },
+			]);
+		} finally {
+			bridge.clear("test cleanup");
+		}
+	});
+
+	it.each(["Row 42 saved", ""])("reports stripped input alongside host response %j", async content => {
+		let writtenContent: string | undefined;
+		const bridge = new RpcHostUriBridge(frame => {
+			if (frame.type !== "host_uri_request") throw new Error("Expected host_uri_request frame");
+			writtenContent = frame.content;
+			bridge.handleResult({ type: "host_uri_result", id: frame.id, content });
+		});
+		try {
+			bridge.setSchemes([{ scheme: "db", writable: true }]);
+			const settings = Settings.isolated();
+			cfgEditMode.set(settings, "hashline");
+			const tool = new WriteTool({
+				cwd: process.cwd(),
+				hasUI: false,
+				enableLsp: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				settings,
+			});
+			const result = await tool.execute("write-host-hashlines", {
+				path: "db://users/42",
+				content: "[db://users/42#ABCD]\n1:name=Bob\n",
+			});
+			expect(writtenContent).toBe("name=Bob\n");
+			const text = result.content.find(block => block.type === "text")?.text ?? "";
+			expect(text).toContain("auto-stripped hashline display prefixes");
+			if (content) expect(text.startsWith(content)).toBe(true);
+		} finally {
+			bridge.clear("test cleanup");
+		}
+	});
+
+	it("rejects host write errors instead of returning their content as success", async () => {
+		const bridge = new RpcHostUriBridge(frame => {
+			if (frame.type !== "host_uri_request") throw new Error("Expected host_uri_request frame");
+			bridge.handleResult({
+				type: "host_uri_result",
+				id: frame.id,
+				content: "stale row",
+				isError: true,
+				error: "version conflict",
+			});
+		});
+		try {
+			bridge.setSchemes([{ scheme: "db", writable: true }]);
+			await expect(router.write("db://users/42", "name=Bob")).rejects.toThrow("version conflict");
+		} finally {
+			bridge.clear("test cleanup");
+		}
+	});
+
 	it("registers schemes against the router and surfaces read results", async () => {
 		const out = recordOutput();
 		const bridge = new RpcHostUriBridge(out.push);

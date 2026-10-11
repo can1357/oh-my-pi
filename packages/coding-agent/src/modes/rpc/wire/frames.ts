@@ -280,7 +280,10 @@ export const frameDefs = {
 		{
 			type: "'host_uri_result'",
 			id: "string",
-			"content?": doc("string", "Required for a successful read."),
+			"content?": doc(
+				"string",
+				"Required for a successful read; on write success, replaces the default acknowledgement.",
+			),
 			"contentType?": "'text/markdown' | 'application/json' | 'text/plain'",
 			"notes?": "string[]",
 			"immutable?": "boolean",

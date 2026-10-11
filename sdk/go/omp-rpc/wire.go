@@ -6173,7 +6173,7 @@ func (v HostUriCancelRequest) MarshalJSON() ([]byte, error) {
 // Completes a pending host URI request.
 type HostUriResult struct {
 	ID string `json:"id"`
-	// Required for a successful read.
+	// Required for a successful read; on write success, replaces the default acknowledgement.
 	Content     *string                   `json:"content,omitempty"`
 	ContentType *HostUriResultContentType `json:"contentType,omitempty"`
 	Notes       []string                  `json:"notes,omitempty"`

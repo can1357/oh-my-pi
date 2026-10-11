@@ -846,6 +846,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 							isError: handlerResult.isError,
 							useless: handlerResult.useless,
 						};
+						if (stripped) {
+							appendNoteToResult(
+								result,
+								"Note: auto-stripped hashline display prefixes from content before writing.",
+							);
+						}
 						if (recovered.note) appendNoteToResult(result, recovered.note);
 						return result;
 					}

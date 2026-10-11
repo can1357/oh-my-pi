@@ -1450,11 +1450,19 @@ For successful reads:
 }
 ```
 
-For successful writes, omit content:
+For successful writes, optionally send `content` as the write tool's result:
+
+```json
+{ "type": "host_uri_result", "id": "uri_1", "content": "Updated row 42; version 2" }
+```
+
+An empty string returns no host text. Omit `content` to keep the default write acknowledgement:
 
 ```json
 { "type": "host_uri_result", "id": "uri_1" }
 ```
+
+The write tool still reports when it strips copied hashline prefixes from the input.
 
 To reject the request, set `isError: true` and either populate `error` with
 a message or fall back to `content` for textual error surfacing:
