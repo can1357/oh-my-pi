@@ -344,6 +344,13 @@
 - Fixed `omp auth-gateway`'s Anthropic `/v1/messages` stream misnumbering content blocks after a redacted reasoning block, which misrouted every later delta in index-addressed clients ([#15654](https://github.com/can1357/oh-my-pi/pull/15654) by [@abilliontokens](https://github.com/abilliontokens))
 
 ## [18.10.4] - 2026-10-13
+### Changed
+
+- Stream hot paths do less work per chunk: the thinking-loop guard re-slices its rolling tail only when a scan runs instead of on every delta, and GitLab Duo workflow checkpoints skip re-hashing content that replayed unchanged.
+
+### Added
+
+- Exported `matchesReplacementCredential` and `isSameOAuthAccount`, which tell whether storing a credential replaces an existing account row and whether two credentials belong to the same account ([#14901](https://github.com/can1357/oh-my-pi/pull/14901) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -465,7 +472,6 @@
 - Fixed resumed OpenAI Responses sessions (xAI, Factory Droid, OpenAI and other hosts) dropping all earlier encrypted reasoning on their first request; GitHub Copilot still rebuilds history until its first response ([#15148](https://github.com/can1357/oh-my-pi/pull/15148) by [@will-bogusz](https://github.com/will-bogusz))
 ### Changed
 
-- Stream hot paths do less work per chunk: the thinking-loop guard re-slices its rolling tail only when a scan runs instead of on every delta, and GitLab Duo workflow checkpoints skip re-hashing content that replayed unchanged.
 
 ## [18.8.7] - 2026-10-09
 
