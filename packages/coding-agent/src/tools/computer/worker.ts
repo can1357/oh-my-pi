@@ -21,6 +21,7 @@ import type {
 	DesktopScreenState,
 	DesktopSessionOptions,
 	DesktopWindow,
+	OpenedApplication,
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
@@ -64,7 +65,7 @@ export interface NativeDesktopSession {
 	cancel(): void;
 	retire(): void;
 	listApplications(options?: ApplicationQuery): Promise<Application[]>;
-	openApplication(id: string, options?: ApplicationOpenOptions): Promise<Application>;
+	openApplication(id: string, options?: ApplicationOpenOptions): Promise<OpenedApplication>;
 	menuItems(target: string, path?: string[]): Promise<MenuItem[]>;
 	menuSelect(target: string, path: string[]): Promise<void>;
 	observe(
@@ -1137,11 +1138,15 @@ export class ComputerWorkerCore {
 					const { signal } = getContext();
 					return await nativeCall(signal, () => session.listApplications(options));
 				},
-				open: async (id: string, options?: ApplicationOpenOptions): Promise<Application> => {
+				open: async (
+					id: string,
+					options?: ApplicationOpenOptions,
+				): Promise<Application & { window: Win | null }> => {
 					const context = getContext();
 					guardRun(context, "apps.open");
 					validateString(id, "apps.open(id)", { nonEmpty: true });
-					return await nativeCall(context.signal, () => session.openApplication(id, options));
+					const opened = await nativeCall(context.signal, () => session.openApplication(id, options));
+					return { ...opened.application, window: opened.window ? makeWin(opened.window) : null };
 				},
 			},
 			control: {
