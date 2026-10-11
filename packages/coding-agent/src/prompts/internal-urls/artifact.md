@@ -1,1 +1,1 @@
-`artifact://<id>`: spilled output; page :N-M or :raw:N-M.
+`artifact://<id>`: spilled output; requested lines retain full columns within read byte/line limits. Off-window context retains the configured column cap. Page :N-M; :raw:N-M returns verbatim bounded content.
