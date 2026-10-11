@@ -1,5 +1,5 @@
 ```
-completion(prompt, model?="default"|"smol"|"slow", system?=None, schema?=None) → handle; `.wait()` returns text (parsed with `schema`). Stateless, no tools/history.
+completion(prompt, model?="default"|"smol"|"slow", system?=None, schema?=None) → handle; `.wait()` returns text (parsed with `schema`), and `.metadata()` returns detached provider-options routing evidence (what the bridge supplied, not service-side reasoning) without waiting (or `None`/`null` when unavailable). Stateless, no tools/history.
 await judge(state, questions) → `{id: answer}`
     Typed judgment over one `state` (str | JSON object | JSON array). Every question sees the same state and is answered independently: batch independent questions into one call. Cheap and fast (TypeSafe when credentialed, else the tiny/smol chat model); prefer over `completion()` for classification, yes/no, ranking. Two or more states → `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}`, never a loop of `judge()`.
     `questions`: `{id: q}` where q is one of

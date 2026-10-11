@@ -10,13 +10,15 @@ import { Settings } from "../../src/config/settings";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../../src/eval/bridge-timeout";
 import {
 	EVAL_HANDLE_CONCURRENCY,
+	evalRequestSlots,
 	getCompletionHandle,
 	releaseCompletionHandles,
+	retainCompletionHandle,
 	runEvalCompletion,
 	type EvalCompletionBridgeOptions,
 	type EvalCompletionResult,
 } from "../../src/eval/completion-bridge";
-import { runEvalWait } from "../../src/eval/handle-bridge";
+import { runEvalCancel, runEvalStatus, runEvalWait } from "../../src/eval/handle-bridge";
 import { IdleTimeout } from "../../src/eval/idle-timeout";
 import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
@@ -148,10 +150,12 @@ async function runPythonCompletionsInSubprocess(tempDir: TempDir): Promise<Pytho
 	const settingsPath = path.resolve(import.meta.dir, "../../src/config/settings.ts");
 	const code = [
 		"import json",
-		'plain = completion("hi", model="smol").wait()',
+		'plain_handle = completion("hi", model="smol")',
+		"plain = plain_handle.wait()",
+		"plain_metadata = plain_handle.metadata()",
 		// `await` resolves on a worker thread; it must keep the cell's run context.
 		'structured = await completion("hi", schema={"type": "object"})',
-		'print(json.dumps({"plain": plain, "structured": structured}))',
+		'print(json.dumps({"plain": plain, "plain_metadata": plain_metadata, "structured": structured}))',
 	].join("\n");
 	await Bun.write(
 		scriptPath,
@@ -368,10 +372,35 @@ describe("runEvalCompletion", () => {
 			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "b down" }))
 			.mockResolvedValueOnce(assistant({ text: "c answer" }));
 
-		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+		const handle = await runEvalCompletion({ prompt: "q", model: "slow" }, { session });
+		await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
 
-		const efforts = spy.mock.calls.map(call => (call[2] as { reasoning?: unknown }).reasoning);
-		expect(efforts).toEqual([Effort.High, Effort.Low, Effort.Low]);
+		const providerOptions = spy.mock.calls.map(call => call[2] as { reasoning?: Effort; disableReasoning?: boolean });
+		expect(providerOptions.map(options => options.reasoning)).toEqual([Effort.High, Effort.Low, Effort.Low]);
+		const finalOptions = providerOptions[providerOptions.length - 1];
+		const metadata = runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session }).metadata;
+		expect(metadata).toMatchObject({
+			requestedRole: "slow",
+			configuredSelector: "p/slow",
+			configuredEffort: null,
+			fallbackUsed: true,
+			effortEvidence: "provider-options",
+		});
+		expect(metadata?.requestEffort).toBe(finalOptions?.reasoning ?? null);
+		expect(metadata?.reasoningDisabled).toBe(finalOptions?.disableReasoning ?? null);
+		expect(
+			metadata?.attempts.map(attempt => ({
+				requestEffort: attempt.requestEffort,
+				reasoningDisabled: attempt.reasoningDisabled,
+				outcome: attempt.outcome,
+			})),
+		).toEqual(
+			providerOptions.map((options, index) => ({
+				requestEffort: options.reasoning ?? null,
+				reasoningDisabled: options.disableReasoning ?? null,
+				outcome: index === providerOptions.length - 1 ? "succeeded" : "failed",
+			})),
+		);
 	});
 
 	it("keeps reasoning disabled for bare nested entries after an :off fallback", async () => {
@@ -390,11 +419,40 @@ describe("runEvalCompletion", () => {
 			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "b down" }))
 			.mockResolvedValueOnce(assistant({ text: "c answer" }));
 
-		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+		const handle = await runEvalCompletion({ prompt: "q", model: "slow" }, { session });
+		await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
 
-		const nested = spy.mock.calls[2]?.[2] as { reasoning?: unknown; disableReasoning?: unknown };
-		expect(nested.reasoning).toBeUndefined();
-		expect(nested.disableReasoning).toBe(true);
+		const providerOptions = spy.mock.calls.map(call => call[2] as { reasoning?: Effort; disableReasoning?: boolean });
+		expect(providerOptions.map(options => [options.reasoning, options.disableReasoning])).toEqual([
+			[Effort.High, false],
+			[undefined, true],
+			[undefined, true],
+		]);
+		const finalOptions = providerOptions[providerOptions.length - 1];
+		const metadata = runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session }).metadata;
+		expect(metadata).toMatchObject({
+			requestedRole: "slow",
+			configuredSelector: "p/slow",
+			configuredEffort: null,
+			finalModel: "p/c",
+			fallbackUsed: true,
+			effortEvidence: "provider-options",
+		});
+		expect(metadata?.requestEffort).toBe(finalOptions?.reasoning ?? null);
+		expect(metadata?.reasoningDisabled).toBe(finalOptions?.disableReasoning ?? null);
+		expect(
+			metadata?.attempts.map(attempt => ({
+				requestEffort: attempt.requestEffort,
+				reasoningDisabled: attempt.reasoningDisabled,
+				outcome: attempt.outcome,
+			})),
+		).toEqual(
+			providerOptions.map((options, index) => ({
+				requestEffort: options.reasoning ?? null,
+				reasoningDisabled: options.disableReasoning ?? null,
+				outcome: index === providerOptions.length - 1 ? "succeeded" : "failed",
+			})),
+		);
 	});
 
 	it("inherits disabled reasoning for a bare fallback after an explicit :off primary", async () => {
@@ -876,6 +934,559 @@ describe("runEvalCompletion", () => {
 		expect(opts.reasoning).toBeUndefined();
 	});
 
+	it("exposes live metadata through status while keeping wait snapshots unchanged", async () => {
+		const started = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<AssistantMessage>();
+		vi.spyOn(ai, "completeSimple").mockImplementation(async () => {
+			started.resolve();
+			return await finish.promise;
+		});
+		const session = makeSession();
+		const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+		await started.promise;
+
+		const running = runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session });
+		expect(running).toMatchObject({
+			kind: "completion",
+			id: handle.id,
+			status: "running",
+			metadata: {
+				requestedRole: "smol",
+				configuredSelector: "p/smol",
+				configuredEffort: null,
+				finalModel: "p/smol",
+				requestEffort: null,
+				reasoningDisabled: false,
+				fallbackUsed: false,
+				effortEvidence: "provider-options",
+				attempts: [
+					{
+						candidateIndex: 0,
+						model: "p/smol",
+						requestEffort: null,
+						reasoningDisabled: false,
+						outcome: "running",
+					},
+				],
+			},
+		});
+
+		finish.resolve(assistant({ text: "done" }));
+		const waited = await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+		expect(waited.items[0]).toEqual({
+			kind: "completion",
+			id: handle.id,
+			status: "completed",
+			text: "done",
+		});
+		expect(Object.hasOwn(waited.items[0] ?? {}, "metadata")).toBe(false);
+
+		const settled = runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session });
+		expect(settled.metadata?.attempts[0]?.outcome).toBe("succeeded");
+	});
+
+	it("reports configured selector effort separately from provider request options", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		const session = makeSession({ roles: { smol: "p/smol:max" } });
+		const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+		await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+
+		const options = spy.mock.calls[0]?.[2] as { reasoning?: unknown; disableReasoning?: unknown };
+		expect(options.reasoning).toBeUndefined();
+		expect(options.disableReasoning).toBe(false);
+		expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session }).metadata).toMatchObject({
+			configuredSelector: "p/smol:max",
+			configuredEffort: "max",
+			requestEffort: null,
+			reasoningDisabled: false,
+			effortEvidence: "provider-options",
+		});
+	});
+
+	it("captures max from short smol and default selectors without changing provider options", async () => {
+		const short = makeModel("p", "a", {
+			reasoning: true,
+			thinking: { efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max], mode: "effort" },
+		});
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		const session = makeSession({
+			available: [short],
+			roles: { smol: "p/a:max", default: "p/a:max" },
+		});
+
+		for (const tier of ["smol", "default"] as const) {
+			const handle = await runEvalCompletion({ prompt: "q", model: tier }, { session });
+			await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+			expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session }).metadata).toMatchObject({
+				requestedRole: tier,
+				configuredSelector: "p/a:max",
+				configuredEffort: Effort.Max,
+				finalModel: "p/a",
+				requestEffort: null,
+				reasoningDisabled: false,
+				fallbackUsed: false,
+			});
+		}
+
+		expect(
+			spy.mock.calls.map(call => {
+				const options = call[2] as { reasoning?: unknown; disableReasoning?: unknown };
+				return [options.reasoning, options.disableReasoning];
+			}),
+		).toEqual([
+			[undefined, false],
+			[undefined, false],
+		]);
+	});
+
+	it("does not infer effort from unqualified literal max and auto model IDs", async () => {
+		const makeLiteral = (id: string) =>
+			makeModel("p", id, {
+				reasoning: true,
+				thinking: { efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max], mode: "effort" },
+			});
+		const maxLiteral = makeLiteral("a:max");
+		const autoLiteral = makeLiteral("a:auto");
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		const session = makeSession({
+			available: [maxLiteral, autoLiteral],
+			roles: { smol: "a:max" },
+		});
+
+		for (const selector of ["A:max", "a:auto"] as const) {
+			session.settings.setModelRole("smol", selector);
+			const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+			await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+			expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session }).metadata).toMatchObject({
+				requestedRole: "smol",
+				configuredSelector: selector,
+				configuredEffort: null,
+				finalModel: `p/${selector.toLowerCase()}`,
+				requestEffort: null,
+				reasoningDisabled: false,
+				fallbackUsed: false,
+			});
+		}
+
+		expect(
+			spy.mock.calls.map(call => {
+				const options = call[2] as { reasoning?: unknown; disableReasoning?: unknown };
+				return [options.reasoning, options.disableReasoning];
+			}),
+		).toEqual([
+			[undefined, false],
+			[undefined, false],
+		]);
+	});
+
+	it.each(["p/slow:max", "P/Slow:max", "P/slow:max", "P/slow:auto"])(
+		"does not report configured effort for the case-insensitive literal selector %s",
+		async selector => {
+			const literalId = selector.endsWith(":auto") ? "Slow:auto" : "Slow:max";
+			const session = makeSession({
+				available: [makeModel("p", literalId)],
+				roles: { smol: selector },
+			});
+			vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "literal answer" }));
+
+			const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+			const waited = await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+			expect(waited.items[0]).toMatchObject({ status: "completed", text: "literal answer" });
+			expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session }).metadata).toMatchObject({
+				configuredSelector: selector,
+				configuredEffort: null,
+				finalModel: `p/${literalId}`,
+				requestEffort: null,
+			});
+		},
+	);
+
+	it("records primary failure and fallback success without claiming an unused request", async () => {
+		const fallback = makeModel("p", "fallback");
+		const session = makeSession({ available: [SMOL, fallback] });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/fallback"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "primary down" }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+		const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+		const waited = await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+		expect(waited.items[0]).toMatchObject({ status: "completed", text: "fallback answer" });
+		expect(Object.hasOwn(waited.items[0] ?? {}, "metadata")).toBe(false);
+		expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session }).metadata).toEqual({
+			requestedRole: "smol",
+			configuredSelector: "p/smol",
+			configuredEffort: null,
+			finalModel: "p/fallback",
+			requestEffort: null,
+			reasoningDisabled: false,
+			fallbackUsed: true,
+			effortEvidence: "provider-options",
+			attempts: [
+				{
+					candidateIndex: 0,
+					model: "p/smol",
+					requestEffort: null,
+					reasoningDisabled: false,
+					outcome: "failed",
+				},
+				{
+					candidateIndex: 1,
+					model: "p/fallback",
+					requestEffort: null,
+					reasoningDisabled: false,
+					outcome: "succeeded",
+				},
+			],
+		});
+		expect(spy).toHaveBeenCalledTimes(2);
+	});
+
+	it("preserves raw multi-item wait order without completion metadata", async () => {
+		vi.spyOn(ai, "completeSimple").mockImplementation(async model => assistant({ text: model.id }));
+		const session = makeSession();
+		const first = await runEvalCompletion({ prompt: "first", model: "smol" }, { session });
+		const second = await runEvalCompletion({ prompt: "second", model: "default" }, { session });
+
+		const waited = await runEvalWait(
+			{
+				items: [
+					{ kind: "completion", id: second.id },
+					{ kind: "completion", id: first.id },
+				],
+			},
+			{ session },
+		);
+		expect(
+			waited.items.map(item => ({
+				id: item.id,
+				status: item.status,
+				text: item.text,
+				hasMetadata: Object.hasOwn(item, "metadata"),
+			})),
+		).toEqual([
+			{ id: second.id, status: "completed", text: "default", hasMetadata: false },
+			{ id: first.id, status: "completed", text: "smol", hasMetadata: false },
+		]);
+	});
+
+	it("omits retry-budget-truncated candidates from metadata", async () => {
+		const models = ["b", "c"].map(id => makeModel("p", id));
+		const session = makeSession({ available: [SMOL, ...models] });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/b", "p/c"] });
+		cfgRetryMaxRetries.set(session.settings, 1);
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(assistant({ stopReason: "error", errorMessage: "all unavailable" }));
+
+		const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+		const waited = await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+		expect(waited.items[0]?.status).toBe("failed");
+		const metadata = runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session }).metadata;
+		expect(metadata?.attempts.map(attempt => [attempt.candidateIndex, attempt.outcome])).toEqual([
+			[0, "failed"],
+			[1, "failed"],
+		]);
+		expect(metadata?.attempts).toHaveLength(2);
+		expect(spy).toHaveBeenCalledTimes(2);
+	});
+
+	it("records structured parsing failures as failed provider attempts", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "not-json" }));
+		const session = makeSession();
+		const handle = await runEvalCompletion({ prompt: "q", model: "smol", schema: { type: "object" } }, { session });
+		const waited = await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+		expect(waited.items[0]).toMatchObject({ status: "failed" });
+		expect(Object.hasOwn(waited.items[0] ?? {}, "metadata")).toBe(false);
+		expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session }).metadata).toMatchObject({
+			finalModel: "p/smol",
+			requestEffort: null,
+			reasoningDisabled: false,
+			attempts: [
+				{
+					candidateIndex: 0,
+					model: "p/smol",
+					requestEffort: null,
+					reasoningDisabled: false,
+					outcome: "failed",
+				},
+			],
+		});
+	});
+
+	it("records missing credentials without fabricating adapter evidence", async () => {
+		const session = makeSession({ apiKey: null });
+		const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+		const waited = await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+		expect(waited.items[0]?.status).toBe("failed");
+		const metadata = runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session }).metadata;
+		expect(metadata).toEqual({
+			requestedRole: "smol",
+			configuredSelector: "p/smol",
+			configuredEffort: null,
+			finalModel: null,
+			requestEffort: null,
+			reasoningDisabled: null,
+			fallbackUsed: false,
+			effortEvidence: "provider-options",
+			attempts: [
+				{
+					candidateIndex: 0,
+					model: "p/smol",
+					requestEffort: null,
+					reasoningDisabled: null,
+					outcome: "skipped-no-credentials",
+				},
+			],
+		});
+	});
+
+	it("records adapter entry after cancellation during credential preflight", async () => {
+		const lookupStarted = Promise.withResolvers<void>();
+		const releaseLookup = Promise.withResolvers<void>();
+		const observedSignals: AbortSignal[] = [];
+		const spy = vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, _context, requestOptions) => {
+			if (requestOptions?.signal) observedSignals.push(requestOptions.signal);
+			throw new Error("adapter request receives an already-aborted signal");
+		});
+		const session = makeSession();
+		const registry = session.modelRegistry;
+		if (!registry) throw new Error("test requires a model registry");
+		registry.getApiKey = async () => {
+			lookupStarted.resolve();
+			await releaseLookup.promise;
+			return "test-key";
+		};
+
+		const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+		await lookupStarted.promise;
+		expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session })).toMatchObject({
+			status: "running",
+			metadata: {
+				finalModel: null,
+				requestEffort: null,
+				reasoningDisabled: null,
+				fallbackUsed: false,
+				attempts: [
+					{
+						candidateIndex: 0,
+						model: "p/smol",
+						requestEffort: null,
+						reasoningDisabled: null,
+						outcome: "running",
+					},
+				],
+			},
+		});
+		expect(runEvalCancel({ item: { kind: "completion", id: handle.id } }, { session })).toEqual({ cancelled: true });
+		expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session })).toMatchObject({
+			status: "running",
+			metadata: {
+				finalModel: null,
+				requestEffort: null,
+				reasoningDisabled: null,
+				fallbackUsed: false,
+				attempts: [{ candidateIndex: 0, outcome: "running" }],
+			},
+		});
+
+		releaseLookup.resolve();
+		const waited = await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+		expect(waited.items[0]?.status).toBe("cancelled");
+		expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session })).toMatchObject({
+			status: "cancelled",
+			metadata: {
+				finalModel: "p/smol",
+				requestEffort: null,
+				reasoningDisabled: false,
+				fallbackUsed: false,
+				attempts: [
+					{
+						candidateIndex: 0,
+						model: "p/smol",
+						requestEffort: null,
+						reasoningDisabled: false,
+						outcome: "cancelled",
+					},
+				],
+			},
+		});
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(observedSignals).toHaveLength(1);
+		expect(observedSignals[0]?.aborted).toBe(true);
+	});
+
+	it("records fallback adapter entry when cancellation happens during fallback credentials", async () => {
+		const lookupStarted = Promise.withResolvers<void>();
+		const releaseLookup = Promise.withResolvers<void>();
+		const session = makeSession();
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/default"] });
+		const registry = session.modelRegistry;
+		if (!registry) throw new Error("test requires a model registry");
+		registry.getApiKey = async model => {
+			if (model.id === "default") {
+				lookupStarted.resolve();
+				await releaseLookup.promise;
+			}
+			return "test-key";
+		};
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "primary failed" }))
+			.mockImplementationOnce(async (_model, _context, options) => {
+				expect(options?.signal?.aborted).toBe(true);
+				throw new Error("cancelled fallback adapter");
+			});
+		const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+		await lookupStarted.promise;
+		runEvalCancel({ item: { kind: "completion", id: handle.id } }, { session });
+		releaseLookup.resolve();
+		await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+		expect(spy).toHaveBeenCalledTimes(2);
+		expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session })).toMatchObject({
+			status: "cancelled",
+			metadata: {
+				finalModel: "p/default",
+				requestEffort: null,
+				reasoningDisabled: false,
+				fallbackUsed: true,
+				attempts: [
+					{ model: "p/smol", outcome: "failed" },
+					{ model: "p/default", reasoningDisabled: false, outcome: "cancelled" },
+				],
+			},
+		});
+	});
+
+	it("cancels a queued completion without fabricating a provider attempt", async () => {
+		let heldSlots = 0;
+		try {
+			for (let index = 0; index < EVAL_HANDLE_CONCURRENCY; index++) {
+				await evalRequestSlots.acquire();
+				heldSlots++;
+			}
+			const spy = vi.spyOn(ai, "completeSimple");
+			const session = makeSession();
+			const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+			expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session })).toMatchObject({
+				status: "running",
+				metadata: {
+					finalModel: null,
+					requestEffort: null,
+					reasoningDisabled: null,
+					fallbackUsed: false,
+					attempts: [],
+				},
+			});
+			expect(runEvalCancel({ item: { kind: "completion", id: handle.id } }, { session })).toEqual({
+				cancelled: true,
+			});
+			const waited = await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+			expect(waited.items[0]?.status).toBe("cancelled");
+			expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session })).toMatchObject({
+				status: "cancelled",
+				metadata: {
+					finalModel: null,
+					requestEffort: null,
+					reasoningDisabled: null,
+					fallbackUsed: false,
+					attempts: [],
+				},
+			});
+			expect(spy).not.toHaveBeenCalled();
+		} finally {
+			for (let index = 0; index < heldSlots; index++) evalRequestSlots.release();
+		}
+	});
+
+	it("retains the last observed provider options when a request is cancelled", async () => {
+		const started = Promise.withResolvers<void>();
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, _context, requestOptions) => {
+			started.resolve();
+			const signal = requestOptions?.signal;
+			if (!signal) throw new Error("completion provider request did not receive an abort signal");
+			await new Promise<never>((_resolve, reject) => {
+				signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+			});
+			throw new Error("unreachable");
+		});
+		const session = makeSession();
+		const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+		await started.promise;
+		expect(runEvalCancel({ item: { kind: "completion", id: handle.id } }, { session })).toEqual({ cancelled: true });
+		const waited = await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+		expect(waited.items[0]?.status).toBe("cancelled");
+		expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session }).metadata).toMatchObject({
+			finalModel: "p/smol",
+			requestEffort: null,
+			reasoningDisabled: false,
+			attempts: [
+				{
+					candidateIndex: 0,
+					model: "p/smol",
+					requestEffort: null,
+					reasoningDisabled: false,
+					outcome: "cancelled",
+				},
+			],
+		});
+	});
+
+	it("isolates metadata snapshots and preserves owner and retention boundaries", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "private" }));
+			const owner = makeSession();
+			owner.getAgentId = () => "metadata-owner";
+			const other = makeSession();
+			other.getAgentId = () => "metadata-other";
+			const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session: owner });
+			await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session: owner });
+
+			const copy = runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session: owner });
+			if (!copy.metadata) throw new Error("completion status did not include metadata");
+			copy.metadata.attempts[0]!.model = "tampered";
+			expect(
+				runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session: owner }).metadata?.attempts[0]
+					?.model,
+			).toBe("p/smol");
+			expect(() => runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session: other })).toThrow(
+				"unknown completion handle",
+			);
+
+			vi.advanceTimersByTime(30 * 60 * 1000 - 1);
+			expect(
+				runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session: owner }).metadata,
+			).not.toBeNull();
+			vi.advanceTimersByTime(1);
+			expect(() => runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session: owner })).toThrow(
+				"unknown completion handle",
+			);
+		} finally {
+			vi.useRealTimers();
+			releaseCompletionHandles("metadata-owner");
+		}
+	});
+
+	it("returns null metadata for legacy retained completion handles", async () => {
+		const session = makeSession();
+		const handle = retainCompletionHandle("legacy", { session }, async () => ({
+			text: "legacy",
+			details: { model: "p/smol", tier: "smol", structured: false },
+		}));
+		expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session }).metadata).toBeNull();
+
+		const waited = await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+		expect(waited.items[0]).toEqual({
+			kind: "completion",
+			id: handle.id,
+			status: "completed",
+			text: "legacy",
+		});
+		expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session }).metadata).toBeNull();
+	});
+
 	it("throws ToolError on invalid arguments", async () => {
 		await expect(runEvalCompletionAndWait({ prompt: "" }, { session: makeSession() })).rejects.toBeInstanceOf(
 			ToolError,
@@ -1023,6 +1634,57 @@ describe("completion() through eval runtimes", () => {
 		});
 	});
 
+	it("exposes metadata through JavaScript pending handles", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-completion-js-metadata-");
+		const sessionFile = path.join(tempDir.path(), "session.jsonl");
+		const sessionId = `js-completion-metadata:${crypto.randomUUID()}`;
+		const started = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<AssistantMessage>();
+		vi.spyOn(ai, "completeSimple").mockImplementation(async () => {
+			started.resolve();
+			return await finish.promise;
+		});
+
+		const execution = executeJs(
+			[
+				'const pending = completion("hi", { model: "smol" });',
+				"const before = await pending.metadata();",
+				"const value = await pending.wait();",
+				"const after = await pending.metadata();",
+				"return JSON.stringify({ beforeRole: before?.requestedRole, value, after });",
+			].join("\n"),
+			{ cwd: tempDir.path(), sessionId, session: makeSession({ cwd: tempDir.path() }), sessionFile },
+		);
+		await started.promise;
+		finish.resolve(assistant({ text: "hello with metadata" }));
+		const result = await execution;
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output.trim())).toMatchObject({
+			beforeRole: "smol",
+			value: "hello with metadata",
+			after: {
+				requestedRole: "smol",
+				configuredSelector: "p/smol",
+				configuredEffort: null,
+				finalModel: "p/smol",
+				requestEffort: null,
+				reasoningDisabled: false,
+				fallbackUsed: false,
+				effortEvidence: "provider-options",
+				attempts: [
+					{
+						candidateIndex: 0,
+						model: "p/smol",
+						requestEffort: null,
+						reasoningDisabled: false,
+						outcome: "succeeded",
+					},
+				],
+			},
+		});
+	});
+
 	it("exposes plain and structured completion() in the Python runtime", async () => {
 		const tempDir = TempDir.createSync("@omp-eval-completion-py-");
 		try {
@@ -1030,6 +1692,25 @@ describe("completion() through eval runtimes", () => {
 			expect(result.exitCode).toBe(0);
 			expect(JSON.parse(result.output.trim())).toEqual({
 				plain: "hello from python",
+				plain_metadata: {
+					requestedRole: "smol",
+					configuredSelector: "p/smol",
+					configuredEffort: null,
+					finalModel: "p/smol",
+					requestEffort: null,
+					reasoningDisabled: false,
+					fallbackUsed: false,
+					effortEvidence: "provider-options",
+					attempts: [
+						{
+							candidateIndex: 0,
+							model: "p/smol",
+							requestEffort: null,
+							reasoningDisabled: false,
+							outcome: "succeeded",
+						},
+					],
+				},
 				structured: { ok: true },
 			});
 		} finally {
