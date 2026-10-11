@@ -1,7 +1,8 @@
 /**
  * Focused subagent views are chat-only, except for viewer-scoped commands: `/btw`
  * asks a side question about the focused transcript, `/export` writes the focused
- * agent's own transcript (with its nested subagents), and `/usage` reports
+ * agent's own transcript (with its nested subagents), `/advisor on|off` (and bare
+ * `/advisor`) toggles the focused agent's own advisor, and `/usage` reports
  * account-wide limits. Everything else still requires returning to main.
  *
  * Failure mode if this regresses: these commands silently do nothing (or steer the
@@ -39,6 +40,7 @@ function createFocusedContext() {
 	const ctx = {
 		editor,
 		ui: { requestRender: vi.fn() },
+		statusLine: { invalidate: vi.fn() },
 		session: {
 			isStreaming: false,
 			isCompacting: false,
@@ -46,8 +48,19 @@ function createFocusedContext() {
 			queuedMessageCount: 0,
 			customCommands: [],
 			promptTemplates: [],
+			setAdvisorEnabled: vi.fn((_enabled: boolean) => false),
+			isAdvisorEnabled: vi.fn(() => false),
+			toggleAdvisorEnabled: vi.fn(() => false),
 		},
-		viewSession: { isStreaming: false, queuedMessageCount: 0, prompt, abort: vi.fn(async () => {}) },
+		viewSession: {
+			isStreaming: false,
+			queuedMessageCount: 0,
+			prompt,
+			abort: vi.fn(async () => {}),
+			setAdvisorEnabled: vi.fn((_enabled: boolean) => true),
+			isAdvisorEnabled: vi.fn(() => true),
+			toggleAdvisorEnabled: vi.fn(() => true),
+		},
 		focusedAgentId: "Worker",
 		skillCommands: new Map(),
 		fileSlashCommands: new Set<string>(),
@@ -135,6 +148,34 @@ describe("focused subagent view slash commands", () => {
 			expect(raw.handleUsageCommand).not.toHaveBeenCalled();
 			expect(editor.getText()).toBe(text);
 		}
+	});
+
+	it("toggles the viewed (focused) session's advisor for /advisor on and /advisor off", async () => {
+		const forms = [
+			["/advisor on", true],
+			["/advisor off", false],
+		] as const;
+		for (const [text, enabled] of forms) {
+			const { raw, prompt } = await submit(text);
+			expect(raw.viewSession.setAdvisorEnabled).toHaveBeenCalledWith(enabled);
+			expect(raw.session.setAdvisorEnabled).not.toHaveBeenCalled();
+			expect(raw.showStatus).toHaveBeenCalledWith(enabled ? "Advisor enabled." : "Advisor disabled.");
+			expect(prompt).not.toHaveBeenCalled();
+		}
+	});
+
+	it("runs the bare /advisor toggle on the viewed (focused) session", async () => {
+		const { raw, prompt } = await submit("/advisor");
+		expect(raw.viewSession.toggleAdvisorEnabled).toHaveBeenCalledTimes(1);
+		expect(raw.session.toggleAdvisorEnabled).not.toHaveBeenCalled();
+		expect(raw.showStatus).toHaveBeenCalledWith("Advisor enabled.");
+		expect(prompt).not.toHaveBeenCalled();
+	});
+
+	it("keeps /advisor status on the main session, and still names /advisor in the hint", async () => {
+		const { raw, editor } = await submit("/advisor status");
+		expect(raw.showStatus).toHaveBeenCalledWith(expect.stringContaining("/advisor"));
+		expect(editor.getText()).toBe("/advisor status");
 	});
 
 	it("exports the viewed (focused) session rather than the main session", async () => {

@@ -163,11 +163,18 @@ const SHELL_PROMPT_OPERATOR_RE = /(?:^|\s)(?:&&|\|\||\||2>&1|[<>]{1,2})(?:\s|$)/
 const OMP_STATUS_LINE_RE = /^\s*in:\s+\d+\s+out:\s+\d+(?:\s+cache\s+\S+)?\s+t:\s+\S+\s+tok\/s:\s+\S+/m;
 
 /**
- * Read-only slash commands that also run from a focused subagent view, keyed by name to
- * a check on their arguments; every other command (and mutating forms such as
- * `/usage reset`, which spends a saved rate-limit reset) still needs the main session.
+ * Slash commands that also run from a focused subagent view, keyed by name to a check
+ * on their arguments; every other command (and mutating forms such as `/usage reset`,
+ * which spends a saved rate-limit reset) still needs the main session. `/advisor` is
+ * the deliberate exception among mutators: `on`/`off` (and the bare toggle) flip only
+ * the focused agent's own advisor (#15055).
  */
 const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
+	advisor: args => {
+		const { verb } = parseSubcommand(args);
+		// Keep in sync with /advisor's TUI arms: `status`, `dump`, `configure` stay main-only.
+		return !verb || verb === "toggle" || verb === "on" || verb === "off";
+	},
 	btw: () => true,
 	export: () => true,
 	usage: args => {
@@ -1410,7 +1417,7 @@ export class InputController {
 		);
 	}
 
-	/** Submit editor text to the focused subagent session (chat and continue shortcuts only). */
+	/** Submit editor text to the focused subagent session (chat, continue shortcuts, and viewer-scoped commands). */
 	async #submitToFocusedSession(text: string, streamingBehavior: "steer" | "followUp"): Promise<void> {
 		const target = this.ctx.viewSession;
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
@@ -1429,7 +1436,8 @@ export class InputController {
 			const parsed = parseSlashCommand(text);
 			if (parsed && FOCUSED_VIEW_COMMANDS[parsed.name]?.(parsed.args)) {
 				// Viewer-scoped commands: /btw asks about the focused transcript, /export
-				// writes it (with its own subagents), /usage reports account-wide limits.
+				// writes it (with its own subagents), /usage reports account-wide limits,
+				// /advisor toggles the focused agent's own advisor.
 				this.#recordSlashCommandUsage(text);
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx })) === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
