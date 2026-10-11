@@ -138,6 +138,8 @@ interface WorkerHandle {
 	dead: boolean;
 	/** Identity of the parent env this worker was spawned under; see {@link pooledWorkerEnv}. */
 	envIdentity: string;
+	/** This handle's idle-deadline timer while it sits in the warm pool; `null` while it is checked out. */
+	idleTimer: NodeJS.Timeout | null;
 }
 
 /**
@@ -170,12 +172,16 @@ function spawnWorker(parentEnv: PooledWorkerEnv): WorkerHandle {
 		reject: null,
 		dead: false,
 		envIdentity: parentEnv.identity,
+		idleTimer: null,
 	};
 	worker.onmessage = (event: MessageEvent<SyncWorkerResponse>) => {
 		const { resolve, reject } = handle;
 		handle.resolve = null;
 		handle.reject = null;
 		handle.busy = false;
+		// Nothing is in flight anymore, so the worker goes back to unref'd: an idle
+		// worker must not hold the process open on its way out.
+		handle.worker.unref();
 		if (!resolve || !reject) return;
 		const data = event.data;
 		if (!data.ok) {
@@ -195,6 +201,7 @@ function spawnWorker(parentEnv: PooledWorkerEnv): WorkerHandle {
 		handle.resolve = null;
 		handle.reject = null;
 		handle.busy = false;
+		handle.worker.unref();
 		reject?.(event.error instanceof Error ? event.error : new Error(event.message || "worker error"));
 	};
 	return handle;
@@ -208,6 +215,10 @@ function dispatch(handle: WorkerHandle, request: SyncWorkerRequest): Promise<Par
 	handle.busy = true;
 	handle.resolve = resolve;
 	handle.reject = reject;
+	// A pooled worker is unref'd while idle, and an unref'd worker does not keep
+	// the loop alive for its own reply, so hold it referenced until the response
+	// unrefs it again - see the reply handler in spawnWorker.
+	handle.worker.ref();
 	handle.worker.postMessage(request);
 	return promise;
 }
@@ -252,19 +263,37 @@ function pooledWorkerEnv(): PooledWorkerEnv {
  * Idles are `unref`'d: a referenced worker holds the parent thread open even
  * with no work in flight (measured on Bun 1.4.3: an idle referenced worker
  * stalls an otherwise ready exit), so a pooled worker must not pin a process on
- * its way out. An unref'd worker still delivers in-flight replies — the pending
- * message keeps the loop alive — so nothing is re-`ref`'d on checkout.
+ * its way out. `unref` is not enough on its own, though - it also takes the
+ * worker out of the exit path while a parse is in flight, so a pooled worker is
+ * referenced exactly while a dispatch is outstanding: {@link dispatch} refs it
+ * and the reply handler in {@link spawnWorker} unrefs it again.
  */
 const warmPool: WorkerHandle[] = [];
-let idleEvictTimer: NodeJS.Timeout | null = null;
 
-function armIdleEviction(): void {
-	if (idleEvictTimer !== null || warmPool.length === 0) return;
-	idleEvictTimer = setTimeout(() => {
-		idleEvictTimer = null;
-		for (const handle of warmPool.splice(0)) handle.worker.terminate();
+/** Cancel a handle's idle deadline. A checked-out worker has nothing to evict. */
+function cancelIdleEviction(handle: WorkerHandle): void {
+	if (handle.idleTimer === null) return;
+	clearTimeout(handle.idleTimer);
+	handle.idleTimer = null;
+}
+
+/**
+ * Give a returned worker its own {@link STATS_SYNC_WORKER_IDLE_MS} window.
+ * The deadline belongs to the handle, not to the pool: a pool-wide timer would
+ * fire on whichever worker was released first, so a worker handed back at t=9s
+ * (say, by a watcher drain finishing on another lane) would die at t=10s after
+ * one second idle instead of getting its full window.
+ */
+function armIdleEviction(handle: WorkerHandle): void {
+	cancelIdleEviction(handle);
+	const timer = setTimeout(() => {
+		handle.idleTimer = null;
+		const pooled = warmPool.indexOf(handle);
+		if (pooled !== -1) warmPool.splice(pooled, 1);
+		handle.worker.terminate();
 	}, STATS_SYNC_WORKER_IDLE_MS);
-	idleEvictTimer.unref?.();
+	timer.unref?.();
+	handle.idleTimer = timer;
 }
 
 /**
@@ -278,6 +307,7 @@ function acquireWorker(): WorkerHandle {
 	while (true) {
 		const pooled = warmPool.pop();
 		if (pooled === undefined) return spawnWorker(parentEnv);
+		cancelIdleEviction(pooled);
 		if (pooled.dead || pooled.envIdentity !== parentEnv.identity) {
 			pooled.worker.terminate();
 			continue;
@@ -293,8 +323,10 @@ function releaseWorker(handle: WorkerHandle, discard: boolean): void {
 		return;
 	}
 	warmPool.push(handle);
+	// Every dispatch has settled by now, so the handle is idle: keep it out of
+	// the exit path and start its own deadline back up.
 	handle.worker.unref();
-	armIdleEviction();
+	armIdleEviction(handle);
 }
 
 /**
@@ -304,11 +336,10 @@ function releaseWorker(handle: WorkerHandle, discard: boolean): void {
  * `globalThis.Worker` spy asserts a spawn that never happened.
  */
 export function __resetStatsSyncWorkerPool(): void {
-	if (idleEvictTimer !== null) {
-		clearTimeout(idleEvictTimer);
-		idleEvictTimer = null;
+	for (const handle of warmPool.splice(0)) {
+		cancelIdleEviction(handle);
+		handle.worker.terminate();
 	}
-	for (const handle of warmPool.splice(0)) handle.worker.terminate();
 }
 
 /**
@@ -367,8 +398,9 @@ export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: n
  * Larger pools fan parsing out across workers
  * (one in-flight job per worker) while DB writes and offset bookkeeping stay on
  * the calling thread. Workers are kept warm between runs: a pool worker is
- * checked out per lane and returned idle (unref'd, evicted after 10s) when the
- * drain ends, so the common watcher-driven sync pays no spawn at all.
+ * checked out per lane (referenced while its parse is in flight, unref'd again
+ * on reply) and returned idle with its own 10s deadline when the drain ends, so
+ * the common watcher-driven sync pays no spawn at all.
  * Bounded batches commit rows and cursors atomically without
  * holding a database transaction open during file I/O.
  * `onProgress` fires once per completed file (skipped files included so the
@@ -609,7 +641,7 @@ async function syncAllSessionsLocked(
 		}
 	} finally {
 		// Return the lane's workers instead of terminating them: the pool keeps
-		// them warm for the next run, unref'd so an idle exit stays prompt.
+		// them warm for the next run, idle and unref'd so an exit stays prompt.
 		for (const handle of checkedOut) releaseWorker(handle, failed);
 	}
 
