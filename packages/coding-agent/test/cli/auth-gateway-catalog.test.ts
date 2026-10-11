@@ -8,6 +8,7 @@ import {
 	gatewayRoutableModels,
 	gatewayRoutableProviders,
 	indexModelsByRequestId,
+	resolveGatewayModel,
 } from "../../src/cli/auth-gateway-cli";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
@@ -147,6 +148,31 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		expect(index.get("jev-latest")?.provider).toBe("typesafe");
 		// Tiny on-device models have no gateway route and are not advertised.
 		expect([...index.values()].some(model => modelKind(model) === "tiny")).toBe(false);
+	});
+});
+
+describe("resolveGatewayModel", () => {
+	test("routes an OpenRouter variant selector the catalog does not list to its base model", async () => {
+		const storage = await createAuthStorage();
+		await storage.credentials.set("openrouter", { type: "api_key", key: "sk-test-openrouter" });
+		await storage.credentials.set("anthropic", { type: "api_key", key: "sk-test-anthropic" });
+		const settings = Settings.isolated({});
+		const registry = new ModelRegistry(storage, undefined, { ignoreLocalModelConfig: true, settings });
+		const providers = gatewayRoutableProviders(storage, settings);
+		const routable = gatewayRoutableModels(registry).filter(model => providers.has(model.provider));
+		const index = indexModelsByRequestId(routable, providers);
+		const base = routable.find(model => model.provider === "openrouter" && !model.id.includes(":"));
+		const anthropic = routable.find(model => model.provider === "anthropic");
+		if (!base || !anthropic) throw new Error("expected bundled openrouter and anthropic models");
+
+		// Previously "Unknown model: openrouter/<id>:floor" — the suffix must survive to the wire id.
+		const floor = resolveGatewayModel(`openrouter/${base.id}:floor`, index, routable);
+		expect(floor?.provider).toBe("openrouter");
+		expect(floor?.id).toBe(`${base.id}:floor`);
+		expect(floor?.api).toBe(base.api);
+		// Route suffixes are an OpenRouter concept; other providers stay exact-match.
+		expect(resolveGatewayModel(`anthropic/${anthropic.id}:floor`, index, routable)).toBeUndefined();
+		expect(resolveGatewayModel("openrouter/no-such-vendor/no-such-model:floor", index, routable)).toBeUndefined();
 	});
 });
 

@@ -99,6 +99,8 @@ function makeStubTab(overrides: Record<string, unknown> = {}): { tab: TabSession
 			return {};
 		},
 		detach: async (): Promise<void> => undefined,
+		// A live renderer: Chromium never reports it crashed.
+		once: (): void => undefined,
 	};
 	const target = {
 		_targetId: "stub-target-1",
@@ -374,7 +376,11 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 			const { tab, calls } = makeStubTab({ frozen: true });
 			expect(await unfreezeTabSessionForTest(tab)).toBe(true);
 			expect(tab.frozen).toBe(false);
-			expect(calls.map(call => call.method)).toEqual(["Page.enable", "Page.setWebLifecycleState"]);
+			expect(calls.map(call => call.method)).toEqual([
+				"Inspector.enable",
+				"Page.enable",
+				"Page.setWebLifecycleState",
+			]);
 			expect(calls.at(-1)?.params).toEqual({ state: "active" });
 		});
 
@@ -393,6 +399,7 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 										return {};
 									},
 									detach: async (): Promise<void> => undefined,
+									once: (): void => undefined,
 								}),
 							},
 						],

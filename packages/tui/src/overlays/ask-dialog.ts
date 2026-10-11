@@ -81,7 +81,7 @@ import {
 import { optionMarker } from "../tools/ask";
 import { CountdownTimer } from "../chrome/countdown-timer";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
-import { formatKeyHint, formatKeyHints } from "../app-keybindings";
+import { formatKeyHint, formatKeyHints, formatTooltipKey } from "../app-keybindings";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 import { handleTabSwitchKey } from "../chrome/selector-helpers";
 import { col, node, span, text } from "../native/describe";
@@ -543,6 +543,8 @@ export class AskDialogComponent implements Component {
 	#contentWidth = 76;
 	#headerExpandable = false;
 	#descExpandable = false;
+	/** Collapsed to one line (`app.ask.hide` / the Hide button) while the question stays pending. */
+	#hidden = false;
 	/** Memoized native description; dropped whenever dialog state may have changed. */
 	#native: NativeNode | undefined;
 	/** Input-guard blocked state {@link #native} was described with (the guard flips outside this dialog). */
@@ -632,7 +634,7 @@ export class AskDialogComponent implements Component {
 	}
 
 	#canToggleExpansion(): boolean {
-		if (this.#closed || this.#isSubmitTab()) return false;
+		if (this.#closed || this.#hidden || this.#isSubmitTab()) return false;
 		const question = this.#questions[this.#currentQuestionIndex()];
 		if (!question) return false;
 		if (this.#expanded) return true;
@@ -652,6 +654,10 @@ export class AskDialogComponent implements Component {
 			this.#finishCancel();
 			return;
 		}
+		if (getKeybindings().matches(keyData, "app.ask.hide")) {
+			this.#setHidden(!this.#hidden);
+			return;
+		}
 		// Expand before the draft-input guard so Ctrl+O can reveal a truncated
 		// question even while a pending prompt still owns typing.
 		if (matchesAppToolsExpand(keyData)) {
@@ -662,6 +668,12 @@ export class AskDialogComponent implements Component {
 		if (inputGuard?.isBlocked()) {
 			inputGuard.handleInput(keyData);
 			this.#requestRender();
+			return;
+		}
+		if (this.#hidden) {
+			if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
+				this.#setHidden(false);
+			}
 			return;
 		}
 		if (this.#hasSubmitTab() && handleTabSwitchKey(keyData, direction => this.#switchTab(direction))) {
@@ -680,6 +692,7 @@ export class AskDialogComponent implements Component {
 		// renders as the next sibling in the same container, so this lands in the
 		// same frame).
 		this.options.inputGuard?.syncPresentation?.();
+		if (this.#hidden) return this.#renderHidden(width);
 		const innerWidth = Math.max(1, width - 4);
 		this.#contentWidth = innerWidth;
 		// Fixed panel height: measured from the tallest tab at spawn and
@@ -725,6 +738,11 @@ export class AskDialogComponent implements Component {
 		const ring = this.#countdown !== undefined && cx.supports("meter");
 		if (ring) this.#startRingTick();
 		if (this.#native && this.#nativeBlocked === blocked) return this.#native;
+		if (this.#hidden) {
+			this.#native = this.#describeHidden(ring);
+			this.#nativeBlocked = blocked;
+			return this.#native;
+		}
 		const children: NativeChild[] = [];
 		const head = this.#describeHead(ring);
 		if (head) children.push(head);
@@ -752,29 +770,50 @@ export class AskDialogComponent implements Component {
 		}
 		if (this.#countdown) {
 			children.push(node("spacer", { grow: 1 }));
-			if (ring) {
-				const total = Math.max(1, this.options.timeout ?? 1);
-				const left = Math.max(0, this.#countdownDeadline - Date.now());
-				children.push(
-					node(
-						"meter",
-						{
-							value: Math.round((left / total) * 1000) / 1000,
-							style: "ring",
-							size: "sm",
-							label: `${Math.ceil(left / 1000)}s`,
-							title: "Answers the recommended option when the time runs out",
-						},
-						undefined,
-						"timer",
-					),
-				);
-			} else {
-				children.push(this.#countdown.describe());
-			}
+			children.push(this.#describeTimer(this.#countdown, ring));
 		}
 		if (children.length === 0) return undefined;
 		return node("row", { role: "omp.ask.head", gap: "sm", align: "center" }, children, "head");
+	}
+
+	/** The countdown: a ring when the terminal draws meters, else a clocked `elapsed`. */
+	#describeTimer(countdown: CountdownTimer, ring: boolean): NativeNode {
+		if (!ring) return countdown.describe();
+		const total = Math.max(1, this.options.timeout ?? 1);
+		const left = Math.max(0, this.#countdownDeadline - Date.now());
+		return node(
+			"meter",
+			{
+				value: Math.round((left / total) * 1000) / 1000,
+				style: "ring",
+				size: "sm",
+				label: `${Math.ceil(left / 1000)}s`,
+				title: "Answers the recommended option when the time runs out",
+			},
+			undefined,
+			"timer",
+		);
+	}
+
+	/** Hidden: one action row in the composer's place — the question clipped to a line, the countdown, Show and Skip. */
+	#describeHidden(ring: boolean): NativeNode {
+		const question = this.#questions[this.#currentQuestionIndex()];
+		const more = this.#questions.length > 1 ? ` (+${this.#questions.length - 1} more)` : "";
+		const summary = text(
+			[
+				span("Ask hidden · ", "muted"),
+				span(`${normalizedInlineInput(sanitizeCarriageReturns(question?.question ?? ""))}${more}`),
+			],
+			{ truncate: "end" },
+		);
+		const hideKey = getKeybindings().getKeys("app.ask.hide")[0];
+		const show = actionButton("Show", "show", { tone: "accent", ...(hideKey ? { keys: hideKey } : {}) });
+		const cancelKey = getKeybindings().getKeys("tui.select.cancel")[0];
+		const skip = actionButton("Skip", "cancel", cancelKey ? { keys: cancelKey } : {});
+		const items: (NativeNode | null)[] = [summary, null];
+		if (this.#countdown) items.push(this.#describeTimer(this.#countdown, ring));
+		items.push(show, skip);
+		return col([actionBar(items)], { role: "omp.editor", gap: "md" });
 	}
 
 	/** Question tab: the question as markdown and its answers as radio/check rows (label, description, badge). */
@@ -870,14 +909,20 @@ export class AskDialogComponent implements Component {
 	/**
 	 * The action bar: Submit ⏎ (Enter's action on this tab; `Next` while more
 	 * questions follow), Note n, Skip esc. Keyboard-only keys live in the
-	 * buttons' tooltips; a draft that owns input shows its hint instead.
+	 * buttons' tooltips; a draft that owns input shows its hint instead. Hide
+	 * (left-aligned, apart from the answer actions) collapses the dialog.
 	 */
 	#describeActions(blocked: boolean): NativeNode {
 		const cancelKey = getKeybindings().getKeys("tui.select.cancel")[0];
 		const skip = actionButton("Skip", "cancel", cancelKey ? { keys: cancelKey } : {});
+		const hideKey = getKeybindings().getKeys("app.ask.hide")[0];
+		const hide = actionButton("Hide", "hide", {
+			...(hideKey ? { keys: hideKey } : {}),
+			title: `Hide the question until you are ready to answer${hideKey ? `  ${formatTooltipKey(hideKey)}` : ""}`,
+		});
 		const inputGuard = this.options.inputGuard;
 		if (blocked && inputGuard) {
-			return actionBar([text([span(plainText(inputGuard.hint), "muted")], { truncate: "end" }), null, skip]);
+			return actionBar([text([span(plainText(inputGuard.hint), "muted")], { truncate: "end" }), null, hide, skip]);
 		}
 		const moves = ["up/down move"];
 		if (this.#hasSubmitTab()) moves.push("tab switches question");
@@ -887,7 +932,7 @@ export class AskDialogComponent implements Component {
 				tone: "accent",
 				title: "Submit answers  enter",
 			});
-			return actionBar([null, skip, submit]);
+			return actionBar([hide, null, skip, submit]);
 		}
 		const question = this.#questions[this.#currentQuestionIndex()];
 		const last = this.#questions.length === 1;
@@ -899,14 +944,15 @@ export class AskDialogComponent implements Component {
 			title: `${enterLabel}  enter · ${tips.join(" · ")}`,
 		});
 		const note = actionButton("Note", "note", { keys: "n", title: `Add a note to the highlighted answer  n` });
-		return actionBar([null, note, skip, submit]);
+		return actionBar([hide, null, note, skip, submit]);
 	}
 
 	/**
 	 * Pointer actions: a tab click switches to it; a click on an answer row is
 	 * Enter on it (Space for a multi-select option, so it toggles; its
 	 * double-click `activate` is Enter); the action bar's Submit, Note and Skip
-	 * run exactly what Enter, `n` and Esc run on the highlighted row.
+	 * run exactly what Enter, `n` and Esc run on the highlighted row; Hide/Show
+	 * collapse and restore the dialog.
 	 */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.#closed || this.#promptActive) return;
@@ -915,13 +961,17 @@ export class AskDialogComponent implements Component {
 				this.#finishCancel();
 				return;
 			}
-			if (this.options.inputGuard?.isBlocked()) return;
+			if (event.act === "hide" || event.act === "show") {
+				this.#setHidden(event.act === "hide");
+				return;
+			}
+			if (this.#hidden || this.options.inputGuard?.isBlocked()) return;
 			if (event.act === "submit") this.#pressEnter();
 			else if (event.act === "note") this.#pressNote();
 			return;
 		}
 		if (event.type !== "select" && event.type !== "activate") return;
-		if (this.options.inputGuard?.isBlocked()) return;
+		if (this.#hidden || this.options.inputGuard?.isBlocked()) return;
 		const key = leafKey(event.key);
 		if (key === "tabs") {
 			if (!this.#hasSubmitTab()) return;
@@ -1049,6 +1099,35 @@ export class AskDialogComponent implements Component {
 		return this.#remainingSeconds === undefined ? "Ask" : `Ask (${this.#remainingSeconds}s)`;
 	}
 
+	#setHidden(hidden: boolean): void {
+		if (this.#hidden === hidden) return;
+		this.#hidden = hidden;
+		this.#countdown?.reset();
+		this.#requestRender();
+	}
+
+	/** Hidden: one line in the composer's place — title (with countdown), the question clipped to fit, and how to bring it back. */
+	#renderHidden(width: number): readonly string[] {
+		const hideKey = editorKey("app.ask.hide");
+		const enter = formatKeyHint("enter");
+		const inputGuard = this.options.inputGuard;
+		const blocked = inputGuard?.isBlocked() ?? false;
+		// While a draft owns input, Enter goes to the draft, so only the hide key restores.
+		const show = blocked ? hideKey : hideKey ? `${hideKey}/${enter}` : enter;
+		const hints: string[] = [];
+		if (blocked && inputGuard) hints.push(inputGuard.hint);
+		if (show) hints.push(`${show} show`);
+		hints.push(`${editorKey("tui.select.cancel")} cancel`);
+		const hint = theme.fg("dim", ` · ${hints.join(" · ")}`);
+		const label = theme.fg("accent", `${this.#titleText()} hidden:`);
+		const question = this.#questions[this.#currentQuestionIndex()];
+		const more = this.#questions.length > 1 ? theme.fg("dim", ` (+${this.#questions.length - 1} more)`) : "";
+		const summary = normalizedInlineInput(sanitizeCarriageReturns(question?.question ?? ""));
+		const summaryWidth = Math.max(1, width - visibleWidth(label) - visibleWidth(more) - visibleWidth(hint) - 1);
+		const clipped = truncateToWidth(summary, summaryWidth, Ellipsis.Unicode);
+		return [truncateToWidth(`${label} ${theme.fg("muted", clipped)}${more}${hint}`, width, Ellipsis.Unicode)];
+	}
+
 	#hasSubmitTab(): boolean {
 		// Multi questions confirm on the Submit tab (Enter toggles, never
 		// submits), so any multi question forces the tab even when there is
@@ -1114,7 +1193,9 @@ export class AskDialogComponent implements Component {
 	}
 
 	#footerHintText(indicator: string): string {
-		const cancel = `${editorKey("tui.select.cancel")} cancel`;
+		// Hide rides along with cancel: both leave the question view without answering.
+		const hideKey = editorKey("app.ask.hide");
+		const cancel = `${editorKey("tui.select.cancel")} cancel${hideKey ? ` · ${hideKey} hide` : ""}`;
 		const enter = formatKeyHint("enter");
 		const upDown = editorKeys("tui.select.up", "tui.select.down");
 		const inputGuard = this.options.inputGuard;

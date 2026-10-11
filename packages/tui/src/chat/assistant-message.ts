@@ -2,7 +2,12 @@ import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-a
 import { type Component, Container } from "../tui";
 import { Image, type ImageBudget } from "../components/image";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
-import { Markdown, type MarkdownTheme, rewriteMarkdownLinkDestinations } from "../components/markdown";
+import {
+	type DefaultTextStyle,
+	Markdown,
+	type MarkdownTheme,
+	rewriteMarkdownLinkDestinations,
+} from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
@@ -388,6 +393,26 @@ export class AssistantMessageComponent extends Container {
 
 	setTextColorTransform(transform?: (text: string) => string): void {
 		this.#textColorTransform = transform;
+	}
+
+	/**
+	 * Default text style for assistant paragraph Markdown. An explicitly
+	 * installed transform (live-command output) always wins and keeps its
+	 * historical paint-everything contract; otherwise the optional
+	 * `assistantMessageText` theme token paints prose, flagged `proseFg` so
+	 * markdown sub-elements keep their own `md*` tokens (docs/theme.md).
+	 * Returns undefined when the token is unset or empty so the terminal
+	 * default foreground is used byte-for-byte, exactly as before the token
+	 * existed.
+	 *
+	 * The token is re-derived on every rebuild (the theme-change path calls
+	 * `invalidate()` and rebuilds through the teardown path, which re-consults
+	 * the active theme), so prose follows theme switches both ways.
+	 */
+	#getProseTextStyle(): DefaultTextStyle | undefined {
+		if (this.#textColorTransform) return { color: this.#textColorTransform };
+		if (typeof theme === "undefined" || !theme.hasColor("assistantMessageText")) return undefined;
+		return { color: (text: string) => theme.fg("assistantMessageText", text), proseFg: true };
 	}
 
 	#getProseTheme(): MarkdownTheme {
@@ -1269,14 +1294,7 @@ export class AssistantMessageComponent extends Container {
 	/** Markdown for a text or thinking block; live children and stable-row renders share it so stable rows prefix the block render. */
 	#createMarkdown(kind: StablePartKind, text: string): Markdown {
 		return kind === "text"
-			? new Markdown(
-					text,
-					1,
-					0,
-					this.#getProseTheme(),
-					this.#textColorTransform ? { color: this.#textColorTransform } : undefined,
-					0,
-				)
+			? new Markdown(text, 1, 0, this.#getProseTheme(), this.#getProseTextStyle(), 0)
 			: new Markdown(text, 1, 0, getMarkdownTheme(), {
 					color: (value: string) => theme.fg("thinkingText", value),
 					italic: true,

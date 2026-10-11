@@ -739,6 +739,32 @@ export const cfgRetryModelFallback = register({
 	},
 });
 
+export const cfgRetryFallbackOn = register({
+	id: "retry.fallbackOn",
+	type: "enum",
+	values: ["any", "usage-limit", "except-usage-limit"] as const,
+	default: "any",
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Fallback Trigger",
+		description: "Which failed requests may switch to a configured fallback model",
+		options: [
+			{ value: "any", label: "Any error", description: "Every provider error may switch models" },
+			{
+				value: "usage-limit",
+				label: "Usage limits only",
+				description: "Switch only on a usage limit; retry other errors on the same model, then surface them",
+			},
+			{
+				value: "except-usage-limit",
+				label: "All but usage limits",
+				description: "Wait out or surface a usage limit; switch on other errors",
+			},
+		],
+	},
+});
+
 export const cfgRetryUsageAwareFallback = register({
 	id: "retry.usageAwareFallback",
 	type: "boolean",
@@ -846,6 +872,7 @@ export const cfgRetry = combine({
 	maxDelayMs: cfgRetryMaxDelayMs,
 	waitForUsageReset: cfgRetryWaitForUsageReset,
 	modelFallback: cfgRetryModelFallback,
+	fallbackOn: cfgRetryFallbackOn,
 	usageAwareFallback: cfgRetryUsageAwareFallback,
 	usageReservePct: cfgRetryUsageReservePct,
 	usageReservePolicy: cfgRetryUsageReservePolicy,
@@ -1278,12 +1305,13 @@ export const cfgCodexResetsAutoRedeem = register({
 		group: "Services",
 		label: "Codex Auto-Redeem Saved Resets",
 		description:
-			"Spend saved Codex rate-limit resets automatically: restore an account blocked by an exhausted 5h or weekly window when a turn is stuck and no other account can take over, and salvage credits that are about to expire. unset asks before the first spend, yes spends without prompting, and no disables both checks.",
+			"Spend saved Codex rate-limit resets automatically: restore an account blocked by an exhausted 5h or weekly window when a turn is stuck and no other account can take over, and salvage credits that are about to expire. unset asks before the first spend (with no prompt UI, it spends only a reset expiring within 5 minutes), yes spends without prompting, and no disables both checks.",
 		options: [
 			{
 				value: "unset",
 				label: "Unset",
-				description: "Check eligibility, then ask before spending the first saved reset.",
+				description:
+					"Check eligibility, then ask before spending the first saved reset. With no prompt UI, spend only a reset expiring within 5 minutes.",
 			},
 			{ value: "yes", label: "Yes", description: "Spend eligible saved resets without prompting." },
 			{ value: "no", label: "No", description: "Do not run the saved-reset auto-redeem check." },
@@ -1352,12 +1380,13 @@ export const cfgClaudeResetsAutoRedeem = register({
 		group: "Services",
 		label: "Claude Auto-Redeem Resets",
 		description:
-			"Spend eligible Claude Cedar or Juniper resets automatically. Cedar is spent only for covered limits; Juniper can only recover a sole 5-hour block. unset asks before the first spend, yes spends without prompting, and no disables blocked recovery and expiry salvage.",
+			"Spend eligible Claude Cedar or Juniper resets automatically. Cedar is spent only for covered limits; Juniper can only recover a sole 5-hour block. unset asks before the first spend (with no prompt UI, it spends only a reset expiring within 5 minutes), yes spends without prompting, and no disables blocked recovery and expiry salvage.",
 		options: [
 			{
 				value: "unset",
 				label: "Unset",
-				description: "Check live eligibility, then ask before spending the first Claude reset.",
+				description:
+					"Check live eligibility, then ask before spending the first Claude reset. With no prompt UI, spend only a reset expiring within 5 minutes.",
 			},
 			{ value: "yes", label: "Yes", description: "Spend eligible Claude resets without prompting." },
 			{ value: "no", label: "No", description: "Do not run Claude reset auto-redeem checks." },

@@ -53,6 +53,7 @@ describe("waitForRelayExtension", () => {
 			error: "relay extension is not connected",
 			extensionSeen: false,
 			uptimeMs: 60_000,
+			ompRelayCdpClients: 0,
 		};
 		fake = Bun.serve({
 			hostname: "127.0.0.1",
@@ -69,6 +70,7 @@ describe("waitForRelayExtension", () => {
 			error: "relay extension is not connected",
 			extensionSeen: true,
 			uptimeMs: 600_000,
+			ompRelayCdpClients: 0,
 			ompRelayVersion: VERSION,
 			disconnectedMs: 120_000,
 		};
@@ -115,6 +117,7 @@ describe("waitForRelayExtension", () => {
 					error: "relay extension is not connected",
 					extensionSeen: true,
 					uptimeMs: 600_000,
+					ompRelayCdpClients: 0,
 					ompRelayVersion: VERSION,
 					disconnectedMs: disconnects[Math.min(probes++, disconnects.length - 1)],
 				};
@@ -169,6 +172,29 @@ describe("waitForRelayExtension", () => {
 		});
 		expect(await waitForRelayExtension(`http://127.0.0.1:${fake.port}`)).toBe("ready");
 	});
+
+	it.each([
+		{ version: "18.5.1", clients: 0, outcome: "idle-older-relay" },
+		{ version: "18.5.1", clients: 1, outcome: "ready" },
+		{ version: "999.0.0", clients: 0, outcome: "ready" },
+		{ version: VERSION, clients: 0, outcome: "ready" },
+	])(
+		"reports a compatible relay from $version with $clients CDP clients as $outcome",
+		async ({ version, clients, outcome }) => {
+			fake = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch: () =>
+					Response.json({
+						ompRelayVersion: version,
+						ompRelayDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
+						ompExtensionDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
+						ompRelayCdpClients: clients,
+					}),
+			});
+			expect(await waitForRelayExtension(`http://127.0.0.1:${fake.port}`)).toBe(outcome);
+		},
+	);
 
 	it("identifies a stale relay before its extension connects, without waiting for the dial window", async () => {
 		fake = Bun.serve({

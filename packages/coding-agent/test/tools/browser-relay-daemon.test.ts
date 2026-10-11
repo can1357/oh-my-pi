@@ -421,6 +421,104 @@ try {
 		});
 	}, 60_000);
 
+	it("replaces a compatible older broker-owned relay only while no CDP client uses it and it reports its clients", async () => {
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-idle-restart-"));
+		const ownedPort = await findFreeCdpPort();
+		let manualPort = await findFreeCdpPort();
+		while (manualPort === ownedPort) manualPort = await findFreeCdpPort();
+		// Stands in for a ready relay of the given version; an empty client count stands in for a relay that predates it.
+		const standIn = path.join(home, "stand-in-relay.ts");
+		await Bun.write(
+			standIn,
+			`const [port, version, clients] = process.argv.slice(2);
+Bun.serve({
+	hostname: "127.0.0.1",
+	port: Number(port),
+	fetch: () =>
+		Response.json({ Browser: "Chrome/1", ompRelayVersion: version, ...(clients ? { ompRelayCdpClients: Number(clients) } : {}) }),
+});
+console.log(\`omp browser relay listening on http://127.0.0.1:\${port}\`);
+`,
+		);
+		const result = await runWithIsolatedBroker(
+			home,
+			`import { VERSION } from "@oh-my-pi/pi-utils/dirs";
+import { closeDaemonClients, daemonClientForGlobal } from ${JSON.stringify(path.resolve(import.meta.dir, "../../src/launch/client.ts"))};
+import { restartRelayDaemon } from ${JSON.stringify(path.resolve(import.meta.dir, "../../src/tools/browser/relay/daemon.ts"))};
+const [ownedPort, manualPort, standIn] = [Bun.env.OMP_TEST_OWNED_PORT!, Bun.env.OMP_TEST_MANUAL_PORT!, Bun.env.OMP_TEST_STALE_RELAY!];
+const name = \`omp.browser.relay.\${ownedPort}\`;
+const ownedUrl = \`http://127.0.0.1:\${ownedPort}\`;
+const manual = Bun.spawn([process.execPath, standIn, manualPort, "18.0.0", "0"], { stdout: "pipe" });
+try {
+	const client = await daemonClientForGlobal("browser-relay");
+	const describe = () =>
+		client.request({ op: "describe", name }).then(
+			response => response.daemon,
+			() => undefined,
+		);
+	const versionAt = async (port: string) => {
+		const body: unknown = await (await fetch(\`http://127.0.0.1:\${port}/json/version\`)).json();
+		return typeof body === "object" && body !== null && "ompRelayVersion" in body ? body.ompRelayVersion : null;
+	};
+	// Starts a stand-in under the broker, asks for an idle-only restart, and reports whether the stand-in kept serving.
+	const restartOwned = async (version: string, clients: string) => {
+		const previous = await describe();
+		if (previous && previous.state !== "exited" && previous.state !== "failed") {
+			await client.request({ op: "stop", name, timeoutMs: 5_000 });
+		}
+		await client.request({
+			op: "start",
+			spec: {
+				name,
+				application: process.execPath,
+				args: [standIn, ownedPort, version, clients],
+				env: {},
+				cwd: process.cwd(),
+				pty: false,
+				ready: { log: "browser relay listening", timeoutMs: 15_000 },
+				restart: "no",
+				persist: false,
+				detached: false,
+			},
+		});
+		const pid = (await describe())?.pid;
+		const restarted = await restartRelayDaemon({ cdpUrl: ownedUrl, idleOnly: true });
+		return { restarted, kept: pid !== undefined && (await describe())?.pid === pid, version: await versionAt(ownedPort) };
+	};
+	const olderIdle = await restartOwned("18.0.0", "0");
+	const olderInUse = await restartOwned("18.0.0", "1");
+	const newerIdle = await restartOwned("999.0.0", "0");
+	const olderUncounted = await restartOwned("18.0.0", "");
+	await manual.stdout.getReader().read();
+	const manualRestarted = await restartRelayDaemon({ cdpUrl: \`http://127.0.0.1:\${manualPort}\`, idleOnly: true });
+	process.stdout.write(
+		JSON.stringify({
+			olderIdle: { ...olderIdle, version: olderIdle.version === VERSION ? "current" : olderIdle.version },
+			olderInUse,
+			newerIdle,
+			olderUncounted,
+			manual: { restarted: manualRestarted, version: await versionAt(manualPort) },
+		}),
+	);
+} finally {
+	manual.kill();
+	await closeDaemonClients();
+}`,
+			{
+				OMP_TEST_OWNED_PORT: String(ownedPort),
+				OMP_TEST_MANUAL_PORT: String(manualPort),
+				OMP_TEST_STALE_RELAY: standIn,
+			},
+		);
+		expect(result).toEqual({
+			olderIdle: { restarted: true, kept: false, version: "current" },
+			olderInUse: { restarted: false, kept: true, version: "18.0.0" },
+			newerIdle: { restarted: false, kept: true, version: "999.0.0" },
+			olderUncounted: { restarted: false, kept: true, version: "18.0.0" },
+			manual: { restarted: false, version: "18.0.0" },
+		});
+	}, 60_000);
+
 	it("keeps a replacement another omp started while this one was about to stop the outdated relay", async () => {
 		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-restart-race-"));
 		const port = String(await findFreeCdpPort());
@@ -550,12 +648,173 @@ try {
 		);
 		expect(result).toEqual({ abortedWhileRestarting: true, error: "ToolAbortError", relayServing: true });
 	}, 60_000);
+
+	it("replaces a compatible older broker-owned relay nobody uses when acquiring the browser, and connects to the replacement", async () => {
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-idle-acquire-"));
+		const port = String(await findFreeCdpPort());
+		const source = (file: string) => JSON.stringify(path.resolve(import.meta.dir, "../../src", file));
+		const utils = (file: string) => JSON.stringify(path.resolve(import.meta.dir, "../../../utils/src", file));
+		const standIn = path.join(home, "stand-in-relay.ts");
+		await Bun.write(
+			standIn,
+			`import { DISCARDED_TABS_PROTOCOL_VERSION } from ${source("tools/browser/relay/protocol.ts")};
+const port = Number(process.argv[2]);
+// A compatible relay from an older omp with no CDP client; it never accepts an extension.
+Bun.serve({
+	hostname: "127.0.0.1",
+	port,
+	fetch: () =>
+		Response.json({
+			ompRelayVersion: "18.0.0",
+			ompRelayDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
+			ompExtensionDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
+			ompRelayCdpClients: 0,
+		}),
+});
+console.log(\`omp browser relay listening on http://127.0.0.1:\${port}\`);
+`,
+		);
+		// The acquiring omp is also the worker host the registry spawns its replacement relay through.
+		const host = path.join(home, "host.ts");
+		await Bun.write(
+			host,
+			`import { VERSION } from ${utils("dirs.ts")};
+import { declareWorkerHostEntry } from ${utils("worker-host.ts")};
+import { closeDaemonClients, daemonClientForGlobal } from ${source("launch/client.ts")};
+import { acquireBrowser, releaseBrowser } from ${source("tools/browser/registry.ts")};
+import { DISCARDED_TABS_PROTOCOL_VERSION } from ${source("tools/browser/relay/protocol.ts")};
+import { startRelayServer } from ${source("tools/browser/relay/server.ts")};
+
+if (process.argv[2] === "browser-relay") {
+	const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
+	startRelayServer({ port });
+	console.log(\`omp browser relay listening on http://127.0.0.1:\${port}\`);
+} else {
+	const [port, standIn] = [Bun.env.OMP_TEST_PORT!, Bun.env.OMP_TEST_STALE_RELAY!];
+	const name = \`omp.browser.relay.\${port}\`;
+	const cdpUrl = \`http://127.0.0.1:\${port}\`;
+	// Stands in for the extension: redials until a relay accepts it, as the real one does after its relay stops.
+	const connectExtension = async (): Promise<WebSocket> => {
+		const deadline = Date.now() + 20_000;
+		while (Date.now() < deadline) {
+			const socket = new WebSocket(\`ws://127.0.0.1:\${port}/ext\`);
+			const opened = Promise.withResolvers<boolean>();
+			socket.addEventListener("open", () => opened.resolve(true), { once: true });
+			socket.addEventListener("error", () => opened.resolve(false), { once: true });
+			if (await opened.promise) {
+				socket.send(JSON.stringify({ t: "hello", userAgent: "test", browserVersion: "Chrome/1", tabs: [], attachedTabIds: [], discardedTabsProtocol: DISCARDED_TABS_PROTOCOL_VERSION }));
+				return socket;
+			}
+			await Bun.sleep(50);
+		}
+		throw new Error("no relay accepted the extension");
+	};
+	try {
+		// Start the broker before declaring this script the worker host: it cannot serve as the broker.
+		const client = await daemonClientForGlobal("browser-relay");
+		await client.request({
+			op: "start",
+			spec: {
+				name,
+				application: process.execPath,
+				args: [standIn, port],
+				env: {},
+				cwd: process.cwd(),
+				pty: false,
+				ready: { log: "browser relay listening", timeoutMs: 15_000 },
+				restart: "no",
+				persist: false,
+				detached: false,
+			},
+		});
+		const olderPid = (await client.request({ op: "describe", name })).daemon.pid;
+		declareWorkerHostEntry();
+		const extension = connectExtension();
+		const handle = await acquireBrowser({ kind: "relay", cdpUrl }, { cwd: process.cwd() });
+		const body: unknown = await (await fetch(\`\${cdpUrl}/json/version\`)).json();
+		const current = (await client.request({ op: "describe", name })).daemon;
+		process.stdout.write(
+			JSON.stringify({
+				connected: "browser" in handle && handle.browser.connected,
+				replaced: current.pid !== olderPid && current.state === "ready",
+				versionIsCurrent: typeof body === "object" && body !== null && "ompRelayVersion" in body && body.ompRelayVersion === VERSION,
+				cdpClients: typeof body === "object" && body !== null && "ompRelayCdpClients" in body ? body.ompRelayCdpClients : null,
+			}),
+		);
+		await releaseBrowser(handle, { kill: false });
+		(await extension).close();
+	} finally {
+		await closeDaemonClients();
+	}
+}
+`,
+		);
+		const result = await runWithIsolatedBroker(
+			home,
+			{ file: host },
+			{ OMP_TEST_PORT: port, OMP_TEST_STALE_RELAY: standIn },
+		);
+		expect(result).toEqual({ connected: true, replaced: true, versionIsCurrent: true, cdpClients: 1 });
+	}, 60_000);
+
+	it("probes again when another omp replaced the idle older relay with an incompatible newer one before the restart", async () => {
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-idle-raced-"));
+		const result = await runWithIsolatedBroker(
+			home,
+			`import { declareWorkerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
+import { closeDaemonClients, daemonClientForGlobal } from ${JSON.stringify(path.resolve(import.meta.dir, "../../src/launch/client.ts"))};
+import { acquireBrowser } from ${JSON.stringify(path.resolve(import.meta.dir, "../../src/tools/browser/registry.ts"))};
+import { DISCARDED_TABS_PROTOCOL_VERSION } from ${JSON.stringify(path.resolve(import.meta.dir, "../../src/tools/browser/relay/protocol.ts"))};
+// A compatible relay from an older omp that nobody is connected to, until a newer omp with another protocol replaces it.
+let served = {
+	ompRelayVersion: "18.0.0",
+	ompRelayDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
+	ompExtensionDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
+	ompRelayCdpClients: 0,
+};
+const relay = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json(served) });
+const cdpUrl = \`http://127.0.0.1:\${relay.port}\`;
+try {
+	// Start the broker first: the declared host is this script, which cannot serve as the broker.
+	const client = await daemonClientForGlobal("browser-relay");
+	await client.request({ op: "ping" });
+	const request = client.request.bind(client);
+	// Only the restart describes the relay's broker record; the newer relay is in place by then.
+	client.request = (operation, signal) => {
+		if (operation.op === "describe") {
+			served = {
+				ompRelayVersion: "999.0.0",
+				ompRelayDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION + 1),
+				ompExtensionDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION + 1),
+				ompRelayCdpClients: 0,
+			};
+		}
+		return request(operation, signal);
+	};
+	declareWorkerHostEntry();
+	const error = await acquireBrowser({ kind: "relay", cdpUrl }, { cwd: process.cwd() }).then(
+		() => null,
+		(failure: unknown) => failure,
+	);
+	process.stdout.write(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+} finally {
+	await relay.stop(true);
+	await closeDaemonClients();
+}`,
+			{},
+		);
+		expect(result).toEqual({ error: expect.stringContaining("is out of date") });
+	}, 60_000);
 });
 
-/** Runs `script` in a child bun with an isolated HOME and global broker; returns its JSON stdout. */
-async function runWithIsolatedBroker(home: string, script: string, env: Record<string, string>): Promise<unknown> {
+/** Runs `script` (source, or a script file) in a child bun with an isolated HOME and global broker; returns its JSON stdout. */
+async function runWithIsolatedBroker(
+	home: string,
+	script: string | { file: string },
+	env: Record<string, string>,
+): Promise<unknown> {
 	const globalRuntimeDir = path.join(home, ".omp", "run", "daemons", "global", "browser-relay");
-	const child = Bun.spawn([process.execPath, "-e", script], {
+	const child = Bun.spawn([process.execPath, ...(typeof script === "string" ? ["-e", script] : [script.file])], {
 		cwd: path.resolve(import.meta.dir, "../.."),
 		env: {
 			...process.env,

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import { relayCdpClientsOf } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import {
 	type RelayServer,
 	type RelayUnavailableInfo,
@@ -167,5 +168,32 @@ describe("browser relay discovery endpoint", () => {
 		expect(info.extensionSeen).toBeTrue();
 		// Clients measure the redial window from the disconnect.
 		expect(info.disconnectedMs).toBeGreaterThanOrEqual(0);
+	});
+
+	it("reports how many CDP clients are connected, both while waiting for the extension and once ready", async () => {
+		const port = await findFreeCdpPort();
+		relay = startRelayServer({ port });
+		const discovery = async () => {
+			const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+			const body: unknown = await response.json();
+			return {
+				status: response.status,
+				clients: typeof body === "object" && body !== null ? relayCdpClientsOf(body) : null,
+			};
+		};
+		expect(await discovery()).toEqual({ status: 503, clients: 0 });
+		const client = new WebSocket(`ws://127.0.0.1:${port}/cdp`);
+		const opened = Promise.withResolvers<void>();
+		client.addEventListener("open", () => opened.resolve(), { once: true });
+		await opened.promise;
+		expect(await discovery()).toEqual({ status: 503, clients: 1 });
+		extension = await connectExtension(port);
+		await waitForDiscovery(port);
+		expect(await discovery()).toEqual({ status: 200, clients: 1 });
+		client.close();
+		const deadline = Date.now() + 1_000;
+		let after = await discovery();
+		while (after.clients !== 0 && Date.now() < deadline) after = await discovery();
+		expect(after).toEqual({ status: 200, clients: 0 });
 	});
 });

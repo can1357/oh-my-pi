@@ -231,6 +231,69 @@ describe("anthropic head caching (general API-key path)", () => {
 		expect(second).toBeGreaterThan(first);
 	});
 
+	it("pins checkpoints across an interior per-call mark in a long conversation", async () => {
+		// 32 conversational turns with a per-call context message inserted
+		// between turns 20 and 21. The mark splits the request into a stable
+		// prefix (turns 1-20) whose bytes repeat next turn and a rebuilt tail
+		// (turns 21-32 plus the current request) that does not, so placement
+		// across it is the case a single backward walk has to get right: the
+		// decimation checkpoint belongs to a turn BEHIND the mark, the
+		// sub-prefix anchor to the newest message before it, and the rolling
+		// tail anchor to the newest message of all — never to the mark itself.
+		const messages: Message[] = [];
+		for (let i = 1; i <= 32; i++) {
+			messages.push({ role: "user", content: `user ${i}`, timestamp: i * 2 });
+			messages.push(assistantMessage(`assistant ${i}`, i * 2 + 1));
+		}
+		const perCallMessage: Message = { role: "developer", content: "per-call context", timestamp: 99 };
+		markPerCallContextMessage(perCallMessage);
+		// Between assistant 20 (index 39) and user 21 (index 40): the mark takes
+		// wire index 40 and shifts every later turn by one.
+		messages.splice(40, 0, perCallMessage);
+
+		const body = await captureWireBody(undefined, { ...CONTEXT, tools: [], messages });
+		// 65 conversation messages plus the `Continue.` pad the converter appends
+		// behind the trailing assistant.
+		expect(body.messages).toHaveLength(66);
+		expect(countCacheBreakpoints(body)).toBeLessThanOrEqual(4);
+		// Turn i sits at wire index 2*(i-1) before the mark and 2*(i-1)+1 after:
+		// 39 = assistant 20, the newest message before the mark; 28 = user 15, the
+		// decimation checkpoint inside the stable prefix; 64 = assistant 32, the
+		// rolling tail anchor. Nothing lands on the mark at 40.
+		expect(findCachedMessageIndices(body)).toEqual([28, 39, 64]);
+
+		// With tools sent, the tool definition takes one of the four breakpoints
+		// and the budget runs out before the sub-prefix anchor.
+		const withTools = await captureWireBody(undefined, { ...CONTEXT, messages });
+		expect(findCachedMessageIndices(withTools)).toEqual([28, 64]);
+	});
+
+	it("bounds the stable prefix at the oldest of several per-call marks", async () => {
+		// 40 turns with per-call marks after turns 32 and 36. Only the prefix
+		// before the OLDEST mark repeats next request, so decimation counts and
+		// the sub-prefix anchor must both come from turns 1-32, not 1-36.
+		const messages: Message[] = [];
+		for (let i = 1; i <= 40; i++) {
+			messages.push({ role: "user", content: `user ${i}`, timestamp: i * 2 });
+			messages.push(assistantMessage(`assistant ${i}`, i * 2 + 1));
+		}
+		const mark = (timestamp: number): Message => {
+			const message: Message = { role: "developer", content: "per-call context", timestamp };
+			markPerCallContextMessage(message);
+			return message;
+		};
+		// After assistant 36 (index 71) first, so the earlier splice index holds.
+		messages.splice(72, 0, mark(98));
+		messages.splice(64, 0, mark(99));
+
+		const body = await captureWireBody(undefined, { ...CONTEXT, systemPrompt: [], tools: [], messages });
+		expect(countCacheBreakpoints(body)).toBeLessThanOrEqual(4);
+		// 28 = user 15 and 58 = user 30 (decimation inside turns 1-32); 63 =
+		// assistant 32, the newest message before the oldest mark; 81 = the
+		// rolling tail anchor.
+		expect(findCachedMessageIndices(body)).toEqual([28, 58, 63, 81]);
+	});
+
 	it("adds no breakpoints when caching is disabled", async () => {
 		const body = await captureWireBody("none");
 		expect(countCacheBreakpoints(body)).toBe(0);

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { collectGarbage } from "../../gc";
 import { base64ImageNode, getNativeBlob, registerNativeBlob } from "../../../src/native/blobs";
 import { keyed, node, withHidden } from "../../../src/native/describe";
 import type { NativeNode } from "../../../src/native/node";
@@ -31,10 +32,7 @@ function blobId(image: NativeNode): string {
 }
 
 async function collect(): Promise<void> {
-	for (let i = 0; i < 3; i++) {
-		await Bun.sleep(0);
-		Bun.gc(true);
-	}
+	for (let i = 0; i < 3; i++) await collectGarbage();
 }
 
 await initTheme(false);

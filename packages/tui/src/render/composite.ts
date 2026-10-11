@@ -11,6 +11,8 @@ export function compositeLineAt(
 	overlayWidth: number,
 	totalWidth: number,
 ): string {
+	// A full-width image row owns its terminal row; the writer must see its exact placement shape.
+	if (startCol === 0 && overlayWidth >= totalWidth && TERMINAL.isImageLine(overlayLine)) return overlayLine;
 	if (TERMINAL.isImageLine(baseLine)) {
 		// Full-width overlays such as /switch are opaque: replace the
 		// Unicode placeholder cells so the image cannot cover the modal.

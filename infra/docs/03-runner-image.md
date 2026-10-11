@@ -84,7 +84,7 @@ reproduced verbatim (it contains no secrets or redactable host identifiers; the
 FROM ghcr.io/actions/actions-runner:latest
 
 ARG RUST_NIGHTLY=nightly-2026-10-06
-ARG BUN_VERSION=1.4.2
+ARG BUN_VERSION=1.4.3
 ARG SCCACHE_VERSION=0.18.0
 ARG ZIG_VERSION=0.16.0
 

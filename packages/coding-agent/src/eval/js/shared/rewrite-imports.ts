@@ -104,10 +104,14 @@ export async function loadBabelParser(): Promise<typeof BabelParser> {
 	return babelParser;
 }
 
-async function parseProgram(code: string): Promise<{ program: { body: ReadonlyArray<BabelProgramNode> } } | null> {
+type ParsedProgram = { program: { body: ReadonlyArray<BabelProgramNode> } };
+
+async function tryParseProgram(
+	code: string,
+): Promise<{ ast: ParsedProgram; recovered: readonly unknown[] } | { error: unknown }> {
 	const { parse } = await loadBabelParser();
 	try {
-		return parse(code, {
+		const file = parse(code, {
 			sourceType: "module",
 			allowAwaitOutsideFunction: true,
 			allowReturnOutsideFunction: true,
@@ -117,10 +121,79 @@ async function parseProgram(code: string): Promise<{ program: { body: ReadonlyAr
 			allowUndeclaredExports: true,
 			errorRecovery: true,
 			plugins: ["typescript"],
-		}) as unknown as { program: { body: ReadonlyArray<BabelProgramNode> } };
-	} catch {
-		return null;
+		});
+		return { ast: file as unknown as ParsedProgram, recovered: file.errors ?? [] };
+	} catch (error) {
+		return { error };
 	}
+}
+
+async function parseProgram(code: string): Promise<ParsedProgram | null> {
+	const result = await tryParseProgram(code);
+	return "ast" in result ? result.ast : null;
+}
+
+const FRAME_CONTEXT_LINES = 2;
+const FRAME_MAX_LINE_WIDTH = 120;
+
+/**
+ * Builds a `SyntaxError` for a Babel parse failure on the user's cell source. `line` is
+ * 1-based and `column` is shown 1-based (Babel reports it 0-based). The message carries the
+ * position plus a short code frame with a caret under the offending column.
+ */
+function buildCellSyntaxError(code: string, error: unknown): SyntaxError | undefined {
+	if (!(error instanceof Error) || !("loc" in error)) return undefined;
+	const { loc } = error;
+	if (typeof loc !== "object" || loc === null || !("line" in loc) || !("column" in loc)) return undefined;
+	const { line, column } = loc;
+	if (typeof line !== "number" || typeof column !== "number") return undefined;
+	const reason = error.message.replace(/ \(\d+:\d+\)$/, "");
+	const lines = code.split(/\r\n|[\n\r\u2028\u2029]/);
+	if (line < 1 || line > lines.length) return undefined;
+	const first = Math.max(1, line - FRAME_CONTEXT_LINES);
+	const gutterWidth = String(line).length;
+	const frame: string[] = [];
+	for (let n = first; n <= line; n++) {
+		let text = lines[n - 1];
+		let caretColumn = column;
+		if (n === line && text.length > FRAME_MAX_LINE_WIDTH) {
+			const start = Math.min(Math.max(0, column - FRAME_MAX_LINE_WIDTH / 2), text.length - FRAME_MAX_LINE_WIDTH);
+			const end = start + FRAME_MAX_LINE_WIDTH;
+			const cutAfter = end < text.length;
+			text = text.slice(start, end);
+			caretColumn = column - start;
+			if (start > 0) {
+				text = `…${text}`;
+				caretColumn += 1;
+			}
+			if (cutAfter) text += "…";
+		} else if (text.length > FRAME_MAX_LINE_WIDTH) {
+			text = `${text.slice(0, FRAME_MAX_LINE_WIDTH)}…`;
+		}
+		frame.push(`${String(n).padStart(gutterWidth)} | ${text}`);
+		if (n === line) {
+			// Keep tabs so the caret lines up with the source line above it.
+			let pad = "";
+			for (const char of text.slice(0, caretColumn)) {
+				pad += char === "\t" ? char : " ".repeat(Bun.stringWidth(char));
+			}
+			frame.push(`${" ".repeat(gutterWidth)} | ${pad}^`);
+		}
+	}
+	return new SyntaxError(`${reason} (line ${line}, column ${column + 1})\n${frame.join("\n")}`);
+}
+
+/**
+ * Re-parses the original cell source after the engine rejected it with a `SyntaxError`, and returns
+ * a position-carrying replacement when Babel also fails, whether it throws or recovers with
+ * reported errors. Returns `undefined` when Babel accepts the
+ * cell (the engine error is then the better signal). Runs only on the failure path.
+ */
+export async function diagnoseCellSyntaxError(code: string): Promise<SyntaxError | undefined> {
+	const parsed = await tryParseProgram(code);
+	if ("error" in parsed) return buildCellSyntaxError(code, parsed.error);
+	// Babel recovers from some errors (e.g. `break;` outside a loop) and reports them on the AST.
+	return buildCellSyntaxError(code, parsed.recovered[0]);
 }
 
 // Callee substituted for dynamic `import(...)` calls. Functions handed to puppeteer
