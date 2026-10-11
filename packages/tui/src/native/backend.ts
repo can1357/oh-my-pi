@@ -123,6 +123,8 @@ const DEFAULT_SCHEDULER: RenderScheduler = {
 const RECENT_FRAMES = 64;
 /** An unanswered frame older than this no longer holds rendering back. */
 const STALLED_ACK_MS = 5000;
+/** Tern drops a chunked message once its joined body exceeds 24 MiB. */
+const MAX_FRAME_BYTES = 24 * 1024 * 1024;
 /** Role of the session's surfaces; a screen page may name its own. */
 const SESSION_ROLE = "omp.session";
 /** A `blobs` query unanswered this long counts its ids as missing: they go inline. */
@@ -238,6 +240,9 @@ class Surface {
 	unacked: number[] = [];
 	focus: string | null = null;
 	dirty = false;
+	/** Reconciled ops waiting for frame credits, with the next unsent op index. */
+	pendingOps: readonly TspOp[] | null = null;
+	pendingAt = 0;
 
 	constructor(id: string, mode: "inline" | "screen", role: string, mirror: boolean) {
 		this.id = id;
@@ -535,6 +540,11 @@ export class NativeBackend {
 			layer = overlays.map(overlay => this.#overlayNode(overlay));
 		}
 		this.#pruneOverlayNodes(overlays);
+		if (surface.pendingOps) {
+			surface.dirty = true;
+			this.#drainPending(surface);
+			if (surface.pendingOps) return;
+		}
 		if (!this.#hasCredit(surface)) {
 			surface.dirty = true;
 			this.#armStallTimer(surface);
@@ -633,16 +643,57 @@ export class NativeBackend {
 	}
 
 	#sendFrame(surface: Surface, ops: readonly TspOp[]): void {
-		surface.seq++;
+		const frame: TspFrame = { sf: surface.id, s: surface.seq + 1, ops };
+		const body = JSON.stringify(frame);
+		if (Buffer.byteLength(body, "utf8") <= MAX_FRAME_BYTES) {
+			this.#emitFrame(surface, frame, body);
+			return;
+		}
+		surface.pendingOps = ops;
+		surface.pendingAt = 0;
+		this.#drainPending(surface);
+	}
+
+	/** Send queued ops in order, taking a credit and a sequence number per bounded frame. */
+	#drainPending(surface: Surface): void {
+		const ops = surface.pendingOps;
+		if (!ops) return;
+		while (surface.pendingAt < ops.length && this.#hasCredit(surface)) {
+			const nextSeq = surface.seq + 1;
+			let bytes = Buffer.byteLength(JSON.stringify({ sf: surface.id, s: nextSeq, ops: [] }), "utf8");
+			const start = surface.pendingAt;
+			while (surface.pendingAt < ops.length) {
+				const op = ops[surface.pendingAt]!;
+				const size = Buffer.byteLength(JSON.stringify(op), "utf8") + (surface.pendingAt === start ? 0 : 1);
+				if (bytes + size > MAX_FRAME_BYTES) {
+					if (surface.pendingAt === start) throw new RangeError("TSP op exceeds Tern's 24 MiB frame limit");
+					break;
+				}
+				bytes += size;
+				surface.pendingAt++;
+			}
+			const frame: TspFrame = { sf: surface.id, s: nextSeq, ops: ops.slice(start, surface.pendingAt) };
+			this.#emitFrame(surface, frame, JSON.stringify(frame));
+		}
+		if (surface.pendingAt === ops.length) {
+			surface.pendingOps = null;
+			surface.pendingAt = 0;
+		} else {
+			this.#armStallTimer(surface);
+		}
+	}
+
+	#emitFrame(surface: Surface, frame: TspFrame, body: string): void {
+		surface.seq = frame.s;
 		surface.unacked.push(this.#scheduler.now());
-		const frame: TspFrame = { sf: surface.id, s: surface.seq, ops };
 		if (surface.doc) {
 			const errors = surface.doc.applyFrame(frame);
 			if (errors.length > 0) logger.warn("TSP: reference document rejected ops", { sf: surface.id, errors });
 			this.#recent.push(frame);
 			if (this.#recent.length > RECENT_FRAMES) this.#recent.splice(0, this.#recent.length - RECENT_FRAMES);
 		}
-		this.#write("f", frame);
+		this.#record("out", "f", undefined, frame);
+		this.#host.terminal.write(encodeTspMessage("f", body, undefined, this.#limit));
 	}
 
 	/** Deliver the blobs `ops` reference that this connection hasn't handled yet (see the module doc). */
@@ -794,7 +845,8 @@ export class NativeBackend {
 				surface.acked = Math.min(event.s, surface.seq);
 				surface.unacked.splice(0, newly);
 				this.#clearStallTimer();
-				if (surface.dirty) this.#host.requestRender();
+				this.#drainPending(surface);
+				if (surface.dirty && !surface.pendingOps) this.#host.requestRender();
 				return;
 			}
 			case "resize": {
@@ -814,9 +866,30 @@ export class NativeBackend {
 				return;
 			case "visible":
 				return;
-			case "error":
+			case "error": {
 				logger.warn("TSP: terminal reported an error", event);
+				if (
+					!event.msg.startsWith("chunked f message ") &&
+					!event.msg.startsWith("malformed f body:") &&
+					event.sf === undefined
+				)
+					return;
+				const surfaces: Surface[] = [];
+				if (event.sf === undefined || event.sf === this.#inline.id) surfaces.push(this.#inline);
+				if (this.#screen && (event.sf === undefined || event.sf === this.#screen.id)) surfaces.push(this.#screen);
+				if (surfaces.length === 0) return;
+				this.#resetBlobs();
+				this.#clearStallTimer();
+				for (const surface of surfaces) {
+					this.#close(surface, false);
+					const replacement = this.#newSurface(surface.mode, surface.role);
+					if (surface === this.#inline) this.#inline = replacement;
+					else this.#screen = replacement;
+					if (this.#live) this.#open(replacement);
+				}
+				this.#host.requestRender();
 				return;
+			}
 			case "gone":
 				if (event.ids.includes(this.#inline.id)) {
 					// Adopt found nothing (evicted, or another pane): start over.

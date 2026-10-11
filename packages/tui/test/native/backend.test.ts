@@ -73,6 +73,60 @@ describe("native backend", () => {
 		expect(h.byId(id)?.p).toEqual({ text: "one two three", stream: true });
 	});
 
+	it("delivers an oversized transcript in ordered frames within Tern's joined-message cap and credits", async () => {
+		const text = "x".repeat(12_000);
+		harness = await TspHarness.start(
+			tui => {
+				for (let i = 0; i < 2200; i++) tui.addChild(new Probe(md(text + i)));
+			},
+			{ credits: 1, autoAck: false, maxFrameBytes: 24 * 1024 * 1024 },
+		);
+		const h = harness;
+		expect(h.frames.length).toBe(1);
+		const latest = new Probe(md("arrived while blocked"));
+		h.tui.addChild(latest);
+		h.flush();
+		expect(h.frames.length).toBe(1);
+
+		h.terminal.ackAll();
+		h.flush();
+		expect(h.frames.length).toBe(2);
+		h.terminal.ackAll();
+		h.flush();
+		expect(h.frames.every(frame => Buffer.byteLength(JSON.stringify(frame), "utf8") <= 24 * 1024 * 1024)).toBe(true);
+		expect(h.region("main")?.c?.length).toBe(2201);
+		expect(h.byId(nativeComponentId(latest))?.p).toEqual({ text: "arrived while blocked" });
+		expect(h.errors).toEqual([]);
+	});
+
+	it("reopens the surface after a terminal drops a frame, instead of sending deltas to missing nodes", async () => {
+		const block = new Probe(md("restored"));
+		harness = await TspHarness.start(tui => tui.addChild(block), { dropFirstFrame: true });
+		const h = harness;
+		expect(h.terminal.docs.size).toBe(1);
+		expect(h.frames.length).toBe(1);
+		const surface = h.terminal.surface!;
+		expect(h.byId(nativeComponentId(block))?.p).toEqual({ text: "restored" });
+
+		block.current = md("later turn");
+		await h.render();
+		expect(h.terminal.surface).toBe(surface);
+		expect(h.byId(nativeComponentId(block))?.p).toEqual({ text: "later turn" });
+		expect(h.errors).toEqual([]);
+	});
+
+	it("resends full state when a malformed frame has no surface id", async () => {
+		const block = new Probe(md("original"));
+		harness = await TspHarness.start(tui => tui.addChild(block));
+		const h = harness;
+		const old = h.terminal.surface!;
+		h.event({ ev: "error", msg: "malformed f body: expected value at line 1 column 1" });
+		expect(h.terminal.surface).not.toBe(old);
+		expect(h.terminal.docs.has(old)).toBe(false);
+		expect(h.byId(nativeComponentId(block))?.p).toEqual({ text: "original" });
+		expect(h.errors).toEqual([]);
+	});
+
 	it("routes pointer events to the component that described the node, with its keypath and item key", async () => {
 		const other = new Probe(node("text", { text: "other" }));
 		const target = new Probe(

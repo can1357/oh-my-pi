@@ -32,6 +32,10 @@ export interface TspHarnessOptions {
 	reply?: boolean;
 	/** Acknowledge every frame automatically (default true). */
 	autoAck?: boolean;
+	/** Reject frames exceeding this joined JSON-body limit, as Tern does. */
+	maxFrameBytes?: number;
+	/** Drop the first frame with a chunk error to exercise surface recovery. */
+	dropFirstFrame?: boolean;
 	reduceMotion?: boolean;
 	/** The clock the terminal reports (`hour12`; default: none). */
 	hour12?: boolean;
@@ -136,6 +140,7 @@ export class TspTestTerminal implements Terminal {
 	#chunks = new Map<string, string>();
 	#open: string[] = [];
 
+	#droppedFirstFrame = false;
 	constructor(options: TspHarnessOptions) {
 		this.#options = options;
 		this.#cols = options.cols ?? 100;
@@ -329,6 +334,15 @@ export class TspTestTerminal implements Terminal {
 				return;
 			}
 			case "f": {
+				if (
+					(this.#options.dropFirstFrame && !this.#droppedFirstFrame) ||
+					(this.#options.maxFrameBytes !== undefined &&
+						Buffer.byteLength(body, "utf8") > this.#options.maxFrameBytes)
+				) {
+					this.#droppedFirstFrame = true;
+					this.send(tspEvent({ ev: "error", msg: "chunked f message c=1 dropped: over 25165824 bytes" }));
+					return;
+				}
 				const frame = JSON.parse(body) as TspFrame;
 				this.frames.push(frame);
 				const doc = this.docs.get(frame.sf);

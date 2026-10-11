@@ -16,6 +16,7 @@
 ### Fixed
 
 - Native settings editors now display submission and validation errors instead of silently keeping the editor open ([#15252](https://github.com/can1357/oh-my-pi/pull/15252) by [@Shadorain](https://github.com/Shadorain)).
+- Fixed Tern resuming long sessions with a blank transcript when the first native frame exceeds its message limit; rejected frames now restore the surface ([#15302](https://github.com/can1357/oh-my-pi/issues/15302)).
 - Fixed `/tree` stalling when opened on very long session histories ([#12527](https://github.com/can1357/oh-my-pi/pull/12527) by [@azain47](https://github.com/azain47)).
 - Fixed `/tree` exhausting memory on long sessions with many branch points ([#12622](https://github.com/can1357/oh-my-pi/pull/12622) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
 - Fixed extension statuses set via `ctx.ui.setStatus` losing their SGR colours and text styles under the status line; other escape sequences are still stripped ([#14500](https://github.com/can1357/oh-my-pi/pull/14500) by [@sandboiii](https://github.com/sandboiii))
