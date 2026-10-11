@@ -886,6 +886,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// keep a finished `:async:` Shell (and its background children) alive.
 		let pids: () => readonly number[] = NO_PIDS;
 		let latestText = "";
+		let emissionPreview = "";
+		let promotionPreview: string | undefined;
+		let promotionDeliveryGate: PromiseWithResolvers<void> | undefined;
 		let latestProgressDetails: BashProgressDetails | undefined;
 		let progressSampler: ProgressLines | undefined;
 		let promotionRequested = false;
@@ -955,16 +958,28 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							// drain every chunk that already crossed that boundary into
 							// the foreground preview.
 							chunkStamp: trackChunkDelivery,
+							// Future-stamped raw deliveries cannot feed the sampler until
+							// promotion resets its epoch. They own no pre-boundary token.
+							chunkReady: stamp =>
+								promotionRequested && stamp !== (progressSampler?.epoch ?? 0)
+									? promotionDeliveryGate?.promise
+									: undefined,
 							onChunk: (chunk, stamp, artifactId) => {
 								confirmedProgressArtifactId = artifactId;
 								progressLines?.append(chunk, stamp);
-							},
-							onPreview: text => {
+								const text =
+									promotionRequested && stamp === (progressSampler?.epoch ?? 0)
+										? (promotionPreview ?? emissionPreview)
+										: emissionPreview;
 								latestText = text;
 								void reportProgress(text, {
 									output: text,
 									async: { state: "running", jobId, type: "bash" },
 								});
+							},
+							onPreview: (text, stamp) => {
+								emissionPreview = text;
+								if (promotionRequested && stamp === (progressSampler?.epoch ?? 0)) promotionPreview = text;
 							},
 							onChunkSettled: finishChunkDelivery,
 							onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
@@ -1062,6 +1077,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				// Mark the boundary before yielding. Chunks entering from this
 				// point receive the next sampler epoch, while a throttle-merged
 				// delivery keeps the stamp of its earliest pre-boundary byte.
+				promotionPreview = emissionPreview;
+				promotionDeliveryGate = Promise.withResolvers<void>();
 				promotionRequested = true;
 				trackPromotionDeliveries = false;
 				const prePromotionDeliveries = chunkDeliveryBarrier;
@@ -1071,11 +1088,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				const onAbort = (): void => abortGuard.resolve("aborted");
 				signal?.addEventListener("abort", onAbort, { once: true });
 				try {
-					// Mirror-mode artifact flushing and throttling can delay onChunk,
-					// which owns latestText. Drain those entry-time-stamped chunks
-					// through the inactive foreground gate before taking an immutable
-					// preview snapshot and activating progress. OutputSink settles each
-					// token even if artifact persistence fails; a delivery that still
+					// Drain only pre-boundary raw deliveries for provenance before
+					// freezing their emission preview and activating progress. Future
+					// deliveries wait behind the gate, never inside this barrier.
+					// OutputSink settles each token even if artifact persistence fails;
+					// a delivery that still
 					// stalls past the guard cannot hold the turn: promote without it,
 					// and mark coverage gapped so completion keeps the terminal text
 					// that the preview never showed. A cancel that lands inside the
@@ -1109,6 +1126,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					signal?.removeEventListener("abort", onAbort);
 					clearTimeout(drainTimer);
 					promotionRequested = false;
+					promotionDeliveryGate?.resolve();
+					promotionDeliveryGate = undefined;
+					promotionPreview = undefined;
 				}
 			},
 		};

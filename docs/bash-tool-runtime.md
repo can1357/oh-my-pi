@@ -245,7 +245,7 @@ Non-PTY execution also passes shell-minimizer settings into the native `Shell` s
 
 ## Live tool updates and async jobs
 
-For non-PTY foreground execution, `BashTool` passes an `onPreview` callback to `executeBash()`, which streams the `OutputSink`'s own inline view (`OutputSink.preview()`) as `onUpdate` snapshots while the command is running; there is no separate partial-update buffer.
+For non-PTY execution, `BashTool` passes an `onPreview` callback to `executeBash()`. It samples the `OutputSink`'s own bounded inline body synchronously at throttled emission, with the source stamp; there is no separate partial-update buffer or preview window retained per queued mirror delivery. Managed jobs publish that immutable snapshot only when the corresponding raw chunk is delivered. During promotion, a single bounded pre-boundary snapshot is kept separate from later emissions, and future-stamped mirror callbacks wait until the sampler epoch is reset and progress delivery is activated. Only pre-boundary delivery tokens enter the bounded promotion drain, so the future callback fence cannot deadlock it.
 
 For PTY execution, live rendering is handled by custom UI overlay, not by `onUpdate` text chunks.
 

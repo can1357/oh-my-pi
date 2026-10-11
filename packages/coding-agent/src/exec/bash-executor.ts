@@ -41,17 +41,20 @@ export interface BashExecutorOptions {
 	timeout?: number;
 	onChunk?: (chunk: string, stamp: number, artifactId?: string) => void;
 	/**
-	 * Receives the sink's current inline view ({@link OutputSink.preview}: the
-	 * body the final result will carry so far) at the `onChunk` cadence. Use it
-	 * for live previews instead of re-buffering `onChunk` chunks.
+	 * Receives the sink's bounded inline body and stamp synchronously at chunk
+	 * emission, before mirror flushing can admit later output. Use these
+	 * immutable snapshots instead of re-buffering chunks or querying the sink
+	 * from a delayed `onChunk` callback.
 	 */
-	onPreview?: (text: string) => void;
+	onPreview?: (text: string, stamp: number) => void;
 	/**
 	 * Sampled when a chunk enters the output sink and delivered with the
 	 * matching `onChunk` call, so callers can discard chunks captured before
 	 * a boundary (e.g. async promotion) that the sink delivered after it.
 	 */
 	chunkStamp?: () => number;
+	/** Mirror-only consumer boundary fence, after persistence and before `onChunk`. */
+	chunkReady?: (stamp: number) => Promise<void> | undefined;
 	/** Invoked after each sampled chunk delivery settles, including failed mirror flushes. */
 	onChunkSettled?: (stamp: number) => void;
 	chunkThrottleMs?: number;
@@ -586,14 +589,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const graphics = new TerminalGraphicsDecoder();
 	const onChunk = usePty ? undefined : options?.onChunk;
 	const onPreview = usePty ? undefined : options?.onPreview;
-	const sink: OutputSink = new OutputSink({
-		onChunk:
-			onChunk || onPreview
-				? (chunk, stamp, artifactId) => {
-						onChunk?.(chunk, stamp, artifactId);
-						onPreview?.(sink.preview());
-					}
-				: undefined,
+	const sink = new OutputSink({
+		onChunk,
+		onPreview,
+		chunkReady: options?.chunkReady,
 		chunkStamp: options?.chunkStamp,
 		onChunkSettled: options?.onChunkSettled,
 		artifactPath: options?.artifactPath,
@@ -605,8 +604,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		chunkThrottleMs: onChunk || onPreview ? (options?.chunkThrottleMs ?? 50) : 0,
 	});
 
-	// sink.push() updates buffers synchronously. Normal onChunk callbacks also run
-	// inline; mirror mode delays them until the artifact bytes are readable.
+	// Storage and bounded preview sampling are synchronous. Mirror chunk callbacks
+	// wait for readable artifact bytes and any consumer boundary fence.
 	let acceptingChunks = true;
 	let graphicsFinished = false;
 	let decodedImages: ImageContent[] = [];
