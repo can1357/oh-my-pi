@@ -355,6 +355,7 @@ export interface GitLabDuoWorkflowActiveSession {
 	pendingActions?: GitLabDuoWorkflowActionDescriptor[];
 	checkpointAgentContentByKey?: Record<string, string>;
 	checkpointAgentContentSignatures?: Record<string, true>;
+	checkpointAgentContentHashes?: Record<string, string>;
 	paused?: boolean;
 	pauseBuffer?: unknown[];
 	// Byte length of the server's last checkpoint observed at this workflow's tool-call
@@ -379,6 +380,7 @@ export interface GitLabDuoWorkflowStreamState {
 	started: boolean;
 	checkpointAgentContentByKey?: Record<string, string>;
 	checkpointAgentContentSignatures?: Record<string, true>;
+	checkpointAgentContentHashes?: Record<string, string>;
 	pauseRequested?: boolean;
 	stepLimitRequested?: boolean;
 	retryableErrorRequested?: boolean;
@@ -2340,6 +2342,7 @@ function hydrateGitLabDuoWorkflowCheckpointState(
 ): void {
 	state.checkpointAgentContentByKey = session.checkpointAgentContentByKey;
 	state.checkpointAgentContentSignatures = session.checkpointAgentContentSignatures;
+	state.checkpointAgentContentHashes = session.checkpointAgentContentHashes;
 }
 
 function syncGitLabDuoWorkflowCheckpointState(state: GitLabDuoWorkflowStreamState): void {
@@ -2347,6 +2350,7 @@ function syncGitLabDuoWorkflowCheckpointState(state: GitLabDuoWorkflowStreamStat
 	if (!active) return;
 	active.checkpointAgentContentByKey = state.checkpointAgentContentByKey;
 	active.checkpointAgentContentSignatures = state.checkpointAgentContentSignatures;
+	active.checkpointAgentContentHashes = state.checkpointAgentContentHashes;
 }
 
 function emitGitLabDuoWorkflowCheckpoint(
@@ -2374,7 +2378,12 @@ function emitGitLabDuoWorkflowCheckpoint(
 	// per-key lookup misses but the text was already emitted for that turn). A
 	// genuinely new later message with text equal to an earlier one lands at a
 	// LATER turn (after an extra boundary), so its signature differs and it still
-	// emits — repeated assistant output across turns is no longer swallowed.
+	// emits — repeated assistant output across turns is no longer swallowed. The
+	// signature carries the REAL content hash, never a placeholder: when a snapshot
+	// shrinks by dropping a request/tool boundary the same unchanged entry moves to
+	// an earlier turn, and that turn still has to be signed by the text's actual
+	// hash — a later frame then renames the message id (fresh per-key lookup) and
+	// only the signature on THIS turn can suppress the redundant re-emit.
 	let turnIndex = 0;
 	for (const entry of checkpoint.entries) {
 		if (entry.kind === "boundary") {
@@ -2390,17 +2399,24 @@ function emitGitLabDuoWorkflowCheckpoint(
 
 		const contentByKey = state.checkpointAgentContentByKey ?? {};
 		const contentSignatures = state.checkpointAgentContentSignatures ?? {};
+		const contentHashes = state.checkpointAgentContentHashes ?? {};
 		const previousContent = contentByKey[entry.messageKey];
 		// Keyed by a content hash: every frame is a full snapshot, so keying on the
 		// text itself kept two copies of each message prefix seen per stream. A frame
 		// that replays an entry byte-identically (previousContent defined and equal)
-		// already establishes an empty delta, and duplicate detection cannot fire for
-		// it (that path requires previousContent === undefined), so the full cumulative
-		// text is not hashed on the socket-event path. The placeholder hash only builds
-		// inert signature keys: every real lookup hashes its content, so it never
-		// matches a placeholder key.
+		// already establishes an empty delta and cannot be a duplicate candidate
+		// (that path requires previousContent === undefined), so it reuses the hash
+		// recorded for the key: the full cumulative text is never re-hashed on the
+		// socket-event path. Reusing it is what keeps the signature real — signing
+		// such a replay with a placeholder (empty) hash left the new turn of a
+		// shrunk snapshot unsigned, and a later rename of the message id then hashed
+		// the text, missed the placeholder, and appended the full content again.
 		const replayedIdentically = previousContent !== undefined && entry.content === previousContent;
-		const contentHash = replayedIdentically ? "" : Bun.hash(entry.content).toString(36);
+		let contentHash = replayedIdentically ? contentHashes[entry.messageKey] : undefined;
+		if (contentHash === undefined) {
+			contentHash = Bun.hash(entry.content).toString(36);
+			contentHashes[entry.messageKey] = contentHash;
+		}
 		const contentSignature = `${turnIndex}\u0000${entry.kind}\u0000${contentHash}`;
 		const contentOnlySignature = `${turnIndex}\u0000content\u0000${contentHash}`;
 		const duplicateContent =
@@ -2423,6 +2439,7 @@ function emitGitLabDuoWorkflowCheckpoint(
 		contentSignatures[contentOnlySignature] = true;
 		state.checkpointAgentContentByKey = contentByKey;
 		state.checkpointAgentContentSignatures = contentSignatures;
+		state.checkpointAgentContentHashes = contentHashes;
 		syncGitLabDuoWorkflowCheckpointState(state);
 
 		if (delta.length === 0) continue;
