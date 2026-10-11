@@ -28,6 +28,12 @@ const DECODABLE_EXTENSIONS: Readonly<Record<string, true>> = {
 	flac: true,
 };
 
+/** MIME spellings browsers report for containers the table names differently. */
+const MIME_ALIASES: Readonly<Record<string, string>> = {
+	"audio/m4a": "audio/mp4",
+	"audio/opus": "audio/ogg",
+};
+
 /**
  * The endpoint picks its decoder from the upload's file extension and answers `500 Error in ASR API` when the
  * extension is missing or unknown (`voice.oga`, `audio`), even for audio it can decode. Keep a decodable name
@@ -39,7 +45,8 @@ function uploadFileName(request: TranscriptionRequest): string {
 	const name = request.fileName?.trim() || "audio";
 	const dot = name.lastIndexOf(".");
 	const extension = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
-	const mimeType = request.mimeType.split(";", 1)[0]?.trim().toLowerCase().replace("audio/x-", "audio/");
+	const rawMime = request.mimeType.split(";", 1)[0]?.trim().toLowerCase().replace("audio/x-", "audio/") ?? "";
+	const mimeType = MIME_ALIASES[rawMime] ?? rawMime;
 	const declared = Object.entries(TRANSCRIPTION_AUDIO_MIME_TYPES).find(([, mime]) => mime === mimeType)?.[0];
 	if (
 		DECODABLE_EXTENSIONS[extension] === true &&
