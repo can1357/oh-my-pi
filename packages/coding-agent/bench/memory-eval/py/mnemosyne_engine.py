@@ -137,9 +137,11 @@ def main():
 			if handler is None:
 				raise ValueError(f"unknown op {request['op']!r}")
 			response = {"id": request["id"], "result": handler(request.get("params") or {})}
-		except Exception as error:
-			traceback.print_exc()
-			response = {"id": request["id"], "error": f"{type(error).__name__}: {error}"}
+		except Exception:
+			# The traceback goes in the response too: the client's stderr tail may not have caught up with it yet.
+			detail = traceback.format_exc().rstrip()
+			print(detail, file=sys.stderr)
+			response = {"id": request["id"], "error": detail}
 		PROTOCOL_OUT.write(json.dumps(response) + "\n")
 		PROTOCOL_OUT.flush()
 
