@@ -152,6 +152,34 @@ describe("STTController cloud transcription", () => {
 		},
 	);
 
+	it("routes the Codex Dictation model through buffered cloud transcription instead of warning unsupported", async () => {
+		const model = getBundledModel("openai-codex", "codex-transcribe");
+		settings.setModelRole("dictation", "openai-codex/codex-transcribe");
+		const registry = registryFor(model);
+		const transcribe = vi.spyOn(transcription, "transcribeAudio").mockResolvedValue({
+			text: "codex transcript",
+			usage: ZERO_USAGE,
+		});
+		let onAudio: ((error: Error | null, samples: Float32Array) => void) | undefined;
+		controller = new STTController(
+			callback => {
+				onAudio = callback;
+				return { stop: vi.fn() };
+			},
+			{ settings, registry },
+		);
+		const editor = makeEditor();
+		const options = makeOptions();
+
+		await controller.toggle(editor, options);
+		onAudio?.(null, new Float32Array([0, 0.5]));
+		await controller.toggle(editor, options);
+
+		expect(options.showWarning).not.toHaveBeenCalled();
+		expect(transcribe.mock.calls[0]?.[0]).toBe(model);
+		expect(editor.commitVolatileText).toHaveBeenCalledWith("codex transcript");
+	});
+
 	it("aborts an in-flight cloud request when the controller is disposed", async () => {
 		const model = getBundledModel("openai", "whisper-1");
 		settings.setModelRole("dictation", "openai/whisper-1");
