@@ -74,6 +74,8 @@ describe("memory-eval score", () => {
 		const gold = `${"😀".repeat(50)}tail`;
 		expect(cp(gold, 3)).toBe("😀😀😀");
 		expect(compatRecall(["😀".repeat(50)], [gold], 10)).toBe(1);
+		// 30 emoji are 60 UTF-16 units but only 30 code points: not a superset of the 50-code-point prefix.
+		expect(compatRecall(["😀".repeat(30)], [gold], 10)).toBe(0);
 		expect(compatRecall(["x", "y"], ["y"], 1)).toBe(0);
 	});
 
