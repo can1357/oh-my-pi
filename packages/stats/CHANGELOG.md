@@ -31,6 +31,9 @@
 - Providers → Subscription windows no longer mixes Codex 5-hour and 7-day quotas across plans: Team and weekly-only (ProLite) accounts now share the 7-day row, the 5-hour row counts only accounts that have one, and labels no longer flip with whichever account reported last ([#15664](https://github.com/can1357/oh-my-pi/issues/15664))
 
 ## [18.10.4] - 2026-10-13
+### Changed
+
+- Stats sync keeps its parse workers warm between runs and evicts each worker after its own 10s idle window, so watcher-driven and back-to-back syncs no longer respawn workers per pass ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 
 ### Fixed
 
