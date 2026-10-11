@@ -41,7 +41,25 @@ def _normalize_for_fixture(value: Any) -> Any:
     return value
 
 
-def test_status_contract(settings: Settings) -> None:
+@pytest.fixture
+def stub_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop the WorkerPool dispatcher from claiming events.
+
+    ``create_app`` starts a live dispatch loop that steals freshly-``queued``
+    rows (moves them to ``running``) on a background thread. Tests that record
+    an event and then claim or inspect it race against that loop, flaking on
+    the event's observed state. Adopt this fixture in tests that exercise only
+    API/DB logic (not delivery) so state assertions are deterministic.
+    """
+    from robomp import queue as queue_module
+
+    async def _never_claim(self) -> None:
+        return None
+
+    monkeypatch.setattr(queue_module.WorkerPool, "_claim_next_unique", _never_claim)
+
+
+def test_status_contract(settings: Settings, stub_dispatch) -> None:
     app = create_app(settings)
     with TestClient(app) as client:
         # Seed AFTER startup:
@@ -244,7 +262,7 @@ def _enable_replay(monkeypatch: pytest.MonkeyPatch) -> str:
     return token
 
 
-def test_cancel_happy_path(env, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cancel_happy_path(env, monkeypatch: pytest.MonkeyPatch, stub_dispatch) -> None:
     token = _enable_replay(monkeypatch)
     cfg = Settings()
     cfg.ensure_paths()
@@ -277,7 +295,7 @@ def test_cancel_happy_path(env, monkeypatch: pytest.MonkeyPatch) -> None:
         }
 
 
-def test_cancel_errors_and_gating(env, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cancel_errors_and_gating(env, monkeypatch: pytest.MonkeyPatch, stub_dispatch) -> None:
     token = _enable_replay(monkeypatch)
     cfg = Settings()
     cfg.ensure_paths()
@@ -342,7 +360,7 @@ def test_cancel_errors_and_gating(env, monkeypatch: pytest.MonkeyPatch) -> None:
         assert resp.status_code == 404
 
 
-def test_retry_state_transition(env, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_retry_state_transition(env, monkeypatch: pytest.MonkeyPatch, stub_dispatch) -> None:
     token = _enable_replay(monkeypatch)
     cfg = Settings()
     cfg.ensure_paths()
