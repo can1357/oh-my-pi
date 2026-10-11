@@ -63,6 +63,10 @@ pub struct DesktopCapture {
 	pub displays:          Vec<DesktopDisplay>,
 	pub backend:           String,
 	pub display_server:    Option<String>,
+	/// The user session was locked when this frame was taken: a display
+	/// capture shows the lock screen, and a window capture shows the window's
+	/// last frame behind it. Only macOS detects this; others report `false`.
+	pub screen_locked:     bool,
 }
 
 #[napi(object)]
@@ -88,6 +92,12 @@ pub struct DesktopCapabilities {
 	pub input_permission: String,
 	pub ax_permission: String,
 	pub display_count: u32,
+	/// The user session is locked (lock screen up). Only macOS detects this;
+	/// other backends report `false`.
+	pub screen_locked: bool,
+	/// The display is asleep, so nothing can be captured until it wakes. Only
+	/// macOS detects this; other backends report `false`.
+	pub display_asleep: bool,
 }
 
 impl DesktopCapabilities {
@@ -109,6 +119,31 @@ impl DesktopCapabilities {
 			input_permission: "unavailable".to_string(),
 			ax_permission: "unavailable".to_string(),
 			display_count: 0,
+			screen_locked: false,
+			display_asleep: false,
+		}
+	}
+}
+
+/// Lock and display-sleep state of the user session, read live per call.
+/// Only macOS detects either; other platforms report both as `false`.
+#[napi(object, js_name = "DesktopScreenState")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScreenState {
+	#[napi(js_name = "screenLocked")]
+	pub locked:         bool,
+	pub display_asleep: bool,
+}
+
+impl ScreenState {
+	/// Sentence appended to a failure while the session is locked or the
+	/// display is asleep, so the model learns why instead of guessing.
+	pub(crate) const fn failure_note(self) -> Option<&'static str> {
+		match (self.locked, self.display_asleep) {
+			(true, true) => Some("the screen is locked and the display is asleep"),
+			(true, false) => Some("the screen is locked"),
+			(false, true) => Some("the display is asleep"),
+			(false, false) => None,
 		}
 	}
 }

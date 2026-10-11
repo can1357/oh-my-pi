@@ -39,7 +39,7 @@ describe("SessionAnonymizer", () => {
 				message: {
 					role: "assistant",
 					content: [
-						{ type: "thinking", thinking: "look for invoiceParser" },
+						{ type: "thinking", thinking: "look for invoiceParser", summary: false },
 						{
 							type: "toolCall",
 							id: "toolu_01MNY3aqvM6YV4Bg",
@@ -142,6 +142,7 @@ describe("SessionAnonymizer", () => {
 		const content = (index: number, ...rest: Array<string | number>) =>
 			at(assistant, "message", "content", index, ...rest);
 		expect(content(0, "thinking")).toMatch(/^\[redacted #\d+: 22 chars, 1 line\]$/);
+		expect(content(0, "summary")).toBe(false);
 		expect(content(1)).toMatchObject({ type: "toolCall", id: "toolu_01MNY3aqvM6YV4Bg", name: "grep" });
 		const pattern = String(content(1, "arguments", "pattern"));
 		const grepPath = String(content(1, "arguments", "path"));

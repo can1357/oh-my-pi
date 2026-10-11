@@ -1275,6 +1275,12 @@ function formatUsageReset(value: number, unit: "m" | "h"): string {
 	return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
 }
 
+/** Expiring saved resets outrank the usable/unusable color: red within 24 hours, yellow within 7 days. */
+function resetCreditsColor(resets: NonNullable<NonNullable<SegmentContext["usage"]>["resetCredits"]>): ThemeColor {
+	if (resets.expiring) return resets.expiring.tier === "imminent" ? "error" : "warning";
+	return resets.redeemableCount > 0 ? "success" : "warning";
+}
+
 const usageSegment: StatusLineSegment = {
 	id: "usage",
 	render(ctx) {
@@ -1309,7 +1315,8 @@ const usageSegment: StatusLineSegment = {
 				resetText += ` (${resets.redeemableCount} usable)`;
 			}
 			if (resets.expiryHours !== undefined) {
-				resetText += ` exp ${formatUsageReset(resets.expiryHours, "h")}`;
+				const expiring = resets.expiring ? `▲ ${resets.expiring.count} ` : "";
+				resetText += ` ${expiring}exp ${formatUsageReset(resets.expiryHours, "h")}`;
 			} else if (resets.expired) {
 				resetText += " expired";
 			}
@@ -1317,7 +1324,7 @@ const usageSegment: StatusLineSegment = {
 				const reason = truncateToWidth(sanitizeStatusText(resets.unavailableReason), TRUNCATE_LENGTHS.SHORT);
 				if (reason) resetText += ` ${reason}`;
 			}
-			parts.push(theme.fg(resets.redeemableCount > 0 ? "success" : "warning", resetText));
+			parts.push(theme.fg(resetCreditsColor(resets), resetText));
 		}
 		const content = withIcon(theme.icon.time, parts.join(theme.sep.dot));
 		return { content, visible: true };
@@ -1342,13 +1349,15 @@ const usageSegment: StatusLineSegment = {
 			const resets = u.resetCredits;
 			let resetText = `✦ ${resets.bankedCount}`;
 			if (resets.redeemableCount !== resets.bankedCount) resetText += ` (${resets.redeemableCount} usable)`;
-			if (resets.expiryHours !== undefined) resetText += ` exp ${formatUsageReset(resets.expiryHours, "h")}`;
-			else if (resets.expired) resetText += " expired";
+			if (resets.expiryHours !== undefined) {
+				const expiring = resets.expiring ? `▲ ${resets.expiring.count} ` : "";
+				resetText += ` ${expiring}exp ${formatUsageReset(resets.expiryHours, "h")}`;
+			} else if (resets.expired) resetText += " expired";
 			if (resets.redeemableCount === 0 && resets.unavailableReason) {
 				const reason = sanitizeStatusText(resets.unavailableReason);
 				if (reason) resetText += ` ${reason}`;
 			}
-			parts.push([span(resetText, resets.redeemableCount > 0 ? "success" : "warning")]);
+			parts.push([span(resetText, resetCreditsColor(resets))]);
 		}
 		const spans: TspSpan[] = [];
 		for (const part of parts) {

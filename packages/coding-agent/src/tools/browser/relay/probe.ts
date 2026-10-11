@@ -39,6 +39,8 @@ export type RelayWaitOutcome =
 	| "extension-gone"
 	/** An older relay server is still running. */
 	| "outdated-relay"
+	/** A compatible relay from an older OMP is ready and reports no CDP client connected to it. */
+	| "idle-older-relay"
 	/** The relay extension is older than the running server. */
 	| "outdated-extension";
 
@@ -47,7 +49,25 @@ export function relayVersionOf(parsed: object): string {
 	return "ompRelayVersion" in parsed && typeof parsed.ompRelayVersion === "string" ? parsed.ompRelayVersion : "";
 }
 
-function parseUnavailableInfo(body: string): RelayUnavailableInfo | null {
+/** CDP clients a parsed `/json/version` body (ready or waiting) reports; null for a relay too old to report them. */
+export function relayCdpClientsOf(parsed: object): number | null {
+	return "ompRelayCdpClients" in parsed && typeof parsed.ompRelayCdpClients === "number"
+		? parsed.ompRelayCdpClients
+		: null;
+}
+
+/** Whether a relay reporting `version` predates this OMP; one reporting none predates version markers. */
+export function isOlderRelayVersion(version: string): boolean {
+	if (version === "") return true;
+	try {
+		return Bun.semver.order(version, VERSION) < 0;
+	} catch {
+		// Unparseable: not provably older, so leave it to its owner.
+		return false;
+	}
+}
+
+function parseUnavailableInfo(body: string): Omit<RelayUnavailableInfo, "ompRelayCdpClients"> | null {
 	try {
 		const parsed: unknown = JSON.parse(body);
 		if (
@@ -93,6 +113,7 @@ function readyOutcome(body: string): RelayWaitOutcome {
 			if (relayVersionOf(parsed) !== VERSION) return "outdated-relay";
 			return "outdated-extension";
 		}
+		if (isOlderRelayVersion(relayVersionOf(parsed)) && relayCdpClientsOf(parsed) === 0) return "idle-older-relay";
 		return "ready";
 	} catch {
 		return "outdated-relay";
@@ -118,6 +139,8 @@ export async function waitForRelayExtension(cdpUrl: string, signal?: AbortSignal
 		if (response.status >= 200 && response.status < 300) return readyOutcome(response.body);
 		if (response.status !== 503) return "unreachable";
 		const info = parseUnavailableInfo(response.body);
+		// Past the dial window a relay from another version reads as outdated even
+		// with CDP clients connected: no extension, so no browser, is behind them.
 		staleRelay = info !== null && info.ompRelayVersion !== VERSION;
 		if (info && !info.extensionSeen) {
 			// Never connected: the window is measured from server start, not from now.

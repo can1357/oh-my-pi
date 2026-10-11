@@ -882,6 +882,35 @@ describe("Anthropic cache_control rejection fallback", () => {
 		expect(capture.betaHeaders[1]).toBe(`${CUSTOM_BETA},${PER_MESSAGE_EFFORT_BETA}`);
 	});
 
+	it("keeps a caller-header cache beta out of an injected client's legacy-compaction override", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const fetchImpl = createFetch(capture, ["reject", "ok"]);
+		// No control or effort beta: the legacy compaction edit is the first beta
+		// the override adds, so it alone decides which caller header seeds it.
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-ant-api-test",
+			baseURL: "https://injected.example/v1",
+			fetch: fetchImpl,
+		});
+
+		const message = await streamAnthropic(MODEL, CONTEXT, {
+			client,
+			headers: { "anthropic-beta": `${EXTENDED_CACHE_TTL_BETA},${CUSTOM_BETA}` },
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			onPayload: params =>
+				Object.assign({}, params, {
+					context_management: {
+						edits: [{ type: "compact_20260112", trigger: { type: "input_tokens", value: 50_000 } }],
+					},
+				}),
+		}).result();
+
+		expect(message.stopReason).toBe("stop");
+		expect(capture.betaHeaders[0]).toContain(EXTENDED_CACHE_TTL_BETA);
+		expect(capture.betaHeaders[1]).not.toContain(EXTENDED_CACHE_TTL_BETA);
+		expect(capture.betaHeaders[1]).toContain(CUSTOM_BETA);
+	});
+
 	it("cannot remove a cache beta baked into an injected client's own default headers", async () => {
 		const capture: Capture = { bodies: [], betaHeaders: [] };
 		const fetchImpl = createFetch(capture, ["reject", "ok"]);

@@ -1229,6 +1229,7 @@ describe("openai-completions compatibility", () => {
 			type: "thinking",
 			thinking: "inspect tool output",
 			thinkingSignature: "reasoning_text",
+			summary: false,
 		});
 
 		const compat = { ...model.compat, requiresReasoningContentForToolCalls: true };

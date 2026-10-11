@@ -301,8 +301,13 @@ export class RelayBridge {
 		return this.#extensionGoneSince === null ? null : Date.now() - this.#extensionGoneSince;
 	}
 
+	/** Downstream CDP clients (omp browser sessions, puppeteer) connected right now. */
+	get cdpClientCount(): number {
+		return this.#conns.size;
+	}
+
 	/** Payload for `GET /json/version`. */
-	versionInfo(wsUrl: string): Record<string, string> {
+	versionInfo(wsUrl: string): Record<string, string | number> {
 		const info = this.#lastHello()?.info;
 		let hasCompatibleExtension = false;
 		for (const instance of this.#instances.values()) {
@@ -322,6 +327,7 @@ export class RelayBridge {
 			ompRelayVersion: VERSION,
 			ompRelayDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
 			ompExtensionDiscardedTabsProtocol: String(hasCompatibleExtension ? DISCARDED_TABS_PROTOCOL_VERSION : 0),
+			ompRelayCdpClients: this.#conns.size,
 		};
 	}
 

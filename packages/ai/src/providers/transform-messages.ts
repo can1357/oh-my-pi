@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
 	Api,
@@ -10,7 +11,13 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "../types";
-import { isDemotedThinking, kDemotedThinking, kSyntheticUser, type SyntheticUserCarrier } from "../utils/block-symbols";
+import {
+	isDemotedThinking,
+	kCarriedReasoning,
+	kDemotedThinking,
+	kSyntheticUser,
+	type SyntheticUserCarrier,
+} from "../utils/block-symbols";
 
 const enum ToolCallStatus {
 	/** A tool result has already been emitted for this tool call; later duplicates must be skipped. */
@@ -394,6 +401,47 @@ function targetReadsForeignThinking(model: Model, compat: Model["compat"]): bool
 	return model.reasoning && compat.thinkingFormat === "zai";
 }
 
+/**
+ * Whether the target's encoder already replays the target's own plaintext
+ * reasoning in a native slot. Reasoning carried from another host of the same
+ * model (`carriesReasoning`) takes exactly that path, so this is derived from
+ * the flags the encoders branch on rather than declared per host:
+ * - chat completions writes a reasoning field or content part for thinking
+ *   blocks only under these flags; otherwise it drops them.
+ * - the Responses wire replays reasoning items unless history is filtered, and
+ *   hosts that require reasoning replay already receive id-less plaintext
+ *   items from omp (the `requiresReasoningContent*` safety net). OpenRouter's
+ *   chat fallback shares the tool-call flag.
+ * - Devin sends every turn's thinking in the prompt's `thinking` field.
+ * Anthropic-format targets that accept unsigned thinking already read it via
+ * `targetReadsForeignThinking`; Bedrock and Google reject or ignore unsigned
+ * reasoning, and Codex hosts no portable family.
+ */
+function targetReplaysPlaintextReasoning(model: Model, compat: Model["compat"]): boolean {
+	if (!model.reasoning || compat === undefined) return false;
+	if (model.api === "devin-agent") return true;
+	if (!("requiresReasoningContentForToolCalls" in compat)) return false;
+	switch (model.api) {
+		case "openai-completions":
+			return (
+				!compat.requiresThinkingAsText &&
+				(compat.mistralReasoningContentParts === true ||
+					compat.requiresReasoningContentForToolCalls ||
+					compat.thinkingFormat === "zai" ||
+					compat.replayReasoningContent)
+			);
+		case "openrouter":
+			return !compat.filterReasoningHistory && compat.requiresReasoningContentForToolCalls;
+		case "openai-responses":
+			return (
+				!compat.filterReasoningHistory &&
+				(compat.requiresReasoningContentForToolCalls || compat.requiresReasoningContentForAllAssistantTurns)
+			);
+		default:
+			return false;
+	}
+}
+
 const ANTHROPIC_TOOL_CALL_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 
 function isValidAnthropicToolCallId(id: string): boolean {
@@ -679,6 +727,7 @@ export function transformMessages<TApi extends Api>(
 			}
 		}
 	}
+	const targetHasReasoningSlot = targetReplaysPlaintextReasoning(model, targetCompat);
 	// First pass: transform messages (thinking blocks, tool call ID normalization)
 	const normalizedMessages = messages.map((msg, index) => {
 		// User and developer messages pass through unchanged
@@ -707,6 +756,24 @@ export function transformMessages<TApi extends Api>(
 				assistantMsg.provider === model.provider &&
 				assistantMsg.api === model.api &&
 				assistantMsg.model === model.id;
+			// The same model on another host (or another id of the same model):
+			// its full plaintext reasoning replays natively where the target has
+			// a native slot, exactly as the target replays its own turns. Errored
+			// turns keep the text fallback: Responses encoders skip their reasoning.
+			// A router's reported serving model is the identity that produced the
+			// reasoning, so it is what must match.
+			const carriesSameModelReasoning =
+				!isSameModel &&
+				assistantMsg.stopReason !== "error" &&
+				targetHasReasoningSlot &&
+				carriesReasoning(
+					{
+						provider: assistantMsg.provider,
+						api: assistantMsg.api,
+						model: assistantMsg.upstreamModel ?? assistantMsg.model,
+					},
+					model,
+				);
 
 			const isAnthropicTarget = isAnthropicMessagesModel(model);
 			// Anthropic's all-or-none contract on prior-turn thinking blocks
@@ -896,6 +963,13 @@ export function transformMessages<TApi extends Api>(
 					// canonical visible-text fallback without adding model context.
 					if (targetReadsForeignThinking(model, targetCompat)) {
 						return sanitized.thinkingSignature ? { ...sanitized, thinkingSignature: undefined } : sanitized;
+					}
+					// Same model from another host: keep the full trace natively, minus
+					// the signature and item id bound to the host that minted them.
+					// Only blocks their parser confirmed as the model's own trace carry;
+					// summaries and blocks of unknown provenance keep the text fallback.
+					if (carriesSameModelReasoning && sanitized.summary === false) {
+						return { type: "thinking" as const, thinking: sanitized.thinking, [kCarriedReasoning]: true };
 					}
 					// Other cross-API targets (openai-responses encrypted blobs, google
 					// thought parts, anthropic-target from a non-Anthropic source, or any

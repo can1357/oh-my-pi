@@ -56,6 +56,7 @@ await win.click(120, 48, button="right")
 - After changing the UI, verify the expected state with fresh AX evidence or a screenshot. In a run, use `wait(predicate, {timeout, interval})` for a specific state rather than assuming a fixed sleep means success.
 - Desktop-root pointer helpers (`computer.click`, `computer.move`, …) drive the user's real pointer; act through window handles.
 - Wayland: per-window native input and `.raise()` are unavailable; use AX, or desktop input after focusing the target yourself.
+- macOS `screenLocked` (in `capabilities()`, a screenshot result, or a run's leading `Note:`): a display capture shows the lock screen and a window capture that window's last frame; keystrokes, takeover and AX fail until someone unlocks, while background clicks still reach the app. Report the lock rather than retrying keys.
 - Screenshots save full resolution to a temp path; use `{ silent: true }` in loops.
 </rules>
 

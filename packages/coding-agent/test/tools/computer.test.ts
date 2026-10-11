@@ -7,11 +7,12 @@ import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-age
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { computerApproval, createComputerPrelude } from "@oh-my-pi/pi-coding-agent/tools/computer";
 import { isReadOnlyComputerCall, renderComputerCall } from "@oh-my-pi/pi-coding-agent/tools/computer/call";
-import type {
-	ComputerSessionSnapshot,
-	ComputerWorkerInbound,
-	ComputerWorkerOutbound,
-	ComputerWorkerTransport,
+import {
+	type ComputerSessionSnapshot,
+	type ComputerWorkerInbound,
+	type ComputerWorkerOutbound,
+	type ComputerWorkerTransport,
+	SCREEN_LOCKED_CAPTURE_NOTE,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/protocol";
 import {
 	type ComputerController,
@@ -28,6 +29,7 @@ import type {
 	DesktopCapture,
 	DesktopDisplay,
 	DesktopPoint,
+	DesktopScreenState,
 	DesktopWindow,
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
@@ -59,6 +61,8 @@ const capabilities: DesktopCapabilities = {
 	menus: true,
 	heldInput: true,
 	spaces: true,
+	screenLocked: false,
+	displayAsleep: false,
 };
 
 const display: DesktopDisplay = {
@@ -103,7 +107,15 @@ const axNode: AxNode = {
 };
 
 class FakeNativeSession implements NativeDesktopSession {
-	readonly capabilities = capabilities;
+	/** Lock and sleep state reported by captures, capabilities and screenState, as the native session reads it live. */
+	screenLocked = false;
+	displayAsleep = false;
+	get capabilities(): DesktopCapabilities {
+		return { ...capabilities, screenLocked: this.screenLocked, displayAsleep: this.displayAsleep };
+	}
+	get screenState(): DesktopScreenState {
+		return { screenLocked: this.screenLocked, displayAsleep: this.displayAsleep };
+	}
 	clickCount = 0;
 	closeCount = 0;
 	cancelCount = 0;
@@ -133,6 +145,7 @@ class FakeNativeSession implements NativeDesktopSession {
 			target,
 			displays: [display],
 			backend: "fake",
+			screenLocked: this.screenLocked,
 		};
 	}
 	async captureRegion(_target: string, _region: CaptureRegion): Promise<DesktopCapture> {
@@ -1166,6 +1179,124 @@ describe("computer worker round trips", () => {
 			sourceWidth: 128,
 			sourceHeight: 64,
 		});
+	});
+
+	it("marks a screenshot taken behind the lock screen, and only then", async () => {
+		for (const locked of [true, false]) {
+			const transport = new MemoryTransport();
+			const native = new FakeNativeSession();
+			native.screenLocked = locked;
+			new ComputerWorkerCore(transport, () => native);
+
+			const result = await runWorker(transport, `locked-${locked}`, "return await desktop.screenshot()");
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			const [caption] = result.payload.displays.filter(block => block.type === "text");
+			const lines = caption?.type === "text" ? caption.text.split("\n") : [];
+			if (locked) {
+				expect(lines).toHaveLength(2);
+				expect(lines[1]).toBe(SCREEN_LOCKED_CAPTURE_NOTE);
+				expect(result.payload.screenshots[0]?.screenLocked).toBe(true);
+				expect(result.payload.returnValue).toMatchObject({ screenLocked: true });
+			} else {
+				expect(lines).toHaveLength(1);
+				expect(result.payload.screenshots[0]).not.toHaveProperty("screenLocked");
+				expect(result.payload.returnValue).not.toHaveProperty("screenLocked");
+			}
+		}
+	});
+
+	it("tells the model a run ended on a locked screen without refusing its input", async () => {
+		for (const locked of [true, false]) {
+			const session = toolSession();
+			const native = new FakeNativeSession();
+			native.screenLocked = locked;
+			const prelude = workerPrelude(session, native);
+			const result = await prelude.invoke(
+				{ action: "run", code: "await desktop.screenshot({ silent: true }); await desktop.click(1, 2)" },
+				{ session, toolCallId: `locked-run-${locked}`, signal: new AbortController().signal },
+			);
+			expect(native.clickCount).toBe(1);
+			const notes = result.content.filter(block => block.type === "text" && block.text.startsWith("Note: "));
+			if (locked) {
+				expect(result.content[0]).toMatchObject({
+					type: "text",
+					text: expect.stringMatching(/^Note: when this run ended the screen is locked\. /),
+				});
+			} else {
+				expect(notes).toEqual([]);
+			}
+		}
+	});
+
+	it("keeps a failed run's own error first and adds the lock state after it", async () => {
+		for (const locked of [true, false]) {
+			const transport = new MemoryTransport();
+			const native = new FakeNativeSession();
+			native.screenLocked = locked;
+			new ComputerWorkerCore(transport, () => native);
+			const result = await runWorker(
+				transport,
+				`failed-${locked}`,
+				'await desktop.screenshot({ silent: true }); await desktop.click(1, 2); assert(false, "verification failed")',
+			);
+			expect(native.clickCount).toBe(1);
+			expect(result.ok).toBe(false);
+			if (result.ok) return;
+			const [first, ...rest] = result.error.message.split("\n");
+			expect(first).toBe("verification failed");
+			if (locked) expect(rest.join("\n")).toMatch(/^Note: when this run ended the screen is locked\. /);
+			else expect(rest).toEqual([]);
+		}
+	});
+
+	it("scopes a display-sleep notice to the session's display", async () => {
+		const session = toolSession();
+		const native = new FakeNativeSession();
+		native.displayAsleep = true;
+		const prelude = workerPrelude(session, native);
+		const result = await prelude.invoke(
+			{ action: "run", code: "await desktop.click(1, 2)" },
+			{ session, toolCallId: "asleep-run", signal: new AbortController().signal },
+		);
+		const [note] = result.content;
+		const text = note?.type === "text" ? note.text : "";
+		expect(text).toMatch(/^Note: when this run ended the session's display is asleep\. /);
+		expect(text).toContain("Nothing on that display can be captured or clicked until it wakes.");
+		expect(text).toContain("`computer.display`");
+	});
+
+	it("adds the lock state to a run timed out by a hung native call without reading capabilities", async () => {
+		const started = Promise.withResolvers<void>();
+		const hung = Promise.withResolvers<DesktopCapture>();
+		class HungSession extends FakeNativeSession {
+			/** Native capabilities reads queue behind the hung call when no snapshot exists. */
+			blockingReads = 0;
+			override get capabilities(): DesktopCapabilities {
+				this.blockingReads += 1;
+				return super.capabilities;
+			}
+			override async capture(): Promise<DesktopCapture> {
+				started.resolve();
+				// Stuck in the OS: cancellation does not settle it.
+				return hung.promise;
+			}
+		}
+		const native = new HungSession();
+		native.screenLocked = true;
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const pending = runWorker(transport, "hung", "await desktop.screenshot({ silent: true })", false, 50);
+		await started.promise;
+		const result = await pending;
+		// Let the script's runtime finish so later tests can start theirs.
+		hung.reject(new Error("released"));
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		const [first, ...rest] = result.error.message.split("\n");
+		expect(first).toBe("Computer code execution timed out after 50ms");
+		expect(rest.join("\n")).toMatch(/^Note: when this run ended the screen is locked\. /);
+		expect(native.blockingReads).toBe(0);
 	});
 
 	it("blocks read-only click after capture before invoking native input", async () => {

@@ -109,6 +109,7 @@ import {
 	getRetryFallbackRevertPolicy,
 	parseRetryFallbackSelector,
 	type RetryFallbackSelector,
+	retryFallbackAdmits,
 } from "./retry-fallback-chains";
 import { getOpenAiRemoteCompactionPayload } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
@@ -2153,6 +2154,7 @@ export class SessionAdvisors {
 					)
 				: Promise.resolve(false);
 		if (!retrySettings.enabled || !retrySettings.modelFallback) return declineUsageLimit();
+		if (!retryFallbackAdmits(retrySettings.fallbackOn, usageLimit)) return declineUsageLimit();
 		// Same two-key walk the main loop uses: the chain that owns this advisor's
 		// active fallback, then the chain the current model owns. Without the
 		// second key an advisor that lands on the last entry of one chain never

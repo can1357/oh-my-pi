@@ -8,6 +8,7 @@ import { factoryModel, workosJwt } from "./helpers/factory-droid";
 import {
 	NATIVE_CASES,
 	type NativeCapture,
+	type NativeCase,
 	type NativeRequest,
 	projectNativeRequest,
 } from "./helpers/factory-droid-native";
@@ -58,13 +59,36 @@ function followUp(capture: NativeCapture, thinking: boolean): Message[] {
 	];
 }
 
+/**
+ * A primed case resumes after the round trip ran with reasoning on: the
+ * thinking-led tool call, the answer, and a new user turn.
+ */
+function resumed(capture: NativeCapture): Message[] {
+	const history = followUp(capture, true);
+	const toolTurn = history[1];
+	if (toolTurn.role !== "assistant") throw new Error("expected the tool-call turn");
+	return [
+		...history,
+		{
+			...toolTurn,
+			content: [
+				{ type: "thinking", thinking: "Answer it.", thinkingSignature: "sig-2" },
+				{ type: "text", text: "nonce" },
+			],
+			stopReason: "stop",
+			timestamp: 4,
+		},
+		{ role: "user", content: "Reply with exactly: done", timestamp: 5 },
+	];
+}
+
 async function encode(capture: NativeCapture, turn: 0 | 1): Promise<NativeRequest | undefined> {
 	const model = factoryModel(capture.model, [capture.upstream]);
 	// The capture pinned each upstream through live routing.
 	model.factoryDroidRoutingSource = "configured_order";
 	const disabled = capture.effort === "off" || capture.effort === "none";
 	const context: Context = {
-		messages: turn === 0 ? opening : followUp(capture, !disabled),
+		messages: capture.prime ? resumed(capture) : turn === 0 ? opening : followUp(capture, !disabled),
 		// `bash` is one of the tools omp's Anthropic encoder marks strict; native never does.
 		tools: [
 			{ name: "Read", description: "Read a file", parameters: type({ path: "string" }) },
@@ -81,6 +105,7 @@ async function encode(capture: NativeCapture, turn: 0 | 1): Promise<NativeReques
 				new URL(String(url)).pathname,
 				Object.fromEntries(new Headers(init?.headers)),
 				JSON.parse(String(init?.body)),
+				{ history: capture.prime !== undefined },
 			);
 			return Response.json({ error: { message: "captured" } }, { status: 400 });
 		},
@@ -90,14 +115,19 @@ async function encode(capture: NativeCapture, turn: 0 | 1): Promise<NativeReques
 
 describe("Factory Droid native request parity", () => {
 	it("covers every declared case", () => {
-		expect(captures.map(({ model, upstream, effort }) => ({ model, upstream, effort }))).toEqual([...NATIVE_CASES]);
+		expect(captures.map(({ requests: _requests, ...testCase }): NativeCase => testCase)).toEqual([...NATIVE_CASES]);
 	});
 
-	it.each(captures.map(capture => [`${capture.model}@${capture.upstream} ${capture.effort}`, capture] as const))(
-		"%s matches the native dialect on both turns",
-		async (_label, capture) => {
-			expect(await encode(capture, 0)).toEqual(capture.requests[0]);
-			expect(await encode(capture, 1)).toEqual(capture.requests[1]);
-		},
-	);
+	it.each(
+		captures.map(
+			capture =>
+				[
+					`${capture.model}@${capture.upstream} ${capture.effort}${capture.prime ? ` after ${capture.prime}` : ""}`,
+					capture,
+				] as const,
+		),
+	)("%s matches the native dialect on every recorded turn", async (_label, capture) => {
+		expect(await encode(capture, 0)).toEqual(capture.requests[0]);
+		if (!capture.prime) expect(await encode(capture, 1)).toEqual(capture.requests[1]);
+	});
 });

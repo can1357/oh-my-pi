@@ -62,6 +62,10 @@ impl MacCapture {
 		Self { selector }
 	}
 
+	pub(super) const fn selector(&self) -> &DisplaySelector {
+		&self.selector
+	}
+
 	#[allow(clippy::unused_self, reason = "keeps discovery on the backend capture object")]
 	pub(super) fn displays(&self) -> CoreResult<Vec<DesktopDisplay>> {
 		require_capture_permission()?;

@@ -18,6 +18,7 @@ import type {
 	DesktopCapture,
 	DesktopDisplay,
 	DesktopPoint,
+	DesktopScreenState,
 	DesktopSessionOptions,
 	DesktopWindow,
 	PointerOptions,
@@ -35,19 +36,23 @@ import {
 } from "../run-scope";
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type {
-	ComputerScreenshot,
-	ComputerSessionSnapshot,
-	ComputerWorkerInbound,
-	ComputerWorkerTransport,
-	RunErrorPayload,
-	ToolReply,
+import {
+	type ComputerScreenshot,
+	type ComputerSessionSnapshot,
+	type ComputerWorkerInbound,
+	type ComputerWorkerTransport,
+	type RunErrorPayload,
+	SCREEN_LOCKED_CAPTURE_NOTE,
+	screenStateNotice,
+	type ToolReply,
 } from "./protocol";
 import { describeWindowMiss } from "./window-miss";
 
 /** Native desktop operations consumed by the script runtime. */
 export interface NativeDesktopSession {
 	readonly capabilities: DesktopCapabilities;
+	/** Lock and display-sleep state, read without waiting behind queued native work. */
+	readonly screenState: DesktopScreenState;
 	listDisplays(): Promise<DesktopDisplay[]>;
 	listWindows(): Promise<DesktopWindow[]>;
 	capture(target: string, caps?: { maxWidth?: number; maxHeight?: number } | null): Promise<DesktopCapture>;
@@ -107,7 +112,7 @@ type InputOptions = { takeover?: boolean };
 type ScreenshotOptions = { silent?: boolean };
 type ScreenshotResult = Pick<
 	ComputerScreenshot,
-	"path" | "width" | "height" | "coordinateWidth" | "coordinateHeight" | "region"
+	"path" | "width" | "height" | "coordinateWidth" | "coordinateHeight" | "region" | "screenLocked"
 >;
 type ClickOptions = InputOptions & { button?: string; count?: number; modifiers?: string[] };
 type DragOptions = InputOptions & { modifiers?: string[]; keys?: string[] };
@@ -282,6 +287,7 @@ async function emitScreenshot(
 		coordinateHeight: frame.coordinateHeight,
 		...(frame.region ? { region: frame.region } : {}),
 	};
+	if (frame.screenLocked) result.screenLocked = true;
 	const scaled = frame.width !== frame.sourceWidth || frame.height !== frame.sourceHeight;
 	context.screenshots.push({
 		...result,
@@ -292,11 +298,12 @@ async function emitScreenshot(
 	if (!options?.silent) {
 		const dimensions = `${frame.width}×${frame.height}${scaled ? ` (scaled from ${frame.sourceWidth}×${frame.sourceHeight})` : ""}`;
 		const coordinates = `coordinateWidth=${frame.coordinateWidth} coordinateHeight=${frame.coordinateHeight}`;
+		const captured = frame.region
+			? `zoom ${frame.target} ${dimensions}; region=${JSON.stringify(frame.region)}; ${coordinates}; use the base full screenshot coordinates for input, not zoom pixels → ${destination}`
+			: `screenshot ${frame.target} ${dimensions}; ${coordinates} → ${destination}`;
 		context.output.push({
 			type: "text",
-			text: frame.region
-				? `zoom ${frame.target} ${dimensions}; region=${JSON.stringify(frame.region)}; ${coordinates}; use the base full screenshot coordinates for input, not zoom pixels → ${destination}`
-				: `screenshot ${frame.target} ${dimensions}; ${coordinates} → ${destination}`,
+			text: frame.screenLocked ? `${captured}\n${SCREEN_LOCKED_CAPTURE_NOTE}` : captured,
 		});
 		context.output.push({
 			type: "image",
@@ -851,7 +858,12 @@ export class ComputerWorkerCore {
 			if (this.#active?.id === message.id) this.#active = null;
 		}
 		if (failure !== undefined) {
-			this.#transport.send({ type: "result", id: message.id, ok: false, error: errorPayload(failure.error) });
+			this.#transport.send({
+				type: "result",
+				id: message.id,
+				ok: false,
+				error: this.#withScreenState(errorPayload(failure.error)),
+			});
 			return;
 		}
 		if (completed) {
@@ -874,6 +886,22 @@ export class ComputerWorkerCore {
 				payload: { displays: output.finish(), returnValue: cloneSafe(returnValue), screenshots, capabilities },
 			});
 		}
+	}
+
+	/**
+	 * A run that fails while the macOS screen is locked or the display asleep
+	 * says so after its own message, which stays first and intact. Aborts and
+	 * sessions that never started are returned unchanged. The state is read
+	 * without queuing, since the failure may be a native request that hangs.
+	 */
+	#withScreenState(payload: RunErrorPayload): RunErrorPayload {
+		if (payload.isAbort || !this.#session) return payload;
+		const notice = screenStateNotice(this.#session.screenState);
+		if (!notice) return payload;
+		const message = payload.message ? `${payload.message}\n${notice}` : notice;
+		const stack =
+			payload.stack && payload.message ? payload.stack.replace(payload.message, () => message) : payload.stack;
+		return { ...payload, message, stack };
 	}
 
 	/**

@@ -1,4 +1,5 @@
 import { scheduler } from "node:timers/promises";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	$flag,
 	cloneJsonTree,
@@ -55,10 +56,10 @@ import {
 } from "../utils/tool-choice";
 import { compactGrammarDefinition } from "./grammar";
 import {
-	getOpenAIEffortControlState,
-	releaseOpenAIEffortControlSession,
 	type OpenAIEffortControlState,
 	planStableOpenAIEffort,
+	releaseOpenAIEffortControlSession,
+	resolveOpenAIEffortControlState,
 } from "./openai-configuration-update";
 import {
 	applyOpenAIReasoningEffortFallback,
@@ -411,6 +412,27 @@ interface OpenAIResponsesProviderSessionState
 
 /** Wire efforts a `configuration_update` can carry: every real tier, never `none`/null. */
 type ResponsesStableEffort = Exclude<ReasoningEffort, "none" | null>;
+
+const RESPONSES_STABLE_EFFORTS: Record<ResponsesStableEffort, true> = {
+	minimal: true,
+	low: true,
+	medium: true,
+	high: true,
+	xhigh: true,
+	max: true,
+};
+
+function isResponsesStableEffort(effort: string): effort is ResponsesStableEffort {
+	return Object.hasOwn(RESPONSES_STABLE_EFFORTS, effort);
+}
+
+/** Wire `reasoning.effort` for `level` on this model: catalog effort maps first, else the level itself. */
+function mapResponsesEffort(
+	model: Model<"openai-responses">,
+	level: Effort | NonNullable<OpenAIResponsesOptions["reasoning"]>,
+): string {
+	return model.compat.reasoningEffortMap?.[level] ?? model.thinking?.effortMap?.[level] ?? level;
+}
 
 interface OpenAIResponsesChainState {
 	sessionId: string;
@@ -1709,10 +1731,7 @@ export function buildParams(
 	applyResponsesCompatPolicy(params, reasoningPolicy, {
 		reasoningSummary: resolveReasoningSummaryOption(model, options),
 		forceReasoningOff: options?.forceReasoningOff,
-		mapEffort: effort =>
-			model.compat.reasoningEffortMap?.[effort as NonNullable<OpenAIResponsesOptions["reasoning"]>] ??
-			model.thinking?.effortMap?.[effort as NonNullable<OpenAIResponsesOptions["reasoning"]>] ??
-			effort,
+		mapEffort: effort => mapResponsesEffort(model, effort as NonNullable<OpenAIResponsesOptions["reasoning"]>),
 	});
 	// Catalog pro aliases (`gpt-5.6-*-pro`): merge AFTER the compat policy so the
 	// mode survives every policy branch (disabled/omitted effort included) while
@@ -1748,9 +1767,10 @@ export function buildParams(
 
 /**
  * Keep the request-level effort byte-stable across a conversation and carry
- * later changes as `configuration_update` items (GPT-6 Astra). Requires a
- * routing session id and provider session state to remember the baseline;
- * without them every request stands alone and sends its own effort.
+ * later changes as `configuration_update` items (GPT-6 family, standard
+ * reasoning mode). Requires a routing session id and provider session state to
+ * remember the baseline; without them every request stands alone and sends its
+ * own effort.
  */
 function applyResponsesStableEffort(
 	model: Model<"openai-responses">,
@@ -1759,19 +1779,34 @@ function applyResponsesStableEffort(
 	options: OpenAIResponsesOptions | undefined,
 	providerSessionState: OpenAIResponsesProviderSessionState | undefined,
 ): void {
-	if (!model.compat.supportsConfigurationUpdate || !providerSessionState) return;
+	if (!model.compat.supportsConfigurationUpdate || model.reasoningMode === "pro" || !providerSessionState) return;
 	const reasoning = params.reasoning;
 	if (!reasoning || !("effort" in reasoning)) return;
 	const effort = reasoning.effort;
 	if (effort === undefined || effort === null || effort === "none") return;
 	const sessionId = getOpenAIResponsesRoutingSessionId(options);
 	if (!sessionId) return;
-	const state = getOpenAIEffortControlState(
+	const state = resolveOpenAIEffortControlState(
 		providerSessionState.effortControls,
-		`${model.baseUrl ?? ""}\u0000${model.id}\u0000${sessionId}`,
+		id => `${model.baseUrl ?? ""}\u0000${model.id}\u0000${id}`,
 		sessionId,
+		normalizeOpenAIPromptCacheKey(options?.parentSessionId),
 	);
-	params.reasoning = { ...reasoning, effort: planStableOpenAIEffort(state, input, effort) };
+	params.reasoning = {
+		...reasoning,
+		effort: planStableOpenAIEffort(state, input, effort, minimizedResponsesEffort(model, options)),
+	};
+}
+
+/** The model's lowest effort on the wire when the caller asked to minimize it (`minimizeEffort`). */
+function minimizedResponsesEffort(
+	model: Model<"openai-responses">,
+	options: OpenAIResponsesOptions | undefined,
+): ResponsesStableEffort | undefined {
+	const lowest = options?.minimizeEffort ? model.thinking?.efforts[0] : undefined;
+	if (lowest === undefined) return undefined;
+	const wire = mapResponsesEffort(model, lowest);
+	return isResponsesStableEffort(wire) ? wire : undefined;
 }
 
 /**

@@ -80,6 +80,8 @@ impl Backend for Win32Backend {
 			input_permission: "granted".to_string(),
 			ax_permission: "granted".to_string(),
 			display_count,
+			screen_locked: false,
+			display_asleep: false,
 		}
 	}
 

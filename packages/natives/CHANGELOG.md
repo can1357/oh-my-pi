@@ -5,12 +5,14 @@
 ### Added
 
 - Added `applyBinaryPatch(oldPath, patchPath, outPath)`, which applies an HDiffPatch single-stream delta patch (zstd or uncompressed) to a file
+- macOS desktop sessions keep the display awake while in use (released five minutes after the last call or on close); capabilities report `screenLocked`/`displayAsleep`, `screenState` reads both without waiting on queued work, captures carry `screenLocked`, and failures name the state ([#15188](https://github.com/can1357/oh-my-pi/pull/15188) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
 - Sped up external commands in the embedded shell on Linux (glibc 2.29+) by spawning them without copying the host's memory (~9 ms → ~0.8 ms per launch at ~450 MB RSS) ([#14847](https://github.com/can1357/oh-my-pi/issues/14847), [#14858](https://github.com/can1357/oh-my-pi/pull/14858) by [@farnoy](https://github.com/farnoy))
 - Reduced macOS computer-use screenshot latency by about 35 ms per window capture; a machine holding thousands of off-screen windows no longer takes seconds per screenshot ([#15291](https://github.com/can1357/oh-my-pi/pull/15291) by [@will-bogusz](https://github.com/will-bogusz))
 - `grep()` and `search()` cut a matching line wider than `maxColumns` around its first match, marking each cut side with `...`, and report that match's character column in `column` ([#15278](https://github.com/can1357/oh-my-pi/pull/15278) by [@will-bogusz](https://github.com/will-bogusz))
+- Sped up macOS accessibility reads (`ax()`, `find()` and single-element reads) by fetching each element's attributes in one round trip to the app ([#15275](https://github.com/can1357/oh-my-pi/pull/15275) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 

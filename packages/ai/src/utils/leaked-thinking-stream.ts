@@ -23,7 +23,7 @@
  * fences, so wrapping a provider that already heals (or wrapping twice) is a
  * harmless pass-through. Signatures are load-bearing for Google/Gemini/Vertex
  * thought round-tripping, so text sub-blocks carry the source `textSignature`,
- * forwarded thinking blocks their `thinkingSignature`, and forwarded tool calls
+ * forwarded thinking blocks their `thinkingSignature` and `summary` state, and forwarded tool calls
  * their `thoughtSignature`.
  *
  * Modeled on {@link wrapInbandToolStream} / `InbandStreamProjector` in
@@ -69,6 +69,12 @@ function syncToolCall(target: StreamingToolCall, source: StreamingToolCall): voi
 	copyCursorExecResolved(target, source);
 }
 
+/** Copy the replay-relevant state a source thinking block has gained so far. */
+function adoptThinkingState(target: ThinkingContent, source: ThinkingContent | undefined): void {
+	if (source?.thinkingSignature !== undefined) target.thinkingSignature = source.thinkingSignature;
+	if (source?.summary !== undefined) target.summary = source.summary;
+}
+
 /**
  * Wrap a provider stream so leaked reasoning fences are healed into thinking
  * blocks live, for every provider. Returns a new stream that re-projects the
@@ -102,19 +108,12 @@ export function wrapLeakedThinkingStream(inner: AssistantMessageEventStream): As
 					case "thinking_delta": {
 						projector ??= new LeakedThinkingProjector(out, event.partial);
 						const block = event.partial.content[event.contentIndex];
-						projector.thinking(
-							event.contentIndex,
-							event.delta,
-							block?.type === "thinking" ? block.thinkingSignature : undefined,
-						);
+						projector.thinking(event.contentIndex, event.delta, block?.type === "thinking" ? block : undefined);
 						break;
 					}
 					case "thinking_end": {
 						const block = event.partial.content[event.contentIndex];
-						projector?.thinkingEnd(
-							event.contentIndex,
-							block?.type === "thinking" ? block.thinkingSignature : undefined,
-						);
+						projector?.thinkingEnd(event.contentIndex, block?.type === "thinking" ? block : undefined);
 						break;
 					}
 					case "image_end":
@@ -217,8 +216,8 @@ class LeakedThinkingProjector {
 		this.#apply(this.#healer.feed(delta), this.#lastTextSignature, srcIndex);
 	}
 
-	/** Forward a native thinking delta, preserving its source block identity and signature. */
-	thinking(srcIndex: number, delta: string, signature: string | undefined): void {
+	/** Forward a native thinking delta, preserving its source block identity, signature and summary state. */
+	thinking(srcIndex: number, delta: string, source: ThinkingContent | undefined): void {
 		let index = this.#thinkingBlocks.get(srcIndex);
 		if (index === undefined) {
 			if (this.#thinking && this.#pendingThinkingEnds.has(this.#thinking.index)) this.#closeThinking();
@@ -228,7 +227,7 @@ class LeakedThinkingProjector {
 		}
 		const block = this.#partial.content[index] as ThinkingContent;
 		block.thinking += delta;
-		if (signature !== undefined) block.thinkingSignature = signature;
+		adoptThinkingState(block, source);
 		this.#out.push({ type: "thinking_delta", contentIndex: index, delta, partial: this.#partial });
 	}
 
@@ -244,15 +243,13 @@ class LeakedThinkingProjector {
 	 * every current-turn function-call replay unsigned, which Gemini 3 punishes
 	 * with empty stops and `server_error: stream closed with reason: error`.
 	 */
-	thinkingEnd(srcIndex: number, signature: string | undefined): void {
+	thinkingEnd(srcIndex: number, source: ThinkingContent | undefined): void {
 		const index = this.#thinkingBlocks.get(srcIndex);
 		if (index === undefined) {
-			if (signature) this.#projectSignedThinking(srcIndex, "", signature);
+			if (source?.thinkingSignature) this.#projectSignedThinking(srcIndex, "", source);
 			return;
 		}
-		if (signature !== undefined) {
-			(this.#partial.content[index] as ThinkingContent).thinkingSignature = signature;
-		}
+		adoptThinkingState(this.#partial.content[index] as ThinkingContent, source);
 		if (!this.#pendingThinkingEnds.delete(index)) return;
 		if (this.#thinking?.index === index) this.#thinking = undefined;
 		this.#emitThinkingEnd(index);
@@ -264,11 +261,13 @@ class LeakedThinkingProjector {
 	 * semantics as {@link toolStart}) so block order survives for replay —
 	 * the signature item must precede the function call it signs.
 	 */
-	#projectSignedThinking(srcIndex: number, thinking: string, signature: string): void {
+	#projectSignedThinking(srcIndex: number, thinking: string, source: ThinkingContent): void {
 		this.#flushHealer();
 		this.#closeText();
 		this.#closeThinking();
-		this.#partial.content.push({ type: "thinking", thinking, thinkingSignature: signature });
+		const block: ThinkingContent = { type: "thinking", thinking };
+		adoptThinkingState(block, source);
+		this.#partial.content.push(block);
 		const index = this.#partial.content.length - 1;
 		this.#anchor(index, srcIndex);
 		this.#thinkingBlocks.set(srcIndex, index);
@@ -361,7 +360,7 @@ class LeakedThinkingProjector {
 	finish(message: AssistantMessage): AssistantMessage["content"] {
 		for (const [srcIndex] of this.#thinkingBlocks) {
 			const block = message.content[srcIndex];
-			this.thinkingEnd(srcIndex, block?.type === "thinking" ? block.thinkingSignature : undefined);
+			this.thinkingEnd(srcIndex, block?.type === "thinking" ? block : undefined);
 		}
 		// Safety net: signature-bearing thinking blocks whose events never
 		// reached the projector at all (e.g. a terminal message assembled from
@@ -371,7 +370,7 @@ class LeakedThinkingProjector {
 			const block = message.content[srcIndex];
 			if (block?.type !== "thinking" || !block.thinkingSignature) continue;
 			if (this.#thinkingBlocks.has(srcIndex)) continue;
-			this.#projectSignedThinking(srcIndex, block.thinking, block.thinkingSignature);
+			this.#projectSignedThinking(srcIndex, block.thinking, block);
 		}
 		for (let srcIndex = 0; srcIndex < message.content.length; srcIndex++) {
 			const block = message.content[srcIndex];

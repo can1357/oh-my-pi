@@ -143,6 +143,8 @@ interface ComputerScreenshotResult {
 	coordinateHeight: number;
 	/** Captured rectangle in the full screenshot coordinate frame; absent for full screenshots. */
 	region?: CaptureRegion;
+	/** macOS lock screen was up: a display capture shows it; a window capture shows that window's last frame. */
+	screenLocked?: true;
 }
 
 /** Native desktop backend and permission state. */
@@ -169,6 +171,10 @@ interface ComputerCapabilities {
 	menus: boolean;
 	heldInput: boolean;
 	spaces: boolean;
+	/** macOS lock screen is up: captures show it, and keystrokes, takeover and AX actions fail until someone unlocks. */
+	screenLocked: boolean;
+	/** macOS session display is asleep (the display id the session was opened on, else every display): nothing can be captured or clicked there until it wakes. */
+	displayAsleep: boolean;
 }
 
 /** Live accessibility element resolved from a snapshot ref; expired refs throw `StaleRef`. */

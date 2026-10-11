@@ -2367,6 +2367,146 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
+	it("retries an advisor's transient error on its own model under retry.fallbackOn usage-limit", async () => {
+		const mainModel = getBundledModel("openai", "gpt-4o-mini");
+		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const advisorFallback = getBundledModel("google", "gemini-2.5-flash");
+		if (!mainModel || !advisorPrimary || !advisorFallback) {
+			throw new Error("Expected bundled advisor fallback models to exist");
+		}
+
+		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const advisorMock = createMockModel();
+		const requestedAdvisorModels: string[] = [];
+		const secondAdvisorRequest = Promise.withResolvers<void>();
+		const advisorPrimarySelector = `${advisorPrimary.provider}/${advisorPrimary.id}`;
+		const advisorRoleSelector = `${advisorPrimarySelector}:high`;
+		const advisorFallbackSelector = `${advisorFallback.provider}/${advisorFallback.id}`;
+
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: mainModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mainMock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackOn": "usage-limit",
+			"retry.fallbackChains": {
+				advisor: [advisorFallbackSelector],
+			},
+			"advisor.syncBacklog": "1",
+		});
+		settings.setModelRole("commit", `${mainModel.provider}/${mainModel.id}`);
+		settings.setModelRole("advisor", advisorRoleSelector);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "transient-test", model: advisorRoleSelector }],
+			advisorStreamFn: (model, context, options) => {
+				requestedAdvisorModels.push(`${model.provider}/${model.id}`);
+				if (requestedAdvisorModels.length === 1) {
+					advisorMock.push({ stopReason: "error", errorMessage: "503 Service Unavailable" });
+				} else {
+					advisorMock.push({ content: ["Advisor recovered"] });
+					secondAdvisorRequest.resolve();
+				}
+				return advisorMock.stream(model, context, options);
+			},
+		});
+
+		session.setAdvisorEnabled(true);
+		await session.prompt("Complete one primary turn");
+		await session.waitForIdle();
+		await secondAdvisorRequest.promise;
+
+		expect(requestedAdvisorModels).toEqual([advisorPrimarySelector, advisorPrimarySelector]);
+		expect(session.getAdvisorAgent()?.state.model).toMatchObject({
+			provider: advisorPrimary.provider,
+			id: advisorPrimary.id,
+		});
+	});
+
+	it("pauses an advisor on a usage limit instead of switching under retry.fallbackOn except-usage-limit", async () => {
+		vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const mainModel = getBundledModel("openai", "gpt-4o-mini");
+		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const advisorFallback = getBundledModel("google", "gemini-2.5-flash");
+		if (!mainModel || !advisorPrimary || !advisorFallback) {
+			throw new Error("Expected bundled advisor fallback models to exist");
+		}
+
+		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const advisorMock = createMockModel();
+		const requestedAdvisorModels: string[] = [];
+		const advisorYielded = Promise.withResolvers<void>();
+		const advisorPrimarySelector = `${advisorPrimary.provider}/${advisorPrimary.id}`;
+		const advisorRoleSelector = `${advisorPrimarySelector}:high`;
+		const advisorFallbackSelector = `${advisorFallback.provider}/${advisorFallback.id}`;
+
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: mainModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mainMock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackOn": "except-usage-limit",
+			"retry.fallbackChains": {
+				advisor: [advisorFallbackSelector],
+			},
+			"advisor.syncBacklog": "1",
+		});
+		settings.setModelRole("commit", `${mainModel.provider}/${mainModel.id}`);
+		settings.setModelRole("advisor", advisorRoleSelector);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "quota-test", model: advisorRoleSelector }],
+			advisorStreamFn: (model, context, options) => {
+				requestedAdvisorModels.push(`${model.provider}/${model.id}`);
+				advisorMock.push({ stopReason: "error", errorMessage: "429 usage_limit_reached" });
+				return advisorMock.stream(model, context, options);
+			},
+		});
+		session.subscribe(event => {
+			if (event.type === "advisor_yielded") advisorYielded.resolve();
+		});
+
+		session.setAdvisorEnabled(true);
+		await session.prompt("Complete one primary turn");
+		await session.waitForIdle();
+		await advisorYielded.promise;
+
+		expect(requestedAdvisorModels).not.toContain(advisorFallbackSelector);
+		expect(requestedAdvisorModels[0]).toBe(advisorPrimarySelector);
+		expect(session.getAdvisorAgent()?.state.model).toMatchObject({
+			provider: advisorPrimary.provider,
+			id: advisorPrimary.id,
+		});
+		expect(session.getAdvisorStatusOverview().advisors[0]).toMatchObject({
+			status: "quota_exhausted",
+			yielded: true,
+		});
+	});
+
 	it("hops an advisor to the chain owned by the fallback it landed on", async () => {
 		const mainModel = getBundledModel("openai", "gpt-4o-mini");
 		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -2975,6 +3115,111 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(getLastAssistantMessage(session).stopReason).toBe("stop");
 	});
+
+	it.each([
+		{
+			fallbackOn: "usage-limit",
+			error: "503 Service Unavailable",
+			failures: 1,
+			requests: ["primary", "primary"],
+			stop: "stop",
+		},
+		{
+			fallbackOn: "usage-limit",
+			error: "503 Service Unavailable",
+			failures: 9,
+			requests: ["primary", "primary", "primary"],
+			stop: "error",
+		},
+		{
+			fallbackOn: "usage-limit",
+			error: "unrecoverable model quirk",
+			failures: 9,
+			requests: ["primary"],
+			stop: "error",
+		},
+		{
+			fallbackOn: "usage-limit",
+			error: "429 usage_limit_reached",
+			failures: 9,
+			requests: ["primary", "fallback"],
+			stop: "stop",
+		},
+		{
+			fallbackOn: "except-usage-limit",
+			error: "429 usage_limit_reached",
+			failures: 9,
+			requests: ["primary"],
+			stop: "error",
+		},
+		{
+			fallbackOn: "except-usage-limit",
+			error: "503 Service Unavailable",
+			failures: 9,
+			requests: ["primary", "fallback"],
+			stop: "stop",
+		},
+	] as const)(
+		"retry.fallbackOn $fallbackOn: $error failing $failures time(s) requests $requests",
+		async ({ fallbackOn, error, failures, requests, stop }) => {
+			mockSchedulerWaitWithClock();
+			vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!primaryModel || !fallbackModel) {
+				throw new Error("Expected bundled test models to exist");
+			}
+
+			const mock = createMockModel();
+			const requested: string[] = [];
+			let primaryFailures = 0;
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: {
+					model: primaryModel,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+				streamFn: (model, context, options) => {
+					const onPrimary = model.provider === primaryModel.provider;
+					requested.push(onPrimary ? "primary" : "fallback");
+					if (onPrimary && primaryFailures < failures) {
+						primaryFailures++;
+						mock.push({ throw: error });
+					} else {
+						mock.push({ content: ["ok"] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.maxRetries": 2,
+				"retry.fallbackOn": fallbackOn,
+				"retry.fallbackChains": {
+					[`${primaryModel.provider}/${primaryModel.id}`]: [`${fallbackModel.provider}/${fallbackModel.id}`],
+				},
+			});
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+
+			await session.prompt("Recover or surface");
+			await session.waitForIdle();
+
+			expect(requested).toEqual([...requests]);
+			expect(session.model?.provider).toBe(
+				requests.at(-1) === "fallback" ? fallbackModel.provider : primaryModel.provider,
+			);
+			expect(getLastAssistantMessage(session).stopReason).toBe(stop);
+		},
+	);
 	it("surfaces immutable Anthropic thinking errors without retry fallback", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("anthropic", "claude-opus-4-1");

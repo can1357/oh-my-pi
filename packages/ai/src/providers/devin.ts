@@ -78,7 +78,6 @@ export interface DevinOptions extends StreamOptions {
 const CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 const DEVIN_ASSIGN_MODEL_PATH = "/exa.api_server_pb.ApiServerService/AssignModel";
 const DEVIN_AUTH_PATH = "/exa.auth_pb.AuthService/GetUserJwt";
-const DEVIN_DEFAULT_STOP_PATTERNS = ["<|user|>", "<|bot|>", "<|context_request|>", "<|endoftext|>", "<|end_of_turn|>"];
 
 /**
  * Hard upper bound on a single Connect frame payload. The 4-byte length prefix
@@ -376,7 +375,11 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 
 					if (msg.deltaThinking) {
 						markFirstToken();
-						const block: ThinkingContent = currentThinkingBlock ?? { type: "thinking", thinking: "" };
+						const block: ThinkingContent = currentThinkingBlock ?? {
+							type: "thinking",
+							thinking: "",
+							summary: false,
+						};
 						if (currentThinkingBlock !== block) {
 							blockIndices.set(block, output.content.push(block) - 1);
 							currentThinkingBlock = block;
@@ -659,10 +662,6 @@ function buildDevinChatRequest(
 	turn: DevinTurn,
 	assignment: ModelAssignment | undefined,
 ) {
-	const stopPatterns =
-		options?.stopSequences && options.stopSequences.length > 0
-			? [...DEVIN_DEFAULT_STOP_PATTERNS, ...options.stopSequences]
-			: DEVIN_DEFAULT_STOP_PATTERNS;
 	const chatModelUid = assignment?.modelUid ?? options?.chatModelUid ?? model.requestModelId ?? model.id;
 	// Devin routes multiple provider families through one Cascade envelope. Its
 	// Gemini backend applies Google's tool-schema constraints and rejects JSON
@@ -699,13 +698,12 @@ function buildDevinChatRequest(
 		configuration: create(CompletionConfigurationSchema, {
 			numCompletions: 1n,
 			maxTokens: BigInt(options?.maxTokens ?? model.maxTokens ?? 64000),
-			maxNewlines: 200n,
-			temperature: options?.temperature ?? 0.4,
-			firstTemperature: options?.temperature ?? 0.4,
-			topK: 50n,
-			topP: options?.topP ?? 1,
-			stopPatterns,
-			fimEotProbThreshold: 1,
+			maxNewlines: 400n,
+			temperature: options?.temperature ?? 1,
+			topK: 40n,
+			// Devin's CLI sends topP as a float32 widened to double; round the same way.
+			topP: Math.fround(options?.topP ?? 0.95),
+			stopPatterns: options?.stopSequences ?? [],
 		}),
 		tools,
 	});
@@ -767,10 +765,11 @@ function buildChatMessagePrompts(
 			if (!promptText && !thinkingText && !signature && toolCalls.length === 0) continue;
 			prompts.push(
 				create(ChatMessagePromptSchema, {
+					// Native assistant ids are bare UUIDs, like every other history row.
 					messageId:
 						isNativeDevinMessage && msg.responseId
 							? msg.responseId
-							: `bot-${deterministicUuid(`${cascadeId}\0${index}\0assistant`)}`,
+							: deterministicUuid(`${cascadeId}\0${index}\0assistant`),
 					source: ChatMessageSource.SYSTEM,
 					prompt: promptText,
 					thinking: thinkingText,
