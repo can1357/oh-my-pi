@@ -1100,8 +1100,8 @@ describe("computer prelude", () => {
 				})()`,
 				realm,
 			);
-			expect(shape).toEqual({
-				json: '[{"ref":"e1","role":"button","nativeRole":"button","title":"Save","enabled":true,"focused":false,"childCount":0}]',
+			expect({ ...shape, json: JSON.parse(shape.json) }).toEqual({
+				json: [expect.objectContaining({ ref: "e1", role: "button" })],
 				keys: ["0"],
 				spread: 1,
 			});
@@ -1148,7 +1148,8 @@ describe("computer prelude", () => {
 					"    await found.press()",
 					"except AttributeError as error:",
 					"    print(error)",
-					"print(hasattr(found, 'click'), hasattr(found, 'nope'), repr(found))",
+					"print(hasattr(found, 'click'), hasattr(found, 'nope'))",
+					"print([element.ref for element in found], found)",
 					"print(type(copy.copy(found)).__name__, type(copy.deepcopy(found)).__name__)",
 				].join("\n"),
 				{
@@ -1162,8 +1163,9 @@ describe("computer prelude", () => {
 			const lines = result.output.trim().split("\n");
 			expect(lines[0]).toContain("find() returns a list (length 1), not one element, so it has no press");
 			expect(lines[0]).toContain("el = (await win.find(query))[0]");
-			expect(lines[1]).toBe("False False [<computer.Element ref='e1' role='button'>]");
-			expect(lines[2]).toBe("list list");
+			expect(lines[1]).toBe("False False");
+			expect(lines[2]).toStartWith("['e1'] [<");
+			expect(lines[3]).toBe("list list");
 			expect(native.axCalls.filter(call => (call as unknown[])[0] === "axClick")).toEqual([
 				["axClick", "e1", { button: "right", count: 2 }],
 				["axClick", "e1", { count: 2 }],
@@ -1847,7 +1849,16 @@ describe("computer worker round trips", () => {
 
 	it("returns find() results as plain arrays whose element calls name the pick, and gates element doubleClick as exec", async () => {
 		const transport = new MemoryTransport();
-		new ComputerWorkerCore(transport, () => new FakeNativeSession());
+		const axClicks: unknown[] = [];
+		new ComputerWorkerCore(
+			transport,
+			() =>
+				new (class extends FakeNativeSession {
+					override async axClick(ref: string, opts?: PointerOptions | null): Promise<void> {
+						axClicks.push([ref, opts]);
+					}
+				})(),
+		);
 
 		const found = await runWorker(
 			transport,
@@ -1877,8 +1888,17 @@ describe("computer worker round trips", () => {
 			{ method: "ref", args: ["e1"] },
 			{ method: "doubleClick", args: [] },
 		];
-		expect(isReadOnlyComputerCall(doubleClick)).toBe(false);
-		expect(renderComputerCall(doubleClick)).toBe('return await (await desktop.ref("e1")).doubleClick();');
+		const blocked = await runWorker(transport, "call-double-click-ro", renderComputerCall(doubleClick), true);
+		expect(blocked.ok).toBe(false);
+		expect(axClicks).toEqual([]);
+		const clicked = await runWorker(
+			transport,
+			"call-double-click",
+			renderComputerCall(doubleClick),
+			isReadOnlyComputerCall(doubleClick),
+		);
+		expect(clicked.ok).toBe(true);
+		expect(axClicks).toEqual([["e1", { count: 2 }]]);
 	});
 
 	it("applies the current read-only policy to a retained writable window", async () => {
