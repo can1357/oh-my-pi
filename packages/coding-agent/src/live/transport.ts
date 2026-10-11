@@ -21,7 +21,6 @@ const MAX_ERROR_BODY_LENGTH = 2_048;
 const SIDEBAND_CONNECT_ATTEMPTS = 5;
 const SIDEBAND_CONNECT_TIMEOUT_MS = 15_000;
 const LIVE_PROVIDER = "openai-codex";
-const LIVE_ORIGINATOR = "Codex Desktop";
 const LIVE_CALL_ID_PATTERN = /^rtc_[\w-]+$/;
 /** Proxy scope of a custom live endpoint: `PI_PROXY_LIVE`, else `PI_PROXY`, else the standard variables. */
 const LIVE_ENDPOINT_PROXY = "live";
