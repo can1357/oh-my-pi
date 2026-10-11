@@ -2409,7 +2409,10 @@ mod tests {
 		let error = result.unwrap_err();
 		assert_eq!(error.code, ErrorCode::InputFailed);
 		assert!(error.message.contains("may already have landed"), "{}", error.message);
-		assert_eq!(typed, [CGEventType::KeyDown as u32, CGEventType::KeyUp as u32]);
+		// b is never pressed; its release still goes out, as after any failed
+		// press.
+		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
+		assert_eq!(typed, [down, up, up]);
 		// Space is never pressed once a sibling is key; the releases still go
 		// out, so nothing stays held.
 		focused.set(ax::FocusedWindow::Id(7));
