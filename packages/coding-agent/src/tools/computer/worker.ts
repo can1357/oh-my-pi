@@ -21,6 +21,7 @@ import type {
 	DesktopScreenState,
 	DesktopSessionOptions,
 	DesktopWindow,
+	OpenedApplication,
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
@@ -64,7 +65,7 @@ export interface NativeDesktopSession {
 	cancel(): void;
 	retire(): void;
 	listApplications(options?: ApplicationQuery): Promise<Application[]>;
-	openApplication(id: string, options?: ApplicationOpenOptions): Promise<Application>;
+	openApplication(id: string, options?: ApplicationOpenOptions): Promise<OpenedApplication>;
 	menuItems(target: string, path?: string[]): Promise<MenuItem[]>;
 	menuSelect(target: string, path: string[]): Promise<void>;
 	observe(
@@ -93,7 +94,7 @@ export interface NativeDesktopSession {
 	axAttributes(ref: string): Promise<Array<[string, string]>>;
 	axChildren(ref: string): Promise<AxNode[]>;
 	axParent(ref: string): Promise<AxNode | null | undefined>;
-	axPerform(ref: string, action: string): Promise<void>;
+	axPerform(ref: string, action: string, menu?: string[] | null): Promise<void>;
 	axSetValue(ref: string, value: string): Promise<void>;
 	axFocus(ref: string): Promise<void>;
 	axClick(ref: string, opts?: PointerOptions | null): Promise<void>;
@@ -114,7 +115,8 @@ type ScreenshotResult = Pick<
 	ComputerScreenshot,
 	"path" | "width" | "height" | "coordinateWidth" | "coordinateHeight" | "region" | "screenLocked"
 >;
-type ClickOptions = InputOptions & { button?: string; count?: number; modifiers?: string[] };
+type MenuOptions = { menu?: string[] };
+type ClickOptions = InputOptions & MenuOptions & { button?: string; count?: number; modifiers?: string[] };
 type DragOptions = InputOptions & { modifiers?: string[]; keys?: string[] };
 type ScrollOptions = InputOptions & { dx?: number; dy?: number };
 type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
@@ -191,8 +193,16 @@ function pointerOptions(options?: ClickOptions | DragOptions | InputOptions): Po
 	if ("count" in options && options.count !== undefined) mapped.count = options.count;
 	if ("modifiers" in options && options.modifiers !== undefined) mapped.modifiers = options.modifiers;
 	if ("keys" in options && options.keys !== undefined) mapped.keys = options.keys;
+	if ("menu" in options && options.menu !== undefined) mapped.menu = menuOption(options);
 	if (options.takeover !== undefined) mapped.takeover = options.takeover;
 	return mapped;
+}
+
+/** The item path of a `menu` option, checked before anything is sent. */
+function menuOption(options?: MenuOptions): string[] | undefined {
+	if (options?.menu === undefined) return undefined;
+	validateKeys(options.menu, "menu path");
+	return options.menu;
 }
 
 function chordKeys(chord: string | string[]): string[] {
@@ -404,17 +414,19 @@ class El {
 		return (await nativeCall(signal, () => this.#session.axNode(this.ref))).actions ?? [];
 	}
 
-	async perform(action: string): Promise<void> {
+	async perform(action: string, options?: MenuOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "perform");
 		validateString(action, "perform(action)", { nonEmpty: true });
-		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action));
+		const menu = menuOption(options);
+		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action, menu));
 	}
 
-	async press(): Promise<void> {
+	async press(options?: MenuOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "press");
-		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press"));
+		const menu = menuOption(options);
+		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press", menu));
 	}
 
 	async click(options?: ClickOptions): Promise<void> {
@@ -532,14 +544,14 @@ class ElRef implements PromiseLike<El> {
 		return (await this.#resolve()).actions();
 	}
 
-	async perform(action: string): Promise<void> {
+	async perform(action: string, options?: MenuOptions): Promise<void> {
 		guardRun(this.#getContext(), "perform");
 		validateString(action, "perform(action)", { nonEmpty: true });
-		await (await this.#resolve()).perform(action);
+		await (await this.#resolve()).perform(action, options);
 	}
 
-	async press(): Promise<void> {
-		await (await this.#resolve()).press();
+	async press(options?: MenuOptions): Promise<void> {
+		await (await this.#resolve()).press(options);
 	}
 
 	async click(options?: ClickOptions): Promise<void> {
@@ -1137,11 +1149,15 @@ export class ComputerWorkerCore {
 					const { signal } = getContext();
 					return await nativeCall(signal, () => session.listApplications(options));
 				},
-				open: async (id: string, options?: ApplicationOpenOptions): Promise<Application> => {
+				open: async (
+					id: string,
+					options?: ApplicationOpenOptions,
+				): Promise<Application & { window: Win | null }> => {
 					const context = getContext();
 					guardRun(context, "apps.open");
 					validateString(id, "apps.open(id)", { nonEmpty: true });
-					return await nativeCall(context.signal, () => session.openApplication(id, options));
+					const opened = await nativeCall(context.signal, () => session.openApplication(id, options));
+					return { ...opened.application, window: opened.window ? makeWin(opened.window) : null };
 				},
 			},
 			control: {
