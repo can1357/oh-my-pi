@@ -99,11 +99,6 @@ export function setTableCharts(mode: TableChartMode, planner?: TableChartPlanner
 	charts.clear();
 }
 
-/** How assistant tables currently become charts. */
-export function tableChartMode(): TableChartMode {
-	return chartMode;
-}
-
 /** Whether `markdown` may hold a table {@link splitTableCharts} would chart. */
 export function hasChartTable(markdown: string): boolean {
 	return chartMode !== "off" && markdown.includes("|") && DELIMITER_ROW.test(markdown);
@@ -121,7 +116,11 @@ export function splitTableCharts(markdown: string, streaming: boolean): ChartSeg
 	tokens.forEach((token, index) => {
 		prose += token.raw;
 		if (!isTable(token)) return;
-		const closed = !streaming || tokens.slice(index + 1).some(next => next.type !== "space");
+		// A later non-space token means the table has closed; rows may still stream otherwise.
+		let closed = !streaming;
+		for (let j = index + 1; !closed && j < tokens.length; j++) {
+			closed = tokens[j]!.type !== "space";
+		}
 		const entry = closed ? chartEntry(token) : undefined;
 		if (!entry?.guess || entry.chart === null) return;
 		segments.push({ kind: "markdown", text: prose }, { kind: "chart", table: token });

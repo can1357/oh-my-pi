@@ -74,6 +74,10 @@
 
 - Tern draws each bash run, eval cell and `!`/`$` run as one box: the command or code, its output, status lines and a foot with state, time and facts; images sit below the box and the bash head shows the intent instead of the command
 
+### Changed
+
+- Streaming edit previews parse each diff line once instead of up to four times per render, and streamed assistant tables no longer copy the remaining token array per table token.
+
 ### Fixed
 
 - Fixed the Agents hub Time column rewinding and freezing for running subagents between progress updates ([#15140](https://github.com/can1357/oh-my-pi/pull/15140) by [@H4vC](https://github.com/H4vC))
