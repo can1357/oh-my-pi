@@ -4,6 +4,7 @@ mod date;
 mod input;
 mod process;
 mod session;
+mod settle;
 mod skylight;
 mod spaces;
 
@@ -21,7 +22,7 @@ use super::{
 	keys::KeyName,
 	types::{
 		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector,
-		ScreenState, Target,
+		ScreenState, Target, UiQuiet,
 	},
 };
 
@@ -215,6 +216,20 @@ impl Backend for MacosBackend {
 			)));
 		}
 		Ok(())
+	}
+
+	fn wait_for_ui_quiet(
+		&mut self,
+		pids: &[u32],
+		quiet: std::time::Duration,
+		cap: std::time::Duration,
+		token: &OperationToken,
+	) -> CoreResult<UiQuiet> {
+		token.check()?;
+		if !ax::is_trusted() {
+			return Ok(UiQuiet::unwatched());
+		}
+		settle::wait_for_quiet(pids, quiet, cap, token)
 	}
 
 	fn ax(&mut self) -> Option<&mut dyn AxBackend> {

@@ -16,6 +16,7 @@ import { attachSessionOwner, EvalKernelNotRunningError, type SessionOwners } fro
 import { shouldDetachKernel } from "../py/spawn-options";
 import { updateEvalState } from "../state";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
+import { type EvalPreludeCell, getActiveEvalPreludeCell } from "../preludes";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import type { ShadowPlan } from "../speculation/types";
 import type { EvalToolDescriptor, EvalToolInvokeResult } from "../types";
@@ -64,6 +65,8 @@ interface PendingRun {
 	runState: VmRunState;
 	toolSession: ToolSession;
 	shadowCell?: EvalShadowCellSession;
+	/** The eval cell this run executes, handed to prelude calls it makes. */
+	preludeCell?: EvalPreludeCell;
 	resolve(value: { value: unknown }): void;
 	reject(error: Error): void;
 	toolCalls: Map<string, AbortController>;
@@ -513,6 +516,7 @@ async function runOnce(
 		runState: options.runState,
 		toolSession: options.session,
 		shadowCell: getActiveEvalShadowCell(),
+		preludeCell: getActiveEvalPreludeCell(),
 		resolve,
 		reject,
 		toolCalls: new Map(),
@@ -821,6 +825,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 			signal: ctrl.signal,
 			identity: msg.identity,
 			shadowCell: pending.shadowCell,
+			cell: pending.preludeCell,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
 				pending.runState.onDisplay?.({ type: "status", event });
