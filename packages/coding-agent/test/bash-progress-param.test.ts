@@ -825,16 +825,23 @@ describe("bash progress parameter", () => {
 			expect(completions).toHaveLength(1);
 			const completion = completions[0];
 			if (!completion?.job) throw new Error("Expected counted Bash completion");
+			const job = completion.job;
+			// Match AgentSession's final-message preparation: confirmed progress
+			// suppresses the covered raw terminal stream, not its pending leftover.
+			const progressSummary =
+				job.progressDelivery !== undefined &&
+				(job.progressDeliveredCount ?? 0) > 0 &&
+				job.progressArtifactId !== undefined
+					? { artifactId: job.progressArtifactId, leftover: job.completionLeftover }
+					: undefined;
 			const message = buildAsyncResultBatchMessage([
 				{
 					jobId: completion.jobId,
-					result: completion.text,
-					job: completion.job,
-					durationMs: 1_000,
+					result: job.terminalTextProvenance === "progress" ? "" : completion.text,
+					job,
+					durationMs: Math.max(0, (job.endTime ?? Date.now()) - job.startTime),
 					epoch: 0,
-					progressSummary: completion.job.progressArtifactId
-						? { artifactId: completion.job.progressArtifactId, leftover: completion.job.completionLeftover }
-						: undefined,
+					progressSummary,
 				},
 			]);
 			if (!message || typeof message.content !== "string") throw new Error("Expected text async-result");
