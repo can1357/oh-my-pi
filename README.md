@@ -63,7 +63,7 @@ bun install -g @oh-my-pi/pi-coding-agent
 nix run github:can1357/oh-my-pi
 
 # Or install into the active profile
-nix profile install github:can1357/oh-my-pi
+nix profile add github:can1357/oh-my-pi
 ```
 
 Flake consumers can use `packages.<system>.omp`, `overlays.default`, `nixosModules.default`, or `homeManagerModules.default`. A Home Manager configuration can install OMP and own its settings declaratively:
