@@ -710,6 +710,54 @@ describe("wrapLeakedThinkingStream", () => {
 		expect(result.content).toEqual(content);
 	});
 
+	it("keeps a text signature that arrives after the block's last delta", async () => {
+		// Gemini signs a reply with an empty part after its last text chunk, so the
+		// signature is on the source block only from text_end on.
+		const signed: TextContent = { type: "text", text: "7919 is prime.", textSignature: "reply-sig" };
+		const { result } = await runWrapper(inner => {
+			inner.push({ type: "start", partial: msg() });
+			inner.push({ type: "text_start", contentIndex: 0, partial: msg({ content: [{ type: "text", text: "" }] }) });
+			inner.push({
+				type: "text_delta",
+				contentIndex: 0,
+				delta: "7919 is",
+				partial: msg({ content: [{ type: "text", text: "7919 is" }] }),
+			});
+			inner.push({
+				type: "text_delta",
+				contentIndex: 0,
+				delta: " prime.",
+				partial: msg({ content: [{ type: "text", text: signed.text }] }),
+			});
+			inner.push({ type: "text_end", contentIndex: 0, content: signed.text, partial: msg({ content: [signed] }) });
+			inner.push({ type: "done", reason: "stop", message: msg({ content: [signed] }) });
+		});
+
+		expect(result.content).toEqual([signed]);
+	});
+
+	it("signs the pieces of a healed reply the same whether its signature arrives early or at text_end", async () => {
+		const leaked = "before ```thinking\nhmm\n``` after";
+		const block = (textSignature?: string): AssistantMessage =>
+			msg({ content: [{ type: "text", text: leaked, ...(textSignature && { textSignature }) }] });
+		const project = (deltaSignature: string | undefined) =>
+			runWrapper(inner => {
+				inner.push({ type: "start", partial: msg() });
+				inner.push({ type: "text_delta", contentIndex: 0, delta: leaked, partial: block(deltaSignature) });
+				inner.push({ type: "text_end", contentIndex: 0, content: leaked, partial: block("sig") });
+				inner.push({ type: "done", reason: "stop", message: block("sig") });
+			});
+
+		const early = await project("sig");
+		const late = await project(undefined);
+		expect(late.result.content).toEqual(early.result.content);
+		expect(late.result.content.map(b => (b.type === "text" ? b.textSignature : b.type))).toEqual([
+			"sig",
+			"thinking",
+			"sig",
+		]);
+	});
+
 	it("passes clean text through unchanged and forwards native thinking", async () => {
 		const clean = "Just a normal answer.";
 		const cleanRun = await runWrapper(inner => {
@@ -1165,5 +1213,72 @@ describe("leaked thinking healing through stream()", () => {
 				typeof block === "object" && block !== null && "type" in block ? block.type : undefined,
 			),
 		).toEqual(["thinking", "server_tool_use", "web_search_tool_result", "thinking", "text", "tool_use"]);
+	});
+
+	it("replays a chunked Gemini reply with its trailing signature and its own summary as a thought", async () => {
+		// Gemini signs a reply with an empty part after its last text chunk. That
+		// frame is held until the reply's last delta has left the wrapper, so the
+		// wrapper has projected the whole reply before the signature exists.
+		const parts = (finishReason: string | undefined, ...partList: Array<Record<string, unknown>>) => ({
+			candidates: [{ content: { role: "model", parts: partList }, ...(finishReason && { finishReason }) }],
+		});
+		const frames = [
+			parts(undefined, { text: "Checking divisors up to 88.", thought: true }),
+			parts(undefined, { text: "7919 is" }),
+			parts(undefined, { text: " prime." }),
+			parts("STOP", { text: "", thoughtSignature: "cmVwbHktc2ln" }),
+		];
+		const signatureFrame = Promise.withResolvers<void>();
+		const requests: Array<{ contents: unknown[] }> = [];
+		const geminiFetch = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				if (typeof init?.body !== "string") throw new Error("Expected JSON request body");
+				requests.push(JSON.parse(init.body));
+				let next = 0;
+				const body = new ReadableStream<Uint8Array>({
+					async pull(controller) {
+						if (next === frames.length - 1) await signatureFrame.promise;
+						if (next === frames.length) return controller.close();
+						controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(frames[next++])}\n\n`));
+					},
+				});
+				return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const model = buildModel({
+			id: "gemini-3-flash",
+			name: "Gemini 3 Flash",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 32_000,
+		});
+
+		const firstStream = stream(model, context, { apiKey: "test", fetch: geminiFetch });
+		for await (const event of firstStream) {
+			if (event.type === "text_delta" && event.delta.endsWith("prime.")) signatureFrame.resolve();
+		}
+		const first = await firstStream.result();
+		expect(first.content).toMatchObject([
+			{ type: "thinking", thinking: "Checking divisors up to 88." },
+			{ type: "text", text: "7919 is prime.", textSignature: "cmVwbHktc2ln" },
+		]);
+
+		const next: Context = {
+			messages: [...context.messages, first, { role: "user", content: "And 7921?", timestamp: 2 }],
+		};
+		await stream(model, next, { apiKey: "test", fetch: geminiFetch }).result();
+		expect(requests[1]?.contents[1]).toEqual({
+			role: "model",
+			parts: [
+				{ thought: true, text: "Checking divisors up to 88." },
+				{ text: "7919 is prime.", thoughtSignature: "cmVwbHktc2ln" },
+			],
+		});
 	});
 });

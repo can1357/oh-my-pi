@@ -1452,6 +1452,44 @@ describe("computer worker round trips", () => {
 		});
 	});
 
+	describe("more windows than the listing cap", () => {
+		class CrowdedSession extends FakeNativeSession {
+			override async listWindows(): Promise<DesktopWindow[]> {
+				const front = Array.from({ length: 59 }, (_, index) => ({
+					...windowFixture,
+					id: String(index + 100),
+					app: "Front",
+					focused: false,
+				}));
+				return [...front, { ...windowFixture, id: "999", app: "Rear", focused: false }];
+			}
+		}
+
+		it("caps the listing after filtering and finds a window behind the cap by id or app", async () => {
+			const transport = new MemoryTransport();
+			new ComputerWorkerCore(transport, () => new CrowdedSession());
+			const result = await runWorker(
+				transport,
+				"crowded-desktop",
+				'({ listed: (await desktop.windows()).length, filtered: (await desktop.windows({ app: "rear" })).map(w => w.id), byId: (await desktop.window(999)).app, byApp: (await desktop.window({ app: "rear" })).id })',
+			);
+			expect(result.ok).toBe(true);
+			if (result.ok)
+				expect(result.payload.returnValue).toEqual({ listed: 48, filtered: ["999"], byId: "Rear", byApp: "999" });
+		});
+
+		it("lists at most 48 candidates for an ambiguous filter", async () => {
+			const transport = new MemoryTransport();
+			new ComputerWorkerCore(transport, () => new CrowdedSession());
+			const result = await runWorker(transport, "crowded-ambiguous", 'await desktop.window({ app: "front" })');
+			expect(result.ok).toBe(false);
+			if (result.ok) return;
+			expect(result.error.message).toContain("147 Front");
+			expect(result.error.message).not.toContain("148 Front");
+			expect(result.error.message).toContain("… 11 more");
+		});
+	});
+
 	it("returns plain identity snapshots for rendered handle calls and enforces the derived read-only tier", async () => {
 		const transport = new MemoryTransport();
 		const native = new FakeNativeSession();

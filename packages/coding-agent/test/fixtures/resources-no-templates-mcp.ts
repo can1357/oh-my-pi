@@ -14,8 +14,13 @@
  */
 import * as readline from "node:readline";
 
-/** Concrete resource URIs the fixture advertises via `resources/list`. */
-export const RESOURCE_URIS = ["test://alpha", "test://beta", "urn:fixture:gamma"];
+/** Concrete resource URIs the fixture advertises via `resources/list`; the `skill://` one mirrors an MCP-published skill. */
+export const RESOURCE_URIS = [
+	"test://alpha",
+	"test://beta",
+	"urn:fixture:gamma",
+	"skill://fixture/remote-skill/SKILL.md",
+];
 
 /**
  * JSON-RPC error code returned for `resources/templates/list`. Defaults to

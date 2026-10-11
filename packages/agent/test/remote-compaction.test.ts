@@ -1045,6 +1045,31 @@ describe("requestCompactionV2Streaming", () => {
 		expect(result.usage?.cachedInputTokens).toBe(7);
 		expect(result.usage?.reasoningOutputTokens).toBe(1);
 	});
+	test("keeps the LiteLLM conversation session header on the compaction request", async () => {
+		const model = makeOpenAiModel({
+			provider: "litellm",
+			baseUrl: "https://litellm.example/v1",
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		const userItem = { type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] };
+		const request = buildCompactionV2Request(model, [userItem], "instructions", { sessionId: "session-1" });
+		const sessionHeaders: (string | null)[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			sessionHeaders.push(new Headers(init?.headers).get("x-litellm-session-id"));
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc" },
+				},
+				{ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
+			]);
+		};
+
+		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
+
+		expect(sessionHeaders).toEqual(["session-1"]);
+	});
 	test.each(["The socket connection was closed unexpectedly", "socket connection closed unexpectedly"] as const)(
 		"retries a transient socket closure: %s",
 		async socketCloseMessage => {
@@ -1968,6 +1993,28 @@ test("uses configured OpenAI-compatible compaction for custom providers", async 
 		{ fetch: fetchMock },
 	);
 	expect(requestBody).toMatchObject({ model: "gpt-5.5" });
+});
+
+test("keeps the LiteLLM conversation session header on V1 compaction unless configured", async () => {
+	const sessionHeaders: (string | null)[] = [];
+	const fetchMock: FetchImpl = async (_input, init) => {
+		sessionHeaders.push(new Headers(init?.headers).get("x-litellm-session-id"));
+		return Response.json({ output: [{ type: "compaction_summary", summary: "compacted" }] });
+	};
+	const input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }];
+	for (const headers of [undefined, { "X-LiteLLM-Session-Id": "run-42" }]) {
+		const model = makeOpenAiModel({
+			provider: "litellm",
+			baseUrl: "https://litellm.example/v1",
+			headers,
+			remoteCompaction: { enabled: true },
+		});
+		await requestOpenAiRemoteCompaction(model, "test-key", input, "instructions", undefined, {
+			fetch: fetchMock,
+			sessionId: "session-1",
+		});
+	}
+	expect(sessionHeaders).toEqual(["session-1", "run-42"]);
 });
 
 test("uses Azure request shape for Azure Responses remote compaction", async () => {

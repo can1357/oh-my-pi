@@ -2723,7 +2723,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		question: string | undefined,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails>> {
-		if (parsedSel.kind === "image") throw new ToolError("The ':img' selector requires a file-backed path.");
+		if (parsedSel.kind === "image") {
+			// A file-backed URL that locate deferred to a remote resolve (an unknown skill:// while
+			// MCP is available) reports its local miss (`Unknown skill`), not the selector refusal.
+			if (spec.backing === "file") {
+				await InternalUrlRouter.instance().locate(url, sessionResolveContext(this.session, { signal }), {
+					localOnly: true,
+				});
+			}
+			throw new ToolError("The ':img' selector requires a file-backed path.");
+		}
 		const resource = await InternalUrlRouter.instance().resolve(url, sessionResolveContext(this.session, { signal }));
 		if (question !== undefined) throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
 		const resourceDetails: NonNullable<InternalResource["details"]> = resource.details ?? {};
@@ -2747,7 +2756,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			sourcePath: resource.sourcePath,
 			sourceInternal: url,
 			entityLabel: "resource",
-			ignoreResultLimits: spec.unbounded === true,
+			ignoreResultLimits: resource.unbounded ?? spec.unbounded === true,
 			immutable: resource.immutable,
 		});
 	}

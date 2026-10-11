@@ -98,6 +98,7 @@ Types: `OpenAICompat` / `ResolvedOpenAISharedCompat` in `packages/catalog/src/ty
 | `alwaysSendMaxTokens` | Kimi family | Always sends the max-output-tokens field (defaults to model max) to keep Kimi TPM accounting correct |
 | `openRouterRouting` | unset | Adds `provider: { only, order }` body field on OpenRouter (`applyOpenAIGatewayRouting`) |
 | `promptCacheSessionHeader` | `"x-grok-conv-id"` on first-party xAI API/OAuth routes | Emits that HTTP header with the prompt-cache session key |
+| `sessionHeader` | `"x-litellm-session-id"` on the `litellm` provider and `discovery.type: "litellm"` aliases | Emits that HTTP header with the explicit conversation `sessionId`, independent of prompt caching; a configured header wins |
 | `supportsPromptCacheBreakpoints` / `promptCacheBreakpointTtl` | Official OpenAI GPT-5.6+ | Gates explicit prompt-cache breakpoints; `ConfigurationError` if requested unsupported. TTL default `"30m"` |
 | `isOpenRouterHost` | OpenRouter endpoint detection | Omits default max-token cap (optional fields are routing hints on OpenRouter) and attaches routing |
 | `wireModelIdMode` | `"raw"` baseline; gateway/discovery rules select `"cline-pass"`, `"firepass"`, `"fireworks"`, or `"openrouter"` | Model-id rewriting for gateway dispatch |

@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
-import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
+import { getMemoriesDir, logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 
 import {
@@ -230,25 +230,27 @@ export function extendRecallWithLegacyBanks(
 	dbPath: string,
 	cwd: string,
 ): readonly string[] {
-	const banksDir = path.join(path.dirname(dbPath), "banks");
-	const cwdAbs = path.resolve(cwd || ".");
-	let entries: fs.Dirent[];
-	try {
-		entries = fs.readdirSync(banksDir, { withFileTypes: true });
-	} catch {
-		return resolved;
-	}
-	const have = new Set(resolved);
-	const extras: string[] = [];
-	let scanned = 0;
-	for (const entry of entries) {
-		if (!entry.isDirectory() || have.has(entry.name)) continue;
-		if (scanned >= LEGACY_BANK_SCAN_LIMIT) break;
-		scanned++;
-		const candidate = path.join(banksDir, entry.name, "mnemopi.db");
-		if (bankOnlyHasCwd(candidate, cwdAbs)) extras.push(entry.name);
-	}
-	return extras.length === 0 ? resolved : [...resolved, ...extras];
+	return withLoopPhase("mnemopi.open", () => {
+		const banksDir = path.join(path.dirname(dbPath), "banks");
+		const cwdAbs = path.resolve(cwd || ".");
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(banksDir, { withFileTypes: true });
+		} catch {
+			return resolved;
+		}
+		const have = new Set(resolved);
+		const extras: string[] = [];
+		let scanned = 0;
+		for (const entry of entries) {
+			if (!entry.isDirectory() || have.has(entry.name)) continue;
+			if (scanned >= LEGACY_BANK_SCAN_LIMIT) break;
+			scanned++;
+			const candidate = path.join(banksDir, entry.name, "mnemopi.db");
+			if (bankOnlyHasCwd(candidate, cwdAbs)) extras.push(entry.name);
+		}
+		return extras.length === 0 ? resolved : [...resolved, ...extras];
+	});
 }
 
 function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {

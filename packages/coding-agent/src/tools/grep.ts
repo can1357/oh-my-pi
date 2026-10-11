@@ -981,7 +981,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								pushLine(ctx.lineNumber, ctx.line, false);
 							}
 						}
-						pushLine(match.lineNumber, match.line, true);
+						// A cut line shows a window around its first match; name where that match sits.
+						const matchLine = match.column === undefined ? match.line : `${match.line} [col ${match.column}]`;
+						pushLine(match.lineNumber, matchLine, true);
 						if (match.truncated) linesTruncated = true;
 						if (match.contextAfter) {
 							for (const ctx of match.contextAfter) {

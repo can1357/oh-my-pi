@@ -4,6 +4,7 @@ import * as path from "node:path";
 import {
 	$which,
 	getPuppeteerDir,
+	isEnoent,
 	isRecord,
 	logger,
 	removeWithRetries,
@@ -559,6 +560,7 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 		launchArgs.push(`--user-data-dir=${userDataDir}`);
 	}
 	try {
+		if (userDataDir) await seedOwnedProfilePreferences(userDataDir);
 		const executablePath = await ensureChromiumExecutable();
 		const browser = await puppeteer.launch({
 			headless: opts.headless,
@@ -573,6 +575,49 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 		return { browser, userDataDir };
 	} catch (error) {
 		if (userDataDir) await removeUserDataDir(userDataDir);
+		throw error;
+	}
+}
+
+/**
+ * Pin automation-safe preferences in a Chromium profile OMP owns. Password leak
+ * detection answers a password form submit with a tab-modal "Change your
+ * password" dialog; while it is open Chromium drops `Input.dispatchMouseEvent`
+ * input for the tab, and a hidden browser offers no way to close it. Chromium
+ * reads `Preferences` only at startup and rewrites it from memory, so call this
+ * before a Chromium process starts on the profile. Best-effort: the preference
+ * only suppresses a dialog, so a failure is logged and never blocks the launch.
+ */
+export async function seedOwnedProfilePreferences(userDataDir: string): Promise<void> {
+	try {
+		await writeOwnedProfilePreferences(path.join(userDataDir, "Default", "Preferences"));
+	} catch (error) {
+		logger.warn("Could not seed browser profile preferences", {
+			userDataDir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
+}
+
+async function writeOwnedProfilePreferences(file: string): Promise<void> {
+	let prefs: Record<string, unknown> = {};
+	try {
+		const parsed: unknown = JSON.parse(await fs.promises.readFile(file, "utf8"));
+		if (isRecord(parsed)) prefs = parsed;
+	} catch (error) {
+		// Fresh profiles have no file yet; Chromium discards an unparseable one on startup anyway.
+		if (!isEnoent(error) && !(error instanceof SyntaxError)) throw error;
+	}
+	const profile = isRecord(prefs.profile) ? prefs.profile : {};
+	if (profile.password_manager_leak_detection === false) return;
+	profile.password_manager_leak_detection = false;
+	prefs.profile = profile;
+	const staged = `${file}.omp-${process.pid}`;
+	try {
+		await Bun.write(staged, JSON.stringify(prefs));
+		await fs.promises.rename(staged, file);
+	} catch (error) {
+		await fs.promises.rm(staged, { force: true });
 		throw error;
 	}
 }

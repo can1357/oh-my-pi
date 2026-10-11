@@ -67,6 +67,7 @@ function thinkingOnlyStop(thinking: string): MockResponse {
 async function createHarness(
 	responses: MockResponse[],
 	settingsOverrides: SettingsOverrides = {},
+	sessionOptions: { unexpectedStopJudgeTimeoutMs?: number } = {},
 ): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-unexpected-stop-guard-");
 
@@ -101,13 +102,13 @@ async function createHarness(
 		getToolChoice: () => session?.nextToolChoiceDirective(),
 		streamFn: mock.stream,
 	});
-
 	const agentSession = new AgentSession({
 		agent,
 		sessionManager,
 		settings,
 		modelRegistry,
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+		unexpectedStopJudgeTimeoutMs: sessionOptions.unexpectedStopJudgeTimeoutMs,
 	});
 	const session = agentSession;
 	const harness = { session: agentSession, tempDir };
@@ -343,4 +344,129 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(mock.calls).toHaveLength(1);
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
+	it("nudges a second turn when the verdict lands within the judge budget", async () => {
+		// The injected budget stands in for the 15s production default (which
+		// would stall the suite); a verdict held only briefly must still nudge.
+		const release = Promise.withResolvers<boolean | undefined>();
+		let observedSignal: AbortSignal | undefined;
+		const spy = vi
+			.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop")
+			.mockImplementation(async (_text, deps) => {
+				observedSignal = deps.signal;
+				return release.promise;
+			});
+		const { session, mock } = await createHarness(
+			[
+				unexpectedStop("Looks like that command syntax didn't work right — let me verify differently."),
+				{ content: ["verified, all green"], stopReason: "stop" },
+			],
+			{
+				"features.unexpectedStopDetection": "smart",
+			},
+			{ unexpectedStopJudgeTimeoutMs: 5000 },
+		);
+
+		const pending = session.prompt("do the thing");
+		try {
+			const deadline = Date.now() + 10_000;
+			while (spy.mock.calls.length === 0 && Date.now() < deadline) {
+				await Bun.sleep(10);
+			}
+			expect(spy).toHaveBeenCalledTimes(1);
+			// A slow-but-within-budget verdict (12.2s in production against the
+			// 15s default): the judge wait must still be alive.
+			await Bun.sleep(200);
+			expect(observedSignal?.aborted).toBe(false);
+			// Later stops are terminal: only the slow verdict under test retries.
+			spy.mockResolvedValue(false);
+			release.resolve(true);
+			await pending;
+			await session.waitForIdle();
+		} finally {
+			release.resolve(undefined);
+		}
+
+		expect(spy).toHaveBeenCalledTimes(2);
+		expect(mock.calls).toHaveLength(2);
+		expect(assistantText(session.agent.state.messages)).toContain("verified, all green");
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+	});
+	it("drops the verdict when the judge budget elapses first", async () => {
+		// Guards the other side of the boundary: a verdict that arrives after
+		// the timeout abort must not resurrect the turn.
+		const release = Promise.withResolvers<boolean | undefined>();
+		let observedSignal: AbortSignal | undefined;
+		const spy = vi
+			.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop")
+			.mockImplementation(async (_text, deps) => {
+				observedSignal = deps.signal;
+				const verdict = await release.promise;
+				// Mirror the real classifier: an aborted wait yields no-retry.
+				return deps.signal?.aborted === true ? undefined : verdict;
+			});
+		const { session, mock } = await createHarness(
+			[unexpectedStop("Looks like that command syntax didn't work right — let me verify differently.")],
+			{
+				"features.unexpectedStopDetection": "smart",
+			},
+			{ unexpectedStopJudgeTimeoutMs: 100 },
+		);
+
+		const pending = session.prompt("do the thing");
+		try {
+			const deadline = Date.now() + 10_000;
+			while (spy.mock.calls.length === 0 && Date.now() < deadline) {
+				await Bun.sleep(10);
+			}
+			expect(spy).toHaveBeenCalledTimes(1);
+			// Hold past the injected budget: the wait must abort and settle.
+			await Bun.sleep(200);
+			expect(observedSignal?.aborted).toBe(true);
+			// The late verdict plus any later stop must not resurrect the turn.
+			spy.mockResolvedValue(false);
+			release.resolve(true);
+			await pending;
+			await session.waitForIdle();
+		} finally {
+			release.resolve(undefined);
+		}
+
+		expect(mock.calls).toHaveLength(1);
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
+	});
+	it("drops the nudge when the session aborts during a slow judge wait", async () => {
+		// Esc during the extended judge wait must settle promptly (not hold the
+		// abort drain for the full budget) and must not schedule a retry for a
+		// turn the user interrupted.
+		const release = Promise.withResolvers<boolean | undefined>();
+		const spy = vi
+			.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop")
+			.mockImplementation(() => release.promise);
+		const { session, mock } = await createHarness(
+			[unexpectedStop("Looks like that command syntax didn't work right — let me verify differently.")],
+			{
+				"features.unexpectedStopDetection": "smart",
+			},
+		);
+
+		const pending = session.prompt("do the thing");
+		try {
+			const deadline = Date.now() + 10_000;
+			while (spy.mock.calls.length === 0 && Date.now() < deadline) {
+				await Bun.sleep(10);
+			}
+			expect(spy).toHaveBeenCalledTimes(1);
+			const aborted = session.abort();
+			// A verdict that arrives after the interrupt must not resurrect the turn.
+			release.resolve(true);
+			await aborted;
+			await pending;
+			await session.waitForIdle();
+		} finally {
+			release.resolve(undefined);
+		}
+
+		expect(mock.calls).toHaveLength(1);
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
+	}, 30000);
 });

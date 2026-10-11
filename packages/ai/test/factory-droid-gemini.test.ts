@@ -88,8 +88,7 @@ describe("Factory Droid gemini wire — history replay", () => {
 							{ type: "thinking", thinking: "unsigned reasoning" },
 							{ type: "thinking", thinking: "signed reasoning", thinkingSignature: "sig-think" },
 							{ type: "toolCall", id: "signed-call", name: "Read", arguments: {}, thoughtSignature: "sig-call" },
-							// A signature captured on a TEXT block is never replayed —
-							// the CLI never signs text, and it is not funneled into thinking.
+							// The reply's signature replays on the text it signed.
 							{ type: "text", text: "answer", textSignature: "text-sig" },
 							{ type: "thinking", thinking: "second unsigned" },
 						],
@@ -104,13 +103,35 @@ describe("Factory Droid gemini wire — history replay", () => {
 			expect(modelTurn?.parts).toEqual([
 				{ text: "signed reasoning", thoughtSignature: "sig-think" },
 				{ functionCall: { name: "Read", args: {} }, thoughtSignature: "sig-call" },
-				{ text: "answer" },
+				{ text: "answer", thoughtSignature: "text-sig" },
 			]);
 			expect(JSON.stringify(modelTurn)).not.toContain('thought":true');
-			expect(JSON.stringify(modelTurn)).not.toContain("text-sig");
 			expect(captured[0].body.systemInstruction).toEqual({ parts: [{ text: "first block\nsecond block" }] });
 		},
 	);
+
+	it("replays a text signature only to the model that signed it", async () => {
+		const { contents } = await run({
+			messages: [
+				{ role: "user", content: "hi", timestamp: 1 },
+				assistantMessage([{ type: "text", text: "other Gemini", textSignature: "other-model-sig" }], {
+					provider: "google-antigravity",
+					api: "google-gemini-cli",
+					model: "gemini-3.8-flash",
+				}),
+				{ role: "user", content: "next", timestamp: 2 },
+				assistantMessage(
+					[{ type: "text", text: "Responses reply", textSignature: JSON.stringify({ v: 1, id: "msg_1" }) }],
+					{ provider: "openai-codex", api: "openai-codex-responses", model: "gpt-5.5" },
+				),
+				{ role: "user", content: "again", timestamp: 3 },
+			],
+		});
+		expect(contents.filter(entry => entry.role === "model").map(entry => entry.parts)).toEqual([
+			[{ text: "other Gemini" }],
+			[{ text: "Responses reply" }],
+		]);
+	});
 
 	it("drops foreign wire signatures while retaining tool calls across two turns", async () => {
 		const captured: CapturedRequest[] = [];
@@ -199,6 +220,87 @@ describe("Factory Droid gemini wire — history replay", () => {
 		expect(thinking[1]).toMatchObject({ thinking: "second think", thinkingSignature: "sig-2" });
 	});
 
+	it("keeps an empty thought part's signature on a thinking block of its own", async () => {
+		const { result } = await run("hi", [
+			JSON.stringify({
+				candidates: [
+					{
+						content: {
+							parts: [
+								{ thought: true, text: "", thoughtSignature: "sig-opening" },
+								{ text: "visible answer" },
+								{ thought: true, text: "", thoughtSignature: "sig-after-text" },
+							],
+						},
+					},
+				],
+			}),
+			finishChunk("STOP"),
+		]);
+		expect(result.content).toMatchObject([
+			{ type: "thinking", thinking: "", thinkingSignature: "sig-opening" },
+			{ type: "text", text: "visible answer" },
+			{ type: "thinking", thinking: "", thinkingSignature: "sig-after-text" },
+		]);
+		expect(result.content[1]).not.toHaveProperty("textSignature");
+	});
+
+	it("keeps the newest signature of a thinking block signed more than once, as the other Google routes do", async () => {
+		// Live Factory and Antigravity thought parts arrive unsigned; Gemini validates
+		// only function-call signatures, so this pins the rule rather than a wire need.
+		const { result } = await run("hi", [
+			JSON.stringify({
+				candidates: [
+					{
+						content: {
+							parts: [
+								{ thought: true, text: "first part ", thoughtSignature: "sig-1" },
+								{ thought: true, text: "second part", thoughtSignature: "sig-2" },
+								{ text: "answer" },
+							],
+						},
+					},
+				],
+			}),
+			finishChunk("STOP"),
+		]);
+		expect(result.content[0]).toMatchObject({ thinking: "first part second part", thinkingSignature: "sig-2" });
+
+		const { contents } = await run({ messages: [{ role: "user", content: "hi", timestamp: 1 }, result] });
+		expect(contents.find(entry => entry.role === "model")?.parts[0]).toEqual({
+			text: "first part second part",
+			thoughtSignature: "sig-2",
+		});
+	});
+
+	it("stores and replays signed thinking exactly as received", async () => {
+		const summary = "```thinking\nWeigh the divisors.\n```\n";
+		const { result } = await run("is 7919 prime?", [
+			JSON.stringify({
+				candidates: [
+					{
+						content: {
+							parts: [
+								{ thought: true, text: summary, thoughtSignature: "sig-think" },
+								{ text: "7919 is prime." },
+							],
+						},
+					},
+				],
+			}),
+			finishChunk("STOP"),
+		]);
+		expect(result.content[0]).toMatchObject({ type: "thinking", thinking: summary, thinkingSignature: "sig-think" });
+
+		const { contents } = await run({
+			messages: [{ role: "user", content: "is 7919 prime?", timestamp: 1 }, result],
+		});
+		expect(contents.find(entry => entry.role === "model")?.parts[0]).toEqual({
+			text: summary,
+			thoughtSignature: "sig-think",
+		});
+	});
+
 	it("drops sentinel-signed thinking rather than exposing it as assistant text", async () => {
 		const { contents } = await run({
 			messages: [
@@ -211,24 +313,34 @@ describe("Factory Droid gemini wire — history replay", () => {
 		expect(contents.find(entry => entry.role === "model")).toBeUndefined();
 	});
 
-	it("keeps the first signature captured per thinking block", async () => {
-		const { result } = await run("hi", [
+	it("keeps the signature Gemini sends after a reply's last text chunk", async () => {
+		const { result } = await run("is 7917 prime?", [
+			JSON.stringify({
+				candidates: [{ content: { role: "model", parts: [{ text: "**Testing primality**", thought: true }] } }],
+			}),
+			JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text: "No, 7917 is" }] } }] }),
+			JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text: " not prime." }] } }] }),
 			JSON.stringify({
 				candidates: [
 					{
-						content: {
-							role: "model",
-							parts: [
-								{ thought: true, text: "first", thoughtSignature: "sig-1" },
-								{ thought: true, text: " second", thoughtSignature: "sig-2" },
-							],
-						},
+						content: { role: "model", parts: [{ text: "", thoughtSignature: "reply-sig" }] },
+						finishReason: "STOP",
 					},
 				],
 			}),
-			finishChunk("STOP"),
 		]);
-		expect(result.content).toEqual([{ type: "thinking", thinking: "first second", thinkingSignature: "sig-1" }]);
+		expect(result.content[1]).toEqual({ type: "text", text: "No, 7917 is not prime.", textSignature: "reply-sig" });
+
+		const { contents } = await run({
+			messages: [
+				{ role: "user", content: "is 7917 prime?", timestamp: 1 },
+				result,
+				{ role: "user", content: "and 7921?", timestamp: 2 },
+			],
+		});
+		expect(contents.find(entry => entry.role === "model")?.parts).toEqual([
+			{ text: "No, 7917 is not prime.", thoughtSignature: "reply-sig" },
+		]);
 	});
 
 	it("captures thoughtSignature on tool calls and replays the droid continuation shape", async () => {

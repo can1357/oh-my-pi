@@ -5,6 +5,7 @@ import {
 	pushLoopPhase,
 	resetLoopPhaseWindow,
 	takeLoopPhaseAttribution,
+	withLoopPhase,
 } from "@oh-my-pi/pi-utils";
 
 // The stack and attribution window are process-global; isolate every case.
@@ -53,6 +54,44 @@ describe("loop phase stack", () => {
 		expect(currentLoopPhase()).toBeUndefined();
 		pushLoopPhase("after-underflow");
 		expect(currentLoopPhase()).toBe("after-underflow");
+	});
+
+	test("withLoopPhase returns the callback's value and restores the enclosing phase", () => {
+		pushLoopPhase("outer");
+		const value = {};
+		expect(
+			withLoopPhase("inner", () => {
+				expect(currentLoopPhase()).toBe("inner");
+				return value;
+			}),
+		).toBe(value);
+		expect(currentLoopPhase()).toBe("outer");
+		popLoopPhase();
+	});
+
+	test("withLoopPhase pops on throw and preserves the error", () => {
+		const error = new Error("failed");
+		let caught: unknown;
+		try {
+			withLoopPhase("A", () => {
+				throw error;
+			});
+		} catch (e) {
+			caught = e;
+		}
+		expect(caught).toBe(error);
+		expect(currentLoopPhase()).toBeUndefined();
+	});
+
+	test("withLoopPhase labels only an async callback's synchronous prefix", async () => {
+		const promise = withLoopPhase("A", async () => {
+			expect(currentLoopPhase()).toBe("A");
+			await Promise.resolve();
+			expect(currentLoopPhase()).toBeUndefined();
+			return 42;
+		});
+		expect(currentLoopPhase()).toBeUndefined();
+		expect(await promise).toBe(42);
 	});
 });
 
