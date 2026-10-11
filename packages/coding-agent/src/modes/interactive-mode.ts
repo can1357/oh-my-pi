@@ -3605,10 +3605,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		const hideThinkingBlock = cfgHideThinkingBlock.get(this.settings);
 		if (any("hideThinkingBlock") && hideThinkingBlock !== this.hideThinkingBlock) {
 			this.hideThinkingBlock = hideThinkingBlock;
-			for (const child of this.chatContainer.children) {
-				if (child instanceof AssistantMessageComponent) child.setHideThinkingBlock(this.effectiveHideThinkingBlock);
-			}
-			this.ui.requestRender(true);
+			// Same propagation as the Ctrl+T keybinding: children + live streaming
+			// component + reveal resync, then forget the stable-emission ledger and
+			// rebuild retired history. Skipping the ledger reset here slices the
+			// shorter render by the stale emitted-row count — the assistant's
+			// answer vanishes from the live block AND is never written to scrollback
+			// on retirement (#10177).
+			this.#inputController.applyThinkingBlockVisibility(hideThinkingBlock);
 		}
 		const proseOnlyThinking = cfgProseOnlyThinking.get(this.settings);
 		if (any("proseOnlyThinking") && proseOnlyThinking !== this.proseOnlyThinking) {

@@ -1,4 +1,5 @@
 import { describe, expect, it, type Mock, vi } from "bun:test";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
@@ -139,5 +140,91 @@ describe("InputController thinking visibility", () => {
 		expect(setHideThinkingBlock).not.toHaveBeenCalled();
 		expect(resetDisplay).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith("Thinking is off — enable thinking to show blocks");
+	});
+
+	it("resyncs the streaming reveal controller instead of pushing the raw message on a mid-stream toggle", () => {
+		// R2 regression: Ctrl+T mid-reveal used to call
+		// `streamingComponent.updateContent(rawStreamingMessage)` — the raw
+		// cumulative message bypasses the reveal controller's truncating view, so
+		// the text snaps to 100% and re-types (and the non-transient update zeroes
+		// the streaming gauges for a frame). The toggle must hand the in-flight
+		// render back to the reveal controller.
+		const assistant = createAssistant();
+		const setHideThinkingBlock = assistant.setHideThinkingBlock as Mock<(hidden: boolean) => void>;
+		const streamingComponent = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
+		streamingComponent.setHideThinkingBlock = vi.fn();
+		streamingComponent.updateContent = vi.fn();
+		const updateContent = streamingComponent.updateContent as Mock<
+			(message: AssistantMessage, options?: { transient?: boolean }) => void
+		>;
+		const streamingMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "reasoning through the answer", thinkingSignature: "sig" },
+				{ type: "text", text: "the visible answer tail" },
+			],
+		} as unknown as AssistantMessage;
+		const resyncStreamingRevealVisibility = vi.fn();
+		const settings = Settings.isolated();
+		const resetOrder: string[] = [];
+		const resetDisplay = vi.fn(() => resetOrder.push("display"));
+		const resetStableEmission = vi.fn(() => resetOrder.push("stable emission"));
+		const ctx = {
+			hideThinkingBlock: false,
+			effectiveHideThinkingBlock: false,
+			hasDisplayableThinkingContent: true,
+			settings,
+			session: { agent: { hideThinkingSummary: false }, thinkingLevel: "high" },
+			chatContainer: {
+				children: [assistant],
+				clear: vi.fn(),
+				addChild: vi.fn(),
+				resetStableEmission,
+			},
+			streamingComponent,
+			streamingMessage,
+			eventController: { resyncStreamingRevealVisibility },
+			showStatus: vi.fn(),
+			ui: { resetDisplay },
+		} as unknown as InteractiveModeContext;
+
+		new InputController(ctx).toggleThinkingBlockVisibility();
+
+		// The reveal controller — never the toggle — owns the in-flight render.
+		expect(updateContent).not.toHaveBeenCalled();
+		expect(resyncStreamingRevealVisibility).toHaveBeenCalledTimes(1);
+		expect(streamingComponent.setHideThinkingBlock).toHaveBeenCalledWith(true);
+		expect(setHideThinkingBlock).toHaveBeenCalledWith(true);
+		expect(resetStableEmission).toHaveBeenCalledTimes(1);
+		expect(resetDisplay).toHaveBeenCalledTimes(1);
+		expect(resetOrder).toEqual(["stable emission", "display"]);
+		expect(ctx.hideThinkingBlock).toBe(true);
+		expect(cfgHideThinkingBlock.get(settings)).toBe(true);
+	});
+
+	it("delegates the toggle to the shared applyThinkingBlockVisibility helper", () => {
+		// Both gestures (Ctrl+T here, the /settings branch in InteractiveMode)
+		// must funnel through ONE propagation helper so the paths cannot drift.
+		const assistant = createAssistant();
+		const applyThinkingBlockVisibility = vi.spyOn(InputController.prototype, "applyThinkingBlockVisibility");
+		const settings = Settings.isolated();
+		const ctx = {
+			hideThinkingBlock: false,
+			effectiveHideThinkingBlock: false,
+			hasDisplayableThinkingContent: true,
+			settings,
+			session: { agent: { hideThinkingSummary: false }, thinkingLevel: "high" },
+			chatContainer: { children: [assistant], clear: vi.fn(), addChild: vi.fn(), resetStableEmission: vi.fn() },
+			streamingComponent: undefined,
+			streamingMessage: undefined,
+			showStatus: vi.fn(),
+			ui: { resetDisplay: vi.fn() },
+		} as unknown as InteractiveModeContext;
+
+		new InputController(ctx).toggleThinkingBlockVisibility();
+
+		expect(applyThinkingBlockVisibility).toHaveBeenCalledWith(true);
+		expect(ctx.hideThinkingBlock).toBe(true);
+		applyThinkingBlockVisibility.mockRestore();
 	});
 });

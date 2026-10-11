@@ -2771,6 +2771,42 @@ export class InputController {
 		this.ctx.ui.requestRender(true);
 	}
 
+	/**
+	 * Shared display propagation for every hide-thinking gesture (the Ctrl+T
+	 * keybinding and the /settings / on-disk-reload branch in InteractiveMode):
+	 * set the flag on every rendered assistant message plus the live streaming
+	 * component, resync the streaming reveal controller so the in-flight
+	 * message keeps its reveal-shaped view (NOT the raw cumulative message),
+	 * then rebuild native history so rows already retired from the viewport
+	 * are re-rendered under the new visibility.
+	 *
+	 * The ledger half is what keeps the assistant's answer alive: append-only
+	 * thinking heads publish stable rows to scrollback while streaming
+	 * (visible); forgetting that emission ledger here makes the paired
+	 * scrollback clear re-render them under the new visibility instead of
+	 * slicing the shorter block down to the stale row count (#10177).
+	 */
+	applyThinkingBlockVisibility(hide: boolean): void {
+		this.ctx.hideThinkingBlock = hide;
+
+		for (const child of this.ctx.chatContainer.children) {
+			if (child instanceof AssistantMessageComponent) {
+				child.setHideThinkingBlock(hide);
+			}
+		}
+
+		if (this.ctx.streamingComponent && this.ctx.streamingMessage) {
+			this.ctx.streamingComponent.setHideThinkingBlock(hide);
+			// The reveal controller keeps its own truncating view of the live
+			// message; resync it instead of pushing the raw cumulative message
+			// through updateContent, which snaps the text to 100% and re-types.
+			this.ctx.eventController?.resyncStreamingRevealVisibility();
+		}
+
+		this.ctx.chatContainer.resetStableEmission();
+		this.ctx.ui.resetDisplay();
+	}
+
 	toggleThinkingBlockVisibility(): void {
 		// When thinking is "off" and the session has not produced reasoning
 		// content, thinking blocks stay auto-hidden; the toggle would only corrupt
@@ -2783,30 +2819,10 @@ export class InputController {
 			this.ctx.showStatus("Thinking is off — enable thinking to show blocks");
 			return;
 		}
-		this.ctx.hideThinkingBlock = !this.ctx.hideThinkingBlock;
-		cfgHideThinkingBlock.set(this.ctx.settings, this.ctx.hideThinkingBlock);
-
-		for (const child of this.ctx.chatContainer.children) {
-			if (child instanceof AssistantMessageComponent) {
-				child.setHideThinkingBlock(this.ctx.hideThinkingBlock);
-			}
-		}
-
-		if (this.ctx.streamingComponent && this.ctx.streamingMessage) {
-			this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.hideThinkingBlock);
-			this.ctx.streamingComponent.updateContent(this.ctx.streamingMessage);
-		}
-
-		// This is an explicit user display gesture: rebuild native history so the
-		// visibility change also applies to rows already retired from the viewport.
-		// Append-only thinking heads emitted their stable rows to scrollback while
-		// streaming (visible); forget that emission ledger so the paired scrollback
-		// clear re-renders them under the new visibility instead of replaying the
-		// captured reasoning (#10177).
-		this.ctx.chatContainer.resetStableEmission();
-		this.ctx.ui.resetDisplay();
-
-		this.ctx.showStatus(`Thinking blocks: ${this.ctx.hideThinkingBlock ? "hidden" : "visible"}`);
+		const hide = !this.ctx.hideThinkingBlock;
+		cfgHideThinkingBlock.set(this.ctx.settings, hide);
+		this.applyThinkingBlockVisibility(hide);
+		this.ctx.showStatus(`Thinking blocks: ${hide ? "hidden" : "visible"}`);
 	}
 
 	async openExternalEditor(): Promise<void> {
