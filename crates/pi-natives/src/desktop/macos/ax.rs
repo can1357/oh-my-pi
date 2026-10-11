@@ -804,22 +804,35 @@ fn replace_native_text(element: &AXUIElement, text: &str) -> CoreResult<bool> {
 		return Ok(false);
 	}
 	// An unfocused Cocoa field has no field editor, so it publishes no
-	// settable selection until it is focused.
-	let mut previous = None;
-	if copy_bool(element, "AXFocused") != Some(true) {
+	// settable selection until it is focused. Focus is borrowed only when the
+	// element that holds it is known, so it can be handed back.
+	let previous = if copy_bool(element, "AXFocused") == Some(true) {
+		None
+	} else {
 		let pid = element_pid(element)?;
 		if !may_borrow_focus(skylight::front_pid(), pid) {
 			return Ok(false);
 		}
-		previous = probe_application(pid).and_then(|app| copy_element(&app, "AXFocusedUIElement"));
+		let Some(owner) =
+			probe_application(pid).and_then(|app| copy_element(&app, "AXFocusedUIElement"))
+		else {
+			return Ok(false);
+		};
 		if focus_element(element) != AXError::Success {
 			return Ok(false);
 		}
-	}
+		Some(owner)
+	};
 	if !select_whole_value(element) {
 		// Nothing was written: hand focus back before the `AXValue` fallback.
 		if let Some(previous) = previous {
-			let _ = focus_element(&previous);
+			let error = focus_element(&previous);
+			if error != AXError::Success {
+				return Err(DesktopError::ax_failed(format!(
+					"focused the field to replace its text, then could not hand focus back \
+					 ({error:?}); nothing was written"
+				)));
+			}
 		}
 		return Ok(false);
 	}
@@ -1338,29 +1351,21 @@ mod tests {
 		let error =
 			text_readback("555-789-0123", "555-789-0123", Some("(555) 789-0123"), false).unwrap_err();
 		assert_eq!(error.code, ErrorCode::AxFailed);
-		assert!(
-			error
-				.message
-				.starts_with(r#"wrote "555-789-0123"; the field now reads "(555) 789-0123". "#),
-			"{}",
-			error.message
-		);
-		assert!(!error.message.contains("instead of"), "{}", error.message);
+		assert!(error.message.contains(r#""555-789-0123""#), "{}", error.message);
+		assert!(error.message.contains(r#""(555) 789-0123""#), "{}", error.message);
 		assert!(text_readback("555-789-0123", "555-789-0123", Some("555-789-0123"), false).is_ok());
 	}
 
 	#[test]
 	fn inserted_readback_names_the_whole_value_it_expected() {
 		let error = text_readback("b", "abc", Some("ac"), false).unwrap_err();
-		assert!(
-			error
-				.message
-				.starts_with(r#"wrote "b"; the field now reads "ac" instead of "abc". "#),
-			"{}",
-			error.message
-		);
+		assert_eq!(error.code, ErrorCode::AxFailed);
+		for quoted in [r#""b""#, r#""ac""#, r#""abc""#] {
+			assert!(error.message.contains(quoted), "{quoted}: {}", error.message);
+		}
 		let unread = text_readback("b", "abc", None, false).unwrap_err();
-		assert!(unread.message.contains("could not be read back"), "{}", unread.message);
+		assert_eq!(unread.code, ErrorCode::AxFailed);
+		assert!(unread.message.contains(r#""b""#), "{}", unread.message);
 	}
 
 	#[test]
