@@ -5,9 +5,10 @@
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ReactNode } from "react";
 import { useState } from "react";
+import { ElidedImage, LoadFull } from "./parts";
 import { resolveToolRenderer } from "./registry";
 import type { ToolRenderHost, ToolRenderProps, ToolResultLike } from "./types";
-import { isRecord, replaceTabs, stripAnsi } from "./util";
+import { elidedImagesOf, isRecord, replaceTabs, stripAnsi } from "./util";
 import "./tool-render.css";
 
 export interface ToolViewProps {
@@ -55,9 +56,7 @@ export function ToolView(props: ToolViewProps): ReactNode {
 	const { args, intent: argIntent } = normalizeArgs(props.args);
 	const intent = props.intent?.trim() || argIntent;
 	const name = xdev?.tool ?? props.name;
-	const result = xdev
-		? { content: props.result!.content, details: xdev.inner, isError: props.result!.isError }
-		: props.result;
+	const result = xdev ? { ...props.result!, details: xdev.inner } : props.result;
 	const renderer = resolveToolRenderer(name);
 	const renderProps: ToolRenderProps = {
 		name,
@@ -70,6 +69,12 @@ export function ToolView(props: ToolViewProps): ReactNode {
 	const isError = props.result?.isError === true;
 	const status = props.running ? "run" : isError ? "err" : props.result ? "ok" : "pending";
 	const partial = props.running && !props.result && props.partial ? stripAnsi(replaceTabs(props.partial)) : "";
+	// The card, not each renderer, offers trimmed images, so every renderer's
+	// results can load them; each gets its own tile (the renderer already shows
+	// the host's text placeholder), and "load full output" covers the rest.
+	const elidedImages = elidedImagesOf(result);
+	const canLoad = props.host?.loadFull !== undefined && result?.entryId !== undefined;
+	const trimmed = result?.collabElided?.filter(record => !elidedImages.includes(record)) ?? [];
 
 	return (
 		<div className={`tv-card${isError ? " tv-card--error" : ""}`}>
@@ -95,6 +100,19 @@ export function ToolView(props: ToolViewProps): ReactNode {
 				<div className="tv-body">
 					{intent && <div className="tv-intent">{intent}</div>}
 					{renderer.Body ? <renderer.Body {...renderProps} /> : null}
+					{canLoad && elidedImages.length > 0 && (
+						<div className="tv-imgs">
+							{elidedImages.map(elided => (
+								<ElidedImage
+									key={elided.path.join(".")}
+									host={props.host}
+									entryId={result?.entryId}
+									elided={elided}
+								/>
+							))}
+						</div>
+					)}
+					<LoadFull host={props.host} entryId={result?.entryId} records={trimmed} label="load full output" />
 				</div>
 			)}
 			{partial && <pre className="tv-partial">{partial.length > 2048 ? `…${partial.slice(-2048)}` : partial}</pre>}

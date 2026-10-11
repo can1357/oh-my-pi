@@ -44,6 +44,9 @@
 ### Added
 
 - Added the Tern Surface Protocol wire contract (`@oh-my-pi/pi-wire`): message framing constants, the component vocabulary, document ops, frames, the handshake and terminal events that let omp render natively in terminals that speak it
+### Added
+
+- Added the tail-first snapshot grammar: `hello.snapshot`, `welcome.history`, the `fetch-history`/`history` and `fetch-value`/`value` frames, and `collabElided` placeholder records on entries ([#9469](https://github.com/can1357/oh-my-pi/issues/9469), [#9328](https://github.com/can1357/oh-my-pi/issues/9328), [#11859](https://github.com/can1357/oh-my-pi/issues/11859), [#13389](https://github.com/can1357/oh-my-pi/pull/13389) by [@andrewleech](https://github.com/andrewleech)).
 
 ## [18.2.11] - 2026-09-23
 

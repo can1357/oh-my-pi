@@ -8,7 +8,7 @@
  * send, and the loop never broke ("/collab disconnects when session is too
  * large").
  *
- * The fixed host runs every replicated entry through `serializeReplicatedEntry`
+ * The host bounds every replicated entry through `serializeReplicatedEntry`
  * so a head-truncated mirror ships instead. The test stands up a real
  * Bun.serve relay with `maxPayloadLength` set tight, hosts a snapshot
  * containing one ~5 MB entry, and asserts:
@@ -28,20 +28,21 @@
  * {@link MAX_REPLICATED_PAYLOAD_BYTES}, and preserves the entry's
  * `id`/`parentId` so the guest's branch chain stays connected.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import {
 	COLLAB_PROTO,
+	type CollabElided,
 	type CollabFrame,
 	parseCollabLink,
 	rewriteEnvelopePeer,
 	unpackEnvelope,
 } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import { placeholdImagesForReplication } from "@oh-my-pi/pi-coding-agent/collab/replication-images";
 import {
-	COLLAB_ENTRY_OMITTED_CUSTOM_TYPE,
 	copyForReplication,
 	MAX_REPLICATED_PAYLOAD_BYTES,
 	type ReplicatedEntry,
@@ -54,6 +55,9 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { COLLAB_ENTRY_OMITTED_CUSTOM_TYPE } from "@oh-my-pi/pi-wire";
+import { expectFetchable, valueAtPath } from "./helpers/collab-elided";
+import { buildTailFixture, type TailFixture } from "./helpers/tail-fixture";
 
 interface RelayData {
 	role: "host" | "guest";
@@ -124,7 +128,7 @@ function startTestRelay(maxPayloadLength: number): TestRelay {
 
 interface HostSnapshot {
 	header: { type: "session"; id: string; timestamp: string; cwd: string };
-	entries: SessionEntry[];
+	entries: readonly SessionEntry[];
 }
 
 interface OversizedSnapshot extends HostSnapshot {
@@ -189,13 +193,13 @@ interface HostHarness {
 /**
  * The slice of `SessionManager` the host actually drives. Narrowing it here is
  * what lets a case supply either a fixture snapshot or the real manager — and
- * the real manager is the interesting one, because the host reads its live
- * entries without a copy and must leave them untouched.
+ * the real manager is the interesting one, because it owns the deep copy the
+ * host performs before the shrinker runs.
  */
 interface HostReplicationSource {
 	getSessionId(): string;
 	getCwd(): string;
-	snapshotForReplication(): { header: HostSnapshot["header"]; entries: readonly SessionEntry[] };
+	snapshotForReplication(copy?: <T>(value: T) => T): HostSnapshot;
 	onEntryAppended?: ((entry: SessionEntry) => void) | undefined;
 }
 
@@ -288,20 +292,6 @@ function expectBounded(value: unknown): number {
 	return bytes;
 }
 
-/** The bounded entry, after checking its JSON is exactly what the frame would carry. */
-function boundEntry(entry: ReplicatedEntry): ReplicatedEntry {
-	const { value, json } = serializeReplicatedEntry(entry);
-	expect(json).toBe(JSON.stringify(value));
-	return value;
-}
-
-/** The bounded event, after checking its JSON is exactly what the frame would carry. */
-function boundEvent(event: AgentSessionEvent): AgentSessionEvent {
-	const { value, json } = serializeReplicatedEvent(event);
-	expect(json).toBe(JSON.stringify(value));
-	return value;
-}
-
 // ── Fixture ────────────────────────────────────────────────────────────────
 
 /**
@@ -368,7 +358,7 @@ describe("serializeReplicatedEntry (#11433)", () => {
 		// bound. An entry under it must reach the guest verbatim — substituting
 		// here would show every ordinary entry as "too large to replicate".
 		const small = userMessage("m1", null, "2026-09-13T00:00:00Z", "hi");
-		const shrunk = boundEntry(small);
+		const shrunk = serializeReplicatedEntry(small).value;
 		expect(shrunk.type).toBe("message");
 		const serialized = JSON.stringify(shrunk);
 		expect(serialized).not.toContain(COLLAB_ENTRY_OMITTED_CUSTOM_TYPE);
@@ -377,7 +367,7 @@ describe("serializeReplicatedEntry (#11433)", () => {
 
 	it("clamps a single giant string under the ceiling with an elision marker", () => {
 		const entry = userMessage("m1", null, "2026-09-13T00:00:00Z", "x".repeat(5 * 1024 * 1024));
-		const shrunk = boundEntry(entry);
+		const shrunk = serializeReplicatedEntry(entry).value;
 		expect(shrunk).not.toBe(entry);
 		expectBounded(shrunk);
 		if (shrunk.type !== "message" || shrunk.message.role !== "user") throw new Error("expected user message");
@@ -398,7 +388,7 @@ describe("serializeReplicatedEntry (#11433)", () => {
 		} as unknown as ReplicatedEntry;
 		expect(replicationByteLength(entry) ?? 0).toBeGreaterThan(MAX_REPLICATED_PAYLOAD_BYTES);
 
-		const shrunk = boundEntry(entry);
+		const shrunk = serializeReplicatedEntry(entry).value;
 		expectBounded(shrunk);
 		if (shrunk.type !== "message") throw new Error("expected message entry");
 		const shrunkContent = (shrunk.message as unknown as { content: unknown[] }).content;
@@ -420,7 +410,7 @@ describe("serializeReplicatedEntry (#11433)", () => {
 			message: { role: "user", content: "", timestamp: 0, blob: { [giantKey]: 1 } },
 		} as unknown as ReplicatedEntry;
 
-		const shrunk = boundEntry(entry);
+		const shrunk = serializeReplicatedEntry(entry).value;
 		expect(shrunk.type).toBe("custom_message");
 		expectBounded(shrunk);
 		if (shrunk.type !== "custom_message") throw new Error("expected typed placeholder");
@@ -442,7 +432,7 @@ describe("serializeReplicatedEntry (#11433)", () => {
 			message: { role: "user", content: "", timestamp: 0, blob },
 		} as unknown as ReplicatedEntry;
 
-		const shrunk = boundEntry(entry);
+		const shrunk = serializeReplicatedEntry(entry).value;
 		expect(shrunk.type).toBe("custom_message");
 		expectBounded(shrunk);
 		expect(shrunk.id).toBe("m2");
@@ -463,7 +453,7 @@ describe("serializeReplicatedEntry (#11433)", () => {
 			message: { role: "user", content: "", timestamp: 0, blob: deep },
 		} as unknown as ReplicatedEntry;
 
-		const shrunk = boundEntry(entry);
+		const shrunk = serializeReplicatedEntry(entry).value;
 		// The depth cap is what makes this serializable at all: the engine's own
 		// `JSON.stringify`/`structuredClone` throw at ~40,000 levels, so the
 		// walk must emit a shallower clone than it was given.
@@ -482,7 +472,7 @@ describe("serializeReplicatedEntry (#11433)", () => {
 		expect(asJson.length).toBeLessThanOrEqual(MAX_REPLICATED_PAYLOAD_BYTES);
 		expect(Buffer.byteLength(asJson, "utf8")).toBeGreaterThan(MAX_REPLICATED_PAYLOAD_BYTES);
 
-		const shrunk = boundEntry(entry);
+		const shrunk = serializeReplicatedEntry(entry).value;
 		expect(shrunk).not.toBe(entry);
 		expectBounded(shrunk);
 	});
@@ -506,7 +496,7 @@ describe("serializeReplicatedEntry (#11433)", () => {
 		// returning it by reference.
 		expect(replicationByteLength(entry)).toBeNull();
 
-		const shrunk = boundEntry(entry);
+		const shrunk = serializeReplicatedEntry(entry).value;
 		expectBounded(shrunk);
 		expect(shrunk.id).toBe("m5");
 		if (shrunk.type !== "message") throw new Error("expected the message entry to survive");
@@ -530,7 +520,7 @@ describe("serializeReplicatedEntry (#11433)", () => {
 
 		const manager = SessionManager.inMemory();
 		manager.ingestReplicatedEntry(userMessage("prior", null, "2026-09-13T00:00:00Z", "before"));
-		manager.ingestReplicatedEntry(boundEntry(omitted));
+		manager.ingestReplicatedEntry(serializeReplicatedEntry(omitted).value);
 		manager.ingestReplicatedEntry(successor);
 
 		expect(manager.getBranch().map(entry => entry.id)).toEqual(["prior", "omitted", "successor"]);
@@ -540,7 +530,7 @@ describe("serializeReplicatedEntry (#11433)", () => {
 describe("serializeReplicatedEvent (#11433)", () => {
 	it("does not substitute a notice for an event that already fits", () => {
 		const event: AgentSessionEvent = { type: "agent_end", messages: [] } as unknown as AgentSessionEvent;
-		const shrunk = boundEvent(event);
+		const shrunk = serializeReplicatedEvent(event).value;
 		expect(shrunk.type).toBe("agent_end");
 		expect(JSON.stringify(shrunk)).not.toContain("Host event omitted");
 	});
@@ -553,7 +543,7 @@ describe("serializeReplicatedEvent (#11433)", () => {
 			result: { text: "x".repeat(8 * 1024 * 1024) },
 		} as unknown as AgentSessionEvent;
 
-		const shrunk = boundEvent(event);
+		const shrunk = serializeReplicatedEvent(event).value;
 		expect(shrunk).not.toBe(event);
 		expect(shrunk.type).toBe("tool_execution_end");
 		expectBounded(shrunk);
@@ -571,7 +561,7 @@ describe("serializeReplicatedEvent (#11433)", () => {
 			result: { [giantKey]: 1 },
 		} as unknown as AgentSessionEvent;
 
-		const shrunk = boundEvent(event);
+		const shrunk = serializeReplicatedEvent(event).value;
 		expect(shrunk.type).toBe("notice");
 		expectBounded(shrunk);
 		if (shrunk.type !== "notice") throw new Error("expected notice event");
@@ -596,8 +586,8 @@ describe("collab snapshot train over a real SessionManager (#11433)", () => {
 
 		// Every other host case injects a snapshot object literal, which skips
 		// `snapshotForReplication` entirely. This one runs the real manager, so
-		// the host serializes the live entries itself — the path where a copy
-		// used to throw before the shrinker could bound anything.
+		// the host's own deep copy of the entries is on the path being tested —
+		// the copy that used to throw before the shrinker could bound anything.
 		const manager = SessionManager.inMemory();
 		manager.ingestReplicatedEntry(userMessage("small-1", null, "2026-09-13T00:00:00Z", "hi"));
 		manager.ingestReplicatedEntry({
@@ -635,55 +625,6 @@ describe("collab snapshot train over a real SessionManager (#11433)", () => {
 		const replica = SessionManager.inMemory();
 		for (const entry of chunkEntries) replica.ingestReplicatedEntry(entry);
 		expect(replica.getBranch().map(entry => entry.id)).toEqual(["small-1", "deep-1"]);
-	});
-});
-
-describe("collab welcome image strip over a real SessionManager", () => {
-	it("strips images from the guest's snapshot without touching the host's live entry", async () => {
-		const relay = startTestRelay(RELAY_MAX_PAYLOAD);
-		cleanups.push(() => relay.stop());
-
-		// The host reads the manager's live entries without a copy, so stripping
-		// must happen on a private copy: an in-place strip would delete the image
-		// from the host's own transcript (and its next model request) just
-		// because a guest joined a large session.
-		const manager = SessionManager.inMemory();
-		// 25 MB of filler pushes the snapshot past the host's 24 MB welcome
-		// threshold; the entry itself ships head-truncated.
-		manager.ingestReplicatedEntry(
-			userMessage("filler-1", null, "2026-09-13T00:00:00Z", "x".repeat(25 * 1024 * 1024)),
-		);
-		const image: ImageContent = { type: "image", data: "iVBORw0KGgo", mimeType: "image/png" };
-		const imageEntry: ReplicatedEntry = {
-			type: "message",
-			id: "image-1",
-			parentId: "filler-1",
-			timestamp: "2026-09-13T00:00:01Z",
-			message: { role: "user", content: [{ type: "text", text: "look" }, image], timestamp: 0 },
-		};
-		manager.ingestReplicatedEntry(imageEntry);
-
-		const harness = makeHostHarness(manager);
-		const host = new CollabHost(harness.ctx);
-		await host.start(relay.url);
-		cleanups.push(() => host.stop("test done"));
-
-		const { frames, closes } = await collectSnapshotTrain(host);
-		expect(closes).toEqual([]);
-
-		const chunkEntries: SessionEntry[] = [];
-		for (const f of frames) if (f.t === "snapshot-chunk") chunkEntries.push(...f.entries);
-		expect(chunkEntries.map(entry => entry.id)).toEqual(["filler-1", "image-1"]);
-		const shipped = chunkEntries.find(entry => entry.id === "image-1");
-		if (shipped?.type !== "message" || shipped.message.role !== "user") throw new Error("expected the image message");
-		const shippedContent = shipped.message.content;
-		if (!Array.isArray(shippedContent)) throw new Error("expected array content");
-		expect(shippedContent.some(block => block.type === "image")).toBe(false);
-		expect(shippedContent).toContainEqual({ type: "text", text: "look" });
-
-		const live = manager.getEntry("image-1");
-		if (live?.type !== "message" || live.message.role !== "user") throw new Error("expected the live image message");
-		expect(live.message.content).toEqual([{ type: "text", text: "look" }, image]);
 	});
 });
 
@@ -765,5 +706,242 @@ describe("copyForReplication JSON contract (PR #11999 review)", () => {
 		const copy = copyForReplication(value) as { details: { at: unknown; label: string } };
 		expect(JSON.stringify(copy)).toBe('{"details":{"at":"2026-09-13T12:00:00.000Z","label":"x"}}');
 		expect(replicationByteLength(copy)).not.toBe(null);
+	});
+});
+
+/** A tool-result entry over `content` (and optional `details`), as the host holds it. */
+function toolResultEntry(id: string, content: unknown[], details?: unknown): ReplicatedEntry {
+	return {
+		type: "message",
+		id,
+		parentId: null,
+		timestamp: "2026-09-24T00:00:00Z",
+		message: {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			content,
+			details,
+			isError: false,
+			timestamp: 0,
+		},
+	} as unknown as ReplicatedEntry;
+}
+
+/** An image block whose base64 payload is `bytes` long; `seed` keeps blocks distinct. */
+function imageBlock(bytes: number, seed = 0): ImageContent {
+	return { type: "image", data: String.fromCharCode(65 + (seed % 26)).repeat(bytes), mimeType: "image/png" };
+}
+
+describe("collabElided: every trimmed value stays fetchable (#9469)", () => {
+	let fixture: TailFixture;
+	beforeAll(() => {
+		fixture = buildTailFixture();
+	});
+
+	it("lists every clipped fixture string at its path in the original entry", () => {
+		const entry = fixture.sessionManager.getEntry(fixture.ids.clippedString) as ReplicatedEntry;
+		const before = JSON.stringify(entry);
+		const shrunk = serializeReplicatedEntry(entry).value;
+		expectBounded(shrunk);
+		const records = shrunk.collabElided ?? [];
+		expect(records.map(r => [r.kind, r.path])).toEqual(
+			[0, 1, 2].map(i => ["string", ["message", "content", i, "text"]]),
+		);
+		for (const record of records) {
+			expect(expectFetchable(entry, record)).toHaveLength(450 * 1024);
+			expect(valueAtPath(shrunk, record.path)).toContain("chars elided for collab session");
+		}
+		// The live path hands over the session's own entry: it must come back untouched.
+		expect(JSON.stringify(entry)).toBe(before);
+	});
+
+	it("sizes a clipped string by the UTF-8 bytes of its JSON", () => {
+		const text = 'é"'.repeat(400_000);
+		const entry = toolResultEntry("utf8", [
+			{ type: "text", text: "ok" },
+			{ type: "text", text },
+		]);
+		const shrunk = serializeReplicatedEntry(entry).value;
+		expectBounded(shrunk);
+		const [record, ...rest] = shrunk.collabElided ?? [];
+		if (!record) throw new Error("expected a string record");
+		expect(rest).toEqual([]);
+		expect(record.path).toEqual(["message", "content", 1, "text"]);
+		// `é` is two bytes and `"` escapes to two: four per pair, plus the JSON quotes.
+		expect(record.bytes).toBe(400_000 * 4 + 2);
+		expect(expectFetchable(entry, record)).toBe(text);
+	});
+
+	it("lists a clipped array by its path, keeping the original's indices", () => {
+		const items = Array.from({ length: 200_000 }, (_, i) => i);
+		const entry = toolResultEntry("array", [
+			{ type: "text", text: "a" },
+			{ type: "text", text: "b" },
+			{ type: "text", text: "c", items },
+		]);
+		const shrunk = serializeReplicatedEntry(entry).value;
+		expectBounded(shrunk);
+		const records = shrunk.collabElided ?? [];
+		expect(records.map(r => [r.kind, r.path])).toEqual([["array", ["message", "content", 2, "items"]]]);
+		const [record] = records;
+		if (!record) throw new Error("expected an array record");
+		expect(expectFetchable(entry, record)).toBe(items);
+		expect(valueAtPath(shrunk, [...record.path, 256])).toContain("items elided for collab session");
+	});
+
+	it("gives the whole-entry placeholder one entry-level record of the original", () => {
+		const entry = fixture.sessionManager.getEntry(fixture.ids.keyHeavy) as ReplicatedEntry;
+		const shrunk = serializeReplicatedEntry(entry).value;
+		expectBounded(shrunk);
+		if (shrunk.type !== "custom_message") throw new Error("expected the typed placeholder");
+		expect(shrunk.customType).toBe(COLLAB_ENTRY_OMITTED_CUSTOM_TYPE);
+		const records = shrunk.collabElided ?? [];
+		expect(records.map(r => [r.kind, r.path])).toEqual([["entry", []]]);
+		const [record] = records;
+		if (!record) throw new Error("expected an entry record");
+		expect(expectFetchable(entry, record)).toBe(entry);
+		expect(shrunk.details).toEqual({ omittedType: "message", bytes: record.bytes });
+	});
+
+	it("returns an entry that already fits by reference, without metadata", () => {
+		const entry = userMessage("fits", null, "2026-09-24T00:00:00Z", "hi");
+		const shrunk = serializeReplicatedEntry(entry).value;
+		expect(shrunk).toBe(entry);
+		expect(shrunk.collabElided).toBeUndefined();
+	});
+
+	it("ships an oversized screenshot as an image record, not as clipped base64", () => {
+		const entry = fixture.sessionManager.getEntry(fixture.ids.toolImage) as ReplicatedEntry;
+		const shrunk = serializeReplicatedEntry(entry).value;
+		expectBounded(shrunk);
+		expect(valueAtPath(shrunk, ["message", "content", 1])).toEqual({
+			type: "text",
+			text: expect.stringMatching(/^\[image image\/png, .+ not sent\]$/),
+		});
+		const records = shrunk.collabElided ?? [];
+		expect(records.map(r => [r.kind, r.path, r.mimeType])).toEqual([
+			["image", ["message", "content", 1], "image/png"],
+		]);
+		const [record] = records;
+		if (!record) throw new Error("expected an image record");
+		expect(expectFetchable(entry, record)).toMatchObject({ type: "image", mimeType: "image/png" });
+	});
+
+	it("keeps records the entry already carries ahead of its own, once each", () => {
+		// The host placeholders a whole oversized snapshot's images itself, then
+		// shrinks each entry: those records must survive verbatim and not repeat.
+		const original = toolResultEntry("prior", [imageBlock(2_000), { type: "text", text: "x".repeat(1_500_000) }]);
+		const copy = structuredClone(original);
+		expect(placeholdImagesForReplication(copy)).toBe(1);
+		const imageRecords = structuredClone(copy.collabElided);
+		const shrunk = serializeReplicatedEntry(copy).value;
+		expectBounded(shrunk);
+		const records = shrunk.collabElided ?? [];
+		expect(records.map(r => [r.kind, r.path])).toEqual([
+			["image", ["message", "content", 0]],
+			["string", ["message", "content", 1, "text"]],
+		]);
+		expect(records[0]).toEqual(imageRecords?.[0] as CollabElided);
+		for (const record of records) expectFetchable(original, record);
+	});
+
+	it("hashes a clipped array holding an image placeholder as the original array", () => {
+		// The array record is fetched from the host's original, which still has
+		// the image — hashing the placeholder copy would make it forever stale.
+		const original = toolResultEntry(
+			"mixed",
+			Array.from({ length: 300 }, (_, i) =>
+				i === 3 ? imageBlock(2_000) : { type: "text", text: "t".repeat(5_000) },
+			),
+		);
+		const hostPlaceholdered = structuredClone(original);
+		placeholdImagesForReplication(hostPlaceholdered);
+		for (const input of [original, hostPlaceholdered]) {
+			const shrunk = serializeReplicatedEntry(input).value;
+			expectBounded(shrunk);
+			const records = shrunk.collabElided ?? [];
+			expect(records.map(r => [r.kind, r.path])).toEqual([
+				["image", ["message", "content", 3]],
+				["array", ["message", "content"]],
+			]);
+			for (const record of records) expectFetchable(original, record);
+		}
+	});
+
+	it("addresses the original across an image-only array that lost its image", () => {
+		// `details.images` loses its image outright, shifting later elements down.
+		// Records inside, of, or around that array must still resolve on the
+		// host's original, whoever removed the image.
+		const figures = [{ type: "text", text: "figures" }];
+		const chart = (text: string) => ({ type: "chart", text });
+		const files: Record<string, number> = {};
+		for (let i = 0; i < 20_000; i++) files[`src/generated/module-${i}/index.generated.ts`] = i;
+		const cases: { entry: ReplicatedEntry; expected: [CollabElided["kind"], (string | number)[]][] }[] = [
+			{
+				entry: toolResultEntry("inside", figures, { images: [imageBlock(2_000), chart("c".repeat(1_500_000))] }),
+				expected: [
+					["image", ["message", "details", "images", 0]],
+					["string", ["message", "details", "images", 1, "text"]],
+				],
+			},
+			{
+				entry: toolResultEntry("of", figures, {
+					images: [imageBlock(2_000), ...Array.from({ length: 400 }, (_, i) => chart(`${i}`.padEnd(5_000, "c")))],
+				}),
+				expected: [
+					["image", ["message", "details", "images", 0]],
+					["array", ["message", "details", "images"]],
+				],
+			},
+			{
+				entry: toolResultEntry("around", figures, { images: [imageBlock(2_000)], files }),
+				expected: [["entry", []]],
+			},
+		];
+		for (const { entry: original, expected } of cases) {
+			const hostPlaceholdered = structuredClone(original);
+			expect(placeholdImagesForReplication(hostPlaceholdered)).toBe(1);
+			for (const input of [original, hostPlaceholdered]) {
+				const shrunk = serializeReplicatedEntry(input).value;
+				expectBounded(shrunk);
+				const records = shrunk.collabElided ?? [];
+				expect(records.map(r => [r.kind, r.path])).toEqual(expected);
+				for (const record of records) expectFetchable(original, record);
+			}
+		}
+	});
+
+	it("collapses more than 64 records into one entry-level record", () => {
+		const entry = toolResultEntry(
+			"many",
+			Array.from({ length: 70 }, (_, i) => ({ type: "text", text: `${i}`.padEnd(20_000, "s") })),
+		);
+		const shrunk = serializeReplicatedEntry(entry).value;
+		expectBounded(shrunk);
+		expect(shrunk.type).toBe("message");
+		const records = shrunk.collabElided ?? [];
+		expect(records.map(r => [r.kind, r.path])).toEqual([["entry", []]]);
+		const [record] = records;
+		if (!record) throw new Error("expected an entry record");
+		expect(expectFetchable(entry, record)).toBe(entry);
+	});
+
+	it("collapses image records with the rest, hashing the entry with its images", () => {
+		const original = toolResultEntry("many-images", [
+			...Array.from({ length: 70 }, (_, i) => imageBlock(1_000, i)),
+			{ type: "text", text: "x".repeat(2_000_000) },
+		]);
+		const hostPlaceholdered = structuredClone(original);
+		expect(placeholdImagesForReplication(hostPlaceholdered)).toBe(70);
+		for (const input of [original, hostPlaceholdered]) {
+			const shrunk = serializeReplicatedEntry(input).value;
+			expectBounded(shrunk);
+			const records = shrunk.collabElided ?? [];
+			expect(records.map(r => [r.kind, r.path])).toEqual([["entry", []]]);
+			const [record] = records;
+			if (!record) throw new Error("expected an entry record");
+			expectFetchable(original, record);
+		}
 	});
 });

@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { formatBytes } from "@oh-my-pi/pi-utils/format";
+import type { CollabElided } from "@oh-my-pi/pi-wire";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ToolView } from "../src/tool-render/ToolView";
 
@@ -229,5 +231,48 @@ describe("ToolView ask renderer", () => {
 		expect(html).toContain("managed instance");
 		// The cache question answered without a note must not leak the db note.
 		expect(html.match(/managed instance/g)?.length).toBe(1);
+	});
+});
+
+describe("ToolView trimmed values", () => {
+	const image: CollabElided = {
+		path: ["message", "content", 1],
+		kind: "image",
+		bytes: 120,
+		hash: "i",
+		mimeType: "image/png",
+	};
+	const text: CollabElided = { path: ["message", "content", 0, "text"], kind: "string", bytes: 4096, hash: "t" };
+	const result = {
+		content: [
+			{ type: "text", text: "Fetched https://example.com/a.png" },
+			{ type: "text", text: "[image image/png, 120B not sent]" },
+		],
+		entryId: "r1",
+		collabElided: [image, text],
+	};
+
+	it("offers an image tile whatever the renderer, and leaves the image out of 'load full output'", () => {
+		// `fetch` renders no image strip of its own.
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="fetch"
+				args={{ url: "https://example.com/a.png" }}
+				result={result}
+				defaultOpen
+				host={{ loadFull: () => Promise.resolve(null) }}
+			/>,
+		);
+		expect(html.match(/class="tv-img-tile"/g)).toHaveLength(1);
+		expect(html).toContain(`load full output (${formatBytes(text.bytes)})`);
+	});
+
+	it("offers nothing when the host cannot load (HTML exports)", () => {
+		const html = renderToStaticMarkup(
+			<ToolView name="fetch" args={{ url: "https://example.com/a.png" }} result={result} defaultOpen host={{}} />,
+		);
+		expect(html).not.toContain("tv-img-tile");
+		expect(html).not.toContain("load full output");
+		expect(html).toContain("[image image/png, 120B not sent]");
 	});
 });

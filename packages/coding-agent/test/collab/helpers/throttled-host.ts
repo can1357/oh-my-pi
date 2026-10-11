@@ -96,10 +96,13 @@ export interface RelayProbe {
 	/** Target peer id of every host→relay envelope, in wire order. */
 	targets: number[];
 	hostSocket(): FakeWebSocket;
+	/** Stop charging host sends to `bufferedAmount` and clear it, so the host's queue drains freely. */
+	unthrottle(): void;
 }
 
 export function instrumentRelay(relay: InMemoryRelay, opts: { throttle: boolean }): RelayProbe {
 	let hostWs: FakeWebSocket | undefined;
+	let throttled = opts.throttle;
 	const connect = relay.connect.bind(relay);
 	relay.connect = ws => {
 		connect(ws);
@@ -108,7 +111,7 @@ export function instrumentRelay(relay: InMemoryRelay, opts: { throttle: boolean 
 		if (!opts.throttle) return;
 		const send = ws.send.bind(ws);
 		ws.send = data => {
-			ws.bufferedAmount += data.byteLength;
+			if (throttled) ws.bufferedAmount += data.byteLength;
 			send(data);
 		};
 	};
@@ -123,6 +126,10 @@ export function instrumentRelay(relay: InMemoryRelay, opts: { throttle: boolean 
 		hostSocket: () => {
 			if (!hostWs) throw new Error("in-memory relay never saw the host socket");
 			return hostWs;
+		},
+		unthrottle: () => {
+			throttled = false;
+			if (hostWs) hostWs.bufferedAmount = 0;
 		},
 	};
 }

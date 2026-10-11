@@ -127,17 +127,21 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 
 	const subCount = useMemo(() => snap.agents.filter(a => a.kind === "sub").length, [snap.agents]);
 
-	// Task-card agent chips drill into the same drawer the rail uses.
+	// Task-card agent chips drill into the same drawer the rail uses. Trimmed
+	// values load only from a host that advertised it in `welcome.history`.
 	const agentIds = useMemo(() => new Set(snap.agents.map(a => a.id)), [snap.agents]);
+	const canLoadFull = snap.history !== null;
 	const toolHost = useMemo<ToolRenderHost>(
 		() => ({
 			hasAgent: id => agentIds.has(id),
 			openAgent: id => {
 				if (agentIds.has(id)) setSelectedId(id);
 			},
+			loadFull: canLoadFull ? (entryId, elided) => client.loadFull(entryId, elided) : undefined,
 		}),
-		[agentIds],
+		[agentIds, canLoadFull, client],
 	);
+	const loadEarlier = useCallback(() => client.fetchHistory(), [client]);
 
 	// Auto-open the rail the first time a subagent appears.
 	useEffect(() => {
@@ -180,6 +184,8 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 							working={snap.working}
 							host={toolHost}
 							phase={snap.phase}
+							history={snap.history}
+							onLoadEarlier={loadEarlier}
 						/>
 					</div>
 					<Composer
