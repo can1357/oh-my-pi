@@ -9,7 +9,7 @@ import { Text } from "../components/text";
 import { getImageDimensions, imageFallback, ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import { Container, type TUI } from "../tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import type { Terminal as XtermTerminalType } from "@oh-my-pi/pi-utils/vterm";
+import type { BufferLine, BufferView, Terminal as XtermTerminalType } from "@oh-my-pi/pi-utils/vterm";
 import { theme } from "../theme/theme";
 import type { OutputArtifactError } from "../tools/streaming-output";
 import type { TruncationMeta } from "../tools/output-meta";
@@ -21,7 +21,7 @@ import {
 	getSixelLineMask,
 	isSixelPassthroughEnabled,
 	sanitizeWithOptionalSixelPassthrough,
-	type RawSixelSegment,
+	type RawSixelExtractor,
 } from "../render/sixel";
 import {
 	buildExecutionFrame,
@@ -54,13 +54,17 @@ const MAX_PTY_QUEUE_CHUNKS = 512;
 const MAX_PTY_SIXEL_SPANS = 256;
 
 /** One queued PTY replay unit: raw bytes, or a sixel payload held out of the vterm. */
-type PtyQueueUnit =
-	| { kind: "text"; text: string }
-	| { kind: "sixel"; payload: string; row: number };
+type PtyQueueUnit = { kind: "text"; text: string } | { kind: "sixel"; payload: string; line?: BufferLine };
 
-/** A sixel payload retained with the replay row it was emitted on. */
+/**
+ * A sixel payload retained with the buffer line it was emitted on. The line is
+ * the anchor, not its index: once the scrollback is full every added row is
+ * spliced off the front while `buffer.length` stays at its cap, so an index
+ * recorded earlier addresses a newer row and the payload would reappear
+ * somewhere it was never emitted.
+ */
 interface PtySixelSpan {
-	row: number;
+	line: BufferLine;
 	payload: string;
 }
 let nextBashExecutionId = 0;
@@ -104,7 +108,7 @@ export class BashExecutionComponent extends Container {
 	#ptyReplayFinalized = false;
 	// Sixel passthrough: payloads are pulled out of the raw byte stream (the
 	// vterm swallows DCS strings) and stitched back onto their replay rows.
-	#ptySixelExtractor?: () => RawSixelSegment[];
+	#ptySixelExtractor?: RawSixelExtractor;
 	#ptySixelSpans: PtySixelSpan[] = [];
 	#images: readonly ImageContent[] = [];
 	#showImages = true;
@@ -283,11 +287,11 @@ export class BashExecutionComponent extends Container {
 			// Sixel never enters the vterm: it swallows DCS strings, so the payload
 			// would vanish from the replay rows. It is extracted here and stitched
 			// back onto the row it was emitted on in #refreshPtyLines.
-			this.#ptySixelExtractor ??= createRawSixelExtractor();
-			for (const segment of this.#ptySixelExtractor(chunk)) {
+			const extractSixel = (this.#ptySixelExtractor ??= createRawSixelExtractor());
+			for (const segment of extractSixel(chunk)) {
 				this.#ptyQueue.push(
 					segment.kind === "sixel"
-						? { kind: "sixel", payload: segment.payload, row: -1 }
+						? { kind: "sixel", payload: segment.payload }
 						: { kind: "text", text: segment.text },
 				);
 			}
@@ -328,11 +332,9 @@ export class BashExecutionComponent extends Container {
 			return;
 		}
 		if (unit.kind === "sixel") {
-			// The row is anchored by the preceding text write; a leading payload
+			// The line is anchored by the preceding text write; a leading payload
 			// (nothing written yet) belongs to the cursor's row.
-			const row = unit.row >= 0 ? unit.row : terminal.buffer.active.baseY + terminal.buffer.active.cursorY;
-			this.#ptySixelSpans.push({ row, payload: unit.payload });
-			if (this.#ptySixelSpans.length > MAX_PTY_SIXEL_SPANS) this.#ptySixelSpans.shift();
+			this.#anchorPtySixelPayload(unit.payload, unit.line);
 			// No write follows the payload, so the pending refresh (queued by the
 			// preceding text write) already ran without it.
 			this.#schedulePtyRefresh();
@@ -345,12 +347,23 @@ export class BashExecutionComponent extends Container {
 			// A payload queued behind this text belongs to the row the cursor
 			// now sits on: the vterm consumed the sequence without moving it.
 			const next = this.#ptyQueue[0];
-			if (next?.kind === "sixel" && next.row < 0) {
-				next.row = terminal.buffer.active.baseY + terminal.buffer.active.cursorY;
+			if (next?.kind === "sixel" && next.line === undefined) {
+				const buffer = terminal.buffer.active;
+				next.line = buffer.getLine(buffer.baseY + buffer.cursorY);
 			}
 			this.#schedulePtyRefresh();
 			this.#drainPtyQueue();
 		});
+	}
+
+	/** Retains a payload with the buffer line it was emitted on. */
+	#anchorPtySixelPayload(payload: string, line: BufferLine | undefined): void {
+		const buffer = this.#ptyTerminal?.buffer.active;
+		if (!buffer) return;
+		const anchored = line ?? buffer.getLine(buffer.baseY + buffer.cursorY) ?? buffer.getLine(buffer.length - 1);
+		if (anchored === undefined) return;
+		this.#ptySixelSpans.push({ line: anchored, payload });
+		if (this.#ptySixelSpans.length > MAX_PTY_SIXEL_SPANS) this.#ptySixelSpans.shift();
 	}
 
 	#schedulePtyRefresh(): void {
@@ -376,7 +389,7 @@ export class BashExecutionComponent extends Container {
 		const buffer = terminal.buffer.active;
 		const startRow = full ? 0 : Math.max(0, buffer.length - STREAMING_LINE_CAP);
 		const rows = readTerminalRows(terminal, startRow, buffer.length - startRow);
-		const spansByRow = this.#collectPtySixelSpans(startRow, buffer.length);
+		const spansByRow = this.#collectPtySixelSpans(startRow, buffer);
 		const lastPayloadRow = spansByRow.size > 0 ? Math.max(...spansByRow.keys()) : -1;
 		// Trailing blank rows are trimmed, but never past a row carrying a
 		// payload — an image is frequently the last thing a command emits.
@@ -397,16 +410,21 @@ export class BashExecutionComponent extends Container {
 	}
 
 	/** Groups retained payloads by replay row, keyed relative to `startRow`. */
-	#collectPtySixelSpans(startRow: number, rowCount: number): Map<number, string> {
+	#collectPtySixelSpans(startRow: number, buffer: BufferView): Map<number, string> {
+		const lines: Array<BufferLine | undefined> = [];
+		for (let row = 0; row < buffer.length; row++) lines.push(buffer.getLine(row));
 		const spansByRow = new Map<number, string>();
 		for (const span of this.#ptySixelSpans) {
-			// Front-trimming of an over-long scrollback shifts absolute row
-			// indices; a stale anchor clamps onto the last retained row so the
-			// payload is still emitted instead of lost.
-			const index = Math.min(span.row, rowCount - 1) - startRow;
-			// Above the streaming window: the final full read picks it up.
+			// Trimming splices rows off the front, so the index is resolved from
+			// the anchored line. A line that is gone belonged to trimmed
+			// scrollback: the payload is dropped rather than pinned onto a newer
+			// row that never carried it.
+			const index = lines.indexOf(span.line);
 			if (index < 0) continue;
-			spansByRow.set(index, `${spansByRow.get(index) ?? ""}${span.payload}`);
+			// Above the streaming window: the final full read picks it up.
+			const relative = index - startRow;
+			if (relative < 0) continue;
+			spansByRow.set(relative, `${spansByRow.get(relative) ?? ""}${span.payload}`);
 		}
 		return spansByRow;
 	}
@@ -480,6 +498,11 @@ export class BashExecutionComponent extends Container {
 		const hiddenLineCount = showingAllLines ? 0 : Math.max(0, availableLines.length - PREVIEW_LINES);
 		this.#outputPane.configure({ uncapSixel: hasSixelOutput });
 		this.#outputPane.setLines(availableLines);
+		// The PTY executor also decodes every sixel frame it saw into an image.
+		// A payload rendered raw through the replay rows already rasterizes in
+		// the host terminal, so handing that decode through here would draw the
+		// same image a second time below the output.
+		const images = hasSixelOutput ? [] : this.#images;
 
 		// Rebuild content container
 		this.#contentContainer.clear();
@@ -490,8 +513,8 @@ export class BashExecutionComponent extends Container {
 		// Output
 		if (availableLines.length > 0) this.#contentContainer.addChild(this.#outputPane);
 
-		for (let index = 0; index < this.#images.length; index++) {
-			const image = this.#images[index]!;
+		for (let index = 0; index < images.length; index++) {
+			const image = images[index]!;
 			if (TERMINAL.imageProtocol && this.#showImages) {
 				this.#contentContainer.addChild(
 					new Image(

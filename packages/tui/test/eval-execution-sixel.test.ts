@@ -72,14 +72,33 @@ describe("EvalExecutionComponent SIXEL", () => {
 	it("keeps a payload that spans several rows intact", () => {
 		enableSixelPassthrough();
 		// The continuation row carries no DCS start of its own: the clamp must
-		// still recognize it as part of the open sequence.
+		// still recognize it as part of the open sequence. The newline arrives in
+		// its own append, so the row it closes is complete before the next one.
 		const secondRow = `C${"x".repeat(6000)}\x1b\\`;
 		const component = new EvalExecutionComponent("print(1)", ui, false);
-		component.appendOutput(`\x1bPqAB\n${secondRow}\n`);
+		component.appendOutput(`\x1bPqAB\n`);
+		component.appendOutput(`${secondRow}\n`);
 
 		const output = component.getOutput();
 		expect(output).toContain("\x1bPqAB");
 		expect(output).toContain(secondRow);
+		expect(output).not.toContain("visible columns omitted");
+	});
+
+	it("keeps a continuation row classified after its terminator arrived", () => {
+		enableSixelPassthrough();
+		// The continuation row already saw the DCS terminator, and a later chunk
+		// still appends plain text to that same row. Classifying the row from
+		// scratch would see no start marker and clamp the payload, cutting the
+		// terminator and leaving the host terminal inside the string.
+		const continuation = `#0${"~".repeat(6000)}\x1b\\`;
+		const component = new EvalExecutionComponent("print(1)", ui, false);
+		component.appendOutput(`\x1bPq#0~~-\n${continuation}`);
+		component.appendOutput(" done");
+
+		const output = component.getOutput();
+		expect(output).toContain(continuation);
+		expect(output).toContain(" done");
 		expect(output).not.toContain("visible columns omitted");
 	});
 

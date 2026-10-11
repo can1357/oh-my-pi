@@ -299,6 +299,23 @@ describe("OutputSink", () => {
 		expect(dumped.output).toContain(sixel);
 	});
 
+	test("keeps a SIXEL payload through the column cap", async () => {
+		// A real frame is wider than the column cap. Cutting it drops the DCS
+		// terminator too, and the terminal this snapshot is replayed into stays
+		// inside the string for the rest of the cell.
+		const sixel = `\x1bPq#0;2;100;0;0${"~~".repeat(400)}\x1b\\`;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+		const sink = new OutputSink({ maxColumns: 8, spillThreshold: 100_000 });
+		await sink.push(`${"z".repeat(50)}\n`);
+		await sink.push(`${sixel}\nafter`);
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain(sixel);
+		// A plain row in the same sink is still capped.
+		expect(dumped.output).toContain("…");
+		expect(dumped.columnTruncatedLines).toBe(1);
+	});
+
 	test("strips SIXEL chunks when passthrough gates are disabled", async () => {
 		const sixel = "\x1bPqabc\x1b\\";
 		delete Bun.env.PI_FORCE_IMAGE_PROTOCOL;

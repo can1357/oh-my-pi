@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { formatBytes, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
-import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
+import { createSixelPayloadGuard, sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
 
 // =============================================================================
 // Constants
@@ -911,6 +911,9 @@ export class OutputSink {
 	#columnLastCutLine = 0;
 	/** Set once a cut line's number may not match the artifact; the range is then withheld. */
 	#columnCutLinesUnmapped = false;
+	// Reports which raw chunks carry DCS payload bytes; those chunks bypass the
+	// column cap so a payload's terminator survives to the terminal.
+	#sixelPayloadGuard = createSixelPayloadGuard();
 	#file?: {
 		path: string;
 		artifactId?: string;
@@ -1066,8 +1069,13 @@ export class OutputSink {
 		const inlineBytes = substituted ? Buffer.byteLength(inlineChunk, "utf-8") : rawBytes;
 		// Per-line column cap. State persists across chunks so a mid-line split
 		// still respects the budget. Operates on the inline chunk; the complete
-		// chunk is mirrored to the artifact before any cap is applied.
-		const capped = this.#maxColumns > 0 ? this.#applyColumnCap(inlineChunk, firstLine) : inlineChunk;
+		// chunk is mirrored to the artifact before any cap is applied. Chunks
+		// carrying a DCS payload are exempt: cutting a payload also drops its
+		// terminator, and the terminal that receives this snapshot would stay
+		// inside an open string for the rest of the cell.
+		const payloadChunk = this.#sixelPayloadGuard(inlineChunk);
+		const capped =
+			this.#maxColumns > 0 && !payloadChunk ? this.#applyColumnCap(inlineChunk, firstLine) : inlineChunk;
 		const cappedBytes = capped === inlineChunk ? inlineBytes : Buffer.byteLength(capped, "utf-8");
 		const cappedThisChunk = cappedBytes < inlineBytes;
 		if (substituted) this.#truncated = true;

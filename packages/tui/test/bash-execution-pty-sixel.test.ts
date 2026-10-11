@@ -10,6 +10,8 @@ type MutableTerminalInfo = {
 
 const terminal = TERMINAL as unknown as MutableTerminalInfo;
 const SIXEL = "\x1bPq#0;2;100;0;0#0~~\x1b\\";
+// 1x1 opaque PNG, large enough for the dimension probe to report a size.
+const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
 const ui = { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI;
 
 // Condition-driven poll, not a fixed wait: the vterm write pipeline completes on
@@ -112,6 +114,67 @@ describe("BashExecutionComponent PTY SIXEL", () => {
 		const output = component.getOutput();
 		expect(output).toContain("visible");
 		expect(output).toContain(SIXEL);
+	});
+
+	it("holds a DCS introducer split across chunks", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		// The chunk boundary inside the introducer must not reach the vterm: it
+		// would open a DCS string and swallow the rows that follow it.
+		const component = new BashExecutionComponent("img", ui, false);
+		component.appendPtyChunk("head\r\n\x1bP");
+		component.appendPtyChunk(`q#0~~\x1b\\\r\nvisible\r\n`);
+		component.setComplete(0, false);
+
+		await renderUntil(component, () => component.isTranscriptBlockFinalized());
+
+		const output = component.getOutput();
+		expect(output).toContain("\x1bPq#0~~\x1b\\");
+		expect(output).toContain("visible");
+	});
+
+	it("drops a payload whose rows were trimmed out of the scrollback", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		// Once the scrollback is full every added row splices one off the front
+		// while `buffer.length` stays at its cap, so an anchor recorded as a row
+		// index resolves onto a newer line. The payload belongs to trimmed
+		// history: it must vanish, not reappear on an unrelated row.
+		const component = new BashExecutionComponent("img", ui, false);
+		component.appendPtyChunk(`line0\r\n${SIXEL}line1\r\n`);
+		const rows = Array.from({ length: 6000 }, (_, index) => `L${index}\r\n`).join("");
+		component.appendPtyChunk(rows);
+		component.setComplete(0, false);
+
+		await renderUntil(component, () => component.isTranscriptBlockFinalized());
+
+		const output = component.getOutput();
+		expect(output).not.toContain("\x1bPq");
+		expect(output).toContain("L5999");
+	});
+
+	it("renders the raw payload once, without the executor's decoded image", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		// The PTY executor decodes every frame it saw into an image as well; the
+		// raw payload already rasterizes in the host terminal, so the decode is
+		// dropped instead of drawn a second time below the output.
+		const component = new BashExecutionComponent("img", ui, false);
+		component.appendPtyChunk(`${SIXEL}\r\nvisible\r\n`);
+		component.setComplete(0, false, {
+			images: [{ type: "image", data: PNG, mimeType: "image/png" }],
+			showImages: false,
+		});
+
+		const text = await renderUntil(component, () => component.isTranscriptBlockFinalized());
+		expect(text).toContain(SIXEL);
+		expect(text).not.toContain("[Image:");
 	});
 
 	it("renders the payload raw and uncapped with no expand hint", async () => {
