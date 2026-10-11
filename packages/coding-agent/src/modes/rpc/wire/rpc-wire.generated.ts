@@ -1394,7 +1394,7 @@ export interface HostUriCancelRequest {
 export interface HostUriResult {
 	type: "host_uri_result";
 	id: string;
-	/** Required for a successful read. */
+	/** Required for a successful read; on write success, replaces the default acknowledgement. */
 	content?: string;
 	contentType?: "text/markdown" | "application/json" | "text/plain";
 	notes?: string[];

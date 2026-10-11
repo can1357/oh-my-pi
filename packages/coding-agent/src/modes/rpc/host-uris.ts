@@ -40,7 +40,7 @@ export function isRpcHostUriResult(value: unknown): value is RpcHostUriResult {
 class RpcHostUriProtocolHandler implements ProtocolHandler {
 	readonly scheme: string;
 	readonly spec: SchemeSpec;
-	readonly write?: ProtocolHandler["write"];
+	readonly write?: (url: InternalUrl, content: string, context?: WriteContext) => Promise<InternalWriteResult | void>;
 	readonly #bridge: RpcHostUriBridge;
 
 	constructor(definition: RpcHostUriSchemeDefinition, bridge: RpcHostUriBridge) {

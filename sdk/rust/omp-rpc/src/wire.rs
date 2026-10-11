@@ -4703,7 +4703,7 @@ pub struct HostUriCancelRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostUriResult {
 	pub id: String,
-	/// Required for a successful read.
+	/// Required for a successful read; on write success, replaces the default acknowledgement.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub content: Option<String>,
 	#[serde(rename = "contentType", default, skip_serializing_if = "Option::is_none")]

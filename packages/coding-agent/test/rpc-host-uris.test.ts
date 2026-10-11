@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { isRpcHostUriResult, RpcHostUriBridge } from "@oh-my-pi/pi-coding-agent/modes/rpc/host-uris";
@@ -54,6 +55,38 @@ describe("RpcHostUriBridge", () => {
 			expect(result.content).toEqual([
 				{ type: "text", text: content ?? "Successfully wrote 8 bytes to db://users/42" },
 			]);
+		} finally {
+			bridge.clear("test cleanup");
+		}
+	});
+
+	it.each(["Row 42 saved", ""])("reports stripped input alongside host response %j", async content => {
+		let writtenContent: string | undefined;
+		const bridge = new RpcHostUriBridge(frame => {
+			if (frame.type !== "host_uri_request") throw new Error("Expected host_uri_request frame");
+			writtenContent = frame.content;
+			bridge.handleResult({ type: "host_uri_result", id: frame.id, content });
+		});
+		try {
+			bridge.setSchemes([{ scheme: "db", writable: true }]);
+			const settings = Settings.isolated();
+			cfgEditMode.set(settings, "hashline");
+			const tool = new WriteTool({
+				cwd: process.cwd(),
+				hasUI: false,
+				enableLsp: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				settings,
+			});
+			const result = await tool.execute("write-host-hashlines", {
+				path: "db://users/42",
+				content: "[db://users/42#ABCD]\n1:name=Bob\n",
+			});
+			expect(writtenContent).toBe("name=Bob\n");
+			const text = result.content.find(block => block.type === "text")?.text ?? "";
+			expect(text).toContain("auto-stripped hashline display prefixes");
+			if (content) expect(text.startsWith(content)).toBe(true);
 		} finally {
 			bridge.clear("test cleanup");
 		}

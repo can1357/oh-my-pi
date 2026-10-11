@@ -5537,7 +5537,7 @@
 				},
 				"content": {
 					"type": "string",
-					"description": "Required for a successful read."
+					"description": "Required for a successful read; on write success, replaces the default acknowledgement."
 				},
 				"contentType": {
 					"enum": [
