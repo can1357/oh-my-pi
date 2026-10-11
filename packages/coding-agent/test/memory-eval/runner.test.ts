@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { loadDataset } from "../../bench/memory-eval/datasets";
-import type { EngineAdapter, RecallHit, RememberItem } from "../../bench/memory-eval/engine";
+import type { DroppedRow, EngineAdapter, RecallHit, RememberItem } from "../../bench/memory-eval/engine";
 import { oracleEngine, randomEngine } from "../../bench/memory-eval/engines/sanity";
 import { buildResultFile, primaryMetric, runCases } from "../../bench/memory-eval/runner";
 import type { EvalCase, EvalMessage } from "../../bench/memory-eval/types";
@@ -38,6 +38,8 @@ interface FakeOptions {
 	rowIds: (items: readonly RememberItem[]) => (string | null)[];
 	hits: RecallHit[];
 	vectors?: number;
+	dropped?: DroppedRow[];
+	onSleep?: () => void;
 }
 
 function fakeEngine(options: FakeOptions): EngineAdapter {
@@ -48,8 +50,9 @@ function fakeEngine(options: FakeOptions): EngineAdapter {
 		open: async () => {},
 		remember: async items => options.rowIds(items),
 		vectorCount: async () => options.vectors ?? 1,
-		sleep: async () => {},
+		sleep: async () => options.onSleep?.(),
 		recall: async () => options.hits,
+		lastDropped: () => options.dropped ?? [],
 		close: async () => {},
 		dispose: async () => {},
 		warmup: async () => {},
@@ -163,5 +166,67 @@ describe("runner", () => {
 		expect(file.resources.rssScope).toBe("harness-process");
 		expect(file.perCategory[run.questions[0].category]).toBeDefined();
 		expect(primaryMetric("beam-500k")).toBe("recall@10");
+	});
+
+	it("records dropped derived rows and counts the ones that map to a gold message", async () => {
+		const engine = fakeEngine({
+			rowIds: items => items.map((_, i) => `r${i + 1}`),
+			hits: [hit("r1", "alpha beta")],
+			dropped: [
+				{ tier: "memoria_source", engineId: "memoria_source_r2", sourceMemoryId: "r2", rank: 0 },
+				{ tier: "memoria", engineId: "memoria_1", sourceMemoryId: null, rank: 3 },
+			],
+		});
+		const run = await runCases(engine, [twoMessageCase], "standard", 10, tmp);
+		expect(run.questions[0].dropped).toEqual([
+			{ tier: "memoria_source", messageIds: ["m2"], rank: 0, gold: true },
+			{ tier: "memoria", messageIds: [], rank: 3, gold: false },
+		]);
+		// Dropped rows never enter the ranking or the score.
+		expect(run.questions[0].ranked).toHaveLength(1);
+		const file = buildResultFile(
+			{
+				dataset: "beam-100k",
+				datasetRevision: "r",
+				engine: "mnemosyne",
+				engineInfo: {},
+				protocol: "standard",
+				k: 10,
+				gitCommit: "g",
+				startedAt: "t",
+			},
+			run,
+			[],
+		);
+		expect(file.droppedRows).toBe(2);
+		expect(file.droppedGoldRows).toBe(1);
+	});
+
+	it("scores recall over the deduplicated gold ids", async () => {
+		// Real BEAM has questions whose gold list repeats an id.
+		const engine = fakeEngine({
+			rowIds: items => items.map((_, i) => `r${i + 1}`),
+			hits: [hit("r2", "Gamma   DELTA")],
+		});
+		const repeated = caseOf(twoMessageCase.messages, ["m2", "m2"]);
+		expect((await runCases(engine, [repeated], "standard", 10, tmp)).questions[0].metrics["recall@10"]).toBe(1);
+		const mixed = caseOf(twoMessageCase.messages, ["m1", "m1", "m2"]);
+		expect((await runCases(engine, [mixed], "standard", 10, tmp)).questions[0].metrics["recall@10"]).toBe(0.5);
+	});
+
+	it("with-sleep sleeps once per case and standard never does", async () => {
+		let sleeps = 0;
+		const engine = fakeEngine({
+			rowIds: items => items.map((_, i) => `r${i}`),
+			hits: [],
+			onSleep: () => {
+				sleeps++;
+			},
+		});
+		const cases = [twoMessageCase, { ...twoMessageCase, caseId: "c/2" }];
+		await runCases(engine, cases, "with-sleep", 10, tmp);
+		expect(sleeps).toBe(2);
+		await runCases(engine, cases, "standard", 10, tmp);
+		expect(sleeps).toBe(2);
 	});
 });

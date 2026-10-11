@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { readLines } from "@oh-my-pi/pi-utils";
-import type { EngineAdapter, ProtocolName, RecallHit } from "../engine";
+import type { DroppedRow, EngineAdapter, ProtocolName, RecallHit } from "../engine";
 
 const EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5";
 const CACHE_ROOT = path.join(os.homedir(), ".cache", "omp-memory-eval");
@@ -43,6 +43,13 @@ interface WireHit {
 	tier: RecallHit["tier"];
 	content: string;
 	summary_of: string[];
+}
+
+interface WireDropped {
+	tier: string;
+	engine_id: string;
+	source_memory_id: string | null;
+	rank: number;
 }
 
 /** One Python process. The first failure (error response, bad output, exit, EOF) rejects the pending call and every later call. */
@@ -142,6 +149,7 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 	let served: ProtocolName | undefined;
 	let dataDir: string | undefined;
 	let isOpen = false;
+	let lastDropped: DroppedRow[] = [];
 
 	// Embedding settings are read when Python imports Mnemosyne, so the first protocol fixes the process.
 	const start = async (protocol: ProtocolName): Promise<PythonProcess> => {
@@ -173,6 +181,8 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 		rssScope: "engine-process",
 		describe: async () => ({
 			...((await live().call("describe")) as Record<string, string>),
+			// A fresh temp dir per run: its path would make otherwise identical configs differ.
+			MNEMOSYNE_DATA_DIR: "<temp>",
 			git_commit: (await vcs.requireGit(REPO_ROOT).headSha()) ?? "unknown",
 		}),
 		open: async (_evalCase, { storeDir, protocol }) => {
@@ -188,7 +198,16 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 			await live().call("sleep");
 		},
 		recall: async (question, k) => {
-			const hits = (await live().call("recall", { query: question.text, k })) as WireHit[];
+			const { hits, dropped } = (await live().call("recall", { query: question.text, k })) as {
+				hits: WireHit[];
+				dropped: WireDropped[];
+			};
+			lastDropped = dropped.map(row => ({
+				tier: row.tier,
+				engineId: row.engine_id,
+				sourceMemoryId: row.source_memory_id,
+				rank: row.rank,
+			}));
 			return hits.map(hit => ({
 				engineId: hit.engine_id,
 				tier: hit.tier,
@@ -196,6 +215,7 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 				summaryOf: hit.summary_of,
 			}));
 		},
+		lastDropped: () => lastDropped,
 		close: async () => {
 			if (!isOpen) return;
 			await live().call("close");

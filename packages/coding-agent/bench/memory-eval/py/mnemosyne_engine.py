@@ -11,7 +11,6 @@ import importlib.metadata
 import json
 import logging
 import os
-import resource
 import sys
 import traceback
 
@@ -36,12 +35,16 @@ from mnemosyne.core import embeddings  # noqa: E402
 from mnemosyne.core.beam import BeamMemory  # noqa: E402
 
 
-def peak_rss_bytes() -> int:
-	# ru_maxrss is in kilobytes on Linux.
-	return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+def proc_status_bytes(field: str) -> int:
+	# Linux only. getrusage's ru_maxrss survives spawn/exec, so a child would report its parent's peak; /proc is per-process.
+	with open("/proc/self/status", encoding="ascii") as status:
+		for line in status:
+			if line.startswith(f"{field}:"):
+				return int(line.split()[1]) * 1024  # the value is in kB
+	raise RuntimeError(f"{field} not found in /proc/self/status")
 
 
-BASELINE_RSS_BYTES = peak_rss_bytes()
+BASELINE_RSS_BYTES = proc_status_bytes("VmRSS")
 
 
 class Engine:
@@ -81,10 +84,15 @@ class Engine:
 
 	def op_recall(self, params):
 		hits = []
-		for row in self.beam.recall(params["query"], top_k=params["k"]):
+		dropped = []
+		for rank, row in enumerate(self.beam.recall(params["query"], top_k=params["k"])):
 			tier = row["tier"]
 			if tier not in ("working", "episodic"):
+				# The spec ranks working and episodic rows only; derived rows are dropped but recorded.
 				self.dropped_tier_rows += 1
+				dropped.append(
+					{"tier": tier, "engine_id": row["id"], "source_memory_id": row.get("source_memory_id"), "rank": rank}
+				)
 				continue
 			summary_of = []
 			if tier == "episodic":
@@ -93,7 +101,7 @@ class Engine:
 				).fetchone()
 				summary_of = [part for part in ((found and found["summary_of"]) or "").split(",") if part]
 			hits.append({"engine_id": row["id"], "tier": tier, "content": row["content"], "summary_of": summary_of})
-		return hits
+		return {"hits": hits, "dropped": dropped}
 
 	def op_close(self, _params):
 		if self.beam is not None:
@@ -101,7 +109,7 @@ class Engine:
 			self.beam = None
 
 	def op_resources(self, _params):
-		return {"peak_rss_bytes": peak_rss_bytes(), "baseline_rss_bytes": BASELINE_RSS_BYTES}
+		return {"peak_rss_bytes": proc_status_bytes("VmHWM"), "baseline_rss_bytes": BASELINE_RSS_BYTES}
 
 	# Used only by the upstream-compat protocol.
 	def op_oldest_working(self, params):

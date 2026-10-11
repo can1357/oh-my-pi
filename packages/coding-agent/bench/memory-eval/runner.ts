@@ -12,11 +12,20 @@ export interface RankedHit {
 	contentPrefix: string;
 }
 
+/** A row the engine returned but the runner does not rank; `gold` when it maps to a gold message. */
+export interface DroppedHit {
+	tier: string;
+	messageIds: string[];
+	rank: number;
+	gold: boolean;
+}
+
 export interface QuestionResult {
 	caseId: string;
 	questionId: string;
 	category: string;
 	ranked: RankedHit[];
+	dropped: DroppedHit[];
 	metrics: Record<string, number>;
 	latencyMs: number;
 	lme?: { corpusIds: string[]; correctDocs: string[]; rankings: number[] };
@@ -47,6 +56,8 @@ export interface ResultFile {
 	aggregate: Record<string, number>;
 	perCategory: Record<string, Record<string, number>>;
 	fallbackRate: number;
+	droppedRows: number;
+	droppedGoldRows: number;
 	storeBytesMean: number;
 	resources: RunResources;
 	excluded: ExcludedQuestion[];
@@ -184,11 +195,17 @@ export async function runCases(
 				tier: hit.tier,
 				contentPrefix: cp(hit.content, CONTENT_PREFIX_CHARS),
 			}));
+			const gold = new Set(question.goldMessageIds);
+			const dropped: DroppedHit[] = (engine.lastDropped?.() ?? []).map(row => {
+				const messageIds = row.sourceMemoryId === null ? [] : [...(idMap.get(row.sourceMemoryId) ?? [])];
+				return { tier: row.tier, messageIds, rank: row.rank, gold: messageIds.some(id => gold.has(id)) };
+			});
 			questions.push({
 				caseId: evalCase.caseId,
 				questionId: question.questionId,
 				category: question.category,
 				ranked,
+				dropped,
 				latencyMs,
 				...scoreQuestion(evalCase, question.goldMessageIds, ranked),
 			});
@@ -223,6 +240,7 @@ export function buildResultFile(config: RunConfig, run: RunOutput, excluded: Exc
 	const byCategory: Record<string, Record<string, number>[]> = {};
 	for (const q of questions) (byCategory[q.category] ??= []).push(q.metrics);
 	const hits = questions.flatMap(q => q.ranked);
+	const dropped = questions.flatMap(q => q.dropped);
 	return {
 		config,
 		questions,
@@ -233,6 +251,8 @@ export function buildResultFile(config: RunConfig, run: RunOutput, excluded: Exc
 		},
 		perCategory: Object.fromEntries(Object.entries(byCategory).map(([cat, rows]) => [cat, means(rows)])),
 		fallbackRate: hits.length === 0 ? 0 : hits.filter(h => h.viaFallback).length / hits.length,
+		droppedRows: dropped.length,
+		droppedGoldRows: dropped.filter(d => d.gold).length,
 		storeBytesMean: run.storeBytesMean,
 		resources: run.resources,
 		excluded,
