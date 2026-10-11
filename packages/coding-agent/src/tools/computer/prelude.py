@@ -176,11 +176,11 @@ def _make_computer():
             return await self._root._method(f"{self._namespace}.{method}", args, kwargs)
 
     class _Menu(_Namespace):
-        async def items(self, path=None):
-            return await self._method("items", (path,), {})
+        async def items(self, *path):
+            return await self._method("items", path, {})
 
-        async def select(self, path):
-            return await self._method("select", (path,), {})
+        async def select(self, *path):
+            return await self._method("select", path, {})
 
     class _Apps(_Namespace):
         async def list(self, options=None, **kwargs):

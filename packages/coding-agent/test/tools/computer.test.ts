@@ -2070,6 +2070,7 @@ describe("expanded computer APIs", () => {
 					"win = await computer.window(42)",
 					"items = await win.menu.items('File')",
 					"await win.menu.select(items[0]['path'])",
+					"await win.menu.select('File', 'Save')",
 					"obs = await win.observe(silent=True)",
 					"await win.click(60, 30)",
 					"monitor = await computer.display('display-1')",
@@ -2090,9 +2091,111 @@ describe("expanded computer APIs", () => {
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toContain("1 display-1 False");
 			expect(native.controlActive).toBe(false);
+			expect(native.operations.filter(operation => operation.startsWith("menu:"))).toEqual([
+				"menu:42:File/Save",
+				"menu:42:File/Save",
+			]);
 		} finally {
 			await prelude.invoke({ action: "close" }, { session, toolCallId: "expanded-py" });
 		}
+	});
+
+	it("takes a menu path as one title, an array, or separate titles, and names those forms when it is malformed", async () => {
+		const session = toolSession();
+		const native = new FakeNativeSession();
+		const prelude = workerPrelude(session, native);
+		const context = { session, toolCallId: "menu-path-js" };
+		const realm = createContext({
+			__omp_display__: () => {},
+			__omp_prelude__: async (_name: string, parameters: unknown) => {
+				const result = await prelude.invoke(parameters, context);
+				return { text: "", details: result.details };
+			},
+		});
+		runInContext(prelude.javascript, realm);
+		try {
+			const items = await runInContext(
+				`(async () => {
+					const win = await computer.window(42);
+					await win.menu.select("File", "Save");
+					await win.menu.select(["File", "Save"]);
+					return [await win.menu.items("File", "Save"), await win.menu.items(["File"]), await win.menu.items()];
+				})()`,
+				realm,
+			);
+			expect(items.map((list: Array<{ path: string[] }>) => list[0]!.path)).toEqual([
+				["File", "Save", "Save"],
+				["File", "Save"],
+				["Save"],
+			]);
+			expect(native.operations).toEqual(["menu:42:File/Save", "menu:42:File/Save"]);
+			const forms = 'requires a menu path of non-empty titles: "File", ["File", "Export…"] or "File", "Export…"';
+			for (const [call, got] of [
+				["select()", "no path"],
+				['select(["File"], "Save")', '[["File"],"Save"]'],
+				['select("File", "")', '["File",""]'],
+			]) {
+				await expect(
+					runInContext(`(async () => (await computer.window(42)).menu.${call})()`, realm),
+				).rejects.toThrow(`menu.select ${forms}; got ${got}`);
+			}
+			expect(native.operations).toHaveLength(2);
+		} finally {
+			await prelude.invoke({ action: "close" }, context);
+		}
+	});
+
+	it("names the helper and argument for a missing or non-string text argument before any native call", async () => {
+		class ArgumentSession extends FakeNativeSession {
+			readonly calls: string[] = [];
+			override async axNode(ref: string): Promise<AxNode> {
+				this.calls.push(`axNode:${ref}`);
+				return axNode;
+			}
+			override async axSetValue(ref: string, _value: string): Promise<void> {
+				this.calls.push(`axSetValue:${ref}`);
+			}
+			override async axPerform(ref: string, _action: string): Promise<void> {
+				this.calls.push(`axPerform:${ref}`);
+			}
+			override async typeText(target: string, _text: string): Promise<void> {
+				this.calls.push(`typeText:${target}`);
+			}
+			override async keyChord(target: string, _keys: string[]): Promise<void> {
+				this.calls.push(`keyChord:${target}`);
+			}
+			override async openApplication(id: string) {
+				this.calls.push(`open:${id}`);
+				return super.openApplication(id);
+			}
+		}
+		const transport = new MemoryTransport();
+		const native = new ArgumentSession();
+		new ComputerWorkerCore(transport, () => native);
+		for (const [code, message] of [
+			['await desktop.ref("e1").setValue()', "setValue(value) requires a string, got undefined"],
+			['await desktop.ref("e1").setValue(42)', "setValue(value) requires a string, got number"],
+			['await desktop.ref("e1").perform("")', 'perform(action) requires a non-empty string, got ""'],
+			["desktop.ref()", "ref(ref) requires a non-empty string, got undefined"],
+			["(await desktop.window(42)).ref(null)", "ref(ref) requires a non-empty string, got null"],
+			["await (await desktop.window(42)).type()", "type(text) requires a string, got undefined"],
+			["await desktop.type(['a'])", "type(text) requires a string, got an array"],
+			[
+				"await desktop.press()",
+				'press(chord) requires a key chord such as "cmd+shift+p" or ["cmd", "shift", "p"], got undefined',
+			],
+			[
+				"await desktop.press(['cmd', 1])",
+				'press(chord) requires a key chord such as "cmd+shift+p" or ["cmd", "shift", "p"], got an array',
+			],
+			["await desktop.apps.open()", "apps.open(id) requires a non-empty string, got undefined"],
+			// Last: reverting the fix would hand undefined to the real clipboard.
+			["await desktop.clipboard.write()", "clipboard.write(text) requires a string, got undefined"],
+		]) {
+			const result = await runWorker(transport, `argument-${code}`, code);
+			expect(result.ok ? undefined : result.error).toMatchObject({ isToolError: true, message });
+		}
+		expect(native.calls).toEqual([]);
 	});
 
 	it("leaves a printed observe() tree out of the JavaScript value's display, but keeps ax readable", async () => {
