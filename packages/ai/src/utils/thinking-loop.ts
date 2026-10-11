@@ -339,7 +339,7 @@ export const GEMINI_HEADER_RUNAWAY_THRESHOLD = 36;
  *  far below the point where retaining it would help detection. The head the cap
  *  drops is folded into `#head` while the line streams, so the line is still
  *  judged whole — see {@link foldPartialLineHead}. */
-const GEMINI_HEADER_PARTIAL_LINE_CAP = 512;
+export const GEMINI_HEADER_PARTIAL_LINE_CAP = 512;
 
 /** Closing `\*{2,3}` of a whole-line bold run — the end of the line, which is the
  *  one part the tail cap always keeps. */
@@ -375,6 +375,11 @@ interface PartialLineHead {
 	run: number;
 	/** `[ \t]+` has followed the hash run — only the `\S` is still missing. */
 	gap: boolean;
+	/** Any non-whitespace character of the line has been folded. The retained tail
+	 *  can be trimmed away entirely by {@link GEMINI_HEADER_PARTIAL_LINE_CAP}
+	 *  (a title followed by a longer whitespace run), so whether the line has body
+	 *  text at all is decided from what was folded, never from the capped tail. */
+	text: boolean;
 }
 
 /**
@@ -388,6 +393,10 @@ interface PartialLineHead {
  * title when it arrives whole and stops being one once it is split.
  */
 function foldPartialLineHead(head: PartialLineHead, ch: string): void {
+	// Record real text before the verdict can settle: the tail cap can leave the
+	// retained tail whitespace-only, and the completed line is only a title when
+	// non-whitespace text was actually folded for it.
+	if (!WHITESPACE_RE.test(ch)) head.text = true;
 	switch (head.phase) {
 		case "atx":
 		case "bold":
@@ -466,7 +475,7 @@ export class GeminiHeaderRunDetector {
 	/** Thinking text not yet split into completed lines. */
 	#pending = "";
 	/** Opening marker of the unterminated partial line, folded as it streams. */
-	#head: PartialLineHead = { phase: "start", run: 0, gap: false };
+	#head: PartialLineHead = { phase: "start", run: 0, gap: false, text: false };
 	/** The held partial line has been cut back to
 	 *  {@link GEMINI_HEADER_PARTIAL_LINE_CAP}, so its head survives only in
 	 *  `#head`. */
@@ -496,7 +505,12 @@ export class GeminiHeaderRunDetector {
 			const line = this.#pending.slice(start, nl).trim();
 			const headCut = this.#headCut;
 			this.#headCut = false;
-			const title = line !== "" && isSummaryTitleLine(line, this.#head, headCut);
+			// Gate on the folded text, not the sliced tail: after the cap cut the head
+			// off, the retained tail can be whitespace-only (a title followed by a long
+			// whitespace run), and trimming it away would discard a settled atx
+			// verdict — the same title then counted or not depending only on where
+			// the chunk boundaries fell.
+			const title = this.#head.text && isSummaryTitleLine(line, this.#head, headCut);
 			this.#resetHead();
 			start = nl + 1;
 			unfolded = nl + 1;
@@ -534,6 +548,7 @@ export class GeminiHeaderRunDetector {
 		this.#head.phase = "start";
 		this.#head.run = 0;
 		this.#head.gap = false;
+		this.#head.text = false;
 	}
 
 	/** Number of summary titles counted in the current run (for the reminder/log). */
