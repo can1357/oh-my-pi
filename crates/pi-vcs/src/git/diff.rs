@@ -23,6 +23,7 @@ struct FileChange {
 	new_mode:     Option<gix::objs::tree::EntryMode>,
 	similarity:   Option<u8>,
 	worktree_new: bool,
+	new_dirty:    bool,
 }
 
 struct Rendered {
@@ -120,6 +121,7 @@ impl GitRepo {
 			new_mode: right_file.as_ref().map(|file| file.mode),
 			similarity: None,
 			worktree_new: false,
+			new_dirty: false,
 		};
 		let mut cache = repo
 			.diff_resource_cache_for_tree_diff()
@@ -205,6 +207,17 @@ fn collect_changes(repo: &gix::Repository, options: &DiffOptions) -> Result<Vec<
 	worktree_changes(repo, &options.files)
 }
 
+fn is_gitlink_type_change(change: &FileChange) -> bool {
+	change.old_mode.is_some()
+		&& change.new_mode.is_some()
+		&& change
+			.old_mode
+			.is_some_and(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit)
+			!= change
+				.new_mode
+				.is_some_and(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit)
+}
+
 fn revision_tree<'repo>(repo: &'repo gix::Repository, rev: &str) -> Result<gix::Tree<'repo>> {
 	let id = repo
 		.rev_parse_single(rev)
@@ -241,6 +254,7 @@ fn tree_changes(
 				new_mode:     Some(entry_mode),
 				similarity:   None,
 				worktree_new: false,
+				new_dirty:    false,
 			},
 			ChangeDetached::Deletion { location, entry_mode, id, .. } => FileChange {
 				old_path:     path_string(location.as_ref()),
@@ -251,6 +265,7 @@ fn tree_changes(
 				new_mode:     None,
 				similarity:   None,
 				worktree_new: false,
+				new_dirty:    false,
 			},
 			ChangeDetached::Modification {
 				location,
@@ -267,6 +282,7 @@ fn tree_changes(
 				new_mode:     Some(entry_mode),
 				similarity:   None,
 				worktree_new: false,
+				new_dirty:    false,
 			},
 			ChangeDetached::Rewrite {
 				source_location,
@@ -293,6 +309,7 @@ fn tree_changes(
 						diff.map_or(100, |stats| (stats.similarity * 100.0).floor() as u8),
 					),
 					worktree_new: false,
+					new_dirty:    false,
 				}
 			},
 		};
@@ -361,14 +378,17 @@ fn base_worktree_changes(
 			previous.new_id = change.new_id;
 			previous.new_mode = change.new_mode;
 			previous.new_path = change.new_path;
-			previous.worktree_new = true;
+			previous.worktree_new = change.worktree_new;
+			previous.new_dirty = change.new_dirty;
 		} else {
 			combined.insert(change.new_path.clone(), change);
 		}
 	}
 	let mut out = combined
 		.into_values()
-		.filter(|change| change.old_id != change.new_id || change.old_mode != change.new_mode)
+		.filter(|change| {
+			change.old_id != change.new_id || change.old_mode != change.new_mode || change.new_dirty
+		})
 		.collect::<Vec<_>>();
 	sort_changes(&mut out);
 	Ok(out)
@@ -387,6 +407,7 @@ fn index_change(repo: &gix::Repository, change: gix::diff::index::Change) -> Res
 			new_mode:     index_mode(entry_mode)?,
 			similarity:   None,
 			worktree_new: false,
+			new_dirty:    false,
 		},
 		ChangeRef::Deletion { location, entry_mode, id, .. } => FileChange {
 			old_path:     path_string(location.as_ref()),
@@ -397,6 +418,7 @@ fn index_change(repo: &gix::Repository, change: gix::diff::index::Change) -> Res
 			new_mode:     None,
 			similarity:   None,
 			worktree_new: false,
+			new_dirty:    false,
 		},
 		ChangeRef::Modification {
 			location,
@@ -414,6 +436,7 @@ fn index_change(repo: &gix::Repository, change: gix::diff::index::Change) -> Res
 			new_mode:     index_mode(entry_mode)?,
 			similarity:   None,
 			worktree_new: false,
+			new_dirty:    false,
 		},
 		ChangeRef::Rewrite {
 			source_location,
@@ -438,6 +461,7 @@ fn index_change(repo: &gix::Repository, change: gix::diff::index::Change) -> Res
 				new_mode:     index_mode(entry_mode)?,
 				similarity:   Some(if identical { 100 } else { u8::MAX }),
 				worktree_new: false,
+				new_dirty:    false,
 			}
 		},
 	};
@@ -471,6 +495,8 @@ fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<File
 		let mut old_mode = index_mode(entry.mode)?;
 		let mut new_id = null;
 		let mut new_mode = None;
+		let mut worktree_new = true;
+		let mut new_dirty = false;
 		match status {
 			EntryStatus::Change(Change::Removed) => {},
 			EntryStatus::Change(Change::Type { .. } | Change::Modification { .. }) => {
@@ -493,11 +519,31 @@ fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<File
 					new_mode = Some(kind.into());
 				}
 			},
-			EntryStatus::Conflict { .. }
-			| EntryStatus::NeedsUpdate(_)
-			| EntryStatus::Change(Change::SubmoduleModification(_)) => continue,
+			EntryStatus::Change(Change::SubmoduleModification(submodule)) => {
+				let Some(head) = submodule.checked_out_head_id else {
+					continue;
+				};
+				new_id = head;
+				new_mode = old_mode;
+				// Git reports untracked submodule files in status, but excludes
+				// them from the superproject's patch and dirty marker.
+				new_dirty = submodule.changes.as_ref().is_some_and(|changes| {
+					changes.iter().any(|item| {
+						matches!(
+							item,
+							gix::status::Item::TreeIndex(_)
+								| gix::status::Item::IndexWorktree(
+									gix::status::index_worktree::Item::Modification { .. }
+										| gix::status::index_worktree::Item::Rewrite { .. }
+								)
+						)
+					})
+				});
+				worktree_new = false;
+			},
+			EntryStatus::Conflict { .. } | EntryStatus::NeedsUpdate(_) => continue,
 		}
-		if new_mode.is_some() && old_id == new_id && old_mode == new_mode {
+		if new_mode.is_some() && old_id == new_id && old_mode == new_mode && !new_dirty {
 			continue;
 		}
 		let path = path_string(path.as_ref());
@@ -509,7 +555,8 @@ fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<File
 			old_mode,
 			new_mode,
 			similarity: None,
-			worktree_new: true,
+			worktree_new,
+			new_dirty,
 		});
 	}
 	sort_changes(&mut out);
@@ -615,13 +662,13 @@ fn render_changes(
 	Ok(out)
 }
 
-/// Bytes `render_change` holds in memory for `change`: both blob sizes read
-/// from object headers, or the working-tree file's size for a side that lives
-/// there. Best effort — a side that cannot be sized counts as zero and is left
-/// to the post-render check.
+/// Bytes `render_change` holds in memory for `change`: blob sizes from object
+/// headers or working-tree metadata, but not gitlink commit objects (only their
+/// IDs are rendered). Best effort; unsized sides count as zero.
 fn change_input_bytes(repo: &gix::Repository, change: &FileChange) -> usize {
-	let blob_bytes = |id: gix::ObjectId| -> usize {
-		if id.is_null() {
+	let blob_bytes = |id: gix::ObjectId, mode: Option<gix::objs::tree::EntryMode>| -> usize {
+		if id.is_null() || mode.is_some_and(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit)
+		{
 			return 0;
 		}
 		repo
@@ -636,9 +683,9 @@ fn change_input_bytes(repo: &gix::Repository, change: &FileChange) -> usize {
 			.and_then(|dir| std::fs::symlink_metadata(dir.join(&change.new_path)).ok())
 			.map_or(0, |meta| usize::try_from(meta.len()).unwrap_or(usize::MAX))
 	} else {
-		blob_bytes(change.new_id)
+		blob_bytes(change.new_id, change.new_mode)
 	};
-	blob_bytes(change.old_id).saturating_add(new_bytes)
+	blob_bytes(change.old_id, change.old_mode).saturating_add(new_bytes)
 }
 
 fn render_change(
@@ -659,6 +706,45 @@ fn render_change(
 		.or(change.old_mode)
 		.ok_or_else(|| Error::backend("git diff", "change has no file mode"))?
 		.kind();
+	// Git shows a gitlink-to-file type change as two patches, while metadata
+	// APIs still report one changed path and one combined numstat entry.
+	if is_gitlink_type_change(change) {
+		let null = repo.object_hash().null();
+		let mut part = change.clone();
+		part.new_id = null;
+		part.new_mode = None;
+		part.similarity = None;
+		part.worktree_new = false;
+		part.new_dirty = false;
+		let mut deleted = render_change(repo, cache, &part, context, binary_patch, budget)?;
+		cache.clear_resource_cache_keep_allocation();
+
+		part.old_id = null;
+		part.old_mode = None;
+		part.new_id = change.new_id;
+		part.new_mode = change.new_mode;
+		part.worktree_new = change.worktree_new;
+		part.new_dirty = change.new_dirty;
+		let next_budget = budget.map(|budget| RenderBudget {
+			already: budget.already.saturating_add(deleted.text.len()),
+			..budget
+		});
+		let inserted = render_change(repo, cache, &part, context, binary_patch, next_budget)?;
+		let added = inserted.added;
+		let removed = deleted.removed;
+		deleted.text.push_str(&inserted.text);
+		let (added, removed) = if added.is_none() || removed.is_none() {
+			(None, None)
+		} else {
+			(added, removed)
+		};
+		return Ok(Rendered { text: deleted.text, added, removed });
+	}
+	if old_kind == gix::objs::tree::EntryKind::Commit
+		|| new_kind == gix::objs::tree::EntryKind::Commit
+	{
+		return render_gitlink(change);
+	}
 	cache
 		.set_resource(
 			change.old_id,
@@ -681,12 +767,7 @@ fn render_change(
 		.prepare_diff()
 		.map_err(|err| Error::backend("git diff", err))?;
 
-	let mut text = String::new();
-	text.push_str("diff --git a/");
-	text.push_str(&change.old_path);
-	text.push_str(" b/");
-	text.push_str(&change.new_path);
-	text.push('\n');
+	let mut text = render_header(change);
 	let is_binary = matches!(
 		prepared.operation,
 		gix::diff::blob::platform::prepare_diff::Operation::SourceOrDestinationIsBinary
@@ -752,6 +833,50 @@ fn render_change(
 			Err(Error::backend("git diff", "external diff drivers cannot be rendered in-process"))
 		},
 	}
+}
+
+fn render_header(change: &FileChange) -> String {
+	format!("diff --git a/{} b/{}\n", change.old_path, change.new_path)
+}
+
+/// Line Git uses as a gitlink's patch content, followed by the commit ID; read
+/// back by patch application in [`super::patch`].
+pub(super) const SUBPROJECT_COMMIT: &str = "Subproject commit ";
+
+fn render_gitlink(change: &FileChange) -> Result<Rendered> {
+	let mut text = render_header(change);
+	append_metadata(&mut text, change, change.similarity, false);
+	text.push_str("--- ");
+	push_old_path(&mut text, change);
+	text.push_str("\n+++ ");
+	push_new_path(&mut text, change);
+	text.push('\n');
+	let old = !change.old_id.is_null();
+	let new = !change.new_id.is_null();
+	if !old && !new {
+		return Err(Error::backend("git diff", "gitlink has no commit ID"));
+	}
+	let old_range = if old { "1" } else { "0,0" };
+	let new_range = if new { "1" } else { "0,0" };
+	let _ = writeln!(text, "@@ -{old_range} +{new_range} @@");
+	if old {
+		let _ = writeln!(text, "-{SUBPROJECT_COMMIT}{}", change.old_id);
+	}
+	if new {
+		let dirty = if change.new_dirty { "-dirty" } else { "" };
+		let _ = writeln!(text, "+{SUBPROJECT_COMMIT}{}{dirty}", change.new_id);
+	}
+	// Git shows a dirty-only checkout in the patch, but does not count it as
+	// changed pointer lines in --numstat.
+	let dirty_only = change.new_dirty
+		&& change.old_id == change.new_id
+		&& change.old_mode == change.new_mode
+		&& change.old_path == change.new_path;
+	Ok(Rendered {
+		text,
+		added: Some(u32::from(new && !dirty_only)),
+		removed: Some(u32::from(old && !dirty_only)),
+	})
 }
 
 fn append_metadata(out: &mut String, change: &FileChange, similarity: Option<u8>, full_ids: bool) {
@@ -1698,6 +1823,265 @@ mod tests {
 			repo.diff_text(&base_only).expect("base diff"),
 			git(dir.path(), &["diff", "--no-ext-diff", "HEAD^"])
 		);
+	}
+
+	#[test]
+	fn gitlink_patches_match_git_for_add_update_and_delete() {
+		let dir = fixture();
+		let first = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_owned();
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{first},sub")]);
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let cached = DiffOptions { cached: true, ..DiffOptions::default() };
+		assert_eq!(
+			repo.diff_text(&cached).expect("added gitlink"),
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached"])
+		);
+		assert_eq!(repo.numstat(&cached).expect("gitlink numstat"), vec![NumstatEntry {
+			path:    "sub".into(),
+			added:   Some(1),
+			removed: Some(0),
+		}]);
+		git(dir.path(), &["commit", "-qm", "add gitlink"]);
+		assert_eq!(
+			repo
+				.diff_tree("HEAD^", "HEAD", false)
+				.expect("revision gitlink"),
+			git(dir.path(), &["diff-tree", "-r", "-p", "HEAD^", "HEAD"])
+		);
+		assert_eq!(
+			repo.show_commit("HEAD", None).expect("show gitlink").bytes,
+			git(dir.path(), &["show", "HEAD"]).into_bytes()
+		);
+
+		let second = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_owned();
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{second},sub")]);
+		assert_eq!(
+			repo.diff_text(&cached).expect("updated gitlink"),
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached"])
+		);
+		git(dir.path(), &["update-index", "--force-remove", "sub"]);
+		assert_eq!(
+			repo.diff_text(&cached).expect("deleted gitlink"),
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached"])
+		);
+		fs::write(dir.path().join("blob.txt"), "text\n").expect("write blob");
+		let blob = git(dir.path(), &["hash-object", "-w", "blob.txt"])
+			.trim()
+			.to_owned();
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("100644,{blob},sub")]);
+		assert_eq!(
+			repo.diff_text(&cached).expect("gitlink to blob"),
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached"])
+		);
+		assert_eq!(repo.changed_files(&cached).expect("changed paths"), vec!["sub"]);
+		assert_eq!(repo.numstat(&cached).expect("type change numstat"), vec![NumstatEntry {
+			path:    "sub".into(),
+			added:   Some(1),
+			removed: Some(1),
+		}]);
+		git(dir.path(), &["commit", "-qm", "replace gitlink with file"]);
+		let revisions = DiffOptions {
+			base: Some("HEAD^".into()),
+			head: Some("HEAD".into()),
+			..DiffOptions::default()
+		};
+		assert_eq!(
+			repo.diff_text(&revisions).expect("revision type change"),
+			git(dir.path(), &["diff", "--no-ext-diff", "HEAD^", "HEAD"])
+		);
+		assert_eq!(repo.changed_files(&revisions).expect("revision paths"), vec!["sub"]);
+		assert_eq!(repo.numstat(&revisions).expect("revision numstat"), vec![NumstatEntry {
+			path:    "sub".into(),
+			added:   Some(1),
+			removed: Some(1),
+		}]);
+		let pointer = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_owned();
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{pointer},sub")]);
+		assert_eq!(
+			repo.diff_text(&cached).expect("blob to gitlink"),
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached"])
+		);
+		assert_eq!(repo.changed_files(&cached).expect("reverse paths"), vec!["sub"]);
+		assert_eq!(repo.numstat(&cached).expect("reverse numstat"), vec![NumstatEntry {
+			path:    "sub".into(),
+			added:   Some(1),
+			removed: Some(1),
+		}]);
+	}
+
+	#[test]
+	fn unstaged_submodule_pointer_diff_matches_git() {
+		let dir = fixture();
+		let source = tempfile::tempdir().expect("submodule source");
+		git(source.path(), &["init", "-q", "-b", "main"]);
+		git(source.path(), &["config", "user.name", "Diff Test"]);
+		git(source.path(), &["config", "user.email", "diff@example.com"]);
+		fs::write(source.path().join("file.txt"), "one\n").expect("write submodule file");
+		git(source.path(), &["add", "file.txt"]);
+		git(source.path(), &["commit", "-qm", "first"]);
+		git(dir.path(), &[
+			"-c",
+			"protocol.file.allow=always",
+			"submodule",
+			"-q",
+			"add",
+			source.path().to_str().expect("UTF-8 path"),
+			"sub",
+		]);
+		git(dir.path(), &["commit", "-qm", "add submodule"]);
+
+		let checkout = dir.path().join("sub");
+		git(&checkout, &["config", "user.name", "Diff Test"]);
+		git(&checkout, &["config", "user.email", "diff@example.com"]);
+		fs::write(checkout.join("file.txt"), "two\n").expect("advance submodule");
+		git(&checkout, &["commit", "-qam", "second"]);
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions::default())
+				.expect("unstaged pointer"),
+			git(dir.path(), &["diff", "--no-ext-diff"])
+		);
+		assert_eq!(
+			repo
+				.changed_files(&DiffOptions::default())
+				.expect("unstaged paths"),
+			vec!["sub"]
+		);
+		assert_eq!(
+			repo
+				.numstat(&DiffOptions::default())
+				.expect("unstaged numstat"),
+			vec![NumstatEntry { path: "sub".into(), added: Some(1), removed: Some(1) }]
+		);
+
+		let base = DiffOptions { base: Some("HEAD".into()), ..DiffOptions::default() };
+		assert_eq!(
+			repo.diff_text(&base).expect("base-to-worktree pointer"),
+			git(dir.path(), &["diff", "--no-ext-diff", "HEAD"])
+		);
+		fs::write(checkout.join("new.txt"), "untracked\n").expect("untracked advanced submodule");
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions::default())
+				.expect("advanced pointer with untracked file"),
+			git(dir.path(), &["diff", "--no-ext-diff"])
+		);
+		fs::remove_file(checkout.join("new.txt")).expect("remove untracked fixture");
+		fs::write(checkout.join("file.txt"), "dirty\n").expect("dirty advanced submodule");
+		let dirty = git(dir.path(), &["diff", "--no-ext-diff"]);
+		assert!(dirty.contains("-dirty"), "Git reports dirty submodule checkout");
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions::default())
+				.expect("dirty pointer"),
+			dirty
+		);
+		assert_eq!(
+			repo
+				.diff_text(&base)
+				.expect("dirty base-to-worktree pointer"),
+			git(dir.path(), &["diff", "--no-ext-diff", "HEAD"])
+		);
+		git(&checkout, &["checkout", "--", "file.txt"]);
+		git(dir.path(), &["add", "sub"]);
+		fs::write(checkout.join("new.txt"), "untracked\n").expect("untracked submodule file");
+		assert_eq!(git(dir.path(), &["diff", "--no-ext-diff"]), "");
+		assert_eq!(git(dir.path(), &["diff", "--no-ext-diff", "--numstat"]), "");
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions::default())
+				.expect("untracked-only diff"),
+			""
+		);
+		assert!(
+			repo
+				.numstat(&DiffOptions::default())
+				.expect("untracked-only numstat")
+				.is_empty()
+		);
+		assert!(
+			repo
+				.changed_files(&DiffOptions::default())
+				.expect("untracked-only paths")
+				.is_empty()
+		);
+		assert!(
+			!repo
+				.has_diff(&DiffOptions::default())
+				.expect("untracked-only has diff")
+		);
+		fs::remove_file(checkout.join("new.txt")).expect("remove untracked fixture");
+		fs::write(checkout.join("file.txt"), "staged dirty\n").expect("stage tracked child edit");
+		git(&checkout, &["add", "file.txt"]);
+		let dirty = git(dir.path(), &["diff", "--no-ext-diff"]);
+		assert!(dirty.contains("-dirty"), "Git reports staged edits in child");
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions::default())
+				.expect("staged child edit"),
+			dirty
+		);
+		git(&checkout, &["reset", "-q", "HEAD", "--", "file.txt"]);
+		git(&checkout, &["checkout", "--", "file.txt"]);
+		fs::write(checkout.join("file.txt"), "dirty again\n").expect("dirty unchanged pointer");
+		let dirty = git(dir.path(), &["diff", "--no-ext-diff"]);
+		assert!(dirty.contains("-dirty"), "Git reports dirty unchanged submodule pointer");
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions::default())
+				.expect("dirty-only pointer"),
+			dirty
+		);
+		assert_eq!(git(dir.path(), &["diff", "--no-ext-diff", "--numstat"]), "0\t0\tsub\n");
+		assert_eq!(
+			repo
+				.numstat(&DiffOptions::default())
+				.expect("dirty-only numstat"),
+			vec![NumstatEntry { path: "sub".into(), added: Some(0), removed: Some(0) }]
+		);
+		git(&checkout, &["checkout", "--", "file.txt"]);
+		fs::write(checkout.join("file.txt"), "three\n").expect("advance submodule again");
+		git(&checkout, &["commit", "-qam", "third"]);
+		assert_eq!(
+			repo.diff_text(&base).expect("staged and unstaged pointer"),
+			git(dir.path(), &["diff", "--no-ext-diff", "HEAD"])
+		);
+	}
+
+	#[test]
+	fn staged_file_to_gitlink_keeps_dirty_marker() {
+		let dir = fixture();
+		fs::write(dir.path().join("sub"), "file\n").expect("write file");
+		git(dir.path(), &["add", "sub"]);
+		git(dir.path(), &["commit", "-qm", "file"]);
+		let source = tempfile::tempdir().expect("submodule source");
+		git(source.path(), &["init", "-q", "-b", "main"]);
+		fs::write(source.path().join("tracked.txt"), "one\n").expect("write child file");
+		git(source.path(), &["add", "tracked.txt"]);
+		git(source.path(), &["-c", "user.name=T", "-c", "user.email=t@e", "commit", "-qm", "child"]);
+		git(dir.path(), &["rm", "-q", "sub"]);
+		git(dir.path(), &[
+			"-c",
+			"protocol.file.allow=always",
+			"submodule",
+			"-q",
+			"add",
+			source.path().to_str().expect("UTF-8 path"),
+			"sub",
+		]);
+		fs::write(dir.path().join("sub/tracked.txt"), "edited\n").expect("dirty child");
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let base = DiffOptions { base: Some("HEAD".into()), ..DiffOptions::default() };
+		let expected = git(dir.path(), &["diff", "--no-ext-diff", "HEAD"]);
+		assert!(expected.contains("-dirty"), "Git marks the created gitlink dirty");
+		assert_eq!(repo.diff_text(&base).expect("file to dirty gitlink"), expected);
 	}
 
 	#[test]

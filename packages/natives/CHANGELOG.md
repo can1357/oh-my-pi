@@ -128,6 +128,10 @@
 
 ### Fixed
 
+- Git diffs now render staged and unstaged submodule pointer changes as `Subproject commit` patches, including `-dirty` for tracked edits in a submodule checkout ([#14568](https://github.com/can1357/oh-my-pi/issues/14568)).
+- Git change stats now report zero changed lines for a submodule with only local tracked edits ([#14568](https://github.com/can1357/oh-my-pi/issues/14568)).
+- Agentic split commits can now stage conversions between submodules and regular files ([#14568](https://github.com/can1357/oh-my-pi/issues/14568)).
+- Applying a submodule-to-file patch refuses to overwrite a populated submodule checkout before changing the worktree ([#14568](https://github.com/can1357/oh-my-pi/issues/14568)).
 - Rejected stale display-layout coordinates before pointer input and zoom, and preserved the previous coordinate frame when a capture is canceled.
 - Released held input on cancellation and refused competing native mutations before dispatch.
 - Fixed `umask` in the embedded shell changing the host process's umask; the mask now belongs to the shell, applies to files created by redirections, builtins such as `touch`, `mkdir` and `cp`, and external commands, and a subshell's `umask` no longer leaks out ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
