@@ -167,33 +167,69 @@ export function handlerTimeoutForEvent(eventType: string): number {
 }
 
 /**
- * Resolve the budget a handler actually gets when its extension requested one
- * via `pi.setHandlerTimeout`.
+ * The budget a dispatch path would use for this event under `settings` before
+ * any `setHandlerTimeout` request. `tool_call` reads the user's
+ * `extensionHandlers.toolCallTimeoutMs` (`emitToolCall` enforces exactly this),
+ * so reporting must derive its base from the same key.
+ */
+export function baseHandlerTimeoutForEvent(eventType: string, settings?: Settings): number {
+	if (eventType !== "tool_call") return handlerTimeoutForEvent(eventType);
+	return normalizeHandlerTimeout(
+		(settings ? cfgExtensionHandlersToolCallTimeoutMs.get(settings) : undefined) ?? extensionHandlerTimeoutMs,
+	);
+}
+
+/**
+ * The user's `extensionHandlers.timeoutMs` (normalized), or the built-in
+ * default when absent. This is the ceiling a `setHandlerTimeout` request can
+ * lengthen to, and — separately — the fallback no-request budgets rise to.
+ */
+export function configuredHandlerTimeoutCeiling(settings?: Settings): number {
+	return normalizeHandlerTimeout(
+		(settings ? cfgExtensionHandlersTimeoutMs.get(settings) : undefined) ?? extensionHandlerTimeoutMs,
+	);
+}
+
+/**
+ * The budget a handler gets when it made no `setHandlerTimeout` request:
+ * the event's own base, raised to the user's `extensionHandlers.timeoutMs`
+ * fallback when that is set higher (#11331's global role). `session_shutdown`
+ * and `tool_call` keep their dedicated caps — the fallback key does not move
+ * them, because their budgets exist for policy (prompt teardown, fail-closed
+ * pre-execution), not convenience.
+ */
+export function fallbackHandlerTimeout(eventType: string, baseMs: number, settings?: Settings): number {
+	if (eventType === "session_shutdown" || eventType === "tool_call") return baseMs;
+	return Math.max(baseMs, configuredHandlerTimeoutCeiling(settings));
+}
+
+/**
+ * Resolve the budget a handler gets for an explicit `setHandlerTimeout`
+ * request. The request sets the budget absolutely — it may shorten freely —
+ * and may lengthen only up to the ceiling `configuredMs`: the user's
+ * `extensionHandlers.timeoutMs`. For `session_shutdown` and `tool_call` the
+ * event's own policy cap (`baseMs`: the 2 s teardown budget, the configured
+ * fail-closed gate) binds as well, so #3948 stays outside extension control.
  *
- * The user's `extensionHandlers.timeoutMs` is the ceiling: a self-declaration
- * can always shorten a budget and can only lengthen it as far as a human has
- * authorised, so no extension can switch off the #3948 watchdog on its own.
- * `session_shutdown` and `tool_call` stay additionally bounded by `baseMs`,
- * their per-event policy cap (the 2 s teardown budget, and the user's
- * `extensionHandlers.toolCallTimeoutMs` for the fail-closed pre-execution gate).
+ * Note the fallback role of the same key is handled by
+ * {@link fallbackHandlerTimeout} and must NOT raise this ceiling: a request is
+ * measured against what the user authorised, not against what unrequested
+ * handlers happen to run with.
  *
- * @param eventType Event discriminant, used for the per-event caps.
  * @param requestedMs Value the extension passed to `setHandlerTimeout`.
- * @param baseMs Budget the dispatch site would have used without a request.
- * @param settings Active settings; absent falls back to the built-in ceiling.
+ * @param configuredMs The user's `extensionHandlers.timeoutMs`, normalized.
+ * @param baseMs The event's own policy cap (binds only shutdown/tool_call).
+ * @param policyCapped True for `session_shutdown` and `tool_call`.
  * @returns Milliseconds the watchdog will enforce.
  */
 export function resolveHandlerTimeoutMs(
-	eventType: string,
 	requestedMs: number,
+	configuredMs: number,
 	baseMs: number,
-	settings?: Settings,
+	policyCapped: boolean,
 ): number {
-	const ceiling = normalizeHandlerTimeout(
-		(settings ? cfgExtensionHandlersTimeoutMs.get(settings) : undefined) ?? extensionHandlerTimeoutMs,
-	);
-	const capped = Math.min(requestedMs, ceiling);
-	return eventType === "session_shutdown" || eventType === "tool_call" ? Math.min(capped, baseMs) : capped;
+	const ceiling = policyCapped ? Math.min(configuredMs, baseMs) : configuredMs;
+	return Math.min(requestedMs, ceiling);
 }
 
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
@@ -1546,12 +1582,19 @@ export class ExtensionRunner {
 	): Promise<R | undefined> {
 		// A per-extension request is resolved here, at the one choke point every
 		// dispatch path shares, so no call site has to know about it. Absent a
-		// request the call-site budget passes through untouched.
+		// request the user's fallback key still raises the call-site budget when
+		// it is set above the built-in default (#11331's global fallback role).
 		const requestedMs = ext.handlerTimeouts?.get(event.type);
-		const effectiveTimeoutMs =
+		const policyCapped = event.type === "session_shutdown" || event.type === "tool_call";
+		const finalTimeoutMs =
 			requestedMs === undefined
-				? timeoutMs
-				: resolveHandlerTimeoutMs(event.type, requestedMs, timeoutMs, this.settings);
+				? fallbackHandlerTimeout(event.type, timeoutMs, this.settings)
+				: resolveHandlerTimeoutMs(
+						requestedMs,
+						configuredHandlerTimeoutCeiling(this.settings),
+						baseHandlerTimeoutForEvent(event.type, this.settings),
+						policyCapped,
+					);
 		// `session_stop` carries its own signal on the event; `tool_call` receives
 		// the outer dispatch signal (loop request or wrapper execute) so an abort
 		// while a handler awaits a human dialog cancels the dialog and settles the
@@ -1593,7 +1636,7 @@ export class ExtensionRunner {
 						}
 						return result;
 					},
-					effectiveTimeoutMs,
+					finalTimeoutMs,
 					signal,
 				),
 			);
@@ -1604,11 +1647,11 @@ export class ExtensionRunner {
 		}
 		if (handlerResult === EXTENSION_HANDLER_ABORTED) return undefined;
 		if (handlerResult === EXTENSION_HANDLER_TIMEOUT) {
-			const error = `handler timed out after ${effectiveTimeoutMs}ms`;
+			const error = `handler timed out after ${finalTimeoutMs}ms`;
 			logger.warn("Extension handler timed out", {
 				extensionPath: ext.path,
 				event: event.type,
-				timeoutMs: effectiveTimeoutMs,
+				timeoutMs: finalTimeoutMs,
 			});
 			this.emitError({
 				extensionPath: ext.path,
@@ -1894,9 +1937,13 @@ export class ExtensionRunner {
 					timeoutMs,
 					(kind, message) => ({
 						block: true,
+						// On timeout the watchdog message already states the effective
+						// budget (`handler timed out after Xms` with X = the resolved
+						// request); interpolating the dispatch-site base instead would
+						// report a number the watchdog did not enforce.
 						reason:
 							kind === "timeout"
-								? `Extension ${ext.path} timed out after ${timeoutMs}ms`
+								? `Extension ${ext.path} ${message}`
 								: `Extension ${ext.path} failed: ${message}`,
 					}),
 					signal,

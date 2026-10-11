@@ -302,12 +302,14 @@ if (enforced < 60_000) {
 pi.on("context", async event => transformWithin(enforced, event));
 ```
 
-A request is not a grant. The host enforces `min(timeoutMs, extensionHandlers.timeoutMs)`,
-and that ceiling defaults to the same 30,000 ms as the base budget — so an extension can
-always **shorten** its own budget, and can only **lengthen** it as far as a user has
-authorised by setting `extensionHandlers.timeoutMs`. The fail-closed `tool_call` watchdog
-therefore stays outside extension control, and the call returns the enforced number so a
-plugin can detect a clamp instead of being silently cut off mid-pass.
+`extensionHandlers.timeoutMs` plays two roles. **Fallback:** it raises the budget of
+every handler that made no request, when set above the built-in default — a user
+setting 140,000 ms unblocks long legitimate workloads without per-extension opt-in
+(`session_shutdown` and `tool_call` keep their dedicated caps). **Ceiling:** a request
+can always **shorten** its budget, and can only **lengthen** it as far as this key
+authorises, so the fail-closed `tool_call` watchdog stays outside extension control.
+The call returns the enforced number so a plugin can detect a clamp instead of being
+silently cut off mid-pass.
 
 - `undefined` restores the host default for that event; repeated calls replace the request.
 - `session_shutdown` and `tool_call` stay additionally within their existing per-event caps; only the duration changes, never the policy (`tool_call` still fails closed).

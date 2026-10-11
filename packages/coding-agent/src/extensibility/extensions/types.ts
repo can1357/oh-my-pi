@@ -1591,13 +1591,18 @@ export interface ExtensionAPI {
 	/**
 	 * Requests a different execution budget for one event of THIS extension only.
 	 *
-	 * The host enforces `min(timeoutMs, ceiling)` where the ceiling is
-	 * `extensionHandlers.timeoutMs` (default 30,000 ms): a request can always
-	 * shorten a budget and can only lengthen it as far as a user has authorised,
-	 * so no extension can switch off the watchdog by itself. `session_shutdown`
-	 * and `tool_call` stay additionally within their existing per-event caps —
-	 * the 2 s teardown budget, and the fail-closed
+	 * The host enforces `min(timeoutMs, extensionHandlers.timeoutMs)`: a request
+	 * can always shorten a budget and can only lengthen it as far as a user has
+	 * authorised, so no extension can switch off the watchdog by itself.
+	 * `session_shutdown` and `tool_call` stay additionally within their existing
+	 * per-event caps — the 2 s teardown budget, and the fail-closed
 	 * `extensionHandlers.toolCallTimeoutMs` gate.
+	 *
+	 * The same key also acts as the fallback budget for handlers that made no
+	 * request: setting it above the built-in default raises those budgets too
+	 * (except `session_shutdown` and `tool_call`, which keep their dedicated
+	 * caps). That does not loosen this ceiling — a request is still measured
+	 * against the key, not against what unrequested handlers run with.
 	 *
 	 * Returns the budget the host will actually enforce, computed from the settings
 	 * the loader was given at registration time. Compare it against your own deadline:

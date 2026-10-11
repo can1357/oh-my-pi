@@ -39,7 +39,12 @@ import { getAllPluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
 import type { Settings } from "../../config/settings";
-import { handlerTimeoutForEvent, resolveHandlerTimeoutMs } from "./runner";
+import {
+	baseHandlerTimeoutForEvent,
+	configuredHandlerTimeoutCeiling,
+	fallbackHandlerTimeout,
+	resolveHandlerTimeoutMs,
+} from "./runner";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
 	AssistantThinkingRenderer,
@@ -285,15 +290,20 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 				`Unknown extension event "${String(event)}"; expected one of ${Object.keys(EXTENSION_EVENT_NAMES).join(", ")}`,
 			);
 		}
-		const baseMs = handlerTimeoutForEvent(event);
+		const baseMs = baseHandlerTimeoutForEvent(event, this.settings);
 		if (timeoutMs === undefined) {
 			this.extension.handlerTimeouts?.delete(event);
-			return baseMs;
+			return fallbackHandlerTimeout(event, baseMs, this.settings);
 		}
 		// The map is allocated lazily so extensions that never call this keep the
 		// exact object shape existing fixtures and equality checks rely on.
 		(this.extension.handlerTimeouts ??= new Map()).set(event, timeoutMs);
-		const effectiveMs = resolveHandlerTimeoutMs(event, timeoutMs, baseMs, this.settings);
+		const effectiveMs = resolveHandlerTimeoutMs(
+			timeoutMs,
+			configuredHandlerTimeoutCeiling(this.settings),
+			baseMs,
+			event === "session_shutdown" || event === "tool_call",
+		);
 		logger.info("Extension handler budget requested", {
 			extensionPath: this.extension.path,
 			event,

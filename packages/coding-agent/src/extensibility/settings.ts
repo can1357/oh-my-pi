@@ -162,10 +162,11 @@ export const cfgExtensionHandlersToolCallTimeoutMs = register({
 });
 
 /**
- * Ceiling for every extension handler budget, including a value an extension
- * asks for via `pi.setHandlerTimeout`. It stays at the 30 s default so the
- * watchdog cannot be talked out of existence from extension code: raising a
- * handler budget above it requires a user to set this key.
+ * Budget scale for extension handlers. Fallback: every handler without a
+ * `pi.setHandlerTimeout` request runs at this value when it is above the
+ * built-in default (`session_shutdown` and `tool_call` keep their dedicated
+ * caps). Ceiling: a request can lengthen its budget only up to this value, so
+ * the watchdog cannot be talked out of existence from extension code.
  */
 export const cfgExtensionHandlersTimeoutMs = register({
 	id: "extensionHandlers.timeoutMs",
@@ -174,8 +175,8 @@ export const cfgExtensionHandlersTimeoutMs = register({
 	ui: {
 		tab: "tools",
 		group: "Extensions",
-		label: "Handler Timeout Ceiling (ms)",
+		label: "Handler Timeout (ms)",
 		description:
-			"Upper bound for extension handler budgets, including values requested via pi.setHandlerTimeout; invalid values use 30000ms",
+			"Budget for extension handlers without a pi.setHandlerTimeout request, and the ceiling for requested budgets; invalid values use 30000ms",
 	},
 });
