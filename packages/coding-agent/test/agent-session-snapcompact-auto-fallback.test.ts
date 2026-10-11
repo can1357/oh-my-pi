@@ -10,6 +10,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
 
@@ -17,6 +18,7 @@ interface Harness {
 	session: AgentSession;
 	sessionManager: SessionManager;
 	notices: string[];
+	failures: string[];
 	awaitCompactionEnd: () => Promise<{ action: string; errorMessage?: string }>;
 	triggerThreshold: () => void;
 }
@@ -26,6 +28,7 @@ interface HarnessOptions {
 	seedMessages?: Message[];
 	/** Null leaves compaction.methodOrder at its schema default. */
 	methodOrder?: readonly CompactionMethod[] | null;
+	retryMaxDelayMs?: number;
 }
 
 async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptions): Promise<Harness> {
@@ -42,6 +45,7 @@ async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptio
 
 	const methodOrder = options.methodOrder ?? ["snapcompact", "soft"];
 	const settings = Settings.isolated({
+		...(options.retryMaxDelayMs === undefined ? {} : { "retry.maxDelayMs": options.retryMaxDelayMs }),
 		// Assert the blocking threshold pass itself; keep the speculation grace
 		// band from deferring it.
 		"compaction.asyncEnabled": false,
@@ -68,8 +72,10 @@ async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptio
 	});
 	const end = Promise.withResolvers<{ action: string; errorMessage?: string }>();
 	const notices: string[] = [];
+	const failures: string[] = [];
 	session.subscribe(event => {
 		if (event.type === "notice" && event.source === "compaction") notices.push(event.message);
+		if (event.type === "auto_compaction_end" && event.errorMessage) failures.push(event.errorMessage);
 		if (
 			event.type === "auto_compaction_end" &&
 			!event.aborted &&
@@ -111,7 +117,7 @@ async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptio
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
 	};
 
-	return { session, sessionManager, notices, awaitCompactionEnd: () => end.promise, triggerThreshold };
+	return { session, sessionManager, notices, failures, awaitCompactionEnd: () => end.promise, triggerThreshold };
 }
 
 describe("AgentSession auto-snapcompact local-blocker fallback", () => {
@@ -122,6 +128,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("aimlapi", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		authStorage.keys.setRuntime("openai", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
@@ -195,6 +202,58 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		expect(result).toEqual({ action: "snapcompact", errorMessage: undefined });
 		expect(compactionModule.compact).toHaveBeenCalledTimes(1);
 	});
+
+	it("advances past a long Anthropic native retry-after instead of parking the turn", async () => {
+		const harness = await createHarness(modelRegistry, {
+			activeModel: { provider: "anthropic", id: "claude-sonnet-4-6" },
+			methodOrder: ["remote", "soft"],
+			retryMaxDelayMs: 100,
+		});
+		session = harness.session;
+		const waitSpy = mockSchedulerWaitWithClock();
+		let attempts = 0;
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			if (++attempts === 1) {
+				throw new compactionModule.NativeCompactionError(new Error("429 rate_limit_error retry-after-ms=60144000"));
+			}
+			return {
+				summary: "fallback summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+			};
+		});
+		harness.triggerThreshold();
+		const result = await harness.awaitCompactionEnd();
+		expect(result.action).toBe("context-full");
+		expect(harness.failures.some(message => message.includes("trying the next preferred compaction method"))).toBe(
+			true,
+		);
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		expect(waitSpy).not.toHaveBeenCalled();
+	});
+
+	it("surfaces the Anthropic error when no preferred method remains", async () => {
+		const harness = await createHarness(modelRegistry, {
+			activeModel: { provider: "anthropic", id: "claude-sonnet-4-6" },
+			methodOrder: ["remote"],
+		});
+		session = harness.session;
+		const waitSpy = mockSchedulerWaitWithClock();
+		const compactSpy = vi
+			.spyOn(compactionModule, "compact")
+			.mockRejectedValue(
+				new compactionModule.NativeCompactionError(new Error("429 rate_limit_error retry-after-ms=60144000")),
+			);
+		const end = Promise.withResolvers<string | undefined>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") end.resolve(event.errorMessage);
+		});
+		harness.triggerThreshold();
+		expect(await end.promise).toContain("429 rate_limit_error retry-after-ms=60144000");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(waitSpy).not.toHaveBeenCalled();
+	});
+
 	it("downgrades to context-full when unsupported glyphs make snapcompact unsafe", async () => {
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "aimlapi", id: "claude-sonnet-4-5-20250929" },
