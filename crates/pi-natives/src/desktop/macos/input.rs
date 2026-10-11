@@ -503,7 +503,7 @@ const MAX_ATTACHED_DEPTH: usize = 4;
 /// Whether `window` is attached, directly or through other attached windows,
 /// to a window `is_ancestor` accepts, as `parent_of` reports `WindowServer`'s
 /// parents.
-fn attached_under(
+pub(super) fn attached_under(
 	window: u32,
 	parent_of: impl Fn(u32) -> Option<u32>,
 	is_ancestor: impl Fn(u32) -> bool,
@@ -553,7 +553,7 @@ fn pressed_point(event: &PointerEvent) -> Option<(f64, f64)> {
 /// reported focused window, or is that window itself while attached to
 /// another. Making such a window key with a press outside its frame would
 /// close a popover, or land in the window a sheet is attached to.
-fn takes_overlay_focus(
+pub(super) fn takes_overlay_focus(
 	wid: u32,
 	focused: Option<u32>,
 	parent_of: impl Fn(u32) -> Option<u32>,

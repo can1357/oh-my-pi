@@ -853,25 +853,51 @@ fn perform_choosing(
 /// application, as a background click does, before an action that opens a
 /// menu: `AppKit` validates a menu's items when it opens, and an inactive
 /// Finder read every Action-menu command but three as disabled. An element
-/// whose window cannot be resolved is acted on as it is.
+/// whose window cannot be resolved is acted on as it is. An element in a
+/// sheet or popover is in that window ([`menu_window`]); on the focused
+/// window it gets only the activation, as a background click into it does,
+/// since the press that makes a window key would close a popover.
 fn activate_for_menu(
 	element: &AXUIElement,
 	pid: libc::pid_t,
 	entry_front: Option<libc::pid_t>,
 ) -> CoreResult<()> {
-	let Some(wid) = element_window(element).as_deref().and_then(window_id) else {
+	let Some(attached_to) = element_window(element).as_deref().and_then(window_id) else {
 		return Ok(());
 	};
+	let drawn = innermost_window_id(element).map(|(id, _)| id);
+	let wid = menu_window(attached_to, drawn, skylight::window_parent);
 	let Ok(window) = capture::window_by_id(&wid.to_string()) else {
 		return Ok(());
 	};
+	let in_overlay =
+		input::takes_overlay_focus(wid, focused_window_id(pid), skylight::window_parent);
 	let prepared =
-		input::make_key_in_background(&input::source()?, pid, wid, &window, entry_front, false)?;
-	input::await_key_window(pid, wid)?;
+		input::make_key_in_background(&input::source()?, pid, wid, &window, entry_front, in_overlay)?;
+	// A popover never becomes the focused window; the one it is on already is.
+	if !in_overlay {
+		input::await_key_window(pid, wid)?;
+	}
 	if prepared {
 		input::still_behind_user(pid, wid)?;
 	}
 	Ok(())
+}
+
+/// The window an element's menu action is aimed at: `drawn`, the window
+/// `_AXUIElementGetWindow` maps the element to, when it is a sheet or popover
+/// attached to `attached_to`, the element's `AXWindow`, which a sheet's or
+/// popover's controls report; otherwise `attached_to`.
+fn menu_window(
+	attached_to: u32,
+	drawn: Option<u32>,
+	parent_of: impl Fn(u32) -> Option<u32>,
+) -> u32 {
+	drawn
+		.filter(|&id| {
+			id != attached_to && input::attached_under(id, parent_of, |parent| parent == attached_to)
+		})
+		.unwrap_or(attached_to)
 }
 
 fn element_pid(element: &AXUIElement) -> CoreResult<libc::pid_t> {
@@ -1412,9 +1438,30 @@ mod tests {
 
 	use super::{
 		AttachedCandidate, AxWindowRecord, FocusedWindow, KeyDestination, KeyFocus, WindowContent,
-		content_owner, create_system_wide, replace_utf16_selection, select_attached, stringify_value,
-		window_records_of,
+		content_owner, create_system_wide, menu_window, replace_utf16_selection, select_attached,
+		stringify_value, window_records_of,
 	};
+
+	#[test]
+	fn a_menu_action_in_a_popover_or_sheet_is_aimed_at_that_window() {
+		// Calendar's Repeat popup reports window 25567 as its AXWindow and maps
+		// to its event popover 25579; a field in Automator's Save sheet 25670
+		// maps to the sheet, attached to window 25656.
+		let parents = |id| match id {
+			25579 => Some(25567),
+			25670 => Some(25656),
+			_ => None,
+		};
+		assert_eq!(menu_window(25567, Some(25579), parents), 25579);
+		assert_eq!(menu_window(25656, Some(25670), parents), 25670);
+		// The window itself, an unmapped element, and a window that is not
+		// attached to the element's AXWindow, such as the one
+		// openAndSavePanelService draws a panel's controls in, keep AXWindow.
+		assert_eq!(menu_window(25567, Some(25567), parents), 25567);
+		assert_eq!(menu_window(25567, None, parents), 25567);
+		assert_eq!(menu_window(25656, Some(25579), parents), 25656);
+		assert_eq!(menu_window(25656, Some(31000), parents), 25656);
+	}
 
 	#[test]
 	fn numeric_values_render_as_numbers_at_stored_precision() {
