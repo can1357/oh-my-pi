@@ -93,6 +93,8 @@ describe("openai-codex-transcriptions transport", () => {
 		expect(await upload("voice.oga", "audio/ogg")).toBe("audio.ogg");
 		// A decodable extension whose container contradicts the MIME type is renamed too: the decoder follows the name.
 		expect(await upload("clip.webm", "audio/ogg")).toBe("audio.ogg");
+		// Browser MIME aliases name their container: `audio/x-m4a` is M4A, `audio/opus` is Ogg/Opus.
+		expect(await upload("blob", "audio/x-m4a")).toBe("audio.m4a");
 		// Agreeing containers (including aliases) and unknown MIME types keep the caller's name.
 		expect(await upload("clip.mp3", "audio/mpeg")).toBe("clip.mp3");
 		expect(await upload("clip.mpeg", "audio/mpeg")).toBe("clip.mpeg");
