@@ -1233,6 +1233,9 @@ export class UiHelpers {
 			this.#parkLoopOnLocalConsume(message.text, false);
 			return;
 		}
+		// A mode command already scheduled its prompt; keep its continuation
+		// armed instead of replaying the slash text or parking the loop.
+		if (typeof builtin === "object" && builtin.pending) return;
 		if (typeof builtin === "string") {
 			const forwarded = await this.ctx.session.prompt(builtin, {
 				streamingBehavior: message.mode,

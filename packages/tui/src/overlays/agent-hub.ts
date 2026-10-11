@@ -11,7 +11,7 @@
  *   revives a parked agent, then prompts/steers it; the message lands in the
  *   agent's persisted history via the normal prompt path.
  *
- * Replaces the old SessionObserverOverlayComponent (ctrl+s observer).
+ * Replaces the old SessionObserverOverlayComponent.
  */
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type {
@@ -283,7 +283,7 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	transcript: AgentTranscriptSource;
 	/** Register persisted roster entries while the overlay remains alive. */
 	loadPersisted: (shouldContinue: () => boolean) => Promise<void>;
-	/** Keys that toggle the hub closed from inside (app.agents.hub + app.session.observe). */
+	/** Keys that toggle the hub closed from inside (app.agents.hub). */
 	hubKeys: KeyId[];
 	onDone: () => void;
 	requestRender: () => void;

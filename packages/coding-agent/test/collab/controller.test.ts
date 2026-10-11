@@ -36,7 +36,10 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
-import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import {
+	type BuiltinSlashCommandExecutionResult,
+	executeBuiltinSlashCommand,
+} from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
@@ -1152,7 +1155,7 @@ describe("CollabController", () => {
 			const transition = Promise.withResolvers<void>();
 			const flush = spyOn(CollabSocket.prototype, "flush").mockImplementation(() => drain.promise);
 			state.transition = transition.promise;
-			let stopping: Promise<string | boolean> | undefined;
+			let stopping: Promise<BuiltinSlashCommandExecutionResult> | undefined;
 			try {
 				switchSession(state, "cancelled-session");
 				// The old room has left the command's public slot, but its goodbye is

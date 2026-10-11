@@ -39,6 +39,7 @@ app.history.search: []
 | `app.thinking.toggle`        | `Ctrl+T`                                                              | Toggle thinking-block visibility                                                                                                                                                     |
 | `app.thinking.cycle`         | `Shift+Tab`                                                           | Cycle thinking level                                                                                                                                                                 |
 | `app.editor.external`        | `Ctrl+G`                                                              | Edit the draft in `$VISUAL` / `$EDITOR`                                                                                                                                              |
+| `app.editor.stash`           | `Ctrl+S`                                                              | Stash a draft, or restore it from an empty editor                                                                                                                                   |
 | `app.message.followUp`       | `Ctrl+Q`, `Ctrl+Enter`                                                | Queue a follow-up message                                                                                                                                                            |
 | `app.message.dequeue`        | `Alt+Up`, `Shift+Up`                                                  | Dequeue a queued message back into the editor                                                                                                                                        |
 | `app.retry`                  | `F5`, `Alt+R`                                                         | Retry the last failed assistant turn                                                                                                                                                 |
@@ -60,6 +61,12 @@ app.stt.toggle: Ctrl+Shift+S
 ```
 
 While speech-to-text is enabled, non-printable keys and chords assigned to `app.stt.pushToTalk` are reserved: a tap is swallowed instead of running its normal editing or application action. A plain printable key tap still types normally. Text-assistance transformations from initial taps are preserved; only unchanged literal repeat text is removed when a hold is recognized. Each configured alternative is independent; alternating between alternatives does not combine them into one hold. Hold detection requires a terminal that delivers key auto-repeat.
+
+## Stash a prompt temporarily
+
+Press `Ctrl+S` with a nonempty draft to stash its text, cursor position, Vim input mode, collapsed pastes, and image attachments, leaving the editor empty. Press `Ctrl+S` again while the editor is empty to restore it, or submit a separate prompt to restore the stashed draft as soon as that submission is accepted (without waiting for the model turn or a queued message to run). If another draft is already stashed, `Ctrl+S` swaps the two drafts rather than discarding either. Automatic loop/goal continuations and delivery of previously queued prompts do not consume the stash. An empty or failed submission does not consume it. The stash is local to the current editor and is not added to prompt history.
+
+`Alt+A` opens Agent Hub. Existing `app.session.observe` and `observeSessions` remaps migrate to `app.agents.hub`; the obsolete action is no longer available. If you explicitly remap the Hub to `Ctrl+S`, that binding takes precedence over the stash default; bind `app.editor.stash` separately to keep both actions. The session selector has its own key scope: even an explicit `app.session.toggleSort: Ctrl+S` does not disable editor stash.
 
 ## Recover a cleared prompt
 
