@@ -53,6 +53,7 @@ import { TspDocument } from "./apply";
 import { getNativeBlob, type NativeBlob } from "./blobs";
 import { node } from "./describe";
 import { encodeTspJson, encodeTspMessage, type TspHello, TspReader, splitTspMessage } from "./encode";
+import { boundOps, MAX_FRAME_BYTES, type SizedOp } from "./frames";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiEvent } from "./node";
 import { nativeComponentId, Reconciler } from "./reconcile";
 import { setNativeRendering } from "./state";
@@ -123,10 +124,14 @@ const DEFAULT_SCHEDULER: RenderScheduler = {
 const RECENT_FRAMES = 64;
 /** An unanswered frame older than this no longer holds rendering back. */
 const STALLED_ACK_MS = 5000;
-/** Tern drops a chunked message once its joined body exceeds 24 MiB. */
-const MAX_FRAME_BYTES = 24 * 1024 * 1024;
 /** Role of the session's surfaces; a screen page may name its own. */
 const SESSION_ROLE = "omp.session";
+
+/** Bytes of a frame for surface `sf` without ops, at the largest sequence number. */
+function frameEnvelopeBytes(sf: string): number {
+	return Buffer.byteLength(JSON.stringify({ sf, s: Number.MAX_SAFE_INTEGER, ops: [] }), "utf8");
+}
+
 /** A `blobs` query unanswered this long counts its ids as missing: they go inline. */
 const BLOB_REPLY_MS = 3000;
 /** Expired queries kept to pair late replies with their queries, at most. */
@@ -240,8 +245,8 @@ class Surface {
 	unacked: number[] = [];
 	focus: string | null = null;
 	dirty = false;
-	/** Reconciled ops waiting for frame credits, with the next unsent op index. */
-	pendingOps: readonly TspOp[] | null = null;
+	/** Bounded ops waiting for frame credits, with the next unsent index. */
+	pendingOps: readonly SizedOp[] | null = null;
 	pendingAt = 0;
 
 	constructor(id: string, mode: "inline" | "screen", role: string, mirror: boolean) {
@@ -649,7 +654,7 @@ export class NativeBackend {
 			this.#emitFrame(surface, frame, body);
 			return;
 		}
-		surface.pendingOps = ops;
+		surface.pendingOps = boundOps(ops, MAX_FRAME_BYTES - frameEnvelopeBytes(surface.id));
 		surface.pendingAt = 0;
 		this.#drainPending(surface);
 	}
@@ -658,21 +663,18 @@ export class NativeBackend {
 	#drainPending(surface: Surface): void {
 		const ops = surface.pendingOps;
 		if (!ops) return;
+		const budget = MAX_FRAME_BYTES - frameEnvelopeBytes(surface.id);
 		while (surface.pendingAt < ops.length && this.#hasCredit(surface)) {
-			const nextSeq = surface.seq + 1;
-			let bytes = Buffer.byteLength(JSON.stringify({ sf: surface.id, s: nextSeq, ops: [] }), "utf8");
 			const start = surface.pendingAt;
-			while (surface.pendingAt < ops.length) {
-				const op = ops[surface.pendingAt]!;
-				const size = Buffer.byteLength(JSON.stringify(op), "utf8") + (surface.pendingAt === start ? 0 : 1);
-				if (bytes + size > MAX_FRAME_BYTES) {
-					if (surface.pendingAt === start) throw new RangeError("TSP op exceeds Tern's 24 MiB frame limit");
-					break;
-				}
-				bytes += size;
+			// `boundOps` keeps every op within `budget`, so each frame takes at least one.
+			let bytes = ops[start]!.bytes;
+			surface.pendingAt++;
+			while (surface.pendingAt < ops.length && bytes + 1 + ops[surface.pendingAt]!.bytes <= budget) {
+				bytes += 1 + ops[surface.pendingAt]!.bytes;
 				surface.pendingAt++;
 			}
-			const frame: TspFrame = { sf: surface.id, s: nextSeq, ops: ops.slice(start, surface.pendingAt) };
+			const batch = ops.slice(start, surface.pendingAt).map(entry => entry.op);
+			const frame: TspFrame = { sf: surface.id, s: surface.seq + 1, ops: batch };
 			this.#emitFrame(surface, frame, JSON.stringify(frame));
 		}
 		if (surface.pendingAt === ops.length) {
@@ -868,10 +870,15 @@ export class NativeBackend {
 				return;
 			case "error": {
 				logger.warn("TSP: terminal reported an error", event);
+				// Only a frame dropped whole (no `op`) leaves the terminal without state omp
+				// thinks it sent; a rejected single op is reported and the rest applies.
 				if (
-					!event.msg.startsWith("chunked f message ") &&
-					!event.msg.startsWith("malformed f body:") &&
-					event.sf === undefined
+					event.op !== undefined ||
+					!(
+						event.msg.startsWith("chunked f message ") ||
+						event.msg.startsWith("malformed f body:") ||
+						(event.sf !== undefined && event.s !== undefined)
+					)
 				)
 					return;
 				const surfaces: Surface[] = [];

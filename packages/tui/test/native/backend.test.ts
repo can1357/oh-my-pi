@@ -99,6 +99,28 @@ describe("native backend", () => {
 		expect(h.errors).toEqual([]);
 	});
 
+	it("restores a single node larger than one frame by adding it bare and appending its text", async () => {
+		// A surrogate pair straddles every likely cut point; cutting inside one would corrupt the text.
+		const text = "😀".repeat(15 * 1024 * 1024) + "end";
+		const block = new Probe(card({ status: "done" }, [md(text)]));
+		harness = await TspHarness.start(tui => tui.addChild(block), { maxFrameBytes: 24 * 1024 * 1024 });
+		const h = harness;
+		expect(h.frames.length).toBeGreaterThan(1);
+		expect(h.byId(`${nativeComponentId(block)}.0`)?.p).toEqual({ text });
+		expect(h.errors).toEqual([]);
+	});
+
+	it("keeps the surface when the terminal rejects a single op", async () => {
+		const block = new Probe(md("kept"));
+		harness = await TspHarness.start(tui => tui.addChild(block));
+		const h = harness;
+		const surface = h.terminal.surface!;
+		const sent = h.terminal.log.length;
+		h.event({ ev: "error", sf: surface, s: 1, op: 0, msg: "unknown id dq5" });
+		expect(h.terminal.surface).toBe(surface);
+		expect(h.terminal.log.length).toBe(sent);
+	});
+
 	it("reopens the surface after a terminal drops a frame, instead of sending deltas to missing nodes", async () => {
 		const block = new Probe(md("restored"));
 		harness = await TspHarness.start(tui => tui.addChild(block), { dropFirstFrame: true });
