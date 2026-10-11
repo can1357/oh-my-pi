@@ -1,0 +1,485 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mapAgentSessionEventToAcpSessionUpdates } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-event-mapper";
+import { AcpSubagentStreams } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-subagents";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import {
+	type SubagentLifecyclePayload,
+	TASK_SUBAGENT_EVENT_CHANNEL,
+	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+} from "@oh-my-pi/pi-coding-agent/task/types";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { type AgentSideConnection, type SessionNotification, zSessionNotification } from "@oh-my-pi/pi-utils/acp";
+
+const ROOT_SESSION_ID = "root-session";
+const ROOT_AGENT_ID = `acp:${ROOT_SESSION_ID}`;
+
+function lifecycle(id: string, status: SubagentLifecyclePayload["status"]): SubagentLifecyclePayload {
+	return { id, agent: "task", agentSource: "bundled", status, index: 0 };
+}
+
+function registerAgent(id: string, parentId: string): void {
+	AgentRegistry.global().register({ id, displayName: id, kind: "sub", parentId, session: null });
+}
+
+describe("AcpSubagentStreams", () => {
+	let bus: EventBus;
+	let sent: SessionNotification[];
+	let onSent: (() => void) | undefined;
+	let streams: AcpSubagentStreams;
+
+	/** Resolves once `count` notifications reached the client, each valid on the wire. */
+	async function delivered(count: number): Promise<SessionNotification[]> {
+		while (sent.length < count) {
+			const next = Promise.withResolvers<void>();
+			onSent = next.resolve;
+			await next.promise;
+		}
+		for (const notification of sent) {
+			const result = zSessionNotification.safeParse(notification);
+			expect(result.success, JSON.stringify(notification)).toBe(true);
+		}
+		return sent;
+	}
+
+	beforeEach(() => {
+		AgentRegistry.resetGlobalForTests();
+		bus = new EventBus();
+		sent = [];
+		const connection = {
+			sessionUpdate: async (notification: SessionNotification) => {
+				sent.push(notification);
+				onSent?.();
+			},
+		} as unknown as AgentSideConnection;
+		const session = {
+			sessionId: ROOT_SESSION_ID,
+			getAgentId: () => ROOT_AGENT_ID,
+			sessionManager: { getCwd: () => "/work" },
+		} as unknown as AgentSession;
+		streams = new AcpSubagentStreams(connection, session, bus);
+		streams.start();
+	});
+
+	afterEach(() => {
+		streams.dispose();
+		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("announces a child on its parent before streaming the child's own traffic, then reports it idle", async () => {
+		registerAgent("Scout", ROOT_AGENT_ID);
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Scout", "started"));
+		bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "Scout",
+			event: {
+				type: "message_end",
+				message: { role: "user", content: "Find the flaky test", attribution: "agent", timestamp: 1 },
+			} as AgentSessionEvent,
+		});
+		bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "Scout",
+			event: { type: "tool_execution_start", toolCallId: "tc-1", toolName: "bash", args: { command: "ls" } },
+		});
+		// Only the first agent-attributed user message is the delegated assignment.
+		bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "Scout",
+			event: {
+				type: "message_end",
+				message: { role: "user", content: "Reminder: call yield", attribution: "agent", timestamp: 2 },
+			} as AgentSessionEvent,
+		});
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Scout", "completed"));
+
+		const childSessionId = `${ROOT_SESSION_ID}/Scout`;
+		expect((await delivered(4)).map(n => [n.sessionId, n.update.sessionUpdate])).toEqual([
+			[ROOT_SESSION_ID, "subagent_update"],
+			[childSessionId, "session_message"],
+			[childSessionId, "tool_call"],
+			[ROOT_SESSION_ID, "subagent_update"],
+		]);
+		expect(sent[0]!.update).toEqual({
+			sessionUpdate: "subagent_update",
+			sessionId: childSessionId,
+			title: "Scout",
+			state: { state: "running" },
+		});
+		expect(sent[1]!.update).toMatchObject({
+			senderSessionId: ROOT_SESSION_ID,
+			recipientSessionId: childSessionId,
+			content: [{ type: "text", text: "Find the flaky test" }],
+		});
+		expect(sent[3]!.update).toMatchObject({ state: { state: "idle", stopReason: "end_turn" } });
+	});
+
+	it("nests a grandchild under its exposed parent and never exposes a child of an unexposed parent", async () => {
+		registerAgent("Lead", ROOT_AGENT_ID);
+		registerAgent("Helper", "Lead");
+		registerAgent("Stranger", "Unannounced");
+		for (const id of ["Lead", "Helper", "Stranger"])
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle(id, "started"));
+		bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "Stranger",
+			event: { type: "tool_execution_start", toolCallId: "tc-x", toolName: "bash", args: { command: "ls" } },
+		});
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Helper", "aborted"));
+
+		const leadSessionId = `${ROOT_SESSION_ID}/Lead`;
+		const helperSessionId = `${ROOT_SESSION_ID}/Helper`;
+		expect((await delivered(3)).map(n => [n.sessionId, n.update])).toEqual([
+			[ROOT_SESSION_ID, expect.objectContaining({ sessionUpdate: "subagent_update", sessionId: leadSessionId })],
+			[leadSessionId, expect.objectContaining({ sessionUpdate: "subagent_update", sessionId: helperSessionId })],
+			[
+				leadSessionId,
+				{
+					sessionUpdate: "subagent_update",
+					sessionId: helperSessionId,
+					state: { state: "idle", stopReason: "cancelled" },
+				},
+			],
+		]);
+		expect(streams.resolveAgentSessionId("Stranger")).toBeUndefined();
+	});
+
+	it("reports a woken child as running again in the same child session", async () => {
+		registerAgent("Scout", ROOT_AGENT_ID);
+		for (const status of ["started", "completed", "started"] as const) {
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Scout", status));
+		}
+		const updates = (await delivered(3)).map(n => n.update);
+		expect(updates).toHaveLength(3);
+		expect(new Set(updates.map(u => (u.sessionUpdate === "subagent_update" ? u.sessionId : undefined)))).toEqual(
+			new Set([`${ROOT_SESSION_ID}/Scout`]),
+		);
+		expect(updates[2]).toMatchObject({ state: { state: "running" } });
+	});
+
+	it("stays running when a wake turn starts before the previous run's terminal frame", async () => {
+		registerAgent("Scout", ROOT_AGENT_ID);
+		// Run 1 starts; a wake turn starts; only then does run 1 report completion.
+		for (const status of ["started", "started", "completed", "completed"] as const) {
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Scout", status));
+		}
+		const states = (await delivered(3)).map(n =>
+			n.update.sessionUpdate === "subagent_update" ? n.update.state : null,
+		);
+		await Promise.resolve();
+		// No idle while the wake turn is active; idle once the last run ends.
+		expect(states).toEqual([{ state: "running" }, { state: "running" }, { state: "idle", stopReason: "end_turn" }]);
+		expect(sent).toHaveLength(3);
+	});
+
+	it("forwards a description that first arrives on a later lifecycle frame and re-announces it", async () => {
+		registerAgent("Scout", ROOT_AGENT_ID);
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Scout", "started"));
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...lifecycle("Scout", "completed"), description: "Find flaky test" });
+		const [, idle] = await delivered(2);
+		expect(idle!.update).toMatchObject({ description: "Find flaky test", state: { state: "idle" } });
+		sent.length = 0;
+		streams.announceAll();
+		expect((await delivered(1))[0]!.update).toMatchObject({ title: "Scout", description: "Find flaky test" });
+	});
+
+	it("re-establishes known children for a reloaded parent, routing first and current state after", async () => {
+		registerAgent("Lead", ROOT_AGENT_ID);
+		registerAgent("Helper", "Lead");
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Lead", "started"));
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Helper", "started"));
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Helper", "completed"));
+		sent.length = 0;
+
+		streams.announceAll();
+		streams.reportStates();
+
+		const leadSessionId = `${ROOT_SESSION_ID}/Lead`;
+		const helperSessionId = `${ROOT_SESSION_ID}/Helper`;
+		expect((await delivered(4)).map(n => [n.sessionId, n.update])).toEqual([
+			[ROOT_SESSION_ID, { sessionUpdate: "subagent_update", sessionId: leadSessionId, title: "Lead" }],
+			[leadSessionId, { sessionUpdate: "subagent_update", sessionId: helperSessionId, title: "Helper" }],
+			[ROOT_SESSION_ID, { sessionUpdate: "subagent_update", sessionId: leadSessionId, state: { state: "running" } }],
+			[
+				leadSessionId,
+				{
+					sessionUpdate: "subagent_update",
+					sessionId: helperSessionId,
+					state: { state: "idle", stopReason: "end_turn" },
+				},
+			],
+		]);
+	});
+
+	it("resolves a child's file locations against the child's own cwd, never the parent's", async () => {
+		AgentRegistry.global().register({
+			id: "Isolated",
+			displayName: "Isolated",
+			kind: "sub",
+			parentId: ROOT_AGENT_ID,
+			session: { sessionManager: { getCwd: () => "/worktrees/isolated" } } as unknown as AgentSession,
+		});
+		registerAgent("Detached", ROOT_AGENT_ID);
+		for (const id of ["Isolated", "Detached"]) {
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle(id, "started"));
+			bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+				id,
+				event: {
+					type: "tool_execution_start",
+					toolCallId: `tc-${id}`,
+					toolName: "write",
+					args: { path: "src/a.ts", content: "x" },
+				},
+			});
+		}
+		const locations = (await delivered(4))
+			.map(n => n.update)
+			.flatMap(update => (update.sessionUpdate === "tool_call" ? [update.locations?.map(l => l.path)] : []));
+		expect(locations[0]).toEqual(["/worktrees/isolated/src/a.ts"]);
+		// With no session to read a cwd from, nothing may resolve against the parent workspace.
+		expect(locations[1]?.some(path => path.startsWith("/work/"))).not.toBe(true);
+	});
+
+	it("reports the delegated prompt that opens each run, but not later harness notices", async () => {
+		registerAgent("Worker", ROOT_AGENT_ID);
+		const userMessage = (content: string) => ({
+			type: "message_end",
+			message: { role: "user", content, attribution: "agent", timestamp: 1 },
+		});
+		const assistantStart = { type: "message_start", message: { role: "assistant", content: [], timestamp: 1 } };
+		for (const [run, prompt] of [
+			[1, "first item"],
+			[2, "follow-up item"],
+		] as const) {
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "started"));
+			for (const event of [userMessage(prompt), assistantStart, userMessage(`budget notice ${run}`)]) {
+				bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, { id: "Worker", event: event as AgentSessionEvent });
+			}
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "completed"));
+		}
+		const childSessionId = `${ROOT_SESSION_ID}/Worker`;
+		const assignments = (await delivered(6))
+			.map(n => n.update)
+			.filter(update => update.sessionUpdate === "session_message");
+		expect(assignments).toEqual([
+			expect.objectContaining({
+				messageId: `assignment:${childSessionId}:1`,
+				content: [{ type: "text", text: "first item" }],
+			}),
+			expect.objectContaining({
+				messageId: `assignment:${childSessionId}:2`,
+				content: [{ type: "text", text: "follow-up item" }],
+			}),
+		]);
+	});
+
+	it("sends a child's final answer or error when agent_end arrives without it, exactly once", async () => {
+		const assistant = (text: string, extra: Record<string, unknown> = {}) => ({
+			role: "assistant",
+			content: text ? [{ type: "text", text }] : [],
+			stopReason: "stop",
+			timestamp: 1,
+			...extra,
+		});
+		const emit = (id: string, event: Record<string, unknown>) =>
+			bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, { id, event: event as AgentSessionEvent });
+		for (const id of ["Raced", "Failed", "Streamed"]) {
+			registerAgent(id, ROOT_AGENT_ID);
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle(id, "started"));
+			emit(id, { type: "agent_start" });
+		}
+		// `agent_end` overtakes the final `message_end`: only a thought reached the client.
+		const answer = assistant("the flaky test is X");
+		emit("Raced", {
+			type: "message_update",
+			message: answer,
+			assistantMessageEvent: { type: "thinking_delta", delta: "hmm", contentIndex: 0 },
+		});
+		emit("Raced", { type: "agent_end", messages: [answer] });
+		emit("Raced", { type: "message_end", message: answer });
+		// The request failed before streaming anything.
+		emit("Failed", {
+			type: "agent_end",
+			messages: [assistant("", { stopReason: "error", errorMessage: "model_not_supported" })],
+		});
+		// A normally streamed answer needs no fallback.
+		const streamed = assistant("done");
+		emit("Streamed", {
+			type: "message_update",
+			message: streamed,
+			assistantMessageEvent: { type: "text_delta", delta: "done", contentIndex: 0 },
+		});
+		emit("Streamed", { type: "message_end", message: streamed });
+		emit("Streamed", { type: "agent_end", messages: [streamed] });
+
+		const texts = (await delivered(7))
+			.filter(n => n.update.sessionUpdate === "agent_message_chunk")
+			.map(n => [n.sessionId.split("/")[1], n.update.sessionUpdate === "agent_message_chunk" && n.update.content]);
+		expect(texts).toEqual([
+			["Raced", { type: "text", text: "the flaky test is X" }],
+			["Failed", { type: "text", text: "model_not_supported" }],
+			["Streamed", { type: "text", text: "done" }],
+		]);
+	});
+
+	it("keeps runs apart when a previous run's message_end arrives late or never", async () => {
+		registerAgent("Worker", ROOT_AGENT_ID);
+		const emit = (event: Record<string, unknown>) =>
+			bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, { id: "Worker", event: event as AgentSessionEvent });
+		const answer = {
+			role: "assistant",
+			content: [{ type: "text", text: "run 1" }],
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "started"));
+		emit({ type: "agent_start" });
+		emit({ type: "message_update", message: answer, assistantMessageEvent: { type: "thinking_delta", delta: "." } });
+		// Run 1 ends before its `message_end`.
+		emit({ type: "agent_end", messages: [answer] });
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "completed"));
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "started"));
+		// Run 1's `message_end` lands after run 2 started; the fallback already sent it.
+		emit({ type: "message_end", message: answer });
+		emit({ type: "agent_start" });
+		emit({
+			type: "agent_end",
+			messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "boom", timestamp: 2 }],
+		});
+
+		const chunks = (await delivered(6)).flatMap(n =>
+			n.update.sessionUpdate === "agent_message_chunk" && n.update.content.type === "text"
+				? [{ text: n.update.content.text, messageId: n.update.messageId }]
+				: [],
+		);
+		expect(chunks.map(chunk => chunk.text)).toEqual(["run 1", "boom"]);
+		expect(chunks[1]!.messageId).not.toBe(chunks[0]!.messageId);
+	});
+
+	it("drops every late event of turns already settled by the fallback, not just the latest", async () => {
+		registerAgent("Worker", ROOT_AGENT_ID);
+		const emit = (event: Record<string, unknown>) =>
+			bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, { id: "Worker", event: event as AgentSessionEvent });
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "started"));
+		const turnA = { role: "assistant", content: [{ type: "text", text: "A" }], stopReason: "stop", timestamp: 1 };
+		const turnB = { role: "assistant", content: [{ type: "text", text: "B" }], stopReason: "stop", timestamp: 2 };
+		for (const turn of [turnA, turnB]) {
+			emit({ type: "agent_start" });
+			emit({ type: "message_update", message: turn, assistantMessageEvent: { type: "thinking_delta", delta: "." } });
+			// The turn ends before its `message_end`.
+			emit({ type: "agent_end", messages: [turn] });
+		}
+		// Both late `message_end`s arrive after turn B settled.
+		emit({ type: "message_end", message: turnA });
+		emit({ type: "message_end", message: turnB });
+
+		// The announcement, then a thought and its fallback answer per turn.
+		const texts = (await delivered(5)).flatMap(n =>
+			n.update.sessionUpdate === "agent_message_chunk" && n.update.content.type === "text"
+				? [n.update.content.text]
+				: [],
+		);
+		await Promise.resolve();
+		expect(texts).toEqual(["A", "B"]);
+		expect(sent.filter(n => n.update.sessionUpdate === "agent_message_chunk")).toHaveLength(2);
+	});
+
+	it("holds back traffic until started, so nothing names the child before the client knows the root session", async () => {
+		const held: SessionNotification[] = [];
+		const pending = new AcpSubagentStreams(
+			{ sessionUpdate: async (n: SessionNotification) => void held.push(n) } as unknown as AgentSideConnection,
+			{
+				sessionId: ROOT_SESSION_ID,
+				getAgentId: () => ROOT_AGENT_ID,
+				sessionManager: { getCwd: () => "/work" },
+			} as unknown as AgentSession,
+			bus,
+		);
+		registerAgent("Early", ROOT_AGENT_ID);
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Early", "started"));
+		bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "Early",
+			event: { type: "tool_execution_start", toolCallId: "tc-early", toolName: "bash", args: { command: "ls" } },
+		});
+		await Promise.resolve();
+		expect(held).toEqual([]);
+		expect(pending.resolveAgentSessionId("Early")).toBeUndefined();
+
+		pending.start();
+		await Promise.resolve();
+		expect(held.map(n => n.update.sessionUpdate)).toEqual(["subagent_update", "tool_call"]);
+		expect(pending.resolveAgentSessionId("Early")).toBe(`${ROOT_SESSION_ID}/Early`);
+		pending.dispose();
+	});
+});
+
+describe("ACP session messages for agent IRC traffic", () => {
+	const sessionMessages = {
+		resolveAgentSessionId: (agentId: string) => ({ Scout: "child-scout", main: "root" })[agentId],
+	};
+
+	it("reports a delivered agent:// write as an outgoing message to the recipient session", () => {
+		const args = { path: "agent://Scout", content: "Also check Windows." };
+		const end: AgentSessionEvent = {
+			type: "tool_execution_end",
+			toolCallId: "tc-1",
+			toolName: "write",
+			isError: false,
+			result: { content: [{ type: "text", text: "Delivered." }] },
+		};
+		expect(
+			mapAgentSessionEventToAcpSessionUpdates(end, "root", { getToolArgs: () => args, sessionMessages }),
+		).toEqual([
+			{
+				sessionId: "root",
+				update: {
+					sessionUpdate: "session_message",
+					messageId: "irc-out:tc-1",
+					senderSessionId: "root",
+					recipientSessionId: "child-scout",
+					content: [{ type: "text", text: "Also check Windows." }],
+				},
+			},
+		]);
+		const broadcast = mapAgentSessionEventToAcpSessionUpdates(end, "root", {
+			getToolArgs: () => ({ path: "agent://all", content: "Stop." }),
+			sessionMessages,
+		});
+		expect(broadcast[0]!.update).not.toHaveProperty("recipientSessionId");
+		const failed = mapAgentSessionEventToAcpSessionUpdates({ ...end, isError: true }, "root", {
+			getToolArgs: () => args,
+			sessionMessages,
+		});
+		expect(failed).toEqual([]);
+	});
+
+	it("reports an incoming IRC message once whether it arrives live or as a wake-turn record", () => {
+		const record = {
+			role: "custom" as const,
+			customType: "irc:incoming",
+			content: "<rendered envelope>",
+			display: true,
+			details: { id: "m-7", from: "Scout", message: "pong" },
+			attribution: "agent" as const,
+			timestamp: 1,
+		};
+		const live = mapAgentSessionEventToAcpSessionUpdates({ type: "irc_message", message: record }, "root", {
+			sessionMessages,
+		});
+		const persisted = mapAgentSessionEventToAcpSessionUpdates(
+			{ type: "message_end", message: record } as AgentSessionEvent,
+			"root",
+			{ sessionMessages },
+		);
+		expect(live).toEqual(persisted);
+		expect(live).toEqual([
+			{
+				sessionId: "root",
+				update: {
+					sessionUpdate: "session_message",
+					messageId: "irc-in:m-7",
+					senderSessionId: "child-scout",
+					recipientSessionId: "root",
+					content: [{ type: "text", text: "pong" }],
+				},
+			},
+		]);
+		expect(mapAgentSessionEventToAcpSessionUpdates({ type: "irc_message", message: record }, "root")).toEqual([]);
+	});
+});

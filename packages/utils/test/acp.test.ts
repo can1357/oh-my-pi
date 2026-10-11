@@ -210,4 +210,37 @@ describe("ACP runtime schemas", () => {
 			}).success,
 		).toBe(false);
 	});
+
+	it("validates the unstable subagent session updates", () => {
+		const valid = (update: Record<string, unknown>) =>
+			schema.zSessionNotification.safeParse({ sessionId: "parent", update }).success;
+		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", state: { state: "running" } })).toBe(true);
+		// A session cannot own itself.
+		expect(valid({ sessionUpdate: "subagent_update", sessionId: "parent" })).toBe(false);
+		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", state: 1 })).toBe(false);
+		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", title: false })).toBe(false);
+		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", description: 3 })).toBe(false);
+		// Unknown state values are reserved for future and `_`-prefixed extension states.
+		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", state: { state: "_paused" } })).toBe(true);
+		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", state: null, title: null })).toBe(true);
+		const idle = (state: Record<string, unknown>) =>
+			valid({ sessionUpdate: "subagent_update", sessionId: "child", state: { state: "idle", ...state } });
+		expect(idle({ stopReason: "error", error: { code: -32000, message: "boom" } })).toBe(true);
+		expect(idle({ stopReason: 1 })).toBe(false);
+		expect(idle({ stopReason: "error", error: false })).toBe(false);
+		expect(
+			valid({
+				sessionUpdate: "session_message",
+				messageId: "m",
+				recipientSessionId: "child",
+				content: [{ type: "text", text: "hi" }],
+			}),
+		).toBe(true);
+		expect(valid({ sessionUpdate: "session_message", messageId: "m", content: null })).toBe(true);
+		expect(valid({ sessionUpdate: "session_message", content: [{ type: "text", text: "hi" }] })).toBe(false);
+		expect(valid({ sessionUpdate: "session_message", messageId: "m", content: [{ type: "text" }] })).toBe(false);
+		expect(valid({ sessionUpdate: "session_message", messageId: "m", senderSessionId: false })).toBe(false);
+		expect(valid({ sessionUpdate: "session_message", messageId: "m", recipientSessionId: {} })).toBe(false);
+		expect(valid({ sessionUpdate: "session_message", messageId: "m", senderSessionId: null })).toBe(true);
+	});
 });

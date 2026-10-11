@@ -22,11 +22,14 @@ import type {
 	AgentSessionEvent,
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { TASK_SUBAGENT_EVENT_CHANNEL, TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import type {
 	AgentSideConnection,
@@ -132,6 +135,9 @@ class FakeAgentSession {
 	disposed = false;
 	fastMode = false;
 	forcedToolChoice: string | undefined;
+	getAgentId(): string {
+		return MAIN_AGENT_ID;
+	}
 	get settings(): Settings {
 		return Settings.instance;
 	}
@@ -497,6 +503,8 @@ async function createHarness(
 		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
 		/** Gives each session the factory creates a real extension runner with no extensions. */
 		extensionRunners?: boolean;
+		/** Returned with every factory-created session, as `createAcpSessionFactory` does. */
+		subagentEventBus?: EventBus;
 	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
@@ -546,7 +554,11 @@ async function createHarness(
 		sessions.push(session);
 		setToolUIContextSpies.push(setToolUIContext);
 		sessionFactoryOptions.push(factoryOptions);
-		return { session: session as unknown as AgentSession, setToolUIContext };
+		return {
+			session: session as unknown as AgentSession,
+			setToolUIContext,
+			subagentEventBus: options.subagentEventBus,
+		};
 	};
 
 	const agent = new AcpAgent(connection, factory, initialSession as unknown as AgentSession);
@@ -1897,6 +1909,275 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("exposes subagents as child sessions only to clients that advertise the subagents capability", async () => {
+		for (const clientCapabilities of [{ subagents: {} }, {}] satisfies ClientCapabilities[]) {
+			AgentRegistry.resetGlobalForTests();
+			const bus = new EventBus();
+			const harness = await createHarness({ clientCapabilities, subagentEventBus: bus });
+			vi.useFakeTimers();
+			const { sessionId } = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			AgentRegistry.global().register({
+				id: "Scout",
+				displayName: "Scout",
+				kind: "sub",
+				parentId: MAIN_AGENT_ID,
+				session: null,
+			});
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+				id: "Scout",
+				agent: "task",
+				agentSource: "bundled",
+				status: "started",
+				index: 0,
+			});
+			bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+				id: "Scout",
+				event: { type: "tool_execution_start", toolCallId: "tc-scout", toolName: "bash", args: { command: "ls" } },
+			});
+			await Promise.resolve();
+			const subagentTraffic = () =>
+				harness.updates.filter(n => n.update.sessionUpdate === "subagent_update" || n.sessionId !== sessionId);
+			// Nothing names the session before the bootstrap guard lets the client learn it.
+			expect(subagentTraffic()).toEqual([]);
+			await advanceBootstrapGuard();
+			await Promise.resolve();
+			vi.useRealTimers();
+			if (clientCapabilities.subagents) {
+				expect(subagentTraffic().map(n => [n.sessionId, n.update.sessionUpdate])).toEqual([
+					[sessionId, "subagent_update"],
+					[`${sessionId}/Scout`, "tool_call"],
+				]);
+			} else {
+				expect(subagentTraffic()).toEqual([]);
+			}
+		}
+		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("re-announces a live parent's children before replay names them and reports their state after the response", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const bus = new EventBus();
+		let reloaded = false;
+		const stateReported = Promise.withResolvers<void>();
+		const harness = await createHarness({
+			clientCapabilities: { subagents: {} },
+			subagentEventBus: bus,
+			sessionUpdateHook: n => {
+				if (reloaded && n.update.sessionUpdate === "subagent_update" && n.update.state) stateReported.resolve();
+			},
+		});
+		vi.useFakeTimers();
+		const { sessionId } = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		await advanceBootstrapGuard();
+		AgentRegistry.global().register({
+			id: "Scout",
+			displayName: "Scout",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: null,
+		});
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "Scout",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 0,
+		});
+		harness
+			.findSession(sessionId)!
+			.sessionManager.appendCustomMessageEntry(
+				"irc:incoming",
+				"<rendered IRC envelope>",
+				true,
+				{ id: "m-2", from: "Scout", message: "done" },
+				"agent",
+			);
+		// The hook defers each recorded delivery by one microtask; let the
+		// announcement above land before starting from a clean slate.
+		await Promise.resolve();
+		harness.updates.length = 0;
+
+		reloaded = true;
+		await harness.agent.loadSession({ sessionId, cwd: harness.cwdA, mcpServers: [] });
+
+		const childSessionId = `${sessionId}/Scout`;
+		const subagentUpdates = () => harness.updates.filter(n => n.update.sessionUpdate === "subagent_update");
+		const announcement = harness.updates.findIndex(n => n.update.sessionUpdate === "subagent_update");
+		const replayedMessage = harness.updates.findIndex(
+			n => n.update.sessionUpdate === "session_message" && n.update.senderSessionId === childSessionId,
+		);
+		expect(announcement).toBeGreaterThanOrEqual(0);
+		expect(replayedMessage).toBeGreaterThan(announcement);
+		expect(subagentUpdates().map(n => n.update)).toEqual([
+			{ sessionUpdate: "subagent_update", sessionId: childSessionId, title: "Scout" },
+		]);
+
+		await advanceBootstrapGuard();
+		await stateReported.promise;
+		await Promise.resolve();
+		expect(subagentUpdates().map(n => n.update)).toEqual([
+			{ sessionUpdate: "subagent_update", sessionId: childSessionId, title: "Scout" },
+			{ sessionUpdate: "subagent_update", sessionId: childSessionId, state: { state: "running" } },
+		]);
+		vi.useRealTimers();
+		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("replays recorded agent messages as session messages only when subagents are negotiated", async () => {
+		for (const clientCapabilities of [{ subagents: {} }, {}] satisfies ClientCapabilities[]) {
+			const harness = await createHarness({ clientCapabilities, subagentEventBus: new EventBus() });
+			const stored = new FakeAgentSession(harness.cwdA);
+			harness.sessions.push(stored);
+			stored.sessionManager.appendCustomMessageEntry(
+				"irc:incoming",
+				"<rendered IRC envelope>",
+				true,
+				{ id: "m-1", from: "Scout", message: "found the flaky test" },
+				"agent",
+			);
+			stored.sessionManager.appendMessage({
+				...makeAssistantMessage(""),
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-irc",
+						name: "write",
+						arguments: { path: "agent://Scout", content: "check Windows" },
+					},
+				],
+				stopReason: "toolUse",
+			});
+			stored.sessionManager.appendMessage({
+				role: "toolResult",
+				toolCallId: "tc-irc",
+				toolName: "write",
+				content: [{ type: "text", text: "Delivered." }],
+				isError: false,
+				timestamp: Date.now(),
+			});
+			await stored.sessionManager.ensureOnDisk();
+			await stored.sessionManager.flush();
+
+			await harness.agent.loadSession({ sessionId: stored.sessionId, cwd: harness.cwdA, mcpServers: [] });
+
+			const replayed = harness.updates.filter(n => n.sessionId === stored.sessionId).map(n => n.update);
+			if (clientCapabilities.subagents) {
+				expect(replayed).toContainEqual({
+					sessionUpdate: "session_message",
+					messageId: "irc-in:m-1",
+					recipientSessionId: stored.sessionId,
+					content: [{ type: "text", text: "found the flaky test" }],
+				});
+				expect(replayed).toContainEqual({
+					sessionUpdate: "session_message",
+					messageId: "irc-out:tc-irc",
+					senderSessionId: stored.sessionId,
+					content: [{ type: "text", text: "check Windows" }],
+				});
+				expect(replayed.some(update => update.sessionUpdate === "user_message_chunk")).toBe(false);
+			} else {
+				expect(replayed.some(update => update.sessionUpdate === "session_message")).toBe(false);
+			}
+		}
+	});
+
+	it("reports an agent message that reaches the root outside ACP prompt turns, held until bootstrap and sent once", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: new EventBus() });
+		vi.useFakeTimers();
+		const { sessionId } = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(sessionId)!;
+		const deliverIrc = (id: string, text: string) => {
+			for (const listener of session.listeners()) {
+				listener({
+					type: "irc_message",
+					message: {
+						role: "custom",
+						customType: "irc:incoming",
+						content: "<rendered IRC envelope>",
+						display: true,
+						details: { id, from: "Scout", message: text },
+						attribution: "agent",
+						timestamp: 1,
+					},
+				} as AgentSessionEvent);
+			}
+		};
+		const sessionMessages = () =>
+			harness.updates.flatMap(n => (n.update.sessionUpdate === "session_message" ? [n.update.messageId] : []));
+		// e.g. a child spawned by a `session_start` extension, before the client knows the session id.
+		deliverIrc("m-early", "spawned at startup");
+		await Promise.resolve();
+		expect(sessionMessages()).toEqual([]);
+		await advanceBootstrapGuard();
+		await Promise.resolve();
+		vi.useRealTimers();
+		deliverIrc("m-idle", "done in the background");
+		await Promise.resolve();
+		expect(sessionMessages()).toEqual(["irc-in:m-early", "irc-in:m-idle"]);
+		expect(harness.updates.map(n => n.update)).toContainEqual({
+			sessionUpdate: "session_message",
+			messageId: "irc-in:m-idle",
+			recipientSessionId: sessionId,
+			content: [{ type: "text", text: "done in the background" }],
+		});
+	});
+
+	it("reports an agent message that reaches the root while a cancelled prompt is still aborting", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: new EventBus() });
+		vi.useFakeTimers();
+		const { sessionId } = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		await advanceBootstrapGuard();
+		vi.useRealTimers();
+		const session = harness.findSession(sessionId)!;
+		const abortStarted = Promise.withResolvers<void>();
+		const releaseAbort = Promise.withResolvers<void>();
+		session.abort = async () => {
+			session.isStreaming = false;
+			abortStarted.resolve();
+			await releaseAbort.promise;
+		};
+		const finishPrompt = holdPromptStreaming(session);
+		const promptStarted = Promise.withResolvers<void>();
+		const holdingPrompt = session.prompt;
+		session.prompt = text => {
+			promptStarted.resolve();
+			return holdingPrompt(text);
+		};
+		const prompt = harness.agent.prompt({
+			sessionId,
+			messageId: "00000000-0000-4000-8000-000000000141",
+			prompt: [{ type: "text", text: "cancel me" }],
+		} as PromptRequest);
+		await promptStarted.promise;
+		const cancel = harness.agent.cancel({ sessionId });
+		await abortStarted.promise;
+		expect((await prompt).stopReason).toBe("cancelled");
+
+		// The prompt listener is already detached while the abort is still settling.
+		for (const listener of session.listeners()) {
+			listener({
+				type: "irc_message",
+				message: {
+					role: "custom",
+					customType: "irc:incoming",
+					content: "<rendered IRC envelope>",
+					display: true,
+					details: { id: "m-cancel", from: "Scout", message: "still here" },
+					attribution: "agent",
+					timestamp: 1,
+				},
+			} as AgentSessionEvent);
+		}
+		await Promise.resolve();
+		expect(
+			harness.updates.flatMap(n => (n.update.sessionUpdate === "session_message" ? [n.update.messageId] : [])),
+		).toEqual(["irc-in:m-cancel"]);
+
+		releaseAbort.resolve();
+		finishPrompt();
+		await cancel;
 	});
 
 	it("replays todo tool results as ACP plan updates", async () => {

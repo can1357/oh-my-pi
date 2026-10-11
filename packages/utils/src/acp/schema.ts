@@ -83,6 +83,25 @@ function contentBlock(value: unknown): boolean {
 	}
 }
 
+/** Unrecognized state values are reserved for future or `_`-prefixed extension states, so only known fields are checked. */
+function subagentWorkState(value: unknown): boolean {
+	if (typeof value !== "object" || value === null || !("state" in value) || typeof value.state !== "string")
+		return false;
+	if (value.state !== "idle") return true;
+	const stopReason = "stopReason" in value ? value.stopReason : undefined;
+	const error = "error" in value ? value.error : undefined;
+	return (
+		(stopReason === undefined || stopReason === null || typeof stopReason === "string") &&
+		(error === undefined ||
+			error === null ||
+			(typeof error === "object" &&
+				"code" in error &&
+				typeof error.code === "number" &&
+				"message" in error &&
+				typeof error.message === "string"))
+	);
+}
+
 function sessionNotification(value: unknown): boolean {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	const notification = value as Record<string, unknown>;
@@ -115,6 +134,29 @@ function sessionNotification(value: unknown): boolean {
 			return update.title === undefined || update.title === null || typeof update.title === "string";
 		case "usage_update":
 			return typeof update.size === "number" && typeof update.used === "number";
+		case "subagent_update":
+			return (
+				typeof update.sessionId === "string" &&
+				update.sessionId !== notification.sessionId &&
+				(update.title === undefined || update.title === null || typeof update.title === "string") &&
+				(update.description === undefined ||
+					update.description === null ||
+					typeof update.description === "string") &&
+				(update.state === undefined || update.state === null || subagentWorkState(update.state))
+			);
+		case "session_message":
+			return (
+				typeof update.messageId === "string" &&
+				(update.senderSessionId === undefined ||
+					update.senderSessionId === null ||
+					typeof update.senderSessionId === "string") &&
+				(update.recipientSessionId === undefined ||
+					update.recipientSessionId === null ||
+					typeof update.recipientSessionId === "string") &&
+				(update.content === undefined ||
+					update.content === null ||
+					(Array.isArray(update.content) && update.content.every(contentBlock)))
+			);
 		default:
 			return false;
 	}
