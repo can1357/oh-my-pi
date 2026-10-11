@@ -115,6 +115,40 @@ test("a queued builtin's inline prompt starts a turn without sending the slash t
 	expect(requests).toEqual(["investigate"]);
 });
 
+test("queued /plan prompt is dispatched once and keeps its loop continuation armed", async () => {
+	const slashText = "/plan investigate";
+	const { ctx, helpers } = makeBuiltinCtx([{ text: slashText, mode: "followUp" }]);
+	ctx.loopPrompt = slashText;
+	ctx.editor.clearDraft = mock(() => {});
+	let finishPrompt!: (forwarded: boolean) => void;
+	const pendingPrompt = new Promise<boolean>(resolve => {
+		finishPrompt = resolve;
+	});
+	const requests: string[] = [];
+	ctx.session.prompt = mock(async text => {
+		requests.push(text);
+		return text === "investigate" ? pendingPrompt : true;
+	});
+	ctx.handlePlanModeCommand = mock(async rest => {
+		// The real mode handler schedules its prompt and returns true before
+		// the turn finishes; replay must consume the command without parking it.
+		void ctx.session.prompt(rest!);
+		return true;
+	});
+
+	try {
+		await helpers.flushCompactionQueue({ willRetry: false });
+
+		expect(ctx.handlePlanModeCommand).toHaveBeenCalledWith("investigate", undefined);
+		expect(requests).toEqual(["investigate"]);
+		expect(ctx.pauseLoop).not.toHaveBeenCalled();
+		expect(ctx.loopPrompt).toBe(slashText);
+		expect(ctx.compactionQueuedMessages).toEqual([]);
+	} finally {
+		finishPrompt(true);
+	}
+});
+
 describe("flushCompactionQueue loop parking", () => {
 	test("all-slash drain parks the loop when the body is consumed locally", async () => {
 		const queued: CompactionQueuedMessage[] = [{ text: "/void-cmd", mode: "steer" }];
