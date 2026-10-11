@@ -1,10 +1,11 @@
 import { type } from "@oh-my-pi/omptype";
 import * as AIError from "../error";
-import type {
-	TranscriptionRequest,
-	TranscriptionResponseFormat,
-	TranscriptionResult,
-	TranscriptionTimestampGranularity,
+import {
+	TRANSCRIPTION_AUDIO_MIME_TYPES,
+	type TranscriptionRequest,
+	type TranscriptionResponseFormat,
+	type TranscriptionResult,
+	type TranscriptionTimestampGranularity,
 } from "../transcription/types";
 
 export const MAX_TRANSCRIPTION_BODY_BYTES = 25 * 1024 * 1024;
@@ -18,20 +19,6 @@ const jsonRequestSchema = type({
 	"response_format?": "string",
 	"timestamp_granularities?": "string[]",
 });
-
-const MIME_TYPES: Readonly<Record<string, string>> = {
-	wav: "audio/wav",
-	wave: "audio/wav",
-	mp3: "audio/mpeg",
-	mpeg: "audio/mpeg",
-	flac: "audio/flac",
-	m4a: "audio/mp4",
-	mp4: "audio/mp4",
-	ogg: "audio/ogg",
-	opus: "audio/ogg",
-	webm: "audio/webm",
-	aac: "audio/aac",
-};
 
 export class TranscriptionWireError extends AIError.ValidationError {
 	readonly status: number;
@@ -69,7 +56,7 @@ function timestampGranularities(values: readonly string[]): TranscriptionTimesta
 }
 
 function mimeTypeFor(format: string): string {
-	return MIME_TYPES[format.trim().toLowerCase().replace(/^\./, "")] ?? "application/octet-stream";
+	return TRANSCRIPTION_AUDIO_MIME_TYPES[format.trim().toLowerCase().replace(/^\./, "")] ?? "application/octet-stream";
 }
 
 function mimeTypeForFile(file: File): string {

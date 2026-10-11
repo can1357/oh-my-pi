@@ -55,13 +55,23 @@ function decodeUsage(model: Model<Api>, raw: unknown): { usage: Usage; seconds?:
 	return { usage, seconds: finiteNumber(upstream.seconds) };
 }
 
-async function responseError(response: Response, model: Model<Api>): Promise<TranscriptionApiError> {
+/** Upstream error bodies can be whole HTML pages (Cloudflare 403); only this much reaches the message. */
+const MAX_ERROR_DETAIL_LENGTH = 500;
+
+/** Map a non-2xx transcription response onto {@link TranscriptionApiError}; shared by every transcription transport. */
+export async function transcriptionResponseError(
+	response: Response,
+	model: Model<Api>,
+): Promise<TranscriptionApiError> {
 	const text = await response.text();
 	let detail = text;
 	let code: string | undefined;
 	try {
 		const parsed: unknown = JSON.parse(text);
-		if (parsed && typeof parsed === "object" && "error" in parsed) {
+		if (parsed && typeof parsed === "object" && "detail" in parsed && typeof parsed.detail === "string") {
+			// ChatGPT backend error envelope: `{"detail":"Error in ASR API"}`.
+			detail = parsed.detail;
+		} else if (parsed && typeof parsed === "object" && "error" in parsed) {
 			const error = parsed.error;
 			if (error && typeof error === "object") {
 				const envelope = error as { message?: unknown; code?: unknown; type?: unknown };
@@ -72,7 +82,7 @@ async function responseError(response: Response, model: Model<Api>): Promise<Tra
 		}
 	} catch {}
 	return new TranscriptionApiError(
-		`${model.provider}/${model.id} transcription API error (${response.status}): ${detail || response.statusText}`,
+		`${model.provider}/${model.id} transcription API error (${response.status}): ${(detail || response.statusText).slice(0, MAX_ERROR_DETAIL_LENGTH)}`,
 		response.status,
 		{ headers: response.headers, code },
 	);
@@ -106,7 +116,7 @@ export async function transcribeOpenAI(
 				body: form,
 				signal: options.signal,
 			});
-			if (!attempt.ok) throw await responseError(attempt, model);
+			if (!attempt.ok) throw await transcriptionResponseError(attempt, model);
 			return attempt;
 		},
 		{ signal: options.signal },

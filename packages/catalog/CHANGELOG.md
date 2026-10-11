@@ -343,6 +343,9 @@
 ### Removed
 
 - Removed `parseCloudflareAiGatewayCredential`, `serializeCloudflareAiGatewayCredential`, and `CloudflareAiGatewayCredential` from `@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway`. Use the equivalents from `@oh-my-pi/pi-catalog/wire/cloudflare` instead.
+### Added
+
+- Added the `openai-codex/codex-transcribe` (Codex Dictation) speech-to-text model on the new `openai-codex-transcriptions` runner API
 
 ## [18.9.1] - 2026-10-11
 

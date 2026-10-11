@@ -23,17 +23,9 @@ import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../
 /** Names the caller in the gateway's logs. */
 const STDIO_PEER = "stdio";
 
-/**
- * The models a request naming `selector` may run on, in order: the model
- * `--model` would pick (the first entry of a comma list that resolves), then
- * that model's `retry.fallbackChains` (its role's chain when the entry named a
- * role). Empty when no entry resolves.
- */
-export function selectorCandidates(
-	selector: string,
-	settings: Settings,
-	registry: Pick<ModelRegistry, "getAll" | "getAvailable">,
-): Model<Api>[] {
+type RegistryView = Pick<ModelRegistry, "getAll" | "getAvailable">;
+
+function viewCandidates(selector: string, settings: Settings, registry: RegistryView): Model<Api>[] {
 	const available = registry.getAvailable();
 	for (const pattern of normalizeModelPatternList(selector)) {
 		const { model, configuredRole } = resolveCliModel({ cliModel: pattern, modelRegistry: registry, settings });
@@ -48,6 +40,25 @@ export function selectorCandidates(
 			seen.add(key);
 			return true;
 		});
+	}
+	return [];
+}
+
+/**
+ * The models a request naming `selector` may run on, in order: the model
+ * `--model` would pick (the first entry of a comma list that resolves), then
+ * that model's `retry.fallbackChains` (its role's chain when the entry named a
+ * role). Chat models are tried first so a chat selector never lands on a
+ * same-named runner; runner kinds (stt, tts, image, …) only resolve in the full
+ * catalog. Empty when no entry resolves.
+ */
+export function selectorCandidates(selector: string, settings: Settings, registry: RegistryView): Model<Api>[] {
+	for (const kind of ["chat", "all"] as const) {
+		const candidates = viewCandidates(selector, settings, {
+			getAll: () => registry.getAll(kind),
+			getAvailable: () => registry.getAvailable(kind),
+		});
+		if (candidates.length > 0) return candidates;
 	}
 	return [];
 }
