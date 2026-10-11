@@ -99,7 +99,12 @@ export function sanitizeAssistantForReparentedHistory(message: AssistantMessage)
 	for (const block of message.content) {
 		if (block.type === "redactedThinking" || block.type === "anthropicServerTool") continue;
 		if (block.type === "thinking") {
-			content.push({ type: "thinking", thinking: block.thinking });
+			// Signatures are replay-bound and go; the summary state is provenance and stays.
+			content.push({
+				type: "thinking",
+				thinking: block.thinking,
+				...(block.summary !== undefined && { summary: block.summary }),
+			});
 			continue;
 		}
 		content.push(block);

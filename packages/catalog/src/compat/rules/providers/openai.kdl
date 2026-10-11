@@ -84,8 +84,23 @@ provider "openai" {
 			limits context=8192
 			supports-tools #false
 		}
+		// Decisions API (`POST /v1/decisions`, public beta,
+		// developers.openai.com/api/docs/guides/decisions) answers typed questions
+		// with GPT-6 Luna. The wire id is the chat row's `gpt-6-luna`, so the judge
+		// row takes its own id. Billed $0.10 per 1M input tokens, no output charge.
+		model "gpt-6-luna-decisions" name="GPT-6 Luna Decisions" api="openai-decisions" base-url="https://api.openai.com/v1" {
+			request-model-id "gpt-6-luna"
+			reasoning #false
+			input "text" "image"
+			cost input=0.1 output=0 cache-read=0 cache-write=0
+			limits context=1050000
+			supports-tools #false
+		}
 	}
 
+	models "gpt-6-luna-decisions" {
+		kind "judge"
+	}
 	models "whisper-1" "gpt-4o-transcribe" "gpt-4o-mini-transcribe" {
 		kind "stt"
 	}
@@ -176,8 +191,10 @@ provider "openai" {
 			cache-read 2.0
 			cache-write 25.0
 		}
-		// Ultrafast is Astra-only: $60/$6/$75/$300 per 1M short-context
-		// (6x the standard card), and the same 6x holds on the long-context tier.
+	}
+	// API Ultrafast is 6x the standard card on both context tiers: GPT-6 Astra
+	// $60/$6/$75/$300 and GPT-6.1 Sol $12/$0.60/$15/$60 per 1M short-context.
+	models "gpt-6-astra*" "gpt-6.1-sol*" {
 		service-tier-cost {
 			ultrafast 6
 		}

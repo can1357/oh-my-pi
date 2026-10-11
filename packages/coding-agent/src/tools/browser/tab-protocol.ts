@@ -133,6 +133,8 @@ export interface RunErrorPayload {
 	recoverTab?: boolean;
 	/** `tab.goto` outlasted its budget; the page stays on what loaded. */
 	navigationTimeout?: boolean;
+	/** The page's renderer crashed; the worker runs nothing more and must be recycled. */
+	rendererCrashed?: boolean;
 }
 
 export type WorkerOutbound =

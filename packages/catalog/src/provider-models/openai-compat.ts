@@ -1071,8 +1071,8 @@ export interface OpenAIModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
-export function openaiModelManagerOptions(config?: OpenAIModelManagerConfig): ModelManagerOptions<"openai-responses"> {
-	return createOpenAICompatibleModelManagerOptions({
+export function openaiModelManagerOptions(config?: OpenAIModelManagerConfig): ModelManagerOptions<Api> {
+	const options = createOpenAICompatibleModelManagerOptions({
 		api: "openai-responses",
 		providerId: "openai",
 		defaultBaseUrl: OPENAI_API_BASE_URL,
@@ -1081,6 +1081,30 @@ export function openaiModelManagerOptions(config?: OpenAIModelManagerConfig): Mo
 		filterModel: (_entry, model, references) => isLikelyOpenAIResponsesModelId(model.id, references),
 		mapModel: mapWithBundledReference,
 	});
+	const fetchDiscovered = options.fetchDynamicModels;
+	if (!fetchDiscovered) return options;
+	return {
+		...options,
+		fetchDynamicModels: async () => appendUnbundledSeedModels("openai", await fetchDiscovered()),
+	};
+}
+
+/**
+ * Append the authored seed rows that neither discovery nor the bundled catalog
+ * carries yet: a seed added since the last models.json regeneration (the
+ * Decisions judge row) reaches runtime through a successful discovery. Seeds
+ * already bundled keep resolving through the bundled slice, and the static
+ * catalog (and with it the cache fingerprint) stays the bundled one.
+ */
+function appendUnbundledSeedModels(
+	providerId: GeneratedProvider,
+	discovered: readonly ModelSpec<Api>[] | null,
+): readonly ModelSpec<Api>[] | null {
+	if (!discovered) return null;
+	const known = new Set(getBundledModels(providerId).map(model => model.id));
+	for (const model of discovered) known.add(model.id);
+	const seeds = seedModels(providerId).filter(seed => !known.has(seed.id));
+	return seeds.length === 0 ? discovered : [...discovered, ...seeds.map(seed => ({ ...seed }))];
 }
 
 /**
@@ -3298,8 +3322,8 @@ function openCodeModelManagerOptions(
 			},
 		},
 		...(apiKey && {
-			fetchDynamicModels: () =>
-				fetchOpenAICompatibleModels<Api>({
+			fetchDynamicModels: async () => {
+				const discovered = await fetchOpenAICompatibleModels<Api>({
 					api: "openai-completions",
 					provider: providerId,
 					baseUrl: discoveryBaseUrl,
@@ -3357,7 +3381,12 @@ function openCodeModelManagerOptions(
 						};
 					},
 					fetch: config?.fetch,
-				}),
+				});
+				if (!discovered) return null;
+				const seeds = seedModels(providerId).map(seed => ({ ...seed, baseUrl: basePath }));
+				const seedIds = new Set(seeds.map(seed => seed.id));
+				return [...discovered.filter(model => !seedIds.has(model.id)), ...seeds];
+			},
 		}),
 	};
 }
@@ -3450,8 +3479,9 @@ export interface OpenRouterModelManagerConfig {
  * OpenRouter's Decisions API lives at `/api/alpha`, a sibling of the `/api/v1`
  * chat root; derive it so a custom gateway base URL keeps both aligned.
  */
-function openrouterDecisionsBaseUrl(chatBaseUrl: string): string {
-	return chatBaseUrl.endsWith("/v1") ? `${chatBaseUrl.slice(0, -"/v1".length)}/alpha` : `${chatBaseUrl}/alpha`;
+export function openrouterDecisionsBaseUrl(chatBaseUrl: string): string {
+	const base = chatBaseUrl.replace(/\/+$/g, "");
+	return base.endsWith("/v1") ? `${base.slice(0, -"/v1".length)}/alpha` : `${base}/alpha`;
 }
 
 function mapOpenRouterThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {

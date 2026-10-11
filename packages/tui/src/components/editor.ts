@@ -771,6 +771,12 @@ export class Editor implements Component, Focusable {
 	 *  cursor. The host styles it (ANSI allowed). Re-evaluated on every render, so hosts can derive
 	 *  it from live state. */
 	placeholder?: () => string | undefined;
+	/** Whole-message prediction for the next prompt, painted as ghost text after the cursor while
+	 *  the single-line buffer is a strict prefix of it, the cursor sits at its end, and no
+	 *  autocomplete is open. A shown prediction replaces the {@link placeholder}; Tab or Right inserts
+	 *  the rest without submitting. Must be a single line. Re-evaluated on every render, so hosts can
+	 *  derive it from live state. */
+	prediction?: () => string | undefined;
 
 	// Custom top border (for status line integration). Either an eager `content`
 	// (set once, reused every frame) or a `provider` that recomputes lazily just
@@ -1678,7 +1684,10 @@ export class Editor implements Component, Focusable {
 
 		const placeholder = this.#getPlaceholder();
 		const nativePlaceholder =
-			this.describePlaceholder !== undefined && !this.#autocompleteState && this.#isEditorEmpty()
+			this.describePlaceholder !== undefined &&
+			!this.#autocompleteState &&
+			this.#isEditorEmpty() &&
+			!this.#getPredictionSuffix()
 				? this.describePlaceholder()
 				: placeholder && plainText(placeholder).trim();
 		const atLineEnd = cursorCol >= (lines[cursorLine]?.length ?? 0);
@@ -2211,8 +2220,8 @@ export class Editor implements Component, Focusable {
 				this.#moveCursor(1, 0); // Cursor movement (within text or history entry)
 			}
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorRight")) {
-			// Right walks over the ghost word completion as if it were typed: no trailing space.
-			if (this.#acceptWordCompletion({ space: false })) return;
+			// Right walks over the ghost prediction or word completion as if it were typed: no trailing space.
+			if (this.#acceptPrediction() || this.#acceptWordCompletion({ space: false })) return;
 			this.#moveCursor(0, 1);
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorLeft")) {
 			// Left
@@ -4626,6 +4635,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	async #handleTabCompletion(): Promise<void> {
+		if (this.#acceptPrediction()) return;
 		if (this.#acceptWordCompletion({ space: true })) return;
 		if (!this.#autocompleteProvider) return;
 
@@ -4661,6 +4671,13 @@ export class Editor implements Component, Focusable {
 		);
 		this.#insertTextAtCursor(space ? `${wordCompletion} ` : wordCompletion);
 		if (space) this.#lastAction = "accept-word";
+		return true;
+	}
+	/** Insert the rest of the shown {@link prediction}, if any. Never submits. */
+	#acceptPrediction(): boolean {
+		const suffix = this.#getPredictionSuffix();
+		if (!suffix) return false;
+		this.#insertTextAtCursor(suffix);
 		return true;
 	}
 
@@ -4917,7 +4934,7 @@ export class Editor implements Component, Focusable {
 
 	/**
 	 * Get inline hint text to show as dim ghost text after the cursor.
-	 * Checks selected autocomplete item's hint first, then falls back to provider.
+	 * Checks the selected autocomplete item's hint first, then the prediction, then the provider.
 	 */
 	#getInlineHint(): string | null {
 		// Check selected autocomplete item for a hint
@@ -4925,6 +4942,9 @@ export class Editor implements Component, Focusable {
 			const selected = this.#autocompleteList.getSelectedItem();
 			return selected?.hint ?? null;
 		}
+
+		const prediction = this.#getPredictionSuffix();
+		if (prediction) return prediction;
 
 		// Fall back to provider's getInlineHint
 		if (this.#autocompleteProvider?.getInlineHint) {
@@ -4939,8 +4959,21 @@ export class Editor implements Component, Focusable {
 		return this.#getWordCompletion();
 	}
 	#getPlaceholder(): string | undefined {
-		if (this.#autocompleteState || !this.#isEditorEmpty()) return undefined;
+		if (this.#autocompleteState || !this.#isEditorEmpty() || this.#getPredictionSuffix()) return undefined;
 		return this.placeholder?.() || undefined;
+	}
+	/** The part of {@link prediction} not yet typed, or `null` when no prediction is shown. */
+	#getPredictionSuffix(): string | null {
+		if (this.#autocompleteState) return null;
+		const prediction = this.prediction?.();
+		if (!prediction) return null;
+		const { lines, cursorCol } = this.#state;
+		if (lines.length !== 1) return null;
+		const typed = lines[0] ?? "";
+		if (cursorCol !== typed.length || typed.length >= prediction.length || !prediction.startsWith(typed)) {
+			return null;
+		}
+		return prediction.slice(typed.length);
 	}
 	/** Typing `typed` where it diverges from the shown ghost completion rejects that ghost. */
 	#reportTypedPastWordCompletion(typed: string): void {

@@ -155,4 +155,30 @@ describe("EpisodicGraph scoring and proactive links", () => {
 			expect(graph.getStats().facts).toBe(first.facts.length + second.facts.length);
 		});
 	});
+
+	it("does not link memories that only share a time scope", () => {
+		withGraph(graph => {
+			graph.ingestMemory("Yesterday the database migration finished on staging.", "mem_db");
+			const unrelated = graph.ingestMemory("Today I bought fresh vegetables at the market.", "mem_food");
+			expect(unrelated.gist.timeScope).toBe("point_in_time");
+			expect(graph.getGist("gist_mem_db")?.timeScope).toBe("point_in_time");
+			expect(unrelated.edges.filter(item => item.target === "mem_db")).toEqual([]);
+
+			const related = graph.ingestMemory("Today the database migration finished on production.", "mem_db_prod");
+			const linked = related.edges.filter(item => item.target === "mem_db").map(item => item.edgeType);
+			expect(linked.sort()).toEqual(["ctx", "related_to"]);
+			expect(related.edges.filter(item => item.target === "mem_food")).toEqual([]);
+
+			graph.ingestMemory("Alice uses Python.", "mem_alice");
+			const entityOnly = graph.ingestMemory(
+				"Alice uses Python during long winter evenings while sketching harbor boats.",
+				"mem_alice_evenings",
+			);
+			const toAlice = entityOnly.edges.filter(item => item.target === "mem_alice");
+			const references = toAlice.find(item => item.edgeType === "references");
+			expect(references?.weight).toBeGreaterThanOrEqual(0.35);
+			expect(toAlice.some(item => item.edgeType === "related_to")).toBe(false);
+			expect(toAlice.find(item => item.edgeType === "ctx")?.weight).toBe(references?.weight);
+		});
+	});
 });

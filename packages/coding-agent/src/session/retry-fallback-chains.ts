@@ -13,7 +13,7 @@ import {
 import { resolveConfiguredModelPatterns, resolveModelRoleValue } from "../config/model-resolver";
 import { getRoleInfo, isKindRole } from "../config/model-roles";
 
-import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy } from "./settings";
+import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy, type RetrySettings } from "./settings";
 
 /** Configured fallback chains keyed by role or model selector. */
 export type RetryFallbackChains = Record<string, string[]>;
@@ -138,8 +138,8 @@ export function formatRetryFallbackSelector(model: Model, thinkingLevel: Thinkin
 	return formatModelSelectorValue(formatModelStringWithRouting(model), thinkingLevel);
 }
 
-/** Formats the model-only portion of a parsed fallback selector. */
-function formatRetryFallbackBaseSelector(selector: RetryFallbackSelector): string {
+/** Formats the model-only portion of a parsed fallback selector (`provider/id`, no thinking level). */
+export function formatRetryFallbackBaseSelector(selector: RetryFallbackSelector): string {
 	return `${selector.provider}/${selector.id}`;
 }
 
@@ -345,6 +345,18 @@ export function validateRetryFallbackChains(
 /** Returns the configured fallback-primary restoration policy. */
 export function getRetryFallbackRevertPolicy(settings: Settings): RetryFallbackRevertPolicy {
 	return cfgRetryFallbackRevertPolicy.get(settings) === "never" ? "never" : "cooldown-expiry";
+}
+
+/** Whether `retry.fallbackOn` lets a failure walk the fallback chain. */
+export function retryFallbackAdmits(fallbackOn: RetrySettings["fallbackOn"], usageLimit: boolean): boolean {
+	switch (fallbackOn) {
+		case "any":
+			return true;
+		case "usage-limit":
+			return usageLimit;
+		case "except-usage-limit":
+			return !usageLimit;
+	}
 }
 
 /** Resolves the primary selector represented by a fallback-chain key. */

@@ -20,7 +20,7 @@ import { resolveWorkerSpawnCmd } from "../../../subprocess/worker-client";
 import { throwIfAborted } from "../../tool-errors";
 import { probeCdpResponse, probeCdpStatus } from "../attach";
 import { DEFAULT_RELAY_URL } from "./kind";
-import { relayVersionOf } from "./probe";
+import { isOlderRelayVersion, relayCdpClientsOf, relayVersionOf } from "./probe";
 
 const DEFAULT_RELAY_PORT = new URL(DEFAULT_RELAY_URL).port;
 
@@ -127,14 +127,19 @@ export async function ensureRelayDaemon(opts: { cdpUrl: string; signal?: AbortSi
 
 /**
  * Replace the broker-owned relay at `cdpUrl` with one from this OMP version
- * when it comes from an older one. True once the old relay has stopped (the
- * caller's wait reports whether the new one serves) or another process already
- * replaced it or stopped it to replace it. False when a relay the broker does
- * not run serves there (a manually started relay is left alone), the relay
- * comes from a newer OMP (a concurrently running newer omp owns it), or the old
- * relay did not stop.
+ * when it comes from an older one; with `idleOnly`, only while it reports no
+ * CDP client connected. True once the old relay has stopped (the caller's wait
+ * reports whether the new one serves) or another process already replaced it
+ * or stopped it to replace it. False when a relay the broker does not run
+ * serves there (a manually started relay is left alone), the relay comes from
+ * a newer OMP (a concurrently running newer omp owns it), an `idleOnly` relay
+ * has a client or does not report its clients, or the old relay did not stop.
  */
-export async function restartRelayDaemon(opts: { cdpUrl: string; signal?: AbortSignal }): Promise<boolean> {
+export async function restartRelayDaemon(opts: {
+	cdpUrl: string;
+	signal?: AbortSignal;
+	idleOnly?: boolean;
+}): Promise<boolean> {
 	const port = relayPort(opts.cdpUrl);
 	if (port === null) return false;
 	const name = relayDaemonName(port);
@@ -145,7 +150,7 @@ export async function restartRelayDaemon(opts: { cdpUrl: string; signal?: AbortS
 		// replacement; start or adopt it unless a relay the broker does not run serves.
 		const serving = await probeRelayServer(opts.cdpUrl);
 		throwIfAborted(opts.signal);
-		if (serving) return (await relayVersionAt(opts.cdpUrl, opts.signal)) === VERSION;
+		if (serving) return (await relayStatusAt(opts.cdpUrl, opts.signal))?.version === VERSION;
 		// Returns true even if the start fails: the caller's next wait then reports
 		// the relay unreachable, which is accurate, rather than out of date.
 		await ensureRelayDaemon(opts);
@@ -154,11 +159,15 @@ export async function restartRelayDaemon(opts: { cdpUrl: string; signal?: AbortS
 	// Another omp of this version may have replaced it since the caller's probe,
 	// possibly with a relay that has not printed its ready line yet.
 	if (existing.readyAt === undefined) await waitReady(client, name, "Browser relay", opts.signal);
-	const version = await relayVersionAt(opts.cdpUrl, opts.signal);
-	if (version === VERSION) return true;
+	const status = await relayStatusAt(opts.cdpUrl, opts.signal);
+	if (status?.version === VERSION) return true;
 	// A newer omp running alongside this one owns a newer relay; replacing it
 	// would only make the two versions take turns killing each other's relay.
-	if (version !== null && !isOlderRelayVersion(version)) return false;
+	if (status !== null && !isOlderRelayVersion(status.version)) return false;
+	// The last read before the stop: a client that connected since the caller's
+	// probe keeps the relay. One connecting during the stop request itself loses
+	// its connection, as on any relay restart.
+	if (opts.idleOnly && status?.cdpClients !== 0) return false;
 	// Stops only the generation judged outdated, not one another omp started since.
 	const stopped = await stopQuietly(client, name, "Browser relay", opts.signal, existing.id);
 	if (stopped?.state === "exited" || stopped?.state === "failed") {
@@ -172,29 +181,23 @@ export async function restartRelayDaemon(opts: { cdpUrl: string; signal?: AbortS
 }
 
 /**
- * The OMP version the relay at `cdpUrl` reports on `/json/version` (ready or
- * waiting for its extension): empty for a relay too old to report one, null
- * when nothing parseable answers.
+ * The OMP version (empty for a relay too old to report one) and connected CDP
+ * client count the relay at `cdpUrl` reports on `/json/version`, ready or
+ * waiting for its extension; null when nothing parseable answers.
  */
-async function relayVersionAt(cdpUrl: string, signal: AbortSignal | undefined): Promise<string | null> {
+async function relayStatusAt(
+	cdpUrl: string,
+	signal: AbortSignal | undefined,
+): Promise<{ version: string; cdpClients: number | null } | null> {
 	const response = await probeCdpResponse(`${cdpUrl}/json/version`, { timeoutMs: PROBE_TIMEOUT_MS, signal });
 	throwIfAborted(signal);
 	if (!response) return null;
 	try {
 		const parsed: unknown = JSON.parse(response.body);
-		return typeof parsed === "object" && parsed !== null ? relayVersionOf(parsed) : null;
+		return typeof parsed === "object" && parsed !== null
+			? { version: relayVersionOf(parsed), cdpClients: relayCdpClientsOf(parsed) }
+			: null;
 	} catch {
 		return null;
-	}
-}
-
-/** Whether a relay reporting `version` predates this OMP; one reporting none predates version markers. */
-function isOlderRelayVersion(version: string): boolean {
-	if (version === "") return true;
-	try {
-		return Bun.semver.order(version, VERSION) < 0;
-	} catch {
-		// Unparseable: not provably older, so leave it to its owner.
-		return false;
 	}
 }

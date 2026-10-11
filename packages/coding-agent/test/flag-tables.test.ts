@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { parseArgs, reportInvalidFlagValues, validateToolNames } from "../src/cli/args";
+import { parseArgs, reportInvalidFlagValues, validateGoalLaunch, validateToolNames } from "../src/cli/args";
 import { OPTIONAL_VALUE_FLAGS, restartArgv, STRING_VALUE_FLAGS } from "../src/cli/flag-tables";
 import { CliUsageError } from "../src/cli/usage-error";
 
@@ -260,6 +260,22 @@ describe("restartArgv (/restart relaunch argv)", () => {
 			"--resume",
 			"sid",
 		]);
+	});
+
+	it("drops a fresh-session --goal so the resumed relaunch passes goal validation", () => {
+		const relaunch = restartArgv(["--goal", "ship the release", "--model", "gpt-5"], "sid");
+		expect(relaunch).toEqual(["--model", "gpt-5", "--resume", "sid"]);
+		expect(() => validateGoalLaunch(parseArgs(relaunch), true)).not.toThrow();
+	});
+
+	it("drops caller-supplied overrides together with their values", () => {
+		expect(
+			restartArgv(["--model=a/b", "--thinking", "low", "--no-tools", "--cwd", "/old"], undefined, {
+				"--model": true,
+				"--thinking": true,
+				"--cwd": true,
+			}),
+		).toEqual(["--no-tools"]);
 	});
 
 	it("omits --resume for a session that never materialized on disk", () => {

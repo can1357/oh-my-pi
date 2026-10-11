@@ -39,12 +39,16 @@ const indexHtml = `<!DOCTYPE html>
       })();
     </script>
     <link rel="stylesheet" href="index.css">
+    <link rel="icon" type="image/x-icon" href="favicon.ico">
 </head>
 <body>
     <div id="root"></div>
     <script src="index.js" type="module"></script>
 </body>
 </html>`;
+
+// Static asset the bundler never emits; copied beside index.css so the on-disk client and the embedded archive both serve it.
+await fs.copyFile("./src/client/favicon.ico", "./dist/client/favicon.ico");
 
 await Bun.write("./dist/client/index.html", indexHtml);
 

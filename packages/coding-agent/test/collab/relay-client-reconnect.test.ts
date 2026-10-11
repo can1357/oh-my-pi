@@ -4,6 +4,8 @@ import {
 	HOST_RECLAIM_BACKOFF_MAX_MS,
 	HOST_RECLAIM_CONFIRM_MS,
 	HOST_RECLAIM_WINDOW_MS,
+	RELAY_PING_INTERVAL_MS,
+	RELAY_SILENCE_LIMIT_MS,
 } from "../../src/collab/relay-client";
 
 const NativeWebSocket = globalThis.WebSocket;
@@ -47,6 +49,26 @@ class ScriptedWebSocket {
 	relayClose(code: number, reason: string): void {
 		this.readyState = ScriptedWebSocket.CLOSED;
 		this.onclose?.(new CloseEvent("close", { code, reason }));
+	}
+
+	/** Pong listeners; a scripted relay answers pings only when a test pongs. */
+	pongListeners: Array<() => void> = [];
+	pings = 0;
+
+	addEventListener(type: string, listener: () => void): void {
+		if (type === "pong") this.pongListeners.push(listener);
+	}
+
+	ping(): void {
+		this.pings++;
+	}
+
+	pong(): void {
+		for (const listener of this.pongListeners) listener();
+	}
+
+	terminate(): void {
+		this.readyState = ScriptedWebSocket.CLOSED;
 	}
 
 	close(code = 1000, reason = "closed"): void {
@@ -296,5 +318,65 @@ describe("CollabSocket host room recovery", () => {
 		expect(reconnects).toEqual([true, ...attemptOffsetsMs.map(offsetMs => offsetMs < HOST_RECLAIM_WINDOW_MS)]);
 		vi.advanceTimersByTime(60_000);
 		expect(ScriptedWebSocket.instances).toHaveLength(attemptOffsetsMs.length + 2);
+	});
+});
+
+describe("CollabSocket silent connection", () => {
+	it("keeps an idle connection whose relay answers pings", async () => {
+		vi.useFakeTimers();
+		installScriptedWebSocket();
+		const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+		const closes: string[] = [];
+		const socket = hostSocket(key);
+		socket.onClose = reason => closes.push(reason);
+
+		try {
+			socket.connect();
+			instance(0).open();
+			// Ten idle minutes: nothing is sent either way except pings and their pongs.
+			for (let elapsed = 0; elapsed < 600_000; elapsed += RELAY_PING_INTERVAL_MS) {
+				vi.advanceTimersByTime(RELAY_PING_INTERVAL_MS);
+				instance(0).pong();
+			}
+			expect(instance(0).pings).toBe(600_000 / RELAY_PING_INTERVAL_MS);
+			expect(closes).toEqual([]);
+			expect(socket.isOpen).toBe(true);
+			expect(ScriptedWebSocket.instances).toHaveLength(1);
+		} finally {
+			socket.close();
+		}
+	});
+
+	it("drops and reopens a connection that went silent without closing", async () => {
+		vi.useFakeTimers();
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		installScriptedWebSocket();
+		const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+		const closes: Array<{ reason: string; willReconnect: boolean }> = [];
+		let recreated = 0;
+		const socket = hostSocket(key);
+		socket.onClose = (reason, willReconnect) => closes.push({ reason, willReconnect });
+		socket.onRoomRecreated = () => recreated++;
+
+		try {
+			socket.connect();
+			instance(0).open();
+			// The network drops: no pong, no close event, the socket still reads as open.
+			vi.advanceTimersByTime(RELAY_SILENCE_LIMIT_MS);
+			expect(closes).toEqual([]);
+			vi.advanceTimersByTime(RELAY_PING_INTERVAL_MS);
+			expect(closes).toEqual([{ reason: "relay stopped responding", willReconnect: true }]);
+			expect(instance(0).readyState).toBe(ScriptedWebSocket.CLOSED);
+
+			// The network is back; the relay has retired the old socket, so the retry lands.
+			vi.advanceTimersByTime(1_000);
+			expect(ScriptedWebSocket.instances).toHaveLength(2);
+			instance(1).open();
+			vi.advanceTimersByTime(HOST_RECLAIM_CONFIRM_MS);
+			expect(socket.isOpen).toBe(true);
+			expect(recreated).toBe(1);
+		} finally {
+			socket.close();
+		}
 	});
 });

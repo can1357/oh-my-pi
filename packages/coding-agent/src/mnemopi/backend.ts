@@ -6,7 +6,7 @@ import type { Mnemopi } from "@oh-my-pi/pi-mnemopi";
 import type { MnemopiLlmCompleteOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 import type * as MnemopiDiagnoseNs from "@oh-my-pi/pi-mnemopi/diagnose";
 import type { DiagnosticSummary } from "@oh-my-pi/pi-mnemopi/diagnose";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { roleCandidatePool } from "../config/model-roles";
 import { resolveRoleChain } from "../config/model-resolver";
@@ -137,33 +137,26 @@ export const mnemopiBackend: MemoryBackend = {
 	},
 
 	async buildDeveloperInstructions(_agentDir, settings, session): Promise<string | undefined> {
-		const state = getMnemopiSessionState(session);
-		const primary = state?.aliasOf ?? state;
-		const parts = [prompt.render(mnemopiInstructions, { toolRefs: memoryToolRefs(session?.getXdevToolEntries()) })];
-		if (primary?.lastRecallSnippet) parts.push(primary.lastRecallSnippet);
-		const rendered = parts.join("\n\n").trim();
-		if (!rendered) return undefined;
-		return truncateApproxTokens(rendered, cfgMnemopiInjectionTokenLimit.get(settings));
+		return withLoopPhase("mnemopi.recall", () => {
+			const state = getMnemopiSessionState(session);
+			const primary = state?.aliasOf ?? state;
+			const parts = [
+				prompt.render(mnemopiInstructions, { toolRefs: memoryToolRefs(session?.getXdevToolEntries()) }),
+			];
+			if (primary?.lastRecallSnippet) parts.push(primary.lastRecallSnippet);
+			const rendered = parts.join("\n\n").trim();
+			if (!rendered) return undefined;
+			return truncateApproxTokens(rendered, cfgMnemopiInjectionTokenLimit.get(settings));
+		});
 	},
 
 	async beforeAgentStartPrompt(session, promptText, signal): Promise<MemoryPromptPreparation | undefined> {
 		const state = getMnemopiSessionState(session);
 		const preparation = await state?.beforeAgentStartPrompt(promptText, signal);
-		if (!preparation) return undefined;
-		if (preparation.context) {
-			// Match the canonical memory block's budget while the recall is staged
-			// separately from its static instructions. Commit still caches the full snippet.
-			const instructions = prompt.render(mnemopiInstructions, {
-				toolRefs: memoryToolRefs(session.getXdevToolEntries()),
-			});
-			const rendered = [instructions, preparation.context].join("\n\n").trim();
-			preparation.context =
-				truncateApproxTokens(rendered, cfgMnemopiInjectionTokenLimit.get(session.settings))
-					.slice(instructions.length)
-					.trim() || undefined;
-		}
+		if (!state || !preparation) return undefined;
 		return {
 			context: preparation.context,
+			notice: preparation.notice,
 			commit: () => getMnemopiSessionState(session) === state && preparation.commit(),
 		};
 	},
@@ -230,10 +223,12 @@ export const mnemopiBackend: MemoryBackend = {
 		const [{ inspectDatabase }] = await Promise.all([loadMnemopiDiagnose(), loadMnemopiCore()]);
 		const banks = getMnemopiScopedBanks(config);
 		const dbPaths = getMnemopiScopedDbPaths(config);
-		const summaries = dbPaths.map((dbPath, index) => ({
-			bank: banks[index] ?? "unknown",
-			summary: inspectDatabase({ dbPath, initialize: false }),
-		}));
+		const summaries = withLoopPhase("mnemopi.stats", () =>
+			dbPaths.map((dbPath, index) => ({
+				bank: banks[index] ?? "unknown",
+				summary: inspectDatabase({ dbPath, initialize: false }),
+			})),
+		);
 		return renderMnemopiDiagnostics(summaries);
 	},
 
@@ -348,20 +343,22 @@ function createStatsTargets(
 	agentDir: string,
 	session: AgentSession | undefined,
 ): { targets: MnemopiStatsTarget[]; owned: Mnemopi[] } {
-	const state = getMnemopiSessionState(session);
-	if (state) {
-		return {
-			targets: dedupeStatsTargets([state.getScopedRetainTarget(), ...state.getScopedRecallTargets()]),
-			owned: [],
-		};
-	}
-	if (!session) return { targets: [], owned: [] };
-	const config = loadMnemopiConfig(session.settings, agentDir);
-	const targets = getMnemopiScopedBanks(config).map(bank => ({
-		bank,
-		memory: createStatsMemory(config, bank),
-	}));
-	return { targets, owned: targets.map(target => target.memory) };
+	return withLoopPhase("mnemopi.open", () => {
+		const state = getMnemopiSessionState(session);
+		if (state) {
+			return {
+				targets: dedupeStatsTargets([state.getScopedRetainTarget(), ...state.getScopedRecallTargets()]),
+				owned: [],
+			};
+		}
+		if (!session) return { targets: [], owned: [] };
+		const config = loadMnemopiConfig(session.settings, agentDir);
+		const targets = getMnemopiScopedBanks(config).map(bank => ({
+			bank,
+			memory: createStatsMemory(config, bank),
+		}));
+		return { targets, owned: targets.map(target => target.memory) };
+	});
 }
 
 function createStatsMemory(config: MnemopiBackendConfig, bank: string): Mnemopi {
@@ -579,12 +576,14 @@ async function resolveMnemopiProviderOptions(
 			// journalJudgmentUsage snapshots the session id. /new, fork, and session
 			// switch keep this function, so bind inside each call. An in-flight call
 			// keeps the callback it already created and still journals to its start.
-			const onUsage = journalJudgmentUsage(usageLedger);
-			const request = resolveMemoryCompletionInput(prompt, opts);
-			const signal =
-				typeof opts?.timeout === "number" && Number.isFinite(opts.timeout) && opts.timeout > 0
-					? AbortSignal.timeout(opts.timeout)
-					: undefined;
+			const { onUsage, request, signal } = {
+				onUsage: journalJudgmentUsage(usageLedger),
+				request: resolveMemoryCompletionInput(prompt, opts),
+				signal:
+					typeof opts?.timeout === "number" && Number.isFinite(opts.timeout) && opts.timeout > 0
+						? AbortSignal.timeout(opts.timeout)
+						: undefined,
+			};
 
 			for (const { model } of candidates) {
 				if (signal?.aborted) return null;
@@ -614,30 +613,32 @@ async function resolveMnemopiProviderOptions(
 					}
 					const message = await retryTransientCompletion(
 						() =>
-							completeSimple(
-								model,
-								{
-									...(request.systemPrompt ? { systemPrompt: [request.systemPrompt] } : {}),
-									messages: [{ role: "user", content: request.prompt, timestamp: Date.now() }],
-								},
-								{
-									apiKey: modelRegistry.resolver(model, sessionId),
-									sessionId,
-									maxTokens: opts?.maxTokens,
-									temperature: opts?.temperature,
-									signal,
-									onAttempt: message =>
-										onUsage?.({
-											purpose: "memory",
-											role: "memory",
-											api: model.api,
-											provider: model.provider,
-											model: model.id,
-											usage: message.usage,
-											stopReason: message.stopReason,
-											errorMessage: message.errorMessage,
-										}),
-								},
+							withLoopPhase("mnemopi.extract", () =>
+								completeSimple(
+									model,
+									{
+										...(request.systemPrompt ? { systemPrompt: [request.systemPrompt] } : {}),
+										messages: [{ role: "user", content: request.prompt, timestamp: Date.now() }],
+									},
+									{
+										apiKey: modelRegistry.resolver(model, sessionId),
+										sessionId,
+										maxTokens: opts?.maxTokens,
+										temperature: opts?.temperature,
+										signal,
+										onAttempt: message =>
+											onUsage?.({
+												purpose: "memory",
+												role: "memory",
+												api: model.api,
+												provider: model.provider,
+												model: model.id,
+												usage: message.usage,
+												stopReason: message.stopReason,
+												errorMessage: message.errorMessage,
+											}),
+									},
+								),
 							),
 						{ provider: model.provider, signal },
 					);
