@@ -8,6 +8,7 @@ import type TurndownService from "@oh-my-pi/pi-utils/turndown";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { AgentStorage } from "../../session/agent-storage";
 import { ToolAbortError } from "../../tools/tool-errors";
+import { decodeBody, readBodyCapped } from "../search/providers/utils";
 
 export { formatNumber } from "@oh-my-pi/pi-utils";
 
@@ -111,33 +112,6 @@ function parseRetryAfterMs(value: string | null): number {
 	return 1_000;
 }
 
-function charsetFromContentType(header: string): string | undefined {
-	return /charset\s*=\s*"?([\w-]+)"?/i.exec(header)?.[1];
-}
-
-/**
- * Decode a response body honoring the declared charset (Content-Type header,
- * then a cheap <meta charset> sniff), falling back to UTF-8.
- */
-function decodeBody(bytes: Buffer, contentTypeHeader: string): string {
-	let label = charsetFromContentType(contentTypeHeader);
-	if (!label) {
-		// All charsets we can decode are ASCII-compatible in the prefix, so a
-		// latin1 view of the first 2KB is enough to find a <meta charset>.
-		label = /<meta[^>]+charset\s*=\s*["']?([\w-]+)/i.exec(bytes.subarray(0, 2048).toString("latin1"))?.[1];
-	}
-	if (label && !/^utf-?8$/i.test(label)) {
-		try {
-			// Bun.Encoding's union is narrower than the runtime, which accepts
-			// WHATWG labels (shift_jis, euc-kr, gbk, big5, …); unknowns throw here.
-			return new TextDecoder(label as Bun.Encoding).decode(bytes);
-		} catch {
-			// Unknown/unsupported label — fall back to UTF-8.
-		}
-	}
-	return bytes.toString("utf-8");
-}
-
 /**
  * Fetch a page with timeout and size limit
  */
@@ -199,44 +173,21 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 				return { content: "", contentType, finalUrl, ok: true, status: response.status, bodySkipped: true };
 			}
 
-			const reader = response.body?.getReader();
-			if (!reader) {
+			const body = await readBodyCapped(response, maxBytes);
+			if (!body) {
 				return { content: "", contentType, finalUrl, ok: false, status: response.status };
 			}
 
-			const chunks: Uint8Array[] = [];
-			let totalSize = 0;
-			let truncated = false;
-
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-
-				chunks.push(value);
-				totalSize += value.length;
-
-				if (totalSize > maxBytes) {
-					truncated = true;
-					void reader.cancel().catch(() => {});
-					break;
-				}
-			}
-
-			// A single chunk is decoded in place; only multi-chunk bodies need a concat copy.
-			const bytes =
-				chunks.length === 1
-					? Buffer.from(chunks[0].buffer, chunks[0].byteOffset, chunks[0].byteLength)
-					: Buffer.concat(chunks, totalSize);
-			const content = decodeBody(bytes, rawContentType);
+			const content = decodeBody(body.bytes, rawContentType);
 			if (isBotBlocked(response.status, content) && attempt < USER_AGENTS.length - 1) {
 				continue;
 			}
 
 			if (!response.ok) {
-				return { content, contentType, finalUrl, ok: false, status: response.status, truncated };
+				return { content, contentType, finalUrl, ok: false, status: response.status, truncated: body.truncated };
 			}
 
-			return { content, contentType, finalUrl, ok: true, status: response.status, truncated };
+			return { content, contentType, finalUrl, ok: true, status: response.status, truncated: body.truncated };
 		} catch (error) {
 			if (signal?.aborted) {
 				throw new ToolAbortError();
