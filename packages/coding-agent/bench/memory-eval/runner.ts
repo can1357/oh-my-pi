@@ -1,0 +1,240 @@
+/** Protocol runner: ingests each case into an engine, recalls every question, maps hits back to message ids and scores them. */
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import type { EngineAdapter, EngineName, ProtocolName, RememberItem } from "./engine";
+import { cp, lmeMetrics, messageLevelMetrics } from "./score";
+import type { DatasetName, EvalCase, EvalMessage, ExcludedQuestion } from "./types";
+
+export interface RankedHit {
+	messageIds: string[];
+	tier: "working" | "episodic";
+	viaFallback: boolean;
+	contentPrefix: string;
+}
+
+export interface QuestionResult {
+	caseId: string;
+	questionId: string;
+	category: string;
+	ranked: RankedHit[];
+	metrics: Record<string, number>;
+	latencyMs: number;
+	lme?: { corpusIds: string[]; correctDocs: string[]; rankings: number[] };
+	compat?: { question: string; rankedContents: string[]; goldContents: string[] };
+}
+
+export interface RunConfig {
+	dataset: DatasetName;
+	datasetRevision: string;
+	engine: EngineName;
+	engineInfo: Record<string, string>;
+	protocol: ProtocolName;
+	k: number;
+	gitCommit: string;
+	startedAt: string;
+}
+
+export interface RunResources {
+	warmupMs: number;
+	peakRssBytes: number;
+	baselineRssBytes: number;
+	rssScope: "engine-process" | "harness-process";
+}
+
+export interface ResultFile {
+	config: RunConfig;
+	questions: QuestionResult[];
+	aggregate: Record<string, number>;
+	perCategory: Record<string, Record<string, number>>;
+	fallbackRate: number;
+	storeBytesMean: number;
+	resources: RunResources;
+	excluded: ExcludedQuestion[];
+}
+
+export interface RunOutput {
+	questions: QuestionResult[];
+	resources: RunResources;
+	storeBytesMean: number;
+}
+
+const REMEMBER_BATCH = 500;
+const CONTENT_PREFIX_CHARS = 80;
+const FALLBACK_PREFIX_CHARS = 50;
+
+const isBeam = (dataset: DatasetName): boolean => dataset.startsWith("beam");
+
+export function primaryMetric(dataset: DatasetName): "recall@10" | "session.recall_all@5" {
+	return isBeam(dataset) ? "recall@10" : "session.recall_all@5";
+}
+
+const normalize = (s: string): string => s.toLowerCase().replace(/\s+/g, " ").trim();
+
+/** Total size of the files under `dir`. */
+async function dirBytes(dir: string): Promise<number> {
+	const entries = await fs.readdir(dir, { recursive: true, withFileTypes: true });
+	let total = 0;
+	for (const entry of entries) if (entry.isFile()) total += Bun.file(path.join(entry.parentPath, entry.name)).size;
+	return total;
+}
+
+interface MappedHit {
+	messageIds: string[];
+	viaFallback: boolean;
+}
+
+/** Engine row id, else the rows it summarises, else a content-prefix match against the case's messages. */
+function mapHit(
+	hit: { engineId: string; content: string; summaryOf: readonly string[] },
+	idMap: ReadonlyMap<string, string[]>,
+	prefixes: readonly { messageId: string; prefix: string }[],
+): MappedHit {
+	const direct = idMap.get(hit.engineId);
+	if (direct) return { messageIds: [...direct], viaFallback: false };
+	const viaSummary = [...new Set(hit.summaryOf.flatMap(id => idMap.get(id) ?? []))];
+	if (viaSummary.length > 0) return { messageIds: viaSummary, viaFallback: false };
+	const content = normalize(hit.content);
+	return {
+		messageIds: prefixes.filter(p => content.includes(p.prefix)).map(p => p.messageId),
+		viaFallback: true,
+	};
+}
+
+function scoreQuestion(
+	evalCase: EvalCase,
+	goldMessageIds: readonly string[],
+	ranked: readonly RankedHit[],
+): Pick<QuestionResult, "metrics" | "lme"> {
+	if (isBeam(evalCase.dataset)) {
+		return {
+			metrics: {
+				...messageLevelMetrics(
+					ranked.map(r => r.messageIds),
+					goldMessageIds,
+				),
+			},
+		};
+	}
+	const corpusIds = evalCase.messages.map(m => m.messageId);
+	const indexOf = new Map(corpusIds.map((id, i) => [id, i]));
+	const rankings: number[] = [];
+	const seen = new Set<number>();
+	for (const hit of ranked) {
+		for (const id of hit.messageIds) {
+			const index = indexOf.get(id);
+			if (index === undefined || seen.has(index)) continue;
+			seen.add(index);
+			rankings.push(index);
+		}
+	}
+	const correctDocs = [...goldMessageIds];
+	return { metrics: lmeMetrics(rankings, correctDocs, corpusIds), lme: { corpusIds, correctDocs, rankings } };
+}
+
+export async function runCases(
+	engine: EngineAdapter,
+	cases: readonly EvalCase[],
+	protocol: Exclude<ProtocolName, "upstream-compat">,
+	k: number,
+	storeRoot: string,
+): Promise<RunOutput> {
+	const warmupStart = performance.now();
+	await engine.warmup(protocol);
+	const warmupMs = performance.now() - warmupStart;
+
+	const questions: QuestionResult[] = [];
+	let storeBytesTotal = 0;
+	for (const [caseIndex, evalCase] of cases.entries()) {
+		const storeDir = path.join(storeRoot, evalCase.caseId.replace(/[^A-Za-z0-9._-]/g, "_"));
+		await fs.mkdir(storeDir, { recursive: true });
+		await engine.open(evalCase, { storeDir, protocol });
+
+		const messages: EvalMessage[] = evalCase.messages.filter(m => m.content.trim() !== "");
+		const idMap = new Map<string, string[]>();
+		for (let i = 0; i < messages.length; i += REMEMBER_BATCH) {
+			const batch = messages.slice(i, i + REMEMBER_BATCH);
+			const items: RememberItem[] = batch.map(m => ({
+				messageId: m.messageId,
+				content: m.content,
+				source: m.role,
+				importance: 0.5,
+			}));
+			const engineIds = await engine.remember(items);
+			for (const [j, engineId] of engineIds.entries()) {
+				if (engineId === null) continue;
+				const ids = idMap.get(engineId);
+				if (ids) ids.push(batch[j].messageId);
+				else idMap.set(engineId, [batch[j].messageId]);
+			}
+		}
+		if (protocol === "with-sleep") await engine.sleep();
+		if (caseIndex === 0 && protocol !== "fts-only" && (await engine.vectorCount()) <= 0) {
+			throw new Error(`embeddings unavailable for ${engine.name}`);
+		}
+
+		const prefixes = messages
+			.map(m => ({ messageId: m.messageId, prefix: normalize(cp(m.content, FALLBACK_PREFIX_CHARS)) }))
+			.filter(p => p.prefix !== "");
+		for (const question of evalCase.questions) {
+			const start = performance.now();
+			const hits = await engine.recall(question, k);
+			const latencyMs = performance.now() - start;
+			const ranked: RankedHit[] = hits.map(hit => ({
+				...mapHit(hit, idMap, prefixes),
+				tier: hit.tier,
+				contentPrefix: cp(hit.content, CONTENT_PREFIX_CHARS),
+			}));
+			questions.push({
+				caseId: evalCase.caseId,
+				questionId: question.questionId,
+				category: question.category,
+				ranked,
+				latencyMs,
+				...scoreQuestion(evalCase, question.goldMessageIds, ranked),
+			});
+		}
+
+		await engine.close();
+		storeBytesTotal += await dirBytes(storeDir);
+		await fs.rm(storeDir, { recursive: true, force: true });
+	}
+
+	const resources = await engine.resources();
+	return {
+		questions,
+		resources: { warmupMs, ...resources, rssScope: engine.rssScope },
+		storeBytesMean: cases.length === 0 ? 0 : storeBytesTotal / cases.length,
+	};
+}
+
+function means(rows: readonly Record<string, number>[]): Record<string, number> {
+	const sums: Record<string, number> = {};
+	for (const row of rows) for (const [key, value] of Object.entries(row)) sums[key] = (sums[key] ?? 0) + value;
+	return Object.fromEntries(Object.entries(sums).map(([key, sum]) => [key, sum / rows.length]));
+}
+
+/** Nearest-rank percentile of an ascending-sorted array. */
+const percentile = (sorted: readonly number[], p: number): number =>
+	sorted.length === 0 ? 0 : sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)];
+
+export function buildResultFile(config: RunConfig, run: RunOutput, excluded: ExcludedQuestion[]): ResultFile {
+	const { questions } = run;
+	const latencies = questions.map(q => q.latencyMs).sort((a, b) => a - b);
+	const byCategory: Record<string, Record<string, number>[]> = {};
+	for (const q of questions) (byCategory[q.category] ??= []).push(q.metrics);
+	const hits = questions.flatMap(q => q.ranked);
+	return {
+		config,
+		questions,
+		aggregate: {
+			...means(questions.map(q => q.metrics)),
+			"latency.p50": percentile(latencies, 0.5),
+			"latency.p95": percentile(latencies, 0.95),
+		},
+		perCategory: Object.fromEntries(Object.entries(byCategory).map(([cat, rows]) => [cat, means(rows)])),
+		fallbackRate: hits.length === 0 ? 0 : hits.filter(h => h.viaFallback).length / hits.length,
+		storeBytesMean: run.storeBytesMean,
+		resources: run.resources,
+		excluded,
+	};
+}
