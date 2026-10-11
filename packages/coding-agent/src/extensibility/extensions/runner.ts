@@ -183,10 +183,16 @@ export function baseHandlerTimeoutForEvent(eventType: string, settings?: Setting
  * The user's `extensionHandlers.timeoutMs` (normalized), or the built-in
  * default when absent. This is the ceiling a `setHandlerTimeout` request can
  * lengthen to, and — separately — the fallback no-request budgets rise to.
+ * Clamped to the signed 32-bit timer limit: a `setTimeout` delay above
+ * 2147483647 overflows to 1 ms, which would kill every handler instantly
+ * instead of granting the configured long budget.
  */
 export function configuredHandlerTimeoutCeiling(settings?: Settings): number {
-	return normalizeHandlerTimeout(
-		(settings ? cfgExtensionHandlersTimeoutMs.get(settings) : undefined) ?? extensionHandlerTimeoutMs,
+	return Math.min(
+		normalizeHandlerTimeout(
+			(settings ? cfgExtensionHandlersTimeoutMs.get(settings) : undefined) ?? extensionHandlerTimeoutMs,
+		),
+		2_147_483_647,
 	);
 }
 

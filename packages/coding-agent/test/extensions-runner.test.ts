@@ -1895,13 +1895,13 @@ describe("ExtensionRunner", () => {
 					settled = true;
 					return messages;
 				});
-				// Advance in 50 ms steps: the requested handler finishes at ~35 ms
-				// (10 ms sibling base + 25 ms wait), long before the sibling's
-				// 60 s fallback expiry — so settle happens without reaching it.
-				while (!settled) {
+				// Bounded: a regression that never settles must fail the test, not
+				// hang the suite in a microtask/timer spin.
+				for (let tick = 0; tick < 10_000 && !settled; tick++) {
 					await Promise.resolve();
 					vi.advanceTimersByTime(50);
 				}
+				expect(settled).toBe(true);
 				const transformed = await emitted;
 
 				expect(transformed).toHaveLength(2);
@@ -2126,10 +2126,13 @@ describe("ExtensionRunner", () => {
 					settled = true;
 					return result;
 				});
-				for (let tick = 0; tick < 200 && !settled; tick++) {
+				// Bounded: a regression that never settles must fail the test, not
+				// hang the suite in a microtask/timer spin.
+				for (let tick = 0; tick < 10_000 && !settled; tick++) {
 					await Promise.resolve();
 					vi.advanceTimersByTime(1);
 				}
+				expect(settled).toBe(true);
 
 				expect(process.env.MC_PROBE_VALIDATION).toBe(
 					[
