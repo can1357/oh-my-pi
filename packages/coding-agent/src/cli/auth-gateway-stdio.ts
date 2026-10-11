@@ -19,6 +19,7 @@ import { Settings } from "../config/settings";
 import { claimRpcInput } from "../modes/rpc/rpc-input";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
+import { gatewayRoutableModels } from "./auth-gateway-cli";
 
 /** Names the caller in the gateway's logs. */
 const STDIO_PEER = "stdio";
@@ -82,7 +83,7 @@ export async function runAuthGatewayStdio(): Promise<void> {
 	const router = createAuthGatewayRouter({
 		storage,
 		resolveModel: id => routed.get(id),
-		listModels: () => registry.getAvailable(),
+		listModels: () => gatewayRoutableModels(registry, true),
 	});
 	const route = async (req: Request): Promise<Response> => {
 		// Unparseable bodies pass through for the route to reject in its own wire format.
