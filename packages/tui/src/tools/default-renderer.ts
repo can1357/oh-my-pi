@@ -126,13 +126,14 @@ function buildDefaultToolBody(input: DefaultToolRenderInput, uiTheme: Theme, con
 				}
 			}
 			if (!renderedAsJson) {
+				// No expanded cap: the terminal's own disclosure clamp is the only
+				// bound, so Ctrl+O reveals every row the collapsed view promised.
 				body.push(
 					...formatOutputPaneLines(
 						{
 							lines: textContent.split("\n"),
 							expanded: options.expanded,
 							collapsedMaxLines: 4,
-							expandedMaxLines: 12,
 							styleLine: line =>
 								clipCollapsed(styleToolOutputLine(line, uiTheme), contentWidth, options.expanded),
 							showExpandHintWhenUncapped: true,
@@ -159,12 +160,12 @@ export function formatDefaultToolExecution(
 
 /** Inline args summary budget in characters (a data cap, not a width). */
 const NATIVE_ARGS_SUMMARY_CHARS = 160;
-/** Result text kept for the native card body. */
-const NATIVE_RESULT_MAX_CHARS = 64 * 1024;
 
 /**
  * TSP view of the generic fallback card: the tool label with a one-line args
  * summary as the head target; the result as a JSON tree or raw `ansi` output.
+ * The complete output goes over the wire — the card-level disclosure clamp the
+ * terminal applies is the only bound, so an expanded card keeps every row.
  */
 export function describeDefaultToolExecution(input: DefaultToolRenderInput): NativeToolView {
 	const { result } = input;
@@ -175,7 +176,7 @@ export function describeDefaultToolExecution(input: DefaultToolRenderInput): Nat
 			: undefined;
 	const tool: NativeToolHead = { title: input.label, target: summary || undefined, targetKind: "text" };
 	if (!result) return { tool };
-	const output = result.output.trimEnd().slice(0, NATIVE_RESULT_MAX_CHARS);
+	const output = result.output.trimEnd();
 	const tone = result.skipped ? "info" : result.isError ? "error" : undefined;
 	if (!output) return { tool, tone, body: [noteText("(no output)")] };
 	if (output.startsWith("{") || output.startsWith("[")) {
