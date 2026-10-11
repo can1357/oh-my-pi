@@ -1609,6 +1609,12 @@ export interface ExtensionAPI {
 	 * a value below `timeoutMs` means the ceiling has not been raised, so the extension
 	 * should shorten its work or tell the user which setting to change.
 	 *
+	 * The ceiling is live user configuration: if `extensionHandlers.timeoutMs` is
+	 * lowered after registration, later dispatches are capped at the new value even
+	 * though this call previously reported more. Treat the returned number as the
+	 * budget as of registration, not a guarantee for the session's lifetime — the
+	 * user's setting always wins.
+	 *
 	 * Only `tool_call` treats the budget as active-work time. Dialog waits pause it
 	 * there and nowhere else, so a handler for any other event that opens an
 	 * `ctx.ui.*` dialog is still charged wall-clock time.
