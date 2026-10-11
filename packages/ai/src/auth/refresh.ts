@@ -3,7 +3,7 @@ import * as AIError from "../error";
 import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
-import { raceSignal } from "./abort";
+import { raceWithSignal } from "../utils/abort";
 import { authCredentialEquals, type CredentialPool, credentialDisabledEvent } from "./pool";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import { hasRefreshLeases, type AuthCredentialStore } from "./store";
@@ -233,7 +233,7 @@ export class OAuthRefresher {
 				leaseExpiresAt === undefined
 					? OAUTH_REFRESH_LEASE_POLL_MS
 					: Math.min(Math.max(leaseExpiresAt - Date.now(), OAUTH_REFRESH_LEASE_POLL_MS), 250);
-			await raceSignal(Bun.sleep(waitMs), options.signal, "OAuth refresh ownership wait aborted by caller");
+			await raceWithSignal(Bun.sleep(waitMs), options.signal, "OAuth refresh ownership wait aborted by caller");
 		}
 
 		try {
@@ -490,7 +490,7 @@ export class OAuthRefresher {
 		credential = normalizeOAuthCredentialExpiry(provider, credential);
 		if (credentialId !== undefined) {
 			const existing = this.#oauthCredentialRefreshInFlight.get(credentialId);
-			if (existing) return raceSignal(existing, signal, "credential refresh aborted");
+			if (existing) return raceWithSignal(existing, signal, "credential refresh aborted");
 		}
 		if (Date.now() + OAUTH_REFRESH_SKEW_MS < credential.expires) return credential;
 		if (credentialId === undefined) {
@@ -509,7 +509,7 @@ export class OAuthRefresher {
 				this.#oauthCredentialRefreshInFlight.delete(credentialId);
 			});
 		this.#oauthCredentialRefreshInFlight.set(credentialId, promise);
-		return raceSignal(promise, signal, "credential refresh aborted");
+		return raceWithSignal(promise, signal, "credential refresh aborted");
 	}
 
 	async #refreshOAuthCredentialUnshared(
@@ -634,7 +634,7 @@ export class OAuthRefresher {
 		options?: OAuthRefreshByIdOptions,
 	): Promise<AuthCredentialSnapshotEntry> {
 		const existing = this.#oauthRefreshInFlight.get(id);
-		if (existing) return raceSignal(existing, signal, "credential refresh aborted");
+		if (existing) return raceWithSignal(existing, signal, "credential refresh aborted");
 		const recent = options?.reuseRecentMint ? this.#recentMint(id) : undefined;
 		if (recent) return snapshotEntry(id, recent.provider, recent.credential);
 
@@ -650,7 +650,7 @@ export class OAuthRefresher {
 			}
 		})();
 		this.#oauthRefreshInFlight.set(id, promise);
-		return raceSignal(promise, signal, "credential refresh aborted");
+		return raceWithSignal(promise, signal, "credential refresh aborted");
 	}
 
 	async #forceRefreshCredentialByIdUnshared(
