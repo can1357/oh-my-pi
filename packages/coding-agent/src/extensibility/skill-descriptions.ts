@@ -259,16 +259,25 @@ export class SkillDescriptionStore {
 export class SkillDescriptionCatalog {
 	readonly #store: SkillDescriptionStore | undefined;
 	readonly #compress?: SkillDescriptionCompressor;
+	readonly #verbatim: boolean;
 	readonly #snapshot = new Map<string, string>();
 
-	/** `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews. */
-	constructor(options: { store?: SkillDescriptionStore; compress?: SkillDescriptionCompressor } = {}) {
-		this.#store = options.store ?? sharedSkillDescriptionStore();
-		this.#compress = options.compress;
+	/**
+	 * `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews.
+	 * `verbatim` renders every description exactly as authored: no preview truncation, no store
+	 * (none is opened), and no compression work (`skills.compressDescriptions: false`).
+	 */
+	constructor(
+		options: { store?: SkillDescriptionStore; compress?: SkillDescriptionCompressor; verbatim?: boolean } = {},
+	) {
+		this.#verbatim = options.verbatim === true;
+		this.#store = this.#verbatim ? undefined : (options.store ?? sharedSkillDescriptionStore());
+		this.#compress = this.#verbatim ? undefined : options.compress;
 	}
 
 	/** Read the session's frozen prompt hints without starting new model work. */
 	snapshot(skills: readonly Skill[]): Array<Skill & { description: string }> {
+		if (this.#verbatim) return skills.map(skill => ({ ...skill }));
 		return skills.map(skill => ({
 			...skill,
 			description: this.#snapshot.get(keyFor(skill)) ?? previewSkillDescription(skill.description),
@@ -277,6 +286,7 @@ export class SkillDescriptionCatalog {
 
 	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
 		if (skills.length === 0) return [];
+		if (this.#verbatim) return skills.map(skill => ({ ...skill }));
 		const store = this.#store;
 		return skills.map(skill => {
 			const key = keyFor(skill);
