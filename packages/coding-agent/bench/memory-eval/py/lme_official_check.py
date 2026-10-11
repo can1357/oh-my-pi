@@ -31,10 +31,11 @@ def official_metrics(rankings, correct_docs, corpus_ids):
 
 
 def lme_questions(path):
-    questions = [q for q in json.loads(Path(path).read_text())["questions"] if "lme" in q]
-    if not questions:
-        sys.exit(f"{path}: no question carries `lme`")
-    return questions
+    all_questions = json.loads(Path(path).read_text())["questions"]
+    missing = [q["questionId"] for q in all_questions if "lme" not in q]
+    if missing or not all_questions:
+        sys.exit(f"{path}: {len(missing)}/{len(all_questions)} questions lack `lme` (first: {missing[:5]})")
+    return all_questions
 
 
 def compare(path):
@@ -49,7 +50,7 @@ def compare(path):
             continue
         for key, theirs in official.items():
             ours = q["metrics"][key]
-            if abs(ours - theirs) > TOL:
+            if not abs(ours - theirs) <= TOL:  # NaN-safe: NaN compares false, so counts as a mismatch
                 print(f"MISMATCH {q['questionId']} {key}: ours={ours!r} official={theirs!r}")
                 mismatches += 1
     print(f"{path}: {len(questions)} questions, {mismatches} mismatches")
@@ -93,4 +94,5 @@ def main():
     sys.exit(0 if ok else 1)
 
 
-main()
+if __name__ == "__main__":
+    main()
