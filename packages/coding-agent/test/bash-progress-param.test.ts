@@ -795,11 +795,15 @@ describe("bash progress parameter", () => {
 			const originalSetTimeout = globalThis.setTimeout;
 			// Observe the drain guard: promotion has set its entry-time stamp
 			// boundary before installing this timer. Do not advance the clock.
-			const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation((handler, delay, ...args) => {
+			const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+				handler: () => void,
+				delay?: number,
+				...args: unknown[]
+			) => {
 				const timer = originalSetTimeout(handler, delay, ...args);
 				if (delay === PROGRESS_LIMITS.BATCH_INTERVAL_MS * 5) promotionEntered.resolve();
 				return timer;
-			});
+			}) as typeof globalThis.setTimeout);
 			steering.abort();
 			await promotionEntered.promise;
 			timerSpy.mockRestore();
