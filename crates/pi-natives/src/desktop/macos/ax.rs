@@ -848,11 +848,22 @@ fn perform_choosing(
 	let watch = path.is_some()
 		|| (background && open_menu::may_open(&native, || copy_string(element, "AXRole")));
 	skylight::with_background_guard(pid, || {
+		// A popup in a system Open or Save panel opens its menu in the
+		// process that draws the panel.
+		let menu_pid = if watch {
+			open_menu::menu_process(
+				pid,
+				innermost_window_id(element).map(|(id, _)| id),
+				skylight::window_owner_pid,
+			)
+		} else {
+			pid
+		};
 		let before = if watch {
-			let before = capture::menu_windows(pid).ok_or_else(|| {
+			let before = capture::menu_windows(menu_pid).ok_or_else(|| {
 				DesktopError::ax_failed(format!(
-					"cannot list the open menus of process {pid}, so a menu that {native} opens could \
-					 not be closed; nothing was performed"
+					"cannot list the open menus of process {menu_pid}, so a menu that {native} opens \
+					 could not be closed; nothing was performed"
 				))
 			})?;
 			if background {
@@ -867,7 +878,9 @@ fn perform_choosing(
 			before.as_deref(),
 			path,
 			perform,
-			|before, path| open_menu::settle(pid, before, path, open_menu::CONTROL_MENU_TIMEOUT),
+			|before, path| {
+				open_menu::settle(menu_pid, pid, before, path, open_menu::CONTROL_MENU_TIMEOUT)
+			},
 		)
 	})
 }

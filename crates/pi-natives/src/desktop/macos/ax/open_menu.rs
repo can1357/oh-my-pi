@@ -261,16 +261,36 @@ trait Menus {
 	fn escape(&mut self) -> CoreResult<()>;
 }
 
-/// Settles a menu that a press of `pid` opened, within `timeout`, since its
-/// menu windows were `before`: chooses `path` in it, or closes it; see
+/// Settles a menu that a press of `app_pid` opened, within `timeout`, since
+/// the menu windows of `menu_pid`, the process that shows its menus
+/// ([`menu_process`]), were `before`: chooses `path` in it, or closes it; see
 /// [`guard`].
 pub(crate) fn settle(
-	pid: libc::pid_t,
+	menu_pid: libc::pid_t,
+	app_pid: libc::pid_t,
 	before: &[u32],
 	path: Option<&[String]>,
 	timeout: Duration,
 ) -> CoreResult<Settled> {
-	settle_with(&mut AxMenus { pid, app: None }, before, path, timeout)
+	settle_with(&mut AxMenus { pid: menu_pid, app_pid, app: None }, before, path, timeout)
+}
+
+/// The process that shows the menus of an element of `app_pid` whose window
+/// maps to `drawn`: the window's owner (`owner_of`), which for a system Open
+/// or Save panel is `openAndSavePanelService`, or else `app_pid`.
+pub(crate) fn menu_process(
+	app_pid: libc::pid_t,
+	drawn: Option<u32>,
+	owner_of: impl FnOnce(u32) -> Option<libc::pid_t>,
+) -> libc::pid_t {
+	drawn.and_then(owner_of).unwrap_or(app_pid)
+}
+
+/// Whether a menu element reporting process `owner`, hit-tested in a menu
+/// window of `menu_pid`, is the target's: a remote view's service shows the
+/// menu, but its elements report `app_pid`, the application hosting the view.
+const fn owns_menu(owner: libc::pid_t, menu_pid: libc::pid_t, app_pid: libc::pid_t) -> bool {
+	owner == menu_pid || owner == app_pid
 }
 
 fn settle_with<M: Menus>(
@@ -481,10 +501,12 @@ pub(crate) fn new_menu(before: &[u32], now: &[u32]) -> Option<u32> {
 	now.iter().copied().find(|menu| !before.contains(menu))
 }
 
-/// [`Menus`] on a live application through accessibility.
+/// [`Menus`] on a live application through accessibility: `pid` shows the
+/// menu windows, and its menus belong to `pid` or `app_pid` ([`owns_menu`]).
 struct AxMenus {
-	pid: libc::pid_t,
-	app: Option<CFRetained<AXUIElement>>,
+	pid:     libc::pid_t,
+	app_pid: libc::pid_t,
+	app:     Option<CFRetained<AXUIElement>>,
 }
 
 impl Menus for AxMenus {
@@ -507,7 +529,8 @@ impl Menus for AxMenus {
 		let mut element = hit_test(app, x, y)?;
 		for _ in 0..MAX_ASCENT {
 			if copy_string(&element, "AXRole").as_deref() == Some("AXMenu") {
-				return (element_pid(&element).ok()? == self.pid).then_some(element);
+				return owns_menu(element_pid(&element).ok()?, self.pid, self.app_pid)
+					.then_some(element);
 			}
 			element = copy_element(&element, "AXParent")?;
 		}
@@ -923,5 +946,26 @@ mod tests {
 		assert!(may_open("AXPress", || Some("AXPopUpButton".to_string())));
 		assert!(!may_open("AXPress", || Some("AXButton".to_string())));
 		assert!(!may_open("AXPress", || None));
+	}
+
+	#[test]
+	fn a_menu_of_a_remote_panel_is_watched_in_its_service_and_belongs_to_the_host() {
+		// Automator (pid 71991) shows its Save sheet's controls in window 26086
+		// of openAndSavePanelService (pid 71995); the Where: popup's menu is a
+		// window of the service, and its AXMenu reports Automator.
+		let owners = |window| match window {
+			26086 => Some(71995),
+			26072 => Some(71991),
+			_ => None,
+		};
+		assert_eq!(menu_process(71991, Some(26086), owners), 71995);
+		assert_eq!(menu_process(71991, Some(26072), owners), 71991);
+		assert_eq!(menu_process(71991, Some(9), owners), 71991);
+		assert_eq!(menu_process(71991, None, |_| panic!("no window to look up")), 71991);
+		assert!(owns_menu(71991, 71995, 71991));
+		assert!(owns_menu(71995, 71995, 71991));
+		assert!(owns_menu(7581, 7581, 7581));
+		// A menu another application shows over the point is not the target's.
+		assert!(!owns_menu(512, 71995, 71991));
 	}
 }

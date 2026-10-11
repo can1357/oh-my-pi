@@ -131,6 +131,8 @@ To use an item of such a menu, name its path as `menu` in the call that opens it
 
 Before a background action that may open a menu, the element's window is made key in its application, because `AppKit` checks which items are enabled when the menu opens. A control in a sheet or popover, such as the Repeat popup in Calendar's event popover, belongs to that sheet or popover, not to the window it is attached to. When it sits on the application's focused window, only the activation goes out, as for a background click into it, since the press that makes a window key would close the popover.
 
+A popup in a system Open or Save panel, such as a Save sheet's Where: popup, opens its menu in `openAndSavePanelService`, while the menu's items report the app that showed the panel. Menu watching and `menu` paths look for the menu in that service.
+
 A macOS background shortcut with a modifier throws `InputFailed` when its application stops answering accessibility requests right after it: the shortcut was sent, but whether it took effect is unknown. Inspect the application before retrying.
 
 Wayland per-window native input and `raise()` remain unavailable without compositor-specific integration; use AX actions, or desktop input after focusing the target yourself.

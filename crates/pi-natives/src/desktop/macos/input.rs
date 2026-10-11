@@ -1186,7 +1186,9 @@ fn background_pointer(
 		before.as_deref(),
 		menu,
 		|| background_gesture(source, pid, wid, window, event, entry_front, to, in_overlay),
-		|before, path| ax::open_menu::settle(menu_pid, before, path, timeout.unwrap_or_default()),
+		|before, path| {
+			ax::open_menu::settle(menu_pid, pid, before, path, timeout.unwrap_or_default())
+		},
 	)
 }
 
@@ -2173,7 +2175,7 @@ fn foreground_pointer(
 							Some(&before),
 							Some(path),
 							|| global_pointer(source, event),
-							|before, path| ax::open_menu::settle(pid, before, path, timeout),
+							|before, path| ax::open_menu::settle(pid, pid, before, path, timeout),
 						)
 					},
 				});
