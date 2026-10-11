@@ -27,6 +27,7 @@
 
 ### Fixed
 
+- Auto-compaction now skips multi-hour provider retry waits, trying the next configured method or reporting the failure instead of leaving the turn waiting ([#15311](https://github.com/can1357/oh-my-pi/issues/15311)).
 - Fixed `/btw`, IRC, and composer-prediction requests missing the conversation's prompt cache on Codex, and on GPT-6 models after a thinking-level change
 - Fixed SDK and RPC sessions keeping a stale MCP tool list when a server's tools changed while extensions were loading; `createAgentSession` now adopts the change before it returns ([#11315](https://github.com/can1357/oh-my-pi/pull/11315) by [@aktanazat](https://github.com/aktanazat)).
 - `omp plugin install` now passes raw non-GitHub git URLs (`https://git.example.com/group/repo`, `ssh://…`) to bun as `git+…` so they are cloned via git instead of being misread as an npm tarball (ZlibError: error decompressing). Inline userinfo credentials are stripped from the spec — `bun install` persists it into `plugins/package.json` and `bun.lock`, and a long-lived repository token must not land in those files; private repositories authenticate via SSH, a git credential helper, or `.netrc` ([#11810](https://github.com/can1357/oh-my-pi/pull/11810) by [@blindcat-10835](https://github.com/blindcat-10835)).

@@ -37,7 +37,7 @@ Group files by locality, e.g.:
 Reviewer MUST:
 1. Focus ONLY on assigned files
 2. {{#if skipDiff}}{{#if diffInstruction}}{{diffInstruction}}{{else}}MUST run `git diff`/`git show` for assigned files{{/if}}{{else}}MUST use diff hunks below (NEVER re-run git diff){{/if}}
-3. {{#if suppliedPatch}}MUST NOT read local workspace files for file context; the supplied diff may not match the checkout{{else}}{{#if contextInstruction}}{{contextInstruction}}{{else}}MAY read full file context as needed via `read`{{/if}}{{/if}}
+3. {{#if suppliedPatch}}NEVER read local workspace files for file context; the supplied diff may not match the checkout{{else}}{{#if contextInstruction}}{{contextInstruction}}{{else}}MAY read full file context as needed via `read`{{/if}}{{/if}}
 4. Use incremental `yield` sections for findings and verdict fields; do NOT call a separate finding tool
 
 {{#if skipDiff}}
