@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { type CompactionPreparation, resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -11,6 +11,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { IrcBridge } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { INCOMPLETE_RECOVERY_MAX_RETRIES } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
@@ -1086,6 +1087,33 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// turn — the loop the report hit. Without a cap it never terminates.
 		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const mail = {
+			id: "synthetic-length-mail",
+			from: "SyntheticPeer",
+			to: "SyntheticRecipient",
+			body: "synthetic mail",
+			ts: 42,
+		};
+		const aside: AgentMessage = { role: "user", content: "synthetic retained aside", timestamp: 43 };
+		const wake: AgentMessage = { role: "user", content: "synthetic deferred wake", timestamp: 44 };
+		let observations = 0;
+		const irc = new IrcBridge({
+			agent: session.agent,
+			sessionManager,
+			isDisposed: () => false,
+			isStreaming: () => true,
+			planModeEnabled: () => false,
+			emitSessionEvent: async () => {
+				observations++;
+			},
+			wakeForIrc: () => {
+				throw new Error("Unexpected synthetic wake");
+			},
+		});
+		expect(await irc.deliver(mail)).toBe("injected");
+		irc.queueAside([aside]);
+		irc.queueDeferredWake([wake]);
+		const boundary = sessionManager.captureIrcConsumptionBoundary();
 
 		const errorNotices: string[] = [];
 		session.subscribe(event => {
@@ -1142,6 +1170,22 @@ describe("AgentSession auto-compaction progress guard", () => {
 				message: expect.objectContaining({ role: "assistant", stopReason: "length" }),
 			}),
 		);
+		// The actual length-stop cap calls discardEntryDurably on this shared manager.
+		expect(sessionManager.captureIrcConsumptionBoundary()).not.toBe(boundary);
+		expect(irc.hasInterrupts()).toBe(true);
+		expect(irc.hasPending()).toBe(true);
+		await irc.deliver(mail);
+		expect(observations).toBe(1);
+		// Drain without journaling a successor, preserving the restart proof below.
+		const pending = irc.drainPending();
+		expect(pending).toHaveLength(2);
+		expect(pending[0]).toMatchObject({
+			role: "custom",
+			customType: "irc:incoming",
+			details: { id: mail.id, from: mail.from },
+		});
+		expect(pending[1]).toBe(aside);
+		expect(irc.drainDeferredWakes()).toEqual([wake]);
 
 		// The capped path appends no successor after dropping the failed turn. Reopen
 		// the journal to prove the durable branch marker, rather than the discarded

@@ -124,6 +124,11 @@
 
 ### Fixed
 
+- Deduplicated IRC transport identities across pending delivery, wait consumption, and session restore, scoped to sender and message ID ([#14921](https://github.com/can1357/oh-my-pi/pull/14921) by [@vavilonska](https://github.com/vavilonska))
+- Preserved IRC transport identity through session persistence and transcript restore without changing message authority or parent steering envelopes ([#14921](https://github.com/can1357/oh-my-pi/pull/14921) by [@vavilonska](https://github.com/vavilonska))
+- Released undelivered IRC identities when interrupting and discarding queued parent steering, and prevented a late wait refresh from consuming a replacement session or branch's inbox ([#14921](https://github.com/can1357/oh-my-pi/pull/14921) by [@vavilonska](https://github.com/vavilonska))
+- Kept accepted IRC messages and deferred wakes pending across same-session rewind and length-stop recovery, including session-switch rollback ([#14921](https://github.com/can1357/oh-my-pi/pull/14921) by [@vavilonska](https://github.com/vavilonska))
+- Kept aside-triggered wait interruptions scoped to the current logical session without consuming pending asides or waking for parked peer messages ([#14921](https://github.com/can1357/oh-my-pi/pull/14921) by [@vavilonska](https://github.com/vavilonska))
 - Reduced memory growth after one-shot side requests without interrupting ongoing conversations ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
 - Fixed sessions staying untitled when you interrupted the first reply to send a queued steer message.
 - Fixed browser downloads saving into another tab's `downloads` folder, and `tab.waitForDownload()` saving into the system Downloads folder once another tab closed; each tab in a Chromium omp launched or spawned now saves into its own, iframe downloads included. In those browsers a download no tab tracks (started by a page omp did not open, or finishing after its tab closed) now keeps Chromium's GUID file name instead of its suggested name; connected and relay browsers keep real file names ([#14544](https://github.com/can1357/oh-my-pi/pull/14544) by [@will-bogusz](https://github.com/will-bogusz))

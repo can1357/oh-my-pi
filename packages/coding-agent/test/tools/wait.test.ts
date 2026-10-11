@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
-import { TOOL_INTERRUPT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
+import { Agent, TOOL_INTERRUPT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
 import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 
@@ -142,6 +146,119 @@ describe("wait", () => {
 		expect(manager.getJob(id)?.status).toBe("running");
 		manager.cancel(id);
 	});
+
+	test("the real bus-wait consumer commits identity before its tool result is appended", async () => {
+		const registry = AgentRegistry.global();
+		const transcript = SessionManager.inMemory();
+		registry.register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: { sessionManager: transcript } as AgentSession,
+		});
+		registry.register({ id: "Peer", displayName: "Peer", kind: "sub", parentId: "Main", session: null });
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const gate = Promise.withResolvers<string>();
+		const id = manager.register("bash", "unfinished", async () => gate.promise, { ownerId: "Main" });
+		try {
+			const waiting = new WaitTool(session(manager)).execute("wait-identity", {});
+			await IrcBus.global().send({ from: "Peer", to: "Main", body: "synthetic message" });
+			const result = await waiting;
+			const waited = result.details?.waited;
+			if (!waited) throw new Error("Expected an IRC wait result");
+			expect(result.content).toEqual([{ type: "text", text: `[${waited.id}] Peer: synthetic message` }]);
+			expect(transcript.cloneCurrentSession({ persist: false }).hasReceivedIrcMessage(waited.from, waited.id)).toBe(
+				true,
+			);
+			expect(transcript.buildSessionContext().messages).toEqual([]);
+			expect(manager.getJob(id)?.status).toBe("running");
+		} finally {
+			manager.cancel(id);
+			gate.resolve("released");
+		}
+	});
+
+	for (const transition of ["switch", "branch", "clear", "replacement"] as const) {
+		test(`a wait refreshing services cannot consume the ${transition} inbox`, async () => {
+			const registry = AgentRegistry.global();
+			let transcript = SessionManager.inMemory();
+			const root = transcript.appendMessage({ role: "user", content: "synthetic root", timestamp: 1 });
+			const host: IrcBridgeHost = {
+				agent: new Agent(),
+				sessionManager: transcript,
+				isDisposed: () => false,
+				isStreaming: () => true,
+				planModeEnabled: () => false,
+				emitSessionEvent: async () => {},
+				wakeForIrc: () => {
+					throw new Error("Unexpected idle wake");
+				},
+			};
+			const bridge = new IrcBridge(host);
+			const facade = {
+				sessionManager: transcript,
+				deliverIrcMessage: (message: IrcMessage) => bridge.deliver(message),
+				drainPendingIrcInboxMessages: (agentId: string, opts?: { from?: string; limit?: number }) =>
+					bridge.drainInboxMessages(agentId, opts),
+			};
+			registry.register({ id: "Main", displayName: "Main", kind: "main", session: facade as AgentSession });
+			const refreshStarted = Promise.withResolvers<void>();
+			const releaseRefresh = Promise.withResolvers<void>();
+			const blocked = Promise.withResolvers<void>();
+			const broker = {
+				request: async () => {
+					refreshStarted.resolve();
+					await releaseRefresh.promise;
+					return { op: "list", daemons: [] };
+				},
+				onCompletion: () => () => {},
+			} as unknown as DaemonBrokerClient;
+			vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(broker);
+			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			const work = Promise.withResolvers<string>();
+			const id = manager.register("bash", "unfinished", async () => work.promise, { ownerId: "Main" });
+			const waiting = new WaitTool(session(manager, "Main", true)).execute("old-wait", {}, undefined, () =>
+				blocked.resolve(),
+			);
+			try {
+				await refreshStarted.promise;
+				if (transition === "switch") await transcript.newSession();
+				else if (transition === "branch") transcript.branch(root);
+				else if (transition === "clear") transcript.appendResetBoundary();
+				else {
+					transcript = transcript.cloneCurrentSession({ persist: false });
+					host.sessionManager = transcript;
+					facade.sessionManager = transcript;
+				}
+				const incoming: IrcMessage = {
+					id: "new-inbox",
+					from: "Peer",
+					to: "Main",
+					body: "synthetic new inbox",
+					ts: 42,
+				};
+				await bridge.deliver(incoming);
+				releaseRefresh.resolve();
+				const stillWaiting = await Promise.race([blocked.promise.then(() => true), waiting.then(() => false)]);
+				expect(stillWaiting).toBe(true);
+				await IrcBus.global().send({ from: "Peer", to: "Main", body: "synthetic later inbox" });
+				work.resolve("synthetic old work completed");
+				const result = await waiting;
+				expect(result.details?.waited).toBeUndefined();
+				expect(result.details?.jobs?.[0]).toMatchObject({ id, resultText: "synthetic old work completed" });
+				expect(transcript.hasReceivedIrcMessage(incoming.from, incoming.id)).toBe(false);
+				expect(bridge.drainInboxMessages("Main").map(message => message.body)).toEqual([
+					"synthetic new inbox",
+					"synthetic later inbox",
+				]);
+			} finally {
+				releaseRefresh.resolve();
+				work.resolve("released");
+				manager.cancel(id);
+				await waiting;
+			}
+		});
+	}
 
 	test("a hung daemon broker does not fail the wait; the job result still arrives", async () => {
 		const hungBroker = {

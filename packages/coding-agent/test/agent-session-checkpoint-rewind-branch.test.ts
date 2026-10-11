@@ -15,6 +15,7 @@ import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { IrcBridge } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { RewindTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -235,8 +236,44 @@ describe("AgentSession checkpoint rewind branch context", () => {
 				stopReason: "stop",
 			},
 		]);
+		const mail = {
+			id: "synthetic-rewind-mail",
+			from: "SyntheticPeer",
+			to: "SyntheticRecipient",
+			body: "synthetic mail",
+			ts: 42,
+		};
+		const aside: AgentMessage = { role: "user", content: "synthetic retained aside", timestamp: 43 };
+		const wake: AgentMessage = { role: "user", content: "synthetic deferred wake", timestamp: 44 };
+		let observations = 0;
+		const irc = new IrcBridge({
+			agent: session.agent,
+			sessionManager: session.sessionManager,
+			isDisposed: () => false,
+			isStreaming: () => session.isStreaming,
+			planModeEnabled: () => false,
+			emitSessionEvent: async () => {
+				observations++;
+			},
+			wakeForIrc: () => {
+				throw new Error("Unexpected synthetic wake");
+			},
+		});
+		const boundary = session.sessionManager.captureIrcConsumptionBoundary();
+		let queued = false;
+		const removeHook = session.agent.addBeforeModelCallHook(async () => {
+			if (queued) return;
+			queued = true;
+			expect(await irc.deliver(mail)).toBe("injected");
+			irc.queueAside([aside]);
+			irc.queueDeferredWake([wake]);
+		});
 
-		await session.prompt("investigate with a checkpoint");
+		try {
+			await session.prompt("investigate with a checkpoint");
+		} finally {
+			removeHook();
+		}
 
 		expect(mock.calls.length).toBe(3);
 		const finalCall = mock.calls[2];
@@ -277,6 +314,15 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		const finalThinking = finalAssistant.content.find((block): block is ThinkingContent => block.type === "thinking");
 		expect(finalThinking?.thinking).toBe("answer after rewind");
 		expect(finalThinking?.thinkingSignature).toBe("sig_after_rewind");
+		// The real checkpoint/rewind consumer has changed the shared manager's branch.
+		expect(session.sessionManager.captureIrcConsumptionBoundary()).not.toBe(boundary);
+		expect(irc.hasInterrupts()).toBe(true);
+		expect(irc.hasPending()).toBe(true);
+		await irc.deliver(mail);
+		expect(observations).toBe(1);
+		expect(irc.drainInboxMessages(mail.to)).toEqual([mail]);
+		expect(irc.drainPending()).toEqual([aside]);
+		expect(irc.drainDeferredWakes()).toEqual([wake]);
 	});
 
 	it("retains a sibling task result after rewinding the same assistant turn", async () => {

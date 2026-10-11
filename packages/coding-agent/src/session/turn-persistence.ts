@@ -18,6 +18,7 @@
  * `AgentSession`.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { isRecord } from "@oh-my-pi/pi-utils";
 
 /**
  * Stable identity for messages that pass through {@link AgentSession}'s
@@ -32,7 +33,8 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
  * - `toolResult` — timestamp + toolCallId + toolName (toolCallId is unique
  *   per execution; toolName guards against synthetic reuse).
  * - `user` / `developer` — timestamp + attribution (attribution distinguishes
- *   user-typed vs hook-injected at the same wall-clock millisecond).
+ *   user-typed vs hook-injected at the same wall-clock millisecond); native
+ *   IRC user steers instead carry the transport's sender + message ID.
  * - `fileMention` — timestamp.
  *
  * Returns `undefined` for message roles that are not persisted through this
@@ -52,7 +54,13 @@ export function sessionMessagePersistenceKey(message: AgentMessage): string | un
 			].join(":");
 		case "toolResult":
 			return `toolResult:${message.timestamp}:${message.toolCallId}:${message.toolName}`;
-		case "user":
+		case "user": {
+			const source = "ircSource" in message ? message.ircSource : undefined;
+			if (isRecord(source) && typeof source.from === "string" && typeof source.id === "string") {
+				return `irc-user:${JSON.stringify([source.from, source.id])}`;
+			}
+			return `${message.role}:${message.timestamp}:${message.attribution ?? ""}`;
+		}
 		case "developer":
 			return `${message.role}:${message.timestamp}:${message.attribution ?? ""}`;
 		case "fileMention":
