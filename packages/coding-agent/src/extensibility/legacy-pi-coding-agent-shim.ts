@@ -1192,7 +1192,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			settings,
 		);
 
-		const result = await loadExtensions(paths, cwd, eventBus);
+		const result = await loadExtensions(paths, cwd, eventBus, settings);
 		for (let i = 0; i < extensionFactories.length; i++) {
 			const loaded = await loadExtensionFromFactory(
 				extensionFactories[i],
@@ -1200,6 +1200,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 				eventBus,
 				result.runtime,
 				`<inline-loader-${i}>`,
+				settings,
 			);
 			result.extensions.push(loaded);
 		}
@@ -1420,6 +1421,28 @@ export async function createAgentSession(
 		rest.preloadedPreparedExtensions === undefined &&
 		rest.preloadedExtensionPaths === undefined
 	) {
+		// A caller-supplied settings override must match the loader's settings:
+		// extensions bind their factories (and `setHandlerTimeout` reports) against
+		// the loader's instance, and re-running factories under different settings
+		// would double-fire their load-time side effects on the shared event bus.
+		// The mismatch is a caller bug; make it loud instead of silently reporting
+		// one budget while enforcing another.
+		const overrideSettings = rest.settings ?? rest.settingsManager;
+		if (
+			overrideSettings !== undefined &&
+			loader instanceof DefaultResourceLoader &&
+			state.settingsPromise !== undefined
+		) {
+			const loaderSettings = await state.settingsPromise;
+			const effective = await (typeof overrideSettings === "object" && "then" in overrideSettings
+				? overrideSettings
+				: Promise.resolve(overrideSettings));
+			if (effective !== loaderSettings) {
+				throw new Error(
+					"resourceLoader was loaded under different settings than the session's explicit settings/settingsManager; construct the loader with the session's settings so extension budgets bind once",
+				);
+			}
+		}
 		forwarded.preloadedExtensions = state.extensionsResult;
 	}
 

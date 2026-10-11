@@ -1821,7 +1821,7 @@ describe("ExtensionRunner", () => {
 
 			const startedAt = performance.now();
 			await expect(wrapped.execute("tool-call-id", {})).rejects.toThrow(
-				`Extension ${hangExtensionPath} timed out after 10ms`,
+				`Extension ${hangExtensionPath} handler timed out after 10ms`,
 			);
 			const elapsedMs = performance.now() - startedAt;
 
@@ -1843,6 +1843,483 @@ describe("ExtensionRunner", () => {
 			]);
 
 			warnSpy.mockRestore();
+		});
+
+		it("raises an unrequested sibling to the fallback key while a request below the ceiling passes", async () => {
+			const budgetedPath = path.join(tempDir.path(), "ceiling-raised-context.ts");
+			const siblingPath = path.join(tempDir.path(), "ceiling-fallback-sibling-context.ts");
+			fs.writeFileSync(
+				budgetedPath,
+				`
+					export default function(pi) {
+						pi.setHandlerTimeout("context", 60_000);
+						pi.on("context", async event => {
+							const { promise: budgeted, resolve: releaseBudgeted } = Promise.withResolvers();
+							setTimeout(releaseBudgeted, 25);
+							await budgeted;
+							return { messages: [...event.messages, { role: "user", content: "opted-in", timestamp: 2 }] };
+						});
+					}
+				`,
+			);
+			fs.writeFileSync(
+				siblingPath,
+				`
+					export default function(pi) {
+						pi.on("context", async () => await Promise.withResolvers().promise);
+					}
+				`,
+			);
+
+			const loaded = await loadTestExtensions([budgetedPath, siblingPath]);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				// One key, two roles, and they read the same number: 60 s raises the
+				// unrequested sibling well past its 10 ms base (fallback role) AND
+				// authorises the 60 s request (ceiling role). The sibling is killed at
+				// 60 s fake-time only after the requested handler has long finished.
+				Settings.isolated({ "extensionHandlers.timeoutMs": 60_000 }),
+			);
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			testSetExtensionHandlerTimeoutMs(10);
+
+			vi.useFakeTimers();
+			try {
+				let settled = false;
+				const emitted = runner.emitContext([{ role: "user", content: "hello", timestamp: 1 }]).then(messages => {
+					settled = true;
+					return messages;
+				});
+				// Bounded: a regression that never settles must fail the test, not
+				// hang the suite in a microtask/timer spin.
+				for (let tick = 0; tick < 10_000 && !settled; tick++) {
+					await Promise.resolve();
+					vi.advanceTimersByTime(50);
+				}
+				expect(settled).toBe(true);
+				const transformed = await emitted;
+
+				expect(transformed).toHaveLength(2);
+				const appended = transformed[1] as Extract<AgentMessage, { role: "user" }>;
+				expect(appended.content).toBe("opted-in");
+				// The requested handler was served under its 60 s ceiling, and the
+				// unrequested sibling ran on the raised fallback: it expired at the
+				// key's 60 s, not at the 10 ms built-in base — both roles of one key
+				// in a single pass.
+				expect(warnSpy).toHaveBeenCalledTimes(1);
+				expect(warnSpy).toHaveBeenCalledWith("Extension handler timed out", {
+					extensionPath: siblingPath,
+					event: "context",
+					timeoutMs: 60_000,
+				});
+			} finally {
+				vi.useRealTimers();
+				warnSpy.mockRestore();
+			}
+		});
+
+		it("keeps the built-in default when the fallback key is unset and no request was made", async () => {
+			const siblingPath = path.join(tempDir.path(), "unset-key-sibling-context.ts");
+			fs.writeFileSync(
+				siblingPath,
+				`
+					export default function(pi) {
+						pi.on("context", async () => await Promise.withResolvers().promise);
+					}
+				`,
+			);
+
+			const loaded = await loadTestExtensions([siblingPath]);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			testSetExtensionHandlerTimeoutMs(15);
+
+			vi.useFakeTimers();
+			try {
+				const messages: AgentMessage[] = [{ role: "user", content: "hello", timestamp: 1 }];
+				let settled = false;
+				const emitted = runner.emitContext(messages).then(result => {
+					settled = true;
+					return result;
+				});
+				for (let tick = 0; tick < 10_000 && !settled; tick++) {
+					await Promise.resolve();
+					vi.advanceTimersByTime(1);
+				}
+				expect(settled).toBe(true);
+
+				// No key, no request: the fail-open passthrough is unchanged, killed
+				// at the built-in base.
+				expect(await emitted).toEqual(messages);
+				expect(warnSpy).toHaveBeenCalledWith("Extension handler timed out", {
+					extensionPath: siblingPath,
+					event: "context",
+					timeoutMs: 15,
+				});
+			} finally {
+				vi.useRealTimers();
+				warnSpy.mockRestore();
+			}
+		});
+
+		it("caps a request above the configured ceiling instead of honouring it", async () => {
+			const extensionPath = path.join(tempDir.path(), "ceiling-capped-context.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.setHandlerTimeout("context", 60_000);
+						pi.on("context", async () => {
+							const { promise, resolve } = Promise.withResolvers();
+							setTimeout(resolve, 50);
+							await promise;
+						});
+					}
+				`,
+			);
+
+			const loaded = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				Settings.isolated({ "extensionHandlers.timeoutMs": 20 }),
+			);
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError(error => {
+				errors.push(error);
+			});
+			// A base above the ceiling isolates the cap: without ceiling enforcement the
+			// 50 ms wait would complete inside the 10 s base.
+			testSetExtensionHandlerTimeoutMs(10_000);
+
+			vi.useFakeTimers();
+			try {
+				const messages: AgentMessage[] = [{ role: "user", content: "hello", timestamp: 1 }];
+				let settled = false;
+				const emitted = runner.emitContext(messages).then(result => {
+					settled = true;
+					return result;
+				});
+				for (let tick = 0; tick < 10_000 && !settled; tick++) {
+					await Promise.resolve();
+					vi.advanceTimersByTime(1);
+				}
+				expect(settled).toBe(true);
+
+				// Fail-open passthrough is unchanged: the capped handler is dropped.
+				expect(await emitted).toEqual(messages);
+				expect(errors).toContainEqual({
+					extensionPath,
+					event: "context",
+					error: "handler timed out after 20ms",
+				});
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("returns the enforced budget so an extension can detect an unraised ceiling", async () => {
+			const extensionPath = path.join(tempDir.path(), "budget-probe-context.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						process.env.MC_PROBE_RAISE = String(pi.setHandlerTimeout("context", 60_000));
+						process.env.MC_PROBE_SHORTEN = String(pi.setHandlerTimeout("context", 5));
+						process.env.MC_PROBE_SHUTDOWN = String(pi.setHandlerTimeout("session_shutdown", 1));
+						pi.on("session_shutdown", async () => {
+							const { promise, resolve } = Promise.withResolvers();
+							setTimeout(resolve, 50);
+							await promise;
+						});
+						process.env.MC_PROBE_RESET = String(pi.setHandlerTimeout("context", undefined));
+					}
+				`,
+			);
+
+			// The ceiling before any user setting is the default budget itself.
+			testSetExtensionHandlerTimeoutMs(25);
+			testSetSessionShutdownHandlerTimeoutMs(3);
+			const loaded = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError(error => {
+				errors.push(error);
+			});
+			try {
+				// Lengthening is refused down to the ceiling, shortening is honoured, and
+				// teardown never exceeds its own cap. Reset reports the host default.
+				expect(process.env.MC_PROBE_RAISE).toBe("25");
+				expect(process.env.MC_PROBE_SHORTEN).toBe("5");
+				expect(process.env.MC_PROBE_SHUTDOWN).toBe("1");
+				expect(process.env.MC_PROBE_RESET).toBe("25");
+
+				// Reset isolation through dispatch, not storage: resetting `context`
+				// must leave the shutdown request in force, so the watchdog kills the
+				// 50 ms teardown handler at its retained 1 ms request — not at the
+				// 3 ms cap a no-request handler would get.
+				vi.useFakeTimers();
+				let settled = false;
+				const shutdown = runner.emit({ type: "session_shutdown" }).then(() => {
+					settled = true;
+				});
+				for (let tick = 0; tick < 10_000 && !settled; tick++) {
+					await Promise.resolve();
+					vi.advanceTimersByTime(1);
+				}
+				expect(settled).toBe(true);
+				await shutdown;
+				expect(errors).toContainEqual({
+					extensionPath,
+					event: "session_shutdown",
+					error: "handler timed out after 1ms",
+				});
+			} finally {
+				vi.useRealTimers();
+				delete process.env.MC_PROBE_RAISE;
+				delete process.env.MC_PROBE_SHORTEN;
+				delete process.env.MC_PROBE_SHUTDOWN;
+				delete process.env.MC_PROBE_RESET;
+			}
+		});
+
+		it("rejects invalid budgets and unknown event names, then enforces only the last valid request", async () => {
+			const extensionPath = path.join(tempDir.path(), "budget-validation.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						const probe = [];
+						for (const invalid of [0, -5, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2147483648]) {
+							try {
+								pi.setHandlerTimeout("context", invalid);
+								probe.push("accepted:" + invalid);
+							} catch (error) {
+								probe.push(error instanceof RangeError ? "range" : "wrong:" + error);
+							}
+						}
+						try {
+							pi.setHandlerTimeout("contxt", 60);
+							probe.push("accepted-bogus-name");
+						} catch (error) {
+							probe.push(error instanceof RangeError ? "unknown-event" : "wrong:" + error);
+						}
+						pi.setHandlerTimeout("context", 60);
+						pi.setHandlerTimeout("context", 45);
+						pi.on("context", async () => {
+							const { promise, resolve } = Promise.withResolvers();
+							setTimeout(resolve, 100);
+							await promise;
+						});
+						process.env.MC_PROBE_VALIDATION = probe.join(",");
+					}
+				`,
+			);
+
+			const loaded = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError(error => {
+				errors.push(error);
+			});
+			// The base stays far above the 100 ms handler wait, so any kill can only
+			// come from the last accepted request (45 ms) — proving every rejected
+			// call above was a no-op and the replacement won.
+			testSetExtensionHandlerTimeoutMs(10_000);
+
+			vi.useFakeTimers();
+			try {
+				const messages: AgentMessage[] = [{ role: "user", content: "hello", timestamp: 1 }];
+				let settled = false;
+				const emitted = runner.emitContext(messages).then(result => {
+					settled = true;
+					return result;
+				});
+				// Bounded: a regression that never settles must fail the test, not
+				// hang the suite in a microtask/timer spin.
+				for (let tick = 0; tick < 10_000 && !settled; tick++) {
+					await Promise.resolve();
+					vi.advanceTimersByTime(1);
+				}
+				expect(settled).toBe(true);
+
+				expect(process.env.MC_PROBE_VALIDATION).toBe(
+					[
+						"range",
+						"range",
+						"range",
+						"range",
+						"range",
+						"range",
+						// A mistyped event must fail loudly: storing it would report success
+						// while granting nothing, and a typo in a budget is invisible.
+						"unknown-event",
+					].join(","),
+				);
+				// Dispatch behaviour, not storage: fail-open passthrough kept the input,
+				// and the watchdog killed the handler at the last valid 45 ms request.
+				expect(await emitted).toEqual(messages);
+				expect(errors).toContainEqual({
+					extensionPath,
+					event: "context",
+					error: "handler timed out after 45ms",
+				});
+			} finally {
+				vi.useRealTimers();
+				delete process.env.MC_PROBE_VALIDATION;
+			}
+		});
+
+		it("reports the same budget it will enforce when loader and runner share one settings instance", async () => {
+			const extensionPath = path.join(tempDir.path(), "consistent-budget-context.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						process.env.MC_PROBE_REPORTED = String(pi.setHandlerTimeout("context", 60_000));
+						pi.on("context", async event => {
+							const started = performance.now();
+							const { promise, resolve } = Promise.withResolvers();
+							setTimeout(resolve, 30);
+							await promise;
+							process.env.MC_PROBE_ACTUAL = String(Math.round(performance.now() - started));
+							return { messages: [...event.messages, { role: "user", content: "served", timestamp: 2 }] };
+						});
+					}
+				`,
+			);
+
+			// One Settings instance feeds both the loader (which answers the API call)
+			// and the runner (which enforces the watchdog). A request above the ceiling
+			// must be reported as the ceiling, not as the unrelated 10 ms base.
+			const settings = Settings.isolated({ "extensionHandlers.timeoutMs": 120 });
+			const loaded = await loadExtensions([extensionPath], tempDir.path(), undefined, settings);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				settings,
+			);
+			testSetExtensionHandlerTimeoutMs(10);
+
+			vi.useFakeTimers();
+			try {
+				let settled = false;
+				const emitted = runner.emitContext([{ role: "user", content: "hello", timestamp: 1 }]).then(messages => {
+					settled = true;
+					return messages;
+				});
+				// Bounded: a regression that never settles must fail the test, not
+				// hang the suite in a microtask/timer spin.
+				for (let tick = 0; tick < 10_000 && !settled; tick++) {
+					await Promise.resolve();
+					vi.advanceTimersByTime(1);
+				}
+				expect(settled).toBe(true);
+				const transformed = await emitted;
+
+				expect(process.env.MC_PROBE_REPORTED).toBe("120");
+				// Enforcement agreed with the reported figure: the 30 ms wait survived the
+				// 10 ms base because the shared ceiling allowed the raise.
+				expect(Number(process.env.MC_PROBE_ACTUAL)).toBeGreaterThanOrEqual(30);
+				const appended = transformed[transformed.length - 1] as Extract<AgentMessage, { role: "user" }>;
+				expect(appended.content).toBe("served");
+			} finally {
+				vi.useRealTimers();
+				delete process.env.MC_PROBE_REPORTED;
+				delete process.env.MC_PROBE_ACTUAL;
+			}
+		});
+
+		it("reports a tool_call budget measured against the same configured cap dispatch enforces", async () => {
+			const extensionPath = path.join(tempDir.path(), "tool-call-budget-report.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						process.env.MC_PROBE_TC_REPORT = String(pi.setHandlerTimeout("tool_call", 20_000));
+						process.env.MC_PROBE_TC_RESET = String(pi.setHandlerTimeout("tool_call", undefined));
+						pi.on("tool_call", async () => {
+							const { promise, resolve } = Promise.withResolvers();
+							setTimeout(resolve, 30);
+							await promise;
+						});
+					}
+				`,
+			);
+
+			// toolCallTimeoutMs: 40 — dispatch (emitToolCall) enforces 40 ms, so the
+			// 20 s request must be reported as 40, and the reset as the same
+			// configured cap rather than the generic 30 s default.
+			const settings = Settings.isolated({ "extensionHandlers.toolCallTimeoutMs": 40 });
+			const loaded = await loadExtensions([extensionPath], tempDir.path(), undefined, settings);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				settings,
+			);
+
+			vi.useFakeTimers();
+			try {
+				let settled = false;
+				const decision = runner
+					.emitToolCall({ type: "tool_call", toolName: "gated", toolCallId: "budget-report-call", input: {} })
+					.then(result => {
+						settled = true;
+						return result;
+					});
+				for (let tick = 0; tick < 10_000 && !settled; tick++) {
+					await Promise.resolve();
+					vi.advanceTimersByTime(1);
+				}
+				expect(settled).toBe(true);
+
+				// The 30 ms handler wait sits under the 40 ms configured cap, so the
+				// gate passes. A handler returning nothing aggregates to `undefined`
+				// (shared-events.ts:385); the point is that the gate did NOT block,
+				// and the reported figures matched what could have been enforced.
+				expect(await decision).toBeUndefined();
+				expect(process.env.MC_PROBE_TC_REPORT).toBe("40");
+				expect(process.env.MC_PROBE_TC_RESET).toBe("40");
+			} finally {
+				vi.useRealTimers();
+				delete process.env.MC_PROBE_TC_REPORT;
+				delete process.env.MC_PROBE_TC_RESET;
+			}
 		});
 
 		it("falls back to the default tool_call timeout for invalid configured values", async () => {
@@ -1903,7 +2380,7 @@ describe("ExtensionRunner", () => {
 					vi.advanceTimersByTime(0);
 					expect(await decision).toEqual({
 						block: true,
-						reason: `Extension ${extensionPath} timed out after ${EXTENSION_HANDLER_TIMEOUT_MS}ms`,
+						reason: `Extension ${extensionPath} handler timed out after ${EXTENSION_HANDLER_TIMEOUT_MS}ms`,
 					});
 				}
 			} finally {
@@ -2129,7 +2606,7 @@ describe("ExtensionRunner", () => {
 				await Promise.resolve();
 				await Promise.resolve();
 				vi.advanceTimersByTime(0);
-				await expect(execution).rejects.toThrow(`Extension ${extensionPath} timed out after 25ms`);
+				await expect(execution).rejects.toThrow(`Extension ${extensionPath} handler timed out after 25ms`);
 			} finally {
 				performanceNow.mockRestore();
 				vi.useRealTimers();
@@ -2199,7 +2676,7 @@ describe("ExtensionRunner", () => {
 				expect(settled).toBe(true);
 				expect(await decision).toEqual({
 					block: true,
-					reason: `Extension ${extensionPath} timed out after 10ms`,
+					reason: `Extension ${extensionPath} handler timed out after 10ms`,
 				});
 			} finally {
 				vi.useRealTimers();

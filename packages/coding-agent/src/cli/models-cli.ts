@@ -310,6 +310,8 @@ export interface RunModelsListingOptions {
 	disabledExtensionIds?: string[];
 	/** When true, exclude ambient factories and resolve only `additionalExtensionPaths`. */
 	disableExtensionDiscovery?: boolean;
+	/** Settings whose handler-budget ceiling governs extension loading and shutdown dispatch. */
+	settings?: Settings;
 }
 
 export async function runModelsListing(options: RunModelsListingOptions): Promise<void> {
@@ -336,6 +338,7 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 		eventBus,
 		disableExtensionDiscovery ? undefined : disabledExtensionIds,
 		{ ambient: !disableExtensionDiscovery, includeAmbientHooks: false },
+		options.settings,
 	);
 	const extensionRunner =
 		extensionsResult.extensions.length > 0
@@ -345,6 +348,8 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 					cwd,
 					SessionManager.inMemory(cwd),
 					modelRegistry,
+					undefined,
+					options.settings,
 				)
 			: undefined;
 
@@ -417,6 +422,7 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 			settingsExtensions: cfgExtensions.get(settings),
 			disabledExtensionIds: cfgDisabledExtensions.get(settings),
 			disableExtensionDiscovery: Boolean(command.flags.noExtensions),
+			settings,
 		});
 	} finally {
 		authStorage.close();

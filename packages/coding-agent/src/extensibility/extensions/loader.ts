@@ -38,12 +38,22 @@ import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/leg
 import { getAllPluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
+import type { Settings } from "../../config/settings";
+import {
+	MAX_TIMER_DELAY_MS,
+	baseHandlerTimeoutForEvent,
+	configuredHandlerTimeoutCeiling,
+	fallbackHandlerTimeout,
+	isPolicyCappedEvent,
+	resolveHandlerTimeoutMs,
+} from "./runner";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
 	AssistantThinkingRenderer,
 	Extension,
 	ExtensionAPI,
 	ExtensionContext,
+	ExtensionEvent,
 	ExtensionFactory,
 	ExtensionRuntime as IExtensionRuntime,
 	LoadExtensionsResult,
@@ -172,6 +182,63 @@ export class ExtensionRuntime implements IExtensionRuntime {
 }
 
 /**
+ * Every event name the runner can dispatch, exhaustively checked against
+ * {@link ExtensionEvent}. `setHandlerTimeout` validates against this because a
+ * mistyped name would otherwise be stored under a key no dispatch path reads,
+ * and the call would report success while granting nothing.
+ */
+const EXTENSION_EVENT_NAMES: Record<ExtensionEvent["type"], true> = {
+	resources_discover: true,
+	session_start: true,
+	session_before_switch: true,
+	session_switch: true,
+	session_before_branch: true,
+	session_branch: true,
+	session_before_compact: true,
+	"session.compacting": true,
+	cache_warming_decision: true,
+	session_compact: true,
+	session_shutdown: true,
+	session_before_tree: true,
+	session_tree: true,
+	context: true,
+	before_provider_request: true,
+	after_provider_response: true,
+	before_agent_start: true,
+	before_subagent_spawn: true,
+	agent_start: true,
+	agent_end: true,
+	session_stop: true,
+	turn_start: true,
+	turn_end: true,
+	message_start: true,
+	message_update: true,
+	message_end: true,
+	assistant_message: true,
+	tool_execution_start: true,
+	tool_execution_update: true,
+	tool_execution_end: true,
+	auto_compaction_start: true,
+	auto_compaction_end: true,
+	auto_retry_start: true,
+	auto_retry_end: true,
+	retry_fallback_applied: true,
+	retry_fallback_succeeded: true,
+	ttsr_triggered: true,
+	todo_reminder: true,
+	goal_updated: true,
+	credential_disabled: true,
+	input: true,
+	tool_approval_requested: true,
+	tool_approval_resolved: true,
+	tool_call: true,
+	tool_result: true,
+	user_bash: true,
+	user_python: true,
+	mcp_notification: true,
+};
+
+/**
  * ExtensionAPI implementation for an extension.
  * Registration methods write to the extension object.
  * Action methods delegate to the shared runtime.
@@ -194,6 +261,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		private readonly runtime: IExtensionRuntime,
 		private readonly cwd: string,
 		public readonly events: EventBus,
+		private readonly settings?: Settings,
 	) {
 		// Extensions destructure `pi.on` or forward API methods as callbacks, so every
 		// prototype method must keep its receiver when detached. Walk the prototype
@@ -211,6 +279,43 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		const list = this.extension.handlers.get(event) ?? [];
 		list.push(handler);
 		this.extension.handlers.set(event, list);
+	}
+
+	setHandlerTimeout(event: ExtensionEvent["type"], timeoutMs: number | undefined): number {
+		// Validate before touching stored state, so a rejected call leaves the
+		// previous request in place.
+		if (
+			timeoutMs !== undefined &&
+			(!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMER_DELAY_MS)
+		) {
+			throw new RangeError(`Handler timeout must be a positive integer no greater than ${MAX_TIMER_DELAY_MS}ms`);
+		}
+		if (!Object.hasOwn(EXTENSION_EVENT_NAMES, event)) {
+			throw new RangeError(
+				`Unknown extension event "${String(event)}"; expected one of ${Object.keys(EXTENSION_EVENT_NAMES).join(", ")}`,
+			);
+		}
+		const baseMs = baseHandlerTimeoutForEvent(event, this.settings);
+		if (timeoutMs === undefined) {
+			this.extension.handlerTimeouts?.delete(event);
+			return fallbackHandlerTimeout(event, baseMs, this.settings);
+		}
+		// The map is allocated lazily so extensions that never call this keep the
+		// exact object shape existing fixtures and equality checks rely on.
+		(this.extension.handlerTimeouts ??= new Map()).set(event, timeoutMs);
+		const effectiveMs = resolveHandlerTimeoutMs(
+			timeoutMs,
+			configuredHandlerTimeoutCeiling(this.settings),
+			baseMs,
+			isPolicyCappedEvent(event),
+		);
+		logger.info("Extension handler budget requested", {
+			extensionPath: this.extension.path,
+			event,
+			requestedMs: timeoutMs,
+			effectiveMs,
+		});
+		return effectiveMs;
 	}
 
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
@@ -441,6 +546,7 @@ async function bindExtension(
 	cwd: string,
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
+	settings?: Settings,
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const factory = imported.factory;
 	if (imported.error !== null || factory === null) {
@@ -448,7 +554,7 @@ async function bindExtension(
 	}
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
-		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
+		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus, settings);
 		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
 
 		return { extension, error: null };
@@ -467,9 +573,10 @@ export async function loadExtensionFromFactory(
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
 	name = "<inline>",
+	settings?: Settings,
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
-	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
+	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus, settings);
 	await runExtensionFactory(factory, api, runtime);
 	return extension;
 }
@@ -482,9 +589,14 @@ export async function loadExtensionFromFactory(
  * sequentially in the original path order, so registration semantics
  * (last-wins collisions, shared runtime flag defaults) stay deterministic.
  */
-export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
+export async function loadExtensions(
+	paths: string[],
+	cwd: string,
+	eventBus?: EventBus,
+	settings?: Settings,
+): Promise<LoadExtensionsResult> {
 	const preparedExtensions = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd)));
-	return bindPreparedExtensions(preparedExtensions, cwd, eventBus);
+	return bindPreparedExtensions(preparedExtensions, cwd, eventBus, settings);
 }
 
 /** Bind previously imported extension factories to a fresh session runtime. */
@@ -492,6 +604,7 @@ export async function bindPreparedExtensions(
 	preparedExtensions: readonly PreparedExtension[],
 	cwd: string,
 	eventBus?: EventBus,
+	settings?: Settings,
 ): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
@@ -499,7 +612,14 @@ export async function bindPreparedExtensions(
 	const runtime = new ExtensionRuntime();
 
 	for (const prepared of preparedExtensions) {
-		const { extension, error } = await bindExtension(prepared.path, prepared, cwd, resolvedEventBus, runtime);
+		const { extension, error } = await bindExtension(
+			prepared.path,
+			prepared,
+			cwd,
+			resolvedEventBus,
+			runtime,
+			settings,
+		);
 
 		if (error) {
 			errors.push({ path: prepared.path, error });
@@ -671,7 +791,8 @@ export async function discoverAndLoadExtensions(
 	eventBus?: EventBus,
 	disabledExtensionIds?: string[],
 	options: DiscoverExtensionPathOptions = {},
+	settings?: Settings,
 ): Promise<LoadExtensionsResult> {
 	const paths = await discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds, options);
-	return loadExtensions(paths, cwd, eventBus);
+	return loadExtensions(paths, cwd, eventBus, settings);
 }
