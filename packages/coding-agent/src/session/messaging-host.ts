@@ -162,11 +162,11 @@ export function peerAddressDisplay(session: AgentSession): string {
 	return reason ? `unavailable — ${reason}` : "off";
 }
 
-export function messagingEnvFor(session: { readonly messaging?: MessagingService }): {
+export function messagingEnvFor(session: { readonly messaging?: MessagingService } | undefined): {
 	set: Record<string, string>;
 	strip: readonly ["OMP_MESSAGING_SOCKET", "OMP_MESSAGING_TOKEN"];
 } {
-	return { set: session.messaging ? { ...session.messaging.env } : {}, strip: messagingEnvKeys };
+	return { set: session?.messaging ? { ...session.messaging.env } : {}, strip: messagingEnvKeys };
 }
 
 export function ownSessionLine(session: { readonly messaging?: MessagingService }): string | undefined {

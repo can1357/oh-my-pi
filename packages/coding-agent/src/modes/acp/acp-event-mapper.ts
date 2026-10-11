@@ -191,6 +191,14 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 	options: AcpEventMapperOptions = {},
 ): SessionNotification[] {
 	switch (event.type) {
+		case "notice":
+			if (event.source !== "messaging") return [];
+			return [
+				toSessionNotification(sessionId, {
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text", text: event.message },
+				}),
+			];
 		case "irc_message": {
 			const { customType, details } = event.message;
 			if (

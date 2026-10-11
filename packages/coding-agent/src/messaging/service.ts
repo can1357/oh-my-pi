@@ -7,13 +7,11 @@ import type { SessionTitleSource } from "../session/session-entries";
 import { droppedMessageText, IdleSubscriptions } from "./idle";
 import { InboundGate, type OutgoingNotice } from "./inbound";
 import {
-	drainOffline,
 	drainOfflineUnlocked,
 	enqueueOfflineUnlocked,
 	listOfflineSessions,
 	mailboxDir,
 	withOfflineMailboxLock,
-	type DrainedMail,
 	type OfflineSession,
 	type StoredMessage,
 	type StoredRefusalNotice,
@@ -121,6 +119,7 @@ export class MessagingService {
 	#closing: Promise<void> | undefined;
 	#retiring: Promise<void> = Promise.resolve();
 	readonly #buffer: BufferedDelivery[] = [];
+	#offlineReplies: Array<() => Promise<void>> | undefined;
 	readonly #sent = new Map<string, number[]>();
 	// ponytail: retirement notices older than the 1024 most recent sends cannot be correlated.
 	readonly #outgoing = new LRUCache<string, { entryId?: string; sessionId: string }>({ max: 1024 });
@@ -201,12 +200,7 @@ export class MessagingService {
 				{ sessionId: service.#ownSessionId() },
 			);
 			initialized.resolve(service.#sender());
-			const mail = await withOfflineMailboxLock(
-				service.#ownSessionId(),
-				() => drainOfflineUnlocked(service.#ownSessionId(), { dir: service.#publication.registryDir }),
-				{ dir: service.#publication.registryDir },
-			);
-			await service.#deliverOfflineMail(mail);
+			await service.#drainOfflineMail(service.#ownSessionId());
 			return service;
 		} catch (error) {
 			service.#unsubscribe();
@@ -719,9 +713,13 @@ export class MessagingService {
 	}
 
 	async #reply(sender: SenderInfo, notice: OutgoingNotice, from = this.#sender()): Promise<void> {
+		if (this.#offlineReplies) {
+			this.#offlineReplies.push(() => this.#reply(sender, notice, from));
+			return;
+		}
 		try {
 			const dir = this.#publication.registryDir;
-			const entry = (await listInboxEntries({ dir })).find(item => item.entryId === sender.entryId);
+			const entry = (await readInboxEntries({ dir })).find(item => item.entryId === sender.entryId);
 			if (!entry || entry.entryId === this.#publication.entryId || entry.version !== MESSAGING_WIRE_VERSION) return;
 			await requestInbox(
 				entry,
@@ -762,7 +760,7 @@ export class MessagingService {
 		}
 		this.#publication = publication;
 		await previous.close();
-		await this.#deliverOfflineMail(await drainOffline(receiver.sessionId, { dir: publication.registryDir }));
+		await this.#drainOfflineMail(receiver.sessionId);
 	}
 
 	async #notifyOfflineRefusal(message: StoredMessage): Promise<void> {
@@ -810,55 +808,66 @@ export class MessagingService {
 		}
 	}
 
-	async #deliverOfflineMail(
-		mail: DrainedMail[],
-		arrival = "arrived while this session was not running",
-	): Promise<void> {
+	async #drainOfflineMail(sessionId: string, arrival = "arrived while this session was not running"): Promise<void> {
 		if (this.#receivingStopped || this.#closed) return;
+		const dir = this.#publication.registryDir;
+		const replies: Array<() => Promise<void>> = [];
 		let admitted = 0;
 		this.#batching++;
 		try {
-			for (const { message, ack } of mail) {
-				if (this.#receivingStopped || this.#closed) break;
-				if (!("body" in message)) {
-					if (message.toSessionId === this.#ownSessionId())
-						this.#deliver({
-							type: "receipt",
-							recipientSessionId: this.#ownSessionId(),
-							text: `Your offline message to ${peerDisplayText(message.from.name ?? message.from.shortId)} was refused.`,
-						});
-					await ack();
-					continue;
-				}
-				const result = this.#gate.receiveOffline(message);
-				if (
-					result.ok &&
-					"outcome" in result &&
-					(result.outcome === "delivered" || result.outcome === "queued" || result.outcome === "held")
-				) {
-					await ack();
-					admitted++;
-				} else if (
-					result.ok &&
-					"outcome" in result &&
-					(result.outcome === "refused" || (result.outcome === "dropped" && result.reason !== "queue_full"))
-				) {
-					if (result.outcome === "refused") await this.#notifyOfflineRefusal(message);
-					else if (result.outcome === "dropped")
-						await this.#reply(message.from, {
-							type: "notice",
-							kind: "dropped",
-							reason: result.reason,
-							aboutId: message.id,
-						});
-					await ack();
-				}
-			}
+			await withOfflineMailboxLock(
+				sessionId,
+				async () => {
+					this.#offlineReplies = replies;
+					for (const { message, ack } of await drainOfflineUnlocked(sessionId, { dir })) {
+						if (this.#receivingStopped || this.#closed) break;
+						if (!("body" in message)) {
+							if (message.toSessionId === this.#ownSessionId())
+								this.#deliver({
+									type: "receipt",
+									recipientSessionId: this.#ownSessionId(),
+									text: `Your offline message to ${peerDisplayText(message.from.name ?? message.from.shortId)} was refused.`,
+								});
+							await ack();
+							continue;
+						}
+						const result = this.#gate.receiveOffline(message);
+						if (
+							result.ok &&
+							"outcome" in result &&
+							(result.outcome === "delivered" || result.outcome === "queued" || result.outcome === "held")
+						) {
+							await ack();
+							admitted++;
+						} else if (
+							result.ok &&
+							"outcome" in result &&
+							(result.outcome === "refused" || (result.outcome === "dropped" && result.reason !== "queue_full"))
+						) {
+							if (result.outcome === "refused") replies.push(() => this.#notifyOfflineRefusal(message));
+							else if (result.outcome === "dropped") {
+								const notice: OutgoingNotice = {
+									type: "notice",
+									kind: "dropped",
+									reason: result.reason,
+									aboutId: message.id,
+								};
+								replies.push(() => this.#reply(message.from, notice));
+							}
+							await ack();
+						}
+					}
+				},
+				{ dir },
+			);
 		} finally {
+			this.#offlineReplies = undefined;
 			this.#batching--;
 			this.#flush();
+			if (admitted > 0) this.host.showNotice(`${admitted} message(s) from other sessions ${arrival}.`);
+			// Admission may evict held mail too; all sender I/O waits until the handoff lock is released.
+			await Promise.all(replies.map(reply => reply()));
 		}
-		if (admitted > 0) this.host.showNotice(`${admitted} message(s) from other sessions ${arrival}.`);
 	}
 
 	turnSettledIdle(): void {
@@ -876,7 +885,7 @@ export class MessagingService {
 		const sessionId = this.#ownSessionId();
 		// Skip the lock entirely in the common empty case: this runs after every turn.
 		if ((await fs.readdir(mailboxDir(sessionId, { dir })).catch(() => [])).length === 0) return;
-		await this.#deliverOfflineMail(await drainOffline(sessionId, { dir }), "were waiting in this session's mailbox");
+		await this.#drainOfflineMail(sessionId, "were waiting in this session's mailbox");
 	}
 
 	close(): Promise<void> {

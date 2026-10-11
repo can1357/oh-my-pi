@@ -159,6 +159,38 @@ describe("top-level cross-session delivery", () => {
 		} as ToolSession;
 	}
 
+	it("avoids peer snapshots for file-only mentions and retains mixed session mentions", async () => {
+		const sender = await makeSession("sender");
+		await makeSession("peer");
+		await Bun.write(temp.join("notes.txt"), "FILE_MENTION_CONTENT");
+		const request = vi.spyOn(transport, "requestInbox");
+		const list = vi.spyOn(transport, "listInboxEntries");
+		request.mockClear();
+		list.mockClear();
+		await sender.session.prompt("Read @notes.txt");
+		expect(request.mock.calls.filter(([, message]) => message.type === "snapshot")).toHaveLength(0);
+		expect(list.mock.calls).toHaveLength(0);
+		expect(JSON.stringify(sender.contexts.at(-1)!.messages)).toContain("FILE_MENTION_CONTENT");
+		await sender.session.prompt("Read @notes.txt and ask @peer");
+		expect(request.mock.calls.some(([, message]) => message.type === "snapshot")).toBe(true);
+		expect(
+			sender.session.messages.filter(
+				message => message.role === "custom" && message.customType === "session-mention",
+			),
+		).toHaveLength(1);
+		expect(JSON.stringify(sender.contexts.at(-1)!.messages)).toContain("FILE_MENTION_CONTENT");
+		request.mockClear();
+		list.mockClear();
+		await sender.session.prompt("Ask @peer");
+		expect(request.mock.calls.filter(([, message]) => message.type === "snapshot")).toHaveLength(0);
+		expect(list.mock.calls).toHaveLength(0);
+		expect(
+			sender.session.messages.filter(
+				message => message.role === "custom" && message.customType === "session-mention",
+			),
+		).toHaveLength(2);
+	});
+
 	it.each([
 		["<alice>", "&lt;alice&gt;"],
 		['x"><y&z', "x&quot;&gt;&lt;y&amp;z"],

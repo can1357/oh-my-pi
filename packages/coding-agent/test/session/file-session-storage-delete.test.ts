@@ -8,6 +8,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import * as mailbox from "@oh-my-pi/pi-coding-agent/messaging/mailbox";
 import * as transport from "@oh-my-pi/pi-coding-agent/messaging/transport";
 
+afterEach(() => vi.restoreAllMocks());
 describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 	let tmpRoot = "";
 
@@ -143,4 +144,67 @@ it.each(["mail", "registry"] as const)(
 			temp[Symbol.dispose]();
 		}
 	},
+);
+
+it.skipIf(process.platform !== "win32" && process.getuid?.() === 0)(
+	"preserves artifact error when mail cleanup also fails",
+	async () => {
+		const temp = TempDir.createSync("@omp-delete-precedence-");
+		const registry = temp.join("messaging");
+		const artifacts = temp.join("owner");
+		let holder: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined;
+		try {
+			await fs.mkdir(registry, { mode: 0o700 });
+			await Bun.write(path.join(registry, "mail"), "not a mail directory");
+			vi.spyOn(transport, "messagingRegistryDir").mockReturnValue(registry);
+			await fs.mkdir(artifacts);
+			const locked = path.join(artifacts, "locked.log");
+			await Bun.write(locked, "artifact");
+			if (process.platform === "win32") {
+				holder = Bun.spawn(
+					[
+						"powershell.exe",
+						"-NoProfile",
+						"-NonInteractive",
+						"-Command",
+						"$f=[IO.File]::Open($env:LOCKED_FILE,'Open','Read','None'); [Console]::WriteLine('READY'); [Console]::ReadLine() | Out-Null; $f.Dispose()",
+					],
+					{
+						env: { ...process.env, LOCKED_FILE: locked },
+						stdin: "pipe",
+						stdout: "pipe",
+						stderr: "pipe",
+					},
+				);
+				const reader = holder.stdout.getReader();
+				const ready = await reader.read();
+				reader.releaseLock();
+				expect(new TextDecoder().decode(ready.value)).toContain("READY");
+			} else {
+				await fs.chmod(artifacts, 0o500);
+			}
+			const file = `${artifacts}.jsonl`;
+			await Bun.write(file, '{"type":"session","id":"precedence-owner"}\n');
+			await expect(new FileSessionStorage().deleteSessionWithArtifactsIf(file, () => true)).rejects.toThrow(
+				"artifacts directory",
+			);
+			expect(await Bun.file(file).exists()).toBe(false);
+			expect(await Bun.file(locked).exists()).toBe(true);
+			const mailOnly = temp.join("mail-only.jsonl");
+			await Bun.write(mailOnly, '{"type":"session","id":"mail-only"}\n');
+			await expect(new FileSessionStorage().deleteSessionWithArtifactsIf(mailOnly, () => true)).rejects.toThrow(
+				"not a directory",
+			);
+			expect(await Bun.file(mailOnly).exists()).toBe(false);
+		} finally {
+			if (holder) {
+				holder.stdin.write("\n");
+				holder.stdin.end();
+				await holder.exited;
+			}
+			if (process.platform !== "win32") await fs.chmod(artifacts, 0o700);
+			temp.removeSync();
+		}
+	},
+	15_000,
 );

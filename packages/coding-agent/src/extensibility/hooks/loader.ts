@@ -121,9 +121,7 @@ async function createHookAPI(
 			commands.set(name, { name, ...options });
 		},
 		exec(command: string, args: string[], options?: ExecOptions) {
-			const messagingEnv = session
-				? messagingEnvFor(session)
-				: { set: {}, strip: ["OMP_MESSAGING_SOCKET", "OMP_MESSAGING_TOKEN"] as const };
+			const messagingEnv = messagingEnvFor(session);
 			return execCommand(command, args, options?.cwd ?? cwd, {
 				...options,
 				env: { ...options?.env, ...messagingEnv.set },

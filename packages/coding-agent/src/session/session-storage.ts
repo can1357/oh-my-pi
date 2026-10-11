@@ -1292,8 +1292,10 @@ export class FileSessionStorage implements SessionStorage {
 	): Promise<boolean> {
 		let sessionId: string | undefined;
 		let unlinked = false;
+		let deleted = false;
+		let cleanupError: Error | undefined;
 		try {
-			return this.withSessionFileLockSync(sessionPath, () => {
+			deleted = this.withSessionFileLockSync(sessionPath, () => {
 				const content = fs.readFileSync(sessionPath, "utf-8");
 				if (!shouldDelete(content)) return false;
 				sessionId = readSessionHeaderIdSync(sessionPath);
@@ -1312,10 +1314,17 @@ export class FileSessionStorage implements SessionStorage {
 				}
 				return true;
 			});
-		} finally {
+		} catch (error) {
+			cleanupError = toError(error);
+		}
+		try {
 			if (unlinked && sessionId)
 				await retireOfflineMailbox(sessionId, { dir: (await resolveRegistry(messagingRegistryDir(), false)).dir });
+		} catch (error) {
+			cleanupError ??= toError(error);
 		}
+		if (cleanupError) throw cleanupError;
+		return deleted;
 	}
 
 	/**

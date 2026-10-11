@@ -69,7 +69,3 @@ export function claimSessionName(requested: string, taken: ReadonlySet<string>):
 export function formatAddressForUrl(name: string): string {
 	return encodeURIComponent(name);
 }
-
-export function encodeAddressForUrl(name: string): string {
-	return encodeURIComponent(name);
-}

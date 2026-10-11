@@ -51,7 +51,8 @@ export function messagingRegistryDir(): string {
 	return path.join(getBaseConfigRoot(), "run", "messaging");
 }
 
-function registryFor(dir: string): LocalEndpointRegistry {
+/** Messaging's endpoint-registry configuration rooted at `dir`; does not pick a fallback root. */
+export function registryFor(dir: string): LocalEndpointRegistry {
 	return {
 		dir,
 		pipePrefix: "omp-msg",
@@ -103,33 +104,40 @@ async function readPeerKey(registry: LocalEndpointRegistry): Promise<string> {
 	const pending = peerKeyReads.get(keyPath);
 	if (pending) return pending;
 	const read = (async (): Promise<string> => {
+		// Never expose an empty key: publish a flushed sibling with no replacement.
+		let handle: fs.promises.FileHandle;
+		const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
 		try {
-			const handle = await fs.promises.open(keyPath, "wx", 0o600);
-			const key = crypto.randomBytes(32).toString("hex");
-			try {
-				await handle.writeFile(key, "utf8");
-			} finally {
-				await handle.close();
-			}
-			return key;
+			handle = await fs.promises.open(keyPath, flags);
 		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+			if (!isEnoent(err)) throw err;
+			const staging = `${keyPath}.${process.pid}.${crypto.randomUUID()}`;
+			const staged = await fs.promises.open(staging, "wx", 0o600);
+			try {
+				try {
+					await staged.writeFile(crypto.randomBytes(32).toString("hex"), "utf8");
+					await staged.sync();
+				} finally {
+					await staged.close();
+				}
+				try {
+					await fs.promises.link(staging, keyPath);
+				} catch (linkError) {
+					if ((linkError as NodeJS.ErrnoException).code !== "EEXIST") throw linkError;
+				}
+			} finally {
+				await fs.promises.unlink(staging);
+			}
+			handle = await fs.promises.open(keyPath, flags);
 		}
 		// Windows relies on the private profile ACL, not a SID-owner API.
-		const handle = await fs.promises.open(keyPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
 		try {
 			const stat = await handle.stat();
 			if (!stat.isFile() || (process.platform !== "win32" && stat.uid !== process.getuid?.())) {
 				throw new Error("Messaging peer key is not a current-user file");
 			}
 			if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) await handle.chmod(0o600);
-			// An O_EXCL winner in another process may still be writing its 64-byte key.
-			const deadline = Date.now() + 1_000;
-			let key = await handle.readFile("utf8");
-			while (key.length === 0 && Date.now() < deadline) {
-				await Bun.sleep(5);
-				key = await handle.readFile("utf8");
-			}
+			const key = await handle.readFile("utf8");
 			if (!/^[0-9a-f]{64}$/.test(key)) throw new Error("Invalid messaging peer key");
 			return key;
 		} finally {
@@ -434,10 +442,11 @@ function parseResponse(raw: unknown): InboxResponse | undefined {
 export async function requestInbox(
 	entry: InboxEntry,
 	request: InboxRequest,
-	options?: { timeoutMs?: number; signal?: AbortSignal; dir?: string },
+	options?: { timeoutMs?: number; signal?: AbortSignal; dir?: string; expectProof?: true },
 ): Promise<InboxResponse> {
 	if (options?.signal?.aborted) return { ok: false, error: "aborted" };
-	if (process.platform === "win32" && entry.version !== MESSAGING_WIRE_VERSION) {
+	const expectProof = process.platform === "win32" || options?.expectProof === true;
+	if (expectProof && entry.version !== MESSAGING_WIRE_VERSION) {
 		return { ok: false, error: "unsupported_protocol" };
 	}
 	const serialized = JSON.stringify(request);
@@ -456,7 +465,7 @@ export async function requestInbox(
 	const socket = net.createConnection({ path: entry.endpoint });
 	let buffer = "";
 	let finished = false;
-	let awaitingProof = process.platform === "win32";
+	let awaitingProof = expectProof;
 	const challenge: ServerChallengeLine | undefined = awaitingProof
 		? { type: "challenge", nonce: crypto.randomBytes(32).toString("hex") }
 		: undefined;

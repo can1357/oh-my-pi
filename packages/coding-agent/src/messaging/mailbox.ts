@@ -5,15 +5,8 @@ import { isEnoent, withFileLock } from "@oh-my-pi/pi-utils";
 import { assertPrivateDir, ensurePrivateDir } from "../ipc/local-endpoint-registry";
 import { listLocalSessionsWithRegisteredFiles, type SessionInfo } from "../session/session-listing";
 import { sessionAddress, sessionShortId } from "./names";
-import {
-	type InboxRequest,
-	isMailboxSessionId,
-	MAX_SERIALIZED_CHARS,
-	MESSAGING_WIRE_VERSION,
-	parseInboxRequest,
-	type SenderInfo,
-} from "./protocol";
-import { messagingRegistryDir } from "./transport";
+import { type InboxRequest, isMailboxSessionId, parseInboxRequest, type SenderInfo } from "./protocol";
+import { messagingRegistryDir, registryFor } from "./transport";
 
 export const OFFLINE_INBOX_CAP = 50;
 export const OFFLINE_INBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -83,13 +76,7 @@ export async function listOfflineSessions(options?: {
 }
 
 async function mailboxFiles(dir: string, create: boolean): Promise<string[]> {
-	const registry = {
-		dir: path.dirname(path.dirname(dir)),
-		pipePrefix: "omp-msg",
-		version: MESSAGING_WIRE_VERSION,
-		maxRequestBytes: MAX_SERIALIZED_CHARS,
-		maxResponseBytes: MAX_SERIALIZED_CHARS,
-	};
+	const registry = registryFor(path.dirname(path.dirname(dir)));
 	try {
 		for (const privateDir of [registry.dir, path.dirname(dir), dir]) {
 			if (create) await ensurePrivateDir(registry, privateDir);
@@ -150,13 +137,7 @@ export async function withOfflineMailboxLock<T>(
 	options?: { dir?: string; signal?: AbortSignal },
 ): Promise<T> {
 	const inbox = mailboxDir(sessionId, options);
-	const registry = {
-		dir: path.dirname(path.dirname(inbox)),
-		pipePrefix: "omp-msg",
-		version: MESSAGING_WIRE_VERSION,
-		maxRequestBytes: MAX_SERIALIZED_CHARS,
-		maxResponseBytes: MAX_SERIALIZED_CHARS,
-	};
+	const registry = registryFor(path.dirname(path.dirname(inbox)));
 	for (const dir of [registry.dir, path.dirname(inbox)]) await ensurePrivateDir(registry, dir);
 	return withFileLock(path.join(path.dirname(inbox), `.${sessionId}.handoff`), fn, { signal: options?.signal });
 }
@@ -215,15 +196,22 @@ export async function drainOfflineUnlocked(
 		if (message && message.sentAt >= cutoff)
 			messages.push({
 				message,
-				ack: () => withOfflineMailboxLock(sessionId, () => fs.promises.rm(file, { force: true }), options),
+				ack: () => fs.promises.rm(file, { force: true }),
 			});
 		else await fs.promises.rm(file, { force: true });
 	}
 	return messages.sort((a, b) => a.message.sentAt - b.message.sentAt);
 }
 
-export function drainOffline(sessionId: string, options?: { dir?: string; now?: number }): Promise<DrainedMail[]> {
-	return withOfflineMailboxLock(sessionId, () => drainOfflineUnlocked(sessionId, options), options);
+export async function drainOffline(
+	sessionId: string,
+	options?: { dir?: string; now?: number },
+): Promise<DrainedMail[]> {
+	const mail = await withOfflineMailboxLock(sessionId, () => drainOfflineUnlocked(sessionId, options), options);
+	return mail.map(({ message, ack }) => ({
+		message,
+		ack: () => withOfflineMailboxLock(sessionId, ack, options),
+	}));
 }
 
 export async function retireOfflineMailbox(sessionId: string, options?: { dir?: string }): Promise<void> {

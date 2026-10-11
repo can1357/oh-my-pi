@@ -318,9 +318,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	exec(command: string, args: string[], options?: ExecOptions) {
 		const session = execSessions.get(this.runtime);
-		const messagingEnv = session
-			? messagingEnvFor(session)
-			: { set: {}, strip: ["OMP_MESSAGING_SOCKET", "OMP_MESSAGING_TOKEN"] as const };
+		const messagingEnv = messagingEnvFor(session);
 		return execCommand(command, args, options?.cwd ?? this.cwd, {
 			...options,
 			env: { ...options?.env, ...messagingEnv.set },

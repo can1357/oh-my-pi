@@ -241,3 +241,80 @@ test("accepted print turns can send real replies after cutoff and before full bi
 		await temp.remove();
 	}
 });
+
+test.each(["text", "json"] as const)(
+	"print %s routes messaging notices without contaminating the answer",
+	async mode => {
+		const temp = TempDir.createSync("@print-messaging-notice-");
+		const manager = SessionManager.inMemory(temp.path());
+		const output: string[] = [];
+		const diagnostics: string[] = [];
+		const answer = assistant("CLI answer");
+		const notice = {
+			type: "notice",
+			level: "info",
+			source: "messaging",
+			message: "Messaging status",
+		} as const;
+		const otherNotice = { ...notice, source: "other", message: "Other status" };
+		let subscriber: ((event: AgentSessionEvent) => void) | undefined;
+		vi.spyOn(process.stdout, "write").mockImplementation(((chunk: unknown, callback?: (error?: Error) => void) => {
+			output.push(String(chunk));
+			callback?.();
+			return true;
+		}) as never);
+		vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+			diagnostics.push(String(chunk));
+			return true;
+		}) as never);
+		const session = {
+			disableStopTimeTodoReminders: () => {},
+			settings: Settings.isolated({ "messaging.enabled": false }),
+			sessionManager: manager,
+			extensionRunner: undefined,
+			isStreaming: false,
+			hasAdmittedSubmission: false,
+			queuedMessageCount: 0,
+			agent: { hasQueuedMessages: () => false },
+			hasPendingAsyncWork: () => false,
+			subscribe: (listener: (event: AgentSessionEvent) => void) => {
+				subscriber = listener;
+				return () => {};
+			},
+			prompt: async (_text: string, opts: { onPromptAdmitted?: () => void }) => {
+				opts.onPromptAdmitted?.();
+				subscriber?.({ type: "agent_start" });
+				subscriber?.(notice);
+				subscriber?.(otherNotice);
+				subscriber?.({ type: "agent_end", messages: [answer], yielded: true });
+				return true;
+			},
+			waitForIdle: async () => {},
+			getLastAssistantMessage: () => answer,
+			setTextOutputCommitted: () => {},
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForAdvisorCatchup: async () => true,
+			dispose: async () => {},
+		} as unknown as AgentSession;
+		try {
+			expect(await runPrintMode(session, { mode, initialMessage: "answer me" })).toBe(0);
+			if (mode === "text") {
+				expect(output.join("")).toBe("CLI answer\n");
+				expect(diagnostics.join("")).toContain(`${notice.message}\n`);
+				expect(diagnostics.join("")).not.toContain(otherNotice.message);
+			} else {
+				const notices = output
+					.join("")
+					.trim()
+					.split("\n")
+					.map(line => JSON.parse(line))
+					.filter(event => event.type === "notice");
+				expect(notices).toEqual([notice, otherNotice]);
+				expect(diagnostics.join("")).not.toContain(notice.message);
+			}
+		} finally {
+			await manager.close();
+			await temp.remove();
+		}
+	},
+);

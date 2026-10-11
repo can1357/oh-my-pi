@@ -5691,6 +5691,14 @@ export class AgentSession implements SettingsScope {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		// Teardown disposers may start asynchronous messaging drains immediately.
+		// Stop warming before any of those drain windows can issue another request.
+		if (this.#cacheWarmer) {
+			this.#cacheWarmer.onWarmed = undefined;
+			this.#cacheWarmer.onRefreshStart = undefined;
+			this.#cacheWarmer.onRefreshEnd = undefined;
+			this.#cacheWarmer.cancel();
+		}
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
@@ -5857,19 +5865,9 @@ export class AgentSession implements SettingsScope {
 	}
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
-		this.#isDisposed = true;
 		this.#recordSessionExit(options.reason ?? "dispose");
 		this.beginDispose();
 		await this.#messaging?.close();
-		// Stop cache warming before the drain windows below: an armed tick firing
-		// mid-dispose would issue a paid warm request and persist usage into the
-		// closing session writer.
-		if (this.#cacheWarmer) {
-			this.#cacheWarmer.onWarmed = undefined;
-			this.#cacheWarmer.onRefreshStart = undefined;
-			this.#cacheWarmer.onRefreshEnd = undefined;
-			this.#cacheWarmer.cancel();
-		}
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
 		this.#cancelFatalRecoveryHint?.();
@@ -8156,22 +8154,22 @@ export class AgentSession implements SettingsScope {
 				}
 				const messaging = this.#messaging;
 				if (messaging) {
-					if (
-						this.#sessionMentionCache?.service !== messaging ||
-						Date.now() - this.#sessionMentionCache.refreshedAt >= 5_000
-					) {
-						this.#sessionMentionCache = {
-							service: messaging,
-							refreshedAt: Date.now(),
-							sessions: await messaging.listSessions(setupAbort.signal),
-						};
-					}
 					for (const mention of fileMentions) {
 						try {
 							await Bun.file(resolveReadPath(mention, this.sessionManager.getCwd())).stat();
 							continue;
 						} catch {
 							// Non-file mentions may identify another live session.
+						}
+						if (
+							this.#sessionMentionCache?.service !== messaging ||
+							Date.now() - this.#sessionMentionCache.refreshedAt >= 5_000
+						) {
+							this.#sessionMentionCache = {
+								service: messaging,
+								refreshedAt: Date.now(),
+								sessions: await messaging.listSessions(setupAbort.signal),
+							};
 						}
 						const target = this.#sessionMentionCache.sessions.find(session => session.name === mention);
 						if (!target) continue;

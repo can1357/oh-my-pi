@@ -17,6 +17,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { CacheWarmer } from "@oh-my-pi/pi-coding-agent/session/cache-warmer";
 import { bindSessionMessaging } from "@oh-my-pi/pi-coding-agent/session/messaging-host";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import * as sessionListing from "@oh-my-pi/pi-coding-agent/session/session-listing";
@@ -79,16 +80,29 @@ describe("cross-session messaging lifecycle", () => {
 		}
 	});
 
-	async function makeSession(name: string, messaging = true, persisted = false, legacyTitle = false) {
+	async function makeSession(
+		name: string,
+		messaging = true,
+		persisted = false,
+		legacyTitle = false,
+		warming?: { warmer: CacheWarmer; entered: () => void; response: Promise<void> },
+	) {
 		const contexts: string[] = [];
 		const mock = createMockModel({
 			provider: "openai",
 			id: "messaging-lifecycle",
-			handler(context) {
+			cost: warming ? { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } : undefined,
+			async handler(context) {
+				if (warming) {
+					warming.entered();
+					await warming.response;
+				}
 				contexts.push(JSON.stringify(context.messages));
 				return { content: ["COMPLETION_FROM_PREVIOUS_CONVERSATION"] };
 			},
 		});
+		// A cache-capable price card arms the real warmer.
+		if (warming) Object.assign(mock.model, { promptCache: { short: 300 } });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model: mock.model, systemPrompt: ["Lifecycle harness"], tools: [], messages: [] },
@@ -132,6 +146,7 @@ describe("cross-session messaging lifecycle", () => {
 			sessionManager: manager,
 			settings,
 			modelRegistry: new ModelRegistry(auth),
+			cacheWarmer: warming?.warmer,
 			rebuildSystemPrompt: async () => ({ systemPrompt: ["Lifecycle harness"] }),
 		});
 		sessions.push(session);
@@ -143,6 +158,49 @@ describe("cross-session messaging lifecycle", () => {
 		binding.ready();
 		return { session, manager, settings, contexts, binding };
 	}
+
+	it("cancels cache warming before closing messaging", async () => {
+		const entered = Promise.withResolvers<void>();
+		const response = Promise.withResolvers<void>();
+		const warmer = new CacheWarmer({
+			getMode: () => "idle",
+			getPromptTokens: () => 100_000,
+			stream: createMockModel({ handler: { content: ["warm"] } }).stream,
+		});
+		try {
+			const watched = await makeSession("watched", true, false, false, {
+				warmer,
+				entered: entered.resolve,
+				response: response.promise,
+			});
+			const requester = await makeSession("requester");
+			const prompting = watched.session.prompt("stay busy");
+			await entered.promise;
+			const target = await peerFor(requester.session, watched.manager.getSessionId());
+			expect((await requester.session.messaging!.send(target, "", { notifyWhenIdle: true })).ok).toBe(true);
+			watched.session.startCacheWarming(watched.session.model!, { messages: [] }, { cacheRetention: "short" });
+			expect(warmer.status.state).toBe("scheduled");
+			const service = watched.session.messaging!;
+			const close = service.close.bind(service);
+			const observed: Array<{ state: string; callbacksCleared: boolean }> = [];
+			vi.spyOn(service, "close").mockImplementation(() => {
+				observed.push({
+					state: warmer.status.state,
+					callbacksCleared: !warmer.onWarmed && !warmer.onRefreshStart && !warmer.onRefreshEnd,
+				});
+				return close();
+			});
+			const disposing = watched.session.dispose();
+			response.resolve();
+			await prompting;
+			await disposing;
+			expect(observed.length).toBeGreaterThan(0);
+			expect(observed.every(value => value.state === "inactive" && value.callbacksCleared)).toBe(true);
+		} finally {
+			response.resolve();
+			warmer.cancel();
+		}
+	});
 
 	function watchMessaging(session: AgentSession) {
 		const stopped = Promise.withResolvers<void>();

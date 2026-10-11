@@ -183,15 +183,21 @@ describe("offline mailbox", () => {
 			session("auto", cutoff, { title: "Generated title", titleSource: "auto" }),
 			session("legacy", now, { title: "Legacy title" }),
 			session("untitled", now),
+			session("reserved-all", now, { title: "all", titleSource: "user" }),
+			session("reserved-at", now, { title: "@foo", titleSource: "user" }),
+			session("reserved-card", now, { title: "\uD83E\uDDEA BETA: all", titleSource: "user" }),
 			session("expired", cutoff - 1, { title: "Too old", titleSource: "user" }),
 		];
 		const listed = await listOfflineSessions({ now, sessions: async () => source });
 		expect(listed).toEqual(
-			source.slice(0, 4).map(item => ({
+			source.slice(0, -1).map(item => ({
 				sessionId: item.id,
 				path: item.path,
 				shortId: sessionShortId(item.id),
-				name: item.titleSource === "user" ? item.title! : defaultSessionName(item.cwd, item.id),
+				name:
+					item.titleSource === "user" && !item.id.startsWith("reserved-")
+						? item.title!
+						: defaultSessionName(item.cwd, item.id),
 				cwd: item.cwd,
 				title: item.title ?? null,
 				modified: item.modified.getTime(),

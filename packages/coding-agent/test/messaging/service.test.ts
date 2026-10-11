@@ -8,13 +8,13 @@ import * as dirs from "@oh-my-pi/pi-utils/dirs";
 import { FileSessionStorage } from "../../src/session/session-storage";
 import { SessionManager } from "../../src/session/session-manager";
 import { Settings } from "../../src/config/settings";
+import { ManagedTimers } from "../../src/extensibility/extensions/managed-timers";
 import { IdleSubscriptions } from "../../src/messaging/idle";
 import { InboundGate, type OutgoingNotice } from "../../src/messaging/inbound";
 import * as mailbox from "../../src/messaging/mailbox";
 import {
 	claimSessionName,
 	defaultSessionName,
-	encodeAddressForUrl,
 	formatAddressForUrl,
 	isReservedAddress,
 	RESERVED_SESSION_NAME_ERROR,
@@ -257,6 +257,45 @@ function idleFixture(
 	subscriptions.push(idle);
 	return { idle, replies, reply };
 }
+
+function captureManagedTimeouts() {
+	const pending = new Map<Timer, { owner: ManagedTimers; ms: number; fire: () => void }>();
+	const setTimeout = ManagedTimers.prototype.setTimeout;
+	const clear = ManagedTimers.prototype.clear;
+	const clearAll = ManagedTimers.prototype.clearAll;
+	vi.spyOn(ManagedTimers.prototype, "setTimeout").mockImplementation(function (
+		this: ManagedTimers,
+		callback,
+		ms = 0,
+		...args
+	) {
+		const fire = () => {
+			pending.delete(timer);
+			return callback(...args);
+		};
+		const timer = setTimeout.call(this, fire, ms);
+		pending.set(timer, { owner: this, ms, fire });
+		return timer;
+	});
+	vi.spyOn(ManagedTimers.prototype, "clear").mockImplementation(function (this: ManagedTimers, timer) {
+		pending.delete(timer);
+		clear.call(this, timer);
+	});
+	vi.spyOn(ManagedTimers.prototype, "clearAll").mockImplementation(function (this: ManagedTimers) {
+		for (const [timer, entry] of pending) if (entry.owner === this) pending.delete(timer);
+		clearAll.call(this);
+	});
+	return {
+		pending,
+		async advance(ms: number) {
+			for (const [timer, entry] of [...pending]) {
+				if (entry.ms > ms) continue;
+				entry.owner.clear(timer);
+				await entry.fire();
+			}
+		},
+	};
+}
 function message(body: string, chain?: string[]): Extract<InboxRequest, { type: "message" }> {
 	return { type: "message", id: crypto.randomUUID(), from: sender, body, ...(chain ? { chain } : {}) };
 }
@@ -287,7 +326,6 @@ describe("session names", () => {
 		expect(claimSessionName("release", new Set())).toBe("release");
 		expect(claimSessionName("release", new Set(["release"]))).toMatch(/^release-[a-z]+-[a-z]+$/);
 		expect(formatAddressForUrl("release notes/#")).toBe("release%20notes%2F%23");
-		expect(encodeAddressForUrl("release notes")).toBe("release%20notes");
 		expect(isReservedAddress("@ns/name")).toBe(true);
 		expect(isReservedAddress("name@host")).toBe(false);
 		expect(claimSessionName.bind(null, "@reserved", new Set<string>())).toThrow(RESERVED_SESSION_NAME_ERROR);
@@ -343,7 +381,9 @@ describe("inbound gate", () => {
 			outcome: "held",
 		});
 		expect(host.deliveries).toHaveLength(1);
-		expect(host.display).toEqual([]);
+		expect(host.display).toHaveLength(1);
+		expect(host.display[0]).toContain("Held message from @alpha: unknown peer content.");
+		expect(host.display[0]).toContain("No approval dialog here; it expires in 5m");
 	});
 
 	it.each(["peer", "own-child", "offline"] as const)("uses pre-delivery busy state for %s admissions", source => {
@@ -702,14 +742,18 @@ describe("messaging service with real inboxes", () => {
 		const { a, ah, bh, bs, target } = await pair();
 		bh.permission = "prompting";
 		cfgMessagingDialogExpiry.override(bs, "60s");
-		vi.useFakeTimers();
+		const timers = captureManagedTimeouts();
 		const expired = ah.nextNotice();
 		expect(await a.send(target, "needs approval", { notifyWhenIdle: false })).toEqual({
 			ok: true,
 			text: "Held by beta for its user's approval.",
 		});
-		expect(bh.display).toEqual([]);
-		vi.advanceTimersByTime(60_000);
+		expect(bh.display).toHaveLength(1);
+		expect(bh.display[0]).toContain("Held message from @alpha: needs approval.");
+		expect(bh.display[0]).toContain("No approval dialog here; it expires in 1m");
+		expect(bh.display[0]).toContain("messaging.crossSessionInbound");
+		expect(bh.deliveries).toEqual([]);
+		await timers.advance(60_000);
 		expect(await expired).toBe("Your message to @beta expired before its user approved it.");
 		const own = (await transport.listInboxEntries()).find(entry => entry.endpoint === a.env.OMP_MESSAGING_SOCKET)!;
 		await transport.requestInbox(own, {
@@ -720,6 +764,29 @@ describe("messaging service with real inboxes", () => {
 			aboutId: "not-sent",
 		});
 		expect(ah.notices).toHaveLength(1);
+	});
+
+	it("shows a no-approver notice for a default hold that never expires", async () => {
+		const { a, b, ah, bh, bs, target } = await pair();
+		bh.permission = "prompting";
+		cfgMessagingDialogExpiry.override(bs, "never");
+		const timers = captureManagedTimeouts();
+		expect(await a.send(target, "needs approval\nsecond line", { notifyWhenIdle: false })).toMatchObject({
+			ok: true,
+			text: "Held by beta for its user's approval.",
+		});
+		expect(bh.display).toHaveLength(1);
+		expect(bh.display[0]).toContain("Held message from @alpha: needs approval.");
+		expect(bh.display[0]).toContain("No approval dialog here; it waits until this session ends");
+		expect(bh.display[0]).toContain("messaging.crossSessionInbound");
+		expect(bh.display[0]).not.toContain("second line");
+		expect(timers.pending.size).toBe(0);
+		await timers.advance(IDLE_SUBSCRIPTION_TTL_MS);
+		expect(bh.deliveries).toEqual([]);
+		expect(ah.notices).toEqual([]);
+		await b.retireConversation();
+		expect(ah.notices).toHaveLength(1);
+		expect(ah.notices[0]).toContain("dropped unread");
 	});
 
 	it("notifies immediately while idle and once after a busy turn settles", async () => {
@@ -928,7 +995,7 @@ describe("messaging service with real inboxes", () => {
 
 	it("retires held messages and subscriptions using the old address, aborts dialogs, and clears timers", async () => {
 		const { a, b, ah, bh, target, bs } = await pair();
-		vi.useFakeTimers();
+		const timers = captureManagedTimeouts();
 		bh.busy = true;
 		bh.permission = "prompting";
 		cfgMessagingDialogExpiry.override(bs, "60s");
@@ -948,6 +1015,8 @@ describe("messaging service with real inboxes", () => {
 		ah.busy = true;
 		const reverse = (await receiver.listSessions())[0];
 		await receiver.send(reverse, "", { notifyWhenIdle: true });
+		expect([...timers.pending.values()].some(timer => timer.ms === 60_000)).toBe(true);
+		expect([...timers.pending.values()].some(timer => timer.ms === IDLE_SUBSCRIPTION_TTL_MS)).toBe(true);
 		bh.id = "new-conversation";
 		bh.name = "new-name";
 		await receiver.retireConversation();
@@ -962,7 +1031,9 @@ describe("messaging service with real inboxes", () => {
 		cfgMessagingInbound.override(bs, "accept");
 		bh.reapply();
 		expect(bh.deliveries).toEqual([]);
-		vi.advanceTimersByTime(IDLE_SUBSCRIPTION_TTL_MS);
+		expect([...timers.pending.values()].some(timer => timer.ms === 60_000)).toBe(false);
+		await timers.advance(IDLE_SUBSCRIPTION_TTL_MS);
+		expect(timers.pending.size).toBe(0);
 		expect(ah.notices).toHaveLength(1);
 		expect(ah.display.filter(text => text === cancellation)).toHaveLength(1);
 		expect(bh.notices).toEqual([]);
@@ -1112,14 +1183,15 @@ describe("messaging service with real inboxes", () => {
 			ok: true,
 			text: "Queued for beta (not running); it will see this when resumed.",
 		});
-		vi.useFakeTimers();
+		const timers = captureManagedTimeouts();
 		const resumed = await MessagingService.start(bh, bs);
 		services.push(resumed);
 		resumed.markReady();
 		expect(bh.deliveries).toEqual([]);
 		expect(bh.display).toContain("1 message(s) from other sessions arrived while this session was not running.");
 		const expired = ah.nextNotice();
-		vi.advanceTimersByTime(60_000);
+		expect([...timers.pending.values()].map(timer => timer.ms)).toEqual([60_000]);
+		await timers.advance(60_000);
 		expect(await expired).toBe("Your message to @beta expired before its user approved it.");
 	});
 
@@ -1938,7 +2010,7 @@ it("cutoff during an offline acknowledgement preserves the remaining mail and ac
 		sentAt: Date.now(),
 	};
 	const untouched = vi.fn(async () => {});
-	vi.spyOn(mailbox, "drainOffline").mockResolvedValueOnce([
+	vi.spyOn(mailbox, "drainOfflineUnlocked").mockResolvedValueOnce([
 		{
 			message: first,
 			ack: async () => {

@@ -1,4 +1,4 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { formatDuration, logger } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { Settings } from "../config/settings";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
@@ -202,7 +202,13 @@ export class InboundGate {
 					this.#remove(held);
 					logger.warn("Messaging approval failed", { error: String(error) });
 				});
-		} else startExpiry();
+		} else {
+			const expiry = dialogExpiryMs(this.settings);
+			this.host.showNotice(
+				`Held message from @${peerDisplayText(held.delivery.from.address)}: ${peerDisplayText(held.request.body.split(/\r?\n/, 1)[0])}. No approval dialog here; ${expiry === null ? "it waits until this session ends" : `it expires in ${formatDuration(expiry)}`} unless messaging.crossSessionInbound allows it.`,
+			);
+			startExpiry();
+		}
 	}
 
 	#remove(held: HeldMessage): void {

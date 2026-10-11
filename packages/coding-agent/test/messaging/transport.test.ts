@@ -4,6 +4,7 @@ import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { publishLocalEndpoint, type LocalEndpointPublication } from "../../src/ipc/local-endpoint-registry";
 import {
@@ -148,7 +149,7 @@ async function proofClient(
 		return socket;
 	});
 	vi.useFakeTimers();
-	const result = requestInbox(entry!, request, { dir, timeoutMs: 100, signal });
+	const result = requestInbox(entry!, request, { dir, timeoutMs: 100, signal, expectProof: true });
 	await connecting.promise;
 	socket.emit("connect");
 	return { socket, writes, entry: entry!, peerKey, result };
@@ -233,58 +234,58 @@ describe("server proof framing", () => {
 	});
 });
 
-it.skipIf(process.platform !== "win32")(
-	"sends an impostor pipe only challenges, never the key or message body",
-	async () => {
-		const dir = tempDir();
-		const seed = await publish(dir, async () => ({ ok: true, snapshot }));
-		const peerKey = await Bun.file(path.join(dir, "peer.key")).text();
-		await seed.close();
-		const received: string[] = [];
-		const impostor = await publishLocalEndpoint(
-			{
-				dir,
-				pipePrefix: "omp-msg",
-				version: MESSAGING_WIRE_VERSION,
-				maxRequestBytes: MAX_SERIALIZED_CHARS,
-				maxResponseBytes: MAX_SERIALIZED_CHARS,
-			},
-			socket => {
-				sockets.push(socket);
-				let bytes = "";
-				socket.setEncoding("utf8");
-				socket.on("error", () => socket.destroy());
-				socket.on("data", chunk => {
-					bytes += chunk;
-					if (!bytes.includes("\n")) return;
-					received.push(bytes);
-					socket.end(`${JSON.stringify({ type: "proof", proof: "0".repeat(64) })}\n`);
-				});
-			},
-			{ extra: { sessionId: "impostor-session" } },
-		);
-		impostorPublications.push(impostor);
-		const [entry] = await readInboxEntries({ dir });
-		expect(entry!.pid).toBe(process.pid);
-		for (const request of [
-			{ type: "message", id: "private", body: "PRIVATE BODY MARKER" },
-			{ type: "snapshot" },
-		] satisfies InboxRequest[]) {
-			expect(await requestInbox(entry!, request, { dir })).toEqual({ ok: false, error: "authentication_failed" });
-		}
-		expect(received).toHaveLength(2);
-		for (const bytes of received) {
-			expect(bytes.split("\n")).toHaveLength(2);
-			expect(JSON.parse(bytes)).toEqual({ type: "challenge", nonce: expect.stringMatching(/^[0-9a-f]{64}$/) });
-			expect(bytes).not.toContain(peerKey);
-			expect(bytes).not.toContain('"auth"');
-			expect(bytes).not.toContain("PRIVATE BODY MARKER");
-		}
-		expect(JSON.parse(received[0]!).nonce).not.toBe(JSON.parse(received[1]!).nonce);
-	},
-);
+it("sends an impostor endpoint only challenges, never the key or message body", async () => {
+	const dir = tempDir();
+	const seed = await publish(dir, async () => ({ ok: true, snapshot }));
+	const peerKey = await Bun.file(path.join(dir, "peer.key")).text();
+	await seed.close();
+	const received: string[] = [];
+	const impostor = await publishLocalEndpoint(
+		{
+			dir,
+			pipePrefix: "omp-msg",
+			version: MESSAGING_WIRE_VERSION,
+			maxRequestBytes: MAX_SERIALIZED_CHARS,
+			maxResponseBytes: MAX_SERIALIZED_CHARS,
+		},
+		socket => {
+			sockets.push(socket);
+			let bytes = "";
+			socket.setEncoding("utf8");
+			socket.on("error", () => socket.destroy());
+			socket.on("data", chunk => {
+				bytes += chunk;
+				if (!bytes.includes("\n")) return;
+				received.push(bytes);
+				socket.end(`${JSON.stringify({ type: "proof", proof: "0".repeat(64) })}\n`);
+			});
+		},
+		{ extra: { sessionId: "impostor-session" } },
+	);
+	impostorPublications.push(impostor);
+	const [entry] = await readInboxEntries({ dir });
+	expect(entry!.pid).toBe(process.pid);
+	for (const request of [
+		{ type: "message", id: "private", body: "PRIVATE BODY MARKER" },
+		{ type: "snapshot" },
+	] satisfies InboxRequest[]) {
+		expect(await requestInbox(entry!, request, { dir, expectProof: true })).toEqual({
+			ok: false,
+			error: "authentication_failed",
+		});
+	}
+	expect(received).toHaveLength(2);
+	for (const bytes of received) {
+		expect(bytes.split("\n")).toHaveLength(2);
+		expect(JSON.parse(bytes)).toEqual({ type: "challenge", nonce: expect.stringMatching(/^[0-9a-f]{64}$/) });
+		expect(bytes).not.toContain(peerKey);
+		expect(bytes).not.toContain('"auth"');
+		expect(bytes).not.toContain("PRIVATE BODY MARKER");
+	}
+	expect(JSON.parse(received[0]!).nonce).not.toBe(JSON.parse(received[1]!).nonce);
+});
 
-describe.skipIf(process.platform !== "win32")("Windows proof client", () => {
+describe("server proof client", () => {
 	it.each(["fragmented", "coalesced"])("waits for a valid %s proof before writing auth and body", async framing => {
 		const request: InboxRequest = { type: "message", id: "private", body: "PRIVATE BODY MARKER" };
 		const { socket, writes, entry, peerKey, result } = await proofClient(request);
@@ -334,9 +335,9 @@ describe.skipIf(process.platform !== "win32")("Windows proof client", () => {
 		if (kind === "malformed") line = "not JSON";
 		if (kind === "oversized") line = "x".repeat(MAX_SERIALIZED_CHARS + 1);
 		socket.emit("data", `${line}\n`);
-		expect(await result).toEqual({ ok: false, error: "authentication_failed" });
 		expect(writes).toHaveLength(1);
 		expect(writes[0]).not.toContain(peerKey);
+		expect(await result).toEqual({ ok: false, error: "authentication_failed" });
 	});
 
 	it.each([
@@ -391,7 +392,7 @@ describe("inbox transport", () => {
 			await requestInbox(
 				entries.find(entry => entry.entryId === b.entryId)!,
 				{ type: "snapshot" },
-				{ dir: b.registryDir },
+				{ dir: b.registryDir, expectProof: true },
 			),
 		).toEqual({ ok: true, snapshot });
 		expect(authSeen).toEqual(["peer"]);
@@ -423,6 +424,13 @@ describe("inbox transport", () => {
 			createdAt: metadata.createdAt,
 		});
 		expect(await Bun.file(file).json()).toEqual(metadata);
+		const connect = vi.spyOn(net, "createConnection");
+		expect(await requestInbox(entry!, { type: "snapshot" }, { dir, expectProof: true })).toEqual({
+			ok: false,
+			error: "unsupported_protocol",
+		});
+		expect(connect).not.toHaveBeenCalled();
+		connect.mockRestore();
 		if (process.platform === "win32") {
 			const connect = vi.spyOn(net, "createConnection");
 			expect(await requestInbox(entry!, { type: "snapshot" }, { dir })).toEqual({
@@ -717,15 +725,81 @@ describe("inbox transport", () => {
 		expect(await Bun.file(file).exists()).toBe(false);
 	});
 
-	it("surfaces a corrupt peer key as unavailable instead of replacing its identity", async () => {
+	it("publishes a valid stable peer key after a creator is killed immediately after open", async () => {
 		const dir = tempDir();
-		await fs.writeFile(path.join(dir, "peer.key"), "corrupt", { mode: 0o600 });
-		await expect(
-			publishInbox(async () => ({ ok: true, snapshot }), { dir, sessionId: "receiver-session" }),
-		).rejects.toBeInstanceOf(MessagingUnavailableError);
-		expect(await Bun.file(path.join(dir, "peer.key")).text()).toBe("corrupt");
-		expect((await fs.readdir(dir)).filter(name => name.endsWith(".json"))).toEqual([]);
+		const childFile = path.join(tempDir(), "peer-key-child.test.ts");
+		const transportUrl = pathToFileURL(path.resolve(import.meta.dir, "../../src/messaging/transport.ts")).href;
+		await fs.writeFile(
+			childFile,
+			`
+import { it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { publishInbox } from ${JSON.stringify(transportUrl)};
+it("publishes in a separate process", async () => {
+	const dir = process.env.OMP_KEY_DIR!;
+	if (process.env.OMP_KEY_CRASH === "1") {
+		const open = fs.promises.open;
+		vi.spyOn(fs.promises, "open").mockImplementation(async (...args: Parameters<typeof open>) => {
+			const handle = await open(...args);
+			if (args[1] === "wx" && path.basename(String(args[0])).startsWith("peer.key")) {
+				await fs.promises.writeFile(path.join(dir, "opened"), String(args[0]));
+				process.kill(process.pid, "SIGKILL");
+				await Promise.withResolvers<void>().promise;
+			}
+			return handle;
+		});
+	}
+	const pub = await publishInbox(async () => ({ ok: true, outcome: "delivered" }), {
+		dir, sessionId: "crash-test-session",
 	});
+	await pub.close();
+});
+`,
+		);
+		let key: string | undefined;
+		for (const crash of [true, false, false]) {
+			const child = Bun.spawn([process.execPath, "test", childFile], {
+				env: { ...process.env, OMP_KEY_DIR: dir, OMP_KEY_CRASH: crash ? "1" : "0" },
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [exitCode, stdout, stderr] = await Promise.all([
+				child.exited,
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+			]);
+			if (crash) {
+				expect(exitCode).not.toBe(0);
+				expect(await Bun.file(path.join(dir, "opened")).exists()).toBe(true);
+			} else {
+				expect({ exitCode, diagnostics: exitCode === 0 ? "" : stdout + stderr }).toEqual({
+					exitCode: 0,
+					diagnostics: "",
+				});
+				const current = await fs.readFile(path.join(dir, "peer.key"), "utf8");
+				expect(current).toMatch(/^[0-9a-f]{64}$/);
+				if (key !== undefined) expect(current).toBe(key);
+				key = current;
+			}
+		}
+		const killedFile = path.basename(await fs.readFile(path.join(dir, "opened"), "utf8"));
+		expect((await fs.readdir(dir)).filter(file => file.startsWith("peer.key."))).toEqual([killedFile]);
+	});
+
+	it.each(["corrupt", ""])(
+		"surfaces a corrupt peer key (%j) as unavailable instead of replacing its identity",
+		async key => {
+			const dir = tempDir();
+			await fs.writeFile(path.join(dir, "peer.key"), key, { mode: 0o600 });
+			await expect(
+				publishInbox(async () => ({ ok: true, snapshot }), { dir, sessionId: "receiver-session" }),
+			).rejects.toBeInstanceOf(MessagingUnavailableError);
+			expect(await Bun.file(path.join(dir, "peer.key")).text()).toBe(key);
+			expect((await fs.readdir(dir)).filter(name => name.endsWith(".json"))).toEqual([]);
+		},
+	);
 });
 
 describe("inbox request boundary", () => {

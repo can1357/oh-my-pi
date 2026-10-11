@@ -222,7 +222,6 @@ export class IrcBridge {
 					from: escapeXmlAttribute(d.from.address),
 					fromUrl: formatAddressForUrl(d.from.shortId),
 					shortId: d.from.shortId,
-					cwd: escapePeerText(d.from.cwd),
 					message: escapePeerText(d.body),
 				}),
 				display: true,

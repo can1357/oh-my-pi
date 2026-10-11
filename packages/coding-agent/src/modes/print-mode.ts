@@ -276,10 +276,12 @@ async function runPrintModeCore(
 		// In JSON mode, output all events
 		if (mode === "json") {
 			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
-		} else if (event.type === "notice" && event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE) {
-			// Text mode renders no session notices, but an automatic sign-out must not stay
-			// hidden behind a sibling account that quietly answers the prompt.
-			writeStderrLine(`Warning: ${event.message}`);
+		} else if (
+			event.type === "notice" &&
+			(event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE || event.source === "messaging")
+		) {
+			// Keep actionable headless notices visible without mixing them into the answer.
+			writeStderrLine(event.level === "warning" ? `Warning: ${event.message}` : event.message);
 		}
 		promptResults.observe(event);
 	});
