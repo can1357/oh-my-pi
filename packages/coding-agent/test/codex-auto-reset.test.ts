@@ -10,8 +10,9 @@
  *   which base limit slot carries them; a banked reset also clears a 5h-only
  *   block (openai/codex#28525). The natural unblock is the LATEST reset among
  *   the exhausted windows.
- *   Candidates span ALL accounts; the longest natural wait wins, and the
- *   active account wins near-ties.
+ *   Candidates span ALL accounts; a reset restarts both windows, so the one
+ *   that brings the weekly refill furthest forward (less the weekly allowance
+ *   it discards) wins, and the active account wins near-ties.
  * - `expiring-credit` (any trigger): use-it-or-lose-it salvage of credits
  *   whose `expiresAt` falls inside the horizon, gated by meaningful usage
  *   outside the last five minutes — never by the reserve. Imminent expiry
@@ -571,6 +572,32 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			).actions[0]?.accountKey;
 		expect(restoredFor(3 * DAY + RESTORE_WAIT_TOLERANCE_MS)).toBe(ACCOUNT_KEY);
 		expect(restoredFor(3 * DAY + RESTORE_WAIT_TOLERANCE_MS + 60_000)).toBe("openai-codex|-|2");
+	});
+
+	it("restores a 5h wall over a longer weekly wall when its nearly spent weekly window restarts a week out", () => {
+		const fiveHourWall = report({
+			primaryUsed: 1,
+			primaryResetInMs: 3 * HOUR,
+			weeklyUsed: 0.98,
+			weeklyResetInMs: 6.9 * DAY,
+		});
+		const weeklyWall = report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: 6 * DAY });
+		const plan = planCodexResetRedemptions(input([fiveHourWall, weeklyWall]));
+		expect(plan.actions[0]).toMatchObject({ accountKey: ACCOUNT_KEY, remainingMs: 3 * HOUR, blockedWindows: ["5h"] });
+	});
+
+	it("passes over a 5h wall whose restart would discard most of a weekly window due in a day", () => {
+		const fresh = report({ primaryUsed: 1, primaryResetInMs: 3 * HOUR, weeklyUsed: 0.3, weeklyResetInMs: DAY });
+		const spent = report({
+			accountId: "acct-sib",
+			email: "sib@example.com",
+			primaryUsed: 1,
+			primaryResetInMs: 2 * HOUR,
+			weeklyUsed: 0.95,
+			weeklyResetInMs: 6 * DAY,
+		});
+		const plan = planCodexResetRedemptions(input([fresh, spent]));
+		expect(plan.actions[0]).toMatchObject({ accountKey: "openai-codex|-|2", remainingMs: 2 * HOUR });
 	});
 
 	it("still salvages the passed-over account's expiring credit in the same pass", () => {

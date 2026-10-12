@@ -482,9 +482,10 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			if (leftExpiry !== rightExpiry) return leftExpiry - rightExpiry;
 			return right.remainingMs - left.remainingMs;
 		});
-		// The account refills on its own at the natural unblock, so a reset is
-		// worth the wait it skips: spend the one that skips the longest, letting
-		// the order above break near-ties.
+		// A Claude reset keeps the window timers: the allowance it restores lasts
+		// only until the natural unblock, when the account refills anyway. So it
+		// is worth the wait it skips: spend the one that skips the longest,
+		// letting the order above break near-ties.
 		const longestWaitMs = Math.max(...candidates.map(candidate => candidate.remainingMs));
 		const best = candidates.find(candidate => candidate.remainingMs >= longestWaitMs - RESTORE_WAIT_TOLERANCE_MS);
 		if (best) {

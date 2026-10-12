@@ -35,12 +35,14 @@
  *   reset among the exhausted windows (the account stays blocked until every
  *   one rolls over) and must be far enough away to justify the spend, with
  *   credits above the reserve, on an account the session may use (its account
- *   pool). One candidate is redeemed: the one whose natural unblock is
- *   furthest away, because the account refills on its own then, so a reset is
- *   worth the wait it skips. Among candidates within
- *   {@link RESTORE_WAIT_TOLERANCE_MS} of that wait the active account wins,
- *   then the account whose credit dies soonest. The redeem clears its
- *   credential blocks so the retry's re-rank picks it up.
+ *   pool). A Codex reset restarts both windows: the account gets a full
+ *   weekly allowance now and its next weekly refill moves a full week out.
+ *   One candidate is redeemed: the one whose reset brings the weekly refill
+ *   furthest forward, less the weekly allowance the restart discards (see
+ *   {@link codexRestoreValueMs}); for a weekly wall that is its wait. Among
+ *   candidates within {@link RESTORE_WAIT_TOLERANCE_MS} of the best the
+ *   active account wins, then the account whose credit dies soonest. The
+ *   redeem clears its credential blocks so the retry's re-rank picks it up.
  *
  * TRIGGERS: `blocked` runs from the usage-limit branch of the retry pipeline
  * after sibling switch fails, on force-refreshed reports (the cached snapshot
@@ -95,7 +97,7 @@ export const ATTEMPT_COOLDOWN_MS = 60_000;
 export const DEBOUNCE_BUCKET_MS = 60_000;
 /** Floor between salvage sweeps; dedupe keys make sweeps idempotent, this just avoids useless re-planning. */
 export const SWEEP_MIN_INTERVAL_MS = 60_000;
-/** Restore candidates whose natural waits differ by at most this buy about the same time; the active account wins among them. */
+/** Restore candidates whose value (time bought) differs by at most this buy about the same; the active account wins among them. */
 export const RESTORE_WAIT_TOLERANCE_MS = 60 * 60_000;
 
 export function shouldEvaluateCodexAutoRedeem(mode: ResetAutoRedeemMode): boolean {
@@ -327,6 +329,28 @@ function fullestChatWindow(windows: readonly CodexChatWindowSnapshot[]): CodexCh
 	return fullest;
 }
 
+/**
+ * What restoring a blocked account is worth, in weekly-refill time. The reset
+ * restarts both windows, so the weekly refill that was due arrives now and
+ * the next one a full week out: the account gains the time until its weekly
+ * refill and loses the weekly allowance it still had. A weekly wall has no
+ * allowance left, so it is worth its wait; a 5h-only wall is worth little or
+ * less than nothing when its weekly window is fresh or nearly due.
+ */
+function codexRestoreValueMs(
+	windows: readonly CodexChatWindowSnapshot[],
+	blockedWindows: readonly ("5h" | "weekly")[],
+	remainingMs: number,
+	nowMs: number,
+): number {
+	if (blockedWindows.includes("weekly")) return remainingMs;
+	const weekly = windows.find(window => window.window === "weekly");
+	if (weekly?.resetsAt === undefined || weekly.usedFraction === undefined) return remainingMs;
+	const weekMs = 7 * 24 * 3_600_000;
+	const untilRefillMs = Math.min(Math.max(0, weekly.resetsAt - nowMs), weekMs);
+	return untilRefillMs - (1 - Math.min(1, Math.max(0, weekly.usedFraction))) * weekMs;
+}
+
 /** The chat window the `expiring-credit` rule measures for one Codex usage report. */
 export function fullestCodexChatWindow(report: UsageReport): CodexChatWindowSnapshot | undefined {
 	return fullestChatWindow(codexChatWindows(report));
@@ -432,6 +456,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		interface RestoreCandidate {
 			snapshot: AccountSnapshot;
 			remainingMs: number;
+			valueMs: number;
 			unblockAtMs: number;
 			blockedWindows: ("5h" | "weekly")[];
 		}
@@ -525,7 +550,13 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				skip("cooldown");
 				continue;
 			}
-			candidates.push({ snapshot, remainingMs, unblockAtMs, blockedWindows });
+			candidates.push({
+				snapshot,
+				remainingMs,
+				valueMs: codexRestoreValueMs(snapshot.windows, blockedWindows, remainingMs, nowMs),
+				unblockAtMs,
+				blockedWindows,
+			});
 		}
 		candidates.sort((a, b) => {
 			// Active account first: the sticky session credential stays usable.
@@ -542,10 +573,10 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			}
 			return b.remainingMs - a.remainingMs;
 		});
-		// That order only breaks near-ties: a reset is worth the wait it skips,
-		// so only candidates within the tolerance of the longest wait qualify.
-		const longestWaitMs = Math.max(...candidates.map(candidate => candidate.remainingMs));
-		const best = candidates.find(candidate => candidate.remainingMs >= longestWaitMs - RESTORE_WAIT_TOLERANCE_MS);
+		// That order only breaks near-ties: only candidates within the tolerance
+		// of the most valuable restore qualify.
+		const bestValueMs = Math.max(...candidates.map(candidate => candidate.valueMs));
+		const best = candidates.find(candidate => candidate.valueMs >= bestValueMs - RESTORE_WAIT_TOLERANCE_MS);
 		if (best) {
 			restore = {
 				reason: "blocked-account",
