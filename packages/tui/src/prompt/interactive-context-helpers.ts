@@ -26,6 +26,7 @@ export interface AssistantMessageHost {
 	/** Whether the viewed session's tables get charts: the main session's do, a focused subagent's do not. */
 	readonly tableChartsVisible: boolean;
 	readonly hideToolActivity: boolean;
+	readonly hideToolOutputDetails: boolean;
 	readonly toolOutputExpanded: boolean;
 	readonly ui: { requestRender(): void; readonly imageBudget: ImageBudget };
 	/** Resolve already-extracted Markdown link destinations to local targets. */
@@ -154,7 +155,8 @@ export function createReplyWriteComponent(ctx: AssistantMessageHost): ReplyWrite
 function applyHostDisplay(ctx: AssistantMessageHost, component: AssistantMessageComponent): void {
 	component.setImagesVisible(ctx.assistantImagesVisible);
 	component.setTableChartsVisible(ctx.tableChartsVisible);
-	component.setToolResultImagesVisible(!ctx.hideToolActivity);
+	// Read-result images are part of the tool output body, so both switches gate them.
+	component.setToolResultImagesVisible(!ctx.hideToolActivity && !ctx.hideToolOutputDetails);
 	component.setExpanded(ctx.toolOutputExpanded);
 	// A wire the `stream-revision` axis marks `possible` can rewrite text it has
 	// already streamed; published rows are unrecoverable once they reach native

@@ -21,12 +21,12 @@ import {
 	PREVIEW_LIMITS,
 	shortenPath,
 } from "../render/render-utils";
-import { fileHyperlink, renderCodeCell, renderMarkdownCell, urlHyperlinkAlways } from "../render";
+import { WidthAwareText, fileHyperlink, renderCodeCell, renderMarkdownCell, urlHyperlinkAlways } from "../render";
 import { wrapTreeLine } from "../render/hanging-wrap";
-import { wrapTextWithAnsi } from "../utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
 import { SpotlightNotices } from "./spotlight";
+import { truncateToWidth, visibleWidth } from "../utils";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "../overlays/usage-row";
 import { formatCount, isUrlLikePath, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
@@ -400,11 +400,15 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#entries = new Map<string, ReadEntry>();
 	#usageRows = new Map<string, ReadUsageRow>();
 	#usageBatchByToolCallId = new Map<string, string>();
-	#text: Text;
+	#text: WidthAwareText;
+	#summaryLines: readonly string[] = [];
+	/** Folded rows keep their usage suffix out of the truncatable target text. */
+	#summaryUsage: readonly (string | undefined)[] = [];
 	/** Whether presenters draw these reads (not a replayed transcript). */
 	#presented: boolean;
 	#expanded = false;
 	#toolActivityVisible = true;
+	#toolOutputDetailsHidden = false;
 	#showContentPreview: boolean;
 	// A read group accretes entries across multiple assistant completions for as
 	// long as the run of reads is uninterrupted. It remains active while its
@@ -429,15 +433,48 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		super();
 		this.#showContentPreview = options.showContentPreview ?? false;
 		this.#presented = options.transcriptPresenters ?? true;
-		this.#text = new Text("", 0, 0);
+		this.#text = this.#createSummaryText();
 		this.addChild(this.#text);
 		this.#updateDisplay();
 	}
 
 	/**
-	 * Reads a presenter leaves full draw as the group, at the first full read's place; a compact
-	 * read is a row of its own; hidden draws nothing.
+	 * The summary rows, cut to the terminal width while tool output details are
+	 * folded: the setting promises one row per read call, and the `Text` inside
+	 * would otherwise wrap a long target into several physical rows. A row that
+	 * carries a usage suffix keeps that suffix whole and gives the target the
+	 * remaining width, so a long path cannot push the numbers off the row.
 	 */
+	#createSummaryText(): WidthAwareText {
+		return new WidthAwareText(
+			contentWidth => {
+				if (!this.#toolOutputDetailsHidden) {
+					// Expanded rows keep a long tree node hanging beneath its connector's
+					// guides instead of wrapping to column zero; the inner `Text` wraps
+					// whatever is left over exactly as it did before.
+					return this.#summaryLines
+						.flatMap(line => wrapTreeLine(line, contentWidth, theme) ?? [line])
+						.join("\n");
+				}
+				return this.#summaryLines
+					.map((line, index) => {
+						const usage = this.#summaryUsage[index];
+						if (!usage) return truncateToWidth(line, contentWidth);
+						// The summary identifies the call, so it keeps the larger share of
+						// the row and the optional usage takes the rest — dropped when that
+						// would squeeze the summary below half the row, or wrap it.
+						const usageWidth = visibleWidth(usage);
+						const summaryWidth = contentWidth - usageWidth;
+						if (summaryWidth < Math.ceil(contentWidth / 2)) return truncateToWidth(line, contentWidth);
+						return `${truncateToWidth(line, summaryWidth)}${usage}`;
+					})
+					.join("\n");
+			},
+			0,
+			0,
+		);
+	}
+
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible) return [];
 		const entries = [...this.#entries.values()];
@@ -701,6 +738,18 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	nativeTrailers(): readonly Component[] {
 		// A read a presenter hides takes its notice with it.
 		return this.#spotlight.list(id => this.#entries.get(id)?.presentation.shown.mode !== "hidden");
+	}
+
+	/**
+	 * Drop the per-file content previews, leaving the summary rows that name what
+	 * was read. Display-affecting, so the rebuilt children bump the block version
+	 * the transcript's committed-render bypass keys on.
+	 */
+	setToolOutputDetailsHidden(hidden: boolean): void {
+		if (this.#toolOutputDetailsHidden === hidden) return;
+		this.#toolOutputDetailsHidden = hidden;
+		this.#blockVersion++;
+		this.#updateDisplay();
 	}
 
 	getComponent(): Component {
@@ -1080,12 +1129,20 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 		// Clear previous children and rebuild the summary and preview blocks.
 		this.clear();
-		this.#text = new Text("", 0, 0).setWrapLine(
-			(line, width) => wrapTreeLine(line, width, theme) ?? wrapTextWithAnsi(line, width),
-		);
+this.#summaryLines = [];
+		this.#summaryUsage = [];
+		this.#text = this.#createSummaryText();
 
 		if (displayRows.length === 0) {
-			this.#text.setText(` ${theme.format.bullet} ${theme.fg("toolTitle", theme.bold("Read"))}`);
+			this.#summaryLines = [` ${theme.format.bullet} ${theme.fg("toolTitle", theme.bold("Read"))}`];
+			this.addChild(this.#text);
+			return;
+		}
+
+		if (this.#toolOutputDetailsHidden) {
+			// Folded mode promises one row per read call, so a call that fanned out
+			// into several target rows collapses back onto its own line here.
+			this.#summaryLines = this.#foldedSummaryLines(entries, displayTargets);
 			this.addChild(this.#text);
 			return;
 		}
@@ -1098,7 +1155,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				const lines = [` ${statusSymbol} ${theme.fg("toolTitle", theme.bold("Read"))} ${pathDisplay}`.trimEnd()];
 				const usageRows = this.#usageRowsBySummaryRow(displayRows).get(0) ?? [];
 				this.#appendUsageRows(lines, usageRows, "   ");
-				this.#text.setText(lines.join("\n"));
+				this.#summaryLines = lines;
 				this.addChild(this.#text);
 			}
 			for (const entry of this.#previewEntriesForRow(row)) {
@@ -1118,7 +1175,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			this.#appendSummaryRow(lines, row, index, rows.length, usageRowsBySummaryRow.get(index) ?? []);
 		}
 
-		this.#text.setText(lines.join("\n"));
+		this.#summaryLines = lines;
 		this.addChild(this.#text);
 
 		for (const entry of entries) {
@@ -1221,6 +1278,34 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		this.#appendUsageRows(lines, usageRows, `   ${continuation} `);
 	}
 
+	/**
+	 * The folded rows: one bounded line per read call, whatever its target
+	 * fan-out. The call keeps the target list its expanded tree row showed, so
+	 * the row still names what was read instead of dropping to a bare count.
+	 */
+	#foldedSummaryLines(entries: ReadEntry[], targets: ReadDisplayTarget[]): string[] {
+		const usageRowsByEntry = this.#usageRowsByIndex(
+			new Map(entries.map((entry, index): [string, number] => [entry.toolCallId, index])),
+		);
+		const lines: string[] = [];
+		for (const [index, entry] of entries.entries()) {
+			const entryTargets = targets.filter(target => target.entry === entry);
+			// Per-call rows, so the same-file ranges a call merged into one expanded
+			// row merge here too, and a call with no target still keeps its line.
+			const rows = this.#buildSummaryRows(entryTargets);
+			const status = formatStatusIcon(
+				entryTargets.length > 0 ? this.#statusForTargets(entryTargets) : entry.status,
+				theme,
+			);
+			const count = rows.length > 1 ? ` ${theme.fg("dim", `(${rows.length})`)}` : "";
+			const paths = rows.map(row => this.#formatRowPath(row)).join(theme.fg("dim", ", "));
+			const title = theme.fg("toolTitle", theme.bold("Read"));
+			lines.push(` ${status} ${title}${count} ${paths}`.trimEnd());
+			this.#appendUsageRows(lines, usageRowsByEntry.get(index) ?? [], "   ");
+		}
+		return lines;
+	}
+
 	#usageRowsBySummaryRow(rows: ReadSummaryRow[]): Map<number, ReadUsageRow[]> {
 		const lastRowIndexByToolCallId = new Map<string, number>();
 		for (const [index, row] of rows.entries()) {
@@ -1228,32 +1313,49 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				lastRowIndexByToolCallId.set(target.entry.toolCallId, index);
 			}
 		}
+		return this.#usageRowsByIndex(lastRowIndexByToolCallId);
+	}
 
+	/** Usage rows bucketed onto the last of the indexes their calls occupy. */
+	#usageRowsByIndex(lastIndexByToolCallId: Map<string, number>): Map<number, ReadUsageRow[]> {
 		const usageRowsByIndex = new Map<number, ReadUsageRow[]>();
 		for (const usageRow of this.#usageRows.values()) {
-			let lastRowIndex: number | undefined;
+			let lastIndex: number | undefined;
 			for (const toolCallId of usageRow.toolCallIds) {
-				const index = lastRowIndexByToolCallId.get(toolCallId);
-				if (index !== undefined && (lastRowIndex === undefined || index > lastRowIndex)) {
-					lastRowIndex = index;
+				const index = lastIndexByToolCallId.get(toolCallId);
+				if (index !== undefined && (lastIndex === undefined || index > lastIndex)) {
+					lastIndex = index;
 				}
 			}
-			if (lastRowIndex === undefined) continue;
-			const usageRows = usageRowsByIndex.get(lastRowIndex);
+			if (lastIndex === undefined) continue;
+			const usageRows = usageRowsByIndex.get(lastIndex);
 			if (usageRows) usageRows.push(usageRow);
-			else usageRowsByIndex.set(lastRowIndex, [usageRow]);
+			else usageRowsByIndex.set(lastIndex, [usageRow]);
 		}
 		return usageRowsByIndex;
 	}
 
 	#appendUsageRows(lines: string[], usageRows: ReadUsageRow[], prefix: string): void {
 		for (const usageRow of usageRows) {
-			lines.push(
-				theme.fg(
-					"dim",
-					`${prefix}${formatUsageRow(usageRow.usage, usageRow.durationMs, usageRow.ttftMs, usageRow.timestamp, usageRow.turnElapsedMs)}`,
-				),
+			const usage = formatUsageRow(
+				usageRow.usage,
+				usageRow.durationMs,
+				usageRow.ttftMs,
+				usageRow.timestamp,
+				usageRow.turnElapsedMs,
 			);
+			if (this.#toolOutputDetailsHidden) {
+				// Folded keeps one row per read call, so the usage rides the call row
+				// the caller just pushed instead of claiming a line of its own. It is
+				// held aside so the row's target is what gets truncated, not the usage.
+				const index = lines.length - 1;
+				const suffix = `${theme.fg("dim", theme.sep.dot)}${theme.fg("dim", usage)}`;
+				const suffixes = [...this.#summaryUsage];
+				suffixes[index] = `${suffixes[index] ?? ""}${suffix}`;
+				this.#summaryUsage = suffixes;
+				continue;
+			}
+			lines.push(theme.fg("dim", `${prefix}${usage}`));
 		}
 	}
 
@@ -1328,12 +1430,15 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		} = {},
 	): string {
 		const { basePath } = options;
+		// The path is model-supplied and lands in a one-row summary, so a tab,
+		// newline, or escape sequence here would add rows or corrupt the terminal.
+		const safeValue = sanitizeText(value).replace(/\s+/g, " ");
 		const split =
-			basePath !== undefined && value.startsWith(`${basePath}:`)
-				? { path: basePath, sel: value.slice(basePath.length + 1) }
-				: splitPathAndSel(value);
+			basePath !== undefined && safeValue.startsWith(`${basePath}:`)
+				? { path: basePath, sel: safeValue.slice(basePath.length + 1) }
+				: splitPathAndSel(safeValue);
 		// `?q=…` queries read like selectors: they follow the path, outside its link.
-		const target = splitReadQuery(split.sel ? split.path : value);
+		const target = splitReadQuery(split.sel ? split.path : safeValue);
 		const filePath = shortenPath(target.path);
 		const selectors = split.sel ? `${target.query ?? ""}:${split.sel}` : (target.query ?? "");
 		let pathDisplay = filePath ? paint.path(filePath, isUrlLikePath(target.path)) : theme.fg("toolOutput", "…");
@@ -1347,7 +1452,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		}
 		if (selectors) pathDisplay += theme.fg(paint.selectors, selectors);
 		if (options.correctedFrom) {
-			pathDisplay += theme.fg("dim", ` (corrected from ${shortenPath(options.correctedFrom)})`);
+			const corrected = sanitizeText(options.correctedFrom).replace(/\s+/g, " ");
+			pathDisplay += theme.fg("dim", ` (corrected from ${shortenPath(corrected)})`);
 		}
 		return pathDisplay + this.#formatConflictBadge(options.conflictCount);
 	}
@@ -1444,6 +1550,6 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	#shouldRenderPreview(entry: ReadEntry): boolean {
-		return this.#showContentPreview && entry.contentText !== undefined;
+		return this.#showContentPreview && !this.#toolOutputDetailsHidden && entry.contentText !== undefined;
 	}
 }

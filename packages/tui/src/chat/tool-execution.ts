@@ -57,6 +57,7 @@ import {
 	formatStatusIcon,
 	replaceTabs,
 	resolveImageOptions,
+	shortenEmbeddedPaths,
 } from "../render/render-utils";
 import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
@@ -427,6 +428,7 @@ export class ToolExecutionComponent extends Container {
 	#allocation = Number.POSITIVE_INFINITY;
 	#presentationFrame: AnimationFrame = { tick: 0, now: 0 };
 	#toolActivityVisible = true;
+	#toolOutputDetailsHidden = false;
 	#showImages: boolean;
 	#isPartial = true;
 	// A background task whose call already returned; later async job frames are
@@ -1336,6 +1338,7 @@ export class ToolExecutionComponent extends Container {
 			this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization,
 			this.#displayInputVersion,
 			this.#toolActivityVisible,
+			this.#toolOutputDetailsHidden,
 			host.media,
 			host.json,
 			host.shell,
@@ -1363,12 +1366,14 @@ export class ToolExecutionComponent extends Container {
 
 	/**
 	 * The native `collapsed` prop: the transcript's expand state, except that a
-	 * view that asks to be {@link NativeToolView.open} never starts folded, and
-	 * a call streaming its body (edit, write) stays open until it settles, then
-	 * folds like a finished thought. The user's own toggle still wins meanwhile:
-	 * the terminal keeps local collapse state until this prop changes.
+	 * view that asks to be {@link NativeToolView.open} never starts folded, a
+	 * call streaming its body (edit, write) stays open until it settles, then
+	 * folds like a finished thought, and Ctrl+H's `hideToolOutputDetails` folds
+	 * every call to its summary regardless. The user's own toggle still wins
+	 * meanwhile: the terminal keeps local collapse state until this prop changes.
 	 */
 	#nativeCollapsed(status: TspCardStatus, view: NativeToolView): boolean {
+		if (this.#toolOutputDetailsHidden) return true;
 		if (view.open) return false;
 		const live = status === "pending" || status === "running";
 		return !this.#expanded && !(live && streamsBody(this.#toolName));
@@ -1434,7 +1439,13 @@ export class ToolExecutionComponent extends Container {
 				frame: inline ? "inline" : "card",
 				collapsible: hasBody,
 				collapsed: hasBody ? this.#nativeCollapsed(status, view) : undefined,
-				preview: hasBody ? (preview === "auto" ? { lines: DEFAULT_TERMINAL_PREVIEW_LINES } : preview) : undefined,
+				preview: hasBody
+					? this.#toolOutputDetailsHidden
+						? "none"
+						: preview === "auto"
+							? { lines: DEFAULT_TERMINAL_PREVIEW_LINES }
+							: preview
+					: undefined,
 				tools: view.tools,
 				tone: view.tone,
 			},
@@ -1502,7 +1513,7 @@ export class ToolExecutionComponent extends Container {
 				status,
 				collapsible: hasBody,
 				collapsed: hasBody ? this.#nativeCollapsed(status, view) : undefined,
-				preview: hasBody ? cardPreview(view.preview) : undefined,
+				preview: hasBody && !this.#toolOutputDetailsHidden ? cardPreview(view.preview) : undefined,
 			},
 			children,
 		);
@@ -1633,6 +1644,16 @@ export class ToolExecutionComponent extends Container {
 		super.invalidate();
 	}
 
+	/**
+	 * Fold the call into its one-line summary. The card's block is kept intact —
+	 * this only changes which of its two presentations {@link render} returns.
+	 */
+	setToolOutputDetailsHidden(hidden: boolean): void {
+		if (this.#toolOutputDetailsHidden === hidden) return;
+		this.#toolOutputDetailsHidden = hidden;
+		super.invalidate();
+	}
+
 	setShowImages(show: boolean): void {
 		this.#showImages = show;
 		this.#updateDisplay();
@@ -1706,6 +1727,7 @@ export class ToolExecutionComponent extends Container {
 		if (!this.#toolActivityVisible || this.#allocation === 0 || (this.#toolName === "wait" && this.#isBenignSkip())) {
 			return [];
 		}
+		if (this.#toolOutputDetailsHidden) return this.#renderFolded(width);
 		const presentation = this.#presentation.draw();
 		if (presentation.mode === "hidden") return [];
 		if (presentation.mode === "compact") {
@@ -1734,8 +1756,15 @@ export class ToolExecutionComponent extends Container {
 	/** The one-row summary: bold label, muted detail, and the elapsed seconds of a running call. */
 	#compactText(width: number): string {
 		const summary = this.#activitySummary();
-		// Raw call input (a bash command): stripped of ANSI and control characters before theming.
-		const shownDetail = summary.detail ? plainLine(summary.detail) : "";
+		// Any summary can carry model text — `hub` targets, xdev inner arguments, a
+		// bare command, an extension-supplied label — and the fold makes this row the
+		// whole card, so terminal control bytes come out before styling.
+		// `sanitizeText` returns the input untouched when there is nothing to strip,
+		// but keeps tabs and newlines, which would break the one-line row; both
+		// halves collapse their whitespace and drop any home-prefixed path they
+		// embed (`cat /home/me/x`).
+		const label = shortenEmbeddedPaths(sanitizeText(summary.label).replace(/\s+/g, " "));
+		const shownDetail = summary.detail ? shortenEmbeddedPaths(sanitizeText(summary.detail).replace(/\s+/g, " ")) : "";
 		const detail = shownDetail ? theme.fg("muted", ` · ${shownDetail}`) : "";
 		// Elapsed ticks only while the call is genuinely running; a settled
 		// placeholder row must not read as live ("Todo · running 0s").
@@ -1746,16 +1775,26 @@ export class ToolExecutionComponent extends Container {
 						` ${Math.max(0, Math.floor((this.#presentationFrame.now - this.#executionStartedAtNow) / 1000))}s`,
 					)
 				: "";
-		return truncateToWidth(
-			`${theme.fg("toolTitle", theme.bold(plainLine(summary.label)))}${detail}${elapsed}`,
-			Math.max(1, width - 4),
-		);
+		return truncateToWidth(`${theme.fg("toolTitle", theme.bold(label))}${detail}${elapsed}`, Math.max(1, width - 4));
 	}
 
 	/** The one-row form's lead glyph: the spinner while it animates, else a dim bullet. */
 	#compactGlyph(): string {
 		const glyph = this.#spinnerFrame === undefined ? "•" : (theme.spinnerFrames[this.#spinnerFrame] ?? "•");
 		return theme.fg(this.#spinnerFrame === undefined ? "dim" : "muted", glyph);
+	}
+
+	/**
+	 * The whole card under `display.hideToolOutputDetails`: one row naming the call.
+	 * A settled failure keeps an error glyph, since the neutral bullet would read as
+	 * success; a benign skip stays neutral (the full card renders it that way too,
+	 * #7199). The spinner keeps its own frames while the call is still running.
+	 */
+	#renderFolded(width: number): readonly string[] {
+		const text = this.#compactText(width);
+		const failed = !this.#isRunning() && this.#result?.isError === true && !this.#isBenignSkip();
+		const glyph = failed ? formatStatusIcon("error", theme) : this.#compactGlyph();
+		return [truncateToWidth(`${glyph} ${text}`, width)];
 	}
 
 	#renderCompact(width: number): readonly string[] {
@@ -1783,6 +1822,8 @@ export class ToolExecutionComponent extends Container {
 			for (const key of ["command", "path", "input"] as const) {
 				const value = this.#args[key];
 				if (typeof value === "string" && value.length > 0) {
+					// Control bytes, whitespace, and home-prefixed paths are handled
+					// where the row is assembled, for every summary alike.
 					return { label: this.#toolLabel, detail: value.split("\n", 1)[0] };
 				}
 			}

@@ -118,6 +118,7 @@ export class ChatTranscriptBuilder {
 	constructor(deps: ChatTranscriptBuilderDeps) {
 		this.#deps = deps;
 		this.container.setToolActivityVisible(!displayPreferences.hideToolActivity);
+		this.container.setToolOutputDetailsHidden(displayPreferences.hideToolOutputDetails);
 	}
 
 	/** Whether the transcript currently holds any rendered rows. */
@@ -210,7 +211,9 @@ export class ChatTranscriptBuilder {
 	/** Append assistant prose (a reply, a post-tool segment, or an `out://` reply write) with the transcript's display preferences. */
 	#mountProse(component: AssistantMessageComponent): void {
 		component.setImagesVisible(displayPreferences.showImages);
-		component.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
+		component.setToolResultImagesVisible(
+			!displayPreferences.hideToolActivity && !displayPreferences.hideToolOutputDetails,
+		);
 		component.setTableChartsVisible(this.#deps.tableCharts !== false);
 		this.#trackExpandable(component);
 		this.container.addChild(component);
@@ -440,6 +443,7 @@ export class ChatTranscriptBuilder {
 			expandThinkingBlocks,
 			{ renderers: this.#deps.textRenderers ?? [], contentOffset: 0 },
 		);
+
 		assistantComponent.pickReactionTarget(this.container.children);
 		this.#mountProse(assistantComponent);
 		let lastAssistantComponent = assistantComponent;
