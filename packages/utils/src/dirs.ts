@@ -857,6 +857,7 @@ export function getDocsCacheDir(): string {
 	if (override) return override;
 	return dirs.rootSubdir(path.join("cache", "docs"), "cache");
 }
+
 /**
  * Get the conventional commit inference cache database path (~/.omp/cache/commit-inference.db).
  * Honors `OMP_COMMIT_CACHE_DB` so tests and operators can isolate the cache.
