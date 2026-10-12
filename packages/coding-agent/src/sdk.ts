@@ -2549,27 +2549,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (restrictToolNames || !toolRegistry.has("eval") || !activeToolNames.has("eval")) return [];
 			const builtins: EvalPreludeDefinition[] = [];
 			if (cfgBrowserEnabled.get(settings)) {
-				browserPrelude ??= (preludeFactories.browser ??= require("./tools/browser").createBrowserPrelude)(
-					toolSession,
-				);
+				const loadBrowser: () => PreludeFactory = () => require("./tools/browser").createBrowserPrelude;
+				browserPrelude ??= (preludeFactories.browser ??= loadBrowser())(toolSession);
 				builtins.push(browserPrelude);
 			}
 			if (cfgComputerEnabled.get(settings)) {
-				computerPrelude ??= (preludeFactories.computer ??= require("./tools/computer").createComputerPrelude)(
-					toolSession,
-				);
+				const loadComputer: () => PreludeFactory = () => require("./tools/computer").createComputerPrelude;
+				computerPrelude ??= (preludeFactories.computer ??= loadComputer())(toolSession);
 				builtins.push(computerPrelude);
 			}
 			if (cfgRatchetEnabled.get(settings)) {
-				ratchetPrelude ??= (preludeFactories.ratchet ??= require("./ratchet/prelude-definition").createRatchetPrelude)(
-					toolSession,
-				);
+				const loadRatchet: () => PreludeFactory = () =>
+					require("./ratchet/prelude-definition").createRatchetPrelude;
+				ratchetPrelude ??= (preludeFactories.ratchet ??= loadRatchet())(toolSession);
 				builtins.push(ratchetPrelude);
 			}
 			if (cfgArchiveEnabled.get(settings)) {
-				archivePrelude ??= (preludeFactories.archive ??= require("./archive/prelude-definition").createArchivePrelude)(
-					toolSession,
-				);
+				const loadArchive: () => PreludeFactory = () =>
+					require("./archive/prelude-definition").createArchivePrelude;
+				archivePrelude ??= (preludeFactories.archive ??= loadArchive())(toolSession);
 				builtins.push(archivePrelude);
 			}
 			return getEnabledEvalPreludes(builtins);
