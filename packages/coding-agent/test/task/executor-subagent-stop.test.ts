@@ -25,6 +25,7 @@ import {
 	SUBAGENT_WARNING_EMPTY_MESSAGE,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -690,6 +691,34 @@ describe("runSubprocess subagent_stop", () => {
 		expect(result.exitCode).toBe(0);
 		expect(JSON.parse(result.output)).toEqual({ report: "finish it" });
 		expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeNumber();
+	});
+
+	it("drops the 99% completion estimate while a refused worker keeps working", async () => {
+		const id = "RefusedProgress";
+		let latest: AgentProgress | undefined;
+		const percentSeen: Array<number | undefined> = [];
+		const harness = createHarness({
+			hasStopHandlers: true,
+			onPrompt: call => {
+				// The continuation starts after the refusal: the latched 99% must be gone.
+				if (call.promptIndex === 2) percentSeen.push(latest?.completionPercent);
+				call.yieldTerminal({ report: call.text });
+			},
+			onStop: async (_event, callIndex) => (callIndex === 1 ? { decision: "block", reason: "redo" } : undefined),
+		});
+		registerRunning(id, harness.session);
+
+		await runSubagentFollowUpTurn({
+			id,
+			agent: baseAgent,
+			message: "continue",
+			completionProbe: true,
+			onProgress: progress => {
+				latest = progress;
+			},
+		});
+
+		expect(percentSeen).toEqual([undefined]);
 	});
 
 	it("reports the spawning session on a kept-alive worker's IRC wake turn", async () => {

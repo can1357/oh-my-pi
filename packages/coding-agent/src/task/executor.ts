@@ -2377,6 +2377,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			yieldCalled = false;
 			yieldInvalidatedByStop = true;
 			yieldAcceptedAt = undefined;
+			// The 99% set when the candidate latched is stale: the run works again.
+			progress.completionPercent = undefined;
+			scheduleProgress(true);
 			// The yield's deferred budget check was skipped when it latched
 			// `yieldCalled`; the refused turn still cost a request.
 			evaluateSoftRequestBudget();
