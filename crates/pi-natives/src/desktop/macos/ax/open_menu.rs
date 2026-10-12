@@ -199,13 +199,25 @@ fn listed(items: &str) -> String {
 	}
 }
 
+/// How to choose an item in the background instead: holds and drags take no
+/// `menu` option, but a click on the same control does.
+fn choose_hint(press: Press<'_>) -> &'static str {
+	match press {
+		Press::Pointer { kind: "mouse hold" | "drag", .. } => {
+			"click the control with the item's path as the menu option"
+		},
+		_ => "pass its path as the menu option",
+	}
+}
+
 fn unchosen_message(press: Press<'_>, refusal: Option<&str>, items: &str) -> String {
 	let (opened, aftermath, listed) = (opened(press), aftermath(press), listed(items));
 	match refusal {
 		None => format!(
 			"{opened}, which takes the keyboard from the user's app, so it was closed with nothing \
-			 chosen{aftermath}. To choose an item in the background, pass its path as the menu \
-			 option, e.g. menu: [\"<item>\", \"<subitem>\"].{listed}"
+			 chosen{aftermath}. To choose an item in the background, {}, e.g. menu: [\"<item>\", \
+			 \"<subitem>\"].{listed}",
+			choose_hint(press)
 		),
 		Some(refusal) => format!(
 			"{opened}, but {refusal}, so nothing was chosen and the menu was \
@@ -823,6 +835,22 @@ mod tests {
 			height:  100,
 			focused: false,
 		}
+	}
+
+	#[test]
+	fn a_hold_or_drag_whose_menu_was_closed_points_to_a_click_with_menu() {
+		let window = finder_window();
+		for kind in ["mouse hold", "drag"] {
+			let message =
+				unchosen_message(Press::Pointer { kind, window: &window }, None, "\"Small\"");
+			// Holds and drags take no `menu` option.
+			assert!(
+				message.contains("click the control with the item's path as the menu option"),
+				"{message}"
+			);
+		}
+		let click = unchosen_message(Press::Pointer { kind: "click", window: &window }, None, "");
+		assert!(click.contains("pass its path as the menu option"), "{click}");
 	}
 
 	#[test]
