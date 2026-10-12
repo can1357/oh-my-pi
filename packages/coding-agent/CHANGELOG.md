@@ -31,6 +31,7 @@
 ### Fixed
 
 - Kept private prompt-cache routing keys out of shared sessions and HTML exports ([#15467](https://github.com/can1357/oh-my-pi/pull/15467) by [@iliaal](https://github.com/iliaal))
+- `display.hideToolOutputDetails` renders each tool call as its own one-line summary and hides its output body — on the assembled transcript and on Tern's native surface alike — and `app.display.toggleDetail` moves that together with the thinking-block toggle from a single key ([#11840](https://github.com/can1357/oh-my-pi/pull/11840) by [@iacore](https://github.com/iacore))
 
 ## [18.10.2] - 2026-10-12
 
