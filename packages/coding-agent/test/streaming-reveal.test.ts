@@ -177,6 +177,54 @@ describe("streaming reveal", () => {
 		expect(textAt(display, 1)).toBe("");
 	});
 
+	it("keeps the answer at its reveal position when thinking visibility toggles after the answer is reached", async () => {
+		// Hiding a long thinking prefix mid-stream must not snap the answer to
+		// 100%, and showing it again must not spend the answer's budget on the
+		// freshly shown prefix. The aggregate reveal count is spent from the
+		// first visible block, so the controller re-anchors per block instead of
+		// clamping the old thinking-plus-answer count to the text total.
+		const thinking = "reasoning through the answer ".repeat(12);
+		const answer = "the visible answer tail that the user is reading".repeat(4);
+		let hideThinking = false;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		// Stream the thinking prefix out, then land the answer mid-reveal, so the
+		// reveal position sits inside the answer text, past the whole prefix.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 4);
+		for (let step = 1; step <= 10; step++) {
+			const text = answer.slice(0, Math.floor((answer.length * step) / 10));
+			controller.setTarget(makeMessage([{ type: "thinking", thinking }, { type: "text", text }]), false);
+			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		}
+		const revealed = textAt(latestMessage(component), 1);
+		expect(revealed.length).toBeGreaterThan(0);
+		expect(revealed.length).toBeLessThan(answer.length);
+
+		// Hide the prefix: the answer keeps exactly the units it had revealed.
+		hideThinking = true;
+		controller.resyncVisibility();
+		expect(textAt(latestMessage(component), 1)).toBe(revealed);
+
+		// Show it again: the answer does not give its units back to the prefix.
+		hideThinking = false;
+		controller.resyncVisibility();
+		expect(textAt(latestMessage(component), 1)).toBe(revealed);
+		const shownBlock = latestMessage(component).content[0];
+		expect(shownBlock?.type).toBe("thinking");
+		if (shownBlock?.type === "thinking") {
+			expect(shownBlock.thinking.length).toBeGreaterThan(0);
+			expect("rawThinking" in shownBlock).toBe(true);
+		}
+	});
+
 	it("uses an adaptive catchup step with the configured floor", () => {
 		const largeBacklog = CATCHUP_FRAMES * 101;
 		const step = nextStep(largeBacklog);

@@ -406,17 +406,57 @@ export class StreamingRevealController {
 	 * Re-read cached visibility flags (hideThinkingBlock, proseOnlyThinking)
 	 * and re-render the current target. Called when the thinking level changes
 	 * mid-stream so the reveal controller doesn't keep rendering with stale values.
+	 *
+	 * The aggregate reveal count is spent from the first visible block, so a
+	 * visibility toggle moves every later block by the units it adds or drops.
+	 * Re-anchor per block: the revealed amount of every block that stays
+	 * visible is preserved, so a hide/show after the reveal reached the answer
+	 * keeps the answer where it was instead of clamping the whole old count to
+	 * the text total (answer snapped to 100%) or spending the answer budget on
+	 * the freshly shown thinking prefix (answer re-hidden). A block whose text
+	 * changed under the new prose mode keeps its position, clamped to its new
+	 * length; a block that just became visible is already fully revealed, so
+	 * showing a prefix restores the view it had when it was hidden.
 	 */
 	resyncVisibility(): void {
 		if (!this.#target || !this.#component) return;
+		const target = this.#target;
+		const revealedBefore = this.#revealed;
+		const hideBefore = this.#hideThinkingBlock;
+		const proseBefore = this.#proseOnlyThinking;
 		this.#hideThinkingBlock = this.#getHideThinkingBlock();
 		this.#proseOnlyThinking = this.#getProseOnlyThinking();
-		// Recalculate visible units — hiding thinking blocks may reduce the total,
-		// and the reveal position may now exceed it.
-		const total = this.#visibleUnits(this.#target);
-		this.#revealed = Math.min(this.#revealed, total);
+		// Pass 1 spends the old count under the flags it was earned with; pass 2
+		// re-walks under the fresh flags, carrying a still-visible block's share
+		// forward (clamped to its new length) and snapping a newly visible one.
+		let remaining = Math.max(0, Math.floor(revealedBefore));
+		let revealed = 0;
+		for (let i = 0; i < target.content.length; i++) {
+			const before = this.#blockUnits(target.content[i]!, hideBefore, proseBefore, i);
+			const after = this.#blockUnits(target.content[i]!, this.#hideThinkingBlock, this.#proseOnlyThinking, i);
+			if (before > 0 && after > 0) {
+				const spent = Math.min(remaining, before);
+				remaining -= before;
+				revealed += Math.min(spent, after);
+			} else if (before === 0 && after > 0) {
+				revealed += after;
+			} else {
+				remaining -= before;
+			}
+		}
+		this.#revealed = revealed;
+		const total = this.#visibleUnits(target);
 		this.#renderCurrent();
 		this.#syncTimer(total);
+	}
+
+	/** Visible units of one block under an explicit visibility pair. */
+	#blockUnits(block: AssistantContentBlock, hideThinking: boolean, proseOnly: boolean, index: number): number {
+		if (block.type === "text") return this.#unitCounter.count(index, block.text);
+		if (block.type !== "thinking" || hideThinking) return 0;
+		const formatted = formatThinkingForDisplay(block.thinking, proseOnly);
+		if (!hasDisplayableThinking(block.thinking, formatted)) return 0;
+		return this.#unitCounter.count(index, formatted);
 	}
 
 	/** Total reveal units of `message`, memoized per block across ticks. */
