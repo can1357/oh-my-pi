@@ -27,6 +27,12 @@ const XDG_KEYS = ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"] as const;
 export interface StatsTestIsolation {
 	/** Active per-test `TempDir`. Null between tests. */
 	current(): TempDir | null;
+	/** Terminate every worker the sync warm pool is holding, as the test boundary does. */
+	resetWarmPool(): void;
+}
+
+function resetWarmPool(): void {
+	__resetStatsSyncWorkerPool();
 }
 
 // The sync warm pool is module state, and Bun shares module state across the
@@ -52,7 +58,7 @@ export function installStatsTestIsolation(prefix: string): StatsTestIsolation {
 
 	afterEach(() => {
 		closeDb();
-		__resetStatsSyncWorkerPool();
+		resetWarmPool();
 		if (originalConfigDir === undefined) {
 			delete process.env.PI_CONFIG_DIR;
 		} else {
@@ -72,5 +78,6 @@ export function installStatsTestIsolation(prefix: string): StatsTestIsolation {
 		current() {
 			return tempDir;
 		},
+		resetWarmPool,
 	};
 }

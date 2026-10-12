@@ -7,7 +7,7 @@ import { getOverallStats } from "@oh-my-pi/omp-stats/rollup";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
-installStatsTestIsolation("@pi-stats-sync-serial-");
+const isolation = installStatsTestIsolation("@pi-stats-sync-serial-");
 
 // The sync warm pool is module state, and Bun shares module state across the
 // files of a `bun test` run, so a worker a pooled sync leaves behind stays live
@@ -30,8 +30,6 @@ afterEach(() => {
 const spawnedWorkers: Worker[] = [];
 const workerRefDepth = new WeakMap<Worker, number>();
 const terminatedWorkers = new Set<Worker>();
-/** Warm worker the previous test left in the pool, for the teardown test. */
-let warmWorkerFromPreviousTest: Worker | undefined;
 
 /**
  * Install a `globalThis.Worker` spy that still builds real workers.
@@ -75,6 +73,26 @@ function spyOnWorkerSpawns() {
 			workerRefDepth.set(worker, 1);
 			return worker;
 		});
+}
+
+/**
+ * Run one pooled sync and return the worker it leaves in the warm pool.
+ *
+ * A returned worker stays live but unref'd as module state, so a single run
+ * is enough to leave a handle behind - the shape the run's exit-path
+ * guarantees have to be observed on.
+ */
+async function poolOneWorker(): Promise<Worker> {
+	await writeSessionFile();
+	const sessionFile = path.join(getSessionsDir(), "--tmp--sync-serial", "session.jsonl");
+	const spawnSpy = spyOnWorkerSpawns();
+
+	await syncAllSessions({ workers: 2, files: [sessionFile] });
+
+	expect(spawnSpy).toHaveBeenCalled();
+	const pooled = spawnedWorkers.at(-1);
+	expect(pooled).toBeDefined();
+	return pooled as Worker;
 }
 
 /**
@@ -267,26 +285,29 @@ describe("stats sync serial mode", () => {
 	// already abandoned (Bun neither rejects that post nor answers it, so the
 	// lane would wait forever holding the stats sync lock). Skipped on darwin,
 	// where the serial parser never spawns.
-	it.skipIf(process.platform === "darwin")("fails the run when a dispatch lands on a worker that died between parses", async () => {
-		// Two files per lane, so each lane reaches for its worker a second time
-		// after the crash has already been flagged.
-		const sessionFiles = await Promise.all(
-			[0, 1, 2, 3].map(index => writeSessionFile({ name: `crash-${index}.jsonl` })),
-		);
-		const dying: DyingWorker[] = [];
-		vi.spyOn(globalThis, "Worker").mockImplementation(() => {
-			const worker = new DyingWorker();
-			dying.push(worker);
-			return worker as unknown as Worker;
-		});
+	it.skipIf(process.platform === "darwin")(
+		"fails the run when a dispatch lands on a worker that died between parses",
+		async () => {
+			// Two files per lane, so each lane reaches for its worker a second time
+			// after the crash has already been flagged.
+			const sessionFiles = await Promise.all(
+				[0, 1, 2, 3].map(index => writeSessionFile({ name: `crash-${index}.jsonl` })),
+			);
+			const dying: DyingWorker[] = [];
+			vi.spyOn(globalThis, "Worker").mockImplementation(() => {
+				const worker = new DyingWorker();
+				dying.push(worker);
+				return worker as unknown as Worker;
+			});
 
-		await expect(syncAllSessions({ workers: 2, files: sessionFiles })).rejects.toThrow(
-			"sync worker died before the request was sent",
-		);
+			await expect(syncAllSessions({ workers: 2, files: sessionFiles })).rejects.toThrow(
+				"sync worker died before the request was sent",
+			);
 
-		// The lane never posted its second request into the dead worker.
-		for (const worker of dying) expect(worker.requests).toHaveLength(1);
-	});
+			// The lane never posted its second request into the dead worker.
+			for (const worker of dying) expect(worker.requests).toHaveLength(1);
+		},
+	);
 
 	// The warm pool is module state, so a pooled worker outlives its run: it is
 	// unref'd (never holding the process open) but still a live Bun worker thread
@@ -295,31 +316,24 @@ describe("stats sync serial mode", () => {
 	// returned worker were left referenced, the run would not exit past its last
 	// parse. Skipped on darwin, where the serial parser never spawns.
 	it.skipIf(process.platform === "darwin")("unrefs a returned worker so it cannot hold the process open", async () => {
-		await writeSessionFile();
-		const sessionFile = path.join(getSessionsDir(), "--tmp--sync-serial", "session.jsonl");
-		const workerSpy = spyOnWorkerSpawns();
+		const pooled = await poolOneWorker();
 
-		await syncAllSessions({ workers: 2, files: [sessionFile] });
-
-		const pooled = spawnedWorkers.at(-1);
-		expect(pooled).toBeDefined();
-		expect(workerSpy).toHaveBeenCalled();
 		// Every dispatch settled, so the run must have handed back the reference it
 		// held for the parse: a still-referenced worker would keep the process (and
 		// this test binary) open past the end of the sync.
-		expect(workerRefDepth.get(pooled as Worker)).toBe(0);
-		// Kept for the test below, which asserts what the shared isolation boundary
-		// does to the warm worker this run leaves behind.
-		warmWorkerFromPreviousTest = pooled;
+		expect(workerRefDepth.get(pooled)).toBe(0);
 	});
 
-	// The test above leaves a worker sitting in the warm pool, and
-	// `installStatsTestIsolation` is the seam every stats test file shares. Bun
-	// shares module state across the files of one `bun test` run, so a warm worker
-	// that survives its test's boundary stays live for the rest of the run and
-	// only the next checkout or its own 10s deadline ends it.
-	it.skipIf(process.platform === "darwin")("drops the warm pool at the shared isolation boundary", () => {
-		expect(warmWorkerFromPreviousTest).toBeDefined();
-		expect(terminatedWorkers.has(warmWorkerFromPreviousTest as Worker)).toBe(true);
+	// The warm pool is module state that outlives its run: a returned worker stays
+	// a live Bun thread until an idle deadline, a checkout, or an explicit reset
+	// ends it. `installStatsTestIsolation` is the seam every stats test file shares,
+	// so a worker that survives one test's boundary must be gone before the next
+	// test's checkout. Skipped on darwin, where the serial parser never spawns.
+	it.skipIf(process.platform === "darwin")("drops the warm pool at the shared isolation boundary", async () => {
+		const pooled = await poolOneWorker();
+
+		isolation.resetWarmPool();
+
+		expect(terminatedWorkers.has(pooled)).toBe(true);
 	});
 });
