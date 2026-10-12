@@ -389,6 +389,23 @@ describe("runSubprocess subagent_stop", () => {
 		expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeNumber();
 	});
 
+	it("asks a reason-less refusal's continuation to yield again", async () => {
+		const id = "RefusedNoReason";
+		const harness = createHarness({
+			hasStopHandlers: true,
+			onPrompt: call => call.yieldTerminal({ report: call.text }),
+			onStop: async (_event, callIndex) => (callIndex === 1 ? { decision: "block" } : undefined),
+		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
+
+		await runSubprocess(baseOptions(id));
+
+		expect(harness.prompts).toHaveLength(2);
+		expect(harness.prompts[1]?.text).toContain("without a reason");
+		expect(harness.prompts[1]?.text).toContain("yield again");
+	});
+
 	it("does not publish the refused yield when the replacement is only a complete section", async () => {
 		const id = "RefusedThenSection";
 		const harness = createHarness({
@@ -801,6 +818,24 @@ describe("runSubprocess subagent_stop", () => {
 			expect(result.output).toBe("replacement report");
 			expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).text()).toBe("replacement report");
 			expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeNumber();
+		});
+
+		it("does not ask a reason-less refusal's continuation to call a yield tool it does not have", async () => {
+			const id = "UnstructuredNoReason";
+			const harness = createHarness({
+				hasStopHandlers: true,
+				onPrompt: call => call.report(call.promptIndex === 1 ? "first report" : "second report"),
+				onStop: async (_event, callIndex) => (callIndex === 1 ? { decision: "block" } : undefined),
+			});
+			mockCreateAgentSession(harness.session);
+			registerRunning(id, harness.session);
+
+			const result = await runSubprocess({ ...baseOptions(id), structured: false });
+
+			expect(harness.prompts).toHaveLength(2);
+			expect(harness.prompts[1]?.text).toContain("without a reason");
+			expect(harness.prompts[1]?.text).not.toMatch(/yield/i);
+			expect(result.output).toBe("second report");
 		});
 
 		it("fails the run instead of publishing a refused report the continuation never replaced", async () => {

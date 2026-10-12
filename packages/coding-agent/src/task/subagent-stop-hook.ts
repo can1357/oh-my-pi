@@ -59,12 +59,15 @@ export type SubagentStopOutcome =
 export class SubagentStopHook {
 	readonly #identity: SubagentStopRunIdentity;
 	readonly #signal: AbortSignal;
+	/** `false` = the child has no `yield` tool, so its continuation prompt must not ask for one. */
+	readonly #structured: boolean;
 	#continuations = 0;
 	#active = false;
 
-	constructor(identity: SubagentStopRunIdentity, signal: AbortSignal) {
+	constructor(identity: SubagentStopRunIdentity, signal: AbortSignal, structured: boolean) {
 		this.#identity = identity;
 		this.#signal = signal;
+		this.#structured = structured;
 	}
 
 	/**
@@ -95,7 +98,8 @@ export class SubagentStopHook {
 		// must drop it rather than accept a yield a handler was still judging.
 		if (this.#signal.aborted) return { kind: "aborted" };
 		// The diagnostic is only consulted for a reason-less refusal; render it only for a refusal.
-		const blockedFallback = result?.decision === "block" ? prompt.render(subagentStopBlockedPrompt) : "";
+		const blockedFallback =
+			result?.decision === "block" ? prompt.render(subagentStopBlockedPrompt, { structured: this.#structured }) : "";
 		const text = resolveStopContinuationText(result, blockedFallback);
 		if (text === undefined) return { kind: "allow" };
 		if (result?.decision !== "block" && this.#continuations >= SUBAGENT_STOP_CONTINUATION_CAP) {
