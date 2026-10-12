@@ -1,0 +1,218 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/extensibility/plugins/marketplace/marketplace-schema.json",
+	"title": "OMP marketplace catalog",
+	"description": "Schema for .omp-plugin/marketplace.json and .claude-plugin/marketplace.json read by omp.",
+	"type": "object",
+	"properties": {
+		"name": {
+			"type": "string",
+			"pattern": "^(?=.{1,64}$)[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$",
+			"description": "Marketplace name, the part after `@` in plugin IDs. Up to 64 ASCII letters, digits, `.` and `-`, starting and ending with a letter or digit."
+		},
+		"owner": {
+			"type": "object",
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"email": {
+					"description": "Owner email."
+				}
+			},
+			"required": [
+				"name"
+			],
+			"description": "Marketplace owner."
+		},
+		"plugins": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"properties": {
+					"name": {
+						"type": "string",
+						"pattern": "^(?=.{1,64}$)[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$",
+						"description": "Plugin name, installed as `name@marketplace`. Up to 64 ASCII letters, digits, `.` and `-`, starting and ending with a letter or digit."
+					},
+					"source": {
+						"anyOf": [
+							{
+								"type": "string",
+								"pattern": "^\\.\\/",
+								"description": "Directory inside the marketplace, starting with `./`."
+							},
+							{
+								"type": "object",
+								"properties": {
+									"source": {
+										"const": "github"
+									},
+									"repo": {
+										"type": "string",
+										"minLength": 1,
+										"description": "`owner/repo`."
+									},
+									"ref": {
+										"description": "Branch or tag to check out."
+									},
+									"sha": {
+										"description": "Commit SHA to pin."
+									}
+								},
+								"required": [
+									"source",
+									"repo"
+								],
+								"description": "GitHub repository."
+							},
+							{
+								"type": "object",
+								"properties": {
+									"source": {
+										"const": "url"
+									},
+									"url": {
+										"type": "string",
+										"minLength": 1,
+										"description": "Git repository URL."
+									},
+									"ref": {
+										"description": "Branch or tag to check out."
+									},
+									"sha": {
+										"description": "Commit SHA to pin."
+									}
+								},
+								"required": [
+									"source",
+									"url"
+								],
+								"description": "Git repository."
+							},
+							{
+								"type": "object",
+								"properties": {
+									"source": {
+										"const": "git-subdir"
+									},
+									"url": {
+										"type": "string",
+										"minLength": 1,
+										"description": "Git repository URL."
+									},
+									"path": {
+										"type": "string",
+										"minLength": 1,
+										"description": "Subdirectory holding the plugin."
+									},
+									"ref": {
+										"description": "Branch or tag to check out."
+									},
+									"sha": {
+										"description": "Commit SHA to pin."
+									}
+								},
+								"required": [
+									"source",
+									"url",
+									"path"
+								],
+								"description": "Subdirectory of a git repository."
+							},
+							{
+								"type": "object",
+								"properties": {
+									"source": {
+										"const": "npm"
+									},
+									"package": {
+										"type": "string",
+										"minLength": 1,
+										"description": "npm package name."
+									},
+									"version": {
+										"description": "Package version or range."
+									},
+									"registry": {
+										"description": "Registry URL."
+									}
+								},
+								"required": [
+									"source",
+									"package"
+								],
+								"description": "npm package. Not installable yet."
+							}
+						],
+						"description": "Where to fetch the plugin."
+					},
+					"description": {
+						"description": "Short description."
+					},
+					"version": {
+						"description": "Plugin version. Installation requires 1-128 ASCII letters, digits, or `._+-`, without `..`."
+					},
+					"author": {
+						"description": "`{ name, email? }`."
+					},
+					"homepage": {
+						"description": "Homepage URL."
+					},
+					"repository": {
+						"description": "Source repository URL."
+					},
+					"license": {
+						"description": "License identifier."
+					},
+					"keywords": {
+						"description": "Search keywords."
+					},
+					"category": {
+						"description": "Category."
+					},
+					"tags": {
+						"description": "Tags."
+					},
+					"strict": {
+						"description": "Preserved; not used by omp."
+					},
+					"commands": {
+						"description": "Preserved; not used by omp."
+					},
+					"agents": {
+						"description": "Preserved; not used by omp."
+					},
+					"hooks": {
+						"description": "Preserved; not used by omp."
+					},
+					"mcpServers": {
+						"description": "Preserved; not used by omp."
+					},
+					"lspServers": {
+						"description": "Inline LSP server map or a path inside the plugin."
+					},
+					"dapAdapters": {
+						"description": "Inline DAP adapter map or a JSON/YAML path inside the plugin."
+					}
+				},
+				"required": [
+					"name",
+					"source"
+				]
+			},
+			"description": "Plugins offered by this marketplace."
+		},
+		"$schema": {
+			"description": "JSON Schema URL for editors; ignored by omp."
+		},
+		"metadata": {
+			"description": "`{ description, version, pluginRoot }`; `pluginRoot` prefixes relative sources."
+		}
+	},
+	"required": [
+		"name",
+		"owner",
+		"plugins"
+	]
+}
