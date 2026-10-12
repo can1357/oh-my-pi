@@ -1017,7 +1017,7 @@
 - Transparent images the model receives (small icons, oversized screenshots) keep their transparency instead of turning into a black square, and resized edges no longer pick up a dark fringe
 ### Fixed
 
-- Fixed model-authored `omp://` documentation links in the transcript rendering as plain text: the first render now materializes each embedded doc into a content-addressed, read-only cache under `~/.omp/cache/docs/<hash>/` and hyperlinks that file, while `read`, `grep`, and attachment displays keep showing the `omp://` URL — in source checkouts they name the file the corpus was read from ([#15163](https://github.com/can1357/oh-my-pi/pull/15163) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed `omp://` documentation links in the transcript now rendering as clickable hyperlinks ([#15163](https://github.com/can1357/oh-my-pi/pull/15163) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.10.1] - 2026-10-12
 
