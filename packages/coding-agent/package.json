@@ -531,6 +531,7 @@
 		"gen:tool-views": "bun --cwd=../collab-web run gen:tool-views",
 		"gen:bundle": "bun scripts/bundle-dist.ts",
 		"gen:rpc": "bun scripts/gen-rpc/index.ts",
+		"gen:marketplace-schema": "bun scripts/gen-marketplace-schema.ts",
 		"prepack": "bun run gen:tool-views && bun run gen:bundle",
 		"bench:guard": "bun scripts/bench-guard.ts"
 	},

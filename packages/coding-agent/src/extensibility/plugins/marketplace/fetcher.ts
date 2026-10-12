@@ -7,15 +7,11 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
-
-import {
-	isValidNameSegment,
-	nameSegmentCollisionKey,
-	type MarketplaceCatalog,
-	type MarketplaceSourceType,
-} from "./types";
+import { MarketplaceCatalogSchema, MarketplacePluginEntrySchema } from "./schema";
+import { type MarketplaceCatalog, type MarketplaceSourceType, nameSegmentCollisionKey } from "./types";
 
 const GIT_CLONE_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -90,20 +86,13 @@ export function classifySource(source: string): MarketplaceSourceType {
 
 // ── parseMarketplaceCatalog ───────────────────────────────────────────
 
-function assertField(condition: boolean, field: string, filePath: string): asserts condition {
-	if (!condition) {
-		throw new Error(`Missing or invalid field "${field}" in catalog: ${filePath}`);
-	}
-}
-
 /**
  * Parse and validate a marketplace.json catalog from raw JSON content.
  *
- * Required fields: name (valid name segment), owner.name, plugins array.
- * Each plugin entry requires name (string) and source (string or object
- * with a "source" field). Extra fields are preserved via spread.
- *
- * @throws on JSON parse failure or missing/invalid required fields.
+ * Structure is checked with `./schema`, the same definition published as
+ * `marketplace-schema.json`. An invalid catalog throws; an invalid `plugins[]`
+ * entry, or one whose name repeats an earlier entry ignoring case, is skipped
+ * with a warning. Extra fields are preserved.
  */
 export function parseMarketplaceCatalog(content: string, filePath: string): MarketplaceCatalog {
 	let raw: unknown;
@@ -117,83 +106,29 @@ export function parseMarketplaceCatalog(content: string, filePath: string): Mark
 		throw new Error(`Marketplace catalog at ${filePath} must be a JSON object`);
 	}
 
-	const obj = raw as Record<string, unknown>;
+	const catalog = MarketplaceCatalogSchema(raw);
+	if (catalog instanceof type.errors) {
+		throw new Error(`Missing or invalid field "${catalog[0].path.join(".")}" in catalog: ${filePath}`);
+	}
 
-	// name: required, must be a valid name segment
-	assertField(typeof obj.name === "string" && isValidNameSegment(obj.name), "name", filePath);
-
-	// owner: required object with name string
-	assertField(typeof obj.owner === "object" && obj.owner !== null && !Array.isArray(obj.owner), "owner", filePath);
-	const owner = obj.owner as Record<string, unknown>;
-	assertField(typeof owner.name === "string", "owner.name", filePath);
-
-	// plugins: required array
-	assertField(Array.isArray(obj.plugins), "plugins", filePath);
-
-	const plugins = obj.plugins as unknown[];
 	const validPlugins: unknown[] = [];
 	const pluginNameKeys = new Set<string>();
-	for (let i = 0; i < plugins.length; i++) {
-		try {
-			const entry = plugins[i];
-			assertField(typeof entry === "object" && entry !== null && !Array.isArray(entry), `plugins[${i}]`, filePath);
-			const p = entry as Record<string, unknown>;
-			assertField(typeof p.name === "string" && isValidNameSegment(p.name), `plugins[${i}].name`, filePath);
-			// source can be a string path or a typed object (github/url/git-subdir/npm)
-			// all typed objects carry a "source" discriminant string field
-			assertField(
-				typeof p.source === "string" ||
-					(typeof p.source === "object" &&
-						p.source !== null &&
-						!Array.isArray(p.source) &&
-						typeof (p.source as Record<string, unknown>).source === "string"),
-				`plugins[${i}].source`,
-				filePath,
-			);
-			// String sources must be relative paths starting with "./"
-			if (typeof p.source === "string") {
-				assertField((p.source as string).startsWith("./"), `plugins[${i}].source (must start with "./")`, filePath);
-			}
-			// Validate required fields for typed source variants
-			if (typeof p.source === "object" && p.source !== null) {
-				const src = p.source as Record<string, unknown>;
-				const variant = src.source as string;
-				if (variant === "github") {
-					assertField(typeof src.repo === "string" && src.repo.length > 0, `plugins[${i}].source.repo`, filePath);
-				} else if (variant === "url" || variant === "git-subdir") {
-					assertField(typeof src.url === "string" && src.url.length > 0, `plugins[${i}].source.url`, filePath);
-					if (variant === "git-subdir") {
-						assertField(
-							typeof src.path === "string" && src.path.length > 0,
-							`plugins[${i}].source.path`,
-							filePath,
-						);
-					}
-				} else if (variant === "npm") {
-					assertField(
-						typeof src.package === "string" && src.package.length > 0,
-						`plugins[${i}].source.package`,
-						filePath,
-					);
-				} else {
-					assertField(false, `plugins[${i}].source.source (unknown variant: "${variant}")`, filePath);
-				}
-			}
-			const pluginNameKey = nameSegmentCollisionKey(p.name);
-			assertField(!pluginNameKeys.has(pluginNameKey), `plugins[${i}].name (case-equivalent duplicate)`, filePath);
-			pluginNameKeys.add(pluginNameKey);
-			validPlugins.push(entry);
-		} catch (err) {
-			// Warn and skip invalid plugin entries instead of failing the entire catalog.
-			// This lets the rest of the marketplace load even if one entry has a bad name/source.
-			const name =
-				typeof plugins[i] === "object" && plugins[i] !== null
-					? ((plugins[i] as Record<string, unknown>).name ?? `[${i}]`)
-					: `[${i}]`;
-			logger.warn(`Skipping invalid plugin ${name}: ${(err as Error).message}`);
+	for (const [i, entry] of catalog.plugins.entries()) {
+		const plugin = MarketplacePluginEntrySchema(entry);
+		if (plugin instanceof type.errors) {
+			const field = [`plugins[${i}]`, ...plugin[0].path].join(".");
+			logger.warn(`Skipping invalid plugin entry: field "${field}" in ${filePath}`);
+			continue;
 		}
+		const nameKey = nameSegmentCollisionKey(plugin.name);
+		if (pluginNameKeys.has(nameKey)) {
+			logger.warn(`Skipping plugin "${plugin.name}": name repeats an earlier entry ignoring case in ${filePath}`);
+			continue;
+		}
+		pluginNameKeys.add(nameKey);
+		validPlugins.push(entry);
 	}
-	// Replace the plugins array with only valid entries
+	const obj = raw as Record<string, unknown>;
 	obj.plugins = validPlugins;
 
 	// Extra fields are preserved — cast through unknown for type safety

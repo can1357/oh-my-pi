@@ -5,6 +5,7 @@
 ### Added
 
 - Added `task.agentSoftRequestBudget` to give named subagents their own soft request budget, so a long-running agent can get more requests (or `0` for no guard) while scout, sonic and other agents keep theirs ([#15419](https://github.com/can1357/oh-my-pi/pull/15419) by [@will-bogusz](https://github.com/will-bogusz))
+- Added a JSON Schema for `marketplace.json` catalogs (`marketplace-schema.json`) so marketplace authors can validate catalogs in their editor or CI; the docs' example `$schema` now points to it instead of a URL that returned 404
 
 ## [18.10.2] - 2026-10-12
 
