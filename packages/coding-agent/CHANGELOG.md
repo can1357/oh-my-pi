@@ -314,6 +314,7 @@
 ### Fixed
 
 - Fixed `grep` on a single file showing in Tern as separate boxed snippets with no file row or syntax colors; it now looks the same as a `grep` over a directory
+- Faster startup: off-boot-path modules like the OTel exporter and model catalog now load lazily instead of during initial boot ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.10.0] - 2026-10-12
 
@@ -1862,10 +1863,3 @@ Older entries are archived in [packages/coding-agent/CHANGELOG.md@2a4691429ee6](
 - Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked ([#12236](https://github.com/can1357/oh-my-pi/pull/12236) by [@shivamklr](https://github.com/shivamklr)).
 
 Older entries are archived in [packages/coding-agent/CHANGELOG.md@1e3cc3ab94d0](https://github.com/can1357/oh-my-pi/blob/1e3cc3ab94d05617e79fb12d95711d58161747d3/packages/coding-agent/CHANGELOG.md).
-
-## [Unreleased]
-
-### Fixed
-
-- Fixed compiled ESM artifacts receiving a different `pi` namespace from custom tools, commands, and hooks due to `require()` lowering to a CommonJS wrapper ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed unconditional telemetry-export await inserting an embedded-chunk fetch into normal startup ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
