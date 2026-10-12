@@ -2938,13 +2938,17 @@ async function driveSessionToResult(
 							session.getLastAssistantMessage()?.stopReason === "error" ||
 							!session.hasPendingAsyncWork())
 					) {
-						// A message-result run's settled final report is also a candidate.
-						// Budget stops and model errors end the run without offering one.
+						// A message-result run's settled final report is also a candidate,
+						// whatever ended it short of an error or abort (`stop`, `length`, ...).
+						// Budget stops and terminal model errors end the run without offering one.
+						const finalTurn = session.getLastAssistantMessage();
 						if (
 							!hasLaterSteps &&
 							!monitor.budgetStopRequested() &&
 							monitor.lastReportTurnText() !== undefined &&
-							session.getLastAssistantMessage()?.stopReason === "stop" &&
+							finalTurn !== undefined &&
+							finalTurn.stopReason !== "error" &&
+							finalTurn.stopReason !== "aborted" &&
 							(await runStopPass())
 						)
 							continue;
@@ -3600,6 +3604,18 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
  * never reach this monitor. When the session is no longer idle (a newer turn
  * took it) the continuation cannot start; the refusal then stays unanswered and
  * finalization fails the turn instead of publishing the refused payload.
+ *
+ * Each continuation settles the session's owner async work before the next
+ * pass, so a candidate is only judged once that work quiesced; a result the
+ * settle delivers un-latches the yield and the turn fails closed as an
+ * unanswered refusal.
+ *
+ * Known narrow race: while a pass consults, a newer wake can start and finish
+ * its turn while its own observation is still settling async work. A
+ * continuation that starts then is seen by both monitors, so the newer
+ * observation could judge and publish this turn's yield. The newer
+ * observation's own pass still gates it; closing the race would need the
+ * session to hand an observation exclusive ownership of the continuation.
  */
 async function runWakeStopPasses(
 	session: AgentSession,
@@ -3619,6 +3635,8 @@ async function runWakeStopPasses(
 					throwOnDrop: true,
 				});
 				await session.waitForIdle();
+				// Attached still: a delivered async result un-latches the yield.
+				await session.settleAsyncWork();
 				await monitor.waitForYieldTurnStop();
 			} finally {
 				detach();
@@ -3629,6 +3647,8 @@ async function runWakeStopPasses(
 		let refused = true;
 		while (refused && monitor.yieldCalled()) refused = await runSubagentStopPass(session, monitor, stopHook, io);
 	} catch (error) {
+		// A cancelled run surfaces here as an abort; that is the run's outcome, not a failure.
+		if (signal.aborted) return;
 		logger.warn("IRC wake-turn subagent_stop continuation failed", {
 			error: error instanceof Error ? error.message : String(error),
 		});
@@ -3819,11 +3839,15 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			const runtimeLimitExceeded = turnMonitor.runtimeLimitExceeded();
 			const budgetExceeded = turnMonitor.abortKind() === "budget";
 			// A refusal no continuation answered: the wake turn fails, and its
-			// last assistant turn is not an abort of the turn's work.
-			const unresolvedRefusal = turnMonitor.yieldInvalidatedByStop() && !yielded;
+			// last assistant turn is not an abort of the turn's work. A run
+			// cancelled while handlers were consulting is cancelled instead.
+			const refusedWithoutReplacement = turnMonitor.yieldInvalidatedByStop() && !yielded;
+			const cancelledDuringStop = refusedWithoutReplacement && turnMonitor.abortSignal.aborted;
+			const unresolvedRefusal = refusedWithoutReplacement && !cancelledDuringStop;
 			const aborted =
 				runtimeLimitExceeded ||
 				budgetExceeded ||
+				cancelledDuringStop ||
 				(lastAssistant?.stopReason === "aborted" && !yielded && !unresolvedRefusal);
 			// Two error lanes. `error` carries full diagnostics (a thrown turn
 			// error's stack) for `done.error`, logs, and lifecycle. `errorForPeer`
