@@ -1,11 +1,16 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { findFreeCdpPort, waitForCdp } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { navigateMainFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/navigation";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
-import type { Page, WaitForOptions } from "puppeteer-core";
+import puppeteer, { type Page, type WaitForOptions } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -72,6 +77,19 @@ const server = Bun.serve({
 			const stuck = `http://localhost:${new URL(request.url).port}/stuck`;
 			return new Response(`<button>Main</button><iframe id="stuck" src="${stuck}"></iframe>`, { headers });
 		}
+		if (pathname === "/print" || pathname === "/print-on-load") {
+			// `log` records what the page saw: Chrome fires afterprint only once a print finished, and headless Chrome
+			// returns from an unheld print() without printing anything.
+			return new Response(
+				`<button id="print">Print</button><script>
+					globalThis.log = [];
+					addEventListener("afterprint", () => log.push("afterprint"));
+					document.querySelector("#print").addEventListener("click", () => { print(); log.push("print returned"); });
+					if (location.pathname === "/print-on-load") addEventListener("load", () => { print(); log.push("load print returned"); });
+				</script>`,
+				{ headers },
+			);
+		}
 		return new Response(
 			`<!doctype html><title>${pathname}</title><body data-path="${pathname}">${iframe}<script>
 				sessionStorage.setItem('loads', String(Number(sessionStorage.getItem('loads') || 0) + 1));
@@ -107,6 +125,10 @@ function valueOf(result: { details?: unknown }): unknown {
 	const { details } = result;
 	if (!details || typeof details !== "object" || !("value" in details)) return undefined;
 	return details.value;
+}
+
+function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
+	return result.content.flatMap(part => (part.type === "text" && part.text ? [part.text] : [])).join("\n");
 }
 
 async function observe(invoke: (parameters: unknown) => Promise<{ details?: unknown }>, name: string, options: object) {
@@ -381,6 +403,91 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 			name: "dialogs",
 			chain: [{ method: "setDialogs", args: [null] }],
 		});
+	}, 30_000);
+
+	test("holds print() in a tab omp launched, during its calls and between them, and says so", async () => {
+		const invoke = createHost();
+		await invoke({ action: "open", name: "print", url: `${baseUrl}/print` });
+		const clicked = await invoke({
+			action: "run",
+			name: "print",
+			code: 'await tab.click("#print"); return await tab.evaluate(() => globalThis.log);',
+		});
+		expect(valueOf(clicked)).toEqual(["afterprint", "print returned"]);
+		expect(textOf(clicked)).toContain("The page called window.print()");
+		expect(textOf(clicked)).toContain("tab.pdf()");
+
+		// A page that prints a moment after the call returns: nobody but omp drives this browser, so it stays held.
+		// The print has to land between two calls, which only the real clock in the page can arrange.
+		await invoke({
+			action: "run",
+			name: "print",
+			code: 'await tab.evaluate(() => { setTimeout(() => document.querySelector("#print").click(), 100); });',
+		});
+		await Bun.sleep(500);
+		const later = await invoke({
+			action: "run",
+			name: "print",
+			code: "return await tab.evaluate(() => globalThis.log);",
+		});
+		expect(valueOf(later)).toEqual(["afterprint", "print returned", "afterprint", "print returned"]);
+		expect(textOf(later)).toContain("The page called window.print()");
+	}, 30_000);
+
+	test("holds print() in the user's own browser only around omp's calls", async () => {
+		const exe = await ensureChromiumExecutable();
+		if (!exe) throw new Error("Expected a Chromium executable");
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-print-connected-"));
+		const port = await findFreeCdpPort();
+		const child = Bun.spawn(
+			[
+				exe,
+				"--headless=new",
+				"--no-sandbox",
+				"--no-first-run",
+				"--use-mock-keychain",
+				`--user-data-dir=${root}`,
+				`--remote-debugging-port=${port}`,
+			],
+			{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+		);
+		const invoke = createHost();
+		try {
+			const cdpUrl = `http://127.0.0.1:${port}`;
+			await waitForCdp(cdpUrl, 15_000);
+			await invoke({ action: "open", name: "user-print", url: `${baseUrl}/print`, app: { cdp_url: cdpUrl } });
+			// A document the call navigates to starts held, so a page printing as it loads is caught too.
+			const loaded = await invoke({
+				action: "run",
+				name: "user-print",
+				code: `await tab.goto(${JSON.stringify(`${baseUrl}/print-on-load`)}); return await tab.evaluate(() => globalThis.log);`,
+			});
+			expect(valueOf(loaded)).toEqual(["afterprint", "load print returned"]);
+			expect(textOf(loaded)).toContain("The page called window.print()");
+
+			// The hold ends 1.5 s after the call on the tab worker's real clock; then the user's own click prints.
+			await Bun.sleep(2_000);
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = (await user.pages()).find(candidate => candidate.url().endsWith("/print-on-load"));
+				if (!page) throw new Error("Expected the print page in the user's browser");
+				await page.evaluate('document.querySelector("#print").click()');
+			} finally {
+				await user.disconnect();
+			}
+			const after = await invoke({
+				action: "run",
+				name: "user-print",
+				code: "return await tab.evaluate(() => globalThis.log);",
+			});
+			expect(valueOf(after)).toEqual(["afterprint", "load print returned", "print returned"]);
+			expect(textOf(after)).not.toContain("window.print()");
+		} finally {
+			await invoke({ action: "close", name: "user-print" }).catch(() => {});
+			child.kill();
+			await child.exited;
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	}, 30_000);
 
 	test("scopes helpers to iframe documents in run and direct call paths", async () => {

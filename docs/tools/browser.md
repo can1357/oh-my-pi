@@ -79,7 +79,7 @@ Direct helpers cross the host bridge and return real structured values. The comp
 - Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `type`, `fill`, `press`, `keyDown`, `keyUp`, `mouseMove`, `mouseDown`, `mouseUp`, `clickAt`, `wheel`, `scroll`, `drag`, `highlight`, `scrollIntoView`, `select`, `uploadFile`.
 - Waiting: `waitFor(selector, { timeout? })`, `waitForSelector(selector, { timeout?, visible?, hidden? })`, `waitForUrl(stringOrRegExp, { timeout? })`, `waitForText(text, { timeout?, selector?, exact? })`.
 - Frames: `frames()` lists the frame tree; `frame(selectorOrNameOrUrl)` returns a scoped proxy with `click`, `fill`, `type`, `press`, `text`, `html`, `value`, `attr`, `count`, `isVisible`, `ariaSnapshot`, `evaluate`, `waitFor`, `waitForSelector`, and `screenshot`.
-- Dialogs: `dialog`, `handleDialog`, `setDialogs`.
+- Dialogs: `dialog`, `handleDialog`, `setDialogs`. On Chromium a page's `window.print()` is held instead of opening the print preview, which would block the page's script until someone closes it: the page receives `beforeprint` and `afterprint` and carries on, and the call's output says the page printed (`pdf` gives the printout). Managed and spawned browsers hold it for the tab's lifetime; connected and relay browsers, which the user also drives, only during omp's calls and 1.5 s after.
 - Emulation: `emulate`, `devices`.
 - Clipboard: `clipboardRead`, `clipboardWrite`, `clipboardCopy`, `clipboardPaste`.
 - Storage: `cookies`, `setCookies`, `clearCookies`, `storage`, `setStorage`, `clearStorage`, `saveState`, `loadState`.

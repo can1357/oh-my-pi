@@ -67,6 +67,7 @@ import {
 	readPageViewport,
 } from "./launch";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "./readable";
+import { PrintHold } from "./print-hold";
 import { assertTabPressArgs } from "./tab-arguments";
 import {
 	type BrowserCookie,
@@ -1377,6 +1378,7 @@ export class WorkerCore {
 	#emulation?: BrowserEmulationController;
 	#screenshotHistory = new Map<string, ScreenshotHistory>();
 	#webmcp?: WebMcpController;
+	#printHold?: PrintHold;
 	readonly #recording = new RecordingController();
 	/**
 	 * A back/forward cache restore brings a document back without loading it, so the frame keeps the
@@ -1558,6 +1560,12 @@ export class WorkerCore {
 				await this.#page.emulateFocusedPage(true);
 			}
 			this.#webmcp = await installWebMcp(this.#page);
+			// Nobody else drives a browser omp launched, so its tabs hold every print(); the user's own browser only
+			// while omp acts, so the page's Print buttons still work for the user.
+			this.#printHold = await PrintHold.install(
+				this.#page,
+				payload.mode === "headless" || payload.userDriven !== true ? "tab" : "calls",
+			);
 			await installVitalsObservers(this.#page);
 			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
 			if (payload.ignoreHttpsErrors) await applyIgnoreHttpsErrors(this.#page);
@@ -1589,6 +1597,8 @@ export class WorkerCore {
 			const page = this.#page;
 			await this.#webmcp?.dispose().catch(() => undefined);
 			this.#webmcp = undefined;
+			await this.#printHold?.dispose().catch(() => undefined);
+			this.#printHold = undefined;
 			if (payload.mode === "headless" && page && !page.isClosed()) {
 				await page.close().catch(() => undefined);
 			}
@@ -1838,6 +1848,8 @@ export class WorkerCore {
 			if (signal.aborted) onCancel();
 			else signal.addEventListener("abort", onCancel, { once: true });
 			try {
+				// A renderer already blocked in a print nobody held never answers; the run's timeout reports that.
+				await Promise.race([this.#printHold?.beginCall(), cancelRejection]);
 				const hooks = this.#hooksForActiveRun();
 				if (!hooks) throw new ToolError("Browser runtime started without an active run");
 				returnValue = await withBrowserPromiseCombinatorTracking(
@@ -1885,6 +1897,7 @@ export class WorkerCore {
 			}
 			failure = this.#foldFloatingRejections(active, failure);
 			if (this.#active?.id === msg.id) this.#active = null;
+			this.#printHold?.endCall();
 		}
 		// A renderer crash answers the run itself.
 		if (this.#unanswered !== active) return;
@@ -1894,6 +1907,8 @@ export class WorkerCore {
 			return;
 		}
 		if (completed) {
+			const printNotice = this.#printHold?.takeNotice();
+			if (printNotice) output.pushText(`${printNotice}\n`);
 			await this.#postReadyInfo();
 			if (this.#unanswered !== active) return;
 			this.#unanswered = null;
@@ -3216,6 +3231,8 @@ export class WorkerCore {
 		});
 		await this.#webmcp?.dispose().catch(() => undefined);
 		this.#webmcp = undefined;
+		await this.#printHold?.dispose().catch(() => undefined);
+		this.#printHold = undefined;
 		this.#dialogs?.dispose();
 		await this.#network?.close();
 		await this.#downloads?.close();
