@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -77,6 +78,9 @@ interface PromptCall {
 	submitWorkPoolItem: (key: number, data: string) => Promise<void>;
 }
 
+/** Observer a kept-alive session's IRC wake turns are bracketed with (`AgentSession.setIrcWakeTurnObserver`). */
+type WakeObserver = (records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined;
+
 interface StopHarness {
 	session: AgentSession;
 	prompts: PromptCall[];
@@ -85,6 +89,10 @@ interface StopHarness {
 	messages: AssistantMessage[];
 	/** Messages of yield submissions the real `YieldTool` rejected. */
 	yieldErrors: string[];
+	/** The IRC wake-turn observer the executor installed on the kept-alive session, if any. */
+	wakeObserver: () => WakeObserver | undefined;
+	/** Record a terminal `yield` outside any prompt, as a wake turn the executor does not drive would. */
+	emitTerminalYield: (data: unknown) => void;
 }
 
 /** Text of a captured `last_assistant_message` (the fake transcript is text-only). */
@@ -113,6 +121,7 @@ function createHarness(args: {
 	let yieldSeq = 0;
 	let stopCalls = 0;
 	const yieldErrors: string[] = [];
+	let wakeObserver: WakeObserver | undefined;
 
 	const emit = (event: AgentSessionEvent) => {
 		// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
@@ -153,6 +162,10 @@ function createHarness(args: {
 		getEnabledToolNames: () => ["read", "yield"],
 		getToolByName: (name: string) => (name === "yield" ? args.yieldTool : undefined),
 		setWorkPoolYieldItems: async () => {},
+		setIrcWakeTurnObserver: (observer: WakeObserver | undefined) => {
+			wakeObserver = observer;
+		},
+		trackIrcReply: () => {},
 		extensionRunner: {
 			// The executor wires the runner it finds on the session during setup
 			// (`initialize` + `onError` + a `session_start` emit) before it can
@@ -219,7 +232,15 @@ function createHarness(args: {
 		isAdvisorActive: () => false,
 	};
 
-	return { session: session as unknown as AgentSession, prompts, events, messages, yieldErrors };
+	return {
+		session: session as unknown as AgentSession,
+		prompts,
+		events,
+		messages,
+		yieldErrors,
+		wakeObserver: () => wakeObserver,
+		emitTerminalYield: data => emitYield({ status: "success", data }, "Result submitted."),
+	};
 }
 
 function mockCreateAgentSession(session: AgentSession): void {
@@ -439,6 +460,57 @@ describe("runSubprocess subagent_stop", () => {
 		expect(JSON.parse(result.output)).toEqual({ report: "again" });
 	});
 
+	it("keeps re-prompting on an explicit refusal past the advisory cap", async () => {
+		const id = "UncappedRefusals";
+		const refusals = 3 * DOCUMENTED_ADVISORY_CONTINUATIONS;
+		const harness = createHarness({
+			hasStopHandlers: true,
+			onPrompt: call => call.yieldTerminal({ report: call.text }),
+			onStop: async (_event, callIndex) =>
+				callIndex <= refusals ? { decision: "block", reason: `refusal ${callIndex}` } : undefined,
+		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
+
+		const result = await runSubprocess(baseOptions(id));
+
+		// Every refusal got a continuation; the run finished on the first pass that allowed it.
+		expect(harness.events).toHaveLength(refusals + 1);
+		expect(harness.prompts).toHaveLength(refusals + 1);
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output)).toEqual({ report: `refusal ${refusals}` });
+	});
+
+	it("spends the advisory allowance only on advisory continuations when refusals interleave", async () => {
+		const id = "MixedContinuations";
+		const verdicts: SubagentStopEventResult[] = [
+			// Refusals first: they must not consume the allowance...
+			...Array.from({ length: 3 }, (): SubagentStopEventResult => ({ decision: "block", reason: "refused" })),
+			// ...so the full advisory allowance is still available...
+			...Array.from({ length: DOCUMENTED_ADVISORY_CONTINUATIONS }, (): SubagentStopEventResult => ({
+				continue: true,
+				additionalContext: "again",
+			})),
+			// ...and refusals after the allowance is spent are still not capped.
+			...Array.from({ length: 3 }, (): SubagentStopEventResult => ({ decision: "block", reason: "refused" })),
+			// The next advisory request finds the allowance spent and the run is let go.
+			{ continue: true, additionalContext: "again" },
+		];
+		const harness = createHarness({
+			hasStopHandlers: true,
+			onPrompt: call => call.yieldTerminal({ report: call.text }),
+			onStop: async (_event, callIndex) => verdicts[callIndex - 1],
+		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
+
+		const result = await runSubprocess(baseOptions(id));
+
+		expect(harness.events).toHaveLength(verdicts.length);
+		expect(harness.prompts).toHaveLength(verdicts.length);
+		expect(result.exitCode).toBe(0);
+	});
+
 	it("charges each refused yield against the soft request budget and ends the run with the budget reason", async () => {
 		const id = "RefusedBudget";
 		const refusedReport = "REFUSED-REPORT-MUST-NOT-BE-PUBLISHED";
@@ -618,6 +690,39 @@ describe("runSubprocess subagent_stop", () => {
 		expect(result.exitCode).toBe(0);
 		expect(JSON.parse(result.output)).toEqual({ report: "finish it" });
 		expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeNumber();
+	});
+
+	it("reports the spawning session on a kept-alive worker's IRC wake turn", async () => {
+		const id = "WakeIdentity";
+		const harness = createHarness({
+			hasStopHandlers: true,
+			onPrompt: call => call.yieldTerminal({ report: call.text }),
+		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
+		await runSubprocess(baseOptions(id));
+
+		const finish = harness.wakeObserver()?.([
+			{
+				role: "custom",
+				customType: "irc:incoming",
+				content: "wake",
+				display: false,
+				attribution: "user",
+				timestamp: Date.now(),
+			} as unknown as AgentMessage,
+		]);
+		harness.emitTerminalYield({ report: "answered while woken" });
+		await finish?.(undefined);
+
+		// Pass 1 belongs to the first run; pass 2 is the wake turn's, built from the
+		// wake options the executor installed with the observer.
+		expect(harness.events).toHaveLength(2);
+		expect(harness.events[1]).toMatchObject({
+			agent_id: id,
+			parent_session_id: "parent-session-1",
+			parent_session_file: path.join(tempDir.path(), "parent.jsonl"),
+		});
 	});
 
 	describe("without a yield tool (structured: false)", () => {
