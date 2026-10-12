@@ -4,7 +4,12 @@
 
 ### Added
 
+- Extensions can call `ctx.getContextBreakdown()` to read the same per-category context usage that `/context` shows, including free space, the auto-compaction buffer, and the snapcompact wire savings ([#14208](https://github.com/can1357/oh-my-pi/pull/14208) by [@listellm](https://github.com/listellm)).
 - Added `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` support: set it to stop Anthropic requests sending experimental beta fields that a company `ANTHROPIC_BASE_URL` gateway rejects, such as the Sonnet 5.5 `thinking.adaptive.block_binding` 400 ([#15458](https://github.com/can1357/oh-my-pi/pull/15458) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed `/context` crashing instead of degrading when a malformed system-prompt section makes the snapcompact savings estimate throw ([#9331](https://github.com/can1357/oh-my-pi/issues/9331)).
 
 ## [18.10.1] - 2026-10-12
 
