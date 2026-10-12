@@ -27,7 +27,6 @@ import {
 	formatModelStringWithRouting,
 	resolveAgentAdvisorRolePattern,
 	resolveAgentAdvisorSelection,
-	resolveAgentPrewalkPattern,
 	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
 	resolveModelOverride,
@@ -106,7 +105,7 @@ import { TextTap } from "../job-widgets/text-tap";
 import { TOOLS_SOURCE_ID } from "../job-widgets/types";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
-import { resolveAgentPrewalkDefault } from "./prewalk";
+import { agentPrewalkPattern } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
@@ -133,8 +132,6 @@ import {
 import { yieldSectionShapes } from "./yield-assembly";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import {
-	cfgTaskPrewalk,
-	cfgTaskAgentPrewalk,
 	cfgTaskMaxEffort,
 	cfgTaskSoftRequestBudgetNotice,
 	cfgTaskSoftRequestBudget,
@@ -1086,7 +1083,7 @@ export function followMCPTools(mcpManager: MCPManager, reservedNames?: ReadonlyS
  * them, else its configured `tier.*`. Live entries a family can't realize (a resumed session
  * file may carry `{anthropic: "flex"}`) are dropped — the subagent overlay rejects them.
  */
-function inheritedSubagentServiceTiers(
+export function inheritedSubagentServiceTiers(
 	baseSettings: Settings,
 	inheritedServiceTier?: ServiceTierByFamily | null,
 ): ServiceTierByFamily {
@@ -1198,6 +1195,135 @@ export function createSubagentSettings(
 	});
 	subagentSettings[kRootCompactionThresholds] = rootThresholds;
 	return subagentSettings;
+}
+
+/**
+ * Settings one spawn of `agent` runs with, and the advisor it persists: the
+ * expanded model pattern, `"on"` for the advisor role, or undefined. Subagents
+ * run unadvised unless the agent's `advisor` frontmatter or its
+ * `task.agentAdvisor` entry (agent name → "on"/"off"/model pattern) pairs it
+ * with one. An explicit pattern is expanded against this owner's roles (a
+ * nested spawn's owner is its parent subagent) and lands on the child's
+ * `modelRoles.advisor`; it is also what the session contract persists, so cold
+ * revival under root settings reuses it. A prepared session (a seance fork)
+ * always runs unadvised.
+ */
+export function resolveSubagentSettings(
+	agent: AgentDefinition,
+	settings: Settings,
+	options: {
+		compactionThresholdOverride?: CompactionThresholdPair;
+		isolated: boolean;
+		parentServiceTier?: ServiceTierByFamily | null;
+		preparedSession?: boolean;
+	},
+): { settings: Settings; advisor: string | undefined } {
+	const advisorSelection = options.preparedSession
+		? undefined
+		: resolveAgentAdvisorSelection({
+				settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
+				agentAdvisor: agent.advisor,
+			});
+	const advisorRolePattern = advisorSelection?.model
+		? resolveAgentAdvisorRolePattern(advisorSelection.model, settings)
+		: undefined;
+	const subagentSettings = createSubagentSettings(
+		settings,
+		{
+			...compactionThresholdSettings(options.compactionThresholdOverride),
+			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+			// Isolated runs must not expose roots outside the worktree.
+			...(options.isolated ? { "workspace.additionalDirectories": [] } : undefined),
+			...(advisorSelection ? { "advisor.enabled": true } : undefined),
+			...(advisorRolePattern
+				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorRolePattern } }
+				: undefined),
+		},
+		options.parentServiceTier,
+	);
+	return { settings: subagentSettings, advisor: advisorSelection ? (advisorRolePattern ?? "on") : undefined };
+}
+
+/**
+ * Tool names a spawn of `agent` hands its session, or undefined for the
+ * session's default set: the agent's `tools` (without `yield` for an
+ * unstructured run, even when the frontmatter lists it), plus `task` for
+ * agents that spawn (never at the depth cap), with `exec` expanded to its
+ * backends.
+ */
+export function resolveSubagentToolNames(
+	agent: AgentDefinition,
+	settings: Settings,
+	options: { atMaxDepth: boolean; restrictToolNames: boolean; structured: boolean },
+): string[] | undefined {
+	if (!agent.tools) return undefined;
+	let toolNames = options.structured ? agent.tools : agent.tools.filter(name => name !== "yield");
+	if (agent.spawns !== undefined && !toolNames.includes("task") && !options.atMaxDepth) {
+		toolNames = [...toolNames, "task"];
+	}
+	if (options.atMaxDepth && toolNames.includes("task")) {
+		toolNames = toolNames.filter(name => name !== "task");
+	}
+	if (toolNames.includes("exec")) {
+		const backends = resolveEvalBackends({ settings } as ToolSession);
+		const expanded = toolNames.filter(name => name !== "exec");
+		if (backends.python || backends.js) expanded.push("eval");
+		expanded.push("bash");
+		toolNames = Array.from(new Set(expanded));
+	}
+	// Agents that can start background work (`task`, `bash`) need `wait` to block on it;
+	// without it they `sleep`. Runs after `exec` expansion and the max-depth `task` strip.
+	// `createTools` still drops it when no wake source (async/IRC/services) is enabled.
+	// Restricted sessions own their explicit list and are never widened.
+	if (
+		!options.restrictToolNames &&
+		!toolNames.includes("wait") &&
+		(toolNames.includes("task") || toolNames.includes("bash"))
+	) {
+		toolNames = [...toolNames, "wait"];
+	}
+	return toolNames;
+}
+
+/** Spawn policy a spawn of `agent` hands its session: `*`, a comma list, or "" for none. */
+export function subagentSpawnsEnv(agent: AgentDefinition, atMaxDepth: boolean): string {
+	if (atMaxDepth || agent.spawns === undefined) return "";
+	return agent.spawns === "*" ? "*" : agent.spawns.join(",");
+}
+
+/**
+ * Thinking level a spawn hands its session when the caller set no `effort`: an
+ * explicit `:level` on the resolved model selector, then the agent's
+ * `thinkingLevel` (e.g. task's `auto`), then the selector's own level.
+ * Undefined leaves the session default.
+ */
+export function resolveSubagentThinkingLevel(
+	resolved: { thinkingLevel?: ConfiguredThinkingLevel; explicitThinkingLevel: boolean },
+	agentThinkingLevel: ConfiguredThinkingLevel | undefined,
+): ConfiguredThinkingLevel | undefined {
+	return resolved.explicitThinkingLevel ? resolved.thinkingLevel : (agentThinkingLevel ?? resolved.thinkingLevel);
+}
+
+/** A spawn's configured prewalk target, checked against the model and thinking level it starts on. */
+export type SubagentPrewalkResolution =
+	| { kind: "armed"; prewalk: Prewalk }
+	/** No available model with configured auth matches; the spawn runs without prewalk. */
+	| { kind: "unavailable"; warning?: string }
+	/** Same model at the same thinking level: switching would only inject the plan/checklist nudges. */
+	| { kind: "noop" };
+
+export function resolveSubagentPrewalk(
+	pattern: string,
+	modelRegistry: ModelRegistry,
+	settings: Settings,
+	start: { model: Model | undefined; thinkingLevel: ConfiguredThinkingLevel | undefined },
+): SubagentPrewalkResolution {
+	const resolved = resolveModelOverride([pattern], modelRegistry, settings);
+	const target = resolved.model;
+	if (!target || !modelRegistry.hasConfiguredAuth(target)) return { kind: "unavailable", warning: resolved.warning };
+	// An effort-only delta on the same model still arms: it is a real cheapening hand-off.
+	if (prewalkWouldBeNoop(start.model, start.thinkingLevel, target, resolved.thinkingLevel)) return { kind: "noop" };
+	return { kind: "armed", prewalk: { target, thinkingLevel: resolved.thinkingLevel } };
 }
 
 export type AbortReason = "signal" | "shutdown" | "terminate" | "timeout" | "budget";
@@ -4290,37 +4416,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	const settings = options.settings ?? Settings.isolated();
-	// Per-agent advisor: the agent definition's `advisor` frontmatter or the
-	// `task.agentAdvisor` settings override (agent name → "on"/"off"/model
-	// pattern) pairs the spawned session with an advisor. Subagents default to
-	// no advisor (createSubagentSettings forces `advisor.enabled` off); an
-	// explicit model pattern is expanded against this owner's roles (a nested
-	// spawn's owner is its parent subagent) and lands on the child's
-	// `modelRoles.advisor`. The expanded pattern is also what the session
-	// contract persists, so cold revival under root settings reuses it.
-	const advisorSelection = preparedSession
-		? undefined
-		: resolveAgentAdvisorSelection({
-				settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
-				agentAdvisor: agent.advisor,
-			});
-	const advisorRolePattern = advisorSelection?.model
-		? resolveAgentAdvisorRolePattern(advisorSelection.model, settings)
-		: undefined;
-	const subagentSettings = createSubagentSettings(
-		settings,
-		{
-			...compactionThresholdSettings(options.compactionThresholdOverride),
-			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
-			// Isolated runs must not expose roots outside the worktree.
-			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
-			...(advisorSelection ? { "advisor.enabled": true } : undefined),
-			...(advisorRolePattern
-				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorRolePattern } }
-				: undefined),
-		},
-		options.parentServiceTier,
-	);
+	const { settings: subagentSettings, advisor } = resolveSubagentSettings(agent, settings, {
+		compactionThresholdOverride: options.compactionThresholdOverride,
+		isolated: worktree !== undefined,
+		parentServiceTier: options.parentServiceTier,
+		preparedSession: preparedSession !== undefined,
+	});
 	const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(settings);
 	const maxRuntimeMs = Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? cfgTaskMaxRuntimeMs.get(settings)) || 0));
 	// TTL before an adopted idle subagent is parked by the lifecycle manager.
@@ -4338,39 +4439,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const restrictToolNames = options.restrictToolNames === true || preparedSession !== undefined;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
 
-	// Add tools if specified. Unstructured runs never get `yield`, even when
-	// the frontmatter lists it.
-	let toolNames: string[] | undefined;
-	if (agent.tools) {
-		toolNames = structured ? agent.tools : agent.tools.filter(name => name !== "yield");
-		// Auto-include task tool if spawns defined but task not in tools
-		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
-			toolNames = [...toolNames, "task"];
-		}
-	}
-
-	if (atMaxDepth && toolNames?.includes("task")) {
-		toolNames = toolNames.filter(name => name !== "task");
-	}
-	if (toolNames?.includes("exec")) {
-		const backends = resolveEvalBackends({ settings } as ToolSession);
-		const expanded = toolNames.filter(name => name !== "exec");
-		if (backends.python || backends.js) expanded.push("eval");
-		expanded.push("bash");
-		toolNames = Array.from(new Set(expanded));
-	}
-	// Agents that can start background work (`task`, `bash`) need `wait` to block on it;
-	// without it they `sleep`. Runs after `exec` expansion and the max-depth `task` strip.
-	// `createTools` still drops it when no wake source (async/IRC/services) is enabled.
-	// Restricted sessions own their explicit list and are never widened.
-	if (
-		toolNames &&
-		!options.restrictToolNames &&
-		!toolNames.includes("wait") &&
-		(toolNames.includes("task") || toolNames.includes("bash"))
-	) {
-		toolNames = [...toolNames, "wait"];
-	}
+	const toolNames = resolveSubagentToolNames(agent, settings, {
+		atMaxDepth,
+		restrictToolNames: options.restrictToolNames === true,
+		structured,
+	});
 	// Inbound steering works without messaging; outbound peer coordination requires write.
 	const ircEnabled =
 		!preparedSession &&
@@ -4380,13 +4453,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
 	const sessionFile = subtaskSessionFile ?? null;
-	const spawnsEnv = atMaxDepth
-		? ""
-		: agent.spawns === undefined
-			? ""
-			: agent.spawns === "*"
-				? "*"
-				: agent.spawns.join(",");
+	const spawnsEnv = subagentSpawnsEnv(agent, atMaxDepth);
 
 	const lspEnabled = enableLsp ?? true;
 	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
@@ -4607,7 +4674,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// model pattern > agent-definition default (e.g. task's `auto`) >
 			// pattern-derived level.
 			const effectiveThinkingLevel =
-				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
+				effortLevel ??
+				resolveSubagentThinkingLevel(
+					{ thinkingLevel: resolvedThinkingLevel, explicitThinkingLevel },
+					thinkingLevel,
+				);
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
 			const fork = preparedSession?.fork;
@@ -4640,32 +4711,26 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
 			// Resolution failures skip prewalk instead of failing the spawn.
 			let prewalk: Prewalk | undefined;
-			const prewalkPattern = preparedSession
-				? undefined
-				: resolveAgentPrewalkPattern({
-						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
-						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
-					});
+			const prewalkPattern = preparedSession ? undefined : agentPrewalkPattern(agent, settings);
 			if (prewalkPattern) {
 				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
-				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
-				const target = resolvedPrewalk.model;
-				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
+				const resolvedPrewalk = resolveSubagentPrewalk(prewalkPattern, modelRegistry, settings, {
+					model,
+					thinkingLevel: effectiveThinkingLevel,
+				});
+				if (resolvedPrewalk.kind === "unavailable") {
 					logger.warn("Subagent prewalk target unavailable; skipping prewalk", {
 						agent: agent.name,
 						pattern: prewalkPattern,
 						warning: resolvedPrewalk.warning,
 					});
-				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
-					// Same model AND same effective thinking level: switching would only
-					// inject the plan/checklist nudges for no gain — skip. An effort-only
-					// delta on the same model still arms (it is a real cheapening hand-off).
+				} else if (resolvedPrewalk.kind === "noop") {
 					logger.debug("Subagent prewalk target matches starting model and thinking level; skipping prewalk", {
 						agent: agent.name,
 						pattern: prewalkPattern,
 					});
 				} else {
-					prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
+					prewalk = resolvedPrewalk.prewalk;
 				}
 			}
 
@@ -4960,7 +5025,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
-				advisor: advisorSelection ? (advisorRolePattern ?? "on") : undefined,
+				advisor,
 				compactionThreshold: options.compactionThresholdOverride,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,

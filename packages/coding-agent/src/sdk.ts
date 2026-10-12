@@ -72,7 +72,7 @@ import {
 	getModelMatchPreferences,
 	type ModelMatchPreferences,
 	parseModelPattern,
-	pickDefaultAvailableModel,
+	pickStartupFallbackModel,
 	providerModelHint,
 	resolveAllowedModels,
 	resolveCliModel,
@@ -3322,7 +3322,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// mid-discovery, so a role pointing at such a model (an openai-compat
 			// plugin's `posthog/claude-opus-4-8`, a models.yml `openai-models-list`
 			// endpoint) returned `undefined` there. Without this retry the
-			// `pickDefaultAvailableModel` fallback below happily replaces the
+			// `pickStartupFallbackModel` fallback below happily replaces the
 			// user's configured default with a bundled provider's default whenever
 			// a stray `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` is in the environment.
 			// (issues #3569, #6162)
@@ -3428,9 +3428,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 			if (!model) {
 				let fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
-				let pick = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth), provider =>
-					modelRegistry.hasConcreteAuth(provider),
-				);
+				let pick = pickStartupFallbackModel(modelRegistry, fallbackCandidates);
 
 				// Cold-cache discovery race (issues #6114, #6162): a discovery
 				// provider (models.yml openai-models-list, LM Studio/Ollama/
@@ -3449,9 +3447,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					await logger.time("resolveModelDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));
 					if (!(await tryResolveDefaultRole()) && !model) {
 						fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
-						pick = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth), provider =>
-							modelRegistry.hasConcreteAuth(provider),
-						);
+						pick = pickStartupFallbackModel(modelRegistry, fallbackCandidates);
 					}
 				}
 
