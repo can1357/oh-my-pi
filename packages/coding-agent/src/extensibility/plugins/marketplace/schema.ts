@@ -9,8 +9,12 @@
 import { type } from "@oh-my-pi/omptype";
 import { MAX_NAME_LENGTH, NAME_RE } from "./types";
 
-/** {@link isValidNameSegment} as one pattern, so the emitted JSON Schema keeps its description. */
-const NAME_PATTERN = new RegExp(`^(?=.{1,${MAX_NAME_LENGTH}}$)${NAME_RE.source.slice(1)}`);
+/** {@link isValidNameSegment}: the 64-char bound plus the character pattern. */
+const NameSchema = type(`string <= ${MAX_NAME_LENGTH}` as const).narrow(
+	(name, ctx) => NAME_RE.test(name) || ctx.mustBe(`a string matching ${NAME_RE}`),
+);
+/** Emitted as one lookaround-free node so RE2-based validators (Go and others) can compile it. */
+const NAME_JSON = { type: "string", maxLength: MAX_NAME_LENGTH, pattern: NAME_RE.source };
 const NAME_RULE = "Up to 64 ASCII letters, digits, `.` and `-`, starting and ending with a letter or digit.";
 
 function doc<const D>(def: D, description: string): readonly [D, "@", string] {
@@ -55,7 +59,10 @@ const PluginSourceSchema = type(doc(/^\.\//, "Directory inside the marketplace, 
 
 /** One `plugins[]` entry. */
 export const MarketplacePluginEntrySchema = type({
-	name: doc(NAME_PATTERN, `Plugin name, installed as \`name@marketplace\`. ${NAME_RULE}`),
+	name: type.withJsonSchema(NameSchema, {
+		...NAME_JSON,
+		description: `Plugin name, installed as \`name@marketplace\`. ${NAME_RULE}`,
+	}),
 	source: PluginSourceSchema.describe("Where to fetch the plugin."),
 	"description?": documented("Short description."),
 	"version?": documented(
@@ -83,7 +90,10 @@ export const MarketplacePluginEntrySchema = type({
  */
 export const MarketplaceCatalogSchema = type({
 	"$schema?": documented("JSON Schema URL for editors; ignored by omp."),
-	name: doc(NAME_PATTERN, `Marketplace name, the part after \`@\` in plugin IDs. ${NAME_RULE}`),
+	name: type.withJsonSchema(NameSchema, {
+		...NAME_JSON,
+		description: `Marketplace name, the part after \`@\` in plugin IDs. ${NAME_RULE}`,
+	}),
 	owner: doc({ name: "string", "email?": documented("Owner email.") }, "Marketplace owner."),
 	"metadata?": documented("`{ description, version, pluginRoot }`; `pluginRoot` prefixes relative sources."),
 	plugins: "unknown[]",

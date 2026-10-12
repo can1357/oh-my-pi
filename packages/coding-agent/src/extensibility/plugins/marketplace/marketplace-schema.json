@@ -7,7 +7,8 @@
 	"properties": {
 		"name": {
 			"type": "string",
-			"pattern": "^(?=.{1,64}$)[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$",
+			"maxLength": 64,
+			"pattern": "^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$",
 			"description": "Marketplace name, the part after `@` in plugin IDs. Up to 64 ASCII letters, digits, `.` and `-`, starting and ending with a letter or digit."
 		},
 		"owner": {
@@ -32,7 +33,8 @@
 				"properties": {
 					"name": {
 						"type": "string",
-						"pattern": "^(?=.{1,64}$)[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$",
+						"maxLength": 64,
+						"pattern": "^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$",
 						"description": "Plugin name, installed as `name@marketplace`. Up to 64 ASCII letters, digits, `.` and `-`, starting and ending with a letter or digit."
 					},
 					"source": {
