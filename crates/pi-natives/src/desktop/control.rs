@@ -1279,7 +1279,6 @@ pub(crate) fn alone(test: &str) -> bool {
 mod tests {
 	use super::*;
 
-
 	/// Removes this process's private kernel lock (see `KernelLease::path`).
 	fn remove_test_lock() {
 		#[cfg(unix)]

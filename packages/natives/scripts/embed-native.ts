@@ -55,9 +55,9 @@ export async function embeddedAddonFiles({
 	const candidates =
 		arch === "x64"
 			? [
-				{ variant: "modern", filename: `pi_natives.${platformTag}-modern.node` },
-				{ variant: "baseline", filename: `pi_natives.${platformTag}-baseline.node` },
-			]
+					{ variant: "modern", filename: `pi_natives.${platformTag}-modern.node` },
+					{ variant: "baseline", filename: `pi_natives.${platformTag}-baseline.node` },
+				]
 			: [{ variant: "default", filename: `pi_natives.${platformTag}.node` }];
 
 	// Override keys must equal the bundler's symlink-resolved module paths.
@@ -79,8 +79,8 @@ export async function embeddedAddonFiles({
 			const addonPath = path.join(dir, filename);
 			throw new Error(
 				`Native addon ${addonPath} does not carry the @oh-my-pi/pi-natives@${version} version stamp ` +
-				`\`${VERSION_STAMP_MAGIC}${version}\`. Rebuild it (installs stamp automatically), run ` +
-				`\`bun scripts/stamp-native-version.ts ${addonPath}\`, or fetch @oh-my-pi/pi-natives-${platformTag}@${version} before embedding.`,
+					`\`${VERSION_STAMP_MAGIC}${version}\`. Rebuild it (installs stamp automatically), run ` +
+					`\`bun scripts/stamp-native-version.ts ${addonPath}\`, or fetch @oh-my-pi/pi-natives-${platformTag}@${version} before embedding.`,
 			);
 		}
 	}
@@ -95,10 +95,9 @@ export async function embeddedAddonFiles({
 	);
 	const files = available.map(
 		({ variant, filename, bytes }, index) =>
-			`{ variant: ${JSON.stringify(variant)}, filename: ${JSON.stringify(filename)}, size: ${bytes.length}, zstdPath: process.env.PI_ANDROID_BUNDLE === "1" ? fileURLToPath(new URL(zstdPath${index}, import.meta.url)) : zstdPath${index} }`,
+			`{ variant: ${JSON.stringify(variant)}, filename: ${JSON.stringify(filename)}, size: ${bytes.length}, zstdPath: zstdPath${index} }`,
 	);
 	const manifest = `${imports.join("\n")}
-import { fileURLToPath } from "node:url";
 
 export const embeddedAddon = {
 	platformTag: ${JSON.stringify(platformTag)},

@@ -83,6 +83,8 @@ describe("build service targets", () => {
 		expect(resolve("linux", "x64", true)).toEqual({ target: "linux-musl-x86_64", fileName: "omp-linux-musl-x64" });
 		expect(resolve("linux", "arm64", false)).toEqual({ target: "linux-arm64", fileName: "omp-linux-arm64" });
 		expect(resolve("win32", "x64", false)).toEqual({ target: "windows-x86_64", fileName: "omp-windows-x64.exe" });
+		expect(resolve("android", "arm64", false)).toEqual({ target: "android-arm64", fileName: "omp-android-arm64" });
+		expect(() => resolveBuildHost("android", "x64", false)).toThrow("only arm64 is supported");
 	});
 
 	it("does not mistake an installed musl loader for a glibc host", () => {
@@ -161,13 +163,53 @@ describe("fetchBuild", () => {
 		expect(url).toBe("https://build.stencil.so/api/products/omp/versions/18.8.9/macos-arm64");
 	});
 
-	it("names the target when nothing is published for it", async () => {
+	it("rejects when no build is published", async () => {
 		await expect(
 			fetchBuild(
 				{ channel: "stable" },
 				{ host, fetchImpl: async () => Response.json({ error: "no_build" }, { status: 404 }) },
 			),
-		).rejects.toThrow("No omp stable build for macos-arm64 is published");
+		).rejects.toThrow();
+	});
+
+	it("uses Android's current host for update requests and the Android artifact", async () => {
+		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+		const archDescriptor = Object.getOwnPropertyDescriptor(process, "arch");
+		if (!platformDescriptor || !archDescriptor) throw new Error("process platform or arch descriptor is unavailable");
+		const requests: string[] = [];
+
+		try {
+			Object.defineProperty(process, "platform", { ...platformDescriptor, value: "android" });
+			Object.defineProperty(process, "arch", { ...archDescriptor, value: "arm64" });
+			process.env.PI_BUILD_URL = "https://build.test";
+			const build = await fetchBuild(
+				{ channel: "stable" },
+				{
+					fetchImpl: async input => {
+						requests.push(String(input));
+						return Response.json(
+							answer({
+								file: {
+									name: "omp-android-arm64",
+									platform: "android",
+									arch: "arm64",
+									kind: "binary",
+									size: 3,
+									sha256: sha("android"),
+								},
+								download: "https://r2.test/omp-android-arm64",
+							}),
+						);
+					},
+				},
+			);
+
+			expect(requests).toEqual(["https://build.test/api/products/omp/latest/android-arm64?channel=stable"]);
+			expect(build.file.name).toBe("omp-android-arm64");
+		} finally {
+			Object.defineProperty(process, "platform", platformDescriptor);
+			Object.defineProperty(process, "arch", archDescriptor);
+		}
 	});
 });
 

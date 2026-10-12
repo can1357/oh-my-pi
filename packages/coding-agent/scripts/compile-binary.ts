@@ -13,6 +13,19 @@ export const COMPILED_EXTERNAL_DEPENDENCIES: readonly string[] = Object.freeze([
 	"onnxruntime-node",
 ]);
 
+/** Bun 1.4.3 supports Android cross-compilation; the installed Bun types lag this target. */
+export const ANDROID_COMPILE_TARGET = "bun-linux-arm64-android";
+
+/**
+ * Compile targets accepted by the shared coding-agent builder. Current Bun
+ * declarations omit its Android target and the existing musl-baseline release
+ * target spelling.
+ */
+export type CodingAgentCompileTarget =
+	| Bun.Build.CompileTarget
+	| typeof ANDROID_COMPILE_TARGET
+	| "bun-linux-x64-musl-baseline";
+
 /** Inputs shared by local and release coding-agent binary builds. */
 export interface CodingAgentCompileOptions {
 	/** Absolute repository root used for package resolution. */
@@ -27,7 +40,7 @@ export interface CodingAgentCompileOptions {
 	 */
 	readonly native: NativeEmbedTarget | null;
 	/** Optional cross-compilation runtime target. */
-	readonly target?: Bun.Build.CompileTarget;
+	readonly target?: CodingAgentCompileTarget;
 	/** Optional unmodified Bun executable used as the standalone runtime template. */
 	readonly executablePath?: string;
 	/** Match release builds that minify identifiers while retaining names. */
@@ -75,7 +88,7 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 				...(options.executablePath
 					? { executablePath: options.executablePath }
 					: options.target
-						? { target: options.target }
+						? { target: options.target as Bun.Build.CompileTarget }
 						: {}),
 				outfile: options.outfile,
 				autoloadBunfig: false,
