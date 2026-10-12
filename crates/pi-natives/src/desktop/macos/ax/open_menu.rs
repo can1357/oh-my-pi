@@ -6,9 +6,10 @@
 //! application to show for it. A press that can open one (a right-click or
 //! Control-click, a click or `AXPress` on a menu button or popup button,
 //! `AXShowMenu`) therefore never returns with that menu open. Given an item
-//! path, the call presses that item, which closes the menu; otherwise it
-//! closes the menu with nothing chosen and reports the menu's items, so the
-//! next call can name one.
+//! path, the call presses that item and ends the menu with `AXCancel` at once,
+//! since a pressed item flashes and its menu fades out for about 340 ms with
+//! the keyboard; otherwise it closes the menu with nothing chosen and reports
+//! the menu's items, so the next call can name one.
 //!
 //! The open menu is found where it shows: a hit-test inside its window yields
 //! one of its items, whose parent is the menu. A submenu's items are children
@@ -332,7 +333,7 @@ fn settle_with<M: Menus>(
 	let menu = menus.locate(window);
 	let (refusal, items) = match (path, &menu) {
 		(Some(path), Some(menu)) => match choose(menus, menu, path) {
-			Ok(()) if await_closed(menus, window)? => return Ok(Settled::Chosen),
+			Ok(()) if end_chosen(menus, window, menu)? => return Ok(Settled::Chosen),
 			Ok(()) => (
 				Some(format!("the menu stayed open after {} was pressed", quote_path(path))),
 				String::new(),
@@ -347,6 +348,18 @@ fn settle_with<M: Menus>(
 	};
 	let closed = close(menus, window, menu.as_ref())?;
 	Ok(Settled::Unchosen { refusal, items, closed })
+}
+
+/// Ends the menu showing in `window` after an item of `menu` was pressed:
+/// `true` once it is closed. The pressed item flashes and the menu fades out
+/// for about 340 ms, and until it is gone `WindowServer` sends the user's keys
+/// to the target, which types them into its own key window once the menu
+/// closes. `AXCancel` right behind the press ends it within a few
+/// milliseconds, and `AppKit` still sends the item's action. A menu that
+/// refuses the cancel closes after its fade.
+fn end_chosen<M: Menus>(menus: &mut M, window: u32, menu: &M::Node) -> CoreResult<bool> {
+	let _ = menus.cancel(menu);
+	await_closed(menus, window)
 }
 
 /// Closes menu window `window`, showing `menu`, unless it already closed;
@@ -618,7 +631,8 @@ mod tests {
 		opens:        Option<(u32, usize)>,
 		polls:        usize,
 		/// Whether pressing an item, `AXCancel` or Escape closes the menu; a
-		/// menu that does not take `AXCancel` refuses it.
+		/// pressed item's menu that stays open models `AppKit`'s flash and
+		/// fade, and a menu that does not take `AXCancel` refuses it.
 		press_closes: bool,
 		cancel_works: bool,
 		escape_works: bool,
@@ -731,12 +745,15 @@ mod tests {
 	}
 
 	#[test]
-	fn a_path_presses_its_leaf_through_submenus_and_needs_no_escape() {
+	fn a_path_presses_its_leaf_through_submenus_and_cancels_the_fading_menu() {
 		let mut app = font_book();
+		// `AppKit` flashes the pressed item and fades the menu out for about
+		// 340 ms, with the user's keyboard; the cancel ends it at once.
+		app.press_closes = false;
 		let wanted = path(&["add TO", "serif..."]);
 		let settled = settle_with(&mut app, &[], Some(&wanted), CONTEXT_MENU_TIMEOUT);
 		assert_eq!(settled.expect("settled"), Settled::Chosen);
-		assert_eq!(*app.log.borrow(), ["press Serif…"]);
+		assert_eq!(*app.log.borrow(), ["press Serif…", "cancel"]);
 	}
 
 	#[test]
@@ -768,6 +785,7 @@ mod tests {
 	fn a_pressed_item_whose_menu_stays_open_is_closed_and_reported() {
 		let mut app = font_book();
 		app.press_closes = false;
+		app.cancel_works = false;
 		let wanted = path(&["Show in Finder"]);
 		let settled = settle_with(&mut app, &[], Some(&wanted), CONTEXT_MENU_TIMEOUT);
 		match settled.expect("settled") {
@@ -779,7 +797,7 @@ mod tests {
 			},
 			other => panic!("{other:?}"),
 		}
-		assert_eq!(*app.log.borrow(), ["press Show in Finder", "cancel"]);
+		assert_eq!(*app.log.borrow(), ["press Show in Finder", "cancel", "cancel", "escape"]);
 	}
 
 	#[test]
