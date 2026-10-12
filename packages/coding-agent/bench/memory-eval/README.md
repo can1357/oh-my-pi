@@ -49,7 +49,7 @@ Set `MEMORY_EVAL_DEBUG_SCORES=<file.jsonl>` for both runs to append the score, t
 
 ```sh
 R="bun packages/coding-agent/bench/memory-eval/run.ts"; O=~/.cache/omp-memory-eval/results
-$R run --dataset <beam-100k|beam-500k|lme-s|lme-s-dev> --engine <mnemopi|mnemosyne|oracle|random> --protocol <standard|fts-only|with-sleep|upstream-compat> [--cases N] [--out file]
+$R run --dataset <beam-100k|beam-500k|lme-s|lme-s-dev> --engine <mnemopi|mnemosyne|oracle|random> --protocol <standard|fts-only|with-sleep|upstream-compat> [--embedder js|python] [--cases N] [--out file]
 $R diff a.json b.json
 $R calibration-check calib-a.json calib-b.json
 ```
@@ -59,6 +59,10 @@ $R calibration-check calib-a.json calib-b.json
 Mnemosyne also returns derived rows (`memoria`, `memoria_source`, `associative`, `fact`). They are not ranked (the spec ranks working and episodic rows), but every one is recorded per question under `dropped` with its tier, rank in Mnemosyne's raw list and the message ids behind its `source_memory_id`. `droppedGoldRows` counts those that map to a gold message.
 
 Memory: Mnemosyne's baseline and peak resident set size come from the engine process's own `/proc/self/status` (`VmRSS` after imports, `VmHWM`; Linux only). Mnemopi and the sanity engines run in the harness process and report its RSS (`rssScope: "harness-process"`).
+
+### Mnemopi embedder
+
+`--embedder js` (default) uses Mnemopi's own local fastembed, as omp does in production. On the reference machine it embeds about 20-40x slower than Python fastembed with the same ONNX model file, so a full LongMemEval run takes days. `--embedder python` serves the same model from `py/embed_server.py` (in `venv-engine`) through Mnemopi's embedding-provider option. Mnemopi's retrieval code is unchanged, and an embedding-server failure aborts the run. The server's memory is recorded in the result's engine info (`embed_server_peak_rss_bytes`), not in `resources`. Compare a Python-embedder run against a JS-embedder run with `diff` before relying on it for a new model.
 
 ### Comparing two runs
 
