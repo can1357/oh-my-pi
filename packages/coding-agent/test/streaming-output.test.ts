@@ -1174,3 +1174,176 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		expect(elided + dropped).toBeLessThan(dumped.totalBytes);
 	});
 });
+
+describe("OutputSink SIXEL spill window", () => {
+	function enableSixelPassthrough(): void {
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+	}
+
+	/** A frame too big for any inline budget: the case that used to be sliced. */
+	function oversizedFrame(): string {
+		return `\x1bPq${"~".repeat(70_000)}\x1b\\`;
+	}
+
+	test("a completed frame past the spill budget is never sliced", async () => {
+		// #15327 round 2 item 1: the payload exemption only skipped the column
+		// cap. The spill limits still tail-sliced the frame, so `dump().output`
+		// — which replaces the live preview at completion — carried a DCS whose
+		// introducer and body had been cut away.
+		enableSixelPassthrough();
+		const frame = oversizedFrame();
+		const sink = new OutputSink({ spillThreshold: 50 * 1024, maxColumns: 768 });
+		await sink.push(frame);
+
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain("\x1bPq");
+		expect(dumped.output).toContain("~".repeat(70_000));
+		expect(dumped.output).toContain("\x1b\\");
+		// The elision marker the spill used to splice into the middle of the frame.
+		expect(dumped.output).not.toContain("elided");
+		expect(dumped.truncated).toBeFalsy();
+	});
+
+	test("a completed frame past the spill budget keeps the text around it", async () => {
+		// With head retention on (the eval/bash default) the frame must not be
+		// parked in the head window either: head bytes subtract from the spill
+		// threshold, so an oversized frame parked there zeroed the tail budget
+		// and dropped every text region that followed it.
+		enableSixelPassthrough();
+		const frame = oversizedFrame();
+		const sink = new OutputSink({
+			spillThreshold: 50 * 1024,
+			headBytes: 20 * 1024,
+			maxColumns: 768,
+		});
+		await sink.push("before image\n");
+		await sink.push(frame);
+		await sink.push("\nafter image text");
+
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain("\x1bPq");
+		expect(dumped.output).toContain("~".repeat(70_000));
+		expect(dumped.output).toContain("\x1b\\");
+		expect(dumped.output).toContain("before image");
+		expect(dumped.output).toContain("after image text");
+		// Order survives: the payload sits between the two text regions.
+		expect(dumped.output.indexOf("before image")).toBeLessThan(dumped.output.indexOf("\x1bPq"));
+		expect(dumped.output.indexOf("\x1bPq")).toBeLessThan(dumped.output.indexOf("after image text"));
+		expect(dumped.truncated).toBeFalsy();
+	});
+
+	test("a frame is still elided away once it no longer arrives as one payload", async () => {
+		// The exemption is for complete frames only. Text that merely looks like
+		// the start of one keeps its head/tail window and its elision marker.
+		enableSixelPassthrough();
+		const head = `${"h".repeat(200)}\n`;
+		const middle = `${"m".repeat(2000)}\n`;
+		const tail = `${"t".repeat(200)}\n`;
+		const sink = new OutputSink({ spillThreshold: 600, headBytes: 256 });
+		await sink.push(head);
+		await sink.push(middle);
+		await sink.push(tail);
+
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain("elided");
+		expect(dumped.truncated).toBe(true);
+	});
+
+	test("a frame split across chunks is held, not half-retained", async () => {
+		// A partial frame is held until its terminator arrives; only then is it
+		// exempt. Feeding it in pieces must not slice it either.
+		enableSixelPassthrough();
+		const frame = oversizedFrame();
+		const sink = new OutputSink({ spillThreshold: 50 * 1024, headBytes: 20 * 1024 });
+		for (let i = 0; i < frame.length; i += 8192) await sink.push(frame.slice(i, i + 8192));
+
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain("~".repeat(70_000));
+		expect(dumped.output.indexOf("\x1b\\")).toBeGreaterThan(dumped.output.indexOf("\x1bPq"));
+		expect(dumped.truncated).toBeFalsy();
+	});
+
+	test("an 8-bit introducer is not mistaken for text and loses nothing", async () => {
+		// Round 2 item 4: 0x90 is a C1 DCS introducer. Recognized here, the frame
+		// is a payload; unrecognized, it is text and its introducer is stripped.
+		enableSixelPassthrough();
+		const frame = `\x90q${"~".repeat(70_000)}\x9c`;
+		const sink = new OutputSink({ spillThreshold: 50 * 1024, headBytes: 20 * 1024 });
+		await sink.push(`before\n${frame}\nafter`);
+
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain("\x90q");
+		expect(dumped.output).toContain("\x9c");
+		expect(dumped.output).toContain("~".repeat(70_000));
+		expect(dumped.output).toContain("before");
+		expect(dumped.output).toContain("after");
+	});
+});
+
+describe("OutputSink SIXEL mixed-write column cap", () => {
+	function enableSixelPassthrough(): void {
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+	}
+
+	test("a payload in the same write does not exempt the text after it", async () => {
+		// #15327 round 2 item 2: the whole-write payload exemption let
+		// `sixel + "\n" + 5000 chars` through maxColumns, because one frame in
+		// the write made the guard report the entire chunk as payload.
+		enableSixelPassthrough();
+		const frame = `\x1bPq#0;2;100;0;0${"~~".repeat(16)}\x1b\\`;
+		const wide = "q".repeat(5000);
+		const sink = new OutputSink({ maxColumns: 768, spillThreshold: 100_000 });
+		await sink.push(`${frame}\n${wide}`);
+		const dumped = await sink.dump();
+
+		// The frame survives byte-for-byte.
+		expect(dumped.output).toContain(frame);
+		// The wide row is still capped: the ellipsis fires and the rest is gone.
+		expect(dumped.output).toContain("…");
+		expect(dumped.output).not.toContain(wide);
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.columnDroppedBytes).toBeGreaterThan(4000);
+	});
+
+	test("the cap still fires on text written before and after a payload", async () => {
+		// Both long rows share one write with the frame, so the per-line and
+		// ellipsis state must survive the payload span in between them.
+		enableSixelPassthrough();
+		const frame = `\x1bPq#0~~\x1b\\`;
+		const sink = new OutputSink({ maxColumns: 64, spillThreshold: 100_000 });
+		await sink.push(`${"a".repeat(500)}\n${frame}\n${"b".repeat(500)}`);
+		const dumped = await sink.dump();
+
+		expect(dumped.output).toContain(frame);
+		expect(dumped.output).not.toContain("a".repeat(500));
+		expect(dumped.output).not.toContain("b".repeat(500));
+		expect(dumped.columnTruncatedLines).toBe(2);
+	});
+
+	test("a cap that already fired before a payload written later still fires again", async () => {
+		// Round 2 item 2, second half: the cap routine's state went stale behind
+		// the old whole-write exemption, so a line that tripped after the write
+		// escaped the cap entirely.
+		enableSixelPassthrough();
+		const frame = `\x1bPq#0~~\x1b\\`;
+		const sink = new OutputSink({ maxColumns: 64, spillThreshold: 100_000 });
+		await sink.push(`${"a".repeat(500)}\n${frame}\n`);
+		await sink.push("b".repeat(500));
+
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain(frame);
+		expect(dumped.output).not.toContain("b".repeat(500));
+		expect(dumped.columnTruncatedLines).toBe(2);
+	});
+
+	test("text alone in the same write is capped normally", async () => {
+		enableSixelPassthrough();
+		const sink = new OutputSink({ maxColumns: 64, spillThreshold: 100_000 });
+		await sink.push("a".repeat(500));
+		const dumped = await sink.dump();
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.output).not.toContain("a".repeat(500));
+	});
+});
