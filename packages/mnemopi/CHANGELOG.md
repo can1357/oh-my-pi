@@ -15,6 +15,9 @@
 - Fixed a failing `mnemopi` CLI command or MCP memory call dropping the embeddings of memories it had just stored ([#15804](https://github.com/can1357/oh-my-pi/pull/15804) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.0] - 2026-10-14
+### Changed
+
+- Replaced unchecked `as` row casts with typed `prepare<Row, Params>()` generics at 10 SQLite read sites in beam store and binary-vectors ([#15437](https://github.com/can1357/oh-my-pi/pull/15437) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 

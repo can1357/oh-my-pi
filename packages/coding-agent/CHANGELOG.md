@@ -216,6 +216,9 @@
 - Fixed startup without an explicit model picking an unrelated authenticated provider instead of the first available model in the configured default fallback chain ([#15781](https://github.com/can1357/oh-my-pi/pull/15781) by [@mvid](https://github.com/mvid))
 
 ## [18.11.0] - 2026-10-14
+### Changed
+
+- Replaced unchecked `as` row casts with typed `prepare<Row, Params>()` generics at 20 SQLite read sites in agent storage, memories, and gc-cli ([#15437](https://github.com/can1357/oh-my-pi/pull/15437) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
