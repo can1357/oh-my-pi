@@ -4,7 +4,7 @@
  * hands `createAgentSession`, and checks the view reports the same values and
  * names the layer that set them.
  */
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -52,17 +52,20 @@ const sonnet = bundled("claude-sonnet-4-5");
 const opus = bundled("claude-opus-4-5");
 const models = [haiku, sonnet, opus];
 
-const modelRegistry = {
-	authStorage: {},
-	refresh: async () => {},
-	awaitBackgroundRefresh: async () => {},
-	getAvailable: () => models,
-	getDiscoverableProviders: () => [],
-	getApiKey: async () => "test-key",
-	hasConfiguredAuth: () => true,
-	hasConcreteAuth: () => true,
-	fitContextWindow: (model: Model) => model,
-} as unknown as ModelRegistry;
+// A real registry with one Anthropic key: the view and the spawn see the same auth and catalog.
+const fixtureDir = path.join(os.tmpdir(), `pi-agents-show-fixture-${Snowflake.next()}`);
+const fixtureAuth = createInMemoryAuthStorage();
+const modelRegistry = new ModelRegistry(fixtureAuth, path.join(fixtureDir, "models.yml"));
+
+beforeAll(async () => {
+	await fs.mkdir(fixtureDir, { recursive: true });
+	await fixtureAuth.credentials.set("anthropic", [{ type: "api_key", key: "sk-test-anthropic" }]);
+});
+
+afterAll(async () => {
+	fixtureAuth.close();
+	await fs.rm(fixtureDir, { recursive: true, force: true });
+});
 
 /** A child session that yields on its first prompt, so the run settles. */
 function yieldingSession(): AgentSession {
@@ -378,6 +381,29 @@ describe("omp agents show against the session a spawn starts", () => {
 		}
 	});
 
+	it("reports `todo` for a yield-gated child whose prewalk is armed", async () => {
+		await setup();
+		const settings = Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } });
+		const agent: AgentDefinition = {
+			name: "walker",
+			description: "test",
+			systemPrompt: "test",
+			source: "project",
+			model: ["anthropic/claude-opus-4-5"],
+			tools: ["read", "todo"],
+			prewalk: "anthropic/claude-haiku-4-5",
+		};
+		const view = await resolveEffectiveAgentConfig(agent, settings, registry, tempDir);
+		const { options, session } = await startSpawn(agent, settings);
+		try {
+			expect(options.prewalk).toBeDefined();
+			expect(session.getActiveToolNames()).toContain("todo");
+			expect([...(view.tools.value as string[])].sort()).toEqual(session.getActiveToolNames().sort());
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("attributes compaction to compaction.enabled=false over the agent's threshold entry", async () => {
 		await setup();
 		const settings = Settings.isolated({
@@ -419,18 +445,30 @@ describe("omp agents show against the session a spawn starts", () => {
 describe("omp agents show inputs", () => {
 	it("runs one discovery pass when a cold models.yml cache resolves no model", async () => {
 		let refreshed = false;
-		const coldRegistry = {
-			...modelRegistry,
-			getAvailable: () => (refreshed ? models : []),
-			getDiscoverableProviders: () => ["local"],
-			refresh: async () => {
-				refreshed = true;
-			},
-		} as unknown as ModelRegistry;
+		vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => (refreshed ? models : []));
+		vi.spyOn(modelRegistry, "getDiscoverableProviders").mockReturnValue(["local"]);
+		vi.spyOn(modelRegistry, "refresh").mockImplementation(async () => {
+			refreshed = true;
+		});
 		const settings = Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } });
-		const view = await resolveEffectiveAgentConfig(worker, settings, coldRegistry, "/tmp");
+		const view = await resolveEffectiveAgentConfig(worker, settings, modelRegistry, "/tmp");
 		expect(refreshed).toBe(true);
 		expect(view.model.value).toBe("anthropic/claude-opus-4-5");
+	});
+
+	it("refreshes discovery for an unresolved default role even when a fallback model is available", async () => {
+		let refreshed = false;
+		vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => (refreshed ? models : [haiku]));
+		vi.spyOn(modelRegistry, "getDiscoverableProviders").mockReturnValue(["local"]);
+		vi.spyOn(modelRegistry, "refresh").mockImplementation(async () => {
+			refreshed = true;
+		});
+		const settings = Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } });
+		const agent: AgentDefinition = { name: "plain", description: "test", systemPrompt: "test", source: "project" };
+		const view = await resolveEffectiveAgentConfig(agent, settings, modelRegistry, "/tmp");
+		expect(refreshed).toBe(true);
+		expect(view.model.value).toBe("anthropic/claude-sonnet-4-5");
+		expect(view.model.source).toEqual({ layer: "session", key: "modelRoles.default" });
 	});
 
 	it("lists each enabled WATCHDOG.yml advisor on its model", async () => {
