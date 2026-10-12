@@ -719,6 +719,9 @@ export const SUBAGENT_WARNING_MISSING_YIELD =
 export const SUBAGENT_WARNING_EMPTY_MESSAGE = "SYSTEM WARNING: Subagent ended without a final message.";
 export const SUBAGENT_STOP_REFUSAL_UNRESOLVED =
 	"Subagent stopped at a yield that a subagent_stop handler refused; the continuation turn ended without a replacement yield.";
+/** Why a wake turn's judged yield was dropped: a newer wake took the session while the handlers were consulting. */
+const WAKE_SUPERSEDED_WHILE_JUDGING =
+	"a newer wake took the session before the subagent_stop handlers answered, so this turn's yield was not published";
 
 /** Build a schema_violation outcome — surfaced as a non-zero exit so callers treat it as a failure. */
 function buildSchemaViolationOutcome(
@@ -3461,7 +3464,10 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
  * already settling stops observing. The refusal then stays unanswered and
  * finalization fails the turn instead of publishing the refused payload. A
  * newer turn that took the session while a pass consults is the same case: the
- * continuation cannot start on a busy session.
+ * continuation cannot start on a busy session. A handler that allows after a
+ * newer observation started is cancelled the same way: the candidate is dropped
+ * rather than published over the newer turn's artifact, and the call returns
+ * true so the turn reports as cancelled instead of refused.
  *
  * Each continuation settles the session's owner async work before the next
  * pass, so a candidate is only judged once that work quiesced; a result the
@@ -3473,7 +3479,7 @@ async function runWakeStopPasses(
 	monitor: SubagentRunMonitor,
 	stopHook: SubagentStopHook,
 	superseded: AbortSignal,
-): Promise<void> {
+): Promise<boolean> {
 	const signal = monitor.abortSignal;
 	const io: SubagentStopPassIo = {
 		awaitAbortable: promise => untilAborted(signal, () => promise),
@@ -3499,8 +3505,18 @@ async function runWakeStopPasses(
 		},
 	};
 	let refused = true;
+	let supersededWhileJudging = false;
 	try {
-		while (refused && monitor.yieldCalled()) refused = await runSubagentStopPass(session, monitor, stopHook, io);
+		while (refused && monitor.yieldCalled()) {
+			refused = await runSubagentStopPass(session, monitor, stopHook, io);
+			// An allow after a newer observation took the session is no verdict on a
+			// candidate this turn can still publish: it would finalize after the newer
+			// turn and overwrite that turn's artifact with a stale yield. Drop it.
+			if (!refused && superseded.aborted && monitor.yieldCalled()) {
+				monitor.invalidateYieldForStop();
+				supersededWhileJudging = true;
+			}
+		}
 	} catch (error) {
 		// A cancelled run surfaces here as an abort; that is the run's outcome, not a failure.
 		if (!signal.aborted) {
@@ -3514,6 +3530,7 @@ async function runWakeStopPasses(
 	// results un-latched (or that an error cut off) is still unjudged here: drop it
 	// like the refused one, or finalization would publish a payload no handler saw.
 	if (refused && !monitor.yieldInvalidatedByStop()) monitor.invalidateYieldForStop();
+	return supersededWhileJudging;
 }
 
 /**
@@ -3683,8 +3700,9 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			// A wake turn's candidate yield is judged like a first run's before it
 			// is accepted or published. Unstructured wake turns record no yield, so
 			// their prose reply is a peer relay rather than a result and is not offered.
+			let supersededWhileJudging = false;
 			if (turnError === undefined && turnMonitor.yieldCalled()) {
-				await runWakeStopPasses(
+				supersededWhileJudging = await runWakeStopPasses(
 					session,
 					turnMonitor,
 					new SubagentStopHook(
@@ -3709,7 +3727,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			// last assistant turn is not an abort of the turn's work. A run
 			// cancelled while handlers were consulting is cancelled instead.
 			const refusedWithoutReplacement = turnMonitor.yieldInvalidatedByStop() && !yielded;
-			const cancelledDuringStop = refusedWithoutReplacement && turnMonitor.abortSignal.aborted;
+			const cancelledDuringStop =
+				refusedWithoutReplacement && (turnMonitor.abortSignal.aborted || supersededWhileJudging);
 			const unresolvedRefusal = refusedWithoutReplacement && !cancelledDuringStop;
 			const aborted =
 				runtimeLimitExceeded ||
@@ -3752,7 +3771,11 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				turnMonitor.lastReportTurnText() ??
 				(turnMonitor.sawAssistantMessage() ? undefined : turnMonitor.lastAssistantSalvageText()) ??
 				"";
-			const abortReason = aborted ? turnMonitor.resolveAbortReasonText() : undefined;
+			const abortReason = supersededWhileJudging
+				? WAKE_SUPERSEDED_WHILE_JUDGING
+				: aborted
+					? turnMonitor.resolveAbortReasonText()
+					: undefined;
 			let result: SingleResult | undefined;
 			let finalizeError: unknown;
 			try {
