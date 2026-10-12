@@ -7538,7 +7538,7 @@ describe("agentLoop streaming snapshots", () => {
 
 describe("agentLoop kCursorExecResolved (issue #4348)", () => {
 	it("skips execute for a toolCall block marked as already run by Cursor's exec channel", async () => {
-		const { kCursorExecResolved } = await import("@oh-my-pi/pi-ai/utils/block-symbols");
+
 
 		const toolSchema = type({ command: "string" });
 		let executeCalls = 0;
@@ -7629,7 +7629,7 @@ describe("agentLoop kCursorExecResolved (issue #4348)", () => {
 	it("still runs a normal, unmarked toolCall block in the same turn", async () => {
 		// Guards against the filter over-matching: a mixed turn where only
 		// SOME blocks are Cursor-resolved must still execute the unmarked one.
-		const { kCursorExecResolved } = await import("@oh-my-pi/pi-ai/utils/block-symbols");
+
 
 		const toolSchema = type({ value: "string" });
 		const executed: string[] = [];
