@@ -43,7 +43,7 @@ const DOCUMENTED_ADVISORY_CONTINUATIONS = 8;
 
 const baseAgent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 
-function assistantMessage(text: string): AssistantMessage {
+function assistantMessage(text: string, stopReason: AssistantMessage["stopReason"] = "stop"): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
@@ -58,7 +58,7 @@ function assistantMessage(text: string): AssistantMessage {
 			totalTokens: 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
-		stopReason: "stop",
+		stopReason,
 		timestamp: Date.now(),
 	};
 }
@@ -70,7 +70,7 @@ interface PromptCall {
 	/** Append a child assistant turn carrying `text`, as the model's reply next turn would. */
 	reply: (text: string) => void;
 	/** End the turn on a final report (`structured: false` runs): a counted `stop` assistant message carrying `text`. */
-	report: (text: string) => void;
+	report: (text: string, stopReason?: AssistantMessage["stopReason"]) => void;
 	/** Submit a terminal `yield` carrying `data`. */
 	yieldTerminal: (data: unknown) => void;
 	/** Submit a `complete: true` incremental section labelled `label` carrying `data`. */
@@ -200,8 +200,8 @@ function createHarness(args: {
 				reply: (replyText: string) => {
 					messages.push(assistantMessage(replyText));
 				},
-				report: (reportText: string) => {
-					const message = assistantMessage(reportText);
+				report: (reportText: string, stopReason?: AssistantMessage["stopReason"]) => {
+					const message = assistantMessage(reportText, stopReason);
 					messages.push(message);
 					emit({ type: "message_end", message } as AgentSessionEvent);
 				},
@@ -846,6 +846,91 @@ describe("runSubprocess subagent_stop", () => {
 
 			expect(harness.events).toEqual([]);
 			expect(result.error).toBe(SUBAGENT_WARNING_EMPTY_MESSAGE);
+		});
+
+		it("offers a final report that ended short of a clean stop, like a length cutoff", async () => {
+			const id = "UnstructuredLength";
+			const harness = createHarness({
+				hasStopHandlers: true,
+				onPrompt: call =>
+					call.report(
+						call.promptIndex === 1 ? "partial" : "replacement",
+						call.promptIndex === 1 ? "length" : "stop",
+					),
+				onStop: async (_event, callIndex) =>
+					callIndex === 1 ? { decision: "block", reason: "finish it" } : undefined,
+			});
+			mockCreateAgentSession(harness.session);
+			registerRunning(id, harness.session);
+
+			const result = await runSubprocess({ ...baseOptions(id), structured: false });
+
+			// The cut-off report would otherwise be published unjudged.
+			expect(harness.events).toHaveLength(2);
+			const offered = harness.events[0]?.last_assistant_message;
+			expect(offered?.role === "assistant" ? offered.stopReason : undefined).toBe("length");
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("replacement");
+		});
+
+		it("does not offer the budget wrap-up report that ends a stopped run", async () => {
+			const id = "UnstructuredBudgetStop";
+			const harness = createHarness({
+				hasStopHandlers: true,
+				onPrompt: call => {
+					if (call.promptIndex === 1) {
+						// Budget 2 stops the free-running turn at the third request.
+						call.report("working 1");
+						call.report("working 2");
+						call.report("working 3");
+					} else {
+						call.report("budget wrap-up");
+					}
+				},
+				onStop: async () => ({ decision: "block", reason: "not done" }),
+			});
+			mockCreateAgentSession(harness.session);
+			registerRunning(id, harness.session);
+
+			const result = await runSubprocess({
+				...baseOptions(id),
+				structured: false,
+				settings: Settings.isolated({ "task.softRequestBudget": 2 }),
+				modelRegistry: { refresh: async () => {} } as unknown as ModelRegistry,
+			});
+
+			// The wrap-up is the stopped run's forced answer: handlers are never asked to
+			// refuse it, or an always-blocking handler would burn the grace window.
+			expect(harness.events).toEqual([]);
+			expect(harness.prompts).toHaveLength(2);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("budget wrap-up");
+		});
+
+		it("re-prompts a resumed worker's final report on a refusal and publishes the replacement", async () => {
+			const id = "UnstructuredResumed";
+			const harness = createHarness({
+				hasStopHandlers: true,
+				onPrompt: call => call.report(call.promptIndex === 1 ? "REFUSED-REPORT" : "replacement report"),
+				onStop: async (_event, callIndex) =>
+					callIndex === 1 ? { decision: "block", reason: "keep going" } : undefined,
+			});
+			registerRunning(id, harness.session);
+
+			const result = await runSubagentFollowUpTurn({
+				id,
+				agent: baseAgent,
+				message: "continue",
+				structured: false,
+				artifactsDir: tempDir.path(),
+			});
+
+			expect(harness.prompts.map(call => call.text)).toEqual(["continue", "keep going"]);
+			expect(harness.events.map(event => event.stop_hook_active)).toEqual([false, true]);
+			expect(result.exitCode).toBe(0);
+			expect(result.error).toBeUndefined();
+			expect(result.output).toBe("replacement report");
+			expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeNumber();
 		});
 	});
 });
