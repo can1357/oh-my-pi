@@ -134,7 +134,7 @@ interface WorkerHandle {
 	busy: boolean;
 	resolve: ((res: ParseSessionResult) => void) | null;
 	reject: ((err: Error) => void) | null;
-	/** Set by `onerror`: a dead worker can never answer another dispatch, so it is reaped. */
+	/** Set by `onerror`: the worker hit a runtime error, so it can never answer another dispatch. */
 	dead: boolean;
 	/** Identity of the parent env this worker was spawned under; see {@link pooledWorkerEnv}. */
 	envIdentity: string;
@@ -211,13 +211,21 @@ function dispatch(handle: WorkerHandle, request: SyncWorkerRequest): Promise<Par
 	if (handle.busy) {
 		return Promise.reject(new Error("worker is busy - this is a bug in the dispatcher"));
 	}
+	// A worker that hit a runtime error cannot answer anything anymore. Refusing
+	// the dispatch keeps the failure on the lane's normal path — the run fails,
+	// every checked-out handle is discarded, and the caller retries with a fresh
+	// worker — instead of posting into a worker that dropped the request and
+	// waiting forever for a reply that never comes.
+	if (handle.dead) {
+		return Promise.reject(new Error("sync worker died before the request was sent"));
+	}
 	const { promise, resolve, reject } = Promise.withResolvers<ParseSessionResult>();
 	handle.busy = true;
 	handle.resolve = resolve;
 	handle.reject = reject;
 	// A pooled worker is unref'd while idle, and an unref'd worker does not keep
 	// the loop alive for its own reply, so hold it referenced until the response
-	// unrefs it again - see the reply handler in spawnWorker.
+	// unrefs it again — see the reply handler in spawnWorker.
 	handle.worker.ref();
 	handle.worker.postMessage(request);
 	return promise;
@@ -253,17 +261,17 @@ function pooledWorkerEnv(): PooledWorkerEnv {
 }
 
 /**
- * Idle workers kept warm across sync runs. Draining parses is spawn-bound: every
- * `new Worker` re-enters the CLI entrypoint and re-evaluates the module graph,
- * so one drain used to pay that 8 times over no matter how often it ran. A
- * pooled worker is checked out per lane and returned here when the run ends,
- * until it has been idle for {@link STATS_SYNC_WORKER_IDLE_MS} or the parent
- * environment it was spawned under no longer matches.
+ * Idle workers kept warm across sync runs. A parse worker is spawn-bound:
+ * draining parses means booting a Worker runtime, so a pool of N lanes spawns N
+ * workers even when most of the drain had nothing to parse. A pooled worker is
+ * checked out per lane and returned here when the run ends, until it has been
+ * idle for {@link STATS_SYNC_WORKER_IDLE_MS} or the parent environment it was
+ * spawned under no longer matches.
  *
  * Idles are `unref`'d: a referenced worker holds the parent thread open even
  * with no work in flight (measured on Bun 1.4.3: an idle referenced worker
  * stalls an otherwise ready exit), so a pooled worker must not pin a process on
- * its way out. `unref` is not enough on its own, though - it also takes the
+ * its way out. `unref` is not enough on its own, though — it also takes the
  * worker out of the exit path while a parse is in flight, so a pooled worker is
  * referenced exactly while a dispatch is outstanding: {@link dispatch} refs it
  * and the reply handler in {@link spawnWorker} unrefs it again.
