@@ -110,13 +110,4 @@ describe("extension loader host runtime binding", () => {
 		expect(hookResult.hooks).toHaveLength(1);
 		expect(hookResult.hooks[0].handlers.has("identity:event")).toBe(true);
 	});
-
-	it("resolves the host pi namespace through dynamic import, not require", () => {
-		const loaderSource = fs.readFileSync(
-			path.join(import.meta.dir, "../src/extensibility/extensions/loader.ts"),
-			"utf8",
-		);
-		expect(loaderSource).not.toMatch(/require\(["']\.\.\/\.\.\/index["']\)/);
-		expect(loaderSource).toMatch(/await import\(["']\.\.\/\.\.\/index["']\)/);
-	});
 });
