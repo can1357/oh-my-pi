@@ -2712,6 +2712,34 @@ describe("RelayBridge focus emulation", () => {
 		expect(switchSends(restarted, FOCUS)).toEqual([true]);
 		expect(switchSends(restarted, CHOOSER)).toEqual([]);
 	});
+
+	it("brings a surviving attachment's switches to the live sessions' wishes when the extension reconnects", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const registry = new FakeCdpSocket();
+		await attachPage(bridge, ext, registry, bridge.cdpConnected(registry), 1);
+		const killed = new FakeCdpSocket();
+		const killedConn = bridge.cdpConnected(killed);
+		const killedSession = await attachPage(bridge, ext, killed, killedConn, 1);
+		const live = new FakeCdpSocket();
+		const liveConn = bridge.cdpConnected(live);
+		const liveSession = await attachPage(bridge, ext, live, liveConn, 1);
+		await setSwitch(bridge, ext, killedConn, killedSession, FOCUS, true);
+		await setSwitch(bridge, ext, killedConn, killedSession, CHOOSER, true);
+		await setSwitch(bridge, ext, liveConn, liveSession, FOCUS, true);
+
+		// The socket drops but chrome.debugger stays attached; the worker dies meanwhile, so nothing reaches the tab.
+		bridge.extClosed(ext);
+		bridge.cdpClosed(killedConn);
+		await flush();
+		const back = new FakeExtSocket();
+		connect(bridge, back, [tab({ tabId: 1 })], [1]);
+		await flush();
+		// Focus emulation is still on and still wanted; only the release that could not be sent is settled.
+		expect(switchSends(back, FOCUS)).toEqual([]);
+		expect(switchSends(back, CHOOSER)).toEqual([false]);
+	});
 });
 
 describe("RelayBridge foreign extension frames", () => {
