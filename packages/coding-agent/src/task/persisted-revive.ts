@@ -29,6 +29,7 @@ import { installRetryFallbackRole } from "../session/retry-fallback-chains";
 import type { AuthStorage } from "../session/auth-storage";
 import { revivePersistedPlaced } from "../thread/executor-routing";
 import { subagentWorkerPool } from "../thread/subagent-worker";
+import { readSessionHeaderId } from "../session/session-loader";
 import {
 	extractSessionInit,
 	hasConversationalHistory,
@@ -111,10 +112,6 @@ export interface PersistedReviveSpec {
 	readonly enableLsp: boolean;
 	readonly eventBus: EventBus | undefined;
 	readonly subagentEventBus: EventBus | undefined;
-	/** Spawning top-level session's id, reported as the `subagent_stop` event's `parent_session_id`. */
-	readonly parentSessionId: string | undefined;
-	/** Spawning top-level session's transcript file, reported as the event's `parent_session_file`. */
-	readonly parentSessionFile: string | undefined;
 }
 
 /**
@@ -147,6 +144,31 @@ export function persistedAgentDefinition(displayName: string, init: PersistedSes
 		systemPrompt: init.systemPrompt.join("\n\n"),
 		source: "user",
 	};
+}
+
+/**
+ * The session `subagent_stop` reports as a cold-revived child's spawner. A child
+ * of the top-level session joins that live session. A nested child was spawned
+ * by another subagent: its header records that subagent's transcript as
+ * `parentSession`, and the subagent's id is on its live session or in that
+ * file's header. When neither survives the identity stays unset rather than
+ * naming the top-level session, which did not spawn it.
+ */
+async function resolveSpawner(
+	registry: AgentRegistry,
+	topLevel: AgentSessionHandle,
+	ref: AgentRef,
+	recordedParentFile: string | undefined,
+): Promise<{ sessionId: string | undefined; sessionFile: string | undefined }> {
+	if (!ref.parentId || ref.parentId === MAIN_AGENT_ID) {
+		return { sessionId: topLevel.sessionId, sessionFile: topLevel.sessionFile };
+	}
+	const parent = registry.get(ref.parentId);
+	const sessionFile = recordedParentFile ?? parent?.sessionFile ?? undefined;
+	const sessionId =
+		parent?.session?.sessionId ??
+		(sessionFile ? await readSessionHeaderId(sessionFile).catch(() => undefined) : undefined);
+	return { sessionId, sessionFile };
 }
 
 /**
@@ -238,10 +260,6 @@ export function createPersistedSubagentReviverFactory(
 				enableLsp: ctx.enableLsp,
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
-				// The top-level session this revive joins is the spawning session the
-				// `subagent_stop` event reports; the transcript cannot name it reliably.
-				parentSessionId: ctx.session.sessionId,
-				parentSessionFile: ctx.session.sessionFile,
 			};
 			// Worker mode: a revival is placed like a fresh spawn (main thread or a worker).
 			const pool = subagentWorkerPool(ctx.settings);
@@ -557,6 +575,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	// The internal run-state signal precedes deferrable public `agent_end`,
 	// keeping idle-TTL ownership synchronized even while prompts unwind.
 	registry.syncSessionStatus(ref.id, session);
+	const spawner = await resolveSpawner(registry, spec.root, expectedRef, reopened.getHeader()?.parentSession);
 	attachIrcWakeTurnMonitor(session, {
 		id: ref.id,
 		agent: persistedAgentDefinition(ref.displayName, init),
@@ -564,8 +583,9 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 		...softRequestBudgetFor(persistedAgentName(ref.displayName, init), spec.settings),
 		eventBus: spec.eventBus,
 		subagentEventBus: spec.subagentEventBus,
-		parentSessionId: spec.parentSessionId,
-		parentSessionFile: spec.parentSessionFile,
+		// A nested child's spawner is its parent subagent, not the top-level session.
+		parentSessionId: spawner.sessionId,
+		parentSessionFile: spawner.sessionFile,
 		sessionFile,
 		structured,
 		outputSchema: init.outputSchema,
