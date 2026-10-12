@@ -5,10 +5,13 @@
  * `model`/`effort`, a live `/model` or `/fast` change, plan mode and
  * `before_subagent_spawn` handlers can still change it.
  */
-import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { resolveModelServiceTier, type ServiceTierFamily, serviceTierFamily } from "@oh-my-pi/pi-ai/types";
-import { AUTO_THINKING, parseConfiguredThinkingLevel, resolveThinkingLevelForModel } from "@oh-my-pi/pi-tui/thinking";
+import {
+	parseConfiguredThinkingLevel,
+	parseThinkingLevel,
+	resolveThinkingLevelForModel,
+} from "@oh-my-pi/pi-tui/thinking";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
 import { discoverAdvisorConfigs } from "../advisor/config";
@@ -413,9 +416,9 @@ async function resolveAdvisorRoster(
 }
 
 function clampThinking(entry: AgentConfigEntry, model: Model | undefined): AgentConfigEntry {
-	const level = entry.value;
-	if (!model || typeof level !== "string" || level === AUTO_THINKING) return entry;
-	const clamped = resolveThinkingLevelForModel(model, level as ThinkingLevel);
+	const level = typeof entry.value === "string" ? parseThinkingLevel(entry.value) : undefined;
+	if (!model || level === undefined) return entry;
+	const clamped = resolveThinkingLevelForModel(model, level);
 	if (clamped === level) return entry;
 	const clampNote = `clamped from ${level}`;
 	return { ...entry, value: clamped ?? null, note: entry.note ? `${entry.note}; ${clampNote}` : clampNote };
