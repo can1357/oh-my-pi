@@ -678,11 +678,17 @@ function resolveFallbackCompletion(rawOutput: string, outputSchema: unknown): { 
 }
 
 /**
- * Whether a structured run that ended without a `yield` still has a result
- * {@link finalizeSubprocessOutput} publishes from its output: a JSON completion
- * that satisfies the schema, or any output when no usable schema applies.
+ * Whether a structured run that ended without a terminal `yield` still has a
+ * result {@link finalizeSubprocessOutput} publishes: the incremental sections it
+ * recorded (assembled on idle, ahead of any output), a JSON completion that
+ * satisfies the schema, or any output when no usable schema applies.
  */
-function hasUnyieldedResult(rawOutput: string, outputSchema: unknown): boolean {
+function hasUnyieldedResult(
+	rawOutput: string,
+	outputSchema: unknown,
+	recordedYields: readonly unknown[] | undefined,
+): boolean {
+	if (recordedYields !== undefined && recordedYields.length > 0) return true;
 	if (resolveFallbackCompletion(rawOutput, outputSchema) !== null) return true;
 	const { normalized, error } = normalizeSchema(outputSchema);
 	return (normalized === undefined || Boolean(error)) && rawOutput.trim().length > 0;
@@ -2388,6 +2394,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		yieldInvalidatedByAsync: () => yieldInvalidatedByAsync,
 		yieldInvalidatedByStop: () => yieldInvalidatedByStop,
 		invalidateYieldForStop: () => {
+			const latched = yieldCalled;
 			yieldCalled = false;
 			yieldInvalidatedByStop = true;
 			yieldAcceptedAt = undefined;
@@ -2402,17 +2409,23 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				lastReportTurnText = undefined;
 				return;
 			}
-			// The refused candidate is the last recorded yield: every recorded
-			// yield reassigns `yieldCalled`, so a latched yield is the newest item.
-			// Left in place it would still win result assembly as the terminal item
-			// when the replacement is only a `complete: true` section.
-			const refused = progress.extractedToolData?.yield?.pop();
+			// A latched candidate is the last recorded yield: every recorded yield
+			// reassigns `yieldCalled`, so a latched yield is the newest item. Left in
+			// place it would still win result assembly as the terminal item when the
+			// replacement is only a `complete: true` section. An unlatched candidate
+			// is the output the run would still publish when no terminal yield ever
+			// came: finalization folds EVERY recorded section into it, so all of them
+			// are the refused payload. Left in place, a data-less finalize in the
+			// replacement would publish them again.
+			const recorded = progress.extractedToolData?.yield;
+			const refused = recorded ? (latched ? recorded.splice(-1) : recorded.splice(0)) : [];
 			// A workpool batch's final submission is the candidate: the yield tool
 			// remembers its item as submitted, so release it for the continuation.
-			const refusedLabels =
-				isRecord(refused) && Array.isArray(refused.type)
-					? refused.type.filter((label): label is string => typeof label === "string")
-					: [];
+			const refusedLabels = refused.flatMap(item =>
+				isRecord(item) && Array.isArray(item.type)
+					? item.type.filter((label): label is string => typeof label === "string")
+					: [],
+			);
 			if (refusedLabels.length > 0) reopenYieldWorkPoolItems(activeSession?.getToolByName("yield"), refusedLabels);
 		},
 		yieldTurnStopRequested: () => yieldTurnStopRequested,
@@ -2822,14 +2835,16 @@ async function driveSessionToResult(
 				) {
 					// The settled result is the candidate when no yield will carry it: a
 					// message-result run's final report turn, whatever ended it short of an
-					// error or abort (`stop`, `length`, ...), or the output a structured run
-					// that exhausted the ladder still publishes (see hasUnyieldedResult). A
+					// error or abort (`stop`, `length`, ...), or what a structured run that
+					// exhausted the ladder still publishes (see hasUnyieldedResult). A
 					// refusal of the latter is answerable only by a fresh yield, so a ladder
-					// that again ends without one fails closed rather than re-offering it. A
+					// that again ends without one fails closed rather than re-offering it, and
+					// the sections it recorded are dropped with the refusal. A
 					// budget stop or a terminal model error ends the run without a candidate.
 					const finalTurn = session.getLastAssistantMessage();
 					const settledResult = structured
-						? !monitor.yieldInvalidatedByStop() && hasUnyieldedResult(monitor.rawOutput(), outputSchema)
+						? !monitor.yieldInvalidatedByStop() &&
+							hasUnyieldedResult(monitor.rawOutput(), outputSchema, monitor.progress.extractedToolData?.yield)
 						: monitor.lastReportTurnText() !== undefined;
 					if (
 						settledResult &&

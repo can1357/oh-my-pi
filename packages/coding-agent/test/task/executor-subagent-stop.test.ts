@@ -75,6 +75,8 @@ interface PromptCall {
 	yieldTerminal: (data: unknown) => void;
 	/** Submit a `complete: true` incremental section labelled `label` carrying `data`. */
 	yieldCompleteSection: (label: string, data: unknown) => void;
+	/** Submit an incremental section labelled `label` that does not end the run (no terminal yield follows). */
+	yieldSection: (label: string, data: unknown) => void;
 	/** Submit one workpool item through the harness's real `YieldTool`; a rejected submission is recorded in `yieldErrors`. */
 	submitWorkPoolItem: (key: number, data: string) => Promise<void>;
 }
@@ -208,6 +210,8 @@ function createHarness(args: {
 				yieldTerminal: (data: unknown) => emitYield({ status: "success", data }, "Result submitted."),
 				yieldCompleteSection: (label: string, data: unknown) =>
 					emitYield({ status: "success", data, type: [label], complete: true }, "Section submitted."),
+				yieldSection: (label: string, data: unknown) =>
+					emitYield({ status: "success", data, type: [label] }, "Section submitted."),
 				submitWorkPoolItem: async (key: number, data: string) => {
 					try {
 						const result = await args.yieldTool?.execute(`pool-${prompts.length}`, { key, data });
@@ -494,6 +498,77 @@ describe("runSubprocess subagent_stop", () => {
 
 			expect(prose.events).toHaveLength(0);
 			expect(failed.exitCode).not.toBe(0);
+		});
+
+		describe("with only incremental sections recorded", () => {
+			/** Two sections, then silence through every reminder: the model never submits a terminal yield. */
+			const submitSectionsThenStall = (call: PromptCall) => {
+				if (call.promptIndex === 1) {
+					call.yieldSection("findings", "FINDING-A");
+					call.yieldSection("findings", "FINDING-B");
+				} else {
+					call.reply("no terminal yield");
+				}
+			};
+
+			it("offers the sections finalization would publish, and publishes them when allowed", async () => {
+				const id = "SectionsOffered";
+				const harness = createHarness({ hasStopHandlers: true, onPrompt: submitSectionsThenStall });
+				mockCreateAgentSession(harness.session);
+				registerRunning(id, harness.session);
+
+				const result = await runSubprocess(baseOptions(id));
+
+				// The run publishes these sections with exit 0 either way; what the hook decides is whether
+				// any handler saw them first. Output stays empty, so only the sections can be the candidate.
+				expect(result.exitCode).toBe(0);
+				expect(JSON.parse(result.output)).toEqual({ findings: ["FINDING-A", "FINDING-B"] });
+				expect(harness.events).toHaveLength(1);
+			});
+
+			it("fails closed on a refusal, publishing none of the refused sections", async () => {
+				const id = "SectionsRefused";
+				const harness = createHarness({
+					hasStopHandlers: true,
+					onPrompt: submitSectionsThenStall,
+					onStop: async (_event, callIndex) =>
+						callIndex === 1 ? { decision: "block", reason: "not done" } : undefined,
+				});
+				mockCreateAgentSession(harness.session);
+				registerRunning(id, harness.session);
+
+				const result = await runSubprocess(baseOptions(id));
+
+				// The continuation never produced a judged replacement, so the refused sections are not re-offered.
+				expect(harness.events).toHaveLength(1);
+				expect(result.exitCode).not.toBe(0);
+				expect(result.error).toBe(SUBAGENT_STOP_REFUSAL_UNRESOLVED);
+				expect(result.output).not.toContain("FINDING-");
+				expect(result.extractedToolData?.yield).toBeUndefined();
+				expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).exists()).toBe(false);
+			});
+
+			it("does not let refused sections ride into the replacement that finalizes the run", async () => {
+				const id = "SectionsRefusedThenFinalized";
+				const harness = createHarness({
+					hasStopHandlers: true,
+					onPrompt: call => {
+						if (call.text === "not done") call.yieldCompleteSection("findings", "FINDING-C");
+						else submitSectionsThenStall(call);
+					},
+					onStop: async (_event, callIndex) =>
+						callIndex === 1 ? { decision: "block", reason: "not done" } : undefined,
+				});
+				mockCreateAgentSession(harness.session);
+				registerRunning(id, harness.session);
+
+				const result = await runSubprocess(baseOptions(id));
+
+				expect(harness.events.map(event => event.stop_hook_active)).toEqual([false, true]);
+				expect(result.exitCode).toBe(0);
+				// Folding the refused sections into the replacement would publish payload no handler allowed.
+				expect(JSON.parse(result.output)).toEqual({ findings: "FINDING-C" });
+			});
 		});
 	});
 
