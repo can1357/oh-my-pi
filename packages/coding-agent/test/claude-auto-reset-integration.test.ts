@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
+	ApiKey,
 	ResetCreditAccountStatus,
 	ResetCreditTarget,
 	SessionRestrictionLease,
@@ -99,6 +100,15 @@ function withInventory(report: UsageReport, status: ResetCreditAccountStatus): U
 	return { ...report, resetCredits: { availableCount, redeemableCount, eligible, nextCreditId, credits } };
 }
 
+/** The bearer a request was sent with. */
+function resolvedApiKey(apiKey: ApiKey | undefined): string {
+	const resolved = typeof apiKey === "function" ? apiKey({ lastChance: false, error: undefined }) : apiKey;
+	const bearer =
+		typeof resolved === "string" ? resolved : resolved && "apiKey" in resolved ? resolved.apiKey : undefined;
+	if (typeof bearer !== "string") throw new Error("Expected the API key to be resolved before streaming");
+	return bearer;
+}
+
 describe("Claude saved-reset trigger integration", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
@@ -149,16 +159,24 @@ describe("Claude saved-reset trigger integration", () => {
 		consent?: () => Promise<string | undefined>;
 		/** Shares another session's coordinator, as sessions of one process do. */
 		coordinator?: CodexAutoRedeemCoordinator;
+		/**
+		 * Resolves each request's key through the stored accounts, as a real
+		 * session does, and fails exactly the requests sent with a key in this set.
+		 */
+		blockedKeys?: Set<string>;
 	}): {
 		session: AgentSession;
 		coordinator: CodexAutoRedeemCoordinator;
 		targets: ResetCreditTarget[];
 		modelCalls: () => number;
 		listCalls: () => number;
+		requestKeys: string[];
 	} {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
-		authStorage.keys.setRuntime("anthropic", "test-key");
+		const blockedKeys = options.blockedKeys;
+		if (blockedKeys) authStorage.keys.removeRuntime("anthropic");
+		else authStorage.keys.setRuntime("anthropic", "test-key");
 		vi.spyOn(authStorage.oauth, "identity").mockReturnValue({
 			accountId: ACCOUNT_ID,
 			email: EMAIL,
@@ -197,13 +215,24 @@ describe("Claude saved-reset trigger integration", () => {
 
 		const mock = createMockModel();
 		let calls = 0;
+		const requestKeys: string[] = [];
 		const agent = new Agent({
-			getApiKey: () => "test-key",
+			getApiKey: blockedKeys
+				? requestedModel => modelRegistry.resolver(requestedModel, agent.sessionId)
+				: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: (requestedModel, context, streamOptions) => {
 				calls++;
 				const transientFailures = options.transientFailures ?? 0;
-				if (calls <= transientFailures) mock.push({ throw: "503 Service unavailable" });
+				if (blockedKeys) {
+					const key = resolvedApiKey(streamOptions?.apiKey);
+					requestKeys.push(key);
+					mock.push(
+						blockedKeys.has(key)
+							? { throw: CLAUDE_USAGE_LIMIT_ERROR }
+							: { content: ["recovered after Claude reset"], stopReason: "stop" },
+					);
+				} else if (calls <= transientFailures) mock.push({ throw: "503 Service unavailable" });
 				else if (options.streamErrorFirst && (calls === transientFailures + 1 || !quota.restored)) {
 					mock.push({ throw: CLAUDE_USAGE_LIMIT_ERROR });
 				} else mock.push({ content: ["recovered after Claude reset"], stopReason: "stop" });
@@ -261,7 +290,7 @@ describe("Claude saved-reset trigger integration", () => {
 			extensionRunner,
 		});
 		sessions.push(session);
-		return { session, coordinator, targets, modelCalls: () => calls, listCalls: () => listAttempts };
+		return { session, coordinator, targets, modelCalls: () => calls, listCalls: () => listAttempts, requestKeys };
 	}
 
 	/**
@@ -944,6 +973,90 @@ describe("Claude saved-reset trigger integration", () => {
 		// The third replans instead of keeping the second's empty-handed result.
 		expect(spent).toEqual([outsideId, ownId]);
 		expect(third.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	/**
+	 * Both stored accounts blocked: the session's own by the 429 its first request
+	 * gets, the longer-blocked one by a stored block. A spend unblocks its account
+	 * as a real redeem does. Returns the credentials spent.
+	 */
+	async function blockBothAccounts(
+		blockedKeys: Set<string>,
+	): Promise<{ ownId: number; outsideId: number; spent: number[] }> {
+		const { ownId, outsideId } = await storeLongerBlockedAccount(6 * 24 * HOUR);
+		const keyById = new Map([
+			[ownId, `access-${ACCOUNT_ID}`],
+			[outsideId, "access-claude-excluded"],
+		]);
+		for (const key of keyById.values()) blockedKeys.add(key);
+		authStorage.blocks.upsert({
+			credentialId: outsideId,
+			providerKey: "anthropic:oauth",
+			blockScope: "",
+			blockedUntilMs: Date.now() + 6 * 24 * HOUR,
+		});
+		const spent: number[] = [];
+		vi.spyOn(authStorage.resets, "redeem").mockImplementation(async request => {
+			const credentialId = request.target.credentialId;
+			spent.push(credentialId);
+			blockedKeys.delete(keyById.get(credentialId) ?? "");
+			authStorage.blocks.deleteAll(credentialId);
+			return {
+				ok: true,
+				code: "reset",
+				provider: "anthropic",
+				creditId: "cedar-grant-1",
+				cleared: ["anthropic:7d"],
+			};
+		});
+		return { ownId, outsideId, spent };
+	}
+
+	it("sends the retry with the credential of the longer-blocked account it restored", async () => {
+		const blockedKeys = new Set<string>();
+		const { session, requestKeys } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			salvageHorizonHours: 0,
+			blockedKeys,
+		});
+		const { outsideId, spent } = await blockBothAccounts(blockedKeys);
+		mockSchedulerWaitWithClock();
+
+		try {
+			await session.prompt("blocked on both accounts");
+			await session.waitForIdle();
+		} finally {
+			await authStorage.credentials.remove("anthropic");
+		}
+
+		expect(spent).toEqual([outsideId]);
+		expect(requestKeys).toEqual([`access-${ACCOUNT_ID}`, "access-claude-excluded"]);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it("routes a session pinned to its own blocked account to the longer-blocked one it restored", async () => {
+		const blockedKeys = new Set<string>();
+		const { session, requestKeys } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			salvageHorizonHours: 0,
+			blockedKeys,
+		});
+		const { ownId, outsideId, spent } = await blockBothAccounts(blockedKeys);
+		// An explicit user pin yields to hard unavailability, so the restored account serves the retry.
+		expect(authStorage.sessions.pin("anthropic", session.sessionId, ownId)).toBe(true);
+		mockSchedulerWaitWithClock();
+
+		try {
+			await session.prompt("blocked on both accounts");
+			await session.waitForIdle();
+		} finally {
+			await authStorage.credentials.remove("anthropic");
+		}
+		expect(spent).toEqual([outsideId]);
+		expect(requestKeys).toEqual([`access-${ACCOUNT_ID}`, "access-claude-excluded"]);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 
 	it("cancels reset discovery backoff without spending a credit or resuming the task", async () => {
