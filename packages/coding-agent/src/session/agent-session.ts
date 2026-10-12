@@ -14358,7 +14358,7 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Spend every planned action under `yes`, and only the confirmed ones under
-	 * `unset`. `options` reaches the prompt and the executor; a run with nothing
+	 * `unset`. `signal` reaches the prompt and the executor; a run with nothing
 	 * approved reports `cancelled` when `signal` stopped the prompt.
 	 */
 	async #redeemConsentedResets(
@@ -14366,15 +14366,14 @@ export class AgentSession implements SettingsScope {
 		mode: ResetAutoRedeemMode,
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
-		options?: { signal?: AbortSignal; poolOnly?: boolean },
+		signal?: AbortSignal,
 	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean; cancelled: boolean }> {
 		const approved = shouldPromptCodexAutoRedeem(mode)
-			? await this.#confirmAutoRedeem(provider, actions, coordinator, options?.signal)
+			? await this.#confirmAutoRedeem(provider, actions, coordinator, signal)
 			: actions;
-		if (approved.length === 0) {
-			return { restoredCredentialIds: [], poolLimited: false, cancelled: options?.signal?.aborted === true };
-		}
-		return this.#executeResetActions(provider, approved, coordinator, options);
+		if (approved.length === 0)
+			return { restoredCredentialIds: [], poolLimited: false, cancelled: signal?.aborted === true };
+		return this.#executeResetActions(provider, approved, coordinator, signal);
 	}
 
 	#planCodexResets(
@@ -14482,15 +14481,14 @@ export class AgentSession implements SettingsScope {
 	 * process-wide set before mutation, while nonterminal outcomes release and
 	 * defer the episode so a still-banked grant is not buried permanently.
 	 * Returns the credentials whose reset was spent or adopted from a peer,
-	 * whether the session's account pool dropped a planned action, and whether
-	 * `signal` stopped the run before a spend. `poolOnly` holds every action, not
-	 * only restores, to the session's account pool.
+	 * whether the session's account pool dropped a planned restore, and whether
+	 * `signal` stopped the run before a spend.
 	 */
 	async #executeResetActions(
 		provider: "openai-codex" | "anthropic",
 		actions: readonly (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
-		options?: { signal?: AbortSignal; poolOnly?: boolean },
+		signal?: AbortSignal,
 	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean; cancelled: boolean }> {
 		const authStorage = this.#modelRegistry.authStorage;
 		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
@@ -14499,11 +14497,11 @@ export class AgentSession implements SettingsScope {
 		// planning: a cancelled run, or a restore the session's account pool no
 		// longer allows, is dropped. Checked with no await before the redeem call.
 		const dropReason = (action: CodexResetAction | ClaudeResetAction): "cancelled" | "outside-pool" | undefined => {
-			if (options?.signal?.aborted) return "cancelled";
-			if (!options?.poolOnly && action.reason !== "blocked-account") return undefined;
-			return authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId)
-				? undefined
-				: "outside-pool";
+			if (signal?.aborted) return "cancelled";
+			return action.reason === "blocked-account" &&
+				!authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId)
+				? "outside-pool"
+				: undefined;
 		};
 		const restored: number[] = [];
 		let poolLimited = false;
@@ -14582,7 +14580,7 @@ export class AgentSession implements SettingsScope {
 						break;
 					}
 					poolLimited = true;
-					logger.debug(`${source}: action dropped, account outside the session's pool`, {
+					logger.debug(`${source}: restore dropped, account left the session's pool`, {
 						account: action.accountKey,
 					});
 				}
@@ -14703,15 +14701,12 @@ export class AgentSession implements SettingsScope {
 							coordinator,
 							activeBlockUnblockAtMs,
 						);
-			// While a sibling could take over, spend only within the session's
-			// account pool, salvage included.
+			// While a sibling could take over, spend only restores of blocked
+			// accounts; salvage of an expiring reset is left to the sweep.
 			const actions = beforeTakeover
-				? plan.actions.filter(action =>
-						authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId),
-					)
+				? plan.actions.filter(action => action.reason === "blocked-account")
 				: plan.actions;
-			const poolLimited =
-				actions.length < plan.actions.length || plan.skipped.some(skip => skip.reason === "outside-account-pool");
+			const poolLimited = plan.skipped.some(skip => skip.reason === "outside-account-pool");
 			if (actions.length === 0) {
 				const adoptedId = await this.#adoptRecentReset(statuses, coordinator);
 				if (adoptedId !== undefined) return { restored: true, restoredCredentialIds: [adoptedId] };
@@ -14726,10 +14721,7 @@ export class AgentSession implements SettingsScope {
 				}
 				return { restored: false, retryAfterMs, poolLimited };
 			}
-			const executed = await this.#redeemConsentedResets(provider, cfg.autoRedeem, actions, coordinator, {
-				signal,
-				poolOnly: beforeTakeover !== undefined,
-			});
+			const executed = await this.#redeemConsentedResets(provider, cfg.autoRedeem, actions, coordinator, signal);
 			return {
 				restored: executed.restoredCredentialIds.length > 0,
 				restoredCredentialIds: executed.restoredCredentialIds,

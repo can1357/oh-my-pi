@@ -959,6 +959,8 @@ describe("saved reset before a reserve-protected sibling", () => {
 		resets: number;
 		usageUnavailable?: boolean;
 		resetExpiresInMs?: number;
+		/** The Claude grant may be spent before its window is blocked. */
+		resetUsableEarly?: boolean;
 	}
 	const previousProxy = Bun.env.PI_PROXY_ANTHROPIC;
 	let tempDir: TempDir;
@@ -1054,6 +1056,7 @@ describe("saved reset before a reserve-protected sibling", () => {
 											ends_at: new Date(now + (account.resetExpiresInMs ?? 7 * 24 * HOUR)).toISOString(),
 											clears: ["five_hour", "seven_day"],
 											usable_now: true,
+											use_requires_limit: account.resetUsableEarly !== true,
 											percent_used: { seven_day: account.usedPct },
 											blocking: account.usedPct >= 100 ? ["seven_day"] : [],
 										},
@@ -1102,6 +1105,8 @@ describe("saved reset before a reserve-protected sibling", () => {
 			restoreBeforeReserve: boolean;
 			backupReservePct?: number;
 			primaryResets?: number;
+			/** A saved reset on the backup that expires this long from now. */
+			backupResetExpiresInMs?: number;
 			/** A third stored account outside the session's account pool. */
 			excluded?: "healthy" | "unknown" | "blocked with a reset";
 			excludedResetExpiresInMs?: number;
@@ -1128,7 +1133,9 @@ describe("saved reset before a reserve-protected sibling", () => {
 				priority: 10,
 				reservePct: options.backupReservePct ?? 100,
 				usedPct: 8,
-				resets: 0,
+				resets: options.backupResetExpiresInMs === undefined ? 0 : 1,
+				resetExpiresInMs: options.backupResetExpiresInMs,
+				resetUsableEarly: true,
 			},
 		};
 		if (options.excluded) {
@@ -1379,4 +1386,17 @@ describe("saved reset before a reserve-protected sibling", () => {
 		expect(result.resetPosts).toEqual([]);
 		expect(result.requests).toEqual(["primary", "backup"]);
 	});
+
+	it.each(["anthropic", "openai-codex"] as const)(
+		"leaves the %s backup's expiring reset to the sweep while it could take over",
+		async provider => {
+			const result = await hitWall(provider, {
+				restoreBeforeReserve: true,
+				primaryResets: 0,
+				backupResetExpiresInMs: 60_000,
+			});
+			expect(result.resetPosts).toEqual([]);
+			expect(result.requests).toEqual(["primary", "backup"]);
+		},
+	);
 });
