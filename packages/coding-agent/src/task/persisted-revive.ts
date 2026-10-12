@@ -108,6 +108,10 @@ export interface PersistedReviveSpec {
 	readonly enableLsp: boolean;
 	readonly eventBus: EventBus | undefined;
 	readonly subagentEventBus: EventBus | undefined;
+	/** Spawning top-level session's id, reported as the `subagent_stop` event's `parent_session_id`. */
+	readonly parentSessionId: string | undefined;
+	/** Spawning top-level session's transcript file, reported as the event's `parent_session_file`. */
+	readonly parentSessionFile: string | undefined;
 }
 
 /**
@@ -213,6 +217,10 @@ export function createPersistedSubagentReviverFactory(
 				enableLsp: ctx.enableLsp,
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
+				// The top-level session this revive joins is the spawning session the
+				// `subagent_stop` event reports; the transcript cannot name it reliably.
+				parentSessionId: ctx.session.sessionId,
+				parentSessionFile: ctx.session.sessionFile,
 			};
 			// Worker mode: a revival is placed like a fresh spawn (main thread or a worker).
 			const pool = subagentWorkerPool(ctx.settings);
@@ -524,6 +532,8 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 		...softRequestBudgetFor(persistedAgentName(ref.displayName, init), spec.settings),
 		eventBus: spec.eventBus,
 		subagentEventBus: spec.subagentEventBus,
+		parentSessionId: spec.parentSessionId,
+		parentSessionFile: spec.parentSessionFile,
 		sessionFile,
 		outputSchema: init.outputSchema,
 		outputSchemaMode: init.outputSchemaMode,
