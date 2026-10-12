@@ -453,41 +453,41 @@ function snapshotAssistantMessage(message: AssistantMessage): AssistantMessage {
  * provider mutates then pushes), and that `output.content` is append-only
  * within a turn. A fresh snapshot therefore only needs to re-clone:
  *
- * - the blocks an event targeted since the previous snapshot (`dirtyBlocks`),
- * - every block still open (started but not ended) — Cursor's edit block merges
- *   `path`/`stream_content` into a live block without an event, so the caller
- *   re-seeds `dirtyBlocks` from its open set after every snapshot,
+ * - the block the current event targets (`changedIndex`),
+ * - blocks still open (started but not ended) — Cursor's edit block merges
+ *   `path`/`stream_content` into a live block without an event, so open blocks
+ *   are re-cloned on every delta,
  * - blocks appended since the previous snapshot.
  *
  * Every other (finalized) block is carried over from the previous snapshot by
  * reference: finalized blocks are never mutated after their end event, so
  * sharing them is exact and turns the per-delta cost from O(turn content) into
- * O(live blocks) — the difference between quadratic and linear streaming cost
+ * O(open blocks) — the difference between quadratic and linear streaming cost
  * on long turns (issue #10605).
  */
 function snapshotAssistantMessageIncremental(
 	live: AssistantMessage,
 	prev: AssistantMessage,
-	dirtyBlocks: ReadonlySet<number>,
+	changedIndex: number,
+	openBlocks: ReadonlySet<number>,
 ): AssistantMessage {
 	const liveContent = live.content;
 	const prevContent = prev.content;
 	const prevLen = prevContent.length;
 	// Reference-copy the previous snapshot's block array (native-speed), then
-	// patch in fresh clones only where the live state moved: blocks appended
-	// since the previous snapshot, plus every dirty index — the block this delta
-	// targeted and every block still streaming. Finalized blocks keep their
-	// existing snapshot clone. Each re-clone is the full deep clone, so no shared
-	// reference outlives a block's frozen semantics: a tool call whose producer
-	// keeps growing `arguments` in place cannot reach a snapshot it already
-	// emitted.
+	// patch in fresh clones only where the live state moved: the block this
+	// delta targeted, blocks still streaming, and blocks appended since the
+	// previous snapshot. Finalized blocks keep their existing snapshot clone.
 	const content = prevContent.slice();
 	for (let i = prevLen; i < liveContent.length; i++) {
-		content[i] = snapshotAssistantContentBlock(liveContent[i]!);
+		content.push(snapshotAssistantContentBlock(liveContent[i]!));
 	}
-	for (const index of dirtyBlocks) {
-		if (index >= 0 && index < prevLen && index < liveContent.length) {
-			content[index] = snapshotAssistantContentBlock(liveContent[index]!);
+	if (changedIndex >= 0 && changedIndex < prevLen && changedIndex < liveContent.length) {
+		content[changedIndex] = snapshotAssistantContentBlock(liveContent[changedIndex]!);
+	}
+	for (const openIndex of openBlocks) {
+		if (openIndex !== changedIndex && openIndex >= 0 && openIndex < prevLen && openIndex < liveContent.length) {
+			content[openIndex] = snapshotAssistantContentBlock(liveContent[openIndex]!);
 		}
 	}
 	return {
@@ -2199,12 +2199,6 @@ async function streamAssistantResponse(
 			// yet — re-cloned on every delta because live blocks may be patched
 			// without a paired event (Cursor's silent edit-block merge).
 			const openBlocks = new Set<number>();
-			// Blocks the next snapshot must re-clone: the pending event's target plus
-			// every still-open block. The stream contract pairs each content mutation
-			// with an event carrying that block's contentIndex, so the blocks an event
-			// targeted since the last snapshot are the complete set of moved blocks.
-			// Cleared after every snapshot and re-seeded from `openBlocks`.
-			const dirtyBlocks = new Set<number>();
 			const completedToolCallIds = new Set<string>();
 			const argStreams = new Map<number, { id: string; stream: AgentToolArgStream }>();
 			const cancelArgStreams = (): void => {
@@ -2440,7 +2434,6 @@ async function streamAssistantResponse(
 								const messageSnapshot = snapshotAssistantMessage(partialMessage);
 								turnSnapshot = messageSnapshot;
 								openBlocks.clear();
-								dirtyBlocks.clear();
 								stream.push({
 									type: "message_update",
 									assistantMessageEvent: snapshotAssistantMessageEvent(event, messageSnapshot),
@@ -2528,20 +2521,17 @@ async function streamAssistantResponse(
 								partialMessage = event.partial;
 								context.messages[context.messages.length - 1] = partialMessage;
 								config.onAssistantMessageEvent?.(partialMessage, event);
-								// Track which blocks are still streaming (open blocks are
-								// re-cloned on every delta, finalized blocks are shared) and
-								// mark the block this event targeted so only it — not every
-								// block — is re-cloned for that mutation.
-								const contentIndex = "contentIndex" in event ? event.contentIndex : undefined;
+								// Track which blocks are still streaming: open blocks are
+								// re-cloned on every delta, finalized blocks are shared.
+								const contentIndex = (event as { contentIndex?: number }).contentIndex;
 								if (contentIndex !== undefined) {
-									dirtyBlocks.add(contentIndex);
 									if (event.type.endsWith("_start")) openBlocks.add(contentIndex);
 									else if (event.type.endsWith("_end")) openBlocks.delete(contentIndex);
 								}
 								// READ-ONLY-CONSUMER INVARIANT: `message` and
 								// `assistantMessageEvent.partial` intentionally share one snapshot,
 								// and the snapshot is rebuilt incrementally — only the delta's
-								// block, still-open blocks, and newly appended blocks are
+								// the delta's block, open blocks, and newly appended blocks are
 								// re-cloned; finalized blocks are carried over from the previous
 								// snapshot by reference (see
 								// `snapshotAssistantMessageIncremental`), so they are shared
@@ -2552,10 +2542,13 @@ async function streamAssistantResponse(
 								// exchange, per-delta work is proportional to the live stream
 								// instead of the whole turn (issue #10605).
 								const messageSnapshot: AssistantMessage = turnSnapshot
-									? snapshotAssistantMessageIncremental(partialMessage, turnSnapshot, dirtyBlocks)
+									? snapshotAssistantMessageIncremental(
+											partialMessage,
+											turnSnapshot,
+											contentIndex ?? -1,
+											openBlocks,
+										)
 									: snapshotAssistantMessage(partialMessage);
-								dirtyBlocks.clear();
-								for (const openIndex of openBlocks) dirtyBlocks.add(openIndex);
 								turnSnapshot = messageSnapshot;
 								stream.push({
 									type: "message_update",
