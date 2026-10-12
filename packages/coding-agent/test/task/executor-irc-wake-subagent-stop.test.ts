@@ -158,7 +158,7 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			artifactsDir: tempDir.path(),
 			maxRuntimeMs: args.maxRuntimeMs,
 		});
-		return { session, mock, stopEvents, lifecycle, artifact: path.join(tempDir.path(), `${AGENT_ID}.md`) };
+		return { session, mock, stopEvents, lifecycle, eventBus, artifact: path.join(tempDir.path(), `${AGENT_ID}.md`) };
 	}
 
 	async function deliverWake(target: AgentSession, id: string, from = "peer"): Promise<void> {
@@ -261,6 +261,123 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(run.stopEvents).toHaveLength(1);
 		expect(await Bun.file(run.artifact).exists()).toBe(false);
 		expect(run.lifecycle.map(frame => frame.status)).toContain("failed");
+	});
+
+	it("never lets a newer wake that is still settling publish a refused wake's continuation", async () => {
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const gate = Promise.withResolvers<string>();
+		const stopEntered = Promise.withResolvers<void>();
+		const releaseStop = Promise.withResolvers<void>();
+		const secondWakeRan = Promise.withResolvers<void>();
+		const refusalOutcome = Promise.withResolvers<void>();
+		const run = await setup({
+			manager,
+			responses: [
+				yieldCall("REFUSED-PAYLOAD"),
+				() => {
+					secondWakeRan.resolve();
+					return { content: ["second wake reply"] };
+				},
+				// Whichever turn runs third: a refusal's continuation yields, anything else is prose.
+				context => {
+					if (!JSON.stringify(context.messages).includes("keep going"))
+						return { content: ["noted the job result"] };
+					refusalOutcome.resolve();
+					return yieldCall("CONTINUATION-PAYLOAD");
+				},
+				{ content: ["noted the job result"] },
+			],
+			onStop: async (event, callIndex) => {
+				if (callIndex > 1) return event.stop_hook_active ? { decision: "block", reason: "keep going" } : undefined;
+				// The newer wake's turn ends while this job runs, so its observation stays open, settling.
+				manager.register("bash", "bg build", ({ signal }) => untilAborted(signal, gate.promise).then(() => "ok"), {
+					id: "bg-job",
+					ownerId: AGENT_ID,
+				});
+				stopEntered.resolve();
+				await releaseStop.promise;
+				return { decision: "block", reason: "keep going" };
+			},
+		});
+		run.eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
+			if (toLifecycleFrame(data).status === "failed") refusalOutcome.resolve();
+		});
+
+		await deliverWake(run.session, "m1");
+		await stopEntered.promise;
+		await deliverWake(run.session, "m2");
+		await secondWakeRan.promise;
+		await run.session.waitForIdle();
+		// The newer wake's turn has ended and its observation is still open. The
+		// refusal now either starts a continuation or fails the refused wake.
+		releaseStop.resolve();
+		await refusalOutcome.promise;
+		gate.resolve("BUILD GREEN");
+		await run.session.waitForIrcReplies();
+		await run.session.waitForIdle();
+		await manager.waitForAll();
+
+		// The newer wake owns the session: the refusal could not be answered, so no
+		// continuation ran and no other observation judged or published its yield.
+		const artifact = (await Bun.file(run.artifact).exists()) ? await Bun.file(run.artifact).text() : "";
+		expect(artifact).not.toContain("REFUSED-PAYLOAD");
+		expect(artifact).not.toContain("CONTINUATION-PAYLOAD");
+		expect(run.stopEvents).toHaveLength(1);
+		expect(run.mock.calls.map(call => JSON.stringify(call.context.messages)).join("\n")).not.toContain("keep going");
+		expect(run.lifecycle.map(frame => frame.status)).toContain("failed");
+	});
+
+	it("stops a settling continuation from observing a newer wake's turn", async () => {
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const gate = Promise.withResolvers<string>();
+		const continuationRan = Promise.withResolvers<void>();
+		const newerWakeRan = Promise.withResolvers<void>();
+		const run = await setup({
+			manager,
+			responses: [
+				yieldCall("REFUSED-PAYLOAD"),
+				() => {
+					continuationRan.resolve();
+					return yieldCall("CONTINUATION-PAYLOAD");
+				},
+				() => {
+					newerWakeRan.resolve();
+					return yieldCall("NEWER-PAYLOAD");
+				},
+				// The delivered job result's turn.
+				{ content: ["noted the job result"] },
+			],
+			onStop: (_event, callIndex) => {
+				if (callIndex > 1) return undefined;
+				// Still running when the continuation's turn ends, so the continuation keeps settling.
+				manager.register("bash", "bg build", ({ signal }) => untilAborted(signal, gate.promise).then(() => "ok"), {
+					id: "bg-job",
+					ownerId: AGENT_ID,
+				});
+				return { decision: "block", reason: "keep going" };
+			},
+		});
+
+		await deliverWake(run.session, "m1");
+		await continuationRan.promise;
+		await run.session.waitForIdle();
+		await deliverWake(run.session, "m2");
+		await newerWakeRan.promise;
+		await run.session.waitForIdle();
+		gate.resolve("BUILD GREEN");
+		await run.session.waitForIrcReplies();
+		await run.session.waitForIdle();
+		await manager.waitForAll();
+
+		// The newer wake's yield and the job result it un-latched are that wake's:
+		// the continuation's own yield is what its pass judged and published.
+		expect(run.stopEvents.map(event => event.stop_hook_active)).toEqual([false, true]);
+		const artifact = await Bun.file(run.artifact).text();
+		expect(artifact).toContain("CONTINUATION-PAYLOAD");
+		expect(artifact).not.toContain("NEWER-PAYLOAD");
+		expect(artifact).not.toContain("REFUSED-PAYLOAD");
 	});
 
 	it("judges a continuation's yield only after its owner async work quiesced", async () => {

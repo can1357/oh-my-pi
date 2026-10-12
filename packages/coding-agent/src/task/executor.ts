@@ -3427,32 +3427,35 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
  * async work settled, so a refusal can only re-drive the session from there.
  * The observer contract detaches the monitor before anything awaits, so each
  * continuation re-attaches it for its own turn only: a newer wake's events must
- * never reach this monitor. When the session is no longer idle (a newer turn
- * took it) the continuation cannot start; the refusal then stays unanswered and
- * finalization fails the turn instead of publishing the refused payload.
+ * never reach this monitor.
+ *
+ * Only the newest observation owns the session's turns. `superseded` aborts
+ * the moment a newer observation starts: from then on a refusal here cannot be
+ * answered (a continuation would be seen by the newer observation's monitor
+ * too, which could judge and publish this pass's yield), and a continuation
+ * already settling stops observing. The refusal then stays unanswered and
+ * finalization fails the turn instead of publishing the refused payload. A
+ * newer turn that took the session while a pass consults is the same case: the
+ * continuation cannot start on a busy session.
  *
  * Each continuation settles the session's owner async work before the next
  * pass, so a candidate is only judged once that work quiesced; a result the
  * settle delivers un-latches the yield and the turn fails closed as an
  * unanswered refusal.
- *
- * Known narrow race: while a pass consults, a newer wake can start and finish
- * its turn while its own observation is still settling async work. A
- * continuation that starts then is seen by both monitors, so the newer
- * observation could judge and publish this turn's yield. The newer
- * observation's own pass still gates it; closing the race would need the
- * session to hand an observation exclusive ownership of the continuation.
  */
 async function runWakeStopPasses(
 	session: AgentSession,
 	monitor: SubagentRunMonitor,
 	stopHook: SubagentStopHook,
+	superseded: AbortSignal,
 ): Promise<void> {
 	const signal = monitor.abortSignal;
 	const io: SubagentStopPassIo = {
 		awaitAbortable: promise => untilAborted(signal, () => promise),
 		continueWith: async text => {
+			if (superseded.aborted) throw new Error("A newer turn owns the session; the continuation cannot start");
 			const detach = monitor.attach(session);
+			superseded.addEventListener("abort", detach, { once: true });
 			try {
 				await session.prompt(text, {
 					attribution: "agent",
@@ -3465,6 +3468,7 @@ async function runWakeStopPasses(
 				await session.settleAsyncWork();
 				await monitor.waitForYieldTurnStop();
 			} finally {
+				superseded.removeEventListener("abort", detach);
 				detach();
 			}
 		},
@@ -3510,6 +3514,9 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const { id, agent } = options;
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
+	// Aborts when the next observation starts: the session's turns are then the
+	// newer observation's, so an older stop pass can no longer continue the session.
+	let newestObservation: AbortController | undefined;
 	session.setIrcWakeTurnObserver(records => {
 		// Autonomous IRC wake turns reuse the session's YieldTool just like
 		// runSubagentFollowUpTurn; clear the prior run's incremental-section flag
@@ -3625,6 +3632,10 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		} as const;
 		emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
+		// Before the newer monitor attaches: an older pass stops listening first.
+		const superseded = new AbortController();
+		newestObservation?.abort();
+		newestObservation = superseded;
 		turnMonitor.setActiveSession(session);
 		const unsubscribeTurn = turnMonitor.attach(session);
 		if (ownerWoken) registerWakeJob();
@@ -3660,6 +3671,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						},
 						turnMonitor.abortSignal,
 					),
+					superseded.signal,
 				);
 			}
 			const activeSession = turnMonitor.takeActiveSession();
