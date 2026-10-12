@@ -76,7 +76,7 @@ export class DateCwdReminderInjector {
 	#memo:
 		| {
 				refs: Message[];
-				derived: Array<{ after: Message; message: Message }>;
+				derived: Array<{ after: Message; message: Message; isInjected: boolean }>;
 				root: UserMessage;
 				reminder: string;
 				version: number;
@@ -183,12 +183,13 @@ export class DateCwdReminderInjector {
 		const root = this.#root;
 		const currentReminder = this.#currentReminder;
 		if (root !== undefined && currentReminder !== undefined) {
-			const derived: Array<{ after: Message; message: Message }> = [];
+			const derived: Array<{ after: Message; message: Message; isInjected: boolean }> = [];
 			for (const message of messages) {
 				const injected = this.#injections.get(message);
-				if (injected) derived.push({ after: message, message: injected });
+				if (injected) derived.push({ after: message, message: injected, isInjected: true });
 				const controls = controlsByAnchor.get(message);
-				if (controls) for (const control of controls) derived.push({ after: message, message: control });
+				if (controls)
+					for (const control of controls) derived.push({ after: message, message: control, isInjected: false });
 			}
 			this.#memo = {
 				refs: messages.slice(),
@@ -213,7 +214,7 @@ export class DateCwdReminderInjector {
 	#replayable(
 		memo: {
 			refs: Message[];
-			derived: Array<{ after: Message; message: Message }>;
+			derived: Array<{ after: Message; message: Message; isInjected: boolean }>;
 			output: Message[];
 		},
 		messages: Message[],
@@ -223,35 +224,42 @@ export class DateCwdReminderInjector {
 		for (let index = 0; index < refs.length; index++) {
 			if (refs[index] !== messages[index]) return false;
 		}
-		if (output.length !== refs.length + derived.length) return false;
+		// Injections replace their original in the output; controls follow it.
+		const controlCount = derived.reduce((count, entry) => count + (entry.isInjected ? 0 : 1), 0);
+		if (output.length !== refs.length + controlCount) return false;
 		let slot = 0;
 		let position = 0;
 		for (const message of refs) {
+			// An injection replaces the original: it occupies the slot instead.
+			if (slot < derived.length && derived[slot]!.after === message && derived[slot]!.isInjected) {
+				if (output[position] !== derived[slot]!.message) return false;
+				position++;
+				slot++;
+			} else if (output[position] !== message) {
+				return false;
+			} else {
+				position++;
+			}
+			// Controls follow the (possibly injected) message.
 			while (slot < derived.length && derived[slot]!.after === message) {
 				if (output[position] !== derived[slot]!.message) return false;
 				position++;
 				slot++;
 			}
-			if (output[position] !== message) return false;
-			position++;
 		}
 		return slot === derived.length;
 	}
 
 	/**
-	 * Drop the replay memo and every injection/control pinned to the live
-	 * history. The injector is session-scoped while the history it transforms is
-	 * not: a committed `/compact` (or any other wholesale `replaceMessages`)
-	 * swaps in a new transcript, and the memo would otherwise keep the discarded
-	 * one — including its normalized/rasterized image turns — reachable until the
-	 * next model call or session disposal.
+	 * Invalidate the replay memo. The injection/control state is deliberately
+	 * preserved: a queue-only edit (`replaceQueues`) fires this callback without
+	 * changing the live transcript, and discarding the state would rewrite the
+	 * first historical user turn with the current reminder and drop later
+	 * injected reminders or developer controls. Stale entries for messages that
+	 * are no longer in the transcript are cleaned up lazily on the next
+	 * `transform()` when the root changes.
 	 */
 	release(): void {
 		this.#memo = undefined;
-		this.#injections.clear();
-		this.#controls = [];
-		this.#root = undefined;
-		this.#currentReminder = undefined;
-		this.#stateVersion++;
 	}
 }

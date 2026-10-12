@@ -238,27 +238,27 @@ describe("AgentSession Anthropic native compaction", () => {
 			// replacement transcript: the memo was released with the discarded one.
 			await session.prompt("third question");
 			await expect(session.compact()).rejects.toThrow("captured");
+
+			expect(requests).toHaveLength(5);
+			const after = requests[3]!;
+			// The compaction summary replaced the whole pre-compaction transcript, so
+			// none of those messages are on the wire any more.
+			expect(JSON.stringify(after.messages)).not.toContain("first question");
+			expect(JSON.stringify(after.messages)).not.toContain("second question");
+			// The memo was released with the discarded history, so the next turn
+			// rebuilds from the replacement transcript instead of replaying it.
+			await session.prompt("fourth question");
+			await session.prompt("fifth question");
+			expect(requests).toHaveLength(7);
+			const next = requests[5]!;
+			// The replacement transcript is what ships now: the reminder rides the new
+			// first user turn, and the discarded pre-compaction history is gone.
+			expect(JSON.stringify(next.messages)).toContain("fourth question");
+			expect(JSON.stringify(next.messages)).not.toContain("first question");
+			expect(JSON.stringify(next.messages)).not.toContain("second question");
 		} finally {
 			await opened.close();
 		}
-
-		expect(requests).toHaveLength(5);
-		const after = requests[3]!;
-		// The compaction summary replaced the whole pre-compaction transcript, so
-		// none of those messages are on the wire any more.
-		expect(JSON.stringify(after.messages)).not.toContain("first question");
-		expect(JSON.stringify(after.messages)).not.toContain("second question");
-		// The memo was released with the discarded history, so the next turn
-		// rebuilds from the replacement transcript instead of replaying it.
-		await session.prompt("fourth question");
-		await session.prompt("fifth question");
-		expect(requests).toHaveLength(7);
-		const next = requests[5]!;
-		// The replacement transcript is what ships now: the reminder rides the new
-		// first user turn, and the discarded pre-compaction history is gone.
-		expect(JSON.stringify(next.messages)).toContain("fourth question");
-		expect(JSON.stringify(next.messages)).not.toContain("first question");
-		expect(JSON.stringify(next.messages)).not.toContain("second question");
 	});
 
 	it("replays a later compaction's prefix as sent, without disturbing the live reminder state", async () => {
