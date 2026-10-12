@@ -2785,26 +2785,38 @@ export class InputController {
 	 * (visible); forgetting that emission ledger here makes the paired
 	 * scrollback clear re-render them under the new visibility instead of
 	 * slicing the shorter block down to the stale row count (#10177).
+	 *
+	 * `deferDisplayReset` leaves the paired scrollback clear to a caller that
+	 * ends in exactly one reset of its own, so a coalesced settings batch that
+	 * also rebuilds the transcript does not clear and replay the terminal twice.
 	 */
-	applyThinkingBlockVisibility(hide: boolean): void {
+	applyThinkingBlockVisibility(hide: boolean, options: { deferDisplayReset?: boolean } = {}): void {
 		this.ctx.hideThinkingBlock = hide;
+		// The reveal controller and every freshly rendered block read the
+		// effective flag, which stays hidden while thinking is off and the
+		// session has produced no displayable reasoning yet. Ctrl+T cannot
+		// disagree with it (its thinking-off guard runs first), but the /settings
+		// and on-disk-reload gestures have no such guard, so propagate the
+		// effective value: the raw preference would reveal blocks the auto-hide
+		// keeps hidden while the in-flight render hid them.
+		const hideThinkingBlock = this.ctx.effectiveHideThinkingBlock;
 
 		for (const child of this.ctx.chatContainer.children) {
 			if (child instanceof AssistantMessageComponent) {
-				child.setHideThinkingBlock(hide);
+				child.setHideThinkingBlock(hideThinkingBlock);
 			}
 		}
 
 		if (this.ctx.streamingComponent && this.ctx.streamingMessage) {
-			this.ctx.streamingComponent.setHideThinkingBlock(hide);
+			this.ctx.streamingComponent.setHideThinkingBlock(hideThinkingBlock);
 			// The reveal controller keeps its own truncating view of the live
 			// message; resync it instead of pushing the raw cumulative message
 			// through updateContent, which snaps the text to 100% and re-types.
-			this.ctx.eventController?.resyncStreamingRevealVisibility();
+			this.ctx.eventController.resyncStreamingRevealVisibility();
 		}
 
 		this.ctx.chatContainer.resetStableEmission();
-		this.ctx.ui.resetDisplay();
+		if (!options.deferDisplayReset) this.ctx.ui.resetDisplay();
 	}
 
 	toggleThinkingBlockVisibility(): void {

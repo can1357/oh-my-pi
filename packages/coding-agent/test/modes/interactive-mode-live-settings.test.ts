@@ -4,16 +4,15 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import * as theme from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import {
+	cfgDisplaySmoothStreaming,
 	cfgStatusLineContextLine,
 	cfgStatusLineLeftSegments,
 	cfgSymbolPreset,
@@ -93,14 +92,13 @@ describe("InteractiveMode live settings", () => {
 	});
 
 	it("routes /settings hide-thinking changes through the shared display resync", async () => {
-		// R1 regression: the /settings branch used to flip the flag on children and
+		// /settings regression: the branch used to flip the flag on children and
 		// requestRender(true) only. The stable-row ledger still counted the rows the
 		// append-only thinking heads had published to scrollback while streaming, so
 		// the block's shorter render was sliced by that count — the live assistant
 		// block rendered zero rows (the answer vanished) and retirement wrote nothing
 		// to scrollback (permanent loss). It must run the exact same propagation as
 		// the Ctrl+T keybinding (#10177).
-		const applyThinkingBlockVisibility = vi.spyOn(InputController.prototype, "applyThinkingBlockVisibility");
 		const resetStableEmission = vi.spyOn(mode.chatContainer, "resetStableEmission");
 		const resetDisplay = vi.spyOn(mode.ui, "resetDisplay");
 
@@ -108,19 +106,23 @@ describe("InteractiveMode live settings", () => {
 		await Promise.resolve();
 
 		expect(mode.hideThinkingBlock).toBe(true);
-		// Same helper as Ctrl+T — one propagation, not a second copy that can drift.
-		expect(applyThinkingBlockVisibility).toHaveBeenCalledWith(true);
 		// The ledger+history rebuild the branch used to skip.
 		expect(resetStableEmission).toHaveBeenCalledTimes(1);
 		expect(resetDisplay).toHaveBeenCalledTimes(1);
 	});
 
 	it("keeps the assistant answer in the transcript when /settings hides thinking mid-stream", async () => {
-		// R1 end-to-end: hide thinking blocks through the settings path while a turn
-		// is still streaming, then finish the turn. The finalized block must still
-		// render the answer (the stale-ledger slice would drop it) and must keep the
-		// hidden thinking hidden (the reveal resync must not resurrect reasoning).
+		// /settings regression (#10177), end to end: hide thinking blocks through the
+		// settings path while a turn is still streaming, then finish the turn. The
+		// finalized block must still render the answer (the stale-ledger slice would
+		// drop it) and must keep the hidden thinking hidden (the reveal resync must
+		// not resurrect reasoning).
 		type SessionEvent = Parameters<typeof mode.eventController.handleEvent>[0];
+		// The smooth reveal paces the streamed text on an interval, so the live head
+		// would still be revealing when this test drives the ledger; turning the
+		// pacing off renders the same content immediately and keeps the assertions
+		// free of wall-clock waits.
+		cfgDisplaySmoothStreaming.set(session.settings, false);
 		const usage = {
 			input: 1,
 			output: 2,
@@ -131,7 +133,13 @@ describe("InteractiveMode live settings", () => {
 		};
 		const thinking = {
 			type: "thinking" as const,
-			thinking: "Deliberating about the request in detail.",
+			// Long enough that the append-only head publishes many stable rows while
+			// thinking is still visible; that emitted count is what a path skipping
+			// the ledger reset would slice the shorter render by.
+			thinking: Array.from(
+				{ length: 10 },
+				(_, index) => `Deliberating about the request in detail, step ${index + 1} of a long reasoning chain.`,
+			).join("\n\n"),
 			thinkingSignature: "sig",
 		};
 
@@ -162,7 +170,16 @@ describe("InteractiveMode live settings", () => {
 			assistantMessageEvent: { type: "start", partial },
 		} as unknown as SessionEvent);
 
-		// Mid-stream hide via the settings path (the R1 trigger).
+		// Retire the append-only thinking head into native history exactly as a
+		// pressured frame does, so the container's ledger records the rows the
+		// head had already emitted while thinking was still visible.
+		const published = mode.chatContainer.peekFinalizedBatch(80, 1);
+		expect(published).toBeDefined();
+		expect(published!.rows.length).toBeGreaterThan(0);
+		mode.chatContainer.acknowledgeFinalizedBatch(published!.id);
+		expect(mode.chatContainer.emittedStableRows()[0]!).toBeGreaterThan(0);
+
+		// Mid-stream hide via the settings path (the /settings trigger).
 		cfgHideThinkingBlock.set(session.settings, true);
 		await Promise.resolve();
 		expect(mode.hideThinkingBlock).toBe(true);
@@ -172,12 +189,14 @@ describe("InteractiveMode live settings", () => {
 			message: { ...partial, stopReason: "stop" },
 		} as unknown as SessionEvent);
 
-		const assistantBlocks = mode.chatContainer.children.filter(
-			(child): child is AssistantMessageComponent => child instanceof AssistantMessageComponent,
-		);
-		expect(assistantBlocks.length).toBe(1);
-		const rendered = Bun.stripANSI(assistantBlocks[0]!.render(100).join("\n"));
+		// Container-level viewport rows: only the container applies the emitted-row
+		// count to a block's render, so this is where a skipped ledger reset drops
+		// the answer.
+		const rendered = Bun.stripANSI(mode.chatContainer.renderViewport(80, 40, { tick: 1, now: Date.now() }).join("\n"));
 		expect(rendered).toContain("ANSWER_TAIL_MARKER");
 		expect(rendered).not.toContain("Deliberating");
+		// The propagation forgets the emission ledger, so the replay re-renders the
+		// head under the new visibility instead of slicing it by the stale count.
+		expect(mode.chatContainer.emittedStableRows()).toEqual([0]);
 	});
 });
