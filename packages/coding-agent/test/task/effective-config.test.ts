@@ -38,6 +38,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { rejectionOf } from "../helpers/rejection";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 function bundled(id: string): Model {
@@ -462,9 +463,8 @@ describe("omp agents show inputs", () => {
 		const init = vi.spyOn(Settings, "init");
 		const readOnly = vi.spyOn(Settings, "loadReadOnly");
 		const auth = vi.spyOn(sdkModule, "discoverAuthStorage");
-		await expect(agentsCli.runAgentsCommand({ action: "show", name: "no-such-agent", flags: {} })).rejects.toThrow(
-			'Unknown agent "no-such-agent"',
-		);
+		const error = await rejectionOf(agentsCli.runAgentsCommand({ action: "show", name: "no-such-agent", flags: {} }));
+		expect((error as Error).message).toContain('Unknown agent "no-such-agent"');
 		expect(init).not.toHaveBeenCalled();
 		expect(readOnly).toHaveBeenCalled();
 		expect(auth).not.toHaveBeenCalled();
