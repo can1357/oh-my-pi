@@ -8,6 +8,7 @@ import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { findFreeCdpPort, waitForCdp } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { navigateMainFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/navigation";
+import { PrintHold } from "@oh-my-pi/pi-coding-agent/tools/browser/print-hold";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import puppeteer, { type Page, type WaitForOptions } from "puppeteer-core";
@@ -540,6 +541,86 @@ return await tab.evaluate(() => {
 				expect(valueOf(restored)).toEqual(["restored", "afterprint", "print returned"]);
 			} finally {
 				await invoke({ action: "close", name: "user-bfcache" }).catch(() => {});
+			}
+		});
+	}, 30_000);
+
+	test("lets go of a page cached during a call once it is restored after omp has gone", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const invoke = createHost();
+			await invoke({ action: "open", name: "user-gone", url: `${baseUrl}/print`, app: { cdp_url: cdpUrl } });
+			// The page leaves the cache held for the 30 s call budget; then omp lets go of the tab.
+			await invoke({
+				action: "run",
+				name: "user-gone",
+				code: `await tab.goto(${JSON.stringify(`${baseUrl}/print-on-load`)});`,
+				timeout: 30,
+			});
+			await invoke({ action: "close", name: "user-gone" });
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = (await user.pages()).find(candidate => candidate.url().endsWith("/print-on-load"));
+				if (!page) throw new Error("Expected the print page in the user's browser");
+				await page.goBack();
+				// The restored page holds for 1.5 s on its own real clock, which nothing outside the page can advance.
+				await Bun.sleep(2_000);
+				const clicked = await page
+					.mainFrame()
+					.mainRealm()
+					.evaluate('document.querySelector("#print").click(); globalThis.log');
+				expect(clicked).toEqual(["restored", "print returned"]);
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
+	test("holds print() in the user's browser while the page fakes its clock", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const invoke = createHost();
+			try {
+				await invoke({ action: "open", name: "user-clock", url: `${baseUrl}/print`, app: { cdp_url: cdpUrl } });
+				const clicked = await invoke({
+					action: "run",
+					name: "user-clock",
+					code: `return await tab.evaluate(() => {
+	Date.now = () => 8.64e15;
+	document.querySelector("#print").click();
+	return globalThis.log;
+});`,
+				});
+				expect(valueOf(clicked)).toEqual(["afterprint", "print returned"]);
+			} finally {
+				await invoke({ action: "close", name: "user-clock" }).catch(() => {});
+			}
+		});
+	}, 30_000);
+
+	test("keeps one attachment's print hold when another attaches to the same page", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				const first = await PrintHold.install(page, "calls");
+				try {
+					await page.goto(`${baseUrl}/print`);
+					await first.beginCall(30_000);
+					// A second attachment arrives released; it must not release the first one's call.
+					const second = await PrintHold.install(page, "calls");
+					try {
+						const clicked = await page
+							.mainFrame()
+							.mainRealm()
+							.evaluate('document.querySelector("#print").click(); globalThis.log');
+						expect(clicked).toEqual(["afterprint", "print returned"]);
+					} finally {
+						await second.dispose();
+					}
+				} finally {
+					await first.dispose();
+				}
+			} finally {
+				await user.disconnect();
 			}
 		});
 	}, 30_000);
