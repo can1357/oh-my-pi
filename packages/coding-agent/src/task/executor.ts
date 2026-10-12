@@ -677,6 +677,17 @@ function resolveFallbackCompletion(rawOutput: string, outputSchema: unknown): { 
 	return { data: candidate };
 }
 
+/**
+ * Whether a structured run that ended without a `yield` still has a result
+ * {@link finalizeSubprocessOutput} publishes from its output: a JSON completion
+ * that satisfies the schema, or any output when no usable schema applies.
+ */
+function hasUnyieldedResult(rawOutput: string, outputSchema: unknown): boolean {
+	if (resolveFallbackCompletion(rawOutput, outputSchema) !== null) return true;
+	const { normalized, error } = normalizeSchema(outputSchema);
+	return (normalized === undefined || Boolean(error)) && rawOutput.trim().length > 0;
+}
+
 interface FinalizeSubprocessOutputArgs {
 	rawOutput: string;
 	exitCode: number;
@@ -2517,7 +2528,8 @@ interface SubagentStopPassIo {
 
 /**
  * Offer the settled candidate to `subagent_stop` handlers: the recorded
- * terminal yield, or for a `structured: false` run its final report turn.
+ * terminal yield, for a `structured: false` run its final report turn, or the
+ * output a structured run that never yielded still publishes.
  * Owner async work has quiesced, so this is what the parent would accept and
  * publish; the pass runs after the child's own work is done and before every
  * acceptance/finalize path downstream. A refusal drops the candidate so
@@ -2573,6 +2585,8 @@ async function driveSessionToResult(
 		solutionSpace?: string;
 		/** `false` = no `yield` tool; the final assistant message is the result. Default `true`. */
 		structured?: boolean;
+		/** Output schema the run finalizes against; decides whether a structured run without a yield has a result to offer. */
+		outputSchema?: unknown;
 		/**
 		 * Invoked when the initial prompt loses a prompt race (AgentBusyError) before
 		 * retrying. Lets the caller restore a safe contract and detach its monitor
@@ -2583,7 +2597,7 @@ async function driveSessionToResult(
 		restore?: boolean;
 	} = {},
 ): Promise<DriveOutcome> {
-	const { solutionSpace, onPromptBusy, restore } = options;
+	const { solutionSpace, onPromptBusy, restore, outputSchema } = options;
 	const structured = options.structured !== false;
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
@@ -2803,15 +2817,20 @@ async function driveSessionToResult(
 						session.getLastAssistantMessage()?.stopReason === "error" ||
 						!session.hasPendingAsyncWork())
 				) {
-					// A message-result run parks nothing behind a yield: its settled final
-					// report turn is the candidate, whatever ended it short of an error or
-					// abort (`stop`, `length`, ...): that report is published as the result.
-					// A budget stop or a terminal model error ends the run without one.
+					// The settled result is the candidate when no yield will carry it: a
+					// message-result run's final report turn, whatever ended it short of an
+					// error or abort (`stop`, `length`, ...), or the output a structured run
+					// that exhausted the ladder still publishes (see hasUnyieldedResult). A
+					// refusal of the latter is answerable only by a fresh yield, so a ladder
+					// that again ends without one fails closed rather than re-offering it. A
+					// budget stop or a terminal model error ends the run without a candidate.
 					const finalTurn = session.getLastAssistantMessage();
+					const settledResult = structured
+						? !monitor.yieldInvalidatedByStop() && hasUnyieldedResult(monitor.rawOutput(), outputSchema)
+						: monitor.lastReportTurnText() !== undefined;
 					if (
-						!structured &&
+						settledResult &&
 						!monitor.budgetStopRequested() &&
-						monitor.lastReportTurnText() !== undefined &&
 						finalTurn !== undefined &&
 						finalTurn.stopReason !== "error" &&
 						finalTurn.stopReason !== "aborted" &&
@@ -4161,6 +4180,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 			outcome = await driveSessionToResult(session, monitor, message, stopHook, {
 				structured,
 				restore: options.restore,
+				outputSchema: options.outputSchema,
 				onPromptBusy: async () => {
 					attemptUnsubscribe();
 					logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
@@ -5437,6 +5457,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const outcome = await driveSessionToResult(session, monitor, task, stopHook, {
 				solutionSpace: options.solutionSpace,
 				structured,
+				outputSchema,
 			});
 			// Acceptance boundary (#11079): the run's final result is settled, so
 			// stamp the lifecycle and terminalize a ref the run-state mirror left
