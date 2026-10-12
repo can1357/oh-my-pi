@@ -1060,10 +1060,10 @@ mod tests {
 		);
 		assert!(settled);
 		let error = result.expect_err("the action failed");
-		assert_eq!((error.code, error.message.as_str()), (
-			ErrorCode::AxFailed,
-			"AX action 'AXOpen' failed (AXError(-25205))"
-		));
+		assert_eq!(
+			(error.code, error.message.as_str()),
+			(ErrorCode::AxFailed, "AX action 'AXOpen' failed (AXError(-25205))")
+		);
 
 		let result = run_then_settle(|| Ok(7), || Err(DesktopError::cancelled("stopped")));
 		assert_eq!(result.expect_err("the settle was cancelled").code, ErrorCode::Cancelled);
