@@ -3602,6 +3602,20 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (!visible) this.ui.clearInlineImages();
 			this.ui.requestRender(true);
 		}
+		// proseOnlyThinking runs first: the reveal resync below spends its count
+		// from the target with the cached prose mode, and an on-disk or
+		// programmatic bulk update that both shows thinking and flips prose mode
+		// would otherwise format the newly shown block under the old mode and tag
+		// it with `rawThinking`, which resolveThinkingDisplay treats as already
+		// formatted — the component setter and display reset then leave the trace
+		// in the previous mode.
+		const proseOnlyThinking = cfgProseOnlyThinking.get(this.settings);
+		if (any("proseOnlyThinking") && proseOnlyThinking !== this.proseOnlyThinking) {
+			this.proseOnlyThinking = proseOnlyThinking;
+			for (const child of this.chatContainer.children) {
+				if (child instanceof AssistantMessageComponent) child.setProseOnlyThinking(proseOnlyThinking);
+			}
+		}
 		const hideThinkingBlock = cfgHideThinkingBlock.get(this.settings);
 		if (any("hideThinkingBlock") && hideThinkingBlock !== this.hideThinkingBlock) {
 			// Same propagation as the Ctrl+T keybinding: children + live streaming
@@ -3614,13 +3628,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#inputController.applyThinkingBlockVisibility(hideThinkingBlock, { deferDisplayReset: true });
 			resetDisplay = true;
 		}
-		const proseOnlyThinking = cfgProseOnlyThinking.get(this.settings);
-		if (any("proseOnlyThinking") && proseOnlyThinking !== this.proseOnlyThinking) {
-			this.proseOnlyThinking = proseOnlyThinking;
-			for (const child of this.chatContainer.children) {
-				if (child instanceof AssistantMessageComponent) child.setProseOnlyThinking(proseOnlyThinking);
-			}
-			this.ui.requestRender(true);
+		if (any("proseOnlyThinking")) {
+			// The component setter ran above; this batch's only display reset
+			// (below) replays retired rows under the new prose mode.
+			resetDisplay = true;
 		}
 		const expandThinkingBlocks = cfgExpandThinkingBlocks.get(this.settings);
 		if (any("expandThinkingBlocks") && expandThinkingBlocks !== this.expandThinkingBlocks) {
