@@ -1589,30 +1589,12 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("subagent_stop", () => {
-		it("invokes handlers with the child run identity and returns continuation feedback", async () => {
-			const eventsPath = path.join(tempDir.path(), "subagent-stop-events.jsonl");
+		it("returns a loaded handler's advisory continuation feedback", async () => {
 			await Bun.write(
 				path.join(extensionsDir, "subagent-stop.ts"),
 				`
-				import * as fs from "node:fs";
-
 				export default function(pi) {
-					pi.on("subagent_stop", async (event) => {
-						fs.appendFileSync(
-							${JSON.stringify(eventsPath)},
-							JSON.stringify({
-								type: event.type,
-								agent_id: event.agent_id,
-								agent_type: event.agent_type,
-								session_id: event.session_id,
-								session_file: event.session_file,
-								parent_session_id: event.parent_session_id,
-								parent_session_file: event.parent_session_file,
-								stop_hook_active: event.stop_hook_active,
-							}) + "\\n",
-						);
-						return { continue: true, additionalContext: "Run one more pass." };
-					});
+					pi.on("subagent_stop", async () => ({ continue: true, additionalContext: "Run one more pass." }));
 				}
 			`,
 			);
@@ -1630,31 +1612,51 @@ describe("ExtensionRunner", () => {
 				agent_id: "Scout",
 				agent_type: "task",
 				session_id: "child-session-1",
-				session_file: "/tmp/artifacts/Scout.jsonl",
-				parent_session_id: "parent-session-1",
-				parent_session_file: "/tmp/parent.jsonl",
 				messages: [],
 				stop_hook_active: false,
 				signal: new AbortController().signal,
 			});
 
-			const events = (await Bun.file(eventsPath).text())
-				.trim()
-				.split("\n")
-				.map(line => JSON.parse(line));
-			expect(events).toEqual([
-				{
-					type: "subagent_stop",
+			expect(stopResult).toEqual({ continue: true, additionalContext: "Run one more pass." });
+		});
+
+		it("fails open when a handler throws and reports the failure through the error channel", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "subagent-stop-throws.ts"),
+				`
+				export default function(pi) {
+					pi.on("subagent_stop", async () => {
+						throw new Error("handler exploded");
+					});
+				}
+			`,
+			);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+
+			// A crashing handler must not wedge the child run: no verdict means the
+			// candidate is allowed, and the failure is reported, not thrown.
+			await expect(
+				runner.emitSubagentStop({
 					agent_id: "Scout",
 					agent_type: "task",
 					session_id: "child-session-1",
-					session_file: "/tmp/artifacts/Scout.jsonl",
-					parent_session_id: "parent-session-1",
-					parent_session_file: "/tmp/parent.jsonl",
+					messages: [],
 					stop_hook_active: false,
-				},
-			]);
-			expect(stopResult).toEqual({ continue: true, additionalContext: "Run one more pass." });
+					signal: new AbortController().signal,
+				}),
+			).resolves.toBeUndefined();
+			expect(errors).toHaveLength(1);
+			expect(errors[0]).toMatchObject({ event: "subagent_stop", error: "handler exploded" });
 		});
 
 		it("keeps subagent_stop dispatch independent of session_stop handlers", async () => {
