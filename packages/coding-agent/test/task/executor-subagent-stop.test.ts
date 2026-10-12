@@ -24,6 +24,8 @@ import {
 	SUBAGENT_WARNING_EMPTY_MESSAGE,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createSessionDefaults } from "../helpers/session-defaults";
@@ -71,6 +73,8 @@ interface PromptCall {
 	yieldTerminal: (data: unknown) => void;
 	/** Submit a `complete: true` incremental section labelled `label` carrying `data`. */
 	yieldCompleteSection: (label: string, data: unknown) => void;
+	/** Submit one workpool item through the harness's real `YieldTool`; a rejected submission is recorded in `yieldErrors`. */
+	submitWorkPoolItem: (key: number, data: string) => Promise<void>;
 }
 
 interface StopHarness {
@@ -79,6 +83,8 @@ interface StopHarness {
 	events: SubagentStopEvent[];
 	/** Child transcript the fake session reports as `session.messages`. */
 	messages: AssistantMessage[];
+	/** Messages of yield submissions the real `YieldTool` rejected. */
+	yieldErrors: string[];
 }
 
 /** Text of a captured `last_assistant_message` (the fake transcript is text-only). */
@@ -88,7 +94,7 @@ function assistantText(message: SubagentStopEvent["last_assistant_message"]): st
 }
 
 function createHarness(args: {
-	onPrompt: (call: PromptCall) => void;
+	onPrompt: (call: PromptCall) => void | Promise<void>;
 	/** Prompts whose turn ends without a `yield` (a continuation that did not finish). */
 	idlePrompt?: (promptIndex: number) => boolean;
 	/** Handler verdict per `subagent_stop` pass. */
@@ -97,6 +103,8 @@ function createHarness(args: {
 	hasStopHandlers: boolean;
 	/** Child transcript path the session reports (`session.sessionFile`). */
 	sessionFile?: string;
+	/** Real yield tool the session hands out as `getToolByName("yield")`. */
+	yieldTool?: YieldTool;
 }): StopHarness {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const messages: AssistantMessage[] = [];
@@ -104,6 +112,7 @@ function createHarness(args: {
 	const events: SubagentStopEvent[] = [];
 	let yieldSeq = 0;
 	let stopCalls = 0;
+	const yieldErrors: string[] = [];
 
 	const emit = (event: AgentSessionEvent) => {
 		// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
@@ -142,6 +151,7 @@ function createHarness(args: {
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
+		getToolByName: (name: string) => (name === "yield" ? args.yieldTool : undefined),
 		setWorkPoolYieldItems: async () => {},
 		extensionRunner: {
 			// The executor wires the runner it finds on the session during setup
@@ -184,13 +194,21 @@ function createHarness(args: {
 				yieldTerminal: (data: unknown) => emitYield({ status: "success", data }, "Result submitted."),
 				yieldCompleteSection: (label: string, data: unknown) =>
 					emitYield({ status: "success", data, type: [label], complete: true }, "Section submitted."),
+				submitWorkPoolItem: async (key: number, data: string) => {
+					try {
+						const result = await args.yieldTool?.execute(`pool-${prompts.length}`, { key, data });
+						emitYield({ ...result?.details }, "Item submitted.");
+					} catch (error) {
+						yieldErrors.push(error instanceof Error ? error.message : String(error));
+					}
+				},
 			};
 			prompts.push(call);
 			if (args.idlePrompt?.(call.promptIndex)) {
 				messages.push(assistantMessage(`no yield for prompt ${call.promptIndex}`));
 				return;
 			}
-			args.onPrompt(call);
+			await args.onPrompt(call);
 		},
 		waitForIdle: async () => {},
 		getLastAssistantMessage: () => messages[messages.length - 1],
@@ -201,7 +219,7 @@ function createHarness(args: {
 		isAdvisorActive: () => false,
 	};
 
-	return { session: session as unknown as AgentSession, prompts, events, messages };
+	return { session: session as unknown as AgentSession, prompts, events, messages, yieldErrors };
 }
 
 function mockCreateAgentSession(session: AgentSession): void {
@@ -370,6 +388,36 @@ describe("runSubprocess subagent_stop", () => {
 		// shadow the section the continuation produced.
 		expect(JSON.parse(result.output)).toEqual({ summary: "replacement" });
 		expect(result.output).not.toContain("REFUSED-PAYLOAD");
+	});
+
+	it("lets a workpool item's refused final submission be submitted again", async () => {
+		const id = "RefusedPoolItem";
+		const toolSession: ToolSession = {
+			cwd: "/tmp",
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+			getWorkPoolYieldItems: () => [{ id: "review#1", index: 1 }],
+		};
+		const harness = createHarness({
+			hasStopHandlers: true,
+			yieldTool: new YieldTool(toolSession),
+			// The single item is the batch's final submission: the candidate.
+			onPrompt: call => call.submitWorkPoolItem(1, call.promptIndex === 1 ? "REFUSED-ITEM" : "replacement item"),
+			onStop: async (_event, callIndex) => (callIndex === 1 ? { decision: "block", reason: "redo it" } : undefined),
+		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
+
+		const result = await runSubprocess(baseOptions(id));
+
+		// The yield tool remembers a submitted item and rejects it a second time, so
+		// a refusal would be unanswerable unless the refused item is released.
+		expect(harness.yieldErrors).toEqual([]);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("replacement item");
+		expect(result.output).not.toContain("REFUSED-ITEM");
 	});
 
 	it("bounds advisory continuations at the cap and then accepts the pending yield", async () => {
