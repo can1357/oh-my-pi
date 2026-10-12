@@ -131,6 +131,35 @@ function textOf(result: { content: Array<{ type: string; text?: string }> }): st
 	return result.content.flatMap(part => (part.type === "text" && part.text ? [part.text] : [])).join("\n");
 }
 
+/** Runs `use` against a headless Chromium omp did not launch, standing in for the user's own browser. */
+async function withUserBrowser(use: (cdpUrl: string) => Promise<void>): Promise<void> {
+	const exe = await ensureChromiumExecutable();
+	if (!exe) throw new Error("Expected a Chromium executable");
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-print-connected-"));
+	const port = await findFreeCdpPort();
+	const child = Bun.spawn(
+		[
+			exe,
+			"--headless=new",
+			"--no-sandbox",
+			"--no-first-run",
+			"--use-mock-keychain",
+			`--user-data-dir=${root}`,
+			`--remote-debugging-port=${port}`,
+		],
+		{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+	);
+	try {
+		const cdpUrl = `http://127.0.0.1:${port}`;
+		await waitForCdp(cdpUrl, 15_000);
+		await use(cdpUrl);
+	} finally {
+		child.kill();
+		await child.exited;
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}
+
 async function observe(invoke: (parameters: unknown) => Promise<{ details?: unknown }>, name: string, options: object) {
 	const { elements } = valueOf(
 		await invoke({ action: "call", name, chain: [{ method: "observe", args: [options] }] }),
@@ -435,59 +464,61 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 	}, 30_000);
 
 	test("holds print() in the user's own browser only around omp's calls", async () => {
-		const exe = await ensureChromiumExecutable();
-		if (!exe) throw new Error("Expected a Chromium executable");
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-print-connected-"));
-		const port = await findFreeCdpPort();
-		const child = Bun.spawn(
-			[
-				exe,
-				"--headless=new",
-				"--no-sandbox",
-				"--no-first-run",
-				"--use-mock-keychain",
-				`--user-data-dir=${root}`,
-				`--remote-debugging-port=${port}`,
-			],
-			{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
-		);
-		const invoke = createHost();
-		try {
-			const cdpUrl = `http://127.0.0.1:${port}`;
-			await waitForCdp(cdpUrl, 15_000);
-			await invoke({ action: "open", name: "user-print", url: `${baseUrl}/print`, app: { cdp_url: cdpUrl } });
-			// A document the call navigates to starts held, so a page printing as it loads is caught too.
-			const loaded = await invoke({
-				action: "run",
-				name: "user-print",
-				code: `await tab.goto(${JSON.stringify(`${baseUrl}/print-on-load`)}); return await tab.evaluate(() => globalThis.log);`,
-			});
-			expect(valueOf(loaded)).toEqual(["afterprint", "load print returned"]);
-			expect(textOf(loaded)).toContain("The page called window.print()");
-
-			// The hold ends 1.5 s after the call on the tab worker's real clock; then the user's own click prints.
-			await Bun.sleep(2_000);
-			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+		await withUserBrowser(async cdpUrl => {
+			const invoke = createHost();
 			try {
-				const page = (await user.pages()).find(candidate => candidate.url().endsWith("/print-on-load"));
-				if (!page) throw new Error("Expected the print page in the user's browser");
-				await page.evaluate('document.querySelector("#print").click()');
+				await invoke({ action: "open", name: "user-print", url: `${baseUrl}/print`, app: { cdp_url: cdpUrl } });
+				// A document the call navigates to starts held, so a page printing as it loads is caught too.
+				const loaded = await invoke({
+					action: "run",
+					name: "user-print",
+					code: `await tab.goto(${JSON.stringify(`${baseUrl}/print-on-load`)}); return await tab.evaluate(() => globalThis.log);`,
+				});
+				expect(valueOf(loaded)).toEqual(["afterprint", "load print returned"]);
+				expect(textOf(loaded)).toContain("The page called window.print()");
+
+				// The hold ends 1.5 s after the call on the tab worker's real clock; then the user's own click prints.
+				await Bun.sleep(2_000);
+				const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+				try {
+					const page = (await user.pages()).find(candidate => candidate.url().endsWith("/print-on-load"));
+					if (!page) throw new Error("Expected the print page in the user's browser");
+					await page.evaluate('document.querySelector("#print").click()');
+				} finally {
+					await user.disconnect();
+				}
+				const after = await invoke({
+					action: "run",
+					name: "user-print",
+					code: "return await tab.evaluate(() => globalThis.log);",
+				});
+				expect(valueOf(after)).toEqual(["afterprint", "load print returned", "print returned"]);
+				expect(textOf(after)).not.toContain("window.print()");
 			} finally {
-				await user.disconnect();
+				await invoke({ action: "close", name: "user-print" }).catch(() => {});
 			}
-			const after = await invoke({
-				action: "run",
-				name: "user-print",
-				code: "return await tab.evaluate(() => globalThis.log);",
-			});
-			expect(valueOf(after)).toEqual(["afterprint", "load print returned", "print returned"]);
-			expect(textOf(after)).not.toContain("window.print()");
-		} finally {
-			await invoke({ action: "close", name: "user-print" }).catch(() => {});
-			child.kill();
-			await child.exited;
-			await fs.rm(root, { recursive: true, force: true });
-		}
+		});
+	}, 30_000);
+
+	test("re-arms the print hold in the user's browser without waiting on a stuck cross-site frame", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const invoke = createHost();
+			try {
+				await invoke({
+					action: "open",
+					name: "user-stuck",
+					url: `${baseUrl}/observe-stuck-frame`,
+					app: { cdp_url: cdpUrl },
+				});
+				const read = 'return await tab.text("button");';
+				expect(valueOf(await invoke({ action: "run", name: "user-stuck", code: read, timeout: 5 }))).toBe("Main");
+				// Past the 1.5 s release on the tab worker's real clock, the next call arms the hold again.
+				await Bun.sleep(2_000);
+				expect(valueOf(await invoke({ action: "run", name: "user-stuck", code: read, timeout: 5 }))).toBe("Main");
+			} finally {
+				await invoke({ action: "close", name: "user-stuck" }).catch(() => {});
+			}
+		});
 	}, 30_000);
 
 	test("scopes helpers to iframe documents in run and direct call paths", async () => {
