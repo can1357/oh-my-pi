@@ -507,4 +507,22 @@ describe("omp agents show inputs", () => {
 		expect(readOnly).toHaveBeenCalled();
 		expect(auth).not.toHaveBeenCalled();
 	});
+
+	it("discovers agents from the effective extension roots, as session startup does", async () => {
+		const discover = vi
+			.spyOn(discoveryModule, "discoverAgents")
+			.mockResolvedValue({ agents: [], projectAgentsDir: null });
+		await rejectionOf(agentsCli.runAgentsCommand({ action: "show", name: "missing", flags: {} }));
+		expect(discover.mock.calls[0]?.[2]).toMatchObject({ explicit: [], mode: "merge" });
+		expect(Array.isArray(discover.mock.calls[0]?.[2]?.configured)).toBe(true);
+	});
+
+	it("strips control characters from discovered names in the usage error", async () => {
+		const hostile: AgentDefinition = { ...worker, name: "evil\u001b[31m\nFAKE LINE" };
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [hostile], projectAgentsDir: null });
+		const error = await rejectionOf(agentsCli.runAgentsCommand({ action: "show", name: "missing\u0007", flags: {} }));
+		const message = (error as Error).message;
+		expect(message).toContain("Unknown agent");
+		expect(message).not.toMatch(/[\u0000-\u001f\u007f]/);
+	});
 });
