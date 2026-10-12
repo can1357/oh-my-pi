@@ -3734,6 +3734,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 							parentSessionFile: options.parentSessionFile,
 						},
 						turnMonitor.abortSignal,
+						options.structured !== false,
 					),
 					superseded.signal,
 				);
@@ -4270,6 +4271,7 @@ async function driveFollowUpTurn(
 				parentSessionFile: options.parentSessionFile,
 			},
 			monitor.abortSignal,
+			structured,
 		);
 		try {
 			outcome = await driveSessionToResult(session, monitor, message, stopHook, {
@@ -5585,6 +5587,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					parentSessionFile: options.sessionFile ?? undefined,
 				},
 				monitor.abortSignal,
+				structured,
 			);
 			const outcome = await driveSessionToResult(session, monitor, task, stopHook, {
 				solutionSpace: options.solutionSpace,
