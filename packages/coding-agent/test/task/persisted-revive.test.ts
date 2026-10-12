@@ -45,7 +45,7 @@ import { PerCallModelError, PerCallModelUnavailableError } from "@oh-my-pi/pi-co
 import { cfgTaskMaxEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import { buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { buildWakeRelayBody, type IrcWakeTurnMonitorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -227,6 +227,7 @@ interface ReviveOwnerOptions {
 
 function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptions = {}) {
 	const parentSession = {
+		sessionId: "parent-session-1",
 		sessionManager: {
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
@@ -446,6 +447,37 @@ describe("persisted subagent revival", () => {
 		// which is where finalizeRunResult writes <id>.md, not the live root dir.
 		expect(capturedArtifactsDir).toBe(path.dirname(sessionFile));
 		expect(capturedArtifactsDir).not.toBe(path.join(cwd, "parent"));
+		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("reports the owning session as the wake monitor's parent for subagent_stop", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-revive-parent-identity-");
+		const sessionFile = await createPersistedSession(cwd);
+		MCPManager.setInstance(fakeMcpManager(() => []));
+		let captured: IrcWakeTurnMonitorOptions | undefined;
+		vi.spyOn(executorModule, "attachIrcWakeTurnMonitor").mockImplementation((_session, options) => {
+			captured = options;
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		AgentRegistry.global().register({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: "sub",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(captured?.parentSessionId).toBe("parent-session-1");
+		expect(captured?.parentSessionFile).toBe(path.join(cwd, "parent.jsonl"));
 		AgentRegistry.resetGlobalForTests();
 	});
 

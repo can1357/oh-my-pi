@@ -474,6 +474,10 @@ export function createPersistedSubagentReviverFactory(
 				completionProbe: isCompletionProbeEnabled(ctx.settings, taskDepth - 1),
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
+				// The top-level session this revive joins is the spawning session the
+				// `subagent_stop` event reports; the transcript cannot name it reliably.
+				parentSessionId: ctx.session.sessionId,
+				parentSessionFile: ctx.session.sessionFile,
 				sessionFile,
 				structured,
 				outputSchema: init.outputSchema,

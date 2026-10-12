@@ -2497,6 +2497,47 @@ const PROMPT_DISPATCH_IDLE_TIMEOUT_MS = 5_000;
 
 class PromptDispatchError extends Error {}
 
+/** What a `subagent_stop` pass needs from whatever is driving the session. */
+interface SubagentStopPassIo {
+	/** Await `promise`, throwing once the run is aborted. */
+	awaitAbortable<T>(promise: Promise<T>): Promise<T>;
+	/** Run one continuation turn on the same session: prompt with `text`, then wait for the turn to settle. */
+	continueWith(text: string): Promise<void>;
+}
+
+/**
+ * Offer the settled candidate to `subagent_stop` handlers: the recorded
+ * terminal yield, or for a `structured: false` run its final report turn.
+ * Owner async work has quiesced, so this is what the parent would accept and
+ * publish; the pass runs after the child's own work is done and before every
+ * acceptance/finalize path downstream. A refusal drops the candidate so
+ * nothing can accept or publish it, and the SAME child session runs again;
+ * the caller then demands a fresh one.
+ *
+ * Returns true when refused and re-driven (the caller re-evaluates the run);
+ * false when the candidate stands — allowed, or the run was cancelled while
+ * handlers were consulting, so it was never confirmed and is dropped.
+ */
+async function runSubagentStopPass(
+	session: AgentSession,
+	monitor: SubagentRunMonitor,
+	stopHook: SubagentStopHook,
+	io: SubagentStopPassIo,
+): Promise<boolean> {
+	const stop = await stopHook.run(session);
+	if (stop.kind === "allow") return false;
+	monitor.invalidateYieldForStop();
+	if (stop.kind === "aborted") return false;
+	// Charging the refused turn may have stopped the run for budget: let that
+	// abort settle (throws if the run is now aborted, so no continuation starts
+	// after an abort) and leave the stopped run to the ladder's forced final
+	// turn instead of a free-running one.
+	await io.awaitAbortable(monitor.waitForBudgetStop());
+	if (monitor.budgetStopRequested()) return true;
+	await io.continueWith(stop.text);
+	return true;
+}
+
 /**
  * Drive one assignment through a live session: send the prompt (with `restore`,
  * go on with the turn the previous process left unfinished instead:
@@ -2709,35 +2750,14 @@ async function driveSessionToResult(
 			}
 		};
 
-		/**
-		 * Offer the settled candidate to `subagent_stop` handlers: the recorded
-		 * terminal yield, or for a `structured: false` run its final report turn.
-		 * Owner async work has quiesced, so this is what the parent would accept
-		 * and publish; the pass runs after the child's own work is done and before
-		 * every acceptance/finalize path downstream. A refusal drops the
-		 * candidate so nothing can accept or publish it, and the SAME child
-		 * session runs again; the loop then demands a fresh one.
-		 *
-		 * Returns true when refused and re-driven (the caller re-evaluates the
-		 * run); false when the candidate stands — allowed, or the run was
-		 * cancelled while handlers were consulting, so it was never confirmed
-		 * and is dropped.
-		 */
-		const runStopPass = async (): Promise<boolean> => {
-			const stop = await stopHook.run(session);
-			if (stop.kind === "allow") return false;
-			monitor.invalidateYieldForStop();
-			if (stop.kind === "aborted") return false;
-			// Charging the refused turn may have stopped the run for budget: let
-			// that abort settle (throws if the run is now aborted, so no
-			// continuation starts after an abort) and leave the stopped run to
-			// the ladder's forced final turn instead of a free-running one.
-			await awaitAbortable(monitor.waitForBudgetStop());
-			if (monitor.budgetStopRequested()) return true;
-			await dispatchPrompt(stop.text, { attribution: "agent", synthetic: true }, "subagent_stop continuation");
-			await awaitAbortable(session.waitForIdle());
-			return true;
-		};
+		const runStopPass = (): Promise<boolean> =>
+			runSubagentStopPass(session, monitor, stopHook, {
+				awaitAbortable,
+				continueWith: async text => {
+					await dispatchPrompt(text, { attribution: "agent", synthetic: true }, "subagent_stop continuation");
+					await awaitAbortable(session.waitForIdle());
+				},
+			});
 
 		// Yield ladder + quiescence barrier (structured concurrency), one
 		// loop: a turn without a yield first settles pending owner work, then
@@ -3202,6 +3222,10 @@ export interface IrcWakeTurnMonitorOptions {
 	eventBus?: EventBus;
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
+	/** Spawning session's id, reported as the `subagent_stop` event's `parent_session_id`. */
+	parentSessionId?: string;
+	/** Spawning session's transcript file, reported as the event's `parent_session_file`. */
+	parentSessionFile?: string;
 	/** Fallback session file when the registry ref carries none. */
 	sessionFile?: string;
 	maxRuntimeMs?: number;
@@ -3384,6 +3408,50 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
 }
 
 /**
+ * `subagent_stop` passes for an IRC wake turn that ended on a candidate `yield`.
+ * The session's turn observer finishes after the turn ended and its owned
+ * async work settled, so a refusal can only re-drive the session from there.
+ * The observer contract detaches the monitor before anything awaits, so each
+ * continuation re-attaches it for its own turn only: a newer wake's events must
+ * never reach this monitor. When the session is no longer idle (a newer turn
+ * took it) the continuation cannot start; the refusal then stays unanswered and
+ * finalization fails the turn instead of publishing the refused payload.
+ */
+async function runWakeStopPasses(
+	session: AgentSession,
+	monitor: SubagentRunMonitor,
+	stopHook: SubagentStopHook,
+): Promise<void> {
+	const signal = monitor.abortSignal;
+	const io: SubagentStopPassIo = {
+		awaitAbortable: promise => untilAborted(signal, () => promise),
+		continueWith: async text => {
+			const detach = monitor.attach(session);
+			try {
+				await session.prompt(text, {
+					attribution: "agent",
+					synthetic: true,
+					runCommands: false,
+					throwOnDrop: true,
+				});
+				await session.waitForIdle();
+				await monitor.waitForYieldTurnStop();
+			} finally {
+				detach();
+			}
+		},
+	};
+	try {
+		let refused = true;
+		while (refused && monitor.yieldCalled()) refused = await runSubagentStopPass(session, monitor, stopHook, io);
+	} catch (error) {
+		logger.warn("IRC wake-turn subagent_stop continuation failed", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
+}
+
+/**
  * Bracket a kept-alive subagent's undriven turns — autonomous IRC wakes,
  * focused-session prompts and bare queued/async continuations — with a task
  * run monitor so RPC/collab subscribers see lifecycle/progress frames and
@@ -3397,6 +3465,10 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
  * {@link relayWakeTurnOutput}; the relay is registered as a pending reply on
  * the session up front so a `send await:true` waiter holds its "stopped
  * without replying" verdict until the relay has been delivered.
+ *
+ * A turn that ended on a yield is offered to `subagent_stop` handlers before it
+ * is accepted ({@link runWakeStopPasses}); `parentSessionId` /
+ * `parentSessionFile` identify the spawning session in that event.
  */
 export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWakeTurnMonitorOptions): void {
 	const { id, agent } = options;
@@ -3536,12 +3608,34 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		return async turnError => {
 			unsubscribeTurn();
 			unsubscribeParentSteer();
+			// A wake turn's candidate yield is judged like a first run's before it
+			// is accepted or published. Unstructured wake turns record no yield, so
+			// their prose reply is a peer relay rather than a result and is not offered.
+			if (turnError === undefined && turnMonitor.yieldCalled()) {
+				await runWakeStopPasses(
+					session,
+					turnMonitor,
+					new SubagentStopHook(
+						{
+							agentId: id,
+							agentType: agent.name,
+							parentSessionId: options.parentSessionId,
+							parentSessionFile: options.parentSessionFile,
+						},
+						turnMonitor.abortSignal,
+					),
+				);
+			}
 			const activeSession = turnMonitor.takeActiveSession();
 			if (activeSession) turnMonitor.captureSalvage(activeSession);
 			const lastAssistant = session.getLastAssistantMessage();
 			const yielded = turnMonitor.yieldCalled();
 			const runtimeLimitExceeded = turnMonitor.runtimeLimitExceeded();
-			const aborted = runtimeLimitExceeded || (lastAssistant?.stopReason === "aborted" && !yielded);
+			// A refusal no continuation answered: the wake turn fails, and its
+			// last assistant turn is not an abort of the turn's work.
+			const unresolvedRefusal = turnMonitor.yieldInvalidatedByStop() && !yielded;
+			const aborted =
+				runtimeLimitExceeded || (lastAssistant?.stopReason === "aborted" && !yielded && !unresolvedRefusal);
 			// Two error lanes. `error` carries full diagnostics (a thrown turn
 			// error's stack) for `done.error`, logs, and lifecycle. `errorForPeer`
 			// carries only the short, attributed message: a stack trace injected
@@ -3557,10 +3651,12 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					? thrown.stack || thrown.message
 					: thrown === undefined
 						? undefined
-						: String(thrown));
+						: String(thrown)) ??
+				(unresolvedRefusal ? SUBAGENT_STOP_REFUSAL_UNRESOLVED : undefined);
 			const errorForPeer =
 				providerError ??
-				(thrown instanceof Error ? thrown.message : thrown === undefined ? undefined : String(thrown));
+				(thrown instanceof Error ? thrown.message : thrown === undefined ? undefined : String(thrown)) ??
+				(unresolvedRefusal ? SUBAGENT_STOP_REFUSAL_UNRESOLVED : undefined);
 			turnMonitor.finish();
 			if (yielded) {
 				// Acceptance boundary for an autonomous wake turn (#11079): the
@@ -4628,6 +4724,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		eventBus: options.eventBus,
 		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
+		parentSessionId: options.parentSessionId,
+		parentSessionFile: options.sessionFile ?? undefined,
 		sessionFile: subtaskSessionFile,
 		maxRuntimeMs,
 		structured,
