@@ -99,6 +99,8 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		parentId?: string;
 		/** Wall-clock cap on the wake turn, ms. */
 		maxRuntimeMs?: number;
+		/** Agent definition name reported as `agent_type`, when it differs from `wakeAgent.name`. */
+		agentType?: string;
 	}) {
 		const stopEvents: SubagentStopEvent[] = [];
 		const lifecycle: LifecycleFrame[] = [];
@@ -157,6 +159,7 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			parentSessionFile: "/parent/session.jsonl",
 			artifactsDir: tempDir.path(),
 			maxRuntimeMs: args.maxRuntimeMs,
+			agentType: args.agentType,
 		});
 		return { session, mock, stopEvents, lifecycle, eventBus, artifact: path.join(tempDir.path(), `${AGENT_ID}.md`) };
 	}
@@ -195,6 +198,19 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		const artifact = await Bun.file(run.artifact).text();
 		expect(artifact).toContain("replacement");
 		expect(artifact).not.toContain("REFUSED-PAYLOAD");
+	});
+
+	it("reports the restored definition name as agent_type when the wake definition carries a ref label", async () => {
+		const run = await setup({
+			responses: [yieldCall("answer")],
+			onStop: () => undefined,
+			agentType: "reviewer",
+		});
+
+		await wake(run.session);
+
+		expect(run.stopEvents).toHaveLength(1);
+		expect(run.stopEvents[0]?.agent_type).toBe("reviewer");
 	});
 
 	it("accepts the wake turn's yield once, with no extra turn, when handlers allow it", async () => {

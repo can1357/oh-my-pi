@@ -359,6 +359,24 @@ export function createPersistedSubagentReviverFactory(
 			const restrictToolNames = restoredSeance !== undefined || init.restrictToolNames === true;
 			// The spawn's result contract: a session persisted without `yield` returned its final message.
 			const structured = revivedToolNames.includes("yield");
+			// The durable definition name (`scout`, `reviewer`, …), not the registry
+			// display label: cold-revived refs register with `displayName: id`
+			// (registry/persisted-agents.ts), so a generated task id would silently
+			// drop every agent-scoped rule and be reported as the `subagent_stop`
+			// `agent_type`. `init.agent` carries the real name; only files predating
+			// that field fall back to the display label. A parked transcript may also
+			// predate the `main`/`sub` definition-name reservation (discovery/helpers.ts):
+			// a persisted `init.agent` of either sentinel value from such a legacy
+			// custom agent must not masquerade as that sentinel here, so it falls
+			// back to the display label too, keeping it scoped as an ordinary
+			// subagent under its generated id instead of `main` or the shared `sub`
+			// bucket.
+			const agentName =
+				init.agent &&
+				init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
+				init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
+					? init.agent
+					: ref.displayName;
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			// Subscribe before minting proxies so a manager change during startup is replayed on bind.
 			const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
@@ -381,24 +399,7 @@ export function createPersistedSubagentReviverFactory(
 					sessionManager: reopened,
 					agentId: ref.id,
 					agentDisplayName: ref.displayName,
-					// `agents` rule scoping keys on the durable definition name (`scout`,
-					// `reviewer`, …), not the registry display label — cold-revived refs
-					// register with `displayName: id` (registry/persisted-agents.ts), so a
-					// generated task id would silently drop every agent-scoped rule.
-					// `init.agent` carries the real name; only files predating that field
-					// fall back to the display label. A parked transcript may also predate
-					// the `main`/`sub` definition-name reservation (discovery/helpers.ts): a
-					// persisted `init.agent` of either sentinel value from such a legacy
-					// custom agent must not masquerade as that sentinel here, so it falls
-					// back to the display label too, keeping it scoped as an ordinary
-					// subagent under its generated id instead of `main` or the shared `sub`
-					// bucket.
-					agentName:
-						init.agent &&
-						init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
-						init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
-							? init.agent
-							: ref.displayName,
+					agentName,
 					parentTaskPrefix: ref.id,
 					asyncJobManager: ctx.session.asyncJobManager,
 					parentAgentId: ref.parentId,
@@ -499,6 +500,8 @@ export function createPersistedSubagentReviverFactory(
 				id: ref.id,
 				agent: persistedAgentDefinition(ref.displayName, init),
 				completionProbe: isCompletionProbeEnabled(ctx.settings, taskDepth - 1),
+				// The frames keep the ref label; `subagent_stop` reports the definition.
+				agentType: agentName,
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
 				// The session that spawned this child is what the `subagent_stop`

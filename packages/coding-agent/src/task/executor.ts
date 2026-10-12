@@ -3229,6 +3229,12 @@ export interface IrcWakeTurnMonitorOptions {
 	id: string;
 	index?: number;
 	agent: AgentDefinition;
+	/**
+	 * Definition name reported as the `subagent_stop` event's `agent_type`.
+	 * Defaults to `agent.name`; a cold revival's synthetic definition is labelled
+	 * with the registry ref, so it supplies the restored definition name here.
+	 */
+	agentType?: string;
 	description?: string;
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
@@ -3665,7 +3671,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					new SubagentStopHook(
 						{
 							agentId: id,
-							agentType: agent.name,
+							agentType: options.agentType ?? agent.name,
 							parentSessionId: options.parentSessionId,
 							parentSessionFile: options.parentSessionFile,
 						},

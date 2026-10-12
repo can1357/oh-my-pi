@@ -751,6 +751,30 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.agentName).toBe("scout");
 	});
 
+	it("hands the wake monitor the restored definition name as agent_type, not the ref label", async () => {
+		MCPManager.setInstance(fakeMcpManager(() => []));
+		const captured: Array<IrcWakeTurnMonitorOptions | undefined> = [];
+		vi.spyOn(executorModule, "attachIrcWakeTurnMonitor").mockImplementation((_session, options) => {
+			captured.push(options);
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		// A legacy transcript whose persisted name is a reserved sentinel is scoped
+		// under the ref label, so it must not be reported as the `main` agent either.
+		for (const persisted of ["scout", "main"]) {
+			const cwd = makeTempDir("@pi-revive-wake-agent-type-");
+			const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { agent: persisted });
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd)(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(ref);
+		}
+
+		expect(captured.map(options => options?.agentType)).toEqual(["scout", "Persisted Restricted"]);
+	});
+
 	it("restores the live account pool for the persisted agent name, so a revived agent stays restricted", async () => {
 		const cwd = makeTempDir("@pi-revive-account-pool-");
 		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { agent: "scout" });
