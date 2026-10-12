@@ -2365,6 +2365,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			yieldCalled = false;
 			yieldInvalidatedByStop = true;
 			yieldAcceptedAt = undefined;
+			// The refused candidate is the last recorded yield: every recorded
+			// yield reassigns `yieldCalled`, so a latched yield is the newest item.
+			// Left in place it would still win result assembly as the terminal item
+			// when the replacement is only a `complete: true` section.
+			progress.extractedToolData?.yield?.pop();
 		},
 		yieldTurnStopRequested: () => yieldTurnStopRequested,
 		waitForYieldTurnStop: async () => {
