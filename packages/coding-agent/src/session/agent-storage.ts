@@ -305,10 +305,10 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
 `);
 
-		// Reads go through `db.query`, whose cached statements `close()` finalizes immediately; an
-		// unfinalized `prepare` statement would keep the SQLite connection (and agent.db) open
-		// after close() until GC collects it.
-		const settingsInfo = this.#db.query<{ name: string }, []>("PRAGMA table_info(settings)").all();
+		// One-off reads use `prepare` (no caching); field-cached reads use `db.query`.
+		// An unfinalized `prepare` statement keeps the SQLite connection open after close().
+		using settingsInfoStmt = this.#db.prepare<{ name: string }, []>("PRAGMA table_info(settings)");
+		const settingsInfo = settingsInfoStmt.all();
 		const hasSettingsTable = settingsInfo.length > 0;
 		const hasKey = settingsInfo.some(column => column.name === "key");
 		const hasValue = settingsInfo.some(column => column.name === "value");
@@ -324,7 +324,8 @@ CREATE TABLE settings (
 		} else if (!hasKey || !hasValue) {
 			// Migrate v1 schema: single JSON blob in `data` column → per-key rows
 			let legacySettings: Record<string, unknown> | null = null;
-			const row = this.#db.query<{ data: string }, []>("SELECT data FROM settings WHERE id = 1").get();
+			using legacyRowStmt = this.#db.prepare<{ data: string }, []>("SELECT data FROM settings WHERE id = 1");
+			const row = legacyRowStmt.get();
 			if (row?.data) {
 				try {
 					const parsed = JSON.parse(row.data);
@@ -363,9 +364,9 @@ CREATE TABLE settings (
 			migrate(legacySettings);
 		}
 
-		const versionRow = this.#db
-			.query<{ version: number }, []>("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
-			.get();
+		using versionStmt = this.#db
+			.prepare<{ version: number }, []>("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
+		const versionRow = versionStmt.get();
 		const schemaVersion = typeof versionRow?.version === "number" ? versionRow.version : 0;
 		if (versionRow?.version !== undefined && versionRow.version !== SCHEMA_VERSION) {
 			logger.warn("AgentStorage schema version mismatch", {
@@ -668,14 +669,14 @@ FROM model_usage_legacy
 		if (!this.#autoPerfBackfill || this.#perfBackfillChecked) return;
 		this.#perfBackfillChecked = true;
 		try {
-			const metaValue = this.#db.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?");
-			const marker = metaValue.get(MODEL_PERF_BACKFILL_KEY);
+			using markerStmt = this.#db.prepare<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?");
+			const marker = markerStmt.get(MODEL_PERF_BACKFILL_KEY);
 			if (marker) return;
 			// The v1 import already folded the stats history into the bare rows, and no
 			// stats row written before the served-tier field carries a tier, so
 			// re-importing would only double-count it. Keep the live aggregates (blended
 			// history decays out of them) and just record v2.
-			if (metaValue.get(MODEL_PERF_BACKFILL_V1_KEY)) {
+			if (markerStmt.get(MODEL_PERF_BACKFILL_V1_KEY)) {
 				using markCompleteStmt = this.#db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
 				markCompleteStmt.run(MODEL_PERF_BACKFILL_KEY, "complete");
 				return;
@@ -718,16 +719,14 @@ FROM model_usage_legacy
 			// Stats databases written before the served-tier column existed cannot
 			// separate a fast serving path's samples from standard ones; those rows
 			// import as standard-tier history.
-			const hasTier = statsDb
-				.query<{ name: string }, []>("PRAGMA table_info(messages)")
-				.all()
-				.some(column => column.name === "service_tier");
-			const select = statsDb.query<StatsMessageRow, [number, number, number, number]>(
+			using tierInfoStmt = statsDb.prepare<{ name: string }, []>("PRAGMA table_info(messages)");
+			const hasTier = tierInfoStmt.all().some(column => column.name === "service_tier");
+			using select = statsDb.prepare<StatsMessageRow, [number, number, number, number]>(
 				`SELECT rowid, timestamp, provider, model, output_tokens, duration, ttft${hasTier ? ", service_tier" : ""}
 FROM messages
 WHERE (timestamp < ?1 OR (timestamp = ?1 AND rowid < ?2))
-	AND timestamp >= ?3
-	AND duration > 0 AND output_tokens > 0 AND stop_reason != 'error'
+AND timestamp >= ?3
+AND duration > 0 AND output_tokens > 0 AND stop_reason != 'error'
 ORDER BY timestamp DESC, rowid DESC
 LIMIT ?4`,
 			);
@@ -823,12 +822,18 @@ ON CONFLICT(model_key) DO UPDATE SET
 		const credentials = this.#authStore.listAuthCredentials(provider);
 		if (!includeDisabled) return credentials;
 
-		const sql = provider
-			? "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC"
-			: "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials ORDER BY id ASC";
-		const rows = provider
-			? this.#db.query<AuthCredentialRow, [string]>(sql).all(provider)
-			: this.#db.query<AuthCredentialRow, []>(sql).all();
+		let rows: AuthCredentialRow[];
+		if (provider) {
+			using stmt = this.#db.prepare<AuthCredentialRow, [string]>(
+				"SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC",
+			);
+			rows = stmt.all(provider);
+		} else {
+			using stmt = this.#db.prepare<AuthCredentialRow, []>(
+				"SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials ORDER BY id ASC",
+			);
+			rows = stmt.all();
+		}
 
 		const results: StoredAuthCredential[] = [];
 		for (const row of rows) {

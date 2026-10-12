@@ -1059,16 +1059,14 @@ function sqliteNumber(value: number | bigint | null | undefined): number {
 	return 0;
 }
 
-// Reads go through `db.query`, whose cached statements `close()` finalizes immediately; an
-// unfinalized `prepare` statement would keep the SQLite connection (and its db/-wal/-shm
+// One-off reads use `prepare` (no caching); field-cached reads use `db.query`.
+// An unfinalized `prepare` statement keeps the SQLite connection (and its db/-wal/-shm
 // files) open after close() until GC, and Windows refuses to delete or replace an open file.
 function tableExists(db: Database, table: string): boolean {
-	const row = db
-		.query<{ present: number }, [string]>(
-			"SELECT 1 AS present FROM sqlite_master WHERE type IN ('table','view') AND name = ?",
-		)
-		.get(table);
-	return row?.present === 1;
+	using stmt = db.prepare<{ present: number }, [string]>(
+		"SELECT 1 AS present FROM sqlite_master WHERE type IN ('table','view') AND name = ?",
+	);
+	return stmt.get(table)?.present === 1;
 }
 
 function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { deleted: number; ftsRebuilt: boolean } {
@@ -1205,7 +1203,8 @@ function statsIdentityKeys(identities: Record<StatsEntryTable, StatsEntryIdentit
 }
 
 function tableHasColumn(db: Database, table: string, column: string): boolean {
-	const rows = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
+	using stmt = db.prepare<{ name: string }, []>(`PRAGMA table_info(${table})`);
+	const rows = stmt.all();
 	return rows.some(row => row.name === column);
 }
 
@@ -1213,7 +1212,8 @@ function collectStoredStatsSessionPaths(db: Database): string[] {
 	const sessionPaths = new Set<string>();
 	for (const table of STATS_SESSION_TABLES) {
 		if (!tableExists(db, table) || !tableHasColumn(db, table, "session_file")) continue;
-		const rows = db.query<{ session_file: string | null }, []>(`SELECT DISTINCT session_file FROM ${table}`).all();
+		using stmt = db.prepare<{ session_file: string | null }, []>(`SELECT DISTINCT session_file FROM ${table}`);
+		const rows = stmt.all();
 		for (const row of rows) {
 			if (typeof row.session_file === "string") sessionPaths.add(row.session_file);
 		}
@@ -2046,7 +2046,8 @@ async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpo
 	let checkpointAttempted = false;
 	try {
 		db.run("PRAGMA busy_timeout = 5000");
-		const row = db.query<WalCheckpointRow, []>("PRAGMA wal_checkpoint(TRUNCATE)").get();
+		using checkpointStmt = db.prepare<WalCheckpointRow, []>("PRAGMA wal_checkpoint(TRUNCATE)");
+		const row = checkpointStmt.get();
 		checkpointAttempted = true;
 		result.busy = sqliteNumber(row?.busy);
 		result.log = sqliteNumber(row?.log);

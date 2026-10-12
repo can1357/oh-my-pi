@@ -224,7 +224,7 @@ export class BinaryVectorStore {
 		const queryDim = Math.min(queryEmbedding.length, EMBEDDING_DIM);
 		const queryBinary = maximallyInformativeBinarization(queryEmbedding);
 		const rows = this.conn
-			.query<VectorRow, []>(`SELECT memory_id, binary_vector, original_dim, magnitude FROM ${this.tableName}`)
+			.prepare<VectorRow, []>(`SELECT memory_id, binary_vector, original_dim, magnitude FROM ${this.tableName}`)
 			.all();
 		const results: BinaryVectorSearchResult[] = [];
 		for (const row of rows) {
@@ -249,7 +249,7 @@ export class BinaryVectorStore {
 	}
 	getStats(): BinaryVectorStats {
 		const row = this.conn
-			.query<StatsRow, []>(
+			.prepare<StatsRow, []>(
 				`SELECT COUNT(*) AS count,
 				AVG(LENGTH(binary_vector)) AS avg_bytes,
 				MAX(LENGTH(binary_vector)) AS max_bytes,

@@ -239,14 +239,14 @@ export function claimStage1Jobs(
 	const maxAgeSec = maxRolloutAgeDays * 24 * 60 * 60;
 	const minIdleSec = minRolloutIdleHours * 60 * 60;
 	const runningCountRow = db
-		.query<RunningJobsCountRow, [string, number]>(
+		.prepare<RunningJobsCountRow, [string, number]>(
 			"SELECT COUNT(*) AS count FROM jobs WHERE kind = ? AND status = 'running' AND lease_until IS NOT NULL AND lease_until > ?",
 		)
 		.get(STAGE1_KIND, nowSec);
 	let runningCount = runningCountRow?.count ?? 0;
 	if (runningCount >= runningConcurrencyCap) return [];
 	const candidateRows = db
-		.query<ThreadCandidateRow, [number]>(
+		.prepare<ThreadCandidateRow, [number]>(
 			"SELECT id, updated_at, rollout_path, cwd, source_kind FROM threads ORDER BY updated_at DESC LIMIT ?",
 		)
 		.all(threadScanLimit);
@@ -260,7 +260,7 @@ export function claimStage1Jobs(
 		if (nowSec - row.updated_at < minIdleSec) continue;
 		if (runningCount >= runningConcurrencyCap) break;
 		const stage1 = db
-			.query<Stage1TimestampRow, [string]>("SELECT source_updated_at FROM stage1_outputs WHERE thread_id = ?")
+			.prepare<Stage1TimestampRow, [string]>("SELECT source_updated_at FROM stage1_outputs WHERE thread_id = ?")
 			.get(row.id);
 		if ((stage1?.source_updated_at ?? 0) >= row.updated_at) continue;
 		ensureStage1Job(db, row.id);
@@ -385,7 +385,7 @@ export function markStage1SucceededWithOutput(
 	const { threadId, ownershipToken, sourceUpdatedAt, rawMemory, rolloutSummary, rolloutSlug, nowSec, cwd } = params;
 	const tx = db.transaction(() => {
 		const matched = db
-			.query<Stage1OwnershipRow, [string, string, string]>(
+			.prepare<Stage1OwnershipRow, [string, string, string]>(
 				"SELECT 1 AS ok FROM jobs WHERE kind = ? AND job_key = ? AND status = 'running' AND ownership_token = ?",
 			)
 			.get(STAGE1_KIND, threadId, ownershipToken);
@@ -423,7 +423,7 @@ export function markStage1SucceededNoOutput(
 	const { threadId, ownershipToken, sourceUpdatedAt, nowSec, cwd } = params;
 	const tx = db.transaction(() => {
 		const matched = db
-			.query<Stage1OwnershipRow, [string, string, string]>(
+			.prepare<Stage1OwnershipRow, [string, string, string]>(
 				"SELECT 1 AS ok FROM jobs WHERE kind = ? AND job_key = ? AND status = 'running' AND ownership_token = ?",
 			)
 			.get(STAGE1_KIND, threadId, ownershipToken);
@@ -468,7 +468,7 @@ export function tryClaimGlobalPhase2Job(
 	const jobKey = globalJobKey(cwd);
 	ensureGlobalJob(db, cwd);
 	const pre = db
-		.query<GlobalJobRow, [string, string]>(
+		.prepare<GlobalJobRow, [string, string]>(
 			"SELECT status, lease_until, input_watermark, last_success_watermark, retry_at, retry_remaining FROM jobs WHERE kind = ? AND job_key = ?",
 		)
 		.get(GLOBAL_KIND, jobKey);
@@ -488,7 +488,7 @@ WHERE kind = ? AND job_key = ?
 		.run(workerId, ownershipToken, nowSec, nowSec + leaseSeconds, GLOBAL_KIND, jobKey, nowSec, nowSec);
 	if (Number(claimed.changes ?? 0) > 0) {
 		const row = db
-			.query<GlobalJobWatermarkRow, [string, string, string]>(
+			.prepare<GlobalJobWatermarkRow, [string, string, string]>(
 				"SELECT input_watermark FROM jobs WHERE kind = ? AND job_key = ? AND ownership_token = ?",
 			)
 			.get(GLOBAL_KIND, jobKey, ownershipToken);
@@ -517,7 +517,7 @@ WHERE kind = ? AND job_key = ?
 	}
 
 	const post = db
-		.query<GlobalJobRow, [string, string]>(
+		.prepare<GlobalJobRow, [string, string]>(
 			"SELECT status, lease_until, input_watermark, last_success_watermark, retry_at, retry_remaining FROM jobs WHERE kind = ? AND job_key = ?",
 		)
 		.get(GLOBAL_KIND, jobKey);
@@ -549,7 +549,7 @@ WHERE kind = ? AND job_key = ? AND status = 'running' AND ownership_token = ?
 // project's data written into its memory directory (see #369).
 export function listStage1OutputsForGlobal(db: Database, limit: number, cwd: string): Stage1OutputRow[] {
 	const rows = db
-		.query<Stage1OutputJoinRow, [string, number]>(
+		.prepare<Stage1OutputJoinRow, [string, number]>(
 			`SELECT o.thread_id, o.source_updated_at, o.raw_memory, o.rollout_summary, o.rollout_slug, o.generated_at, t.cwd
 FROM stage1_outputs o
 LEFT JOIN threads t ON t.id = o.thread_id

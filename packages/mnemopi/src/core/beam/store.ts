@@ -199,22 +199,20 @@ function invalidateCaches(beam: BeamMemoryState): void {
 }
 
 function findDuplicate(beam: BeamMemoryState, content: string): string | null {
-	const row = beam.db
-		.query<WorkingIdRow, [string, string]>(
+	using statement = beam.db
+		.prepare<WorkingIdRow, [string, string]>(
 			"SELECT id FROM working_memory WHERE content = ? AND session_id = ? LIMIT 1",
-		)
-		.get(content, beam.sessionId);
+		);
+		const row = statement.get(content, beam.sessionId);
 	return row?.id ?? null;
 }
 
 function tableExists(db: BeamMemoryState["db"], table: string): boolean {
-	return (
-		db
-			.query<{ "1": number }, [string]>(
-				"SELECT 1 FROM sqlite_master WHERE type IN ('table','virtual table') AND name = ? LIMIT 1",
-			)
-			.get(table) !== null
-	);
+	using statement = db
+		.prepare<{ "1": number }, [string]>(
+			"SELECT 1 FROM sqlite_master WHERE type IN ('table','virtual table') AND name = ? LIMIT 1",
+		);
+	return statement.get(table) !== null;
 }
 
 /** Tables whose rows point back to a `working_memory` id via `source_memory_id`. */
@@ -284,8 +282,8 @@ function trimWorkingMemory(beam: BeamMemoryState): void {
 	const ttlHours = beam.config.workingMemoryTtlHours;
 	const cutoff = toUtcIso(new Date(Date.now() - ttlHours * 3_600_000));
 	transaction(beam.db, () => {
-		const ids = beam.db
-			.query<WorkingIdRow, [string, string, string, number]>(`
+		using selectStatement = beam.db
+			.prepare<WorkingIdRow, [string, string, string, number]>(`
 			SELECT id FROM working_memory
 			WHERE session_id = ?
 			  AND consolidated_at IS NULL
@@ -299,7 +297,8 @@ function trimWorkingMemory(beam: BeamMemoryState): void {
 					LIMIT ?
 				)
 			  )
-		`)
+		`);
+		const ids = selectStatement
 			.all(beam.sessionId, cutoff, beam.sessionId, limit)
 			.map(row => row.id);
 		if (ids.length === 0) return;
@@ -432,10 +431,10 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 	const mismatch = beam.db.query("SELECT 1 FROM memory_embeddings WHERE model IS NOT ? LIMIT 1").get(active);
 	if (mismatch) {
 		const staleModels = beam.db
-			.query<EmbeddingModelRow, [string]>("SELECT DISTINCT model FROM memory_embeddings WHERE model IS NOT ?")
+			.prepare<EmbeddingModelRow, [string]>("SELECT DISTINCT model FROM memory_embeddings WHERE model IS NOT ?")
 			.all(active);
 		const live = beam.db
-			.query<EmbedItem, []>(
+			.prepare<EmbedItem, []>(
 				`
 				SELECT id AS memoryId, COALESCE(embed_text, content) AS content FROM working_memory WHERE superseded_by IS NULL
 				UNION ALL
@@ -470,7 +469,7 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 	// empty/partial table as "reconciled" would strand them FTS-only, so re-enqueue any live
 	// row still missing an active-model embedding.
 	const missing = beam.db
-		.query<EmbedItem, [string, string]>(
+		.prepare<EmbedItem, [string, string]>(
 			`
 			SELECT id AS memoryId, COALESCE(embed_text, content) AS content FROM working_memory
 			WHERE superseded_by IS NULL AND id NOT IN (SELECT memory_id FROM memory_embeddings WHERE model = ?)
@@ -678,8 +677,8 @@ export function rememberBatch(
 
 export function getContext(beam: BeamMemoryState, limit = 10): Row[] {
 	const now = toUtcIso();
-	return beam.db
-		.query<ContextRow, [string, string, number]>(`
+	using statement = beam.db
+		.prepare<ContextRow, [string, string, number]>(`
 			SELECT id, content, source, timestamp, importance, scope
 			FROM working_memory
 			WHERE (session_id = ? OR scope = 'global')
@@ -690,9 +689,8 @@ export function getContext(beam: BeamMemoryState, limit = 10): Row[] {
 				importance DESC,
 				timestamp DESC
 			LIMIT ?
-		`)
-		.all(beam.sessionId, now, limit)
-		.map(rowToDict);
+		`);
+		return statement.all(beam.sessionId, now, limit).map(rowToDict);
 }
 
 export function invalidate(beam: BeamMemoryState, memoryId: string, replacementId: string | null = null): boolean {
@@ -796,24 +794,24 @@ export function updateWorking(
 }
 
 export function get(beam: BeamMemoryState, memoryId: string): Row | null {
-	const working = beam.db
-		.query<MemoryRow, [string]>(
+	using workingStmt = beam.db
+		.prepare<MemoryRow, [string]>(
 			`SELECT id, content, source, timestamp, session_id,
 			   importance, metadata_json, veracity, created_at
 			FROM working_memory
 			WHERE id = ?`,
-		)
-		.get(memoryId);
+		);
+	const working = workingStmt.get(memoryId);
 	if (working != null) return { ...working, metadata: working.metadata_json, memory_store: "working" };
 
-	const episodic = beam.db
-		.query<MemoryRow, [string, string]>(
+	using episodicStmt = beam.db
+		.prepare<MemoryRow, [string, string]>(
 			`SELECT id, content, source, timestamp, session_id,
 			   importance, metadata_json, veracity, created_at
 			FROM episodic_memory
 			WHERE id = ? AND (session_id = ? OR scope = 'global')`,
-		)
-		.get(memoryId, beam.sessionId);
+		);
+	const episodic = episodicStmt.get(memoryId, beam.sessionId);
 	if (episodic != null) return { ...episodic, metadata: episodic.metadata_json, memory_store: "episodic" };
 
 	return getFact(beam, memoryId);
@@ -891,16 +889,17 @@ export function scratchpadWrite(beam: BeamMemoryState, content: string): string 
 }
 
 export function scratchpadRead(beam: BeamMemoryState): Row[] {
-	return beam.db
-		.query<ScratchpadRow, [string, number]>(
+	using statement = beam.db
+		.prepare<ScratchpadRow, [string, number]>(
 			`SELECT id, content, created_at, updated_at
 			FROM scratchpad
 			WHERE session_id = ?
 			ORDER BY updated_at DESC
 			LIMIT ?`,
-		)
-		.all(beam.sessionId, Number.isFinite(SCRATCHPAD_MAX_ITEMS) ? SCRATCHPAD_MAX_ITEMS : 1000)
-		.map(rowToDict);
+		);
+		return statement
+			.all(beam.sessionId, Number.isFinite(SCRATCHPAD_MAX_ITEMS) ? SCRATCHPAD_MAX_ITEMS : 1000)
+			.map(rowToDict);
 }
 
 export function scratchpadClear(beam: BeamMemoryState): void {
