@@ -10,6 +10,7 @@ import {
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
 import { emptyUsage } from "../images/shared";
+import { getCodexAttestationHeader } from "../providers/openai-codex-attestation";
 import { normalizeCodexBaseUrl } from "../usage/openai-codex-base-url";
 import { type TranscriptionOptions, transcriptionResponseError } from "./openai-transcriptions";
 import { TRANSCRIPTION_AUDIO_MIME_TYPES, type TranscriptionRequest, type TranscriptionResult } from "./types";
@@ -86,6 +87,8 @@ export async function transcribeOpenAICodex(
 			};
 			const accountId = getCodexAccountId(key);
 			if (accountId) headers[OPENAI_HEADERS.ACCOUNT_ID] = accountId;
+			const attestation = await getCodexAttestationHeader(accountId);
+			if (attestation) headers[OPENAI_HEADERS.ATTESTATION] = attestation;
 			// The backend 401s a region-pinned workspace unless the request declares its residency.
 			applyCodexResidencyHeader(headers, key);
 			const attempt = await fetchImpl(`${normalizeCodexBaseUrl(model.baseUrl)}/transcribe`, {
