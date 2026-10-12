@@ -1139,6 +1139,10 @@ export class SelectorController {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
+				onForgetRecent: selector => {
+					this.ctx.settings.getStorage()?.forgetModelUsage(selector);
+					this.ctx.showStatus(`Removed ${selector} from recent models`);
+				},
 				onCompactionPointChange: (model, input, confirmed) => {
 					try {
 						const update = setModelCompactionPoint(this.ctx.settings, model, input, {
