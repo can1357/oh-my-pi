@@ -6,11 +6,10 @@
  * to its tail permanently — Ctrl+O could not expand it back and the footer's
  * hidden-line count was computed from the capped array.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { TUI } from "@oh-my-pi/pi-tui";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
@@ -19,8 +18,6 @@ import { createInteractiveModeContext } from "./helpers/interactive-mode-context
 const REPLAY_LINES = Array.from({ length: 250 }, (_, index) => `line-${index}`);
 const REPLAY_OUTPUT = REPLAY_LINES.join("\n");
 const HIDDEN_LINES = REPLAY_LINES.length - 20;
-
-const ui = { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI;
 
 function bashMessage(output: string): AgentMessage {
 	return {
@@ -65,13 +62,5 @@ describe("UiHelpers bash replay seeding", () => {
 		for (const line of REPLAY_LINES) {
 			expect(rendered).toContain(line);
 		}
-	});
-
-	it("adds the block to the chat container", () => {
-		const ctx = createInteractiveModeContext();
-		const helpers = new UiHelpers(ctx);
-
-		helpers.addMessageToChat(bashMessage("ok"));
-		expect(ctx.chatContainer.children.some(child => child instanceof BashExecutionComponent)).toBe(true);
 	});
 });

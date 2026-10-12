@@ -7,23 +7,27 @@
  * the footer under-reported the hidden count by ~9900 lines.
  */
 import { beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
+import { BashExecutionComponent, STREAMING_LINE_CAP } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
+import { PREVIEW_LINES } from "@oh-my-pi/pi-tui/chat/execution-shared";
 import { getThemeByName, initTheme, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 const ui = { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI;
-/** Past both the 100-line streaming cap and the 20-line collapsed preview. */
+/** Past both the streaming cap and the 20-row collapsed preview. */
 const REPLAY_LINES = Array.from({ length: 250 }, (_, index) => `line-${index}`);
 const REPLAY_OUTPUT = REPLAY_LINES.join("\n");
-const HIDDEN_LINES = REPLAY_LINES.length - 20;
+/** Rows the collapsed preview hides but the expanded view still delivers. */
+const HIDDEN_LINES = REPLAY_LINES.length - PREVIEW_LINES;
+/** Same, for the tail window the live streaming cap retains. */
+const CAPPED_HIDDEN_LINES = STREAMING_LINE_CAP - PREVIEW_LINES;
+/** Rows the live streaming cap discarded, unrecoverable by any means. */
+const DROPPED_LINES = REPLAY_LINES.length - STREAMING_LINE_CAP;
 
 let darkTheme: Theme;
 
 beforeAll(async () => {
-	await Settings.init({ inMemory: true, cwd: process.cwd() });
 	await initTheme();
 	const loaded = await getThemeByName("dark");
 	if (!loaded) throw new Error("Expected dark theme");
@@ -68,24 +72,32 @@ describe("BashExecutionComponent replay seeding", () => {
 		expect(rowsOf(component)).not.toContain("line-0");
 	});
 
-	it("keeps the live streaming cap and stops advertising expand for dropped rows", () => {
+	it("keeps the live streaming cap and reports dropped rows apart from the recoverable tail", () => {
 		const component = new BashExecutionComponent("seq 1 10000", ui, false);
 		component.appendOutput(REPLAY_OUTPUT);
 
 		// The cap is live-output only: the tail is retained, the head is gone.
 		const streamed = component.getOutput().split("\n");
-		expect(streamed.length).toBeLessThanOrEqual(101);
+		expect(streamed).toHaveLength(STREAMING_LINE_CAP);
 		expect(streamed).toContain("line-249");
 
-		// Completion without a full snapshot (error/abort path) cannot recover
-		// the rows above the cap, so the footer must not promise ctrl+o.
+		// Completion without a full snapshot (error/abort path) leaves the
+		// retained tail, so the rows the footer counts stay recoverable and the
+		// expand hint must stay.
 		component.setComplete(0, false);
 		const collapsed = rowsOf(component).join("\n");
-		expect(collapsed).toContain("more lines");
-		expect(collapsed).not.toContain("to expand");
+		expect(collapsed).toContain(`… ${CAPPED_HIDDEN_LINES} more lines`);
+		expect(collapsed).toContain("to expand");
+		// The rows above the cap are gone for good, and the footer names them
+		// without advertising expand for them.
+		expect(collapsed).toContain(`… ${DROPPED_LINES} earlier lines dropped`);
 
+		// Expansion reaches the retained tail but not the dropped head.
 		component.setExpanded(true);
 		const expanded = rowsOf(component).join("\n");
+		expect(expanded).toContain(`… ${DROPPED_LINES} earlier lines dropped`);
+		expect(expanded).toContain("line-249");
+		expect(expanded).not.toContain("line-0");
 		expect(expanded).not.toContain("to expand");
 	});
 });
@@ -95,7 +107,7 @@ describe("ChatTranscriptBuilder bash replay", () => {
 		setThemeInstance(darkTheme);
 	});
 
-	function replayBash(bash: AgentMessage): BashExecutionComponent {
+	function replayBash(bash: AgentMessage): { builder: ChatTranscriptBuilder; component: BashExecutionComponent } {
 		const builder = new ChatTranscriptBuilder({
 			ui,
 			cwd: process.cwd(),
@@ -108,11 +120,11 @@ describe("ChatTranscriptBuilder bash replay", () => {
 			(child): child is BashExecutionComponent => child instanceof BashExecutionComponent,
 		);
 		if (!component) throw new Error("Expected a bash execution component");
-		return component;
+		return { builder, component };
 	}
 
 	it("seeds the recorded output whole so expansion reveals every line", () => {
-		const component = replayBash({
+		const { builder, component } = replayBash({
 			role: "bashExecution",
 			command: "seq 1 250",
 			output: REPLAY_OUTPUT,
@@ -126,7 +138,9 @@ describe("ChatTranscriptBuilder bash replay", () => {
 		expect(collapsed).toContain(`… ${HIDDEN_LINES} more lines`);
 		expect(collapsed).toContain("to expand");
 
-		component.setExpanded(true);
+		// Toggled through the builder, the way the rewind / copy / agent
+		// transcript views do: only registered components follow it.
+		builder.setExpanded(true);
 		const rendered = rowsOf(component);
 		for (const line of REPLAY_LINES) {
 			expect(rendered).toContain(line);
@@ -134,7 +148,7 @@ describe("ChatTranscriptBuilder bash replay", () => {
 	});
 
 	it("emits no output pane for an empty recorded result", () => {
-		const component = replayBash({
+		const { component } = replayBash({
 			role: "bashExecution",
 			command: "true",
 			output: "",
@@ -145,6 +159,10 @@ describe("ChatTranscriptBuilder bash replay", () => {
 		} as unknown as AgentMessage);
 
 		expect(component.getOutput()).toBe("");
-		expect(rowsOf(component).join("\n")).not.toContain("more lines");
+		// No output pane: the only rendered rows are the frame's borders and the
+		// command header, so there is neither a preview nor a status line.
+		const rows = rowsOf(component);
+		expect(rows).toHaveLength(3);
+		expect(rows[1]).toBe("$ true");
 	});
 });
