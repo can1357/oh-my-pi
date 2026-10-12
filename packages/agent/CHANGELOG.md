@@ -174,6 +174,9 @@
 ### Added
 
 - Added `AgentLoopConfig.onDetachedToolUpdate`: a tool's `onUpdate` frames that arrive after its run's event stream ended (a returned call whose background job keeps reporting) reach it instead of being dropped; `Agent` forwards them to its subscribers as `tool_execution_update` events
+### Fixed
+
+- Fixed streamed `message_update` snapshots aliasing a producer's live tool-call arguments: a `StreamFn` that grows `arguments` in place while carrying `kStreamingPartialJson` no longer retroactively rewrites the snapshots it already emitted ([#15221](https://github.com/can1357/oh-my-pi/pull/15221) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.9.2] - 2026-10-11
 

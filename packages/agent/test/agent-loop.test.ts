@@ -23,7 +23,12 @@ import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD, SPECULATIVE_STREAM_SESSION
 import type { AssistantMessage, AssistantMessageEvent, Context, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import { kCursorExecResolved, setStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import {
+	getStreamingPartialJson,
+	kCursorExecResolved,
+	kStreamingPartialJson,
+	setStreamingPartialJson,
+} from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import type { HarmonyDetection } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import * as harmonyLeak from "@oh-my-pi/pi-ai/utils/harmony-leak";
@@ -7280,6 +7285,95 @@ describe("agentLoop streaming snapshots", () => {
 		expect(block.arguments).toEqual({ meta: { tags: ["a", "x"] }, content: "x", ["__proto__"]: { k: 1 } });
 		expect(Object.hasOwn(block.arguments, "__proto__")).toBe(true);
 		expect(Object.getPrototypeOf(block.arguments)).toBe(Object.prototype);
+	});
+
+	it("freezes message_update snapshots against a custom StreamFn that grows carrier arguments in place", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const config: AgentLoopConfig = { model: createMockModel().model, convertToLlm: identityConverter };
+
+		// `StreamFn` is a public extension point, and the carrier contract
+		// (`kStreamingPartialJson`) promises only the partial-JSON buffer — never
+		// that `arguments` is replaced wholesale per delta. This producer appends
+		// to the buffer while mutating the live tree in place, so every snapshot
+		// it triggers must carry a deep copy of the containers it froze.
+		const args: Record<string, unknown> = JSON.parse('{"meta":{"tags":["a"]},"content":""}');
+		const buffer = '{"meta":{"tags":["a"]},"content":"';
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "tc-carrier-inplace",
+			name: "noop",
+			arguments: args,
+			[kStreamingPartialJson]: buffer,
+		};
+		const partial = createAssistantMessage([], "toolUse");
+		let advance = (): void => {};
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new AssistantMessageEventStream();
+			if (turn++ > 0) {
+				const done = createAssistantMessage([{ type: "text", text: "ok" }], "stop");
+				stream.push({ type: "start", partial: done });
+				stream.push({ type: "done", reason: "stop", message: done });
+				return stream;
+			}
+			stream.push({ type: "start", partial });
+			const steps: (() => void)[] = [
+				() => {
+					partial.content.push(toolCall);
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+				},
+				...["x", "y", "z"].map(delta => () => {
+					const meta = args.meta as { tags: string[] };
+					meta.tags.push(delta);
+					args.content = `${args.content}${delta}`;
+					stream.push({ type: "toolcall_delta", contentIndex: 0, delta, partial });
+				}),
+				() => stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial }),
+				() => stream.push({ type: "done", reason: "toolUse", message: partial }),
+			];
+			let step = 0;
+			advance = () => {
+				if (step < steps.length) steps[step++]!();
+			};
+			return stream;
+		};
+
+		type MessageUpdate = Extract<AgentEvent, { type: "message_update" }>;
+		type ToolCallBlock = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
+		const updates: MessageUpdate[] = [];
+		for await (const event of agentLoop([createUserMessage("go")], context, config, undefined, streamFn)) {
+			if (
+				event.type === "message_update" &&
+				event.message.role === "assistant" &&
+				event.message.content.some(c => c.type === "toolCall")
+			) {
+				updates.push(event);
+			}
+			if (
+				(event.type === "message_start" && event.message.role === "assistant") ||
+				event.type === "message_update"
+			) {
+				advance();
+			}
+		}
+
+		const frozenToolCall = (update: MessageUpdate): ToolCallBlock => {
+			if (update.message.role !== "assistant") throw new Error("expected assistant message_update");
+			const block = update.message.content.find(c => c.type === "toolCall");
+			if (block?.type !== "toolCall") throw new Error("expected toolCall block");
+			return block;
+		};
+		// One update per streamed event; the buffer string is immutable, so the
+		// fallback clone must not drop the carrier renderers read mid-stream.
+		expect(updates.length).toBe(5);
+		updates.forEach(update => expect(getStreamingPartialJson(frozenToolCall(update))).toBe(buffer));
+		// Every snapshot keeps the arguments it froze when it was emitted: the
+		// first delta's view still reads "x" once "y" and "z" have landed, and
+		// its nested `tags` array is a copy rather than the producer's live one.
+		expect(frozenToolCall(updates[0]!).arguments).toEqual({ meta: { tags: ["a"] }, content: "" });
+		expect(frozenToolCall(updates[1]!).arguments).toEqual({ meta: { tags: ["a", "x"] }, content: "x" });
+		expect(frozenToolCall(updates[2]!).arguments).toEqual({ meta: { tags: ["a", "x", "y"] }, content: "xy" });
+		expect(frozenToolCall(updates[3]!).arguments).toEqual({ meta: { tags: ["a", "x", "y", "z"] }, content: "xyz" });
 	});
 
 	it("shares one immutable snapshot between message and assistantMessageEvent.partial on message_update", async () => {
