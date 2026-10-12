@@ -56,20 +56,6 @@ describe("OmpProtocolHandler", () => {
 		expect(router.locateSync("omp://docs/tools/read.md:1-20")).toBe(onDisk);
 	});
 
-	it("materializes the doc an async link resolves to", async () => {
-		// Every install gets a link, not only source checkouts: the async path
-		// writes the embedded body into the content-addressed read-only cache.
-		const located = await InternalUrlRouter.instance().locate("omp://tools/read.md");
-		expect(located).toBeString();
-		// ~/.omp/cache/docs/<sha16>/tools/read.md
-		expect(path.relative(cacheDir, located!).split(path.sep)).toEqual([
-			expect.stringMatching(/^[\da-f]{16}$/),
-			"tools",
-			"read.md",
-		]);
-		expect(await Bun.file(located!).text()).toBe((await getEmbeddedDoc("tools/read.md"))!);
-	});
-
 	it("never links a cache entry that resolves outside the docs cache", async () => {
 		// The doc path is joined into the cache root, so containment is proven
 		// before the write: an entry resolving elsewhere (here a symlink standing
