@@ -9,9 +9,14 @@
 ### Changed
 
 - The in-composer tool approval prompt summarizes the command, path, or content to one row so the composer keeps its room; `Ctrl+O` shows them in full ([#15642](https://github.com/can1357/oh-my-pi/pull/15642) by [@H4vC](https://github.com/H4vC))
+- When several Codex or Claude accounts are blocked, auto-redeem now spends the saved reset that buys the most time instead of always the session's own: for Claude and for Codex weekly walls the account with the longest wait; for a Codex 5h wall, whose reset restarts the weekly window, the weekly time it brings forward less the weekly allowance it discards. The session's account still wins within an hour of the best ([#15128](https://github.com/can1357/oh-my-pi/pull/15128) by [@will-bogusz](https://github.com/will-bogusz))
 ### Changed
 
 - Background task guidance now lives in the Task tool description (and in same-name extension replacements that delegate to Task) instead of being repeated in every spawn acknowledgment ([#15477](https://github.com/can1357/oh-my-pi/pull/15477) by [@iliaal](https://github.com/iliaal))
+
+### Fixed
+
+- When two sessions on different accounts planned the same blocked-account reset (both waiting for consent, say), the one that asked second now shares the reset the first spent instead of failing on its old limit ([#15128](https://github.com/can1357/oh-my-pi/pull/15128) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.10.4] - 2026-10-13
 
@@ -94,10 +99,6 @@
 ### Fixed
 
 - Fixed `grep` on a single file showing in Tern as separate boxed snippets with no file row or syntax colors; it now looks the same as a `grep` over a directory
-
-### Changed
-
-- When several Codex or Claude accounts are blocked, auto-redeem now spends the saved reset that buys the most time instead of always the session's own: for Claude and for Codex weekly walls the account with the longest wait; for a Codex 5h wall, whose reset restarts the weekly window, the weekly time it brings forward less the weekly allowance it discards. The session's account still wins within an hour of the best ([#15128](https://github.com/can1357/oh-my-pi/pull/15128) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.10.0] - 2026-10-12
 

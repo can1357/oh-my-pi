@@ -826,6 +826,12 @@ export interface CodexAutoRedeemCoordinator {
 	/** Alternate lock root for isolated sessions (production uses the shared agent database path). */
 	resetLockPath?: string;
 	inFlightByAccount: Map<string, Promise<ResetRecoveryResult>>;
+	/**
+	 * Each blocked restore this process spent or is spending, by attempt key,
+	 * resolving to whether it reset: a session that planned the same restore
+	 * before the spend began shares its outcome.
+	 */
+	restoreSpends: Map<string, Promise<boolean>>;
 	sweepInFlight: boolean;
 	lastSweepAt: number;
 	/** Settlement of the most recently scheduled sweep (never rejects). */
@@ -840,6 +846,7 @@ export function createCodexAutoRedeemCoordinator(): CodexAutoRedeemCoordinator {
 		deferredUntilByKey: new Map(),
 		lastAttemptAtByAccount: new Map(),
 		inFlightByAccount: new Map(),
+		restoreSpends: new Map(),
 		sweepInFlight: false,
 		lastSweepAt: 0,
 		sweepPromise: undefined,

@@ -12902,10 +12902,21 @@ export class AgentSession implements SettingsScope {
 		const restored: number[] = [];
 		let poolLimited = false;
 		for (const action of actions) {
-			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
+			if (coordinator.attemptedKeys.has(action.attemptKey)) {
+				// Another session in this process planned the same restore and spent it
+				// first (both waited for consent, say): share its reset.
+				const peerSpend = coordinator.restoreSpends.get(action.attemptKey);
+				if (peerSpend && (await peerSpend) && !outsidePool(action)) {
+					await authStorage.credentials.revalidate();
+					restored.push(action.target.credentialId);
+				}
+				continue;
+			}
 			const previousAttemptAt = coordinator.lastAttemptAtByAccount.get(action.accountKey);
 			coordinator.attemptedKeys.add(action.attemptKey);
 			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
+			const spend = action.reason === "blocked-account" ? Promise.withResolvers<boolean>() : undefined;
+			if (spend) coordinator.restoreSpends.set(action.attemptKey, spend.promise);
 			let outcome: ResetCreditRedeemOutcome | undefined;
 			let sharedReset = false;
 			let leftPool = false;
@@ -12956,6 +12967,8 @@ export class AgentSession implements SettingsScope {
 				}
 			} catch (error) {
 				coordinator.attemptedKeys.delete(action.attemptKey);
+				coordinator.restoreSpends.delete(action.attemptKey);
+				spend?.resolve(false);
 				coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
 				logger.warn(`${source}: redeem threw, deferred`, {
 					account: action.accountKey,
@@ -12964,11 +12977,13 @@ export class AgentSession implements SettingsScope {
 				continue;
 			}
 			if (!outcome) {
+				spend?.resolve(sharedReset);
 				if (sharedReset) restored.push(action.target.credentialId);
 				if (leftPool) {
 					// Never attempted: the episode and cooldown stay free if the pool allows it again.
 					poolLimited = true;
 					coordinator.attemptedKeys.delete(action.attemptKey);
+					coordinator.restoreSpends.delete(action.attemptKey);
 					if (previousAttemptAt === undefined) coordinator.lastAttemptAtByAccount.delete(action.accountKey);
 					else coordinator.lastAttemptAtByAccount.set(action.accountKey, previousAttemptAt);
 					logger.debug(`${source}: restore dropped, account left the session's pool`, {
@@ -12977,8 +12992,10 @@ export class AgentSession implements SettingsScope {
 				}
 				continue;
 			}
+			spend?.resolve(outcome.code === "reset");
 			if (!isTerminalRedeemOutcome(outcome.code)) {
 				coordinator.attemptedKeys.delete(action.attemptKey);
+				coordinator.restoreSpends.delete(action.attemptKey);
 				coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
 			}
 			switch (outcome.code) {

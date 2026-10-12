@@ -261,15 +261,12 @@ describe("Claude saved-reset trigger integration", () => {
 	}
 
 	/**
-	 * Stores the session's account and one outside its pool, pools the session to
-	 * its own, and lists both as blocked with a saved reset. The outside account's
-	 * weekly wall clears in `outsideWaitMs` and its reset is far from expiry, so
-	 * only a restore could spend it.
+	 * Stores the session's account and a second one, and lists both as blocked
+	 * with a saved reset. The second account's weekly wall clears in
+	 * `outsideWaitMs` and its reset is far from expiry, so only a restore could
+	 * spend it. Remove both with `authStorage.credentials.remove("anthropic")`.
 	 */
-	async function poolToSessionAccount(
-		session: AgentSession,
-		outsideWaitMs: number,
-	): Promise<{ pooledId: number; outsideId: number; release: () => Promise<void> }> {
+	async function storeLongerBlockedAccount(outsideWaitMs: number): Promise<{ ownId: number; outsideId: number }> {
 		await authStorage.credentials.set(
 			"anthropic",
 			[
@@ -308,10 +305,19 @@ describe("Claude saved-reset trigger integration", () => {
 			{ ...claudeStatus(true), credentialId: pooled.id },
 			outsideStatus,
 		]);
+		return { ownId: pooled.id, outsideId: outside.id };
+	}
+
+	/** {@link storeLongerBlockedAccount}, with the session pooled to its own account. */
+	async function poolToSessionAccount(
+		session: AgentSession,
+		outsideWaitMs: number,
+	): Promise<{ pooledId: number; outsideId: number; release: () => Promise<void> }> {
+		const { ownId, outsideId } = await storeLongerBlockedAccount(outsideWaitMs);
 		const lease = authStorage.sessions.restrict("anthropic", session.sessionId, [`email:${EMAIL}|org:${ORG_ID}`]);
 		return {
-			pooledId: pooled.id,
-			outsideId: outside.id,
+			pooledId: ownId,
+			outsideId,
 			release: async () => {
 				authStorage.sessions.unrestrict("anthropic", session.sessionId, lease);
 				await authStorage.credentials.remove("anthropic");
@@ -698,6 +704,65 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(spent).toEqual([pool.outsideId, pool.pooledId]);
 		expect(pooled.modelCalls()).toBe(2);
 		for (const { session } of [open, pooled]) {
+			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		}
+	});
+
+	it("shares one restore of a longer-blocked account between sessions on different accounts that both asked consent", async () => {
+		const quota = { restored: false };
+		// The sessions share one prompt UI: the first prompt answers once both are
+		// waiting, the second only after the first has spent.
+		let prompts = 0;
+		const bothAsked = Promise.withResolvers<void>();
+		const firstSpent = Promise.withResolvers<void>();
+		const consent = async (): Promise<string> => {
+			prompts++;
+			if (prompts === 2) bothAsked.resolve();
+			await (prompts === 1 ? bothAsked.promise : firstSpent.promise);
+			return "Yes";
+		};
+		const first = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			quota,
+			consent,
+		});
+		const second = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			quota,
+			coordinator: first.coordinator,
+			consent,
+		});
+		// Different session accounts, so each runs its own blocked pass; both plan the longer-blocked one.
+		vi.spyOn(authStorage.oauth, "identity").mockImplementation((_provider, sessionId) =>
+			sessionId === second.session.sessionId
+				? { accountId: "claude-second", email: "second@example.com", orgId: "org-second" }
+				: { accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID },
+		);
+		const { outsideId } = await storeLongerBlockedAccount(6 * 24 * HOUR);
+		const spent = recordSpends(credentialId => {
+			if (credentialId !== outsideId) return undefined;
+			firstSpent.resolve();
+			return quota;
+		});
+		mockSchedulerWaitWithClock();
+
+		try {
+			await Promise.all([first.session.prompt("first blocked turn"), second.session.prompt("second blocked turn")]);
+			await Promise.all([first.session.waitForIdle(), second.session.waitForIdle()]);
+		} finally {
+			await authStorage.credentials.remove("anthropic");
+		}
+
+		expect(spent).toEqual([outsideId]);
+		for (const { session } of [first, second]) {
 			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 		}
 	});
