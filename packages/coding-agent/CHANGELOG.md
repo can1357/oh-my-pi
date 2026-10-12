@@ -32,6 +32,7 @@
 - Fixed reading `proc://<id>/kill` or `proc://<id>/mode` answering only "writable only", so agents often moved on with the job still running; the error now names the `write` call that cancels the job or sets the mode, with the real id ([#16580](https://github.com/can1357/oh-my-pi/pull/16580) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `history://<id>` failing with "has no transcript: session is gone" for a worker that is still running but has not created its session or transcript file yet; it now answers "No transcript has been written yet". ([#16645](https://github.com/can1357/oh-my-pi/pull/16645) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the `eval` tool telling sessions with only the Python runtime to call `tool.<name>(args)` without `await`, which returns a coroutine and never runs the tool ([#16578](https://github.com/can1357/oh-my-pi/pull/16578) by [@will-bogusz](https://github.com/will-bogusz))
+- A page calling `window.print()` in a Chromium tab no longer freezes behind the print preview and times out the browser call: omp holds it, the page carries on as after a finished print, and the call says so (pointing at `tab.pdf()`) ([#15508](https://github.com/can1357/oh-my-pi/pull/15508) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.6] - 2026-10-21
 
@@ -595,10 +596,6 @@
 - Fixed anonymized session exports losing whether bash timing was shown ([#15468](https://github.com/can1357/oh-my-pi/pull/15468) by [@iliaal](https://github.com/iliaal))
 - Added `omp --restore <session>`: resumes a session like `--resume`, then goes on with what its last process left unfinished when it crashed or was killed, both the interrupted turn and the subagents it was running (their results reach the parent as usual); Tern's session daemon now restarts omp with it after a crash
 - Kept private prompt-cache routing keys out of shared sessions and HTML exports ([#15467](https://github.com/can1357/oh-my-pi/pull/15467) by [@iliaal](https://github.com/iliaal))
-
-### Fixed
-
-- A page calling `window.print()` in a Chromium tab no longer freezes behind the print preview and times out the browser call: omp holds it, the page carries on as after a finished print, and the call says so (pointing at `tab.pdf()`) ([#15508](https://github.com/can1357/oh-my-pi/pull/15508) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.10.2] - 2026-10-12
 
