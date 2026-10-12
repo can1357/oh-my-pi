@@ -1,7 +1,7 @@
 import type { Protocol } from "devtools-protocol";
-import type { CDPSession, NewDocumentScriptEvaluation, Page } from "puppeteer-core";
+import type { CDPSession, Page } from "puppeteer-core";
 
-/** CDP binding a held `print()` reports through; Chrome adds it to every document of the tab. */
+/** CDP binding a held `print()` reports through; Chrome adds it to every document the tab's own renderer loads. */
 const PRINT_BINDING = "__ompPrintRequested";
 /** `Symbol.for` key of the page flag the wrapper reads: hold `print()` while it is true. */
 const HOLD_KEY = "omp.holdPrint";
@@ -30,7 +30,7 @@ function holdPrintInPage(binding: string, holdKey: string, held: boolean): void 
 	realm[hold] = held;
 	if (realm[wrapped]) return;
 	realm[wrapped] = true;
-	// A proxy keeps the native function's name, length and `[native code]` source.
+	// A proxy keeps the native function's name and length, and its source still reads `[native code]`.
 	realm.print = new Proxy(realm.print, {
 		apply(print, thisArg, args) {
 			if (realm[hold] !== true) return Reflect.apply(print, thisArg, args);
@@ -46,12 +46,14 @@ function holdPrintInPage(binding: string, holdKey: string, held: boolean): void 
  * Holds the page's `window.print()`. Chrome's print preview blocks the page's script until someone closes it, so a
  * click on a Print button timed out the call, wedged the calls after it, and raised the preview window over the
  * user's screen; held, the page goes on as after a finished print and the call's output says what happened.
+ * Only the tab's own renderer is touched: cross-site iframes run in other processes and print as before, so a stuck
+ * one never holds up a call.
  */
 export class PrintHold {
 	readonly #page: Page;
 	readonly #session: CDPSession;
 	readonly #scope: PrintHoldScope;
-	#script: NewDocumentScriptEvaluation | undefined;
+	#scriptId: string | undefined;
 	#held = false;
 	#requests = 0;
 	#releaseTimer: NodeJS.Timeout | undefined;
@@ -68,6 +70,7 @@ export class PrintHold {
 	static async install(page: Page, scope: PrintHoldScope): Promise<PrintHold> {
 		const session = await page.createCDPSession();
 		const printHold = new PrintHold(page, session, scope);
+		await session.send("Page.enable");
 		await session.send("Runtime.enable");
 		await session.send("Runtime.addBinding", { name: PRINT_BINDING });
 		await printHold.#apply(scope === "tab");
@@ -102,8 +105,10 @@ export class PrintHold {
 		clearTimeout(this.#releaseTimer);
 		this.#releaseTimer = undefined;
 		await this.#applying;
-		if (this.#script) await this.#page.removeScriptToEvaluateOnNewDocument(this.#script.identifier);
-		this.#script = undefined;
+		if (this.#scriptId) {
+			await this.#session.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: this.#scriptId });
+		}
+		this.#scriptId = undefined;
 		// The wrapper stays in loaded documents; released, it is the page's own print() again.
 		await this.#setInFrames(false);
 		await this.#session.send("Runtime.removeBinding", { name: PRINT_BINDING });
@@ -118,23 +123,31 @@ export class PrintHold {
 	#apply(held: boolean): Promise<void> {
 		this.#held = held;
 		const applied = this.#applying.then(async () => {
-			const previous = this.#script;
-			this.#script = await this.#page.evaluateOnNewDocument(holdPrintInPage, PRINT_BINDING, HOLD_KEY, held);
-			if (previous) await this.#page.removeScriptToEvaluateOnNewDocument(previous.identifier);
+			const previous = this.#scriptId;
+			const { identifier } = await this.#session.send("Page.addScriptToEvaluateOnNewDocument", {
+				source: `(${holdPrintInPage})(${JSON.stringify(PRINT_BINDING)}, ${JSON.stringify(HOLD_KEY)}, ${held});`,
+			});
+			this.#scriptId = identifier;
+			if (previous) await this.#session.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: previous });
 			await this.#setInFrames(held);
 		});
 		this.#applying = applied.catch(() => undefined);
 		return applied;
 	}
 
+	/** Updates the documents already loaded in the tab's own renderer: the main frame and its same-site iframes. */
 	async #setInFrames(held: boolean): Promise<void> {
+		const client = this.#page.mainFrame().client;
 		await Promise.all(
-			this.#page.frames().map(frame =>
-				frame
-					.mainRealm()
-					.evaluate(holdPrintInPage, PRINT_BINDING, HOLD_KEY, held)
-					.catch(() => undefined),
-			),
+			this.#page
+				.frames()
+				.filter(frame => frame.client === client)
+				.map(frame =>
+					frame
+						.mainRealm()
+						.evaluate(holdPrintInPage, PRINT_BINDING, HOLD_KEY, held)
+						.catch(() => undefined),
+				),
 		);
 	}
 }
