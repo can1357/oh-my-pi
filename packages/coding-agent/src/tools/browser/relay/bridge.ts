@@ -220,6 +220,8 @@ class TabState {
 	reattachedAfterDetach = false;
 	/** The relay asked the extension to close this tab (`Target.closeTarget`); its coming detach is not Chrome's own. */
 	closing = false;
+	/** Tab-wide switches whose last change never reached the extension (its socket was down or the send failed). */
+	readonly unsettledSwitches = new Set<TabWideSwitch>();
 	/** True after the relay put this tab in the omp group; `ompGroupId` holds that group. */
 	grouped = false;
 	/** Group RPC in flight — suppresses duplicate requests from load-time tabUpdated bursts. */
@@ -732,6 +734,14 @@ export class RelayBridge {
 				this.#retractTab(tab);
 				this.#detachIfUnheld(tab.tabKey);
 				continue;
+			}
+			// An attachment that outlived the extension's socket kept its switches, including any a release could not
+			// turn off while the socket was down: bring those to what the tab's live sessions want now.
+			const unsettled = [...tab.unsettledSwitches];
+			tab.unsettledSwitches.clear();
+			if (tab.attached) {
+				for (const method of unsettled)
+					this.#sendSwitch(tab.tabKey, method, this.#switchWanted(tab.tabKey, method));
 			}
 			// A service-worker restart can drop attachments while downstream
 			// connections still hold sessions: restore them best-effort.
@@ -1964,9 +1974,15 @@ export class RelayBridge {
 		void this.#serializeSwitches(tabKey, method, async () => {
 			if (this.#switchWanted(tabKey, method) !== enabled) return;
 			const tab = this.#tabs.get(tabKey);
-			const inst = tab?.attached ? this.#instances.get(tab.instanceId) : undefined;
-			if (!tab || !inst) return;
-			await this.#rpc({ op: "send", tabId: tab.tabId, method, params: { enabled } }, inst).catch(() => {});
+			if (!tab) return;
+			const inst = tab.attached ? this.#instances.get(tab.instanceId) : undefined;
+			if (!inst?.socket) {
+				tab.unsettledSwitches.add(method);
+				return;
+			}
+			await this.#rpc({ op: "send", tabId: tab.tabId, method, params: { enabled } }, inst).catch(() => {
+				tab.unsettledSwitches.add(method);
+			});
 		});
 	}
 
