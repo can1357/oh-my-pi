@@ -16,6 +16,7 @@ import {
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
+import type { Settings } from "../config/settings";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
@@ -342,6 +343,33 @@ function discoverAgentsShared(cwd: string, extensionRoots?: EffectiveExtensionRo
 	return promise;
 }
 
+/** Exact-name `task.agent*` entries task and eval dispatch apply to one agent. */
+export interface AgentSettingsEntries {
+	/** `task.agentModelOverrides` entry. */
+	model?: string | string[];
+	/** `task.agentServiceTierOverrides` entry, applied after model resolution. */
+	serviceTier?: ServiceTierInheritSettingValue;
+	/** `task.agentCompactionThresholdOverrides` entry, normalized to both child compaction threshold fields. */
+	compactionThreshold?: CompactionThresholdPair;
+	/** `task.agentAccountPools` entry: the only OAuth accounts the child may use, per listed provider. */
+	accountPools?: OAuthAccountPools;
+}
+
+/** The exact-name `task.agent*` entries for `agentName`; a malformed map throws. */
+export function resolveAgentSettingsEntries(settings: Settings, agentName: string): AgentSettingsEntries {
+	const serviceTiers = validateAgentServiceTierOverrides(cfgTaskAgentServiceTierOverrides.get(settings));
+	const compactionThresholds = validateAgentCompactionThresholdOverrides(
+		cfgTaskAgentCompactionThresholdOverrides.get(settings),
+	);
+	const accountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(settings));
+	return {
+		model: cfgTaskAgentModelOverrides.get(settings)[agentName],
+		serviceTier: Object.hasOwn(serviceTiers, agentName) ? serviceTiers[agentName] : undefined,
+		compactionThreshold: Object.hasOwn(compactionThresholds, agentName) ? compactionThresholds[agentName] : undefined,
+		accountPools: Object.hasOwn(accountPools, agentName) ? accountPools[agentName] : undefined,
+	};
+}
+
 /**
  * Resolve every policy shared by task and eval before allocating artifacts or
  * dispatching work. Callers translate {@link StructuredSubagentError} into
@@ -413,26 +441,12 @@ export async function resolveEffectiveSubagentPolicy(
 			throw new StructuredSubagentError("preflight", `Invalid ${scope} output schema: ${error}`);
 		}
 	}
-	const agentModelOverrides = cfgTaskAgentModelOverrides.get(request.session.settings);
-	const agentServiceTierOverrides = validateAgentServiceTierOverrides(
-		cfgTaskAgentServiceTierOverrides.get(request.session.settings),
-	);
-	const serviceTierOverride = Object.hasOwn(agentServiceTierOverrides, agentName)
-		? agentServiceTierOverrides[agentName]
-		: undefined;
-	const compactionThresholdOverrides = validateAgentCompactionThresholdOverrides(
-		cfgTaskAgentCompactionThresholdOverrides.get(request.session.settings),
-	);
-	const compactionThresholdOverride = Object.hasOwn(compactionThresholdOverrides, agentName)
-		? compactionThresholdOverrides[agentName]
-		: undefined;
-	const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(request.session.settings));
-	const oauthAccountPools = Object.hasOwn(agentAccountPools, agentName) ? agentAccountPools[agentName] : undefined;
+	const entries = resolveAgentSettingsEntries(request.session.settings, agentName);
 	const hasPreparedSeance = preparedSeance !== undefined;
 	const parentActiveModelPattern = hasPreparedSeance ? undefined : request.session.getActiveModelString?.();
 	const modelResolution = {
 		requestModel: preparedSeance?.modelPatterns ?? request.model,
-		settingsOverride: hasPreparedSeance ? undefined : agentModelOverrides[agentName],
+		settingsOverride: hasPreparedSeance ? undefined : entries.model,
 		agentModel: hasPreparedSeance ? undefined : effectiveAgent.model,
 		settings: request.session.settings,
 		activeModelPattern: parentActiveModelPattern,
@@ -458,9 +472,9 @@ export async function resolveEffectiveSubagentPolicy(
 		modelOverride,
 		preparedSession: preparedSeance?.session,
 		modelRole,
-		serviceTierOverride,
-		compactionThresholdOverride,
-		oauthAccountPools,
+		serviceTierOverride: entries.serviceTier,
+		compactionThresholdOverride: entries.compactionThreshold,
+		oauthAccountPools: entries.accountPools,
 		parentActiveModelPattern,
 		structured,
 		schema,
