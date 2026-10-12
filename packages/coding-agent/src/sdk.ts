@@ -31,6 +31,7 @@ import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-co
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
@@ -48,6 +49,7 @@ import {
 } from "./advisor";
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
+import { resolveAutolearnScribeModel } from "./autolearn/scribe";
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability, reset as resetCapabilities } from "./capability";
 import {
@@ -159,6 +161,7 @@ import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
+import autolearnScribeTemplate from "./prompts/system/autolearn-scribe.md" with { type: "text" };
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -1574,6 +1577,10 @@ export interface AutoLearnCaptureRunnerOptions {
 	sourceAgent: Agent;
 	/** Resolves the capture tools per run, so live `autolearn.enabled` / backend changes apply. */
 	captureTools: () => AgentTool[];
+	/** Resolves the pass model per run; the source agent's model when omitted. */
+	model?: () => Model | undefined | Promise<Model | undefined>;
+	/** Extra system-prompt block for this pass, appended after the source prompt. */
+	systemPromptAppend?: string;
 	createAgent: (options: AgentOptions) => Agent;
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
@@ -1587,7 +1594,7 @@ export function createAutoLearnCaptureRunner(
 	return async (content, signal) => {
 		const captureTools = options.captureTools();
 		if (captureTools.length === 0 || signal?.aborted) return;
-		const captureModel = options.sourceAgent.state.model;
+		const captureModel = options.model ? await options.model() : options.sourceAgent.state.model;
 		if (!captureModel) return;
 
 		const captureSessionId = options.createSessionId?.() ?? Bun.randomUUIDv7();
@@ -1603,9 +1610,11 @@ export function createAutoLearnCaptureRunner(
 		});
 		const captureAgent = options.createAgent({
 			initialState: {
-				systemPrompt: [...options.sourceAgent.state.systemPrompt],
+				systemPrompt: options.systemPromptAppend
+					? [...options.sourceAgent.state.systemPrompt, options.systemPromptAppend]
+					: [...options.sourceAgent.state.systemPrompt],
 				model: captureModel,
-				thinkingLevel: options.sourceAgent.state.thinkingLevel,
+				thinkingLevel: clampThinkingLevelForModel(captureModel, options.sourceAgent.state.thinkingLevel),
 				disableReasoning: options.sourceAgent.state.disableReasoning,
 				tools: captureTools,
 				messages: captureMessages,
@@ -5149,7 +5158,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			});
 		};
 
-		const runAutoLearnCapture = createAutoLearnCaptureRunner({
+		const autoLearnRunnerOptions = {
 			sourceAgent: agent,
 			captureTools: () =>
 				(["manage_skill", "learn"] as const)
@@ -5213,6 +5222,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						: undefined,
 				});
 			},
+		} satisfies Omit<AutoLearnCaptureRunnerOptions, "model" | "systemPromptAppend">;
+
+		const runAutoLearnCapture = createAutoLearnCaptureRunner(autoLearnRunnerOptions);
+		// The scribe shares the capture plumbing but chooses its own model and
+		// carries its own standing instructions. `model` resolves per run, so a
+		// session that never has a scribe model simply never scribes.
+		const runAutoLearnScribe = createAutoLearnCaptureRunner({
+			...autoLearnRunnerOptions,
+			model: () => resolveAutolearnScribeModel(settings, modelRegistry),
+			systemPromptAppend: autolearnScribeTemplate.trim(),
 		});
 
 		// Auto-learn can immediately trigger a private capture after the first real
@@ -5239,6 +5258,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					session,
 					settings,
 					capture: content => session.runAutolearnCapture(signal => runAutoLearnCapture(content, signal)),
+					scribe: content => session.runAutolearnCapture(signal => runAutoLearnScribe(content, signal)),
 				});
 			}
 		}

@@ -1,10 +1,19 @@
 /**
  * Auto-learn session controller (experimental).
  *
- * Subscribes to the session event stream and, after a substantive turn,
- * optionally auto-runs a synthetic capture turn. Passive mode is intentionally
- * prompt-cache neutral: the standing system guidance remains available, but no
- * hidden mid-session reminder is inserted into the conversation.
+ * Subscribes to the session event stream and runs at most one private pass per
+ * substantive stop, choosing between two disjoint ones:
+ *
+ *   * a *terminal* settle — the session went idle — belongs to the scribe: a
+ *     small model re-reads the finished session for reusable procedures, gated
+ *     by `autolearn.scribe` and by a wired scribe runner;
+ *   * every other substantive stop belongs to the capture nudge for the primary
+ *     model, gated by `autolearn.autoContinue`.
+ *
+ * Disjointness is the point: a stop is never paid for twice. Passive mode is
+ * intentionally prompt-cache neutral: the standing system guidance remains
+ * available, but no hidden mid-session reminder is inserted into the
+ * conversation.
  *
  * Installed once per top-level session (taskDepth 0) regardless of
  * `autolearn.enabled`: every stop re-reads the live setting, so toggling it
@@ -17,11 +26,21 @@ import type { Settings } from "../config/settings";
 import autolearnGuidance from "../prompts/system/autolearn-guidance.md" with { type: "text" };
 import autolearnGuidanceLearn from "../prompts/system/autolearn-guidance-learn.md" with { type: "text" };
 import autolearnNudgeAutoContinue from "../prompts/system/autolearn-nudge-autocontinue.md" with { type: "text" };
+import autolearnScribeNudge from "../prompts/system/autolearn-scribe-nudge.md" with { type: "text" };
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 
-import { cfgAutolearnAutoContinue, cfgAutolearnEnabled, cfgAutolearnMinToolCalls } from "./settings";
+import {
+	cfgAutolearnAutoContinue,
+	cfgAutolearnEnabled,
+	cfgAutolearnMinToolCalls,
+	cfgAutolearnScribe,
+} from "./settings";
 
-const AUTOLEARN_NUDGE_AUTOCONTINUE = autolearnNudgeAutoContinue.trim();
+const CAPTURE_NUDGE = autolearnNudgeAutoContinue.trim();
+const SCRIBE_NUDGE = autolearnScribeNudge.trim();
+
+/** The private pass a stop is eligible for; the two never share a stop. */
+type AutoLearnPass = "capture" | "scribe";
 
 /**
  * Build the standing auto-learn guidance for the system prompt from the tools
@@ -44,12 +63,18 @@ export interface AutoLearnControllerOptions {
 	session: AgentSession;
 	settings: Settings;
 	capture: (content: string) => Promise<void>;
+	/**
+	 * Optional: wired only where a scribe model can resolve. Absent, a terminal
+	 * settle falls back to the capture nudge rather than running nothing.
+	 */
+	scribe?: (content: string) => Promise<void>;
 }
 
 export class AutoLearnController {
 	readonly #session: AgentSession;
 	readonly #settings: Settings;
 	readonly #capture: (content: string) => Promise<void>;
+	readonly #scribe: ((content: string) => Promise<void>) | undefined;
 	#toolCalls = 0;
 	/**
 	 * Whether the in-flight turn BEGAN while goal mode was active. Captured at
@@ -58,15 +83,15 @@ export class AutoLearnController {
 	 * would let a goal-continuation turn slip through and get nudged.
 	 */
 	#turnStartedInGoalMode = false;
-	/** Prevent overlapping private capture runs while real primary turns continue. */
-	#captureInFlight = false;
-	/** One newer eligible primary stop arrived while capture was running. */
-	#capturePending = false;
+	/** The pass now running, plus one newer eligible pass waiting behind it. */
+	#passInFlight: AutoLearnPass | undefined;
+	#passPending: AutoLearnPass | undefined;
 
 	constructor(options: AutoLearnControllerOptions) {
 		this.#session = options.session;
 		this.#settings = options.settings;
 		this.#capture = options.capture;
+		this.#scribe = options.scribe;
 		// The listener closure captures `this`, so the session's listener array
 		// keeps the controller alive — no stored unsubscribe needed.
 		this.#session.subscribe(event => this.#onEvent(event));
@@ -122,32 +147,44 @@ export class AutoLearnController {
 		// auto-continue would compete with it.
 		if (startedInGoalMode || this.#session.getGoalModeState()?.enabled) return;
 
+		// A terminal settle means the session is idle, and that stop belongs to
+		// the scribe alone. Without one — disabled, or no model resolved — the
+		// capture nudge keeps the stop, so the scribe flag never silences capture.
+		if (event.isTerminal === true && this.#scribe && cfgAutolearnScribe.get(this.#settings)) {
+			this.#schedule("scribe");
+			return;
+		}
+
 		// Auto-run a capture turn only when explicitly enabled. Passive mode used to
 		// queue a hidden custom message for the next real turn, but that mutates the
 		// persisted conversation prefix after providers have cached it. The standing
 		// auto-learn system guidance is stable; keep passive mode to that guidance
 		// so Anthropic prompt-cache prefixes survive long sessions.
-		const autoContinue = cfgAutolearnAutoContinue.get(this.#settings) === true;
-		if (!autoContinue) return;
-
-		if (this.#captureInFlight) {
-			this.#capturePending = true;
-			return;
-		}
-		this.#startCapture();
+		if (cfgAutolearnAutoContinue.get(this.#settings) !== true) return;
+		this.#schedule("capture");
 	}
 
-	#startCapture(): void {
-		this.#captureInFlight = true;
-		void this.#capture(AUTOLEARN_NUDGE_AUTOCONTINUE)
+	#schedule(pass: AutoLearnPass): void {
+		if (this.#passInFlight) {
+			this.#passPending = pass;
+			return;
+		}
+		this.#start(pass);
+	}
+
+	#start(pass: AutoLearnPass): void {
+		const run = pass === "scribe" ? this.#scribe : this.#capture;
+		if (!run) return;
+		this.#passInFlight = pass;
+		void run(pass === "scribe" ? SCRIBE_NUDGE : CAPTURE_NUDGE)
 			.catch(err => {
-				logger.warn("auto-learn capture failed", { err });
+				logger.warn("auto-learn pass failed", { pass, err });
 			})
 			.finally(() => {
-				this.#captureInFlight = false;
-				if (!this.#capturePending) return;
-				this.#capturePending = false;
-				this.#startCapture();
+				this.#passInFlight = undefined;
+				const next = this.#passPending;
+				this.#passPending = undefined;
+				if (next) this.#start(next);
 			});
 	}
 }

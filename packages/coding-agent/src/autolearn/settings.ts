@@ -36,3 +36,22 @@ export const cfgAutolearnAutoContinue = register({
 
 // Config-file-only knob (numbers without `options` are hidden from the UI).
 export const cfgAutolearnMinToolCalls = register({ id: "autolearn.minToolCalls", type: "number", default: 5 });
+
+// Both below gate the session-settle scribe (see `autolearn/controller.ts`): a
+// small model re-reads the finished session and mints managed skills from it.
+export const cfgAutolearnScribe = register({
+	id: "autolearn.scribe",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "memory",
+		group: "Auto-Learn",
+		label: "Scribe pass at session settle",
+		description:
+			"When on, a small model reads the settled session and mints/enhances managed skills for its reusable procedures (uses extra tokens)",
+		condition: "autolearnActive",
+	},
+});
+
+/** Scribe model selector; empty means the `smol` role (see `resolveAutolearnScribeModel`). */
+export const cfgAutolearnModel = register({ id: "autolearn.model", type: "string", default: undefined });

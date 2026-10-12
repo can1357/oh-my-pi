@@ -16,6 +16,7 @@ import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/setting
 class FakeSession {
 	readonly listeners: Array<(event: AgentSessionEvent) => void> = [];
 	readonly captures: string[] = [];
+	readonly scribes: string[] = [];
 	planEnabled = false;
 	goalEnabled = false;
 	captureGate: Promise<void> | undefined;
@@ -28,6 +29,14 @@ class FakeSession {
 
 	async capture(content: string): Promise<void> {
 		this.captures.push(content);
+		const gate = this.captureGate;
+		const error = this.captureError;
+		if (gate) await gate;
+		if (error) throw error;
+	}
+
+	async scribe(content: string): Promise<void> {
+		this.scribes.push(content);
 		const gate = this.captureGate;
 		const error = this.captureError;
 		if (gate) await gate;
@@ -60,6 +69,10 @@ class FakeSession {
 	agentEnd(messages: AgentMessage[] = []): void {
 		this.emit({ type: "agent_end", messages });
 	}
+
+	agentSettled(): void {
+		this.emit({ type: "agent_end", messages: [], isTerminal: true });
+	}
 }
 
 function install(session: FakeSession, overrides: Record<string, unknown> = {}): Settings {
@@ -68,6 +81,7 @@ function install(session: FakeSession, overrides: Record<string, unknown> = {}):
 		session: session as unknown as AgentSession,
 		settings,
 		capture: content => session.capture(content),
+		scribe: content => session.scribe(content),
 	});
 	return settings;
 }
@@ -323,6 +337,61 @@ describe("AutoLearnController", () => {
 		};
 		session.agentEnd([abortedMessage]);
 		expect(session.captures).toHaveLength(0);
+	});
+
+	it("runs the scribe on a terminal settle instead of the capture nudge", () => {
+		const session = new FakeSession();
+		install(session, { "autolearn.autoContinue": true, "autolearn.scribe": true });
+		session.toolCalls(5);
+		session.agentSettled();
+		expect(session.captures).toHaveLength(0);
+		expect(session.scribes).toHaveLength(1);
+	});
+
+	it("does not scribe a non-terminal stop", () => {
+		const session = new FakeSession();
+		install(session, { "autolearn.autoContinue": true, "autolearn.scribe": true });
+		session.toolCalls(5);
+		session.agentEnd();
+		expect(session.scribes).toHaveLength(0);
+		expect(session.captures).toHaveLength(1);
+	});
+
+	it("keeps the capture nudge on a terminal settle while the scribe is off", () => {
+		const session = new FakeSession();
+		install(session, { "autolearn.autoContinue": true });
+		session.toolCalls(5);
+		session.agentSettled();
+		expect(session.scribes).toHaveLength(0);
+		expect(session.captures).toHaveLength(1);
+	});
+
+	it("skips the scribe below the threshold and fires it on a later substantive settle", () => {
+		const session = new FakeSession();
+		install(session, { "autolearn.scribe": true });
+		session.toolCalls(4);
+		session.agentSettled();
+		expect(session.scribes).toHaveLength(0);
+		session.toolCalls(5);
+		session.agentSettled();
+		expect(session.scribes).toHaveLength(1);
+	});
+
+	it("holds a terminal settle's scribe behind an in-flight capture", async () => {
+		const session = new FakeSession();
+		const release = Promise.withResolvers<void>();
+		session.captureGate = release.promise;
+		install(session, { "autolearn.autoContinue": true, "autolearn.scribe": true });
+		session.toolCalls(5);
+		session.agentEnd();
+		session.toolCalls(5);
+		session.agentSettled();
+		expect(session.captures).toHaveLength(1);
+		expect(session.scribes).toHaveLength(0);
+		session.captureGate = undefined;
+		release.resolve();
+		await settleCaptures();
+		expect(session.scribes).toHaveLength(1);
 	});
 });
 
