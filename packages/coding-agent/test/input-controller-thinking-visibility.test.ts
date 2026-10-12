@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
@@ -57,15 +58,18 @@ describe("InputController thinking visibility", () => {
 		const resetOrder: string[] = [];
 		const resetDisplay = vi.fn(() => resetOrder.push("display"));
 		const resetStableEmission = vi.fn(() => resetOrder.push("stable emission"));
-		const ctx = {
+		const ctx = createInteractiveModeContext({
 			hideThinkingBlock: false,
-			// Effective after the toggle: thinking is off but reasoning content was
-			// observed, so the auto-hide no longer applies and the effective flag
-			// follows the preference (see the dedicated propagation test below).
-			effectiveHideThinkingBlock: true,
+			// Mirrors InteractiveMode.effectiveHideThinkingBlock: the helper writes
+			// ctx.hideThinkingBlock before propagating, so the fake must derive the
+			// effective value instead of freezing it.
+			get effectiveHideThinkingBlock(): boolean {
+				const thinkingOff = (this.session?.thinkingLevel ?? ThinkingLevel.Off) === ThinkingLevel.Off;
+				return this.hideThinkingBlock || (thinkingOff && !this.hasDisplayableThinkingContent);
+			},
 			hasDisplayableThinkingContent: true,
 			settings,
-			session: { agent: { hideThinkingSummary: false }, thinkingLevel: "off" },
+			session: { agent: { hideThinkingSummary: false }, thinkingLevel: ThinkingLevel.Off },
 			chatContainer: {
 				children: [assistant],
 				clear: vi.fn(),
@@ -76,7 +80,7 @@ describe("InputController thinking visibility", () => {
 			streamingMessage: undefined,
 			showStatus,
 			ui: { resetDisplay },
-		} as unknown as InteractiveModeContext;
+		});
 
 		new InputController(ctx).toggleThinkingBlockVisibility();
 
@@ -177,15 +181,18 @@ describe("InputController thinking visibility", () => {
 		const resetOrder: string[] = [];
 		const resetDisplay = vi.fn(() => resetOrder.push("display"));
 		const resetStableEmission = vi.fn(() => resetOrder.push("stable emission"));
-		const ctx = {
+		const ctx = createInteractiveModeContext({
 			hideThinkingBlock: false,
-			// Effective after the toggle: thinking is on, so the auto-hide never
-			// applies and the effective flag follows the preference (see the
-			// dedicated propagation test below).
-			effectiveHideThinkingBlock: true,
+			// Mirrors InteractiveMode.effectiveHideThinkingBlock: the helper writes
+			// ctx.hideThinkingBlock before propagating, so the fake must derive the
+			// effective value instead of freezing it.
+			get effectiveHideThinkingBlock(): boolean {
+				const thinkingOff = (this.session?.thinkingLevel ?? ThinkingLevel.Off) === ThinkingLevel.Off;
+				return this.hideThinkingBlock || (thinkingOff && !this.hasDisplayableThinkingContent);
+			},
 			hasDisplayableThinkingContent: true,
 			settings,
-			session: { agent: { hideThinkingSummary: false }, thinkingLevel: "high" },
+			session: { agent: { hideThinkingSummary: false }, thinkingLevel: ThinkingLevel.High },
 			chatContainer: {
 				children: [assistant],
 				clear: vi.fn(),
@@ -197,7 +204,7 @@ describe("InputController thinking visibility", () => {
 			eventController: { resyncStreamingRevealVisibility },
 			showStatus: vi.fn(),
 			ui: { resetDisplay },
-		} as unknown as InteractiveModeContext;
+		});
 
 		new InputController(ctx).toggleThinkingBlockVisibility();
 
