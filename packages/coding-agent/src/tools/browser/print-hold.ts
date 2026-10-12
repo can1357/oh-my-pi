@@ -20,26 +20,24 @@ export type PrintHoldScope = "tab" | "calls";
  * `print()`. Runs in the page, so it stays self-contained.
  */
 function holdPrintInPage(binding: string, holdKey: string, held: boolean): void {
-	const realm = globalThis as unknown as Record<symbol | string, unknown> & {
-		print: () => void;
-		Event: new (type: string) => object;
-		dispatchEvent(event: object): boolean;
-	};
 	const hold = Symbol.for(holdKey);
 	const wrapped = Symbol.for(`${holdKey}.wrapped`);
-	realm[hold] = held;
-	if (realm[wrapped]) return;
-	realm[wrapped] = true;
+	Reflect.set(globalThis, hold, held);
+	if (Reflect.get(globalThis, wrapped)) return;
+	const print: unknown = Reflect.get(globalThis, "print");
+	if (typeof print !== "function") return;
+	Reflect.set(globalThis, wrapped, true);
 	// A proxy keeps the native function's name and length, and its source still reads `[native code]`.
-	realm.print = new Proxy(realm.print, {
-		apply(print, thisArg, args) {
-			if (realm[hold] !== true) return Reflect.apply(print, thisArg, args);
-			const report = realm[binding];
+	const heldPrint = new Proxy(print, {
+		apply(target, thisArg, args) {
+			if (Reflect.get(globalThis, hold) !== true) return Reflect.apply(target, thisArg, args);
+			const report: unknown = Reflect.get(globalThis, binding);
 			if (typeof report === "function") report("");
-			realm.dispatchEvent(new realm.Event("beforeprint"));
-			realm.dispatchEvent(new realm.Event("afterprint"));
+			Reflect.apply(EventTarget.prototype.dispatchEvent, globalThis, [new Event("beforeprint")]);
+			Reflect.apply(EventTarget.prototype.dispatchEvent, globalThis, [new Event("afterprint")]);
 		},
 	});
+	Reflect.set(globalThis, "print", heldPrint);
 }
 
 /**
