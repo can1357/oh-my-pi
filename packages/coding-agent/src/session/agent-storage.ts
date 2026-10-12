@@ -535,15 +535,12 @@ FROM model_usage_legacy
 
 	/**
 	 * Drops `modelKey` from the recently-used list; the next recordModelUsage re-adds it.
+	 * Unlike recording, this is a user action, so a failed delete throws for the caller to report.
 	 * @param modelKey - Model key in "provider/modelId" format
 	 */
 	forgetModelUsage(modelKey: string): void {
-		try {
-			this.#deleteModelUsageStmt.run(modelKey);
-			this.#modelUsageCache = null;
-		} catch (error) {
-			logger.warn("AgentStorage failed to forget model usage", { modelKey, error: String(error) });
-		}
+		this.#deleteModelUsageStmt.run(modelKey);
+		this.#modelUsageCache = null;
 	}
 
 	/**

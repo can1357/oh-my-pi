@@ -935,6 +935,13 @@ export class SelectorController {
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
+		const sessionSelector = () =>
+			this.ctx.session.model ? `${this.ctx.session.model.provider}/${this.ctx.session.model.id}` : undefined;
+		/** Re-sync the hub after a callback that may have switched the session's model. */
+		const refreshHub = () => {
+			hub?.setCurrentSelector(sessionSelector());
+			hub?.refreshAfterExternalMutation();
+		};
 		const hub = new ModelHubComponent(
 			this.ctx.ui,
 			createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
@@ -1024,7 +1031,7 @@ export class SelectorController {
 						return false;
 					} finally {
 						releaseDefaultMutation?.();
-						hub?.refreshAfterExternalMutation();
+						refreshHub();
 					}
 				},
 				onUnassign: async (role, scope?: ModelRoleSelectionScope) => {
@@ -1108,7 +1115,7 @@ export class SelectorController {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					} finally {
 						releaseDefaultMutation?.();
-						hub?.refreshAfterExternalMutation();
+						refreshHub();
 					}
 				},
 				onFallbackChainChange: (role, chain) => {
@@ -1140,8 +1147,16 @@ export class SelectorController {
 					}
 				},
 				onForgetRecent: selector => {
-					this.ctx.settings.getStorage()?.forgetModelUsage(selector);
+					try {
+						this.ctx.settings.getStorage()?.forgetModelUsage(selector);
+					} catch (error) {
+						this.ctx.showError(
+							`Failed to remove ${selector} from recent models: ${error instanceof Error ? error.message : String(error)}`,
+						);
+						return false;
+					}
 					this.ctx.showStatus(`Removed ${selector} from recent models`);
+					return true;
 				},
 				onCompactionPointChange: (model, input, confirmed) => {
 					try {
@@ -1199,16 +1214,14 @@ export class SelectorController {
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					} finally {
-						hub?.refreshAfterExternalMutation();
+						refreshHub();
 					}
 				},
 				onCancel: () => done(),
 			},
 			{
 				initialProviderId: hubOptions.initialProviderId,
-				currentSelector: this.ctx.session.model
-					? `${this.ctx.session.model.provider}/${this.ctx.session.model.id}`
-					: undefined,
+				currentSelector: sessionSelector(),
 			},
 		);
 		const menu = this.#claimMenu("model-hub");
