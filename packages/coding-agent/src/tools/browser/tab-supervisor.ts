@@ -620,7 +620,7 @@ async function navigateOpenedTab(
 }
 
 /** Close a tab its failed open created, unless something already replaced or closed it. */
-async function rollBackCreatedTab(name: string, tab: WorkerTabSession): Promise<void> {
+export async function rollBackCreatedTab(name: string, tab: TabSession): Promise<void> {
 	if (tabs.get(name) !== tab) return;
 	try {
 		await releaseTab(name, { kill: false });

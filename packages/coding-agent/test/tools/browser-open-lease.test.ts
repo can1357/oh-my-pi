@@ -14,9 +14,11 @@ import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import * as attach from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import { resolveCmuxKind } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/rpc";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
 import * as launch from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import * as registry from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import * as probe from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { getTabsMapForTest, releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
@@ -420,5 +422,41 @@ describe("browser open — concurrent different-name acquisitions each own a lea
 		expect(getTabsMapForTest().has("tab-a")).toBe(false);
 		expect(getTabsMapForTest().size).toBe(1);
 		expect(surfaceClosed).toEqual(["surface-1"]);
+	});
+});
+
+describe("browser open — a cancel during the relay extension read", () => {
+	it("closes the tab the cancelled open created", async () => {
+		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
+		spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
+		const surfaceClosed: string[] = [];
+		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
+			async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
+				if (method === "browser.open_split") return { surface_id: "surface-relay", url: "about:blank" };
+				if (method === "surface.close") surfaceClosed.push(String(params.surface_id));
+				return {};
+			},
+		);
+		// The relay open runs on a cmux browser, so a real tab gets published without a live relay.
+		const cmuxKind = resolveCmuxKind();
+		if (!cmuxKind) throw new Error("CMUX_SOCKET_PATH is set in beforeEach");
+		const acquireBrowser = registry.acquireBrowser;
+		spyOn(registry, "acquireBrowser").mockImplementation((_kind, opts) => acquireBrowser(cmuxKind, opts));
+		const controller = new AbortController();
+		spyOn(probe, "relayExtensionNotice").mockImplementation(async () => {
+			controller.abort();
+			return null;
+		});
+
+		const failure = await rejectionOf(
+			createBrowserHost()(
+				{ action: "open", name: "relay-read", app: { relay: true }, timeout: 30 },
+				controller.signal,
+			),
+		);
+
+		expect(failure).toBeInstanceOf(ToolAbortError);
+		expect(getTabsMapForTest().has("relay-read")).toBe(false);
+		expect(surfaceClosed).toEqual(["surface-relay"]);
 	});
 });
