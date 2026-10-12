@@ -171,8 +171,8 @@ export interface ModelHubCallbacks {
 	onSwitchPreset?: (name: string) => void | Promise<void>;
 	/** Persist a new quick-switch cycle order (the ctrl+p role cycle). */
 	onCycleOrderChange?: (order: string[]) => void;
-	/** Drop `selector` from the recently-used list; using the model again re-adds it. */
-	onForgetRecent?: (selector: string) => void;
+	/** Drop `selector` from the recently-used list (using the model again re-adds it); false when it could not be removed. */
+	onForgetRecent?: (selector: string) => boolean;
 	/**
 	 * Persist typed text as `model`'s own compaction limit: a token base the
 	 * policy scales (`400k`), a fixed trigger (`f400k`), a percentage (`80%`), or
@@ -1008,7 +1008,7 @@ export class ModelHubComponent implements Component {
 	/** Drop the selected `item` from the recent list, keeping the cursor on the row that took its place. */
 	#forgetRecent(item: ModelBrowserItem): void {
 		const neighbor = this.#browser.adjacentSelector(1) ?? this.#browser.adjacentSelector(-1);
-		this.#callbacks.onForgetRecent?.(item.selector);
+		if (!this.#callbacks.onForgetRecent?.(item.selector)) return;
 		this.#refreshAfterMutation();
 		if (neighbor) this.#browser.selectSelector(neighbor);
 	}
@@ -1016,6 +1016,11 @@ export class ModelHubComponent implements Component {
 	/** Re-sync after an asynchronous callback finishes mutating settings. */
 	refreshAfterExternalMutation(): void {
 		this.#refreshAfterMutation();
+	}
+
+	/** Track the session's model after an in-hub action switched it (current mark, Ctrl+D guard). */
+	setCurrentSelector(selector: string | undefined): void {
+		this.#currentSelector = selector;
 	}
 
 	/**

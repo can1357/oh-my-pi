@@ -418,6 +418,8 @@
 - The `wait` tool's native job rows (`omp.wait.job`) are a single `row`: badge, id and label, progress and clock, without the output preview or capture notice beneath
 - The native bash run foot reads In background with a live clock (`omp.run.time` without `stopped`) while a parked job's frames stream (`details.async.state === "running"`, partial), instead of Running
 - Native model pickers (/model, the quick switch and the advisor's) mark providers with their logo (`mark.icon: "provider:<id>"`, initials where the terminal has none), and every model row leads with its provider's mark
+- Added `Shift+Left` / `Shift+Right` navigation across visible `/tree` branches and nested fork depths, rebindable as `app.tree.previousBranch` / `app.tree.nextBranch` ([#12623](https://github.com/can1357/oh-my-pi/pull/12623) by [@azain47](https://github.com/azain47)).
+- Added `Ctrl+D` in the model hub to remove a recently used model from its recent section, with a footer hint shown only on rows it can remove ([#15461](https://github.com/can1357/oh-my-pi/pull/15461) by [@TheDiscoScript](https://github.com/TheDiscoScript))
 
 ### Removed
 
