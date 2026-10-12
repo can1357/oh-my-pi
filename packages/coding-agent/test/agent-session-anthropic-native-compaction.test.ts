@@ -218,6 +218,49 @@ describe("AgentSession Anthropic native compaction", () => {
 		expect(withoutCacheControl(compaction.messages)).toEqual(withoutCacheControl(live.messages));
 	});
 
+	it("drops the discarded transcript from the reminder memo when a compaction commits", async () => {
+		using tempDir = TempDir.createSync("@pi-anthropic-native-compaction-release-");
+		const opened = await openSession(tempDir, request =>
+			request === 3 ? compactionAnswer() : request === 5 ? captured() : answer(request),
+		);
+		const { session, requests } = opened;
+		try {
+			await session.prompt("first question");
+			await session.prompt("second question");
+			// The first turn carries the reminder; the memo pins that transcript.
+			const live = requests[1]!;
+			expect(JSON.stringify(live.messages[0])).toContain("<system-reminder>");
+
+			await session.compact();
+
+			// The compaction committed a summary and swapped the live history under
+			// the session-scoped injector. The next turn must rebuild from the
+			// replacement transcript: the memo was released with the discarded one.
+			await session.prompt("third question");
+			await expect(session.compact()).rejects.toThrow("captured");
+		} finally {
+			await opened.close();
+		}
+
+		expect(requests).toHaveLength(5);
+		const after = requests[3]!;
+		// The compaction summary replaced the whole pre-compaction transcript, so
+		// none of those messages are on the wire any more.
+		expect(JSON.stringify(after.messages)).not.toContain("first question");
+		expect(JSON.stringify(after.messages)).not.toContain("second question");
+		// The memo was released with the discarded history, so the next turn
+		// rebuilds from the replacement transcript instead of replaying it.
+		await session.prompt("fourth question");
+		await session.prompt("fifth question");
+		expect(requests).toHaveLength(7);
+		const next = requests[5]!;
+		// The replacement transcript is what ships now: the reminder rides the new
+		// first user turn, and the discarded pre-compaction history is gone.
+		expect(JSON.stringify(next.messages)).toContain("fourth question");
+		expect(JSON.stringify(next.messages)).not.toContain("first question");
+		expect(JSON.stringify(next.messages)).not.toContain("second question");
+	});
+
 	it("replays a later compaction's prefix as sent, without disturbing the live reminder state", async () => {
 		using tempDir = TempDir.createSync("@pi-anthropic-native-compaction-second-");
 		const opened = await openSession(tempDir, request =>
