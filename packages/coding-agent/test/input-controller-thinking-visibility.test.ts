@@ -1,10 +1,11 @@
-import { describe, expect, it, type Mock, vi } from "bun:test";
+import { afterEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { cfgHideThinkingBlock } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 function createAssistant(): AssistantMessageComponent {
 	const assistant = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
@@ -13,6 +14,10 @@ function createAssistant(): AssistantMessageComponent {
 }
 
 describe("InputController thinking visibility", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it("refuses to toggle and informs the user when thinking level is off", () => {
 		// When thinking is "off", effectiveHideThinkingBlock is true even if the
 		// user's hideThinkingBlock setting is false. The toggle should refuse
@@ -54,7 +59,10 @@ describe("InputController thinking visibility", () => {
 		const resetStableEmission = vi.fn(() => resetOrder.push("stable emission"));
 		const ctx = {
 			hideThinkingBlock: false,
-			effectiveHideThinkingBlock: false,
+			// Effective after the toggle: thinking is off but reasoning content was
+			// observed, so the auto-hide no longer applies and the effective flag
+			// follows the preference (see the dedicated propagation test below).
+			effectiveHideThinkingBlock: true,
 			hasDisplayableThinkingContent: true,
 			settings,
 			session: { agent: { hideThinkingSummary: false }, thinkingLevel: "off" },
@@ -143,7 +151,7 @@ describe("InputController thinking visibility", () => {
 	});
 
 	it("resyncs the streaming reveal controller instead of pushing the raw message on a mid-stream toggle", () => {
-		// R2 regression: Ctrl+T mid-reveal used to call
+		// Ctrl+T mid-reveal regression: the toggle used to call
 		// `streamingComponent.updateContent(rawStreamingMessage)` — the raw
 		// cumulative message bypasses the reveal controller's truncating view, so
 		// the text snaps to 100% and re-types (and the non-transient update zeroes
@@ -171,7 +179,10 @@ describe("InputController thinking visibility", () => {
 		const resetStableEmission = vi.fn(() => resetOrder.push("stable emission"));
 		const ctx = {
 			hideThinkingBlock: false,
-			effectiveHideThinkingBlock: false,
+			// Effective after the toggle: thinking is on, so the auto-hide never
+			// applies and the effective flag follows the preference (see the
+			// dedicated propagation test below).
+			effectiveHideThinkingBlock: true,
 			hasDisplayableThinkingContent: true,
 			settings,
 			session: { agent: { hideThinkingSummary: false }, thinkingLevel: "high" },
@@ -202,29 +213,39 @@ describe("InputController thinking visibility", () => {
 		expect(cfgHideThinkingBlock.get(settings)).toBe(true);
 	});
 
-	it("delegates the toggle to the shared applyThinkingBlockVisibility helper", () => {
-		// Both gestures (Ctrl+T here, the /settings branch in InteractiveMode)
-		// must funnel through ONE propagation helper so the paths cannot drift.
+	it("propagates the effective visibility, not the raw preference, when thinking is off", () => {
+		// The /settings and on-disk-reload gestures have no thinking-off guard, so
+		// with thinking off and no displayable reasoning yet the stored preference
+		// and the effective visibility disagree. The raw preference must not reach
+		// the components: the reveal controller re-renders the in-flight message
+		// from the effective flag (event-controller.ts:332), and a component shown
+		// under the raw value would disagree with it and with every re-rendered
+		// block. The stored preference itself must survive untouched — the
+		// auto-hide is derived, not persisted.
 		const assistant = createAssistant();
-		const applyThinkingBlockVisibility = vi.spyOn(InputController.prototype, "applyThinkingBlockVisibility");
+		const setHideThinkingBlock = assistant.setHideThinkingBlock as Mock<(hidden: boolean) => void>;
+		const streamingComponent = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
+		streamingComponent.setHideThinkingBlock = vi.fn();
+		const resyncStreamingRevealVisibility = vi.fn();
+		const resetDisplay = vi.fn();
 		const settings = Settings.isolated();
 		const ctx = {
 			hideThinkingBlock: false,
-			effectiveHideThinkingBlock: false,
-			hasDisplayableThinkingContent: true,
+			effectiveHideThinkingBlock: true, // thinking is off → effective is true
 			settings,
-			session: { agent: { hideThinkingSummary: false }, thinkingLevel: "high" },
-			chatContainer: { children: [assistant], clear: vi.fn(), addChild: vi.fn(), resetStableEmission: vi.fn() },
-			streamingComponent: undefined,
-			streamingMessage: undefined,
-			showStatus: vi.fn(),
-			ui: { resetDisplay: vi.fn() },
+			chatContainer: { children: [assistant], resetStableEmission: vi.fn() },
+			streamingComponent,
+			streamingMessage: {} as unknown as AssistantMessage,
+			eventController: { resyncStreamingRevealVisibility },
+			ui: { resetDisplay },
 		} as unknown as InteractiveModeContext;
 
-		new InputController(ctx).toggleThinkingBlockVisibility();
+		new InputController(ctx).applyThinkingBlockVisibility(false);
 
-		expect(applyThinkingBlockVisibility).toHaveBeenCalledWith(true);
-		expect(ctx.hideThinkingBlock).toBe(true);
-		applyThinkingBlockVisibility.mockRestore();
+		expect(ctx.hideThinkingBlock).toBe(false);
+		expect(setHideThinkingBlock).toHaveBeenCalledWith(true);
+		expect(streamingComponent.setHideThinkingBlock).toHaveBeenCalledWith(true);
+		expect(resyncStreamingRevealVisibility).toHaveBeenCalledTimes(1);
+		expect(resetDisplay).toHaveBeenCalledTimes(1);
 	});
 });
