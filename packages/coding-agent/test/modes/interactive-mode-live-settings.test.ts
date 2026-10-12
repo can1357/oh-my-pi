@@ -17,7 +17,7 @@ import {
 	cfgStatusLineLeftSegments,
 	cfgSymbolPreset,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
-import { cfgHideThinkingBlock } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgHideThinkingBlock, cfgProseOnlyThinking } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("InteractiveMode live settings", () => {
 	let tempDir: TempDir;
@@ -192,11 +192,96 @@ describe("InteractiveMode live settings", () => {
 		// Container-level viewport rows: only the container applies the emitted-row
 		// count to a block's render, so this is where a skipped ledger reset drops
 		// the answer.
-		const rendered = Bun.stripANSI(mode.chatContainer.renderViewport(80, 40, { tick: 1, now: Date.now() }).join("\n"));
+		const rendered = Bun.stripANSI(
+			mode.chatContainer.renderViewport(80, 40, { tick: 1, now: Date.now() }).join("\n"),
+		);
 		expect(rendered).toContain("ANSWER_TAIL_MARKER");
 		expect(rendered).not.toContain("Deliberating");
 		// The propagation forgets the emission ledger, so the replay re-renders the
 		// head under the new visibility instead of slicing it by the stale count.
+		expect(mode.chatContainer.emittedStableRows()).toEqual([0]);
+	});
+
+	it("resets the stable ledger when prose-only thinking changes mid-stream", async () => {
+		// When proseOnlyThinking changes while an assistant block has emitted stable
+		// thinking rows but has not yet retired, the destructive replay must reset
+		// the stable ledger and resync the live reveal BEFORE the paired display
+		// reset. Without the ledger reset, the emitted snapshots describe the old
+		// raw/prose layout while the display reset renders the new layout, so the
+		// container slices the block by the old prefix height — a raw-to-prose
+		// shrink can slice past the answer and retirement then permanently omits it.
+		type SessionEvent = Parameters<typeof mode.eventController.handleEvent>[0];
+		cfgDisplaySmoothStreaming.set(session.settings, false);
+		const usage = {
+			input: 1,
+			output: 2,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 3,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const thinking = {
+			type: "thinking" as const,
+			thinking: Array.from(
+				{ length: 10 },
+				(_, index) => `Deliberating about the request in detail, step ${index + 1} of a long reasoning chain.`,
+			).join("\n\n"),
+			thinkingSignature: "sig",
+		};
+
+		await mode.eventController.handleEvent({
+			type: "message_start",
+			message: {
+				role: "assistant",
+				content: [thinking],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: session.model!.id,
+				usage,
+				timestamp: Date.now(),
+			},
+		} as unknown as SessionEvent);
+		const partial = {
+			role: "assistant",
+			content: [thinking, { type: "text" as const, text: "Streaming the ANSWER_TAIL_MARKER." }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: session.model!.id,
+			usage,
+			timestamp: Date.now(),
+		} as unknown as AssistantMessage;
+		await mode.eventController.handleEvent({
+			type: "message_update",
+			message: partial,
+			assistantMessageEvent: { type: "start", partial },
+		} as unknown as SessionEvent);
+
+		// Retire the append-only thinking head into native history so the
+		// container's ledger records the rows the head had already emitted.
+		const published = mode.chatContainer.peekFinalizedBatch(80, 1);
+		expect(published).toBeDefined();
+		expect(published!.rows.length).toBeGreaterThan(0);
+		mode.chatContainer.acknowledgeFinalizedBatch(published!.id);
+		expect(mode.chatContainer.emittedStableRows()[0]!).toBeGreaterThan(0);
+
+		// Mid-stream prose-only change via the settings path.
+		cfgProseOnlyThinking.set(session.settings, false);
+		await Promise.resolve();
+		expect(mode.proseOnlyThinking).toBe(false);
+
+		await mode.eventController.handleEvent({
+			type: "message_end",
+			message: { ...partial, stopReason: "stop" },
+		} as unknown as SessionEvent);
+
+		// The answer must still be visible — the ledger reset prevents the stale
+		// emitted-row count from slicing past it.
+		const rendered = Bun.stripANSI(
+			mode.chatContainer.renderViewport(80, 40, { tick: 1, now: Date.now() }).join("\n"),
+		);
+		expect(rendered).toContain("ANSWER_TAIL_MARKER");
+		// The propagation forgets the emission ledger, so the replay re-renders
+		// the head under the new prose mode instead of slicing by the stale count.
 		expect(mode.chatContainer.emittedStableRows()).toEqual([0]);
 	});
 });

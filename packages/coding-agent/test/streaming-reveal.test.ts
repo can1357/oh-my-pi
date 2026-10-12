@@ -201,7 +201,13 @@ describe("streaming reveal", () => {
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 4);
 		for (let step = 1; step <= 10; step++) {
 			const text = answer.slice(0, Math.floor((answer.length * step) / 10));
-			controller.setTarget(makeMessage([{ type: "thinking", thinking }, { type: "text", text }]), false);
+			controller.setTarget(
+				makeMessage([
+					{ type: "thinking", thinking },
+					{ type: "text", text },
+				]),
+				false,
+			);
 			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 		}
 		const revealed = textAt(latestMessage(component), 1);
@@ -666,5 +672,52 @@ describe("frame-skip coalescing", () => {
 		const drained = component.messages.length;
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 4);
 		expect(component.messages.length).toBe(drained);
+	});
+
+	it("clamps the reveal budget at zero when hiding thinking mid-reveal", () => {
+		// When the provider has already supplied a later block while smooth reveal
+		// is still part-way through an earlier one, hiding thinking makes
+		// `remaining` smaller than `before` for the thinking block. Subtracting
+		// the whole block makes it negative, and the subsequent text block then
+		// contributes a negative `spent` value to `revealed`. The answer text
+		// must not be blanked out by the fictitious negative offset.
+		const thinking = "reasoning through the problem ".repeat(20);
+		const answer = "the answer that must remain visible".repeat(3);
+		let hideThinking = false;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		// Advance a few frames so reveal is partway through the thinking block.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+
+		// Provider supplies the answer while reveal is still inside thinking.
+		controller.setTarget(
+			makeMessage([
+				{ type: "thinking", thinking },
+				{ type: "text", text: answer },
+			]),
+			false,
+		);
+
+		// Hide thinking while reveal lags inside the preceding thinking run.
+		hideThinking = true;
+		controller.resyncVisibility();
+
+		// Advance the timer: the answer should reveal from a clamped
+		// (non-negative) offset, not from a fictitious negative one.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 5);
+		const revealedText = textAt(latestMessage(component), 1);
+		expect(revealedText.length).toBeGreaterThan(0);
+
+		// The answer must stay visible — a negative offset would blank it out.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 5);
+		expect(textAt(latestMessage(component), 1).length).toBeGreaterThan(0);
 	});
 });

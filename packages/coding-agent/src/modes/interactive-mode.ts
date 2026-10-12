@@ -3615,6 +3615,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			for (const child of this.chatContainer.children) {
 				if (child instanceof AssistantMessageComponent) child.setProseOnlyThinking(proseOnlyThinking);
 			}
+			// Reset the stable ledger and resync the live reveal BEFORE the
+			// paired display reset below. The emitted snapshots describe the old
+			// raw/prose layout; without the ledger reset, the display reset slices
+			// the block by the stale prefix height — a raw-to-prose shrink can
+			// slice past the answer and retirement then permanently omits it.
+			if (this.streamingComponent && this.streamingMessage) {
+				this.chatContainer.resetStableEmission();
+				this.#eventController.resyncStreamingRevealVisibility();
+			}
 		}
 		const hideThinkingBlock = cfgHideThinkingBlock.get(this.settings);
 		if (any("hideThinkingBlock") && hideThinkingBlock !== this.hideThinkingBlock) {
