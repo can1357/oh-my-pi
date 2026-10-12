@@ -87,19 +87,19 @@ export function buildStatusFooter(opts: {
 	/** Suppress the "… N more lines" hint (used when sixel passthrough renders the full output). */
 	suppressHiddenCount?: boolean;
 	/**
-	 * Whether expanding can actually reveal the hidden lines. False when the
-	 * caller only holds a tail window of a longer stream (rows above it were
-	 * discarded, not hidden), so the count must not advertise the expand key.
-	 * Defaults to true.
+	 * Rows the caller discarded while streaming (the live line cap). They are
+	 * gone for good, so they are reported apart from `hiddenLineCount`, which
+	 * counts retained rows the expand key still delivers.
 	 */
-	expandRecoversHidden?: boolean;
+	droppedLineCount?: number;
 }): Text | undefined {
 	const parts: string[] = [];
 
 	if (opts.hiddenLineCount > 0 && !opts.suppressHiddenCount) {
-		const expandHint =
-			opts.expandRecoversHidden === false ? "" : ` (${expandKeyHint()} to expand)`;
-		parts.push(theme.fg("dim", `… ${opts.hiddenLineCount} more lines${expandHint}`));
+		parts.push(theme.fg("dim", `… ${opts.hiddenLineCount} more lines (${expandKeyHint()} to expand)`));
+	}
+	if (opts.droppedLineCount !== undefined && opts.droppedLineCount > 0) {
+		parts.push(theme.fg("dim", `… ${opts.droppedLineCount} earlier lines dropped`));
 	}
 	if (opts.status === "cancelled") {
 		parts.push(theme.fg("warning", "(cancelled)"));

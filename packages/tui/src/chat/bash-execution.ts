@@ -35,7 +35,8 @@ import { NativeImageCache } from "../native/blobs";
 import { imageLinksEnabled, linkedImageSpan, linkedImageText } from "../prompt/image-references";
 import { Memo } from "../native/memo";
 
-const STREAMING_LINE_CAP = PREVIEW_LINES * 5;
+/** Rows retained from a live stream; older rows are dropped for good. */
+export const STREAMING_LINE_CAP = PREVIEW_LINES * 5;
 // Minimum interval between processing incoming chunks for display (ms).
 // Chunks arriving faster than this are accumulated and processed in one batch.
 const CHUNK_THROTTLE_MS = 50;
@@ -69,11 +70,11 @@ export class BashExecutionComponent extends Container {
 	#blockVersion = 0;
 	#displayDirty = false;
 	#chunkGate = false;
-	// True while the retained lines are only a tail window of a longer live
-	// stream (STREAMING_LINE_CAP dropped earlier rows). A replay or a completed
-	// run seeds its full output and clears this, so the collapsed footer knows
-	// whether expanding can actually deliver the lines it counts.
-	#liveTruncated = false;
+	// Rows STREAMING_LINE_CAP discarded while streaming: gone for good, so the
+	// footer names them apart from the retained rows it counts, which the expand
+	// key still delivers. A replay or a completed run seeds its full output and
+	// clears the count, because a complete snapshot has dropped nothing.
+	#droppedLiveLines = 0;
 	#contentContainer: Container;
 	#outputPane: OutputPane;
 	#headerText: Text;
@@ -249,10 +250,8 @@ export class BashExecutionComponent extends Container {
 
 		// Cap stored lines during streaming to avoid unbounded memory growth
 		if (this.#outputLines.length > STREAMING_LINE_CAP) {
+			this.#droppedLiveLines += this.#outputLines.length - STREAMING_LINE_CAP;
 			this.#outputLines = this.#outputLines.slice(-STREAMING_LINE_CAP);
-			// The rows above the cap are gone, not merely hidden behind the
-			// collapsed preview: the footer must not advertise ctrl+o for them.
-			this.#liveTruncated = true;
 		}
 
 		this.#displayDirty = true;
@@ -342,9 +341,6 @@ export class BashExecutionComponent extends Container {
 		while (rows.length > 0 && rows[rows.length - 1] === "") rows.pop();
 		const base = theme.getFgAnsi("muted");
 		this.#outputLines = rows.map(row => (row ? styleTerminalRow(row, base) : ""));
-		// The final read spans the whole scrollback; a mid-stream refresh only
-		// reads the tail window, so rows above it are not in the block yet.
-		this.#liveTruncated = !full && startRow > 0;
 		this.#displayDirty = true;
 		this.#outputVersion++;
 	}
@@ -462,9 +458,10 @@ export class BashExecutionComponent extends Container {
 				artifactError: this.#artifactError,
 				hiddenLineCount,
 				suppressHiddenCount: hasSixelOutput,
-				// A live tail window cannot deliver the rows the cap dropped, so the
-				// footer must not advertise ctrl+o as a route to them.
-				expandRecoversHidden: !this.#liveTruncated,
+				// Rows the live cap discarded. The counted hidden rows are the
+				// retained tail, which Ctrl+O still delivers, so the count keeps
+				// advertising expand; only the dropped head is reported without one.
+				droppedLineCount: this.#droppedLiveLines,
 			});
 			if (footer) this.#contentContainer.addChild(footer);
 		}
@@ -490,7 +487,7 @@ export class BashExecutionComponent extends Container {
 		// A complete snapshot replaces the streaming tail window: what the cap
 		// dropped while streaming is irrelevant now, so the footer's hidden count
 		// is the true total and every line it counts survives expansion.
-		this.#liveTruncated = false;
+		this.#droppedLiveLines = 0;
 		this.#outputVersion++;
 	}
 

@@ -362,6 +362,9 @@ export class ChatTranscriptBuilder {
 					images: message.images,
 					showImages: displayPreferences.showImages,
 				});
+				// Tracked so a transcript-wide toggle (rewind, copy, agent
+				// transcripts) expands the replayed block too.
+				this.#trackExpandable(component);
 				this.container.addChild(component);
 				break;
 			}
