@@ -19,6 +19,7 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 - [`src/discovery/omp-extension-roots.ts`](../packages/coding-agent/src/discovery/omp-extension-roots.ts)
 - [`src/config.ts`](../packages/coding-agent/src/config.ts)
 - [`src/task/executor.ts`](../packages/coding-agent/src/task/executor.ts)
+- [`src/task/effective-config.ts`](../packages/coding-agent/src/task/effective-config.ts)
 
 ---
 
@@ -289,6 +290,22 @@ These schemas apply only to structured runs. With `task.structured` off (the def
 Explicit caller schemas are validated during preflight in both modes. Agent/session schemas are preflight-validated when the effective mode is `strict`. Invalid schemas fail before child execution.
 
 The model-facing prompt (`src/prompts/tools/task.md`) tags read-only agents and warns against offloading reasoning to `scout`/`sonic`.
+
+## Inspecting what an agent runs with
+
+`omp agents show <name>` prints what a task or eval spawn of that agent runs with: model, thinking
+level, service tier, compaction trigger, soft request budget, tools, prewalk target, advisor,
+account pool and idle TTL. Each value names the layer that set it: the agent's exact-name `task.agent*`
+entry, a frontmatter field, a setting (with the settings layer it came from), a default, or the
+spawning session. The values come from the resolvers the spawn itself calls
+(`src/task/effective-config.ts`); `--json` prints them as one object.
+
+It resolves the way a spawn from a new top-level session in the current directory would: an inherited
+model is `modelRoles.default`, or the first available model when no default role resolves, and
+`inherit` tiers are the configured `tier.*`. Tools are the built-ins the child session constructs;
+MCP and extension tools come from the session. A caller's `model` or `effort`, a live `/model` or
+`/fast` change, a session-only `Alt+P` pick, plan mode and `before_subagent_spawn` handlers can still
+change what a real spawn uses.
 
 ## Command discovery interaction
 

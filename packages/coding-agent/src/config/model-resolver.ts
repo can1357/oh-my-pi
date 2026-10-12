@@ -1270,7 +1270,11 @@ export interface AgentModelPatternResolutionOptions {
 	fallbackModelPattern?: string;
 }
 
+/** Which input an agent's model came from: the caller, the agent's settings entry, its definition, or the session. */
+export type AgentModelSelectionSource = "request" | "settings" | "agent" | "session";
+
 interface EffectiveAgentModelSelection {
+	from: AgentModelSelectionSource;
 	source?: string | string[];
 	patterns: string[];
 }
@@ -1282,12 +1286,12 @@ function resolveEffectiveAgentModelSelection(
 
 	const requestPatterns = resolveConfiguredModelPatterns(requestModel, settings);
 	if (requestPatterns.length > 0) {
-		return { source: requestModel, patterns: requestPatterns };
+		return { from: "request", source: requestModel, patterns: requestPatterns };
 	}
 
 	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings);
 	if (overridePatterns.length > 0) {
-		return { source: settingsOverride, patterns: overridePatterns };
+		return { from: "settings", source: settingsOverride, patterns: overridePatterns };
 	}
 
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
@@ -1299,14 +1303,14 @@ function resolveEffectiveAgentModelSelection(
 			singleAgentPattern === formatModelRoleAlias("task") ||
 			singleAgentPattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
 		) {
-			return { source: agentModel, patterns: configuredAgentPatterns };
+			return { from: "agent", source: agentModel, patterns: configuredAgentPatterns };
 		}
-		if (!agentInheritsSessionModel) return { source: agentModel, patterns: configuredAgentPatterns };
+		if (!agentInheritsSessionModel) return { from: "agent", source: agentModel, patterns: configuredAgentPatterns };
 	}
 
 	const fallback =
 		activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
-	return { patterns: resolveConfiguredModelPatterns(fallback, settings) };
+	return { from: "session", patterns: resolveConfiguredModelPatterns(fallback, settings) };
 }
 
 /** Effective agent model patterns paired with the pre-expansion role alias behind them. */
@@ -1315,6 +1319,8 @@ export interface AgentModelSelection {
 	patterns: string[];
 	/** Role alias the patterns came from (`@task` -> `task`), when the source named one. */
 	role: string | undefined;
+	/** Input the patterns came from. */
+	from: AgentModelSelectionSource;
 }
 
 /**
@@ -1324,8 +1330,8 @@ export interface AgentModelSelection {
  * discards, and deriving the two halves separately is how they drift apart.
  */
 export function resolveAgentModelSelection(options: AgentModelPatternResolutionOptions): AgentModelSelection {
-	const { source, patterns } = resolveEffectiveAgentModelSelection(options);
-	return { patterns, role: resolveExplicitModelRole(source, options.settings) };
+	const { from, source, patterns } = resolveEffectiveAgentModelSelection(options);
+	return { patterns, role: resolveExplicitModelRole(source, options.settings), from };
 }
 
 /** Effective agent model patterns alone, for callers with no interest in role identity. */
@@ -1947,6 +1953,22 @@ export async function resolveAllowedModels(
 	return includeSyntheticAllowedModels(
 		available,
 		scoped.map(entry => entry.model),
+	);
+}
+
+/**
+ * The model a new session falls back to when no model was requested and the
+ * `default` role resolves nothing: the first of the allowed `candidates`
+ * ({@link resolveAllowedModels}) with configured credentials, preferring
+ * providers with concrete auth.
+ */
+export function pickStartupFallbackModel(
+	modelRegistry: Pick<ModelRegistry, "hasConfiguredAuth" | "hasConcreteAuth">,
+	candidates: Model<Api>[],
+): Model<Api> | undefined {
+	return pickDefaultAvailableModel(
+		candidates.filter(candidate => modelRegistry.hasConfiguredAuth(candidate)),
+		provider => modelRegistry.hasConcreteAuth(provider),
 	);
 }
 

@@ -364,6 +364,10 @@
 
 - Fixed `grep` on a single file showing in Tern as separate boxed snippets with no file row or syntax colors; it now looks the same as a `grep` over a directory
 
+### Added
+
+- Added `omp agents show <name>` to list the model, service tier, compaction trigger, tools and other values an agent's spawns run with, and which setting or frontmatter field set each
+
 ## [18.10.0] - 2026-10-12
 
 ### Added

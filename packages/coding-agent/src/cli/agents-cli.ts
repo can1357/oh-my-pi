@@ -1,21 +1,38 @@
 /**
  * Agents CLI command handlers.
  *
- * Handles `omp agents unpack` for writing bundled agent definitions to disk.
+ * Handles `omp agents unpack` for writing bundled agent definitions to disk,
+ * and `omp agents show <name>` for what one agent runs with.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDir, getProjectDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { formatDuration, getAgentDir, getProjectDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { CliUsageError } from "@oh-my-pi/pi-utils/cli";
 import { YAML } from "bun";
 import { theme } from "@oh-my-pi/pi-tui/theme";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { ModelRegistry } from "../config/model-registry";
+import { Settings } from "../config/settings";
+import { initializeWithSettings } from "../discovery";
+import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { loadBundledAgents } from "../task/agents";
+import { discoverAgents, getAgent } from "../task/discovery";
+import {
+	type AgentConfigEntry,
+	type AgentConfigField,
+	type AgentConfigSource,
+	type EffectiveAgentConfig,
+	resolveEffectiveAgentConfig,
+} from "../task/effective-config";
 import type { AgentDefinition } from "../task/types";
 
-export type AgentsAction = "unpack";
+export type AgentsAction = "unpack" | "show";
 
 export interface AgentsCommandArgs {
 	action: AgentsAction;
+	/** Agent to show. */
+	name?: string;
 	flags: {
 		force?: boolean;
 		json?: boolean;
@@ -107,8 +124,106 @@ async function unpackBundledAgents(flags: AgentsCommandArgs["flags"]): Promise<U
 	};
 }
 
+/** Rows of `omp agents show`, with how each renders a null (off or unresolved) value. */
+const SHOW_ROWS: ReadonlyArray<{ field: AgentConfigField; label: string; none: string }> = [
+	{ field: "model", label: "model", none: "unresolved" },
+	{ field: "thinking", label: "thinking", none: "default" },
+	{ field: "serviceTier", label: "service tier", none: "none" },
+	{ field: "compaction", label: "compaction", none: "none" },
+	{ field: "requestBudget", label: "request budget", none: "off" },
+	{ field: "tools", label: "tools", none: "default set" },
+	{ field: "prewalk", label: "prewalk", none: "off" },
+	{ field: "advisor", label: "advisor", none: "off" },
+	{ field: "accountPools", label: "account pool", none: "all accounts" },
+	{ field: "idleTtlMs", label: "idle TTL", none: "never parked" },
+];
+
+const MAX_SHOW_VALUE_WIDTH = 40;
+
+function formatEntryValue(field: AgentConfigField, value: AgentConfigEntry["value"], none: string): string {
+	if (value === null || (typeof value === "number" && value <= 0)) return none;
+	if (typeof value === "number") {
+		if (field === "idleTtlMs") return formatDuration(value);
+		return field === "compaction" ? `${value.toLocaleString("en-US")} tokens` : `${value} requests`;
+	}
+	if (typeof value === "string") return value;
+	if (Array.isArray(value)) return value.join(", ");
+	return Object.entries(value)
+		.map(([provider, keys]) => `${provider}: ${keys.join(", ")}`)
+		.join("; ");
+}
+
+function formatSource(source: AgentConfigSource): string {
+	switch (source.layer) {
+		case "agent-entry":
+			return source.key ?? "agent entry";
+		case "frontmatter":
+			return `frontmatter ${source.key}`;
+		case "setting":
+			return `${source.key} (${source.scope})`;
+		case "default":
+			return source.key ? `${source.key} (default)` : "default";
+		case "session":
+			return source.key ? `session (${source.key})` : "session";
+	}
+}
+
+async function showAgent(name: string | undefined, json: boolean | undefined): Promise<void> {
+	const cwd = getProjectDir();
+	// Read-only: showing an agent must not migrate or write any settings file.
+	const settings = await Settings.loadReadOnly({ cwd });
+	initializeWithSettings(settings);
+	const { agents } = await discoverAgents(cwd);
+	const agent = name ? getAgent(agents, name) : undefined;
+	if (!agent) {
+		const available = agents.map(candidate => candidate.name).join(", ");
+		throw new CliUsageError(
+			name
+				? `Unknown agent "${name}". Available: ${available}`
+				: `Usage: omp agents show <name>. Available: ${available}`,
+		);
+	}
+	const authStorage = await discoverAuthStorage(undefined, { settings });
+	let config: EffectiveAgentConfig;
+	try {
+		const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
+		await modelRegistry.hydrateCredentialScopedModelCaches();
+		await loadCliExtensionProviders(modelRegistry, settings, cwd);
+		config = await resolveEffectiveAgentConfig(agent, settings, modelRegistry, cwd);
+	} finally {
+		authStorage.close();
+	}
+	if (json) {
+		writeStdout(JSON.stringify(config, null, 2));
+		return;
+	}
+
+	const definedIn = config.filePath ? `${config.definedIn}: ${shortenPath(config.filePath)}` : config.definedIn;
+	writeStdout(`${chalk.bold(config.name)} ${chalk.dim(`(${definedIn})`)}`);
+	if (config.disabled) {
+		writeStdout(chalk.yellow(`${theme.status.warning} Disabled by task.disabledAgents: spawns are refused.`));
+	}
+	const rows = SHOW_ROWS.map(({ field, label, none }) => ({
+		label,
+		value: formatEntryValue(field, config[field].value, none),
+		entry: config[field],
+	}));
+	const labelWidth = Math.max(...rows.map(row => row.label.length));
+	// Long tool lists and account pools overflow instead of pushing every source column right.
+	const valueWidth = Math.max(...rows.map(row => row.value.length).filter(length => length <= MAX_SHOW_VALUE_WIDTH));
+	for (const { label, value, entry } of rows) {
+		const note = entry.note ? chalk.dim(` · ${entry.note}`) : "";
+		writeStdout(
+			`  ${label.padEnd(labelWidth)}  ${value.padEnd(valueWidth)}  ${chalk.dim(formatSource(entry.source))}${note}`,
+		);
+	}
+}
+
 export async function runAgentsCommand(cmd: AgentsCommandArgs): Promise<void> {
 	switch (cmd.action) {
+		case "show":
+			await showAgent(cmd.name, cmd.flags.json);
+			return;
 		case "unpack": {
 			const result = await unpackBundledAgents(cmd.flags);
 			if (cmd.flags.json) {
