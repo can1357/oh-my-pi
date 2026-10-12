@@ -1076,7 +1076,7 @@ pub(super) fn await_key_window(pid: libc::pid_t, wid: u32) -> CoreResult<bool> {
 /// Lets `WindowServer` apply a pointer warp before HID input at the new
 /// location, and lets the target consume a click before focus or the pointer
 /// moves on.
-const POINTER_SETTLE: Duration = Duration::from_millis(40);
+pub(super) const POINTER_SETTLE: Duration = Duration::from_millis(40);
 /// Press-to-release gap: an `NSButton` press enters a tracking loop that can
 /// miss a release arriving before its first poll.
 const PRESS_GAP: Duration = Duration::from_millis(28);

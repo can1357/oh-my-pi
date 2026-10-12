@@ -3,8 +3,8 @@
 //! A popup's options are the `AXMenuItem`s of its `AXMenu`, and its `AXValue`
 //! is not settable. `AppKit` builds that menu's accessibility items only while
 //! the menu is open, so a closed native popup publishes no options at all:
-//! choosing one means opening the menu, pressing the item, and reading the
-//! popup's `AXValue` back as the verdict.
+//! choosing one means opening the menu, pressing the item, ending the menu
+//! with `AXCancel`, and reading the popup's `AXValue` back as the verdict.
 
 use std::{
 	thread,
@@ -185,18 +185,43 @@ fn open_menu(popup: &AXUIElement) -> CoreResult<Vec<CFRetained<AXUIElement>>> {
 	})
 }
 
-/// Presses the chosen item and waits for the popup to report it. The popup's
-/// value, not the press's return code, says whether the app took the choice.
+/// Presses the chosen item, ends its menu at once, and waits for the popup to
+/// report the choice. The popup's value, not the press's return code, says
+/// whether the app took the choice.
 fn press_option(popup: &AXUIElement, item: &AXUIElement, title: &str) -> CoreResult<()> {
 	if copy_bool(item, "AXEnabled") == Some(false) {
 		return Err(DesktopError::ax_failed(format!(
 			"popup option \"{title}\" is disabled; nothing was selected"
 		)));
 	}
-	perform_action(item, "AXPress")?;
+	settle_choice(
+		title,
+		CHOICE_SETTLE_WAIT,
+		|| perform_action(item, "AXPress"),
+		|| close_menu(popup),
+		|| copy_string(popup, "AXValue"),
+	)
+}
+
+/// Runs `press` on the option titled `title`, then `close`s its menu, then
+/// waits up to `wait` for the popup's `value` to read `title`. A pressed item
+/// flashes and its menu fades out for about 340 ms, and until the menu is gone
+/// `WindowServer` sends the user's keys to the target, which types them into
+/// its own key window once it closes; `AXCancel` right behind the press ends
+/// the menu within a few milliseconds, and `AppKit` still sends the item's
+/// action. A menu the cancel misses closes after its fade on its own.
+fn settle_choice(
+	title: &str,
+	wait: Duration,
+	press: impl FnOnce() -> CoreResult<()>,
+	close: impl FnOnce() -> bool,
+	mut value: impl FnMut() -> Option<String>,
+) -> CoreResult<()> {
+	press()?;
+	close();
 	let mut after = None;
-	let taken = poll(CHOICE_SETTLE_WAIT, || {
-		after = copy_string(popup, "AXValue");
+	let taken = poll(wait, || {
+		after = value();
 		(after.as_deref() == Some(title)).then_some(())
 	});
 	if taken.is_some() {
@@ -242,7 +267,9 @@ fn poll<T>(wait: Duration, mut probe: impl FnMut() -> Option<T>) -> Option<T> {
 
 #[cfg(test)]
 mod tests {
-	use super::{Refusal, choose_option, option_list};
+	use std::{cell::RefCell, time::Duration};
+
+	use super::{Refusal, choose_option, option_list, settle_choice};
 
 	fn titles(names: &[&str]) -> Vec<String> {
 		names.iter().map(ToString::to_string).collect()
@@ -272,5 +299,36 @@ mod tests {
 		let menu = titles(&["Small", "", "Large"]);
 		assert_eq!(choose_option(&menu, ""), Err(Refusal::Missing));
 		assert_eq!(option_list(&menu), "\"Small\", \"Large\"");
+	}
+
+	#[test]
+	fn a_pressed_option_ends_its_menu_before_the_choice_is_read() {
+		let log = RefCell::new(Vec::new());
+		let chosen = settle_choice(
+			"Large",
+			Duration::ZERO,
+			|| {
+				log.borrow_mut().push("press");
+				Ok(())
+			},
+			|| {
+				log.borrow_mut().push("cancel");
+				true
+			},
+			|| {
+				log.borrow_mut().push("value");
+				Some("Large".to_string())
+			},
+		);
+		assert!(chosen.is_ok(), "{chosen:?}");
+		// Read before the cancel, the menu would still be fading with the keyboard.
+		assert_eq!(*log.borrow(), ["press", "cancel", "value"]);
+	}
+
+	#[test]
+	fn a_choice_the_app_did_not_take_is_reported_after_the_cancel() {
+		let error = settle_choice("Large", Duration::ZERO, || Ok(()), || false, || Some("Small".to_string()))
+			.expect_err("the popup still reads Small");
+		assert!(error.message.contains("still reads \"Small\""), "{}", error.message);
 	}
 }

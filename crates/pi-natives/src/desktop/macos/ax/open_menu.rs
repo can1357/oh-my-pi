@@ -203,9 +203,9 @@ fn unchosen_message(press: Press<'_>, refusal: Option<&str>, items: &str) -> Str
 	let (opened, aftermath, listed) = (opened(press), aftermath(press), listed(items));
 	match refusal {
 		None => format!(
-			"{opened}, which takes the keyboard from the user's app, so it was closed with Escape \
-			 and nothing chosen{aftermath}. To choose an item in the background, pass its path as \
-			 the menu option, e.g. menu: [\"<item>\", \"<subitem>\"].{listed}"
+			"{opened}, which takes the keyboard from the user's app, so it was closed with nothing \
+			 chosen{aftermath}. To choose an item in the background, pass its path as the menu \
+			 option, e.g. menu: [\"<item>\", \"<subitem>\"].{listed}"
 		),
 		Some(refusal) => format!(
 			"{opened}, but {refusal}, so nothing was chosen and the menu was \
@@ -257,6 +257,8 @@ trait Menus {
 	/// The titled items of `menu`, in order.
 	fn items(&mut self, menu: &Self::Node) -> CoreResult<Vec<Entry<Self::Node>>>;
 	fn press(&mut self, item: &Self::Node) -> CoreResult<()>;
+	/// Ends `menu`'s tracking through accessibility (`AXCancel`).
+	fn cancel(&mut self, menu: &Self::Node) -> CoreResult<()>;
 	/// Posts Escape to the application, which closes its open menu.
 	fn escape(&mut self) -> CoreResult<()>;
 }
@@ -316,8 +318,8 @@ fn settle_with<M: Menus>(
 		};
 	};
 	let menu = menus.locate(window);
-	let (refusal, items) = match (path, menu) {
-		(Some(path), Some(menu)) => match choose(menus, &menu, path) {
+	let (refusal, items) = match (path, &menu) {
+		(Some(path), Some(menu)) => match choose(menus, menu, path) {
 			Ok(()) if await_closed(menus, window)? => return Ok(Settled::Chosen),
 			Ok(()) => (
 				Some(format!("the menu stayed open after {} was pressed", quote_path(path))),
@@ -328,17 +330,26 @@ fn settle_with<M: Menus>(
 		(Some(_), None) => {
 			(Some("its items could not be read through accessibility".to_string()), String::new())
 		},
-		(None, Some(menu)) => (None, listing(menus, &menu)),
+		(None, Some(menu)) => (None, listing(menus, menu)),
 		(None, None) => (None, String::new()),
 	};
-	let closed = close(menus, window)?;
+	let closed = close(menus, window, menu.as_ref())?;
 	Ok(Settled::Unchosen { refusal, items, closed })
 }
 
-/// Closes menu window `window` with Escape unless it already closed; whether
-/// it is closed afterwards.
-fn close<M: Menus>(menus: &mut M, window: u32) -> CoreResult<bool> {
+/// Closes menu window `window`, showing `menu`, unless it already closed;
+/// whether it is closed afterwards. `AXCancel` closes it at once. Escape, the
+/// fallback, leaves it fading out for about 270 ms, and until the fade ends
+/// the keyboard stays with the target, which types the user's keys into its
+/// own key window once the menu is gone.
+fn close<M: Menus>(menus: &mut M, window: u32, menu: Option<&M::Node>) -> CoreResult<bool> {
 	if !is_open(menus, window) {
+		return Ok(true);
+	}
+	if let Some(menu) = menu
+		&& menus.cancel(menu).is_ok()
+		&& await_closed(menus, window)?
+	{
 		return Ok(true);
 	}
 	menus.escape()?;
@@ -564,6 +575,10 @@ impl Menus for AxMenus {
 		perform_action(item, "AXPress")
 	}
 
+	fn cancel(&mut self, menu: &Self::Node) -> CoreResult<()> {
+		perform_action(menu, "AXCancel")
+	}
+
 	fn escape(&mut self) -> CoreResult<()> {
 		input::post_escape(self.pid)
 	}
@@ -579,8 +594,8 @@ mod tests {
 	type Item = (&'static str, bool, Option<u32>);
 
 	/// A scripted application: its menu tree, which window shows it from which
-	/// poll on, and a log of every press and Escape. Item `i` of menu `m` is
-	/// node `m * 100 + i`.
+	/// poll on, and a log of every press, `AXCancel` and Escape. Item `i` of
+	/// menu `m` is node `m * 100 + i`.
 	#[derive(Default)]
 	struct Fake {
 		/// Menu id → its items.
@@ -590,8 +605,10 @@ mod tests {
 		/// The menu window the press opens, and the poll that first lists it.
 		opens:        Option<(u32, usize)>,
 		polls:        usize,
-		/// Whether pressing an item, or Escape, closes the menu.
+		/// Whether pressing an item, `AXCancel` or Escape closes the menu; a
+		/// menu that does not take `AXCancel` refuses it.
 		press_closes: bool,
+		cancel_works: bool,
 		escape_works: bool,
 		log:          RefCell<Vec<String>>,
 	}
@@ -635,6 +652,15 @@ mod tests {
 			Ok(())
 		}
 
+		fn cancel(&mut self, _: &u32) -> CoreResult<()> {
+			self.log.borrow_mut().push("cancel".to_string());
+			if !self.cancel_works {
+				return Err(DesktopError::ax_failed("AXCancel is not supported"));
+			}
+			self.open.clear();
+			Ok(())
+		}
+
 		fn escape(&mut self) -> CoreResult<()> {
 			self.log.borrow_mut().push("escape".to_string());
 			if self.escape_works {
@@ -658,6 +684,7 @@ mod tests {
 			]),
 			opens: Some((9, 3)),
 			press_closes: true,
+			cancel_works: true,
 			escape_works: true,
 			..Fake::default()
 		}
@@ -678,7 +705,17 @@ mod tests {
 				.to_string(),
 			closed:  true,
 		});
-		assert_eq!(*app.log.borrow(), ["escape"]);
+		// Escape would leave the menu fading out with the keyboard.
+		assert_eq!(*app.log.borrow(), ["cancel"]);
+	}
+
+	#[test]
+	fn escape_closes_a_menu_that_refuses_cancel() {
+		let mut app = font_book();
+		app.cancel_works = false;
+		let settled = settle_with(&mut app, &[], None, CONTEXT_MENU_TIMEOUT).expect("settled");
+		assert!(matches!(settled, Settled::Unchosen { closed: true, .. }), "{settled:?}");
+		assert_eq!(*app.log.borrow(), ["cancel", "escape"]);
 	}
 
 	#[test]
@@ -696,7 +733,7 @@ mod tests {
 			let mut app = font_book();
 			let wanted = path(labels);
 			let settled = settle_with(&mut app, &[], Some(&wanted), CONTEXT_MENU_TIMEOUT);
-			assert_eq!(*app.log.borrow(), ["escape"], "{labels:?}");
+			assert_eq!(*app.log.borrow(), ["cancel"], "{labels:?}");
 			match settled.expect("settled") {
 				Settled::Unchosen { refusal: Some(refusal), items, closed: true } => (refusal, items),
 				other => panic!("{labels:?}: {other:?}"),
@@ -730,7 +767,7 @@ mod tests {
 			},
 			other => panic!("{other:?}"),
 		}
-		assert_eq!(*app.log.borrow(), ["press Show in Finder", "escape"]);
+		assert_eq!(*app.log.borrow(), ["press Show in Finder", "cancel"]);
 	}
 
 	#[test]
@@ -753,8 +790,9 @@ mod tests {
 	}
 
 	#[test]
-	fn a_menu_that_ignores_escape_is_reported_open() {
+	fn a_menu_that_ignores_cancel_and_escape_is_reported_open() {
 		let mut app = font_book();
+		app.cancel_works = false;
 		app.escape_works = false;
 		let settled = settle_with(&mut app, &[], None, CONTEXT_MENU_TIMEOUT).expect("settled");
 		assert!(matches!(settled, Settled::Unchosen { closed: false, .. }), "{settled:?}");
@@ -824,7 +862,7 @@ mod tests {
 		assert!(
 			error
 				.message
-				.contains("so it was closed with Escape and nothing chosen")
+				.contains("so it was closed with nothing chosen")
 		);
 		assert!(error.message.contains("pass its path as the menu option"));
 		// A menu still open fails whatever the press returned.

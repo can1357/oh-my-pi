@@ -25,6 +25,7 @@ use super::{
 	super::{
 		ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_macos},
 		backend::AxBackend,
+		control,
 		error::{CoreResult, DesktopError},
 		types::DesktopWindow,
 	},
@@ -1084,6 +1085,13 @@ fn activate_for_menu(
 		input::takes_overlay_focus(wid, focused_window_id(pid), skylight::window_parent);
 	let prepared =
 		input::make_key_in_background(&input::source()?, pid, wid, &window, entry_front, in_overlay)?;
+	// The press that makes the window key waits in the application's event
+	// queue, while the action that follows is handled as soon as it arrives:
+	// `AXShowMenu` sent right behind the press opened its menu first, and the
+	// press, landing outside the menu, closed it again.
+	if prepared && !in_overlay {
+		control::wait(input::POINTER_SETTLE)?;
+	}
 	// A popover never becomes the focused window; the one it is on already is.
 	if !in_overlay {
 		input::await_key_window(pid, wid)?;
