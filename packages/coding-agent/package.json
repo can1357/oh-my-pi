@@ -520,7 +520,7 @@
 	},
 	"scripts": {
 		"build": "bun scripts/build-binary.ts",
-		"build:android": "bun scripts/build-android-bundle.ts",
+		"build:android": "bun scripts/build-android-binary.ts",
 		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
 		"check:types": "bun check --no-script -p tsconfig.json",
 		"lint": "oxlint .",

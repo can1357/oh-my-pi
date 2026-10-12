@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added native Android ARM64/Termux runtime support and Linux cross-builds for relocatable Android bundles.
+- Added standalone Android ARM64/Termux executables with Linux cross-build support.
 
 ## [18.18.9] - 2026-11-11
 

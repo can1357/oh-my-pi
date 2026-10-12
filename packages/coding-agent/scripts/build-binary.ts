@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
 
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { compileCodingAgent } from "./compile-binary";
 
@@ -40,10 +39,9 @@ function resolveCrossBuild(value: string | undefined): CrossBuild | null {
 	}
 }
 
-async function runCommand(command: string[], env?: Record<string, string | undefined>): Promise<void> {
+async function runCommand(command: string[]): Promise<void> {
 	const proc = Bun.spawn(command, {
 		cwd: packageDir,
-		env: env ?? Bun.env,
 		stdout: "inherit",
 		stderr: "inherit",
 	});
@@ -54,8 +52,7 @@ async function runCommand(command: string[], env?: Record<string, string | undef
 }
 
 async function main(): Promise<void> {
-	const crossTarget = Bun.env.CROSS_TARGET;
-	const crossBuild = resolveCrossBuild(crossTarget);
+	const crossBuild = resolveCrossBuild(Bun.env.CROSS_TARGET);
 	const shouldAdhocSign =
 		process.platform === "darwin" &&
 		(!crossBuild || crossBuild.platform === "darwin") &&
@@ -69,32 +66,15 @@ async function main(): Promise<void> {
 		// Embed metadata for the same content-addressed viewer used by source exports.
 		// Generate here too for clean checkouts that skipped install hooks.
 		await runCommand(["bun", "--cwd=../collab-web", "run", "gen:export-viewer"]);
-		if (isAndroidBuild) {
-			if (isAndroidCrossBuild && process.platform !== "android") {
-				// Explicit target builds use the canonical Bazel driver; only a
-				// native Termux build uses the local Cargo/N-API host path.
-				await runCommand(
-					["bun", "../../scripts/bazel-natives.ts", "android-arm64", "--dest", "../natives/native"],
-					{ ...Bun.env, OMP_NATIVE_BUILD_BACKEND: "bazel" },
-				);
-			} else {
-				await runCommand(["bun", "--cwd=../natives", "run", "build"], {
-					...Bun.env,
-					OMP_NATIVE_BUILD_BACKEND: "cargo",
-				});
-			}
-			await buildAndroidLauncher(outputPath);
-		} else {
-			await compileCodingAgent({
-				repoRoot,
-				entrypoint: path.join(packageDir, "src", "cli.ts"),
-				outfile: outputPath,
-				native: crossBuild ?? { platform: process.platform, arch: process.arch },
-				target: crossBuild?.target,
-				executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,
-				skipBuiltinCodesign: shouldAdhocSign,
-			});
-		}
+		await compileCodingAgent({
+			repoRoot,
+			entrypoint: path.join(packageDir, "src", "cli.ts"),
+			outfile: outputPath,
+			native: crossBuild ?? { platform: process.platform, arch: process.arch },
+			target: crossBuild?.target,
+			executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,
+			skipBuiltinCodesign: shouldAdhocSign,
+		});
 
 		if (shouldAdhocSign) {
 			await runCommand([
@@ -107,6 +87,7 @@ async function main(): Promise<void> {
 				outputPath,
 			]);
 		}
+
 	} finally {
 		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats:reset"]);
 	}

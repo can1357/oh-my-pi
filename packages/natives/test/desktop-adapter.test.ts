@@ -20,19 +20,26 @@ describe("desktop native ABI requirements", () => {
 	});
 
 	it("rejects an addon built before the Escape stop count", () => {
-		// Every method present, so only the getter can decide; without it the worker reads each run as stopped.
-		const prototype = (escapeStops: boolean) =>
-			new Proxy(
-				{},
-				{
-					get: () => () => {},
-					has: (_target, key) => escapeStops || key !== "escapeStops",
-				},
-			);
-		const Current = { prototype: prototype(true) };
+		// Every method is present, so only the getter decides; without it the worker reads each run as stopped.
+		const methods = new Proxy(
+			{},
+			{
+				get: () => () => {},
+				has: (_target, key) => key !== "escapeStops",
+			},
+		);
+		class NativeSession {}
+		Object.setPrototypeOf(NativeSession.prototype, methods);
+		class Current extends NativeSession {
+			get escapeStops() {
+				return 0;
+			}
+		}
 		expect<unknown>(adaptDesktopSession(Current)).toBe(Current);
-		const Stale = adaptDesktopSession({ prototype: prototype(false) });
-		expect(() => new Stale({ display: "active" })).toThrow(/^Unsupported: .*\(missing escapeStops\)/);
+		class Stale extends NativeSession {}
+		expect(() => new (adaptDesktopSession(Stale))({ display: "active" })).toThrow(
+			/^Unsupported: .*\(missing escapeStops\)/,
+		);
 	});
 });
 

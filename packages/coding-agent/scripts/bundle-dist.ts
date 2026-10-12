@@ -3,7 +3,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
-import { embeddedAddonFiles } from "../../natives/scripts/embed-native";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
@@ -15,14 +14,10 @@ const shebang = "#!/usr/bin/env bun\n";
 // Remove old inline-viewer sidecars left in an existing output directory.
 const obsoleteHtmlExportAssetPattern =
 	/^(?:template-[^.]+\.(?:css|html|js)|tool-views\.generated-[^.]+\.js|(?:marked|highlight)\.min-[^.]+\.js)$/;
-const androidBundle = Bun.env.OMP_ANDROID_BUNDLE === "1";
 
-// Native and optional dependencies stay outside desktop bundles. Android embeds its
-// native addon archive while heavyweight model runtimes remain on the worker's
-// on-demand install path.
-const ALWAYS_EXTERNAL = androidBundle
-	? ["@huggingface/transformers", "fastembed", "onnxruntime-node"]
-	: ["@oh-my-pi/pi-natives", "@huggingface/transformers", "fastembed", "onnxruntime-node"];
+// Native and optional dependencies load from installed files in desktop npm bundles.
+const ALWAYS_EXTERNAL = ["@oh-my-pi/pi-natives", "@huggingface/transformers", "fastembed", "onnxruntime-node"];
+const RUNTIME_EXTERNAL = ["puppeteer-core", "@babel/parser"];
 
 /**
  * Embeds `@oh-my-pi/pi-natives/THIRD-PARTY-NOTICES.txt` even though the natives package is external. An external
@@ -45,7 +40,6 @@ const inlineNativeNoticesPlugin: Bun.BunPlugin = {
 // import would load the unpatched npm package in users' installs (currently
 // @ark/schema is patched, so it — and arktype, which pulls @ark/schema — stay
 // bundled).
-const RUNTIME_EXTERNAL = androidBundle ? [] : ["puppeteer-core", "@babel/parser"];
 
 async function runCommand(command: string[]): Promise<void> {
 	const proc = Bun.spawn(command, {
@@ -112,9 +106,6 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 	// still resolve omp:// docs (see src/internal-urls/docs-index.ts).
 	try {
 		const docsPayload = await buildDocsIndexPayload();
-		const embeddedFiles = androidBundle
-			? await embeddedAddonFiles({ platform: "android", arch: "arm64" })
-			: {};
 		// Build in-process: the docs embed payload is far larger than Linux's
 		// 128KiB per-argv-string cap, so it can never be passed as a CLI
 		// `--define` (posix_spawn fails with E2BIG).
@@ -124,7 +115,6 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 			target: "bun",
 			plugins: [createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin(), inlineNativeNoticesPlugin],
 			external: [...ALWAYS_EXTERNAL, ...RUNTIME_EXTERNAL],
-			files: embeddedFiles,
 			define: {
 				"process.env.PI_BUNDLED": JSON.stringify("true"),
 				"process.env.PI_DOCS_EMBED": JSON.stringify(docsPayload.payload),
