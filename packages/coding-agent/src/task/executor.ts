@@ -2365,6 +2365,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			yieldCalled = false;
 			yieldInvalidatedByStop = true;
 			yieldAcceptedAt = undefined;
+			// The yield's deferred budget check was skipped when it latched
+			// `yieldCalled`; the refused turn still cost a request.
+			evaluateSoftRequestBudget();
 			// The refused candidate is the last recorded yield: every recorded
 			// yield reassigns `yieldCalled`, so a latched yield is the newest item.
 			// Left in place it would still win result assembly as the terminal item
@@ -2743,6 +2746,12 @@ async function driveSessionToResult(
 				}
 				if (stop.kind === "allow") break;
 				monitor.invalidateYieldForStop();
+				// Charging the refused turn may have stopped the run for budget: let
+				// that abort settle (throws if the run is now aborted, so no
+				// continuation starts after an abort) and leave the stopped run to
+				// the ladder's forced final yield instead of a free-running turn.
+				await awaitAbortable(monitor.waitForBudgetStop());
+				if (monitor.budgetStopRequested()) continue;
 				await dispatchPrompt(stop.text, { attribution: "agent", synthetic: true }, "subagent_stop continuation");
 				await awaitAbortable(session.waitForIdle());
 				continue;
