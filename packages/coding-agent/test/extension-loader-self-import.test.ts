@@ -44,9 +44,6 @@ describe("extension loader host runtime binding", () => {
 		expect(projectDir).toBeDefined();
 		const cwd = projectDir!.path();
 
-		// Write every module before any loader runs: Bun's resolver caches
-		// directory entries process-wide, so a file created in `cwd` after the
-		// first module resolution there is invisible to later dynamic imports.
 		const extensionPath = writeModule(
 			"extension.ts",
 			`
@@ -112,5 +109,14 @@ describe("extension loader host runtime binding", () => {
 		expect(hookResult.errors).toEqual([]);
 		expect(hookResult.hooks).toHaveLength(1);
 		expect(hookResult.hooks[0].handlers.has("identity:event")).toBe(true);
+	});
+
+	it("resolves the host pi namespace through dynamic import, not require", () => {
+		const loaderSource = fs.readFileSync(
+			path.join(import.meta.dir, "../src/extensibility/extensions/loader.ts"),
+			"utf8",
+		);
+		expect(loaderSource).not.toMatch(/require\(["']\.\.\/\.\.\/index["']\)/);
+		expect(loaderSource).toMatch(/await import\(["']\.\.\/\.\.\/index["']\)/);
 	});
 });
