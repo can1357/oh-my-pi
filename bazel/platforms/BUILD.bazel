@@ -36,6 +36,14 @@ platform(
 )
 
 platform(
+    name = "android-arm64",
+    constraint_values = [
+        "@platforms//os:android",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+platform(
     name = "darwin-x64-baseline",
     constraint_values = [
         "@platforms//os:macos",

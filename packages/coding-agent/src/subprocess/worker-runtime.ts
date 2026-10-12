@@ -437,10 +437,10 @@ export class MemoizedRuntime<T> {
 }
 
 /**
- * Load the `@huggingface/transformers` runtime into `holder` (memoized): from
- * the ambient install when running from source, or from a version-keyed side
- * runtime (resolved lazily at `runtimeDir()`) when running as a compiled binary.
- * The result is cast to the caller's concrete runtime type `T`.
+ * Load the `@huggingface/transformers` runtime into `holder`: from the ambient
+ * install when running from source or a desktop bundle, or from a version-keyed
+ * side runtime when running as a compiled binary. The result is cast to the
+ * caller's concrete runtime type `T`.
  */
 export function loadTransformersRuntime<T extends ConfigurableTransformers, K>(
 	holder: MemoizedRuntime<T>,

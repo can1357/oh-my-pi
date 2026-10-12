@@ -1697,8 +1697,9 @@ impl SpawnObserver for process::SpawnRegistry {
 	fn on_spawn(&self, pid: i32, pgid: Option<i32>) {
 		// Pin a stable process reference *now*, before the pid can be recycled.
 		// On Windows an open handle keeps the pid slot reserved for the lifetime
-		// of the handle; on Linux the pidfd carries identity; on macOS the
-		// recorded start-time triple detects impersonation. Deferring the open
+		// of the handle; on Linux the pidfd carries identity; Android prefers a
+		// pidfd and otherwise records `/proc` start time; on macOS the recorded
+		// start-time triple detects impersonation. Deferring the open
 		// to `build_targets` (as the old code did) let a recycled pid resolve
 		// to an unrelated process — issue #4605.
 		let process = process::Process::from_pid(pid);

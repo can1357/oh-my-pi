@@ -1,14 +1,16 @@
 """omp — Bazel build for the native (Rust) side of the workspace.
 
-Builds the pi_natives NAPI cdylib for every shipped target with hermetic
-toolchains, replacing cargo-zigbuild/cargo-xwin/sccache plus the hand-rolled
-CI caches with Bazel's content-addressed action cache (see infra/bazel-remote.yaml).
+Builds the pi_natives NAPI cdylib for every shipped target, plus an explicit
+experimental Android ARM64 cross-target, with hermetic toolchains. This replaces
+cargo-zigbuild/cargo-xwin/sccache plus hand-rolled CI caches with Bazel's
+content-addressed action cache (see infra/bazel-remote.yaml).
 
 Layout:
   //:natives-<target>      release-grade renamed .node artifacts (root BUILD.bazel)
   //crates/...             first-party crate targets
   //bazel/...              platforms, ISA-variant constraints, toolchains, rules
   @crates//...             third-party crates from Cargo.lock via crate_universe
+  //:natives-android-arm64  explicit experimental Android ARM64 target
 
 The cargo workspace stays authoritative for local iteration (rust-analyzer,
 `cargo nextest`, napi typedef regeneration); Bazel is the artifact and CI
@@ -22,6 +24,7 @@ bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "rules_rust", version = "0.71.3")
 bazel_dep(name = "hermetic_cc_toolchain", version = "4.2.0")
+bazel_dep(name = "rules_android_ndk", version = "0.1.5")
 
 # zig-wrapper patches (rationale in each patch header):
 # - zig 0.14's cache corrupts under concurrent `zig cc` (ziglang/zig#18763);
@@ -55,6 +58,7 @@ rust.toolchain(
     extra_target_triples = [
         "x86_64-unknown-linux-gnu",
         "aarch64-unknown-linux-gnu",
+        "aarch64-linux-android",
         "x86_64-unknown-linux-musl",
         "aarch64-unknown-linux-musl",
         "x86_64-apple-darwin",
@@ -88,6 +92,7 @@ rust.toolchain(
         "2026-10-06/rust-std-nightly-aarch64-pc-windows-msvc.tar.xz": "96d0649de9b4ec3090417b69b22259eb2a6aa939037be06d1feb784f49e2f665",
         "2026-10-06/rust-std-nightly-aarch64-apple-darwin.tar.xz": "fc04ec629d899bf8cc72aedf49d183d08b0b2bb3365d9d26b0670118691254aa",
         "2026-10-06/rust-std-nightly-aarch64-unknown-linux-gnu.tar.xz": "d922fc95481f151b3ffdb71629508ca07599212ac6c1e9f4cfcc375f5b3cd6d7",
+        "2026-10-06/rust-std-nightly-aarch64-linux-android.tar.xz": "84a5bedf118431ebab2af4df2c05ab9427fbb3d7ae8ba055b2ce968d6e2b9435",
         "2026-10-06/rust-std-nightly-aarch64-unknown-linux-musl.tar.xz": "add87c8713470d6ba3f23eff483d2d19a58363c20a863636c3d23666347b19de",
         "2026-10-06/rust-std-nightly-x86_64-apple-darwin.tar.xz": "c0678a942fb88aa1e08a46a42df8fa30d3ae5db30f72186821e6e6bce49d4cae",
         "2026-10-06/rust-std-nightly-x86_64-pc-windows-msvc.tar.xz": "e2ea91d670676d845a0c7bdb6e84acf4b3c6df7486208bc2f91f33b6ba00c169",
@@ -127,6 +132,14 @@ use_repo(
 register_toolchains("//bazel/toolchains:all")
 
 register_toolchains("@rust_toolchains//:all")
+
+# --- Android NDK toolchain ----------------------------------------------------
+# Keep the local NDK repository lazy: desktop Bazel builds must not require
+# ANDROID_NDK_HOME. The installer opts into the C++ toolchain only when an
+# Android target is requested; rules_android_ndk 0.1.5 supports NDK 25b+.
+android_ndk = use_extension("@rules_android_ndk//:extension.bzl", "android_ndk_repository_extension")
+android_ndk.configure(api_level = 24)
+use_repo(android_ndk, "androidndk")
 
 # --- C/C++ toolchains ---------------------------------------------------------
 # zig cc provides hermetic linux-gnu (pinned glibc 2.17 portability floor, same
@@ -174,12 +187,13 @@ crate.from_cargo(
     # brush fork (members so their sources render hermetically; the
     # [patch.crates-io] entry redirects brush-core's registry dep to it).
     manifests = ["//:Cargo.toml"],
-    # Exactly the shipped addon triples: crate BUILD files get
-    # target_compatible_with selects over this set (defaults omit darwin-x64
-    # and musl), and features/deps resolve per-triple from Cargo.lock.
+    # Shipped addon triples plus the explicit experimental Android ARM64 target;
+    # crate BUILD files use target_compatible_with to select over this set
+    # (defaults omit darwin-x64 and musl), and features/deps resolve per triple.
     supported_platform_triples = [
         "x86_64-unknown-linux-gnu",
         "aarch64-unknown-linux-gnu",
+        "aarch64-linux-android",
         "x86_64-unknown-linux-musl",
         "aarch64-unknown-linux-musl",
         "x86_64-apple-darwin",
@@ -189,10 +203,15 @@ crate.from_cargo(
     ],
 )
 
-# opusic-sys builds its bundled Opus via `cmake` and selects Ninja from PATH.
-# The target-specific toolchain keeps MSVC cross builds on the wrapper
-# compiler/linker; CFLAGS keeps Zig cross builds free of host UBSan links.
+# opusic-sys expects ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake to
+# select its Android ABI, but rules_android_ndk intentionally exposes only the
+# compiler/sysroot subset of the NDK. Supply a small adapter at that expected
+# path. rules_rust already adds the resolved cc_toolchain's all_files to build
+# script actions, so no second NDK input is needed.
+# The Android-only ANDROID_NDK_HOME below locates the adapter; actual NDK
+# discovery remains in the lazy rules_android_ndk repository using host config.
 crate.annotation(
+    build_script_data = ["@@//bazel/toolchains/android:cmake_toolchain"],
     build_script_env = {
         "CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc": "$${pwd}/external/+msvc_cc_repository+msvc_cc/toolchain.cmake",
         "CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc": "$${pwd}/external/+msvc_cc_repository+msvc_cc_arm64/toolchain.cmake",
@@ -200,6 +219,16 @@ crate.annotation(
         "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/run/current-system/sw/bin",
     },
     crate = "opusic-sys",
+)
+
+crate.annotation_select(
+    build_script_env = {
+        "ANDROID_NDK_HOME": "$${pwd}/bazel/toolchains/android",
+        "ANDROID_NDK_ROOT": "$${pwd}/external/rules_android_ndk++android_ndk_repository_extension+androidndk",
+        "ANDROID_PLATFORM": "android-24",
+    },
+    crate = "opusic-sys",
+    triples = ["aarch64-linux-android"],
 )
 
 # wasmtime-c-api-impl (tree-sitter's `wasm` feature) runs `cmake -P` to install

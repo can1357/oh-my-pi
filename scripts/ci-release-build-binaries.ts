@@ -3,13 +3,18 @@
 import * as fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import { COMPILED_EXTERNAL_DEPENDENCIES, compileCodingAgent } from "../packages/coding-agent/scripts/compile-binary";
+import {
+	ANDROID_COMPILE_TARGET,
+	COMPILED_EXTERNAL_DEPENDENCIES,
+	compileCodingAgent,
+	type CodingAgentCompileTarget,
+} from "../packages/coding-agent/scripts/compile-binary";
 
 interface BinaryTarget {
 	id: string;
 	platform: string;
 	arch: string;
-	target: Bun.Build.CompileTarget;
+	target: CodingAgentCompileTarget;
 	outfile: string;
 }
 
@@ -56,6 +61,13 @@ const targets: BinaryTarget[] = [
 		arch: "arm64",
 		target: "bun-linux-arm64",
 		outfile: "packages/coding-agent/binaries/omp-linux-arm64",
+	},
+	{
+		id: "android-arm64",
+		platform: "android",
+		arch: "arm64",
+		target: ANDROID_COMPILE_TARGET,
+		outfile: "packages/coding-agent/binaries/omp-android-arm64",
 	},
 	{
 		id: "linux-musl-x64",

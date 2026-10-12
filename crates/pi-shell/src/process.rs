@@ -16,7 +16,7 @@ pub use pi_builtins::ProcessStatus;
 
 use crate::cancel::CancelToken;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod platform {
 	use std::{
 		collections::HashSet,
@@ -29,12 +29,35 @@ mod platform {
 
 	use super::ProcessStatus;
 
-	/// Stable Linux process reference backed by a pidfd.
+	/// Stable process identity for Linux/Android processes. Linux requires a
+	/// pidfd; Android prefers one and falls back to `/proc` start-time identity.
+	#[derive(Clone)]
+	enum ProcessIdentity {
+		Pidfd {
+			pidfd:      Arc<OwnedFd>,
+			start_time: u64,
+		},
+		#[cfg(target_os = "android")]
+		ProcStartTime {
+			start_time: u64,
+		},
+	}
+
+	impl ProcessIdentity {
+		const fn start_time(&self) -> u64 {
+			match self {
+				Self::Pidfd { start_time, .. } => *start_time,
+				#[cfg(target_os = "android")]
+				Self::ProcStartTime { start_time } => *start_time,
+			}
+		}
+	}
+
+	/// Stable Linux/Android process reference.
 	#[derive(Clone)]
 	pub struct Process {
-		pid:        i32,
-		pidfd:      Arc<OwnedFd>,
-		start_time: u64,
+		pid:      i32,
+		identity: ProcessIdentity,
 	}
 
 	impl Process {
@@ -42,9 +65,16 @@ mod platform {
 			if pid <= 0 {
 				return None;
 			}
-			let pidfd = Arc::new(sys::open_pidfd(pid)?);
-			let start_time = sys::start_time(pid)?;
-			Some(Self { pid, pidfd, start_time })
+			let pidfd = sys::open_pidfd(pid).map(Arc::new);
+			#[cfg(target_os = "linux")]
+			let identity =
+				ProcessIdentity::Pidfd { pidfd: pidfd?, start_time: sys::start_time(pid)? };
+			#[cfg(target_os = "android")]
+			let identity = match pidfd {
+				Some(pidfd) => ProcessIdentity::Pidfd { pidfd, start_time: sys::start_time(pid)? },
+				None => ProcessIdentity::ProcStartTime { start_time: read_live_start_time(pid)? },
+			};
+			Some(Self { pid, identity })
 		}
 
 		pub const fn pid(&self) -> i32 {
@@ -148,7 +178,20 @@ mod platform {
 		}
 
 		pub fn kill(&self, signal: i32) -> bool {
-			sys::pidfd_send_signal(self.pidfd.as_fd(), signal)
+			match &self.identity {
+				ProcessIdentity::Pidfd { pidfd, .. } => sys::pidfd_send_signal(pidfd.as_fd(), signal),
+				#[cfg(target_os = "android")]
+				ProcessIdentity::ProcStartTime { .. } => {
+					// Revalidate the recorded `/proc` start time immediately before
+					// the raw signal; never signal a bare pid.
+					if !self.live_identity() {
+						return false;
+					}
+					// SAFETY: `kill` takes integer identifiers by value and does not
+					// access caller-owned memory.
+					unsafe { libc::kill(self.pid, signal) == 0 }
+				},
+			}
 		}
 
 		pub fn group_id(&self) -> Option<i32> {
@@ -156,52 +199,76 @@ mod platform {
 				return None;
 			}
 
-			// SAFETY: `self.pid` names the process currently referenced by
-			// `self.pidfd` unless it exits concurrently. If it exits, `getpgid`
-			// reports failure rather than dereferencing caller-owned memory.
+			// SAFETY: `status` just confirmed that `self.pid` still has the
+			// recorded identity. If it exits concurrently, `getpgid`
+			// reports failure rather than dereferencing caller-owned
+			// memory.
 			let pgid = unsafe { libc::getpgid(self.pid) };
 			if pgid > 0 { Some(pgid) } else { None }
 		}
 
 		pub fn status(&self) -> ProcessStatus {
-			loop {
-				let mut pollfd =
-					libc::pollfd { fd: self.pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-				// SAFETY: `pollfd` points to one initialized `pollfd` element, and
-				// the pidfd remains open for the duration of the call. Timeout
-				// zero makes this a non-blocking readiness probe.
-				let ready = unsafe { libc::poll(&raw mut pollfd, 1, 0) };
-				if ready < 0 {
-					// Retry on EINTR; for any other transient poll error treat the
-					// pidfd as still running. The pidfd is still owned and the
-					// kernel has not reported the process gone — a spurious
-					// `Exited` here makes every downstream signal/kill fall
-					// through silently.
-					if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-						continue;
+			match &self.identity {
+				ProcessIdentity::Pidfd { pidfd, .. } => loop {
+					let mut pollfd =
+						libc::pollfd { fd: pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+					// SAFETY: `pollfd` points to one initialized `pollfd` element,
+					// and the pidfd remains open for the duration of
+					// the call. Timeout zero makes this a
+					// non-blocking readiness probe.
+					let ready = unsafe { libc::poll(&raw mut pollfd, 1, 0) };
+					if ready < 0 {
+						// Retry on EINTR; for any other transient poll error treat
+						// the pidfd as still running. The pidfd is
+						// still owned and the kernel has not
+						// reported the process gone — a spurious
+						// `Exited` here makes every downstream signal/kill fall
+						// through silently.
+						if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+							continue;
+						}
+						return ProcessStatus::Running;
+					}
+					if ready == 0 {
+						return ProcessStatus::Running;
+					}
+					if (pollfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL))
+						!= 0
+					{
+						return ProcessStatus::Exited;
 					}
 					return ProcessStatus::Running;
-				}
-				if ready == 0 {
-					return ProcessStatus::Running;
-				}
-				if (pollfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL))
-					!= 0
-				{
-					return ProcessStatus::Exited;
-				}
-				return ProcessStatus::Running;
+				},
+				#[cfg(target_os = "android")]
+				ProcessIdentity::ProcStartTime { start_time } => {
+					if read_live_start_time(self.pid) == Some(*start_time) {
+						ProcessStatus::Running
+					} else {
+						ProcessStatus::Exited
+					}
+				},
 			}
 		}
 
-		/// Resolves once the process exits: its pidfd becomes readable then.
+		/// Resolves once the process exits, through a pidfd or `/proc` polling.
 		pub async fn exited(&self) -> std::io::Result<()> {
-			let pidfd = tokio::io::unix::AsyncFd::with_interest(
-				self.pidfd.try_clone()?,
-				tokio::io::Interest::READABLE,
-			)?;
-			let _ready = pidfd.readable().await?;
-			Ok(())
+			match &self.identity {
+				ProcessIdentity::Pidfd { pidfd, .. } => {
+					let pidfd = tokio::io::unix::AsyncFd::with_interest(
+						pidfd.try_clone()?,
+						tokio::io::Interest::READABLE,
+					)?;
+					let _ready = pidfd.readable().await?;
+					Ok(())
+				},
+				#[cfg(target_os = "android")]
+				ProcessIdentity::ProcStartTime { .. } => {
+					while self.status() == ProcessStatus::Running {
+						tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+					}
+					Ok(())
+				},
+			}
 		}
 
 		/// Walk the descendant tree in post-order (leaves first), de-duplicating
@@ -225,8 +292,24 @@ mod platform {
 
 		fn live_identity(&self) -> bool {
 			self.status() == ProcessStatus::Running
-				&& sys::start_time(self.pid) == Some(self.start_time)
+				&& sys::start_time(self.pid) == Some(self.identity.start_time())
 		}
+	}
+
+	#[cfg(target_os = "android")]
+	fn read_live_start_time(pid: i32) -> Option<u64> {
+		// `/proc/[pid]/stat` field 22 is the process start time in clock ticks
+		// since boot. The comm field (between parens) may itself contain
+		// spaces and parens, so locate the *last* `)` and split the
+		// trailing whitespace-separated fields.
+		let stat_path = format!("/proc/{pid}/stat");
+		let content = fs::read_to_string(stat_path).ok()?;
+		let last_paren = content.rfind(')')?;
+		let mut fields = content[last_paren + 1..].split_whitespace();
+		if fields.next()? == "Z" {
+			return None;
+		}
+		fields.nth(18)?.parse().ok()
 	}
 
 	/// Find processes whose `/proc/{pid}/exe` symlink resolves to exactly
@@ -240,6 +323,8 @@ mod platform {
 			.filter_map(Process::from_pid)
 			.collect()
 	}
+	#[cfg(all(test, target_os = "android"))]
+	mod fallback_tests;
 }
 
 #[cfg(target_os = "macos")]
@@ -1138,7 +1223,8 @@ impl TerminationTargets {
 /// `process` is captured *at spawn time* so its OS-level identity is pinned
 /// before the pid can be recycled. On Windows an open process handle keeps
 /// the pid reserved for the lifetime of the reference; on Linux the pidfd
-/// pins identity; on macOS the recorded `(pid, start_time)` triple detects
+/// pins identity; Android prefers a pidfd and otherwise records the `/proc`
+/// start time; on macOS the recorded `(pid, start_time)` triple detects
 /// impersonation. Storing only the raw pid and re-opening at cancellation
 /// time — as previous versions did — leaked kills onto unrelated processes
 /// that happened to acquire the recycled pid between the child exiting and

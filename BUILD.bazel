@@ -1,4 +1,4 @@
-# Shipping pi_natives addons, one per (platform, arch, ISA-variant).
+# Native addon targets; Android ARM64 is experimental and explicit-only.
 # `bazel build //:natives-<target>` yields the canonically named .node file;
 # packages/natives/scripts/build-native.ts copies it into packages/natives/native/.
 # Note: musl addons intentionally reuse the plain linux-<arch> filenames — the
@@ -17,6 +17,7 @@ _ADDONS = {
     "linux-x64-baseline": ("//bazel/platforms:linux-x64-baseline", "pi_natives.linux-x64-baseline.node"),
     "linux-x64-modern": ("//bazel/platforms:linux-x64-modern", "pi_natives.linux-x64-modern.node"),
     "linux-arm64": ("//bazel/platforms:linux-arm64", "pi_natives.linux-arm64.node"),
+    "android-arm64": ("//bazel/platforms:android-arm64", "pi_natives.android-arm64.node"),
     "linux-musl-x64-baseline": ("//bazel/platforms:linux-musl-x64-baseline", "pi_natives.linux-x64-baseline.node"),
     "linux-musl-arm64": ("//bazel/platforms:linux-musl-arm64", "pi_natives.linux-arm64.node"),
     "darwin-x64-baseline": ("//bazel/platforms:darwin-x64-baseline", "pi_natives.darwin-x64-baseline.node"),

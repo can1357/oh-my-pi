@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
+	copyToClipboard,
 	readImageFromClipboard,
 	readMacFileUrlsFromClipboard,
 	readTextFromClipboard,
@@ -82,6 +83,48 @@ afterEach(() => {
 // 1x1 red PNG; round-tripped through PowerShell as base64 in the real flow.
 const RED_1X1_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+
+describe("copyToClipboard on Termux", () => {
+	it("does not invoke the native fallback when the Termux helper fails", async () => {
+		setPlatform("android");
+		process.env.TERMUX_VERSION = "0.118";
+		const calls: SpawnCall[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		spySpawn(calls, "", 1);
+		const nativeSpy = vi.spyOn(native, "copyToClipboard");
+
+		await copyToClipboard("hello");
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.cmd).toEqual(["termux-clipboard-set"]);
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+	it("uses the Termux helper on Android when available", async () => {
+		setPlatform("android");
+		process.env.TERMUX_VERSION = "0.118";
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, "");
+		const nativeSpy = vi.spyOn(native, "copyToClipboard");
+
+		await copyToClipboard("hello");
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.cmd).toEqual(["termux-clipboard-set"]);
+		expect(calls[0]?.options.stdin).toEqual(Buffer.from("hello"));
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not use native clipboard or desktop tools on Android without Termux", async () => {
+		setPlatform("android");
+		const spawnSpy = vi.spyOn(Bun, "spawn");
+		const nativeSpy = vi.spyOn(native, "copyToClipboard");
+
+		await copyToClipboard("hello");
+
+		expect(spawnSpy).not.toHaveBeenCalled();
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+});
 
 describe("readImageFromClipboard on WSL", () => {
 	it("decodes the PowerShell base64 payload without touching the native bridge", async () => {
@@ -229,6 +272,19 @@ describe("readImageFromClipboard dispatch", () => {
 		},
 	);
 
+	it("returns no image on Android without invoking native or desktop clipboard paths", async () => {
+		setPlatform("android");
+		process.env.WSL_INTEROP = "/run/WSL/1_interop";
+		process.env.WSL_DISTRO_NAME = "Ubuntu";
+		process.env.DISPLAY = ":0";
+		process.env.WAYLAND_DISPLAY = "wayland-0";
+		const spawnSpy = vi.spyOn(Bun, "spawn");
+		const nativeSpy = vi.spyOn(native, "readImageFromClipboard");
+
+		expect(await readImageFromClipboard()).toBeNull();
+		expect(spawnSpy).not.toHaveBeenCalled();
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
 	it("returns null on Termux without spawning anything", async () => {
 		setPlatform("linux");
 		process.env.TERMUX_VERSION = "0.118";
@@ -277,6 +333,31 @@ describe("readMacFileUrlsFromClipboard", () => {
 });
 
 describe("readTextFromClipboard", () => {
+	it("returns no text on Android without Termux or desktop/native clipboard access", async () => {
+		setPlatform("android");
+		process.env.WSL_INTEROP = "/run/WSL/1_interop";
+		process.env.WSL_DISTRO_NAME = "Ubuntu";
+		process.env.DISPLAY = ":0";
+		process.env.WAYLAND_DISPLAY = "wayland-0";
+		const spawnSpy = vi.spyOn(Bun, "spawn");
+		const nativeSpy = vi.spyOn(native, "readTextFromClipboard");
+
+		expect(await readTextFromClipboard()).toBe("");
+		expect(spawnSpy).not.toHaveBeenCalled();
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+
+	it("reads Android text through termux-clipboard-get", async () => {
+		setPlatform("android");
+		process.env.TERMUX_VERSION = "0.118";
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, "from Termux");
+		const nativeSpy = vi.spyOn(native, "readTextFromClipboard");
+
+		expect(await readTextFromClipboard()).toBe("from Termux");
+		expect(calls.map(call => call.cmd)).toEqual([["termux-clipboard-get"]]);
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
 	it("falls back to xsel when xclip is unavailable on X11", async () => {
 		setPlatform("linux");
 		process.env.DISPLAY = ":0";

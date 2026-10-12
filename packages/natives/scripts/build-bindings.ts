@@ -62,6 +62,62 @@ const repoRoot = path.join(import.meta.dir, "../../..");
 const rustDir = path.join(repoRoot, "crates/pi-natives");
 const nativeDir = path.join(import.meta.dir, "../native");
 const packageJsonPath = path.join(import.meta.dir, "../package.json");
+// napi-rs omits desktop and clipboard modules guarded out for the target.
+// Keep their platform-neutral root declarations and referenced-type closure so
+// generated declarations and ESM exports retain the package's public shape.
+const PLATFORM_NEUTRAL_BINDING_NAMES: Record<string, true> = {
+	DesktopSession: true,
+	ClipboardImage: true,
+	copyToClipboard: true,
+	readImageFromClipboard: true,
+	readTextFromClipboard: true,
+};
+
+const DECLARATION_START_RE = /^export (?:declare )?(?:class|function|(?:const )?enum|interface|type)\s+(\w+)/;
+
+function declarationBlocks(dts: string): Map<string, string> {
+	const lines = dts.split("\n");
+	const starts: Array<{ name: string; line: number }> = [];
+	for (let line = 0; line < lines.length; line++) {
+		const match = DECLARATION_START_RE.exec(lines[line]!);
+		if (match !== null) starts.push({ name: match[1]!, line });
+	}
+
+	const blocks = new Map<string, string>();
+	for (let index = 0; index < starts.length; index++) {
+		const current = starts[index]!;
+		const nextLine = starts[index + 1]?.line ?? lines.length;
+		blocks.set(current.name, lines.slice(current.line, nextLine).join("\n").trim());
+	}
+	return blocks;
+}
+
+function preservePlatformNeutralDeclarations(generated: string, existing: string): string {
+	const generatedBlocks = declarationBlocks(generated);
+	const existingBlocks = declarationBlocks(existing);
+	// Preserve each platform-neutral entry's full referenced-type closure, not only its root signature.
+	const preservedNames = new Set(
+		Object.keys(PLATFORM_NEUTRAL_BINDING_NAMES).filter(
+			name => existingBlocks.has(name) && !generatedBlocks.has(name),
+		),
+	);
+	const pending = [...preservedNames];
+	while (pending.length > 0) {
+		const block = existingBlocks.get(pending.pop()!)!;
+		const source = block.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+		for (const match of source.matchAll(/\b[A-Za-z_$][\w$]*\b/g)) {
+			const name = match[0]!;
+			if (generatedBlocks.has(name) || preservedNames.has(name) || !existingBlocks.has(name)) continue;
+			preservedNames.add(name);
+			pending.push(name);
+		}
+	}
+	const preserved = [...existingBlocks.entries()]
+		.filter(([name]) => preservedNames.has(name))
+		.map(([, block]) => block);
+	if (preserved.length === 0) return generated;
+	return `${generated.trimEnd()}\n\n${preserved.join("\n\n")}\n`;
+}
 
 const localAddon = resolveLocalHostAddon({
 	platform: process.platform,
@@ -171,7 +227,11 @@ async function installGeneratedBindings(outputDir: string): Promise<void> {
 	const sourcePath = path.join(outputDir, "index.d.ts");
 	const destPath = path.join(nativeDir, "index.d.ts");
 	try {
-		await fs.copyFile(sourcePath, destPath);
+		const generated = await fs.readFile(sourcePath, "utf8");
+		const existing = await fs
+			.readFile(destPath, "utf8")
+			.catch(err => ((err as NodeJS.ErrnoException).code === "ENOENT" ? "" : Promise.reject(err)));
+		await fs.writeFile(destPath, preservePlatformNeutralDeclarations(generated, existing));
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		throw new Error(`Failed to install generated index.d.ts: ${message}`);

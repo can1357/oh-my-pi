@@ -59,4 +59,7 @@ mod tests {
 	async fn accepts_a_signal_number() {
 		assert_eq!(u8::from(run("-9").await.exit_code), 1);
 	}
+
+	#[cfg(any(target_os = "android", target_os = "linux"))]
+	mod realtime_signal_tests;
 }

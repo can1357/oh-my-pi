@@ -569,6 +569,48 @@ jobs:
               if-no-files-found: error
               retention-days: 1
 
+   # Android is an explicit release-only target, not part of //:natives-all or
+   # the native npm leaves. Build it with a real NDK and publish its own
+   # artifact for the Android executable row.
+   native_addons_android:
+      name: Build explicit Android ARM64 native addon
+      if: needs.release_metadata.outputs.is-release == 'true'
+      needs: [release_metadata]
+      runs-on: omp-kata
+      steps:
+         - uses: actions/checkout@v4
+         - name: Set up Java for Android SDK
+           uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+           with:
+              distribution: temurin
+              java-version: "17"
+         - name: Set up Android SDK and NDK
+           uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+           with:
+              packages: "ndk;27.2.12479018"
+         - name: Export Android NDK path
+           shell: bash
+           run: |
+              set -euo pipefail
+              sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/.android/sdk}}"
+              ndk="$sdk_root/ndk/27.2.12479018"
+              test -x "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+              echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+         - id: cache
+           uses: ./.github/actions/bazel-cache
+         - name: Build Android ARM64 native addon
+           env:
+              OMP_NATIVE_BUILD_BACKEND: bazel
+              OMP_BAZEL_RC: ${{ steps.cache.outputs.rc }}
+           run: bun scripts/bazel-natives.ts android-arm64
+         - name: Upload Android ARM64 native addon artifact
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: natives-android-arm64
+              path: packages/natives/native/pi_natives.android-arm64.node
+              if-no-files-found: error
+              retention-days: 1
+
    test_coding_agent_native:
       name: "Test coding-agent native/unit (TS) ${{ matrix.shard }}"
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
@@ -759,19 +801,22 @@ jobs:
            run: bun scripts/gen-clippy-bazelrc.ts --check
          - run: echo "release validation green"
 
-   # Builds (does not publish) every release binary on one Linux x64 image in
-   # parallel with the test fan-out; the needs are the two native_addons jobs,
-   # whose artifacts supply their addons. bun cross-compiles every target;
-   # macOS binaries are Developer ID signed and notarized here too
-   # (rcodesign). release_smoke then runs each binary on its own platform.
-   # Publishing (npm leaves, GitHub release, build.stencil.so, core npm) is gated on
-   # release_gate downstream.
+   # Builds (does not publish) every release binary on Linux x64 in parallel
+   # with the test fan-out. The existing native_addons jobs provide Linux and
+   # cross-build targets; Android's separate release-only job supplies its
+   # explicit addon. Bun cross-compiles the executable targets.
+   # macOS binaries are Developer ID signed and notarized here too (rcodesign).
+   # release_smoke runs executable targets on their own platforms; Android gets
+   # structural ELF validation only because this workflow has no Termux device.
+   # Publishing (npm leaves, GitHub release, build.stencil.so, core npm) is gated
+   # on release_gate downstream.
    release_binary:
       name: "Release binary: ${{ matrix.target_id }}"
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.native_addons.result == 'success' &&
-         needs.native_addons_cross.result == 'success' }}
-      needs: [release_metadata, native_addons, native_addons_cross]
+         needs.native_addons_cross.result == 'success' &&
+         needs.native_addons_android.result == 'success' }}
+      needs: [release_metadata, native_addons, native_addons_cross, native_addons_android]
       strategy:
          fail-fast: false
          matrix:
@@ -809,6 +854,12 @@ jobs:
                     native_targets: linux-arm64,
                  }
                - {
+                    platform: android,
+                    target_id: android-arm64,
+                    binary_path: packages/coding-agent/binaries/omp-android-arm64,
+                    native_targets: android-arm64,
+                 }
+               - {
                     platform: linux,
                     target_id: linux-musl-arm64,
                     binary_path: packages/coding-agent/binaries/omp-linux-musl-arm64,
@@ -834,6 +885,11 @@ jobs:
       steps:
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           if: matrix.target_id != 'android-arm64'
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           if: matrix.target_id == 'android-arm64'
+           with:
+              bun-version: "1.4.3"
          - name: Restore bun store
            id: bun-cache
            uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -851,6 +907,16 @@ jobs:
            env:
               RELEASE_TARGETS: ${{ matrix.target_id }}
            run: bun run ci:release:build-binaries
+         - name: Validate Android ARM64 executable ELF (no device smoke)
+           if: matrix.platform == 'android'
+           env:
+              BINARY: ${{ matrix.binary_path }}
+           run: |
+              set -euo pipefail
+              header="$(readelf -hW "$BINARY")"
+              grep -Eq 'Class:[[:space:]]+ELF64' <<< "$header"
+              grep -Eq 'Machine:[[:space:]]+AArch64' <<< "$header"
+              readelf -lW "$BINARY" | grep -Fq '/system/bin/linker64'
          - name: Sign macOS binary
            # Replaces bun's signature with a Developer ID + hardened-runtime one
            # carrying the required JIT, Apple Events, and library-validation
@@ -881,12 +947,13 @@ jobs:
               key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
 
    # Every release binary is cross-built on Linux (release_binary); this runs
-   # each one on its own platform before anything publishes: download the
-   # artifact, then `--version` and `--smoke-test` in a throwaway home. macOS
-   # legs first run Apple's own signature check, and launch under the final
-   # signature (hardened runtime and entitlements included when signed). These
-   # are the exact bytes release_github and release_build publish, so no job
-   # re-verifies the published assets.
+   # each runnable target on its own platform before anything publishes. Android
+   # receives structural ELF validation during its build only: without a
+   # connected Termux device, a Linux-host "smoke" would be misleading.
+   # Executable artifacts run --version and --smoke-test in a throwaway home.
+   # macOS legs first run Apple's signature check and launch under the final
+   # signature. These are the exact bytes release_github and release_build
+   # publish, so no job re-verifies the published assets.
    release_smoke:
       name: "Smoke release binary: ${{ matrix.target_id }}"
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&

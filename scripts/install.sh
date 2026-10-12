@@ -99,6 +99,12 @@ host_arch() {
     esac
 }
 
+# Termux exports TERMUX_VERSION; Android's toybox also identifies itself via
+# `uname -o` even though `uname -s` reports Linux.
+is_android() {
+    [ -n "${TERMUX_VERSION:-}" ] || [ "$(uname -o 2>/dev/null || true)" = "Android" ]
+}
+
 # Bun's own architecture (x64|arm64), or empty when it can't be determined.
 bun_arch() {
     bun -e 'process.stdout.write(process.arch)' 2>/dev/null
@@ -254,26 +260,35 @@ install_binary() {
         exit 1
     fi
 
-    # Detect platform
-    OS="$(uname -s)"
-    ARCH="$(host_arch)"
+    # Android uses Bionic, not Linux glibc or musl. Detect it before libc
+    # classification so a Termux host never receives a Linux executable.
+    if [ "$ANDROID_HOST" -eq 1 ]; then
+        ARCH="$(host_arch)"
+        PLATFORM="android"
+        TARGET_ARCH="arm64"
+        EXPECTED_BINARY="omp-android-arm64"
+    else
+        OS="$(uname -s)"
+        ARCH="$(host_arch)"
 
-    case "$OS" in
-        Linux)  PLATFORM="linux" ;;
-        Darwin) PLATFORM="macos" ;;
-        *)      echo "Unsupported OS: $OS"; exit 1 ;;
-    esac
+        case "$OS" in
+            Linux)  PLATFORM="linux" ;;
+            Darwin) PLATFORM="macos" ;;
+            *)      echo "Unsupported OS: $OS"; exit 1 ;;
+        esac
 
-    case "$ARCH" in
-        x64)   TARGET_ARCH="x86_64" ;;
-        arm64) TARGET_ARCH="arm64" ;;
-        *)     echo "Unsupported architecture: $ARCH"; exit 1 ;;
-    esac
+        case "$ARCH" in
+            x64)   TARGET_ARCH="x86_64" ;;
+            arm64) TARGET_ARCH="arm64" ;;
+            *)     echo "Unsupported architecture: $ARCH"; exit 1 ;;
+        esac
 
-    if [ "$PLATFORM" = "linux" ]; then
-        if [ -f /etc/alpine-release ] || { command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; }; then
-            PLATFORM="linux-musl"
+        if [ "$PLATFORM" = "linux" ]; then
+            if [ -f /etc/alpine-release ] || { command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; }; then
+                PLATFORM="linux-musl"
+            fi
         fi
+
     fi
 
     TARGET="${PLATFORM}-${TARGET_ARCH}"
@@ -299,11 +314,17 @@ install_binary() {
     FILE_JSON=$(printf '%s\n' "$BUILD_JSON" | json_file_object)
     BINARY=$(printf '%s\n' "$FILE_JSON" | json_string name)
     EXPECTED_SHA256=$(printf '%s\n' "$FILE_JSON" | json_string sha256)
+
     # Go's JSON encoder writes `&` in the presigned URL as \u0026.
     DOWNLOAD_URL=$(printf '%s\n' "$BUILD_JSON" | json_string download | sed 's/\\u0026/\&/g')
     if [ -z "$VERSION" ] || [ -z "$BINARY" ] || [ -z "$DOWNLOAD_URL" ] ||
         ! printf '%s\n' "$EXPECTED_SHA256" | grep -Eq '^[0-9a-f]{64}$'; then
         echo "Unexpected answer from ${API_URL}"
+        exit 1
+    fi
+
+    if [ "$ANDROID_HOST" -eq 1 ] && [ "$BINARY" != "$EXPECTED_BINARY" ]; then
+        echo "Unexpected artifact for ${TARGET}: expected ${EXPECTED_BINARY}, got ${BINARY}"
         exit 1
     fi
     echo "Using version: $VERSION"
@@ -354,9 +375,24 @@ install_binary() {
     esac
 }
 
+ANDROID_HOST=0
+if is_android; then
+    ANDROID_HOST=1
+    ANDROID_ARCH="$(host_arch)"
+    if [ "$ANDROID_ARCH" != "arm64" ]; then
+        echo "Unsupported Android architecture: $ANDROID_ARCH (only arm64 is supported)"
+        exit 1
+    fi
+fi
+
 # Main logic
 case "$MODE" in
     source)
+        if [ "$ANDROID_HOST" -eq 1 ]; then
+            echo "Source installs are not supported on Android/Termux."
+            echo "Install the native Android binary with --binary instead."
+            exit 1
+        fi
         if ! has_bun; then
             install_bun
         fi
@@ -374,9 +410,10 @@ case "$MODE" in
         install_binary
         ;;
     *)
-        # Default: use bun only when it matches the host architecture, otherwise
-        # fall back to the prebuilt binary so Rosetta bun can't force an x86_64 build.
-        if has_bun && bun_arch_matches_host; then
+        # Android/Termux does not use an external Bun even if one is on PATH.
+        if [ "$ANDROID_HOST" -eq 1 ]; then
+            install_binary
+        elif has_bun && bun_arch_matches_host; then
             require_bun_version
             install_via_bun
         else

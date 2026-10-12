@@ -11,8 +11,9 @@
  *   version.
  *
  * omp is a public product, so no token is sent. The origin is `PI_BUILD_URL`
- * ({@link DEFAULT_BUILD_URL} when unset). `{target}` is
- * `{macos|linux|linux-musl|windows}-{arm64|x86_64}` ({@link resolveBuildHost}).
+ * ({@link DEFAULT_BUILD_URL} when unset). Targets are
+ * `{macos|linux|linux-musl|windows}-{arm64|x86_64}` or `android-arm64`
+ * ({@link resolveBuildHost}).
  * Requests carry `User-Agent: omp/<version>`, which the service counts in its
  * update-check statistics.
  *
@@ -56,9 +57,9 @@ export function buildServiceUrl(): string {
 
 /** Where this host's builds live on the build service. */
 export interface BuildHost {
-	/** Build service target, e.g. `macos-arm64` or `linux-musl-x86_64`. */
+	/** Build service target, e.g. `macos-arm64`, `linux-musl-x86_64`, or `android-arm64`. */
 	target: string;
-	/** Name of the target's file, the release asset name (e.g. `omp-darwin-arm64`). */
+	/** Name of the target's file, the release asset name (e.g. `omp-darwin-arm64` or `omp-android-arm64`). */
 	fileName: string;
 }
 
@@ -71,6 +72,10 @@ export function resolveBuildHost(platform: NodeJS.Platform, arch: string, musl: 
 			targetOs = "macos";
 			fileOs = "darwin";
 			break;
+		case "android":
+			targetOs = "android";
+			fileOs = "android";
+			break;
 		case "linux":
 			targetOs = musl ? "linux-musl" : "linux";
 			fileOs = targetOs;
@@ -81,6 +86,9 @@ export function resolveBuildHost(platform: NodeJS.Platform, arch: string, musl: 
 			break;
 		default:
 			throw new Error(`Unsupported platform: ${platform}`);
+	}
+	if (platform === "android" && arch !== "arm64") {
+		throw new Error(`Unsupported architecture: ${arch} on Android (only arm64 is supported)`);
 	}
 	let targetArch: string;
 	switch (arch) {

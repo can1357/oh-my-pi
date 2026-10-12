@@ -3,9 +3,25 @@ import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import { $ } from "bun";
 import { resolveCrossBuild } from "../packages/coding-agent/scripts/build-binary";
-import { compileCodingAgent } from "../packages/coding-agent/scripts/compile-binary";
+import { ANDROID_COMPILE_TARGET, compileCodingAgent } from "../packages/coding-agent/scripts/compile-binary";
+import { ASSETS } from "./ci-build-upload";
 
 const repoRoot = path.join(import.meta.dir, "..");
+
+describe("Android release binary target", () => {
+	it("uses the Android ARM64 executable target and upload mapping", async () => {
+		expect(ASSETS["omp-android-arm64"]).toEqual({ platform: "android", arch: "arm64" });
+
+		const result = await $`bun scripts/ci-release-build-binaries.ts --dry-run --targets android-arm64`
+			.cwd(repoRoot)
+			.quiet()
+			.nothrow();
+		expect(result.exitCode).toBe(0);
+		expect(result.text()).toContain(
+			`DRY RUN Bun.build target=${ANDROID_COMPILE_TARGET} outfile=packages/coding-agent/binaries/omp-android-arm64`,
+		);
+	});
+});
 
 describe("Windows release binary target", () => {
 	it("builds both Windows architecture release assets with their native runtimes", async () => {

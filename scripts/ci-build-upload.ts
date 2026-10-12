@@ -6,7 +6,7 @@
 // `canary`, everything else with channel `stable`.
 //
 // Usage:
-//   bun scripts/ci-build-upload.ts <tag> <file>...    # all 8 release binaries
+//   bun scripts/ci-build-upload.ts <tag> <file>...    # all 9 release binaries
 //
 // Runs in ci.yml's `release_build` job (which npm and the Homebrew tap wait
 // for), on the binaries this run built. Requests the job's GitHub OIDC token
@@ -41,6 +41,7 @@ export const ASSETS: Readonly<Record<string, { platform: string; arch: string }>
 	"omp-darwin-x64": { platform: "macos", arch: "x86_64" },
 	"omp-linux-x64": { platform: "linux", arch: "x86_64" },
 	"omp-linux-arm64": { platform: "linux", arch: "arm64" },
+	"omp-android-arm64": { platform: "android", arch: "arm64" },
 	"omp-linux-musl-x64": { platform: "linux-musl", arch: "x86_64" },
 	"omp-linux-musl-arm64": { platform: "linux-musl", arch: "arm64" },
 	"omp-windows-x64.exe": { platform: "windows", arch: "x86_64" },

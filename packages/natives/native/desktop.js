@@ -8,6 +8,12 @@ let DesktopSession;
  * computer worker receives its initialization message.
  */
 export function createDesktopSession(options) {
-	DesktopSession ??= adaptDesktopSession(loadNative().DesktopSession);
+	if (DesktopSession === undefined) {
+		const NativeDesktopSession = loadNative().DesktopSession;
+		if (NativeDesktopSession === undefined) {
+			throw new Error("Unsupported: desktop sessions are not supported on this platform.");
+		}
+		DesktopSession = adaptDesktopSession(NativeDesktopSession);
+	}
 	return new DesktopSession(options);
 }

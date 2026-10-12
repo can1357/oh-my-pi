@@ -621,6 +621,7 @@ mod tests {
 		assert!(printed_signal("128").is_err());
 		assert!(printed_signal("265").is_err());
 	}
+
 }
 
 /// A `kill` signal argument: a real signal, or the "does this process
@@ -691,13 +692,25 @@ pub(crate) fn signal_number(value: &str) -> Option<i32> {
 		.strip_prefix("SIG")
 		.or_else(|| value.strip_prefix("sig"))
 		.unwrap_or(value);
+	#[cfg(any(
+		target_os = "android",
+		target_os = "linux",
+		target_os = "macos",
+		not(unix)
+	))]
 	if let Ok(number) = value.parse::<i32>() {
-		#[cfg(target_os = "linux")]
-		return (0..=libc::SIGRTMAX()).contains(&number).then_some(number);
+		#[cfg(any(target_os = "android", target_os = "linux"))]
+		{
+			return (0..=libc::SIGRTMAX()).contains(&number).then_some(number);
+		}
 		#[cfg(target_os = "macos")]
-		return (0..=31).contains(&number).then_some(number);
+		{
+			return (0..=31).contains(&number).then_some(number);
+		}
 		#[cfg(not(unix))]
-		return (0..=64).contains(&number).then_some(number);
+		{
+			return (0..=64).contains(&number).then_some(number);
+		}
 	}
 	match KillSignal::parse(value).ok()? {
 		KillSignal::Probe => Some(0),

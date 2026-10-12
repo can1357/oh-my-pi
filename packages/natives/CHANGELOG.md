@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an explicit Android ARM64 native cross-build using the Android NDK (API level 24) for standalone Termux binaries.
+
+### Changed
+
+- Added Android ARM64/Bionic process-management support.
+- Android desktop sessions now report `Unsupported`; desktop capture and input remain unavailable.
+
+### Fixed
+
+- Android native-load failures now report attempted addon paths and rebuild guidance instead of incorrectly reporting an unsupported platform.
+
 ## [18.10.0] - 2026-10-12
 
 ### Added
