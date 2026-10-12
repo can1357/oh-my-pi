@@ -709,6 +709,8 @@ export class RelayBridge {
 		// untouched, which is what lets Chrome and Edge share one relay.
 		const seen = new Set<number>();
 		const attachedNow = new Set(msg.attachedTabIds);
+		const known = new Set<string>();
+		for (const tab of this.#tabs.values()) if (tab.instanceId === instanceId) known.add(tab.tabKey);
 		for (const snap of msg.tabs) {
 			seen.add(snap.tabId);
 			this.#onTabUpsert(snap, instanceId, { silent: true });
@@ -740,7 +742,9 @@ export class RelayBridge {
 				continue;
 			}
 			// An attachment that outlived the extension's socket kept its switches, including any a release could not
-			// turn off while the socket was down: bring those to what the tab's live sessions want now.
+			// turn off while the socket was down, and one this bridge first hears of (the relay restarted under a live
+			// extension) may hold any switch a vanished client left on: bring those to what live sessions want now.
+			if (!known.has(tab.tabKey)) for (const method of TAB_WIDE_SWITCHES) tab.unsettledSwitches.add(method);
 			const unsettled = [...tab.unsettledSwitches];
 			tab.unsettledSwitches.clear();
 			if (tab.attached) {
@@ -1006,6 +1010,8 @@ export class RelayBridge {
 					if (!(await this.#forwardToTab(conn, { ...msg, params }, ref.tabKey, undefined))) {
 						if (previous) ref.switches.add(method);
 						else ref.switches.delete(method);
+						// Chrome may have applied it before the reply was lost with the socket.
+						this.#tabs.get(ref.tabKey)?.unsettledSwitches.add(method);
 					}
 				});
 				return;

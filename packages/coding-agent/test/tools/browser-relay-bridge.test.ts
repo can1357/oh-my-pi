@@ -2740,6 +2740,36 @@ describe("RelayBridge focus emulation", () => {
 		expect(switchSends(back, FOCUS)).toEqual([]);
 		expect(switchSends(back, CHOOSER)).toEqual([false]);
 	});
+
+	it("switches off what a vanished client left on when the relay restarts under a live extension", async () => {
+		// A fresh bridge: the extension kept tab 1's attachment, and whatever switches the old relay's clients set.
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 })], [1]);
+		await flush();
+		expect(ext.rpcs("send").map(rpc => [rpc.tabId, rpc.method, rpc.params?.enabled])).toEqual([
+			[1, CHOOSER, false],
+			[1, FOCUS, false],
+		]);
+	});
+
+	it("settles a switch whose reply was lost with the extension socket", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		// Chrome may apply the switch, but the socket drops before its reply arrives.
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: FOCUS, params: { enabled: true } }));
+		await flush();
+		bridge.extClosed(ext);
+		await flush();
+		const back = new FakeExtSocket();
+		connect(bridge, back, [tab({ tabId: 1 })], [1]);
+		await flush();
+		expect(switchSends(back, FOCUS)).toEqual([false]);
+	});
 });
 
 describe("RelayBridge foreign extension frames", () => {
