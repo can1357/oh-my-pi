@@ -8,7 +8,6 @@ import type {
 	TextContent,
 	Usage,
 } from "@oh-my-pi/pi-ai";
-import { type AgentMessage, createSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
 import { messageEstimateVersion } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	directoryIsEnterable,
@@ -1757,7 +1756,7 @@ export class SessionManager {
 		const message = entry.type === "message" ? entry.message : undefined;
 		if (message === undefined) {
 			const line = this.#lineFor(entry);
-			return { line, bytes: Buffer.byteLength(line, "utf8"), fields: {} };
+			return { line, bytes: Buffer.byteLength(line, "utf8"), fields: {}, version: 0 };
 		}
 		const cached = this.#entryLines.get(entry);
 		if (
