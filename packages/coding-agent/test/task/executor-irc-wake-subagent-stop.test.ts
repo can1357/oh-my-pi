@@ -24,7 +24,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { attachIrcWakeTurnMonitor } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { attachIrcWakeTurnMonitor, runSubagentFollowUpTurn } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { isRecord, TempDir, untilAborted } from "@oh-my-pi/pi-utils";
@@ -64,6 +64,24 @@ function toLifecycleFrame(data: unknown): LifecycleFrame {
 	return { status: isRecord(data) && typeof data.status === "string" ? data.status : undefined };
 }
 
+/** Rendezvous points of a stop pass held open while a wake turn overlaps it. */
+interface OverlapGates {
+	/** The first stop pass's handler is consulting. */
+	stopEntered: PromiseWithResolvers<void>;
+	/** The overlapping wake turn's model reply was served. */
+	wakeYielded: PromiseWithResolvers<void>;
+	/** Lets the first pass's handler answer. */
+	releaseStop: PromiseWithResolvers<void>;
+}
+
+function createOverlapGates(): OverlapGates {
+	return {
+		stopEntered: Promise.withResolvers<void>(),
+		wakeYielded: Promise.withResolvers<void>(),
+		releaseStop: Promise.withResolvers<void>(),
+	};
+}
+
 describe("IRC wake turn subagent_stop (real session)", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
@@ -101,6 +119,8 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		maxRuntimeMs?: number;
 		/** Agent definition name reported as `agent_type`, when it differs from `wakeAgent.name`. */
 		agentType?: string;
+		/** Register the session live and leave it to `runSubagentFollowUpTurn` instead of observing it as a wake. */
+		driven?: boolean;
 	}) {
 		const stopEvents: SubagentStopEvent[] = [];
 		const lifecycle: LifecycleFrame[] = [];
@@ -141,7 +161,7 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			extensionRunner,
 			ownedAsyncJobManager: args.manager,
 		});
-		if (args.parentId) {
+		if (args.parentId || args.driven) {
 			AgentRegistry.global().register({
 				id: AGENT_ID,
 				displayName: AGENT_ID,
@@ -151,16 +171,19 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 				status: "idle",
 			});
 		}
-		attachIrcWakeTurnMonitor(session, {
-			id: AGENT_ID,
-			agent: wakeAgent,
-			eventBus,
-			parentSessionId: "parent-session-1",
-			parentSessionFile: "/parent/session.jsonl",
-			artifactsDir: tempDir.path(),
-			maxRuntimeMs: args.maxRuntimeMs,
-			agentType: args.agentType,
-		});
+		// A driven session has no wake observer yet, like a first run before its attach.
+		if (!args.driven) {
+			attachIrcWakeTurnMonitor(session, {
+				id: AGENT_ID,
+				agent: wakeAgent,
+				eventBus,
+				parentSessionId: "parent-session-1",
+				parentSessionFile: "/parent/session.jsonl",
+				artifactsDir: tempDir.path(),
+				maxRuntimeMs: args.maxRuntimeMs,
+				agentType: args.agentType,
+			});
+		}
 		return { session, mock, stopEvents, lifecycle, eventBus, artifact: path.join(tempDir.path(), `${AGENT_ID}.md`) };
 	}
 
@@ -530,5 +553,107 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(await Bun.file(run.artifact).exists()).toBe(false);
 		// The refusal went unanswered: a failure, not an abort of the turn's work.
 		expect(run.lifecycle.at(-1)?.status).toBe("failed");
+	});
+
+	// The stop pass of a driven run (initial or resumed) shares the kept-alive session with IRC
+	// wakes: while its handlers consult, the child is idle and a peer message starts a turn that
+	// the run's monitor, still attached, records. These pin that such a turn is never published
+	// on a verdict that was about the candidate it replaced.
+	describe("a driven run overlapped by a wake turn", () => {
+		async function driveThroughWake(target: AgentSession, eventBus: EventBus, gates: OverlapGates) {
+			const turn = runSubagentFollowUpTurn({
+				id: AGENT_ID,
+				agent: wakeAgent,
+				message: "do the work",
+				artifactsDir: tempDir.path(),
+				eventBus,
+			});
+			await gates.stopEntered.promise;
+			// The old candidate's handlers are still consulting; a wake turn yields a newer one.
+			await deliverWake(target, "m1");
+			await gates.wakeYielded.promise;
+			await target.waitForIdle();
+			gates.releaseStop.resolve();
+			return await turn;
+		}
+
+		const wakeYield =
+			(gates: OverlapGates): MockHandler =>
+			() => {
+				gates.wakeYielded.resolve();
+				return yieldCall("WAKE-PAYLOAD");
+			};
+
+		it("judges the candidate a wake turn recorded while handlers were consulting the old one", async () => {
+			const gates = createOverlapGates();
+			const run = await setup({
+				driven: true,
+				responses: [yieldCall("OLD-PAYLOAD"), wakeYield(gates)],
+				onStop: async (_event, callIndex) => {
+					if (callIndex !== 1) return undefined;
+					gates.stopEntered.resolve();
+					await gates.releaseStop.promise;
+					return undefined;
+				},
+			});
+
+			const result = await driveThroughWake(run.session, run.eventBus, gates);
+
+			// The first verdict was about OLD-PAYLOAD. WAKE-PAYLOAD may only be published after a
+			// second pass saw the wake turn's transcript.
+			expect(result.output).toContain("WAKE-PAYLOAD");
+			expect(run.stopEvents).toHaveLength(2);
+			expect(JSON.stringify(run.stopEvents[1]?.messages)).toContain("WAKE-PAYLOAD");
+			expect(await Bun.file(run.artifact).text()).toContain("WAKE-PAYLOAD");
+		});
+
+		it("honors a refusal of the candidate the wake turn recorded", async () => {
+			const gates = createOverlapGates();
+			const run = await setup({
+				driven: true,
+				responses: [yieldCall("OLD-PAYLOAD"), wakeYield(gates), yieldCall("REPLACEMENT")],
+				onStop: async (_event, callIndex) => {
+					if (callIndex === 1) {
+						gates.stopEntered.resolve();
+						await gates.releaseStop.promise;
+						return undefined;
+					}
+					return callIndex === 2 ? { decision: "block", reason: "redo the wake answer" } : undefined;
+				},
+			});
+
+			const result = await driveThroughWake(run.session, run.eventBus, gates);
+
+			expect(result.output).toContain("REPLACEMENT");
+			expect(result.output).not.toContain("WAKE-PAYLOAD");
+			expect(run.stopEvents.map(event => event.stop_hook_active)).toEqual([false, false, true]);
+			const artifact = await Bun.file(run.artifact).text();
+			expect(artifact).toContain("REPLACEMENT");
+			expect(artifact).not.toContain("WAKE-PAYLOAD");
+		});
+
+		it("voids a refusal of the replaced candidate without spending the run's continuation state", async () => {
+			const gates = createOverlapGates();
+			const run = await setup({
+				driven: true,
+				responses: [yieldCall("OLD-PAYLOAD"), wakeYield(gates), yieldCall("CONTINUATION")],
+				onStop: async (_event, callIndex) => {
+					if (callIndex !== 1) return undefined;
+					gates.stopEntered.resolve();
+					await gates.releaseStop.promise;
+					return { decision: "block", reason: "stale refusal" };
+				},
+			});
+
+			const result = await driveThroughWake(run.session, run.eventBus, gates);
+
+			// No continuation ran for a verdict on a candidate nobody would publish, and the pass that
+			// judged the wake turn's candidate was not told this run had already been refused once.
+			expect(run.mock.calls.map(call => JSON.stringify(call.context.messages)).join("\n")).not.toContain(
+				"stale refusal",
+			);
+			expect(run.stopEvents.map(event => event.stop_hook_active)).toEqual([false, false]);
+			expect(result.output).toContain("WAKE-PAYLOAD");
+		});
 	});
 });
