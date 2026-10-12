@@ -62,7 +62,7 @@ describe("task renderer: streaming call preview", () => {
 		expect(out).toContain("First");
 	});
 
-	it("always renders the full task markdown, collapsed or expanded", () => {
+	it("always renders the full task brief, collapsed or expanded", () => {
 		const taskLines = Array.from({ length: 6 }, (_, i) => `Step ${i + 1}: do the thing.`);
 		const args: TaskParams = {
 			agent: "task",
@@ -70,8 +70,8 @@ describe("task renderer: streaming call preview", () => {
 			task: taskLines.join("\n"),
 		};
 
-		// The task text is the brief handed to the subagent; it renders as
-		// markdown in full regardless of the expanded toggle.
+		// The task text is the brief handed to the subagent; it renders
+		// in full (literal-math markdown) regardless of the expanded toggle.
 		const collapsed = render(args, false);
 		expect(collapsed).toContain("Step 1");
 		expect(collapsed).toContain("Step 6");

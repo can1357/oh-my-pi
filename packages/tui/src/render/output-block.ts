@@ -7,7 +7,7 @@ import type { NativeChild, NativeNode } from "../native/node";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import type { Theme, ThemeColor } from "../theme/theme";
 import type { Component } from "../tui";
-import { Ellipsis, padding, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
+import { Ellipsis, padding, sliceWithWidth, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { getSixelLineMask } from "./sixel";
 import type { State } from "./types";
 import type { RenderCache } from "./utils";
@@ -18,7 +18,14 @@ export interface OutputBlockOptions {
 	header?: string;
 	headerMeta?: string;
 	state?: State;
-	sections?: Array<{ label?: string; lines: readonly string[]; separator?: boolean }>;
+	sections?: Array<{
+		label?: string;
+		lines: readonly string[];
+		separator?: boolean;
+		verbatim?: boolean;
+		/** Verbatim overflow policy: expanded wraps across marked rows, collapsed clips with `…`. */
+		expanded?: boolean;
+	}>;
 	width: number;
 	applyBg?: boolean;
 	contentPaddingLeft?: number;
@@ -49,6 +56,44 @@ type BlockRow =
 	| { kind: "bottom"; leftChar: string; rightChar: string }
 	| { kind: "content"; inner: string }
 	| { kind: "sixel"; raw: string };
+
+/** Gutter glyph prefix marking a soft-wrapped continuation row of a verbatim echo. */
+export const VERBATIM_WRAP_MARKER = "↪ ";
+
+/**
+ * Display rows for one verbatim payload-echo source line at `width` columns.
+ *
+ * Every byte of the source line stays recoverable. `expanded` chunks the line
+ * across rows whose continuation rows carry {@link VERBATIM_WRAP_MARKER} (a soft
+ * wrap can then never read as a payload newline), and collapsed clips to a
+ * byte-prefix of the line with a visible `…` marker — the expanded view reveals
+ * the rest. Chunks are column slices (`sliceWithWidth`, strict at the boundary)
+ * so cuts land on grapheme/ANSI boundaries and concatenating the rows minus
+ * their markers re-joins the source line byte-for-byte.
+ */
+export function renderVerbatimRows(line: string, width: number, theme: Theme, expanded: boolean): string[] {
+	// Collapsed: marked-ellipsis truncation — shown bytes stay a byte-prefix of
+	// the source and the `…` says the row continues beyond the frame.
+	if (!expanded) return [truncateToWidth(line, width)];
+	const total = visibleWidth(line);
+	// Zero-width source line (blank or escape-only): still one payload row.
+	if (total === 0) return [line];
+	const marker = theme.fg("dim", VERBATIM_WRAP_MARKER);
+	const markerWidth = visibleWidth(VERBATIM_WRAP_MARKER);
+	const rows: string[] = [];
+	for (let col = 0; col < total;) {
+		const first = rows.length === 0;
+		const budget = Math.max(1, first ? width : width - markerWidth);
+		// Strict: a wide grapheme straddling the boundary drops to the next row
+		// instead of being cut. Degenerate frame (budget below one grapheme's
+		// width): take it non-strict — a 1-column overflow beats stalling.
+		let slice = sliceWithWidth(line, col, budget, true);
+		if (slice.width === 0) slice = sliceWithWidth(line, col, budget);
+		rows.push(first ? slice.text : `${marker}${slice.text}`);
+		col += Math.max(1, slice.width);
+	}
+	return rows;
+}
 
 function normalizeContentPaddingLeft(value: number | undefined): number {
 	if (value === undefined || !Number.isFinite(value)) return 1;
@@ -149,7 +194,14 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 				rows.push({ kind: "sixel", raw: line });
 				continue;
 			}
-			const wrappedLines = wrapTextWithAnsi(line.trimEnd(), contentWidth);
+			// Verbatim sections echo raw tool payloads (commands, file content): one
+			// source line is one logical row — never re-wrapped or right-trimmed, so a
+			// wrap-induced break can't read as a payload newline. Every byte stays
+			// recoverable: `expanded` soft-wraps across rows marked with
+			// VERBATIM_WRAP_MARKER, collapsed clips to a byte-prefix with a `…` marker.
+			const wrappedLines = section.verbatim
+				? renderVerbatimRows(line, contentWidth, theme, section.expanded === true)
+				: wrapTextWithAnsi(line.trimEnd(), contentWidth);
 			for (const wrappedLine of wrappedLines) {
 				const innerPadding = padding(Math.max(0, contentWidth - visibleWidth(wrappedLine)));
 				rows.push({ kind: "content", inner: `${wrappedLine}${innerPadding}` });
@@ -367,6 +419,8 @@ export class CachedOutputBlock {
 			for (const s of options.sections) {
 				h.optional(s.label);
 				h.bool(s.separator ?? false);
+				h.bool(s.verbatim ?? false);
+				h.bool(s.expanded ?? false);
 				for (const line of s.lines) {
 					h.str(line);
 				}
