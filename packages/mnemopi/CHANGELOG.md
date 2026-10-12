@@ -17,8 +17,6 @@
 ## [18.11.0] - 2026-10-14
 ### Changed
 
-- Replaced unchecked `as` row casts with typed `prepare<Row, Params>()` generics at 10 SQLite read sites in beam store and binary-vectors ([#15437](https://github.com/can1357/oh-my-pi/pull/15437) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
 ### Fixed
 
 - Fixed polyphonic recall ranking unrelated memories above relevant ones when the query shared only a common word such as "that" with an extracted fact subject ([#15512](https://github.com/can1357/oh-my-pi/issues/15512)).
