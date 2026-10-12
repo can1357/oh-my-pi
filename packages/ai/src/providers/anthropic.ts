@@ -586,7 +586,7 @@ function createClaudeBillingHeader(firstUserMessageText: string): string {
 	return `${CLAUDE_BILLING_HEADER_PREFIX} cc_version=${version}.${versionSuffix}; cc_entrypoint=cli; ${CCH_PLACEHOLDER_STR};`;
 }
 
-// cch attestation, as Claude Code 2.1.289 computes it:
+// cch attestation (pinned to Claude Code 2.1.289):
 // XXHash64(filtered body with the placeholder, seed) low-20-bits, 5 hex chars.
 const CCH_SEED = 0x4d659218e32a3268n;
 const CCH_PLACEHOLDER_STR = "cch=00000";
@@ -698,7 +698,6 @@ function patchCch(body: Uint8Array): "patched" | "no-billing-header" | "unanchor
 	}
 	const idx = anchor + offset;
 
-	// Hash with the placeholder in place (matches CC's in-place behaviour).
 	const h = Bun.hash.xxHash64(cchHashInput(view), CCH_SEED);
 	const cch = (h & 0xfffffn).toString(16).padStart(5, "0");
 
