@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { TranscriptionApiError, transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
 
 const AUDIO = new Uint8Array([0x66, 0x4c, 0x61, 0x43, 0x01, 0x02, 0x03, 0x04]);
@@ -119,6 +120,25 @@ describe("openai-codex-transcriptions transport", () => {
 			{ apiKey: `header.${payload}.signature`, fetch: fetchImpl },
 		);
 		expect(residency).toBe("us");
+	});
+
+	it("attaches the host's DeviceCheck attestation like other Codex requests", async () => {
+		let attestation: string | null | undefined;
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			attestation = new Headers(init?.headers).get("x-oai-attestation");
+			return Response.json({ text: "ok" });
+		};
+		setCodexAttestationProvider(async () => "attest-envelope");
+		try {
+			await transcribeAudio(
+				model,
+				{ audio: AUDIO, mimeType: "audio/wav", fileName: "dictation.wav", responseFormat: "json" },
+				{ apiKey: codexToken("acct-1"), fetch: fetchImpl },
+			);
+		} finally {
+			setCodexAttestationProvider(undefined);
+		}
+		expect(attestation).toBe("attest-envelope");
 	});
 
 	it("never sends the Codex bearer to a plain-HTTP base URL override", async () => {
