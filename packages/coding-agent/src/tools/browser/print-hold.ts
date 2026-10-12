@@ -1,10 +1,6 @@
 import type { Protocol } from "devtools-protocol";
 import type { CDPSession, Page } from "puppeteer-core";
 
-/** CDP binding a held `print()` reports through; Chrome adds it to every document the tab's own renderer loads. */
-const PRINT_BINDING = "__ompPrintRequested";
-/** `Symbol.for` key of the page value the wrapper reads: hold `print()` until that time (epoch ms). */
-const HOLD_KEY = "omp.holdPrintUntil";
 /**
  * In a browser the user drives, `print()` stays held this long after a call ends, for a page that prints a moment
  * after the click; after that the page's own Print buttons open Chrome's preview for the user again.
@@ -15,28 +11,39 @@ const USER_DRIVEN_RELEASE_MS = 1_500;
 export type PrintHoldScope = "tab" | "calls";
 
 /**
- * Wraps `window.print` once per document and sets until when it is held (`null`: for the document's life). A held
- * call reports itself, fires `beforeprint` and `afterprint` as a finished print does, and returns at once;
- * otherwise it is the page's own `print()`. Runs in the page, so it stays self-contained.
+ * Wraps `window.print` once per document for one attachment and holds it for `holdMs` from `from` (the page's own
+ * epoch ms; default now), or for the document's life when `holdMs` is `null`. A held call reports through `binding`,
+ * fires `beforeprint` and `afterprint` as a finished print does, and returns at once; otherwise it calls the `print`
+ * it wrapped, which may be another attachment's wrapper. Returns the page's time, for the worker to place deadlines
+ * in it. Runs in the page, so it stays self-contained.
  */
-function holdPrintInPage(binding: string, holdKey: string, until: number | null, resyncMs: number): void {
-	const deadline = Symbol.for(holdKey);
+function holdPrintInPage(
+	binding: string,
+	holdKey: string,
+	holdMs: number | null,
+	from: number | undefined,
+	resyncMs: number,
+): number {
+	// The clock as the document started, so a page that fakes or replaces `Date.now` cannot move a hold.
+	const clockKey = Symbol.for("omp.printHold.clock");
+	if (typeof Reflect.get(globalThis, clockKey) !== "function") Reflect.set(globalThis, clockKey, Date.now);
+	const now = (): number => {
+		const clock: unknown = Reflect.get(globalThis, clockKey);
+		return Number(typeof clock === "function" ? Reflect.apply(clock, Date, []) : Date.now());
+	};
+	const deadline = Symbol.for(`${holdKey}.until`);
 	const wrapped = Symbol.for(`${holdKey}.wrapped`);
-	Reflect.set(globalThis, deadline, until ?? Number.POSITIVE_INFINITY);
-	if (Reflect.get(globalThis, wrapped)) return;
+	Reflect.set(globalThis, deadline, holdMs === null ? Number.POSITIVE_INFINITY : (from ?? now()) + holdMs);
+	if (Reflect.get(globalThis, wrapped)) return now();
 	const print: unknown = Reflect.get(globalThis, "print");
-	if (typeof print !== "function") return;
+	if (typeof print !== "function") return now();
 	Reflect.set(globalThis, wrapped, true);
-	// A document back from the back/forward cache kept the deadline it left with, though a call may be running now:
-	// it holds until omp sets the current deadline, and lets go after `resyncMs` if omp has gone.
+	// A document back from the back/forward cache kept the deadline it left with, though a call may be running now
+	// or omp may have gone: it holds `resyncMs` from the restore, until omp sets the current deadline.
 	Reflect.apply(EventTarget.prototype.addEventListener, globalThis, [
 		"pageshow",
 		(event: Event) => {
-			const heldUntil: unknown = Reflect.get(globalThis, deadline);
-			const resync = Date.now() + resyncMs;
-			if (Reflect.get(event, "persisted") === true && (typeof heldUntil !== "number" || heldUntil < resync)) {
-				Reflect.set(globalThis, deadline, resync);
-			}
+			if (Reflect.get(event, "persisted") === true) Reflect.set(globalThis, deadline, now() + resyncMs);
 		},
 		true,
 	]);
@@ -44,7 +51,7 @@ function holdPrintInPage(binding: string, holdKey: string, until: number | null,
 	const heldPrint = new Proxy(print, {
 		apply(target, thisArg, args) {
 			const heldUntil: unknown = Reflect.get(globalThis, deadline);
-			if (typeof heldUntil !== "number" || Date.now() >= heldUntil) return Reflect.apply(target, thisArg, args);
+			if (typeof heldUntil !== "number" || now() >= heldUntil) return Reflect.apply(target, thisArg, args);
 			const report: unknown = Reflect.get(globalThis, binding);
 			if (typeof report === "function") report("");
 			Reflect.apply(EventTarget.prototype.dispatchEvent, globalThis, [new Event("beforeprint")]);
@@ -52,6 +59,7 @@ function holdPrintInPage(binding: string, holdKey: string, until: number | null,
 		},
 	});
 	Reflect.set(globalThis, "print", heldPrint);
+	return now();
 }
 
 /**
@@ -59,15 +67,20 @@ function holdPrintInPage(binding: string, holdKey: string, until: number | null,
  * click on a Print button timed out the call, wedged the calls after it, and raised the preview window over the
  * user's screen; held, the page goes on as after a finished print and the call's output says what happened.
  * Only the tab's own renderer is touched: cross-site iframes run in other processes and print as before, so a stuck
- * one never holds up a call. The page itself keeps the deadline, so a hold ends on time even if omp goes away.
+ * one never holds up a call. The page itself keeps the deadline on its own clock, so a hold ends on time even if
+ * omp goes away. Each attachment keeps its own wrapper and deadline, so `print()` is held while any of them holds it.
  */
 export class PrintHold {
 	readonly #page: Page;
 	readonly #session: CDPSession;
 	readonly #scope: PrintHoldScope;
+	readonly #binding: string;
+	readonly #holdKey: string;
 	#scriptId: string | undefined;
-	/** The deadline documents in the tab hold `print()` until; `null` holds for their life. */
+	/** When the hold ends on the worker's clock; `null` holds for the documents' life. */
 	#until: number | null = 0;
+	/** The page's clock minus the worker's, as last measured: places a new document's deadline in the page's time. */
+	#clockOffset = 0;
 	#requests = 0;
 	/** Hold changes apply in order, so a call's end never lands before its start. */
 	#applying: Promise<void> = Promise.resolve();
@@ -76,6 +89,10 @@ export class PrintHold {
 		this.#page = page;
 		this.#session = session;
 		this.#scope = scope;
+		const id = crypto.randomUUID().replaceAll("-", "");
+		// The binding Chrome adds to every document the tab's own renderer loads; a held `print()` reports through it.
+		this.#binding = `__ompPrintRequested_${id}`;
+		this.#holdKey = `omp.printHold.${id}`;
 		session.on("Runtime.bindingCalled", this.#onBindingCalled);
 		session.on("Page.frameNavigated", this.#onFrameNavigated);
 	}
@@ -85,7 +102,7 @@ export class PrintHold {
 		const printHold = new PrintHold(page, session, scope);
 		await session.send("Page.enable");
 		await session.send("Runtime.enable");
-		await session.send("Runtime.addBinding", { name: PRINT_BINDING });
+		await session.send("Runtime.addBinding", { name: printHold.#binding });
 		await printHold.#apply(scope === "tab" ? null : 0);
 		return printHold;
 	}
@@ -116,51 +133,67 @@ export class PrintHold {
 			await this.#session.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: this.#scriptId });
 		}
 		this.#scriptId = undefined;
-		// The wrapper stays in loaded documents; released, it is the page's own print() again.
+		// The wrapper stays in loaded documents; released, it passes `print()` on as before.
 		this.#until = 0;
-		await this.#setInFrames(0);
-		await this.#session.send("Runtime.removeBinding", { name: PRINT_BINDING });
+		await this.#setInFrames();
+		await this.#session.send("Runtime.removeBinding", { name: this.#binding });
 		this.#session.off("Runtime.bindingCalled", this.#onBindingCalled);
 		await this.#session.detach();
 	}
 
 	readonly #onBindingCalled = (event: Protocol.Runtime.BindingCalledEvent): void => {
-		if (event.name === PRINT_BINDING) this.#requests++;
+		if (event.name === this.#binding) this.#requests++;
 	};
 
 	/** Sets the current deadline in a document back from the back/forward cache, or one that predates the hold. */
 	readonly #onFrameNavigated = (event: Protocol.Page.FrameNavigatedEvent): void => {
-		if (event.type === "BackForwardCacheRestore") void this.#setInFrames(this.#until);
+		if (event.type === "BackForwardCacheRestore") void this.#setInFrames();
 	};
+
+	/** What is left of the hold, a duration that means the same on the worker's and the page's clocks. */
+	#remaining(): number | null {
+		return this.#until === null ? null : Math.max(0, this.#until - Date.now());
+	}
 
 	#apply(until: number | null): Promise<void> {
 		this.#until = until;
 		const applied = this.#applying.then(async () => {
 			const previous = this.#scriptId;
+			const args = [this.#binding, this.#holdKey, this.#remaining(), Date.now() + this.#clockOffset];
 			const { identifier } = await this.#session.send("Page.addScriptToEvaluateOnNewDocument", {
-				source: `(${holdPrintInPage})(${JSON.stringify(PRINT_BINDING)}, ${JSON.stringify(HOLD_KEY)}, ${until}, ${USER_DRIVEN_RELEASE_MS});`,
+				source: `(${holdPrintInPage})(${args.map(arg => JSON.stringify(arg)).join(", ")}, ${USER_DRIVEN_RELEASE_MS});`,
 			});
 			this.#scriptId = identifier;
 			if (previous) await this.#session.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: previous });
-			await this.#setInFrames(until);
+			await this.#setInFrames();
 		});
 		this.#applying = applied.catch(() => undefined);
 		return applied;
 	}
 
 	/** Updates the documents already loaded in the tab's own renderer: the main frame and its same-site iframes. */
-	async #setInFrames(until: number | null): Promise<void> {
-		const client = this.#page.mainFrame().client;
+	async #setInFrames(): Promise<void> {
+		const mainFrame = this.#page.mainFrame();
+		const remaining = this.#remaining();
 		await Promise.all(
 			this.#page
 				.frames()
-				.filter(frame => frame.client === client)
-				.map(frame =>
-					frame
-						.mainRealm()
-						.evaluate(holdPrintInPage, PRINT_BINDING, HOLD_KEY, until, USER_DRIVEN_RELEASE_MS)
-						.catch(() => undefined),
-				),
+				.filter(frame => frame.client === mainFrame.client)
+				.map(async frame => {
+					try {
+						const pageNow = await frame
+							.mainRealm()
+							.evaluate(
+								holdPrintInPage,
+								this.#binding,
+								this.#holdKey,
+								remaining,
+								undefined,
+								USER_DRIVEN_RELEASE_MS,
+							);
+						if (frame === mainFrame) this.#clockOffset = pageNow - Date.now();
+					} catch {}
+				}),
 		);
 	}
 }
