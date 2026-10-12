@@ -2,15 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- The extension now reports which omp version installed it, so omp can tell when an extension from before an upgrade is still loaded ([#15105](https://github.com/can1357/oh-my-pi/pull/15105) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.8.8] - 2026-10-10
 
 ### Fixed
 
 - Fixed tabs a relay client asks to open in the background being created as the selected tab ([#15109](https://github.com/can1357/oh-my-pi/pull/15109) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Added
-
-- The extension now reports which omp version installed it, so omp can tell when an extension from before an upgrade is still loaded ([#15105](https://github.com/can1357/oh-my-pi/pull/15105) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.6.3] - 2026-10-06
 
