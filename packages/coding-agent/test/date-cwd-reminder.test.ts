@@ -130,7 +130,7 @@ describe("date-cwd-reminder", () => {
 			expect(replay.messages).not.toContain(marker);
 		});
 
-		it("releases the discarded transcript when the history is replaced", () => {
+		it("drops the replay memo but preserves injection state on release", () => {
 			const injector = new DateCwdReminderInjector();
 			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
 			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
@@ -145,8 +145,10 @@ describe("date-cwd-reminder", () => {
 
 			const replay = injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
 
+			// The memo is invalidated: a fresh array is built.
 			expect(replay.messages).not.toBe(memo);
-			expect(replay.messages[0]).not.toBe(memo[0]);
+			// Injection state is preserved: the same injected clone is reused.
+			expect(replay.messages[0]).toBe(memo[0]);
 			expect(replay.messages[0]?.content).toBe(memo[0]?.content);
 		});
 
@@ -181,6 +183,36 @@ describe("date-cwd-reminder", () => {
 			// The retained tail is sent exactly as before; only the new summary gets the current reminder.
 			expect(after.messages.slice(1)).toEqual([kept, toolTurn, control]);
 			expect(after.messages[0]?.content).toBe(`${renderDateCwdReminder("2026-08-14", "/new")}\n\nsummary`);
+		});
+		it("rebuilds a regular reminder replay instead of rejecting it", () => {
+			const injector = new DateCwdReminderInjector();
+			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
+			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
+
+			const first = injector.transform(context, "2026-08-14", "/work/omp");
+			const replay = injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
+
+			// A normal reminder replay must hit the memo and return the cached array.
+			expect(replay.messages).toBe(first.messages);
+		});
+
+		it("preserves injection and control state when release() only invalidates the memo", () => {
+			const injector = new DateCwdReminderInjector();
+			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
+			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
+
+			const first = injector.transform(context, "2026-08-14", "/work/omp");
+			const injectedClone = first.messages[0]!;
+
+			// A queue-only edit fires release() without changing the transcript.
+			injector.release();
+
+			// The next request must rebuild from the live transcript, preserving the
+			// injected clone's bytes (not rewriting the first user turn with a new reminder).
+			const replay = injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
+
+			expect(replay.messages[0]).toBe(injectedClone);
+			expect(replay.messages[0]?.content).toBe(injectedClone.content);
 		});
 	});
 });
