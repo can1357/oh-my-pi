@@ -44,6 +44,8 @@
 ### Fixed
 
 - Fixed the stats dashboard favicon so dashboard tabs and bookmarks display the OMP icon correctly.
+- Fixed a stats sync that kept dispatching transcripts to a worker which had already crashed mid-run, stalling the run until a reply that never came; the drain now fails cleanly and the caller retries with a fresh worker ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
+- Fixed the stats dashboard serving index.html at /favicon.ico; it now returns the omp icon (image/x-icon), so dashboard tabs and bookmarks show a real icon ([#15162](https://github.com/can1357/oh-my-pi/pull/15162) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 
 ## [18.8.0] - 2026-10-07
 
