@@ -211,6 +211,35 @@ describe("bash native run box", () => {
 		expect(facts.at(-1)?.t).toContain("900");
 	});
 
+	it("renders dropped-lines and truncation notices together when a run carries both", () => {
+		const view = bashToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: "tail" }],
+				details: {
+					meta: {
+						droppedLines: 5,
+						truncation: {
+							direction: "head",
+							truncatedBy: "lines",
+							totalLines: 900,
+							totalBytes: 9000,
+							outputLines: 100,
+							outputBytes: 1000,
+							shownRange: { start: 801, end: 900 },
+						},
+					},
+				},
+			},
+			done,
+			{ command: "serve" },
+		);
+		const facts = foot(nodes(view.body)[0])?.facts ?? [];
+		const warningFacts = facts.filter(f => f.s === "warning").map(f => f.t);
+		expect(warningFacts).toHaveLength(2);
+		expect(warningFacts[0]).toContain("earlier lines dropped");
+		expect(warningFacts[1]).toContain("900");
+	});
+
 	it("attaches result images below the box", () => {
 		const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
 		const tool = new ToolExecutionComponent("bash", { command: "plot" }, { showImages: true }, undefined, ui);
