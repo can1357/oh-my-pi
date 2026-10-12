@@ -21,6 +21,7 @@ import {
 	runSubagentFollowUpTurn,
 	runSubprocess,
 	SUBAGENT_STOP_REFUSAL_UNRESOLVED,
+	SUBAGENT_WARNING_EMPTY_MESSAGE,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -64,6 +65,8 @@ interface PromptCall {
 	options?: PromptOptions;
 	/** Append a child assistant turn carrying `text`, as the model's reply next turn would. */
 	reply: (text: string) => void;
+	/** End the turn on a final report (`structured: false` runs): a counted `stop` assistant message carrying `text`. */
+	report: (text: string) => void;
 	/** Submit a terminal `yield` carrying `data`. */
 	yieldTerminal: (data: unknown) => void;
 	/** Submit a `complete: true` incremental section labelled `label` carrying `data`. */
@@ -172,6 +175,11 @@ function createHarness(args: {
 				options,
 				reply: (replyText: string) => {
 					messages.push(assistantMessage(replyText));
+				},
+				report: (reportText: string) => {
+					const message = assistantMessage(reportText);
+					messages.push(message);
+					emit({ type: "message_end", message } as AgentSessionEvent);
 				},
 				yieldTerminal: (data: unknown) => emitYield({ status: "success", data }, "Result submitted."),
 				yieldCompleteSection: (label: string, data: unknown) =>
@@ -562,5 +570,100 @@ describe("runSubprocess subagent_stop", () => {
 		expect(result.exitCode).toBe(0);
 		expect(JSON.parse(result.output)).toEqual({ report: "finish it" });
 		expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeNumber();
+	});
+
+	describe("without a yield tool (structured: false)", () => {
+		it("offers the settled final report turn once and publishes it when allowed", async () => {
+			const id = "UnstructuredAllowed";
+			const harness = createHarness({
+				hasStopHandlers: true,
+				onPrompt: call => call.report("final answer"),
+			});
+			mockCreateAgentSession(harness.session);
+			registerRunning(id, harness.session);
+
+			const result = await runSubprocess({ ...baseOptions(id), structured: false });
+
+			expect(harness.events).toHaveLength(1);
+			expect(harness.events[0]).toMatchObject({ agent_id: id, stop_hook_active: false });
+			expect(assistantText(harness.events[0]?.last_assistant_message)).toBe("final answer");
+			expect(harness.prompts).toHaveLength(1);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("final answer");
+			expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeNumber();
+		});
+
+		it("re-prompts the same session on a refusal and publishes only the replacement report", async () => {
+			const id = "UnstructuredRefused";
+			const harness = createHarness({
+				hasStopHandlers: true,
+				onPrompt: call => call.report(call.promptIndex === 1 ? "REFUSED-REPORT" : "replacement report"),
+				onStop: async (_event, callIndex) =>
+					callIndex === 1 ? { decision: "block", reason: "keep going" } : undefined,
+			});
+			mockCreateAgentSession(harness.session);
+			registerRunning(id, harness.session);
+
+			const result = await runSubprocess({ ...baseOptions(id), structured: false });
+
+			expect(harness.prompts.map(call => call.text)).toEqual(["do the work", "keep going"]);
+			expect(harness.prompts[1]?.options).toMatchObject({ attribution: "agent", synthetic: true });
+			expect(harness.events.map(event => event.stop_hook_active)).toEqual([false, true]);
+			expect(harness.events.map(event => assistantText(event.last_assistant_message))).toEqual([
+				"REFUSED-REPORT",
+				"replacement report",
+			]);
+			// A fresh report turn clears the refusal: the run succeeds on it.
+			expect(result.exitCode).toBe(0);
+			expect(result.error).toBeUndefined();
+			expect(result.output).toBe("replacement report");
+			expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).text()).toBe("replacement report");
+			expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeNumber();
+		});
+
+		it("fails the run instead of publishing a refused report the continuation never replaced", async () => {
+			const id = "UnstructuredUnresolved";
+			const refusedReport = "REFUSED-REPORT-MUST-NOT-BE-PUBLISHED";
+			const harness = createHarness({
+				hasStopHandlers: true,
+				// The continuation turn ends without any report text.
+				idlePrompt: promptIndex => promptIndex > 1,
+				onPrompt: call => call.report(refusedReport),
+				// Only the first pass refuses: a regression that offers the cleared
+				// candidate again would be allowed and published rather than loop.
+				onStop: async (_event, callIndex) =>
+					callIndex === 1 ? { decision: "block", reason: "not done" } : undefined,
+			});
+			mockCreateAgentSession(harness.session);
+			registerRunning(id, harness.session);
+
+			const result = await runSubprocess({ ...baseOptions(id), structured: false });
+
+			expect(harness.events).toHaveLength(1);
+			expect(result.exitCode).not.toBe(0);
+			expect(result.error).toBe(SUBAGENT_STOP_REFUSAL_UNRESOLVED);
+			expect(result.output).toBe(SUBAGENT_STOP_REFUSAL_UNRESOLVED);
+			expect(result.output).not.toContain(refusedReport);
+			expect(result.outputPath).toBeUndefined();
+			expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).exists()).toBe(false);
+			expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeUndefined();
+		});
+
+		it("does not offer a final turn that is not a settled report", async () => {
+			const id = "UnstructuredNoCandidate";
+			const harness = createHarness({
+				hasStopHandlers: true,
+				// A turn that produced no report text leaves nothing to judge.
+				idlePrompt: () => true,
+				onPrompt: () => {},
+			});
+			mockCreateAgentSession(harness.session);
+			registerRunning(id, harness.session);
+
+			const result = await runSubprocess({ ...baseOptions(id), structured: false });
+
+			expect(harness.events).toEqual([]);
+			expect(result.error).toBe(SUBAGENT_WARNING_EMPTY_MESSAGE);
+		});
 	});
 });
