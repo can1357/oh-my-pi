@@ -7,6 +7,10 @@
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 
+### Changed
+
+- When several Codex or Claude accounts are blocked, auto-redeem now spends the saved reset that buys the most time instead of always the session's own: for Claude and for Codex weekly walls the account with the longest wait; for a Codex 5h wall, whose reset restarts the weekly window, the weekly time it brings forward less the weekly allowance it discards. The session's account still wins within an hour of the best ([#15128](https://github.com/can1357/oh-my-pi/pull/15128) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed `omp gc --compress` exiting with "the event loop drained while it was still pending" on Bun 1.3.14 when a session artifact is pretty-printed JSON larger than 1 MiB, and session header probes (gc, session move and transfer) reading whole artifacts on Windows ([#15745](https://github.com/can1357/oh-my-pi/issues/15745), [#16754](https://github.com/can1357/oh-my-pi/pull/16754) by [@wolfiesch](https://github.com/wolfiesch))
@@ -32,6 +36,7 @@
 - Fixed reading `proc://<id>/kill` or `proc://<id>/mode` answering only "writable only", so agents often moved on with the job still running; the error now names the `write` call that cancels the job or sets the mode, with the real id ([#16580](https://github.com/can1357/oh-my-pi/pull/16580) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `history://<id>` failing with "has no transcript: session is gone" for a worker that is still running but has not created its session or transcript file yet; it now answers "No transcript has been written yet". ([#16645](https://github.com/can1357/oh-my-pi/pull/16645) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the `eval` tool telling sessions with only the Python runtime to call `tool.<name>(args)` without `await`, which returns a coroutine and never runs the tool ([#16578](https://github.com/can1357/oh-my-pi/pull/16578) by [@will-bogusz](https://github.com/will-bogusz))
+- When two sessions on different accounts planned the same blocked-account reset (both waiting for consent, say), the one that asked second now shares the reset the first spent instead of failing on its old limit ([#15128](https://github.com/can1357/oh-my-pi/pull/15128) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.6] - 2026-10-21
 
@@ -630,10 +635,6 @@
 ### Fixed
 
 - Fixed `grep` on a single file showing in Tern as separate boxed snippets with no file row or syntax colors; it now looks the same as a `grep` over a directory
-
-### Changed
-
-- When several Codex or Claude accounts are blocked, auto-redeem now spends the saved reset that buys the most time instead of always the session's own: for Claude and for Codex weekly walls the account with the longest wait; for a Codex 5h wall, whose reset restarts the weekly window, the weekly time it brings forward less the weekly allowance it discards. The session's account still wins within an hour of the best ([#15128](https://github.com/can1357/oh-my-pi/pull/15128) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.10.0] - 2026-10-12
 
