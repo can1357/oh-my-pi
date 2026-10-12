@@ -2,7 +2,7 @@ import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { escapeXmlAttribute, prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { RemoteDelivery } from "../messaging/service";
-import { formatAddressForUrl } from "../messaging/names";
+import { formatAddressForUrl, peerDisplayText } from "../messaging/names";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -227,7 +227,8 @@ export class IrcBridge {
 				display: true,
 				details: {
 					id: d.id,
-					from: d.from.address,
+					// Display copy for one-line headers (card, ACP, history); routing keeps `shortId`.
+					from: peerDisplayText(d.from.address),
 					message: d.body,
 					remote: true,
 					shortId: d.from.shortId,

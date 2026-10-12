@@ -452,6 +452,7 @@ import {
 	type PersistedSessionInit,
 	SessionManager,
 } from "./session-manager";
+import { cleanSessionTitle } from "./session-title-slot";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
@@ -10175,7 +10176,7 @@ export class AgentSession implements SettingsScope {
 		source: "auto" | "user" = "auto",
 		trigger?: SessionNameTrigger,
 	): Promise<boolean> {
-		if (source === "user" && isReservedAddress(SessionManager.cleanTitle(name))) {
+		if (source === "user" && isReservedAddress(cleanSessionTitle(name))) {
 			throw new Error(RESERVED_SESSION_NAME_ERROR);
 		}
 		const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;

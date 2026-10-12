@@ -41,6 +41,7 @@ import {
 } from "../../hindsight";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
 import { claimSessionName, isReservedAddress, RESERVED_SESSION_NAME_ERROR } from "../../messaging/names";
+import { cleanSessionTitle } from "../../session/session-title-slot";
 import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
@@ -1814,7 +1815,8 @@ export class CommandController {
 			!signal.aborted &&
 			sessionManager.getSessionId() === sessionId &&
 			sessionManager.titleRevision === titleRevision;
-		const requested = title;
+		// The collision note compares against the spelling the session manager stores.
+		const requested = cleanSessionTitle(title);
 		try {
 			if (session.messaging) {
 				const taken = new Set((await session.messaging.listSessions()).flatMap(s => (s.name ? [s.name] : [])));

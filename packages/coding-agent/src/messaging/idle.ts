@@ -7,6 +7,7 @@ import {
 	ACCEPTED_QUEUE_CAP,
 	type DropReason,
 	IDLE_SUBSCRIPTION_TTL_MS,
+	MAX_PEER_TEXT_CHARS,
 	type InboxRequest,
 	type InboxResponse,
 	type SenderInfo,
@@ -148,7 +149,12 @@ export class IdleSubscriptions {
 							? {
 									finishedAt: finished?.finishedAt ?? Date.now(),
 									...(decision === "accept" && finished?.status !== null && finished?.status !== undefined
-										? { status: finished.status }
+										? // The receiver rejects a longer status, which would silently drop the notice.
+											{
+												status: finished.status
+													.slice(0, MAX_PEER_TEXT_CHARS)
+													.replace(/[\uD800-\uDBFF]$/, ""),
+											}
 										: {}),
 								}
 							: {}),

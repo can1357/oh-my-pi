@@ -116,7 +116,7 @@ import {
 	type SessionStorageWriter,
 	SessionWriteConflictError,
 } from "./session-storage";
-import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
+import { cleanSessionTitle, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 import {
 	additionalWorkspaceDirectories,
 	normalizeSessionWorkspace,
@@ -2177,13 +2177,6 @@ export class SessionManager {
 		}
 	}
 
-	static cleanTitle(raw: string): string {
-		return raw
-			.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
-			.replace(/ +/g, " ")
-			.trim();
-	}
-
 	/** Puts a binary blob into the blob store and returns the blob reference. */
 	async putBlob(data: Buffer, options?: BlobPutOptions): Promise<BlobPutResult> {
 		return this.#blobs.put(data, options);
@@ -3320,7 +3313,7 @@ export class SessionManager {
 		if (this.#released) return false;
 		if (this.#titleSource === "user" && source === "auto") return false;
 
-		const title = SessionManager.cleanTitle(name);
+		const title = cleanSessionTitle(name);
 		if (!title) return false;
 
 		const previousTitle = this.#sessionName;

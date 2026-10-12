@@ -117,6 +117,8 @@ Name collision checks in interactive, RPC, and ACP sessions are best-effort and 
 
 The name `all` and names starting with `@` are reserved and rejected by `/rename` and `--name`, even with messaging off: `Session names cannot be "all" or start with "@" (reserved for broadcast and extension peer namespaces).` `agent://all` remains a local-agent broadcast; `@` is reserved for extension peer namespaces such as `@ns/name` ([#14071](https://github.com/can1357/oh-my-pi/issues/14071)). A reserved persisted title remains a label, not a messaging address.
 
+Names are compared and stored the way the session file keeps them: control characters become spaces, space runs collapse, and the ends are trimmed. A saved session keeps only about 150 characters of a name (fewer for non-ASCII), so `/rename` and `--name` reject a messaging name that would not fit, including any collision suffix. A longer name set another way, such as over RPC or from an extension, answers to its stored prefix both live and offline.
+
 Send with `write agent://<name>` (URL-encode names with spaces or other special characters). Add `?notify=idle` for a one-shot idle notice:
 
 ```text

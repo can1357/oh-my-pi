@@ -16,6 +16,7 @@ import {
 	claimSessionName,
 	isReservedAddress,
 	RESERVED_SESSION_NAME_ERROR,
+	SESSION_NAME_TOO_LONG_ERROR,
 	sessionAddress,
 } from "../../src/messaging/names";
 import { executeSend } from "../../src/irc/messaging";
@@ -45,11 +46,13 @@ describe("cross-session naming UI", () => {
 			expect(sessionAddress({ ...title, sessionName: name })).toBe(name);
 		}
 	});
-	it("refuses local names over 4000 characters before adding collision suffixes", () => {
-		const name = "x".repeat(4000);
-		expect(claimSessionName(name, new Set())).toBe(name);
-		expect(() => claimSessionName(`${name}x`, new Set())).toThrow("Session names can be at most 4000 characters.");
-		expect(claimSessionName(name, new Set([name])).length).toBeLessThanOrEqual(4096);
+	it("refuses names the title slot cannot store and checks collisions on the stored spelling", () => {
+		const fits = "x".repeat(140);
+		expect(claimSessionName(fits, new Set())).toBe(fits);
+		expect(() => claimSessionName("x".repeat(300), new Set())).toThrow(SESSION_NAME_TOO_LONG_ERROR);
+		expect(() => claimSessionName("é".repeat(100), new Set())).toThrow(SESSION_NAME_TOO_LONG_ERROR);
+		expect(claimSessionName(" alice \t smith ", new Set())).toBe("alice smith");
+		expect(claimSessionName("alice  smith", new Set(["alice smith"]))).toMatch(/^alice smith-[a-z]+-[a-z]+$/);
 	});
 
 	it("sanitizes ambiguous and incompatible peer displays without changing the routing identity", async () => {

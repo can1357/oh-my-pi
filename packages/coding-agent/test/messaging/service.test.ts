@@ -28,6 +28,7 @@ import {
 	IDLE_SUBSCRIPTION_TTL_MS,
 	type InboxRequest,
 	type InboxResponse,
+	MAX_PEER_TEXT_CHARS,
 	MAX_SERIALIZED_CHARS,
 	MESSAGING_WIRE_VERSION,
 	type SenderInfo,
@@ -811,6 +812,14 @@ describe("messaging service with real inboxes", () => {
 		expect(ah.notices).toHaveLength(2);
 	});
 
+	it("delivers the idle notice when the first answer line is longer than the wire status cap", async () => {
+		const { a, ah, bh, target } = await pair();
+		bh.finished = { ...bh.finished, status: "x".repeat(MAX_PEER_TEXT_CHARS + 1) };
+		const immediate = ah.nextNotice();
+		await a.send(target, "", { notifyWhenIdle: true });
+		expect(await immediate).toStartWith("@beta is idle (turn finished 14:07): xxxx");
+	});
+
 	it("rejects a refusing requester's subscription but still sends a non-empty body without watching", async () => {
 		const { a, b, ah, bh, as, target } = await pair();
 		bh.busy = true;
@@ -1577,6 +1586,32 @@ describe("offline handoff regressions", () => {
 					"body" in item.message ? item.message.body : undefined,
 				),
 			).toEqual(["CUSTOM_MARKER"]);
+		} finally {
+			await manager.close();
+		}
+	});
+
+	it("resolves a stopped session at the address it advertised live under a name too long for the title slot", async () => {
+		const { a } = await pair();
+		vi.spyOn(dirs, "getSessionsDir").mockReturnValue(path.join(temp!.path(), "managed"));
+		vi.spyOn(dirs, "getCustomSessionFilesDir").mockReturnValue(path.join(temp!.path(), "custom-markers"));
+		vi.spyOn(mailbox, "listOfflineSessions").mockImplementation(realListOfflineSessions);
+		const manager = SessionManager.create(temp!.path(), path.join(temp!.path(), "custom-session-dir"));
+		try {
+			// RPC and extension setters store user names without claiming them first.
+			await manager.setSessionName(`long-${"n".repeat(300)}`, "user");
+			await manager.ensureOnDisk();
+			const live = sessionAddress({
+				cwd: manager.getCwd(),
+				sessionId: manager.getSessionId(),
+				sessionName: manager.getSessionName(),
+				titleSource: manager.titleSource,
+				directPrint: false,
+			})!;
+			const resolved = await a.resolve(live);
+			expect(resolved.kind).toBe("offline");
+			if (resolved.kind !== "offline") throw new Error("Long-named session absent offline");
+			expect(resolved.target.sessionId).toBe(manager.getSessionId());
 		} finally {
 			await manager.close();
 		}

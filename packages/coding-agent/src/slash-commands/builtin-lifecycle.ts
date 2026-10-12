@@ -7,6 +7,7 @@ import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import { claimSessionName, isReservedAddress, RESERVED_SESSION_NAME_ERROR } from "../messaging/names";
+import { cleanSessionTitle } from "../session/session-title-slot";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
@@ -658,7 +659,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 							)
 						: new Set<string>();
 					if (!isCurrent()) return;
-					const requested = title;
+					// The collision note compares against the spelling the session manager stores.
+					const requested = cleanSessionTitle(title);
 					const name = session.messaging ? claimSessionName(requested, taken) : requested;
 					const persistence = sessionManager.setSessionName(name, "user");
 					titleRevision = sessionManager.titleRevision;
