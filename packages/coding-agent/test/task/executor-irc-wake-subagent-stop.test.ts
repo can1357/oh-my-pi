@@ -27,7 +27,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { attachIrcWakeTurnMonitor } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { isRecord, TempDir } from "@oh-my-pi/pi-utils";
+import { isRecord, TempDir, untilAborted } from "@oh-my-pi/pi-utils";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 
 const AGENT_ID = "WakeAgent";
@@ -93,6 +93,12 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			event: SubagentStopEvent,
 			callIndex: number,
 		) => SubagentStopEventResult | undefined | Promise<SubagentStopEventResult | undefined>;
+		/** Owner async-job manager the session owns; the wake turn's owner jobs live here. */
+		manager?: AsyncJobManager;
+		/** Registry parent of the woken agent; waking it as that parent opens the wake job the parent waits on. */
+		parentId?: string;
+		/** Wall-clock cap on the wake turn, ms. */
+		maxRuntimeMs?: number;
 	}) {
 		const stopEvents: SubagentStopEvent[] = [];
 		const lifecycle: LifecycleFrame[] = [];
@@ -131,7 +137,18 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			toolRegistry: new Map([["yield", yieldTool]]),
 			agentId: AGENT_ID,
 			extensionRunner,
+			ownedAsyncJobManager: args.manager,
 		});
+		if (args.parentId) {
+			AgentRegistry.global().register({
+				id: AGENT_ID,
+				displayName: AGENT_ID,
+				kind: "sub",
+				parentId: args.parentId,
+				session,
+				status: "idle",
+			});
+		}
 		attachIrcWakeTurnMonitor(session, {
 			id: AGENT_ID,
 			agent: wakeAgent,
@@ -139,12 +156,13 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			parentSessionId: "parent-session-1",
 			parentSessionFile: "/parent/session.jsonl",
 			artifactsDir: tempDir.path(),
+			maxRuntimeMs: args.maxRuntimeMs,
 		});
 		return { session, mock, stopEvents, lifecycle, artifact: path.join(tempDir.path(), `${AGENT_ID}.md`) };
 	}
 
-	async function deliverWake(target: AgentSession, id: string): Promise<void> {
-		await target.deliverIrcMessage({ id, from: "peer", to: AGENT_ID, body: "status?", ts: Date.now() } as IrcMessage);
+	async function deliverWake(target: AgentSession, id: string, from = "peer"): Promise<void> {
+		await target.deliverIrcMessage({ id, from, to: AGENT_ID, body: "status?", ts: Date.now() } as IrcMessage);
 	}
 
 	async function wake(target: AgentSession): Promise<void> {
@@ -243,5 +261,104 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(run.stopEvents).toHaveLength(1);
 		expect(await Bun.file(run.artifact).exists()).toBe(false);
 		expect(run.lifecycle.map(frame => frame.status)).toContain("failed");
+	});
+
+	it("judges a continuation's yield only after its owner async work quiesced", async () => {
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const gate = Promise.withResolvers<string>();
+		const continuationYielded = Promise.withResolvers<void>();
+		const run = await setup({
+			manager,
+			responses: [
+				yieldCall("REFUSED-PAYLOAD"),
+				() => {
+					continuationYielded.resolve();
+					return yieldCall("replacement");
+				},
+				// The delivered job result's turn: prose, no fresh yield.
+				{ content: ["noted the job result"] },
+			],
+			onStop: (_event, callIndex) => {
+				if (callIndex !== 1) return undefined;
+				// The refusal's continuation will leave this job running when it yields.
+				manager.register(
+					"bash",
+					"bg build",
+					({ signal }) => untilAborted(signal, gate.promise).then(() => "build ok"),
+					{
+						id: "bg-job",
+						ownerId: AGENT_ID,
+					},
+				);
+				return { decision: "block", reason: "keep going" };
+			},
+		});
+
+		const woken = wake(run.session);
+		await continuationYielded.promise;
+		// Leave the job running well past the continuation's turn, so only a settle
+		// (not the turn merely ending) can carry the pass to the job's result.
+		await Bun.sleep(200);
+		expect(run.stopEvents).toHaveLength(1);
+		gate.resolve("BUILD GREEN");
+		await woken;
+
+		// The replacement yield predates the job's result, so it was never judged
+		// (judging it with the job pending would break "after owner work quiesced"),
+		// and the result the settle delivered un-latched it: the turn fails closed.
+		expect(run.stopEvents).toHaveLength(1);
+		expect(await Bun.file(run.artifact).exists()).toBe(false);
+		expect(run.lifecycle.at(-1)?.status).toBe("failed");
+	});
+
+	it("reports a wake turn cancelled while handlers were consulting as cancelled, not as a refusal", async () => {
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const stopEntered = Promise.withResolvers<void>();
+		const run = await setup({
+			manager,
+			parentId: "Parent",
+			maxRuntimeMs: 400,
+			responses: [yieldCall("UNCONFIRMED-PAYLOAD")],
+			onStop: async event => {
+				stopEntered.resolve();
+				// Hold the pass open until the wall-clock cap cancels the turn.
+				const aborted = Promise.withResolvers<void>();
+				if (event.signal.aborted) aborted.resolve();
+				else event.signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+				await aborted.promise;
+				return { decision: "block", reason: "not done" };
+			},
+		});
+
+		await deliverWake(run.session, "m1", "Parent");
+		await stopEntered.promise;
+		const wakeJob = manager.getJob(AGENT_ID);
+		await wakeJob?.promise;
+		await run.session.waitForIrcReplies();
+		await run.session.waitForIdle();
+
+		expect(run.stopEvents).toHaveLength(1);
+		// The job the parent waits on carries the turn's verdict.
+		expect(wakeJob?.status).toBe("failed");
+		expect(wakeJob?.errorText).toContain("Wake turn was cancelled");
+		expect(wakeJob?.errorText).not.toContain("subagent_stop handler refused");
+		expect(await Bun.file(run.artifact).exists()).toBe(false);
+	});
+
+	it("fails, rather than cancels, a wake turn whose unanswered refusal ended on an aborted turn", async () => {
+		const run = await setup({
+			// The continuation's turn itself ends aborted: no replacement yield, no cancel.
+			responses: [yieldCall("REFUSED-PAYLOAD"), { content: ["cut off"], stopReason: "aborted" }],
+			onStop: () => ({ decision: "block", reason: "not done" }),
+		});
+
+		await wake(run.session);
+
+		expect(run.stopEvents).toHaveLength(1);
+		expect(await Bun.file(run.artifact).exists()).toBe(false);
+		// The refusal went unanswered: a failure, not an abort of the turn's work.
+		expect(run.lifecycle.at(-1)?.status).toBe("failed");
 	});
 });
