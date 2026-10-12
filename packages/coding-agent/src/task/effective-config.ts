@@ -134,7 +134,9 @@ function settingSource(setting: AnySetting, settings: Settings): AgentConfigSour
 
 /**
  * Model a new top-level session starts on: the `default` role when it resolves
- * among the allowed models, else the startup fallback pick.
+ * among the allowed models, else the startup fallback pick. Like session start,
+ * a configured role that misses (or no pick at all) awaits one discovery pass
+ * first, so a cold models.yml cache cannot hand the role's slot to a fallback.
  */
 async function resolveParentModel(
 	settings: Settings,
@@ -142,21 +144,26 @@ async function resolveParentModel(
 ): Promise<{ pattern: string | undefined; source: AgentConfigSource; note?: string }> {
 	const preferences = getModelMatchPreferences(settings);
 	const defaultRole = settings.getModelRole("default");
-	if (defaultRole) {
+	let refreshed = false;
+	while (true) {
 		const allowed = await resolveAllowedModels(modelRegistry, settings, preferences);
-		const role = resolveModelRoleValue(defaultRole, allowed, { settings, matchPreferences: preferences });
-		if (role.model) return { pattern: defaultRole, source: { layer: "session", key: "modelRoles.default" } };
+		if (defaultRole) {
+			const role = resolveModelRoleValue(defaultRole, allowed, { settings, matchPreferences: preferences });
+			if (role.model) return { pattern: defaultRole, source: { layer: "session", key: "modelRoles.default" } };
+		}
+		const pick = pickStartupFallbackModel(modelRegistry, allowed);
+		if (!refreshed && (defaultRole || !pick) && modelRegistry.getDiscoverableProviders().length > 0) {
+			await modelRegistry.refresh("online-if-uncached");
+			refreshed = true;
+			continue;
+		}
+		const enabled = cfgEnabledModels.get(settings);
+		return {
+			pattern: pick ? `${pick.provider}/${pick.id}` : undefined,
+			source: { layer: "default", key: "first available model" },
+			note: enabled && enabled.length > 0 ? `within enabledModels (${enabled.join(", ")})` : undefined,
+		};
 	}
-	const pick = pickStartupFallbackModel(
-		modelRegistry,
-		await resolveAllowedModels(modelRegistry, settings, preferences),
-	);
-	const enabled = cfgEnabledModels.get(settings);
-	return {
-		pattern: pick ? `${pick.provider}/${pick.id}` : undefined,
-		source: { layer: "default", key: "first available model" },
-		note: enabled && enabled.length > 0 ? `within enabledModels (${enabled.join(", ")})` : undefined,
-	};
 }
 
 export async function resolveEffectiveAgentConfig(
@@ -291,6 +298,11 @@ export async function resolveEffectiveAgentConfig(
 				: settingSource(cfgTaskSoftRequestBudget, settings),
 	};
 
+	const prewalkPattern = agentPrewalkPattern(agent, settings);
+	const prewalkResolution = prewalkPattern
+		? resolveSubagentPrewalk(prewalkPattern, modelRegistry, settings, { model, thinkingLevel: spawnThinking })
+		: undefined;
+
 	const atMaxDepth = !canSpawnAtDepth(cfgTaskMaxRecursionDepth.get(settings), 1);
 	const toolNames = resolveSubagentToolNames(agent, settings, {
 		atMaxDepth,
@@ -307,6 +319,8 @@ export async function resolveEffectiveAgentConfig(
 			settings: childSettings,
 			taskDepth: 1,
 			requireYieldTool: true,
+			// A yield-gated child gets `todo` only while a prewalk hand-off is armed.
+			prewalkArmed: prewalkResolution?.kind === "armed",
 			enableLsp: true,
 			modelRegistry,
 			getActiveModel: () => model,
@@ -322,10 +336,6 @@ export async function resolveEffectiveAgentConfig(
 		toolPlan.names.includes("read") &&
 		!toolPlan.names.includes("write");
 
-	const prewalkPattern = agentPrewalkPattern(agent, settings);
-	const prewalkResolution = prewalkPattern
-		? resolveSubagentPrewalk(prewalkPattern, modelRegistry, settings, { model, thinkingLevel: spawnThinking })
-		: undefined;
 	const prewalk: AgentConfigEntry = {
 		value:
 			prewalkResolution?.kind === "armed" ? formatModelStringWithRouting(prewalkResolution.prewalk.target) : null,
