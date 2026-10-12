@@ -436,12 +436,12 @@ export class StreamingRevealController {
 			const after = this.#blockUnits(target.content[i]!, this.#hideThinkingBlock, this.#proseOnlyThinking, i);
 			if (before > 0 && after > 0) {
 				const spent = Math.min(remaining, before);
-				remaining -= before;
-				revealed += Math.min(spent, after);
+				remaining = Math.max(0, remaining - before);
+				revealed += Math.max(0, Math.min(spent, after));
 			} else if (before === 0 && after > 0) {
 				revealed += after;
 			} else {
-				remaining -= before;
+				remaining = Math.max(0, remaining - before);
 			}
 		}
 		this.#revealed = revealed;
