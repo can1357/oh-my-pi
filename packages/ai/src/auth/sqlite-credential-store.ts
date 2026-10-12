@@ -82,6 +82,67 @@ type CredentialBlockRow = {
 	updated_at: number;
 };
 
+/** Block columns read by {@link SqliteAuthCredentialStore.getCredentialBlock}. */
+type CredentialBlockStateRow = {
+	blocked_until_ms: number;
+	updated_at: number;
+};
+
+/** Block scope columns read by {@link SqliteAuthCredentialStore.getCredentialBlockScopes}. */
+type CredentialBlockScopeRow = {
+	block_scope: string;
+	blocked_until_ms: number;
+};
+
+/** `cache.value` for one key. */
+type CacheValueRow = { value: string };
+
+/** Expiry of the refresh lease held on one credential. */
+type RefreshLeaseRow = { expires_at_ms: number };
+
+/** Newest `usage_history` row for one (provider, account, limit) series. */
+type UsageHistoryKeyRow = { id: number; recorded_at: number };
+
+/** `usage_history` row read by {@link SqliteAuthCredentialStore.listUsageHistory}. */
+type UsageHistoryRow = {
+	recorded_at: number;
+	provider: string;
+	account_key: string;
+	email: string | null;
+	account_id: string | null;
+	limit_id: string;
+	label: string;
+	window_label: string | null;
+	used_fraction: number | null;
+	status: string | null;
+	resets_at: number | null;
+};
+
+/** One `clients` row for the usage summary. */
+type ClientRow = { install_id: string; hostname: string | null; first_seen: number; last_seen: number };
+
+/** `auth_credentials` row read while splitting the retired SingularityAPI provider id. */
+type SingularitySplitRow = { id: number; credential_type: string; data: string };
+
+/** `id` returned by the credential INSERT's `RETURNING` clause. */
+type InsertedAuthIdRow = { id: number };
+
+/** Newest merge bucket for one (install, app, provider, model) usage series. */
+type ClientUsageBucketRow = { id: number };
+
+/** Per-(install, app, provider) client usage aggregate. */
+type ClientUsageAggregateRow = {
+	install_id: string;
+	app: string;
+	provider: string;
+	requests: number;
+	input_tokens: number;
+	output_tokens: number;
+	cache_read_tokens: number;
+	cache_write_tokens: number;
+	cost_usd: number;
+};
+
 type SerializedCredentialRecord = {
 	credentialType: AuthCredential["type"];
 	data: string;
@@ -400,27 +461,27 @@ function extractOAuthTokenIdentifiers(token: string | undefined): string[] | und
  */
 export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#db: Database;
-	#listActiveStmt: Statement;
-	#listActiveByProviderStmt: Statement;
-	#listDisabledStmt: Statement;
-	#listDisabledByProviderStmt: Statement;
-	#insertStmt: Statement;
+	#listActiveStmt: Statement<AuthRow, []>;
+	#listActiveByProviderStmt: Statement<AuthRow, [string]>;
+	#listDisabledStmt: Statement<DisabledAuthRow, []>;
+	#listDisabledByProviderStmt: Statement<DisabledAuthRow, [string]>;
+	#insertStmt: Statement<InsertedAuthIdRow, [string, string, string, string | null]>;
 	#updateStmt: Statement;
 	#deleteStmt: Statement;
 	#deleteIfMatchesStmt: Statement;
 	#updateIfMatchesStmt: Statement;
 	#deleteByProviderStmt: Statement;
 	#hardDeleteStmt: Statement;
-	#getCacheStmt: Statement;
-	#getCacheIncludingExpiredStmt: Statement;
+	#getCacheStmt: Statement<CacheValueRow, [string]>;
+	#getCacheIncludingExpiredStmt: Statement<CacheValueRow, [string]>;
 	#upsertCacheStmt: Statement;
 	#deleteCachePrefixStmt: Statement;
 	#deleteExpiredCacheStmt: Statement;
 	#updateIfMatchesWithLeaseStmt: Statement;
 	#deleteIfMatchesWithLeaseStmt: Statement;
-	#getCredentialBlockStmt: Statement;
-	#listCredentialBlockScopesStmt: Statement;
-	#listCredentialBlocksStmt: Statement;
+	#getCredentialBlockStmt: Statement<CredentialBlockStateRow, [number, string, string, number]>;
+	#listCredentialBlockScopesStmt: Statement<CredentialBlockScopeRow, [number, string, number]>;
+	#listCredentialBlocksStmt: Statement<CredentialBlockRow, [string, number, string, string]>;
 	#upsertCredentialBlockStmt: Statement;
 	#deleteCredentialBlocksStmt: Statement;
 	#deleteCredentialBlockStmt: Statement;
@@ -428,15 +489,15 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	/** Wall-clock time of the last expired-block sweep; throttles read-path sweeps. */
 	#lastCredentialBlockSweepMs = Number.NEGATIVE_INFINITY;
 	#acquireCredentialRefreshLeaseStmt: Statement;
-	#getCredentialRefreshLeaseStmt: Statement;
+	#getCredentialRefreshLeaseStmt: Statement<RefreshLeaseRow, [number]>;
 	#renewCredentialRefreshLeaseStmt: Statement;
 	#releaseCredentialRefreshLeaseStmt: Statement;
-	#getCredentialStateStmt: Statement;
+	#getCredentialStateStmt: Statement<CredentialStateRow, [number]>;
 	#holdsCredentialRefreshLeaseStmt: Statement;
 	#credentialBlockReconcileAfter: Map<string, number> = new Map();
 	#insertUsageHistoryStmt: Statement;
-	#lastUsageHistoryStmt: Statement;
-	#listUsageHistoryStmt: Statement;
+	#lastUsageHistoryStmt: Statement<UsageHistoryKeyRow, [string, string, string]>;
+	#listUsageHistoryStmt: Statement<UsageHistoryRow, [number, string | null, string | null]>;
 	#updateUsageHistoryStmt: Statement;
 	#dataVersion: number;
 	#authRevision: number;
@@ -450,19 +511,19 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#authRevision = this.#readAuthRevision();
 		this.#localAuthRevision = this.#readLocalAuthRevision();
 
-		this.#listActiveStmt = this.#db.prepare(
+		this.#listActiveStmt = this.#db.query<AuthRow, []>(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE disabled_cause IS NULL ORDER BY id ASC",
 		);
-		this.#listActiveByProviderStmt = this.#db.prepare(
+		this.#listActiveByProviderStmt = this.#db.query<AuthRow, [string]>(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE provider = ? AND disabled_cause IS NULL ORDER BY id ASC",
 		);
-		this.#listDisabledStmt = this.#db.prepare(
+		this.#listDisabledStmt = this.#db.query<DisabledAuthRow, []>(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key, updated_at FROM auth_credentials WHERE disabled_cause IS NOT NULL ORDER BY id ASC",
 		);
-		this.#listDisabledByProviderStmt = this.#db.prepare(
+		this.#listDisabledByProviderStmt = this.#db.query<DisabledAuthRow, [string]>(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key, updated_at FROM auth_credentials WHERE provider = ? AND disabled_cause IS NOT NULL ORDER BY id ASC",
 		);
-		this.#insertStmt = this.#db.prepare(
+		this.#insertStmt = this.#db.query<InsertedAuthIdRow, [string, string, string, string | null]>(
 			`INSERT INTO auth_credentials (provider, credential_type, data, identity_key, created_at, updated_at) VALUES (?, ?, ?, ?, ${SQLITE_NOW_EPOCH}, ${SQLITE_NOW_EPOCH}) RETURNING id`,
 		);
 		this.#updateStmt = this.#db.prepare(
@@ -499,24 +560,26 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE provider = ? AND disabled_cause IS NULL`,
 		);
 		this.#hardDeleteStmt = this.#db.prepare("DELETE FROM auth_credentials WHERE id = ?");
-		this.#getCacheStmt = this.#db.prepare(
+		this.#getCacheStmt = this.#db.query<CacheValueRow, [string]>(
 			`SELECT value FROM cache WHERE key = ? AND expires_at > ${SQLITE_NOW_EPOCH}`,
 		);
-		this.#getCacheIncludingExpiredStmt = this.#db.prepare("SELECT value FROM cache WHERE key = ?");
+		this.#getCacheIncludingExpiredStmt = this.#db.query<CacheValueRow, [string]>(
+			"SELECT value FROM cache WHERE key = ?",
+		);
 		this.#upsertCacheStmt = this.#db.prepare(
 			"INSERT INTO cache (key, value, expires_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at",
 		);
 		this.#deleteCachePrefixStmt = this.#db.prepare("DELETE FROM cache WHERE substr(key, 1, ?) = ?");
 		this.#deleteExpiredCacheStmt = this.#db.prepare(`DELETE FROM cache WHERE expires_at <= ${SQLITE_NOW_EPOCH}`);
-		this.#getCredentialBlockStmt = this.#db.prepare(
+		this.#getCredentialBlockStmt = this.#db.query<CredentialBlockStateRow, [number, string, string, number]>(
 			"SELECT blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ? AND blocked_until_ms > ?",
 		);
-		this.#listCredentialBlockScopesStmt = this.#db.prepare(
+		this.#listCredentialBlockScopesStmt = this.#db.query<CredentialBlockScopeRow, [number, string, number]>(
 			"SELECT block_scope, blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND blocked_until_ms > ?",
 		);
 		// One statement for any number of ids: `json_each` keeps the caller's id
 		// order (`ids.key`) and the per-credential provider/scope order.
-		this.#listCredentialBlocksStmt = this.#db.prepare(
+		this.#listCredentialBlocksStmt = this.#db.query<CredentialBlockRow, [string, number, string, string]>(
 			`SELECT b.credential_id, b.provider_key, b.block_scope, b.blocked_until_ms, b.updated_at
 			FROM json_each(?) AS ids
 			JOIN auth_credential_blocks AS b ON b.credential_id = ids.value
@@ -547,7 +610,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				updated_at = excluded.updated_at
 			WHERE auth_credential_refresh_leases.expires_at_ms <= ?`,
 		);
-		this.#getCredentialRefreshLeaseStmt = this.#db.prepare(
+		this.#getCredentialRefreshLeaseStmt = this.#db.query<RefreshLeaseRow, [number]>(
 			"SELECT expires_at_ms FROM auth_credential_refresh_leases WHERE credential_id = ?",
 		);
 		this.#renewCredentialRefreshLeaseStmt = this.#db.prepare(
@@ -556,7 +619,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#releaseCredentialRefreshLeaseStmt = this.#db.prepare(
 			"DELETE FROM auth_credential_refresh_leases WHERE credential_id = ? AND owner = ?",
 		);
-		this.#getCredentialStateStmt = this.#db.prepare(
+		this.#getCredentialStateStmt = this.#db.query<CredentialStateRow, [number]>(
 			"SELECT provider, credential_type, data, identity_key, disabled_cause FROM auth_credentials WHERE id = ?",
 		);
 		this.#holdsCredentialRefreshLeaseStmt = this.#db.prepare(
@@ -565,13 +628,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#insertUsageHistoryStmt = this.#db.prepare(
 			"INSERT INTO usage_history (recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		);
-		this.#lastUsageHistoryStmt = this.#db.prepare(
+		this.#lastUsageHistoryStmt = this.#db.query<UsageHistoryKeyRow, [string, string, string]>(
 			"SELECT id, recorded_at FROM usage_history WHERE provider = ? AND account_key = ? AND limit_id = ? ORDER BY recorded_at DESC LIMIT 1",
 		);
 		this.#updateUsageHistoryStmt = this.#db.prepare(
 			"UPDATE usage_history SET recorded_at = ?, email = ?, account_id = ?, label = ?, window_label = ?, used_fraction = ?, status = ?, resets_at = ? WHERE id = ?",
 		);
-		this.#listUsageHistoryStmt = this.#db.prepare(
+		this.#listUsageHistoryStmt = this.#db.query<UsageHistoryRow, [number, string | null, string | null]>(
 			"SELECT recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at FROM usage_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) ORDER BY recorded_at ASC",
 		);
 	}
@@ -724,25 +787,17 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#authCredentialsTableExists(): boolean {
-		const stmt = this.#db.prepare(
-			"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'auth_credentials'",
-		);
-		try {
-			const row = stmt.get() as { present?: number } | undefined;
-			return row?.present === 1;
-		} finally {
-			stmt.finalize();
-		}
+		const row = this.#db
+			.query<{ present: number }, []>(
+				"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'auth_credentials'",
+			)
+			.get();
+		return row?.present === 1;
 	}
 
 	#readAuthSchemaVersion(): number | null {
-		const stmt = this.#db.prepare("SELECT version FROM auth_schema_version WHERE id = 1");
-		try {
-			const row = stmt.get() as { version?: number } | undefined;
-			return typeof row?.version === "number" ? row.version : null;
-		} finally {
-			stmt.finalize();
-		}
+		const row = this.#db.query<{ version: number }, []>("SELECT version FROM auth_schema_version WHERE id = 1").get();
+		return typeof row?.version === "number" ? row.version : null;
 	}
 
 	#writeAuthSchemaVersion(version: number): void {
@@ -755,16 +810,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#inferAuthSchemaVersion(): number {
-		const stmt = this.#db.prepare("PRAGMA table_info(auth_credentials)");
-		try {
-			const cols = stmt.all() as Array<{ name?: string }>;
-			return this.#inferAuthSchemaVersionFromColumns(cols);
-		} finally {
-			stmt.finalize();
-		}
+		const cols = this.#db.query<{ name: string }, []>("PRAGMA table_info(auth_credentials)").all();
+		return this.#inferAuthSchemaVersionFromColumns(cols);
 	}
 
-	#inferAuthSchemaVersionFromColumns(cols: Array<{ name?: string }>): number {
+	#inferAuthSchemaVersionFromColumns(cols: Array<{ name: string }>): number {
 		const hasDisabledCause = cols.some(column => column.name === "disabled_cause");
 		const hasIdentityKey = cols.some(column => column.name === "identity_key");
 		const hasAccountId = cols.some(column => column.name === "account_id");
@@ -1044,14 +1094,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 	#migrateAuthSchemaV0ToV1(): void {
 		const migrate = this.#db.transaction(() => {
-			const stmt = this.#db.prepare("PRAGMA table_info(auth_credentials)");
-			let hasDisabled = false;
-			try {
-				const v0Cols = stmt.all() as Array<{ name?: string }>;
-				hasDisabled = v0Cols.some(col => col.name === "disabled");
-			} finally {
-				stmt.finalize();
-			}
+			const v0Cols = this.#db.query<{ name: string }, []>("PRAGMA table_info(auth_credentials)").all();
+			const hasDisabled = v0Cols.some(col => col.name === "disabled");
 
 			this.#db.run("ALTER TABLE auth_credentials RENAME TO auth_credentials_v0");
 			this.#db.run(`
@@ -1220,15 +1264,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			// observed live 2026-09-22), and neither key is accepted by the other
 			// host. Route each stored credential to the product that serves it
 			// instead of orphaning it under an id nothing reads anymore.
-			const select = this.#db.prepare(
-				"SELECT id, credential_type, data FROM auth_credentials WHERE provider = 'singularityapi'",
-			);
-			let rows: Array<{ id: number; credential_type: string; data: string }>;
-			try {
-				rows = select.all() as Array<{ id: number; credential_type: string; data: string }>;
-			} finally {
-				select.finalize();
-			}
+			const rows = this.#db
+				.query<SingularitySplitRow, []>(
+					"SELECT id, credential_type, data FROM auth_credentials WHERE provider = 'singularityapi'",
+				)
+				.all();
 			for (const row of rows) {
 				let provider = "singularityapi-tech";
 				try {
@@ -1252,15 +1292,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#backfillCredentialIdentityKeys(): void {
-		const selectRowsStmt = this.#db.prepare(
-			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE identity_key IS NULL ORDER BY id ASC",
-		);
-		let rows: AuthRow[];
-		try {
-			rows = selectRowsStmt.all() as AuthRow[];
-		} finally {
-			selectRowsStmt.finalize();
-		}
+		const rows = this.#db
+			.query<AuthRow, []>(
+				"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE identity_key IS NULL ORDER BY id ASC",
+			)
+			.all();
 		if (rows.length === 0) return;
 
 		let updateIdentity: Statement | null = null;
@@ -1281,10 +1317,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	// ─── AuthCredentialStore interface ──────────────────────────────────────
 
 	listAuthCredentials(provider?: string): StoredAuthCredential[] {
-		const rows =
-			(provider
-				? (this.#listActiveByProviderStmt.all(provider) as AuthRow[])
-				: (this.#listActiveStmt.all() as AuthRow[])) ?? [];
+		const rows = provider ? this.#listActiveByProviderStmt.all(provider) : this.#listActiveStmt.all();
 
 		const results: StoredAuthCredential[] = [];
 		for (const row of rows) {
@@ -1296,10 +1329,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	async listDisabledCredentials(provider?: string): Promise<DisabledCredentialSummary[]> {
-		const rows =
-			(provider
-				? (this.#listDisabledByProviderStmt.all(provider) as DisabledAuthRow[])
-				: (this.#listDisabledStmt.all() as DisabledAuthRow[])) ?? [];
+		const rows = provider ? this.#listDisabledByProviderStmt.all(provider) : this.#listDisabledStmt.all();
 		const results: DisabledCredentialSummary[] = [];
 		for (const row of rows) {
 			const credential = deserializeCredential(row);
@@ -1325,7 +1355,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 	async replaceAuthCredentials(provider: string, credentials: AuthCredential[]): Promise<StoredAuthCredential[]> {
 		const replace = this.#db.transaction((providerName: string, items: AuthCredential[]) => {
-			const existingRows = this.#listActiveByProviderStmt.all(providerName) as AuthRow[];
+			const existingRows = this.#listActiveByProviderStmt.all(providerName);
 			const existing = existingRows.map(row => ({
 				id: row.id,
 				credential: deserializeCredential(row),
@@ -1353,7 +1383,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 						serialized.credentialType,
 						serialized.data,
 						serialized.identityKey,
-					) as { id?: number } | undefined;
+					);
 					if (row?.id) {
 						result.push({ id: row.id, provider: providerName, credential, disabledCause: null });
 					}
@@ -1378,7 +1408,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		const upsert = this.#db.transaction((providerName: string, item: AuthCredential) => {
 			const serialized = serializeCredential(providerName, item);
 			if (!serialized) return this.listAuthCredentials(providerName);
-			const existingRows = this.#listActiveByProviderStmt.all(providerName) as AuthRow[];
+			const existingRows = this.#listActiveByProviderStmt.all(providerName);
 			const existing = existingRows.map(row => ({
 				id: row.id,
 				credential: deserializeCredential(row),
@@ -1410,11 +1440,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					serialized.credentialType,
 					serialized.data,
 					serialized.identityKey,
-				) as { id?: number } | undefined;
+				);
 				targetId = row?.id ?? null;
 			}
 
-			const activeRows = this.#listActiveByProviderStmt.all(providerName) as AuthRow[];
+			const activeRows = this.#listActiveByProviderStmt.all(providerName);
 			const result: StoredAuthCredential[] = [];
 			for (const row of activeRows) {
 				const activeCredential = deserializeCredential(row);
@@ -1450,7 +1480,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			}
 			if (!hasActiveApiKey && activeIdentityKeys.size === 0) return;
 
-			const disabledRows = this.#listDisabledByProviderStmt.all(provider) as AuthRow[];
+			const disabledRows = this.#listDisabledByProviderStmt.all(provider);
 			for (const row of disabledRows) {
 				if (hasActiveApiKey && row.credential_type === "api_key") {
 					this.#hardDeleteStmt.run(row.id);
@@ -1488,7 +1518,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 */
 	updateAuthCredential(id: number, credential: AuthCredential): void {
 		try {
-			const row = this.#getCredentialStateStmt.get(id) as CredentialStateRow | null;
+			const row = this.#getCredentialStateStmt.get(id);
 			const provider = row?.provider ?? "";
 			const serialized = serializeCredential(provider, credential);
 			if (!serialized) return;
@@ -1508,7 +1538,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		credential: AuthCredential,
 		lease?: CredentialRefreshLeaseFence,
 	): boolean {
-		const row = this.#getCredentialStateStmt.get(id) as CredentialStateRow | null;
+		const row = this.#getCredentialStateStmt.get(id);
 		const provider = row?.provider ?? "";
 		const serialized = serializeCredential(provider, credential);
 		if (!serialized) return false;
@@ -1594,7 +1624,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	getCache(key: string, options?: { includeExpired?: boolean }): string | null {
 		try {
 			const stmt = options?.includeExpired === true ? this.#getCacheIncludingExpiredStmt : this.#getCacheStmt;
-			const row = stmt.get(key) as { value?: string } | undefined;
+			const row = stmt.get(key);
 			return row?.value ?? null;
 		} catch {
 			return null;
@@ -1633,17 +1663,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			return undefined;
 		}
 		this.#sweepExpiredCredentialBlocks();
-		const row = this.#getCredentialBlockStmt.get(credentialId, providerKey, blockScope, Date.now()) as
-			| { blocked_until_ms?: number; updated_at?: number }
-			| undefined;
+		const row = this.#getCredentialBlockStmt.get(credentialId, providerKey, blockScope, Date.now());
 		return typeof row?.blocked_until_ms === "number" ? row.blocked_until_ms : undefined;
 	}
 
 	getCredentialBlockScopes(credentialId: number, providerKey: string): Map<string, number> {
 		this.#sweepExpiredCredentialBlocks();
-		const rows = this.#listCredentialBlockScopesStmt.all(credentialId, providerKey, Date.now()) as Array<
-			Pick<CredentialBlockRow, "block_scope" | "blocked_until_ms">
-		>;
+		const rows = this.#listCredentialBlockScopesStmt.all(credentialId, providerKey, Date.now());
 		const hidesLegacyShared = providerKey === LEGACY_CODEX_BLOCK_PROVIDER_KEY;
 		const scopes = new Map<string, number>();
 		for (const row of rows) {
@@ -1659,9 +1685,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		}
 		this.#sweepExpiredCredentialBlocks();
 		const nowMs = Date.now();
-		const row = this.#getCredentialBlockStmt.get(credentialId, providerKey, blockScope, nowMs) as
-			| { blocked_until_ms?: number; updated_at?: number }
-			| undefined;
+		const row = this.#getCredentialBlockStmt.get(credentialId, providerKey, blockScope, nowMs);
 		if (typeof row?.blocked_until_ms !== "number") return undefined;
 		const memoryReconcileAfter =
 			this.#credentialBlockReconcileAfter.get(`${credentialId}\0${providerKey}\0${blockScope}`) ?? 0;
@@ -1754,7 +1778,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			Date.now(),
 			LEGACY_CODEX_BLOCK_PROVIDER_KEY,
 			LEGACY_CODEX_BLOCK_SCOPE,
-		) as CredentialBlockRow[];
+		);
 		return rows.map(row => ({
 			credentialId: row.credential_id,
 			providerKey: row.provider_key,
@@ -1772,7 +1796,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	getCredentialRefreshLeaseExpiresAt(credentialId: number): number | undefined {
-		const row = this.#getCredentialRefreshLeaseStmt.get(credentialId) as { expires_at_ms?: number } | undefined;
+		const row = this.#getCredentialRefreshLeaseStmt.get(credentialId);
 		if (typeof row?.expires_at_ms !== "number") return undefined;
 		if (row.expires_at_ms <= Date.now()) return undefined;
 		return row.expires_at_ms;
@@ -1797,9 +1821,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		try {
 			for (const entry of entries) {
 				const bucket = Math.floor(entry.recordedAt / USAGE_HISTORY_BUCKET_MS);
-				const last = this.#lastUsageHistoryStmt.get(entry.provider, entry.accountKey, entry.limitId) as
-					| { id: number; recorded_at: number }
-					| undefined;
+				const last = this.#lastUsageHistoryStmt.get(entry.provider, entry.accountKey, entry.limitId);
 				if (last && Math.floor(last.recorded_at / USAGE_HISTORY_BUCKET_MS) === bucket) {
 					this.#updateUsageHistoryStmt.run(
 						entry.recordedAt,
@@ -1836,19 +1858,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	listUsageHistory(query?: UsageHistoryQuery): UsageHistoryEntry[] {
 		try {
 			const provider = query?.provider ?? null;
-			const rows = this.#listUsageHistoryStmt.all(query?.sinceMs ?? 0, provider, provider) as Array<{
-				recorded_at: number;
-				provider: string;
-				account_key: string;
-				email: string | null;
-				account_id: string | null;
-				limit_id: string;
-				label: string;
-				window_label: string | null;
-				used_fraction: number | null;
-				status: string | null;
-				resets_at: number | null;
-			}>;
+			const rows = this.#listUsageHistoryStmt.all(query?.sinceMs ?? 0, provider, provider);
 			return rows.map(row => ({
 				recordedAt: row.recorded_at,
 				provider: row.provider as Provider,
@@ -1873,7 +1883,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * the column arrives via ALTER; legacy rows keep the `''` (unlabeled) app.
 	 */
 	#ensureClientUsageAppColumn(): void {
-		const columns = this.#db.query("PRAGMA table_info(client_usage)").all() as Array<{ name: string }>;
+		const columns = this.#db.query<{ name: string }, []>("PRAGMA table_info(client_usage)").all();
 		if (!columns.some(column => column.name === "app")) {
 			this.#db.run("ALTER TABLE client_usage ADD COLUMN app TEXT NOT NULL DEFAULT ''");
 		}
@@ -1888,7 +1898,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			)
 			.run(report.installId, report.hostname ?? null, now, now);
 		const app = report.app?.trim() ?? "";
-		const findBucket = this.#db.query(
+		const findBucket = this.#db.query<ClientUsageBucketRow, [string, string, string, string, number]>(
 			`SELECT id FROM client_usage
 			 WHERE install_id = ? AND app = ? AND provider = ? AND model = ? AND recorded_at >= ?
 			 ORDER BY recorded_at DESC LIMIT 1`,
@@ -1906,9 +1916,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			// Merge into the newest row of the same (install, provider, model)
 			// bucket so 10s client flushes don't accrete one row apiece forever.
 			const bucketFloor = entry.at - CLIENT_USAGE_BUCKET_MS;
-			const existing = findBucket.get(report.installId, app, entry.provider, entry.model, bucketFloor) as {
-				id: number;
-			} | null;
+			const existing = findBucket.get(report.installId, app, entry.provider, entry.model, bucketFloor);
 			if (existing) {
 				merge.run(
 					entry.at,
@@ -1940,27 +1948,19 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 	getClientUsageSummary(sinceMs: number): ClientUsageSummary {
 		const clients = this.#db
-			.query("SELECT install_id, hostname, first_seen, last_seen FROM clients ORDER BY last_seen DESC")
-			.all() as Array<{ install_id: string; hostname: string | null; first_seen: number; last_seen: number }>;
+			.query<ClientRow, []>(
+				"SELECT install_id, hostname, first_seen, last_seen FROM clients ORDER BY last_seen DESC",
+			)
+			.all();
 		const aggregates = this.#db
-			.query(
+			.query<ClientUsageAggregateRow, [number]>(
 				`SELECT install_id, app, provider, SUM(requests) requests, SUM(input_tokens) input_tokens,
 					SUM(output_tokens) output_tokens, SUM(cache_read_tokens) cache_read_tokens,
 					SUM(cache_write_tokens) cache_write_tokens, SUM(cost_usd) cost_usd
 				 FROM client_usage WHERE recorded_at >= ? GROUP BY install_id, app, provider
 				 ORDER BY install_id, SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) DESC`,
 			)
-			.all(sinceMs) as Array<{
-			install_id: string;
-			app: string;
-			provider: string;
-			requests: number;
-			input_tokens: number;
-			output_tokens: number;
-			cache_read_tokens: number;
-			cache_write_tokens: number;
-			cost_usd: number;
-		}>;
+			.all(sinceMs);
 		const providersByInstall = new Map<string, ClientProviderUsage[]>();
 		for (const row of aggregates) {
 			let list = providersByInstall.get(row.install_id);
@@ -2005,7 +2005,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * Get OAuth credentials for a provider.
 	 */
 	getOAuth(provider: string): OAuthCredentials | null {
-		const rows = this.#listActiveByProviderStmt.all(provider) as AuthRow[];
+		const rows = this.#listActiveByProviderStmt.all(provider);
 		for (const row of rows) {
 			const credential = deserializeCredential(row);
 			if (credential && credential.type === "oauth") {
@@ -2028,7 +2028,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * Get API key for a provider.
 	 */
 	getApiKey(provider: string): string | null {
-		const rows = this.#listActiveByProviderStmt.all(provider) as AuthRow[];
+		const rows = this.#listActiveByProviderStmt.all(provider);
 		for (const row of rows) {
 			const credential = deserializeCredential(row);
 			if (credential && credential.type === "api_key") {
@@ -2042,7 +2042,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * List all providers with credentials.
 	 */
 	listProviders(): string[] {
-		const rows = this.#listActiveStmt.all() as AuthRow[];
+		const rows = this.#listActiveStmt.all();
 		const providers = new Set<string>();
 		for (const row of rows) {
 			providers.add(row.provider);
@@ -2083,21 +2083,21 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#readDataVersion(): number {
-		const row = this.#db.query("PRAGMA data_version").get() as { data_version?: number } | null;
+		const row = this.#db.query<{ data_version: number }, []>("PRAGMA data_version").get();
 		return row?.data_version ?? 0;
 	}
 
 	#readAuthRevision(): number {
-		const row = this.#db.query("SELECT revision FROM auth_change_revision WHERE id = 1").get() as {
-			revision?: number;
-		} | null;
+		const row = this.#db
+			.query<{ revision: number }, []>("SELECT revision FROM auth_change_revision WHERE id = 1")
+			.get();
 		return row?.revision ?? 0;
 	}
 
 	#readLocalAuthRevision(): number {
-		const row = this.#db.query("SELECT revision FROM auth_local_change_revision WHERE id = 1").get() as {
-			revision?: number;
-		} | null;
+		const row = this.#db
+			.query<{ revision: number }, []>("SELECT revision FROM auth_local_change_revision WHERE id = 1")
+			.get();
 		return row?.revision ?? 0;
 	}
 
