@@ -481,6 +481,39 @@ describe("persisted subagent revival", () => {
 		AgentRegistry.resetGlobalForTests();
 	});
 
+	it("hands the wake monitor the spawn's result contract", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-revive-structured-");
+		MCPManager.setInstance(fakeMcpManager(() => []));
+		const captured: Array<IrcWakeTurnMonitorOptions | undefined> = [];
+		vi.spyOn(executorModule, "attachIrcWakeTurnMonitor").mockImplementation((_session, options) => {
+			captured.push(options);
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		// A session persisted without `yield` returned its final message.
+		for (const tools of [["read", "yield"], ["read"]]) {
+			const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { tools });
+			const ref = createRef(sessionFile);
+			AgentRegistry.global().register({
+				id: ref.id,
+				displayName: ref.displayName,
+				kind: "sub",
+				session: null,
+				sessionFile,
+				status: "parked",
+			});
+			const reviver = await createFactory(cwd)(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(ref);
+			AgentRegistry.resetGlobalForTests();
+		}
+
+		expect(captured.map(options => options?.structured)).toEqual([true, false]);
+	});
+
 	it("cold-revives a restricted contract without loading hostile same-name capabilities", async () => {
 		const cwd = makeTempDir("@pi-restricted-revive-");
 		const sessionFile = await createPersistedSession(cwd, true);
