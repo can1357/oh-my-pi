@@ -206,10 +206,15 @@ crate.from_cargo(
     ],
 )
 
-# opusic-sys builds its bundled Opus via `cmake` and selects Ninja from PATH.
-# The target-specific toolchain keeps MSVC cross builds on the wrapper
-# compiler/linker; CFLAGS keeps Zig cross builds free of host UBSan links.
+# opusic-sys expects ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake to
+# select its Android ABI, but rules_android_ndk intentionally exposes only the
+# compiler/sysroot subset of the NDK. Supply a small adapter at that expected
+# path. rules_rust already adds the resolved cc_toolchain's all_files to build
+# script actions, so no second NDK input is needed.
+# The Android-only ANDROID_NDK_HOME below locates the adapter; actual NDK
+# discovery remains in the lazy rules_android_ndk repository using host config.
 crate.annotation(
+    build_script_data = ["@@//bazel/toolchains/android:cmake_toolchain"],
     build_script_env = {
         "CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc": "$${pwd}/external/+msvc_cc_repository+msvc_cc/toolchain.cmake",
         "CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc": "$${pwd}/external/+msvc_cc_repository+msvc_cc_arm64/toolchain.cmake",
@@ -222,6 +227,16 @@ crate.annotation(
     # points at a nonexistent directory even when cross-compiling for macOS.
     patches = ["//bazel/patches:opusic-sys-install-libdir.patch"],
     version = "0.7.5",
+)
+
+crate.annotation_select(
+    build_script_env = {
+        "ANDROID_NDK_HOME": "$${pwd}/bazel/toolchains/android",
+        "ANDROID_NDK_ROOT": "$${pwd}/external/rules_android_ndk++android_ndk_repository_extension+androidndk",
+        "ANDROID_PLATFORM": "android-24",
+    },
+    crate = "opusic-sys",
+    triples = ["aarch64-linux-android"],
 )
 
 # wasmtime-c-api-impl (tree-sitter's `wasm` feature) runs `cmake -P` to install

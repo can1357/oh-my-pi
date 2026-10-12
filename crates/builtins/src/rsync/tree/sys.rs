@@ -269,10 +269,17 @@ pub(crate) fn mknodat(
 
 /// `mkfifoat(dir, name, mode)`.
 pub(crate) fn mkfifoat(dir: Option<BorrowedFd<'_>>, name: &CStr, mode: u32) -> io::Result<()> {
-	check(retry(|| {
-		// SAFETY: valid C string and dirfd.
-		unsafe { libc::mkfifoat(dirfd(dir), name.as_ptr(), mode as libc::mode_t) }
-	}))
+	#[cfg(target_os = "android")]
+	{
+		mknodat(dir, name, mode | libc::S_IFIFO, 0)
+	}
+	#[cfg(not(target_os = "android"))]
+	{
+		check(retry(|| {
+			// SAFETY: valid C string and dirfd.
+			unsafe { libc::mkfifoat(dirfd(dir), name.as_ptr(), mode as libc::mode_t) }
+		}))
+	}
 }
 
 /// Names in the directory `fd` (opened for reading), without `.` and `..`.

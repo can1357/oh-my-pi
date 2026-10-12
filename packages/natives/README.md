@@ -96,19 +96,30 @@ The installer targets API level 24 and installs
 `packages/natives/native/pi_natives.android-arm64.node`. It only load-probes
 artifacts native to the current host, so a Linux builder never loads Android.
 
-To cross-build the complete coding-agent Android bundle, use the separate
-optional Linux-host command:
+To cross-build a standalone coding-agent Android binary, use the optional Linux-host command:
 
 ```sh
 ANDROID_NDK_HOME=/path/to/android-ndk bun --cwd=packages/coding-agent run build:android
 ```
 
-It uses the same Bazel target and writes `packages/coding-agent/dist/android`;
-the generic `build` and `CROSS_TARGET` paths remain for ordinary Bun
-host/cross-target builds. This is not a Termux source build. Termux source
-builds remain on the separate `backup/android-build-before-hybrid-20261007`
-escape hatch; the regular `build-bindings.ts` path does not set
-`RUSTC_BOOTSTRAP`.
+Use Android NDK 25b or newer and released Bun 1.4.3 on the Linux build host;
+that compiler version was verified to have the matching Android runtime asset.
+The command builds the explicit Bazel `android-arm64` native target, then
+compiles the CLI for Bun's `bun-linux-arm64-android` target. The raw executable
+is written to `packages/coding-agent/dist/omp-android-arm64`; Bun's runtime is
+included, so it does not need an external Bun installation in Termux. The
+bundled Bun 1.4.3 runtime targets Android 9 (API 28), while the native addon
+targets API 24. The generic `build` and `CROSS_TARGET` paths remain for ordinary
+host/cross-target builds.
+
+Install a published binary from Termux with:
+
+```sh
+curl -fsSL https://omp.sh/install | sh -s -- --binary
+```
+
+Cross-compilation does not verify Android/Termux or seccomp compatibility;
+validate the executable on a native non-root Termux device before publishing.
 
 The Android addon omits the native desktop and clipboard modules. The desktop
 declarations remain available for type compatibility, but Android does not

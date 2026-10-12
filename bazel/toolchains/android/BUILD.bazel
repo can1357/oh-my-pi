@@ -1,0 +1,7 @@
+# The Android NDK CMake adapter is a build-script input for opusic-sys.
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "cmake_toolchain",
+    srcs = ["build/cmake/android.toolchain.cmake"],
+)
