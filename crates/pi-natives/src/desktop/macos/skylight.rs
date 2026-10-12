@@ -817,13 +817,28 @@ pub(super) fn with_background_guard<T>(
 				}
 			})
 			.map_err(start_failed)?;
-		let result = action().and_then(|value| control::wait(BACKGROUND_SETTLE).map(|()| value));
+		let result = run_then_settle(action, || control::wait(BACKGROUND_SETTLE));
 		drop(stop);
 		let cleanup = observer.join().unwrap_or_else(|_| {
 			Err(DesktopError::input_failed("background focus guard terminated unexpectedly"))
 		});
 		after_cleanup(result, cleanup)
 	})
+}
+
+/// Runs a guarded action, then the settle during which the guard still sends
+/// back an app the action brought forward. The settle follows a failed action
+/// too: an AX action can report an error and still activate its app, as
+/// `AXOpen` on a file in Chrome's Open panel fails with -25205 within 20 ms
+/// and Chrome comes to the front some 20 ms later. The action's own error wins
+/// over the settle's.
+fn run_then_settle<T>(
+	action: impl FnOnce() -> CoreResult<T>,
+	settle: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<T> {
+	let result = action();
+	let settled = settle();
+	result.and_then(|value| settled.map(|()| value))
 }
 
 fn set_front(spi: &ForegroundSpi, psn: ProcessSerialNumber, wid: u32) -> CoreResult<()> {
@@ -1249,6 +1264,7 @@ fn attach_keyboard_authentication(pid: pid_t, event: &CGEvent) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::desktop::error::ErrorCode;
 
 	const PREVIOUS: ProcessSerialNumber = ProcessSerialNumber { high: 0, low: 7 };
 	const TARGET: ProcessSerialNumber = ProcessSerialNumber { high: 0, low: 8 };
@@ -1640,6 +1656,30 @@ mod tests {
 		assert_eq!(restorable_key(None, || Some(false), || Some(true)), None);
 		assert_eq!(restorable_key(None, || None, || Some(false)), None);
 		assert_eq!(restorable_key(None, || Some(false), || None), None);
+	}
+
+	#[test]
+	fn a_failed_action_still_settles_under_the_guard() {
+		// AXOpen in Chrome's Open panel fails with -25205, then Chrome comes
+		// forward: the guard must still be watching.
+		let mut settled = false;
+		let result: CoreResult<()> = run_then_settle(
+			|| Err(DesktopError::ax_failed("AX action 'AXOpen' failed (AXError(-25205))")),
+			|| {
+				settled = true;
+				Err(DesktopError::cancelled("stopped"))
+			},
+		);
+		assert!(settled);
+		let error = result.expect_err("the action failed");
+		assert_eq!((error.code, error.message.as_str()), (
+			ErrorCode::AxFailed,
+			"AX action 'AXOpen' failed (AXError(-25205))"
+		));
+
+		let result = run_then_settle(|| Ok(7), || Err(DesktopError::cancelled("stopped")));
+		assert_eq!(result.expect_err("the settle was cancelled").code, ErrorCode::Cancelled);
+		assert_eq!(run_then_settle(|| Ok(7), || Ok(())).ok(), Some(7));
 	}
 
 	#[test]
