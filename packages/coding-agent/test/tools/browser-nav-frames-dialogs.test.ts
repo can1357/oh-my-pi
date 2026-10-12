@@ -463,6 +463,18 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 		expect(textOf(later)).toContain("The page called window.print()");
 	}, 30_000);
 
+	test("reports a print the page makes while the open navigates to it", async () => {
+		const invoke = createHost();
+		const opened = await invoke({ action: "open", name: "print-open", url: `${baseUrl}/print-on-load` });
+		expect(textOf(opened)).toContain("The page called window.print()");
+		const log = await invoke({
+			action: "run",
+			name: "print-open",
+			code: "return await tab.evaluate(() => globalThis.log);",
+		});
+		expect(valueOf(log)).toEqual(["afterprint", "load print returned"]);
+	}, 30_000);
+
 	test("holds print() in the user's own browser only around omp's calls", async () => {
 		await withUserBrowser(async cdpUrl => {
 			const invoke = createHost();

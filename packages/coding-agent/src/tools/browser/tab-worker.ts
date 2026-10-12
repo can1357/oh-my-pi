@@ -1849,7 +1849,7 @@ export class WorkerCore {
 			else signal.addEventListener("abort", onCancel, { once: true });
 			try {
 				// A renderer already blocked in a print nobody held never answers; the run's timeout reports that.
-				await Promise.race([this.#printHold?.beginCall(), cancelRejection]);
+				await Promise.race([this.#printHold?.beginCall(msg.timeoutMs), cancelRejection]);
 				const hooks = this.#hooksForActiveRun();
 				if (!hooks) throw new ToolError("Browser runtime started without an active run");
 				returnValue = await withBrowserPromiseCombinatorTracking(
