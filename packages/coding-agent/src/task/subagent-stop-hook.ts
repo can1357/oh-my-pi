@@ -92,7 +92,9 @@ export class SubagentStopHook {
 		// Cancelled mid-pass: the candidate was never confirmed, so the caller
 		// must drop it rather than accept a yield a handler was still judging.
 		if (this.#signal.aborted) return { kind: "aborted" };
-		const text = resolveStopContinuationText(result, prompt.render(subagentStopBlockedPrompt));
+		// The diagnostic is only consulted for a reason-less refusal; render it only for a refusal.
+		const blockedFallback = result?.decision === "block" ? prompt.render(subagentStopBlockedPrompt) : "";
+		const text = resolveStopContinuationText(result, blockedFallback);
 		if (text === undefined) return { kind: "allow" };
 		if (result?.decision !== "block" && this.#continuations >= SUBAGENT_STOP_CONTINUATION_CAP) {
 			logger.warn("subagent_stop continuation cap reached", {
