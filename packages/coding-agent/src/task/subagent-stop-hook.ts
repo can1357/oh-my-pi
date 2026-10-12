@@ -3,17 +3,18 @@
  *
  * The main session's `session_stop` pass lives in `session/agent-session.ts`,
  * where the settle path owns the decision. A child run's stop pass cannot live
- * there: the terminal-yield predicate is executor/monitor state, so the pass
- * runs inside `driveSessionToResult` (see `task/executor.ts`) at the point where
- * the child's owner background work has quiesced and the candidate yield is the
- * one the parent would otherwise accept. This module owns the decision and its
- * per-run state so that integration stays a few lines in the executor instead of
- * another block in its event loop.
+ * there: the candidate-result predicate is executor/monitor state, so the pass
+ * runs inside `driveSessionToResult` (and the IRC wake-turn observer, see
+ * `task/executor.ts`) at the point where the child's owner background work has
+ * quiesced and the candidate result (its terminal yield, or a message-result
+ * run's final report) is the one the parent would otherwise accept. This module
+ * owns the decision and its per-run state so that integration stays small
+ * instead of another block in the executor's event loop.
  *
  * Semantics mirror `session_stop` deliberately: an explicit `decision: "block"`
  * outranks advisory `continue` requests and does not consume the advisory
  * allowance, a refusal without a reason gets the diagnostic prompt, and
- * `stop_hook_active` reports whether this run already had a continuation.
+ * `stop_hook_active` reports whether this drive already had a continuation.
  */
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { resolveStopContinuationText } from "../extensibility/extensions/stop-continuation";
@@ -21,11 +22,12 @@ import subagentStopBlockedPrompt from "../prompts/system/subagent-stop-blocked.m
 import type { AgentSession } from "../session/agent-session";
 
 /**
- * Advisory continuations one child run may be granted. Matches the main
- * session's allowance (`SESSION_STOP_CONTINUATION_CAP`); an explicit refusal is
- * exempt and stays blocking until the handler allows completion or the run is
- * cancelled. Private: `subagent_stop` publishes the cap as behavior (documented
- * in `docs/extensions.md`), not as configurable API.
+ * Advisory continuations one drive (initial run, follow-up turn, or wake turn)
+ * may be granted. Matches the main session's allowance
+ * (`SESSION_STOP_CONTINUATION_CAP`); an explicit refusal is exempt and stays
+ * blocking until the handler allows completion or the run is cancelled.
+ * Private: `subagent_stop` publishes the cap as behavior (documented in
+ * `docs/extensions.md`), not as configurable API.
  */
 const SUBAGENT_STOP_CONTINUATION_CAP = 8;
 
@@ -41,7 +43,7 @@ export interface SubagentStopRunIdentity {
 	parentSessionFile?: string;
 }
 
-/** Outcome of one `subagent_stop` pass over a candidate terminal yield. */
+/** Outcome of one `subagent_stop` pass over a candidate result. */
 export type SubagentStopOutcome =
 	/** Handlers left the candidate alone: it may be accepted and published. */
 	| { kind: "allow" }
@@ -66,7 +68,7 @@ export class SubagentStopHook {
 	}
 
 	/**
-	 * Offer a candidate terminal yield to `subagent_stop` handlers.
+	 * Offer a candidate result (a terminal yield, or a message-result run's final report) to `subagent_stop` handlers.
 	 *
 	 * Handler failures are isolated by the runner (reported through its error
 	 * channel, never thrown here), and a run cancelled mid-pass reports
