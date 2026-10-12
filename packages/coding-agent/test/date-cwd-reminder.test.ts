@@ -107,6 +107,49 @@ describe("date-cwd-reminder", () => {
 			expect(replay.messages[0]).toBe(first.messages[0]);
 		});
 
+		it("does not replay a provider-appended marker that is absent from the input", () => {
+			const injector = new DateCwdReminderInjector();
+			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
+			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
+
+			const first = injector.transform(context, "2026-08-14", "/work/omp");
+			const memo = first.messages;
+			expect(memo[0]).not.toBe(firstUser);
+
+			// A custom provider receives this same Context and appends its own marker.
+			const marker: Message = { role: "developer", content: "provider-only", timestamp: 2 };
+			memo.push(marker);
+
+			// The replay validates the cached output against the input, so the marker
+			// never reaches the wire a second time.
+			const replay = injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
+
+			expect(replay.messages).not.toBe(memo);
+			expect(replay.messages).toHaveLength(1);
+			expect(replay.messages[0]).toBe(first.messages[0]);
+			expect(replay.messages).not.toContain(marker);
+		});
+
+		it("releases the discarded transcript when the history is replaced", () => {
+			const injector = new DateCwdReminderInjector();
+			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
+			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
+
+			const first = injector.transform(context, "2026-08-14", "/work/omp");
+			const memo = first.messages;
+			expect(memo[0]).not.toBe(firstUser);
+
+			// A committed /compact swaps the live history under this session-scoped
+			// injector; the memo must drop the discarded transcript with it.
+			injector.release();
+
+			const replay = injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
+
+			expect(replay.messages).not.toBe(memo);
+			expect(replay.messages[0]).not.toBe(memo[0]);
+			expect(replay.messages[0]?.content).toBe(memo[0]?.content);
+		});
+
 		it("keeps the reminders of turns a compaction retains when the first user turn changes", () => {
 			const injector = new DateCwdReminderInjector();
 			const first: Message = { role: "user", content: "first", timestamp: 1 };

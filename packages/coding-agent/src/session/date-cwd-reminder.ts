@@ -67,10 +67,16 @@ export class DateCwdReminderInjector {
 	 * `refs` is a snapshot, never the caller's live array: element identity is
 	 * what makes an in-place push/splice a miss, and the array reference alone
 	 * would survive it.
+	 *
+	 * `derived` lists the injected/control turns in output order, each tagged with
+	 * the input turn it follows. It lets reuse re-check the *returned* array
+	 * against the shape it was built with (see {@link #replayable}) without
+	 * re-copying anything.
 	 */
 	#memo:
 		| {
 				refs: Message[];
+				derived: Array<{ after: Message; message: Message }>;
 				root: UserMessage;
 				reminder: string;
 				version: number;
@@ -100,8 +106,7 @@ export class DateCwdReminderInjector {
 			memo.reminder === reminder &&
 			memo.reminder === this.#currentReminder &&
 			memo.version === this.#stateVersion &&
-			memo.refs.length === messages.length &&
-			memo.refs.every((message, index) => message === messages[index])
+			this.#replayable(memo, messages)
 		) {
 			return memo.output;
 		}
@@ -178,8 +183,16 @@ export class DateCwdReminderInjector {
 		const root = this.#root;
 		const currentReminder = this.#currentReminder;
 		if (root !== undefined && currentReminder !== undefined) {
+			const derived: Array<{ after: Message; message: Message }> = [];
+			for (const message of messages) {
+				const injected = this.#injections.get(message);
+				if (injected) derived.push({ after: message, message: injected });
+				const controls = controlsByAnchor.get(message);
+				if (controls) for (const control of controls) derived.push({ after: message, message: control });
+			}
 			this.#memo = {
 				refs: messages.slice(),
+				derived,
 				root,
 				reminder: currentReminder,
 				version: this.#stateVersion,
@@ -187,5 +200,58 @@ export class DateCwdReminderInjector {
 			};
 		}
 		return output;
+	}
+
+	/**
+	 * Whether the cached output is still the array this injector built. The
+	 * caller owns the returned `Context`, so a downstream consumer (a custom
+	 * provider appending its own marker, a retry wrapper splicing the array) can
+	 * mutate it in place; the input snapshot alone cannot see that, so the output
+	 * is re-checked against the shape it was built with: same arity, and every
+	 * slot still holding the input turn or the derived turn that follows it.
+	 */
+	#replayable(
+		memo: {
+			refs: Message[];
+			derived: Array<{ after: Message; message: Message }>;
+			output: Message[];
+		},
+		messages: Message[],
+	): boolean {
+		const { refs, derived, output } = memo;
+		if (refs.length !== messages.length) return false;
+		for (let index = 0; index < refs.length; index++) {
+			if (refs[index] !== messages[index]) return false;
+		}
+		if (output.length !== refs.length + derived.length) return false;
+		let slot = 0;
+		let position = 0;
+		for (const message of refs) {
+			while (slot < derived.length && derived[slot]!.after === message) {
+				if (output[position] !== derived[slot]!.message) return false;
+				position++;
+				slot++;
+			}
+			if (output[position] !== message) return false;
+			position++;
+		}
+		return slot === derived.length;
+	}
+
+	/**
+	 * Drop the replay memo and every injection/control pinned to the live
+	 * history. The injector is session-scoped while the history it transforms is
+	 * not: a committed `/compact` (or any other wholesale `replaceMessages`)
+	 * swaps in a new transcript, and the memo would otherwise keep the discarded
+	 * one — including its normalized/rasterized image turns — reachable until the
+	 * next model call or session disposal.
+	 */
+	release(): void {
+		this.#memo = undefined;
+		this.#injections.clear();
+		this.#controls = [];
+		this.#root = undefined;
+		this.#currentReminder = undefined;
+		this.#stateVersion++;
 	}
 }

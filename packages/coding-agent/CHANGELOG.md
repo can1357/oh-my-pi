@@ -354,6 +354,9 @@
 ### Fixed
 
 - Fixed `grep` on a single file showing in Tern as separate boxed snippets with no file row or syntax colors; it now looks the same as a `grep` over a directory
+### Fixed
+
+- Fixed a repeated date/cwd reminder line reaching a provider a second time when a custom provider appended its own message to the sent context ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.10.0] - 2026-10-12
 

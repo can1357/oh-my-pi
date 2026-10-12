@@ -84,6 +84,9 @@
 ### Added
 
 - Added `AgentLoopConfig.onDetachedToolUpdate`: a tool's `onUpdate` frames that arrive after its run's event stream ended (a returned call whose background job keeps reporting) reach it instead of being dropped; `Agent` forwards them to its subscribers as `tool_execution_update` events
+### Added
+
+- Added `AgentOptions.onHistoryReplaced`, notified after the live transcript or the steering/follow-up queues are replaced wholesale, so per-request caches can drop snapshots pinned to the discarded history ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.9.2] - 2026-10-11
 

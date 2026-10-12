@@ -4298,6 +4298,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		);
 		disposeCallbacks.add(() => blobBroker.dispose());
 		const dateCwdReminder = new DateCwdReminderInjector();
+		// A committed /compact (or any other wholesale replaceMessages) swaps the
+		// history under this session-scoped injector; its replay memo would keep the
+		// discarded transcript reachable, so it is released on the swap.
+		const releaseDateCwdReminderOnHistoryReplace = () => dateCwdReminder.release();
 		// Always installed; the getter-backed options are snapshotted per request,
 		// so `snapcompact.*` changes apply on the next call (a no-op while both are off).
 		const snapcompactInline = new SnapcompactInlineTransformer(
@@ -4451,6 +4455,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const speculativeToolExecution = createSpeculativeToolExecutionConfig(settings, toolSession, extensionRunner);
 
 		agent = new Agent({
+			onHistoryReplaced: releaseDateCwdReminderOnHistoryReplace,
 			initialState: {
 				systemPrompt,
 				model,
@@ -5299,6 +5304,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const captureDateCwdReminder = new DateCwdReminderInjector();
 				return new Agent({
 					...captureOptions,
+					onHistoryReplaced: () => captureDateCwdReminder.release(),
 					cwd: sessionManager.getCwd(),
 					cwdResolver: () => sessionManager.getCwd(),
 					convertToLlm: convertToLlmFinal,
