@@ -1349,6 +1349,8 @@ interface RunMonitorArgs {
 	maxRuntimeMs: number;
 	/** Whether to periodically ask the agent for a completion estimate; see {@link isCompletionProbeEnabled}. */
 	completionProbe: boolean;
+	/** `false` = no `yield` tool: the last report turn is the run's result (see {@link ExecutorOptions.structured}). */
+	structured: boolean;
 	/** Fires each time a terminal `yield` is recorded for this run. */
 	onYieldAccepted?: () => void;
 }
@@ -1386,12 +1388,17 @@ interface SubagentRunMonitor {
 	 */
 	yieldInvalidatedByAsync(): boolean;
 	/**
-	 * True when a recorded yield was refused by a `subagent_stop` handler and no
-	 * fresh yield has landed since: the payload was explicitly rejected, so it
-	 * must not be accepted or published as the run's result.
+	 * True when the run's candidate result was refused by a `subagent_stop`
+	 * handler and no fresh one has landed since (a yield, or for a
+	 * `structured: false` run a new report turn): the payload was explicitly
+	 * rejected, so it must not be accepted or published as the run's result.
 	 */
 	yieldInvalidatedByStop(): boolean;
-	/** Drop the recorded terminal yield so the ladder demands a fresh one after a `subagent_stop` continuation. */
+	/**
+	 * Drop the refused candidate (the recorded terminal yield, or a message-result
+	 * run's last report turn) so the run demands a fresh one after a
+	 * `subagent_stop` continuation, and charge the refused turn to the budget.
+	 */
 	invalidateYieldForStop(): void;
 	/**
 	 * True once a terminal yield with pending owner async work stopped the
@@ -1466,6 +1473,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		softRequestBudgetNotice,
 		maxRuntimeMs,
 		completionProbe,
+		structured,
 	} = args;
 	const startTime = Date.now();
 
@@ -2256,8 +2264,12 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						// prose predates that work and is invalidated.
 						const text = turnText.join("\n");
 						if (startedMoreWork) lastReportTurnText = undefined;
-						else if (text.trim()) lastReportTurnText = text;
-						else if (completedServerWork) lastReportTurnText = undefined;
+						else if (text.trim()) {
+							lastReportTurnText = text;
+							// A message-result run records no yield, so a fresh report turn is
+							// the only thing that supersedes a refused one.
+							if (!structured) yieldInvalidatedByStop = false;
+						} else if (completedServerWork) lastReportTurnText = undefined;
 					}
 					// A yield awaiting validation suppresses the budget check for
 					// its own turn (#5006). Defer it rather than drop it: every
@@ -2462,6 +2474,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			// The yield's deferred budget check was skipped when it latched
 			// `yieldCalled`; the refused turn still cost a request.
 			evaluateSoftRequestBudget();
+			if (!structured) {
+				// A message-result run's candidate is its last report turn.
+				lastReportTurnText = undefined;
+				return;
+			}
 			// The refused candidate is the last recorded yield: every recorded
 			// yield reassigns `yieldCalled`, so a latched yield is the newest item.
 			// Left in place it would still win result assembly as the terminal item
@@ -2596,8 +2613,9 @@ function endsRun(err: unknown): boolean {
  * classify the terminal assistant state. A soft-budget stop short-circuits the
  * reminder ladder into a single forced final yield so partial findings still
  * come back as a real report. Without a `yield` tool (`structured: false`) an
- * idle turn already ended on the final message, so only a budget stop prompts
- * again: one tool-less wrap-up turn.
+ * idle turn already ended on the final message, so only a budget stop or a
+ * `subagent_stop` refusal prompts again (a tool-less wrap-up turn, or the
+ * refusal's continuation).
  */
 async function driveSessionToResult(
 	session: AgentSession,
@@ -2823,6 +2841,36 @@ async function driveSessionToResult(
 			}
 		};
 
+		/**
+		 * Offer the settled candidate to `subagent_stop` handlers: the recorded
+		 * terminal yield, or for a `structured: false` run its final report turn.
+		 * Owner async work has quiesced, so this is what the parent would accept
+		 * and publish; the pass runs after the child's own work is done and before
+		 * every acceptance/finalize path downstream. A refusal drops the
+		 * candidate so nothing can accept or publish it, and the SAME child
+		 * session runs again; the loop then demands a fresh one.
+		 *
+		 * Returns true when refused and re-driven (the caller re-evaluates the
+		 * run); false when the candidate stands — allowed, or the run was
+		 * cancelled while handlers were consulting, so it was never confirmed
+		 * and is dropped.
+		 */
+		const runStopPass = async (): Promise<boolean> => {
+			const stop = await stopHook.run(session);
+			if (stop.kind === "allow") return false;
+			monitor.invalidateYieldForStop();
+			if (stop.kind === "aborted") return false;
+			// Charging the refused turn may have stopped the run for budget: let
+			// that abort settle (throws if the run is now aborted, so no
+			// continuation starts after an abort) and leave the stopped run to
+			// the ladder's forced final turn instead of a free-running one.
+			await awaitAbortable(monitor.waitForBudgetStop());
+			if (monitor.budgetStopRequested()) return true;
+			await dispatchPrompt(stop.text, { attribution: "agent", synthetic: true }, "subagent_stop continuation");
+			await awaitAbortable(session.waitForIdle());
+			return true;
+		};
+
 		// Yield ladder + quiescence barrier (structured concurrency), one
 		// loop: a turn without a yield first settles pending owner work, then
 		// spends reminders only after there is nothing left to wait for.
@@ -2859,35 +2907,28 @@ async function driveSessionToResult(
 						(monitor.budgetStopRequested() ||
 							session.getLastAssistantMessage()?.stopReason === "error" ||
 							!session.hasPendingAsyncWork())
-					)
+					) {
+						// A message-result run's settled final report is also a candidate.
+						// Budget stops and model errors end the run without offering one.
+						if (
+							!hasLaterSteps &&
+							!monitor.budgetStopRequested() &&
+							monitor.lastReportTurnText() !== undefined &&
+							session.getLastAssistantMessage()?.stopReason === "stop" &&
+							(await runStopPass())
+						)
+							continue;
 						break;
+					}
 				}
 				// Let the parked yield's turn-stop session abort settle before
 				// prompting again (mirrors waitForBudgetStop).
 				await awaitAbortable(monitor.waitForYieldTurnStop());
 				if (!session.hasPendingAsyncWork()) {
 					if (!monitor.yieldCalled()) continue;
-					// A successful yield with later steps is only an intermediate
-					// delivery; do not offer it to terminal-stop handlers.
+					// Intermediate step yields are not candidates for a terminal stop pass.
 					if (hasLaterSteps) break;
-					// Owner work is quiescent, so this candidate is what the parent
-					// would accept and publish. Let handlers judge it before acceptance.
-					const stop = await stopHook.run(session);
-					if (stop.kind === "aborted") {
-						monitor.invalidateYieldForStop();
-						break;
-					}
-					if (stop.kind === "allow") break;
-					// Drop the refused payload before re-prompting this same session;
-					// the loop then requires a fresh terminal yield.
-					monitor.invalidateYieldForStop();
-					// Charging the refused turn may have stopped the run for budget:
-					// await that abort before continuing, leaving the run to the
-					// forced-final-yield ladder rather than a free-running turn.
-					await awaitAbortable(monitor.waitForBudgetStop());
-					if (monitor.budgetStopRequested()) continue;
-					await dispatchPrompt(stop.text, { attribution: "agent", synthetic: true }, "subagent_stop continuation");
-					await awaitAbortable(session.waitForIdle());
+					if (!(await runStopPass())) break;
 					continue;
 				}
 				if (!monitor.yieldCalled()) {
@@ -3093,13 +3134,14 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	// the narration of earlier turns.
 	const structured = args.structured !== false;
 	let rawOutput = structured ? monitor.rawOutput() : (monitor.lastReportTurnText() ?? "");
-	// A `subagent_stop` handler refused the run's candidate `yield` and no
-	// continuation turn produced a replacement: the payload was explicitly
-	// rejected, so none of it may be published. Dropping the yield items keeps
-	// the refused report out of result assembly, the `<id>.md` artifact, and the
-	// structured sidecar; on a resumed turn that leaves the previous accepted
-	// artifact (and its sidecar) in place. The child's transcript remains the
-	// audit trail — the refusal gates publication, not the record of what ran.
+	// A `subagent_stop` handler refused the run's candidate (its `yield`, or a
+	// message-result run's report turn) and no continuation turn produced a
+	// replacement: the payload was explicitly rejected, so none of it may be
+	// published. Dropping the yield items keeps the refused report out of
+	// result assembly, the `<id>.md` artifact, and the structured sidecar; on a
+	// resumed turn that leaves the previous accepted artifact (and its sidecar)
+	// in place. The child's transcript remains the audit trail — the refusal
+	// gates publication, not the record of what ran.
 	const refusedYield = monitor.yieldInvalidatedByStop() && !monitor.yieldCalled();
 	const yieldItems = refusedYield ? undefined : (progress.extractedToolData?.yield as YieldItem[] | undefined);
 	if (refusedYield && progress.extractedToolData) {
@@ -3631,6 +3673,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			// A peer's message gets a short answer, too short to probe; the owner's message is an
 			// assignment the owner waits on.
 			completionProbe: ownerWoken && options.completionProbe === true,
+			structured: options.structured !== false,
 			signal: jobCancel.signal,
 			onProgress: progress => reportJobProgress?.(progress),
 			onToolResult: result => appendToolResult(tools, result),
@@ -4153,6 +4196,7 @@ async function driveFollowUpTurn(
 		softRequestBudgetNotice,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
 		completionProbe: options.completionProbe ?? false,
+		structured: options.structured !== false,
 	});
 
 	const startedPayload = {
@@ -4831,6 +4875,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		softRequestBudgetNotice,
 		maxRuntimeMs,
 		completionProbe,
+		structured,
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
