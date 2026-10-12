@@ -19,7 +19,7 @@ export type PrintHoldScope = "tab" | "calls";
  * call reports itself, fires `beforeprint` and `afterprint` as a finished print does, and returns at once;
  * otherwise it is the page's own `print()`. Runs in the page, so it stays self-contained.
  */
-function holdPrintInPage(binding: string, holdKey: string, until: number | null): void {
+function holdPrintInPage(binding: string, holdKey: string, until: number | null, resyncMs: number): void {
 	const deadline = Symbol.for(holdKey);
 	const wrapped = Symbol.for(`${holdKey}.wrapped`);
 	Reflect.set(globalThis, deadline, until ?? Number.POSITIVE_INFINITY);
@@ -27,6 +27,19 @@ function holdPrintInPage(binding: string, holdKey: string, until: number | null)
 	const print: unknown = Reflect.get(globalThis, "print");
 	if (typeof print !== "function") return;
 	Reflect.set(globalThis, wrapped, true);
+	// A document back from the back/forward cache kept the deadline it left with, though a call may be running now:
+	// it holds until omp sets the current deadline, and lets go after `resyncMs` if omp has gone.
+	Reflect.apply(EventTarget.prototype.addEventListener, globalThis, [
+		"pageshow",
+		(event: Event) => {
+			const heldUntil: unknown = Reflect.get(globalThis, deadline);
+			const resync = Date.now() + resyncMs;
+			if (Reflect.get(event, "persisted") === true && (typeof heldUntil !== "number" || heldUntil < resync)) {
+				Reflect.set(globalThis, deadline, resync);
+			}
+		},
+		true,
+	]);
 	// A proxy keeps the native function's name and length, and its source still reads `[native code]`.
 	const heldPrint = new Proxy(print, {
 		apply(target, thisArg, args) {
@@ -115,7 +128,7 @@ export class PrintHold {
 		if (event.name === PRINT_BINDING) this.#requests++;
 	};
 
-	/** A document back from the back/forward cache kept the deadline it left with, or predates the hold. */
+	/** Sets the current deadline in a document back from the back/forward cache, or one that predates the hold. */
 	readonly #onFrameNavigated = (event: Protocol.Page.FrameNavigatedEvent): void => {
 		if (event.type === "BackForwardCacheRestore") void this.#setInFrames(this.#until);
 	};
@@ -125,7 +138,7 @@ export class PrintHold {
 		const applied = this.#applying.then(async () => {
 			const previous = this.#scriptId;
 			const { identifier } = await this.#session.send("Page.addScriptToEvaluateOnNewDocument", {
-				source: `(${holdPrintInPage})(${JSON.stringify(PRINT_BINDING)}, ${JSON.stringify(HOLD_KEY)}, ${until});`,
+				source: `(${holdPrintInPage})(${JSON.stringify(PRINT_BINDING)}, ${JSON.stringify(HOLD_KEY)}, ${until}, ${USER_DRIVEN_RELEASE_MS});`,
 			});
 			this.#scriptId = identifier;
 			if (previous) await this.#session.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: previous });
@@ -145,7 +158,7 @@ export class PrintHold {
 				.map(frame =>
 					frame
 						.mainRealm()
-						.evaluate(holdPrintInPage, PRINT_BINDING, HOLD_KEY, until)
+						.evaluate(holdPrintInPage, PRINT_BINDING, HOLD_KEY, until, USER_DRIVEN_RELEASE_MS)
 						.catch(() => undefined),
 				),
 		);
