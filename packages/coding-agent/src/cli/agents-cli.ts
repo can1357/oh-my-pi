@@ -6,7 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { formatDuration, getAgentDir, getProjectDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { formatDuration, getAgentDir, getProjectDir, isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { CliUsageError } from "@oh-my-pi/pi-utils/cli";
 import { YAML } from "bun";
@@ -14,6 +14,7 @@ import { theme } from "@oh-my-pi/pi-tui/theme";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
+import { cfgExtensions } from "../extensibility/settings";
 import { initializeWithSettings } from "../discovery";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { loadBundledAgents } from "../task/agents";
@@ -168,18 +169,29 @@ function formatSource(source: AgentConfigSource): string {
 	}
 }
 
+/** Agent files are repository content: strip ANSI/control characters and newlines before they reach the terminal. */
+function terminalSafe(text: string): string {
+	return sanitizeText(text).replace(/[\r\n]+/g, " ");
+}
+
 async function showAgent(name: string | undefined, json: boolean | undefined): Promise<void> {
 	const cwd = getProjectDir();
 	// Read-only: showing an agent must not migrate or write any settings file.
 	const settings = await Settings.loadReadOnly({ cwd });
 	initializeWithSettings(settings);
-	const { agents } = await discoverAgents(cwd);
+	// The effective extension roots, as session startup passes them, so extension agents resolve the same.
+	const { agents } = await discoverAgents(cwd, undefined, {
+		explicit: [],
+		mode: "merge",
+		configured: cfgExtensions.get(settings),
+		configuredLevel: settings.extensionsSourceLevel(),
+	});
 	const agent = name ? getAgent(agents, name) : undefined;
 	if (!agent) {
-		const available = agents.map(candidate => candidate.name).join(", ");
+		const available = agents.map(candidate => terminalSafe(candidate.name)).join(", ");
 		throw new CliUsageError(
 			name
-				? `Unknown agent "${name}". Available: ${available}`
+				? `Unknown agent "${terminalSafe(name)}". Available: ${available}`
 				: `Usage: omp agents show <name>. Available: ${available}`,
 		);
 	}
@@ -199,22 +211,22 @@ async function showAgent(name: string | undefined, json: boolean | undefined): P
 	}
 
 	const definedIn = config.filePath ? `${config.definedIn}: ${shortenPath(config.filePath)}` : config.definedIn;
-	writeStdout(`${chalk.bold(config.name)} ${chalk.dim(`(${definedIn})`)}`);
+	writeStdout(`${chalk.bold(terminalSafe(config.name))} ${chalk.dim(`(${terminalSafe(definedIn)})`)}`);
 	if (config.disabled) {
 		writeStdout(chalk.yellow(`${theme.status.warning} Disabled by task.disabledAgents: spawns are refused.`));
 	}
 	const rows = SHOW_ROWS.map(({ field, label, none }) => ({
 		label,
-		value: formatEntryValue(field, config[field].value, none),
+		value: terminalSafe(formatEntryValue(field, config[field].value, none)),
 		entry: config[field],
 	}));
 	const labelWidth = Math.max(...rows.map(row => row.label.length));
 	// Long tool lists and account pools overflow instead of pushing every source column right.
 	const valueWidth = Math.max(...rows.map(row => row.value.length).filter(length => length <= MAX_SHOW_VALUE_WIDTH));
 	for (const { label, value, entry } of rows) {
-		const note = entry.note ? chalk.dim(` · ${entry.note}`) : "";
+		const note = entry.note ? chalk.dim(` · ${terminalSafe(entry.note)}`) : "";
 		writeStdout(
-			`  ${label.padEnd(labelWidth)}  ${value.padEnd(valueWidth)}  ${chalk.dim(formatSource(entry.source))}${note}`,
+			`  ${label.padEnd(labelWidth)}  ${value.padEnd(valueWidth)}  ${chalk.dim(terminalSafe(formatSource(entry.source)))}${note}`,
 		);
 	}
 }
