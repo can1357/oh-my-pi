@@ -997,6 +997,42 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("does not reopen a document whose concurrent idle close never reached the server", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-reopen-race-");
+		try {
+			const server = installHandshakeLsp();
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			const stalePath = await openDocument(client, "stale.ts");
+			ageDocument(client, stalePath, PAST_DOCUMENT_IDLE_MS);
+
+			const controller = new AbortController();
+			const opening = lspClient.syncContent(
+				client,
+				path.join(tempDir.path(), "new.ts"),
+				"export const created = 1;\n",
+				controller.signal,
+			);
+			// Starts while the stale document's close is still queued behind the aborted opener.
+			const reopening = lspClient.ensureFileOpen(client, stalePath);
+			controller.abort();
+			await rejectionOf(opening);
+			await reopening;
+
+			const staleUri = fileToUri(stalePath);
+			const lifecycle = server.received.filter(
+				message =>
+					(message.method === "textDocument/didOpen" || message.method === "textDocument/didClose") &&
+					JSON.stringify(message.params).includes(staleUri),
+			);
+			expect(lifecycle.map(message => message.method)).toEqual(["textDocument/didOpen"]);
+			expect(client.openFiles.has(staleUri)).toBe(true);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("does not report a reopened document clean from the publish that cleared it on close", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-close-clear-");
 		try {

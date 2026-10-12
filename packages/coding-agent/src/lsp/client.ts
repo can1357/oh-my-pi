@@ -1287,7 +1287,8 @@ function closeIdleFiles(client: LspClient, signal?: AbortSignal): void {
 		client.openFiles.delete(uri);
 		client.diagnostics.delete(uri);
 		(client.idleClosedFiles ??= new Map()).set(uri, info.version);
-		sendNotification(client, "textDocument/didClose", { textDocument: { uri } }, signal).catch(() => {
+		const lockKey = `${client.name}:${uri}`;
+		const closing = sendNotification(client, "textDocument/didClose", { textDocument: { uri } }, signal).catch(() => {
 			// The close never reached the server, which still has the document open and
 			// will not republish its diagnostics.
 			if (client.openFiles.has(uri)) return;
@@ -1295,7 +1296,25 @@ function closeIdleFiles(client: LspClient, signal?: AbortSignal): void {
 			client.openFiles.set(uri, info);
 			if (diagnostics && !client.diagnostics.has(uri)) client.diagnostics.set(uri, diagnostics);
 		});
+		pendingIdleCloses.set(lockKey, closing);
+		void closing.finally(() => {
+			if (pendingIdleCloses.get(lockKey) === closing) pendingIdleCloses.delete(lockKey);
+		});
 	}
+}
+
+/**
+ * Idle closes not yet settled, keyed like {@link fileOperationLocks}. An opener of the same
+ * document waits for its close: a close that fails restores the document as open, and a
+ * didOpen sent meanwhile would reach a server that never saw the close.
+ */
+const pendingIdleCloses = new Map<string, Promise<void>>();
+
+/** Wait out a pending idle close of `uri`; true when it failed and the document is open again. */
+async function settleIdleClose(client: LspClient, uri: string, signal?: AbortSignal): Promise<boolean> {
+	const closing = pendingIdleCloses.get(`${client.name}:${uri}`);
+	if (closing) await untilAborted(signal, () => closing);
+	return client.openFiles.has(uri);
 }
 
 /**
@@ -1358,6 +1377,7 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 		throwIfAborted(signal);
 
 		closeIdleFiles(client, signal);
+		if (await settleIdleClose(client, uri, signal)) return;
 		const version = (client.idleClosedFiles?.get(uri) ?? 0) + 1;
 		await sendNotification(
 			client,
@@ -1523,13 +1543,20 @@ export async function syncContent(
 		// Clear stale diagnostics before syncing new content
 		client.diagnostics.delete(uri);
 
-		const info = client.openFiles.get(uri);
+		let info = client.openFiles.get(uri);
 
+		if (!info) {
+			throwIfAborted(signal);
+			closeIdleFiles(client, signal);
+			if (await settleIdleClose(client, uri, signal)) {
+				// The close failed and restored the document; its cached diagnostics predate this content.
+				client.diagnostics.delete(uri);
+				info = client.openFiles.get(uri);
+			}
+		}
 		if (!info) {
 			// Open file with provided content instead of reading from disk
 			const languageId = client.config.languageId ?? detectLanguageId(filePath);
-			throwIfAborted(signal);
-			closeIdleFiles(client, signal);
 			const version = (client.idleClosedFiles?.get(uri) ?? 0) + 1;
 			await sendNotification(
 				client,
