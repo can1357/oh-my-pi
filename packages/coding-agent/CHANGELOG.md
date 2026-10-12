@@ -9,6 +9,7 @@
 ### Fixed
 
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
+- A page calling `window.print()` in a Chromium tab no longer freezes behind the print preview and times out the browser call: omp holds it, the page carries on as after a finished print, and the call says so (pointing at `tab.pdf()`) ([#15508](https://github.com/can1357/oh-my-pi/pull/15508) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.14.0] - 2026-10-29
 
@@ -978,10 +979,6 @@
 - Fixed anonymized session exports losing whether bash timing was shown ([#15468](https://github.com/can1357/oh-my-pi/pull/15468) by [@iliaal](https://github.com/iliaal))
 - Added `omp --restore <session>`: resumes a session like `--resume`, then goes on with what its last process left unfinished when it crashed or was killed, both the interrupted turn and the subagents it was running (their results reach the parent as usual); Tern's session daemon now restarts omp with it after a crash
 - Kept private prompt-cache routing keys out of shared sessions and HTML exports ([#15467](https://github.com/can1357/oh-my-pi/pull/15467) by [@iliaal](https://github.com/iliaal))
-
-### Fixed
-
-- A page calling `window.print()` in a Chromium tab no longer freezes behind the print preview and times out the browser call: omp holds it, the page carries on as after a finished print, and the call says so (pointing at `tab.pdf()`) ([#15508](https://github.com/can1357/oh-my-pi/pull/15508) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.10.2] - 2026-10-12
 
