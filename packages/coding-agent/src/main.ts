@@ -114,6 +114,11 @@ import {
 } from "./system-prompt";
 import { type RestoreOutcome, restoreSession } from "./task/restore";
 import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
+import {
+	createTelemetryExportConfig,
+	initTelemetryExport,
+	isTelemetryExportEnabled,
+} from "./telemetry-export";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { automaticThinkingLevel, concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "./tools";
@@ -2276,10 +2281,8 @@ export async function runRootCommand(
 		// OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT.
 		// First-use boundary: the exporter graph (opentelemetry) and the 11.9 MB
 		// models.json rate-card table are off by default, so neither belongs in
-		// module evaluation.
-		const { initTelemetryExport, isTelemetryExportEnabled, createTelemetryExportConfig } = await import(
-			"./telemetry-export"
-		);
+		// module evaluation. The await moves with the payload, not ahead of it: a
+		// normal launch with no OTEL endpoint pays no embedded-chunk fetch.
 		await logger.time(
 			"initTelemetryExport",
 			initTelemetryExport,
