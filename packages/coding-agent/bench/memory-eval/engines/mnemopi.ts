@@ -1,20 +1,35 @@
 /** Mnemopi adapter: runs `BeamMemory` in the harness process with the same embedding model as upstream Mnemosyne. */
+import * as os from "node:os";
 import * as path from "node:path";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { embed } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import {
+	type MnemopiEmbeddingProvider,
 	type ResolvedMnemopiRuntimeOptions,
 	withMnemopiRuntimeOptions,
 } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { EngineAdapter, ProtocolName, RecallHit } from "../engine";
+import { PythonProcess } from "./python-process";
 
 const EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5";
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../../..");
 const PACKAGE_JSON = path.join(REPO_ROOT, "packages", "mnemopi", "package.json");
+const CACHE_ROOT = path.join(os.homedir(), ".cache", "omp-memory-eval");
+const EMBED_PYTHON = path.join(CACHE_ROOT, "venv-engine", "bin", "python");
+const EMBED_SCRIPT = path.resolve(import.meta.dir, "../py/embed_server.py");
 
-function runtimeOptions(protocol: ProtocolName): ResolvedMnemopiRuntimeOptions {
-	return { embeddings: { model: EMBEDDING_MODEL, disabled: protocol === "fts-only" } };
+/**
+ * `js`: Mnemopi's own local fastembed (production behaviour).
+ * `python`: the same model through Python fastembed, about 20-40x faster here; Mnemopi's retrieval code is unchanged.
+ */
+export type MnemopiEmbedder = "js" | "python";
+
+export interface MnemopiEngineOptions {
+	embedder?: MnemopiEmbedder;
+	/** Overrides for the embedding server process (tests use a stub). */
+	embedPython?: string;
+	embedScript?: string;
 }
 
 function tierOf(label: string | undefined, summaryOf: string | undefined): RecallHit["tier"] {
@@ -23,27 +38,71 @@ function tierOf(label: string | undefined, summaryOf: string | undefined): Recal
 	return tier;
 }
 
-export function mnemopiEngine(): EngineAdapter {
+export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter {
+	const embedder = options.embedder ?? "js";
 	let beam: BeamMemory | undefined;
-	let opts: ResolvedMnemopiRuntimeOptions = runtimeOptions("standard");
+	let embedProc: PythonProcess | undefined;
 	let baselineRssBytes = process.memoryUsage().rss;
+
+	const startEmbedder = (): PythonProcess => {
+		embedProc ??= new PythonProcess(
+			"embedding server",
+			options.embedPython ?? EMBED_PYTHON,
+			options.embedScript ?? EMBED_SCRIPT,
+			{
+				...Bun.env,
+				MEMORY_EVAL_EMBED_MODEL: EMBEDDING_MODEL,
+				MEMORY_EVAL_EMBED_CACHE_DIR: path.join(CACHE_ROOT, "fastembed"),
+			},
+		);
+		return embedProc;
+	};
+	const provider: MnemopiEmbeddingProvider = {
+		async *embed(texts) {
+			yield (await startEmbedder().call("embed", { texts })) as number[][];
+		},
+	};
+	const runtimeOptions = (protocol: ProtocolName): ResolvedMnemopiRuntimeOptions => ({
+		embeddings: {
+			model: EMBEDDING_MODEL,
+			disabled: protocol === "fts-only",
+			...(embedder === "python" ? { provider } : {}),
+		},
+	});
+	let opts = runtimeOptions("standard");
 
 	const open = (): BeamMemory => {
 		if (!beam) throw new Error("mnemopi engine is not open");
 		return beam;
 	};
 	// The scope is an AsyncLocalStorage: it must wrap the whole async operation, flushExtractions included.
-	const scoped = <T>(fn: () => Promise<T>): Promise<T> => withMnemopiRuntimeOptions(opts, fn);
+	// Mnemopi swallows provider errors (the row just gets no vector), so a dead embedding server is surfaced here.
+	const scoped = async <T>(fn: () => Promise<T>): Promise<T> => {
+		const result = await withMnemopiRuntimeOptions(opts, fn);
+		if (embedProc?.failure) throw embedProc.failure;
+		return result;
+	};
 
 	return {
 		name: "mnemopi",
 		rssScope: "harness-process",
 		describe: async () => {
 			const pkg: { version: string } = await Bun.file(PACKAGE_JSON).json();
+			// The embedding server is its own process, so its memory is reported here, not in the harness `resources`.
+			const server = embedProc
+				? ((await embedProc.call("resources")) as { peak_rss_bytes: number; baseline_rss_bytes: number })
+				: undefined;
 			return {
 				package_version: pkg.version,
 				embedding_model: EMBEDDING_MODEL,
+				embedder,
 				embeddings_disabled: String(opts.embeddings?.disabled === true),
+				...(server
+					? {
+							embed_server_peak_rss_bytes: String(server.peak_rss_bytes),
+							embed_server_baseline_rss_bytes: String(server.baseline_rss_bytes),
+						}
+					: {}),
 				...Object.fromEntries(
 					Object.entries(Bun.env).filter(([key, value]) => key.startsWith("MNEMOPI_") && value),
 				),
@@ -101,6 +160,8 @@ export function mnemopiEngine(): EngineAdapter {
 		dispose: async () => {
 			beam?.close();
 			beam = undefined;
+			await embedProc?.shutdown();
+			embedProc = undefined;
 		},
 		warmup: async protocol => {
 			baselineRssBytes = process.memoryUsage().rss;
