@@ -84,6 +84,7 @@ const server = Bun.serve({
 				`<button id="print">Print</button><script>
 					globalThis.log = [];
 					addEventListener("afterprint", () => log.push("afterprint"));
+					addEventListener("pageshow", event => { if (event.persisted) log.push("restored"); });
 					document.querySelector("#print").addEventListener("click", () => { print(); log.push("print returned"); });
 					if (location.pathname === "/print-on-load") addEventListener("load", () => { print(); log.push("load print returned"); });
 				</script>`,
@@ -508,6 +509,37 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 				expect(textOf(after)).not.toContain("window.print()");
 			} finally {
 				await invoke({ action: "close", name: "user-print" }).catch(() => {});
+			}
+		});
+	}, 30_000);
+
+	test("holds print() in a page the call brings back from the back/forward cache", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const invoke = createHost();
+			try {
+				await invoke({ action: "open", name: "user-bfcache", url: `${baseUrl}/print`, app: { cdp_url: cdpUrl } });
+				// Past the release on the tab worker's real clock, the user leaves the page; it is cached released.
+				await Bun.sleep(2_000);
+				const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+				try {
+					const page = (await user.pages()).find(candidate => candidate.url().endsWith("/print"));
+					if (!page) throw new Error("Expected the print page in the user's browser");
+					await page.goto(`${baseUrl}/print-on-load`);
+				} finally {
+					await user.disconnect();
+				}
+				const restored = await invoke({
+					action: "run",
+					name: "user-bfcache",
+					code: `await tab.back();
+return await tab.evaluate(() => {
+	document.querySelector("#print").click();
+	return globalThis.log;
+});`,
+				});
+				expect(valueOf(restored)).toEqual(["restored", "afterprint", "print returned"]);
+			} finally {
+				await invoke({ action: "close", name: "user-bfcache" }).catch(() => {});
 			}
 		});
 	}, 30_000);
