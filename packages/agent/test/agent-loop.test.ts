@@ -7534,6 +7534,96 @@ describe("agentLoop streaming snapshots", () => {
 		// The finalized block's content stays stable across the whole turn.
 		updates.forEach(u => expect(textOf(u, 0)).toBe("A"));
 	});
+
+	it("does not reintroduce per-delta O(open blocks) set writes in the snapshot path", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const config: AgentLoopConfig = { model: createMockModel().model, convertToLlm: identityConverter };
+
+		// Spy on cloneJsonTree to count invocations
+		const utils = await import("@oh-my-pi/pi-utils");
+		const originalClone = utils.cloneJsonTree;
+		let cloneCallCount = 0;
+		const cloneSpy = vi.spyOn(utils, "cloneJsonTree").mockImplementation(<T>(value: T): T => {
+			cloneCallCount++;
+			return originalClone(value);
+		});
+
+		try {
+			// Create a streaming scenario with multiple open blocks
+			const partial = createAssistantMessage([], "toolUse");
+			let advance = (): void => {};
+			let turn = 0;
+			const streamFn = () => {
+				const stream = new AssistantMessageEventStream();
+				if (turn++ > 0) {
+					const done = createAssistantMessage([{ type: "text", text: "ok" }], "stop");
+					stream.push({ type: "start", partial: done });
+					stream.push({ type: "done", reason: "stop", message: done });
+					return stream;
+				}
+				stream.push({ type: "start", partial });
+				const steps: (() => void)[] = [
+					// Start 3 text blocks
+					() => {
+						partial.content.push({ type: "text", text: "" });
+						stream.push({ type: "text_start", contentIndex: 0, partial });
+					},
+					() => {
+						partial.content.push({ type: "text", text: "" });
+						stream.push({ type: "text_start", contentIndex: 1, partial });
+					},
+					() => {
+						partial.content.push({ type: "text", text: "" });
+						stream.push({ type: "text_start", contentIndex: 2, partial });
+					},
+					// Send deltas to all 3 blocks (all still open)
+					() => {
+						(partial.content[0] as { type: "text"; text: string }).text = "a";
+						stream.push({ type: "text_delta", contentIndex: 0, delta: "a", partial });
+					},
+					() => {
+						(partial.content[1] as { type: "text"; text: string }).text = "b";
+						stream.push({ type: "text_delta", contentIndex: 1, delta: "b", partial });
+					},
+					() => {
+						(partial.content[2] as { type: "text"; text: string }).text = "c";
+						stream.push({ type: "text_delta", contentIndex: 2, delta: "c", partial });
+					},
+					// End all blocks
+					() => stream.push({ type: "text_end", contentIndex: 0, content: "a", partial }),
+					() => stream.push({ type: "text_end", contentIndex: 1, content: "b", partial }),
+					() => stream.push({ type: "text_end", contentIndex: 2, content: "c", partial }),
+					() => stream.push({ type: "done", reason: "toolUse", message: partial }),
+				];
+				let step = 0;
+				advance = () => {
+					if (step < steps.length) steps[step++]!();
+				};
+				return stream;
+			};
+
+			for await (const event of agentLoop([createUserMessage("go")], context, config, undefined, streamFn)) {
+				if (
+					(event.type === "message_start" && event.message.role === "assistant") ||
+					event.type === "message_update"
+				) {
+					advance();
+				}
+			}
+
+			// With 3 open blocks and the changedIndex/openBlocks approach:
+			// - text_start events: 1 clone per event (the changed block)
+			// - text_delta events: 1 clone per event (the changed block) + 2 for other open blocks = 3
+			// - text_end events: 1 clone per event (the changed block)
+			// Total: 3 + 9 + 3 = 15 clones for 9 events
+			//
+			// The key assertion: cloneJsonTree should be called a bounded number
+			// of times, not growing with O(open blocks) per delta.
+			expect(cloneCallCount).toBeLessThan(20);
+		} finally {
+			cloneSpy.mockRestore();
+		}
+	});
 });
 
 describe("agentLoop kCursorExecResolved (issue #4348)", () => {
