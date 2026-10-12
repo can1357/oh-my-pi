@@ -19,16 +19,16 @@ afterEach(() => {
 });
 
 /**
- * Every worker this file's pool spawned, how many `ref()` calls each still owes
- * an `unref()` for, and which ones the pool has terminated.
+ * Every worker this file's pool spawned and which ones the pool has
+ * terminated.
  *
- * A pooled worker is a live Bun thread that outlives its run, so both properties
- * the run has to guarantee are only observable through the instance: it must
- * stop holding the process open when the drain ends, and something must be able
- * to end it later.
+ * A pooled worker is a live Bun thread that outlives its run, so the
+ * properties the run has to guarantee are only observable through the
+ * instance: it must stop holding the process open when the drain ends
+ * (asserted by the subprocess test below, the only place an exit path is
+ * observable), and something must be able to end it later.
  */
 const spawnedWorkers: Worker[] = [];
-const workerRefDepth = new WeakMap<Worker, number>();
 const terminatedWorkers = new Set<Worker>();
 
 /**
@@ -51,26 +51,12 @@ function spyOnWorkerSpawns() {
 		.spyOn(globalThis, "Worker")
 		.mockImplementation((url: string | URL, options?: { type: "module"; env?: Record<string, string> }) => {
 			const worker = new NativeWorker(url, options);
-			const nativeRef = worker.ref.bind(worker);
-			const nativeUnref = worker.unref.bind(worker);
-			const ref = (): void => {
-				workerRefDepth.set(worker, (workerRefDepth.get(worker) ?? 0) + 1);
-				nativeRef();
-			};
-			const unref = (): void => {
-				workerRefDepth.set(worker, (workerRefDepth.get(worker) ?? 0) - 1);
-				nativeUnref();
-			};
 			const terminate = worker.terminate.bind(worker);
-			worker.ref = ref;
-			worker.unref = unref;
 			worker.terminate = (): void => {
 				terminatedWorkers.add(worker);
 				terminate();
 			};
 			spawnedWorkers.push(worker);
-			// A Bun worker starts out referenced, so its depth starts at 1.
-			workerRefDepth.set(worker, 1);
 			return worker;
 		});
 }
@@ -314,14 +300,68 @@ describe("stats sync serial mode", () => {
 	// that only an idle deadline, a checkout, or an explicit reset ends. This is
 	// the exit-path guarantee an uninterrupted `omp stats` run depends on - if a
 	// returned worker were left referenced, the run would not exit past its last
-	// parse. Skipped on darwin, where the serial parser never spawns.
-	it.skipIf(process.platform === "darwin")("unrefs a returned worker so it cannot hold the process open", async () => {
-		const pooled = await poolOneWorker();
-
-		// Every dispatch settled, so the run must have handed back the reference it
-		// held for the parse: a still-referenced worker would keep the process (and
-		// this test binary) open past the end of the sync.
-		expect(workerRefDepth.get(pooled)).toBe(0);
+	// parse. The exit path is only observable in a fresh process: the test binary
+	// stays alive regardless, so a child that runs two pooled syncs and drains on
+	// its own is the proof. Skipped on darwin, where the serial parser never spawns.
+	it.skipIf(process.platform === "darwin")("drains on its own after the warm pool reuses a worker", async () => {
+		const script = [
+			`import * as fs from "node:fs/promises";`,
+			`import * as os from "node:os";`,
+			`import * as path from "node:path";`,
+			`import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";`,
+			`import { getOverallStats } from "@oh-my-pi/omp-stats/rollup";`,
+			`import { getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";`,
+			"",
+			`const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stats-pool-sub-"));`,
+			`const configDir = path.join(tempDir, "config");`,
+			`await fs.mkdir(configDir, { recursive: true });`,
+			`process.env.PI_CONFIG_DIR = path.relative(os.homedir(), configDir);`,
+			`setAgentDir(path.join(os.homedir(), process.env.PI_CONFIG_DIR, "agent"));`,
+			`for (const key of ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]) delete process.env[key];`,
+			"",
+			`const sessionDir = path.join(getSessionsDir(), "--tmp--pool-subprocess");`,
+			`await fs.mkdir(sessionDir, { recursive: true });`,
+			`const sessionFile = path.join(sessionDir, "session.jsonl");`,
+			`const assistant = { type: "message", parentId: null, timestamp: new Date().toISOString(),`,
+			`    message: { role: "assistant", content: [{ type: "text", text: "ok" }],`,
+			`        api: "openai-responses", provider: "openai", model: "gpt-5.4",`,
+			`        usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3,`,
+			`            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },`,
+			`        stopReason: "stop", timestamp: Date.now(), duration: 10, ttft: 5 },`,
+			`};`,
+			`await Bun.write(sessionFile, JSON.stringify({ ...assistant, id: "a1" }) + "\\n");`,
+			`await syncAllSessions({ workers: 2, files: [sessionFile] });`,
+			`await fs.appendFile(sessionFile, JSON.stringify({ ...assistant, id: "a2" }) + "\\n");`,
+			`await syncAllSessions({ workers: 2, files: [sessionFile] });`,
+			`console.log("totalRequests=" + getOverallStats().totalRequests);`,
+			`// No process.exit: the child must drain on its own. A pooled worker left`,
+			`// referenced would hold the event loop open and hang this script.`,
+			`await fs.rm(tempDir, { recursive: true, force: true });`,
+		].join("\n");
+		const file = path.join(import.meta.dir, ".tmp-pool-subprocess.ts");
+		await fs.writeFile(file, script);
+		try {
+			const proc = Bun.spawn([process.execPath, file], {
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+				signal: AbortSignal.timeout(15_000),
+			});
+			try {
+				const [exitCode, stdout, stderr] = await Promise.all([
+					proc.exited,
+					new Response(proc.stdout as ReadableStream<Uint8Array>).text(),
+					new Response(proc.stderr as ReadableStream<Uint8Array>).text(),
+				]);
+				expect(exitCode).toBe(0);
+				expect(stderr).toBe("");
+				expect(stdout).toContain("totalRequests=2");
+			} catch (error) {
+				throw new Error("pooled worker held the process open: child did not exit within 15s", { cause: error });
+			}
+		} finally {
+			await fs.rm(file, { force: true });
+		}
 	});
 
 	// The warm pool is module state that outlives its run: a returned worker stays
