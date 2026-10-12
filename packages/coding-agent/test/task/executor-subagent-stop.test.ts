@@ -7,6 +7,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { SubagentStopEvent, SubagentStopEventResult } from "@oh-my-pi/pi-coding-agent/extensibility/shared-events";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -15,6 +17,7 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
+	BUDGET_STOP_GRACE_REQUESTS,
 	runSubagentFollowUpTurn,
 	runSubprocess,
 	SUBAGENT_STOP_REFUSAL_UNRESOLVED,
@@ -104,6 +107,27 @@ function createHarness(args: {
 		for (const listener of [...listeners]) listener(event);
 	};
 
+	/** A real yield turn ends its assistant message (one counted request) before the tool result lands. */
+	const emitYield = (details: Record<string, unknown>, resultText: string) => {
+		yieldSeq += 1;
+		const toolCallId = `yield-${yieldSeq}`;
+		emit({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", id: toolCallId, name: "yield", arguments: {} }],
+				stopReason: "toolUse",
+			},
+		} as unknown as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId,
+			toolName: "yield",
+			result: { content: [{ type: "text", text: resultText }], details },
+			isError: false,
+		} as AgentSessionEvent);
+	};
+
 	const session = {
 		...createSessionDefaults(),
 		state: { messages },
@@ -149,32 +173,9 @@ function createHarness(args: {
 				reply: (replyText: string) => {
 					messages.push(assistantMessage(replyText));
 				},
-				yieldTerminal: (data: unknown) => {
-					yieldSeq += 1;
-					emit({
-						type: "tool_execution_end",
-						toolCallId: `yield-${yieldSeq}`,
-						toolName: "yield",
-						result: {
-							content: [{ type: "text", text: "Result submitted." }],
-							details: { status: "success", data },
-						},
-						isError: false,
-					} as AgentSessionEvent);
-				},
-				yieldCompleteSection: (label: string, data: unknown) => {
-					yieldSeq += 1;
-					emit({
-						type: "tool_execution_end",
-						toolCallId: `yield-${yieldSeq}`,
-						toolName: "yield",
-						result: {
-							content: [{ type: "text", text: "Section submitted." }],
-							details: { status: "success", data, type: [label], complete: true },
-						},
-						isError: false,
-					} as AgentSessionEvent);
-				},
+				yieldTerminal: (data: unknown) => emitYield({ status: "success", data }, "Result submitted."),
+				yieldCompleteSection: (label: string, data: unknown) =>
+					emitYield({ status: "success", data, type: [label], complete: true }, "Section submitted."),
 			};
 			prompts.push(call);
 			if (args.idlePrompt?.(call.promptIndex)) {
@@ -380,6 +381,40 @@ describe("runSubprocess subagent_stop", () => {
 		expect(harness.events.at(-1)?.stop_hook_active).toBe(true);
 		expect(result.exitCode).toBe(0);
 		expect(JSON.parse(result.output)).toEqual({ report: "again" });
+	});
+
+	it("charges each refused yield against the soft request budget and ends the run with the budget reason", async () => {
+		const id = "RefusedBudget";
+		const refusedReport = "REFUSED-REPORT-MUST-NOT-BE-PUBLISHED";
+		const harness = createHarness({
+			hasStopHandlers: true,
+			// Safety valve: without budget accounting the loop never ends, so past
+			// this prompt the child stops yielding and the run fails on the
+			// unresolved refusal instead of hanging the suite.
+			idlePrompt: promptIndex => promptIndex > 40,
+			onPrompt: call => call.yieldTerminal({ report: refusedReport }),
+			onStop: async () => ({ decision: "block", reason: "not done" }),
+		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
+
+		const result = await runSubprocess({
+			...baseOptions(id),
+			settings: Settings.isolated({ "task.softRequestBudget": 2 }),
+			modelRegistry: { refresh: async () => {} } as unknown as ModelRegistry,
+		});
+
+		expect(result.aborted).toBe(true);
+		expect(result.exitCode).not.toBe(0);
+		expect(result.abortReason).toContain("Soft request budget exceeded");
+		// One request per prompt: the run hard-aborts once the budget stop's grace
+		// window is spent, and no continuation prompt starts after that abort.
+		const hardAbortRequests = 2 * 1.5 + BUDGET_STOP_GRACE_REQUESTS;
+		expect(harness.events).toHaveLength(hardAbortRequests);
+		expect(harness.prompts).toHaveLength(hardAbortRequests);
+		expect(result.output).not.toContain(refusedReport);
+		expect(result.extractedToolData?.yield).toBeUndefined();
+		expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeUndefined();
 	});
 
 	it("fails the run instead of publishing a refused yield the continuation never replaced", async () => {
