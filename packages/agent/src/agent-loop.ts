@@ -39,7 +39,6 @@ import {
 	copyCursorExecResolved,
 	getStreamingPartialJson,
 	kCursorExecResolved,
-	setStreamingPartialJson,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { schemaDefinesProperty } from "@oh-my-pi/pi-ai/utils/schema/json-schema-validator";
 import { stamp } from "@oh-my-pi/pi-ai/utils/schema/stamps";
@@ -415,7 +414,11 @@ function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantC
 				// Providers mutate streaming arguments in place (owned-stream, GLM)
 				// as well as replacing them, so containers are always copied; the
 				// strings inside are immutable and shared, keeping the per-delta
-				// cost independent of the argument payload size.
+				// cost independent of the argument payload size. `StreamFn` is a
+				// public extension point whose only promise is the partial-JSON
+				// carrier symbol, so a producer is free to grow `arguments` in
+				// place — copying containers is what keeps the live tree from
+				// reaching snapshots it already emitted.
 				arguments: cloneJsonTree(block.arguments),
 				providerMetadata: snapshotToolCallProviderMetadata(block.providerMetadata),
 			};
@@ -426,35 +429,6 @@ function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantC
 			return snap;
 		}
 	}
-}
-
-/**
- * Snapshot one content block for a per-delta `message_update`.
- *
- * O(1) for the streaming tool-call shape that carries a partial-JSON buffer:
- * those providers maintain `arguments` by *replacing* the whole tree with a
- * freshly parsed one on each delta — never by mutating the previous tree in
- * place — so the snapshot can share the tree by reference and still be exact
- * for the event it froze. The carrier string is immutable and reassigned per
- * delta, so it is copied by value. Deep-walking `arguments` (cloneJsonTree)
- * per delta made the block's snapshot cost grow with its own node count, i.e.
- * quadratic over its streaming lifetime (issue #10605).
- *
- * Everything else falls back to the exact deep clone: the owned-stream/GLM
- * shape mutates arguments *in place* between deltas, and freezing those out is
- * precisely what the deep clone buys.
- */
-function snapshotContentBlockForUpdate(block: AssistantContentBlock): AssistantContentBlock {
-	if (block.type === "toolCall" && getStreamingPartialJson(block) !== undefined) {
-		const snap: AssistantToolCallBlock = {
-			...block,
-			providerMetadata: snapshotToolCallProviderMetadata(block.providerMetadata),
-		};
-		setStreamingPartialJson(snap, getStreamingPartialJson(block));
-		copyCursorExecResolved(snap, block);
-		return snap;
-	}
-	return snapshotAssistantContentBlock(block);
 }
 
 function snapshotAssistantMessage(message: AssistantMessage): AssistantMessage {
@@ -480,9 +454,9 @@ function snapshotAssistantMessage(message: AssistantMessage): AssistantMessage {
  * within a turn. A fresh snapshot therefore only needs to re-clone:
  *
  * - the blocks an event targeted since the previous snapshot (`dirtyBlocks`),
- * - blocks still open (started but not ended, `openBlocks`) — Cursor's edit
- *   block merges `path`/`stream_content` into a live block without an event, so
- *   open blocks are re-cloned on every delta,
+ * - every block still open (started but not ended) — Cursor's edit block merges
+ *   `path`/`stream_content` into a live block without an event, so the caller
+ *   re-seeds `dirtyBlocks` from its open set after every snapshot,
  * - blocks appended since the previous snapshot.
  *
  * Every other (finalized) block is carried over from the previous snapshot by
@@ -495,7 +469,6 @@ function snapshotAssistantMessageIncremental(
 	live: AssistantMessage,
 	prev: AssistantMessage,
 	dirtyBlocks: ReadonlySet<number>,
-	openBlocks: ReadonlySet<number>,
 ): AssistantMessage {
 	const liveContent = live.content;
 	const prevContent = prev.content;
@@ -504,21 +477,17 @@ function snapshotAssistantMessageIncremental(
 	// patch in fresh clones only where the live state moved: blocks appended
 	// since the previous snapshot, plus every dirty index — the block this delta
 	// targeted and every block still streaming. Finalized blocks keep their
-	// existing snapshot clone. A block that just ended gets the full deep clone
-	// again, so no shared reference outlives its frozen semantics; only while a
-	// block is still streaming does the O(1) clone apply, which is what keeps a
-	// tool call's per-delta cost independent of its accumulated arguments.
+	// existing snapshot clone. Each re-clone is the full deep clone, so no shared
+	// reference outlives a block's frozen semantics: a tool call whose producer
+	// keeps growing `arguments` in place cannot reach a snapshot it already
+	// emitted.
 	const content = prevContent.slice();
 	for (let i = prevLen; i < liveContent.length; i++) {
-		const block = liveContent[i]!;
-		content[i] = openBlocks.has(i) ? snapshotContentBlockForUpdate(block) : snapshotAssistantContentBlock(block);
+		content[i] = snapshotAssistantContentBlock(liveContent[i]!);
 	}
 	for (const index of dirtyBlocks) {
 		if (index >= 0 && index < prevLen && index < liveContent.length) {
-			const block = liveContent[index]!;
-			content[index] = openBlocks.has(index)
-				? snapshotContentBlockForUpdate(block)
-				: snapshotAssistantContentBlock(block);
+			content[index] = snapshotAssistantContentBlock(liveContent[index]!);
 		}
 	}
 	return {
@@ -2583,7 +2552,7 @@ async function streamAssistantResponse(
 								// exchange, per-delta work is proportional to the live stream
 								// instead of the whole turn (issue #10605).
 								const messageSnapshot: AssistantMessage = turnSnapshot
-									? snapshotAssistantMessageIncremental(partialMessage, turnSnapshot, dirtyBlocks, openBlocks)
+									? snapshotAssistantMessageIncremental(partialMessage, turnSnapshot, dirtyBlocks)
 									: snapshotAssistantMessage(partialMessage);
 								dirtyBlocks.clear();
 								for (const openIndex of openBlocks) dirtyBlocks.add(openIndex);
