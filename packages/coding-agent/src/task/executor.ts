@@ -3469,16 +3469,22 @@ async function runWakeStopPasses(
 			}
 		},
 	};
+	let refused = true;
 	try {
-		let refused = true;
 		while (refused && monitor.yieldCalled()) refused = await runSubagentStopPass(session, monitor, stopHook, io);
 	} catch (error) {
 		// A cancelled run surfaces here as an abort; that is the run's outcome, not a failure.
-		if (signal.aborted) return;
-		logger.warn("IRC wake-turn subagent_stop continuation failed", {
-			error: error instanceof Error ? error.message : String(error),
-		});
+		if (!signal.aborted) {
+			logger.warn("IRC wake-turn subagent_stop continuation failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
+	// The passes ended on a refusal that no judged yield answered. A fresh yield
+	// recorded after the refusal clears the refusal flag, so one that async
+	// results un-latched (or that an error cut off) is still unjudged here: drop it
+	// like the refused one, or finalization would publish a payload no handler saw.
+	if (refused && !monitor.yieldInvalidatedByStop()) monitor.invalidateYieldForStop();
 }
 
 /**
