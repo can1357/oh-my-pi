@@ -90,6 +90,8 @@ export interface OutputMeta {
 	/** The output is a bounded page of a file or session artifact its `source` re-reads with line selectors; spill-to-artifact skips it. */
 	pagedSource?: true;
 	diagnostics?: DiagnosticMeta;
+	/** Rows the live streaming cap discarded; gone for good, so they are named apart from the hidden rows the preview still delivers. */
+	droppedLines?: number;
 	limits?: LimitsMeta;
 }
 
