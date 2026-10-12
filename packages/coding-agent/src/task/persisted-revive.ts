@@ -580,6 +580,8 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 		id: ref.id,
 		agent: persistedAgentDefinition(ref.displayName, init),
 		completionProbe: isCompletionProbeEnabled(spec.settings, taskDepth - 1),
+		// Frames keep the ref label; the stop hook reports the definition name.
+		agentType: persistedAgentName(ref.displayName, init),
 		...softRequestBudgetFor(persistedAgentName(ref.displayName, init), spec.settings),
 		eventBus: spec.eventBus,
 		subagentEventBus: spec.subagentEventBus,
