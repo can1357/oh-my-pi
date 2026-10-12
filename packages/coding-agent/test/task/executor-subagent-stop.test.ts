@@ -116,6 +116,8 @@ function createHarness(args: {
 	sessionFile?: string;
 	/** Real yield tool the session hands out as `getToolByName("yield")`. */
 	yieldTool?: YieldTool;
+	/** Runs whenever the executor waits for the fake session to go idle; a turn still running there ends inside it. */
+	onWaitForIdle?: () => void | Promise<void>;
 }): StopHarness {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const messages: AssistantMessage[] = [];
@@ -228,7 +230,9 @@ function createHarness(args: {
 			}
 			await args.onPrompt(call);
 		},
-		waitForIdle: async () => {},
+		waitForIdle: async () => {
+			await args.onWaitForIdle?.();
+		},
 		getLastAssistantMessage: () => messages[messages.length - 1],
 		hasPendingAsyncWork: () => false,
 		getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
@@ -408,6 +412,65 @@ describe("runSubprocess subagent_stop", () => {
 		expect(harness.prompts).toHaveLength(2);
 		expect(harness.prompts[1]?.text).toContain("without a reason");
 		expect(harness.prompts[1]?.text).toContain("yield again");
+	});
+
+	describe("when wake turns run while handlers consult", () => {
+		/**
+		 * The first `wakes` passes each leave a wake turn running on the idle child; it ends, recording a newer
+		 * yield, while the run waits for the session to settle. Later passes are undisturbed.
+		 */
+		async function runWithWakes(id: string, wakes: number) {
+			let pending = 0;
+			let started = 0;
+			let served = 0;
+			const harness: StopHarness = createHarness({
+				hasStopHandlers: true,
+				onPrompt: call => call.yieldTerminal({ report: "OLD-PAYLOAD" }),
+				onStop: async () => {
+					if (started < wakes) {
+						started += 1;
+						pending += 1;
+					}
+					return undefined;
+				},
+				onWaitForIdle: () => {
+					if (pending === 0) return;
+					pending -= 1;
+					served += 1;
+					harness.emitTerminalYield({ report: `WAKE-PAYLOAD-${served}` });
+				},
+			});
+			mockCreateAgentSession(harness.session);
+			registerRunning(id, harness.session);
+			const result = await runSubprocess(baseOptions(id));
+			return { harness, result };
+		}
+
+		it("lets the wake turn settle and judges the candidate it recorded before publishing", async () => {
+			const { harness, result } = await runWithWakes("WakeSettles", 1);
+
+			// The first allow was about OLD-PAYLOAD, which the wake turn replaced.
+			expect(harness.events).toHaveLength(2);
+			expect(harness.events.map(event => event.stop_hook_active)).toEqual([false, false]);
+			expect(result.exitCode).toBe(0);
+			expect(JSON.parse(result.output)).toEqual({ report: "WAKE-PAYLOAD-1" });
+			expect(JSON.stringify(result.output)).not.toContain("OLD-PAYLOAD");
+		});
+
+		it("re-judges while turns keep replacing the candidate and stops once one is undisturbed", async () => {
+			const { harness, result } = await runWithWakes("WakesKeepComing", 2);
+
+			// Two disturbed passes, then one nothing overlapped: three consults, no more.
+			expect(harness.events).toHaveLength(3);
+			expect(JSON.parse(result.output)).toEqual({ report: "WAKE-PAYLOAD-2" });
+		});
+
+		it("consults exactly once when nothing overlaps the pass", async () => {
+			const { harness, result } = await runWithWakes("NoWake", 0);
+
+			expect(harness.events).toHaveLength(1);
+			expect(JSON.parse(result.output)).toEqual({ report: "OLD-PAYLOAD" });
+		});
 	});
 
 	describe("a structured run that never yields", () => {

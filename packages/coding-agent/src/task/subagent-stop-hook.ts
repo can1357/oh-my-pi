@@ -50,7 +50,9 @@ export type SubagentStopOutcome =
 	/** Handlers refused the candidate: run the same session again with `text`. */
 	| { kind: "continue"; text: string }
 	/** The run was cancelled while handlers were consulting: the candidate was never confirmed. */
-	| { kind: "aborted" };
+	| { kind: "aborted" }
+	/** The candidate changed while handlers were consulting: the verdict is void and the run's current candidate is still unjudged. */
+	| { kind: "stale" };
 
 /**
  * Per-run `subagent_stop` state: the continuation allowance, `stop_hook_active`,
@@ -77,8 +79,12 @@ export class SubagentStopHook {
 	 * channel, never thrown here), and a run cancelled mid-pass reports
 	 * {@link SubagentStopOutcome} `aborted` so the caller can drop the candidate
 	 * instead of accepting one the handlers never confirmed.
+	 *
+	 * `candidateChanged` runs once the handlers answered and resolves true when
+	 * the candidate they judged is no longer the run's current one (see
+	 * {@link SubagentStopOutcome} `stale`).
 	 */
-	async run(session: AgentSession): Promise<SubagentStopOutcome> {
+	async run(session: AgentSession, candidateChanged?: () => Promise<boolean>): Promise<SubagentStopOutcome> {
 		const runner = session.extensionRunner;
 		if (!runner?.hasHandlers("subagent_stop")) return { kind: "allow" };
 		if (this.#signal.aborted) return { kind: "aborted" };
@@ -97,6 +103,12 @@ export class SubagentStopHook {
 		// Cancelled mid-pass: the candidate was never confirmed, so the caller
 		// must drop it rather than accept a yield a handler was still judging.
 		if (this.#signal.aborted) return { kind: "aborted" };
+		// The verdict is about the candidate the handlers were shown. When the run
+		// moved on while they consulted, it decides nothing about the candidate the
+		// run now has, so void it before it spends any state: a refusal must not
+		// count as a continuation, nor leave `stop_hook_active` set for the pass
+		// that judges the new candidate.
+		if (candidateChanged && (await candidateChanged())) return { kind: "stale" };
 		// The diagnostic is only consulted for a reason-less refusal; render it only for a refusal.
 		const blockedFallback =
 			result?.decision === "block" ? prompt.render(subagentStopBlockedPrompt, { structured: this.#structured }) : "";

@@ -2540,6 +2540,12 @@ interface SubagentStopPassIo {
 	awaitAbortable<T>(promise: Promise<T>): Promise<T>;
 	/** Run one continuation turn on the same session: prompt with `text`, then wait for the turn to settle. */
 	continueWith(text: string): Promise<void>;
+	/**
+	 * Snapshot the candidate before handlers consult. The returned check runs once
+	 * they answered: it lets the session settle and resolves true when the
+	 * candidate changed meanwhile. Absent when nothing can change it during a pass.
+	 */
+	watchCandidate?(): () => Promise<boolean>;
 }
 
 /**
@@ -2552,9 +2558,12 @@ interface SubagentStopPassIo {
  * nothing can accept or publish it, and the SAME child session runs again;
  * the caller then demands a fresh one.
  *
- * Returns true when refused and re-driven (the caller re-evaluates the run);
- * false when the candidate stands — allowed, or the run was cancelled while
- * handlers were consulting, so it was never confirmed and is dropped.
+ * Returns true when the run must be re-evaluated: the candidate was refused
+ * and the session re-driven, or the verdict was void because the candidate
+ * changed while handlers were consulting (nothing is accepted, refused or
+ * continued; the caller judges the candidate the run now has). False when the
+ * candidate stands — allowed, or the run was cancelled while handlers were
+ * consulting, so it was never confirmed and is dropped.
  */
 async function runSubagentStopPass(
 	session: AgentSession,
@@ -2562,7 +2571,8 @@ async function runSubagentStopPass(
 	stopHook: SubagentStopHook,
 	io: SubagentStopPassIo,
 ): Promise<boolean> {
-	const stop = await stopHook.run(session);
+	const stop = await stopHook.run(session, io.watchCandidate?.());
+	if (stop.kind === "stale") return true;
 	if (stop.kind === "allow") return false;
 	monitor.invalidateYieldForStop();
 	if (stop.kind === "aborted") return false;
@@ -2796,6 +2806,18 @@ async function driveSessionToResult(
 				continueWith: async text => {
 					await dispatchPrompt(text, { attribution: "agent", synthetic: true }, "subagent_stop continuation");
 					await awaitAbortable(session.waitForIdle());
+				},
+				// The handlers consult with the child idle and this monitor attached, so an IRC
+				// wake can start a turn that records a newer candidate or output. Every turn the
+				// monitor sees ends with a counted request: a count that moved means the child
+				// worked, and the verdict was about what it replaced. Each recheck follows an
+				// external trigger (a message to the child), so re-judging cannot spin.
+				watchCandidate: () => {
+					const requests = monitor.progress.requests;
+					return async () => {
+						await awaitAbortable(session.waitForIdle());
+						return monitor.progress.requests !== requests;
+					};
 				},
 			});
 
