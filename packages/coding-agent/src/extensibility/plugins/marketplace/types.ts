@@ -11,8 +11,8 @@
 
 // ── Plugin ID helpers ────────────────────────────────────────────────
 
-const NAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/;
-const MAX_NAME_LENGTH = 64;
+export const NAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/;
+export const MAX_NAME_LENGTH = 64;
 const MAX_ID_LENGTH = 128;
 
 /** Validate a plugin or marketplace name segment. */

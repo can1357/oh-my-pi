@@ -45,6 +45,8 @@ Push to GitHub. Users install with:
 
 The catalog file lives at either `.omp-plugin/marketplace.json` or `.claude-plugin/marketplace.json` in the repository root. omp prefers the `.omp-plugin/` path and falls back to the Claude path; a repository may publish both to expose tool-specific catalogs from a single source tree.
 
+Set `$schema` to `https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/extensibility/plugins/marketplace/marketplace-schema.json` to validate the catalog in an editor or CI. The schema accepts exactly the catalogs omp loads with every entry intact; case-insensitive name collisions and install-time version and source rules are checked only by omp.
+
 ### Top-level fields
 
 | Field | Required | Description |
@@ -83,7 +85,7 @@ The catalog file lives at either `.omp-plugin/marketplace.json` or `.claude-plug
 
 ```json
 {
-  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/extensibility/plugins/marketplace/marketplace-schema.json",
   "name": "acme-plugins",
   "owner": {
     "name": "Acme Corp",

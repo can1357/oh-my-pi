@@ -101,7 +101,7 @@ A marketplace catalog lives at `.omp-plugin/marketplace.json` in the repository 
 
 ```json
 {
-  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/extensibility/plugins/marketplace/marketplace-schema.json",
   "name": "my-marketplace",
   "owner": {
     "name": "Your Name",
@@ -123,6 +123,12 @@ A marketplace catalog lives at `.omp-plugin/marketplace.json` in the repository 
   ]
 }
 ```
+
+### Validating a catalog
+
+The `$schema` URL above points to the JSON Schema for this format (`packages/coding-agent/src/extensibility/plugins/marketplace/marketplace-schema.json`). It is generated from the definition omp validates catalogs with, so it accepts exactly the catalogs omp loads with every plugin entry intact. Use it in an editor or CI to catch entries omp would otherwise skip with only a log warning. omp ignores `$schema` when loading the catalog.
+
+The schema checks structure only. omp still checks case-insensitive plugin name collisions when the catalog loads, and relative sources in URL-added marketplaces and install versions when a plugin installs.
 
 ### Required fields
 

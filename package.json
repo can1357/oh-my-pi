@@ -163,6 +163,7 @@
 		"gen:tool-views": "bun --cwd=packages/collab-web run gen:tool-views",
 		"gen:bundle": "bun --cwd=packages/coding-agent run gen:bundle",
 		"gen:rpc": "bun --cwd=packages/coding-agent run gen:rpc",
+		"gen:marketplace-schema": "bun --cwd=packages/coding-agent run gen:marketplace-schema",
 		"gen:glyphs": "bun --cwd=packages/tui run gen:glyphs",
 		"check-spoofed-versions": "bun scripts/check-spoofed-versions.ts"
 	},
