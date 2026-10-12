@@ -238,7 +238,11 @@ describe("Claude saved-reset trigger integration", () => {
 				modelRegistry,
 			);
 			vi.spyOn(extensionRunner, "hasUI").mockReturnValue(true);
-			vi.spyOn(extensionRunner.getUIContext(), "select").mockImplementation(options.consent);
+			// Runners share one default UI context; give this session its own prompt.
+			const ui = extensionRunner.getUIContext();
+			vi.spyOn(extensionRunner, "getUIContext").mockReturnValue(
+				Object.create(ui, { select: { value: options.consent } }),
+			);
 		} else if (options.withExtensionRunner) {
 			extensionRunner = new ExtensionRunner(
 				[],
@@ -323,6 +327,31 @@ describe("Claude saved-reset trigger integration", () => {
 				await authStorage.credentials.remove("anthropic");
 			},
 		};
+	}
+
+	/**
+	 * Puts `sessions` on a second account, the rest on the stored one: sessions
+	 * on different accounts run separate blocked passes that can plan the same restore.
+	 */
+	function onSecondAccount(sessions: AgentSession[]): void {
+		const ids = new Set(sessions.map(session => session.sessionId));
+		vi.spyOn(authStorage.oauth, "identity").mockImplementation((_provider, sessionId) =>
+			sessionId && ids.has(sessionId)
+				? { accountId: "claude-second", email: "second@example.com", orgId: "org-second" }
+				: { accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID },
+		);
+	}
+
+	/** Resolves once a session waits on a peer's spend of a restore it also planned. */
+	function onPeerWait(coordinator: CodexAutoRedeemCoordinator): Promise<void> {
+		const waiting = Promise.withResolvers<void>();
+		const spends = coordinator.restoreSpends;
+		const get = spends.get.bind(spends);
+		vi.spyOn(spends, "get").mockImplementation(key => {
+			waiting.resolve();
+			return get(key);
+		});
+		return waiting.promise;
 	}
 
 	/** Records each redeemed credential and restores the quota it serves. */
@@ -741,11 +770,7 @@ describe("Claude saved-reset trigger integration", () => {
 			consent,
 		});
 		// Different session accounts, so each runs its own blocked pass; both plan the longer-blocked one.
-		vi.spyOn(authStorage.oauth, "identity").mockImplementation((_provider, sessionId) =>
-			sessionId === second.session.sessionId
-				? { accountId: "claude-second", email: "second@example.com", orgId: "org-second" }
-				: { accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID },
-		);
+		onSecondAccount([second.session]);
 		const { outsideId } = await storeLongerBlockedAccount(6 * 24 * HOUR);
 		const spent = recordSpends(credentialId => {
 			if (credentialId !== outsideId) return undefined;
@@ -765,6 +790,160 @@ describe("Claude saved-reset trigger integration", () => {
 		for (const { session } of [first, second]) {
 			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 		}
+	});
+
+	it("spends a restore that a peer on another account released unspent because its pool dropped it", async () => {
+		const secondAsked = Promise.withResolvers<void>();
+		const firstPending = Promise.withResolvers<void>();
+		const first = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			consent: async () => {
+				await secondAsked.promise;
+				return "Yes";
+			},
+		});
+		const quota = { restored: false };
+		const second = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			quota,
+			coordinator: first.coordinator,
+			consent: async () => {
+				secondAsked.resolve();
+				await firstPending.promise;
+				return "Yes";
+			},
+		});
+		onSecondAccount([second.session]);
+		const { outsideId } = await storeLongerBlockedAccount(6 * 24 * HOUR);
+		const spent = recordSpends(credentialId => (credentialId === outsideId ? quota : undefined));
+		const secondWaiting = onPeerWait(first.coordinator);
+		// The first session's pool drops everything once its attempt is recorded,
+		// and its spend is held until the second waits on it.
+		const write = Bun.write.bind(Bun);
+		let lease: SessionRestrictionLease | undefined;
+		vi.spyOn(Bun, "write").mockImplementation(async (destination, input) => {
+			const written = await write(destination as string, input as string);
+			if (!lease && typeof input === "string" && input.startsWith("pending:")) {
+				lease = authStorage.sessions.restrict("anthropic", first.session.sessionId, []);
+				firstPending.resolve();
+				await secondWaiting;
+			}
+			return written;
+		});
+		mockSchedulerWaitWithClock();
+
+		try {
+			await Promise.all([first.session.prompt("first blocked turn"), second.session.prompt("second blocked turn")]);
+			await Promise.all([first.session.waitForIdle(), second.session.waitForIdle()]);
+		} finally {
+			if (lease) authStorage.sessions.unrestrict("anthropic", first.session.sessionId, lease);
+			await authStorage.credentials.remove("anthropic");
+		}
+
+		expect(spent).toEqual([outsideId]);
+		expect(second.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it("lets a joiner replan when its pass's pool dropped a restore a peer on another account spent", async () => {
+		const secondAsked = Promise.withResolvers<void>();
+		const firstPending = Promise.withResolvers<void>();
+		const thirdJoined = Promise.withResolvers<void>();
+		const firstQuota = { restored: false };
+		const thirdQuota = { restored: false };
+		const first = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			quota: firstQuota,
+			consent: async () => {
+				await secondAsked.promise;
+				return "Yes";
+			},
+		});
+		const second = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			coordinator: first.coordinator,
+			consent: async () => {
+				secondAsked.resolve();
+				await firstPending.promise;
+				return "Yes";
+			},
+		});
+		const third = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			quota: thirdQuota,
+			coordinator: first.coordinator,
+			consent: async () => "Yes",
+		});
+		// The second and third sessions share an account, so the third joins the second's pass.
+		onSecondAccount([second.session, third.session]);
+		const { ownId, outsideId } = await storeLongerBlockedAccount(6 * 24 * HOUR);
+		const secondWaiting = onPeerWait(first.coordinator);
+		const inFlight = first.coordinator.inFlightByAccount;
+		const get = inFlight.get.bind(inFlight);
+		vi.spyOn(inFlight, "get").mockImplementation(key => {
+			const pass = get(key);
+			if (pass) thirdJoined.resolve();
+			return pass;
+		});
+		// The first session spends the longer-blocked account once the second waits on
+		// it and the third has joined, while the second's pool drops that account.
+		let lease: SessionRestrictionLease | undefined;
+		const spent: number[] = [];
+		vi.spyOn(authStorage.resets, "redeem").mockImplementation(async request => {
+			spent.push(request.target.credentialId);
+			if (request.target.credentialId === outsideId) {
+				firstPending.resolve();
+				await Promise.all([secondWaiting, thirdJoined.promise]);
+				lease = authStorage.sessions.restrict("anthropic", second.session.sessionId, [
+					`email:${EMAIL}|org:${ORG_ID}`,
+				]);
+				firstQuota.restored = true;
+			} else if (request.target.credentialId === ownId) {
+				thirdQuota.restored = true;
+			}
+			return {
+				ok: true,
+				code: "reset",
+				provider: "anthropic",
+				creditId: "cedar-grant-1",
+				cleared: ["anthropic:7d"],
+			};
+		});
+		mockSchedulerWaitWithClock();
+
+		try {
+			const running = [first.session.prompt("first blocked turn"), second.session.prompt("second blocked turn")];
+			await secondAsked.promise;
+			await Promise.all([...running, third.session.prompt("join the second's pass")]);
+			await Promise.all([first.session.waitForIdle(), second.session.waitForIdle(), third.session.waitForIdle()]);
+		} finally {
+			if (lease) authStorage.sessions.unrestrict("anthropic", second.session.sessionId, lease);
+			await authStorage.credentials.remove("anthropic");
+		}
+
+		expect(lease).toBeDefined();
+		// The third replans instead of keeping the second's empty-handed result.
+		expect(spent).toEqual([outsideId, ownId]);
+		expect(third.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 
 	it("cancels reset discovery backoff without spending a credit or resuming the task", async () => {

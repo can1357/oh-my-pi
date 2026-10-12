@@ -12879,6 +12879,30 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Another session in this process planned the same restore and holds its
+	 * attempt (both waited for consent, say). Waits for that spend: `reset` to
+	 * share it, `free` when it was released unspent and undeferred (its pool
+	 * dropped it) so this session may spend it, `taken` otherwise.
+	 */
+	async #awaitPeerRestore(
+		attemptKey: string,
+		coordinator: CodexAutoRedeemCoordinator,
+	): Promise<"reset" | "free" | "taken"> {
+		while (coordinator.attemptedKeys.has(attemptKey)) {
+			const spend = coordinator.restoreSpends.get(attemptKey);
+			if (!spend) return "taken";
+			if (await spend) return "reset";
+			// Still held by the same failed spend, or released with a deferral: not ours to retry.
+			if (coordinator.attemptedKeys.has(attemptKey) && coordinator.restoreSpends.get(attemptKey) === spend) {
+				return "taken";
+			}
+			if ((coordinator.deferredUntilByKey.get(attemptKey) ?? 0) > Date.now()) return "taken";
+			// Otherwise another waiter may have claimed it since: wait on that spend instead.
+		}
+		return "free";
+	}
+
+	/**
 	 * Shared consume executor for Codex and Claude plans. Attempt keys enter the
 	 * process-wide set before mutation, while nonterminal outcomes release and
 	 * defer the episode so a still-banked grant is not buried permanently.
@@ -12903,14 +12927,16 @@ export class AgentSession implements SettingsScope {
 		let poolLimited = false;
 		for (const action of actions) {
 			if (coordinator.attemptedKeys.has(action.attemptKey)) {
-				// Another session in this process planned the same restore and spent it
-				// first (both waited for consent, say): share its reset.
-				const peerSpend = coordinator.restoreSpends.get(action.attemptKey);
-				if (peerSpend && (await peerSpend) && !outsidePool(action)) {
-					await authStorage.credentials.revalidate();
-					restored.push(action.target.credentialId);
+				const peer = await this.#awaitPeerRestore(action.attemptKey, coordinator);
+				if (peer === "reset") {
+					if (outsidePool(action)) {
+						poolLimited = true;
+					} else {
+						await authStorage.credentials.revalidate();
+						restored.push(action.target.credentialId);
+					}
 				}
-				continue;
+				if (peer !== "free") continue;
 			}
 			const previousAttemptAt = coordinator.lastAttemptAtByAccount.get(action.accountKey);
 			coordinator.attemptedKeys.add(action.attemptKey);
