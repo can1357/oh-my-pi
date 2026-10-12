@@ -3,16 +3,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { readLines } from "@oh-my-pi/pi-utils";
 import type { DroppedRow, EngineAdapter, ProtocolName, RecallHit } from "../engine";
+import { PythonProcess } from "./python-process";
 
 const EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5";
 const CACHE_ROOT = path.join(os.homedir(), ".cache", "omp-memory-eval");
 const DEFAULT_PYTHON = path.join(CACHE_ROOT, "venv-engine", "bin", "python");
 const DEFAULT_SCRIPT = path.resolve(import.meta.dir, "../py/mnemosyne_engine.py");
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../../..");
-const STDERR_TAIL_CHARS = 4000;
-const EXIT_GRACE_MS = 5000;
 
 export interface MnemosyneEngineOptions {
 	python?: string;
@@ -32,12 +30,6 @@ export type UpstreamCompatOps = {
 	recallRaw(query: string, k: number): Promise<string[]>;
 };
 
-interface WireResponse {
-	id: number;
-	result?: unknown;
-	error?: string;
-}
-
 interface WireHit {
 	engine_id: string;
 	tier: RecallHit["tier"];
@@ -50,96 +42,6 @@ interface WireDropped {
 	engine_id: string;
 	source_memory_id: string | null;
 	rank: number;
-}
-
-/** One Python process. The first failure (error response, bad output, exit, EOF) rejects the pending call and every later call. */
-class PythonProcess {
-	readonly #proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
-	readonly #pending = new Map<number, PromiseWithResolvers<unknown>>();
-	readonly #done: Promise<void>;
-	#nextId = 1;
-	#failure: Error | undefined;
-	#stderrTail = "";
-
-	constructor(python: string, script: string, env: Record<string, string | undefined>) {
-		this.#proc = Bun.spawn([python, script], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env });
-		this.#done = this.#pump(this.#collectStderr());
-	}
-
-	async call(op: string, params: object = {}): Promise<unknown> {
-		if (this.#failure) throw this.#failure;
-		const id = this.#nextId++;
-		const waiter = Promise.withResolvers<unknown>();
-		this.#pending.set(id, waiter);
-		try {
-			this.#proc.stdin.write(`${JSON.stringify({ id, op, params })}\n`);
-			await this.#proc.stdin.flush();
-		} catch (err) {
-			// A broken pipe means the process is gone: wait for the pump to attach its exit code and stderr.
-			await this.#done;
-			this.#fail(err instanceof Error ? err : new Error(String(err)));
-		}
-		return waiter.promise;
-	}
-
-	/** Ends stdin so the script exits, killing it if it does not within the grace period. */
-	async shutdown(): Promise<void> {
-		const killer = setTimeout(() => this.#proc.kill(), EXIT_GRACE_MS);
-		try {
-			await this.#proc.stdin.end();
-		} catch {
-			// The process already exited.
-		}
-		try {
-			await this.#done;
-		} finally {
-			clearTimeout(killer);
-		}
-	}
-
-	#fail(error: Error): void {
-		this.#failure ??= error;
-		for (const waiter of this.#pending.values()) waiter.reject(this.#failure);
-		this.#pending.clear();
-	}
-
-	#settle(response: WireResponse): void {
-		if (response.error !== undefined) return this.#fail(new Error(response.error));
-		const waiter = this.#pending.get(response.id);
-		if (!waiter) return this.#fail(new Error(`mnemosyne engine answered unknown request ${response.id}`));
-		this.#pending.delete(response.id);
-		waiter.resolve(response.result);
-	}
-
-	async #collectStderr(): Promise<void> {
-		const decoder = new TextDecoder();
-		for await (const chunk of this.#proc.stderr) {
-			this.#stderrTail = (this.#stderrTail + decoder.decode(chunk, { stream: true })).slice(-STDERR_TAIL_CHARS);
-		}
-	}
-
-	async #pump(stderrDone: Promise<void>): Promise<void> {
-		const decoder = new TextDecoder();
-		try {
-			for await (const bytes of readLines(this.#proc.stdout)) {
-				const line = decoder.decode(bytes);
-				if (line.trim() === "") continue;
-				let response: WireResponse;
-				try {
-					response = JSON.parse(line);
-				} catch {
-					this.#fail(new Error(`mnemosyne engine wrote a non-protocol line: ${line.slice(0, 200)}`));
-					continue;
-				}
-				this.#settle(response);
-			}
-			await stderrDone;
-			const code = await this.#proc.exited;
-			this.#fail(new Error(`mnemosyne engine exited with code ${code}: ${this.#stderrTail.trim()}`));
-		} catch (err) {
-			this.#fail(err instanceof Error ? err : new Error(String(err)));
-		}
-	}
 }
 
 export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAdapter & UpstreamCompatOps {
@@ -160,7 +62,7 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 		dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "mnemosyne-data-"));
 		// Parent MNEMOSYNE_* settings (recall weights, prefixes, ...) would silently change ranking or embeddings.
 		const inherited = Object.entries(Bun.env).filter(([key]) => !key.startsWith("MNEMOSYNE_"));
-		proc = new PythonProcess(python, script, {
+		proc = new PythonProcess("mnemosyne engine", python, script, {
 			...Object.fromEntries(inherited),
 			MNEMOSYNE_DATA_DIR: dataDir,
 			MNEMOSYNE_FASTEMBED_CACHE_DIR: path.join(CACHE_ROOT, "fastembed"),

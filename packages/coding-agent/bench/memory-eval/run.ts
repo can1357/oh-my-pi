@@ -1,5 +1,6 @@
 // Run: bun packages/coding-agent/bench/memory-eval/run.ts <subcommand>
-//   run  --dataset <name> --engine <name> --protocol <name> [--cases N] [--out file]
+//   run  --dataset <name> --engine <name> --protocol <name> [--embedder js|python] [--cases N] [--out file]
+//        --embedder applies to mnemopi only: `python` swaps its slow JS fastembed for the same model in Python fastembed.
 //   diff <a.json> <b.json>
 //   calibration-check <a.json> <b.json>   (a: py/upstream_run_a.py dump, b: run --protocol upstream-compat result)
 import * as fs from "node:fs/promises";
@@ -10,7 +11,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type CalibrationDump, compareCalibration, runUpstreamCompat } from "./compat";
 import { loadBeamUpstreamCompat, loadDataset } from "./datasets";
 import type { EngineAdapter, ProtocolName } from "./engine";
-import { mnemopiEngine } from "./engines/mnemopi";
+import { type MnemopiEmbedder, mnemopiEngine } from "./engines/mnemopi";
 import { mnemosyneEngine, type UpstreamCompatOps } from "./engines/mnemosyne";
 import { oracleEngine, randomEngine } from "./engines/sanity";
 import { buildResultFile, primaryMetric, type ResultFile, type RunConfig, type RunOutput, runCases } from "./runner";
@@ -27,7 +28,8 @@ const REVISIONS = {
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../..");
 const UPSTREAM_COMPAT_CONVERSATIONS = 3;
 
-function createEngine(name: string): EngineAdapter {
+function createEngine(name: string, embedder: MnemopiEmbedder): EngineAdapter {
+	if (embedder !== "js" && name !== "mnemopi") throw new Error("--embedder applies to the mnemopi engine only");
 	if (name === "mnemopi") {
 		// Mnemopi runs in this process and reads these itself, so they cannot be scrubbed: refuse instead.
 		// OPENROUTER_BASE_URL is the one non-MNEMOPI_ variable that can route its embeddings to an API.
@@ -37,7 +39,7 @@ function createEngine(name: string): EngineAdapter {
 		if (set.length > 0) {
 			throw new Error(`refusing to run mnemopi with MNEMOPI_* or OPENROUTER_BASE_URL set: ${set.join(", ")}`);
 		}
-		return mnemopiEngine();
+		return mnemopiEngine({ embedder });
 	}
 	if (name === "mnemosyne") return mnemosyneEngine();
 	if (name === "oracle") return oracleEngine();
@@ -62,11 +64,12 @@ async function runCommand(argv: string[]): Promise<void> {
 			protocol: { type: "string" },
 			cases: { type: "string" },
 			out: { type: "string" },
+			embedder: { type: "string", default: "js" },
 		},
 	});
 	const dataset = pick(values.dataset, DATASETS, "dataset");
 	const protocol = pick(values.protocol, PROTOCOLS, "protocol");
-	const engine = createEngine(values.engine ?? "");
+	const engine = createEngine(values.engine ?? "", pick(values.embedder, ["js", "python"] as const, "embedder"));
 	const k = dataset.startsWith("beam") ? 10 : 50;
 
 	const startedAt = new Date().toISOString();
