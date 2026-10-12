@@ -63,6 +63,8 @@ interface PromptCall {
 	reply: (text: string) => void;
 	/** Submit a terminal `yield` carrying `data`. */
 	yieldTerminal: (data: unknown) => void;
+	/** Submit a `complete: true` incremental section labelled `label` carrying `data`. */
+	yieldCompleteSection: (label: string, data: unknown) => void;
 }
 
 interface StopHarness {
@@ -156,6 +158,19 @@ function createHarness(args: {
 						result: {
 							content: [{ type: "text", text: "Result submitted." }],
 							details: { status: "success", data },
+						},
+						isError: false,
+					} as AgentSessionEvent);
+				},
+				yieldCompleteSection: (label: string, data: unknown) => {
+					yieldSeq += 1;
+					emit({
+						type: "tool_execution_end",
+						toolCallId: `yield-${yieldSeq}`,
+						toolName: "yield",
+						result: {
+							content: [{ type: "text", text: "Section submitted." }],
+							details: { status: "success", data, type: [label], complete: true },
 						},
 						isError: false,
 					} as AgentSessionEvent);
@@ -323,6 +338,29 @@ describe("runSubprocess subagent_stop", () => {
 		expect(result.error).toBeUndefined();
 		expect(JSON.parse(result.output)).toEqual({ report: "keep going" });
 		expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeNumber();
+	});
+
+	it("does not publish the refused yield when the replacement is only a complete section", async () => {
+		const id = "RefusedThenSection";
+		const harness = createHarness({
+			hasStopHandlers: true,
+			onPrompt: call => {
+				if (call.promptIndex === 1) call.yieldTerminal({ report: "REFUSED-PAYLOAD" });
+				else call.yieldCompleteSection("summary", "replacement");
+			},
+			onStop: async (_event, callIndex) => (callIndex === 1 ? { decision: "block", reason: "redo" } : undefined),
+		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
+
+		const result = await runSubprocess(baseOptions(id));
+
+		expect(harness.events).toHaveLength(2);
+		expect(result.exitCode).toBe(0);
+		// A leftover refused item would still be the assembled terminal payload and
+		// shadow the section the continuation produced.
+		expect(JSON.parse(result.output)).toEqual({ summary: "replacement" });
+		expect(result.output).not.toContain("REFUSED-PAYLOAD");
 	});
 
 	it("bounds advisory continuations at the cap and then accepts the pending yield", async () => {
