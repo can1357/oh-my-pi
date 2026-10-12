@@ -406,6 +406,97 @@ describe("runSubprocess subagent_stop", () => {
 		expect(harness.prompts[1]?.text).toContain("yield again");
 	});
 
+	describe("a structured run that never yields", () => {
+		it("offers the fallback result to subagent_stop before publishing it", async () => {
+			const id = "FallbackOffered";
+			const harness = createHarness({
+				hasStopHandlers: true,
+				// The model answers in prose and ignores every yield reminder.
+				onPrompt: call => call.report("prose result"),
+			});
+			mockCreateAgentSession(harness.session);
+			registerRunning(id, harness.session);
+
+			const result = await runSubprocess(baseOptions(id));
+
+			expect(harness.events).toHaveLength(1);
+			expect(harness.events[0]?.stop_hook_active).toBe(false);
+			expect(assistantText(harness.events[0]?.last_assistant_message)).toBe("prose result");
+			expect(result.exitCode).toBe(0);
+			expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).text()).toContain("prose result");
+		});
+
+		it("fails the run instead of publishing a refused fallback result nothing replaced", async () => {
+			const id = "FallbackRefused";
+			const refused = "REFUSED-PROSE-MUST-NOT-BE-PUBLISHED";
+			const harness = createHarness({
+				hasStopHandlers: true,
+				onPrompt: call => call.report(refused),
+				onStop: async (_event, callIndex) =>
+					callIndex === 1 ? { decision: "block", reason: "not done" } : undefined,
+			});
+			mockCreateAgentSession(harness.session);
+			registerRunning(id, harness.session);
+
+			const result = await runSubprocess(baseOptions(id));
+
+			// Only a fresh yield can answer the refusal, so the spent ladder never re-offers the prose.
+			expect(harness.events).toHaveLength(1);
+			expect(harness.prompts.some(call => call.text === "not done")).toBe(true);
+			expect(result.exitCode).not.toBe(0);
+			expect(result.error).toBe(SUBAGENT_STOP_REFUSAL_UNRESOLVED);
+			expect(result.output).not.toContain(refused);
+			expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).exists()).toBe(false);
+		});
+
+		it("publishes the yield that answers a refused fallback result", async () => {
+			const id = "FallbackRefusedThenYield";
+			const harness = createHarness({
+				hasStopHandlers: true,
+				onPrompt: call =>
+					call.text === "not done" ? call.yieldTerminal({ report: "real answer" }) : call.report("prose"),
+				onStop: async (_event, callIndex) =>
+					callIndex === 1 ? { decision: "block", reason: "not done" } : undefined,
+			});
+			mockCreateAgentSession(harness.session);
+			registerRunning(id, harness.session);
+
+			const result = await runSubprocess(baseOptions(id));
+
+			expect(harness.events.map(event => event.stop_hook_active)).toEqual([false, true]);
+			expect(result.exitCode).toBe(0);
+			expect(JSON.parse(result.output)).toEqual({ report: "real answer" });
+			expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).text()).not.toContain("prose");
+		});
+
+		it("offers a JSON completion that satisfies the schema, and nothing under a schema that prose cannot meet", async () => {
+			const outputSchema = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] };
+			const completion = createHarness({
+				hasStopHandlers: true,
+				// The reminders that follow add no text, so the run's output stays one JSON document.
+				onPrompt: call => call.report(call.promptIndex === 1 ? '{"ok":true}' : ""),
+			});
+			mockCreateAgentSession(completion.session);
+			registerRunning("FallbackCompletion", completion.session);
+			const completed = await runSubprocess({ ...baseOptions("FallbackCompletion"), outputSchema });
+
+			expect(completion.events).toHaveLength(1);
+			expect(completed.exitCode).toBe(0);
+
+			// Prose fails the schema, so the run fails on the missing yield: no result, nothing to offer.
+			const prose = createHarness({
+				hasStopHandlers: true,
+				onPrompt: call => call.report("not json"),
+			});
+			mockCreateAgentSession(prose.session);
+			registerRunning("FallbackProse", prose.session);
+			const failed = await runSubprocess({ ...baseOptions("FallbackProse"), outputSchema });
+
+			expect(prose.events).toHaveLength(0);
+			expect(failed.exitCode).not.toBe(0);
+		});
+	});
+
 	it("does not publish the refused yield when the replacement is only a complete section", async () => {
 		const id = "RefusedThenSection";
 		const harness = createHarness({
