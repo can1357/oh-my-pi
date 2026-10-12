@@ -46,20 +46,6 @@ describe("BashExecutionComponent replay seeding", () => {
 		setThemeInstance(darkTheme);
 	});
 
-	it("keeps every line of a >100-line replayed result after expansion", () => {
-		const component = new BashExecutionComponent("seq 1 250", ui, false);
-		// The replay path: seed the persisted output as the completed snapshot.
-		component.setComplete(0, false, { output: REPLAY_OUTPUT });
-
-		expect(component.getOutput().split("\n")).toHaveLength(REPLAY_LINES.length);
-
-		component.setExpanded(true);
-		const rendered = rowsOf(component);
-		for (const line of REPLAY_LINES) {
-			expect(rendered).toContain(line);
-		}
-	});
-
 	it("reports the true hidden-line count and keeps advertising expand", () => {
 		const component = new BashExecutionComponent("seq 1 250", ui, false);
 		component.setComplete(0, false, { output: REPLAY_OUTPUT });

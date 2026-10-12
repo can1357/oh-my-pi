@@ -141,6 +141,8 @@ export class EvalExecutionComponent extends Container {
 				exitCode: this.#exitCode,
 				truncation: this.#truncation,
 				artifactError: this.#artifactError,
+				// The eval pane keeps every line it is handed, so nothing is dropped.
+				droppedLineCount: 0,
 			};
 			return dataFirst
 				? describeExecutionTool({
