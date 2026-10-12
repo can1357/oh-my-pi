@@ -142,6 +142,8 @@ export interface ExecutionCardInput {
 	readonly exitCode: number | undefined;
 	readonly truncation: TruncationMeta | undefined;
 	readonly artifactError?: OutputArtifactError;
+	/** Rows the live streaming cap discarded; gone for good, so they are named apart from the hidden rows expansion still delivers. */
+	readonly droppedLineCount: number;
 }
 
 /**
@@ -180,6 +182,9 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 	else if (input.status === "error") note(`(exit ${input.exitCode})`, "error");
 	if (input.truncation) note(formatTruncationMetaNotice(input.truncation), "warning");
 	if (input.artifactError) note(formatArtifactErrorNotice(input.artifactError), "warning");
+	// Same note the legacy footer prints (buildStatusFooter), so a TSP surface
+	// and the fallback card name the dropped head in the same words.
+	if (input.droppedLineCount > 0) note(`… ${input.droppedLineCount} earlier lines dropped`, "dim");
 	if (notes.length > 0) children.push(text(notes, { wrap: "word", key: "notes" }));
 	return card(
 		{
@@ -216,6 +221,8 @@ export interface ExecutionToolInput {
 	readonly exitCode: number | undefined;
 	readonly truncation: TruncationMeta | undefined;
 	readonly artifactError?: OutputArtifactError;
+	/** Rows the live streaming cap discarded; named in the run foot, apart from the hidden rows the preview still delivers. */
+	readonly droppedLineCount: number;
 }
 
 const EXECUTION_RUN_STATE: Record<ExecutionStatus, RunState> = {
@@ -253,7 +260,11 @@ export function describeExecutionTool(input: ExecutionToolInput): NativeNode {
 				state,
 				exitCode: input.exitCode,
 				elapsedMs: ms,
-				meta: { truncation: input.truncation, artifactError: input.artifactError },
+				meta: {
+					truncation: input.truncation,
+					artifactError: input.artifactError,
+					droppedLines: input.droppedLineCount,
+				},
 			}),
 		],
 		{ key: "run", tone: state === "failed" ? "error" : undefined },

@@ -205,6 +205,7 @@ export class BashExecutionComponent extends Container {
 				exitCode: this.#exitCode,
 				truncation: this.#truncation,
 				artifactError: this.#artifactError,
+				droppedLineCount: this.#droppedLiveLines,
 			};
 			return dataFirst
 				? describeExecutionTool({

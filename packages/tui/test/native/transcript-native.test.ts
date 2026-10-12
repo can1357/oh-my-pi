@@ -485,4 +485,28 @@ describe("native transcript", () => {
 		);
 		expect(h.errors).toEqual([]);
 	});
+
+	it("names the rows a >100-line run dropped in both native descriptions", async () => {
+		const DROPPED = 150;
+		const build = (h: TspHarness): void => {
+			const bash = new BashExecutionComponent("seq 1 250", h.tui);
+			bash.appendOutput(Array.from({ length: 250 }, (_, i) => `line-${i}`).join("\n"));
+			bash.setComplete(0, false);
+			h.tui.addChild(bash);
+		};
+		const run = async (kinds: readonly string[] | undefined): Promise<void> => {
+			const h = await TspHarness.start(undefined, { kinds });
+			build(h);
+			await h.render();
+			const note = `… ${DROPPED} earlier lines dropped`;
+			const frame = h.find(node => node.k === "tool" || node.k === "card");
+			expect(frame).toBeDefined();
+			expect(JSON.stringify(frame)).toContain(note);
+			h.stop();
+		};
+		// A terminal advertising the `tool` kind gets the run box; one without
+		// it gets the card. Both must name the dropped head.
+		await run(["col", "text", "rows"]);
+		await run(undefined);
+	});
 });
