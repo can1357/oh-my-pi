@@ -224,8 +224,8 @@ export class BinaryVectorStore {
 		const queryDim = Math.min(queryEmbedding.length, EMBEDDING_DIM);
 		const queryBinary = maximallyInformativeBinarization(queryEmbedding);
 		const rows = this.conn
-			.query(`SELECT memory_id, binary_vector, original_dim, magnitude FROM ${this.tableName}`)
-			.all() as VectorRow[];
+			.query<VectorRow, []>(`SELECT memory_id, binary_vector, original_dim, magnitude FROM ${this.tableName}`)
+			.all();
 		const results: BinaryVectorSearchResult[] = [];
 		for (const row of rows) {
 			const storedDim = Math.max(0, Math.min(EMBEDDING_DIM, Math.trunc(toFiniteNumber(row.original_dim))));
@@ -249,21 +249,21 @@ export class BinaryVectorStore {
 	}
 	getStats(): BinaryVectorStats {
 		const row = this.conn
-			.query(
+			.query<StatsRow, []>(
 				`SELECT COUNT(*) AS count,
-					AVG(LENGTH(binary_vector)) AS avg_bytes,
-					MAX(LENGTH(binary_vector)) AS max_bytes,
-					MIN(LENGTH(binary_vector)) AS min_bytes
-				 FROM ${this.tableName}`,
+				AVG(LENGTH(binary_vector)) AS avg_bytes,
+				MAX(LENGTH(binary_vector)) AS max_bytes,
+				MIN(LENGTH(binary_vector)) AS min_bytes
+			 FROM ${this.tableName}`,
 			)
-			.get() as StatsRow;
-		const count = row.count;
-		const bytesPerVector = row.avg_bytes ?? 0;
+			.get();
+		const count = row?.count ?? 0;
+		const bytesPerVector = row?.avg_bytes ?? 0;
 		return {
 			total_vectors: count,
 			avg_bytes_per_vector: bytesPerVector,
-			max_bytes: row.max_bytes ?? 0,
-			min_bytes: row.min_bytes ?? 0,
+			max_bytes: row?.max_bytes ?? 0,
+			min_bytes: row?.min_bytes ?? 0,
 			compression_ratio: BYTES_PER_VECTOR / (EMBEDDING_DIM * 4),
 			theoretical_size_mb: (count * BYTES_PER_VECTOR) / (1024 * 1024),
 		};

@@ -1,5 +1,5 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
-import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
+import { logger } from "@oh-my-pi/pi-utils";
 import { transaction } from "../../db";
 import { toUtcIso } from "../../util/datetime";
 import { generateId } from "../../util/ids";
@@ -24,6 +24,52 @@ import type {
 
 type Row = Record<string, unknown>;
 type EventPayload = Omit<BeamEvent, "type" | "sessionId" | "timestamp">;
+
+/** `working_memory.id` as read by the duplicate check and the TTL trim. */
+type WorkingIdRow = { id: string };
+
+/** `memory_embeddings.model`; NULL marks rows stamped before the column existed. */
+type EmbeddingModelRow = { model: string | null };
+
+/** `working_memory` context row (one JSON object per memory). */
+type ContextRow = {
+	id: string;
+	content: string;
+	source: string | null;
+	timestamp: string | null;
+	importance: number | null;
+	scope: string | null;
+};
+
+/** Columns {@link get} reads from `working_memory` / `episodic_memory`. */
+type MemoryRow = {
+	id: string;
+	content: string;
+	source: string | null;
+	timestamp: string | null;
+	session_id: string | null;
+	importance: number | null;
+	metadata_json: string | null;
+	veracity: string | null;
+	created_at: string | null;
+};
+
+/** `facts` row read by {@link getFact}; `scope` only exists on banks that added the column. */
+type FactRow = {
+	fact_id: string;
+	session_id: string | null;
+	subject: string | null;
+	predicate: string | null;
+	object: string | null;
+	timestamp: string | null;
+	source_msg_id: string | null;
+	confidence: number | null;
+	created_at: string | null;
+	scope?: string | null;
+};
+
+/** Scratchpad row read by {@link scratchpadRead}. */
+type ScratchpadRow = { id: string; content: string; created_at: string; updated_at: string };
 
 type StoreRememberOptions = RememberOptions & {
 	memoryId?: string;
@@ -153,16 +199,22 @@ function invalidateCaches(beam: BeamMemoryState): void {
 }
 
 function findDuplicate(beam: BeamMemoryState, content: string): string | null {
-	using statement = beam.db.prepare("SELECT id FROM working_memory WHERE content = ? AND session_id = ? LIMIT 1");
-	const row = statement.get(content, beam.sessionId) as { id: string } | null;
+	const row = beam.db
+		.query<WorkingIdRow, [string, string]>(
+			"SELECT id FROM working_memory WHERE content = ? AND session_id = ? LIMIT 1",
+		)
+		.get(content, beam.sessionId);
 	return row?.id ?? null;
 }
 
 function tableExists(db: BeamMemoryState["db"], table: string): boolean {
-	using statement = db.prepare(
-		"SELECT 1 FROM sqlite_master WHERE type IN ('table','virtual table') AND name = ? LIMIT 1",
+	return (
+		db
+			.query<{ "1": number }, [string]>(
+				"SELECT 1 FROM sqlite_master WHERE type IN ('table','virtual table') AND name = ? LIMIT 1",
+			)
+			.get(table) !== null
 	);
-	return statement.get(table) !== null;
 }
 
 /** Tables whose rows point back to a `working_memory` id via `source_memory_id`. */
@@ -232,7 +284,8 @@ function trimWorkingMemory(beam: BeamMemoryState): void {
 	const ttlHours = beam.config.workingMemoryTtlHours;
 	const cutoff = toUtcIso(new Date(Date.now() - ttlHours * 3_600_000));
 	transaction(beam.db, () => {
-		using selectStatement = beam.db.prepare(`
+		const ids = beam.db
+			.query<WorkingIdRow, [string, string, string, number]>(`
 			SELECT id FROM working_memory
 			WHERE session_id = ?
 			  AND consolidated_at IS NULL
@@ -246,10 +299,9 @@ function trimWorkingMemory(beam: BeamMemoryState): void {
 					LIMIT ?
 				)
 			  )
-		`);
-		const ids = (selectStatement.all(beam.sessionId, cutoff, beam.sessionId, limit) as { id: string }[]).map(
-			row => row.id,
-		);
+		`)
+			.all(beam.sessionId, cutoff, beam.sessionId, limit)
+			.map(row => row.id);
 		if (ids.length === 0) return;
 		const placeholders = ids.map(() => "?").join(", ");
 		beam.db.run(`DELETE FROM working_memory WHERE id IN (${placeholders}) AND session_id = ?`, [
@@ -307,11 +359,9 @@ function proactiveLinkIfEnabled(
 async function runFactExtraction(beam: BeamMemoryState, memoryId: string, content: string): Promise<void> {
 	try {
 		const extracted = await extractFactCategoriesSafe(content);
-		withLoopPhase("mnemopi.extract", () => {
-			if (countExtractedFactCategories(extracted) === 0) return;
-			storeExtractedFactCategories(beam, extracted, 0, memoryId);
-			invalidateCaches(beam);
-		});
+		if (countExtractedFactCategories(extracted) === 0) return;
+		storeExtractedFactCategories(beam, extracted, 0, memoryId);
+		invalidateCaches(beam);
 	} catch {
 		// Background fact extraction is best-effort and never surfaces to the caller.
 	}
@@ -382,15 +432,17 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 	const mismatch = beam.db.query("SELECT 1 FROM memory_embeddings WHERE model IS NOT ? LIMIT 1").get(active);
 	if (mismatch) {
 		const staleModels = beam.db
-			.query("SELECT DISTINCT model FROM memory_embeddings WHERE model IS NOT ?")
-			.all(active) as { model: string | null }[];
+			.query<EmbeddingModelRow, [string]>("SELECT DISTINCT model FROM memory_embeddings WHERE model IS NOT ?")
+			.all(active);
 		const live = beam.db
-			.query(`
+			.query<EmbedItem, []>(
+				`
 				SELECT id AS memoryId, COALESCE(embed_text, content) AS content FROM working_memory WHERE superseded_by IS NULL
 				UNION ALL
 				SELECT id AS memoryId, content FROM episodic_memory WHERE superseded_by IS NULL
-			`)
-			.all() as EmbedItem[];
+			`,
+			)
+			.all();
 
 		transaction(beam.db, () => {
 			beam.db.run("DELETE FROM memory_embeddings");
@@ -418,14 +470,16 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 	// empty/partial table as "reconciled" would strand them FTS-only, so re-enqueue any live
 	// row still missing an active-model embedding.
 	const missing = beam.db
-		.query(`
+		.query<EmbedItem, [string, string]>(
+			`
 			SELECT id AS memoryId, COALESCE(embed_text, content) AS content FROM working_memory
 			WHERE superseded_by IS NULL AND id NOT IN (SELECT memory_id FROM memory_embeddings WHERE model = ?)
 			UNION ALL
 			SELECT id AS memoryId, content FROM episodic_memory
 			WHERE superseded_by IS NULL AND id NOT IN (SELECT memory_id FROM memory_embeddings WHERE model = ?)
-		`)
-		.all(active, active) as EmbedItem[];
+		`,
+		)
+		.all(active, active);
 	if (missing.length === 0) return;
 	logger.info("mnemopi: resuming interrupted embedding rebuild", { to: active, count: missing.length });
 	rebuild(missing);
@@ -624,19 +678,21 @@ export function rememberBatch(
 
 export function getContext(beam: BeamMemoryState, limit = 10): Row[] {
 	const now = toUtcIso();
-	using statement = beam.db.prepare(`
-		SELECT id, content, source, timestamp, importance, scope
-		FROM working_memory
-		WHERE (session_id = ? OR scope = 'global')
-		  AND (valid_until IS NULL OR valid_until > ?)
-		  AND superseded_by IS NULL
-		ORDER BY
-			CASE WHEN scope = 'global' THEN 0 ELSE 1 END,
-			importance DESC,
-			timestamp DESC
-		LIMIT ?
-	`);
-	return (statement.all(beam.sessionId, now, limit) as Row[]).map(rowToDict);
+	return beam.db
+		.query<ContextRow, [string, string, number]>(`
+			SELECT id, content, source, timestamp, importance, scope
+			FROM working_memory
+			WHERE (session_id = ? OR scope = 'global')
+			  AND (valid_until IS NULL OR valid_until > ?)
+			  AND superseded_by IS NULL
+			ORDER BY
+				CASE WHEN scope = 'global' THEN 0 ELSE 1 END,
+				importance DESC,
+				timestamp DESC
+			LIMIT ?
+		`)
+		.all(beam.sessionId, now, limit)
+		.map(rowToDict);
 }
 
 export function invalidate(beam: BeamMemoryState, memoryId: string, replacementId: string | null = null): boolean {
@@ -740,22 +796,24 @@ export function updateWorking(
 }
 
 export function get(beam: BeamMemoryState, memoryId: string): Row | null {
-	using workingStatement = beam.db.prepare(`
-		SELECT id, content, source, timestamp, session_id,
-			   importance, metadata_json, veracity, created_at, valid_until, superseded_by
-		FROM working_memory
-		WHERE id = ?
-	`);
-	const working = workingStatement.get(memoryId) as Row | null | undefined;
+	const working = beam.db
+		.query<MemoryRow, [string]>(
+			`SELECT id, content, source, timestamp, session_id,
+			   importance, metadata_json, veracity, created_at
+			FROM working_memory
+			WHERE id = ?`,
+		)
+		.get(memoryId);
 	if (working != null) return { ...working, metadata: working.metadata_json, memory_store: "working" };
 
-	using episodicStatement = beam.db.prepare(`
-		SELECT id, content, source, timestamp, session_id,
-			   importance, metadata_json, veracity, created_at, valid_until, superseded_by
-		FROM episodic_memory
-		WHERE id = ? AND (session_id = ? OR scope = 'global')
-	`);
-	const episodic = episodicStatement.get(memoryId, beam.sessionId) as Row | null | undefined;
+	const episodic = beam.db
+		.query<MemoryRow, [string, string]>(
+			`SELECT id, content, source, timestamp, session_id,
+			   importance, metadata_json, veracity, created_at
+			FROM episodic_memory
+			WHERE id = ? AND (session_id = ? OR scope = 'global')`,
+		)
+		.get(memoryId, beam.sessionId);
 	if (episodic != null) return { ...episodic, metadata: episodic.metadata_json, memory_store: "episodic" };
 
 	return getFact(beam, memoryId);
@@ -774,8 +832,11 @@ export function get(beam: BeamMemoryState, memoryId: string): Row | null {
  * path mutates `facts`.
  */
 function getFact(beam: BeamMemoryState, memoryId: string): Row | null {
+	// `SELECT *` must stay on `prepare()`: bun's `db.query` cache keys on the SQL
+	// string and keeps the pre-ALTER column set, so a cached `SELECT *` would not
+	// see a `scope` column added by ALTER TABLE (schema-tolerant fact reads).
 	using statement = beam.db.prepare("SELECT * FROM facts WHERE fact_id = ?");
-	const fact = statement.get(memoryId) as Row | null | undefined;
+	const fact = statement.get(memoryId) as FactRow | null | undefined;
 	if (fact == null) return null;
 	if (fact.session_id !== beam.sessionId && fact.scope !== "global") return null;
 	const subject = typeof fact.subject === "string" ? fact.subject : "";
@@ -830,16 +891,16 @@ export function scratchpadWrite(beam: BeamMemoryState, content: string): string 
 }
 
 export function scratchpadRead(beam: BeamMemoryState): Row[] {
-	using statement = beam.db.prepare(`
-		SELECT id, content, created_at, updated_at
-		FROM scratchpad
-		WHERE session_id = ?
-		ORDER BY updated_at DESC
-		LIMIT ?
-	`);
-	return (
-		statement.all(beam.sessionId, Number.isFinite(SCRATCHPAD_MAX_ITEMS) ? SCRATCHPAD_MAX_ITEMS : 1000) as Row[]
-	).map(rowToDict);
+	return beam.db
+		.query<ScratchpadRow, [string, number]>(
+			`SELECT id, content, created_at, updated_at
+			FROM scratchpad
+			WHERE session_id = ?
+			ORDER BY updated_at DESC
+			LIMIT ?`,
+		)
+		.all(beam.sessionId, Number.isFinite(SCRATCHPAD_MAX_ITEMS) ? SCRATCHPAD_MAX_ITEMS : 1000)
+		.map(rowToDict);
 }
 
 export function scratchpadClear(beam: BeamMemoryState): void {

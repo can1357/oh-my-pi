@@ -32,6 +32,48 @@ export interface GlobalClaim {
 	inputWatermark: number;
 }
 
+/** Running stage-1 job count checked against the concurrency cap. */
+type RunningJobsCountRow = { count: number };
+
+/** `threads` columns listed by {@link claimStage1Jobs}. */
+type ThreadCandidateRow = {
+	id: string;
+	updated_at: number;
+	rollout_path: string;
+	cwd: string;
+	source_kind: string;
+};
+
+/** Newest stage-1 output recorded for a thread. */
+type Stage1TimestampRow = { source_updated_at: number };
+
+/** Ownership check for one stage-1 job. */
+type Stage1OwnershipRow = { ok: number };
+
+/** Job columns read by the phase-2 claim path. */
+type GlobalJobRow = {
+	status: string;
+	lease_until: number | null;
+	input_watermark: number | null;
+	last_success_watermark: number | null;
+	retry_at: number | null;
+	retry_remaining: number;
+};
+
+/** Watermark of one claimed global job. */
+type GlobalJobWatermarkRow = { input_watermark: number | null };
+
+/** One stage-1 output joined with its thread cwd for consolidation. */
+type Stage1OutputJoinRow = {
+	thread_id: string;
+	source_updated_at: number;
+	raw_memory: string;
+	rollout_summary: string;
+	rollout_slug: string | null;
+	generated_at: number;
+	cwd: string | null;
+};
+
 const STAGE1_KIND = "memory_stage1";
 const GLOBAL_KIND = "memory_consolidate_global";
 const DEFAULT_RETRY_REMAINING = 3;
@@ -197,21 +239,17 @@ export function claimStage1Jobs(
 	const maxAgeSec = maxRolloutAgeDays * 24 * 60 * 60;
 	const minIdleSec = minRolloutIdleHours * 60 * 60;
 	const runningCountRow = db
-		.prepare(
+		.query<RunningJobsCountRow, [string, number]>(
 			"SELECT COUNT(*) AS count FROM jobs WHERE kind = ? AND status = 'running' AND lease_until IS NOT NULL AND lease_until > ?",
 		)
-		.get(STAGE1_KIND, nowSec) as { count?: number } | undefined;
+		.get(STAGE1_KIND, nowSec);
 	let runningCount = runningCountRow?.count ?? 0;
 	if (runningCount >= runningConcurrencyCap) return [];
 	const candidateRows = db
-		.prepare("SELECT id, updated_at, rollout_path, cwd, source_kind FROM threads ORDER BY updated_at DESC LIMIT ?")
-		.all(threadScanLimit) as Array<{
-		id: string;
-		updated_at: number;
-		rollout_path: string;
-		cwd: string;
-		source_kind: string;
-	}>;
+		.query<ThreadCandidateRow, [number]>(
+			"SELECT id, updated_at, rollout_path, cwd, source_kind FROM threads ORDER BY updated_at DESC LIMIT ?",
+		)
+		.all(threadScanLimit);
 	const claims: Stage1Claim[] = [];
 	const excluded = new Set(excludeThreadIds);
 	for (const row of candidateRows) {
@@ -221,9 +259,9 @@ export function claimStage1Jobs(
 		if (nowSec - row.updated_at > maxAgeSec) continue;
 		if (nowSec - row.updated_at < minIdleSec) continue;
 		if (runningCount >= runningConcurrencyCap) break;
-		const stage1 = db.prepare("SELECT source_updated_at FROM stage1_outputs WHERE thread_id = ?").get(row.id) as
-			| { source_updated_at?: number }
-			| undefined;
+		const stage1 = db
+			.query<Stage1TimestampRow, [string]>("SELECT source_updated_at FROM stage1_outputs WHERE thread_id = ?")
+			.get(row.id);
 		if ((stage1?.source_updated_at ?? 0) >= row.updated_at) continue;
 		ensureStage1Job(db, row.id);
 		const ownershipToken = crypto.randomUUID();
@@ -347,10 +385,10 @@ export function markStage1SucceededWithOutput(
 	const { threadId, ownershipToken, sourceUpdatedAt, rawMemory, rolloutSummary, rolloutSlug, nowSec, cwd } = params;
 	const tx = db.transaction(() => {
 		const matched = db
-			.prepare(
+			.query<Stage1OwnershipRow, [string, string, string]>(
 				"SELECT 1 AS ok FROM jobs WHERE kind = ? AND job_key = ? AND status = 'running' AND ownership_token = ?",
 			)
-			.get(STAGE1_KIND, threadId, ownershipToken) as { ok?: number } | undefined;
+			.get(STAGE1_KIND, threadId, ownershipToken);
 		if (!matched?.ok) return false;
 
 		db.prepare(`
@@ -385,10 +423,10 @@ export function markStage1SucceededNoOutput(
 	const { threadId, ownershipToken, sourceUpdatedAt, nowSec, cwd } = params;
 	const tx = db.transaction(() => {
 		const matched = db
-			.prepare(
+			.query<Stage1OwnershipRow, [string, string, string]>(
 				"SELECT 1 AS ok FROM jobs WHERE kind = ? AND job_key = ? AND status = 'running' AND ownership_token = ?",
 			)
-			.get(STAGE1_KIND, threadId, ownershipToken) as { ok?: number } | undefined;
+			.get(STAGE1_KIND, threadId, ownershipToken);
 		if (!matched?.ok) return false;
 
 		db.prepare(`
@@ -430,19 +468,10 @@ export function tryClaimGlobalPhase2Job(
 	const jobKey = globalJobKey(cwd);
 	ensureGlobalJob(db, cwd);
 	const pre = db
-		.prepare(
+		.query<GlobalJobRow, [string, string]>(
 			"SELECT status, lease_until, input_watermark, last_success_watermark, retry_at, retry_remaining FROM jobs WHERE kind = ? AND job_key = ?",
 		)
-		.get(GLOBAL_KIND, jobKey) as
-		| {
-				status: string;
-				lease_until: number | null;
-				input_watermark: number | null;
-				last_success_watermark: number | null;
-				retry_at: number | null;
-				retry_remaining: number;
-		  }
-		| undefined;
+		.get(GLOBAL_KIND, jobKey);
 	if (!pre) return { kind: "skipped_not_dirty" };
 	const ownershipToken = crypto.randomUUID();
 	const claimed = db
@@ -459,8 +488,10 @@ WHERE kind = ? AND job_key = ?
 		.run(workerId, ownershipToken, nowSec, nowSec + leaseSeconds, GLOBAL_KIND, jobKey, nowSec, nowSec);
 	if (Number(claimed.changes ?? 0) > 0) {
 		const row = db
-			.prepare("SELECT input_watermark FROM jobs WHERE kind = ? AND job_key = ? AND ownership_token = ?")
-			.get(GLOBAL_KIND, jobKey, ownershipToken) as { input_watermark: number | null } | undefined;
+			.query<GlobalJobWatermarkRow, [string, string, string]>(
+				"SELECT input_watermark FROM jobs WHERE kind = ? AND job_key = ? AND ownership_token = ?",
+			)
+			.get(GLOBAL_KIND, jobKey, ownershipToken);
 		return {
 			kind: "claimed",
 			claim: {
@@ -486,19 +517,10 @@ WHERE kind = ? AND job_key = ?
 	}
 
 	const post = db
-		.prepare(
+		.query<GlobalJobRow, [string, string]>(
 			"SELECT status, lease_until, input_watermark, last_success_watermark, retry_at, retry_remaining FROM jobs WHERE kind = ? AND job_key = ?",
 		)
-		.get(GLOBAL_KIND, jobKey) as
-		| {
-				status: string;
-				lease_until: number | null;
-				input_watermark: number | null;
-				last_success_watermark: number | null;
-				retry_at: number | null;
-				retry_remaining: number;
-		  }
-		| undefined;
+		.get(GLOBAL_KIND, jobKey);
 	if (!post) return { kind: "skipped_not_dirty" };
 	if (post.status === "running" && post.lease_until !== null && post.lease_until > nowSec) {
 		return { kind: "skipped_running" };
@@ -527,24 +549,16 @@ WHERE kind = ? AND job_key = ? AND status = 'running' AND ownership_token = ?
 // project's data written into its memory directory (see #369).
 export function listStage1OutputsForGlobal(db: Database, limit: number, cwd: string): Stage1OutputRow[] {
 	const rows = db
-		.prepare(`
-SELECT o.thread_id, o.source_updated_at, o.raw_memory, o.rollout_summary, o.rollout_slug, o.generated_at, t.cwd
+		.query<Stage1OutputJoinRow, [string, number]>(
+			`SELECT o.thread_id, o.source_updated_at, o.raw_memory, o.rollout_summary, o.rollout_slug, o.generated_at, t.cwd
 FROM stage1_outputs o
 LEFT JOIN threads t ON t.id = o.thread_id
 WHERE (TRIM(COALESCE(o.raw_memory, '')) != '' OR TRIM(COALESCE(o.rollout_summary, '')) != '')
   AND t.cwd = ?
 ORDER BY o.source_updated_at DESC
-LIMIT ?
-`)
-		.all(normalizeScopeCwd(cwd), limit) as Array<{
-		thread_id: string;
-		source_updated_at: number;
-		raw_memory: string;
-		rollout_summary: string;
-		rollout_slug: string | null;
-		generated_at: number;
-		cwd: string | null;
-	}>;
+LIMIT ?`,
+		)
+		.all(normalizeScopeCwd(cwd), limit);
 	return rows.map(row => ({
 		threadId: row.thread_id,
 		sourceUpdatedAt: row.source_updated_at,
