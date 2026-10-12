@@ -1111,6 +1111,7 @@
 - Background task cards no longer stop updating once the agent ends its turn while the task is still running
 - Transparent images the model receives (small icons, oversized screenshots) keep their transparency instead of turning into a black square, and resized edges no longer pick up a dark fringe
 - Added removing a model from the recently used models in `/model`: press `Ctrl+D` on a recently used model. The model in use and models assigned to a role can't be removed. Using a removed model again puts it back
+- Added removing a model from the recently used models in `/model`: press `Ctrl+D` on a recently used model. The model in use and models assigned to a role can't be removed. Using a removed model again puts it back ([#15461](https://github.com/can1357/oh-my-pi/pull/15461) by [@TheDiscoScript](https://github.com/TheDiscoScript))
 
 ## [18.10.1] - 2026-10-12
 
