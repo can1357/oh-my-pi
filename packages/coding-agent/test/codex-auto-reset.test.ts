@@ -573,6 +573,21 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		expect(restoredFor(3 * DAY + RESTORE_WAIT_TOLERANCE_MS + 60_000)).toBe("openai-codex|-|2");
 	});
 
+	it("still salvages the passed-over account's expiring credit in the same pass", () => {
+		const active = report({ weeklyResetInMs: 4 * HOUR, creditExpiries: [2 * HOUR] });
+		const sibling = report({
+			accountId: "acct-sib",
+			email: "sib@example.com",
+			weeklyResetInMs: 6 * DAY,
+			creditExpiries: [5 * DAY],
+		});
+		const plan = planCodexResetRedemptions(input([active, sibling]));
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", accountKey: "openai-codex|-|2" },
+			{ reason: "expiring-credit", accountKey: ACCOUNT_KEY, expiresInMs: 2 * HOUR },
+		]);
+	});
+
 	it("never restores an account outside the session's account pool, however long its wait", () => {
 		const active = report({ weeklyResetInMs: 4 * HOUR });
 		const excluded = report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: 6 * DAY });

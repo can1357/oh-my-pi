@@ -691,6 +691,9 @@ describe("Claude saved-reset trigger integration", () => {
 			await pool.release();
 		}
 
+		// Two spends where active-first spends one: the unrestricted runner restores the
+		// account that skips the longest wait, as it would alone, and the pooled joiner
+		// restores its own. Each buys its session the wait it skips.
 		// The pooled session never retries its still-blocked account on the peer's restore.
 		expect(spent).toEqual([pool.outsideId, pool.pooledId]);
 		expect(pooled.modelCalls()).toBe(2);
