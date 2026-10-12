@@ -6,6 +6,7 @@
 
 - With the Hindsight memory backend, `retain` and `learn` can now store a memory with `scope: "global"` so every project recalls it. It is opt-in through the new `hindsight.globalScope` setting (off by default) and needs `global` or `per-project-tagged` scoping ([#17706](https://github.com/can1357/oh-my-pi/pull/17706) by [@alphastorm](https://github.com/alphastorm), from [#15030](https://github.com/can1357/oh-my-pi/pull/15030) by [@kithawk](https://github.com/kithawk)).
 - Added `btw.inject` (off by default; `/settings` → Interaction → "/btw Steering Inject"): when you ask `/btw` for a steering prompt, it drafts one in an `<inject>` block shown behind a pink rail, and `Alt+I` (`app.btw.inject`) sends it to the main session (as a steer while the agent runs, else as a new turn) from the inline answer or the BTW history sheet, once per answer from the current run. Once sent, the block turns green with `➤` on each line and "Injected into main session" below it; if the main session drops or refuses the send, the block turns back to pending and the same key retries ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
+- Added `omp agents show <name>` to list the model, service tier, compaction trigger, tools and other values an agent's spawns run with, and which setting or frontmatter field set each ([#15433](https://github.com/can1357/oh-my-pi/pull/15433) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -1118,10 +1119,6 @@
 ### Fixed
 
 - Fixed `grep` on a single file showing in Tern as separate boxed snippets with no file row or syntax colors; it now looks the same as a `grep` over a directory
-
-### Added
-
-- Added `omp agents show <name>` to list the model, service tier, compaction trigger, tools and other values an agent's spawns run with, and which setting or frontmatter field set each
 
 ## [18.10.0] - 2026-10-12
 
