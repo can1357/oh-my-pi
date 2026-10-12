@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database, Statement } from "bun:sqlite";
 
 import { embeddingDim, type VecType } from "../config";
 import { closeQuietly, type DatabasePath, openDatabase } from "../db";
@@ -180,6 +180,8 @@ export class BinaryVectorStore {
 	readonly dbPath: DatabasePath;
 	readonly tableName: string;
 	private readonly ownsConnection: boolean;
+	private readonly searchStmt: Statement<VectorRow, []>;
+	private readonly statsStmt: Statement<StatsRow, []>;
 
 	constructor(options: BinaryVectorStoreOptions = {}) {
 		this.dbPath = options.dbPath ?? ":memory:";
@@ -187,6 +189,16 @@ export class BinaryVectorStore {
 		this.conn = options.conn ?? openDatabase(this.dbPath, { create: true, readwrite: true });
 		this.ownsConnection = options.conn === undefined;
 		this.initTable();
+		this.searchStmt = this.conn.query<VectorRow, []>(
+			`SELECT memory_id, binary_vector, original_dim, magnitude FROM ${this.tableName}`,
+		);
+		this.statsStmt = this.conn.query<StatsRow, []>(
+			`SELECT COUNT(*) AS count,
+			AVG(LENGTH(binary_vector)) AS avg_bytes,
+			MAX(LENGTH(binary_vector)) AS max_bytes,
+			MIN(LENGTH(binary_vector)) AS min_bytes
+		 FROM ${this.tableName}`,
+		);
 	}
 
 	private initTable(): void {
@@ -223,9 +235,7 @@ export class BinaryVectorStore {
 	search(queryEmbedding: readonly number[], topK = 10): BinaryVectorSearchResult[] {
 		const queryDim = Math.min(queryEmbedding.length, EMBEDDING_DIM);
 		const queryBinary = maximallyInformativeBinarization(queryEmbedding);
-		const rows = this.conn
-			.prepare<VectorRow, []>(`SELECT memory_id, binary_vector, original_dim, magnitude FROM ${this.tableName}`)
-			.all();
+		const rows = this.searchStmt.all();
 		const results: BinaryVectorSearchResult[] = [];
 		for (const row of rows) {
 			const storedDim = Math.max(0, Math.min(EMBEDDING_DIM, Math.trunc(toFiniteNumber(row.original_dim))));
@@ -248,15 +258,7 @@ export class BinaryVectorStore {
 		this.conn.query(`DELETE FROM ${this.tableName} WHERE memory_id = ?`).run(memoryId);
 	}
 	getStats(): BinaryVectorStats {
-		const row = this.conn
-			.prepare<StatsRow, []>(
-				`SELECT COUNT(*) AS count,
-				AVG(LENGTH(binary_vector)) AS avg_bytes,
-				MAX(LENGTH(binary_vector)) AS max_bytes,
-				MIN(LENGTH(binary_vector)) AS min_bytes
-			 FROM ${this.tableName}`,
-			)
-			.get();
+		const row = this.statsStmt.get();
 		const count = row?.count ?? 0;
 		const bytesPerVector = row?.avg_bytes ?? 0;
 		return {
@@ -269,6 +271,8 @@ export class BinaryVectorStore {
 		};
 	}
 	close(): void {
+		this.searchStmt.finalize();
+		this.statsStmt.finalize();
 		if (this.ownsConnection) {
 			closeQuietly(this.conn);
 		}

@@ -499,6 +499,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#lastUsageHistoryStmt: Statement<UsageHistoryKeyRow, [string, string, string]>;
 	#listUsageHistoryStmt: Statement<UsageHistoryRow, [number, string | null, string | null]>;
 	#updateUsageHistoryStmt: Statement;
+	#dataVersionStmt: Statement<{ data_version: number }, []>;
+	#authRevisionStmt: Statement<{ revision: number }, []>;
+	#localAuthRevisionStmt: Statement<{ revision: number }, []>;
 	#dataVersion: number;
 	#authRevision: number;
 	#localAuthRevision: number;
@@ -507,6 +510,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	constructor(db: Database) {
 		this.#db = db;
 		this.#initializeSchema();
+		this.#dataVersionStmt = this.#db.query<{ data_version: number }, []>("PRAGMA data_version");
+		this.#authRevisionStmt = this.#db.query<{ revision: number }, []>(
+			"SELECT revision FROM auth_change_revision WHERE id = 1",
+		);
+		this.#localAuthRevisionStmt = this.#db.query<{ revision: number }, []>(
+			"SELECT revision FROM auth_local_change_revision WHERE id = 1",
+		);
 		this.#dataVersion = this.#readDataVersion();
 		this.#authRevision = this.#readAuthRevision();
 		this.#localAuthRevision = this.#readLocalAuthRevision();
@@ -787,16 +797,16 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#authCredentialsTableExists(): boolean {
-		const row = this.#db
-			.prepare<{ present: number }, []>(
-				"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'auth_credentials'",
-			)
-			.get();
+		using stmt = this.#db.prepare<{ present: number }, []>(
+			"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'auth_credentials'",
+		);
+		const row = stmt.get();
 		return row?.present === 1;
 	}
 
 	#readAuthSchemaVersion(): number | null {
-		const row = this.#db.prepare<{ version: number }, []>("SELECT version FROM auth_schema_version WHERE id = 1").get();
+		using stmt = this.#db.prepare<{ version: number }, []>("SELECT version FROM auth_schema_version WHERE id = 1");
+		const row = stmt.get();
 		return typeof row?.version === "number" ? row.version : null;
 	}
 
@@ -810,7 +820,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#inferAuthSchemaVersion(): number {
-		const cols = this.#db.prepare<{ name: string }, []>("PRAGMA table_info(auth_credentials)").all();
+		using stmt = this.#db.prepare<{ name: string }, []>("PRAGMA table_info(auth_credentials)");
+		const cols = stmt.all();
 		return this.#inferAuthSchemaVersionFromColumns(cols);
 	}
 
@@ -1094,7 +1105,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 	#migrateAuthSchemaV0ToV1(): void {
 		const migrate = this.#db.transaction(() => {
-			const v0Cols = this.#db.prepare<{ name: string }, []>("PRAGMA table_info(auth_credentials)").all();
+			using v0ColsStmt = this.#db.prepare<{ name: string }, []>("PRAGMA table_info(auth_credentials)");
+			const v0Cols = v0ColsStmt.all();
 			const hasDisabled = v0Cols.some(col => col.name === "disabled");
 
 			this.#db.run("ALTER TABLE auth_credentials RENAME TO auth_credentials_v0");
@@ -1264,11 +1276,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			// observed live 2026-09-22), and neither key is accepted by the other
 			// host. Route each stored credential to the product that serves it
 			// instead of orphaning it under an id nothing reads anymore.
-			const rows = this.#db
-				.prepare<SingularitySplitRow, []>(
-					"SELECT id, credential_type, data FROM auth_credentials WHERE provider = 'singularityapi'",
-				)
-				.all();
+			using rowsStmt = this.#db.prepare<SingularitySplitRow, []>(
+				"SELECT id, credential_type, data FROM auth_credentials WHERE provider = 'singularityapi'",
+			);
+			const rows = rowsStmt.all();
 			for (const row of rows) {
 				let provider = "singularityapi-tech";
 				try {
@@ -1292,11 +1303,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#backfillCredentialIdentityKeys(): void {
-		const rows = this.#db
-			.prepare<AuthRow, []>(
-				"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE identity_key IS NULL ORDER BY id ASC",
-			)
-			.all();
+		using rowsStmt = this.#db.prepare<AuthRow, []>(
+			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE identity_key IS NULL ORDER BY id ASC",
+		);
+		const rows = rowsStmt.all();
 		if (rows.length === 0) return;
 
 		let updateIdentity: Statement | null = null;
@@ -1883,7 +1893,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * the column arrives via ALTER; legacy rows keep the `''` (unlabeled) app.
 	 */
 	#ensureClientUsageAppColumn(): void {
-		const columns = this.#db.prepare<{ name: string }, []>("PRAGMA table_info(client_usage)").all();
+		using columnsStmt = this.#db.prepare<{ name: string }, []>("PRAGMA table_info(client_usage)");
+		const columns = columnsStmt.all();
 		if (!columns.some(column => column.name === "app")) {
 			this.#db.run("ALTER TABLE client_usage ADD COLUMN app TEXT NOT NULL DEFAULT ''");
 		}
@@ -1898,7 +1909,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			)
 			.run(report.installId, report.hostname ?? null, now, now);
 		const app = report.app?.trim() ?? "";
-		const findBucket = this.#db.prepare<ClientUsageBucketRow, [string, string, string, string, number]>(
+		using findBucket = this.#db.prepare<ClientUsageBucketRow, [string, string, string, string, number]>(
 			`SELECT id FROM client_usage
 			 WHERE install_id = ? AND app = ? AND provider = ? AND model = ? AND recorded_at >= ?
 			 ORDER BY recorded_at DESC LIMIT 1`,
@@ -1947,20 +1958,18 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	getClientUsageSummary(sinceMs: number): ClientUsageSummary {
-		const clients = this.#db
-			.prepare<ClientRow, []>(
-				"SELECT install_id, hostname, first_seen, last_seen FROM clients ORDER BY last_seen DESC",
-			)
-			.all();
-		const aggregates = this.#db
-			.prepare<ClientUsageAggregateRow, [number]>(
-				`SELECT install_id, app, provider, SUM(requests) requests, SUM(input_tokens) input_tokens,
-					SUM(output_tokens) output_tokens, SUM(cache_read_tokens) cache_read_tokens,
-					SUM(cache_write_tokens) cache_write_tokens, SUM(cost_usd) cost_usd
-				 FROM client_usage WHERE recorded_at >= ? GROUP BY install_id, app, provider
-				 ORDER BY install_id, SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) DESC`,
-			)
-			.all(sinceMs);
+		using clientsStmt = this.#db.prepare<ClientRow, []>(
+			"SELECT install_id, hostname, first_seen, last_seen FROM clients ORDER BY last_seen DESC",
+		);
+		const clients = clientsStmt.all();
+		using aggregatesStmt = this.#db.prepare<ClientUsageAggregateRow, [number]>(
+			`SELECT install_id, app, provider, SUM(requests) requests, SUM(input_tokens) input_tokens,
+				SUM(output_tokens) output_tokens, SUM(cache_read_tokens) cache_read_tokens,
+				SUM(cache_write_tokens) cache_write_tokens, SUM(cost_usd) cost_usd
+			 FROM client_usage WHERE recorded_at >= ? GROUP BY install_id, app, provider
+			 ORDER BY install_id, SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) DESC`,
+		);
+		const aggregates = aggregatesStmt.all(sinceMs);
 		const providersByInstall = new Map<string, ClientProviderUsage[]>();
 		for (const row of aggregates) {
 			let list = providersByInstall.get(row.install_id);
@@ -2083,21 +2092,17 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#readDataVersion(): number {
-		const row = this.#db.prepare<{ data_version: number }, []>("PRAGMA data_version").get();
+		const row = this.#dataVersionStmt.get();
 		return row?.data_version ?? 0;
 	}
 
 	#readAuthRevision(): number {
-		const row = this.#db
-			.prepare<{ revision: number }, []>("SELECT revision FROM auth_change_revision WHERE id = 1")
-			.get();
+		const row = this.#authRevisionStmt.get();
 		return row?.revision ?? 0;
 	}
 
 	#readLocalAuthRevision(): number {
-		const row = this.#db
-			.prepare<{ revision: number }, []>("SELECT revision FROM auth_local_change_revision WHERE id = 1")
-			.get();
+		const row = this.#localAuthRevisionStmt.get();
 		return row?.revision ?? 0;
 	}
 
@@ -2139,6 +2144,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#releaseCredentialRefreshLeaseStmt.finalize();
 		this.#getCredentialStateStmt.finalize();
 		this.#holdsCredentialRefreshLeaseStmt.finalize();
+		this.#dataVersionStmt.finalize();
+		this.#authRevisionStmt.finalize();
+		this.#localAuthRevisionStmt.finalize();
 		this.#db.close();
 	}
 }
