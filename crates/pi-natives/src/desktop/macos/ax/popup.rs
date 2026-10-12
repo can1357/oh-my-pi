@@ -327,8 +327,9 @@ mod tests {
 
 	#[test]
 	fn a_choice_the_app_did_not_take_is_reported_after_the_cancel() {
-		let error = settle_choice("Large", Duration::ZERO, || Ok(()), || false, || Some("Small".to_string()))
-			.expect_err("the popup still reads Small");
+		let error =
+			settle_choice("Large", Duration::ZERO, || Ok(()), || false, || Some("Small".to_string()))
+				.expect_err("the popup still reads Small");
 		assert!(error.message.contains("still reads \"Small\""), "{}", error.message);
 	}
 }

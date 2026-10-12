@@ -1234,7 +1234,7 @@ fn background_pointer(
 	// the menu of a menu button or popup button that a left click lands on.
 	let timeout = if may_open_context_menu(&event) {
 		Some(ax::open_menu::CONTEXT_MENU_TIMEOUT)
-	} else if menu.is_some() || clicks_menu_control(&event, pid, menu_pid) {
+	} else if menu.is_some() || presses_menu_control(&event, pid, menu_pid) {
 		Some(ax::open_menu::CONTROL_MENU_TIMEOUT)
 	} else {
 		None
@@ -1262,15 +1262,26 @@ fn background_pointer(
 	)
 }
 
-/// Whether `event` is a left click that lands on a menu button or popup
-/// button drawn by `owner` (the window's application, or the process drawing
-/// its content) while another application than `pid` is frontmost; the control
-/// opens its menu on the click. Other clicks pay no accessibility hit-test.
-fn clicks_menu_control(event: &PointerEvent, pid: libc::pid_t, owner: libc::pid_t) -> bool {
-	let PointerEvent::Click { x, y, button: MouseButton::Left, .. } = *event else {
+/// Whether `event` presses the left button on a menu button or popup button
+/// drawn by `owner` (the window's application, or the process drawing its
+/// content) while another application than `pid` is frontmost; the control
+/// opens its menu on the press. Other gestures pay no accessibility hit-test.
+fn presses_menu_control(event: &PointerEvent, pid: libc::pid_t, owner: libc::pid_t) -> bool {
+	let Some((x, y)) = left_press(event) else {
 		return false;
 	};
 	skylight::front_pid() != Some(pid) && ax::open_menu::opens_menu_at(owner, x, y)
+}
+
+/// Where `event` presses the left button: a click's point, or the point a
+/// mouse hold or drag starts at.
+fn left_press(event: &PointerEvent) -> Option<(f64, f64)> {
+	match event {
+		PointerEvent::Click { x, y, button: MouseButton::Left, .. }
+		| PointerEvent::Hold { x, y, button: MouseButton::Left, .. } => Some((*x, *y)),
+		PointerEvent::Drag { path, button: MouseButton::Left, .. } => path.first().copied(),
+		_ => None,
+	}
 }
 
 fn background_gesture(
@@ -3558,6 +3569,43 @@ mod tests {
 			PointerEvent::Move { x: 1.0, y: 1.0 },
 		] {
 			assert!(!may_open_context_menu(&event), "{event:?}");
+		}
+	}
+
+	#[test]
+	fn left_clicks_holds_and_drags_press_where_a_control_could_open_its_menu() {
+		let drag = |button| PointerEvent::Drag {
+			path: vec![(3.0, 4.0), (9.0, 9.0)],
+			button,
+			modifiers: Modifiers::default(),
+			keys: Vec::new(),
+		};
+		let hold = |button| PointerEvent::Hold {
+			x: 5.0,
+			y: 6.0,
+			button,
+			keys: Vec::new(),
+			duration: Duration::from_secs(1),
+		};
+		let click = |button| PointerEvent::Click {
+			x: 1.0,
+			y: 2.0,
+			button,
+			count: 1,
+			modifiers: Modifiers::default(),
+		};
+		assert_eq!(left_press(&click(MouseButton::Left)), Some((1.0, 2.0)));
+		// A hold or drag that starts on a popup opens its menu as a click does.
+		assert_eq!(left_press(&hold(MouseButton::Left)), Some((5.0, 6.0)));
+		assert_eq!(left_press(&drag(MouseButton::Left)), Some((3.0, 4.0)));
+		for event in [
+			click(MouseButton::Right),
+			hold(MouseButton::Middle),
+			drag(MouseButton::Right),
+			PointerEvent::Scroll { x: 1.0, y: 1.0, dx: 0.0, dy: 5.0 },
+			PointerEvent::Move { x: 1.0, y: 1.0 },
+		] {
+			assert_eq!(left_press(&event), None, "{event:?}");
 		}
 	}
 
