@@ -344,6 +344,42 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(run.lifecycle.map(frame => frame.status)).toContain("failed");
 	});
 
+	it("drops an older wake's yield its handler allows only after a newer wake published", async () => {
+		const stopEntered = Promise.withResolvers<void>();
+		const releaseStop = Promise.withResolvers<void>();
+		const newerPublished = Promise.withResolvers<void>();
+		const run = await setup({
+			responses: [yieldCall("OLDER-PAYLOAD"), yieldCall("NEWER-PAYLOAD")],
+			onStop: async (_event, callIndex) => {
+				// The newer wake's own pass allows at once.
+				if (callIndex > 1) return undefined;
+				stopEntered.resolve();
+				await releaseStop.promise;
+				return undefined;
+			},
+		});
+		run.eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
+			if (toLifecycleFrame(data).status === "completed") newerPublished.resolve();
+		});
+
+		await deliverWake(run.session, "m1");
+		await stopEntered.promise;
+		// The older pass is still consulting when the newer wake runs, yields and publishes.
+		await deliverWake(run.session, "m2");
+		await newerPublished.promise;
+		expect(await Bun.file(run.artifact).text()).toContain("NEWER-PAYLOAD");
+		releaseStop.resolve();
+		await run.session.waitForIrcReplies();
+		await run.session.waitForIdle();
+
+		// The older handler allowed a candidate its observation no longer owns:
+		// publishing it would overwrite the newer wake's result with a stale one.
+		const artifact = await Bun.file(run.artifact).text();
+		expect(artifact).toContain("NEWER-PAYLOAD");
+		expect(artifact).not.toContain("OLDER-PAYLOAD");
+		expect(run.lifecycle.map(frame => frame.status)).toContain("aborted");
+	});
+
 	it("stops a settling continuation from observing a newer wake's turn", async () => {
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
@@ -387,13 +423,14 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		await run.session.waitForIdle();
 		await manager.waitForAll();
 
-		// The newer wake's yield and the job result it un-latched are that wake's:
-		// the continuation's own yield is what its pass judged and published.
+		// The continuation's pass judged its own yield, not the newer wake's (which
+		// never reached its monitor). The newer wake took the session meanwhile, so
+		// the allowed continuation is dropped rather than published over that turn.
 		expect(run.stopEvents.map(event => event.stop_hook_active)).toEqual([false, true]);
 		const artifact = await Bun.file(run.artifact).text();
-		expect(artifact).toContain("CONTINUATION-PAYLOAD");
-		expect(artifact).not.toContain("NEWER-PAYLOAD");
+		expect(artifact).not.toContain("CONTINUATION-PAYLOAD");
 		expect(artifact).not.toContain("REFUSED-PAYLOAD");
+		expect(run.lifecycle.map(frame => frame.status)).toContain("aborted");
 	});
 
 	it("judges a continuation's yield only after its owner async work quiesced", async () => {
