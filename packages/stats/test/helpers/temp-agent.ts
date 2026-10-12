@@ -11,12 +11,14 @@
  *
  * `installStatsTestIsolation` snapshots and clears `XDG_*_HOME` plus
  * `PI_CONFIG_DIR` for the test, points the agent directory at a fresh
- * `TempDir`, closes the stats DB handle, and tears everything back down in the
- * matching `afterEach`.
+ * `TempDir`, drops any worker the sync warm pool kept from an earlier test,
+ * closes the stats DB handle, and tears everything back down in the matching
+ * `afterEach`.
  */
 import { afterEach, beforeEach } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
+import { __resetStatsSyncWorkerPool } from "@oh-my-pi/omp-stats/aggregator";
 import { closeDb } from "@oh-my-pi/omp-stats/db";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -27,6 +29,9 @@ export interface StatsTestIsolation {
 	current(): TempDir | null;
 }
 
+// The sync warm pool is module state, and Bun shares module state across the
+// files of one `bun test` run, so a worker a pooled sync leaves behind outlives
+// the test that pooled it unless every entry point into a stats test drops it.
 export function installStatsTestIsolation(prefix: string): StatsTestIsolation {
 	const originalAgentDir = getAgentDir();
 	let originalConfigDir: string | undefined;
@@ -47,6 +52,7 @@ export function installStatsTestIsolation(prefix: string): StatsTestIsolation {
 
 	afterEach(() => {
 		closeDb();
+		__resetStatsSyncWorkerPool();
 		if (originalConfigDir === undefined) {
 			delete process.env.PI_CONFIG_DIR;
 		} else {
