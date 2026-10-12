@@ -98,7 +98,7 @@ import { DEFAULT_PEER_ROSTER_LIMIT } from "@oh-my-pi/pi-tui/tools/irc";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
 import { ToolAbortError } from "../tools/tool-errors";
-import { resetYieldTurnState } from "../tools/yield";
+import { reopenYieldWorkPoolItems, resetYieldTurnState } from "../tools/yield";
 import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { buildNamedToolChoice } from "../utils/tool-choice";
@@ -2389,7 +2389,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			// yield reassigns `yieldCalled`, so a latched yield is the newest item.
 			// Left in place it would still win result assembly as the terminal item
 			// when the replacement is only a `complete: true` section.
-			progress.extractedToolData?.yield?.pop();
+			const refused = progress.extractedToolData?.yield?.pop();
+			// A workpool batch's final submission is the candidate: the yield tool
+			// remembers its item as submitted, so release it for the continuation.
+			const refusedLabels =
+				isRecord(refused) && Array.isArray(refused.type)
+					? refused.type.filter((label): label is string => typeof label === "string")
+					: [];
+			if (refusedLabels.length > 0) reopenYieldWorkPoolItems(activeSession?.getToolByName("yield"), refusedLabels);
 		},
 		yieldTurnStopRequested: () => yieldTurnStopRequested,
 		waitForYieldTurnStop: async () => {
