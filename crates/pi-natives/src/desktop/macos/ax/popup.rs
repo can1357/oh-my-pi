@@ -321,7 +321,8 @@ mod tests {
 			},
 		);
 		assert!(chosen.is_ok(), "{chosen:?}");
-		// Read before the cancel, the menu would still be fading with the keyboard.
+		// Read before the cancel, the menu would still be fading with the
+		// keyboard.
 		assert_eq!(*log.borrow(), ["press", "cancel", "value"]);
 	}
 
