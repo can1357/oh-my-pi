@@ -8,8 +8,8 @@ import type { Loader } from "../components/loader";
 import { Text } from "../components/text";
 import { getImageDimensions, imageFallback, ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import { Container, type TUI } from "../tui";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Terminal as XtermTerminalType } from "@oh-my-pi/pi-utils/vterm";
+import { countNewlines, sanitizeText } from "@oh-my-pi/pi-utils";
 import { theme } from "../theme/theme";
 import type { OutputArtifactError } from "../tools/streaming-output";
 import type { TruncationMeta } from "../tools/output-meta";
@@ -70,13 +70,14 @@ export class BashExecutionComponent extends Container {
 	#blockVersion = 0;
 	#displayDirty = false;
 	#chunkGate = false;
-	// Rows the streaming window discarded while running: rows the live cap
-	// dropped outright plus rows in chunks the 50 ms throttle gate rejected —
-	// all of them absent from the retained tail, so the footer names them
-	// apart from the retained rows it counts, which the expand key still
-	// delivers. A replay or a completed run seeds its full output and clears
-	// the count, because a complete snapshot has dropped nothing.
+	// Rows the streaming window discarded while running: the live cap drops
+	// the head for good, while the 50 ms throttle gate skips chunks that arrive
+	// later than the retained tail — the footer names those mid/tail gaps
+	// apart from the dropped head, so the visible block is never mistaken for
+	// a complete tail. A replay or a completed run seeds its full output and
+	// clears both counts, because a complete snapshot has dropped nothing.
 	#droppedLiveLines = 0;
+	#throttledLiveLines = 0;
 	#contentContainer: Container;
 	#outputPane: OutputPane;
 	#headerText: Text;
@@ -210,10 +211,11 @@ export class BashExecutionComponent extends Container {
 				artifactError: this.#artifactError,
 				// Gated on a settled run: while the command still runs, the
 				// completed snapshot replaces the streamed tail window and clears
-				// the count (`setComplete` → `#setOutput`), so a notice now would
+				// the counts (`setComplete` → `#setOutput`), so a notice now would
 				// be retracted by the success path's very next frame. The legacy
 				// footer below is only ever built once the run has settled.
 				droppedLineCount: this.#status === "running" ? 0 : this.#droppedLiveLines,
+				throttledLineCount: this.#status === "running" ? 0 : this.#throttledLiveLines,
 			};
 			return dataFirst
 				? describeExecutionTool({
@@ -240,16 +242,18 @@ export class BashExecutionComponent extends Container {
 		// throttle window and drop the rest — the OutputSink captures everything
 		// for the artifact, and setComplete() replaces with the final output.
 		if (this.#chunkGate) {
-			// A rejected chunk never reaches the retained window, so a run that
-			// settles without a final snapshot (the error/abort path keeps the
-			// streamed tail) is missing those rows as well as the rows the live
-			// cap dropped. Counting them keeps the footer's "earlier lines
-			// dropped" notice equal to the rows the window actually lacks,
-			// instead of naming only the capped head. A chunk's first line merges
-			// into the retained last row exactly as the append path below does,
-			// so it contributes one row fewer than it splits into — unless the
-			// window is still empty and nothing merges.
-			this.#droppedLiveLines += Math.max(0, chunk.split("\n").length - (this.#outputLines.length > 0 ? 1 : 0));
+			// A rejected chunk arrives later than the retained tail: if the run
+			// then settles without a final snapshot (the error/abort path keeps
+			// the streamed tail), those rows are a mid/tail gap, not a dropped
+			// head — counting them apart keeps the footer's "earlier lines
+			// dropped" notice true about where the gap is. A chunk's first line
+			// merges into the retained last row exactly as the append path below
+			// does, so it contributes one row fewer than its newline count plus
+			// one — unless the window is still empty and nothing merges. The
+			// count must not allocate: this branch exists to avoid processing
+			// the chunk, and a multi-MiB callback would otherwise split an array
+			// and substrings proportional to every row just to be discarded.
+			this.#throttledLiveLines += Math.max(0, countNewlines(chunk) + 1 - (this.#outputLines.length > 0 ? 1 : 0));
 			return;
 		}
 		this.#chunkGate = true;
@@ -478,10 +482,13 @@ export class BashExecutionComponent extends Container {
 				artifactError: this.#artifactError,
 				hiddenLineCount,
 				suppressHiddenCount: hasSixelOutput,
-				// Rows the live cap discarded. The counted hidden rows are the
+				// Rows the live run discarded. The counted hidden rows are the
 				// retained tail, which Ctrl+O still delivers, so the count keeps
-				// advertising expand; only the dropped head is reported without one.
+				// advertising expand; the dropped head and throttle gaps are
+				// reported without one, apart from each other so the gap's
+				// position reads true.
 				droppedLineCount: this.#droppedLiveLines,
+				throttledLineCount: this.#throttledLiveLines,
 			});
 			if (footer) this.#contentContainer.addChild(footer);
 		}
@@ -504,10 +511,11 @@ export class BashExecutionComponent extends Container {
 	#setOutput(output: string): void {
 		const clean = sanitizeWithOptionalSixelPassthrough(output, sanitizeText);
 		this.#outputLines = clean ? this.#clampLinesPreservingSixel(clean.split("\n")) : [];
-		// A complete snapshot replaces the streaming tail window: what the cap
+		// A complete snapshot replaces the streaming tail window: what the run
 		// dropped while streaming is irrelevant now, so the footer's hidden count
 		// is the true total and every line it counts survives expansion.
 		this.#droppedLiveLines = 0;
+		this.#throttledLiveLines = 0;
 		this.#outputVersion++;
 	}
 

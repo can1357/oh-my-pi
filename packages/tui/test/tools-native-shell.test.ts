@@ -757,21 +757,45 @@ describe("user shell runs", () => {
 		expect(JSON.stringify(run.describe(cx(["tool", "ansi", "code"])))).toContain("… 150 earlier lines dropped");
 	});
 
-	it("counts throttle-rejected rows in the dropped-lines notice", () => {
+	it("names throttle-skipped rows as a gap apart from the dropped head", () => {
 		const run = new BashExecutionComponent("seq 1 250", ui, false);
 		run.appendOutput(Array.from({ length: 250 }, (_, i) => `line-${i}`).join("\n"));
 		// Second callback inside the 50 ms gate, then a throw: the run settles
 		// without a final snapshot, so the retained tail window is all there is.
-		// Rows missing from it are the 150 the live cap dropped plus this chunk's
-		// four rows — its first row merges into the retained `line-249`, exactly
-		// as an accepted chunk would have.
+		// The rejected chunk arrived later than the retained `line-150…line-249`,
+		// so its four rows (the first merges into `line-249`, exactly as an
+		// accepted chunk would have) are a mid/tail gap — folding them into "N
+		// earlier lines dropped" would falsely present the visible block as the
+		// tail.
 		run.appendOutput(["extra-0", "extra-1", "extra-2", "extra-3", "extra-4"].join("\n"));
 		run.setComplete(undefined, false);
-		const notice = "… 154 earlier lines dropped";
 		const card = run.describe(cx(["card", "ansi"]));
 		const notes = nodes(card.c).find(child => props(child).key === "notes");
-		expect(spansText(notes)).toContain(notice);
-		// Same truth in the native run foot facts.
-		expect(JSON.stringify(run.describe(cx(["tool", "ansi", "code"])))).toContain(notice);
+		expect(spansText(notes)).toContain("… 150 earlier lines dropped");
+		expect(spansText(notes)).toContain("… 4 lines skipped in output");
+		expect(spansText(notes)).not.toContain("154");
+		// Same truth in the native run foot facts (scoped to the facts text:
+		// the output payload itself contains rows like `line-154`).
+		const tool = run.describe(cx(["tool", "ansi", "code"]));
+		const box = nodes(tool.c)[0];
+		const factsText = (foot(box)?.facts ?? []).map(f => f.t).join(" ");
+		expect(factsText).toContain("… 150 earlier lines dropped");
+		expect(factsText).toContain("… 4 lines skipped in output");
+		expect(factsText).not.toContain("154");
+	});
+
+	it("names a throttle gap without a dropped head when the cap never fired", () => {
+		const run = new BashExecutionComponent("echo hi", ui, false);
+		run.appendOutput("kept-0");
+		// Rejected chunk with no capped head: there is no "earlier" drop to
+		// name, only the rows skipped after the retained tail.
+		run.appendOutput(["gap-0", "gap-1", "gap-2"].join("\n"));
+		run.setComplete(undefined, false);
+		const card = run.describe(cx(["card", "ansi"]));
+		const notes = nodes(card.c).find(child => props(child).key === "notes");
+		expect(spansText(notes)).toContain("… 2 lines skipped in output");
+		expect(spansText(notes)).not.toContain("earlier lines dropped");
+		// The legacy terminal footer names the same gap in the same words.
+		expect(Bun.stripANSI(run.render(120).join("\n"))).toContain("… 2 lines skipped in output");
 	});
 });
