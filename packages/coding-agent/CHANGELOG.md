@@ -1044,6 +1044,8 @@
 - Extensions can observe and answer the interactive plan review, including refinement feedback and save-and-quit ([#14250](https://github.com/can1357/oh-my-pi/pull/14250) by [@rlfleming93](https://github.com/rlfleming93))
 - Added opt-in `omp gc --compress` (or `gc.compress`), which stores sessions idle for `gc.compressAfterDays` (default 7) with filesystem transparent compression (APFS, NTFS); they stay resumable and searchable ([#15600](https://github.com/can1357/oh-my-pi/pull/15600) by [@wolfiesch](https://github.com/wolfiesch))
 - Extensions can reopen a dismissed plan review while the session is idle (`ctx.openPlanReview()`) and pick the execution tier on `ctx.resolvePlanReview` (`input.role`); `plan_review_requested` now reports the slider's tiers ([#15552](https://github.com/can1357/oh-my-pi/pull/15552) by [@Shadorain](https://github.com/Shadorain))
+- Added the Codex Dictation speech-to-text model: select `openai-codex/codex-transcribe` as the dictation model to transcribe voice input with your ChatGPT/Codex subscription login ([#15391](https://github.com/can1357/oh-my-pi/pull/15391) by [@andrebrait](https://github.com/andrebrait))
+- Added speech-to-text, text-to-speech and image model selectors (e.g. `openai-codex/codex-transcribe`) to `omp auth-gateway stdio`, which previously answered 404 for anything but chat models ([#15391](https://github.com/can1357/oh-my-pi/pull/15391) by [@andrebrait](https://github.com/andrebrait))
 
 ### Changed
 
@@ -1108,10 +1110,6 @@
 ### Added
 
 - Added a Copy button that leads the turn footer under an answer in Tern (`⧉ · 2m13s · 71K tok · $0.85 this turn`, in place of the clock), which copies that answer
-### Added
-
-- Added the Codex Dictation speech-to-text model: select `openai-codex/codex-transcribe` as the dictation model to transcribe voice input with your ChatGPT/Codex subscription login ([#15391](https://github.com/can1357/oh-my-pi/pull/15391) by [@andrebrait](https://github.com/andrebrait))
-- Added speech-to-text, text-to-speech and image model selectors (e.g. `openai-codex/codex-transcribe`) to `omp auth-gateway stdio`, which previously answered 404 for anything but chat models ([#15391](https://github.com/can1357/oh-my-pi/pull/15391) by [@andrebrait](https://github.com/andrebrait))
 
 ### Changed
 
