@@ -1735,6 +1735,7 @@ export class WorkerCore {
 				// interactive without raising a window; explicit settle-freeze still applies.
 				await this.#page.emulateFocusedPage(true);
 			}
+			this.#webmcp = new WebMcpController(this.#page);
 			await installVitalsObservers(this.#page);
 			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
 			if (payload.ignoreHttpsErrors) await applyIgnoreHttpsErrors(this.#page);
@@ -2293,8 +2294,8 @@ export class WorkerCore {
 		active: ActiveRun,
 	): TabApi {
 		const page = this.#requirePage();
-		// Created on first use and touches the page only when a webmcp* helper runs.
-		const webmcp = (this.#webmcp ??= new WebMcpController(page));
+		const webmcp = this.#webmcp;
+		if (!webmcp) throw new ToolError("Tab worker WebMCP handling is not initialized");
 		const { budgetBound, quickOpMs, actionOpMs } = resolveOpTimeouts(timeoutMs);
 		const waitMs = (explicit?: number): number => resolveWaitTimeout(timeoutMs, explicit);
 		const INF = Number.POSITIVE_INFINITY;
@@ -2650,14 +2651,15 @@ export class WorkerCore {
 					}),
 				),
 			recording: () => op("tab.recording()", quickOpMs, () => Promise.resolve(this.#recording.status())),
-			webmcpList: opts => op("tab.webmcpList()", quickOpMs, sig => untilAborted(sig, () => webmcp.list(opts))),
+			webmcpList: opts => op("tab.webmcpList()", quickOpMs, sig => untilAborted(sig, () => webmcp.list(opts, sig))),
 			webmcpInvoke: (toolName, params, opts) => {
 				const w = waitMs(opts?.timeout);
 				return op(`tab.webmcpInvoke(${JSON.stringify(toolName)})`, w, sig =>
 					untilAborted(sig, () => webmcp.invoke(toolName, params, opts, sig)),
 				);
 			},
-			webmcpEvents: opts => op("tab.webmcpEvents()", quickOpMs, sig => untilAborted(sig, () => webmcp.events(opts))),
+			webmcpEvents: opts =>
+				op("tab.webmcpEvents()", quickOpMs, sig => untilAborted(sig, () => webmcp.events(opts, sig))),
 			a11y: opts =>
 				op("tab.a11y()", budgetBound, async sig => {
 					const result = await untilAborted(sig, () => runA11yAudit(page, opts));

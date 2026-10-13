@@ -194,18 +194,21 @@ function boundedResult(value: unknown): WebMcpInvokeSuccess {
 }
 
 /**
- * The tools Chrome's WebMCP domain holds for the frames one CDP session serves, or `undefined` when the browser has
- * no WebMCP domain. `WebMCP.enable` replays every registered tool as `toolsAdded` before it answers, also on a
- * session where the domain is already enabled, so each call reads the current registrations.
+ * The tools registered in the root frame of one CDP session, or `undefined` when the browser has no WebMCP domain.
+ * `WebMCP.enable` replays the root frame's tools as `toolsAdded` before it answers, also on a session where the
+ * domain is already enabled, so each call reads the current registrations, back/forward cache restores included.
  */
-async function sessionTools(session: CDPSession): Promise<Protocol.WebMCP.Tool[] | undefined> {
+async function rootFrameTools(
+	session: CDPSession,
+	signal: AbortSignal | undefined,
+): Promise<Protocol.WebMCP.Tool[] | undefined> {
 	const tools: Protocol.WebMCP.Tool[] = [];
 	const onAdded = (event: Protocol.WebMCP.ToolsAddedEvent): void => {
 		tools.push(...event.tools);
 	};
 	session.on("WebMCP.toolsAdded", onAdded);
 	try {
-		await session.send("WebMCP.enable");
+		await untilAborted(signal, () => session.send("WebMCP.enable"));
 		return tools;
 	} catch (error) {
 		if (isMissingCommand(error)) return undefined;
@@ -221,6 +224,7 @@ async function invokeNative(
 	input: object,
 	signal: AbortSignal | undefined,
 ): Promise<Protocol.WebMCP.ToolRespondedEvent> {
+	signal?.throwIfAborted();
 	const { session } = entry;
 	const early = new Map<string, Protocol.WebMCP.ToolRespondedEvent>();
 	const { promise, resolve } = Promise.withResolvers<Protocol.WebMCP.ToolRespondedEvent>();
@@ -238,6 +242,8 @@ async function invokeNative(
 		}));
 		const id = invocationId;
 		try {
+			// An abort while the invocation was being started still cancels it once its id is known.
+			signal?.throwIfAborted();
 			return early.get(id) ?? (await untilAborted(signal, promise));
 		} catch (error) {
 			if (signal?.aborted) {
@@ -252,10 +258,14 @@ async function invokeNative(
 
 /**
  * Per-tab WebMCP discovery, invocation, and catalog-event controller over Chrome's native WebMCP DevTools domain.
- * Nothing reaches the page until a call: each one enables the domain on every CDP session serving the tab's frames.
+ * Construction only listens to the WebMCP events Puppeteer enables on the tab's session when it attaches; nothing
+ * reaches the page until a call, which enables the domain on every CDP session serving the tab's frames.
  */
 export class WebMcpController {
 	readonly #page: Page;
+	/** Tools announced on watched sessions, for frames `WebMCP.enable` does not replay. */
+	readonly #announced = new Map<string, { tool: Protocol.WebMCP.Tool; session: CDPSession }>();
+	readonly #watched = new Set<CDPSession>();
 	#catalog = new Map<string, CatalogEntry>();
 	#events: WebMcpCatalogEvent[] = [];
 	#sequence = 0;
@@ -263,11 +273,34 @@ export class WebMcpController {
 
 	constructor(page: Page) {
 		this.#page = page;
+		this.#watch(page.mainFrame().client);
+	}
+
+	/** Follow one session's tool announcements; Chrome replays only a session's root frame on `WebMCP.enable`. */
+	#watch(session: CDPSession): void {
+		if (this.#watched.has(session)) return;
+		this.#watched.add(session);
+		session.on("WebMCP.toolsAdded", (event: Protocol.WebMCP.ToolsAddedEvent) => {
+			for (const tool of event.tools) this.#announced.set(`${tool.frameId}\u0000${tool.name}`, { tool, session });
+		});
+		session.on("WebMCP.toolsRemoved", (event: Protocol.WebMCP.ToolsRemovedEvent) => {
+			for (const tool of event.tools) {
+				const key = `${tool.frameId}\u0000${tool.name}`;
+				if (this.#announced.get(key)?.session === session) this.#announced.delete(key);
+			}
+		});
+		// Chrome announces no removal when a frame loads another document; that document's tools follow this event.
+		session.on("Page.frameNavigated", (event: Protocol.Page.FrameNavigatedEvent) => {
+			if (event.type !== "Navigation") return;
+			for (const [key, announced] of this.#announced) {
+				if (announced.session === session && announced.tool.frameId === event.frame.id) this.#announced.delete(key);
+			}
+		});
 	}
 
 	/** Discover page-provided tools, omitting schemas unless an exact name is requested. */
-	async list(options: WebMcpListOptions = {}): Promise<WebMcpListResult> {
-		const unavailable = await this.#refreshCatalog();
+	async list(options: WebMcpListOptions = {}, signal?: AbortSignal): Promise<WebMcpListResult> {
+		const unavailable = await this.#refreshCatalog(signal);
 		const availability = unavailable
 			? { status: "unavailable" as const, reason: unavailable }
 			: { status: "ready" as const };
@@ -326,7 +359,7 @@ export class WebMcpController {
 		options: WebMcpInvokeOptions = {},
 		signal?: AbortSignal,
 	): Promise<WebMcpInvokeResult> {
-		const unavailable = await this.#refreshCatalog();
+		const unavailable = await this.#refreshCatalog(signal);
 		if (unavailable) throw new ToolError(unavailable);
 		const matches = [...this.#catalog.values()].filter(
 			tool => tool.name === name && (options.frame === undefined || tool.frameId === options.frame),
@@ -366,8 +399,8 @@ export class WebMcpController {
 	}
 
 	/** Poll catalog transitions observed since a prior cursor. */
-	async events(options: WebMcpEventsOptions = {}): Promise<WebMcpEventsResult> {
-		await this.#refreshCatalog();
+	async events(options: WebMcpEventsOptions = {}, signal?: AbortSignal): Promise<WebMcpEventsResult> {
+		await this.#refreshCatalog(signal);
 		const since = typeof options.since === "number" && Number.isFinite(options.since) ? options.since : 0;
 		const events = this.#events.filter(event => event.sequence > since);
 		const truncated = since < this.#droppedThrough;
@@ -406,13 +439,16 @@ export class WebMcpController {
 	}
 
 	/** Re-read the native catalog, record its transitions, and return why the page can have no tools, if it can't. */
-	async #refreshCatalog(): Promise<string | undefined> {
-		const frames = this.#page.frames();
+	async #refreshCatalog(signal: AbortSignal | undefined): Promise<string | undefined> {
+		const page = this.#page;
+		const frames = page.frames();
 		const framesById = new Map(frames.map(frame => [frameId(frame), frame]));
-		const mainSession = this.#page.mainFrame().client;
+		const mainSession = page.mainFrame().client;
 		// Cross-origin iframes run in their own process and register their tools on their own session.
 		const sessions = [...new Set([mainSession, ...frames.map(frame => frame.client)])];
-		const reads = await Promise.allSettled(sessions.map(session => sessionTools(session)));
+		for (const session of sessions) this.#watch(session);
+		const reads = await Promise.allSettled(sessions.map(session => rootFrameTools(session, signal)));
+		signal?.throwIfAborted();
 		const main = reads[0]!;
 		if (main.status === "rejected") throw main.reason;
 		if (main.value === undefined) {
@@ -421,23 +457,29 @@ export class WebMcpController {
 		}
 
 		const next = new Map<string, CatalogEntry>();
+		const add = (tool: Protocol.WebMCP.Tool, session: CDPSession): void => {
+			const frame = framesById.get(tool.frameId);
+			next.set(`${tool.frameId}\u0000${tool.name}`, {
+				name: tool.name,
+				description: tool.description,
+				frameId: tool.frameId,
+				origin: frame ? originForUrl(frame.url()) : "null",
+				inputSchema: tool.inputSchema,
+				annotations: tool.annotations,
+				untrusted: true,
+				session,
+			});
+		};
 		sessions.forEach((session, index) => {
 			const read = reads[index]!;
 			if (read.status === "rejected") return;
-			for (const tool of read.value ?? []) {
-				const frame = framesById.get(tool.frameId);
-				next.set(`${tool.frameId}\u0000${tool.name}`, {
-					name: tool.name,
-					description: tool.description,
-					frameId: tool.frameId,
-					origin: frame ? originForUrl(frame.url()) : "null",
-					inputSchema: tool.inputSchema,
-					annotations: tool.annotations,
-					untrusted: true,
-					session,
-				});
-			}
+			for (const tool of read.value ?? []) add(tool, session);
 		});
+		for (const { tool, session } of this.#announced.values()) {
+			const frame = framesById.get(tool.frameId);
+			const parent = frame?.parentFrame();
+			if (parent && parent.client === session && frame?.client === session) add(tool, session);
+		}
 
 		for (const [key, entry] of next) {
 			const previous = this.#catalog.get(key);
@@ -452,9 +494,9 @@ export class WebMcpController {
 		if (next.size > 0) return undefined;
 		// omp's Puppeteer evaluates in its isolated world, where `in` sees the platform API without creating the
 		// page's context or reading anything the page defined.
-		const exposed = await this.#page
-			.mainFrame()
-			.evaluate(() => "modelContext" in document || "modelContext" in navigator);
+		const exposed = await untilAborted(signal, () =>
+			page.mainFrame().evaluate(() => "modelContext" in document || "modelContext" in navigator),
+		);
 		return exposed ? undefined : WEBMCP_NOT_EXPOSED;
 	}
 

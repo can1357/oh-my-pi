@@ -323,7 +323,7 @@ context.registerTool({
 
 	it("cancels the page's tool invocation when the call is aborted", async () => {
 		using server = servePage(`<title>hang</title><script>
-document.modelContext.registerTool({ name: "never_answers", description: "Hangs.", inputSchema: { type: "object" }, execute: () => new Promise(() => {}) });
+document.modelContext.registerTool({ name: "never_answers", description: "Hangs.", inputSchema: { type: "object" }, execute: () => Promise.withResolvers().promise });
 </script>`);
 		const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 		if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
@@ -332,13 +332,14 @@ document.modelContext.registerTool({ name: "never_answers", description: "Hangs.
 		try {
 			await page.goto(`http://localhost:${server.port}/`);
 			const observer = await page.createCDPSession();
+			const invoked = Promise.withResolvers<void>();
 			const responded = Promise.withResolvers<string>();
+			observer.on("WebMCP.toolInvoked", () => invoked.resolve());
 			observer.on("WebMCP.toolResponded", event => responded.resolve(event.status));
 			await observer.send("WebMCP.enable");
-			const controller = new WebMcpController(page);
 			const aborter = new AbortController();
-			const call = controller.invoke("never_answers", {}, {}, aborter.signal);
-			await Bun.sleep(200);
+			const call = new WebMcpController(page).invoke("never_answers", {}, {}, aborter.signal);
+			await invoked.promise;
 			aborter.abort();
 			expect(await rejectionOf(call)).toBeInstanceOf(Error);
 			expect(await responded.promise).toBe("Canceled");
@@ -347,6 +348,65 @@ document.modelContext.registerTool({ name: "never_answers", description: "Hangs.
 			await page.close();
 			await releaseBrowser(handle, { kill: false });
 		}
+	}, 30_000);
+
+	it("never starts the page's tool once the call is aborted", async () => {
+		using server = servePage(`<title>idle</title><script>
+document.modelContext.registerTool({ name: "rename_page", description: "Renames.", inputSchema: { type: "object" }, execute: () => { document.title = "executed"; return 1; } });
+</script>`);
+		const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
+		holdBrowser(handle);
+		const page = await handle.browser.newPage();
+		try {
+			await page.goto(`http://localhost:${server.port}/`);
+			const controller = new WebMcpController(page);
+			expect((await controller.list()).tools.map(tool => tool.name)).toEqual(["rename_page"]);
+			const aborted = AbortSignal.abort();
+			expect(await rejectionOf(controller.invoke("rename_page", {}, {}, aborted))).toBeInstanceOf(Error);
+			expect(await page.title()).toBe("idle");
+		} finally {
+			await page.close();
+			await releaseBrowser(handle, { kill: false });
+		}
+	}, 30_000);
+
+	it("lists a same-process iframe's tools, registered before the first call, until the iframe navigates", async () => {
+		const invoke = createBrowserHost();
+		// Same site, other port: the iframe shares the page's renderer and CDP session.
+		using child = Bun.serve({
+			port: 0,
+			hostname: "localhost",
+			fetch: request =>
+				new Response(
+					new URL(request.url).pathname === "/plain"
+						? "<!doctype html><title>plain</title>"
+						: `<!doctype html><title>child</title><script>
+document.modelContext.registerTool({ name: "child_tool", description: "Answers from the iframe.", inputSchema: { type: "object" }, execute: () => ({ from: "child" }) });
+</script>`,
+					{ headers: { "content-type": "text/html" } },
+				),
+		});
+		using parent = servePage(
+			`<title>parent</title><iframe allow="tools" src="http://localhost:${child.port}/" onload="document.title = 'loaded'"></iframe>`,
+		);
+		await invoke({ action: "open", name: "webmcp-child", url: `http://localhost:${parent.port}/` });
+		expect(valueFrom<string>(await invoke(call("webmcp-child", "evaluate", ["document.title"])))).toBe("loaded");
+		const listed = valueFrom<WebMcpListResult>(await invoke(call("webmcp-child", "webmcpList")));
+		expect(listed.tools).toEqual([
+			expect.objectContaining({ name: "child_tool", origin: `http://localhost:${child.port}` }),
+		]);
+		const result = valueFrom<WebMcpInvokeResult>(
+			await invoke(call("webmcp-child", "webmcpInvoke", ["child_tool", {}])),
+		);
+		expect(result).toEqual({ ok: true, result: { from: "child" }, untrusted: true });
+		await invoke(
+			call("webmcp-child", "evaluate", [
+				`new Promise(resolve => { const frame = document.querySelector("iframe"); frame.onload = resolve; frame.src = "http://localhost:${child.port}/plain"; }).then(() => null)`,
+			]),
+		);
+		expect(valueFrom<WebMcpListResult>(await invoke(call("webmcp-child", "webmcpList"))).tools).toEqual([]);
+		await invoke({ action: "close", name: "webmcp-child", kill: true });
 	}, 30_000);
 
 	it("says the browser has no WebMCP when its DevTools protocol lacks the domain", async () => {
