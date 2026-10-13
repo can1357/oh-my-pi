@@ -212,6 +212,11 @@ describe("InteractiveMode live settings", () => {
 		// shrink can slice past the answer and retirement then permanently omits it.
 		type SessionEvent = Parameters<typeof mode.eventController.handleEvent>[0];
 		cfgDisplaySmoothStreaming.set(session.settings, false);
+		// Stream in raw mode so the append-only head publishes the full fence;
+		// the toggle below shrinks it back to prose.
+		cfgProseOnlyThinking.set(session.settings, false);
+		await Promise.resolve();
+		expect(mode.proseOnlyThinking).toBe(false);
 		const usage = {
 			input: 1,
 			output: 2,
@@ -222,10 +227,20 @@ describe("InteractiveMode live settings", () => {
 		};
 		const thinking = {
 			type: "thinking" as const,
-			thinking: Array.from(
-				{ length: 10 },
-				(_, index) => `Deliberating about the request in detail, step ${index + 1} of a long reasoning chain.`,
-			).join("\n\n"),
+			// Raw mode renders this fence in full, so the append-only head publishes
+			// many stable rows while it streams; prose mode collapses the fence to a
+			// trailing ellipsis, which is the raw-to-prose shrink that makes the
+			// stale emitted count slice past the answer.
+			thinking: [
+				"Deliberating about the request in detail.",
+				"```python",
+				"def solve(n):",
+				"    if n <= 1:",
+				"        return n",
+				"    return solve(n - 1) + solve(n - 2)",
+				"```",
+				"Checking the result once more.",
+			].join("\n\n"),
 			thinkingSignature: "sig",
 		};
 
@@ -264,10 +279,11 @@ describe("InteractiveMode live settings", () => {
 		mode.chatContainer.acknowledgeFinalizedBatch(published!.id);
 		expect(mode.chatContainer.emittedStableRows()[0]!).toBeGreaterThan(0);
 
-		// Mid-stream prose-only change via the settings path.
-		cfgProseOnlyThinking.set(session.settings, false);
+		// Mid-stream prose-only change via the settings path: raw back to prose is
+		// the shrink direction.
+		cfgProseOnlyThinking.set(session.settings, true);
 		await Promise.resolve();
-		expect(mode.proseOnlyThinking).toBe(false);
+		expect(mode.proseOnlyThinking).toBe(true);
 
 		await mode.eventController.handleEvent({
 			type: "message_end",
@@ -282,6 +298,109 @@ describe("InteractiveMode live settings", () => {
 		expect(rendered).toContain("ANSWER_TAIL_MARKER");
 		// The propagation forgets the emission ledger, so the replay re-renders
 		// the head under the new prose mode instead of slicing by the stale count.
+		expect(mode.chatContainer.emittedStableRows()).toEqual([0]);
+	});
+
+	it("resets the stable ledger when prose-only thinking changes after message_end", async () => {
+		// Same regression as the mid-stream case, one boundary later: #handleMessageEnd
+		// clears streamingComponent/streamingMessage the moment the turn ends, but the
+		// finalized assistant entry stays in the transcript — with the stable rows
+		// its append-only thinking head published — until it retires. A prose-only
+		// toggle in that window must still reset the ledger: without it the paired
+		// display reset replays the entry under the new prose mode while slicing it
+		// by the old prefix height, so a raw-to-prose shrink cuts past the answer
+		// and retirement omits it permanently.
+		type SessionEvent = Parameters<typeof mode.eventController.handleEvent>[0];
+		cfgDisplaySmoothStreaming.set(session.settings, false);
+		// Start in raw mode so the append-only head publishes the full reasoning
+		// while it streams; the toggle below shrinks it back to prose.
+		cfgProseOnlyThinking.set(session.settings, false);
+		await Promise.resolve();
+		expect(mode.proseOnlyThinking).toBe(false);
+		const usage = {
+			input: 1,
+			output: 2,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 3,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const thinking = {
+			type: "thinking" as const,
+			// Raw mode renders this fence in full, so the append-only head publishes
+			// many stable rows while it streams; prose mode collapses the fence to a
+			// trailing ellipsis, so the toggle below is the raw-to-prose shrink that
+			// makes the stale emitted count slice past the answer.
+			thinking: [
+				"Deliberating about the request in detail.",
+				"```python",
+				"def solve(n):",
+				"    if n <= 1:",
+				"        return n",
+				"    return solve(n - 1) + solve(n - 2)",
+				"```",
+				"Checking the result once more.",
+			].join("\n\n"),
+			thinkingSignature: "sig",
+		};
+
+		await mode.eventController.handleEvent({
+			type: "message_start",
+			message: {
+				role: "assistant",
+				content: [thinking],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: session.model!.id,
+				usage,
+				timestamp: Date.now(),
+			},
+		} as unknown as SessionEvent);
+		const partial = {
+			role: "assistant",
+			content: [thinking, { type: "text" as const, text: "Streaming the ANSWER_TAIL_MARKER." }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: session.model!.id,
+			usage,
+			timestamp: Date.now(),
+		} as unknown as AssistantMessage;
+		await mode.eventController.handleEvent({
+			type: "message_update",
+			message: partial,
+			assistantMessageEvent: { type: "start", partial },
+		} as unknown as SessionEvent);
+
+		// Retire the append-only thinking head into native history so the
+		// container's ledger records the rows the head had already emitted.
+		const published = mode.chatContainer.peekFinalizedBatch(80, 1);
+		expect(published).toBeDefined();
+		expect(published!.rows.length).toBeGreaterThan(0);
+		mode.chatContainer.acknowledgeFinalizedBatch(published!.id);
+		expect(mode.chatContainer.emittedStableRows()[0]!).toBeGreaterThan(0);
+
+		// End the turn: the controller drops both streaming fields here, which is
+		// exactly the window this regression lives in.
+		await mode.eventController.handleEvent({
+			type: "message_end",
+			message: { ...partial, stopReason: "stop" },
+		} as unknown as SessionEvent);
+		expect(mode.streamingComponent).toBeUndefined();
+		expect(mode.streamingMessage).toBeUndefined();
+
+		// Prose-only on, after message_end but before the entry retires: the
+		// raw-to-prose shrink is what makes the stale emitted count slice past
+		// the answer.
+		cfgProseOnlyThinking.set(session.settings, true);
+		await Promise.resolve();
+		expect(mode.proseOnlyThinking).toBe(true);
+
+		const rendered = Bun.stripANSI(
+			mode.chatContainer.renderViewport(80, 40, { tick: 1, now: Date.now() }).join("\n"),
+		);
+		expect(rendered).toContain("ANSWER_TAIL_MARKER");
+		// The ledger was forgotten even with no live stream, so the replay
+		// re-renders the head under prose mode instead of slicing it away.
 		expect(mode.chatContainer.emittedStableRows()).toEqual([0]);
 	});
 });

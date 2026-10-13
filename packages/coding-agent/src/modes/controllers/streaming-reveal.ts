@@ -413,10 +413,13 @@ export class StreamingRevealController {
 	 * visible is preserved, so a hide/show after the reveal reached the answer
 	 * keeps the answer where it was instead of clamping the whole old count to
 	 * the text total (answer snapped to 100%) or spending the answer budget on
-	 * the freshly shown thinking prefix (answer re-hidden). A block whose text
-	 * changed under the new prose mode keeps its position, clamped to its new
-	 * length; a block that just became visible is already fully revealed, so
-	 * showing a prefix restores the view it had when it was hidden.
+	 * the freshly shown thinking prefix (answer re-hidden). A block the old
+	 * layout consumed whole stays whole under its new size, so a prose toggle
+	 * that expands or shrinks it does not hand the difference to the block after
+	 * it; a partially revealed one keeps its position, clamped to its new
+	 * length. A block that just became visible is snapped whole only while the
+	 * old budget still covers it — one revealed past that frontier would push
+	 * the aggregate past the answer and make it jump forward.
 	 */
 	resyncVisibility(): void {
 		if (!this.#target || !this.#component) return;
@@ -426,20 +429,40 @@ export class StreamingRevealController {
 		const proseBefore = this.#proseOnlyThinking;
 		this.#hideThinkingBlock = this.#getHideThinkingBlock();
 		this.#proseOnlyThinking = this.#getProseOnlyThinking();
-		// Pass 1 spends the old count under the flags it was earned with; pass 2
-		// re-walks under the fresh flags, carrying a still-visible block's share
-		// forward (clamped to its new length) and snapping a newly visible one.
-		let remaining = Math.max(0, Math.floor(revealedBefore));
-		let revealed = 0;
+		// Per-block unit counts under the old and the fresh flags, the old-layout
+		// total the budget was spent against, and whether that budget covered the
+		// whole old layout (no frontier left to respect).
+		const sizes: { before: number; after: number }[] = [];
+		let beforeTotal = 0;
 		for (let i = 0; i < target.content.length; i++) {
 			const before = this.#blockUnits(target.content[i]!, hideBefore, proseBefore, i);
 			const after = this.#blockUnits(target.content[i]!, this.#hideThinkingBlock, this.#proseOnlyThinking, i);
+			sizes.push({ before, after });
+			beforeTotal += before;
+		}
+		const revealedOldLayout = Math.max(0, Math.floor(revealedBefore)) >= beforeTotal;
+		// Walk the blocks spending the old count under the flags it was earned
+		// with, re-crediting each one under the fresh flags.
+		let remaining = Math.max(0, Math.floor(revealedBefore));
+		let revealed = 0;
+		for (let i = 0; i < sizes.length; i++) {
+			const { before, after } = sizes[i]!;
 			if (before > 0 && after > 0) {
 				const spent = Math.min(remaining, before);
 				remaining = Math.max(0, remaining - before);
-				revealed += Math.max(0, Math.min(spent, after));
+				// Fully consumed under the old size: consume it whole under the
+				// new one, so the prose-mode expansion of a fence is not funded by
+				// the answer's saved units. Partially revealed: keep the position,
+				// clamped to the new length.
+				revealed += spent >= before ? after : Math.min(spent, after);
 			} else if (before === 0 && after > 0) {
-				revealed += after;
+				// Newly visible. Snap it whole only if the old budget had units
+				// left to spend at this point (the frontier lies at or past it) or
+				// covered the whole old layout. Snapping one past the frontier
+				// credits units the reveal never earned, and buildDisplayMessage
+				// spends them on the blocks before it — the visible answer jumps
+				// forward or completes.
+				if (revealedOldLayout || remaining > 0) revealed += after;
 			} else {
 				remaining = Math.max(0, remaining - before);
 			}
