@@ -789,12 +789,21 @@ pub(super) fn with_foreground<T>(
 		{
 			return Ok(());
 		}
-		if control::user_activity() != activity
-			|| !front_process(spi.get_front).is_some_and(|front| front.psn == target)
-		{
+		// The action and its settle are over, so takeover's own keys and
+		// clicks, which `WindowServer` counts like the user's, came before this
+		// timestamp; a user key or click after it refuses the hand-back, and the
+		// make-key records below are then never posted.
+		let handed_back = request_after_check(
+			event_clock_now,
+			|| {
+				control::user_activity() == activity
+					&& front_process(spi.get_front).is_some_and(|front| front.psn == target)
+			},
+			|since| set_front_unless_user_acted(spi, previous.psn, previous_key.unwrap_or(0), since),
+		)?;
+		if handed_back != Some(FrontRequest::Done) {
 			return Ok(());
 		}
-		set_front(spi, previous.psn, previous_key.unwrap_or(0))?;
 		// A previous app that showed no window gets only its front status back.
 		let Some(previous_key) = previous_key else {
 			return Ok(());

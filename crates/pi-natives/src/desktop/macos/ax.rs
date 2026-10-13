@@ -23,11 +23,11 @@ use objc2_core_foundation::{
 use super::{
 	super::{
 		ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_macos},
-		backend::AxBackend,
+		backend::{AxBackend, is_raise_action},
 		error::{CoreResult, DesktopError},
 		types::DesktopWindow,
 	},
-	date, process, skylight,
+	date, permission, process, skylight,
 };
 
 const AX_TIMEOUT_SECONDS: f32 = 2.0;
@@ -897,7 +897,7 @@ impl AxBackend for MacAx {
 		let perform = || element_action_result(&native, send_action(element, &native));
 		// AXRaise is an explicit request to change stacking, including the
 		// takeover preparation path. Other semantic actions must stay background.
-		if native == "AXRaise" {
+		if is_raise_action(action) {
 			perform()
 		} else {
 			skylight::with_background_guard(element_pid(element)?, perform)
@@ -1269,9 +1269,7 @@ fn ensure_trusted() -> CoreResult<()> {
 	if is_trusted() {
 		Ok(())
 	} else {
-		Err(DesktopError::permission_denied(
-			"macOS Accessibility permission is not granted for this process",
-		))
+		Err(permission::denied("Accessibility"))
 	}
 }
 
@@ -1630,11 +1628,21 @@ mod tests {
 
 	use super::{
 		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, FocusedWindow,
-		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, VALUE, WindowContent, ax_result,
-		content_owner, create_system_wide, element_action_result, replace_utf16_selection,
-		required_string, select_attached, stringify_value, window_records_of,
+		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, VALUE, WindowContent,
+		action_name, ax_result, content_owner, create_system_wide, element_action_result,
+		is_raise_action, replace_utf16_selection, required_string, select_attached, stringify_value,
+		window_records_of,
 	};
 	use crate::desktop::error::ErrorCode;
+
+	#[test]
+	fn the_escape_stop_arms_for_exactly_the_actions_that_run_as_axraise() {
+		for action in
+			["raise", " Raise ", "RAISE", "AXRaise", "axraise", "AXRAISE", "Raise", "press", "AXPress"]
+		{
+			assert_eq!(is_raise_action(action), action_name(action) == "AXRaise", "{action:?}");
+		}
+	}
 
 	#[test]
 	fn batched_values_read_like_lone_reads() {
