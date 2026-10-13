@@ -171,15 +171,15 @@ it("handshakes over newline JSON-RPC and keeps runtime config separate from the 
 });
 
 it("rejects unsupported Python, SDK, and method handshakes with actionable diagnostics", async () => {
-	const oldPython = clientFor(await fakeWorker({ pythonVersion: "3.9.0" }));
+	const oldPython = clientFor(await fakeWorker({ pythonVersion: "3.9.0" }), 2_000);
 	await expect(oldPython.capabilities()).rejects.toThrow("Python 3.10+");
 	await oldPython.shutdown();
 
-	const oldSdk = clientFor(await fakeWorker({ sdkVersion: "3.9.0" }));
+	const oldSdk = clientFor(await fakeWorker({ sdkVersion: "3.9.0" }), 2_000);
 	await expect(oldSdk.capabilities()).rejects.toThrow("SDK major 4");
 	await oldSdk.shutdown();
 
-	const incomplete = clientFor(await fakeWorker({ missingMethods: true }));
+	const incomplete = clientFor(await fakeWorker({ missingMethods: true }), 2_000);
 	await expect(incomplete.capabilities()).rejects.toThrow("missing required operations");
 	await incomplete.shutdown();
 });
