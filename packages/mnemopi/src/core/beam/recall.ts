@@ -133,6 +133,11 @@ export function clipRecallContent(
 }
 
 const DEFAULT_LIMIT = 500;
+/**
+ * Newest visible rows per tier that recall scores by embedding similarity. Older rows are reachable only
+ * through keyword search, so a small cap hides semantically relevant memories once a bank outgrows it.
+ */
+const DENSE_CANDIDATE_LIMIT = 10_000;
 const STOP_WORDS = new Set([
 	"a",
 	"an",
@@ -601,7 +606,7 @@ function allVisibleIds(
 	const { where, params } = buildWhere(beam, "", options);
 	const rows = queryAll(beam, `SELECT id FROM ${table} WHERE ${where} ORDER BY timestamp DESC LIMIT ?`, [
 		...params,
-		DEFAULT_LIMIT,
+		DENSE_CANDIDATE_LIMIT,
 	]);
 	return rows.map(row => asString(row.id)).filter(Boolean);
 }
