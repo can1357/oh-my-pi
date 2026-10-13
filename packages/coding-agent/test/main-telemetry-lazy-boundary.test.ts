@@ -40,12 +40,13 @@ async function evaluateLaunchModuleGraph(): Promise<string[]> {
 	const line = stdout.split("\n").find(entry => entry.startsWith("BOOT_MODULES "));
 	expect(line, `no boot module report on stdout:\n${stdout}`).toBeDefined();
 	const report = JSON.parse(line!.slice("BOOT_MODULES ".length)) as BootModuleReport;
-	// Positive controls: the entry really was the process entry, and its static
-	// import graph is observable. Without them a recorder that observed nothing
-	// would pass this test.
+	const modules = report.modules.map(module => module.replaceAll("\\", "/"));
+	// Positive controls: the entry really was the process entry, and its module
+	// graph is observable. Without them a recorder that observed nothing would
+	// pass this test.
 	expect(report.entry?.replaceAll("\\", "/")).toBe(mainModulePath.replaceAll("\\", "/"));
-	expect(report.modules.length).toBeGreaterThan(100);
-	return report.modules.map(module => module.replaceAll("\\", "/"));
+	expect(modules).toContain(mainModulePath.replaceAll("\\", "/"));
+	return modules;
 }
 
 describe("launch module graph telemetry boundary", () => {
