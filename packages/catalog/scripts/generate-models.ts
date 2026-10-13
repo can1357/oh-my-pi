@@ -102,7 +102,7 @@ const STATIC_SEED_COMPLETE_PROVIDERS = new Set(["yolo-auto", "coralbricks"]);
  * runner seed transports. The bundle carries both so configured roles resolve
  * synchronously before live discovery completes.
  */
-function bundledSeedRows(
+export function bundledSeedRows(
 	entry: CompiledProvider,
 	models: readonly ModelSpec[],
 	authoritativeProviders: ReadonlySet<string>,

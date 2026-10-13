@@ -52,6 +52,12 @@ export interface ResolvedModelPolicy<TApi extends Api = Api> {
 	identity: ModelIdentity;
 	compat: CompatOf<TApi>;
 	thinking: ThinkingConfig | undefined;
+	/**
+	 * A `thinking-upgrade-neutral` repair promoted a ladder-free lane to
+	 * reasoning, so `thinking` stays undefined; `buildModel` must promote
+	 * `reasoning` from this flag.
+	 */
+	reasoningUpgrade?: boolean;
 	/** Catalog-data axis assignments (longContext, priority, …) for generation. */
 	catalog: Record<string, unknown>;
 	/** Request-shaping directives for the selected upstream. */
@@ -1391,6 +1397,7 @@ export function resolveModelPolicy(input: ModelSpec<Api>, route?: ResolveRoute):
 		identity,
 		compat,
 		thinking: resolveThinkingPolicy(spec, facts, axes, compat),
+		...(spec.reasoning ? {} : { reasoningUpgrade: compatReasoning(spec, axes) || undefined }),
 		catalog: axes.catalog,
 		request: resolveRequestPolicy(axes),
 	};

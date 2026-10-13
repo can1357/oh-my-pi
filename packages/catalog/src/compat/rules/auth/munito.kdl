@@ -1,0 +1,10 @@
+auth "munito" {
+	name "Munito"
+	login "api-key" {
+		auth-url "https://console.munito.ai/keys"
+		instructions "Create a key with the Inference permission in the Munito console"
+		prompt "Paste your Munito API key" placeholder="munitoai_..."
+		// /models is public but 401s an invalid key, so a wrong key fails validation.
+		validate "models-endpoint" label="Munito" url="https://api.munito.ai/inference/v1/models"
+	}
+}
