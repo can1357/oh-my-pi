@@ -756,4 +756,22 @@ describe("user shell runs", () => {
 		run.setComplete(1, false);
 		expect(JSON.stringify(run.describe(cx(["tool", "ansi", "code"])))).toContain("… 150 earlier lines dropped");
 	});
+
+	it("counts throttle-rejected rows in the dropped-lines notice", () => {
+		const run = new BashExecutionComponent("seq 1 250", ui, false);
+		run.appendOutput(Array.from({ length: 250 }, (_, i) => `line-${i}`).join("\n"));
+		// Second callback inside the 50 ms gate, then a throw: the run settles
+		// without a final snapshot, so the retained tail window is all there is.
+		// Rows missing from it are the 150 the live cap dropped plus this chunk's
+		// four rows — its first row merges into the retained `line-249`, exactly
+		// as an accepted chunk would have.
+		run.appendOutput(["extra-0", "extra-1", "extra-2", "extra-3", "extra-4"].join("\n"));
+		run.setComplete(undefined, false);
+		const notice = "… 154 earlier lines dropped";
+		const card = run.describe(cx(["card", "ansi"]));
+		const notes = nodes(card.c).find(child => props(child).key === "notes");
+		expect(spansText(notes)).toContain(notice);
+		// Same truth in the native run foot facts.
+		expect(JSON.stringify(run.describe(cx(["tool", "ansi", "code"])))).toContain(notice);
+	});
 });
