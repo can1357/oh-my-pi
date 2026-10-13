@@ -82,11 +82,12 @@ const server = Bun.serve({
 			// `log` records what the page saw: Chrome fires afterprint only once a print finished, and headless Chrome
 			// returns from an unheld print() without printing anything.
 			return new Response(
-				`<button id="print">Print</button><script>
+				`<button id="print">Print</button><button id="confirm-print">Print after asking</button><script>
 					globalThis.log = [];
 					addEventListener("afterprint", () => log.push("afterprint"));
 					addEventListener("pageshow", event => { if (event.persisted) log.push("restored"); });
 					document.querySelector("#print").addEventListener("click", () => { print(); log.push("print returned"); });
+					document.querySelector("#confirm-print").addEventListener("click", () => { if (confirm("Print?")) print(); log.push("asked print returned"); });
 					if (location.pathname === "/print-on-load") addEventListener("load", () => { print(); log.push("load print returned"); });
 				</script>`,
 				{ headers },
@@ -657,6 +658,40 @@ return await tab.evaluate(() => {
 				// Closing the tab used to wait here until the tab worker was killed.
 				expect(await within3s(hold.dispose())).toBe("done");
 				await close.dismiss();
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
+	test("holds the print a confirm opened during a call leads to, though the hold ran out while it waited", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				const hold = await PrintHold.install(page, "calls");
+				try {
+					await hold.beginCall(0);
+					const { promise, resolve } = Promise.withResolvers<Dialog>();
+					page.once("dialog", resolve);
+					await page
+						.mainFrame()
+						.mainRealm()
+						.evaluate('void setTimeout(() => document.querySelector("#confirm-print").click())');
+					const asked = await promise;
+					hold.endCall();
+					// Real time, past the 1.5 s release on the page's own clock, which fake timers cannot reach.
+					await Bun.sleep(1_700);
+					// The page went on to print() before omp could hold it again, and the print preview opened.
+					await asked.accept();
+					expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
+						"afterprint",
+						"asked print returned",
+					]);
+				} finally {
+					await hold.dispose();
+				}
 			} finally {
 				await user.disconnect();
 			}
