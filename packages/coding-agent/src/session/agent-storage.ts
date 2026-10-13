@@ -364,8 +364,9 @@ CREATE TABLE settings (
 			migrate(legacySettings);
 		}
 
-		using versionStmt = this.#db
-			.prepare<{ version: number }, []>("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
+		using versionStmt = this.#db.prepare<{ version: number }, []>(
+			"SELECT version FROM schema_version ORDER BY version DESC LIMIT 1",
+		);
 		const versionRow = versionStmt.get();
 		const schemaVersion = typeof versionRow?.version === "number" ? versionRow.version : 0;
 		if (versionRow?.version !== undefined && versionRow.version !== SCHEMA_VERSION) {
