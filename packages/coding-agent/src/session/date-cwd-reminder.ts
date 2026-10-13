@@ -58,6 +58,16 @@ export class DateCwdReminderInjector {
 	 * memo below can't validate against state it has already outlived.
 	 */
 	#stateVersion = 0;
+	#pending:
+		| {
+				length: number;
+				first: Message | undefined;
+				last: Message | undefined;
+				root: UserMessage;
+				reminder: string;
+				version: number;
+		  }
+		| undefined;
 	/**
 	 * Last output built, tagged with the inputs that produced it. A repeat of
 	 * that exact (message set, root, reminder, state) tuple — a provider retry
@@ -66,6 +76,12 @@ export class DateCwdReminderInjector {
 	 * `refs` is a snapshot, never the caller's live array: element identity is
 	 * what makes an in-place push/splice a miss, and the array reference alone
 	 * would survive it.
+	 *
+	 * The memo is admitted on the second identical build only (`#pending`): an
+	 * ordinary turn appends new messages, so its snapshot would never replay and
+	 * would cost two extra O(n) copies plus O(n) retained slots per request. The
+	 * pending signature is O(1) — length plus first/last element identity — and
+	 * a replayable miss rebuilds `out` directly without snapshotting anything.
 	 *
 	 * `output` is private to this injector: it is the array a replay copies, and
 	 * it is never the array a caller is handed. Sharing it (or the caller's own
@@ -172,13 +188,33 @@ export class DateCwdReminderInjector {
 			// never needed a WeakSet entry — check before paying the add.
 			if (message.role === "user" && !this.#seen.has(message)) this.#seen.add(message);
 		}
-		// `out` is the array a replay copies, so this injector is the only holder:
-		// every caller gets a fresh slice of it, and a provider that appends to,
-		// splices, or reorders what it was handed cannot reach back into the memo
-		// or into another request's array.
+		// Two-hit admission: an exact re-preparation of the just-built inputs
+		// promotes to a full memo; anything else returns `out` directly — the
+		// same single array the parent path allocated — recording only the O(1)
+		// boundary signature. Ordinary turns (new messages appended) never match
+		// the signature, so they pay no snapshot and retain no transcript.
 		const root = this.#root;
 		const currentReminder = this.#currentReminder;
-		if (root !== undefined && currentReminder !== undefined) {
+		const pending = this.#pending;
+		if (
+			root !== undefined &&
+			currentReminder !== undefined &&
+			pending !== undefined &&
+			pending.root === root &&
+			pending.reminder === currentReminder &&
+			pending.version === this.#stateVersion &&
+			pending.length === messages.length &&
+			pending.first === messages[0] &&
+			pending.last === messages[messages.length - 1]
+		) {
+			// Second identical build: admit the memo. `out` becomes the array a
+			// replay copies, so this injector is the only holder: every caller
+			// gets a fresh slice of it, and a provider that appends to, splices,
+			// or reorders what it was handed cannot reach back into the memo or
+			// into another request's array. A middle-element swap that slips past
+			// the boundary signature only admits a memo `#replayable` then misses
+			// exactly, so the hit contract below is unchanged.
+			this.#pending = undefined;
 			this.#memo = {
 				refs: messages.slice(),
 				root,
@@ -186,8 +222,20 @@ export class DateCwdReminderInjector {
 				version: this.#stateVersion,
 				output: out,
 			};
+			return out.slice();
 		}
-		return out.slice();
+		this.#pending =
+			root === undefined || currentReminder === undefined
+				? undefined
+				: {
+						length: messages.length,
+						first: messages[0],
+						last: messages[messages.length - 1],
+						root,
+						reminder: currentReminder,
+						version: this.#stateVersion,
+					};
+		return out;
 	}
 
 	/**
@@ -215,5 +263,6 @@ export class DateCwdReminderInjector {
 	 */
 	release(): void {
 		this.#memo = undefined;
+		this.#pending = undefined;
 	}
 }

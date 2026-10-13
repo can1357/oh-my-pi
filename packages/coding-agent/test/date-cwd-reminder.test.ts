@@ -107,6 +107,44 @@ describe("date-cwd-reminder", () => {
 			expect(replay.messages[0]).toBe(first.messages[0]);
 		});
 
+		it("hands back its build array on a miss so an ordinary turn allocates no more than the parent path", () => {
+			// Contract: an ordinary turn (new messages appended) can never hit the
+			// replay memo, so the miss path must allocate exactly what the parent
+			// path did — one output array — and retain no transcript snapshot. If
+			// the miss path goes back to snapshotting `refs` plus copying `out`,
+			// each per-request transform pays two extra O(n) copies per request.
+			const injector = new DateCwdReminderInjector();
+			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
+			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
+
+			const first = injector.transform(context, "2026-08-14", "/work/omp");
+			const appended: Message = { role: "user", content: "second", timestamp: 2 };
+			const slices = new Array<unknown>();
+			const originalSlice = Array.prototype.slice;
+			const sliceSpy = function (this: unknown, ...args: []) {
+				slices.push(this);
+				return (originalSlice as (...callArgs: []) => unknown).apply(this, args);
+			};
+			Object.defineProperty(Array.prototype, "slice", { value: sliceSpy, configurable: true, writable: true });
+			try {
+				const replay = injector.transform(
+					{ ...context, messages: [firstUser, appended] },
+					"2026-08-14",
+					"/work/omp",
+				);
+				expect(replay.messages).toHaveLength(2);
+				expect(replay.messages[0]).toBe(first.messages[0]);
+				expect(replay.messages[1]).toBe(appended);
+				expect(slices).toHaveLength(0);
+			} finally {
+				Object.defineProperty(Array.prototype, "slice", {
+					value: originalSlice,
+					configurable: true,
+					writable: true,
+				});
+			}
+		});
+
 		it("rebuilds the wire when the caller edits the input array in place", () => {
 			const injector = new DateCwdReminderInjector();
 			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
