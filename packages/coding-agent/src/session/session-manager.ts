@@ -117,6 +117,7 @@ import {
 } from "./session-paths";
 import {
 	forgetExternalizedImages,
+	isAtomicPersistenceNode,
 	prepareEntryForPersistence,
 	TRANSIENT_PERSISTENCE_KEYS,
 } from "./session-persistence";
@@ -877,6 +878,8 @@ interface CachedEntryLine {
 const STAMP_OBJECT = Symbol("stamp.object");
 const STAMP_ARRAY = Symbol("stamp.array");
 const STAMP_END = Symbol("stamp.end");
+/** Brands a `JSON.rawJSON` node so it never compares equal to a same-shaped plain object. */
+const STAMP_RAW_JSON = Symbol("stamp.raw-json");
 
 /**
  * Unboxed value `JSON.stringify` emits for a boxed primitive, or `undefined` for
@@ -893,6 +896,22 @@ function unboxedPrimitive(value: object): number | string | boolean | undefined 
 }
 
 /**
+ * The raw payload of a `JSON.rawJSON` branded value, or `undefined` for any
+ * other object. The brand is invisible to `Object.keys` — which sees only the
+ * `rawJSON` payload key — yet `JSON.stringify` emits the payload verbatim
+ * (so `JSON.rawJSON("1")` serializes as `1`, not `{"rawJSON":"1"}`). The
+ * detector degrades to `undefined` on runtimes without the ES2025 API, where
+ * no branded value can exist.
+ */
+function rawJsonPayload(value: object): string | undefined {
+	if (!("isRawJSON" in JSON) || typeof JSON.isRawJSON !== "function" || !JSON.isRawJSON(value)) {
+		return undefined;
+	}
+	if (!("rawJSON" in value) || typeof value.rawJSON !== "string") return undefined;
+	return value.rawJSON;
+}
+
+/**
  * Flatten `value`'s JSON graph — the graph `stringifyJson` in {@link #lineFor}
  * projects — into `out` as structure markers, own keys, and leaf values, never
  * object identity. Used by the entry-line memo to see nested mutation that
@@ -902,14 +921,18 @@ function unboxedPrimitive(value: object): number | string | boolean | undefined 
  *
  * Values that `JSON.stringify` would replace are stamped as their projected
  * output instead of their live shape — a `toJSON()` node as its serialized
- * value, `undefined` as the `null` (in arrays) or dropped key (in objects) it
- * emits — and the fields {@link TRANSIENT_PERSISTENCE_KEYS} strips from the
- * projection are never walked, so the stamp tracks exactly the bytes the line
- * was built from. A boxed primitive is read hook-first for the same reason:
+ * value, a `JSON.rawJSON` node as a brand marker plus its raw payload,
+ * `undefined` as the `null` (in arrays) or dropped key (in objects) it emits —
+ * and the fields {@link TRANSIENT_PERSISTENCE_KEYS} strips from the projection
+ * are skipped only where persistence strips them: inside an atomic node (see
+ * `isAtomicPersistenceNode`) persistence keeps the whole subgraph verbatim,
+ * so the stamp walks it whole. Arrays are walked by indexed slots with a
+ * snapshotted length, the way `JSON.stringify` reads them, never through the
+ * iterator protocol. A boxed primitive is read hook-first for the same reason:
  * `JSON.stringify` runs `toJSON` before unboxing, so a wrapper whose hook
  * output changes must re-stamp even though its `valueOf()` does not.
  */
-function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
+function messageValueStamp(value: unknown, out: unknown[] = [], key?: string): unknown[] {
 	if (value === null || typeof value !== "object") {
 		out.push(value);
 		return out;
@@ -917,9 +940,8 @@ function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
 	// Duck-type read of JSON's own serializer hook; TypeScript has no structural
 	// expression for "serializes through toJSON". Consulted before
 	// `unboxedPrimitive` because `JSON.stringify` does the same.
-	const serializer = value as { toJSON?: () => unknown };
-	if (typeof serializer.toJSON === "function") {
-		out.push(serializer.toJSON.call(value));
+	if ("toJSON" in value && typeof value.toJSON === "function") {
+		out.push(value.toJSON.call(value));
 		return out;
 	}
 	// No hook: the wrapper is projected to the unboxed primitive before the
@@ -929,20 +951,35 @@ function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
 		out.push(unboxed);
 		return out;
 	}
+	// A rawJSON node serializes as its payload verbatim, not as its one-key
+	// container shape — stamp the brand and payload, never the keys.
+	const rawPayload = rawJsonPayload(value);
+	if (rawPayload !== undefined) {
+		out.push(STAMP_RAW_JSON, rawPayload, STAMP_END);
+		return out;
+	}
 	if (Array.isArray(value)) {
 		out.push(STAMP_ARRAY);
-		for (const item of value) messageValueStamp(item, out);
+		// `JSON.stringify` reads indexed slots up to a snapshotted length, not
+		// the iterator protocol — an overridden `Symbol.iterator` changes the
+		// latter while the former (and the persisted bytes) stays fixed.
+		const length = value.length;
+		for (let index = 0; index < length; index++) messageValueStamp(value[index], out);
 	} else {
 		const fields = value as Record<string, unknown>;
+		// Atomic nodes persist verbatim: `truncateForPersistence` returns before
+		// its key-stripping loop, so transient keys inside one reach the line and
+		// must be stamped. Only non-atomic containers strip them.
+		const atomic = isAtomicPersistenceNode(value, key);
 		out.push(STAMP_OBJECT);
-		for (const key of Object.keys(fields)) {
+		for (const childKey of Object.keys(fields)) {
 			// Stripped from the persisted line by `truncateForPersistence` before
 			// serialization, so the projected bytes never depend on it — and the
 			// live field may be cyclic (a streaming event can reference the array
 			// holding it), which this walk could never escape.
-			if (TRANSIENT_PERSISTENCE_KEYS.includes(key)) continue;
-			out.push(key);
-			messageValueStamp(fields[key], out);
+			if (!atomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
+			out.push(childKey);
+			messageValueStamp(fields[childKey], out, childKey);
 		}
 	}
 	out.push(STAMP_END);
@@ -959,7 +996,7 @@ function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
  */
 function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 	let index = 0;
-	const match = (live: unknown): boolean => {
+	const match = (live: unknown, key?: string): boolean => {
 		const expected = stamp[index++];
 		// A `toJSON` node was stamped as its projected value — a single leaf
 		// (see {@link messageValueStamp}) — so compare that projection here
@@ -969,29 +1006,43 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 		// the persisted bytes came from.
 		if (live !== null && typeof live === "object") {
 			// Duck-type read of JSON's own serializer hook.
-			const serializer = live as { toJSON?: () => unknown };
-			if (typeof serializer.toJSON === "function") {
-				return serializer.toJSON.call(live) === expected;
+			if ("toJSON" in live && typeof live.toJSON === "function") {
+				return live.toJSON.call(live) === expected;
 			}
 			// Hookless wrappers were stamped as their unboxed value — one leaf,
 			// not the empty container `unboxedPrimitive` explains.
 			const unboxed = unboxedPrimitive(live);
 			if (unboxed !== undefined) return unboxed === expected;
+			// A rawJSON node was stamped as its brand plus payload — see
+			// {@link messageValueStamp} — so a plain object with the same
+			// `{ rawJSON }` keys falls out at the brand marker.
+			const rawPayload = rawJsonPayload(live);
+			if (rawPayload !== undefined) {
+				return expected === STAMP_RAW_JSON && stamp[index++] === rawPayload && stamp[index++] === STAMP_END;
+			}
+			if (expected === STAMP_RAW_JSON) return false;
 		}
 		if (expected === STAMP_OBJECT || expected === STAMP_ARRAY) {
 			if (live === null || typeof live !== "object") return false;
 			if (Array.isArray(live) !== (expected === STAMP_ARRAY)) return false;
 			if (Array.isArray(live)) {
-				for (const item of live) if (!match(item)) return false;
+				// Indexed slots with a snapshotted length, mirroring both
+				// `JSON.stringify` and {@link messageValueStamp} — never the
+				// iterator protocol.
+				const length = live.length;
+				for (let position = 0; position < length; position++) if (!match(live[position])) return false;
 			} else {
 				const fields = live as Record<string, unknown>;
-				for (const key of Object.keys(fields)) {
+				// Mirror the stamp side: transient keys were recorded inside
+				// atomic nodes (persistence keeps them) and skipped elsewhere.
+				const atomic = isAtomicPersistenceNode(live, key);
+				for (const childKey of Object.keys(fields)) {
 					// Stripped before serialization by `truncateForPersistence`, so
 					// the stamp never recorded it (and must not walk it) — see
 					// {@link messageValueStamp}.
-					if (TRANSIENT_PERSISTENCE_KEYS.includes(key)) continue;
-					if (stamp[index++] !== key) return false;
-					if (!match(fields[key])) return false;
+					if (!atomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
+					if (stamp[index++] !== childKey) return false;
+					if (!match(fields[childKey], childKey)) return false;
 				}
 			}
 			return stamp[index++] === STAMP_END;
