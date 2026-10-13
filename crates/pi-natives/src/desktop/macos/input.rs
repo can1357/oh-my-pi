@@ -1054,6 +1054,14 @@ unsafe extern "C" {
 	#[link_name = "CGEventSourceGetLocalEventsFilterDuringSuppressionState"]
 	fn get_local_events_filter_during_suppression_state(source: CGEventSourceRef, state: u32)
 	-> u32;
+	#[cfg(test)]
+	#[link_name = "CGEventKeyboardGetUnicodeString"]
+	fn keyboard_get_unicode_string(
+		event: CGEventRef,
+		capacity: usize,
+		length: *mut usize,
+		units: *mut u16,
+	);
 }
 
 pub(super) fn source() -> CoreResult<CGEventSource> {
@@ -2364,6 +2372,96 @@ mod tests {
 		assert!(matches!(events.as_slice(), [CGEventType::KeyDown, CGEventType::KeyUp]));
 		assert!(cancellation.token().check().is_ok());
 		assert!(token.check().is_err());
+	}
+
+	/// (event type, key code, UTF-16 Unicode payload).
+	fn text_event(event: &CGEvent) -> (CGEventType, i64, Vec<u16>) {
+		let mut units = [0u16; 32];
+		let mut length = 0;
+		// SAFETY: `event` is live and `units` holds the capacity passed.
+		unsafe {
+			keyboard_get_unicode_string(
+				event.as_ptr(),
+				units.len(),
+				&raw mut length,
+				units.as_mut_ptr(),
+			);
+		}
+		(
+			event.get_type(),
+			event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+			units[..length].to_vec(),
+		)
+	}
+
+	#[test]
+	fn typed_text_reaches_the_target_whole_as_unicode_payloads() {
+		// Control characters, a ZWJ emoji, and a grapheme longer than one
+		// event's 20 UTF-16 units all ride as payloads; none has a key.
+		let text = format!("a\tb\n\u{1b}👨‍👩‍👧‍👦e{}é", "\u{301}".repeat(24));
+		let source = source().expect("event source");
+		let mut events = Vec::new();
+		type_text(&source, &text, |event| {
+			events.push(text_event(event));
+			Ok(())
+		})
+		.unwrap();
+		let mut typed = Vec::new();
+		for pair in events.chunks(2) {
+			let [(CGEventType::KeyDown, 0, press), (CGEventType::KeyUp, 0, release)] = pair else {
+				panic!("expected a key-0 press and release, got {pair:?}");
+			};
+			assert_eq!(press, release);
+			assert!(press.len() <= 20, "{press:?}");
+			typed.extend_from_slice(press);
+		}
+		assert_eq!(String::from_utf16(&typed).unwrap(), text);
+	}
+
+	#[test]
+	fn screen_sharing_text_with_a_keyless_character_types_nothing() {
+		use crate::desktop::error::ErrorCode;
+		for character in ["é", "😀", "e\u{301}", "\u{1b}", "\u{7f}"] {
+			let text = format!("ab{character}cd");
+			let error = physical_transitions(&text).unwrap_err();
+			assert_eq!(error.code, ErrorCode::InvalidKey, "{text:?}");
+			let named = character.chars().last().unwrap();
+			assert!(error.message.contains(&format!("'{named}'")), "{}", error.message);
+			assert!(error.message.contains("no text was typed"), "{}", error.message);
+		}
+		// Tab, newline and shifted characters have keys.
+		assert_eq!(physical_transitions("a\tB\n").unwrap(), [
+			(0, true),
+			(0, false),
+			(48, true),
+			(48, false),
+			(56, true),
+			(11, true),
+			(11, false),
+			(56, false),
+			(36, true),
+			(36, false),
+		]);
+	}
+
+	#[test]
+	fn a_chord_with_a_keyless_character_presses_nothing() {
+		use crate::desktop::error::ErrorCode;
+		let source = source().expect("event source");
+		let mut events = Vec::new();
+		let result = with_held_keys(
+			&source,
+			&[KeyName::Meta, KeyName::Char('é')],
+			|event| {
+				events.push(shift_transition(event));
+				Ok(())
+			},
+			|| panic!("a refused chord must not run the hold"),
+		);
+		let error = result.unwrap_err();
+		assert_eq!(error.code, ErrorCode::InvalidKey);
+		assert!(error.message.contains("'é'"), "{}", error.message);
+		assert!(events.is_empty(), "{events:?}");
 	}
 
 	#[test]
