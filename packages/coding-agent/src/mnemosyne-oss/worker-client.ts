@@ -301,7 +301,7 @@ export class MnemosyneOssWorkerClient {
 		this.#crashed = true;
 		const detail = this.#stderrTail.trim();
 		const failure = detail ? new Error(`${error.message}\n${detail}`) : error;
-		for (const [id, pending] of [...this.#pending.entries()]) {
+		for (const [id, pending] of this.#pending) {
 			this.#settlePending(id, undefined, pending.mutation ? unknownMutationError(failure) : failure);
 		}
 		void this.#disposeProcess();
