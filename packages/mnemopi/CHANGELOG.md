@@ -35,6 +35,10 @@
 
 - Repeated recall reuses decoded memory embeddings instead of re-reading and parsing them on each call, reducing warm-recall work on large banks ([#15730](https://github.com/can1357/oh-my-pi/pull/15730) by [@andrebrait](https://github.com/andrebrait))
 
+### Fixed
+
+- Fixed recall missing older memories that match a query by meaning but share no words with it, once a bank holds more than 500 newer memories.
+
 ## [18.11.2] - 2026-10-16
 
 ### Fixed
