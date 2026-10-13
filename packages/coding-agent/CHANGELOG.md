@@ -174,6 +174,10 @@
 - Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
 
+### Fixed
+
+- Fixed keys you type in another app going into a page on macOS when omp's click in a relay tab opened a new tab or popup: Chrome made itself the active app and kept it; the relay now puts your app back in front within milliseconds
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
