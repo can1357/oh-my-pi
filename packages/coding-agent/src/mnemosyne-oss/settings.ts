@@ -150,7 +150,7 @@ export const cfgMnemosyneOssLocalConsolidation = register({
 		group: "Mnemosyne OSS",
 		label: "Local consolidation model",
 		description:
-			"Permit consolidation with a local LLM only when a local LLM repository or file is also set. Off, or on without a local model path, uses Mnemosyne's no-LLM heuristic consolidation.",
+			"Permit consolidation with a local LLM only when both the local LLM repository and file are set. Off, or on without both, uses Mnemosyne's no-LLM heuristic consolidation.",
 		condition: "mnemosyneOssActive",
 	},
 });
@@ -163,7 +163,8 @@ export const cfgMnemosyneOssLocalLlmRepo = register({
 		tab: "memory",
 		group: "Mnemosyne OSS",
 		label: "Local LLM repository",
-		description: "Optional local consolidation model repository; used only when local consolidation is on.",
+		description:
+			"Hugging Face repository of the local GGUF consolidation model; needs the file too and local consolidation on.",
 		condition: "mnemosyneOssActive",
 	},
 });
@@ -176,7 +177,7 @@ export const cfgMnemosyneOssLocalLlmFile = register({
 		tab: "memory",
 		group: "Mnemosyne OSS",
 		label: "Local LLM file",
-		description: "Optional local consolidation model file; used only when local consolidation is on.",
+		description: "GGUF file name in the local LLM repository; needs the repository too and local consolidation on.",
 		condition: "mnemosyneOssActive",
 	},
 });
