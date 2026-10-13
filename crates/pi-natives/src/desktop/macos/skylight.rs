@@ -634,6 +634,34 @@ fn request_after_check(
 	request(since).map(Some)
 }
 
+/// How many timestamps takeover's hand-back tries while the user keeps typing.
+const TAKEOVER_HAND_BACK_TRIES: usize = 3;
+
+/// Takeover's hand-back through [`request_after_check`], asked again with a
+/// fresh timestamp while `WindowServer` refuses it and `typed_since` shows the
+/// takeover monitor saw the user type after the refused timestamp. Such
+/// typing reached the target only because takeover held the front. A refusal
+/// the monitor cannot account for (a click or shortcut it has not counted
+/// yet, or no monitor at all) stands, as does any try `still_ours` rejects.
+fn hand_back_through_typing(
+	mut now: impl FnMut() -> u64,
+	mut still_ours: impl FnMut() -> bool,
+	mut typed_since: impl FnMut(u64) -> bool,
+	mut request: impl FnMut(u64) -> CoreResult<FrontRequest>,
+) -> CoreResult<Option<FrontRequest>> {
+	for _ in 1..TAKEOVER_HAND_BACK_TRIES {
+		let mut asked = 0;
+		let handed = request_after_check(&mut now, &mut still_ours, |since| {
+			asked = since;
+			request(since)
+		})?;
+		if handed != Some(FrontRequest::UserActed) || !typed_since(asked) {
+			return Ok(handed);
+		}
+	}
+	request_after_check(now, still_ours, request)
+}
+
 /// Makes `psn` the front process unless the user pressed a key or clicked
 /// after `since` ([`event_clock_now`]). `WindowServer` decides on its own
 /// event clock, so polling delays cannot hide that input. It counts keys and
@@ -829,7 +857,7 @@ pub(super) fn with_foreground<T>(
 	action: impl FnOnce(bool) -> CoreResult<T>,
 ) -> CoreResult<T> {
 	control::check()?;
-	let activity = control::user_activity();
+	let choices = control::user_choices();
 	let spi = FOREGROUND.as_ref().ok_or_else(|| {
 		DesktopError::input_failed("exact-window takeover SPI is unavailable; no input was sent")
 	})?;
@@ -856,31 +884,33 @@ pub(super) fn with_foreground<T>(
 		)
 	})?;
 	let restore = |preparation_failed: bool| {
-		if control::user_activity() != activity {
-			return Ok(());
-		}
-		let front = front_process(spi.get_front).ok_or_else(|| {
-			DesktopError::input_failed("cannot establish current focus for takeover restoration")
-		})?;
-		// A user-selected third app or sibling window must not be overwritten.
-		if front.psn != target {
-			return Ok(());
-		}
-		if ax::focused_window_id(pid)
-			.is_some_and(|key| key != wid && (!preparation_failed || Some(key) != focused))
-		{
+		// Keys the user types while takeover holds the front land in the target
+		// without them choosing it, so only a click or Command shortcut of
+		// theirs, or a switch elsewhere, leaves the front application alone.
+		// Takeover's own clicks are over, so a pointer press the HID counters
+		// show after this point is the user's; they are read synchronously,
+		// unlike the monitor's count, which can trail a click.
+		let presses = pointer_presses();
+		let still_ours = || {
+			control::user_choices() == choices
+				&& pointer_presses() == presses
+				// A user-selected third app or sibling window must not be
+				// overwritten.
+				&& front_process(spi.get_front).is_some_and(|front| front.psn == target)
+				&& !ax::focused_window_id(pid)
+					.is_some_and(|key| key != wid && (!preparation_failed || Some(key) != focused))
+		};
+		if !still_ours() {
 			return Ok(());
 		}
 		// The action and its settle are over, so takeover's own keys and
 		// clicks, which `WindowServer` counts like the user's, came before this
-		// timestamp; a user key or click after it refuses the hand-back, and the
+		// timestamp; user input after it refuses the hand-back, and the
 		// make-key records below are then never posted.
-		let handed_back = request_after_check(
+		let handed_back = hand_back_through_typing(
 			event_clock_now,
-			|| {
-				control::user_activity() == activity
-					&& front_process(spi.get_front).is_some_and(|front| front.psn == target)
-			},
+			still_ours,
+			|since| control::last_user_typing() >= since,
 			|since| set_front_unless_user_acted(spi, previous.psn, previous_key, since),
 		)?;
 		if handed_back != Some(FrontRequest::Done) {
@@ -1190,6 +1220,79 @@ mod tests {
 		let unwanted =
 			request_after_check(|| 7, || false, |_| panic!("no request once the check fails"));
 		assert_eq!(unwanted.ok(), Some(None));
+	}
+
+	#[test]
+	fn takeover_hands_back_through_the_users_typing_but_not_their_click() {
+		use std::cell::Cell;
+		// The monitor saw the user type after each refused timestamp, and
+		// nothing else changed: a fresh timestamp is asked for until it goes
+		// through.
+		let clock = Cell::new(0);
+		let stamps = std::cell::RefCell::new(Vec::new());
+		let handed = hand_back_through_typing(
+			|| {
+				clock.set(clock.get() + 1);
+				clock.get()
+			},
+			|| true,
+			|since| since <= 1,
+			|since| {
+				stamps.borrow_mut().push(since);
+				Ok(if since < 2 {
+					FrontRequest::UserActed
+				} else {
+					FrontRequest::Done
+				})
+			},
+		);
+		assert_eq!(handed.ok(), Some(Some(FrontRequest::Done)));
+		assert_eq!(*stamps.borrow(), [1, 2]);
+
+		// A click after the refusal: the target stays the user's.
+		let clicked = Cell::new(false);
+		let requests = Cell::new(0);
+		let handed = hand_back_through_typing(
+			|| 1,
+			|| !clicked.get(),
+			|_| true,
+			|_| {
+				requests.set(requests.get() + 1);
+				clicked.set(true);
+				Ok(FrontRequest::UserActed)
+			},
+		);
+		assert_eq!(handed.ok(), Some(None));
+		assert_eq!(requests.get(), 1);
+
+		// A refusal the monitor has seen no typing for (a click or shortcut it
+		// has not counted yet, or no monitor at all) stands after one request.
+		let requests = Cell::new(0);
+		let handed = hand_back_through_typing(
+			|| 5,
+			|| true,
+			|_| false,
+			|_| {
+				requests.set(requests.get() + 1);
+				Ok(FrontRequest::UserActed)
+			},
+		);
+		assert_eq!(handed.ok(), Some(Some(FrontRequest::UserActed)));
+		assert_eq!(requests.get(), 1);
+
+		// Typing never pauses: a bounded number of requests, then it gives up.
+		let requests = Cell::new(0);
+		let handed = hand_back_through_typing(
+			|| 1,
+			|| true,
+			|_| true,
+			|_| {
+				requests.set(requests.get() + 1);
+				Ok(FrontRequest::UserActed)
+			},
+		);
+		assert_eq!(handed.ok(), Some(Some(FrontRequest::UserActed)));
+		assert_eq!(requests.get(), TAKEOVER_HAND_BACK_TRIES);
 	}
 
 	#[test]
