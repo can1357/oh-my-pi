@@ -1,30 +1,99 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import { getConfigDirPaths } from "../config";
 import { type ClaudePluginRoot, getPreloadedPluginRoots } from "../discovery/helpers";
 
 /** Turns raw file content (from `filePath`) into a config, or `null` to skip the file. */
 export type ConfigFileAdapter<T> = (content: string, filePath: string) => T | null;
 
-/** One entry of a config stack; `read` yields `null` for unreadable or rejected files. */
+/** Why an existing config file was not applied. Absent files are not rejections. */
+export interface ConfigFileRejection {
+	path: string;
+	reason: "unreadable" | "invalid";
+	message: string;
+}
+
+/** Detailed outcome of reading one config path. */
+export type ConfigFileReadResult<T> =
+	| { kind: "value"; value: T }
+	| { kind: "absent" }
+	| { kind: "rejected"; rejection: ConfigFileRejection };
+
+/** One entry of a config stack. */
 export interface ConfigFileSource<T> {
+	/** Path this source reads when it is file-backed; omitted for synthetic sources. */
+	readonly path?: string;
+	readResult(): ConfigFileReadResult<T>;
+	/** Convenience: value when present, otherwise `null` (absent or rejected). */
 	read(): T | null;
 }
 
+function sourceFromResult<T>(
+	pathHint: string | undefined,
+	readResult: () => ConfigFileReadResult<T>,
+): ConfigFileSource<T> {
+	return {
+		path: pathHint,
+		readResult,
+		read: () => {
+			const result = readResult();
+			return result.kind === "value" ? result.value : null;
+		},
+	};
+}
+
 /**
- * Read one JSON/YAML config file through `adapt`. Reading, parsing and rejecting
- * all happen inside one guard so an unreadable, malformed, or irrelevant file is
- * skipped instead of thrown. `adapt` receives the raw content because the YAML/JSON
- * split lives with the config files that consume this walk, not here.
+ * Read one JSON/YAML config file through `adapt`.
+ *
+ * - Missing path → `absent` (callers skip quietly).
+ * - Unreadable path → `rejected` with reason `unreadable`.
+ * - Adapter throw or `null` return → `rejected` with reason `invalid`.
+ */
+export function readConfigFileResult<T>(filePath: string, adapt: ConfigFileAdapter<T>): ConfigFileReadResult<T> {
+	let content: string;
+	try {
+		content = fs.readFileSync(filePath, "utf-8");
+	} catch (err) {
+		if (isEnoent(err)) return { kind: "absent" };
+		const message = err instanceof Error ? err.message : String(err);
+		return {
+			kind: "rejected",
+			rejection: { path: filePath, reason: "unreadable", message },
+		};
+	}
+
+	try {
+		const value = adapt(content, filePath);
+		if (value === null) {
+			return {
+				kind: "rejected",
+				rejection: {
+					path: filePath,
+					reason: "invalid",
+					message: "config did not contain a usable object",
+				},
+			};
+		}
+		return { kind: "value", value };
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return {
+			kind: "rejected",
+			rejection: { path: filePath, reason: "invalid", message },
+		};
+	}
+}
+
+/**
+ * Read one JSON/YAML config file through `adapt`. Missing, unreadable, and
+ * rejected files all become `null` so callers that only need a merge can stay
+ * simple; use {@link readConfigFileResult} when diagnostics matter.
  */
 export function readConfigFile<T>(filePath: string, adapt: ConfigFileAdapter<T>): T | null {
-	try {
-		const content = fs.readFileSync(filePath, "utf-8");
-		return adapt(content, filePath);
-	} catch {
-		return null;
-	}
+	const result = readConfigFileResult(filePath, adapt);
+	return result.kind === "value" ? result.value : null;
 }
 
 export interface ConfigFileSourcesOptions<T> {
@@ -48,7 +117,8 @@ export function configFileSources<T>(
 	const sources: ConfigFileSource<T>[] = [];
 	const addDir = (dir: string): void => {
 		for (const filename of filenames) {
-			sources.push({ read: () => readConfigFile(path.join(dir, filename), adapt) });
+			const filePath = path.join(dir, filename);
+			sources.push(sourceFromResult(filePath, () => readConfigFileResult(filePath, adapt)));
 		}
 	};
 

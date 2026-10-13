@@ -5,6 +5,7 @@ import { YAML } from "bun";
 import type { ClaudePluginRoot } from "../discovery/helpers";
 import {
 	type ConfigFileAdapter,
+	type ConfigFileRejection,
 	type ConfigFileSource,
 	configFileSources,
 	readConfigFile,
@@ -14,10 +15,17 @@ import { SwiftLintClient } from "./clients/swiftlint-client";
 import DEFAULTS from "./defaults.json" with { type: "json" };
 import type { ServerConfig } from "./types";
 
+export type { ConfigFileRejection };
+
 export interface LspConfig {
 	servers: Record<string, ServerConfig>;
 	/** Idle timeout in milliseconds. If set, LSP clients will be shutdown after this period of inactivity. Disabled by default. */
 	idleTimeoutMs?: number;
+	/**
+	 * Config files that existed but could not be applied (unreadable or invalid
+	 * JSON/YAML/object shape). Absent files are not listed.
+	 */
+	rejectedSources?: ConfigFileRejection[];
 }
 
 // =============================================================================
@@ -394,9 +402,26 @@ function readMarketplaceLspConfig(root: ClaudePluginRoot): NormalizedConfig | nu
 }
 
 function marketplaceConfigSource(root: ClaudePluginRoot): ConfigFileSource<NormalizedConfig> {
-	return {
-		read: () => readMarketplaceLspConfig(root),
+	const readResult = (): ReturnType<ConfigFileSource<NormalizedConfig>["readResult"]> => {
+		const value = readMarketplaceLspConfig(root);
+		return value ? { kind: "value", value } : { kind: "absent" };
 	};
+	return {
+		readResult,
+		read: () => {
+			const result = readResult();
+			return result.kind === "value" ? result.value : null;
+		},
+	};
+}
+
+/** Format rejected config sources for status/reload tool output. */
+export function formatRejectedConfigSources(cwd: string, rejected: ConfigFileRejection[] | undefined): string[] {
+	if (!rejected || rejected.length === 0) return [];
+	return rejected.map(rejection => {
+		const display = pathIsWithin(cwd, rejection.path) ? path.relative(cwd, rejection.path) : rejection.path;
+		return `Rejected config: ${display} (${rejection.reason}): ${rejection.message}`;
+	});
 }
 
 /**
@@ -439,9 +464,20 @@ export function loadConfig(cwd: string): LspConfig {
 	}).reverse();
 
 	let idleTimeoutMs: number | undefined;
+	const rejectedSources: ConfigFileRejection[] = [];
 	for (const source of configSources) {
-		const parsed = source.read();
-		if (!parsed) continue;
+		const result = source.readResult();
+		if (result.kind === "absent") continue;
+		if (result.kind === "rejected") {
+			rejectedSources.push(result.rejection);
+			logger.warn("Rejected LSP config source", {
+				path: result.rejection.path,
+				reason: result.rejection.reason,
+				message: result.rejection.message,
+			});
+			continue;
+		}
+		const parsed = result.value;
 		mergedServers = mergeServers(mergedServers, parsed.servers);
 		if (parsed.idleTimeoutMs !== undefined) {
 			idleTimeoutMs = parsed.idleTimeoutMs;
@@ -461,7 +497,11 @@ export function loadConfig(cwd: string): LspConfig {
 	}
 	selectTypescriptServer(servers);
 
-	return { servers, idleTimeoutMs };
+	return {
+		servers,
+		idleTimeoutMs,
+		...(rejectedSources.length > 0 ? { rejectedSources } : {}),
+	};
 }
 
 // Cache config per cwd to avoid repeated file I/O
