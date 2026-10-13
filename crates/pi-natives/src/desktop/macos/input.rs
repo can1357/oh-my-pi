@@ -14,11 +14,15 @@ use core_graphics::{
 	sys::{CGEventRef, CGEventSourceRef},
 };
 use foreign_types::ForeignType;
+use objc2_application_services::AXUIElement;
 use xutf::graphemes_str;
 
 use super::{
 	super::{
-		backend::{DeliveryMode, Modifiers, MouseButton, PointerEvent},
+		backend::{
+			DeliveryMode, ElementDelivery, ElementInput, KeyboardFocus, Modifiers, MouseButton,
+			PointerEvent,
+		},
 		control,
 		error::{CoreResult, DesktopError},
 		keys::KeyName,
@@ -122,43 +126,8 @@ impl MacInput {
 		match target {
 			Target::Desktop | Target::Display(_) => global_type(&self.source, text),
 			Target::Window(id) => {
-				let window = capture.window(id)?;
-				let (pid, wid) = window_identity(&window)?;
-				match mode {
-					DeliveryMode::Background => {
-						if process::is_screen_sharing(pid) {
-							return Err(screen_sharing_refusal(&window, "synthesized text"));
-						}
-						if !process::is_terminal(pid) && ax::insert_native_text(pid, wid, text)? {
-							return Ok(());
-						}
-						with_background_keyboard(&self.source, pid, wid, &window, |to, guard| {
-							background_type(&self.source, to, text, guard)
-						})
-					},
-					DeliveryMode::Foreground => {
-						// Screen Sharing relays physical key transitions only; map
-						// the whole text before activating so a gap
-						// refuses cleanly.
-						let physical = if process::is_screen_sharing(pid) {
-							Some(physical_transitions(text)?)
-						} else {
-							None
-						};
-						skylight::with_foreground(pid, wid, |activated| {
-							control::wait(first_key_settle(activated))?;
-							match &physical {
-								Some(transitions) => {
-									skylight::require_front_window(pid, wid)?;
-									post_bare_keys(transitions)
-								},
-								None => {
-									type_text(&self.source, text, |event| post_takeover_key(pid, wid, event))
-								},
-							}
-						})
-					},
-				}
+				self.window_type(&capture.window(id)?, text, mode, None)?;
+				Ok(())
 			},
 		}
 	}
@@ -177,32 +146,117 @@ impl MacInput {
 		match target {
 			Target::Desktop | Target::Display(_) => global_chord(&self.source, keys),
 			Target::Window(id) => {
-				let window = capture.window(id)?;
-				let (pid, wid) = window_identity(&window)?;
-				match mode {
-					DeliveryMode::Background => {
-						if keys.iter().copied().any(KeyName::is_modifier)
-							&& process::is_screen_sharing(pid)
-						{
-							return Err(screen_sharing_refusal(
-								&window,
-								"modifier flags on routed chords",
-							));
-						}
-						with_background_keyboard(&self.source, pid, wid, &window, |to, guard| {
-							background_chord(&self.source, to, keys, guard)
-						})?;
-						confirm_shortcut_answered(&window, keys, || {
-							control::wait(SHORTCUT_REPLY_DELAY)?;
-							Ok(ax::stopped_answering(pid, SHORTCUT_REPLY_TIMEOUT_SECONDS))
-						})
-					},
-					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
-						control::wait(first_key_settle(activated))?;
-						key_chord(&self.source, keys, |event| post_takeover_key(pid, wid, event))
-					}),
-				}
+				self.window_chord(&capture.window(id)?, keys, mode, None)?;
+				Ok(())
 			},
+		}
+	}
+
+	/// Types or presses `input` into `element`, an element of window `id`.
+	#[allow(
+		clippy::needless_pass_by_ref_mut,
+		reason = "`&mut self` exclusivity backs the `Send` safety argument for the CF event source"
+	)]
+	pub(super) fn element_input(
+		&mut self,
+		id: &str,
+		element: &AXUIElement,
+		input: &ElementInput,
+		mode: DeliveryMode,
+		capture: &MacCapture,
+	) -> CoreResult<ElementDelivery> {
+		let window = capture.window(id)?;
+		match input {
+			ElementInput::Text(text) => self.window_type(&window, text, mode, Some(element)),
+			ElementInput::Chord(keys) => self.window_chord(&window, keys, mode, Some(element)),
+		}
+	}
+
+	/// Types `text` into `window`; with an `element`, into that element: AX
+	/// insertion when it takes it, else keys once it holds keyboard focus
+	/// ([`element_keys`]).
+	fn window_type(
+		&self,
+		window: &DesktopWindow,
+		text: &str,
+		mode: DeliveryMode,
+		element: Option<&AXUIElement>,
+	) -> CoreResult<ElementDelivery> {
+		let (pid, wid) = window_identity(window)?;
+		match mode {
+			DeliveryMode::Background => {
+				if process::is_screen_sharing(pid) {
+					return Err(screen_sharing_refusal(window, "synthesized text"));
+				}
+				if !process::is_terminal(pid) {
+					let inserted = match element {
+						Some(element) => ax::insert_into_element(element, text)?,
+						None => ax::insert_native_text(pid, wid, text)?,
+					};
+					if inserted {
+						return Ok(ElementDelivery::Delivered);
+					}
+				}
+				with_background_keyboard(&self.source, pid, wid, window, |to, guard| {
+					element_keys(pid, element, || background_type(&self.source, to, text, guard))
+				})
+			},
+			DeliveryMode::Foreground => {
+				// Screen Sharing relays physical key transitions only; map
+				// the whole text before activating so a gap
+				// refuses cleanly.
+				let physical = if process::is_screen_sharing(pid) {
+					Some(physical_transitions(text)?)
+				} else {
+					None
+				};
+				skylight::with_foreground(pid, wid, |activated| {
+					control::wait(first_key_settle(activated))?;
+					element_keys(pid, element, || match &physical {
+						Some(transitions) => {
+							skylight::require_front_window(pid, wid)?;
+							post_bare_keys(transitions)
+						},
+						None => type_text(&self.source, text, |event| post_takeover_key(pid, wid, event)),
+					})
+				})
+			},
+		}
+	}
+
+	/// Presses `keys` in `window`; with an `element`, once that element holds
+	/// keyboard focus ([`element_keys`]).
+	fn window_chord(
+		&self,
+		window: &DesktopWindow,
+		keys: &[KeyName],
+		mode: DeliveryMode,
+		element: Option<&AXUIElement>,
+	) -> CoreResult<ElementDelivery> {
+		let (pid, wid) = window_identity(window)?;
+		match mode {
+			DeliveryMode::Background => {
+				if keys.iter().copied().any(KeyName::is_modifier) && process::is_screen_sharing(pid) {
+					return Err(screen_sharing_refusal(window, "modifier flags on routed chords"));
+				}
+				let delivery =
+					with_background_keyboard(&self.source, pid, wid, window, |to, guard| {
+						element_keys(pid, element, || background_chord(&self.source, to, keys, guard))
+					})?;
+				if matches!(delivery, ElementDelivery::Delivered) {
+					confirm_shortcut_answered(window, keys, || {
+						control::wait(SHORTCUT_REPLY_DELAY)?;
+						Ok(ax::stopped_answering(pid, SHORTCUT_REPLY_TIMEOUT_SECONDS))
+					})?;
+				}
+				Ok(delivery)
+			},
+			DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
+				control::wait(first_key_settle(activated))?;
+				element_keys(pid, element, || {
+					key_chord(&self.source, keys, |event| post_takeover_key(pid, wid, event))
+				})
+			}),
 		}
 	}
 }
@@ -356,6 +410,58 @@ fn with_background_keyboard<T>(
 		}
 		deliver(to, &|| keys_still_reach(wid, conflict, focus.window, || ax::focused_window(pid)))
 	})
+}
+
+/// Runs `send` at once without an `element`. With one, focuses it and runs
+/// `send` only once `pid` reports it as its focused element, read every
+/// [`ELEMENT_FOCUS_POLL`] for up to [`ELEMENT_FOCUS_TIMEOUT`]
+/// ([`keys_after_focus`]).
+fn element_keys(
+	pid: libc::pid_t,
+	element: Option<&AXUIElement>,
+	send: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<ElementDelivery> {
+	let Some(element) = element else {
+		send()?;
+		return Ok(ElementDelivery::Delivered);
+	};
+	ax::set_focused(element)?;
+	let deadline = Instant::now() + ELEMENT_FOCUS_TIMEOUT;
+	keys_after_focus(
+		|| ax::holds_keyboard_focus(pid, element),
+		|| Instant::now() >= deadline,
+		|| control::wait(ELEMENT_FOCUS_POLL),
+		|| ax::keyboard_focus(pid),
+		send,
+	)
+}
+
+/// Keys addressed to an element: `send` runs once `holds_focus` reports that
+/// the element has keyboard focus, read again after each `wait` until
+/// `expired`; when it never does, nothing is sent and `unfocused` reads where
+/// focus is instead.
+///
+/// Focus is confirmed once, before the first key. A field that moves focus to
+/// the next one as each character lands, as split code inputs do, keeps
+/// receiving the rest; every press is still checked against the window that
+/// proved the keys reach it ([`keys_still_reach`]).
+fn keys_after_focus(
+	mut holds_focus: impl FnMut() -> bool,
+	mut expired: impl FnMut() -> bool,
+	mut wait: impl FnMut() -> CoreResult<()>,
+	unfocused: impl FnOnce() -> KeyboardFocus,
+	send: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<ElementDelivery> {
+	loop {
+		if holds_focus() {
+			send()?;
+			return Ok(ElementDelivery::Delivered);
+		}
+		if expired() {
+			return Ok(ElementDelivery::Unfocused(unfocused()));
+		}
+		wait()?;
+	}
 }
 
 /// Before a background press: keys posted to the process now still reach
@@ -767,6 +873,10 @@ const ACTIVATION_FLAGS: u64 = 0xc0000;
 /// [`make_key_in_background`] asked for.
 const KEY_WINDOW_TIMEOUT: Duration = Duration::from_millis(250);
 const KEY_WINDOW_POLL: Duration = Duration::from_millis(10);
+/// How long an element given `AXFocused` may take to report itself as its
+/// application's focused element before keys addressed to it are refused.
+const ELEMENT_FOCUS_TIMEOUT: Duration = Duration::from_millis(250);
+const ELEMENT_FOCUS_POLL: Duration = Duration::from_millis(10);
 /// How long an application may take to report the activation
 /// [`activate_then_await`] posted.
 const ACTIVE_STATE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -2455,6 +2565,92 @@ mod tests {
 		// A lone window: one opened during the input stops it once key.
 		assert!(keys_still_reach(7, None, id(7), || id(9)).is_err());
 		assert!(keys_still_reach(7, None, id(7), || unreported).is_ok());
+	}
+
+	#[test]
+	fn element_keys_wait_until_the_element_reports_focus() {
+		let source = source().expect("event source");
+		let reads = std::cell::Cell::new(0);
+		let mut pressed = 0;
+		let delivery = keys_after_focus(
+			|| {
+				reads.set(reads.get() + 1);
+				reads.get() == 3
+			},
+			|| false,
+			|| Ok(()),
+			|| panic!("a focused element needs no fresh read"),
+			|| {
+				type_text(&source, "ab", |event| {
+					pressed += usize::from(matches!(event.get_type(), CGEventType::KeyDown));
+					Ok(())
+				})
+			},
+		);
+		assert!(matches!(delivery, Ok(ElementDelivery::Delivered)));
+		assert_eq!(reads.get(), 3);
+		assert_eq!(pressed, 2);
+	}
+
+	#[test]
+	fn focus_is_confirmed_once_so_an_auto_advancing_code_input_fills() {
+		let source = source().expect("event source");
+		let focused_box = std::cell::Cell::new(0);
+		let reads = std::cell::Cell::new(0);
+		let mut boxes = Vec::new();
+		let delivery = keys_after_focus(
+			|| {
+				reads.set(reads.get() + 1);
+				focused_box.get() == 0
+			},
+			|| false,
+			|| Ok(()),
+			|| panic!("the first box took focus"),
+			|| {
+				type_text(&source, "123456", |event| {
+					match event.get_type() {
+						CGEventType::KeyDown => boxes.push(focused_box.get()),
+						// Each box hands focus to the next once its digit lands.
+						CGEventType::KeyUp => focused_box.set(focused_box.get() + 1),
+						_ => {},
+					}
+					Ok(())
+				})
+			},
+		);
+		assert!(matches!(delivery, Ok(ElementDelivery::Delivered)));
+		assert_eq!(boxes, [0, 1, 2, 3, 4, 5]);
+		assert_eq!(reads.get(), 1);
+	}
+
+	#[test]
+	fn element_keys_are_never_sent_while_the_element_lacks_focus() {
+		use crate::desktop::error::ErrorCode;
+		let polls = std::cell::Cell::new(0);
+		let delivery = keys_after_focus(
+			|| false,
+			|| polls.get() == 25,
+			|| {
+				polls.set(polls.get() + 1);
+				Ok(())
+			},
+			|| KeyboardFocus { window: Some("9".to_owned()), element: None },
+			|| panic!("nothing is sent to an element without focus"),
+		);
+		let Ok(ElementDelivery::Unfocused(focus)) = delivery else {
+			panic!("an element that never took focus is refused");
+		};
+		assert_eq!(focus.window.as_deref(), Some("9"));
+		assert_eq!(polls.get(), 25);
+		// Cancelling the wait stops it with nothing sent either.
+		let cancelled = keys_after_focus(
+			|| false,
+			|| false,
+			|| Err(DesktopError::cancelled("cancelled")),
+			|| panic!("a cancelled wait reads nothing"),
+			|| panic!("nothing is sent once the wait is cancelled"),
+		);
+		assert!(matches!(cancelled, Err(error) if error.code == ErrorCode::Cancelled));
 	}
 
 	#[test]

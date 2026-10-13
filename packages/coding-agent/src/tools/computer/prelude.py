@@ -104,6 +104,9 @@ def _make_computer():
         async def press(self, *args, **kwargs):
             return await self._method("press", args, kwargs)
 
+        async def type(self, *args, **kwargs):
+            return await self._method("type", args, kwargs)
+
         async def click(self, *args, **kwargs):
             return await self._method("click", args, kwargs)
 

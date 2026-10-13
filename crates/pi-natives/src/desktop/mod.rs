@@ -29,7 +29,9 @@ use std::{
 
 pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery, OpenedApplication};
 use ax::{AxRegistry, register_node};
-use backend::{Backend, DeliveryMode, MouseButton, PointerEvent};
+use backend::{
+	Backend, DeliveryMode, ElementDelivery, ElementInput, KeyboardFocus, MouseButton, PointerEvent,
+};
 use control::{CancellationSource, InputLease, OperationToken};
 use error::{CoreResult, DesktopError};
 use frame::{FrameGeometry, apply_capture_caps, encode_png};
@@ -239,6 +241,12 @@ enum Request {
 		options:   ParsedPointerOptions,
 		reply:     Reply,
 	},
+	AxInput {
+		reference: String,
+		input:     ElementInput,
+		takeover:  Option<bool>,
+		reply:     Reply,
+	},
 	Close {
 		reply: Reply,
 	},
@@ -279,6 +287,7 @@ impl Request {
 			| Self::AxSetValue { reply, .. }
 			| Self::AxFocus { reply, .. }
 			| Self::AxClick { reply, .. }
+			| Self::AxInput { reply, .. }
 			| Self::Close { reply } => reply,
 		};
 		reply.send(result).is_ok()
@@ -298,6 +307,7 @@ impl Request {
 				| Self::AxSetValue { .. }
 				| Self::AxFocus { .. }
 				| Self::AxClick { .. }
+				| Self::AxInput { .. }
 				| Self::OpenApplication { .. }
 				| Self::MenuSelect { .. }
 				| Self::BringToCurrentSpace { .. }
@@ -1052,7 +1062,77 @@ impl Worker {
 				)?;
 				Ok(Response::Unit)
 			},
+			Request::AxInput { reference, input, takeover, .. } => {
+				let h = self.registry.resolve(reference)?;
+				let windows = self.backend()?.windows()?;
+				let target = Target::Window(self.ax()?.window_id(&h, &windows)?);
+				let mode = delivery_mode(*takeover, token);
+				match self
+					.backend()?
+					.element_input(&target, &h, input, mode, token)?
+				{
+					ElementDelivery::Delivered => Ok(Response::Unit),
+					ElementDelivery::Unfocused(focus) => {
+						Err(self.element_focus_refusal(reference, focus, mode))
+					},
+				}
+			},
 			Request::Close { .. } => Ok(Response::Unit),
+		}
+	}
+}
+
+impl Worker {
+	/// The error for keys addressed to `reference` that were never sent
+	/// because the element did not take keyboard focus: where focus is now,
+	/// with the focused element's `ax()` line and a ref for it.
+	fn element_focus_refusal(
+		&mut self,
+		reference: &str,
+		focus: KeyboardFocus,
+		mode: DeliveryMode,
+	) -> DesktopError {
+		let window = match focus.window.as_deref() {
+			None => "an unidentified window".to_owned(),
+			Some(id) => {
+				let title = self
+					.backend()
+					.and_then(|backend| backend.windows())
+					.ok()
+					.and_then(|windows| windows.into_iter().find(|window| window.id == id))
+					.map(|window| window.title);
+				match title {
+					Some(title) => format!("window {id} ({title:?})"),
+					None => format!("window {id}"),
+				}
+			},
+		};
+		let target = focus
+			.window
+			.or_else(|| self.registry.target(reference).ok())
+			.unwrap_or_else(|| "desktop".to_owned());
+		let element = match focus.element {
+			None => "no element".to_owned(),
+			Some(handle) => {
+				let (backend, registry) = (&mut self.backend, &mut self.registry);
+				backend
+					.as_mut()
+					.ok()
+					.and_then(|backend| backend.ax())
+					.and_then(|ax| ax::element_line(ax, registry, &target, handle).ok())
+					.unwrap_or_else(|| "an element that could not be read".to_owned())
+			},
+		};
+		let message = format!(
+			"{reference} did not take keyboard focus, so nothing was sent; its application's \
+			 keyboard focus is in {window}, on {element}. Re-read with win.ax() or win.observe() \
+			 before retrying"
+		);
+		match mode {
+			DeliveryMode::Background => {
+				DesktopError::background_unavailable(format!("{message}, or retry with takeover:true"))
+			},
+			DeliveryMode::Foreground => DesktopError::input_failed(message),
 		}
 	}
 }
@@ -1773,6 +1853,46 @@ impl DesktopSession {
 		}))
 	}
 
+	/// Types `text` into the element: native text fields take it by AX
+	/// insertion, other elements as keystrokes once they hold keyboard focus.
+	#[napi]
+	pub fn ax_type(
+		&self,
+		reference: String,
+		text: String,
+		opts: Option<PointerOptions>,
+	) -> Result<task::Promise<()>> {
+		let takeover = ParsedPointerOptions::parse(opts)
+			.map_err(napi::Error::from)?
+			.takeover;
+		Ok(self.unit("desktop.axType", move |reply| Request::AxInput {
+			reference,
+			input: ElementInput::Text(text),
+			takeover,
+			reply,
+		}))
+	}
+
+	/// Presses a key chord in the element once it holds keyboard focus.
+	#[napi]
+	pub fn ax_key_chord(
+		&self,
+		reference: String,
+		keys: Vec<String>,
+		opts: Option<PointerOptions>,
+	) -> Result<task::Promise<()>> {
+		let keys = parse_keys(&keys).map_err(napi::Error::from)?;
+		let takeover = ParsedPointerOptions::parse(opts)
+			.map_err(napi::Error::from)?
+			.takeover;
+		Ok(self.unit("desktop.axKeyChord", move |reply| Request::AxInput {
+			reference,
+			input: ElementInput::Chord(keys),
+			takeover,
+			reply,
+		}))
+	}
+
 	/// Immediately cancel operations submitted before this call. Later
 	/// operations may proceed.
 	#[napi]
@@ -2116,6 +2236,22 @@ mod capture_tests {
 			unreachable!("hold_keys not exercised")
 		}
 
+		/// The element never takes focus, which stays on element 7 of the
+		/// window.
+		fn element_input(
+			&mut self,
+			_: &Target,
+			_: &AxHandle,
+			_: &ElementInput,
+			_: DeliveryMode,
+			_: &OperationToken,
+		) -> CoreResult<ElementDelivery> {
+			Ok(ElementDelivery::Unfocused(KeyboardFocus {
+				window:  Some(self.window.id.clone()),
+				element: Some(AxHandle::Test(7)),
+			}))
+		}
+
 		fn menu_items(
 			&mut self,
 			_: &DesktopWindow,
@@ -2359,6 +2495,44 @@ mod capture_tests {
 		};
 		assert_eq!(error.code, ErrorCode::WindowNotFound);
 		assert!(clicks.lock().is_empty(), "no input may reach the overlapping window");
+	}
+
+	#[test]
+	fn element_keys_refused_for_focus_name_where_focus_is_with_a_usable_ref() {
+		for (takeover, code) in
+			[(None, ErrorCode::BackgroundUnavailable), (Some(true), ErrorCode::InputFailed)]
+		{
+			let mut worker = worker_with(FakeWaylandBackend::new());
+			let (backend, registry) = (&mut worker.backend, &mut worker.registry);
+			let ax = backend
+				.as_mut()
+				.ok()
+				.and_then(|backend| backend.ax())
+				.unwrap();
+			let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
+				.unwrap()
+				.ref_;
+			let (reply, _rx) = flume::bounded(1);
+			let request = Request::AxInput {
+				reference: reference.clone(),
+				input: ElementInput::Text("4".to_owned()),
+				takeover,
+				reply,
+			};
+			let Err(error) = worker.process(&request, &CancellationSource::default().token()) else {
+				panic!("keys for an element without focus must be refused");
+			};
+			assert_eq!(error.code, code);
+			let message = &error.message;
+			assert!(
+				message.starts_with(&format!("{reference} did not take keyboard focus")),
+				"{message}"
+			);
+			assert!(message.contains(&format!("window {WAYLAND_ID} (\"Obsidian\")")), "{message}");
+			assert!(message.contains("on - button [ref=e2]."), "{message}");
+			assert!(message.contains("win.ax()"), "{message}");
+			assert!(worker.registry.resolve("e2").unwrap() == AxHandle::Test(7));
+		}
 	}
 
 	fn capture_request(target: Target) -> Request {

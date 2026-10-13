@@ -197,6 +197,20 @@ interface ComputerElement {
 	perform(action: string): Promise<void>;
 	/** Perform the element's native press action; needs no screenshot. */
 	press(): Promise<void>;
+	/**
+	 * Press a key chord such as `"enter"` or `["cmd", "a"]` in this element. On macOS it is focused first and keys go out
+	 * only once its application reports it as the focused element; otherwise nothing is sent and the call throws
+	 * (`BackgroundUnavailable`, or `InputFailed` in takeover) naming what holds keyboard focus now, with its ref. Re-read
+	 * before retrying. Elsewhere the element is focused, then the chord goes to its window.
+	 */
+	press(chord: string | string[], options?: ComputerInputOptions): Promise<void>;
+	/**
+	 * Type into this element, not whichever field has focus. On macOS a native text field takes the text by accessibility
+	 * insertion at its own selection (no keys, no focus change) unless `takeover: true`; other elements, web and Electron
+	 * fields included, take keystrokes after the same focus check as `press(chord)`. Focus is checked once, before the
+	 * first key, so a code input that advances box to box still fills.
+	 */
+	type(text: string, options?: ComputerInputOptions): Promise<void>;
 	/** Click the element's center with native input; `count: 2` double-clicks. */
 	click(options?: ComputerClickOptions): Promise<void>;
 	doubleClick(options?: Omit<ComputerClickOptions, "count">): Promise<void>;
@@ -218,6 +232,7 @@ interface ComputerElementRef
 			| "actions"
 			| "perform"
 			| "press"
+			| "type"
 			| "click"
 			| "doubleClick"
 			| "focus"

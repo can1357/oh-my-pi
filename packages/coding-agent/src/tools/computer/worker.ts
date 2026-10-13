@@ -98,6 +98,8 @@ export interface NativeDesktopSession {
 	axSetValue(ref: string, value: string): Promise<void>;
 	axFocus(ref: string): Promise<void>;
 	axClick(ref: string, opts?: PointerOptions | null): Promise<void>;
+	axType(ref: string, text: string, opts?: PointerOptions | null): Promise<void>;
+	axKeyChord(ref: string, keys: string[], opts?: PointerOptions | null): Promise<void>;
 	close(): Promise<void>;
 }
 
@@ -196,13 +198,20 @@ function pointerOptions(options?: ClickOptions | DragOptions | InputOptions): Po
 	return mapped;
 }
 
-function chordKeys(chord: string | string[]): string[] {
-	return typeof chord === "string"
-		? chord
-				.split("+")
-				.map(key => key.trim())
-				.filter(Boolean)
-		: chord;
+function chordKeys(chord: unknown): string[] {
+	const keys =
+		typeof chord === "string"
+			? chord
+					.split("+")
+					.map(key => key.trim())
+					.filter(Boolean)
+			: chord;
+	if (!isStringList(keys) || keys.length === 0) {
+		throw new ToolError(
+			`press(chord) requires a key chord such as "cmd+shift+p" or ["cmd", "shift", "p"], got ${describeArgument(chord)}`,
+		);
+	}
+	return keys;
 }
 
 /** Keys and menu titles share one rule: an array of strings, none blank. */
@@ -412,10 +421,23 @@ class El {
 		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action));
 	}
 
-	async press(): Promise<void> {
+	/** Without a chord, the element's native press action; with one, that chord typed into the element. */
+	async press(chord?: string | string[], options?: InputOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "press");
-		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press"));
+		if (chord === undefined) {
+			await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press"));
+			return;
+		}
+		const keys = chordKeys(chord);
+		await nativeCall(context.signal, () => this.#session.axKeyChord(this.ref, keys, pointerOptions(options)));
+	}
+
+	async type(text: string, options?: InputOptions): Promise<void> {
+		const context = this.#getContext();
+		guardRun(context, "type");
+		validateString(text, "type(text)");
+		await nativeCall(context.signal, () => this.#session.axType(this.ref, text, pointerOptions(options)));
 	}
 
 	async click(options?: ClickOptions): Promise<void> {
@@ -539,8 +561,16 @@ class ElRef implements PromiseLike<El> {
 		await (await this.#resolve()).perform(action);
 	}
 
-	async press(): Promise<void> {
-		await (await this.#resolve()).press();
+	async press(chord?: string | string[], options?: InputOptions): Promise<void> {
+		guardRun(this.#getContext(), "press");
+		if (chord !== undefined) chordKeys(chord);
+		await (await this.#resolve()).press(chord, options);
+	}
+
+	async type(text: string, options?: InputOptions): Promise<void> {
+		guardRun(this.#getContext(), "type");
+		validateString(text, "type(text)");
+		await (await this.#resolve()).type(text, options);
 	}
 
 	async click(options?: ClickOptions): Promise<void> {
@@ -647,11 +677,6 @@ class Win {
 		const context = this.#getContext();
 		guardRun(context, "press");
 		const keys = chordKeys(chord);
-		if (!isStringList(keys) || keys.length === 0) {
-			throw new ToolError(
-				`press(chord) requires a key chord such as "cmd+shift+p" or ["cmd", "shift", "p"], got ${describeArgument(chord)}`,
-			);
-		}
 		await nativeCall(context.signal, () => this.#session.keyChord(this.id, keys, pointerOptions(options)));
 	}
 

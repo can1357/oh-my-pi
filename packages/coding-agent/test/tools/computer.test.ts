@@ -242,6 +242,8 @@ class FakeNativeSession implements NativeDesktopSession {
 	async axSetValue(_ref: string, _value: string): Promise<void> {}
 	async axFocus(_ref: string): Promise<void> {}
 	async axClick(_ref: string, _opts?: PointerOptions | null): Promise<void> {}
+	async axType(_ref: string, _text: string, _opts?: PointerOptions | null): Promise<void> {}
+	async axKeyChord(_ref: string, _keys: string[], _opts?: PointerOptions | null): Promise<void> {}
 	async close(): Promise<void> {
 		this.closeCount += 1;
 		this.controlActive = false;
@@ -983,6 +985,12 @@ describe("computer prelude", () => {
 		override async axClick(ref: string, opts?: PointerOptions | null): Promise<void> {
 			this.axCalls.push(["axClick", ref, opts]);
 		}
+		override async axType(ref: string, text: string, opts?: PointerOptions | null): Promise<void> {
+			this.axCalls.push(["axType", ref, text, opts]);
+		}
+		override async axKeyChord(ref: string, keys: string[], opts?: PointerOptions | null): Promise<void> {
+			this.axCalls.push(["axKeyChord", ref, keys, opts]);
+		}
 	}
 
 	it("chains element calls on JavaScript ref() handles, direct and in runs, and double-clicks", async () => {
@@ -1028,6 +1036,46 @@ describe("computer prelude", () => {
 				["axClick", "e1", { count: 2 }],
 				["axNode", "e1"],
 				["axPerform", "e1", "press"],
+			]);
+		} finally {
+			await prelude.invoke({ action: "close" }, context);
+		}
+	});
+
+	it("types and presses chords into JavaScript elements, keeping press() without a chord the native press", async () => {
+		const session = toolSession();
+		const native = new RefCallSession();
+		const prelude = workerPrelude(session, native);
+		const context = { session, toolCallId: "element-keys-js" };
+		const realm = createContext({
+			__omp_display__: () => {},
+			__omp_prelude__: async (_name: string, parameters: unknown) => {
+				const result = await prelude.invoke(parameters, context);
+				return { text: "", details: result.details };
+			},
+		});
+		runInContext(prelude.javascript, realm);
+		try {
+			await runInContext(
+				`(async () => {
+					const win = await computer.window(42);
+					await win.ref("e1").type("123456");
+					await win.ref("e1").press("cmd+a", { takeover: true });
+					await win.ref("e1").press();
+					await computer.run(async ({ desktop }) => {
+						const el = await desktop.ref("e1");
+						await el.type("x", { takeover: true });
+						await el.press(["shift", "tab"]);
+					});
+				})()`,
+				realm,
+			);
+			expect(native.axCalls.filter(call => (call as unknown[])[0] !== "axNode")).toEqual([
+				["axType", "e1", "123456", {}],
+				["axKeyChord", "e1", ["cmd", "a"], { takeover: true }],
+				["axPerform", "e1", "press"],
+				["axType", "e1", "x", { takeover: true }],
+				["axKeyChord", "e1", ["shift", "tab"], {}],
 			]);
 		} finally {
 			await prelude.invoke({ action: "close" }, context);
@@ -2373,6 +2421,12 @@ describe("expanded computer APIs", () => {
 			override async keyChord(target: string, _keys: string[]): Promise<void> {
 				this.calls.push(`keyChord:${target}`);
 			}
+			override async axType(ref: string, _text: string): Promise<void> {
+				this.calls.push(`axType:${ref}`);
+			}
+			override async axKeyChord(ref: string, _keys: string[]): Promise<void> {
+				this.calls.push(`axKeyChord:${ref}`);
+			}
 			override async openApplication(id: string) {
 				this.calls.push(`open:${id}`);
 				return super.openApplication(id);
@@ -2385,6 +2439,11 @@ describe("expanded computer APIs", () => {
 			['await desktop.ref("e1").setValue()', "setValue(value) requires a string, got undefined"],
 			['await desktop.ref("e1").setValue(42)', "setValue(value) requires a string, got number"],
 			['await desktop.ref("e1").perform("")', 'perform(action) requires a non-empty string, got ""'],
+			['await desktop.ref("e1").type()', "type(text) requires a string, got undefined"],
+			[
+				'await desktop.ref("e1").press([])',
+				'press(chord) requires a key chord such as "cmd+shift+p" or ["cmd", "shift", "p"], got an array',
+			],
 			["desktop.ref()", "ref(ref) requires a non-empty string, got undefined"],
 			["(await desktop.window(42)).ref(null)", "ref(ref) requires a non-empty string, got null"],
 			["await (await desktop.window(42)).type()", "type(text) requires a string, got undefined"],

@@ -23,7 +23,7 @@ use objc2_core_foundation::{
 use super::{
 	super::{
 		ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_macos},
-		backend::AxBackend,
+		backend::{AxBackend, KeyboardFocus},
 		error::{CoreResult, DesktopError},
 		types::DesktopWindow,
 	},
@@ -936,13 +936,7 @@ impl AxBackend for MacAx {
 
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
 		let element = mac_handle(h)?;
-		let attribute = CFString::from_str("AXFocused");
-		skylight::with_background_guard(element_pid(element)?, || {
-			// SAFETY: The singleton CFBoolean and retained element remain valid
-			// for the synchronous setter call.
-			let error = unsafe { element.set_attribute_value(&attribute, CFBoolean::new(true)) };
-			ax_result(error, "setting AXFocused=true failed")
-		})
+		skylight::with_background_guard(element_pid(element)?, || set_focused(element))
 	}
 
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>> {
@@ -1157,6 +1151,36 @@ fn set_date_value(element: &AXUIElement, text: &str, current: f64) -> CoreResult
 	})
 }
 
+/// Sets `AXFocused` on `element`; the caller holds the background guard.
+pub(super) fn set_focused(element: &AXUIElement) -> CoreResult<()> {
+	let attribute = CFString::from_str("AXFocused");
+	// SAFETY: The singleton CFBoolean and retained element remain valid for the
+	// synchronous setter call.
+	let error = unsafe { element.set_attribute_value(&attribute, CFBoolean::new(true)) };
+	ax_result(error, "setting AXFocused=true failed")
+}
+
+/// Whether `pid` reports `element` as its `AXFocusedUIElement`.
+pub(super) fn holds_keyboard_focus(pid: libc::pid_t, element: &AXUIElement) -> bool {
+	probe_application(pid)
+		.and_then(|app| copy_element(&app, "AXFocusedUIElement"))
+		.is_some_and(|focused| *focused == *element)
+}
+
+/// Where `pid` has keyboard focus now: its focused window, else the window
+/// its focused element maps to, and that element.
+pub(super) fn keyboard_focus(pid: libc::pid_t) -> KeyboardFocus {
+	let Some(app) = probe_application(pid) else {
+		return KeyboardFocus::default();
+	};
+	let (focus, element) = read_key_focus(&app);
+	let window = match focus.window {
+		FocusedWindow::Id(id) => Some(id),
+		FocusedWindow::Unreported | FocusedWindow::Unmapped => focus.element_window,
+	};
+	KeyboardFocus { window: window.map(|id| id.to_string()), element: element.map(AxHandle::Mac) }
+}
+
 /// Inserts into a native field only when its focused element belongs to this
 /// exact window: a field in a sheet belongs to the sheet, not to the window
 /// the sheet is attached to. `false` means no write was attempted; an
@@ -1169,20 +1193,31 @@ pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> Core
 	let (focus, Some(element)) = read_key_focus(&app) else {
 		return Ok(false);
 	};
-	if !focus.holds_text_for(pid, wid, skylight::window_parent)
-		|| text_surface(&element) != TextSurface::Native
-		|| !matches!(
-			copy_string(&element, "AXRole").as_deref(),
-			Some("AXTextField" | "AXTextArea" | "AXComboBox")
-		)
-		|| !attribute_settable(&element, "AXSelectedText")
-	{
+	if !focus.holds_text_for(pid, wid, skylight::window_parent) {
 		return Ok(false);
 	}
-	let Some(before) = copy_string(&element, "AXValue") else {
+	insert_selected_text(pid, &element, text)
+}
+
+/// Inserts at `element`'s own selection, whichever element holds keyboard
+/// focus; `false` means no write was attempted, as for
+/// [`insert_native_text`].
+pub(super) fn insert_into_element(element: &AXUIElement, text: &str) -> CoreResult<bool> {
+	insert_selected_text(element_pid(element)?, element, text)
+}
+
+fn insert_selected_text(pid: libc::pid_t, element: &AXUIElement, text: &str) -> CoreResult<bool> {
+	if !takes_inserted_text(
+		|| text_surface(element),
+		copy_string(element, "AXRole").as_deref(),
+		|| attribute_settable(element, "AXSelectedText"),
+	) {
+		return Ok(false);
+	}
+	let Some(before) = copy_string(element, "AXValue") else {
 		return Ok(false);
 	};
-	let Some(selection) = copy_attribute(&element, "AXSelectedTextRange")
+	let Some(selection) = copy_attribute(element, "AXSelectedTextRange")
 		.and_then(|value| value.downcast::<AXValue>().ok())
 	else {
 		return Ok(false);
@@ -1197,10 +1232,23 @@ pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> Core
 		return Ok(false);
 	};
 	skylight::with_background_guard(pid, || {
-		set_string_value(&element, "AXSelectedText", text)?;
-		verify_text_value(&element, &expected)
+		set_string_value(element, "AXSelectedText", text)?;
+		verify_text_value(element, &expected)
 	})?;
 	Ok(true)
+}
+
+/// Whether text goes in by writing `AXSelectedText`: a native text field,
+/// text area or combo box whose selection is settable. Web content can echo
+/// a write its renderer never accepted, so it takes keystrokes instead.
+fn takes_inserted_text(
+	surface: impl FnOnce() -> TextSurface,
+	role: Option<&str>,
+	selection_settable: impl FnOnce() -> bool,
+) -> bool {
+	matches!(role, Some("AXTextField" | "AXTextArea" | "AXComboBox"))
+		&& surface() == TextSurface::Native
+		&& selection_settable()
 }
 
 /// AX text ranges use UTF-16 offsets, not UTF-8 byte or Unicode scalar indices.
@@ -1523,7 +1571,7 @@ fn retained_element(pointer: *const AXUIElement) -> CoreResult<CFRetained<AXUIEl
 	not(test),
 	allow(clippy::unnecessary_wraps, reason = "the test-only handle variants are fallible")
 )]
-fn mac_handle(handle: &AxHandle) -> CoreResult<&AXUIElement> {
+pub(super) fn mac_handle(handle: &AxHandle) -> CoreResult<&AXUIElement> {
 	match handle {
 		AxHandle::Mac(element) => Ok(element),
 		#[cfg(test)]
@@ -1630,9 +1678,10 @@ mod tests {
 
 	use super::{
 		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, FocusedWindow,
-		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, VALUE, WindowContent, ax_result,
-		content_owner, create_system_wide, element_action_result, replace_utf16_selection,
-		required_string, select_attached, stringify_value, window_records_of,
+		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, TextSurface, VALUE,
+		WindowContent, ax_result, content_owner, create_system_wide, element_action_result,
+		replace_utf16_selection, required_string, select_attached, stringify_value,
+		takes_inserted_text, window_records_of,
 	};
 	use crate::desktop::error::ErrorCode;
 
@@ -1740,6 +1789,20 @@ mod tests {
 		for (start, length) in [(-1, 0), (0, -1), (2, 0), (1, 1), (4, 9), (6, 0)] {
 			assert_eq!(replace_utf16_selection("a😀bc", start, length, "X"), None);
 		}
+	}
+
+	#[test]
+	fn only_a_settable_native_text_field_takes_inserted_text() {
+		let settable = || true;
+		for role in ["AXTextField", "AXTextArea", "AXComboBox"] {
+			assert!(takes_inserted_text(|| TextSurface::Native, Some(role), settable), "{role}");
+		}
+		// A web field can echo a write its renderer never accepted.
+		assert!(!takes_inserted_text(|| TextSurface::Web, Some("AXTextField"), settable));
+		assert!(!takes_inserted_text(|| TextSurface::Unknown, Some("AXTextArea"), settable));
+		assert!(!takes_inserted_text(|| TextSurface::Native, Some("AXTextField"), || false));
+		assert!(!takes_inserted_text(|| TextSurface::Native, Some("AXButton"), settable));
+		assert!(!takes_inserted_text(|| TextSurface::Native, None, settable));
 	}
 
 	#[test]

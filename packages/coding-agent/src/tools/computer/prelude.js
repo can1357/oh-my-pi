@@ -71,6 +71,7 @@
 		"actions",
 		"perform",
 		"press",
+		"type",
 		"click",
 		"doubleClick",
 		"focus",

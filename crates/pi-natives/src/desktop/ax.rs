@@ -459,40 +459,62 @@ fn format_tree(
 		text.push('\n');
 	}
 	text.push_str(&"  ".repeat(depth));
-	text.push_str("- ");
-	text.push_str(&node.props.role);
-	if let Some(label) = label(&node.props) {
-		let _ = write!(text, " \"{}\"", escaped_truncated(label, 80));
-	}
-	let _ = write!(text, " [ref={reference}]");
-	if depth == 0 {
-		let _ = write!(text, " app={}", window.app);
-	}
-	if let Some(value) = node
-		.props
-		.value
-		.as_deref()
-		.filter(|value| !value.is_empty())
-	{
-		let _ = write!(text, ": \"{}\"", escaped_truncated(value, 80));
-	}
-	if !node.props.enabled {
-		text.push_str(" (disabled)");
-	}
 	// The root's own AXFocused only reflects app-local focus; report the global
 	// roster flag instead.
-	let focused = if depth == 0 {
-		window.focused
+	let (app, focused) = if depth == 0 {
+		(Some(window.app.as_str()), window.focused)
 	} else {
-		node.props.focused
+		(None, node.props.focused)
 	};
-	if focused {
-		text.push_str(" (focused)");
-	}
+	write_line(text, &node.props, &reference, app, focused);
 	*nodes += 1;
 	for child in node.children {
 		format_tree(child, depth + 1, window, backend, registry, target, generation, text, nodes);
 	}
+}
+
+/// One element's line as `ax()` prints it, without its indent.
+fn write_line(
+	text: &mut String,
+	props: &AxProps,
+	reference: &str,
+	app: Option<&str>,
+	focused: bool,
+) {
+	text.push_str("- ");
+	text.push_str(&props.role);
+	if let Some(label) = label(props) {
+		let _ = write!(text, " \"{}\"", escaped_truncated(label, 80));
+	}
+	let _ = write!(text, " [ref={reference}]");
+	if let Some(app) = app {
+		let _ = write!(text, " app={app}");
+	}
+	if let Some(value) = props.value.as_deref().filter(|value| !value.is_empty()) {
+		let _ = write!(text, ": \"{}\"", escaped_truncated(value, 80));
+	}
+	if !props.enabled {
+		text.push_str(" (disabled)");
+	}
+	if focused {
+		text.push_str(" (focused)");
+	}
+}
+
+/// `handle`'s line as `ax()` prints it, registered under `target` so its ref
+/// resolves.
+pub fn element_line(
+	backend: &mut dyn AxBackend,
+	registry: &mut AxRegistry,
+	target: &str,
+	handle: AxHandle,
+) -> CoreResult<String> {
+	let props = backend.props(&handle)?;
+	let generation = registry.current_generation(target);
+	let reference = registry.register(backend, target, generation, handle, &props);
+	let mut line = String::new();
+	write_line(&mut line, &props, &reference, None, props.focused);
+	Ok(line)
 }
 
 pub fn snapshot(
