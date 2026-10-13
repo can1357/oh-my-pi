@@ -575,6 +575,92 @@ describe("structured subagent primitive", () => {
 		expect(path.basename(settled.artifactsDir)).toStartWith("omp-task-");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+	it("applies the agent's skill visibility frontmatter to the child session's skill list", async () => {
+		const skills = [
+			{ name: "alpha", description: "a", filePath: "/skills/alpha/SKILL.md", baseDir: "/skills", source: "user" },
+			{
+				name: "secret",
+				description: "s",
+				filePath: "/skills/secret/SKILL.md",
+				baseDir: "/skills",
+				source: "user",
+				hide: true,
+			},
+			{ name: "beta", description: "b", filePath: "/skills/beta/SKILL.md", baseDir: "/skills", source: "user" },
+		];
+		const visibilityAgent = {
+			...AGENT,
+			skills: ["alpha", "beta", "secret"],
+			unhideSkills: ["secret"],
+			hideSkills: ["beta"],
+		};
+		mockDiscovery(visibilityAgent);
+		const childSession = session();
+		childSession.skills = skills;
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		await runStructuredSubagent(request({ session: childSession, retainArtifacts: true }));
+
+		expect(dispatched[0]?.skills?.map(s => s.name)).toEqual(["alpha", "secret", "beta"]);
+		expect(dispatched[0]?.skills?.filter(s => s.hide !== true).map(s => s.name)).toEqual(["alpha", "secret"]);
+	});
+
+	it("preloads an autoloadSkills entry that visibility hides from the listing", async () => {
+		// `autoloadSkills` exists to inject a skill's content up front, so it must
+		// resolve against the full list: resolving against the visibility-filtered
+		// list would silently stop preloading a skill the agent explicitly asked
+		// for, which is the one case where hiding it from the listing is expected.
+		const skills = [
+			{ name: "alpha", description: "a", filePath: "/skills/alpha/SKILL.md", baseDir: "/skills", source: "user" },
+			{ name: "secret", description: "s", filePath: "/skills/secret/SKILL.md", baseDir: "/skills", source: "user" },
+		];
+		mockDiscovery({ ...AGENT, skills: ["alpha"], autoloadSkills: ["secret"] });
+		const childSession = session();
+		childSession.skills = skills;
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		await runStructuredSubagent(request({ session: childSession, retainArtifacts: true }));
+
+		expect(dispatched[0]?.skills?.filter(s => s.hide !== true).map(s => s.name)).toEqual(["alpha"]);
+		expect(dispatched[0]?.autoloadSkills?.map(s => s.name)).toEqual(["secret"]);
+	});
+
+	it("preloads any named skill via autoloadSkills, even a model-invocation opt-out", async () => {
+		// `autoloadSkills` is the agent author's explicit choice — not a model
+		// invocation — so it resolves against the full list and preloads any
+		// named skill, including one the `<skills>` listing hides.
+		const skills = [
+			{ name: "alpha", description: "a", filePath: "/skills/alpha/SKILL.md", baseDir: "/skills", source: "user" },
+			{
+				name: "revoked",
+				description: "r",
+				filePath: "/skills/revoked/SKILL.md",
+				baseDir: "/skills",
+				source: "user",
+				modelInvocationDisabled: true,
+			},
+		];
+		mockDiscovery({ ...AGENT, autoloadSkills: ["revoked", "alpha"] });
+		const childSession = session();
+		childSession.skills = skills;
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		await runStructuredSubagent(request({ session: childSession, retainArtifacts: true }));
+
+		expect(dispatched[0]?.autoloadSkills?.map(s => s.name)).toEqual(["revoked", "alpha"]);
+	});
 
 	it("retains temporary artifacts when the run failed but yielded schema-valid structured output", async () => {
 		// Regression: a task can produce schema-valid data and then fail (or

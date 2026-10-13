@@ -106,6 +106,56 @@ describe("vibe worker spawn model role", () => {
 		expect(options.modelRole).toBeUndefined();
 	});
 
+	it("hands the worker the parent session's skill list through the visibility resolver", async () => {
+		// The bundled vibe workers set no visibility frontmatter, so the child
+		// receives every skill as a copy: listing intact, never the parent's
+		// object identities, and no autoloads. Pins the `#buildSpawnOptions`
+		// wiring (`resolveAgentSkills` / `resolveAgentAutoloadSkills`) as
+		// reachable behavior rather than dead consistency lines.
+		const parentSkills = [
+			{ name: "alpha", description: "a", filePath: "/skills/alpha/SKILL.md", baseDir: "/skills", source: "user" },
+			{
+				name: "secret",
+				description: "s",
+				filePath: "/skills/secret/SKILL.md",
+				baseDir: "/skills",
+				source: "user",
+				hide: true,
+			},
+		];
+		const captured = Promise.withResolvers<ExecutorOptions>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			captured.resolve(options);
+			return {
+				index: 0,
+				id: options.id,
+				agent: options.agent.name,
+				agentSource: "bundled",
+				task: options.task,
+				exitCode: 0,
+				output: "done",
+				stderr: "",
+				truncated: false,
+				durationMs: 1,
+				tokens: 0,
+				requests: 0,
+			} as SingleResult;
+		});
+
+		const session = makeParentSession(
+			Settings.isolated({ modelRoles: { default: "anthropic/opus", task: "anthropic/sonnet" } }),
+		);
+		session.skills = parentSkills;
+		const registry = VibeSessionRegistry.global();
+		await registry.spawn(session, { cli: "good", prompt: "work" });
+		const options = await captured.promise;
+
+		expect(options.skills?.map(s => s.name)).toEqual(["alpha", "secret"]);
+		expect(options.skills?.filter(s => s.hide !== true).map(s => s.name)).toEqual(["alpha"]);
+		for (const [i, s] of options.skills!.entries()) expect(s).not.toBe(parentSkills[i]);
+		expect(options.autoloadSkills).toEqual([]);
+	});
+
 	it("restricts the first spawn to the worker agent's account pool, as revival does", async () => {
 		// Without it a worker runs unrestricted until it is parked and revived.
 		const options = await spawnAndCaptureOptions(
