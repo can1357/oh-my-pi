@@ -1,9 +1,11 @@
-import { afterAll, beforeAll, expect, it } from "bun:test";
+import { afterAll, beforeAll, expect, it, setDefaultTimeout } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
 const RUN = path.join(import.meta.dir, "../../bench/memory-eval/run.ts");
+// Each case spawns the CLI, which loads the harness and Mnemopi; on a loaded machine that exceeds bun's 5 s default.
+setDefaultTimeout(30_000);
 
 let tmp: string;
 beforeAll(async () => {
