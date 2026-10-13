@@ -181,6 +181,127 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser fill aborts", () => {
 	}, 30_000);
 });
 
+describe.skipIf(!CHROMIUM_AVAILABLE)("browser input cut off mid-gesture", () => {
+	// `blockNow(ms)` blocks the page's main thread in its own script right after the current call answers; with
+	// `blockMs` set, the next mousedown or keydown handler blocks instead. Either way omp's input waits on the page
+	// for 9 s, past the 8 s per-op ceiling of a 10 s cell, and the cell's cleanup returns once the page answers.
+	const gestureHtml = `<!doctype html>
+<button id="target" style="position:absolute;left:20px;top:20px;width:120px;height:40px">Target</button>
+<div id="from" style="position:absolute;left:20px;top:100px;width:60px;height:60px"></div>
+<div id="to" style="position:absolute;left:200px;top:100px;width:60px;height:60px"></div>
+<script>
+window.log = [];
+window.blockMs = 0;
+const block = () => { const until = Date.now() + blockMs; blockMs = 0; while (Date.now() < until) {} };
+window.blockNow = ms => { const channel = new MessageChannel(); channel.port1.onmessage = () => { blockMs = ms; block(); }; channel.port2.postMessage(0); };
+addEventListener("mousedown", () => { log.push("down"); block(); }, true);
+addEventListener("mouseup", () => log.push("up"), true);
+document.querySelector("#target").addEventListener("click", () => log.push("click"));
+addEventListener("keydown", event => { log.push("keydown:" + event.key); block(); }, true);
+addEventListener("keyup", event => log.push("keyup:" + event.key), true);
+</script>`;
+	// Input a cut-off call would still have sent arrives within a few round trips of the page answering; the
+	// page's log is read after that, as the user's next look at the page would be.
+	const readLog = "await wait(500); return await tab.evaluate(() => window.log);";
+
+	async function withGestureTab(
+		toolCallId: string,
+		body: (run: (code: string, timeout?: number) => Promise<unknown>) => Promise<void>,
+	): Promise<void> {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId };
+		const tabName = `${toolCallId}-${crypto.randomUUID()}`;
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(gestureHtml)}` },
+			context,
+		);
+		try {
+			await body(async (code, timeout = 10) =>
+				valueFrom<unknown>(await prelude.invoke({ action: "run", name: tabName, code, timeout }, context)),
+			);
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}
+	const attempt = (call: string) =>
+		`try { await ${call}; return "done"; } catch (error) { return error instanceof Error ? error.message : String(error); }`;
+
+	test("a click that timed out on a page busy in its own script does not click its target once the page answers", async () => {
+		await withGestureTab("late-click", async run => {
+			const outcome = await run(`await tab.evaluate(() => blockNow(9000)); ${attempt("tab.clickAt(80, 40)")}`);
+			expect(outcome).toMatch(/^tab\.clickAt\(\) timed out after \d+ms/);
+			// The press was already on its way; it is released off the target, so the button never sees a click.
+			expect(await run(readLog)).toEqual(["down", "up"]);
+		});
+	}, 40_000);
+
+	test("a drag cut off with the button down releases it off the page, so the next click works", async () => {
+		await withGestureTab("cut-drag", async run => {
+			await run("await tab.evaluate(() => { window.blockMs = 9000; });");
+			expect(await run(attempt(`tab.drag("#from", "#to")`))).toMatch(/^tab\.drag\(\) timed out after \d+ms/);
+			expect(await run(readLog)).toEqual(["down", "up"]);
+			expect(await run(attempt(`tab.click("#target")`))).toBe("done");
+		});
+	}, 40_000);
+
+	test.each([
+		["tab.press", `tab.press("Shift+a")`, "Shift"],
+		["an element handle's press", `(await tab.waitFor("#target")).press("Shift+a")`, "Shift"],
+		["tab.clipboardCopy", "tab.clipboardCopy()", SHORTCUT],
+	])(
+		"a key combo through %s cut off with its modifier down sends no further key and releases the modifier",
+		async (_label, call, modifier) => {
+			await withGestureTab("cut-press", async run => {
+				await run("await tab.evaluate(() => { window.blockMs = 9000; });");
+				expect(await run(attempt(call))).toMatch(/ timed out after \d+ms/);
+				expect(await run(readLog)).toEqual([`keydown:${modifier}`, `keyup:${modifier}`]);
+			});
+		},
+		40_000,
+	);
+
+	test("a tab.mouseDown whose own deadline passed, caught by the code, still releases the button", async () => {
+		await withGestureTab("caught-down", async run => {
+			await run("await tab.evaluate(() => { window.blockMs = 9000; });");
+			expect(await run(`await tab.mouseMove(80, 40); ${attempt("tab.mouseDown()")}`)).toMatch(
+				/^tab\.mouseDown\(\) timed out after \d+ms/,
+			);
+			expect(await run(readLog)).toEqual(["down", "up"]);
+			expect(await run(attempt("tab.mouseDown()"))).toBe("done");
+		});
+	}, 40_000);
+
+	test("a drag refused because the button is already held leaves that hold alone", async () => {
+		await withGestureTab("held-drag", async run => {
+			await run("await tab.mouseMove(80, 40); await tab.mouseDown();");
+			expect(await run(attempt(`tab.drag("#from", "#to")`))).toContain("'left' is already pressed");
+			expect(await run(readLog)).toEqual(["down"]);
+			expect(await run(attempt("tab.mouseUp()"))).toBe("done");
+		});
+	}, 40_000);
+
+	test("a click count below one is refused before anything is sent", async () => {
+		await withGestureTab("zero-clicks", async run => {
+			expect(await run(attempt("tab.clickAt(80, 40, { clickCount: 0 })"))).toContain("positive number of times");
+			expect(await run(readLog)).toEqual([]);
+		});
+	}, 40_000);
+
+	test("a run that times out holding tab.mouseDown releases the button off its target", async () => {
+		await withGestureTab("held-timeout", async run => {
+			const timedOut = await run(
+				"await tab.mouseMove(80, 40); await tab.mouseDown(); await new Promise(() => {});",
+				2,
+			).then(
+				() => "finished",
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			);
+			expect(timedOut).toContain("Browser code execution timed out");
+			expect(await run(readLog)).toEqual(["down", "up"]);
+		});
+	}, 40_000);
+});
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser interaction parity", () => {
 	test("clicks a link that wraps across two lines on the link, not on its paragraph, on puppeteer and Tern", async () => {
 		const session = makeSession();

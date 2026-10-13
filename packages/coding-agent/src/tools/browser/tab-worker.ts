@@ -14,6 +14,7 @@ import type {
 	HTTPResponse,
 	JSHandle,
 	KeyInput,
+	MouseButton,
 	Page,
 	Protocol,
 	Realm,
@@ -170,6 +171,7 @@ import {
 	clickElement,
 	composedContains,
 	clickQueryHandlerText,
+	dragBetween,
 	fillViaHandle,
 	highlightElement,
 	type HighlightOptions,
@@ -180,6 +182,7 @@ import {
 	mouseMove,
 	mouseUp,
 	pressKey,
+	releaseButtonOffPage,
 	selectElementOptions,
 	setElementChecked,
 	type PreparedUpload,
@@ -803,7 +806,7 @@ export function toActionableHandle(
 	}
 
 	for (const method of GUARDED_HANDLE_METHODS) {
-		if (method === "type") continue;
+		if (method === "type" || method === "press") continue;
 		const original = originals.interactive[method];
 		if (!original) continue;
 		methods[method] = (...args) =>
@@ -814,6 +817,23 @@ export function toActionableHandle(
 					`handle.${method}()`,
 					signal,
 					() => original(...args),
+					invalidate,
+				),
+			);
+	}
+	const focus = originals.interactive.focus;
+	if (focus && originals.interactive.press) {
+		enriched.press = (key, options) =>
+			guard<void>("handle.press()", signal =>
+				runGuardedHandleAction(
+					enriched,
+					originals,
+					"handle.press()",
+					signal,
+					async () => {
+						await untilAborted(signal, () => focus());
+						await pressKey(enriched.frame.page(), key, options, signal);
+					},
 					invalidate,
 				),
 			);
@@ -1574,6 +1594,9 @@ export class WorkerCore {
 
 	/** The renderer crashed; the supervisor recycles this worker, so it runs nothing more. */
 	#crashed = false;
+	/** Buttons and keys `tab.mouseDown` / `tab.keyDown` pressed and nothing released yet; a run that is cut off releases them. */
+	readonly #heldButtons = new Set<MouseButton>();
+	readonly #heldKeys = new Set<KeyInput>();
 	/** `ready` was sent; a crash before it fails the start instead. */
 	#started = false;
 	/** The run whose result is not sent yet; it outlives `#active` while the result is being put together. */
@@ -2107,6 +2130,8 @@ export class WorkerCore {
 			// Detach first: the stop below fails the cancelled requests, and run handlers that see
 			// those events would touch the aborted run's facade.
 			runPage?.detach();
+			// A cancelled or timed-out run leaves no button or key pressed for the user's next move.
+			if (ac.signal.aborted || timeoutSignal.aborted) this.#releaseHeldInput();
 			// A cancelled run abandons its main-frame navigation: left loading, it still replaces the
 			// page later and holds up any interception restore below. Stopping is gated on
 			// that navigation because Page.stopLoading also cancels every fetch and subresource
@@ -2151,6 +2176,20 @@ export class WorkerCore {
 				},
 			});
 		}
+	}
+
+	/**
+	 * Release what `tab.mouseDown` / `tab.keyDown` still hold, buttons off the page (`releaseButtonOffPage`). Sent at
+	 * once and not awaited: the page the run gave up on may not answer before this worker is replaced.
+	 */
+	#releaseHeldInput(): void {
+		const page = this.#page;
+		if (page) {
+			for (const button of this.#heldButtons) releaseButtonOffPage(page, { button });
+			for (const key of this.#heldKeys) void page.keyboard.up(key).catch(() => {});
+		}
+		this.#heldButtons.clear();
+		this.#heldKeys.clear();
 	}
 
 	#ensureRuntime(session: SessionSnapshot): JsRuntime {
@@ -2574,7 +2613,7 @@ export class WorkerCore {
 							}
 						} else await untilAborted(sig, () => page.focus(normalizeSelector(selector)));
 					}
-					await untilAborted(sig, () => pressKey(page, key));
+					await pressKey(page, key, undefined, sig);
 				}),
 			scroll: (deltaX, deltaY, opts) =>
 				act("tab.scroll()", actionOpMs, async sig => {
@@ -3045,11 +3084,28 @@ export class WorkerCore {
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
-			keyDown: key => op(`tab.keyDown(${JSON.stringify(key)})`, actionOpMs, sig => keyDown(page, key, sig)),
-			keyUp: key => op(`tab.keyUp(${JSON.stringify(key)})`, actionOpMs, sig => keyUp(page, key, sig)),
+			// A press is held from when it lands; one cut off on its way is released by the helper itself.
+			keyDown: key =>
+				op(`tab.keyDown(${JSON.stringify(key)})`, actionOpMs, async sig => {
+					await keyDown(page, key, sig);
+					this.#heldKeys.add(key);
+				}),
+			keyUp: key =>
+				op(`tab.keyUp(${JSON.stringify(key)})`, actionOpMs, sig => {
+					this.#heldKeys.delete(key);
+					return keyUp(page, key, sig);
+				}),
 			mouseMove: (x, y, opts) => op("tab.mouseMove()", actionOpMs, sig => mouseMove(page, x, y, opts, sig)),
-			mouseDown: opts => op("tab.mouseDown()", actionOpMs, sig => mouseDown(page, opts, sig)),
-			mouseUp: opts => op("tab.mouseUp()", actionOpMs, sig => mouseUp(page, opts, sig)),
+			mouseDown: opts =>
+				op("tab.mouseDown()", actionOpMs, async sig => {
+					await mouseDown(page, opts, sig);
+					this.#heldButtons.add(opts?.button ?? "left");
+				}),
+			mouseUp: opts =>
+				op("tab.mouseUp()", actionOpMs, sig => {
+					this.#heldButtons.delete(opts?.button ?? "left");
+					return mouseUp(page, opts, sig);
+				}),
 			// Raw pointer input runs at once, as on main: sent the moment a new document had parsed, a click did not
 			// reach it.
 			clickAt: (x, y, opts) => op("tab.clickAt()", actionOpMs, sig => clickAt(page, x, y, opts, sig)),
@@ -3083,14 +3139,9 @@ export class WorkerCore {
 				op("tab.clipboardWrite()", actionOpMs, sig =>
 					untilAborted(sig, () => this.#requireEmulation().clipboardWrite(text)),
 				),
-			clipboardCopy: () =>
-				op("tab.clipboardCopy()", actionOpMs, sig =>
-					untilAborted(sig, () => this.#requireEmulation().clipboardCopy()),
-				),
+			clipboardCopy: () => op("tab.clipboardCopy()", actionOpMs, sig => this.#requireEmulation().clipboardCopy(sig)),
 			clipboardPaste: () =>
-				op("tab.clipboardPaste()", actionOpMs, sig =>
-					untilAborted(sig, () => this.#requireEmulation().clipboardPaste()),
-				),
+				op("tab.clipboardPaste()", actionOpMs, sig => this.#requireEmulation().clipboardPaste(sig)),
 		};
 	}
 
@@ -3379,10 +3430,7 @@ export class WorkerCore {
 		let end: { x: number; y: number; handle?: ElementHandle } | undefined;
 		try {
 			end = await resolveDragPoint(to, "to");
-			await untilAborted(signal, () => page.mouse.move(start.x, start.y));
-			await untilAborted(signal, () => page.mouse.down());
-			await untilAborted(signal, () => page.mouse.move(end!.x, end!.y, { steps: 12 }));
-			await untilAborted(signal, () => page.mouse.up());
+			await dragBetween(page, start, end, signal);
 		} finally {
 			if (start.handle) await start.handle.dispose().catch(() => undefined);
 			if (end?.handle) await end.handle.dispose().catch(() => undefined);
