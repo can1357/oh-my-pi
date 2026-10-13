@@ -78,6 +78,11 @@ export class BashExecutionComponent extends Container {
 	// clears both counts, because a complete snapshot has dropped nothing.
 	#droppedLiveLines = 0;
 	#throttledLiveLines = 0;
+	// Set when the throttle gate discards a chunk that contributes no whole
+	// row (a partial-line suffix merging into the retained last row): the
+	// suffix is gone, so the footer must name the corrupted tail even though
+	// the skipped-row count stayed zero.
+	#throttledFragmentLost = false;
 	#contentContainer: Container;
 	#outputPane: OutputPane;
 	#headerText: Text;
@@ -216,6 +221,7 @@ export class BashExecutionComponent extends Container {
 				// footer below is only ever built once the run has settled.
 				droppedLineCount: this.#status === "running" ? 0 : this.#droppedLiveLines,
 				throttledLineCount: this.#status === "running" ? 0 : this.#throttledLiveLines,
+				throttledFragmentLost: this.#status === "running" ? false : this.#throttledFragmentLost,
 			};
 			return dataFirst
 				? describeExecutionTool({
@@ -249,11 +255,15 @@ export class BashExecutionComponent extends Container {
 			// dropped" notice true about where the gap is. A chunk's first line
 			// merges into the retained last row exactly as the append path below
 			// does, so it contributes one row fewer than its newline count plus
-			// one — unless the window is still empty and nothing merges. The
+			// one — unless the window is still empty and nothing merges. A chunk
+			// contributing no whole row is a discarded suffix, not a dropped
+			// row, so it sets the fragment-loss flag instead of the count. The
 			// count must not allocate: this branch exists to avoid processing
 			// the chunk, and a multi-MiB callback would otherwise split an array
 			// and substrings proportional to every row just to be discarded.
-			this.#throttledLiveLines += Math.max(0, countNewlines(chunk) + 1 - (this.#outputLines.length > 0 ? 1 : 0));
+			const skippedRows = Math.max(0, countNewlines(chunk) + 1 - (this.#outputLines.length > 0 ? 1 : 0));
+			this.#throttledLiveLines += skippedRows;
+			if (skippedRows === 0 && chunk.length > 0) this.#throttledFragmentLost = true;
 			return;
 		}
 		this.#chunkGate = true;
@@ -489,6 +499,7 @@ export class BashExecutionComponent extends Container {
 				// position reads true.
 				droppedLineCount: this.#droppedLiveLines,
 				throttledLineCount: this.#throttledLiveLines,
+				throttledFragmentLost: this.#throttledFragmentLost,
 			});
 			if (footer) this.#contentContainer.addChild(footer);
 		}
@@ -516,6 +527,7 @@ export class BashExecutionComponent extends Container {
 		// is the true total and every line it counts survives expansion.
 		this.#droppedLiveLines = 0;
 		this.#throttledLiveLines = 0;
+		this.#throttledFragmentLost = false;
 		this.#outputVersion++;
 	}
 
