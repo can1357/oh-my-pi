@@ -714,19 +714,12 @@ export async function splitDelimitedPathEntry(
 			? parts
 			: null;
 	}
+	// An internal URL that still carries a top-level `;` is a flattened list
+	// (`history://A;history://B`, `skill://x;/abs/path`):
+	// fan it out the same way read's mixed-URL recovery does. A URL whose parts
+	// do not each name a URL or an existing literal path stays whole.
 	if (isInternalUrlPath(normalizedEntry)) {
-		// A `;` list of internal URLs (`artifact://44;artifact://43`) names
-		// several resources: the router resolves one URI per entry, so the list
-		// must split before dispatch (issue #14091). Split only when every part
-		// is itself an internal URL or a `!glob` exclusion (`local://notes;!*.test.ts`)
-		// — a URL whose own path contains `;` stays whole, and a single URL ending
-		// in `;` (`local://report;`) names one resource.
-		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
-		return parts &&
-			parts.length > 1 &&
-			parts.every(part => isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part)))
-			? parts
-			: null;
+		return splitMixedUrlPathList(normalizedEntry, cwd, isInternalUrlPath);
 	}
 	// A real POSIX file may contain a delimiter and a selector-shaped tail
 	// (`a;b:1-2`, `a b:1-2`). Preserve the raw entry whenever the full literal
