@@ -1,7 +1,6 @@
 import { describe, expect, it, jest } from "bun:test";
 import { createHash } from "node:crypto";
 import { closeRelayTarget } from "@oh-my-pi/pi-coding-agent/tools/browser/orphan-registry";
-import { BROWSER_PROTOCOL_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { RelayBridge, type RelaySocket } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
 import type {
 	RelayRpcRequest,
@@ -841,14 +840,16 @@ describe("RelayBridge command deadlines", () => {
 		}
 	}
 
-	const pageBoundMs = BROWSER_PROTOCOL_TIMEOUT_MS + 5_000;
+	// omp's clients give up at `BROWSER_PROTOCOL_TIMEOUT_MS` (60 s); the relay waits 5 s past that.
+	const clientGivesUpMs = 60_000;
+	const pageBoundMs = clientGivesUpMs + 5_000;
 
 	it.each([
 		["Runtime.callFunctionOn", { functionDeclaration: "() => new Promise(() => {})", awaitPromise: true }],
 		["Runtime.awaitPromise", { promiseObjectId: "1" }],
 		["Page.navigate", { url: "https://example.com/slow" }],
 	])("keeps waiting on %s, whose answer waits on the page, until omp's own client gave up", async (method, params) => {
-		expect(await unansweredFor(method, params, BROWSER_PROTOCOL_TIMEOUT_MS)).toBeUndefined();
+		expect(await unansweredFor(method, params, clientGivesUpMs)).toBeUndefined();
 		expect(JSON.stringify(await unansweredFor(method, params, pageBoundMs))).toContain(
 			`${method} on tab 1: Chrome sent no answer within ${pageBoundMs}ms`,
 		);
