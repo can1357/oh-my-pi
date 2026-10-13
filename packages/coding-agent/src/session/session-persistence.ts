@@ -40,14 +40,28 @@ export function isPersistenceTruncatedString(value: unknown): value is string {
 }
 
 export function isImageBlock(value: unknown): value is { type: "image"; data: string; mimeType?: string } {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		"type" in value &&
-		(value as { type?: string }).type === "image" &&
-		"data" in value &&
-		typeof (value as { data?: string }).data === "string"
-	);
+	if (typeof value !== "object" || value === null) return false;
+	return projectorImageField(value, "type") === "image" && projectorImageField(value, "data") !== undefined;
+}
+
+/**
+ * The `key` field of an image-shaped value as the projector accepts it —
+ * through the prototype chain, but only from a string-valued data descriptor.
+ * Answered without invoking anything: an accessor anywhere on the chain yields
+ * `undefined` rather than running user code, so a stateful getter keeps the
+ * value out of the blob store instead of shifting what serialization observes.
+ */
+export function projectorImageField(value: object, key: "data" | "mimeType" | "type"): string | undefined {
+	let current: object | null = value;
+	while (current !== null) {
+		const descriptor = Object.getOwnPropertyDescriptor(current, key);
+		if (descriptor !== undefined) {
+			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return undefined;
+			return typeof descriptor.value === "string" ? descriptor.value : undefined;
+		}
+		current = Object.getPrototypeOf(current);
+	}
+	return undefined;
 }
 
 function isImageMimeType(value: unknown): value is string {
@@ -55,13 +69,11 @@ function isImageMimeType(value: unknown): value is string {
 }
 
 export function isImageDataPayload(value: unknown): value is { data: string; mimeType?: string } {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		"data" in value &&
-		typeof (value as { data?: string }).data === "string" &&
-		(isImageBlock(value) || ("mimeType" in value && isImageMimeType((value as { mimeType?: unknown }).mimeType)))
-	);
+	if (typeof value !== "object" || value === null) return false;
+	if (projectorImageField(value, "data") === undefined) return false;
+	if (isImageBlock(value)) return true;
+	const mimeType = projectorImageField(value, "mimeType");
+	return mimeType !== undefined && isImageMimeType(mimeType);
 }
 
 /**
@@ -358,13 +370,12 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 		return false;
 	}
 	if (Array.isArray(obj)) {
-		for (const item of obj) {
-			if (
-				item !== null && typeof item === "object"
-					? persistenceNodeNeedsRewrite(item, key)
-					: persistenceNodeNeedsRewrite(item, key)
-			)
-				return true;
+		// Indexed slots with a snapshotted length, the way `JSON.stringify` and
+		// the rebuild above read them — never the iterator protocol, which an
+		// overridden `Symbol.iterator` can hide slots from.
+		const length = obj.length;
+		for (let index = 0; index < length; index++) {
+			if (persistenceNodeNeedsRewrite(obj[index], key)) return true;
 		}
 		return false;
 	}

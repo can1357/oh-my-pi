@@ -119,6 +119,7 @@ import {
 	forgetExternalizedImages,
 	isAtomicPersistenceNode,
 	prepareEntryForPersistence,
+	projectorImageField,
 	TRANSIENT_PERSISTENCE_KEYS,
 } from "./session-persistence";
 import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
@@ -899,12 +900,20 @@ function hasToJSONHook(value: object): boolean {
 }
 
 /**
- * Whether `value`'s JSON graph passes through a `toJSON` serializer hook.
+ * Whether `value`'s JSON graph passes through a `toJSON` serializer hook — or
+ * through any accessor whose read the probe must not perform.
  * Hook output is a function call, not a field value: a stateful hook returns a
  * different projection on every call, so a stamp taken from one call cannot
  * describe the bytes another call produces. Hook-backed messages are left
  * uncached — re-projected on every rewrite — rather than stamped from output
  * the next check would re-invoke.
+ *
+ * The same holds for every other accessor: probing one by reading the key runs
+ * user code, so a stateful getter (for example, one closing over `++revision`)
+ * observes a different state when serialization reads it again, persisting
+ * bytes native serialization alone never produces. Any accessor-backed graph
+ * is left uncached instead — answered through property descriptors, never by
+ * reading a key.
  *
  * Walks exactly the graph persistence serializes: transient keys are skipped
  * where `truncateForPersistence` strips them (see {@link messageValueStamp})
@@ -934,9 +943,21 @@ function hasSerializerHook(value: unknown, key?: string): boolean {
 	// cannot affect the persisted bytes — and the live value may be cyclic
 	// where the projection is not.
 	const atomic = isAtomicPersistenceNode(value, key);
+	// An image-shaped value whose `data` rides an inherited data descriptor is
+	// projector-accepted (`isImageDataPayload` reads through the chain) but
+	// invisible to the own-key stamp below: the backing bytes can change with
+	// no own key moving. Leave the graph uncached so the line is always
+	// re-projected from the live bytes.
+	if (projectorImageField(value, "data") !== undefined && !Object.hasOwn(value, "data")) return true;
 	for (const childKey of Object.keys(value)) {
 		if (!atomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
-		if (hasSerializerHook((value as Record<string, unknown>)[childKey], childKey)) return true;
+		// Never read through an accessor: the child lookup below would invoke
+		// the getter, and a stateful one then yields a different value when
+		// `#lineFor` serializes the node — so leave the graph uncached instead.
+		const descriptor = Object.getOwnPropertyDescriptor(value, childKey);
+		if (descriptor === undefined) continue;
+		if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
+		if (hasSerializerHook(descriptor.value, childKey)) return true;
 	}
 	return false;
 }
@@ -967,9 +988,36 @@ const STAMP_TRANSIENT = Symbol("stamp.transient");
  * and `2`. A wrapper that *does* carry `toJSON` serializes through the hook
  * instead — hooked graphs are left uncached (see {@link hasSerializerHook}) —
  * so only hookless wrappers reach here.
+ *
+ * `instanceof` alone is not the brand: a proxy around a wrapper or an object
+ * built on `Number.prototype` passes the chain check while carrying no
+ * `[[NumberData]]` slot, so `valueOf()` throws on it — while the serializer
+ * accepts it as `{}`. The intrinsic call below is the brand check, answered
+ * without invoking an override: only a genuine wrapper unboxes, and anything
+ * else falls through to the object walk.
  */
 function unboxedPrimitive(value: object): number | string | boolean | undefined {
-	if (value instanceof Number || value instanceof String || value instanceof Boolean) return value.valueOf();
+	if (value instanceof Number) {
+		try {
+			return Number.prototype.valueOf.call(value);
+		} catch {
+			return undefined;
+		}
+	}
+	if (value instanceof String) {
+		try {
+			return String.prototype.valueOf.call(value);
+		} catch {
+			return undefined;
+		}
+	}
+	if (value instanceof Boolean) {
+		try {
+			return Boolean.prototype.valueOf.call(value);
+		} catch {
+			return undefined;
+		}
+	}
 	return undefined;
 }
 
@@ -979,14 +1027,18 @@ function unboxedPrimitive(value: object): number | string | boolean | undefined 
  * `rawJSON` payload key — yet `JSON.stringify` emits the payload verbatim
  * (so `JSON.rawJSON("1")` serializes as `1`, not `{"rawJSON":"1"}`). The
  * detector degrades to `undefined` on runtimes without the ES2025 API, where
- * no branded value can exist.
+ * no branded value can exist. Reads through the property descriptor, never by
+ * key: the probe must not invoke user code (see {@link hasSerializerHook}).
  */
 function rawJsonPayload(value: object): string | undefined {
 	if (!("isRawJSON" in JSON) || typeof JSON.isRawJSON !== "function" || !JSON.isRawJSON(value)) {
 		return undefined;
 	}
-	if (!("rawJSON" in value) || typeof value.rawJSON !== "string") return undefined;
-	return value.rawJSON;
+	const descriptor = Object.getOwnPropertyDescriptor(value, "rawJSON");
+	if (descriptor === undefined || typeof descriptor.get === "function" || typeof descriptor.value !== "string") {
+		return undefined;
+	}
+	return descriptor.value;
 }
 
 /**
