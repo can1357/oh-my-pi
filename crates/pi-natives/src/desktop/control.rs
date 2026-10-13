@@ -19,6 +19,8 @@ use parking_lot::{Condvar, Mutex};
 
 use super::error::{CoreResult, DesktopError};
 
+#[cfg(target_os = "macos")]
+pub(crate) mod intervention;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -37,6 +39,10 @@ struct CancellationState {
 	/// monitor; stays set until a later takeover lease starts one. Background
 	/// leases never arm the monitor and leave it unchanged.
 	escape_failed: AtomicBool,
+	/// When the current computer run ends; input waiting for the user to
+	/// pause stops shortly before it.
+	#[cfg(target_os = "macos")]
+	deadline:      Mutex<Option<Instant>>,
 	#[cfg(target_os = "linux")]
 	async_wake:    tokio::sync::Notify,
 }
@@ -103,6 +109,13 @@ impl CancellationSource {
 		self.0.escape_failed.load(Ordering::Acquire)
 	}
 
+	/// Sets when the current computer run ends, `None` for no deadline. Each
+	/// run sets it before its first call.
+	#[cfg(target_os = "macos")]
+	pub(crate) fn set_deadline(&self, deadline: Option<Instant>) {
+		*self.0.deadline.lock() = deadline;
+	}
+
 	#[cfg(test)]
 	pub(crate) fn fail_escape_for_test(&self) {
 		self.0.escape_failed.store(true, Ordering::Release);
@@ -134,6 +147,11 @@ impl OperationToken {
 
 	pub(crate) fn escape_unavailable(&self) -> bool {
 		self.source.escape_unavailable()
+	}
+
+	#[cfg(target_os = "macos")]
+	pub(crate) fn deadline(&self) -> Option<Instant> {
+		*self.source.0.deadline.lock()
 	}
 
 	pub(crate) fn enter(&self) -> OperationScope {

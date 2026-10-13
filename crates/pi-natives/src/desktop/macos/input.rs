@@ -384,14 +384,17 @@ fn keys_still_reach(
 	)))
 }
 
-/// Posts `event`, first running `guard` when it presses a key or modifier;
-/// releases always go out so nothing stays held.
+/// Posts `event`. Before a key or modifier press it checks that the user has
+/// not used the target's app since the call began
+/// ([`control::intervention::check_press`]) and runs `guard`; releases always
+/// go out so nothing stays held.
 fn post_guarded(
 	event: &CGEvent,
 	guard: impl FnOnce() -> CoreResult<()>,
 	post: impl FnOnce(&CGEvent) -> CoreResult<()>,
 ) -> CoreResult<()> {
 	if is_key_press(event) {
+		control::intervention::check_press()?;
 		guard()?;
 	}
 	post(event)
@@ -1391,12 +1394,20 @@ fn global_type(source: &CGEventSource, text: &str) -> CoreResult<()> {
 }
 
 fn post_takeover_key(pid: libc::pid_t, wid: u32, event: &CGEvent) -> CoreResult<()> {
-	if matches!(event.get_type(), CGEventType::KeyDown) {
-		// Stop rather than typing into a newly user-selected app/window. Key
-		// releases must still pass through so held modifiers do not leak.
-		skylight::require_front_window(pid, wid)?;
-	}
-	post_global(event)
+	let key_down = matches!(event.get_type(), CGEventType::KeyDown);
+	// Stop rather than typing into a newly user-selected app/window. Key
+	// releases must still pass through so held modifiers do not leak.
+	post_guarded(
+		event,
+		|| {
+			if key_down {
+				skylight::require_front_window(pid, wid)
+			} else {
+				Ok(())
+			}
+		},
+		post_global,
+	)
 }
 
 fn type_text(
@@ -1518,6 +1529,9 @@ fn physical_key(character: char) -> Option<(u16, bool)> {
 fn post_bare_keys(transitions: &[(u16, bool)]) -> CoreResult<()> {
 	let post = |code, down| {
 		control::check()?;
+		if down {
+			control::intervention::check_press()?;
+		}
 		// SAFETY: A null source is documented as valid for keyboard events.
 		let raw = unsafe { create_keyboard_event(ptr::null_mut(), code, down) };
 		if raw.is_null() {
@@ -2434,6 +2448,46 @@ mod tests {
 			SHIFT_SPACE_TRANSITIONS[0],
 			SHIFT_SPACE_TRANSITIONS[2],
 			SHIFT_SPACE_TRANSITIONS[3]
+		]);
+	}
+
+	#[test]
+	fn keys_stop_at_the_users_first_key_or_click_in_the_target_app() {
+		use crate::desktop::error::ErrorCode;
+		let source = source().expect("event source");
+		let mut listener = control::intervention::Listener::without_tap();
+		listener.touch(7, || "TextEdit".to_string());
+		let token = control::CancellationSource::default().token();
+		let mut events = Vec::new();
+		let result = {
+			let _watch = listener
+				.admit(7, &token)
+				.expect("the user has not used TextEdit");
+			key_chord(&source, &[KeyName::Ctrl, KeyName::Enter], |event| {
+				post_guarded(
+					event,
+					|| Ok(()),
+					|event| {
+						// The user types in TextEdit right after Ctrl goes down.
+						listener.record_for_test(7, Instant::now());
+						events.push((
+							event.get_type() as u32,
+							event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+						));
+						Ok(())
+					},
+				)
+			})
+		};
+		let error = result.unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(error.message.contains("in TextEdit during this input"), "{}", error.message);
+		assert!(error.message.contains("nothing more was sent"), "{}", error.message);
+		// Enter is never pressed; its release and Ctrl's still go out.
+		assert_eq!(events, [
+			(CGEventType::FlagsChanged as u32, 59),
+			(CGEventType::KeyUp as u32, 36),
+			(CGEventType::FlagsChanged as u32, 59),
 		]);
 	}
 

@@ -1529,6 +1529,11 @@ fn mac_handle(handle: &AxHandle) -> CoreResult<&AXUIElement> {
 	}
 }
 
+/// The process owning the element `h` names.
+pub(super) fn handle_pid(h: &AxHandle) -> CoreResult<libc::pid_t> {
+	element_pid(mac_handle(h)?)
+}
+
 fn bounds_matches_window(bounds: AxBounds, window: &DesktopWindow) -> bool {
 	(bounds.x - f64::from(window.x)).abs() <= 2.0
 		&& (bounds.y - f64::from(window.y)).abs() <= 2.0

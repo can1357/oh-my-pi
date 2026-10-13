@@ -7,6 +7,7 @@ pub enum ErrorCode {
 	InputFailed,
 	InputBusy,
 	Cancelled,
+	UserIntervened,
 	BackgroundUnavailable,
 	WindowNotFound,
 	InvalidTarget,
@@ -32,6 +33,7 @@ impl ErrorCode {
 			Self::InputFailed => "InputFailed",
 			Self::InputBusy => "InputBusy",
 			Self::Cancelled => "Cancelled",
+			Self::UserIntervened => "UserIntervened",
 			Self::BackgroundUnavailable => "BackgroundUnavailable",
 			Self::WindowNotFound => "WindowNotFound",
 			Self::InvalidTarget => "InvalidTarget",
@@ -76,6 +78,11 @@ impl DesktopError {
 
 	pub(crate) fn input_busy(message: impl Into<String>) -> Self {
 		Self::new(ErrorCode::InputBusy, message)
+	}
+
+	#[cfg(target_os = "macos")]
+	pub(crate) fn user_intervened(message: impl Into<String>) -> Self {
+		Self::new(ErrorCode::UserIntervened, message)
 	}
 
 	pub(crate) fn cancelled(message: impl Into<String>) -> Self {

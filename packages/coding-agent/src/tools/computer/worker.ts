@@ -64,6 +64,8 @@ export interface NativeDesktopSession {
 	): Promise<DesktopCapture>;
 	cancel(): void;
 	retire(): void;
+	/** Sets when the current run ends, `remainingMs` from now; bounds how long input waits for the user to pause. */
+	setRunDeadline(remainingMs: number): void;
 	listApplications(options?: ApplicationQuery): Promise<Application[]>;
 	openApplication(id: string, options?: ApplicationOpenOptions): Promise<OpenedApplication>;
 	menuItems(target: string, path?: string[]): Promise<MenuItem[]>;
@@ -853,6 +855,7 @@ export class ComputerWorkerCore {
 			return;
 		}
 		const timeoutSignal = AbortSignal.timeout(message.timeoutMs);
+		const deadline = performance.now() + message.timeoutMs;
 		const ac = new AbortController();
 		const runAc = new AbortController();
 		const signal = AbortSignal.any([timeoutSignal, ac.signal, runAc.signal]);
@@ -885,6 +888,7 @@ export class ComputerWorkerCore {
 			throwIfAborted(signal);
 			const session = await this.#ensureSession(message.session);
 			throwIfAborted(signal);
+			session.setRunDeadline(deadline - performance.now());
 			const runtime = this.#ensureRuntime(message.session);
 			runtime.setCwd(message.session.cwd);
 			const desktop = this.#createDesktopScope(session);

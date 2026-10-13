@@ -66,6 +66,12 @@ export declare class DesktopSession {
   controlState(): DesktopControlState
   /** Retire queued work from a completed helper without revoking task control. */
   retire(): void
+  /**
+   * Sets when the current run ends, `remaining_ms` from now; each run sets
+   * it before its first call. On macOS, input waiting for the user to pause
+   * in its app gives up shortly before it.
+   */
+  setRunDeadline(remainingMs: number): void
   capture(target: string, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
   /**
    * Capture a fresh native-detail region without replacing the full input

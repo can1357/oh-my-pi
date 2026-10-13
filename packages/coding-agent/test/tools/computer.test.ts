@@ -158,6 +158,10 @@ class FakeNativeSession implements NativeDesktopSession {
 	retire(): void {
 		this.retireCount += 1;
 	}
+	readonly runDeadlines: number[] = [];
+	setRunDeadline(remainingMs: number): void {
+		this.runDeadlines.push(remainingMs);
+	}
 	async listApplications() {
 		return [{ id: "test.editor", name: "Editor", path: "/Applications/Editor.app", running: true, pid: 123 }];
 	}
@@ -1531,6 +1535,20 @@ describe("computer worker round trips", () => {
 		expect(native.retireCount).toBe(2);
 		expect(native.cancelCount).toBe(0);
 		expect(native.clickCount).toBe(1);
+	});
+
+	it("tells the native session how long each run has left", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		new ComputerWorkerCore(transport, () => native);
+		expect((await runWorker(transport, "long", "42", false, 2_000)).ok).toBe(true);
+		expect((await runWorker(transport, "short", "42", false, 500)).ok).toBe(true);
+		const [long, short] = native.runDeadlines;
+		expect(native.runDeadlines).toHaveLength(2);
+		expect(long).toBeGreaterThan(500);
+		expect(long).toBeLessThanOrEqual(2_000);
+		expect(short).toBeGreaterThan(0);
+		expect(short).toBeLessThanOrEqual(500);
 	});
 
 	it("cancels unawaited native mutations before the next run without cancelling that run", async () => {

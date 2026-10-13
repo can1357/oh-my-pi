@@ -4,6 +4,7 @@ const REQUIRED_METHODS = [
 	"captureRegion",
 	"cancel",
 	"retire",
+	"setRunDeadline",
 	"observe",
 	"listApplications",
 	"openApplication",
