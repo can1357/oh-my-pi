@@ -215,6 +215,8 @@ class TabState {
 	ompGroupId: number | undefined;
 	/** User pulled the tab out of the omp group — never re-group it. */
 	groupOptOut = false;
+	/** The app in front of the user when omp's input last reached this tab, and when; a window the tab opens uses it once. */
+	frontAtInput: { app: FrontApp; at: number } | null = null;
 	/**
 	 * Real Chrome sessions (OOPIF/worker children) under this tab's attachment: the child session
 	 * that reported each (none for the root) and its `Target.attachedToTarget` params.
@@ -274,6 +276,16 @@ const AFFINE_RECONNECT_WAIT_MS = 12_000;
 const DETACHED_COMMAND_ERROR = /Detached while handling command/;
 /** How long such a failure waits for the extension to report the detach itself. */
 const CHROME_DETACH_REPORT_MS = 1_000;
+/** A window a tab opens this long after omp's input reached it is still taken to be that input's doing. */
+const POPUP_AFTER_INPUT_MS = 1_000;
+/** How long the user's app is held in front after omp's input opened a window; Chrome activates within milliseconds. */
+const KEEP_FRONT_MS = 500;
+
+/** The app in front of the user, as `macOSFrontApp` from `@oh-my-pi/pi-natives` reads it. */
+export interface FrontApp {
+	/** Puts the app back in front each time the app that took the front takes it again within `durationMs`, until the user picks an app; resolves how many times. */
+	keepInFront(durationMs: number): Promise<number>;
+}
 
 /**
  * Multiplexing CDP bridge between downstream puppeteer connections and the
@@ -326,6 +338,10 @@ export class RelayBridge {
 	#groupDraining = false;
 	/** Each tab's last file chooser interception transition; see {@link #serializeInterception}. */
 	#interceptionTransitions = new Map<string, Promise<void>>();
+	/** Reads the app in front of the user; set by {@link keepFrontAppWith} where the relay can put it back (macOS). */
+	#readFrontApp: (() => FrontApp | null) | undefined;
+	/** True while a hold on the user's app runs; a window opened meanwhile shares it. */
+	#keepingFront = false;
 
 	constructor(
 		opts: {
@@ -1068,6 +1084,10 @@ export class RelayBridge {
 			await this.#handleBrowserCommand(conn, msg, tab);
 			return true;
 		}
+		if (this.#readFrontApp && msg.method.startsWith("Input.")) {
+			const app = this.#readFrontApp();
+			tab.frontAtInput = app && { app, at: Date.now() };
+		}
 		try {
 			const result = await this.#rpc(
 				{
@@ -1092,6 +1112,40 @@ export class RelayBridge {
 			this.#replyError(conn, msg, message);
 			return false;
 		}
+	}
+
+	/**
+	 * Read the app in front of the user with `read` as omp's input reaches a tab, to put it back when that input opens a
+	 * window and Chrome brings itself forward to show it. Only where the relay can put it back (macOS).
+	 */
+	keepFrontAppWith(read: () => FrontApp | null): void {
+		this.#readFrontApp = read;
+	}
+
+	/**
+	 * Hold the app that was in front at omp's last input to `tab`, if that input can have opened the window the tab's
+	 * page is opening: Chrome makes itself the active app to show it.
+	 */
+	#keepFrontApp(tab: TabState): void {
+		const front = tab.frontAtInput;
+		if (!front || this.#keepingFront || Date.now() - front.at > POPUP_AFTER_INPUT_MS) return;
+		tab.frontAtInput = null;
+		this.#keepingFront = true;
+		front.app
+			.keepInFront(KEEP_FRONT_MS)
+			.then(
+				times => {
+					if (times > 0) this.#log("put the user's app back in front", { times });
+				},
+				err => {
+					this.#log("could not keep the user's app in front", {
+						error: err instanceof Error ? err.message : String(err),
+					});
+				},
+			)
+			.finally(() => {
+				this.#keepingFront = false;
+			});
 	}
 
 	/**
@@ -1369,6 +1423,9 @@ export class RelayBridge {
 	): void {
 		const tab = this.#tabs.get(tabKey);
 		if (!tab) return;
+		// The page (or a frame in it, on a child session) is opening a tab or window; Chrome brings itself forward
+		// to show it.
+		if (method === "Page.windowOpen") this.#keepFrontApp(tab);
 		// Track real child sessions so downstream commands can route back.
 		if (method === "Target.attachedToTarget") {
 			const child = params?.sessionId;
