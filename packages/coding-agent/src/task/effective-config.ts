@@ -69,6 +69,7 @@ import {
 	cfgTaskMaxRecursionDepth,
 	cfgTaskPrewalk,
 	cfgTaskSoftRequestBudget,
+	cfgTaskStructured,
 } from "./settings";
 import { resolveAgentSettingsEntries } from "./structured-subagent";
 import { type AgentDefinition, canSpawnAtDepth } from "./types";
@@ -324,10 +325,12 @@ export async function resolveEffectiveAgentConfig(
 	}
 
 	const atMaxDepth = !canSpawnAtDepth(cfgTaskMaxRecursionDepth.get(settings), 1);
+	// A task spawn gets the `yield` tool only under `task.structured`; otherwise its final message is the result.
+	const structured = cfgTaskStructured.get(settings);
 	const toolNames = resolveSubagentToolNames(agent, settings, {
 		atMaxDepth,
 		restrictToolNames: false,
-		structured: true,
+		structured,
 	});
 	// The built-ins the child session constructs from that request, under the child's settings.
 	const toolPlan = await resolveBuiltinToolPlan(
@@ -338,8 +341,8 @@ export async function resolveEffectiveAgentConfig(
 			getSessionSpawns: () => subagentSpawnsEnv(agent, atMaxDepth),
 			settings: childSettings,
 			taskDepth: 1,
-			requireYieldTool: true,
-			// A yield-gated child gets `todo` only while a prewalk hand-off is armed.
+			requireYieldTool: structured,
+			// A yield-gated child gets `todo` only while a prewalk hand-off is armed; an unstructured one always may.
 			prewalkArmed: prewalkResolution?.kind === "armed",
 			enableLsp: true,
 			modelRegistry,
