@@ -14,8 +14,9 @@ export type PrintHoldScope = "tab" | "calls";
  * Wraps `window.print` once per document for one attachment and holds it for `holdMs` from `from` (the page's own
  * epoch ms; default now), or for the document's life when `holdMs` is `null`. A held call reports through `binding`,
  * fires `beforeprint` and `afterprint` as a finished print does, and returns at once; otherwise it calls the `print`
- * it wrapped, which may be another attachment's wrapper. Returns the page's time, for the worker to place deadlines
- * in it. Runs in the page, so it stays self-contained.
+ * it wrapped, which may be another attachment's wrapper. A dialog that opened while held keeps it held `resyncMs`
+ * after it returns. Returns the page's time, for the worker to place deadlines in it. Runs in the page, so it stays
+ * self-contained.
  */
 function holdPrintInPage(
 	binding: string,
@@ -59,6 +60,25 @@ function holdPrintInPage(
 		},
 	});
 	Reflect.set(globalThis, "print", heldPrint);
+	// A dialog the page opens while `print()` is held returns into code that may print at once (`if (confirm(…))
+	// print()`), before omp can set a deadline in a page the dialog stopped: that print is held for `resyncMs` too.
+	for (const name of ["alert", "confirm", "prompt"]) {
+		const dialog: unknown = Reflect.get(globalThis, name);
+		if (typeof dialog !== "function") continue;
+		const heldDialog = new Proxy(dialog, {
+			apply(target, thisArg, args) {
+				const heldUntil: unknown = Reflect.get(globalThis, deadline);
+				const held = typeof heldUntil === "number" && now() < heldUntil;
+				try {
+					return Reflect.apply(target, thisArg, args);
+				} finally {
+					const until: unknown = Reflect.get(globalThis, deadline);
+					if (held) Reflect.set(globalThis, deadline, Math.max(Number(until), now() + resyncMs));
+				}
+			},
+		});
+		Reflect.set(globalThis, name, heldDialog);
+	}
 	return now();
 }
 
