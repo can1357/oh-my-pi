@@ -9,7 +9,7 @@
 ### Fixed
 
 - Fixed macOS computer use reporting a working physical Escape stop (`globalEscape: true`) when it could not see keys, and refusing input when the stop failed to start; input now runs without it, `inputPermission` reports event-posting access, and permission errors name the terminal or IDE to grant ([#15157](https://github.com/can1357/oh-my-pi/pull/15157) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed macOS takeover input sending the user back to their previous app when they clicked or typed in the takeover target as the input ended, or at any time without Input Monitoring; macOS now refuses that hand-back if any key or click came after the takeover's own input ([#15176](https://github.com/can1357/oh-my-pi/pull/15176) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS takeover input sending the user back to their previous app when they clicked in the takeover target as the input ended, and keeping the target in front for good when they merely kept typing while takeover held it: a click, a Command shortcut such as Command-Tab, or a switch to another app now leaves the front app to the user, and macOS refuses the hand-back if one came after the takeover's own input; typing alone no longer does, once Input Monitoring lets omp tell it apart ([#15176](https://github.com/can1357/oh-my-pi/pull/15176) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.9.2] - 2026-10-11
 
