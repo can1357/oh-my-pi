@@ -1,15 +1,18 @@
 /**
  * The async background jobs of a session as {@link JobsSheet}: the dismissable
- * sheet the native jobs pill and `/jobs` open. A master–detail split lists
- * every job (running first) beside the selected one's status, command, facts
- * (cwd, live pids, exit code, artifact) and live output.
+ * sheet native `/jobs` and the native jobs pill open. A master–detail split
+ * shows status, command, process facts and live output. The separate fullscreen
+ * terminal Background Jobs page reuses the source contracts below.
  */
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
-import { formatDuration } from "@oh-my-pi/pi-utils";
+import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
+import { formatKeyHint } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { matchesKey } from "../keys";
-import { truncateToWidth } from "../utils";
+import { replaceTabs, truncateToWidth } from "../utils";
+import { shortenPath } from "../render/render-utils";
 import { collapseCommand } from "../apps/ps-data";
 import { ansi, code, col, compact, item, node, row, span, stableKey, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
@@ -57,7 +60,27 @@ export interface JobsSheetSource {
 	cancel(id: string): void;
 	/** Dismiss the sheet. */
 	close(): void;
+	/**
+	 * Raw terminal rows, read once per frame. The fallback body ceiling follows
+	 * {@link JOBS_SHEET_HEIGHT_PERCENT}, shared with the host overlay.
+	 * Optional: without it the terminal's own row count is used.
+	 */
+	rows?(): number;
 }
+
+/**
+ * Repaint cadence (ms) shared by the jobs surfaces: the native jobs pill and
+ * the terminal Background jobs page both poll the session at this interval,
+ * since a job's output and pids change with no push notification.
+ */
+export const JOBS_REFRESH_MS = 250;
+
+/**
+ * Fraction of the terminal height the {@link JobsSheet} plain body may fill,
+ * in percent: the same 90% `maxHeight` the sheet's centred overlay opens with,
+ * so the compositor never clips its newest output line.
+ */
+export const JOBS_SHEET_HEIGHT_PERCENT = 90;
 
 /** A job's status as the sheet names it. */
 const STATUS_LABEL: Record<JobsPanelJob["status"], string> = {
@@ -86,9 +109,6 @@ const STATUS_GLYPH: Record<JobsPanelJob["status"], TspSpan> = {
 /** The list row's icon per job type (Tern icon names); other types read as a generic job. */
 const TYPE_ICON: Record<string, string> = { bash: "bash", task: "agent" };
 
-/** Output tail rows the terminal fallback shows under the selected job. */
-const FALLBACK_TAIL_LINES = 8;
-
 /**
  * The jobs pill's sheet: a centred `lg` glass sheet titled Background jobs.
  * A master–detail split (it stacks in a narrow pane): the selectable job list,
@@ -109,8 +129,8 @@ export class JobsSheet implements Component {
 	readonly #source: JobsSheetSource;
 	#selectedId: string | undefined;
 	#native: { key: string; output: string | undefined; node: NativeNode } | undefined;
-	/** Fallback output tail, reused while the selected job's output is unchanged. */
-	#tail: { id: string; output: string; lines: readonly string[] } | undefined;
+	/** Fallback output tail, reused while the selected job, its output and the tail height are unchanged. */
+	#tail: { id: string; output: string; count: number; lines: readonly string[] } | undefined;
 
 	constructor(source: JobsSheetSource) {
 		this.#source = source;
@@ -152,33 +172,87 @@ export class JobsSheet implements Component {
 		return described;
 	}
 
-	/** Rows for a terminal without the native surface: one per job, then the selected job's facts and output tail. */
+	/**
+	 * Rows for a terminal without the native surface: the header, the job list
+	 * (id first, so it survives a cut label) windowed around the selection, the
+	 * selected job's command and facts, its output tail (oldest first, newest
+	 * last) and the key legend. The whole array is bounded to the rows a
+	 * centred `maxHeight: "90%"` overlay could draw, so the compositor never
+	 * clips the newest output; that line is reserved a row ahead of the
+	 * command, the facts and the older output.
+	 */
 	render(width: number): readonly string[] {
 		const { jobs, selected } = this.#current();
 		const now = Date.now();
-		const running = jobs.filter(job => job.status === "running").length;
-		const lines = [truncateToWidth(` Background jobs · ${running} running`, width)];
-		if (jobs.length === 0) lines.push(" No background jobs");
-		for (const job of jobs) {
-			const cursor = job === selected ? ">" : " ";
-			const age = formatDuration(jobAge(job, now));
-			lines.push(
-				truncateToWidth(`${cursor} ${job.status}  ${job.type} ${age}  ${collapseCommand(job.label)}`, width),
-			);
-		}
 		const detail = selected && this.#source.inspect(selected.id);
-		if (detail) {
-			const facts = compact([
-				detail.cwd && `cwd ${detail.cwd}`,
-				detail.pids.length > 0 && `pid ${detail.pids.join(", ")}`,
-				detail.exitCode !== undefined && `exit ${detail.exitCode}`,
-				detail.artifactId && `artifact://${detail.artifactId}`,
-			]);
-			if (facts.length > 0) lines.push(truncateToWidth(`   ${facts.join(" · ")}`, width));
-			for (const line of this.#tailLines(selected.id, detail.output ?? "")) {
-				if (line) lines.push(truncateToWidth(`   ${line}`, width));
+		const command = detail?.command;
+		const facts = compact([
+			detail?.cwd && `cwd ${shortenPath(detail.cwd)}`,
+			detail?.pids.length ? `pid ${detail.pids.join(", ")}` : undefined,
+			detail?.exitCode !== undefined && `exit ${detail.exitCode}`,
+			detail?.artifactId && `artifact://${detail.artifactId}`,
+		]);
+		const height = this.#heightBudget();
+		const legend =
+			height >= 3
+				? [
+						` ${editorKeys("tui.select.up", "tui.select.down")} select`,
+						`${formatKeyHint("x")} cancel`,
+						`${editorKey("tui.select.cancel")} close`,
+					].join(" · ")
+				: undefined;
+		const running = jobs.filter(job => job.status === "running").length;
+		const lines = [plainRow(` Background jobs · ${running} running`, width)];
+		// Room for content under the header (and the legend): the selected row is
+		// guaranteed its line, then content rows are reserved in priority order —
+		// the newest output line, the full command, the facts — with older output
+		// taking the remainder. The block renders command, facts, then the tail
+		// oldest first, so the newest line sits last above the legend.
+		const content = height - lines.length - (legend ? 1 : 0);
+		let listHeight = 0;
+		let commandHeight = 0;
+		let factsHeight = 0;
+		let outputHeight = 0;
+		if (jobs.length > 0 && content > 0) {
+			listHeight = Math.min(jobs.length, Math.max(1, Math.ceil(content / 2)));
+			let left = content - listHeight;
+			if (detail?.output && left > 0) {
+				outputHeight = 1;
+				left--;
+			}
+			if (command && left > 0) {
+				commandHeight = 1;
+				left--;
+			}
+			if (facts.length > 0 && left > 0) {
+				factsHeight = 1;
+				left--;
+			}
+			outputHeight += left;
+		}
+		if (jobs.length === 0) {
+			if (content > 0) lines.push(plainRow(" No background jobs", width));
+		} else if (listHeight > 0 && selected) {
+			const index = jobs.indexOf(selected);
+			const start = Math.max(0, Math.min(index - Math.floor((listHeight - 1) / 2), jobs.length - listHeight));
+			for (const job of jobs.slice(start, start + listHeight)) {
+				const age = formatDuration(jobAge(job, now));
+				lines.push(
+					plainRow(
+						`${job === selected ? ">" : " "} ${job.id} ${job.status} ${job.type} ${age} ${collapseCommand(job.label)}`,
+						width,
+					),
+				);
 			}
 		}
+		if (commandHeight > 0 && command) lines.push(plainRow(`   $ ${command}`, width));
+		if (factsHeight > 0) lines.push(plainRow(`   ${facts.join(" · ")}`, width));
+		if (outputHeight > 0 && selected) {
+			for (const line of this.#tailLines(selected.id, detail?.output ?? "", outputHeight)) {
+				lines.push(plainRow(`   ${line}`, width));
+			}
+		}
+		if (legend) lines.push(plainRow(legend, width));
 		return lines;
 	}
 
@@ -209,11 +283,23 @@ export class JobsSheet implements Component {
 		return { jobs, selected };
 	}
 
-	#tailLines(id: string, output: string): readonly string[] {
+	/**
+	 * Terminal rows the plain body may fill: the front 90% of the terminal the
+	 * caller's centred `maxHeight: "90%"` overlay draws, so the compositor never
+	 * clips the newest output. A host that reports no rows falls back to the
+	 * terminal's own count, and to 40 when even that is unknown, so the body is
+	 * always bounded.
+	 */
+	#heightBudget(): number {
+		const rows = this.#source.rows?.() || process.stdout.rows || 40;
+		return Math.max(1, Math.floor((rows * JOBS_SHEET_HEIGHT_PERCENT) / 100));
+	}
+
+	#tailLines(id: string, output: string, count: number): readonly string[] {
 		const cached = this.#tail;
-		if (cached?.id === id && cached.output === output) return cached.lines;
-		const lines = tailLines(output, FALLBACK_TAIL_LINES);
-		this.#tail = { id, output, lines };
+		if (cached?.id === id && cached.output === output && cached.count === count) return cached.lines;
+		const lines = tailLines(output, count);
+		this.#tail = { id, output, count, lines };
 		return lines;
 	}
 
@@ -250,6 +336,15 @@ function tailLines(text: string, count: number): string[] {
 		end = newline;
 	}
 	return lines.reverse();
+}
+
+/**
+ * One plain terminal row: tabs expanded, terminal controls and line breaks
+ * stripped (the job fields and captured output are untrusted) and the result
+ * bounded to `width`, so no row can wrap, repaint or overflow its overlay.
+ */
+function plainRow(text: string, width: number): string {
+	return truncateToWidth(replaceTabs(sanitizeText(text)).replace(/[\r\n]+/g, " "), width);
 }
 
 /**
@@ -325,7 +420,7 @@ function describeDetail(job: JobsPanelJob, detail: JobsPanelDetail | undefined, 
 	const pids = detail?.pids ?? [];
 	const facts = compact([
 		job.agentId ? { k: "Agent", v: [span(job.agentId, "mono")] } : undefined,
-		detail?.cwd ? { k: "Directory", v: [span(detail.cwd, "path")] } : undefined,
+		detail?.cwd ? { k: "Directory", v: [span(shortenPath(detail.cwd), "path")] } : undefined,
 		pids.length > 0 && { k: pids.length > 1 ? "PIDs" : "PID", v: [span(pids.join(", "), "num")] },
 		exit !== undefined && { k: "Exit code", v: [span(String(exit), exit === 0 ? "success" : "error")] },
 		detail?.artifactId ? { k: "Full output", v: [span(`artifact://${detail.artifactId}`, "mono")] } : undefined,

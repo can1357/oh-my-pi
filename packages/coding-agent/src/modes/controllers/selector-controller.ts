@@ -104,6 +104,8 @@ import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { collapseSharedUsageReports } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
 import { AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
+import type { JobsSheetSource } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
+import { BackgroundJobsPage } from "@oh-my-pi/pi-tui/overlays/jobs-page";
 import { createAgentHubRuntime } from "../agent-hub-runtime";
 import { AgentsHubComponent } from "@oh-my-pi/pi-tui/overlays/agents-hub";
 import { CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
@@ -188,7 +190,14 @@ function loadProviderAuthUi(): ProviderAuthUiModules {
 }
 
 /** Menus that open at most once: a repeat request focuses the open one. */
-type MenuKind = "settings" | "model-picker" | "model-hub" | "agents-dashboard" | "agent-hub" | "usage-dashboard";
+type MenuKind =
+	| "settings"
+	| "model-picker"
+	| "model-hub"
+	| "agents-dashboard"
+	| "agent-hub"
+	| "jobs-page"
+	| "usage-dashboard";
 
 /** An open menu: registered when the request runs, filled once its component mounts. */
 interface OpenMenu {
@@ -206,6 +215,13 @@ export class SelectorController {
 	 * focuses it instead of stacking another menu on top.
 	 */
 	#openMenus = new Map<MenuKind, OpenMenu>();
+
+	/**
+	 * Tear down the open Background Jobs page: called when it closes itself, and
+	 * by the host on a mode stop or session switch so the page's refresh interval
+	 * is always cleared rather than left repainting a dead view.
+	 */
+	#jobsPageDismiss: (() => void) | undefined;
 
 	constructor(private ctx: InteractiveModeContext) {}
 	/**
@@ -2492,5 +2508,51 @@ export class SelectorController {
 		} else {
 			showReadyHub();
 		}
+	}
+
+	/**
+	 * The Background Jobs page: a fullscreen terminal page listing the session's
+	 * async jobs beside the selected one's captured output. `/jobs` and the jobs
+	 * pill open it on an ordinary terminal; the native surface keeps its sheet,
+	 * so this page is never mounted there.
+	 *
+	 * A repeat request raises the open page (it never stacks), and the page owns
+	 * its 250 ms repaint interval, so {@link dismissJobsPage} has to run wherever
+	 * the host hides it — its own Esc, a mode stop, a session switch — to clear
+	 * that interval instead of letting it repaint a dead view.
+	 */
+	showJobsPage(): void {
+		if (this.#focusOpenMenu("jobs-page")) return;
+		const menu = this.#claimMenu("jobs-page");
+		let page: BackgroundJobsPage | undefined;
+		let closed = false;
+		const done = () => {
+			if (closed) return;
+			closed = true;
+			this.#jobsPageDismiss = undefined;
+			page?.dispose();
+			page = undefined;
+			menu.handle?.hide();
+			this.#releaseMenu("jobs-page", menu);
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		this.#jobsPageDismiss = done;
+		const source: JobsSheetSource = {
+			load: () => this.ctx.session.getAsyncJobSnapshot({ recentLimit: 5 }) ?? { running: [], recent: [] },
+			inspect: id => this.ctx.session.inspectAsyncJob(id),
+			cancel: id => {
+				this.ctx.session.cancelAsyncJob(id);
+				this.ctx.ui.requestRender();
+			},
+			close: done,
+		};
+		page = new BackgroundJobsPage(this.ctx.ui, source);
+		this.#mountMenu(menu, page, () => this.#showFullscreenMenu(page!));
+	}
+
+	/** Tear down the Background Jobs page if one is open; a no-op when none is. */
+	dismissJobsPage(): void {
+		this.#jobsPageDismiss?.();
 	}
 }

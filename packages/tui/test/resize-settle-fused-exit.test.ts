@@ -145,3 +145,77 @@ describe("resize settle fused alt exit", () => {
 		}
 	});
 });
+
+// A fullscreen overlay that covers a rebuild-mode resize must close through the
+// same fused exit the settle uses. While that exit is only pending, the terminal
+// still displays the borrowed buffer: a CPR anchor probe written then would
+// snapshot the wrong grid and stall the replay for the round trip, and a
+// continued resize must adopt the buffer instead of stacking a second alt entry
+// on top of it.
+describe("fullscreen close after a covered resize", () => {
+	it("fuses the close into the replay instead of probing while the alt buffer is up", async () => {
+		const { terminal, scheduler, tui } = await startRig();
+		try {
+			const overlay = tui.showOverlay(new Text("modal"), { fullscreen: true });
+			await scheduler.advance(terminal, 10);
+			terminal.written = [];
+
+			// Width change under the overlay: the covered normal screen reflowed,
+			// so the close latches the same rebuild a covered settle would run.
+			terminal.resize(30, 4);
+			await scheduler.advance(terminal, 10);
+			overlay.hide();
+			await scheduler.advance(terminal, 10);
+
+			// The close frame itself restores the buffer and streams the replay —
+			// long before a CPR round trip could answer, and with no DSR ever
+			// written against the still-displayed alternate grid.
+			const exitWrites = terminal.written.filter(data => data.includes(ALT_EXIT));
+			expect(exitWrites).toHaveLength(1);
+			const [rebuild] = exitWrites;
+			expect(rebuild!.indexOf(ERASE_SCREEN_AND_HISTORY)).toBeGreaterThan(rebuild!.indexOf(ALT_EXIT));
+			expect(terminal.written.join("")).not.toContain(DSR);
+			expect(plainRows(terminal)).toEqual(["history-one@30", "history-two@30", "editor@30"]);
+
+			// Outlive the (removed) probe's timeout: nothing may restore or
+			// replay late either.
+			await scheduler.advance(terminal, RESIZE_SETTLE_ADVANCE_MS + 400);
+			expect(count(terminal.written.join(""), ALT_EXIT)).toBe(1);
+			expect(terminal.written.join("")).not.toContain(DSR);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("does not enter the alt buffer again when a resize follows the close", async () => {
+		const { terminal, scheduler, tui } = await startRig();
+		try {
+			const overlay = tui.showOverlay(new Text("modal"), { fullscreen: true });
+			await scheduler.advance(terminal, 10);
+			terminal.written = [];
+
+			terminal.resize(30, 4);
+			await scheduler.advance(terminal, 10);
+			overlay.hide();
+			await scheduler.advance(terminal, 10);
+
+			// The fused close frame wrote before the continued resize arrived.
+			expect(count(terminal.written.join(""), ALT_EXIT)).toBe(1);
+			expect(terminal.written.join("")).not.toContain(DSR);
+
+			terminal.resize(34, 4);
+			await scheduler.advance(terminal, RESIZE_SETTLE_ADVANCE_MS);
+
+			// The continued resize's borrow may only enter the alternate buffer
+			// after the fused close restored the normal one — never stacked on
+			// the still-held borrowed buffer, and never anchored by a CPR probe.
+			const emitted = terminal.written.join("");
+			expect(emitted.indexOf(ALT_ENTER)).toBeGreaterThan(emitted.indexOf(ALT_EXIT));
+			expect(count(emitted, ALT_EXIT)).toBe(2);
+			expect(emitted).not.toContain(DSR);
+			expect(plainRows(terminal)).toEqual(["history-one@34", "history-two@34", "editor@34"]);
+		} finally {
+			tui.stop();
+		}
+	});
+});

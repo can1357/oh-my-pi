@@ -5,6 +5,7 @@
 ### Added
 
 - Added `ApprovalDialogComponent` and the `app.approval.approve` keybinding (default `Ctrl+Enter`, `Ctrl+Q`) ([#15548](https://github.com/can1357/oh-my-pi/pull/15548) by [@H4vC](https://github.com/H4vC))
+- Added `BackgroundJobsPage` with responsive, scrollable live logs, a bash-only default and an All jobs toggle ([#14575](https://github.com/can1357/oh-my-pi/issues/14575); [#15595](https://github.com/can1357/oh-my-pi/pull/15595) by [@wyyyz1937365497](https://github.com/wyyyz1937365497)).
 - Plan review overlay can take a remote answer: it shows the remotely chosen execution tier and locks further input like a terminal approval ([#15552](https://github.com/can1357/oh-my-pi/pull/15552) by [@Shadorain](https://github.com/Shadorain))
 
 ### Removed
@@ -14,6 +15,8 @@
 ### Fixed
 
 - Clicking Copy answer in the `/btw` history (and Copy raw in the raw SSE viewer) on native terminals copies the answer instead of the button's label ([#15547](https://github.com/can1357/oh-my-pi/pull/15547) by [@H4vC](https://github.com/H4vC))
+- Fixed fullscreen pages restoring a stale main screen or waiting unnecessarily for a cursor probe after resizing ([#15595](https://github.com/can1357/oh-my-pi/pull/15595) by [@wyyyz1937365497](https://github.com/wyyyz1937365497)).
+- Fixed background job logs inheriting another job's scroll position after selecting a task with no output ([#15595](https://github.com/can1357/oh-my-pi/pull/15595) by [@wyyyz1937365497](https://github.com/wyyyz1937365497)).
 
 ## [18.10.3] - 2026-10-12
 

@@ -795,25 +795,25 @@ export class CommandController {
 	}
 
 	/**
-	 * `/jobs`: natively the live jobs sheet the jobs pill opens (inspect and
-	 * cancel included); `/jobs full`, and text mode, a report of the running
-	 * and recent jobs (see {@link showCommandReport}).
+	 * `/jobs`: the live jobs surface the jobs pill opens — the fullscreen page on
+	 * an ordinary terminal and the centred sheet on a native one — inspect (↑/↓),
+	 * cancel a running job (X) and close (Esc), without adding anything to the
+	 * transcript. `/jobs full` keeps the static report of the running and recent
+	 * jobs with untruncated commands (see {@link showCommandReport}).
 	 */
 	async handleJobsCommand(options?: { full?: boolean }): Promise<void> {
-		const full = options?.full === true;
 		const snapshot = this.ctx.session.getAsyncJobSnapshot({ recentLimit: 5 });
 		if (!snapshot) {
 			this.ctx.showWarning("Async background jobs are unavailable in this session.");
 			return;
 		}
-		if (isNativeRendering() && !full) {
-			this.ctx.showJobsSheet();
+		if (options?.full !== true) {
+			this.ctx.showBackgroundJobs();
 			return;
 		}
 
 		const now = Date.now();
 		const columns = this.ctx.ui.terminal.columns ?? 100;
-		const lineWidth = Math.max(24, columns - 24);
 		let info = `${theme.fg("dim", "Running:")} ${snapshot.running.length}\n`;
 		if (snapshot.running.length === 0 && snapshot.recent.length === 0) {
 			info += `\n${theme.fg("dim", "No async jobs yet.")}`;
@@ -821,12 +821,12 @@ export class CommandController {
 			return;
 		}
 
-		// Full mode wraps here so every line, including heredoc lines and wrap
-		// continuations, keeps the two-column indent under its job row inside the
-		// report box.
+		// The full report wraps command lines here so every line, including heredoc
+		// lines and wrap continuations, keeps the two-column indent under its job
+		// row inside the report box. `/jobs` (no `full`) never reaches this code:
+		// it opens the sheet, which fits each job's own label/command to its width.
 		const commandWidth = Math.max(1, columns - 6);
 		const describe = (job: AsyncJobSnapshotItem): string => {
-			if (!full) return `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}`;
 			const command = replaceTabs(sanitizeText(job.command ?? job.label));
 			return wrapTextWithAnsi(command, commandWidth)
 				.map(line => `  ${theme.fg("dim", line)}`)

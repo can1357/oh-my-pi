@@ -11,6 +11,7 @@
 ### Changed
 
 - Tool approval prompts now replace the composer like `ask`, show one row per detail, and approve with `Ctrl+Enter` (or `Ctrl+Q`) instead of `Enter` ([#15548](https://github.com/can1357/oh-my-pi/pull/15548) by [@H4vC](https://github.com/H4vC))
+- `/jobs` now opens a live fullscreen log viewer, defaulting to bash jobs; `a` switches to all job types, while native `/jobs` and `/jobs full` remain unchanged ([#14575](https://github.com/can1357/oh-my-pi/issues/14575); [#15595](https://github.com/can1357/oh-my-pi/pull/15595) by [@wyyyz1937365497](https://github.com/wyyyz1937365497)).
 
 ### Fixed
 

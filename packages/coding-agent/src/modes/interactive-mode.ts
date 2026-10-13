@@ -254,7 +254,8 @@ import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
-import { JobsSheet } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
+import { JobsSheet, JOBS_REFRESH_MS, JOBS_SHEET_HEIGHT_PERCENT } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
+import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
@@ -706,7 +707,7 @@ class HudPillsRow implements Component {
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type !== "action") return;
 		if (event.act === "agents.open") this.mode.showAgentHub();
-		else if (event.act === "jobs.open") this.mode.showJobsSheet();
+		else if (event.act === "jobs.open") this.mode.showBackgroundJobs();
 	}
 }
 
@@ -1178,9 +1179,6 @@ export function renderSubagentHudLines(
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
-
-/** Repaint cadence of the open jobs sheet: output tails, pids and list ages are polled, not pushed. */
-const JOBS_SHEET_REFRESH_MS = 250;
 
 export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
@@ -1679,6 +1677,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	clearTransientSessionUi(): void {
 		this.#hideSessionInfo();
+		// The jobs surfaces read the session that is being replaced: close them so
+		// a switch never leaves a sheet/page polling the former session's jobs.
+		this.#hideJobsSheet();
+		this.#selectorController.dismissJobsPage();
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
@@ -7005,8 +7007,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
-		clearInterval(this.#jobsSheetTimer);
-		this.#jobsSheetTimer = undefined;
+		this.#hideJobsSheet();
+		this.#selectorController.dismissJobsPage();
 		if (this.#sttController) {
 			this.#sttController.dispose();
 			this.#sttController = undefined;
@@ -7431,16 +7433,24 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * The jobs pill's sheet: live background jobs in a dismissable overlay.
-	 * Unlike `/jobs` it adds nothing to the transcript, so a click mid-turn
-	 * leaves no deferred command preview above the editor.
+	 * Open the live jobs surface: the fullscreen {@link SelectorController.showJobsPage}
+	 * on an ordinary terminal, the centred sheet where the native surface is in
+	 * use. Opened by the jobs pill and by `/jobs` (no args); it adds nothing to
+	 * the transcript, so it leaves no deferred command preview above the editor.
 	 */
-	showJobsSheet(): void {
-		if (this.#jobsSheetHandle) return;
+	showBackgroundJobs(): void {
 		if (!this.session.getAsyncJobSnapshot()) {
 			this.showWarning("Async background jobs are unavailable in this session.");
 			return;
 		}
+		// The native backend's live surface is the process-wide flag the host uses
+		// elsewhere (the sheets command-controller picks for native); a plain
+		// terminal gets the fullscreen page.
+		if (!isNativeRendering()) {
+			this.#selectorController.showJobsPage();
+			return;
+		}
+		if (this.#jobsSheetHandle) return;
 		const sheet = new JobsSheet({
 			load: () => this.session.getAsyncJobSnapshot({ recentLimit: 5 }) ?? { running: [], recent: [] },
 			inspect: id => this.session.inspectAsyncJob(id),
@@ -7449,9 +7459,16 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.ui.requestRender();
 			},
 			close: () => this.#hideJobsSheet(),
+			// The sheet budgets its rows against the live terminal height so its
+			// content fits the overlay instead of being clipped at the bottom.
+			rows: () => this.ui.terminal.rows,
 		});
-		this.#jobsSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
-		this.#jobsSheetTimer = setInterval(() => this.ui.requestRender(), JOBS_SHEET_REFRESH_MS);
+		this.#jobsSheetHandle = this.ui.showOverlay(sheet, {
+			anchor: "center",
+			width: "90%",
+			maxHeight: `${JOBS_SHEET_HEIGHT_PERCENT}%`,
+		});
+		this.#jobsSheetTimer = setInterval(() => this.ui.requestRender(), JOBS_REFRESH_MS);
 		this.ui.setFocus(sheet);
 		this.ui.requestRender();
 	}

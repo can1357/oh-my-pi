@@ -1037,6 +1037,14 @@ export class TUI extends Container {
 	#altPreparedRows: PreparedLine[] = [];
 	#altEnterWidth = 0;
 	#altEnterHeight = 0;
+	/**
+	 * A SIGWINCH landed while a fullscreen overlay owned the alt buffer. The
+	 * terminal reflowed the covered normal screen even when the size round-trips
+	 * before the overlay closes, so the pre-overlay provider window no longer
+	 * describes what `1049l` restores: the exit must replay/repaint instead of
+	 * diffing logical rows against that stale baseline.
+	 */
+	#altCoveredResize = false;
 	#resizeAltActive = false;
 	#resizeSettleTimer: RenderTimer | undefined;
 	#suppressResizeUntil = 0;
@@ -1568,6 +1576,12 @@ export class TUI extends Container {
 					// A fullscreen overlay owns the alt buffer: repaint the modal at
 					// the new size. Never snapshot the normal window or probe its
 					// anchor against the alternate grid — not even for a toggle echo.
+					// The terminal still reflows the covered normal screen, so record
+					// the burst and mark the exit: the overlay's last frame must
+					// replay/repaint instead of diffing against the pre-overlay
+					// baseline (see the alt-exit branch of #doRender).
+					this.#trackResizeBurst();
+					this.#altCoveredResize = true;
 					this.requestRender(true);
 					return;
 				}
@@ -1892,6 +1906,8 @@ export class TUI extends Container {
 	 */
 	#beginResizeInPlacePaint(): void {
 		if (this.#altActive) {
+			this.#trackResizeBurst();
+			this.#altCoveredResize = true;
 			this.requestRender(true);
 			return;
 		}
@@ -1970,6 +1986,8 @@ export class TUI extends Container {
 	 */
 	#beginResizeAltPaint(restartingProbe = false): void {
 		if (this.#altActive) {
+			this.#trackResizeBurst();
+			this.#altCoveredResize = true;
 			this.requestRender(true);
 			return;
 		}
@@ -3763,11 +3781,31 @@ export class TUI extends Container {
 			const mouseEnter = wantMouse !== "off" && this.#mouseTracking === "off" ? MOUSE_TRACKING_ON : "";
 			const enhancementExit = this.#keyboardEnhancementExit();
 			const exitSequence = `${mouseExit}${mouseEnter}${enhancementExit}\x1b[?1049l`;
+			// A resize landed while this overlay owned the alt buffer: the terminal
+			// reflowed the covered normal screen, so the pre-overlay provider
+			// window no longer describes what `1049l` restores — diffing the exit
+			// frame against it would skip the reflowed rows and leave the stale
+			// restored screen up (transcript rows never rewritten). Latch the same
+			// rebuild/replay a covered settle would run and mark the baseline
+			// stale before restoring: rebuild mode fuses the exit into the replay
+			// frame so history is rebuilt once (no duplicate rows), and modes
+			// without a replay still repaint the whole viewport.
+			const reflowedWhileCovered = this.#altCoveredResize;
+			this.#altCoveredResize = false;
+			if (reflowedWhileCovered) {
+				if (this.#resizeScrollbackMode === "rebuild") this.#prepareResizeReplay(width, height);
+				this.#forceViewportRepaintOnNextRender = true;
+			}
 			// Session replacement finishes while its fullscreen selector still
 			// covers the old normal buffer. Fuse the restore into the destructive
 			// repaint so no stale frame can become visible between writes.
 			if (this.#clearScrollbackOnNextRender) {
+				// Same invariant as #settleResizeAltPaint's fused exit: the terminal
+				// stays on the borrowed buffer until the replay frame writes, so a
+				// SIGWINCH landing first must adopt that buffer instead of entering
+				// it again.
 				this.#pendingAltExit = exitSequence;
+				this.#resizeAltExitFused = true;
 			} else {
 				this.#noteAltBufferToggle();
 				this.terminal.write(exitSequence);
@@ -3783,8 +3821,12 @@ export class TUI extends Container {
 			// rewrap or a height-grow scrollback pull, while our viewport anchor
 			// stayed frozen. Recover the restored cursor position before any
 			// provider repaint can overwrite history at the stale row.
+			// A fused exit still pending skips this: the normal screen is not
+			// restored yet, so a DSR would snapshot the still-displayed alternate
+			// grid and stall the replay for the CPR round trip — and a rebuild
+			// repaint starts at row zero, needing no anchor at all.
 			if (width !== this.#altEnterWidth || height !== this.#altEnterHeight) {
-				if (this.#frameProvider !== undefined) {
+				if (this.#frameProvider !== undefined && this.#pendingAltExit === "") {
 					this.#beginResizeAnchorProbe();
 					return;
 				}
