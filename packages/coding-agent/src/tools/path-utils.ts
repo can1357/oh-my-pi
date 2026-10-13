@@ -684,6 +684,20 @@ async function tryDelimitedPathSplit(
 	return parts;
 }
 
+/** Whether an internal-URL list has a URL with its own path segments followed by an unanchored local part. */
+function hasAmbiguousRelativeTail(parts: readonly string[]): boolean {
+	let urlHasPath = false;
+	for (const part of parts) {
+		if (isInternalUrlPath(part)) {
+			const afterScheme = part.slice(part.indexOf("://") + 3);
+			urlHasPath = urlHasPath || afterScheme.includes("/");
+			continue;
+		}
+		if (urlHasPath && !/^(?:\/|\.\.?\/|~|[A-Za-z]:[\\/])/.test(part)) return true;
+	}
+	return false;
+}
+
 /**
  * Split one path-like entry whose multiple targets were flattened into one
  * string. Existing paths are kept intact, so real filenames containing spaces,
@@ -715,11 +729,17 @@ export async function splitDelimitedPathEntry(
 			: null;
 	}
 	// An internal URL that still carries a top-level `;` is a flattened list
-	// (`history://A;history://B`, `skill://x;/abs/path`):
-	// fan it out the same way read's mixed-URL recovery does. A URL whose parts
-	// do not each name a URL or an existing literal path stays whole.
+	// (`history://A;history://B`, `skill://x;/abs/path`): fan it out the same way
+	// read's mixed-URL recovery does. Splitting is deliberately strict: every
+	// part must be a URL or an existing literal path without glob characters, so
+	// `catalog://items;active` and `skill://demo;*.md` stay whole. When a URL part
+	// has its own path segments, a relative tail (`skill://demo/a;b.md`) is
+	// ambiguous with a literal `;` in the resource name, so only anchored tails
+	// (absolute, `./`, `../`, `~`) fan out and the URL keeps literal precedence.
 	if (isInternalUrlPath(normalizedEntry)) {
-		return splitMixedUrlPathList(normalizedEntry, cwd, isInternalUrlPath);
+		const parts = await splitMixedUrlPathList(normalizedEntry, cwd, isInternalUrlPath);
+		if (!parts) return null;
+		return hasAmbiguousRelativeTail(parts) ? null : parts;
 	}
 	// A real POSIX file may contain a delimiter and a selector-shaped tail
 	// (`a;b:1-2`, `a b:1-2`). Preserve the raw entry whenever the full literal

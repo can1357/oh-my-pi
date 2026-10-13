@@ -8,6 +8,7 @@ import { InternalUrlRouter, LocalProtocolHandler } from "@oh-my-pi/pi-coding-age
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { GlobTool } from "../../src/tools/glob";
 import { GrepTool } from "../../src/tools/grep";
 
 function getResultText(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -77,27 +78,44 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 		expect(text).toContain("abs path needle");
 	});
 
-	it("finds body text of the skill instruction file through bare skill://", async () => {
-		const tool = new GrepTool(createSession());
+	it("fans out for find (GlobTool) too", async () => {
+		const tool = new GlobTool(createSession());
 
-		const result = await tool.execute("skill-body", {
-			pattern: "skill body needle in instructions",
-			path: "skill://demo",
-		});
-
-		expect(getResultText(result)).toContain(skillBodyNeedle);
-	});
-
-	it("keeps a plain single path unchanged", async () => {
-		const tool = new GrepTool(createSession());
-
-		const result = await tool.execute("plain-path", {
-			pattern: "needle",
-			path: absFile,
-		});
+		const result = await tool.execute("semicolon-find", { path: `skill://demo;${absFile}` });
 
 		const text = getResultText(result);
-		expect(text).toContain("abs path needle");
-		expect(text).not.toContain(skillBodyNeedle);
+		expect(text).toContain("SKILL.md");
+		expect(text).toContain("abs-target.md");
+	});
+
+	it("keeps a list with a glob or missing local part whole (strict rule)", async () => {
+		const tool = new GrepTool(createSession());
+
+		for (const target of ["skill://demo;*.md", "skill://demo;missing.md", "skill://demo;nope"]) {
+			let message = "";
+			try {
+				await tool.execute("semicolon-whole", { pattern: "needle", path: target });
+			} catch (err) {
+				message = String(err instanceof Error ? err.message : err);
+			}
+			expect(message).not.toBe("");
+			expect(message).not.toContain("abs path needle");
+		}
+	});
+
+	it("gives a literal `;` in a routed URL path precedence over an existing relative tail", async () => {
+		await Bun.write(path.join(tmpDir, "b.md"), "relative tail needle\n");
+		const tool = new GrepTool(createSession());
+
+		let message = "";
+		let text = "";
+		try {
+			text = getResultText(
+				await tool.execute("semicolon-literal", { pattern: "needle", path: "skill://demo/a;b.md" }),
+			);
+		} catch (err) {
+			message = String(err instanceof Error ? err.message : err);
+		}
+		expect(`${text}${message}`).not.toContain("relative tail needle");
 	});
 });
