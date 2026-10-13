@@ -504,8 +504,8 @@ describe("native transcript", () => {
 			expect(JSON.stringify(frame)).toContain(note);
 			h.stop();
 		};
-		// A terminal advertising the `tool` kind gets the run box; one without
-		// it gets the card. Both must name the dropped head.
+		// A terminal that does not advertise `tool` gets the card; one with the
+		// whole vocabulary gets the run box. Both must name the dropped head.
 		await run(["col", "text", "rows"]);
 		await run(undefined);
 	});
