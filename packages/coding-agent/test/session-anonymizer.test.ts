@@ -202,6 +202,22 @@ describe("SessionAnonymizer", () => {
 		expect(at(entry, "fallback", "reason")).toMatch(/^400 \[redacted #\d+: \d+ chars, 1 line\]$/);
 	});
 
+	test("preserves the minimal task preset in session metadata", () => {
+		const anonymizer = new SessionAnonymizer();
+		const result = anonymizer.entry({
+			type: "session_init",
+			systemPreset: "minimal-task",
+			task: "task",
+		});
+		expect(result).toMatchObject({ type: "session_init", systemPreset: "minimal-task" });
+		expect(JSON.stringify(result)).toContain('"systemPreset":"minimal-task"');
+		const toolResult = anonymizer.entry({
+			type: "message",
+			message: { role: "toolResult", toolName: "task", details: { systemPreset: "minimal-task" } },
+		});
+		expect(at(toolResult, "message", "details", "systemPreset")).toBe("minimal-task");
+	});
+
 	test("keeps a journaled side channel's measurements and none of its content", () => {
 		const stateId = "3fa9c1d2e4b5a6978877665544332211ffeeddccbbaa99887766554433221100";
 		const anonymizer = new SessionAnonymizer();

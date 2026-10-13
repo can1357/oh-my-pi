@@ -21,8 +21,6 @@ const data: SubagentSystemPromptData = {
 	ircSelfId: "",
 };
 
-const inheritedPrompt = ["PROJECT_SENTINEL", "SKILL_SENTINEL", "RULE_SENTINEL"];
-
 function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter(
 		message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
@@ -50,7 +48,7 @@ async function captureProviderContext(dialect?: AgentLoopConfig["dialect"]): Pro
 		],
 	});
 	const context: AgentContext = {
-		systemPrompt: buildSubagentSystemPrompt(inheritedPrompt, "minimal-task", data),
+		systemPrompt: buildSubagentSystemPrompt([], "minimal-task", data),
 		messages: [],
 		tools: [readTool],
 	};
