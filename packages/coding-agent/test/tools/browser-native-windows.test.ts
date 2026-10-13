@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, vi } from "bun:test";
 import type { DesktopRosterWindow } from "@oh-my-pi/pi-natives";
 import { NativeWindowWatch } from "@oh-my-pi/pi-coding-agent/tools/browser/native-windows";
 import { browserShowsWindows } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
@@ -26,11 +26,13 @@ function win(id: number, over: Partial<DesktopRosterWindow> = {}): DesktopRoster
 /** The tab's window, as the page reports its own frame. */
 const TAB_WINDOW = win(10, { title: "AGENT TAB" });
 const USER_WINDOW = win(20, { pid: USER_APP, app: "TextEdit", x: 1210, width: 700 });
-const FRAME = { x: TAB_WINDOW.x, y: TAB_WINDOW.y, width: TAB_WINDOW.width, height: TAB_WINDOW.height };
+const FRAME = { x: TAB_WINDOW.x, y: TAB_WINDOW.y, width: TAB_WINDOW.width, height: TAB_WINDOW.height, visible: true };
+const HIDDEN = { ...FRAME, visible: false };
 
-function watchWith(rosters: DesktopRosterWindow[][]): NativeWindowWatch {
+/** A watch reading `rosters` in turn; `frames` are what the page reports at each call (then the shown tab's frame). */
+function watchWith(rosters: DesktopRosterWindow[][], frames: (typeof FRAME)[] = []): NativeWindowWatch {
 	return new NativeWindowWatch(
-		async () => FRAME,
+		async () => frames.shift() ?? FRAME,
 		() => rosters.shift(),
 	);
 }
@@ -166,11 +168,40 @@ describe("browser native-window report", () => {
 	});
 
 	test("does not name a window that showed after the tail of the previous call", async () => {
-		const bubble = win(38, { x: 120, y: 90, width: 320, height: 180 });
-		const watch = watchWith([[TAB_WINDOW], [TAB_WINDOW], [TAB_WINDOW], [bubble, TAB_WINDOW], [bubble, TAB_WINDOW]]);
+		vi.useFakeTimers();
+		try {
+			const bubble = win(38, { x: 120, y: 90, width: 320, height: 180 });
+			const watch = watchWith([
+				[TAB_WINDOW],
+				[TAB_WINDOW],
+				[TAB_WINDOW],
+				[bubble, TAB_WINDOW],
+				[bubble, TAB_WINDOW],
+			]);
+			expect(await call(watch)).toEqual([]);
+			// The tail's own read finds nothing new; the bubble shows only after it.
+			vi.advanceTimersByTime(2_100);
+			expect(await call(watch)).toEqual([]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("names nothing for a background tab, whose window shows another tab's menus", async () => {
+		// The tab in front of it (the user's, or another session's) opens a <select> menu during this tab's call.
+		const menu = win(42, { x: 40, y: 120, width: 180, height: 90, layer: 101 });
+		const watch = watchWith([[TAB_WINDOW], [TAB_WINDOW], [TAB_WINDOW], [menu, TAB_WINDOW]], [FRAME, HIDDEN]);
 		expect(await call(watch)).toEqual([]);
-		// The tail's own read finds nothing new; the bubble shows only after it.
-		await Bun.sleep(2_100);
+		expect(await call(watch)).toEqual([]);
+	});
+
+	test("does not take another app's window at the tab's frame while the page is hidden", async () => {
+		// The browser's window is on another Space; a maximised window of the user's app has the same frame.
+		const other = win(43, { pid: USER_APP, app: "TextEdit" });
+		const sheet = win(44, { pid: USER_APP, app: "TextEdit", x: 300, y: 120, width: 600, height: 420 });
+		const watch = watchWith([[other], [other], [other, TAB_WINDOW], [other, TAB_WINDOW, sheet]], [HIDDEN, FRAME]);
+		expect(await call(watch)).toEqual([]);
+		// Back on screen, the browser's window and the other app's share the frame: neither is taken as the tab's.
 		expect(await call(watch)).toEqual([]);
 	});
 

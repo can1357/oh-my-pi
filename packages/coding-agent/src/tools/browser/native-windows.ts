@@ -23,8 +23,13 @@ interface Frame {
 	height: number;
 }
 
+/** The tab's window frame, and whether the page is the one showing in it (not a background tab, not minimised). */
+interface TabView extends Frame {
+	visible: boolean;
+}
+
 /** Where the tab's window is on screen, in the points the window server reports; undefined if the page cannot say. */
-export async function readTabFrame(page: Pick<Page, "evaluate">): Promise<Frame | undefined> {
+export async function readTabFrame(page: Pick<Page, "evaluate">): Promise<TabView | undefined> {
 	const read = page
 		.evaluate(() => {
 			const view = globalThis as unknown as {
@@ -32,8 +37,15 @@ export async function readTabFrame(page: Pick<Page, "evaluate">): Promise<Frame 
 				screenY: number;
 				outerWidth: number;
 				outerHeight: number;
+				document: { visibilityState: string };
 			};
-			return { x: view.screenX, y: view.screenY, width: view.outerWidth, height: view.outerHeight };
+			return {
+				x: view.screenX,
+				y: view.screenY,
+				width: view.outerWidth,
+				height: view.outerHeight,
+				visible: view.document.visibilityState === "visible",
+			};
 		})
 		.catch(() => undefined);
 	return await Promise.race([read, Bun.sleep(FRAME_TIMEOUT_MS).then(() => undefined)]);
@@ -43,26 +55,30 @@ export async function readTabFrame(page: Pick<Page, "evaluate">): Promise<Frame 
  * Reports the native windows a browser call raised over its tab that no page or CDP call can see or answer: the
  * browser's own popup menus and pickers, panels, and the sheets and bubbles over the tab (permission, passkey,
  * sign-in, save), each with the computer tool's handle. Only windows the tab's browser process owns, over the tab's
- * own window, that were never on screen before count; one that shows within {@link TAIL_MS} after a call returned
- * is named by the next call. macOS only, and only for browsers that show windows; a call when nothing appeared adds
- * nothing. System-owned prompts (Touch ID, keychain) are not reported: nothing on screen ties them to the tab.
+ * own window, that were never on screen before count, and only while the page is the one showing in that window: a
+ * background tab shares its window with the tab in front, whose menus are not its own. One that shows within the
+ * tail after a call returned is named by the next call. macOS only, and only for browsers that show windows; a call
+ * when nothing appeared adds nothing. System-owned prompts (Touch ID, keychain) are not reported: nothing on screen
+ * ties them to the tab.
  */
 export class NativeWindowWatch {
-	readonly #readFrame: () => Promise<Frame | undefined>;
+	readonly #readFrame: () => Promise<TabView | undefined>;
 	readonly #readRoster: () => DesktopRosterWindow[] | undefined;
-	/** The tab's own window, once its frame named exactly one. */
+	/** The tab's own window, once its frame named exactly one while the page showed. */
 	#tab: DesktopRosterWindow | undefined;
+	/** Whether the page showed in its window at the last read; a dialog-stopped page keeps the previous answer. */
+	#visible = false;
 	/** Every window id on screen at some read: one coming back (restored, un-minimised) did not just open. */
 	#seen = new Set<string>();
 	/** On-screen windows when the call began. */
 	#before: DesktopRosterWindow[] | undefined;
-	#frame: Promise<Frame | undefined> | undefined;
+	#frame: Promise<TabView | undefined> | undefined;
 	/** Windows that showed within the tail after the previous call returned, for this call to name. */
 	#late: DesktopRosterWindow[] = [];
 	#tailTimer: NodeJS.Timeout | undefined;
 
 	constructor(
-		readFrame: () => Promise<Frame | undefined>,
+		readFrame: () => Promise<TabView | undefined>,
 		roster: () => DesktopRosterWindow[] | undefined = readRoster,
 	) {
 		this.#readFrame = readFrame;
@@ -95,6 +111,7 @@ export class NativeWindowWatch {
 			this.#remember(after);
 			return [];
 		}
+		if (frame) this.#visible = frame.visible;
 		this.#findTab(before, frame);
 		const lines: string[] = [];
 		const onScreen = new Set(after.map(window => window.id));
@@ -128,16 +145,17 @@ export class NativeWindowWatch {
 	}
 
 	/**
-	 * The tab's window: the one ordinary window at the frame the page reports. Kept while it stays on screen, since
-	 * another app's window may come to share its frame; when two windows match, none is taken.
+	 * The tab's window: the one ordinary window at the frame the page reports while it shows there, so the browser's
+	 * window is on screen and among the matches. Kept while it stays on screen, since another app's window may come to
+	 * share its frame; when two windows match, none is taken.
 	 */
-	#findTab(roster: DesktopRosterWindow[], frame: Frame | undefined): void {
+	#findTab(roster: DesktopRosterWindow[], frame: TabView | undefined): void {
 		const kept = this.#tab && roster.find(window => window.id === this.#tab?.id);
 		if (kept) {
 			this.#tab = kept;
 			return;
 		}
-		if (!frame) return;
+		if (!frame?.visible) return;
 		const matches = roster.filter(
 			window =>
 				window.layer === 0 &&
@@ -149,10 +167,10 @@ export class NativeWindowWatch {
 		if (matches.length === 1) this.#tab = matches[0];
 	}
 
-	/** The windows in `roster` never seen before that the tab's browser raised over the tab. */
+	/** The windows in `roster` never seen before that the tab's browser raised over the tab while the page showed. */
 	#raised(roster: DesktopRosterWindow[]): DesktopRosterWindow[] {
 		const tab = this.#tab;
-		if (!tab) return [];
+		if (!tab || !this.#visible) return [];
 		const current = roster.find(window => window.id === tab.id) ?? tab;
 		return roster.filter(
 			window =>
