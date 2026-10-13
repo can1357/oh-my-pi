@@ -3,6 +3,7 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import type { TspKind, TspSpan } from "@oh-my-pi/pi-wire";
 import { AssistantMessageComponent } from "../src/chat/assistant-message";
 import { BashExecutionComponent } from "../src/chat/bash-execution";
+import { EvalExecutionComponent } from "../src/chat/eval-execution";
 import { PREVIEW_LINES } from "../src/chat/execution-shared";
 import { ReadToolGroupComponent } from "../src/chat/read-tool-group";
 import { ToolExecutionComponent } from "../src/chat/tool-execution";
@@ -743,6 +744,7 @@ describe("user shell runs", () => {
 		const notes = nodes(card.c).find(child => props(child).key === "notes");
 		expect(spansText(notes)).toContain("… 150 earlier lines dropped");
 	});
+
 	it("pins a settled replay's collapsed ANSI preview to the result tail", () => {
 		// A completed >100-line block replayed on a card/ansi-only surface
 		// describes once: follow:false would anchor the collapsed preview at
@@ -756,6 +758,17 @@ describe("user shell runs", () => {
 		const output = nodes(card.c).find(child => child.key === "output");
 		expect(output?.k).toBe("ansi");
 		expect(props(output)).toMatchObject({ follow: true, preview: { lines: PREVIEW_LINES } });
+	});
+	it("bounds a long eval cell's collapsed card source to the preview window", () => {
+		// The eval card body is unclamped, so the source carries its own
+		// preview: without it a long cell fills screens while collapsed.
+		const cell = new EvalExecutionComponent(Array.from({ length: 60 }, (_, i) => `x${i} = ${i}`).join("\n"), ui);
+		cell.setComplete(0, false, { output: "done" });
+		const card = cell.describe(cx(["card", "ansi"]));
+		expect(card.k).toBe("card");
+		const code = nodes(card.c).find(child => child.k === "code");
+		expect(code).toBeDefined();
+		expect(props(code)).toMatchObject({ preview: { lines: PREVIEW_LINES } });
 	});
 
 	it("bounds a collapsed card's image collection and names the hidden rest", () => {
@@ -834,5 +847,29 @@ describe("user shell runs", () => {
 		expect(spansText(notes)).not.toContain("earlier lines dropped");
 		// The legacy terminal footer names the same gap in the same words.
 		expect(Bun.stripANSI(run.render(120).join("\n"))).toContain("… 2 lines skipped in output");
+	});
+
+	it("names a throttle-discarded partial line even when the skipped-row count is zero", () => {
+		// Failure mode: a callback carrying only a partial-line suffix arrives
+		// inside the 50 ms gate, then the run settles via the error path. The
+		// suffix merges into the retained last row, so countNewlines + 1 - 1 is
+		// zero — but the suffix is gone, and the footer must name the corrupted
+		// tail instead of presenting the line as complete.
+		const run = new BashExecutionComponent("echo hi", ui, false);
+		run.appendOutput("kept-");
+		run.appendOutput("suffix");
+		run.setComplete(undefined, false);
+		// The retained line is the prefix alone; without a notice the user
+		// would read it as the command's whole last line.
+		expect(run.getOutput()).toBe("kept-");
+		const rendered = Bun.stripANSI(run.render(120).join("\n"));
+		expect(rendered).toContain("… partial output skipped in output");
+		expect(rendered).not.toContain("lines skipped in output");
+		const card = run.describe(cx(["card", "ansi"]));
+		const notes = nodes(card.c).find(child => props(child).key === "notes");
+		expect(spansText(notes)).toContain("… partial output skipped in output");
+		const tool = run.describe(cx(["tool", "ansi", "code"]));
+		const factsText = (foot(nodes(tool.c)[0])?.facts ?? []).map(f => f.t).join(" ");
+		expect(factsText).toContain("… partial output skipped in output");
 	});
 });

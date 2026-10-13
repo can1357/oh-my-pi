@@ -1076,8 +1076,9 @@ export class OutputSink {
 		this.#store(chunk, inlineChunk, substituted);
 
 		// Throttled onChunk: coalesce chunks arriving inside the throttle window.
-		// A timer flushes quiet tails at the throttle boundary; dump() catches a
-		// final pending chunk when the process exits before that timer fires.
+		// A timer flushes quiet tails at the throttle boundary; dump() and the
+		// error path's dispose() catch a final pending chunk when the process
+		// exits before that timer fires.
 		// Live preview gets the inline (pre-cap) chunk so the TUI never lags behind
 		// what reached the in-memory sink — the column cap is for the persisted LLM view.
 		if (this.#onChunk && options?.emitInline !== false && inlineChunk.length > 0) {
@@ -1725,9 +1726,12 @@ export class OutputSink {
 	 * `finally`: if {@link dump} already ran this is a no-op, otherwise it
 	 * flushes the capped tail and closes the sink so the descriptor is not
 	 * leaked until a later unrelated read hits `EMFILE` (issue #6463).
+	 * A chunk the throttle still holds back is delivered first: the error path
+	 * never reaches {@link dump}'s flush, and without this the subscriber's
+	 * retained tail silently ends one chunk early with no skipped count.
 	 */
 	async dispose(): Promise<void> {
-		this.#clearPendingChunkTimer();
+		this.#flushPendingChunk();
 		await this.#finalizeFile();
 	}
 }
