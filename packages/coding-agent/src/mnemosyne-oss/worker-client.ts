@@ -345,6 +345,8 @@ function validateCapabilities(capabilities: MnemosyneOssWorkerCapabilities): voi
 	if (!python || python.major < 3 || (python.major === 3 && python.minor < 10)) {
 		throw new Error(`Mnemosyne OSS requires Python 3.10+, found ${String(capabilities.python_version)}.`);
 	}
+	// Pre-4.0 heuristic sleep invalidates memories it flags as conflicting (mnemosyne-oss/mnemosyne#917),
+	// unsafe on a store shared with other clients; the worker enforces the same gate before opening a bank.
 	const sdk = /^([0-9]+)(?:\.|$)/.exec(capabilities.sdk_version);
 	if (sdk?.[1] !== "4") {
 		throw new Error(`Mnemosyne OSS requires SDK major 4, found ${String(capabilities.sdk_version)}.`);

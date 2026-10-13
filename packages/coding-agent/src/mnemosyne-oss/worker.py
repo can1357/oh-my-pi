@@ -99,6 +99,8 @@ class MnemosyneWorker:
             version = importlib.metadata.version("mnemosyne-memory")
         except importlib.metadata.PackageNotFoundError:
             version = getattr(mnemosyne, "__version__", "unknown")
+        # Before 4.0 a heuristic-only sleep (no LLM) invalidated memories it flagged as conflicting
+        # (mnemosyne-oss/mnemosyne#917), which is unsafe on a store shared with other clients.
         if not str(version).startswith("4."):
             raise RpcError(-32000, f"Mnemosyne OSS requires SDK major 4, found {version}")
         try:

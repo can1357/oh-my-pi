@@ -6,14 +6,16 @@ This backend is separate from [Mnemopi](./mnemosyne-memory-backend.md). Legacy `
 
 ## Install
 
-Use Python 3.10 or newer. This backend requires Mnemosyne SDK **major 4**. Current PyPI `mnemosyne-memory` (3.15.1) is rejected on purpose; install 4.x from upstream git into the interpreter selected by `mnemosyne-oss.executable`, your project virtual environment, or `PATH`:
+Use Python 3.10 or newer. This backend requires Mnemosyne SDK **major 4**, which PyPI publishes as a pre-release (4.0.0b4 at the time of writing), so pip needs `--pre`. Install it into the interpreter selected by `mnemosyne-oss.executable`, your project virtual environment, or `PATH`:
 
 ```sh
-python -m pip install 'mnemosyne-memory @ git+https://github.com/mnemosyne-oss/mnemosyne.git'
-python -m pip install 'mnemosyne-memory[embeddings] @ git+https://github.com/mnemosyne-oss/mnemosyne.git'
+python -m pip install --pre "mnemosyne-memory[embeddings]"   # local semantic recall
+python -m pip install --pre mnemosyne-memory                 # lexical recall only
 ```
 
-Upstream `main` currently reports `4.0.0b1`. Pin a commit or tag once you have a known-good 4.x revision. The base package supports lexical recall. The embeddings extra permits local semantic recall. OMP does not install Python packages, parse an SDK CLI, use MCP, or fall back to another memory backend. A missing interpreter, package, supported method, or SDK major version leaves the backend inert with an actionable diagnostic. Tools and `/memory` commands then report that the backend is not initialised; OMP does not pretend the worker is live.
+Without `--pre`, pip installs the latest stable 3.x, which this backend rejects on purpose: before 4.0 a heuristic-only sleep (no LLM) invalidated memories it flagged as conflicting ([mnemosyne-oss/mnemosyne#917](https://github.com/mnemosyne-oss/mnemosyne/pull/917)). OMP runs that sleep on `/memory enqueue`, and on a store shared with other clients it would silently retire their memories.
+
+OMP does not install Python packages, parse an SDK CLI, use MCP, or fall back to another memory backend. A missing interpreter, package, supported method, or SDK major version leaves the backend inert with an actionable diagnostic. Tools and `/memory` commands then report that the backend is not initialised; OMP does not pretend the worker is live.
 
 ## Configuration
 
