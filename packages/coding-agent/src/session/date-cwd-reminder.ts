@@ -86,11 +86,6 @@ export class DateCwdReminderInjector {
 		  }
 		| undefined;
 
-	/** Whether a replay memo is currently cached (read-only test seam). */
-	get hasReplayMemo(): boolean {
-		return this.#memo !== undefined;
-	}
-
 	/** Apply the current reminder while preserving all earlier injected bytes. */
 	transform(context: Context, date: string, cwd: string): Context {
 		if (!context.systemPrompt || context.systemPrompt.length === 0 || context.messages.length === 0) return context;

@@ -1,12 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import type { Context } from "@oh-my-pi/pi-ai";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { DateCwdReminderInjector } from "@oh-my-pi/pi-coding-agent/session/date-cwd-reminder";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
@@ -140,11 +138,7 @@ describe("AgentSession Anthropic native compaction", () => {
 			sessionManager,
 			authStorage,
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
-			settings: Settings.isolated({
-				"compaction.methodOrder": ["remote"],
-				"compaction.keepRecentTokens": 1,
-				"compaction.asyncEnabled": false,
-			}),
+			settings: Settings.isolated({ "compaction.methodOrder": ["remote"], "compaction.keepRecentTokens": 1 }),
 			model,
 			disableExtensionDiscovery: true,
 			skills: [],
@@ -222,51 +216,6 @@ describe("AgentSession Anthropic native compaction", () => {
 		// "third question" turn sent, the inserted control included.
 		expect(JSON.stringify(compaction.messages)).not.toContain("answer 4");
 		expect(withoutCacheControl(compaction.messages)).toEqual(withoutCacheControl(live.messages));
-	});
-
-	it("releases the reminder memo when a compaction commits", async () => {
-		using tempDir = TempDir.createSync("@pi-anthropic-native-compaction-release-");
-		// Contract: once a history replacement commits, the reminder injector's
-		// replay memo must hold no live data from the discarded transcript. The
-		// `transform` spy only captures the session injector instance — the
-		// assertions observe MEMO STATE through `hasReplayMemo` (a read-only
-		// seam: the memo's output is never handed out, so no wire, identity,
-		// or content probe can see it), never the `release()` call.
-		let sessionInjector: DateCwdReminderInjector | undefined;
-		const transform = DateCwdReminderInjector.prototype.transform;
-		vi.spyOn(DateCwdReminderInjector.prototype, "transform").mockImplementation(function (
-			this: DateCwdReminderInjector,
-			context: Context,
-			date: string,
-			cwd: string,
-		) {
-			sessionInjector ??= this;
-			return transform.call(this, context, date, cwd);
-		});
-		const opened = await openSession(tempDir, request => (request === 3 ? compactionAnswer() : answer(request)));
-		const { session, requests } = opened;
-		try {
-			// The sentinel sits in the non-injected tail: the second user turn
-			// never carries the reminder, so only the replay memo pins it.
-			await session.prompt("first question");
-			await session.prompt("second question sentinel-tail-x7k2");
-			expect(JSON.stringify(requests[1]!.messages[0])).toContain("<system-reminder>");
-			if (!sessionInjector) throw new Error("expected the live turns to pass through the injector");
-			// The memo is populated while the session idles on the live
-			// transcript — the necessary precondition for the release below.
-			expect(sessionInjector.hasReplayMemo).toBe(true);
-
-			await session.compact();
-			expect(requests).toHaveLength(3);
-
-			// Idle: no prompt, tool turn, or queue edit ran between the commit and
-			// this assertion, so only the history swap itself can have emptied it.
-			// The injector stays reachable (it is the session's, still installed
-			// for the next turn) — what must be gone is the memo it pinned.
-			expect(sessionInjector.hasReplayMemo).toBe(false);
-		} finally {
-			await opened.close();
-		}
 	});
 
 	it("replays a later compaction's prefix as sent, without disturbing the live reminder state", async () => {

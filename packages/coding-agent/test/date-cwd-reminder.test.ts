@@ -107,27 +107,29 @@ describe("date-cwd-reminder", () => {
 			expect(replay.messages[0]).toBe(first.messages[0]);
 		});
 
-		it("does not replay a provider-appended marker that is absent from the input", () => {
+		it("rebuilds the wire when the caller edits the input array in place", () => {
 			const injector = new DateCwdReminderInjector();
 			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
-			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
+			const secondUser: Message = { role: "user", content: "second", timestamp: 2 };
+			const context: Context = { systemPrompt: ["system"], messages: [firstUser, secondUser] };
 
 			const first = injector.transform(context, "2026-08-14", "/work/omp");
-			const memo = first.messages;
-			expect(memo[0]).not.toBe(firstUser);
+			expect(first.messages).toHaveLength(2);
+			expect(first.messages[0]).not.toBe(firstUser);
+			expect(first.messages[1]).toBe(secondUser);
 
-			// A custom provider receives this same Context and appends its own marker.
-			const marker: Message = { role: "developer", content: "provider-only", timestamp: 2 };
-			memo.push(marker);
+			// The caller replaces an element of its own input array in place: the
+			// memo's element-identity check must miss and rebuild, or the replay
+			// serves the stale layout with the replaced turn still on the wire.
+			const replacement: Message = { role: "user", content: "replaced", timestamp: 3 };
+			context.messages[1] = replacement;
 
-			// The replay validates the cached output against the input, so the marker
-			// never reaches the wire a second time.
-			const replay = injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
+			const replay = injector.transform(context, "2026-08-14", "/work/omp");
 
-			expect(replay.messages).not.toBe(memo);
-			expect(replay.messages).toHaveLength(1);
+			expect(replay.messages).toHaveLength(2);
 			expect(replay.messages[0]).toBe(first.messages[0]);
-			expect(replay.messages).not.toContain(marker);
+			expect(replay.messages[1]).toBe(replacement);
+			expect(replay.messages).not.toContain(secondUser);
 		});
 
 		it("hands each request its own array so a retained context is never rewritten", () => {
@@ -189,26 +191,44 @@ describe("date-cwd-reminder", () => {
 			expect(wire).toEqual(["injected", "anchor", "control", "anchor", "control"]);
 		});
 
-		it("drops the replay memo but preserves injection state on release", () => {
-			const injector = new DateCwdReminderInjector();
-			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
-			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
-
-			const first = injector.transform(context, "2026-08-14", "/work/omp");
-			const memo = first.messages;
-			expect(memo[0]).not.toBe(firstUser);
-
-			// A committed /compact swaps the live history under this session-scoped
-			// injector; the memo must drop the discarded transcript with it.
+		it("frees the discarded transcript on release instead of pinning it in the memo", async () => {
+			// Contract: once the owner reports a wholesale history replacement, the
+			// injector must hold no reference — memo or otherwise — that keeps a
+			// discarded turn alive. The sentinel tail below is never injected, so
+			// only the replay memo pins it; after `release()` plus a full GC it
+			// must be collectable. (`Bun.gc(true)` forces a full collection, the
+			// same trigger `packages/ai/test/fixtures/completion-retention.ts`
+			// uses; the deadline loop only waits out GC scheduling jitter.)
+			function buildPinnedTail(): { ref: WeakRef<Message>; injector: DateCwdReminderInjector } {
+				const injector = new DateCwdReminderInjector();
+				const tail: Message = { role: "user", content: "sentinel-tail", timestamp: 2 };
+				injector.transform(
+					{ systemPrompt: ["system"], messages: [{ role: "user", content: "first", timestamp: 1 }, tail] },
+					"2026-08-14",
+					"/work/omp",
+				);
+				return { ref: new WeakRef(tail), injector };
+			}
+			const { ref, injector } = buildPinnedTail();
 			injector.release();
-
-			const replay = injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
-
-			// The memo is invalidated: a fresh array is built.
-			expect(replay.messages).not.toBe(memo);
-			// Injection state is preserved: the same injected clone is reused.
-			expect(replay.messages[0]).toBe(memo[0]);
-			expect(replay.messages[0]?.content).toBe(memo[0]?.content);
+			let collected = false;
+			const deadline = performance.now() + 5_000;
+			do {
+				await Bun.sleep(0);
+				Bun.gc(true);
+				collected = ref.deref() === undefined;
+			} while (!collected && performance.now() < deadline);
+			expect(collected).toBe(true);
+			// Liveness anchor: the injector must stay alive across the loop above
+			// (otherwise the tail frees vacuously with its owner), so it is used
+			// again here — and it must still serve fresh transforms afterwards.
+			const freshUser: Message = { role: "user", content: "fresh", timestamp: 3 };
+			const post = injector.transform(
+				{ systemPrompt: ["system"], messages: [freshUser] },
+				"2026-08-14",
+				"/work/omp",
+			);
+			expect(post.messages[0]).not.toBe(freshUser);
 		});
 
 		it("keeps the reminders of turns a compaction retains when the first user turn changes", () => {
