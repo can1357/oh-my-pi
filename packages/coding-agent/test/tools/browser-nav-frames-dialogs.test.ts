@@ -11,7 +11,7 @@ import { navigateMainFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/navig
 import { PrintHold } from "@oh-my-pi/pi-coding-agent/tools/browser/print-hold";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
-import puppeteer, { type Page, type WaitForOptions } from "puppeteer-core";
+import puppeteer, { type Dialog, type Page, type WaitForOptions } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -619,6 +619,44 @@ return await tab.evaluate(() => {
 				} finally {
 					await first.dispose();
 				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
+	test("moves and releases the print hold without waiting on a page stopped in a dialog", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				const hold = await PrintHold.install(page, "calls");
+				const confirmOpened = async (message: string): Promise<Dialog> => {
+					const { promise, resolve } = Promise.withResolvers<Dialog>();
+					page.once("dialog", resolve);
+					await page.evaluate(text => void setTimeout(() => confirm(text)), message);
+					return await promise;
+				};
+				// A real deadline: what would hang is Chrome's stopped renderer, which fake timers cannot reach.
+				const within3s = (work: Promise<void>): Promise<string> =>
+					Promise.race([work.then(() => "done"), Bun.sleep(3_000).then(() => "still waiting")]);
+				const stay = await confirmOpened("Stay?");
+				// A call's start used to wait on the stopped page until someone answered the dialog.
+				expect(await within3s(hold.beginCall(30_000))).toBe("done");
+				await stay.dismiss();
+				// Once the dialog closes, the page gets the call's hold: a Print click comes back held.
+				await page
+					.mainFrame()
+					.mainRealm()
+					.waitForFunction(
+						'log.length = 0, document.querySelector("#print").click(), log.includes("afterprint")',
+						{ timeout: 3_000, polling: 50 },
+					);
+				const close = await confirmOpened("Close?");
+				// Closing the tab used to wait here until the tab worker was killed.
+				expect(await within3s(hold.dispose())).toBe("done");
+				await close.dismiss();
 			} finally {
 				await user.disconnect();
 			}

@@ -84,6 +84,15 @@ export class PrintHold {
 	#requests = 0;
 	/** Hold changes apply in order, so a call's end never lands before its start. */
 	#applying: Promise<void> = Promise.resolve();
+	/**
+	 * Set while the page shows a JavaScript dialog. Its renderer then answers no command (scripts, bindings, evaluation)
+	 * until someone answers the dialog, so no hold change waits on it.
+	 */
+	#dialogOpen = false;
+	/** Stops the waits for hold changes in flight when a dialog opens. */
+	readonly #onStop = new Set<() => void>();
+	/** A hold change the page has not had yet; made once the dialog closes. */
+	#stale = false;
 
 	private constructor(page: Page, session: CDPSession, scope: PrintHoldScope) {
 		this.#page = page;
@@ -95,6 +104,8 @@ export class PrintHold {
 		this.#holdKey = `omp.printHold.${id}`;
 		session.on("Runtime.bindingCalled", this.#onBindingCalled);
 		session.on("Page.frameNavigated", this.#onFrameNavigated);
+		session.on("Page.javascriptDialogOpening", this.#onDialogOpening);
+		session.on("Page.javascriptDialogClosed", this.#onDialogClosed);
 	}
 
 	static async install(page: Page, scope: PrintHoldScope): Promise<PrintHold> {
@@ -126,9 +137,20 @@ export class PrintHold {
 		return "The page called window.print(). omp held it, so no print dialog opened and the page went on as after a finished print. Use tab.pdf() for what it would print.";
 	}
 
+	/** Takes the hold off the page and detaches. A page stopped in a dialog is left with the deadline it has. */
 	async dispose(): Promise<void> {
-		await this.#applying;
 		this.#session.off("Page.frameNavigated", this.#onFrameNavigated);
+		this.#session.off("Page.javascriptDialogClosed", this.#onDialogClosed);
+		// Detaching works on a stopped page and drops the session's script and binding with it. The deadline left in
+		// loaded documents runs out on its own after a call; omp's own browser holds `print()` for good anyway.
+		await this.#unlessStopped(this.#release().catch(() => undefined));
+		this.#session.off("Runtime.bindingCalled", this.#onBindingCalled);
+		this.#session.off("Page.javascriptDialogOpening", this.#onDialogOpening);
+		await this.#session.detach();
+	}
+
+	async #release(): Promise<void> {
+		await this.#applying;
 		if (this.#scriptId) {
 			await this.#session.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: this.#scriptId });
 		}
@@ -137,8 +159,6 @@ export class PrintHold {
 		this.#until = 0;
 		await this.#setInFrames();
 		await this.#session.send("Runtime.removeBinding", { name: this.#binding });
-		this.#session.off("Runtime.bindingCalled", this.#onBindingCalled);
-		await this.#session.detach();
 	}
 
 	readonly #onBindingCalled = (event: Protocol.Runtime.BindingCalledEvent): void => {
@@ -150,13 +170,51 @@ export class PrintHold {
 		if (event.type === "BackForwardCacheRestore") void this.#setInFrames();
 	};
 
+	readonly #onDialogOpening = (): void => {
+		this.#dialogOpen = true;
+		for (const stop of this.#onStop) stop();
+	};
+
+	readonly #onDialogClosed = (): void => {
+		this.#dialogOpen = false;
+		if (this.#stale) void this.#apply(this.#until).catch(() => undefined);
+	};
+
+	/** Waits for a change to reach the page, unless a dialog stops it first; the page then gets it once that closes. */
+	async #unlessStopped(change: Promise<void>): Promise<void> {
+		if (this.#dialogOpen) {
+			this.#stale = true;
+			return;
+		}
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const stop = (): void => {
+			this.#stale = true;
+			resolve();
+		};
+		this.#onStop.add(stop);
+		try {
+			await Promise.race([change, promise]);
+		} finally {
+			this.#onStop.delete(stop);
+		}
+	}
+
 	/** What is left of the hold, a duration that means the same on the worker's and the page's clocks. */
 	#remaining(): number | null {
 		return this.#until === null ? null : Math.max(0, this.#until - Date.now());
 	}
 
+	/**
+	 * Sets the hold's deadline for new documents and loaded ones. Resolves once the page has it, or once a dialog stops
+	 * the page; the page then gets the latest deadline when the dialog closes.
+	 */
 	#apply(until: number | null): Promise<void> {
 		this.#until = until;
+		if (this.#dialogOpen) {
+			this.#stale = true;
+			return Promise.resolve();
+		}
+		this.#stale = false;
 		const applied = this.#applying.then(async () => {
 			const previous = this.#scriptId;
 			const args = [this.#binding, this.#holdKey, this.#remaining(), Date.now() + this.#clockOffset];
@@ -168,7 +226,7 @@ export class PrintHold {
 			await this.#setInFrames();
 		});
 		this.#applying = applied.catch(() => undefined);
-		return applied;
+		return this.#unlessStopped(applied);
 	}
 
 	/** Updates the documents already loaded in the tab's own renderer: the main frame and its same-site iframes. */
