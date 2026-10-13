@@ -39,6 +39,7 @@ import {
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
+import { bunUpgradeNotice } from "./cli/bun-upgrade-notice";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
 import { fetchBuild } from "./cli/build-service";
@@ -715,6 +716,11 @@ async function runInteractiveMode(
 				mode.showNewVersionNotification(newVersion);
 			}
 		});
+		// Same switch as the update banner above: turning off `startup.checkUpdate` silences both.
+		if (cfgStartupCheckUpdate.get(settings)) {
+			const bunNotice = bunUpgradeNotice(Bun.version);
+			if (bunNotice) mode.showWarning(bunNotice);
+		}
 
 		const advisorConfigWarnings = session.getAdvisorConfigWarnings();
 		if (advisorConfigWarnings.length > 0) {
