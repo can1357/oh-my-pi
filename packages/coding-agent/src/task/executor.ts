@@ -61,6 +61,7 @@ import type { LocalProtocolOptions } from "../internal-urls";
 import { IrcBus } from "../irc/bus";
 import type { MCPManagerApi, MCPToolScope } from "../mcp/manager";
 import type { MnemopiSessionStateApi } from "../mnemopi/state";
+import type { MnemosyneOssSessionStateApi } from "../mnemosyne-oss/state";
 import { initializeExtensions } from "../modes/runtime-init";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
@@ -602,6 +603,7 @@ export interface ExecutorOptions {
 	parentArtifactManager?: ArtifactManagerApi;
 	parentHindsightSessionState?: HindsightSessionStateApi;
 	parentMnemopiSessionState?: MnemopiSessionStateApi;
+	parentMnemosyneOssSessionState?: MnemosyneOssSessionStateApi;
 	/**
 	 * Parent agent's OpenTelemetry configuration. When defined, the subagent's
 	 * loop is started with the same tracer/hooks but its own agent identity
@@ -4970,6 +4972,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					subagentEventBus: options.subagentEventBus,
 					parentHindsightSessionState: options.parentHindsightSessionState,
 					parentMnemopiSessionState: options.parentMnemopiSessionState,
+					parentMnemosyneOssSessionState: options.parentMnemosyneOssSessionState,
 					parentTaskPrefix: id,
 					asyncJobManager: options.asyncJobManager,
 					parentAgentId: options.parentAgentId,
