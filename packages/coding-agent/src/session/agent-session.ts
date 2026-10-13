@@ -14681,8 +14681,8 @@ export class AgentSession implements SettingsScope {
 		const run = (async (): Promise<ResetRecoveryResult> => {
 			let reports: UsageReport[] | null = null;
 			if (provider === "openai-codex") {
-				await authStorage.usage.invalidate(provider);
-				reports = await this.fetchUsageReports();
+				await authStorage.usage.invalidate(provider, signal);
+				reports = await this.fetchUsageReports(signal);
 			}
 			// Claude's live reset listing includes the same response's quota
 			// windows; a second broker usage poll adds no evidence and can 429.

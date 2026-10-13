@@ -1110,7 +1110,7 @@ describe("saved reset before a reserve-protected sibling", () => {
 			/** A third stored account outside the session's account pool. */
 			excluded?: "healthy" | "unknown" | "blocked with a reset";
 			excludedResetExpiresInMs?: number;
-			abortAt?: "recovery health read" | "reset listing";
+			abortAt?: "recovery health read" | "reset listing" | "usage invalidation" | "usage refresh";
 			/** The primary serves the prompt and hits its wall on the next request. */
 			primaryServesFirst?: boolean;
 			settings?: Record<string, unknown>;
@@ -1158,6 +1158,20 @@ describe("saved reset before a reserve-protected sibling", () => {
 		const requests: string[] = [];
 		const model = getBundledModel(provider, provider === "anthropic" ? "claude-sonnet-4-5" : "gpt-5.6-sol");
 		if (!model) throw new Error(`Expected a bundled ${provider} model`);
+		// Recovery's Codex usage refresh stalls like a slow broker: it answers once its own caller
+		// cancels it, or not before the test ends when it has no signal. The turn must not wait on it.
+		let recoveryRefresh = false;
+		let stalled = false;
+		const stallRelease = Promise.withResolvers<void>();
+		cleanups.push(() => stallRelease.resolve());
+		const stallUntilAborted = async (signal: AbortSignal | undefined): Promise<void> => {
+			stalled = true;
+			void live.session?.abort();
+			const aborted = Promise.withResolvers<void>();
+			if (signal?.aborted) aborted.resolve();
+			signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await Promise.race([aborted.promise, stallRelease.promise]);
+		};
 
 		const serve = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 			const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
@@ -1217,6 +1231,10 @@ describe("saved reset before a reserve-protected sibling", () => {
 					id: "openai-codex",
 					fetchUsage: async params => {
 						const account = accounts[params.credential.accountId ?? ""];
+						if (options.abortAt === "usage refresh" && recoveryRefresh) {
+							recoveryRefresh = false;
+							await stallUntilAborted(undefined);
+						}
 						return account && !account.usageUnavailable ? codexReport(account) : null;
 					},
 				};
@@ -1286,12 +1304,20 @@ describe("saved reset before a reserve-protected sibling", () => {
 			if (options.abortAt === "recovery health read" && healthReads === 2) void session.abort();
 			return healthModel(...args);
 		});
+		const invalidate = storage.usage.invalidate.bind(storage.usage);
+		vi.spyOn(storage.usage, "invalidate").mockImplementation(async (invalidated, signal) => {
+			await invalidate(invalidated, signal);
+			// Turn recovery's reset pass refreshes Codex usage after its pool-health read.
+			if (invalidated !== provider || healthReads < 2) return;
+			if (options.abortAt === "usage invalidation") await stallUntilAborted(signal);
+			else recoveryRefresh = true;
+		});
 		const captures = vi.spyOn(session, "runAutolearnCapture");
 
 		await session.prompt("keep working through the limit");
 		await session.waitForIdle();
 		await Promise.all(captures.mock.results.map(result => result.value));
-		return { resetPosts, requests, healthReads, last: session.agent.state.messages.at(-1) };
+		return { resetPosts, requests, healthReads, stalled, last: session.agent.state.messages.at(-1) };
 	}
 
 	it("spends the blocked Claude account's reset before a backup inside its reserve serves", async () => {
@@ -1355,6 +1381,17 @@ describe("saved reset before a reserve-protected sibling", () => {
 		expect(result.resetPosts).toEqual([]);
 		expect(result.requests).toEqual(["primary"]);
 	});
+
+	it.each(["usage invalidation", "usage refresh"] as const)(
+		"stops without waiting for a stalled Codex %s when the turn is cancelled during recovery",
+		async abortAt => {
+			// Without the takeover signal, the turn waits on the stalled request and never goes idle.
+			const result = await hitWall("openai-codex", { restoreBeforeReserve: true, abortAt });
+			expect(result.stalled).toBe(true);
+			expect(result.resetPosts).toEqual([]);
+			expect(result.requests).toEqual(["primary"]);
+		},
+	);
 
 	it.each([
 		["retries are off", { "retry.enabled": false }],
