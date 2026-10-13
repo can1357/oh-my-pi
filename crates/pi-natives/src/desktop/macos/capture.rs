@@ -362,7 +362,7 @@ pub(super) fn window_by_id(id: &str) -> CoreResult<DesktopWindow> {
 		.ok_or_else(missing)
 }
 
-type WindowDictionary = CFDictionary<CFString, CFType>;
+pub(super) type WindowDictionary = CFDictionary<CFString, CFType>;
 
 /// Reads each window from one immutable Quartz snapshot; individual xcap
 /// property getters would re-enumerate the whole desktop for every field.
@@ -592,12 +592,15 @@ fn named(title: &str, app: &str) -> bool {
 	!((title.is_empty() && app.is_empty()) || (title == "StatusIndicator" && app == "Window Server"))
 }
 
-fn window_value<'a>(dictionary: &'a WindowDictionary, key: &CFString) -> Option<&'a CFType> {
+pub(super) fn window_value<'a>(
+	dictionary: &'a WindowDictionary,
+	key: &CFString,
+) -> Option<&'a CFType> {
 	// SAFETY: All callers borrow an immutable copy-rule Quartz snapshot.
 	unsafe { dictionary.get_unchecked(key) }
 }
 
-fn window_number(dictionary: &WindowDictionary, key: &CFString) -> Option<i64> {
+pub(super) fn window_number(dictionary: &WindowDictionary, key: &CFString) -> Option<i64> {
 	let number = window_value(dictionary, key)?.downcast_ref::<CFNumber>()?;
 	let mut value = 0i64;
 	// SAFETY: The output is writable storage for the requested signed 64-bit
@@ -606,7 +609,7 @@ fn window_number(dictionary: &WindowDictionary, key: &CFString) -> Option<i64> {
 		.then_some(value)
 }
 
-fn window_string(dictionary: &WindowDictionary, key: &CFString) -> String {
+pub(super) fn window_string(dictionary: &WindowDictionary, key: &CFString) -> String {
 	window_value(dictionary, key)
 		.and_then(CFType::downcast_ref::<CFString>)
 		.map_or_default(ToString::to_string)

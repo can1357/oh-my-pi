@@ -181,7 +181,7 @@ export class NativeWindowWatch {
 /** The on-screen windows, or undefined when the roster cannot be read (off macOS it is empty). */
 function readRoster(): DesktopRosterWindow[] | undefined {
 	try {
-		return desktopWindowRoster().windows;
+		return desktopWindowRoster();
 	} catch {
 		return undefined;
 	}

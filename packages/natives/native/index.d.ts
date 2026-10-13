@@ -1791,20 +1791,10 @@ export interface DesktopWindow {
 }
 
 /**
- * Samples every on-screen window in one `WindowServer` pass, with no desktop
- * session and no permission prompt. Empty off macOS.
+ * Samples every on-screen window, front to back, in one `WindowServer` pass,
+ * with no desktop session and no permission prompt. Empty off macOS.
  */
-export declare function desktopWindowRoster(): DesktopWindowRoster
-
-/**
- * On-screen windows front to back, and the frontmost application, sampled
- * together.
- */
-export interface DesktopWindowRoster {
-  /** Frontmost application's process id; absent at the login window. */
-  frontmostPid?: number
-  windows: Array<DesktopRosterWindow>
-}
+export declare function desktopWindowRoster(): Array<DesktopRosterWindow>
 
 /**
  * Detect macOS system appearance via CoreFoundation.
