@@ -53,7 +53,7 @@ interface FakeWorker {
 }
 
 async function fakeWorker(options: FakeWorkerOptions = {}): Promise<FakeWorker> {
-	const directory = TempDir.createSync("mnemosyne-oss-fake-worker-");
+	const directory = TempDir.createSync("@mnemosyne-oss-fake-worker-");
 	temporaryDirectories.push(directory);
 	const root = path.resolve(directory.path());
 	const callsFile = path.join(root, "calls.log");
@@ -138,7 +138,8 @@ for line in sys.stdin:
 
 function clientFor(
 	fake: FakeWorker,
-	timeoutMs = 500,
+	// A cold python3 start under a loaded test run can exceed 500ms.
+	timeoutMs = 2_000,
 	context: MnemosyneOssWorkerContext = workerContext(path.join(path.resolve(fake.directory.path()), "shared-store")),
 ): MnemosyneOssWorkerClient {
 	return new MnemosyneOssWorkerClient({
@@ -171,15 +172,15 @@ it("handshakes over newline JSON-RPC and keeps runtime config separate from the 
 });
 
 it("rejects unsupported Python, SDK, and method handshakes with actionable diagnostics", async () => {
-	const oldPython = clientFor(await fakeWorker({ pythonVersion: "3.9.0" }), 2_000);
+	const oldPython = clientFor(await fakeWorker({ pythonVersion: "3.9.0" }));
 	await expect(oldPython.capabilities()).rejects.toThrow("Python 3.10+");
 	await oldPython.shutdown();
 
-	const oldSdk = clientFor(await fakeWorker({ sdkVersion: "3.9.0" }), 2_000);
+	const oldSdk = clientFor(await fakeWorker({ sdkVersion: "3.9.0" }));
 	await expect(oldSdk.capabilities()).rejects.toThrow("SDK major 4");
 	await oldSdk.shutdown();
 
-	const incomplete = clientFor(await fakeWorker({ missingMethods: true }), 2_000);
+	const incomplete = clientFor(await fakeWorker({ missingMethods: true }));
 	await expect(incomplete.capabilities()).rejects.toThrow("missing required operations");
 	await incomplete.shutdown();
 });
@@ -352,7 +353,7 @@ class Mnemosyne:
 `;
 
 it("drives the bundled worker against Mnemosyne 4.0 SDK signatures", async () => {
-	const directory = TempDir.createSync("mnemosyne-oss-stub-sdk-");
+	const directory = TempDir.createSync("@mnemosyne-oss-stub-sdk-");
 	temporaryDirectories.push(directory);
 	const root = path.resolve(directory.path());
 	const site = path.join(root, "site");
