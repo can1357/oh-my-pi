@@ -33,7 +33,7 @@ import {
 	waitForProjectLoaded,
 } from "./client";
 import { getLinterClient } from "./clients";
-import { configCache, getConfig, getServersForFile } from "./config";
+import { configCache, formatRejectedConfigSources, getConfig, getServersForFile } from "./config";
 import {
 	BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	formatLocationWithContext,
@@ -257,6 +257,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					"  note: 'configured, not started' means the binary resolves on PATH but no request has spawned it yet; 'ready' means a client process is live for this cwd.",
 				);
 			}
+			lines.push(...formatRejectedConfigSources(this.session.cwd, config.rejectedSources));
 			if (lspmuxStatus) lines.push(lspmuxStatus);
 
 			return {
@@ -1097,6 +1098,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const refreshedConfig = getConfig(this.session.cwd);
 			reconcileIdleChecker();
 			const servers = getLspServers(refreshedConfig);
+			const rejectedLines = formatRejectedConfigSources(this.session.cwd, refreshedConfig.rejectedSources);
 			// Identity-aware client keys make a changed server resolve to a fresh
 			// client below, but the process spawned from the superseded config
 			// would stay registered and running otherwise (#8384). This also
@@ -1107,12 +1109,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				signal,
 			);
 			if (servers.length === 0) {
+				const emptyLines = ["No language server found for this action", ...rejectedLines];
 				return {
-					content: [{ type: "text", text: "No language server found for this action" }],
+					content: [{ type: "text", text: emptyLines.join("\n") }],
 					details: { action, success: false, request: params },
 				};
 			}
-			const outputs: string[] = [];
+			const outputs: string[] = [...rejectedLines];
 			if (stopped.length > 0) {
 				outputs.push(`Stopped ${stopped.length} server(s) with superseded configuration: ${stopped.join(", ")}`);
 			}
