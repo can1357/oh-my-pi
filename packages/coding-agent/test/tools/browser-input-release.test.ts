@@ -30,15 +30,18 @@ describe("pressKey releases every key it pressed", () => {
 		expect(error instanceof Error ? error.message : error).toBe("Session closed");
 	});
 
-	test("an abort while a release is unanswered sends the remaining releases at once", async () => {
+	test("an abort while a release is unanswered sends the remaining releases at once, then fails the press", async () => {
 		const pending = Promise.withResolvers<void>();
 		const { page, sent } = recordingPage(key => (key === "a" ? pending.promise : Promise.resolve()));
 		const controller = new AbortController();
-		const pressing = pressKey(page, "Shift+a", undefined, controller.signal);
+		const pressing = pressKey(page, "Shift+a", undefined, controller.signal).then(
+			() => "resolved",
+			(reason: unknown) => (reason instanceof Error ? reason.name : String(reason)),
+		);
 		for (let i = 0; i < 10 && !sent.includes("up:a"); i++) await Promise.resolve();
 		expect(sent).toEqual(["down:Shift", "down:a", "up:a"]);
 		controller.abort();
-		await pressing;
+		expect(await pressing).toBe("AbortError");
 		expect(sent).toEqual(["down:Shift", "down:a", "up:a", "up:Shift"]);
 	});
 });

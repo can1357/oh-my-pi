@@ -1634,7 +1634,8 @@ function trackPress(press: Promise<void>): { press: Promise<void>; refused: bool
 /**
  * Release keys in order. Each release is awaited and one that fails does not stop the rest; once `signal` aborts,
  * every release still owed is sent at once and not awaited: Chrome keeps input in order, and the page the call
- * gave up on may not answer before this worker is replaced.
+ * gave up on may not answer before this worker is replaced. The first failure, or the abort, is thrown once every
+ * release went out.
  */
 async function releaseKeys(page: Page, keys: readonly KeyInput[], signal?: AbortSignal): Promise<void> {
 	let failure: { error: unknown } | undefined;
@@ -1646,10 +1647,11 @@ async function releaseKeys(page: Page, keys: readonly KeyInput[], signal?: Abort
 		try {
 			await untilAborted(signal, () => page.keyboard.up(key));
 		} catch (error) {
-			if (!signal?.aborted) failure ??= { error };
+			failure ??= { error };
 		}
 	}
 	if (failure) throw failure.error;
+	throwIfAborted(signal);
 }
 
 /**
