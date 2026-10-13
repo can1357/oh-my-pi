@@ -1150,6 +1150,7 @@ describe("messaging service with real inboxes", () => {
 			modified: Date.now(),
 		};
 		await fs.writeFile(stopped.path, '{"type":"session","id":"stopped"}\n');
+		// 50 locked, flushed writes: about 5 s on slower disks, hence the 20 s test timeout.
 		for (let i = 0; i < mailbox.OFFLINE_INBOX_CAP; i++)
 			await mailbox.enqueueOffline(stopped.sessionId, {
 				id: `fill-${i}`,
@@ -1178,7 +1179,7 @@ describe("messaging service with real inboxes", () => {
 				"body" in item.message ? item.message.body : undefined,
 			),
 		).toEqual(["queued"]);
-	});
+	}, 20_000);
 
 	it("delivers offline send receipts through resume and retains correlation for held-message expiry", async () => {
 		const { a, ah, bh, bs, stopped } = await stoppedBeta();
