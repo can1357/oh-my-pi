@@ -528,4 +528,58 @@ describe("SessionManager entry-line memo", () => {
 		const body = storage.readTextSync(sessionFile);
 		expect(body).toContain('"details":2');
 	});
+
+	it("re-projects a hook-backed message instead of reusing its hookless line", async () => {
+		// The conservative-union twin of the stabilizing-hook test above: that
+		// one pins the always-uncached gate for messages that are hook-backed
+		// from the start; this one pins the other direction — a message whose
+		// hook arrives in place after its hookless line was cached must still
+		// re-project. The hook is installed directly on the live `details`
+		// object as a non-enumerable key with no field write, so key
+		// enumeration and the stamp's leaves still compare equal — only the
+		// descriptor-based hook-presence checks (gate plus matcher fallback)
+		// can force the miss. Without them the second rewrite reuses the
+		// hookless line instead of persisting the hook's output.
+		const details: Record<string, unknown> = { ordinal: 3 };
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		const messageId = session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-hook-miss",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: hookless, so the line is stamped, cached, and carries
+		// the live shape.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain('"ordinal":3');
+
+		// Install the hook in place on the same object the entry holds, as a
+		// non-enumerable key: `JSON.stringify` still consults it, but no
+		// key walk — entry fields, stamp, or matcher leaves — can see it.
+		const entry = session.getEntries().find(e => e.id === messageId);
+		if (!entry || entry.type !== "message" || entry.message.role !== "toolResult") {
+			throw new Error("Expected toolResult message entry");
+		}
+		const live = entry.message.details;
+		if (live === null || typeof live !== "object") throw new Error("Expected object details");
+		Object.defineProperty(live, "toJSON", {
+			enumerable: false,
+			configurable: true,
+			value: () => 7,
+		});
+
+		// Second rewrite: the persisted body carries the hook's output, never
+		// the cached hookless line.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"details":7');
+		expect(bodyAfterSecond).not.toContain('"ordinal":3');
+	});
 });
