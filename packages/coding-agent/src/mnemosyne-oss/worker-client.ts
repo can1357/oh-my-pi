@@ -401,6 +401,7 @@ function buildWorkerEnvironment(
 	temporaryConfigDir: string,
 	context: MnemosyneOssWorkerContext,
 ): Record<string, string> {
+	// Inherited MNEMOSYNE_* (hosted LLM/embedding URLs and keys included) never reach the SDK.
 	const environment: Record<string, string> = {};
 	for (const [key, value] of Object.entries(runtimeEnv)) {
 		if (value !== undefined && !key.startsWith("MNEMOSYNE_")) environment[key] = value;
@@ -420,24 +421,10 @@ function buildWorkerEnvironment(
 		environment.MNEMOSYNE_EMBEDDINGS_OFF = "1";
 		environment.MNEMOSYNE_EMBEDDING_MODEL = "";
 	}
-	environment.MNEMOSYNE_REMOTE_EMBEDDINGS = "";
 	environment.MNEMOSYNE_LLM_ENABLED = context.consolidation_mode === "local" ? "true" : "false";
+	// The SDK applies these only as a pair; config.ts selects local mode only when both are set.
 	environment.MNEMOSYNE_LLM_REPO = context.local_llm_repo ?? "";
 	environment.MNEMOSYNE_LLM_FILE = context.local_llm_file ?? "";
-	environment.MNEMOSYNE_REMOTE_LLM = "";
-	environment.MNEMOSYNE_REMOTE_MODALITY = "";
-	environment.MNEMOSYNE_SYNC_ENABLED = "0";
-	for (const key of [
-		"MNEMOSYNE_EMBEDDING_API_KEY",
-		"MNEMOSYNE_EMBEDDING_API_URL",
-		"MNEMOSYNE_LLM_API_KEY",
-		"MNEMOSYNE_LLM_API_URL",
-		"MNEMOSYNE_MODALITY_API_KEY",
-		"MNEMOSYNE_MODALITY_API_URL",
-		"MNEMOSYNE_SYNC_API_KEY",
-		"MNEMOSYNE_SYNC_API_URL",
-	])
-		environment[key] = "";
 	return environment;
 }
 
