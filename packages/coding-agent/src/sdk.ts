@@ -296,6 +296,7 @@ import {
 } from "./tools";
 import { createModelJobWidgetAuthor, type JobWidgetAuthor, JobWidgets, resolveToolCallIntent } from "./job-widgets";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
+import { createArchivePrelude } from "./archive/prelude-definition";
 import { isIrcEnabled } from "./irc/messaging";
 import { ToolContextStore } from "./tools/context";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
@@ -399,22 +400,23 @@ import {
 import { cfgTaskBatch, cfgTaskDisabledAgents, cfgTaskEager, cfgTaskMaxConcurrency } from "./task/settings";
 
 /**
- * First-use boundary for the eval prelude definitions.
+ * First-use boundary for the default-off eval prelude definitions.
  *
- * All four gates default off, and every consumer of `getEvalPreludes()` is
- * synchronous (`getEvalPreludes` itself, the prompt/policy callbacks, the
- * `/computer` + `/ratchet` slash toggles), so the prelude modules resolve
- * through Bun's synchronous CommonJS bridge on first use rather than through a
- * static import that would evaluate the browser/computer/ratchet/archive
- * graphs for every session, enabled or not. Memoized per process because
- * `getEvalPreludes` runs on every prompt build.
+ * The browser, computer, and ratchet gates default off, and every consumer of
+ * `getEvalPreludes()` is synchronous (`getEvalPreludes` itself, the
+ * prompt/policy callbacks, the `/computer` + `/ratchet` slash toggles), so the
+ * prelude modules resolve through Bun's synchronous CommonJS bridge on first
+ * use rather than through a static import that would evaluate the
+ * browser/computer/ratchet graphs for every session, enabled or not.
+ * Memoized per process because `getEvalPreludes` runs on every prompt build.
+ * The archive prelude stays a static import: `archive.enabled` defaults on and
+ * the initial prompt build advertises it, so it is on the boot path.
  */
 type PreludeFactory = (session: ToolSession) => EvalPreludeDefinition;
 const preludeFactories: {
 	browser?: PreludeFactory;
 	computer?: PreludeFactory;
 	ratchet?: PreludeFactory;
-	archive?: PreludeFactory;
 } = {};
 
 /** Agent-level tool-call switches, snapshotted by the agent loop per prompt run. */
@@ -2565,9 +2567,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				builtins.push(ratchetPrelude);
 			}
 			if (cfgArchiveEnabled.get(settings)) {
-				const loadArchive: () => PreludeFactory = () =>
-					require("./archive/prelude-definition").createArchivePrelude;
-				archivePrelude ??= (preludeFactories.archive ??= loadArchive())(toolSession);
+				archivePrelude ??= createArchivePrelude(toolSession);
 				builtins.push(archivePrelude);
 			}
 			return getEnabledEvalPreludes(builtins);

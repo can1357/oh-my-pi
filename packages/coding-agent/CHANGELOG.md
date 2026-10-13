@@ -605,6 +605,7 @@
 - Fixed `grep` on a single file showing in Tern as separate boxed snippets with no file row or syntax colors; it now looks the same as a `grep` over a directory
 - Faster startup: off-boot-path modules like the OTel exporter and model catalog now load lazily instead of during initial boot ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fewer modules evaluated before a plain launch's first prompt: the release check, `@file` attachments, marketplace auto-update, project-daemon presence, `--from-claude`/`--from-opencode` resume, the ratchet/archive eval preludes, image generation and TTS now load on first use ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fewer modules evaluated before a plain launch's first prompt: the release check, `@file` attachments, marketplace auto-update, project-daemon presence, `--from-claude`/`--from-opencode` resume, the ratchet eval prelude, image generation and TTS now load on first use ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.10.0] - 2026-10-12
 
