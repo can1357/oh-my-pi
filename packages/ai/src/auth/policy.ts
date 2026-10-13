@@ -28,12 +28,13 @@ export class AccountPolicies {
 	#warnedUnmatched = new Set<number>();
 
 	constructor(policies: AuthAccountPolicies, defaultReservePct: number | undefined) {
-		AccountPolicies.#validateAccountPolicyConfiguration(policies);
-		this.#accountPolicies = policies;
-		this.#defaultReservePct =
+		const effectiveDefaultReservePct =
 			typeof defaultReservePct === "number" && Number.isFinite(defaultReservePct)
 				? Math.max(0, Math.min(100, defaultReservePct))
 				: DEFAULT_USAGE_RESERVE_PCT;
+		AccountPolicies.#validateAccountPolicyConfiguration(policies, effectiveDefaultReservePct);
+		this.#accountPolicies = policies;
+		this.#defaultReservePct = effectiveDefaultReservePct;
 	}
 
 	/** Global usage reserve (0–100) for accounts without a per-account `reservePct`. */
@@ -58,7 +59,7 @@ export class AccountPolicies {
 		this.#warnedUnmatched = next.#warnedUnmatched;
 	}
 
-	static #validateAccountPolicyConfiguration(accountPolicies: AuthAccountPolicies): void {
+	static #validateAccountPolicyConfiguration(accountPolicies: AuthAccountPolicies, defaultReservePct: number): void {
 		for (let index = 0; index < accountPolicies.length; index += 1) {
 			const policy = accountPolicies[index]!;
 			const path = `auth.accountPolicies[${index}]`;
@@ -95,17 +96,32 @@ export class AccountPolicies {
 			) {
 				throw new AIError.ConfigurationError(`${path}.reservePct must be a finite number between 0 and 100`);
 			}
+			if (policy.reclaimAbovePct !== undefined) {
+				const reservePct = policy.reservePct ?? defaultReservePct;
+				if (
+					!Number.isFinite(policy.reclaimAbovePct) ||
+					policy.reclaimAbovePct <= reservePct ||
+					policy.reclaimAbovePct > 100
+				) {
+					throw new AIError.ConfigurationError(
+						`${path}.reclaimAbovePct must be a finite number above the account's reserve (${reservePct}%) and at most 100`,
+					);
+				}
+			}
 		}
 	}
 
 	validateUsageCapability(provider: string, canFetchUsage: boolean): void {
-		const policyIndex = this.#accountPolicies.findIndex(
-			policy => policy.provider === provider && policy.reservePct !== undefined,
-		);
-		if (policyIndex !== -1 && !canFetchUsage) {
-			throw new AIError.ConfigurationError(
-				`auth.accountPolicies[${policyIndex}].reservePct requires a usage provider for ${provider}`,
+		if (canFetchUsage) return;
+		for (const field of ["reservePct", "reclaimAbovePct"] as const) {
+			const policyIndex = this.#accountPolicies.findIndex(
+				policy => policy.provider === provider && policy[field] !== undefined,
 			);
+			if (policyIndex !== -1) {
+				throw new AIError.ConfigurationError(
+					`auth.accountPolicies[${policyIndex}].${field} requires a usage provider for ${provider}`,
+				);
+			}
 		}
 	}
 

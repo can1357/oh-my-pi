@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `reclaimAbovePct` to `auth.accountPolicies`: sessions automatically moved to a lower-priority account return to the preferred one once it has that much quota left ([#14237](https://github.com/can1357/oh-my-pi/pull/14237) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.10.4] - 2026-10-13
 
 ### Fixed
