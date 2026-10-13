@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
-import * as net from "node:net";
+import { IpcConnection } from "@oh-my-pi/pi-natives";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as dirs from "@oh-my-pi/pi-utils/dirs";
 import { FileSessionStorage } from "../../src/session/session-storage";
@@ -960,11 +960,7 @@ describe("messaging service with real inboxes", () => {
 				});
 			}
 			expect(await a.listSessions()).toEqual([]);
-			expect(await a.resolve("beta")).toEqual(
-				source === "metadata" && process.platform === "win32"
-					? { kind: "none" }
-					: { kind: "incompatible", name: "beta" },
-			);
+			expect(await a.resolve("beta")).toEqual({ kind: "incompatible", name: "beta" });
 			expect(await a.resolve(target.shortId)).toEqual({ kind: "incompatible", name: target.shortId });
 			expect(
 				await a.send({ ...target, entry: { ...target.entry, version: MESSAGING_WIRE_VERSION + 1 } }, "no", {
@@ -2012,27 +2008,13 @@ it("cutoff aborts unapproved holds and ignores late approval and presentation", 
 it("rejects authenticated own-child sends after cutoff", async () => {
 	const { b } = await pair();
 	b.stopReceiving();
-	const received = Promise.withResolvers<unknown>();
-	const socket = net.createConnection(b.env.OMP_MESSAGING_SOCKET);
-	socket.on("error", received.reject);
-	socket.once("data", data => {
-		socket.destroy();
-		received.resolve(JSON.parse(data.toString()));
-	});
-	socket.once("connect", () => {
-		socket.write(
-			`${JSON.stringify({ type: "auth", token: b.env.OMP_MESSAGING_TOKEN })}\n${JSON.stringify({
-				type: "message",
-				id: "own-child-after-cutoff",
-				body: "late",
-			})}\n`,
-		);
-	});
-	try {
-		expect(await received.promise).toEqual({ ok: false, error: "unreachable" });
-	} finally {
-		socket.destroy();
-	}
+	expect(
+		await anonymousRequest(
+			b,
+			{ type: "message", id: "own-child-after-cutoff", body: "late" },
+			b.env.OMP_MESSAGING_TOKEN,
+		),
+	).toEqual({ ok: false, error: "unreachable" });
 });
 
 it("cutoff during an offline acknowledgement preserves the remaining mail and accepted work", async () => {
@@ -2117,33 +2099,33 @@ async function anonymousRequest(
 	request: InboxRequest,
 	token?: string,
 ): Promise<InboxResponse> {
-	const socket = net.createConnection(service.env.OMP_MESSAGING_SOCKET);
+	const connection = await IpcConnection.connect(service.env.OMP_MESSAGING_SOCKET, { framing: "lines" });
 	const response = Promise.withResolvers<InboxResponse>();
-	let buffer = "";
-	socket.on("error", response.reject);
-	socket.on("data", data => {
-		buffer += data.toString();
-		if (buffer.includes("\n")) response.resolve(JSON.parse(buffer.split("\n")[0]));
-	});
-	socket.once("connect", () => {
-		socket.write(
-			(token === undefined ? "" : `${JSON.stringify({ type: "auth", token })}\n`) + `${JSON.stringify(request)}\n`,
-		);
-	});
+	connection.start(
+		line => {
+			try {
+				response.resolve(JSON.parse(line));
+			} catch (error) {
+				response.reject(error);
+			}
+		},
+		reason => response.reject(new Error(`Connection closed before a response: ${reason ?? "EOF"}`)),
+	);
+	if (token !== undefined) connection.send(JSON.stringify({ type: "auth", token }));
+	connection.send(JSON.stringify(request));
 	try {
 		return await response.promise;
 	} finally {
-		socket.destroy();
+		connection.destroy();
 	}
 }
 
 describe("anonymous inbox messages", () => {
-	it.each(["body", ""] as const)("rejects a peer-authenticated anonymous body %j", async body => {
+	it.each(["body", ""] as const)("rejects an anonymous peer body %j without an auth line", async body => {
 		const { b, bh } = await pair();
 		bh.permission = "prompting";
 		bh.askApproval = vi.fn(async () => "approve" as const);
-		const key = (await fs.readFile(path.join(temp!.path(), "peer.key"), "utf8")).trim();
-		expect(await anonymousRequest(b, { type: "message", id: "anonymous", body, notifyWhenIdle: true }, key)).toEqual({
+		expect(await anonymousRequest(b, { type: "message", id: "anonymous", body, notifyWhenIdle: true })).toEqual({
 			ok: false,
 			error: "anonymous",
 		});
@@ -2152,7 +2134,7 @@ describe("anonymous inbox messages", () => {
 		expect(bh.display).toEqual([]);
 	});
 
-	it.skipIf(process.platform === "win32")("rejects an anonymous peer without an auth line", async () => {
+	it("rejects an anonymous peer without an auth line", async () => {
 		const { b, bh } = await pair();
 		expect(await anonymousRequest(b, { type: "message", id: "no-auth", body: "body" })).toEqual({
 			ok: false,

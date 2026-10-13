@@ -27,9 +27,9 @@ import {
 	type SessionSnapshot,
 	SNAPSHOT_TIMEOUT_MS,
 } from "./protocol";
+import type { InboxEntry } from "./registry";
 import {
 	type InboxAuth,
-	type InboxEntry,
 	type InboxPublication,
 	listInboxEntries,
 	publishInbox,
@@ -357,16 +357,6 @@ export class MessagingService {
 				.filter(entry => entry.entryId !== this.#publication.entryId)
 				.map(async entry => {
 					const result = await requestInbox(entry, { type: "snapshot" }, { dir, signal });
-					if (process.platform === "win32" && !result.ok && result.error === "unsupported_protocol") {
-						liveSessionIds.add(entry.sessionId);
-						incompatible.push({
-							sessionId: entry.sessionId,
-							name: null,
-							shortId: sessionShortId(entry.sessionId),
-							cwd: "",
-						});
-						return;
-					}
 					if (!result.ok || !("snapshot" in result)) return;
 					const { sessionId, name, shortId, title, cwd, busy, v } = result.snapshot;
 					liveSessionIds.add(sessionId);

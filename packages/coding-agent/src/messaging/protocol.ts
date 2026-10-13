@@ -15,14 +15,6 @@ export interface AuthLine {
 	type: "auth";
 	token: string;
 }
-export interface ServerChallengeLine {
-	type: "challenge";
-	nonce: string;
-}
-export interface ServerProofLine {
-	type: "proof";
-	proof: string;
-}
 export interface SenderInfo {
 	sessionId: string;
 	name: string | null;

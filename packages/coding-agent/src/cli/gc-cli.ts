@@ -732,7 +732,7 @@ async function collectExpiredFiles(
 async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
 	const markersDir = getCustomSessionFilesDir(options.agentDir);
 	const breadcrumbDir = getTerminalSessionsDir(options.agentDir);
-	const mailDir = (await resolveRegistry(messagingRegistryDir(), false)).dir;
+	const mailDir = await resolveRegistry(messagingRegistryDir(), false);
 	const candidates: StaleCandidate[] = [
 		...(await collectOfflineMailGcCandidates({ dir: mailDir })).map(mail => ({
 			kind: mail.kind,
@@ -1867,7 +1867,7 @@ async function runArchiveGc(
 			archivedSessionIds.push(candidate.session.id);
 			archivedSessions.push(candidate.session);
 			await retireOfflineMailbox(candidate.session.id, {
-				dir: (await resolveRegistry(messagingRegistryDir(), false)).dir,
+				dir: await resolveRegistry(messagingRegistryDir(), false),
 			});
 		} catch (error) {
 			result.errors.push(`${candidate.session.path}: ${errorMessage(error)}`);

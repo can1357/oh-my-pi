@@ -1,18 +1,8 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
-import * as net from "node:net";
 import * as path from "node:path";
-import { getBaseConfigRoot, isEnoent } from "@oh-my-pi/pi-utils";
-import {
-	assertPrivateDir,
-	ensurePrivateDir,
-	type LocalEndpointQueryResult,
-	type LocalEndpointRegistry,
-	listLocalEndpoints,
-	publishLocalEndpoint,
-	readLocalEndpointEntries,
-	tokenMatches,
-} from "../ipc/local-endpoint-registry";
+import { IpcConnection } from "@oh-my-pi/pi-natives";
+import { getBaseConfigRoot, isEnoent, isFsError } from "@oh-my-pi/pi-utils";
 import {
 	type AuthLine,
 	type InboxRequest,
@@ -21,14 +11,22 @@ import {
 	LINE_DEADLINE_MS,
 	MAX_PEER_TEXT_CHARS,
 	MAX_SERIALIZED_CHARS,
-	MESSAGING_WIRE_VERSION,
 	MessagingUnavailableError,
 	parseInboxRequest,
 	SEND_TIMEOUT_MS,
-	type ServerChallengeLine,
-	type ServerProofLine,
 	SNAPSHOT_TIMEOUT_MS,
 } from "./protocol";
+import {
+	assertPrivateDir,
+	ensurePrivateDir,
+	type InboxEntry,
+	listLiveEntries,
+	ownsEndpoint,
+	publishEntry,
+	readEntries,
+} from "./registry";
+
+const MAX_FRAME_BYTES = 3 * MAX_SERIALIZED_CHARS;
 
 export type InboxAuth = "own-child" | "peer";
 export interface InboxPublication {
@@ -38,58 +36,36 @@ export interface InboxPublication {
 	readonly token: string;
 	close(): Promise<void>;
 }
-export interface InboxEntry {
-	readonly sessionId: string;
-	readonly version: number;
-	readonly entryId: string;
-	readonly pid: number;
-	readonly endpoint: string;
-	readonly createdAt: number;
-}
 
 export function messagingRegistryDir(): string {
 	return path.join(getBaseConfigRoot(), "run", "messaging");
 }
 
-/** Messaging's endpoint-registry configuration rooted at `dir`; does not pick a fallback root. */
-export function registryFor(dir: string): LocalEndpointRegistry {
-	return {
-		dir,
-		pipePrefix: "omp-msg",
-		version: MESSAGING_WIRE_VERSION,
-		maxRequestBytes: MAX_SERIALIZED_CHARS,
-		maxResponseBytes: MAX_SERIALIZED_CHARS,
-		socketFallbackDir: `/tmp/omp-socks-${process.getuid?.() ?? 0}`,
-	};
-}
-
-export async function resolveRegistry(dir: string, create: boolean): Promise<LocalEndpointRegistry> {
-	const registry = registryFor(dir);
+export async function resolveRegistry(dir: string, create: boolean): Promise<string> {
+	const fallback = `/tmp/omp-socks-${process.getuid?.() ?? 0}`;
 	try {
-		if (create) await ensurePrivateDir(registry, dir);
-		else await assertPrivateDir(registry, dir);
-		return registry;
+		if (create) await ensurePrivateDir(dir);
+		else await assertPrivateDir(dir);
+		return dir;
 	} catch (err) {
 		if (!create && isEnoent(err)) {
 			if (process.platform !== "win32") {
-				const fallback = registryFor(registry.socketFallbackDir!);
 				try {
-					await assertPrivateDir(fallback, fallback.dir);
+					await assertPrivateDir(fallback);
 					return fallback;
 				} catch {
 					// Missing or unsafe fallback directories are not discoverable.
 				}
 			}
-			return registry;
+			return dir;
 		}
 		if (process.platform === "win32") {
 			throw new MessagingUnavailableError(err instanceof Error ? err.message : "Cannot open messaging registry");
 		}
 	}
-	const fallback = registryFor(registry.socketFallbackDir!);
 	try {
-		if (create) await ensurePrivateDir(fallback, fallback.dir);
-		else await assertPrivateDir(fallback, fallback.dir);
+		if (create) await ensurePrivateDir(fallback);
+		else await assertPrivateDir(fallback);
 		return fallback;
 	} catch (err) {
 		if (!create && isEnoent(err)) return fallback;
@@ -97,156 +73,59 @@ export async function resolveRegistry(dir: string, create: boolean): Promise<Loc
 	}
 }
 
-// Share in-flight creation only; closed/replaced registries never inherit cached secrets.
-const peerKeyReads = new Map<string, Promise<string>>();
-async function readPeerKey(registry: LocalEndpointRegistry): Promise<string> {
-	const keyPath = path.join(registry.dir, "peer.key");
-	const pending = peerKeyReads.get(keyPath);
-	if (pending) return pending;
-	const read = (async (): Promise<string> => {
-		// Never expose an empty key: publish a flushed sibling with no replacement.
-		let handle: fs.promises.FileHandle;
-		const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
-		try {
-			handle = await fs.promises.open(keyPath, flags);
-		} catch (err) {
-			if (!isEnoent(err)) throw err;
-			const staging = `${keyPath}.${process.pid}.${crypto.randomUUID()}`;
-			const staged = await fs.promises.open(staging, "wx", 0o600);
-			try {
-				try {
-					await staged.writeFile(crypto.randomBytes(32).toString("hex"), "utf8");
-					await staged.sync();
-				} finally {
-					await staged.close();
-				}
-				try {
-					await fs.promises.link(staging, keyPath);
-				} catch (linkError) {
-					if ((linkError as NodeJS.ErrnoException).code !== "EEXIST") throw linkError;
-				}
-			} finally {
-				await fs.promises.unlink(staging);
-			}
-			handle = await fs.promises.open(keyPath, flags);
-		}
-		// Windows relies on the private profile ACL, not a SID-owner API.
-		try {
-			const stat = await handle.stat();
-			if (!stat.isFile() || (process.platform !== "win32" && stat.uid !== process.getuid?.())) {
-				throw new Error("Messaging peer key is not a current-user file");
-			}
-			if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) await handle.chmod(0o600);
-			const key = await handle.readFile("utf8");
-			if (!/^[0-9a-f]{64}$/.test(key)) throw new Error("Invalid messaging peer key");
-			return key;
-		} finally {
-			await handle.close();
-		}
-	})();
-	peerKeyReads.set(keyPath, read);
-	try {
-		return await read;
-	} finally {
-		peerKeyReads.delete(keyPath);
-	}
+function tokenMatches(expected: string, presented: string): boolean {
+	const a = Buffer.from(expected, "utf8");
+	const b = Buffer.from(presented, "utf8");
+	return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function serverProof(peerKey: string, entryId: string, nonce: string): string {
-	return crypto
-		.createHmac("sha256", peerKey)
-		.update("omp-messaging-server-proof\0")
-		.update(entryId)
-		.update("\0")
-		.update(nonce)
-		.digest("hex");
-}
-
-/** JSONL connection boundary; requireAuth also lets tests exercise Windows framing on POSIX. */
+/** One native line-framed request per connection; claim it before awaiting the handler. */
 export function handleInboxConnection(
-	socket: net.Socket,
+	connection: IpcConnection,
 	handle: (req: InboxRequest, auth: InboxAuth) => Promise<InboxResponse>,
-	options: { sessionToken: string; peerKey: string; entryId: string; requireAuth: boolean },
+	options: { sessionToken: string; onClose?: () => void },
 ): void {
-	let buffer = "";
 	let firstLine = true;
-	let challenged = false;
 	let claimed = false;
 	let auth: InboxAuth = "peer";
-	let deadline = setTimeout(() => socket.destroy(), LINE_DEADLINE_MS);
+	let deadline = setTimeout(() => connection.destroy(), LINE_DEADLINE_MS);
 	const respond = (response: InboxResponse): void => {
 		claimed = true;
 		clearTimeout(deadline);
-		if (!socket.destroyed) socket.end(`${JSON.stringify(response)}\n`);
+		if (!connection.closed) {
+			connection.send(JSON.stringify(response));
+			connection.end();
+		}
 	};
-	socket.setEncoding("utf8");
-	socket.on("error", () => socket.destroy());
-	socket.once("close", () => clearTimeout(deadline));
-	socket.on("data", chunk => {
-		if (claimed) return;
-		buffer += chunk;
-		while (!claimed) {
-			const newline = buffer.indexOf("\n");
-			if (newline < 0) {
-				if (buffer.length > MAX_SERIALIZED_CHARS) {
-					if (firstLine && options.requireAuth) socket.destroy();
-					else respond({ ok: false, error: "too_large" });
-				}
-				return;
-			}
-			const line = buffer.slice(0, newline);
-			buffer = buffer.slice(newline + 1);
-			clearTimeout(deadline);
+	connection.start(
+		line => {
+			if (claimed || connection.closed) return;
 			if (line.length > MAX_SERIALIZED_CHARS) {
-				if (firstLine && options.requireAuth) socket.destroy();
-				else respond({ ok: false, error: "too_large" });
+				respond({ ok: false, error: "too_large" });
 				return;
 			}
 			let raw: unknown;
 			try {
 				raw = JSON.parse(line);
 			} catch {
-				socket.destroy();
+				connection.destroy();
 				return;
 			}
 			if (firstLine) {
-				if (typeof raw === "object" && raw !== null && (raw as ServerChallengeLine).type === "challenge") {
-					const value = raw as ServerChallengeLine;
-					if (
-						challenged ||
-						Object.keys(value).length !== 2 ||
-						typeof value.nonce !== "string" ||
-						!/^[0-9a-f]{64}$/.test(value.nonce)
-					) {
-						socket.destroy();
-						return;
-					}
-					challenged = true;
-					const proof: ServerProofLine = {
-						type: "proof",
-						proof: serverProof(options.peerKey, options.entryId, value.nonce),
-					};
-					socket.write(`${JSON.stringify(proof)}\n`);
-					deadline = setTimeout(() => socket.destroy(), LINE_DEADLINE_MS);
-					continue;
-				}
 				firstLine = false;
 				if (typeof raw === "object" && raw !== null && (raw as AuthLine).type === "auth") {
 					const value = raw as AuthLine;
-					if (Object.keys(value).length !== 2 || typeof value.token !== "string") {
-						socket.destroy();
+					if (
+						Object.keys(value).length !== 2 ||
+						typeof value.token !== "string" ||
+						!tokenMatches(options.sessionToken, value.token)
+					) {
+						connection.destroy();
 						return;
 					}
-					if (tokenMatches(options.sessionToken, value.token)) auth = "own-child";
-					else if (!tokenMatches(options.peerKey, value.token)) {
-						socket.destroy();
-						return;
-					}
-					deadline = setTimeout(() => socket.destroy(), LINE_DEADLINE_MS);
-					continue;
-				}
-				if (options.requireAuth) {
-					socket.destroy();
+					auth = "own-child";
+					clearTimeout(deadline);
+					deadline = setTimeout(() => connection.destroy(), LINE_DEADLINE_MS);
 					return;
 				}
 			}
@@ -256,16 +135,20 @@ export function handleInboxConnection(
 			}
 			const request = parseInboxRequest(raw);
 			if (!request) {
-				socket.destroy();
+				connection.destroy();
 				return;
 			}
 			claimed = true;
-			buffer = "";
+			clearTimeout(deadline);
 			void Promise.resolve()
 				.then(() => handle(request, auth))
 				.then(respond, () => respond({ ok: false, error: "internal" }));
-		}
-	});
+		},
+		() => {
+			clearTimeout(deadline);
+			options.onClose?.();
+		},
+	);
 }
 
 export async function publishInbox(
@@ -273,28 +156,19 @@ export async function publishInbox(
 	options: { dir?: string; sessionId: string },
 ): Promise<InboxPublication> {
 	try {
-		const registry = await resolveRegistry(options?.dir ?? messagingRegistryDir(), true);
-		const peerKey = await readPeerKey(registry);
+		const dir = await resolveRegistry(options.dir ?? messagingRegistryDir(), true);
 		const token = crypto.randomBytes(32).toString("hex");
 		const entryId = crypto.randomBytes(8).toString("hex");
-		const publication = await publishLocalEndpoint(
-			registry,
-			socket =>
-				handleInboxConnection(socket, handle, {
-					sessionToken: token,
-					peerKey,
-					entryId,
-					requireAuth: process.platform === "win32",
-				}),
-			{
-				instanceId: entryId,
-				entryId,
-				extra: { entryId, sessionId: options.sessionId, version: MESSAGING_WIRE_VERSION },
-				maxConnections: 64,
-			},
-		);
+		const publication = await publishEntry(dir, {
+			entryId,
+			sessionId: options.sessionId,
+			maxConnections: 64,
+			maxFrameBytes: MAX_FRAME_BYTES,
+			onConnection: (connection, onClose) =>
+				handleInboxConnection(connection, handle, { sessionToken: token, onClose }),
+		});
 		return {
-			registryDir: registry.dir,
+			registryDir: dir,
 			entryId,
 			endpoint: publication.endpoint,
 			token,
@@ -308,90 +182,29 @@ export async function publishInbox(
 
 /** Metadata-only discovery for the mailbox handoff; never opens a socket. */
 export async function readInboxEntries(options: { dir: string; signal?: AbortSignal }): Promise<InboxEntry[]> {
-	const registry = registryFor(options.dir);
-	const entries = await readLocalEndpointEntries(registry, { signal: options.signal, includeAllVersions: true });
-	return entries.flatMap(({ entryId, meta }) =>
-		isMailboxSessionId(meta.sessionId)
-			? [
-					{
-						entryId,
-						sessionId: meta.sessionId,
-						endpoint: meta.endpoint,
-						pid: meta.pid,
-						version: meta.version,
-						createdAt: meta.createdAt,
-					},
-				]
-			: [],
-	);
+	return readEntries(options.dir, { signal: options.signal });
 }
 
 export async function listInboxEntries(options?: { dir?: string; signal?: AbortSignal }): Promise<InboxEntry[]> {
 	if (options?.signal?.aborted) return [];
-	const registry = await resolveRegistry(options?.dir ?? messagingRegistryDir(), false);
-	const live = await listLocalEndpoints(
-		registry,
-		entry => {
-			const sessionId = entry.meta.sessionId;
-			if (!isMailboxSessionId(sessionId))
-				return Promise.resolve<LocalEndpointQueryResult<InboxEntry>>({ status: "skip" });
-			const { promise, resolve } = Promise.withResolvers<LocalEndpointQueryResult<InboxEntry>>();
-			const socket = net.createConnection({ path: entry.meta.endpoint });
-			let finished = false;
-			const finish = (result: LocalEndpointQueryResult<InboxEntry>): void => {
-				if (finished) return;
-				finished = true;
-				clearTimeout(timer);
-				options?.signal?.removeEventListener("abort", abort);
-				socket.destroy();
-				resolve(result);
-			};
-			const timer = setTimeout(() => finish({ status: "skip" }), SNAPSHOT_TIMEOUT_MS);
-			const abort = (): void => finish({ status: "skip" });
-			socket.once("error", err => {
-				const code = (err as NodeJS.ErrnoException).code;
-				finish({ status: code === "ENOENT" || code === "ECONNREFUSED" ? "dead" : "skip" });
-			});
-			socket.once("connect", () =>
-				finish({
-					status: "ok",
-					value: {
-						sessionId,
-						version: entry.meta.version,
-						entryId: entry.entryId,
-						pid: entry.meta.pid,
-						endpoint: entry.meta.endpoint,
-						createdAt: entry.meta.createdAt,
-					},
-				}),
-			);
-			socket.once("close", () => finish({ status: "skip" }));
-			options?.signal?.addEventListener("abort", abort, { once: true });
-			if (options?.signal?.aborted) abort();
-			return promise;
-		},
-		{ ...options, includeAllVersions: true },
-	);
-	return live.map(({ value }) => value);
+	return listLiveEntries(await resolveRegistry(options?.dir ?? messagingRegistryDir(), false), {
+		timeoutMs: SNAPSHOT_TIMEOUT_MS,
+		signal: options?.signal,
+	});
 }
 
-async function vetEndpoint(registry: LocalEndpointRegistry, endpoint: string): Promise<string | undefined> {
+async function vetEndpoint(dir: string, entry: InboxEntry): Promise<string | undefined> {
 	if (process.platform === "win32") return undefined;
 	try {
-		const stat = await fs.promises.lstat(endpoint);
+		const stat = await fs.promises.lstat(entry.endpoint);
 		if (stat.isSymbolicLink()) return "Refusing to send: reply target is a symlink";
-		const dir = path.dirname(path.resolve(endpoint));
-		if (
-			!stat.isSocket() ||
-			stat.uid !== process.getuid?.() ||
-			(dir !== path.resolve(registry.dir) && dir !== path.resolve(registry.socketFallbackDir!))
-		)
+		if (!stat.isSocket() || stat.uid !== process.getuid?.() || !ownsEndpoint(dir, entry.entryId, entry.endpoint))
 			return "Refusing to send: cannot vet reply target";
-		await assertPrivateDir(registry, dir);
+		await assertPrivateDir(path.dirname(path.resolve(entry.endpoint)));
 		return undefined;
 	} catch (error) {
 		// A vanished socket is a session that exited, not a target we failed to vet.
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "unreachable";
+		if (isEnoent(error)) return "unreachable";
 		return "Refusing to send: cannot vet reply target";
 	}
 }
@@ -442,98 +255,62 @@ function parseResponse(raw: unknown): InboxResponse | undefined {
 export async function requestInbox(
 	entry: InboxEntry,
 	request: InboxRequest,
-	options?: { timeoutMs?: number; signal?: AbortSignal; dir?: string; expectProof?: true },
+	options?: { timeoutMs?: number; signal?: AbortSignal; dir?: string },
 ): Promise<InboxResponse> {
 	if (options?.signal?.aborted) return { ok: false, error: "aborted" };
-	const expectProof = process.platform === "win32" || options?.expectProof === true;
-	if (expectProof && entry.version !== MESSAGING_WIRE_VERSION) {
-		return { ok: false, error: "unsupported_protocol" };
-	}
 	const serialized = JSON.stringify(request);
-	let peerKey: string;
 	try {
-		const registry = await resolveRegistry(options?.dir ?? messagingRegistryDir(), false);
-		const refusal = await vetEndpoint(registry, entry.endpoint);
+		const dir = await resolveRegistry(options?.dir ?? messagingRegistryDir(), false);
+		const refusal = await vetEndpoint(dir, entry);
 		if (refusal) return { ok: false, error: refusal };
 		if (serialized.length > MAX_SERIALIZED_CHARS) return { ok: false, error: "too_large" };
-		peerKey = await readPeerKey(registry);
 	} catch {
 		return { ok: false, error: "Refusing to send: cannot vet reply target" };
 	}
 	if (options?.signal?.aborted) return { ok: false, error: "aborted" };
 	const { promise, resolve } = Promise.withResolvers<InboxResponse>();
-	const socket = net.createConnection({ path: entry.endpoint });
-	let buffer = "";
+	const timeoutMs = options?.timeoutMs ?? (request.type === "snapshot" ? SNAPSHOT_TIMEOUT_MS : SEND_TIMEOUT_MS);
+	let connection: IpcConnection | undefined;
 	let finished = false;
-	let awaitingProof = expectProof;
-	const challenge: ServerChallengeLine | undefined = awaitingProof
-		? { type: "challenge", nonce: crypto.randomBytes(32).toString("hex") }
-		: undefined;
 	const finish = (response: InboxResponse): void => {
 		if (finished) return;
 		finished = true;
 		clearTimeout(timer);
 		options?.signal?.removeEventListener("abort", abort);
-		socket.destroy();
+		connection?.destroy();
 		resolve(response);
 	};
-	// A deadline means the peer is alive but slow; only a failed/closed socket is "unreachable".
-	const timer = setTimeout(
-		() => finish({ ok: false, error: "timeout" }),
-		options?.timeoutMs ?? (request.type === "snapshot" ? SNAPSHOT_TIMEOUT_MS : SEND_TIMEOUT_MS),
-	);
+	// A deadline means the peer is alive but slow; only a failed/closed connection is "unreachable".
+	const timer = setTimeout(() => finish({ ok: false, error: "timeout" }), timeoutMs);
 	const abort = (): void => finish({ ok: false, error: "aborted" });
-	socket.setEncoding("utf8");
-	socket.once("error", () => finish({ ok: false, error: "unreachable" }));
-	socket.once("close", () => finish({ ok: false, error: "unreachable" }));
-	socket.once("connect", () => {
-		if (!finished) {
-			socket.write(
-				challenge
-					? `${JSON.stringify(challenge)}\n`
-					: `${JSON.stringify({ type: "auth", token: peerKey })}\n${serialized}\n`,
-			);
-		}
-	});
-	socket.on("data", chunk => {
-		if (finished) return;
-		buffer += chunk;
-		while (!finished) {
-			const newline = buffer.indexOf("\n");
-			if ((newline < 0 ? buffer.length : newline) > MAX_SERIALIZED_CHARS) {
-				finish({ ok: false, error: awaitingProof ? "authentication_failed" : "too_large" });
-				return;
-			}
-			if (newline < 0) return;
-			const line = buffer.slice(0, newline);
-			buffer = buffer.slice(newline + 1);
-			try {
-				const raw: unknown = JSON.parse(line);
-				if (awaitingProof) {
-					const proof = raw as ServerProofLine | null;
-					if (
-						typeof proof !== "object" ||
-						proof === null ||
-						Object.keys(proof).length !== 2 ||
-						proof.type !== "proof" ||
-						typeof proof.proof !== "string" ||
-						!/^[0-9a-f]{64}$/.test(proof.proof) ||
-						!tokenMatches(serverProof(peerKey, entry.entryId, challenge!.nonce), proof.proof)
-					) {
-						finish({ ok: false, error: "authentication_failed" });
-						return;
-					}
-					awaitingProof = false;
-					socket.write(`${JSON.stringify({ type: "auth", token: peerKey })}\n${serialized}\n`);
-					continue;
-				}
-				finish(parseResponse(raw) ?? { ok: false, error: "invalid_response" });
-			} catch {
-				finish({ ok: false, error: awaitingProof ? "authentication_failed" : "invalid_response" });
-			}
-		}
-	});
 	options?.signal?.addEventListener("abort", abort, { once: true });
 	if (options?.signal?.aborted) abort();
+	IpcConnection.connect(entry.endpoint, { framing: "lines", timeoutMs, maxFrameBytes: MAX_FRAME_BYTES }).then(
+		conn => {
+			if (finished) {
+				conn.destroy();
+				return;
+			}
+			connection = conn;
+			conn.start(
+				line => {
+					if (line.length > MAX_SERIALIZED_CHARS) {
+						finish({ ok: false, error: "too_large" });
+						return;
+					}
+					try {
+						finish(parseResponse(JSON.parse(line)) ?? { ok: false, error: "invalid_response" });
+					} catch {
+						finish({ ok: false, error: "invalid_response" });
+					}
+				},
+				reason => finish({ ok: false, error: reason?.startsWith("EMSGSIZE") ? "too_large" : "unreachable" }),
+			);
+			if (!finished) conn.send(serialized);
+		},
+		(err: unknown) => {
+			finish({ ok: false, error: isFsError(err) && err.code === "ETIMEDOUT" ? "timeout" : "unreachable" });
+		},
+	);
 	return promise;
 }

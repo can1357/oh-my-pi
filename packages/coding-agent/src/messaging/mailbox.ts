@@ -2,11 +2,11 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent, withFileLock } from "@oh-my-pi/pi-utils";
-import { assertPrivateDir, ensurePrivateDir } from "../ipc/local-endpoint-registry";
 import { listLocalSessionsWithRegisteredFiles, type SessionInfo } from "../session/session-listing";
 import { sessionAddress, sessionShortId } from "./names";
 import { type InboxRequest, isMailboxSessionId, parseInboxRequest, type SenderInfo } from "./protocol";
-import { messagingRegistryDir, registryFor } from "./transport";
+import { assertPrivateDir, ensurePrivateDir } from "./registry";
+import { messagingRegistryDir } from "./transport";
 
 export const OFFLINE_INBOX_CAP = 50;
 export const OFFLINE_INBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -76,11 +76,10 @@ export async function listOfflineSessions(options?: {
 }
 
 async function mailboxFiles(dir: string, create: boolean): Promise<string[]> {
-	const registry = registryFor(path.dirname(path.dirname(dir)));
 	try {
-		for (const privateDir of [registry.dir, path.dirname(dir), dir]) {
-			if (create) await ensurePrivateDir(registry, privateDir);
-			else await assertPrivateDir(registry, privateDir);
+		for (const privateDir of [path.dirname(path.dirname(dir)), path.dirname(dir), dir]) {
+			if (create) await ensurePrivateDir(privateDir);
+			else await assertPrivateDir(privateDir);
 		}
 		const entries = await fs.promises.readdir(dir, { withFileTypes: true });
 		return entries.filter(entry => entry.isFile()).map(entry => path.join(dir, entry.name));
@@ -137,8 +136,7 @@ export async function withOfflineMailboxLock<T>(
 	options?: { dir?: string; signal?: AbortSignal },
 ): Promise<T> {
 	const inbox = mailboxDir(sessionId, options);
-	const registry = registryFor(path.dirname(path.dirname(inbox)));
-	for (const dir of [registry.dir, path.dirname(inbox)]) await ensurePrivateDir(registry, dir);
+	for (const dir of [path.dirname(path.dirname(inbox)), path.dirname(inbox)]) await ensurePrivateDir(dir);
 	return withFileLock(path.join(path.dirname(inbox), `.${sessionId}.handoff`), fn, { signal: options?.signal });
 }
 

@@ -1319,7 +1319,7 @@ export class FileSessionStorage implements SessionStorage {
 		}
 		try {
 			if (unlinked && sessionId)
-				await retireOfflineMailbox(sessionId, { dir: (await resolveRegistry(messagingRegistryDir(), false)).dir });
+				await retireOfflineMailbox(sessionId, { dir: await resolveRegistry(messagingRegistryDir(), false) });
 		} catch (error) {
 			cleanupError ??= toError(error);
 		}
@@ -1338,7 +1338,7 @@ export class FileSessionStorage implements SessionStorage {
 		let mailCleanupError: Error | undefined;
 		try {
 			if (sessionId)
-				await retireOfflineMailbox(sessionId, { dir: (await resolveRegistry(messagingRegistryDir(), false)).dir });
+				await retireOfflineMailbox(sessionId, { dir: await resolveRegistry(messagingRegistryDir(), false) });
 		} catch (error) {
 			mailCleanupError = toError(error);
 		}
