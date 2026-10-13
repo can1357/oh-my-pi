@@ -159,6 +159,14 @@ function filterChildShellEnvInternal(
 ): Record<string, string> {
 	const runtimeLaunchEnvValues = env === Bun.env || env === process.env ? launchEnvValues : undefined;
 	const result = filterProcessEnv(env);
+	// Node's IPC channel pointers (`NODE_CHANNEL_FD`, `NODE_CHANNEL_SERIALIZATION_MODE`)
+	// describe the agent's own worker channel. A tool-call child that inherits
+	// them misinterprets fd 3 as its control channel — `bun run` inside a bash
+	// tool call then dies with `EBADF: Bad file descriptor (posix_spawn())`.
+	// The IPC worker spawn that needs its channel sets these itself, so child
+	// shells must never carry them.
+	delete result.NODE_CHANNEL_FD;
+	delete result.NODE_CHANNEL_SERIALIZATION_MODE;
 	const projectEnv = parseEnvFile(path.join(cwd, ".env"));
 	const launchNodeEnv = runtimeLaunchEnvValues ? runtimeLaunchEnvValues.get("NODE_ENV") : env.NODE_ENV;
 	const nodeEnvName = `.env.${launchNodeEnv || "development"}`;

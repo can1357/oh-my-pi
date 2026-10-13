@@ -1184,6 +1184,8 @@ fn should_skip_env_var(key: &str) -> bool {
 			| "EUID"
 			| "HOSTNAME"
 			| "HOSTTYPE"
+			| "NODE_CHANNEL_FD"
+			| "NODE_CHANNEL_SERIALIZATION_MODE"
 	)
 }
 
