@@ -6,6 +6,10 @@
 
 - Recall on large memory banks is about 9× faster after the first recall in a session, because decoded memory embeddings are now kept between recalls instead of being re-read and parsed each time ([#15730](https://github.com/can1357/oh-my-pi/pull/15730) by [@andrebrait](https://github.com/andrebrait))
 
+### Fixed
+
+- Fixed recall missing older memories that match a query by meaning but share no words with it, once a bank holds more than 500 newer memories.
+
 ## [18.11.2] - 2026-10-16
 
 ### Fixed
