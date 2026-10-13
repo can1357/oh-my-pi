@@ -1802,6 +1802,13 @@ export class WorkerCore {
 				this.#observeDialogs();
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			}
+			// Nobody else drives a browser omp launched, so its tabs hold every print(); the user's own browser only
+			// while omp acts, so the page's Print buttons still work for the user. The hold comes first: it covers the
+			// setup below, and its script must reach new documents before any init script the tab adds.
+			this.#printHold = await PrintHold.install(
+				this.#page,
+				payload.mode === "headless" || payload.userDriven !== true ? "tab" : "calls",
+			);
 			const client = this.#page.mainFrame().client;
 			client.on("Page.frameNavigated", this.#onFrameNavigated);
 			client.on("Page.frameRequestedNavigation", this.#onFrameRequestedNavigation);
@@ -1821,12 +1828,6 @@ export class WorkerCore {
 				await this.#page.emulateFocusedPage(true);
 			}
 			this.#webmcp = new WebMcpController(this.#page);
-			// Nobody else drives a browser omp launched, so its tabs hold every print(); the user's own browser only
-			// while omp acts, so the page's Print buttons still work for the user.
-			this.#printHold = await PrintHold.install(
-				this.#page,
-				payload.mode === "headless" || payload.userDriven !== true ? "tab" : "calls",
-			);
 			await installVitalsObservers(this.#page);
 			await installCancelledReleaseGuard(this.#page);
 			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
@@ -1862,6 +1863,7 @@ export class WorkerCore {
 			}
 			const info = await this.#currentReadyInfo();
 			this.#started = true;
+			this.#printHold.endCall();
 			this.#transport.send({ type: "ready", info });
 		} catch (error) {
 			// A page this attempt created would be orphaned (the supervisor retries
