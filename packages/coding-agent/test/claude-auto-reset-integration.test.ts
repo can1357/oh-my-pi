@@ -27,8 +27,10 @@ import {
 	type CodexAutoRedeemCoordinator,
 	createCodexAutoRedeemCoordinator,
 	defaultCodexAutoRedeemCoordinator,
+	type ResetRecoveryResult,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as piUtils from "@oh-my-pi/pi-utils";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { asGlobalFetch } from "./helpers/fetch-mock";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
@@ -1110,7 +1112,13 @@ describe("saved reset before a reserve-protected sibling", () => {
 			/** A third stored account outside the session's account pool. */
 			excluded?: "healthy" | "unknown" | "blocked with a reset";
 			excludedResetExpiresInMs?: number;
-			abortAt?: "recovery health read" | "reset listing" | "usage invalidation" | "usage refresh";
+			abortAt?:
+				| "recovery health read"
+				| "reset listing"
+				| "usage invalidation"
+				| "usage refresh"
+				| "peer pass"
+				| "reset fence";
 			/** The primary serves the prompt and hits its wall on the next request. */
 			primaryServesFirst?: boolean;
 			settings?: Record<string, unknown>;
@@ -1312,12 +1320,40 @@ describe("saved reset before a reserve-protected sibling", () => {
 			if (options.abortAt === "usage invalidation") await stallUntilAborted(signal);
 			else recoveryRefresh = true;
 		});
+		// Another session's pass for the account, or another process holding an account's reset
+		// fence, outlasts the turn; cancelling the turn must not wait for either.
+		const inFlight = defaultCodexAutoRedeemCoordinator.inFlightByAccount;
+		const getInFlight = inFlight.get.bind(inFlight);
+		vi.spyOn(inFlight, "get").mockImplementation(key => {
+			if (options.abortAt === "peer pass" && healthReads >= 2 && !stalled) {
+				inFlight.set(key, Promise.withResolvers<ResetRecoveryResult>().promise);
+				stalled = true;
+				void session.abort();
+			}
+			return getInFlight(key);
+		});
+		const fenceRoot = `${defaultCodexAutoRedeemCoordinator.resetLockPath}.reset-`;
+		const heldFences = new Map<string, piUtils.FileLockHandle>();
+		cleanups.push(() => {
+			for (const held of heldFences.values()) held.release();
+		});
+		const withFileLock = piUtils.withFileLock;
+		vi.spyOn(piUtils, "withFileLock").mockImplementation(async (file, fn, lockOptions) => {
+			if (options.abortAt === "reset fence" && healthReads >= 2 && file.startsWith(fenceRoot)) {
+				if (!heldFences.has(file)) heldFences.set(file, await piUtils.acquireFileLock(file));
+				stalled = true;
+				void session.abort();
+			}
+			return withFileLock(file, fn, lockOptions);
+		});
 		const captures = vi.spyOn(session, "runAutolearnCapture");
 
 		await session.prompt("keep working through the limit");
 		await session.waitForIdle();
 		await Promise.all(captures.mock.results.map(result => result.value));
-		return { resetPosts, requests, healthReads, stalled, last: session.agent.state.messages.at(-1) };
+		// Restores this pass deferred as failed attempts; a cancelled one was never attempted.
+		const deferred = defaultCodexAutoRedeemCoordinator.deferredUntilByKey.size;
+		return { resetPosts, requests, healthReads, stalled, deferred, last: session.agent.state.messages.at(-1) };
 	}
 
 	it("spends the blocked Claude account's reset before a backup inside its reserve serves", async () => {
@@ -1392,6 +1428,19 @@ describe("saved reset before a reserve-protected sibling", () => {
 			expect(result.requests).toEqual(["primary"]);
 		},
 	);
+
+	it.each([
+		["a peer session's pass for the account", { abortAt: "peer pass" }],
+		["another process's reset fence before a spend", { abortAt: "reset fence" }],
+		["another process's reset fence before adopting a reset", { abortAt: "reset fence", primaryResets: 0 }],
+	] as const)("stops without waiting for %s when the turn is cancelled during recovery", async (_name, wait) => {
+		// Without the takeover signal, the turn waits out the peer pass or the fence's 30 s of retries.
+		const result = await hitWall("openai-codex", { restoreBeforeReserve: true, ...wait });
+		expect(result.stalled).toBe(true);
+		expect(result.deferred).toBe(0);
+		expect(result.resetPosts).toEqual([]);
+		expect(result.requests).toEqual(["primary"]);
+	});
 
 	it.each([
 		["retries are off", { "retry.enabled": false }],
