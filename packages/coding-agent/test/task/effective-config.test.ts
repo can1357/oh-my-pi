@@ -36,7 +36,7 @@ import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { getProjectDir, Snowflake, setProjectDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { rejectionOf } from "../helpers/rejection";
 import { createSessionDefaults } from "../helpers/session-defaults";
@@ -96,11 +96,15 @@ function yieldingSession(): AgentSession {
 	} as unknown as AgentSession;
 }
 
-/** Dispatch `agent` as the task tool would from a top-level session on `modelRoles.default`. */
+/**
+ * Dispatch `agent` as the task tool would from a top-level session on `modelRoles.default`;
+ * `activeModel` is the concrete model string that session reports.
+ */
 async function spawn(
 	agent: AgentDefinition,
 	settings: Settings,
 	registry: ModelRegistry = modelRegistry,
+	activeModel: string | undefined = settings.getModelRole("default"),
 ): Promise<CreateAgentSessionOptions> {
 	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 	const create = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
@@ -118,8 +122,8 @@ async function spawn(
 		getSessionSpawns: () => "*",
 		getSessionAgents: () => [],
 		getPlanModeState: () => undefined,
-		getActiveModelString: () => settings.getModelRole("default"),
-		getModelString: () => settings.getModelRole("default"),
+		getActiveModelString: () => activeModel,
+		getModelString: () => activeModel,
 	} as unknown as ToolSession;
 	const settled = await runStructuredSubagent({
 		session,
@@ -262,6 +266,59 @@ describe("omp agents show", () => {
 		expect(view.tools.source).toEqual({ layer: "session" });
 		expect(view.serviceTier.source).toEqual({ layer: "default", key: "tier.anthropic" });
 		expect(view.prewalk.source).toEqual({ layer: "default" });
+	});
+
+	it("hands the spawn the default role's concrete model, without the role's thinking suffix", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5:high" },
+			defaultThinkingLevel: "low",
+		});
+		const agent: AgentDefinition = { name: "plain", description: "test", systemPrompt: "test", source: "project" };
+		const view = await resolveEffectiveAgentConfig(agent, settings, modelRegistry, "/tmp");
+		// A real parent reports its active model as provider/id.
+		const spawned = spawnedValues(await spawn(agent, settings, modelRegistry, "anthropic/claude-sonnet-4-5"));
+
+		expect(spawned).toMatchObject({ model: "anthropic/claude-sonnet-4-5", thinking: null });
+		expect(view.model.value).toBe(spawned.model);
+		expect(view.model.source).toEqual({ layer: "session", key: "modelRoles.default" });
+		// With no level from the spawn, the child starts on defaultThinkingLevel, not the role's `:high`.
+		expect(view.thinking).toMatchObject({ value: "low", source: { layer: "setting" } });
+	});
+
+	it("reports the agent's task.agentSoftRequestBudget entry over the global budget", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+			"task.softRequestBudget": 200,
+			"task.agentSoftRequestBudget": { worker: 25 },
+		});
+		const view = await resolveEffectiveAgentConfig(worker, settings, modelRegistry, "/tmp");
+		expect(view.requestBudget).toEqual({
+			value: 25,
+			source: { layer: "agent-entry", key: "task.agentSoftRequestBudget.worker" },
+		});
+	});
+
+	it("aligns the source column by terminal cells when a value is wide", async () => {
+		const settings = Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } });
+		const agent: AgentDefinition = { name: "plain", description: "test", systemPrompt: "test", source: "project" };
+		const view = await resolveEffectiveAgentConfig(agent, settings, modelRegistry, "/tmp");
+		// 23 UTF-16 units but 35 cells: wider than the 27-cell model value, inside the 40-cell cutoff.
+		const lines = agentsCli.formatAgentConfig({
+			...view,
+			accountPools: {
+				value: { anthropic: ["山田太郎山田太郎山田太郎"] },
+				source: { layer: "agent-entry", key: "task.agentAccountPools.plain" },
+			},
+		});
+		// The model, request-budget and account-pool rows fit the cutoff; the default tool list overflows it.
+		const sourceColumns = ["model", "request budget", "account pool"].map(label => {
+			const plain = Bun.stripANSI(lines.find(line => Bun.stripANSI(line).startsWith(`  ${label} `)) ?? "");
+			const match = /^ {2}\S.*?\s{2,}\S.*?\s{2,}(\S.*)$/.exec(plain);
+			if (!match) throw new Error(`Unexpected row for ${label}: ${plain}`);
+			return Bun.stringWidth(plain.slice(0, plain.length - match[1].length));
+		});
+		const expected = 2 + "request budget".length + 2 + 35 + 2;
+		expect(sourceColumns).toEqual([expected, expected, expected]);
 	});
 });
 
@@ -471,6 +528,20 @@ describe("omp agents show inputs", () => {
 		expect(view.model.source).toEqual({ layer: "session", key: "modelRoles.default" });
 	});
 
+	it("refreshes discovery for an uncached prewalk target when the start models resolve", async () => {
+		let refreshed = false;
+		vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => (refreshed ? models : [sonnet, opus]));
+		vi.spyOn(modelRegistry, "getDiscoverableProviders").mockReturnValue(["local"]);
+		vi.spyOn(modelRegistry, "refresh").mockImplementation(async () => {
+			refreshed = true;
+		});
+		const settings = Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } });
+		const agent: AgentDefinition = { ...worker, prewalk: "anthropic/claude-haiku-4-5" };
+		const view = await resolveEffectiveAgentConfig(agent, settings, modelRegistry, "/tmp");
+		expect(view.model.value).toBe("anthropic/claude-opus-4-5");
+		expect(view.prewalk.value).toBe("anthropic/claude-haiku-4-5");
+	});
+
 	it("lists each enabled WATCHDOG.yml advisor on its model", async () => {
 		const dir = path.join(os.tmpdir(), `pi-agents-show-advisors-${Snowflake.next()}`);
 		await fs.mkdir(dir, { recursive: true });
@@ -508,13 +579,29 @@ describe("omp agents show inputs", () => {
 		expect(auth).not.toHaveBeenCalled();
 	});
 
-	it("discovers agents from the effective extension roots, as session startup does", async () => {
-		const discover = vi
-			.spyOn(discoveryModule, "discoverAgents")
-			.mockResolvedValue({ agents: [], projectAgentsDir: null });
-		await rejectionOf(agentsCli.runAgentsCommand({ action: "show", name: "missing", flags: {} }));
-		expect(discover.mock.calls[0]?.[2]).toMatchObject({ explicit: [], mode: "merge" });
-		expect(Array.isArray(discover.mock.calls[0]?.[2]?.configured)).toBe(true);
+	it("lists an agent from an extension configured in a PI_CONFIG_FILES overlay", async () => {
+		const dir = path.join(os.tmpdir(), `pi-agents-show-extension-${Snowflake.next()}`);
+		const extension = path.join(dir, "extension");
+		const overlay = path.join(dir, "overlay.yml");
+		const originalProjectDir = getProjectDir();
+		const originalConfigFiles = process.env.PI_CONFIG_FILES;
+		try {
+			await Bun.write(
+				path.join(extension, "agents", "ext-agent.md"),
+				"---\nname: ext-agent\ndescription: From an extension\n---\nDo the work.\n",
+			);
+			// Only the merged Settings view carries an overlay; the on-disk .omp config does not.
+			await Bun.write(overlay, `extensions:\n  - ${JSON.stringify(extension)}\n`);
+			process.env.PI_CONFIG_FILES = overlay;
+			setProjectDir(dir);
+			const error = await rejectionOf(agentsCli.runAgentsCommand({ action: "show", name: "missing", flags: {} }));
+			expect((error as Error).message).toMatch(/Available: .*\bext-agent\b/);
+		} finally {
+			if (originalConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
+			else process.env.PI_CONFIG_FILES = originalConfigFiles;
+			setProjectDir(originalProjectDir);
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("strips control characters from discovered names in the usage error", async () => {
