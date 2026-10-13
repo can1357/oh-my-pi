@@ -865,11 +865,27 @@ fn is_macos_malloc_stack_logging_var(key: &str) -> bool {
 	matches!(key, "MallocStackLogging" | "MallocStackLoggingNoCompact")
 }
 
+/// Node's IPC channel pointers describe the agent's own worker channel. A
+/// tool-call child that inherits them misinterprets fd 3 as its control
+/// channel — `bun run` inside a bash tool call then dies with
+/// `EBADF: Bad file descriptor (posix_spawn())`. Windows env names are
+/// case-insensitive, so `node_channel_fd` binds there like `NODE_CHANNEL_FD`.
+#[cfg(windows)]
+pub fn is_node_ipc_channel_var(key: &str) -> bool {
+	key.eq_ignore_ascii_case("NODE_CHANNEL_FD")
+		|| key.eq_ignore_ascii_case("NODE_CHANNEL_SERIALIZATION_MODE")
+}
+
+#[cfg(not(windows))]
+pub fn is_node_ipc_channel_var(key: &str) -> bool {
+	matches!(key, "NODE_CHANNEL_FD" | "NODE_CHANNEL_SERIALIZATION_MODE")
+}
+
 fn should_skip_env_var(key: &str) -> bool {
 	if key.starts_with("BASH_FUNC_") && key.ends_with("%%") {
 		return true;
 	}
-	if is_macos_malloc_stack_logging_var(key) {
+	if is_macos_malloc_stack_logging_var(key) || is_node_ipc_channel_var(key) {
 		return true;
 	}
 
@@ -921,8 +937,6 @@ fn should_skip_env_var(key: &str) -> bool {
 			| "EUID"
 			| "HOSTNAME"
 			| "HOSTTYPE"
-			| "NODE_CHANNEL_FD"
-			| "NODE_CHANNEL_SERIALIZATION_MODE"
 	)
 }
 
