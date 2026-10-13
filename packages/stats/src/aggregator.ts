@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDbPath, getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getSessionsDir, getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
 	applySessionParseResults,
@@ -243,10 +243,20 @@ function dispatch(handle: WorkerHandle, request: SyncWorkerRequest): Promise<Par
  * A sync worker calls `getSessionsDir()` when it classifies a transcript, so a
  * worker reused after `process.env` changed would keep classifying against the
  * old directory. The `identity` is how the pool notices that.
+ *
+ * The environment alone is not the whole reuse key, because it does not always
+ * determine the directory a worker classifies against. `setAgentDir()` with a
+ * relative path resolves it against the process cwd, so an SDK that calls
+ * `setAgentDir("agent")` again after a `chdir()` leaves `process.env`
+ * byte-identical while `getSessionsDir()` moves with the cwd. The effective
+ * sessions root is therefore part of the identity too: a worker cached under
+ * the old root would `path.relative()` new-root transcripts out of it and
+ * persist them under `..`/subagent instead of their real folder, and only a
+ * changed identity stops the pool from handing that worker out again.
  */
 interface PooledWorkerEnv {
 	env: Record<string, string>;
-	/** Order-independent identity of the whole parent environment. */
+	/** Order-independent identity of the whole parent environment, plus the sessions root it resolves to. */
 	identity: string;
 }
 
@@ -257,7 +267,10 @@ function pooledWorkerEnv(): PooledWorkerEnv {
 		const value = process.env[key];
 		if (value !== undefined) entries.push([key, value]);
 	}
-	return { env: Object.fromEntries(entries), identity: JSON.stringify(entries) };
+	// Paired with the env snapshot rather than read back out of it: a relative
+	// agent dir is the one case where equal environments resolve differently.
+	const sessionsRoot = getSessionsDir();
+	return { env: Object.fromEntries(entries), identity: JSON.stringify({ env: entries, sessionsRoot }) };
 }
 
 /**

@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "@oh-my-pi/omp-stats/sync-worker";
-import { getOverallStats } from "@oh-my-pi/omp-stats/rollup";
-import { getSessionsDir } from "@oh-my-pi/pi-utils";
+import { getOverallStats, getStatsByAgentType, getStatsByFolder } from "@oh-my-pi/omp-stats/rollup";
+import { getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 const isolation = installStatsTestIsolation("@pi-stats-sync-serial-");
@@ -303,6 +304,13 @@ describe("stats sync serial mode", () => {
 	// parse. The exit path is only observable in a fresh process: the test binary
 	// stays alive regardless, so a child that runs two pooled syncs and drains on
 	// its own is the proof. Skipped on darwin, where the serial parser never spawns.
+	//
+	// The abort bound has to stay below the pool's own
+	// `STATS_SYNC_WORKER_IDLE_MS` eviction deadline. A bound longer than the
+	// deadline lets that timer terminate a wrongly-referenced pooled worker
+	// instead, which frees the event loop, so the child still exits 0 with the
+	// right output and the run silently costs the dead timeout instead of
+	// failing. Below it, the only way out is the child's own exit.
 	it.skipIf(process.platform === "darwin")("drains on its own after the warm pool reuses a worker", async () => {
 		const script = [
 			`import * as fs from "node:fs/promises";`,
@@ -345,7 +353,7 @@ describe("stats sync serial mode", () => {
 				stdin: "ignore",
 				stdout: "pipe",
 				stderr: "pipe",
-				signal: AbortSignal.timeout(15_000),
+				signal: AbortSignal.timeout(4_000),
 			});
 			try {
 				const [exitCode, stdout, stderr] = await Promise.all([
@@ -357,7 +365,7 @@ describe("stats sync serial mode", () => {
 				expect(stderr).toBe("");
 				expect(stdout).toContain("totalRequests=2");
 			} catch (error) {
-				throw new Error("pooled worker held the process open: child did not exit within 15s", { cause: error });
+				throw new Error("pooled worker held the process open: child did not exit within 4s", { cause: error });
 			}
 		} finally {
 			await fs.rm(file, { force: true });
@@ -376,4 +384,60 @@ describe("stats sync serial mode", () => {
 
 		expect(terminatedWorkers.has(pooled)).toBe(true);
 	});
+
+	// A pooled worker classifies transcripts against the sessions root it was
+	// spawned under, so the pool may only hand it out while that root is still
+	// the current one. An SDK that reuses the module after a `chdir()` and a
+	// second `setAgentDir("agent")` is the case where the raw environment cannot
+	// tell the two apart: `setAgentDir` stores the relative override verbatim, so
+	// `process.env` is byte-identical both times while `getSessionsDir()` moves
+	// with the cwd. Reusing the warm worker there would leave transcripts from the
+	// new root parsed by a `path.relative()` against the old one, which is
+	// observable as requests filed under `../..` instead of the project folder and
+	// as `subagent` instead of `main`. Skipped on darwin, where the serial parser
+	// never spawns.
+	it.skipIf(process.platform === "darwin")(
+		"does not reuse a pooled worker after the sessions root moves",
+		async () => {
+			const originalCwd = process.cwd();
+			const firstRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-stats-reuse-first-"));
+			const secondRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-stats-reuse-second-"));
+			try {
+				process.chdir(firstRoot);
+				setAgentDir("agent");
+				const firstSessions = getSessionsDir();
+				await writeSessionFile();
+				const firstRun = spyOnWorkerSpawns();
+				await syncAllSessions({
+					workers: 2,
+					files: [path.join(firstSessions, "--tmp--sync-serial", "session.jsonl")],
+				});
+				expect(firstRun.mock.calls.length).toBeGreaterThan(0);
+				firstRun.mockRestore();
+
+				// No process.env edit: the reuse key has to notice the move through the
+				// resolved sessions root alone, which is the whole point of this case.
+				process.chdir(secondRoot);
+				setAgentDir("agent");
+				const secondSessions = getSessionsDir();
+				await fs.rm(secondSessions, { recursive: true, force: true });
+				await writeSessionFile();
+				const secondRun = spyOnWorkerSpawns();
+				await syncAllSessions({
+					workers: 2,
+					files: [path.join(secondSessions, "--tmp--sync-serial", "session.jsonl")],
+				});
+				expect(secondRun).toHaveBeenCalled();
+				secondRun.mockRestore();
+
+				expect(getStatsByFolder().map(folder => folder.folder)).toEqual(["/tmp/sync-serial"]);
+				expect(getStatsByAgentType().map(byType => byType.agentType)).toEqual(["main"]);
+			} finally {
+				process.chdir(originalCwd);
+				await fs.rm(firstRoot, { recursive: true, force: true });
+				await fs.rm(secondRoot, { recursive: true, force: true });
+				vi.restoreAllMocks();
+			}
+		},
+	);
 });
