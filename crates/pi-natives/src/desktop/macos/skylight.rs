@@ -14,6 +14,7 @@ use std::{
 use core_graphics::{event::CGEvent, geometry::CGPoint};
 use foreign_types::ForeignType;
 use libc::pid_t;
+use objc2_core_foundation::{CFDictionary, CFNumber, CFString};
 
 use super::{
 	super::{
@@ -45,6 +46,9 @@ const ACTIVATION_TIMEOUT: Duration = Duration::from_millis(400);
 const ACTIVATION_POLL: Duration = Duration::from_millis(10);
 /// Keeps the target frontmost until it has consumed foreground input.
 const FOREGROUND_SETTLE: Duration = Duration::from_millis(40);
+/// `SLSSetFrontProcessWithInfo`'s result when a user key press or click was
+/// dispatched after the request's timestamp.
+const EXPIRED_FRONT_REQUEST: i32 = -13066;
 
 unsafe extern "C" {
 	fn CGEventSourceCounterForEventType(state: i32, event_type: u32) -> u32;
@@ -69,6 +73,8 @@ type GetProcessPIDFn = unsafe extern "C" fn(*const ProcessSerialNumber, *mut pid
 type CGEventSetWindowLocationFn = unsafe extern "C" fn(*mut c_void, CGPoint);
 type SLPSSetFrontProcessWithOptionsFn =
 	unsafe extern "C" fn(*const ProcessSerialNumber, u32, u32) -> i32;
+type SLSSetFrontProcessWithInfoFn =
+	unsafe extern "C" fn(*const ProcessSerialNumber, u32, u32, *const c_void) -> i32;
 type SLEventSetAuthenticationMessageFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type ObjcGetClassFn = unsafe extern "C" fn(*const c_char) -> *mut c_void;
 type SelRegisterNameFn = unsafe extern "C" fn(*const c_char) -> *mut c_void;
@@ -113,7 +119,23 @@ struct ForegroundSpi {
 	get_front:   SLPSGetFrontProcessFn,
 	post_record: SLPSPostEventRecordToFn,
 	psn:         PsnLookup,
+	conditional: Option<ConditionalFront>,
 }
+
+/// The front-process request `WindowServer` refuses when the user pressed a
+/// key or clicked after the request's timestamp.
+#[derive(Clone, Copy)]
+struct ConditionalFront {
+	set_front:     SLSSetFrontProcessWithInfoFn,
+	/// `kSLSSetFrontProcessRequestTimestampKey`, a process-lived `CFString`.
+	timestamp_key: *const CFString,
+}
+
+// SAFETY: `timestamp_key` points at an immutable, process-lived CFString
+// constant exported by SkyLight.
+unsafe impl Send for ConditionalFront {}
+// SAFETY: as above; the pointee is never mutated.
+unsafe impl Sync for ConditionalFront {}
 
 #[derive(Clone, Copy)]
 struct AuthenticationSpi {
@@ -195,7 +217,19 @@ fn resolve_foreground() -> Option<ForegroundSpi> {
 		get_front: symbol(c"_SLPSGetFrontProcess")?,
 		post_record: symbol(c"SLPSPostEventRecordTo")?,
 		psn,
+		conditional: resolve_conditional_front(),
 	})
+}
+
+fn resolve_conditional_front() -> Option<ConditionalFront> {
+	let key: *const *const CFString = symbol(c"kSLSSetFrontProcessRequestTimestampKey")?;
+	// SAFETY: the exported symbol is a `CFStringRef` variable that SkyLight
+	// initializes before any of its functions can be called.
+	let timestamp_key = unsafe { key.read() };
+	if timestamp_key.is_null() {
+		return None;
+	}
+	Some(ConditionalFront { set_front: symbol(c"SLSSetFrontProcessWithInfo")?, timestamp_key })
 }
 
 pub(super) fn ensure_skylight_loaded() -> Option<()> {
@@ -563,6 +597,80 @@ fn set_front(spi: &ForegroundSpi, psn: ProcessSerialNumber, wid: u32) -> CoreRes
 	Ok(())
 }
 
+/// What a front-process request through [`set_front_unless_user_acted`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrontRequest {
+	Done,
+	/// `WindowServer` refused it: the user pressed a key or clicked after its
+	/// timestamp, so the front application is theirs.
+	UserActed,
+}
+
+/// Now on the clock `WindowServer` compares a front-process request's
+/// timestamp with: nanoseconds of `CLOCK_UPTIME_RAW`.
+fn event_clock_now() -> u64 {
+	let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+	// SAFETY: `time` is writable for the call; CLOCK_UPTIME_RAW is a clock
+	// every supported macOS provides, and the call retains no pointer.
+	unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, &raw mut time) };
+	u64::try_from(time.tv_sec).unwrap_or(0) * 1_000_000_000
+		+ u64::try_from(time.tv_nsec).unwrap_or(0)
+}
+
+/// Runs `request` with a timestamp taken from `now` before `still_ours`
+/// confirms the hand-back is still wanted; `None` when it no longer is.
+/// `WindowServer` refuses the request if the user pressed a key or clicked
+/// after that timestamp, so input arriving between the check and the request
+/// vetoes it as well.
+fn request_after_check(
+	now: impl FnOnce() -> u64,
+	still_ours: impl FnOnce() -> bool,
+	request: impl FnOnce(u64) -> CoreResult<FrontRequest>,
+) -> CoreResult<Option<FrontRequest>> {
+	let since = now();
+	if !still_ours() {
+		return Ok(None);
+	}
+	request(since).map(Some)
+}
+
+/// Makes `psn` the front process unless the user pressed a key or clicked
+/// after `since` ([`event_clock_now`]). `WindowServer` decides on its own
+/// event clock, so polling delays cannot hide that input. It counts keys and
+/// clicks posted to the HID event tap, takeover input included, but not
+/// events posted to a process. Where the conditional request is unavailable,
+/// the front process changes unconditionally.
+fn set_front_unless_user_acted(
+	spi: &ForegroundSpi,
+	psn: ProcessSerialNumber,
+	wid: u32,
+	since: u64,
+) -> CoreResult<FrontRequest> {
+	let Some(conditional) = spi.conditional else {
+		return set_front(spi, psn, wid).map(|()| FrontRequest::Done);
+	};
+	control::check()?;
+	let timestamp = CFNumber::new_i64(i64::try_from(since).unwrap_or(i64::MAX));
+	// SAFETY: `timestamp_key` is SkyLight's process-lived CFString constant.
+	let key = unsafe { &*conditional.timestamp_key };
+	let info = CFDictionary::<CFString, CFNumber>::from_slices(&[key], &[&*timestamp]);
+	// SAFETY: The PSN was resolved from WindowServer and `info` stays alive
+	// for the synchronous call. kCPSNoWindows changes only the front process.
+	let status =
+		unsafe { (conditional.set_front)(&psn, wid, CPS_NO_WINDOWS, ptr::from_ref(&*info).cast()) };
+	front_request(status)
+}
+
+fn front_request(status: i32) -> CoreResult<FrontRequest> {
+	match status {
+		0 => Ok(FrontRequest::Done),
+		EXPIRED_FRONT_REQUEST => Ok(FrontRequest::UserActed),
+		_ => Err(DesktopError::input_failed(
+			"WindowServer rejected front-process restoration/activation",
+		)),
+	}
+}
+
 /// Makes `wid` its process's key window without raising it or changing the
 /// front process, runs `action`, then hands keyboard focus back.
 ///
@@ -763,12 +871,21 @@ pub(super) fn with_foreground<T>(
 		{
 			return Ok(());
 		}
-		if control::user_activity() != activity
-			|| !front_process(spi.get_front).is_some_and(|front| front.psn == target)
-		{
+		// The action and its settle are over, so takeover's own keys and
+		// clicks, which `WindowServer` counts like the user's, came before this
+		// timestamp; a user key or click after it refuses the hand-back, and the
+		// make-key records below are then never posted.
+		let handed_back = request_after_check(
+			event_clock_now,
+			|| {
+				control::user_activity() == activity
+					&& front_process(spi.get_front).is_some_and(|front| front.psn == target)
+			},
+			|since| set_front_unless_user_acted(spi, previous.psn, previous_key, since),
+		)?;
+		if handed_back != Some(FrontRequest::Done) {
 			return Ok(());
 		}
-		set_front(spi, previous.psn, previous_key)?;
 		// Returning to an app often reinstates its original key window by
 		// itself. Re-making an already-key Chromium window can clear the user's
 		// renderer focus, just as reactivating an already-key input target can.
@@ -1046,5 +1163,45 @@ mod tests {
 		));
 		assert!(!hand_back_confirmed(false, user, target, || Some(user), || false, || false));
 		assert!(hand_back_confirmed(false, user, target, || Some(user), || false, || true));
+	}
+
+	#[test]
+	fn the_hand_back_timestamp_precedes_the_last_check() {
+		use std::cell::RefCell;
+		let steps = RefCell::new(Vec::new());
+		let handed = request_after_check(
+			|| {
+				steps.borrow_mut().push("clock");
+				7
+			},
+			|| {
+				steps.borrow_mut().push("check");
+				true
+			},
+			|since| {
+				steps.borrow_mut().push("request");
+				assert_eq!(since, 7, "the request carries the timestamp taken before the check");
+				Ok(FrontRequest::UserActed)
+			},
+		);
+		assert_eq!(handed.ok(), Some(Some(FrontRequest::UserActed)));
+		assert_eq!(*steps.borrow(), ["clock", "check", "request"]);
+
+		let unwanted =
+			request_after_check(|| 7, || false, |_| panic!("no request once the check fails"));
+		assert_eq!(unwanted.ok(), Some(None));
+	}
+
+	#[test]
+	fn a_front_request_the_user_overtook_is_their_choice_not_an_error() {
+		use crate::desktop::error::ErrorCode;
+		assert_eq!(front_request(0).ok(), Some(FrontRequest::Done));
+		assert_eq!(front_request(EXPIRED_FRONT_REQUEST).ok(), Some(FrontRequest::UserActed));
+		assert_eq!(
+			front_request(-1)
+				.expect_err("other failures stay errors")
+				.code,
+			ErrorCode::InputFailed
+		);
 	}
 }
