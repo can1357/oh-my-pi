@@ -1,7 +1,9 @@
-import { expect, it } from "bun:test";
+import { expect, it, setDefaultTimeout } from "bun:test";
 import * as path from "node:path";
 
 const RUN = path.join(import.meta.dir, "../../bench/memory-eval/run.ts");
+// Each case spawns the CLI, which loads the harness and Mnemopi; on a loaded machine that exceeds bun's 5 s default.
+setDefaultTimeout(30_000);
 
 /** Runs `run --engine mnemopi` with `extra` added to an environment that has no MNEMOPI_* variables. */
 async function runMnemopi(extra: Record<string, string>): Promise<{ stderr: string; code: number }> {
