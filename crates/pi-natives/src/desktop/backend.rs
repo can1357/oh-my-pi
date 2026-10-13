@@ -112,6 +112,10 @@ pub trait Backend: Send {
 	fn capabilities(&mut self) -> DesktopCapabilities;
 	fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>>;
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>>;
+	/// The process owning window `id` and its application's name, found even
+	/// when the window is off the current Space, without listing every window.
+	#[cfg(target_os = "macos")]
+	fn window_app(&mut self, id: &str) -> Option<(libc::pid_t, String)>;
 	/// Live lock and display-sleep state; `display` narrows the sleep check to
 	/// the display a request targets, else the session's. Backends that cannot
 	/// tell report both as false.

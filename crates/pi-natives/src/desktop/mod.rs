@@ -486,6 +486,10 @@ struct Worker {
 	/// The user's own input into the apps this session reads and acts on.
 	#[cfg(target_os = "macos")]
 	listener:     control::intervention::Listener,
+	/// The app whose window the request being served read, and when the read
+	/// began; it shows the user's input only once its reply is delivered.
+	#[cfg(target_os = "macos")]
+	read:         Option<(libc::pid_t, Instant)>,
 }
 
 impl Worker {
@@ -501,6 +505,8 @@ impl Worker {
 			capabilities,
 			#[cfg(target_os = "macos")]
 			listener: control::intervention::Listener::default(),
+			#[cfg(target_os = "macos")]
+			read: None,
 		}
 	}
 
@@ -708,6 +714,13 @@ impl Worker {
 				self.frames.remove(&key);
 			}
 		}
+		#[cfg(target_os = "macos")]
+		if let Some((pid, started)) = self.read.take()
+			&& !failed
+			&& delivered
+		{
+			self.listener.read(pid, started);
+		}
 	}
 
 	/// A failure while the screen is locked or the display asleep names that
@@ -778,7 +791,10 @@ impl Worker {
 		// Input the user's recent activity holds back fails here, before it
 		// takes the input lease.
 		#[cfg(target_os = "macos")]
-		let watch = self.watch_app(request, token)?;
+		let watch = {
+			self.read = None;
+			self.watch_app(request, token)?
+		};
 		let _lease = request
 			.is_mutation()
 			.then(|| InputLease::acquire(token, request.takes_over(token)))
@@ -807,10 +823,8 @@ impl Worker {
 			}
 		}
 		#[cfg(target_os = "macos")]
-		if result.is_ok()
-			&& let Some((pid, started)) = watch.read
-		{
-			self.listener.read(pid, started);
+		if result.is_ok() {
+			self.read = watch.read;
 		}
 		result
 	}
@@ -818,28 +832,42 @@ impl Worker {
 	/// Watches the user's own input into the app `request` reads or acts on,
 	/// starting with the first request to name it. Input to an app the user
 	/// has used since the session last read it waits for them to pause, then
-	/// fails ([`control::intervention::Listener::admit`]).
+	/// fails ([`control::intervention::Listener::admit`]). Without the tap
+	/// nothing is watched, so the owner is not even looked up.
 	#[cfg(target_os = "macos")]
 	fn watch_app(&mut self, request: &Request, token: &OperationToken) -> CoreResult<AppWatch> {
 		let Some(access) = request.app_access() else {
 			return Ok(AppWatch::default());
 		};
+		if !self.listener.listening() {
+			return Ok(AppWatch::default());
+		}
 		let started = Instant::now();
-		let app = match access {
-			AppAccess::Read(id) | AppAccess::Look(id) | AppAccess::Input(id) => self
-				.window(&Target::Window(id.to_string()))
-				.ok()
-				.and_then(|window| Some((libc::pid_t::try_from(window.pid?).ok()?, window.app))),
-			AppAccess::Element(reference) => self
-				.registry
-				.resolve(reference)
-				.ok()
-				.and_then(|handle| macos::element_app(&handle)),
+		let (app, input) = match access {
+			AppAccess::Read(id) | AppAccess::Look(id) | AppAccess::Input(id) => {
+				(self.backend()?.window_app(id), None)
+			},
+			AppAccess::Element(reference) => match self.element_app(reference)? {
+				Some((app, input)) => (Some(app), Some(input)),
+				None => (None, None),
+			},
 		};
 		let Some((pid, name)) = app else {
-			return Ok(AppWatch::default());
+			// Input whose app cannot be named fails like the input itself
+			// would; a ref that no longer resolves fails in `process`.
+			return match access {
+				AppAccess::Input(id) => Err(DesktopError::window_not_found(format!(
+					"window '{id}' was not found; it may be closed"
+				))),
+				_ => Ok(AppWatch::default()),
+			};
 		};
-		self.listener.touch(pid, || name);
+		self
+			.listener
+			.touch(pid, macos::process_started(pid), || name);
+		if let Some(input) = input {
+			self.listener.route(input, pid);
+		}
 		Ok(match access {
 			AppAccess::Read(_) => AppWatch { read: Some((pid, started)), _input: None },
 			AppAccess::Look(_) => AppWatch::default(),
@@ -847,6 +875,31 @@ impl Worker {
 				AppWatch { read: None, _input: Some(self.listener.admit(pid, token)?) }
 			},
 		})
+	}
+
+	/// The app an element ref acts in, with the process that owns the element.
+	/// The element belongs to the window it was read from, whose app may have
+	/// another process draw a panel, such as `openAndSavePanelService` for an
+	/// Open or Save panel; elements read from the desktop belong to their own
+	/// process. `None` when the ref no longer resolves.
+	#[cfg(target_os = "macos")]
+	fn element_app(
+		&mut self,
+		reference: &str,
+	) -> CoreResult<Option<((libc::pid_t, String), libc::pid_t)>> {
+		let Ok(handle) = self.registry.resolve(reference) else {
+			return Ok(None);
+		};
+		let (pid, name) = macos::element_app(&handle)?;
+		let window = match self
+			.registry
+			.target(reference)
+			.map(|key| Target::parse(&key))
+		{
+			Ok(Target::Window(id)) => self.backend()?.window_app(&id),
+			_ => None,
+		};
+		Ok(Some((window.unwrap_or((pid, name)), pid)))
 	}
 
 	fn ax(&mut self) -> CoreResult<&mut dyn backend::AxBackend> {
@@ -1303,11 +1356,15 @@ impl SessionCore {
 		let (txr, rxr) = flume::bounded(0);
 		let tx = self.ensure_started()?;
 		self.in_flight.fetch_add(1, Ordering::AcqRel);
+		let reply_by = Instant::now() + OPERATION_TIMEOUT;
+		// Input waiting for the user to pause gives up before this caller does.
+		#[cfg(target_os = "macos")]
+		let token = token.replying_by(reply_by);
 		let response = tx
 			.send(QueuedRequest { request: make(txr), token })
 			.map_err(|_| DesktopError::internal("native desktop worker stopped unexpectedly"))
 			.and_then(|()| {
-				rxr.recv_timeout(OPERATION_TIMEOUT).map_err(|e| {
+				rxr.recv_deadline(reply_by).map_err(|e| {
 					self.cancellation.cancel();
 					DesktopError::timeout(format!("native desktop operation did not complete: {e}"))
 				})
@@ -2016,6 +2073,10 @@ mod capture_tests {
 	};
 
 	const WAYLAND_ID: &str = "atspi::1.31:/org/a11y/atspi/accessible/1";
+	/// A window of the fake's app that its window list leaves out, as macOS
+	/// leaves out windows on another Space.
+	#[cfg(target_os = "macos")]
+	const OFF_SPACE_ID: &str = "4242";
 
 	/// Backend that mints a composite AT-SPI window id, mirroring the Wayland
 	/// `AtSpiAx` path. Exists to exercise `Worker::process` without a display.
@@ -2187,6 +2248,11 @@ mod capture_tests {
 				.collect())
 		}
 
+		#[cfg(target_os = "macos")]
+		fn window_app(&mut self, id: &str) -> Option<(libc::pid_t, String)> {
+			(id == self.window.id || id == OFF_SPACE_ID).then(|| (1234, self.window.app.clone()))
+		}
+
 		fn screen_state(&mut self, display: Option<&DisplaySelector>) -> ScreenState {
 			self
 				.screen_displays
@@ -2317,7 +2383,9 @@ mod capture_tests {
 			frames: HashMap::new(),
 			capabilities: Arc::default(),
 			#[cfg(target_os = "macos")]
-			listener: control::intervention::Listener::without_tap(),
+			listener: control::intervention::Listener::simulated(),
+			#[cfg(target_os = "macos")]
+			read: None,
 		}
 	}
 
@@ -2776,9 +2844,7 @@ mod capture_tests {
 			reply:   flume::unbounded().0,
 		};
 		// The capture starts watching the window's app, process 1234.
-		worker
-			.execute(&capture_request(target.clone()), &source.token())
-			.unwrap();
+		worker.dispatch(capture_request(target.clone()), &source.token());
 		worker.listener.record_for_test(1234, Instant::now());
 		// The run ends too soon to wait for the user to pause.
 		source.set_deadline(Some(Instant::now()));
@@ -2787,9 +2853,12 @@ mod capture_tests {
 		assert!(error.message.contains("still using obsidian"), "{}", error.message);
 		assert!(clicks.lock().is_empty());
 		// A read before the user has paused for 5 s does not show their input.
-		worker
-			.execute(&capture_request(target.clone()), &source.token())
-			.unwrap();
+		let (reply, read) = flume::bounded(1);
+		worker.dispatch(
+			Request::Capture { target: target.clone(), caps: CaptureCaps::default(), reply },
+			&source.token(),
+		);
+		assert!(read.recv().unwrap().is_ok());
 		assert_eq!(
 			worker
 				.execute(&click(), &source.token())
@@ -2802,10 +2871,39 @@ mod capture_tests {
 		worker
 			.listener
 			.record_for_test(1234, Instant::now() - Duration::from_secs(6));
-		worker
-			.execute(&capture_request(target.clone()), &source.token())
-			.unwrap();
+		let (reply, read) = flume::bounded(1);
+		worker.dispatch(
+			Request::Capture { target: target.clone(), caps: CaptureCaps::default(), reply },
+			&source.token(),
+		);
+		assert!(read.recv().unwrap().is_ok());
 		assert!(worker.watch_app(&click(), &source.token()).is_ok());
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn input_to_an_off_space_window_is_watched_without_listing_windows() {
+		let backend = FakeWaylandBackend::new();
+		let queries = Arc::clone(&backend.window_queries);
+		let mut worker = worker_with(backend);
+		let token = CancellationSource::default().token();
+		worker.dispatch(capture_request(Target::Window(WAYLAND_ID.to_string())), &token);
+		worker.listener.record_for_test(1234, Instant::now());
+		let raise =
+			|id: &str| Request::RaiseWindow { id: id.to_string(), reply: flume::unbounded().0 };
+		// The off-Space window belongs to the app the user is typing in.
+		let listed = *queries.lock();
+		let error = worker
+			.execute(&raise(OFF_SPACE_ID), &token.clone().replying_by(Instant::now()))
+			.err()
+			.unwrap();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert_eq!(*queries.lock(), listed);
+		// Input whose owner cannot be found is refused, not sent unwatched.
+		assert_eq!(
+			worker.execute(&raise("gone"), &token).err().unwrap().code,
+			ErrorCode::WindowNotFound
+		);
 	}
 
 	#[test]
@@ -2927,6 +3025,26 @@ mod capture_tests {
 			&token,
 		);
 		assert_eq!(worker.frame(&target).unwrap(), original);
+		// Nor does an abandoned read show the user's input to later input.
+		#[cfg(target_os = "macos")]
+		{
+			let click = Request::Click {
+				target:  target.clone(),
+				x:       1.0,
+				y:       1.0,
+				options: ParsedPointerOptions::parse(None).unwrap(),
+				reply:   flume::unbounded().0,
+			};
+			worker
+				.listener
+				.record_for_test(1234, Instant::now() - Duration::from_secs(6));
+			worker.dispatch(capture_request(target.clone()), &token);
+			assert_eq!(worker.execute(&click, &token).err().unwrap().code, ErrorCode::UserIntervened);
+			let (reply, read) = flume::bounded(1);
+			worker.dispatch(Request::Capture { target, caps: CaptureCaps::default(), reply }, &token);
+			assert!(read.recv().unwrap().is_ok());
+			assert!(worker.watch_app(&click, &token).is_ok());
+		}
 	}
 
 	#[test]

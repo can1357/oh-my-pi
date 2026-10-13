@@ -228,6 +228,24 @@ pub(super) fn is_terminal(pid: libc::pid_t) -> bool {
 		})
 }
 
+/// When `pid` started, in microseconds since the epoch: a later process that
+/// reuses the id has a later start.
+pub(in crate::desktop) fn started(pid: libc::pid_t) -> Option<u64> {
+	let size = libc::c_int::try_from(mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+	// SAFETY: An all-zero bit pattern is valid for this plain C struct.
+	let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
+	// SAFETY: The buffer is exactly the kernel structure size and outlives the
+	// synchronous call.
+	let written =
+		unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+	(written == size).then(|| {
+		info
+			.pbi_start_tvsec
+			.saturating_mul(1_000_000)
+			.saturating_add(info.pbi_start_tvusec)
+	})
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

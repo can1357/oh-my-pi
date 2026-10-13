@@ -28,41 +28,74 @@ const READ_AGAIN: &str =
 	"read the window again (win.ax(), win.observe() or a screenshot) before acting on it";
 
 struct App {
-	name:   String,
+	name:    String,
+	/// When the process started; a later process reusing its id starts later.
+	started: Option<u64>,
 	/// The user's key presses and clicks since the session first touched it.
-	inputs: u64,
+	inputs:  u64,
 	/// When the user last pressed a key or clicked there, until a read shows it.
-	unread: Option<Instant>,
+	unread:  Option<Instant>,
+}
+
+#[derive(Default)]
+struct State {
+	apps:   HashMap<libc::pid_t, App>,
+	/// Processes that take input for a watched app's windows, such as the
+	/// service that draws its Open or Save panel, mapped to that app. A
+	/// process takes one app's input at a time: the latest route wins.
+	routes: HashMap<libc::pid_t, libc::pid_t>,
 }
 
 /// The user's input into each app this session has read or sent input to,
 /// shared by the tap thread and the session worker.
 #[derive(Default)]
-pub(crate) struct UserInputs(Mutex<HashMap<libc::pid_t, App>>);
+pub(crate) struct UserInputs(Mutex<State>);
 
 impl UserInputs {
-	/// Starts recording the user's input into `pid`. Input into an app before
-	/// the session first reads it or acts on it is not the agent's concern.
-	fn touch(&self, pid: libc::pid_t, name: impl FnOnce() -> String) {
-		self
+	/// Starts recording the user's input into `pid`, which started at
+	/// `started`. Input into an app before the session first reads it or acts
+	/// on it is not the agent's concern, nor is a former process's under the
+	/// same id.
+	fn touch(&self, pid: libc::pid_t, started: Option<u64>, name: impl FnOnce() -> String) {
+		if self
 			.0
 			.lock()
-			.entry(pid)
-			.or_insert_with(|| App { name: name(), inputs: 0, unread: None });
+			.apps
+			.get(&pid)
+			.is_some_and(|app| app.started == started)
+		{
+			return;
+		}
+		let name = name();
+		let mut state = self.0.lock();
+		state
+			.apps
+			.insert(pid, App { name, started, inputs: 0, unread: None });
+		state.routes.retain(|_, app| *app != pid);
+	}
+
+	/// Counts the user's input into `input` as input into the watched `app`.
+	fn route(&self, input: libc::pid_t, app: libc::pid_t) {
+		if input != app {
+			self.0.lock().routes.insert(input, app);
+		}
 	}
 
 	/// The user pressed a key or clicked in `pid` at `at`.
 	pub(super) fn record(&self, pid: libc::pid_t, at: Instant) {
-		if let Some(app) = self.0.lock().get_mut(&pid) {
+		let mut state = self.0.lock();
+		let pid = state.routes.get(&pid).copied().unwrap_or(pid);
+		if let Some(app) = state.apps.get_mut(&pid) {
 			app.inputs += 1;
 			app.unread = Some(at);
 		}
 	}
 
-	/// A read of one of `pid`'s windows that began at `started` succeeded. It
-	/// shows the user's input only if they had paused for [`QUIET`] by then.
+	/// A read of one of `pid`'s windows that began at `started` reached the
+	/// caller. It shows the user's input only if they had paused for [`QUIET`]
+	/// by then.
 	fn read(&self, pid: libc::pid_t, started: Instant) {
-		if let Some(app) = self.0.lock().get_mut(&pid)
+		if let Some(app) = self.0.lock().apps.get_mut(&pid)
 			&& app
 				.unread
 				.is_some_and(|last| started.saturating_duration_since(last) >= QUIET)
@@ -88,7 +121,7 @@ impl UserInputs {
 		);
 		loop {
 			let (baseline, unread) =
-				self.0.lock().get(&pid).map_or((0, None), |app| {
+				self.0.lock().apps.get(&pid).map_or((0, None), |app| {
 					(app.inputs, app.unread.map(|last| (last, app.name.clone())))
 				});
 			let Some((last, name)) = unread else {
@@ -145,6 +178,17 @@ impl Drop for InputWatch {
 	}
 }
 
+/// The current input call sends its input to process `pid`, such as the
+/// service that draws its window's Open panel: the user's input there counts
+/// as input into the watched app.
+pub(crate) fn input_goes_to(pid: libc::pid_t) {
+	WATCH.with_borrow(|watch| {
+		if let Some(watch) = watch {
+			watch.inputs.route(pid, watch.pid);
+		}
+	});
+}
+
 /// Before a key press of the current input call: refuses once the user has
 /// pressed a key or clicked in its app since the call was admitted, so at most
 /// the press already under way lands after theirs.
@@ -153,7 +197,7 @@ pub(crate) fn check_press() -> CoreResult<()> {
 		let Some(watch) = watch else {
 			return Ok(());
 		};
-		match watch.inputs.0.lock().get(&watch.pid) {
+		match watch.inputs.0.lock().apps.get(&watch.pid) {
 			Some(app) if app.inputs != watch.baseline => Err(DesktopError::user_intervened(format!(
 				"the user pressed a key or clicked in {} during this input; keys sent before that may \
 				 already have landed, and nothing more was sent; {READ_AGAIN}",
@@ -164,38 +208,65 @@ pub(crate) fn check_press() -> CoreResult<()> {
 	})
 }
 
+enum Tap {
+	/// Not started yet, or event-listening access was missing at the last try.
+	Stopped(fn(Arc<UserInputs>) -> CoreResult<UserInputMonitor>),
+	Running(#[allow(dead_code, reason = "dropping it stops the tap")] UserInputMonitor),
+	/// Tests feed events through [`Listener::record_for_test`].
+	#[cfg(test)]
+	Simulated,
+}
+
 /// The session's record of the user's input and the tap that feeds it. The
 /// tap starts when the session first reads or acts on an app and stops when
 /// the session's worker drops this. Without event-listening access it cannot
 /// start: nothing is recorded and no input waits.
 pub(crate) struct Listener {
 	inputs: Arc<UserInputs>,
-	tap:    Option<UserInputMonitor>,
-	start:  fn(Arc<UserInputs>) -> CoreResult<UserInputMonitor>,
+	tap:    Tap,
 }
 
 impl Default for Listener {
 	fn default() -> Self {
-		Self { inputs: Arc::default(), tap: None, start: UserInputMonitor::start }
+		Self { inputs: Arc::default(), tap: Tap::Stopped(UserInputMonitor::start) }
 	}
 }
 
 impl Listener {
-	/// Records the user's input into `pid` from now on.
-	pub(crate) fn touch(&mut self, pid: libc::pid_t, name: impl FnOnce() -> String) {
-		if self.tap.is_none() {
-			self.tap = (self.start)(Arc::clone(&self.inputs)).ok();
+	/// Whether the tap runs, starting it if it does not yet.
+	pub(crate) fn listening(&mut self) -> bool {
+		if let Tap::Stopped(start) = self.tap
+			&& let Ok(tap) = start(Arc::clone(&self.inputs))
+		{
+			self.tap = Tap::Running(tap);
 		}
-		self.inputs.touch(pid, name);
+		!matches!(self.tap, Tap::Stopped(_))
 	}
 
-	/// A read of one of `pid`'s windows that began at `started` succeeded.
+	/// Records the user's input into `pid`, which started at `started`, from
+	/// now on.
+	pub(crate) fn touch(
+		&self,
+		pid: libc::pid_t,
+		started: Option<u64>,
+		name: impl FnOnce() -> String,
+	) {
+		self.inputs.touch(pid, started, name);
+	}
+
+	/// Counts the user's input into process `input` as input into `app`.
+	pub(crate) fn route(&self, input: libc::pid_t, app: libc::pid_t) {
+		self.inputs.route(input, app);
+	}
+
+	/// A read of one of `pid`'s windows that began at `started` reached the
+	/// caller.
 	pub(crate) fn read(&self, pid: libc::pid_t, started: Instant) {
 		self.inputs.read(pid, started);
 	}
 
-	/// Admits input to `pid`, waiting at most until shortly before the run's
-	/// deadline; cancelling the operation ends the wait.
+	/// Admits input to `pid`, waiting at most until shortly before the run or
+	/// the request must end; cancelling the operation ends the wait.
 	pub(crate) fn admit(&self, pid: libc::pid_t, token: &OperationToken) -> CoreResult<InputWatch> {
 		self
 			.inputs
@@ -203,8 +274,8 @@ impl Listener {
 	}
 
 	#[cfg(test)]
-	pub(crate) fn without_tap() -> Self {
-		Self { start: |_| Err(DesktopError::permission_denied("no tap in tests")), ..Self::default() }
+	pub(crate) fn simulated() -> Self {
+		Self { inputs: Arc::default(), tap: Tap::Simulated }
 	}
 
 	#[cfg(test)]
@@ -224,6 +295,7 @@ mod tests {
 		inputs
 			.0
 			.lock()
+			.apps
 			.get(&pid)
 			.map(|app| (app.inputs, app.unread))
 	}
@@ -235,8 +307,8 @@ mod tests {
 		let at = |seconds| start + Duration::from_secs(seconds);
 		// Before the session touches TextEdit, its user's input is theirs alone.
 		inputs.record(7, start);
-		inputs.touch(7, || "TextEdit".to_string());
-		inputs.touch(9, || "Notes".to_string());
+		inputs.touch(7, Some(1), || "TextEdit".to_string());
+		inputs.touch(9, Some(1), || "Notes".to_string());
 		assert_eq!(state(&inputs, 7), Some((0, None)));
 		inputs.record(7, at(1));
 		assert_eq!(state(&inputs, 7), Some((1, Some(at(1)))));
@@ -258,7 +330,7 @@ mod tests {
 		let inputs = Arc::new(UserInputs::default());
 		let start = Instant::now();
 		let at = |seconds| start + Duration::from_secs(seconds);
-		inputs.touch(7, || "TextEdit".to_string());
+		inputs.touch(7, Some(1), || "TextEdit".to_string());
 		inputs.record(7, at(0));
 		let clock = Cell::new(at(1));
 		let mut waits = Vec::new();
@@ -306,7 +378,7 @@ mod tests {
 	fn the_runs_deadline_ends_the_wait_for_a_user_still_typing() {
 		let inputs = Arc::new(UserInputs::default());
 		let start = Instant::now();
-		inputs.touch(7, || "TextEdit".to_string());
+		inputs.touch(7, Some(1), || "TextEdit".to_string());
 		inputs.record(7, start);
 		let clock = Cell::new(start + Duration::from_secs(1));
 		let mut waits = Vec::new();
@@ -326,5 +398,75 @@ mod tests {
 		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert_eq!(waits, [Duration::from_millis(1_750)]);
 		assert!(error.message.contains("still using TextEdit"));
+	}
+
+	#[test]
+	fn input_into_a_process_drawing_the_apps_panel_counts_as_input_into_the_app() {
+		let inputs = Arc::new(UserInputs::default());
+		let start = Instant::now();
+		let at = |seconds| start + Duration::from_secs(seconds);
+		inputs.touch(7, Some(1), || "TextEdit".to_string());
+		inputs.touch(8, Some(1), || "Preview".to_string());
+		let watch = inputs
+			.admit(7, None, || start, |_| panic!("no wait"))
+			.unwrap();
+		// TextEdit's Save panel is drawn by process 70, which takes the input.
+		input_goes_to(70);
+		// The user clicks another app's panel, then the one the keys go to.
+		inputs.record(71, at(0));
+		assert!(check_press().is_ok());
+		inputs.record(70, at(0));
+		assert_eq!(check_press().unwrap_err().code, ErrorCode::UserIntervened);
+		drop(watch);
+		assert_eq!(state(&inputs, 8), Some((0, None)));
+		// Later input waits for a read of TextEdit's window after the pause.
+		assert!(
+			inputs
+				.admit(7, None, || at(6), |_| panic!("no wait"))
+				.is_err()
+		);
+		inputs.read(7, at(6));
+		assert!(
+			inputs
+				.admit(7, None, || at(6), |_| panic!("no wait"))
+				.is_ok()
+		);
+	}
+
+	#[test]
+	fn a_new_process_reusing_a_watched_id_starts_unwatched() {
+		let inputs = Arc::new(UserInputs::default());
+		let start = Instant::now();
+		inputs.touch(7, Some(100), || "TextEdit".to_string());
+		inputs.route(70, 7);
+		// TextEdit quits; Notes starts under id 7, and the user types in it
+		// before the session first reads it.
+		inputs.record(7, start);
+		inputs.touch(7, Some(200), || "Notes".to_string());
+		assert_eq!(state(&inputs, 7), Some((0, None)));
+		assert!(
+			inputs
+				.admit(7, None, || start, |_| panic!("no wait"))
+				.is_ok()
+		);
+		// The old app's panel service no longer routes into the new process.
+		inputs.record(70, start);
+		assert_eq!(state(&inputs, 7), Some((0, None)));
+	}
+
+	#[test]
+	fn the_wait_ends_before_the_native_request_times_out() {
+		let source = super::super::CancellationSource::default();
+		source.set_deadline(Some(Instant::now() + Duration::from_secs(300)));
+		let token = source
+			.token()
+			.replying_by(Instant::now() + Duration::from_millis(400));
+		let mut listener = Listener::simulated();
+		assert!(listener.listening());
+		listener.touch(7, Some(1), || "TextEdit".to_string());
+		listener.record_for_test(7, Instant::now());
+		let error = listener.admit(7, &token).err().unwrap();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(error.message.contains("still using TextEdit"), "{}", error.message);
 	}
 }

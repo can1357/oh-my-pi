@@ -53,8 +53,10 @@ pub(crate) struct CancellationSource(Arc<CancellationState>);
 impl CancellationSource {
 	pub(crate) fn token(&self) -> OperationToken {
 		OperationToken {
-			source:     self.clone(),
+			source: self.clone(),
 			generation: self.0.generation.load(Ordering::Acquire),
+			#[cfg(target_os = "macos")]
+			reply_by: None,
 		}
 	}
 
@@ -138,6 +140,9 @@ impl EmergencyStop {
 pub(crate) struct OperationToken {
 	source:     CancellationSource,
 	generation: u64,
+	/// When the caller stops waiting for this request's reply.
+	#[cfg(target_os = "macos")]
+	reply_by:   Option<Instant>,
 }
 
 impl OperationToken {
@@ -149,9 +154,21 @@ impl OperationToken {
 		self.source.escape_unavailable()
 	}
 
+	/// When this operation must have answered: the run's end or the caller's
+	/// reply timeout, whichever comes first.
 	#[cfg(target_os = "macos")]
 	pub(crate) fn deadline(&self) -> Option<Instant> {
-		*self.source.0.deadline.lock()
+		let run = *self.source.0.deadline.lock();
+		match (run, self.reply_by) {
+			(Some(run), Some(reply)) => Some(run.min(reply)),
+			(run, reply) => run.or(reply),
+		}
+	}
+
+	/// This token for a request whose caller waits for its reply until `at`.
+	#[cfg(target_os = "macos")]
+	pub(crate) fn replying_by(self, at: Instant) -> Self {
+		Self { reply_by: Some(at), ..self }
 	}
 
 	pub(crate) fn enter(&self) -> OperationScope {
