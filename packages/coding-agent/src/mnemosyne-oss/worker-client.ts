@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, postmortem, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import { filterEnv, resolveExplicitPythonRuntime, resolvePythonRuntime } from "../eval/py/runtime";
 import { stageRunnerScript } from "../eval/runner-cache";
 import WORKER_SCRIPT from "./worker.py" with { type: "text" };
@@ -53,6 +53,7 @@ export class MnemosyneOssWorkerClient {
 	#process?: Bun.Subprocess;
 	#writer?: Bun.FileSink;
 	#temporaryConfigDir?: string;
+	#cancelExitCleanup?: () => void;
 	#pending = new Map<string, PendingRequest<unknown>>();
 	#queue: Promise<void> = Promise.resolve();
 	#startup?: Promise<void>;
@@ -181,6 +182,10 @@ export class MnemosyneOssWorkerClient {
 	async #start(): Promise<void> {
 		const temporaryConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mnemosyne-oss-config-"));
 		this.#temporaryConfigDir = temporaryConfigDir;
+		// A fatal exit skips shutdown(); still stop the worker and drop its private config dir.
+		this.#cancelExitCleanup = postmortem.register("mnemosyne-oss-worker", () => this.#disposeProcess(), {
+			exitOnly: true,
+		});
 		try {
 			const runtime = this.#options.executable
 				? resolveExplicitPythonRuntime(this.#options.executable, this.#options.cwd, filterEnv(process.env))
@@ -328,6 +333,8 @@ export class MnemosyneOssWorkerClient {
 		}
 		const temporaryConfigDir = this.#temporaryConfigDir;
 		this.#temporaryConfigDir = undefined;
+		this.#cancelExitCleanup?.();
+		this.#cancelExitCleanup = undefined;
 		if (temporaryConfigDir) await fs.rm(temporaryConfigDir, { recursive: true, force: true });
 	}
 }
