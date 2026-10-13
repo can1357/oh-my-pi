@@ -265,7 +265,8 @@ export class WebMcpController {
 	readonly #page: Page;
 	/** Tools announced on watched sessions, for frames `WebMCP.enable` does not replay. */
 	readonly #announced = new Map<string, { tool: Protocol.WebMCP.Tool; session: CDPSession }>();
-	readonly #watched = new Set<CDPSession>();
+	/** Watched sessions and how to stop listening to each. */
+	readonly #watched = new Map<CDPSession, () => void>();
 	#catalog = new Map<string, CatalogEntry>();
 	#events: WebMcpCatalogEvent[] = [];
 	#sequence = 0;
@@ -279,22 +280,29 @@ export class WebMcpController {
 	/** Follow one session's tool announcements; Chrome replays only a session's root frame on `WebMCP.enable`. */
 	#watch(session: CDPSession): void {
 		if (this.#watched.has(session)) return;
-		this.#watched.add(session);
-		session.on("WebMCP.toolsAdded", (event: Protocol.WebMCP.ToolsAddedEvent) => {
+		const onAdded = (event: Protocol.WebMCP.ToolsAddedEvent): void => {
 			for (const tool of event.tools) this.#announced.set(`${tool.frameId}\u0000${tool.name}`, { tool, session });
-		});
-		session.on("WebMCP.toolsRemoved", (event: Protocol.WebMCP.ToolsRemovedEvent) => {
+		};
+		const onRemoved = (event: Protocol.WebMCP.ToolsRemovedEvent): void => {
 			for (const tool of event.tools) {
 				const key = `${tool.frameId}\u0000${tool.name}`;
 				if (this.#announced.get(key)?.session === session) this.#announced.delete(key);
 			}
-		});
+		};
 		// Chrome announces no removal when a frame loads another document; that document's tools follow this event.
-		session.on("Page.frameNavigated", (event: Protocol.Page.FrameNavigatedEvent) => {
+		const onNavigated = (event: Protocol.Page.FrameNavigatedEvent): void => {
 			if (event.type !== "Navigation") return;
 			for (const [key, announced] of this.#announced) {
 				if (announced.session === session && announced.tool.frameId === event.frame.id) this.#announced.delete(key);
 			}
+		};
+		session.on("WebMCP.toolsAdded", onAdded);
+		session.on("WebMCP.toolsRemoved", onRemoved);
+		session.on("Page.frameNavigated", onNavigated);
+		this.#watched.set(session, () => {
+			session.off("WebMCP.toolsAdded", onAdded);
+			session.off("WebMCP.toolsRemoved", onRemoved);
+			session.off("Page.frameNavigated", onNavigated);
 		});
 	}
 
@@ -412,6 +420,16 @@ export class WebMcpController {
 		return result;
 	}
 
+	/** Stop following the tab's WebMCP announcements. */
+	async dispose(): Promise<void> {
+		for (const stop of this.#watched.values()) stop();
+		this.#watched.clear();
+		this.#announced.clear();
+		this.#catalog.clear();
+		this.#events = [];
+		this.#droppedThrough = 0;
+	}
+
 	#publicRecord(entry: CatalogEntry, full: boolean): WebMcpToolRecord {
 		return {
 			name: entry.name,
@@ -527,4 +545,9 @@ export class WebMcpController {
 			this.#droppedThrough = removed.at(-1)?.sequence ?? this.#droppedThrough;
 		}
 	}
+}
+
+/** Start following a tab's WebMCP announcements; nothing reaches the page until a `webmcp*` call. */
+export async function installWebMcp(page: Page): Promise<WebMcpController> {
+	return new WebMcpController(page);
 }

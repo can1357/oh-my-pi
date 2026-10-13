@@ -127,13 +127,13 @@ import {
 import { assertTabPressArgs } from "../tab-arguments";
 import type { Observation, ReadyInfo, SessionSnapshot } from "../tab-protocol";
 import { readFilePayloads } from "../upload-files";
-import type {
-	WebMcpEventsOptions,
-	WebMcpEventsResult,
-	WebMcpInvokeOptions,
-	WebMcpInvokeResult,
-	WebMcpListOptions,
-	WebMcpListResult,
+import {
+	type WebMcpEventsOptions,
+	type WebMcpEventsResult,
+	type WebMcpInvokeOptions,
+	type WebMcpInvokeResult,
+	type WebMcpListOptions,
+	type WebMcpListResult,
 } from "../webmcp";
 import { keyDownStep, keyUpStep, pressSteps, type TernInputStep, type TernModifier, ternKey, typeSteps } from "./keys";
 import { TernNetworkLog, type TernRequestEntry } from "./network-log";
