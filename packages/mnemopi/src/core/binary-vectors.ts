@@ -180,8 +180,12 @@ export class BinaryVectorStore {
 	readonly dbPath: DatabasePath;
 	readonly tableName: string;
 	private readonly ownsConnection: boolean;
-	private readonly searchStmt: Statement<VectorRow, []>;
-	private readonly statsStmt: Statement<StatsRow, []>;
+	// `Database.query()` memoizes one Statement per SQL string on the connection, so two
+	// stores sharing a borrowed connection would receive the SAME object here and closing
+	// either store would finalize it out from under the sibling. `prepare()` hands out a
+	// per-instance statement, which keeps every finalize() below owned by this store.
+	readonly #searchStmt: Statement<VectorRow, []>;
+	readonly #statsStmt: Statement<StatsRow, []>;
 
 	constructor(options: BinaryVectorStoreOptions = {}) {
 		this.dbPath = options.dbPath ?? ":memory:";
@@ -189,10 +193,10 @@ export class BinaryVectorStore {
 		this.conn = options.conn ?? openDatabase(this.dbPath, { create: true, readwrite: true });
 		this.ownsConnection = options.conn === undefined;
 		this.initTable();
-		this.searchStmt = this.conn.query<VectorRow, []>(
+		this.#searchStmt = this.conn.prepare<VectorRow, []>(
 			`SELECT memory_id, binary_vector, original_dim, magnitude FROM ${this.tableName}`,
 		);
-		this.statsStmt = this.conn.query<StatsRow, []>(
+		this.#statsStmt = this.conn.prepare<StatsRow, []>(
 			`SELECT COUNT(*) AS count,
 			AVG(LENGTH(binary_vector)) AS avg_bytes,
 			MAX(LENGTH(binary_vector)) AS max_bytes,
@@ -235,7 +239,7 @@ export class BinaryVectorStore {
 	search(queryEmbedding: readonly number[], topK = 10): BinaryVectorSearchResult[] {
 		const queryDim = Math.min(queryEmbedding.length, EMBEDDING_DIM);
 		const queryBinary = maximallyInformativeBinarization(queryEmbedding);
-		const rows = this.searchStmt.all();
+		const rows = this.#searchStmt.all();
 		const results: BinaryVectorSearchResult[] = [];
 		for (const row of rows) {
 			const storedDim = Math.max(0, Math.min(EMBEDDING_DIM, Math.trunc(toFiniteNumber(row.original_dim))));
@@ -258,7 +262,7 @@ export class BinaryVectorStore {
 		this.conn.query(`DELETE FROM ${this.tableName} WHERE memory_id = ?`).run(memoryId);
 	}
 	getStats(): BinaryVectorStats {
-		const row = this.statsStmt.get();
+		const row = this.#statsStmt.get();
 		const count = row?.count ?? 0;
 		const bytesPerVector = row?.avg_bytes ?? 0;
 		return {
@@ -271,8 +275,8 @@ export class BinaryVectorStore {
 		};
 	}
 	close(): void {
-		this.searchStmt.finalize();
-		this.statsStmt.finalize();
+		this.#searchStmt.finalize();
+		this.#statsStmt.finalize();
 		if (this.ownsConnection) {
 			closeQuietly(this.conn);
 		}
