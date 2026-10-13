@@ -12,12 +12,15 @@ import {
 	type ComputerWorkerInbound,
 	type ComputerWorkerOutbound,
 	type ComputerWorkerTransport,
+	ESCAPE_STOPPED_MESSAGE,
 	SCREEN_LOCKED_CAPTURE_NOTE,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/protocol";
 import {
 	type ComputerController,
 	ComputerSupervisor,
 	type ComputerWorkerHandle,
+	registerComputerController,
+	resumeComputerUseForOwner,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { ComputerWorkerCore, type NativeDesktopSession } from "@oh-my-pi/pi-coding-agent/tools/computer/worker";
 import type {
@@ -116,6 +119,7 @@ class FakeNativeSession implements NativeDesktopSession {
 	get screenState(): DesktopScreenState {
 		return { screenLocked: this.screenLocked, displayAsleep: this.displayAsleep };
 	}
+	escapeStops = 0;
 	clickCount = 0;
 	closeCount = 0;
 	cancelCount = 0;
@@ -245,6 +249,18 @@ class FakeNativeSession implements NativeDesktopSession {
 	async close(): Promise<void> {
 		this.closeCount += 1;
 		this.controlActive = false;
+	}
+}
+
+/** The user presses physical Escape during the next click, as the native takeover monitor reports it. */
+class EscapeNativeSession extends FakeNativeSession {
+	escapeOnClick = false;
+
+	override async click(target: string, x: number, y: number, opts?: PointerOptions | null): Promise<void> {
+		if (!this.escapeOnClick) return await super.click(target, x, y, opts);
+		this.escapeOnClick = false;
+		this.escapeStops += 1;
+		throw new Error("Cancelled: desktop operation cancelled; input may be partial; inspect before retrying");
 	}
 }
 
@@ -2173,6 +2189,82 @@ describe("expanded computer APIs", () => {
 		await supervisor.close();
 		expect(native.controlActive).toBe(false);
 		expect(native.closeCount).toBe(1);
+	});
+
+	it("refuses computer use after the user's Escape until their next message, and not after a host abort", async () => {
+		const native = new EscapeNativeSession();
+		const ownerId = `escape-owner-${crypto.randomUUID()}`;
+		const session: ToolSession = { ...toolSession(), getEvalKernelOwnerId: () => ownerId };
+		const sent: string[] = [];
+		let runSent = Promise.withResolvers<void>();
+		const supervisor = new ComputerSupervisor(session, () => {
+			const worker = liveWorker(native);
+			return {
+				...worker,
+				send: message => {
+					sent.push(message.type);
+					worker.send(message);
+					if (message.type === "run") runSent.resolve();
+				},
+			};
+		});
+		const unregister = registerComputerController(ownerId, supervisor);
+		const prelude = createComputerPrelude(session, () => supervisor);
+		const context = { session, toolCallId: "escape-stop" };
+		const click = {
+			action: "call",
+			chain: [
+				{ method: "window", args: ["42"] },
+				{ method: "click", args: [1, 2] },
+			],
+		};
+		try {
+			await prelude.invoke(click, context);
+			const abort = new AbortController();
+			runSent = Promise.withResolvers<void>();
+			const hung = prelude.invoke(
+				{ action: "run", code: "await wait(5_000)" },
+				{ ...context, signal: abort.signal },
+			);
+			await runSent.promise;
+			const cancels = native.cancelCount;
+			abort.abort();
+			await expect(hung).rejects.toThrow();
+			expect(native.cancelCount).toBeGreaterThan(cancels);
+			await prelude.invoke(click, context);
+			expect(native.clickCount).toBe(2);
+
+			native.escapeOnClick = true;
+			await expect(prelude.invoke(click, context)).rejects.toThrow(ESCAPE_STOPPED_MESSAGE);
+			const sentAfterStop = sent.length;
+			for (const parameters of [click, { action: "run", code: "return 1" }, { action: "capabilities" }]) {
+				await expect(prelude.invoke(parameters, context)).rejects.toThrow("the user pressed Escape");
+			}
+			expect(sent.length).toBe(sentAfterStop);
+			expect(native.clickCount).toBe(2);
+
+			resumeComputerUseForOwner(ownerId);
+			await prelude.invoke(click, context);
+			expect(native.clickCount).toBe(3);
+
+			// A script that swallows the cancelled click still ends as the user's stop.
+			native.escapeOnClick = true;
+			await expect(
+				prelude.invoke(
+					{ action: "run", code: "try { await (await desktop.window(42)).click(1, 2); } catch {} return 1;" },
+					context,
+				),
+			).rejects.toThrow(ESCAPE_STOPPED_MESSAGE);
+			resumeComputerUseForOwner(ownerId);
+
+			// Escape between runs revokes held control; the next run sends nothing after it.
+			native.escapeStops += 1;
+			await expect(prelude.invoke(click, context)).rejects.toThrow(ESCAPE_STOPPED_MESSAGE);
+			expect(native.clickCount).toBe(3);
+		} finally {
+			unregister();
+			await supervisor.close();
+		}
 	});
 
 	it("routes nested menus, displays, observation, applications and bounded holds through the JS facade and worker", async () => {

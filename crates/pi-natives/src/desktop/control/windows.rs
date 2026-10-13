@@ -28,7 +28,7 @@ unsafe extern "system" fn observe(code: i32, message: WPARAM, data: LPARAM) -> L
 		if key.vkCode == u32::from(VK_ESCAPE) && key.flags & LLKHF_INJECTED == 0 {
 			STOP.with_borrow(|stop| {
 				if let Some(stop) = stop {
-					stop.cancel();
+					stop.escape();
 				}
 			});
 		}

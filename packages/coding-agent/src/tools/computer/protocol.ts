@@ -37,6 +37,10 @@ export interface ComputerRunOk {
 	capabilities?: DesktopCapabilities;
 }
 
+/** Result of a run the user stopped with physical Escape during takeover input. */
+export const ESCAPE_STOPPED_MESSAGE =
+	"The user pressed Escape to stop computer use; this call stopped and its input may be partial. Do not use the computer again this turn: tell the user what you did and what remains.";
+
 /** Appended to a screenshot taken while the macOS lock screen is up. */
 export const SCREEN_LOCKED_CAPTURE_NOTE = prompt.render(screenLockedCaptureNote);
 
@@ -83,7 +87,7 @@ export type ComputerWorkerOutbound =
 	| { type: "control-revoked"; id: string }
 	| { type: "pong"; id: string }
 	| { type: "result"; id: string; ok: true; payload: ComputerRunOk }
-	| { type: "result"; id: string; ok: false; error: RunErrorPayload }
+	| { type: "result"; id: string; ok: false; error: RunErrorPayload; escapeStopped?: true }
 	| { type: "capabilities"; id: string; ok: true; capabilities: DesktopCapabilities }
 	| { type: "capabilities"; id: string; ok: false; error: RunErrorPayload }
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }

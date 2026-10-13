@@ -157,7 +157,7 @@ impl X11 {
 								&& !name.contains("XTEST")
 								&& !name.starts_with("OMP MPX ")
 						}) {
-							emergency.cancel();
+							emergency.escape();
 						}
 					},
 					Ok(Some(Event::MappingNotify(_))) => {

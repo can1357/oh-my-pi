@@ -96,7 +96,7 @@ unsafe extern "C" fn observe(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> R
 			super::USER_ACTIVITY.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 		}
 		if physical_escape(kind, key, pid, tag) {
-			context.stop.cancel();
+			context.stop.escape();
 		}
 	}
 	event

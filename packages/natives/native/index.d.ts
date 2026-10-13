@@ -43,6 +43,12 @@ export declare class DesktopSession {
    * behind the worker, so it answers at once even while a request is stuck.
    */
   get screenState(): DesktopScreenState
+  /**
+   * How many times the user's physical Escape has stopped takeover input in
+   * this session. Host cancels, retirement and release never count, so a
+   * rise tells the host the user stopped the work.
+   */
+  get escapeStops(): number
   listDisplays(): Promise<Array<DesktopDisplay>>
   listWindows(): Promise<Array<DesktopWindow>>
   listApplications(options?: ApplicationQuery | undefined | null): Promise<Array<Application>>

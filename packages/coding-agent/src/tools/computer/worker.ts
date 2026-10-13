@@ -41,6 +41,7 @@ import {
 	type ComputerSessionSnapshot,
 	type ComputerWorkerInbound,
 	type ComputerWorkerTransport,
+	ESCAPE_STOPPED_MESSAGE,
 	type RunErrorPayload,
 	SCREEN_LOCKED_CAPTURE_NOTE,
 	screenStateNotice,
@@ -53,6 +54,8 @@ export interface NativeDesktopSession {
 	readonly capabilities: DesktopCapabilities;
 	/** Lock and display-sleep state, read without waiting behind queued native work. */
 	readonly screenState: DesktopScreenState;
+	/** Physical-Escape stops of takeover input so far; host cancels never count. */
+	readonly escapeStops: number;
 	listDisplays(): Promise<DesktopDisplay[]>;
 	listWindows(): Promise<DesktopWindow[]>;
 	capture(target: string, caps?: { maxWidth?: number; maxHeight?: number } | null): Promise<DesktopCapture>;
@@ -757,6 +760,8 @@ export class ComputerWorkerCore {
 	#sessionInit?: Promise<NativeDesktopSession>;
 	#runtime?: JsRuntime;
 	#active: ActiveRun | null = null;
+	/** Native Escape stops already reported to the host. */
+	#escapeStopsSeen = 0;
 	/**
 	 * Per-run context, carried through AsyncLocalStorage so async work leaked
 	 * from an ended run (timers, dangling promises) keeps that run's aborted
@@ -880,10 +885,14 @@ export class ComputerWorkerCore {
 		let returnValue: unknown;
 		let failure: { error: unknown } | undefined;
 		let completed = false;
+		let escapeStopped = false;
 		try {
 			throwIfAborted(signal);
 			const session = await this.#ensureSession(message.session);
 			throwIfAborted(signal);
+			// An Escape between runs revoked held control; this run must not send input after it.
+			escapeStopped = this.#takeEscapeStops();
+			if (escapeStopped) throw new ToolError(ESCAPE_STOPPED_MESSAGE);
 			const runtime = this.#ensureRuntime(message.session);
 			runtime.setCwd(message.session.cwd);
 			const desktop = this.#createDesktopScope(session);
@@ -947,6 +956,17 @@ export class ComputerWorkerCore {
 			runAc.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Computer run ended")));
 			if (this.#active?.id === message.id) this.#active = null;
 		}
+		// A script that catches the cancelled operation still ends as the user's stop.
+		if (escapeStopped || this.#takeEscapeStops()) {
+			this.#transport.send({
+				type: "result",
+				id: message.id,
+				ok: false,
+				error: errorPayload(new ToolError(ESCAPE_STOPPED_MESSAGE)),
+				escapeStopped: true,
+			});
+			return;
+		}
 		if (failure !== undefined) {
 			this.#transport.send({
 				type: "result",
@@ -976,6 +996,14 @@ export class ComputerWorkerCore {
 				payload: { displays: output.finish(), returnValue: cloneSafe(returnValue), screenshots, capabilities },
 			});
 		}
+	}
+
+	/** Whether the user's physical Escape stopped native work since the last report. */
+	#takeEscapeStops(): boolean {
+		const stops = this.#session?.escapeStops ?? this.#escapeStopsSeen;
+		if (stops <= this.#escapeStopsSeen) return false;
+		this.#escapeStopsSeen = stops;
+		return true;
 	}
 
 	/**

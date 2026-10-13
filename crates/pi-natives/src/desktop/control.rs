@@ -9,7 +9,7 @@ use std::{
 	rc::Rc,
 	sync::{
 		Arc, Weak,
-		atomic::{AtomicBool, AtomicU64, Ordering},
+		atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 	},
 	thread,
 	time::{Duration, Instant},
@@ -37,6 +37,10 @@ struct CancellationState {
 	/// monitor; stays set until a later takeover lease starts one. Background
 	/// leases never arm the monitor and leave it unchanged.
 	escape_failed: AtomicBool,
+	/// Takeover input stopped by the user's physical Escape. Host cancels,
+	/// retirement and release never count, so the host can tell the user's
+	/// stop from its own.
+	escape_stops:  AtomicU32,
 	#[cfg(target_os = "linux")]
 	async_wake:    tokio::sync::Notify,
 }
@@ -103,6 +107,11 @@ impl CancellationSource {
 		self.0.escape_failed.load(Ordering::Acquire)
 	}
 
+	/// How many times the user's physical Escape has stopped this session.
+	pub(crate) fn escape_stops(&self) -> u32 {
+		self.0.escape_stops.load(Ordering::Acquire)
+	}
+
 	#[cfg(test)]
 	pub(crate) fn fail_escape_for_test(&self) {
 		self.0.escape_failed.store(true, Ordering::Release);
@@ -116,6 +125,15 @@ pub(super) struct EmergencyStop(Weak<CancellationState>);
 impl EmergencyStop {
 	fn cancel(&self) {
 		if let Some(source) = self.0.upgrade() {
+			CancellationSource(source).cancel();
+		}
+	}
+
+	/// The user's physical Escape: counted before the cancel, so a host that
+	/// sees the cancelled operation already sees the stop that caused it.
+	fn escape(&self) {
+		if let Some(source) = self.0.upgrade() {
+			source.escape_stops.fetch_add(1, Ordering::AcqRel);
 			CancellationSource(source).cancel();
 		}
 	}
@@ -711,6 +729,23 @@ mod tests {
 		assert!(fresh.check().is_err());
 		drop(KernelOwner::acquire().expect("idle Escape releases kernel ownership"));
 		remove_test_lock();
+	}
+
+	#[test]
+	fn only_the_users_escape_counts_as_an_escape_stop() {
+		let source = CancellationSource::default();
+		let emergency = EmergencyStop(Arc::downgrade(&source.0));
+		source.retire();
+		source.cancel();
+		source.release_control();
+		emergency.cancel();
+		assert_eq!(source.escape_stops(), 0, "host and monitor-failure stops are not the user's");
+		let running = source.token();
+		emergency.escape();
+		assert_eq!(source.escape_stops(), 1);
+		assert!(running.check().is_err(), "the user's Escape cancels running input");
+		source.cancel();
+		assert_eq!(source.escape_stops(), 1);
 	}
 
 	#[test]

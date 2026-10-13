@@ -1303,6 +1303,14 @@ impl DesktopSession {
 		read_screen_state(&self.core.selector)
 	}
 
+	/// How many times the user's physical Escape has stopped takeover input in
+	/// this session. Host cancels, retirement and release never count, so a
+	/// rise tells the host the user stopped the work.
+	#[napi(getter)]
+	pub fn escape_stops(&self) -> u32 {
+		self.core.cancellation.escape_stops()
+	}
+
 	#[napi]
 	pub fn list_displays(&self) -> Result<task::Promise<Vec<DesktopDisplay>>> {
 		let c = Arc::clone(&self.core);

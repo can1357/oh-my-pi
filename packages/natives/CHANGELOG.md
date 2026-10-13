@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `DesktopSession.escapeStops`, counting computer-use takeover input the user stopped with physical Escape on macOS, Windows and X11, apart from host cancels ([#PR](https://github.com/can1357/oh-my-pi/pull/PR) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Changed
 
 - Computer use's physical Escape stop now watches the keyboard only during takeover input (`takeover: true`, held control, desktop-level input, raises); an Escape the user presses in their own app no longer cancels background window input, which the host interrupt still stops ([#15176](https://github.com/can1357/oh-my-pi/pull/15176) by [@will-bogusz](https://github.com/will-bogusz))
