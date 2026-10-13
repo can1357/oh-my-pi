@@ -82,12 +82,20 @@ const server = Bun.serve({
 			// `log` records what the page saw: Chrome fires afterprint only once a print finished, and headless Chrome
 			// returns from an unheld print() without printing anything.
 			return new Response(
-				`<button id="print">Print</button><button id="confirm-print">Print after asking</button><script>
+				`<button id="print">Print</button><button id="confirm-print">Print after asking</button><button id="popup-print">Print a receipt</button><script>
 					globalThis.log = [];
 					addEventListener("afterprint", () => log.push("afterprint"));
 					addEventListener("pageshow", event => { if (event.persisted) log.push("restored"); });
 					document.querySelector("#print").addEventListener("click", () => { print(); log.push("print returned"); });
 					document.querySelector("#confirm-print").addEventListener("click", () => { if (confirm("Print?")) print(); log.push("asked print returned"); });
+					document.querySelector("#popup-print").addEventListener("click", () => {
+						const receipt = open("");
+						receipt.document.write("<p>receipt</p>");
+						receipt.addEventListener("afterprint", () => log.push("receipt afterprint"));
+						receipt.print();
+						log.push("receipt print returned");
+						receipt.close();
+					});
 					if (location.pathname === "/print-on-load") addEventListener("load", () => { print(); log.push("load print returned"); });
 				</script>`,
 				{ headers },
@@ -689,6 +697,31 @@ return await tab.evaluate(() => {
 						"afterprint",
 						"asked print returned",
 					]);
+				} finally {
+					await hold.dispose();
+				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
+	test("holds print() in a window the page opens to print from", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				const hold = await PrintHold.install(page, "calls");
+				try {
+					await hold.beginCall(30_000);
+					// The receipt window's own print() was never held, so its preview blocked this page too.
+					expect(
+						await page
+							.mainFrame()
+							.mainRealm()
+							.evaluate('document.querySelector("#popup-print").click(); globalThis.log'),
+					).toEqual(["receipt afterprint", "receipt print returned"]);
 				} finally {
 					await hold.dispose();
 				}

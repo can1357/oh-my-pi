@@ -40,7 +40,8 @@ function holdPrintInPage(
 	if (typeof print !== "function") return now();
 	Reflect.set(globalThis, wrapped, true);
 	// A document back from the back/forward cache kept the deadline it left with, though a call may be running now
-	// or omp may have gone: it holds `resyncMs` from the restore, until omp sets the current deadline.
+	// or omp may have gone: it holds `resyncMs` from the restore, until omp sets the current deadline. One that went
+	// into the cache before omp attached has no wrapper, and its own `pageshow` runs before omp's update reaches it.
 	Reflect.apply(EventTarget.prototype.addEventListener, globalThis, [
 		"pageshow",
 		(event: Event) => {
@@ -48,20 +49,43 @@ function holdPrintInPage(
 		},
 		true,
 	]);
-	// A proxy keeps the native function's name and length, and its source still reads `[native code]`.
-	const heldPrint = new Proxy(print, {
-		apply(target, thisArg, args) {
-			const heldUntil: unknown = Reflect.get(globalThis, deadline);
-			if (typeof heldUntil !== "number" || now() >= heldUntil) return Reflect.apply(target, thisArg, args);
-			const report: unknown = Reflect.get(globalThis, binding);
-			if (typeof report === "function") report("");
-			Reflect.apply(EventTarget.prototype.dispatchEvent, globalThis, [new Event("beforeprint")]);
-			Reflect.apply(EventTarget.prototype.dispatchEvent, globalThis, [new Event("afterprint")]);
-		},
-	});
-	Reflect.set(globalThis, "print", heldPrint);
+	// A proxy keeps the native function's name and length, and its source still reads `[native code]`. A held call
+	// fires the print events on the window it printed.
+	const holdPrintOf = (view: object, print: Function): Function =>
+		new Proxy(print, {
+			apply(target, thisArg, args) {
+				const heldUntil: unknown = Reflect.get(globalThis, deadline);
+				if (typeof heldUntil !== "number" || now() >= heldUntil) return Reflect.apply(target, thisArg, args);
+				const report: unknown = Reflect.get(globalThis, binding);
+				if (typeof report === "function") report("");
+				Reflect.apply(EventTarget.prototype.dispatchEvent, view, [new Event("beforeprint")]);
+				Reflect.apply(EventTarget.prototype.dispatchEvent, view, [new Event("afterprint")]);
+			},
+		});
+	Reflect.set(globalThis, "print", holdPrintOf(globalThis, print));
+	// A page that prints through a window it opens (`open("")`, write, `print()`) calls that window's own `print()`
+	// before omp could reach the new window, and its print preview blocks this page too: hold it on this document's
+	// deadline. A cross-origin window refuses the access and prints in its own process.
+	const open: unknown = Reflect.get(globalThis, "open");
+	if (typeof open === "function") {
+		const heldOpen = new Proxy(open, {
+			apply(target, thisArg, args) {
+				const opened: unknown = Reflect.apply(target, thisArg, args);
+				try {
+					const openedPrint: unknown = opened === null ? undefined : Reflect.get(Object(opened), "print");
+					if (typeof openedPrint === "function") {
+						Reflect.set(Object(opened), "print", holdPrintOf(Object(opened), openedPrint));
+					}
+				} catch {}
+				return opened;
+			},
+		});
+		Reflect.set(globalThis, "open", heldOpen);
+	}
 	// A dialog the page opens while `print()` is held returns into code that may print at once (`if (confirm(…))
 	// print()`), before omp can set a deadline in a page the dialog stopped: that print is held for `resyncMs` too.
+	// One that opened while released stays so: Chrome runs no command in a page a dialog stopped, and the page runs on
+	// from the answer before any command queued behind it.
 	for (const name of ["alert", "confirm", "prompt"]) {
 		const dialog: unknown = Reflect.get(globalThis, name);
 		if (typeof dialog !== "function") continue;
