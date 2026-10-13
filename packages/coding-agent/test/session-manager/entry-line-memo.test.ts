@@ -457,4 +457,75 @@ describe("SessionManager entry-line memo", () => {
 		expect(bodyAfterSecond).toContain('"lineCount":7');
 		expect(bodyAfterSecond).not.toContain('"lineCount":2');
 	});
+
+	it("rewrites a non-atomic tool result whose stripped jsonlEvents form a back-reference cycle", async () => {
+		// A streaming event can reference the array holding it. Persistence
+		// strips `jsonlEvents` before serialization, so the cycle never reaches
+		// the line — but the hook pre-scan must skip the stripped subgraph too,
+		// or it recurses into the cycle, overflows the stack, and latches a
+		// persistence failure on every full rewrite.
+		const events: unknown[] = [{ seq: 1 }];
+		events.push(events);
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-cyclic-transient",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: { jsonlEvents: events },
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// Full rewrite succeeds: the persisted line drops the stripped key and
+		// carries the surviving fields — no latched failure, no truncated body.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		expect(body).not.toContain("jsonlEvents");
+		expect(body).toContain('"toolName":"bash"');
+	});
+
+	it("never invokes a stateful toJSON prototype getter outside serialization", async () => {
+		// The opaque `details` slot can expose its serializer through a
+		// prototype getter that closes over `++revision`. The hook pre-scan
+		// must answer through the property descriptor, never by reading the
+		// key: the persisted line must carry exactly what the serializations
+		// observed, with no extra probe invocation between them.
+		let revision = 0;
+		const prototype = {};
+		Object.defineProperty(prototype, "toJSON", {
+			enumerable: true,
+			configurable: true,
+			get() {
+				revision++;
+				const observed = revision;
+				return () => observed;
+			},
+		});
+		const details = Object.create(prototype) as Record<string, unknown>;
+		details.marker = "fix15222-getter";
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-stateful-getter",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// One atomic publish performs two full-body serializations
+		// (materialize, then commit), so the getter runs exactly twice and the
+		// persisted line carries the second serialization's revision — a probe
+		// that reads the key would run it four times and persist revision 4.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(revision).toBe(2);
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"details":2');
+	});
 });
