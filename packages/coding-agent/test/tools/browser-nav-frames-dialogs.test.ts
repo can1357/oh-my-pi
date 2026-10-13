@@ -82,7 +82,7 @@ const server = Bun.serve({
 			// `log` records what the page saw: Chrome fires afterprint only once a print finished, and headless Chrome
 			// returns from an unheld print() without printing anything.
 			return new Response(
-				`<button id="print">Print</button><button id="confirm-print">Print after asking</button><button id="popup-print">Print a receipt</button><script>
+				`<button id="print">Print</button><button id="confirm-print">Print after asking</button><button id="popup-print">Print a receipt</button><button id="popup-url-print">Open a receipt</button><script>
 					globalThis.log = [];
 					addEventListener("afterprint", () => log.push("afterprint"));
 					addEventListener("pageshow", event => { if (event.persisted) log.push("restored"); });
@@ -96,7 +96,19 @@ const server = Bun.serve({
 						log.push("receipt print returned");
 						receipt.close();
 					});
+					document.querySelector("#popup-url-print").addEventListener("click", () => void open("/receipt"));
 					if (location.pathname === "/print-on-load") addEventListener("load", () => { print(); log.push("load print returned"); });
+				</script>`,
+				{ headers },
+			);
+		}
+		if (pathname === "/receipt") {
+			// A receipt window that prints as it loads, reporting to the page that opened it.
+			return new Response(
+				`<p>receipt</p><script>
+					addEventListener("afterprint", () => opener.log.push("receipt afterprint"));
+					print();
+					opener.log.push("receipt print returned");
 				</script>`,
 				{ headers },
 			);
@@ -614,9 +626,12 @@ return await tab.evaluate(() => {
 				try {
 					await page.goto(`${baseUrl}/print`);
 					await first.beginCall(30_000);
-					// A second attachment arrives released; it must not release the first one's call.
+					// A second attachment that finishes its setup and lets go must not release the first one's call.
 					const second = await PrintHold.install(page, "calls");
 					try {
+						second.endCall();
+						// Real time, past the second one's 1.5 s release on the page's own clock.
+						await Bun.sleep(1_700);
 						const clicked = await page
 							.mainFrame()
 							.mainRealm()
@@ -722,6 +737,83 @@ return await tab.evaluate(() => {
 							.mainRealm()
 							.evaluate('document.querySelector("#popup-print").click(); globalThis.log'),
 					).toEqual(["receipt afterprint", "receipt print returned"]);
+				} finally {
+					await hold.dispose();
+				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
+	test("holds print() in the page a window the page opens to a URL loads", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				const hold = await PrintHold.install(page, "calls");
+				try {
+					await hold.beginCall(30_000);
+					// Chrome loads the receipt into the same window object the open() wrapper reached; it prints as it loads.
+					await page.mainFrame().mainRealm().evaluate('document.querySelector("#popup-url-print").click()');
+					await page
+						.mainFrame()
+						.mainRealm()
+						.waitForFunction('log.includes("receipt print returned")', { timeout: 5_000, polling: 50 });
+					expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
+						"receipt afterprint",
+						"receipt print returned",
+					]);
+				} finally {
+					await hold.dispose();
+				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
+	test("holds print() an init script the tab adds after the hold kept for later", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				const hold = await PrintHold.install(page, "calls");
+				try {
+					// Added the way the tab worker adds its init scripts, after the hold; each call moves the deadline.
+					await page.evaluateOnNewDocument(
+						'const keptPrint = print; addEventListener("load", () => { keptPrint(); log.push("load print returned"); });',
+					);
+					await hold.beginCall(30_000);
+					await page.goto(`${baseUrl}/print`);
+					expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
+						"afterprint",
+						"load print returned",
+					]);
+				} finally {
+					await hold.dispose();
+				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
+	test("holds print() in the user's browser while omp sets up the tab, until setup ends", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				const hold = await PrintHold.install(page, "calls");
+				try {
+					const click = 'log.length = 0; document.querySelector("#print").click(); globalThis.log';
+					expect(await page.mainFrame().mainRealm().evaluate(click)).toEqual(["afterprint", "print returned"]);
+					hold.endCall();
+					// Real time, past the 1.5 s release on the page's own clock, which fake timers cannot reach.
+					await Bun.sleep(1_700);
+					expect(await page.mainFrame().mainRealm().evaluate(click)).toEqual(["print returned"]);
 				} finally {
 					await hold.dispose();
 				}
