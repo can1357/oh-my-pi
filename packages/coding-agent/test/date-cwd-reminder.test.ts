@@ -196,9 +196,12 @@ describe("date-cwd-reminder", () => {
 			// injector must hold no reference — memo or otherwise — that keeps a
 			// discarded turn alive. The sentinel tail below is never injected, so
 			// only the replay memo pins it; after `release()` plus a full GC it
-			// must be collectable. (`Bun.gc(true)` forces a full collection, the
-			// same trigger `packages/ai/test/fixtures/completion-retention.ts`
-			// uses; the deadline loop only waits out GC scheduling jitter.)
+			// must be collectable. Collection runs from a fresh timer callback per
+			// `packages/tui/test/gc.ts`: JSC scans stale async frames conservatively,
+			// so `Bun.gc(true)` issued from this resumed async frame can retain the
+			// released tail; a timer callback runs on the event loop's shallow stack,
+			// out of reach of those frames. The 2s deadline sits far inside Bun's 5s
+			// per-test default, leaving timeout margin.
 			function buildPinnedTail(): { ref: WeakRef<Message>; injector: DateCwdReminderInjector } {
 				const injector = new DateCwdReminderInjector();
 				const tail: Message = { role: "user", content: "sentinel-tail", timestamp: 2 };
@@ -209,13 +212,20 @@ describe("date-cwd-reminder", () => {
 				);
 				return { ref: new WeakRef(tail), injector };
 			}
+			function collectGarbage(): Promise<void> {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				setTimeout(() => {
+					Bun.gc(true);
+					resolve();
+				}, 0);
+				return promise;
+			}
 			const { ref, injector } = buildPinnedTail();
 			injector.release();
 			let collected = false;
-			const deadline = performance.now() + 5_000;
+			const deadline = performance.now() + 2_000;
 			do {
-				await Bun.sleep(0);
-				Bun.gc(true);
+				await collectGarbage();
 				collected = ref.deref() === undefined;
 			} while (!collected && performance.now() < deadline);
 			expect(collected).toBe(true);
