@@ -130,6 +130,39 @@ describe("date-cwd-reminder", () => {
 			expect(replay.messages).not.toContain(marker);
 		});
 
+		it("keeps a duplicated anchor's controls on their own occurrences after a tail reorder", () => {
+			const injector = new DateCwdReminderInjector();
+			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
+			// One non-user turn object sitting in the input twice, so the control the
+			// reminder change appends is anchored to both occurrences.
+			const anchor = createAssistantMessage("tool turn");
+			const messageSet = () => [firstUser, anchor, anchor];
+
+			injector.transform({ systemPrompt: ["system"], messages: messageSet() }, "2026-08-14", "/old");
+			const live = injector.transform({ systemPrompt: ["system"], messages: messageSet() }, "2026-08-15", "/new");
+			const control = live.messages.at(-1)!;
+			expect(control.role).toBe("developer");
+
+			// A downstream consumer reorders the tail it was handed: the anchored
+			// control moves ahead of the second occurrence of the anchor.
+			const memo = live.messages;
+			expect([memo[1], memo[2], memo[3], memo[4]]).toEqual([anchor, control, anchor, control]);
+			memo.splice(3, 2, control, anchor);
+
+			const replay = injector.transform({ systemPrompt: ["system"], messages: messageSet() }, "2026-08-15", "/new");
+
+			// The reordered array is not replayed: the reminder control stays where it
+			// was appended, after the occurrence it belongs to.
+			expect(replay.messages).not.toBe(memo);
+			const wire = replay.messages.map(message => {
+				if (message === control) return "control";
+				if (message === anchor) return "anchor";
+				if (message === memo[0]) return "injected";
+				return "unexpected";
+			});
+			expect(wire).toEqual(["injected", "anchor", "control", "anchor", "control"]);
+		});
+
 		it("drops the replay memo but preserves injection state on release", () => {
 			const injector = new DateCwdReminderInjector();
 			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
@@ -184,41 +217,17 @@ describe("date-cwd-reminder", () => {
 			expect(after.messages.slice(1)).toEqual([kept, toolTurn, control]);
 			expect(after.messages[0]?.content).toBe(`${renderDateCwdReminder("2026-08-14", "/new")}\n\nsummary`);
 		});
-		it("rebuilds a regular reminder replay instead of rejecting it", () => {
-			const injector = new DateCwdReminderInjector();
-			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
-			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
-
-			const first = injector.transform(context, "2026-08-14", "/work/omp");
-			const replay = injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
-
-			// A normal reminder replay must hit the memo and return the cached array.
-			expect(replay.messages).toBe(first.messages);
-		});
-
-		it("preserves injection and control state when release() only invalidates the memo", () => {
-			const injector = new DateCwdReminderInjector();
-			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
-			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
-
-			const first = injector.transform(context, "2026-08-14", "/work/omp");
-			const injectedClone = first.messages[0]!;
-
-			// A queue-only edit fires release() without changing the transcript.
-			injector.release();
-
-			// The next request must rebuild from the live transcript, preserving the
-			// injected clone's bytes (not rewriting the first user turn with a new reminder).
-			const replay = injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
-
-			expect(replay.messages[0]).toBe(injectedClone);
-			expect(replay.messages[0]?.content).toBe(injectedClone.content);
-		});
 	});
 });
 
 describe("date-cwd reminder on the provider wire", () => {
 	const sessions: Array<{ dispose(): Promise<void> }> = [];
+
+	/** Flatten a turn's text so reminder bytes can be matched regardless of part shape. */
+	function reminderText(message: Message): string {
+		if (typeof message.content === "string") return message.content;
+		return message.content.flatMap(part => (part.type === "text" ? part.text : [])).join("\n");
+	}
 
 	afterEach(async () => {
 		clearCustomApis();
@@ -405,6 +414,91 @@ describe("date-cwd reminder on the provider wire", () => {
 			]);
 			expect(wire[2]!.at(-1)).toBe(reminder);
 			expect(wire[4]!.filter(message => message === reminder)).toHaveLength(1);
+		} finally {
+			setSystemTime();
+			authStorage.close();
+		}
+	});
+
+	it("keeps the injected reminder bytes when a queue-only edit replaces the queues", async () => {
+		using tempDir = TempDir.createSync("@pi-date-cwd-reminder-queue-");
+		const api = "test-date-cwd-reminder-queue";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("ok");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+		const model = buildModel({
+			id: "date-cwd-reminder-queue",
+			name: "Date cwd reminder queue",
+			api,
+			provider: "managed-primary",
+			baseUrl: "https://api.example.com/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.keys.setRuntime(model.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			toolNames: [],
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			taskDepth: 1,
+			agentId: "SubAgent",
+		});
+		sessions.push(session);
+
+		const cwd = normalizePromptPath(tempDir.path());
+		setSystemTime(new Date(2026, 7, 14, 12, 0));
+		try {
+			await session.sendUserMessage("first");
+			await session.waitForIdle();
+			expect(contexts).toHaveLength(1);
+			const sent = contexts[0]!.messages[0]!;
+			expect(reminderText(sent)).toContain(renderDateCwdReminder("2026-08-14", cwd));
+
+			// Queue a follow-up without delivering it, then pop it: `replaceQueues`
+			// replaces the queues under a live transcript, so only the replay memo
+			// may be dropped — the injected turns must survive untouched.
+			await session.sendUserMessage("queued follow up", { deliverAs: "followUp" });
+			expect(session.popLastQueuedMessage()?.text).toBe("queued follow up");
+			await session.waitForIdle();
+			expect(contexts).toHaveLength(1);
+
+			// The day rolls over after the queue-only edit, so the next request needs a
+			// fresh reminder on its own turn while the historical turn keeps its bytes.
+			setSystemTime(new Date(2026, 7, 15, 0, 1));
+			await session.sendUserMessage("second");
+			expect(contexts).toHaveLength(2);
+
+			const resent = contexts[1]!.messages[0]!;
+			expect(resent.content).toEqual(sent.content);
+			expect(reminderText(resent)).not.toContain(renderDateCwdReminder("2026-08-15", cwd));
+			const newTurn = contexts[1]!.messages.at(-1)!;
+			expect(reminderText(newTurn)).toContain(renderDateCwdReminder("2026-08-15", cwd));
 		} finally {
 			setSystemTime();
 			authStorage.close();

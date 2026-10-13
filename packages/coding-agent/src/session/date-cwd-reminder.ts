@@ -69,14 +69,16 @@ export class DateCwdReminderInjector {
 	 * would survive it.
 	 *
 	 * `derived` lists the injected/control turns in output order, each tagged with
-	 * the input turn it follows. It lets reuse re-check the *returned* array
-	 * against the shape it was built with (see {@link #replayable}) without
-	 * re-copying anything.
+	 * the occurrence index of the input turn it replaces or follows. Occurrence
+	 * index, not object identity: the same turn object can sit in the input more
+	 * than once, and identity alone would let a reordered tail satisfy the check.
+	 * It lets reuse re-check the *returned* array against the shape it was built
+	 * with (see {@link #replayable}) without re-copying anything.
 	 */
 	#memo:
 		| {
 				refs: Message[];
-				derived: Array<{ after: Message; message: Message; isInjected: boolean }>;
+				derived: Array<{ index: number; message: Message; isInjected: boolean }>;
 				root: UserMessage;
 				reminder: string;
 				version: number;
@@ -183,13 +185,13 @@ export class DateCwdReminderInjector {
 		const root = this.#root;
 		const currentReminder = this.#currentReminder;
 		if (root !== undefined && currentReminder !== undefined) {
-			const derived: Array<{ after: Message; message: Message; isInjected: boolean }> = [];
-			for (const message of messages) {
+			const derived: Array<{ index: number; message: Message; isInjected: boolean }> = [];
+			for (let index = 0; index < messages.length; index++) {
+				const message = messages[index]!;
 				const injected = this.#injections.get(message);
-				if (injected) derived.push({ after: message, message: injected, isInjected: true });
+				if (injected) derived.push({ index, message: injected, isInjected: true });
 				const controls = controlsByAnchor.get(message);
-				if (controls)
-					for (const control of controls) derived.push({ after: message, message: control, isInjected: false });
+				if (controls) for (const control of controls) derived.push({ index, message: control, isInjected: false });
 			}
 			this.#memo = {
 				refs: messages.slice(),
@@ -209,12 +211,14 @@ export class DateCwdReminderInjector {
 	 * provider appending its own marker, a retry wrapper splicing the array) can
 	 * mutate it in place; the input snapshot alone cannot see that, so the output
 	 * is re-checked against the shape it was built with: same arity, and every
-	 * slot still holding the input turn or the derived turn that follows it.
+	 * slot still holding the input turn or the derived turn that follows it —
+	 * matched by input occurrence, so a turn object repeated in the input cannot
+	 * stand in for the other occurrence.
 	 */
 	#replayable(
 		memo: {
 			refs: Message[];
-			derived: Array<{ after: Message; message: Message; isInjected: boolean }>;
+			derived: Array<{ index: number; message: Message; isInjected: boolean }>;
 			output: Message[];
 		},
 		messages: Message[],
@@ -229,9 +233,10 @@ export class DateCwdReminderInjector {
 		if (output.length !== refs.length + controlCount) return false;
 		let slot = 0;
 		let position = 0;
-		for (const message of refs) {
+		for (let inputIndex = 0; inputIndex < refs.length; inputIndex++) {
+			const message = refs[inputIndex]!;
 			// An injection replaces the original: it occupies the slot instead.
-			if (slot < derived.length && derived[slot]!.after === message && derived[slot]!.isInjected) {
+			if (slot < derived.length && derived[slot]!.index === inputIndex && derived[slot]!.isInjected) {
 				if (output[position] !== derived[slot]!.message) return false;
 				position++;
 				slot++;
@@ -241,7 +246,7 @@ export class DateCwdReminderInjector {
 				position++;
 			}
 			// Controls follow the (possibly injected) message.
-			while (slot < derived.length && derived[slot]!.after === message) {
+			while (slot < derived.length && derived[slot]!.index === inputIndex) {
 				if (output[position] !== derived[slot]!.message) return false;
 				position++;
 				slot++;
