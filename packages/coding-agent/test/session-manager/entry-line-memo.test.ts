@@ -192,4 +192,100 @@ describe("SessionManager entry-line memo", () => {
 		expect(secondWrite).toContain('"details":2');
 		expect(secondWrite).not.toContain('"details":1');
 	});
+
+	it("re-projects a boxed-primitive detail whose toJSON projection changed", async () => {
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		// `JSON.stringify` runs `toJSON` BEFORE unboxing, so this wrapper's
+		// projected value is the hook's output, never `valueOf()`. Both start at
+		// 1; only the hook's output moves below.
+		const details = new Number(1);
+		const boxed = details as number & { serialized: number; toJSON: () => number };
+		boxed.serialized = 1;
+		boxed.toJSON = () => boxed.serialized;
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-hook",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: memo miss — header + entry are projected. The line reads
+		// the hook's output.
+		await session.appendEntriesAtomically(() => {});
+		const afterFirst = prepareSpy.mock.calls.length;
+		expect(afterFirst).toBeGreaterThan(0);
+		const firstWrite = writeSpy.mock.calls.at(-1)?.[1] as string | undefined;
+		expect(firstWrite).toContain('"details":1');
+
+		// Only the hook's output moves — `valueOf()` still reads 1, so a stamp
+		// that unboxes before consulting the hook sees no change at all.
+		boxed.serialized = 2;
+
+		// Second rewrite: the stamp must compare the toJSON projection, so the
+		// entry's line is re-projected and the persisted body carries `2`.
+		await session.appendEntriesAtomically(() => {});
+		expect(prepareSpy.mock.calls.length - afterFirst).toBe(2);
+		const secondWrite = writeSpy.mock.calls.at(-1)?.[1] as string | undefined;
+		expect(secondWrite).toBeDefined();
+		expect(secondWrite).toContain('"details":2');
+		expect(secondWrite).not.toContain('"details":1');
+
+		// Third rewrite with the projection settled: the stamp now records the
+		// hook's output, so the unchanged entry stays a memo hit. A stamp that
+		// unboxes before the hook records `valueOf()` instead and re-projects
+		// this entry on every pass.
+		await session.appendEntriesAtomically(() => {});
+		expect(prepareSpy.mock.calls.length - afterFirst).toBe(3);
+	});
+
+	it("rewrites a tool result whose transient jsonlEvents detail is cyclic", async () => {
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		// `truncateForPersistence` strips `jsonlEvents` (raw streaming events,
+		// already saved to artifact files) before serialization, so this detail
+		// has always been persistable. The events array is genuinely cyclic: the
+		// event points back at the array holding it.
+		const events: Array<Record<string, unknown>> = [{ type: "progress", text: "streaming" }];
+		events[0].container = events;
+		const messageId = session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-cycle",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: { jsonlEvents: events, exitCode: 0 },
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the stamp walk must terminate on the cycle, and the
+		// persisted line carries only the projected detail.
+		await session.rewriteEntries();
+		const afterFirst = prepareSpy.mock.calls.length;
+		expect(afterFirst).toBeGreaterThan(0);
+		const firstWrite = writeSpy.mock.calls.at(-1)?.[1] as string | undefined;
+		expect(firstWrite).toBeDefined();
+		expect(firstWrite).not.toContain("jsonlEvents");
+		expect(firstWrite).toContain('"exitCode":0');
+
+		// Second rewrite: the memo re-walks the live message against its stamp.
+		// The skip must hold on this side too — the cycle must not be entered
+		// here either — and the unchanged entry stays a memo hit.
+		await session.rewriteEntries();
+		expect(prepareSpy.mock.calls.length - afterFirst).toBe(1);
+
+		// A projected leaf moved: the memo misses and re-projects, still without
+		// walking the cycle.
+		const entry = session.getEntries().find(e => e.id === messageId);
+		if (!entry || entry.type !== "message" || entry.message.role !== "toolResult") {
+			throw new Error("Expected toolResult message entry");
+		}
+		(entry.message.details as Record<string, unknown>).exitCode = 3;
+		await session.rewriteEntries();
+		expect(prepareSpy.mock.calls.length - afterFirst).toBe(3);
+		const thirdWrite = writeSpy.mock.calls.at(-1)?.[1] as string | undefined;
+		expect(thirdWrite).toContain('"exitCode":3');
+		expect(thirdWrite).not.toContain("jsonlEvents");
+	});
 });
