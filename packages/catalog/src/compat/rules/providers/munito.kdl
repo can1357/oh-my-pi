@@ -1,0 +1,67 @@
+// Catalog entry for "munito" (api.munito.ai): EU-based open-model inference
+// (https://docs.munito.ai).
+
+provider "munito" {
+	default-model "qwen/qwen3.8-27b"
+	env "MUNITO_API_KEY"
+	// A retired id would otherwise linger as a dead bundled row.
+	dynamic-models-authoritative #true
+	// /models is public (invalid keys still 401): discovery runs keyless and
+	// the seed covers regens that cannot reach the endpoint.
+	discovery label="Munito" allow-unauthenticated=#true
+
+	// Covers regens that cannot reach the endpoint; authoritative discovery
+	// (the default-model qwen row) must win so retired ids do not linger.
+	seed api="openai-completions" base-url="https://api.munito.ai/inference/v1" bundle="fallback" {
+		model "qwen/qwen3.8-27b" name="Qwen3.8 27B" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1001536 max-tokens=32768
+			supports-tools #true
+		}
+		model "google/gemma-4-12b" name="Gemma 4 12B" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #true
+		}
+	}
+
+	// The tier 400s anything outside its whitelist: `max_tokens` only (no
+	// `max_completion_tokens`), and no `store`, which class defaults would
+	// emit for deepseek, glm, gemma, and kolibri rows.
+	max-tokens-field "max_tokens"
+	supports-store #false
+
+	// The qwen dialect (`enable_thinking`/`chat_template_kwargs`) 400s here
+	// ("unknown parameter"), and `none` is refused too: no wire off-switch.
+	thinking-format "openai"
+	// Streams arrive under `reasoning`, not `reasoning_content`.
+	reasoning-content-field "reasoning"
+
+	// Munito's ladder, not the identities' class ladders (deepseek/glm flash
+	// bare-family ladders rank above a provider-wide axis on dimensions; the
+	// glm-5.3 SKUs add priority=10): the models glob raises exactness above
+	// unscoped class rules and this priority clears reviewed class ladders —
+	// those predate munito and Munito's contract documents minimal..max for
+	// every row it serves. The exact no-effort lanes below override it.
+	models "*" priority=11 {
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+
+	// The serving tier 400s `reasoning_effort` on these lanes ("not available
+	// for this model"); reasoning keeps running at the template default.
+	models "qwen/qwen3.6-35b-a3b" "google/gemma-4-12b" {
+		thinking-efforts
+		supports-reasoning-effort #false
+	}
+	// Gemma 4 12B reasons by template default (no non-reasoning mode served),
+	// and no canonical reference exists to recover the flag from. The exact
+	// selector opens the thinking gate so the escaped neutral spec above
+	// materializes as reasoning-capable with no ladder.
+	models "google/gemma-4-12b" {
+		thinking-upgrade-neutral #true
+	}
+}

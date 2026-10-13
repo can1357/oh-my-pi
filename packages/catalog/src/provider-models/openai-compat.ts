@@ -5476,6 +5476,88 @@ export function stepfunModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 16.10 Munito
+// ---------------------------------------------------------------------------
+
+export interface MunitoModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Chat models only: OCR SKUs are excluded via `runtime/behavior.kdl`
+ * (`exclude-models provider="munito"`).
+ */
+export function isMunitoChatModelId(id: string): boolean {
+	const normalized = id.trim().toLowerCase();
+	if (!normalized) {
+		return false;
+	}
+	return !isExcludedModel("munito", normalized);
+}
+
+/**
+ * Munito reference recovery: Munito's `/models` rows carry only
+ * `id`/`owned_by`. An id bundled on Munito hydrates through
+ * {@link mapWithBundledReference}; anything else recovers intrinsic
+ * capabilities (context window, output limit, reasoning, modalities) from the
+ * bundled canonical reference index (`recover-canonical-params "munito"`).
+ * Thinking stays unset: ladders are host policy, and an inherited reference
+ * ladder would win `resolveThinkingPolicy` and defeat Munito's authored
+ * thinking rules, so the provider KDL owns the effort ladder and wire
+ * dialect. Identity, pricing, and compat are never borrowed: Munito
+ * publishes no per-model tariff, so pricing stays zeroed.
+ */
+export function mapMunitoReferenceModel<TApi extends Api>(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<TApi>,
+	reference: ModelSpec<TApi> | undefined,
+): ModelSpec<TApi> {
+	if (reference) {
+		return mapWithBundledReference(entry, defaults, reference);
+	}
+	const canonical = resolveModelReference(defaults.id, getBundledModelReferenceIndex()) as ModelSpec<TApi> | undefined;
+	if (!canonical) {
+		return { ...defaults, name: toModelName(entry.name, defaults.name) };
+	}
+	const contextWindow = canonical.contextWindow ?? defaults.contextWindow;
+	const maxTokens =
+		canonical.maxTokens != null && contextWindow != null
+			? Math.min(canonical.maxTokens, contextWindow)
+			: (canonical.maxTokens ?? defaults.maxTokens);
+	return {
+		...defaults,
+		name: toModelName(entry.name, canonical.name ?? defaults.name),
+		reasoning: canonical.reasoning,
+		input: canonical.input,
+		contextWindow,
+		maxTokens,
+	};
+}
+
+const MUNITO_GLOBAL_BASE_URL = "https://api.munito.ai/inference/v1";
+
+/**
+ * Munito model-manager options. `/models` is public (invalid keys still 401),
+ * so discovery runs keyless; the key gates inference, not the roster probe.
+ * A successful snapshot is authoritative over the bundled seed rows.
+ */
+export function munitoModelManagerOptions(
+	config?: MunitoModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "munito",
+		defaultBaseUrl: MUNITO_GLOBAL_BASE_URL,
+		config,
+		dynamicModelsAuthoritative: true,
+		filterModel: (_entry, model) => isMunitoChatModelId(model.id),
+		mapModel: mapMunitoReferenceModel,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // 17. Qwen Portal
 // ---------------------------------------------------------------------------
 

@@ -52,6 +52,13 @@ export interface ResolvedModelPolicy<TApi extends Api = Api> {
 	identity: ModelIdentity;
 	compat: CompatOf<TApi>;
 	thinking: ThinkingConfig | undefined;
+	/**
+	 * A reviewed `thinking-upgrade-neutral` correction repaired a neutral
+	 * discovery row into a reasoning-capable lane whose ladder is empty
+	 * (`thinking: undefined`). Consumers promoting `reasoning` from policy
+	 * output (`buildModel`) must honor this even without a ladder.
+	 */
+	reasoningUpgrade?: boolean;
 	/** Catalog-data axis assignments (longContext, priority, …) for generation. */
 	catalog: Record<string, unknown>;
 	/** Request-shaping directives for the selected upstream. */
@@ -1405,6 +1412,11 @@ export function resolveModelPolicy(input: ModelSpec<Api>, route?: ResolveRoute):
 		identity,
 		compat,
 		thinking: resolveThinkingPolicy(spec, facts, axes, compat),
+		// An `upgrade-neutral` repair on a ladder-free lane (empty winner
+		// efforts) yields no `thinking` config, but the reasoning capability
+		// is still promoted — `buildModel` reads this to materialize
+		// `reasoning: true` with no controllable effort surface.
+		...(spec.reasoning ? {} : { reasoningUpgrade: compatReasoning(spec, axes) || undefined }),
 		catalog: axes.catalog,
 		request: resolveRequestPolicy(axes),
 	};

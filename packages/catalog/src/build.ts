@@ -418,8 +418,9 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 		// A reviewed `thinking-upgrade-neutral` policy can repair a stale
 		// `reasoning: false` discovery default, and an unclassified neutral spec
 		// gets an unverified ladder (see `resolveThinkingPolicy`); materialize
-		// either for transports and the picker.
-		reasoning: spec.reasoning || policy.thinking !== undefined,
+		// either for transports and the picker. `policy.reasoningUpgrade` covers
+		// the ladder-free repair: reasoning with no controllable effort surface.
+		reasoning: spec.reasoning || policy.thinking !== undefined || policy.reasoningUpgrade === true,
 		name: cleanModelName(spec.name),
 		identity: policy.identity,
 		requiresGlyphTokenization: policy.identity.class === "anthropic",
