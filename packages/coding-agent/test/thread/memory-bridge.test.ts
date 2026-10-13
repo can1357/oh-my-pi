@@ -12,6 +12,9 @@ import { loadHindsightConfig } from "../../src/hindsight/config";
 import { HindsightSessionState } from "../../src/hindsight/state";
 import type { MnemopiBackendConfig } from "../../src/mnemopi/config";
 import { loadMnemopi, loadMnemopiCore, MnemopiSessionState } from "../../src/mnemopi/state";
+import { loadMnemosyneOssConfig } from "../../src/mnemosyne-oss/config";
+import { MnemosyneOssSessionState, type MnemosyneOssWorkerLike } from "../../src/mnemosyne-oss/state";
+import type { MnemosyneOssWorkerRecord } from "../../src/mnemosyne-oss/worker-protocol";
 import { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
 import type { MainThreadLink } from "../../src/thread/protocol";
@@ -104,6 +107,56 @@ describe("memory thread service", () => {
 		vi.restoreAllMocks();
 		await parentSession.dispose();
 		await fs.rm(tempDir, { recursive: true, force: true });
+	});
+
+	it("shares a worker Mnemosyne alias's memories without closing the parent's Python worker", async () => {
+		const memories = new Map<string, MnemosyneOssWorkerRecord>();
+		let shutdowns = 0;
+		const pythonWorker: MnemosyneOssWorkerLike = {
+			async request<T>(method, params = {}) {
+				if (method === "remember") {
+					const record: MnemosyneOssWorkerRecord = {
+						id: "worker-memory", bank: "bridge-bank", content: String(params.content),
+					};
+					memories.set(record.id, record);
+					return { id: record.id } as T;
+				}
+				if (method === "get") {
+					const record = memories.get(String(params.id));
+					return { status: record ? "found" : "not_found", record } as T;
+				}
+				if (method === "recall") return { items: [...memories.values()] } as T;
+				throw new Error(`unexpected worker request: ${method}`);
+			},
+			async shutdown() { shutdowns++; },
+		};
+		const parent = new MnemosyneOssSessionState({
+			sessionId: "parent-session",
+			session: parentSession,
+			config: loadMnemosyneOssConfig(Settings.isolated({
+				"mnemosyne-oss.bank": "bridge-bank",
+				"mnemosyne-oss.autoRecall": false,
+				"mnemosyne-oss.autoRetain": false,
+			}), tempDir),
+			worker: pythonWorker,
+		});
+		parent.lastRecallSnippet = "<memories>parent recall</memories>";
+		try {
+			const report = await probe.mnemosyneOssChild(parent, "deploy host is gamma-3");
+			expect(report.aliasesRemoteParent).toBe(true);
+			expect(report.readBack).toBe("deploy host is gamma-3");
+			expect(report.recalledIds).toEqual(["worker-memory"]);
+			expect(memories.get(report.storedId)?.content).toBe("deploy host is gamma-3");
+			expect(report.instructions).toContain("<memories>parent recall</memories>");
+			expect(parent.lastWriteAt).toBeDefined();
+			expect(parent.lastRecallAt).toBeDefined();
+			expect(parent.hasRecalledForFirstTurn).toBe(false);
+			expect(parent.lastRetainedTurn).toBe(0);
+			expect(shutdowns).toBe(0);
+		} finally {
+			await parent.dispose();
+		}
+		expect(shutdowns).toBe(1);
 	});
 
 	it("routes a worker Hindsight alias's retains, bank confirmation, and recalls through main's client and bank set", async () => {

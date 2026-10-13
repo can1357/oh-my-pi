@@ -48,6 +48,9 @@ import type {
 	MnemopiScopedMemoryHit,
 	MnemopiSessionStateApi,
 } from "../../mnemopi/state";
+import type { MnemosyneOssSessionStateApi } from "../../mnemosyne-oss/state";
+import type { MnemosyneOssWorkerRequestOptions } from "../../mnemosyne-oss/worker-client";
+import type { MnemosyneOssWorkerMethod } from "../../mnemosyne-oss/worker-protocol";
 import type { RpcMethod } from "../rpc";
 
 /** Exported-class kind of `HindsightApi`. */
@@ -56,6 +59,8 @@ export const HINDSIGHT_CLIENT_KIND = "hindsight-client";
 export const HINDSIGHT_SESSION_STATE_KIND = "hindsight-session-state";
 /** Exported-class kind of `MnemopiSessionState`. */
 export const MNEMOPI_SESSION_STATE_KIND = "mnemopi-session-state";
+/** Exported-class kind of `MnemosyneOssSessionState`. */
+export const MNEMOSYNE_OSS_SESSION_STATE_KIND = "mnemosyne-oss-session-state";
 
 /** Every `HindsightApi` request, one method each. */
 export type HindsightClientProtocol = {
@@ -126,4 +131,27 @@ export type MnemopiSessionStateProtocol = {
 	>;
 	getScopedStats: RpcMethod<[], MnemopiBankStats[]>;
 	consolidate: RpcMethod<[options?: MnemopiConsolidateOptions], void>;
+};
+
+type MnemosyneOssOperation = "recall" | "remember" | "save" | "get" | "edit" | "capabilities" | "status" | "clearAndRehydrate" | "retain";
+
+/** Route parent-state operations and the live Python worker through main. */
+export type MnemosyneOssSessionStateProtocol = {
+	[Method in MnemosyneOssOperation]: RpcMethod<
+		Parameters<MnemosyneOssSessionStateApi[Method]>,
+		Awaited<ReturnType<MnemosyneOssSessionStateApi[Method]>>
+	>;
+} & {
+	config: RpcMethod<[], MnemosyneOssSessionStateApi["config"]>;
+	aliasOf: RpcMethod<[], MnemosyneOssSessionStateApi | undefined>;
+	lastRecallSnippet: RpcMethod<[], string | undefined>;
+	lastRecallAt: RpcMethod<[], string | undefined>;
+	lastWriteAt: RpcMethod<[], string | undefined>;
+	setLastRecallAt: RpcMethod<[value: string | undefined], void>;
+	setLastWriteAt: RpcMethod<[value: string | undefined], void>;
+	workerRequest: RpcMethod<
+		[method: MnemosyneOssWorkerMethod, params?: Record<string, unknown>, options?: MnemosyneOssWorkerRequestOptions],
+		unknown
+	>;
+	workerShutdown: RpcMethod<[], void>;
 };

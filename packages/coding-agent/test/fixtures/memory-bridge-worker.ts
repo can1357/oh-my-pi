@@ -8,6 +8,8 @@ import { hindsightBackend } from "../../src/hindsight/backend";
 import type { HindsightSessionStateApi } from "../../src/hindsight/state";
 import { mnemopiBackend } from "../../src/mnemopi/backend";
 import type { MnemopiSessionStateApi } from "../../src/mnemopi/state";
+import { mnemosyneOssBackend } from "../../src/mnemosyne-oss/backend";
+import type { MnemosyneOssSessionStateApi } from "../../src/mnemosyne-oss/state";
 import { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
 import type { WorkerThreadLink } from "../../src/thread/protocol";
@@ -18,6 +20,7 @@ import {
 	RemoteHindsightClient,
 	RemoteHindsightSessionState,
 	RemoteMnemopiSessionState,
+	RemoteMnemosyneOssSessionState,
 } from "../../src/thread/services/memory-remote";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -41,11 +44,20 @@ export interface MnemopiChildReport {
 	workingCount: number | undefined;
 }
 
+export interface MnemosyneOssChildReport {
+	aliasesRemoteParent: boolean;
+	storedId: string;
+	readBack: string | undefined;
+	recalledIds: string[];
+	instructions: string | undefined;
+}
+
 /** Worker-side operations the test drives; each crosses to main as an async function. */
 export interface MemoryProbe {
 	hindsightChild(parent: HindsightSessionStateApi, fact: string, query: string): Promise<HindsightChildReport>;
 	mnemopiChild(parent: MnemopiSessionStateApi, fact: string): Promise<MnemopiChildReport>;
 	mnemopiForget(id: string): Promise<string>;
+	mnemosyneOssChild(parent: MnemosyneOssSessionStateApi, fact: string): Promise<MnemosyneOssChildReport>;
 }
 
 /** Test-only boot globals next to the services' own. */
@@ -73,6 +85,29 @@ function childSession(settings: Settings): AgentSession {
 function buildProbe(): MemoryProbe {
 	let mnemopiChild: AgentSession | undefined;
 	return {
+		mnemosyneOssChild: async (parent, fact) => {
+			const settings = Settings.isolated({ "memory.backend": "mnemosyne-oss" });
+			const session = childSession(settings);
+			try {
+				await mnemosyneOssBackend.start({
+					session, settings, modelRegistry, agentDir: "/tmp", taskDepth: 1,
+					parentMnemosyneOssSessionState: parent,
+				});
+				const alias = session.getMnemosyneOssSessionState();
+				if (!alias) throw new Error("mnemosyne alias was not installed");
+				const storedId = await alias.save({ content: fact });
+				const recalled = await alias.recall(fact);
+				return {
+					aliasesRemoteParent: alias.aliasOf === parent && parent instanceof RemoteMnemosyneOssSessionState,
+					storedId,
+					readBack: (await alias.get(storedId)).record?.content,
+					recalledIds: recalled.map(item => item.id),
+					instructions: await mnemosyneOssBackend.buildDeveloperInstructions("/tmp", "/tmp", settings, session),
+				};
+			} finally {
+				await session.dispose();
+			}
+		},
 		hindsightChild: async (parent, fact, query) => {
 			await using outboxDir = await TempDir.create("@memory-bridge-outbox-");
 			const settings = Settings.isolated({
