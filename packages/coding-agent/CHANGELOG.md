@@ -5,7 +5,7 @@
 ### Added
 
 - Added hiding a pending `ask` question without answering it: `Alt+H` (`app.ask.hide`) or the Hide button in Tern collapses the dialog to one line; the same key, `Enter`, or Show brings it back ([#15400](https://github.com/can1357/oh-my-pi/pull/15400) by [@H4vC](https://github.com/H4vC))
-- Added stopping computer use for the rest of the turn when the user presses Escape during takeover input: later `computer` calls are refused before anything is sent until the user's next message ([#PR](https://github.com/can1357/oh-my-pi/pull/PR) by [@will-bogusz](https://github.com/will-bogusz))
+- Added stopping computer use for the rest of the turn when the user presses Escape during takeover input: later `computer` calls are refused before anything is sent until the user's next message ([#15564](https://github.com/can1357/oh-my-pi/pull/15564) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
