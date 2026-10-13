@@ -873,19 +873,53 @@ interface CachedEntryLine {
 }
 
 /**
+ * Whether `value` serializes through a `toJSON` hook — `JSON.stringify`'s own
+ * serializer lookup, answered without invoking anything.
+ *
+ * A data descriptor is a hook only when its value is callable: a non-function
+ * `toJSON` field shadows any inherited hook and serializes as a plain key. An
+ * accessor descriptor is always treated as a hook: the getter may return a
+ * function, but reading it would run user code — a stateful getter (for
+ * example, one closing over `++revision`) would then observe a different state
+ * when serialization reads it again, persisting bytes native serialization
+ * alone never produces. Treating it as hooked leaves the message uncached, so
+ * the line is always re-projected from a fresh serialization.
+ */
+function hasToJSONHook(value: object): boolean {
+	let current: object | null = value;
+	while (current !== null) {
+		const descriptor = Object.getOwnPropertyDescriptor(current, "toJSON");
+		if (descriptor !== undefined) {
+			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
+			return typeof descriptor.value === "function";
+		}
+		current = Object.getPrototypeOf(current);
+	}
+	return false;
+}
+
+/**
  * Whether `value`'s JSON graph passes through a `toJSON` serializer hook.
  * Hook output is a function call, not a field value: a stateful hook returns a
  * different projection on every call, so a stamp taken from one call cannot
- * describe the bytes another call produced. Hook-backed messages are left
+ * describe the bytes another call produces. Hook-backed messages are left
  * uncached — re-projected on every rewrite — rather than stamped from output
  * the next check would re-invoke.
+ *
+ * Walks exactly the graph persistence serializes: transient keys are skipped
+ * where `truncateForPersistence` strips them (see {@link messageValueStamp})
+ * and walked whole inside an atomic node (see `isAtomicPersistenceNode`),
+ * where persistence keeps the subgraph verbatim. A stripped value may be
+ * cyclic — a streaming event can reference the array holding it — which this
+ * walk could never escape; the projected line never contains it, so no hook
+ * beneath one can reach the persisted bytes.
  */
-function hasSerializerHook(value: unknown): boolean {
+function hasSerializerHook(value: unknown, key?: string): boolean {
 	if (value === null || typeof value !== "object") return false;
-	// Duck-type read of JSON's own serializer hook; TypeScript has no structural
-	// expression for "serializes through toJSON". Checked before the value
-	// branches below because `JSON.stringify` consults the hook first.
-	if ("toJSON" in value && typeof value.toJSON === "function") return true;
+	// `JSON.stringify` consults the hook before the value shape, so the probe
+	// does too — through the property descriptor, never by reading the key: a
+	// stateful getter would otherwise run here and again in #lineFor.
+	if (hasToJSONHook(value)) return true;
 	// No hook on this node: a boxed primitive serializes as its unboxed value
 	// and a rawJSON node as its payload, neither of which can harbor a hook.
 	if (unboxedPrimitive(value) !== undefined || rawJsonPayload(value) !== undefined) return false;
@@ -896,8 +930,13 @@ function hasSerializerHook(value: unknown): boolean {
 		}
 		return false;
 	}
+	// Mirror the projection's stripping boundary: a hook beneath a stripped key
+	// cannot affect the persisted bytes — and the live value may be cyclic
+	// where the projection is not.
+	const atomic = isAtomicPersistenceNode(value, key);
 	for (const childKey of Object.keys(value)) {
-		if (hasSerializerHook((value as Record<string, unknown>)[childKey])) return true;
+		if (!atomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
+		if (hasSerializerHook((value as Record<string, unknown>)[childKey], childKey)) return true;
 	}
 	return false;
 }
@@ -1041,9 +1080,10 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 		// uncached (see {@link hasSerializerHook}), so reaching one here means
 		// the hook arrived after the stamp was taken — the line cannot be reused.
 		if (live !== null && typeof live === "object") {
-			// Duck-type read of JSON's own serializer hook — presence alone
-			// fails the match; the hook is never invoked.
-			if ("toJSON" in live && typeof live.toJSON === "function") return false;
+			// The hook lookup never reads the key — see {@link hasSerializerHook}:
+			// a stateful getter would otherwise run here and again in #lineFor.
+			// Presence alone fails the match; the hook is never invoked.
+			if (hasToJSONHook(live)) return false;
 			// Hookless wrappers were stamped as their unboxed value — one leaf,
 			// not the empty container `unboxedPrimitive` explains.
 			const unboxed = unboxedPrimitive(live);
