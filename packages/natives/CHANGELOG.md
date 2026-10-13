@@ -333,6 +333,7 @@
 ### Fixed
 
 - Fixed `pwsh` code blocks rendering without PowerShell syntax colors ([#15008](https://github.com/can1357/oh-my-pi/issues/15008)).
+- Fixed `bun run` inside embedded-shell tool calls failing with `EBADF: Bad file descriptor` because the host's `NODE_CHANNEL_FD` / `NODE_CHANNEL_SERIALIZATION_MODE` leaked into the shell environment
 
 ## [18.10.2] - 2026-10-12
 

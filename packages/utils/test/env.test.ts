@@ -252,6 +252,23 @@ describe("filterChildShellEnv", () => {
 		).toEqual({ GIT_EDITOR: "true", GIT_AUTHOR_NAME: "Agent" });
 	});
 
+	it("drops node IPC channel pointers from tool-call env", () => {
+		const cwd = path.dirname(writeTempEnv(""));
+		// The agent's own worker channel (`NODE_CHANNEL_FD=3`) must not reach
+		// tool-call children: `bun run` inside a bash tool call reads it as
+		// its control channel and dies with EBADF (posix_spawn()).
+		expect(
+			filterChildShellEnv(
+				{
+					NODE_CHANNEL_FD: "3",
+					NODE_CHANNEL_SERIALIZATION_MODE: "advanced",
+					UNCHANGED: "parent-value",
+				},
+				cwd,
+			),
+		).toEqual({ UNCHANGED: "parent-value" });
+	});
+
 	it("uses the launch mode when dotenv changes NODE_ENV", async () => {
 		const cwd = path.dirname(writeTempEnv("NODE_ENV=production\n"));
 		fs.writeFileSync(
