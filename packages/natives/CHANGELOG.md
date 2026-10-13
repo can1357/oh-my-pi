@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `UserIntervened` on macOS: keys stop at the user's first key or click in the app being typed into, and later input to an app they used since it was last read waits up to 5 s for them to pause, then fails without sending; needs Input Monitoring ([#PR](https://github.com/can1357/oh-my-pi/pull/PR) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `UserIntervened` on macOS: keys stop at the user's first key or click in the app being typed into, and later input to an app they used since it was last read waits up to 5 s for them to pause, then fails without sending; needs Input Monitoring ([#15562](https://github.com/can1357/oh-my-pi/pull/15562) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 

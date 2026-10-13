@@ -5,7 +5,7 @@
 ### Added
 
 - Added hiding a pending `ask` question without answering it: `Alt+H` (`app.ask.hide`) or the Hide button in Tern collapses the dialog to one line; the same key, `Enter`, or Show brings it back ([#15400](https://github.com/can1357/oh-my-pi/pull/15400) by [@H4vC](https://github.com/H4vC))
-- Added the `computer` tool's `UserIntervened` error on macOS: input into an app the user has used since the agent last read its window fails without sending, and the tool prompt tells the agent to read the window again and keep the user's edits ([#PR](https://github.com/can1357/oh-my-pi/pull/PR) by [@will-bogusz](https://github.com/will-bogusz))
+- Added the `computer` tool's `UserIntervened` error on macOS: input into an app the user has used since the agent last read its window fails without sending, and the tool prompt tells the agent to read the window again and keep the user's edits ([#15562](https://github.com/can1357/oh-my-pi/pull/15562) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
