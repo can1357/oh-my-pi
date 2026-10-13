@@ -457,6 +457,7 @@ describe("native transcript", () => {
 		};
 		const run = async (kinds: readonly string[] | undefined): Promise<void> => {
 			const h = await TspHarness.start(undefined, { kinds });
+			harness = h;
 			build(h);
 			await h.render();
 			const note = `… ${DROPPED} earlier lines dropped`;
@@ -464,6 +465,7 @@ describe("native transcript", () => {
 			expect(frame).toBeDefined();
 			expect(JSON.stringify(frame)).toContain(note);
 			h.stop();
+			harness = undefined;
 		};
 		// A terminal that does not advertise `tool` gets the card; one with the
 		// whole vocabulary gets the run box. Both must name the dropped head.
