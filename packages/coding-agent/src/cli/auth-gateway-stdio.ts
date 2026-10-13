@@ -11,6 +11,7 @@
  * ends when stdin does.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { createAuthGatewayRouter, serveAuthGatewayStdio } from "@oh-my-pi/pi-ai/auth-gateway";
 import { getProjectDir, isRecord, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
@@ -51,7 +52,8 @@ function viewCandidates(selector: string, settings: Settings, registry: Registry
  * that model's `retry.fallbackChains` (its role's chain when the entry named a
  * role). Each entry tries chat models first so a chat selector never lands on a
  * same-named runner; runner kinds (stt, tts, image, …) only resolve in the full
- * catalog. Empty when no entry resolves.
+ * catalog, and their fallbacks keep only models of the same kind. Empty when no
+ * entry resolves.
  */
 export function selectorCandidates(selector: string, settings: Settings, registry: RegistryView): Model<Api>[] {
 	for (const pattern of normalizeModelPatternList(selector)) {
@@ -60,7 +62,9 @@ export function selectorCandidates(selector: string, settings: Settings, registr
 				getAll: () => registry.getAll(kind),
 				getAvailable: () => registry.getAvailable(kind),
 			});
-			if (candidates.length > 0) return candidates;
+			// A runner's fallback chain may name chat models (`retry.fallbackChains.default`); its route cannot serve them.
+			const [first] = candidates;
+			if (first) return candidates.filter(candidate => modelKind(candidate) === modelKind(first));
 		}
 	}
 	return [];

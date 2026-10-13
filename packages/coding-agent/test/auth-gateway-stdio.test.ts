@@ -46,6 +46,16 @@ describe("auth-gateway stdio model selectors", () => {
 		]);
 	});
 
+	it("drops chat models a runner's default fallback chain names, since the runner's route cannot serve them", () => {
+		const dictation = getBundledModel("openai-codex", "codex-transcribe")!;
+		const kindRegistry = {
+			getAll: (kind = "chat") => (kind === "all" ? [...models, dictation] : models),
+			getAvailable: (kind = "chat") => (kind === "all" ? [...models, dictation] : models),
+		};
+		const settings = Settings.isolated({ "retry.fallbackChains": { default: [key(mini)] } });
+		expect(selectorCandidates(key(dictation), settings, kindRegistry)).toEqual([dictation]);
+	});
+
 	it("prefers the chat model when the chat view and the full catalog both match a selector", () => {
 		const dictation = getBundledModel("openai-codex", "codex-transcribe")!;
 		// A runner that shares the chat model's bare id and sorts ahead of it in the full catalog.
