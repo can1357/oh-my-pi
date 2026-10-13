@@ -13,6 +13,7 @@ mod macos;
 mod menus;
 #[cfg(target_os = "macos")]
 mod native_helper;
+mod roster;
 mod text_range;
 mod types;
 #[cfg(any(target_os = "windows", test))]
