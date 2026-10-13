@@ -82,7 +82,8 @@ export function loadMnemosyneOssConfig(settings: Settings, _agentDir: string): M
 		localConsolidation,
 		localLlmRepo,
 		localLlmFile,
-		consolidationMode: localConsolidation && (localLlmRepo || localLlmFile) ? "local" : "heuristic",
+		// The SDK ignores a lone repo or file and would load its default GGUF instead.
+		consolidationMode: localConsolidation && localLlmRepo && localLlmFile ? "local" : "heuristic",
 		autoMigrate: cfg.cfgMnemosyneOssAutoMigrate.get(settings),
 		retainEveryNTurns: normalizePositiveInteger(cfg.cfgMnemosyneOssRetainEveryNTurns.get(settings)),
 		recallLimit: normalizePositiveInteger(cfg.cfgMnemosyneOssRecallLimit.get(settings)),

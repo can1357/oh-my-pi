@@ -85,12 +85,12 @@ The root session owns one worker. Subagents alias the root worker and may perfor
 
 ## Local-only execution
 
-The worker starts from a narrow OS/runtime environment allowlist. It removes inherited `MNEMOSYNE_*` configuration and provider credentials, then sets local-only controls:
+The worker starts from a narrow OS/runtime environment allowlist. It drops every inherited `MNEMOSYNE_*` variable (so no hosted embedding or LLM URL or key reaches the SDK) and provider credentials, then sets only variables Mnemosyne 4.0 reads:
 
-- local embeddings when `localEmbeddings: true`; lexical-only when false;
-- no hosted embedding, LLM, modality, or sync endpoints or keys;
-- heuristic/no-LLM consolidation by default;
-- optional local consolidation only when `localConsolidation: true` and local model selectors are configured.
+- `MNEMOSYNE_NO_EMBEDDINGS` / `MNEMOSYNE_SKIP_EMBEDDINGS` / `MNEMOSYNE_EMBEDDINGS_OFF` for lexical-only recall when `localEmbeddings: false`; otherwise `MNEMOSYNE_EMBEDDING_MODEL` (blank = SDK default local model);
+- `MNEMOSYNE_LLM_ENABLED=false` for heuristic/no-LLM consolidation (the default);
+- `MNEMOSYNE_LLM_ENABLED=true` with `MNEMOSYNE_LLM_REPO` and `MNEMOSYNE_LLM_FILE` only when `localConsolidation: true` and both `localLlmRepo` and `localLlmFile` are set — the SDK ignores a lone selector and would fall back to its default model;
+- `MNEMOSYNE_FORCE_LOCAL=1`, `MNEMOSYNE_AUTO_MIGRATE` from `autoMigrate`, and `MNEMOSYNE_DATA_DIR` pointing at the private runtime config directory.
 
 Local embedding models may download model artifacts through the SDK's local loader. Memory or query content must not be sent to a hosted embedding, LLM, modality, or sync endpoint.
 
