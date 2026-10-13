@@ -863,11 +863,42 @@ interface CachedEntryLine {
 	/**
 	 * Deep value stamp of `entry.message` when the line was produced (see
 	 * {@link messageValueStamp}). Absent on the direct, uncached path for
-	 * non-message entries, which never reach the WeakMap.
+	 * non-message entries — which never reach the WeakMap — and for
+	 * hook-backed messages, whose serializer output no stamp can describe.
 	 */
 	message?: unknown[];
 	/** {@link messageEstimateVersion} of the entry's message, or 0 when it has none. */
 	version: number;
+}
+
+/**
+ * Whether `value`'s JSON graph passes through a `toJSON` serializer hook.
+ * Hook output is a function call, not a field value: a stateful hook returns a
+ * different projection on every call, so a stamp taken from one call cannot
+ * describe the bytes another call produced. Hook-backed messages are left
+ * uncached — re-projected on every rewrite — rather than stamped from output
+ * the next check would re-invoke.
+ */
+function hasSerializerHook(value: unknown): boolean {
+	if (value === null || typeof value !== "object") return false;
+	// Duck-type read of JSON's own serializer hook; TypeScript has no structural
+	// expression for "serializes through toJSON". Checked before the value
+	// branches below because `JSON.stringify` consults the hook first.
+	if ("toJSON" in value && typeof value.toJSON === "function") return true;
+	// No hook on this node: a boxed primitive serializes as its unboxed value
+	// and a rawJSON node as its payload, neither of which can harbor a hook.
+	if (unboxedPrimitive(value) !== undefined || rawJsonPayload(value) !== undefined) return false;
+	if (Array.isArray(value)) {
+		const length = value.length;
+		for (let index = 0; index < length; index++) {
+			if (hasSerializerHook(value[index])) return true;
+		}
+		return false;
+	}
+	for (const childKey of Object.keys(value)) {
+		if (hasSerializerHook((value as Record<string, unknown>)[childKey])) return true;
+	}
+	return false;
 }
 
 /**
@@ -879,6 +910,14 @@ const STAMP_ARRAY = Symbol("stamp.array");
 const STAMP_END = Symbol("stamp.end");
 /** Brands a `JSON.rawJSON` node so it never compares equal to a same-shaped plain object. */
 const STAMP_RAW_JSON = Symbol("stamp.raw-json");
+/**
+ * Marks a stripped transient key's presence in the stamp without walking its
+ * value (see {@link messageValueStamp}). The persisted bytes never contain the
+ * value, but the key's presence forces the rebuild pass that normalizes
+ * neighboring fields — so a line stamped while the key was present does not
+ * describe the bytes produced after it is deleted.
+ */
+const STAMP_TRANSIENT = Symbol("stamp.transient");
 
 /**
  * Unboxed value `JSON.stringify` emits for a boxed primitive, or `undefined` for
@@ -886,8 +925,8 @@ const STAMP_RAW_JSON = Symbol("stamp.raw-json");
  * keys and no `toJSON`, so stamping its container shape would call
  * `new Number(1)` and `new Number(2)` equal while the projected line reads `1`
  * and `2`. A wrapper that *does* carry `toJSON` serializes through the hook
- * instead — the stamp consults the hook before this function, exactly as
- * `JSON.stringify` does — so only hookless wrappers reach here.
+ * instead — hooked graphs are left uncached (see {@link hasSerializerHook}) —
+ * so only hookless wrappers reach here.
  */
 function unboxedPrimitive(value: object): number | string | boolean | undefined {
 	if (value instanceof Number || value instanceof String || value instanceof Boolean) return value.valueOf();
@@ -919,32 +958,26 @@ function rawJsonPayload(value: object): string | undefined {
  * the line is considered for reuse.
  *
  * Values that `JSON.stringify` would replace are stamped as their projected
- * output instead of their live shape — a `toJSON()` node as its serialized
- * value, a `JSON.rawJSON` node as a brand marker plus its raw payload,
- * `undefined` as the `null` (in arrays) or dropped key (in objects) it emits —
- * and the fields {@link TRANSIENT_PERSISTENCE_KEYS} strips from the projection
- * are skipped only where persistence strips them: inside an atomic node (see
- * `isAtomicPersistenceNode`) persistence keeps the whole subgraph verbatim,
- * so the stamp walks it whole. Arrays are walked by indexed slots with a
- * snapshotted length, the way `JSON.stringify` reads them, never through the
- * iterator protocol. A boxed primitive is read hook-first for the same reason:
- * `JSON.stringify` runs `toJSON` before unboxing, so a wrapper whose hook
- * output changes must re-stamp even though its `valueOf()` does not.
+ * output instead of their live shape — a `JSON.rawJSON` node as a brand
+ * marker plus its raw payload, `undefined` as the `null` (in arrays) or
+ * dropped key (in objects) it emits. Graphs passing through a `toJSON`
+ * serializer hook are never stamped (see {@link hasSerializerHook}): hook
+ * output is a function call, not a field value, so no stamp taken from one
+ * call can describe the bytes another call produces. Transient keys are
+ * recorded as presence-only markers where persistence strips them (see below)
+ * and walked whole inside an atomic node (see `isAtomicPersistenceNode`),
+ * where persistence keeps the whole subgraph verbatim. Arrays are walked by
+ * indexed slots with a snapshotted length, the way `JSON.stringify` reads
+ * them, never through the iterator protocol.
  */
 function messageValueStamp(value: unknown, out: unknown[] = [], key?: string): unknown[] {
 	if (value === null || typeof value !== "object") {
 		out.push(value);
 		return out;
 	}
-	// Duck-type read of JSON's own serializer hook; TypeScript has no structural
-	// expression for "serializes through toJSON". Consulted before
-	// `unboxedPrimitive` because `JSON.stringify` does the same.
-	if ("toJSON" in value && typeof value.toJSON === "function") {
-		out.push(value.toJSON.call(value));
-		return out;
-	}
-	// No hook: the wrapper is projected to the unboxed primitive before the
-	// container is walked — see {@link unboxedPrimitive}.
+	// A `toJSON` hook makes the graph unstampable — see {@link hasSerializerHook}.
+	// The memo never reaches this walk with a hooked graph; the box below is the
+	// hookless path `JSON.stringify` takes when no hook is present.
 	const unboxed = unboxedPrimitive(value);
 	if (unboxed !== undefined) {
 		out.push(unboxed);
@@ -973,10 +1006,16 @@ function messageValueStamp(value: unknown, out: unknown[] = [], key?: string): u
 		out.push(STAMP_OBJECT);
 		for (const childKey of Object.keys(fields)) {
 			// Stripped from the persisted line by `truncateForPersistence` before
-			// serialization, so the projected bytes never depend on it — and the
-			// live field may be cyclic (a streaming event can reference the array
-			// holding it), which this walk could never escape.
-			if (!atomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
+			// serialization, so the projected bytes never depend on the value —
+			// but the key's presence alone forces the rebuild pass that drops it
+			// and normalizes sibling fields (e.g. `lineCount`), so the stamp
+			// records the presence without traversing the value. The live field
+			// may be cyclic (a streaming event can reference the array holding
+			// it), which this walk could never escape.
+			if (!atomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) {
+				out.push(childKey, STAMP_TRANSIENT);
+				continue;
+			}
 			out.push(childKey);
 			messageValueStamp(fields[childKey], out, childKey);
 		}
@@ -997,17 +1036,13 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 	let index = 0;
 	const match = (live: unknown, key?: string): boolean => {
 		const expected = stamp[index++];
-		// A `toJSON` node was stamped as its projected value — a single leaf
-		// (see {@link messageValueStamp}) — so compare that projection here
-		// instead of recursing, which would consume a second stamp entry. The
-		// hook is read before `unboxedPrimitive` because that is the order
-		// `JSON.stringify` uses, so the comparison re-runs the very projection
-		// the persisted bytes came from.
+		// The stamp never invokes a `toJSON` hook: a hooked graph is left
+		// uncached (see {@link hasSerializerHook}), so reaching one here means
+		// the hook arrived after the stamp was taken — the line cannot be reused.
 		if (live !== null && typeof live === "object") {
-			// Duck-type read of JSON's own serializer hook.
-			if ("toJSON" in live && typeof live.toJSON === "function") {
-				return live.toJSON.call(live) === expected;
-			}
+			// Duck-type read of JSON's own serializer hook — presence alone
+			// fails the match; the hook is never invoked.
+			if ("toJSON" in live && typeof live.toJSON === "function") return false;
 			// Hookless wrappers were stamped as their unboxed value — one leaf,
 			// not the empty container `unboxedPrimitive` explains.
 			const unboxed = unboxedPrimitive(live);
@@ -1032,14 +1067,19 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 				for (let position = 0; position < length; position++) if (!match(live[position])) return false;
 			} else {
 				const fields = live as Record<string, unknown>;
-				// Mirror the stamp side: transient keys were recorded inside
-				// atomic nodes (persistence keeps them) and skipped elsewhere.
+				// Mirror the stamp side: transient keys were recorded whole
+				// inside atomic nodes (persistence keeps them) and as
+				// presence-only markers elsewhere.
 				const atomic = isAtomicPersistenceNode(live, key);
 				for (const childKey of Object.keys(fields)) {
-					// Stripped before serialization by `truncateForPersistence`, so
-					// the stamp never recorded it (and must not walk it) — see
+					// Stripped before serialization by `truncateForPersistence`,
+					// so only the key's presence was recorded — its value was
+					// never walked (and may be cyclic) — see
 					// {@link messageValueStamp}.
-					if (!atomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
+					if (!atomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) {
+						if (stamp[index++] !== childKey || stamp[index++] !== STAMP_TRANSIENT) return false;
+						continue;
+					}
 					if (stamp[index++] !== childKey) return false;
 					if (!match(fields[childKey], childKey)) return false;
 				}
@@ -1844,13 +1884,16 @@ export class SessionManager {
 	 *
 	 * Only message entries are memoized: they carry the file's bytes, while the
 	 * small metadata entries (compaction, label, branch_summary, …) cost less
-	 * to re-serialize than to validate and cache.
+	 * to re-serialize than to validate and cache. Hook-backed messages — whose
+	 * graph passes through a `toJSON` serializer (see {@link hasSerializerHook})
+	 * — are left uncached: a stateful hook's next call can emit bytes no stamp
+	 * of an earlier call describes.
 	 */
 	#bodyLineFor(entry: SessionEntry): CachedEntryLine {
 		// Non-message entries hold no bytes worth memoizing, and some of them
 		// (compaction, label) are mutated in place after their first write.
 		const message = entry.type === "message" ? entry.message : undefined;
-		if (message === undefined) {
+		if (message === undefined || hasSerializerHook(message)) {
 			const line = this.#lineFor(entry);
 			return { line, bytes: Buffer.byteLength(line, "utf8"), fields: {}, version: 0 };
 		}
