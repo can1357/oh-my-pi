@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Shake in a `--no-session` run no longer leaves placeholders pointing at an `artifact://` link that cannot be read; they now carry only the token count; in `--no-session` runs the request-body timeout recovery no longer shrinks and retries, since the dropped content would be unrecoverable ([#14593](https://github.com/can1357/oh-my-pi/pull/14593) by [@tahakotil](https://github.com/tahakotil))
+
 ## [18.10.4] - 2026-10-13
 
 ### Added

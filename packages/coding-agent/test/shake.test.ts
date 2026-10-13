@@ -162,6 +162,66 @@ describe("AgentSession shake", () => {
 			allocateArtifactPath.mockRestore();
 		});
 
+		it("does not advertise an unresolvable artifact link in a non-persisted session", async () => {
+			const memoryManager = SessionManager.inMemory(tempDir.path());
+			const memoryAgent = new Agent({
+				initialState: {
+					model: getBundledModel("anthropic", "claude-sonnet-4-5")!,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			});
+			const memorySession = new AgentSession({
+				agent: memoryAgent,
+				sessionManager: memoryManager,
+				settings: Settings.isolated({ "compaction.enabled": true, "compaction.autoContinue": false }),
+				modelRegistry,
+			});
+			try {
+				const toolCallId = "call_memory_bash";
+				memoryManager.appendMessage({
+					role: "user",
+					content: [{ type: "text", text: "do it" }],
+					timestamp: Date.now() - 3,
+				});
+				memoryManager.appendMessage({
+					role: "assistant",
+					content: [{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "ls" } }],
+					...apiInfo,
+					stopReason: "toolUse",
+					usage,
+					timestamp: Date.now() - 2,
+				});
+				memoryManager.appendMessage({
+					role: "toolResult",
+					toolCallId,
+					toolName: "bash",
+					content: [{ type: "text", text: "X".repeat(4000) }],
+					isError: false,
+					timestamp: Date.now() - 1,
+				});
+				memoryManager.appendMessage({
+					role: "user",
+					content: [{ type: "text", text: recentProtectedTail("newer context") }],
+					timestamp: Date.now() + 2,
+				});
+
+				const result = await memorySession.shake("elide");
+
+				expect(result.toolResultsDropped).toBe(1);
+				expect(result.artifactId).toBeUndefined();
+				const toolResult = memoryManager
+					.getBranch()
+					.flatMap(e => (e.type === "message" && e.message.role === "toolResult" ? [e.message] : []))[0];
+				const text = toolResult.content.map(b => (b.type === "text" ? b.text : "")).join("");
+				expect(text).toContain("[shaken ~");
+				expect(text).not.toContain("artifact://");
+			} finally {
+				await memorySession.dispose();
+			}
+		});
+
 		it("preserves mixed tool-result images while eliding only recoverable text", async () => {
 			const largeText = "mixed tool output ".repeat(2_000);
 			const image: ImageContent = {
