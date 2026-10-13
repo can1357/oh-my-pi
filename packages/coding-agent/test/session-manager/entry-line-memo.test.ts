@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, type Mock } from "bun:test";
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { TempDir, __resetDirsFromEnvForTests, getBlobsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { parseBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
@@ -45,17 +44,21 @@ function persistedBlobRefs(body: string): string[] {
 }
 
 /** Base64 bytes the blob store holds for `ref`; throws when the ref or blob is malformed or missing. */
-function blobBytesBase64(ref: string): string {
+async function blobBytesBase64(ref: string): Promise<string> {
 	const hash = parseBlobRef(ref);
 	if (!hash) throw new Error(`Expected blob reference, got ${ref}`);
-	return fs.readFileSync(path.join(getBlobsDir(), hash)).toString("base64");
+	return Buffer.from(await Bun.file(path.join(getBlobsDir(), hash)).arrayBuffer()).toString("base64");
 }
 
-function removeBlob(ref: string): void {
+async function removeBlob(ref: string): Promise<void> {
 	const hash = parseBlobRef(ref);
 	if (!hash) throw new Error(`Expected blob reference, got ${ref}`);
-	fs.rmSync(path.join(getBlobsDir(), hash), { force: true });
-	fs.rmSync(path.join(getBlobsDir(), `${hash}.png`), { force: true });
+	await Bun.file(path.join(getBlobsDir(), hash))
+		.delete()
+		.catch(() => {});
+	await Bun.file(path.join(getBlobsDir(), `${hash}.png`))
+		.delete()
+		.catch(() => {});
 }
 
 describe("SessionManager entry-line memo", () => {
@@ -116,7 +119,7 @@ describe("SessionManager entry-line memo", () => {
 		expect(refsAfterFirst).toHaveLength(1);
 		const originalRef = refsAfterFirst[0];
 		if (!originalRef) throw new Error("Expected blob reference");
-		expect(blobBytesBase64(originalRef)).toBe(LARGE_BASE64);
+		expect(await blobBytesBase64(originalRef)).toBe(LARGE_BASE64);
 		expect(bodyAfterFirst).not.toContain(LARGE_BASE64);
 
 		// Second rewrite with no changes: the persisted body is byte-identical —
@@ -147,7 +150,7 @@ describe("SessionManager entry-line memo", () => {
 		const mutatedRef = refsAfterThird[0];
 		if (!mutatedRef) throw new Error("Expected blob reference");
 		expect(mutatedRef).not.toBe(originalRef);
-		expect(blobBytesBase64(mutatedRef)).toBe(mutatedBase64);
+		expect(await blobBytesBase64(mutatedRef)).toBe(mutatedBase64);
 		expect(bodyAfterThird).not.toContain(originalRef);
 		expect(bodyAfterThird).not.toContain(mutatedBase64);
 	});
@@ -165,7 +168,7 @@ describe("SessionManager entry-line memo", () => {
 		expect(refsAfterFirst).toHaveLength(1);
 		const originalRef = refsAfterFirst[0];
 		if (!originalRef) throw new Error("Expected blob reference");
-		expect(blobBytesBase64(originalRef)).toBe(LARGE_BASE64);
+		expect(await blobBytesBase64(originalRef)).toBe(LARGE_BASE64);
 
 		// Second rewrite: storage rejects the write. The line that failed to land
 		// leaves its blob unreferenced, so `omp gc` may collect it before the
@@ -173,7 +176,7 @@ describe("SessionManager entry-line memo", () => {
 		// the recovery must re-mint the bytes rather than re-publish a ref whose
 		// blob no longer exists.
 		writeSpy.mockImplementationOnce(async () => {
-			for (const ref of persistedBlobRefs(storage.readTextSync(sessionFile))) removeBlob(ref);
+			for (const ref of persistedBlobRefs(storage.readTextSync(sessionFile))) await removeBlob(ref);
 			throw new Error("disk full");
 		});
 		await expect(session.appendEntriesAtomically(() => {})).rejects.toThrow("disk full");
@@ -183,7 +186,7 @@ describe("SessionManager entry-line memo", () => {
 		await session.appendEntriesAtomically(() => {});
 		const bodyAfterRecovery = storage.readTextSync(sessionFile);
 		expect(persistedBlobRefs(bodyAfterRecovery)).toEqual([originalRef]);
-		expect(blobBytesBase64(originalRef)).toBe(LARGE_BASE64);
+		expect(await blobBytesBase64(originalRef)).toBe(LARGE_BASE64);
 	});
 
 	it("persists the current value of a non-message entry mutated in place", async () => {
@@ -372,5 +375,86 @@ describe("SessionManager entry-line memo", () => {
 		const bodyAfterSecond = storage.readTextSync(sessionFile);
 		expect(bodyAfterSecond).toContain('"jsonlEvents":[{"seq":2}]');
 		expect(bodyAfterSecond).not.toContain('"jsonlEvents":[{"seq":1}]');
+	});
+
+	it("never reuses a line for a hook-backed details value whose serializer is stateful", async () => {
+		// `details` is the tool result's opaque slot, so an extension can hand it
+		// a value that serializes through `toJSON`. The hook's output is a
+		// function call, not a field value: this one emits `1` on its first call
+		// and `2` on every later call, while no field is ever written.
+		let calls = 0;
+		const details = {
+			toJSON(): number {
+				calls++;
+				return calls === 1 ? 1 : 2;
+			},
+		};
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-hook",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// Every rewrite re-projects through the serializer: a stamp taken from
+		// one hook call cannot describe the bytes another call produces, so the
+		// line is never reused — each published body carries the output of the
+		// serialization that produced it.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain('"details":2');
+		expect(bodyAfterFirst).not.toContain('"details":1');
+
+		// Second rewrite: still `2` — the stabilized output — rather than the
+		// first call's `1` restored from a reused line.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"details":2');
+		expect(bodyAfterSecond).not.toContain('"details":1');
+	});
+
+	it("re-normalizes lineCount when a stripped transient key is deleted after the rebuild that normalized it", async () => {
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		const details: Record<string, unknown> = {
+			content: "a\nb",
+			lineCount: 7,
+			jsonlEvents: [{ seq: 1 }],
+		};
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-transient-count",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the transient key forces the rebuild pass, which strips
+		// it and normalizes the inconsistent count to the content's two lines.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain('"lineCount":2');
+		expect(bodyAfterFirst).not.toContain("jsonlEvents");
+
+		// Delete only the stripped key: a fresh projection now takes the fast
+		// path and serializes the live count — a stamp that skips stripped keys
+		// compares equal and reuses the normalized line instead.
+		delete details.jsonlEvents;
+
+		// Second rewrite: the persisted line carries the live count verbatim,
+		// exactly what a fresh projection serializes.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"lineCount":7');
+		expect(bodyAfterSecond).not.toContain('"lineCount":2');
 	});
 });
