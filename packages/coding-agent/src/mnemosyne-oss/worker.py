@@ -47,6 +47,16 @@ def as_dict(value):
     return {"content": str(value)}
 
 
+def _parse_metadata(value):
+    """get() returns metadata as the stored JSON text; decode it so exact reads show an object."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except ValueError:
+        return value
+
+
 def call_sdk(method, *args, **kwargs):
     """Call an SDK method and turn unsupported signatures into useful errors."""
     try:
@@ -192,14 +202,15 @@ class MnemosyneWorker:
         for bank in self.context["recall_banks"]:
             database = self._bank_path(bank)
             try:
-                stats = self._stats(self.memory(bank))
+                # get_stats() nests BEAM tier counts as beam.<tier>.total.
+                beam = self._stats(self.memory(bank)).get("beam") or {}
                 banks.append({
                     "bank": bank,
                     "database": str(database),
                     "health": "ok",
-                    "working_count": stats.get("working_count", stats.get("working_memories")),
-                    "episodic_count": stats.get("episodic_count", stats.get("episodic_memories")),
-                    "triple_count": stats.get("triple_count", stats.get("triples")),
+                    "working_count": (beam.get("working_memory") or {}).get("total"),
+                    "episodic_count": (beam.get("episodic_memory") or {}).get("total"),
+                    "triple_count": (beam.get("triples") or {}).get("total"),
                 })
             except RpcError:
                 raise
@@ -291,7 +302,7 @@ class MnemosyneWorker:
             "status": "found", "record": {
                 "id": str(data.get("id") or memory_id), "content": str(data.get("content") or ""),
                 "source": data.get("source"), "timestamp": data.get("timestamp") or data.get("created_at"),
-                "importance": data.get("importance"), "metadata": data.get("metadata"),
+                "importance": data.get("importance"), "metadata": _parse_metadata(data.get("metadata")),
                 "bank": bank, "store": data.get("store") or data.get("memory_store"),
                 "editable": bool(data.get("editable", True)),
             },
@@ -312,15 +323,12 @@ class MnemosyneWorker:
         if not callable(method):
             raise RpcError(-32000, f"Mnemosyne SDK does not support {operation}")
         if operation == "update":
-            kwargs = {}
-            if "content" in params:
-                kwargs["content"] = params["content"]
-            if "importance" in params:
-                kwargs["importance"] = params["importance"]
-            if "metadata" in params:
-                kwargs["metadata"] = params["metadata"]
+            # Mnemosyne.update(memory_id, content=None, importance=None) accepts nothing else.
+            kwargs = {key: params[key] for key in ("content", "importance") if key in params}
             result = call_sdk(method, memory_id, **kwargs)
-            status = "updated" if result is not False else "not_found"
+            if result is None:
+                raise RpcError(-32000, f"Mnemosyne write policy rejected the update of memory {memory_id}")
+            status = "updated" if result else "not_found"
         elif operation == "forget":
             result = call_sdk(method, memory_id)
             status = "deleted" if result is not False else "not_found"
