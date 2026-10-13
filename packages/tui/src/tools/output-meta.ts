@@ -94,6 +94,8 @@ export interface OutputMeta {
 	droppedLines?: number;
 	/** Rows the output throttle skipped after the retained rows — a mid/tail gap, named apart from the dropped head. */
 	throttledLines?: number;
+	/** The throttle skipped a partial-line suffix contributing no whole row; the retained last row's tail is gone. */
+	throttledFragmentLost?: boolean;
 	limits?: LimitsMeta;
 }
 

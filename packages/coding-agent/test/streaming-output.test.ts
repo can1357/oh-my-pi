@@ -407,6 +407,25 @@ describe("OutputSink", () => {
 		expect(chunks).toEqual(["a", "b"]);
 	});
 
+	test("dispose delivers a throttled pending chunk instead of dropping it silently", async () => {
+		// Failure mode: a second raw chunk arrives inside the executor's 50 ms
+		// OutputSink throttle, then the shell backend rejects — the error path
+		// skips dump() and calls dispose(), which used to clear the pending
+		// timer without flushing. The subscriber's retained tail then silently
+		// ended one chunk early with a zero skipped count. Dispose must deliver
+		// what the shell produced, exactly as dump()'s flush does.
+		const chunks: string[] = [];
+		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 60_000 });
+		sink.push("first");
+		sink.push("second");
+		expect(chunks).toEqual(["first"]);
+		await sink.dispose();
+		expect(chunks).toEqual(["first", "second"]);
+		// Idempotent: a later dump (or second dispose) must not re-emit it.
+		expect((await sink.dump()).output).toBe("firstsecond");
+		expect(chunks).toEqual(["first", "second"]);
+	});
+
 	test("replace cancels a throttled tail and discards its pending preview", () => {
 		vi.useFakeTimers();
 		const chunks: string[] = [];

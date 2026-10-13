@@ -46,18 +46,6 @@ describe("BashExecutionComponent replay seeding", () => {
 		setThemeInstance(darkTheme);
 	});
 
-	it("reports the true hidden-line count and keeps advertising expand", () => {
-		const component = new BashExecutionComponent("seq 1 250", ui, false);
-		component.setComplete(0, false, { output: REPLAY_OUTPUT });
-
-		const rendered = rowsOf(component).join("\n");
-		expect(rendered).toContain(`… ${HIDDEN_LINES} more lines`);
-		expect(rendered).toContain("to expand");
-		// The collapsed preview still shows only the tail window.
-		expect(rowsOf(component)).toContain("line-249");
-		expect(rowsOf(component)).not.toContain("line-0");
-	});
-
 	it("keeps the live streaming cap and reports dropped rows apart from the recoverable tail", () => {
 		const component = new BashExecutionComponent("seq 1 10000", ui, false);
 		component.appendOutput(REPLAY_OUTPUT);

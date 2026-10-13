@@ -144,6 +144,7 @@ export class EvalExecutionComponent extends Container {
 				// The eval pane keeps every line it is handed, so nothing is dropped.
 				droppedLineCount: 0,
 				throttledLineCount: 0,
+				throttledFragmentLost: false,
 			};
 			return dataFirst
 				? describeExecutionTool({
