@@ -777,4 +777,44 @@ describe("SessionManager entry-line memo", () => {
 		expect(await blobBytesBase64(mutatedRef)).toBe(backing.data);
 		expect(bodyAfterSecond).not.toContain(originalRef);
 	});
+	it("persists a jsonlEvents mutation inside a typeless anthropicCompaction carrier", async () => {
+		// The preserveData-style compaction carrier has no `type` marker of its
+		// own (`{ content, jsonlEvents }` under the `anthropicCompaction`
+		// key), yet `truncateForPersistence` returns it verbatim — so the
+		// stamp must classify it atomic and walk the transient key whole. A
+		// key-based check guarded on `"type" in obj` stamps the events as
+		// presence-only, and a later in-place mutation compares equal and
+		// reuses the old line although a fresh projection emits the new value.
+		const carrier: Record<string, unknown> = { content: "summary", jsonlEvents: [{ seq: 1 }] };
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-compaction",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: { anthropicCompaction: carrier },
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the verbatim carrier keeps its events on the line.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain('"seq":1');
+
+		// Mutate the event in place: same carrier, same array, only the leaf changes.
+		const events = carrier.jsonlEvents;
+		if (!Array.isArray(events)) throw new Error("Expected events array");
+		const event = events[0] as Record<string, unknown>;
+		event.seq = 2;
+
+		// Second rewrite: the persisted line carries the mutated event — a
+		// presence-only stamp reuses the old line and a reload restores seq 1.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"seq":2');
+		expect(bodyAfterSecond).not.toContain('"seq":1');
+	});
 });
