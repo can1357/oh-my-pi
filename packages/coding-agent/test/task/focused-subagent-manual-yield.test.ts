@@ -3,6 +3,7 @@
  * peer-woken, queued and async continuations without adopting peer-only replies.
  */
 import { afterEach, beforeEach, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -24,6 +25,16 @@ import { localSession } from "../helpers/local-session";
 const AGENT_ID = "FocusedYield";
 const PARENT_ID = "Main";
 const MOCK_API_SOURCE = "test/focused-subagent-manual-yield";
+const mountedTool: CustomTool = {
+	name: "mounted_probe",
+	label: "Mounted probe",
+	description: "mounted probe description sentinel",
+	parameters: type({ value: type("string").describe("mounted value sentinel") }),
+	loadMode: "discoverable",
+	async execute() {
+		return { content: [{ type: "text", text: "ok" }] };
+	},
+};
 const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
 
 let savedEnv: Record<string, string | undefined> = {};

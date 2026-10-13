@@ -74,6 +74,18 @@ function fakeMcpManager(getTools: () => Array<{ name: string; label: string }>):
 	} as unknown as MCPManager;
 }
 
+const revivedMcpTool = {
+	name: "mcp__server_probe",
+	label: "server/probe",
+	description: "revived MCP probe description sentinel",
+	parameters: type({ value: type("string").describe("revived value sentinel") }),
+	mcpServerName: "server",
+	mcpToolName: "probe",
+	async execute() {
+		return { content: [{ type: "text" as const, text: "ok" }] };
+	},
+} as AgentTool & { mcpServerName: string; mcpToolName: string };
+
 function createRef(sessionFile: string): AgentRef {
 	return {
 		id: "persisted-restricted",

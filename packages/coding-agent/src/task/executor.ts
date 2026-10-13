@@ -4794,7 +4794,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		settings,
 		{
 			...compactionThresholdSettings(options.compactionThresholdOverride),
-			...(isMinimalTask ? { inlineToolDescriptors: "off" } : undefined),
+			...(isMinimalTask ? { inlineToolDescriptors: "off", "tools.commands": false } : undefined),
 			...subagentLspWritethroughSettings(settings),
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.

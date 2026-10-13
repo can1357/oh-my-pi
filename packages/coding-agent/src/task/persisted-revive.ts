@@ -349,7 +349,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	// createSubagentSettings default).
 	const subagentSettings = createSubagentSettings(spec.settings, {
 		...subagentLspWritethroughSettings(spec.settings),
-		...(init.systemPreset === "minimal-task" ? { inlineToolDescriptors: "off" } : undefined),
+		...(init.systemPreset === "minimal-task" ? { inlineToolDescriptors: "off", "tools.commands": false } : undefined),
 		...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 		...(init.advisor
 			? {
