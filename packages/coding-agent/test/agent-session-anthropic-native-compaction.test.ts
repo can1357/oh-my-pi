@@ -5,6 +5,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { DateCwdReminderInjector } from "@oh-my-pi/pi-coding-agent/session/date-cwd-reminder";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
@@ -218,44 +219,39 @@ describe("AgentSession Anthropic native compaction", () => {
 		expect(withoutCacheControl(compaction.messages)).toEqual(withoutCacheControl(live.messages));
 	});
 
-	it("drops the discarded transcript from the reminder memo when a compaction commits", async () => {
+	it("releases the reminder memo when a compaction commits", async () => {
 		using tempDir = TempDir.createSync("@pi-anthropic-native-compaction-release-");
-		const opened = await openSession(tempDir, request =>
-			request === 3 ? compactionAnswer() : request === 5 ? captured() : answer(request),
-		);
+		// `release()` is the session's only seam onto the memo the reminder
+		// injector keeps pinned to the live transcript. Observing it while the
+		// session idles right after the commit is the only way to see the
+		// discarded transcript drop: the next prompt necessarily picks a new
+		// first-user/reference set, so it would overwrite the memo whether or
+		// not anything released it.
+		const release = vi.spyOn(DateCwdReminderInjector.prototype, "release");
+		const opened = await openSession(tempDir, request => (request === 3 ? compactionAnswer() : answer(request)));
 		const { session, requests } = opened;
 		try {
 			await session.prompt("first question");
 			await session.prompt("second question");
-			// The first turn carries the reminder; the memo pins that transcript.
-			const live = requests[1]!;
-			expect(JSON.stringify(live.messages[0])).toContain("<system-reminder>");
+			// Two live turns, no wholesale replacement: nothing has been released yet.
+			expect(release).not.toHaveBeenCalled();
+			expect(JSON.stringify(requests[1]!.messages[0])).toContain("<system-reminder>");
 
+			const releasedBefore = release.mock.calls.length;
 			await session.compact();
 
-			// The compaction committed a summary and swapped the live history under
-			// the session-scoped injector. The next turn must rebuild from the
-			// replacement transcript: the memo was released with the discarded one.
-			await session.prompt("third question");
-			await expect(session.compact()).rejects.toThrow("captured");
+			// Idle: no prompt, tool turn, or queue edit ran between the commit and
+			// this assertion, so only the history swap itself can have fired it.
+			expect(release.mock.calls.length).toBeGreaterThan(releasedBefore);
+			expect(requests).toHaveLength(3);
 
-			expect(requests).toHaveLength(5);
+			// The committed swap is what the provider sees on the next turn: the
+			// pre-compaction transcript is gone from the wire.
+			await session.prompt("third question");
+			expect(requests).toHaveLength(4);
 			const after = requests[3]!;
-			// The compaction summary replaced the whole pre-compaction transcript, so
-			// none of those messages are on the wire any more.
 			expect(JSON.stringify(after.messages)).not.toContain("first question");
 			expect(JSON.stringify(after.messages)).not.toContain("second question");
-			// The memo was released with the discarded history, so the next turn
-			// rebuilds from the replacement transcript instead of replaying it.
-			await session.prompt("fourth question");
-			await session.prompt("fifth question");
-			expect(requests).toHaveLength(7);
-			const next = requests[5]!;
-			// The replacement transcript is what ships now: the reminder rides the new
-			// first user turn, and the discarded pre-compaction history is gone.
-			expect(JSON.stringify(next.messages)).toContain("fourth question");
-			expect(JSON.stringify(next.messages)).not.toContain("first question");
-			expect(JSON.stringify(next.messages)).not.toContain("second question");
 		} finally {
 			await opened.close();
 		}
