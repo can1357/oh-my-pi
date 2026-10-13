@@ -239,4 +239,138 @@ describe("SessionManager entry-line memo", () => {
 		expect(bodyAfterSecond).toContain('"details":2');
 		expect(bodyAfterSecond).not.toContain('"details":1');
 	});
+
+	it("persists an indexed-slot change when details is an array with an overridden Symbol.iterator", async () => {
+		// `details` is the tool result's opaque slot, so an extension can hand it
+		// an array whose iterator yields a frozen snapshot while the slots move.
+		const details = ["a", "b"];
+		details[Symbol.iterator] = function* constantIterator(): ArrayIterator<string> {
+			yield "a";
+			yield "b";
+		};
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		const messageId = session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-iterator",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the persisted line carries the original slots.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain('"details":["a","b"]');
+
+		// Move a slot in place: `JSON.stringify` serializes the indexed slots,
+		// but the overridden iterator still yields the old pair — a stamp that
+		// walks the iterator compares equal and reuses the stale line.
+		const entry = session.getEntries().find(e => e.id === messageId);
+		if (!entry || entry.type !== "message" || entry.message.role !== "toolResult") {
+			throw new Error("Expected toolResult message entry");
+		}
+		const live = entry.message.details;
+		if (!Array.isArray(live)) throw new Error("Expected array details");
+		live[0] = "z";
+
+		// Second rewrite: the persisted line carries the moved slot.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"details":["z","b"]');
+		expect(bodyAfterSecond).not.toContain('"details":["a","b"]');
+	});
+
+	it("re-projects a details value swapped between JSON.rawJSON and a same-shaped plain object", async () => {
+		if (!("rawJSON" in JSON) || typeof JSON.rawJSON !== "function") {
+			throw new Error("Expected JSON.rawJSON support");
+		}
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		const messageId = session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-rawjson",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: JSON.rawJSON("1"),
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the branded value serializes as its payload verbatim.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain('"details":1');
+
+		// Swap brands in place: `JSON.rawJSON("1")` and `{ rawJSON: "1" }` share
+		// the same enumerable graph, but the projection emits `1` for the former
+		// and `{"rawJSON":"1"}` for the latter — a stamp of the container shape
+		// compares equal and reuses the stale line.
+		const entry = session.getEntries().find(e => e.id === messageId);
+		if (!entry || entry.type !== "message" || entry.message.role !== "toolResult") {
+			throw new Error("Expected toolResult message entry");
+		}
+		entry.message.details = { rawJSON: "1" };
+
+		// Second rewrite: the persisted line carries the plain object's shape.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"details":{"rawJSON":"1"}');
+	});
+
+	it("persists a jsonlEvents mutation inside a signed details object that persistence keeps verbatim", async () => {
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		const messageId = session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-atomic",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			// Signed: `truncateForPersistence` returns the whole object before its
+			// key-stripping loop, so `jsonlEvents` reaches the persisted line.
+			details: {
+				type: "thinking",
+				thinking: "opaque extension payload",
+				thinkingSignature: "sig-fix15222",
+				jsonlEvents: [{ seq: 1 }],
+			},
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the atomic details object lands on the line whole.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain('"jsonlEvents":[{"seq":1}]');
+
+		// Mutate the events in place: the stamp must track them because the
+		// projection kept them — an unconditional transient skip compares equal
+		// and reuses the stale line.
+		const entry = session.getEntries().find(e => e.id === messageId);
+		if (!entry || entry.type !== "message" || entry.message.role !== "toolResult") {
+			throw new Error("Expected toolResult message entry");
+		}
+		const details = entry.message.details;
+		if (typeof details !== "object" || details === null || !("jsonlEvents" in details)) {
+			throw new Error("Expected atomic details with jsonlEvents");
+		}
+		const events = details.jsonlEvents;
+		if (!Array.isArray(events)) throw new Error("Expected jsonlEvents array");
+		const first = events[0];
+		if (typeof first !== "object" || first === null || !("seq" in first)) {
+			throw new Error("Expected first event");
+		}
+		first.seq = 2;
+
+		// Second rewrite: the persisted line carries the mutated event.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"jsonlEvents":[{"seq":2}]');
+		expect(bodyAfterSecond).not.toContain('"jsonlEvents":[{"seq":1}]');
+	});
 });
