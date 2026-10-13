@@ -582,4 +582,199 @@ describe("SessionManager entry-line memo", () => {
 		expect(bodyAfterSecond).toContain('"details":7');
 		expect(bodyAfterSecond).not.toContain('"ordinal":3');
 	});
+	it("persists a stateful content getter's serialization-observed values instead of the probe-shifted ones", async () => {
+		// The opaque `details` slot can hold a signed object with an ordinary
+		// enumerable accessor — here a getter that yields a fresh payload on
+		// every read. The hook pre-scan must answer through property
+		// descriptors, never by reading the key: each probe read shifts the
+		// sequence, so the persisted line carries a value native serialization
+		// alone never produces.
+		let calls = 0;
+		const details: Record<string, unknown> = {
+			type: "thinking",
+			thinkingSignature: "sig-fix15222-stateful",
+		};
+		Object.defineProperty(details, "content", {
+			enumerable: true,
+			configurable: true,
+			get() {
+				calls++;
+				return `payload-${calls}`;
+			},
+		});
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-stateful",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// One atomic publish performs two full-body serializations (materialize,
+		// then commit), so the getter runs exactly twice and the persisted line
+		// carries the second serialization's payload — a probe that reads the
+		// key runs it four times and persists payload-4.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(calls).toBe(2);
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"content":"payload-2"');
+	});
+
+	it("rewrites a session whose details is a Number-prototype object without latching a persistence failure", async () => {
+		// `Object.create(Number.prototype)` passes `instanceof Number` (the
+		// prototype chain check) but carries no [[NumberData]] slot, so
+		// `Number.prototype.valueOf` throws on it while `JSON.stringify`
+		// serializes it as `{}`. The stamp must answer the unbox question with
+		// an intrinsic brand check and fall back to the object walk — never
+		// throw on data the serializer accepts.
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-brandless",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: Object.create(Number.prototype),
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// Full rewrite succeeds and the line carries `{}`, exactly what the
+		// serializer emits — no latched failure, no truncated body.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"details":{}');
+		expect(body).toContain('"toolName":"bash"');
+	});
+
+	it("strips jsonlEvents an overridden array iterator hides from the projector pre-scan", async () => {
+		// `details` is the tool result's opaque slot, so an extension can hand
+		// it an array whose iterator hides an indexed object carrying
+		// `jsonlEvents`. The projector's pre-scan must walk indexed slots the
+		// way `JSON.stringify` reads them: transient streaming events must
+		// never reach a persisted line through an iterator-shaped hole.
+		const details: unknown[] = [{ seq: 1, jsonlEvents: [{ event: "hidden" }] }];
+		details[Symbol.iterator] = function* hiddenIterator(): ArrayIterator<unknown> {
+			// Deliberately yields nothing: the indexed slot is invisible here.
+		};
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-hidden-iterator",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// The persisted line drops the hidden transient key and keeps the
+		// surviving fields — a pre-scan that trusts the iterator takes the
+		// verbatim fast path and leaks the raw streaming events.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		expect(body).not.toContain("jsonlEvents");
+		expect(body).toContain('"seq":1');
+	});
+
+	it("never invokes a stateful prototype data getter while persisting an image block", async () => {
+		// An extension can supply a class-backed image block whose `data` rides
+		// a prototype getter that yields a fresh payload on every read. The
+		// projector must answer its acceptance question through property
+		// descriptors, never by reading the key: each acceptance read shifts
+		// the sequence, so the persisted line carries bytes native
+		// serialization alone never produces — and the memo must not cache a
+		// line whose source no stamp can describe.
+		let calls = 0;
+		class PrototypeImage {
+			readonly type = "image" as const;
+			readonly mimeType = "image/png";
+			get data(): string {
+				calls++;
+				return `payload-${calls}`;
+			}
+		}
+		// The getter stays non-enumerable on the prototype, so the projector's
+		// spread never copies an observed value into the projected line.
+		Object.defineProperty(PrototypeImage.prototype, "data", { enumerable: false });
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "user" as const,
+			content: [new PrototypeImage()],
+			timestamp: Date.now(),
+		});
+
+		// One atomic publish performs two full-body serializations (materialize,
+		// then commit). The acceptance checks read descriptors only — the
+		// getter runs exactly zero times outside serialization, so the
+		// persisted line carries no getter-shifted bytes.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(calls).toBe(0);
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"type":"image"');
+		expect(body).not.toContain("payload-");
+	});
+
+	it("persists the current bytes of an inherited-data image payload mutated in place", async () => {
+		// An extension can supply an image block whose `data` rides an
+		// inherited string descriptor: the projector accepts it (its `in`
+		// checks read through the chain) and externalizes the live bytes, so
+		// the stamp must track those bytes — an own-enumerable-only stamp
+		// compares equal after a mutation and reuses the old blob ref,
+		// restoring the previous image on reload.
+		const backing = { data: LARGE_BASE64 };
+		const block = Object.create(backing);
+		block.type = "image";
+		block.mimeType = "image/png";
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		const messageId = session.appendMessage({
+			role: "user" as const,
+			content: [block],
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the live bytes are externalized to a blob ref.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		const refsAfterFirst = persistedBlobRefs(bodyAfterFirst);
+		expect(refsAfterFirst).toHaveLength(1);
+		const originalRef = refsAfterFirst[0];
+		if (!originalRef) throw new Error("Expected blob reference");
+		expect(await blobBytesBase64(originalRef)).toBe(LARGE_BASE64);
+
+		// Mutate the backing bytes behind the inherited descriptor: no own key
+		// changes, so an own-enumerable stamp still matches the original line.
+		const entry = session.getEntries().find(e => e.id === messageId);
+		if (!entry || entry.type !== "message" || entry.message.role !== "user")
+			throw new Error("Expected user message entry");
+		const content = entry.message.content;
+		if (!Array.isArray(content)) throw new Error("Expected array content");
+		if (content[0] == null || typeof content[0] !== "object") throw new Error("Expected image block");
+		expect("data" in content[0]).toBe(true);
+		backing.data = "B".repeat(2048);
+
+		// Second rewrite: the persisted line carries a new ref for the new
+		// bytes — reloading restores the mutated image, not the previous one.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		const refsAfterSecond = persistedBlobRefs(bodyAfterSecond);
+		expect(refsAfterSecond).toHaveLength(1);
+		const mutatedRef = refsAfterSecond[0];
+		if (!mutatedRef) throw new Error("Expected blob reference");
+		expect(mutatedRef).not.toBe(originalRef);
+		expect(await blobBytesBase64(mutatedRef)).toBe(backing.data);
+		expect(bodyAfterSecond).not.toContain(originalRef);
+	});
 });
