@@ -302,8 +302,9 @@ spawning session. The values come from the resolvers the spawn itself calls
 
 It resolves the way a spawn from a new top-level session in the current directory would: an inherited
 model is `modelRoles.default`, or the first available model when no default role resolves, and
-`inherit` tiers are the configured `tier.*`. Tools are the built-ins the child session constructs;
-MCP and extension tools come from the session. A caller's `model` or `effort`, a live `/model` or
+`inherit` tiers are the configured `tier.*`. Tools are the built-ins a task spawn's child session
+constructs, with `yield` only under `task.structured` (an eval `agent()` spawn always gets it); MCP and
+extension tools come from the session. A caller's `model` or `effort`, a live `/model` or
 `/fast` change, a session-only `Alt+P` pick, plan mode and `before_subagent_spawn` handlers can still
 change what a real spawn uses.
 

@@ -32,6 +32,7 @@ import { describeModelCompactionPoint } from "@oh-my-pi/pi-coding-agent/session/
 import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { resolveEffectiveAgentConfig } from "@oh-my-pi/pi-coding-agent/task/effective-config";
+import { cfgTaskStructured } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -67,12 +68,13 @@ afterAll(async () => {
 	await fs.rm(fixtureDir, { recursive: true, force: true });
 });
 
-/** A child session that yields on its first prompt, so the run settles. */
+/** A child session that finishes on its first prompt (a `yield` call and a final message), so either run shape settles. */
 function yieldingSession(): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
+	const messages: unknown[] = [];
 	return {
 		...createSessionDefaults(),
-		state: { messages: [] },
+		state: { messages },
 		agent: { state: { systemPrompt: ["test"] } },
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
@@ -82,6 +84,7 @@ function yieldingSession(): AgentSession {
 			return () => listeners.splice(listeners.indexOf(listener), 1);
 		},
 		prompt: async () => {
+			messages.push({ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" });
 			for (const listener of listeners) {
 				listener({
 					type: "tool_execution_end",
@@ -130,6 +133,8 @@ async function spawn(
 		invocationKind: "task",
 		assignment: "Look.",
 		agent: agent.name,
+		// As the task tool's #resultParams: without task.structured the child gets no `yield` tool.
+		...(cfgTaskStructured.get(settings) ? {} : { structured: false }),
 	});
 	await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	const options = create.mock.calls[0]?.[0];
@@ -440,7 +445,10 @@ describe("omp agents show against the session a spawn starts", () => {
 
 	it("reports `todo` for a yield-gated child whose prewalk is armed", async () => {
 		await setup();
-		const settings = Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } });
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+			"task.structured": true,
+		});
 		const agent: AgentDefinition = {
 			name: "walker",
 			description: "test",
@@ -460,6 +468,32 @@ describe("omp agents show against the session a spawn starts", () => {
 			await session.dispose();
 		}
 	});
+
+	for (const structured of [false, true]) {
+		it(`lists \`yield\` only when task.structured is ${structured ? "on" : "off (the default)"}`, async () => {
+			await setup();
+			const settings = Settings.isolated({
+				modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+				...(structured ? { "task.structured": true } : {}),
+			});
+			const agent: AgentDefinition = {
+				name: "reporter",
+				description: "test",
+				systemPrompt: "test",
+				source: "project",
+				tools: ["read", "yield"],
+			};
+			const view = await resolveEffectiveAgentConfig(agent, settings, registry, tempDir);
+			const { session } = await startSpawn(agent, settings);
+			try {
+				const active = session.getActiveToolNames().sort();
+				expect(active.includes("yield")).toBe(structured);
+				expect([...(view.tools.value as string[])].sort()).toEqual(active);
+			} finally {
+				await session.dispose();
+			}
+		});
+	}
 
 	it("attributes compaction to compaction.enabled=false over the agent's threshold entry", async () => {
 		await setup();
