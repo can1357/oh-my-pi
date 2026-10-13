@@ -54,6 +54,7 @@ unsafe extern "C" {
 		user: Ref,
 	) -> Ref;
 	fn CGEventGetIntegerValueField(event: Ref, field: u32) -> i64;
+	fn CGEventGetFlags(event: Ref) -> u64;
 	fn CGEventTapEnable(tap: Ref, enable: bool);
 }
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -82,6 +83,40 @@ const fn physical_escape(kind: u32, key: i64, pid: i64, tag: i64) -> bool {
 	kind == KEY_DOWN && key == 53 && pid == 0 && tag != SYNTHETIC_EVENT_TAG
 }
 
+const FLAGS_CHANGED: u32 = 12;
+const COMMAND_FLAG: u64 = 0x0010_0000;
+
+/// What a physical event means for takeover's hand-back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UserInput {
+	/// A mouse press or a Command shortcut (Command-Tab, Spotlight): it picks
+	/// an app or window, so the hand-back stands down.
+	Choice,
+	/// Plain typing, which reaches the takeover target only because takeover
+	/// holds the front.
+	Typing,
+}
+
+const fn user_input(kind: u32, flags: u64, pid: i64, tag: i64) -> Option<UserInput> {
+	if pid != 0 || tag == SYNTHETIC_EVENT_TAG {
+		return None;
+	}
+	match kind {
+		1 | 3 | 25 => Some(UserInput::Choice),
+		KEY_DOWN if flags & COMMAND_FLAG != 0 => Some(UserInput::Choice),
+		KEY_DOWN | FLAGS_CHANGED => Some(UserInput::Typing),
+		_ => None,
+	}
+}
+
+fn uptime_ns() -> u64 {
+	let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+	// SAFETY: `time` is writable for the call, which retains no pointer.
+	unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, &raw mut time) };
+	u64::try_from(time.tv_sec).unwrap_or(0) * 1_000_000_000
+		+ u64::try_from(time.tv_nsec).unwrap_or(0)
+}
+
 unsafe extern "C" fn observe(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
 	// SAFETY: the monitor thread retains this stack context through
 	// invalidation.
@@ -96,15 +131,22 @@ unsafe extern "C" fn observe(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> R
 	}
 	if !event.is_null() {
 		// SAFETY: documented read-only CGEvent fields.
-		let (key, pid, tag) = unsafe {
+		let (key, pid, tag, flags) = unsafe {
 			(
 				CGEventGetIntegerValueField(event, KEYBOARD_KEYCODE),
 				CGEventGetIntegerValueField(event, SOURCE_UNIX_PID),
 				CGEventGetIntegerValueField(event, SOURCE_USER_DATA),
+				CGEventGetFlags(event),
 			)
 		};
-		if pid == 0 && tag != SYNTHETIC_EVENT_TAG {
-			super::USER_ACTIVITY.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+		match user_input(kind, flags, pid, tag) {
+			Some(UserInput::Choice) => {
+				super::USER_CHOICES.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+			},
+			Some(UserInput::Typing) => {
+				super::LAST_USER_TYPING.store(uptime_ns(), std::sync::atomic::Ordering::Release);
+			},
+			None => {},
 		}
 		if physical_escape(kind, key, pid, tag) {
 			context.inner.cancel();
@@ -370,5 +412,27 @@ mod tests {
 		assert_eq!(input_target(KEY_DOWN, 0, || None), None);
 		assert_eq!(input_target(LEFT_MOUSE_DOWN, 0, unread), None);
 		assert_eq!(input_target(RIGHT_MOUSE_DOWN, -1, unread), None);
+	}
+
+	#[test]
+	fn clicks_and_command_shortcuts_choose_while_plain_typing_does_not() {
+		for kind in [1, 3, 25] {
+			assert_eq!(user_input(kind, 0, 0, 0), Some(UserInput::Choice));
+			assert_eq!(user_input(kind, 0, 0, SYNTHETIC_EVENT_TAG), None);
+			assert_eq!(user_input(kind, 0, 42, 0), None);
+		}
+		// Command-Tab and Command-Space pick an app; Shift-typing does not.
+		assert_eq!(user_input(KEY_DOWN, COMMAND_FLAG, 0, 0), Some(UserInput::Choice));
+		assert_eq!(user_input(KEY_DOWN, COMMAND_FLAG | 0x2_0000, 0, 0), Some(UserInput::Choice));
+		assert_eq!(user_input(KEY_DOWN, 0x2_0000, 0, 0), Some(UserInput::Typing));
+		assert_eq!(user_input(KEY_DOWN, 0, 0, 0), Some(UserInput::Typing));
+		assert_eq!(user_input(FLAGS_CHANGED, 0x2_0000, 0, 0), Some(UserInput::Typing));
+		// omp's own keys and those another process posts are not the user's.
+		assert_eq!(user_input(KEY_DOWN, COMMAND_FLAG, 0, SYNTHETIC_EVENT_TAG), None);
+		assert_eq!(user_input(KEY_DOWN, 0, 42, 0), None);
+		// Releases mean nothing on their own.
+		for kind in [11, 2, 4, 26] {
+			assert_eq!(user_input(kind, COMMAND_FLAG, 0, 0), None);
+		}
 	}
 }

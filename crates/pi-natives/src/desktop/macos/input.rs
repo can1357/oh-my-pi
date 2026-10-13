@@ -1774,7 +1774,7 @@ fn foreground_pointer(
 ) -> CoreResult<()> {
 	preserving_cursor(source, || {
 		skylight::with_foreground(pid, wid, |_| {
-			let activity = control::user_activity();
+			let choices = control::user_choices();
 			let mut occluder = None;
 			let result = uncover(window, pid, wid, &event, &mut occluder)
 				.and_then(|()| skylight::require_front_window(pid, wid))
@@ -1789,16 +1789,16 @@ fn foreground_pointer(
 				});
 			// Capture before raising, so even a failed raise/re-hit-test retains
 			// the restoration token. Never reorder over a user-selected app.
-			let cleanup =
-				if control::user_activity() == activity && skylight::is_front_window(pid, wid) {
-					control::cleanup(|| {
-						occluder.map_or(Ok(()), |occluder: Occluder| {
-							ax::raise_window_id(occluder.pid, occluder.window)
-						})
+			let cleanup = if control::user_choices() == choices && skylight::is_front_window(pid, wid)
+			{
+				control::cleanup(|| {
+					occluder.map_or(Ok(()), |occluder: Occluder| {
+						ax::raise_window_id(occluder.pid, occluder.window)
 					})
-				} else {
-					Ok(())
-				};
+				})
+			} else {
+				Ok(())
+			};
 			skylight::after_cleanup(result, cleanup)
 		})
 	})

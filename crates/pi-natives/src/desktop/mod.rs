@@ -2376,16 +2376,48 @@ mod capture_tests {
 		}
 	}
 
-	fn worker_with(backend: impl Backend + 'static) -> Worker {
-		Worker {
-			backend: Ok(Box::new(backend)),
-			registry: AxRegistry::default(),
-			frames: HashMap::new(),
-			capabilities: Arc::default(),
-			#[cfg(target_os = "macos")]
-			listener: control::intervention::Listener::simulated(),
-			#[cfg(target_os = "macos")]
-			read: None,
+	/// A worker that holds the ownership test lock for its test: input it is
+	/// sent takes the process's one input lease, which the ownership tests in
+	/// `control` assert on.
+	struct TestWorker {
+		worker:     Worker,
+		_ownership: parking_lot::MutexGuard<'static, ()>,
+	}
+
+	impl TestWorker {
+		fn serve(self, rx: &flume::Receiver<QueuedRequest>, grace: Duration) {
+			let Self { worker, _ownership } = self;
+			worker.serve(rx, grace);
+		}
+	}
+
+	impl std::ops::Deref for TestWorker {
+		type Target = Worker;
+
+		fn deref(&self) -> &Worker {
+			&self.worker
+		}
+	}
+
+	impl std::ops::DerefMut for TestWorker {
+		fn deref_mut(&mut self) -> &mut Worker {
+			&mut self.worker
+		}
+	}
+
+	fn worker_with(backend: impl Backend + 'static) -> TestWorker {
+		TestWorker {
+			_ownership: crate::desktop::control::OWNERSHIP_TEST.lock(),
+			worker:     Worker {
+				backend: Ok(Box::new(backend)),
+				registry: AxRegistry::default(),
+				frames: HashMap::new(),
+				capabilities: Arc::default(),
+				#[cfg(target_os = "macos")]
+				listener: control::intervention::Listener::simulated(),
+				#[cfg(target_os = "macos")]
+				read: None,
+			},
 		}
 	}
 
