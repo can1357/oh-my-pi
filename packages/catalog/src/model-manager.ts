@@ -716,6 +716,9 @@ function mergeDynamicModel<TApi extends Api>(
 		resolveHeaders,
 		compat,
 		contextPromotionTarget: dynamicModel.contextPromotionTarget ?? existingModel.contextPromotionTarget,
+		// Judgment wire policy is api-scoped: a rebuild that moves the row to a
+		// new api must not inherit the prior api\u2019s contract.
+		judgment: dynamicModel.api === existingModel.api ? (dynamicModel.judgment ?? existingModel.judgment) : undefined,
 	} as ModelSpec<TApi>);
 }
 

@@ -4,6 +4,8 @@ import * as path from "node:path";
 import type { ChatUsageEvent } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, ChoiceQuestion, Model, NoulQuestion } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { JudgmentConfig } from "@oh-my-pi/pi-catalog/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -334,6 +336,86 @@ describe("ChainJudge", () => {
 		// A gated feature (find, tab.goal) passes on a native judge, so its judge must route there too.
 		expect(hasNativeJudge(settings, registry)).toBe(true);
 		expect(new ChainJudge({ settings, registry, purpose: "test" }).primaryModel()?.id).toBe(JEV_PREVIEW.id);
+	});
+
+	const EVAL_JUDGMENT: JudgmentConfig = {
+		route: "/v1/evaluate",
+		typeMap: { noul: "boolean" },
+		valueMap: { noul: "probability" },
+		usageMap: { input: "inputTokens", output: "outputTokens" },
+	};
+
+	function mockEvaluateFetch(modelId: string) {
+		const urls: string[] = [];
+		const bodies: { questions: Record<string, { type: string }> }[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch((_url, init) => {
+				urls.push(String(_url));
+				bodies.push(JSON.parse(String(init?.body)));
+				return Response.json({
+					model: modelId,
+					answers: { urgent: { type: "boolean", probability: 0.9 } },
+					usage: { inputTokens: 12, outputTokens: 3 },
+				});
+			}),
+		);
+		return { urls, bodies };
+	}
+
+	it("forwards judgment overrides to native judgment models", async () => {
+		const nativeModel = buildModel({
+			...JEV_PREVIEW,
+			id: "jev-custom-route",
+			provider: "custom-judge",
+			baseUrl: "https://custom.example",
+		});
+		nativeModel.judgment = EVAL_JUDGMENT;
+
+		const settings = Settings.isolated({
+			modelRoles: { judge: "custom-judge/jev-custom-route" },
+		});
+		const registry = makeRegistry([nativeModel], { "custom-judge": "test-key" });
+		const { urls, bodies } = mockEvaluateFetch("jev-custom-route");
+
+		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
+			state: "mechanical task",
+			questions: { urgent: { type: "noul", instructions: "Does this convey urgency?" } },
+		});
+
+		expect(urls).toEqual(["https://custom.example/v1/evaluate"]);
+		expect(bodies[0]?.questions.urgent.type).toBe("boolean");
+		expect(result.answers.urgent).toMatchObject({ type: "noul", noul: 0.9 });
+		expect(result.usage.input).toBe(12);
+		expect(result.usage.totalTokens).toBe(15);
+	});
+
+	it("flows catalog-supplied judgment to ChainJudge", async () => {
+		const nativeModel = buildModel({
+			id: "typesafe-ai/jev",
+			name: "Jev",
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://gateway.example",
+			api: "typesafe",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_000,
+			maxTokens: 4096,
+		});
+		expect(nativeModel.judgment?.route).toBe("/v1/evaluate");
+
+		const registry = makeRegistry([nativeModel], { "vercel-ai-gateway": "test-key" });
+		const { urls, bodies } = mockEvaluateFetch("typesafe-ai/jev");
+		const settings = Settings.isolated({ modelRoles: { judge: "vercel-ai-gateway/typesafe-ai/jev" } });
+		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
+			state: "mechanical task",
+			questions: { urgent: { type: "noul", instructions: "Does this convey urgency?" } },
+		});
+		expect(urls).toEqual(["https://gateway.example/v1/evaluate"]);
+		expect(bodies[0]?.questions.urgent.type).toBe("boolean");
+		expect(result.answers.urgent).toMatchObject({ type: "noul", noul: 0.9 });
+		expect(result.usage.input).toBe(12);
+		expect(result.usage.totalTokens).toBe(15);
 	});
 
 	it("resolves and forwards configured headers to native judgment models", async () => {

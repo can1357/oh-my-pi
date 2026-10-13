@@ -20,7 +20,7 @@
  */
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import predicateTemplate from "./openai-decisions-predicate.md" with { type: "text" };
-import { type Answer, type Question, tokenUsage } from "./types";
+import { type Answer, type JudgmentRequest, type Question, type Questions, tokenUsage } from "./types";
 import { finiteNumber, type JudgmentWire } from "./wire";
 
 type DecisionQuestion =
@@ -100,7 +100,7 @@ function decodeAnswer(entry: Record<string, unknown>): Answer | undefined {
 /** OpenAI's `/v1/decisions` route. */
 export const openaiDecisionsWire: JudgmentWire = {
 	target: (baseUrl, _model, key) => ({ url: `${baseUrl}/decisions`, token: key }),
-	encode: (request, model) => ({
+	encode: (request: JudgmentRequest<Questions>, model) => ({
 		model,
 		input: typeof request.state === "string" ? request.state : JSON.stringify(request.state),
 		questions: Object.entries(request.questions).map(([name, question]) => encodeQuestion(name, question)),

@@ -7,6 +7,71 @@ provider "vercel-ai-gateway" {
 		env "VERCEL_AI_GATEWAY_API_KEY"
 	}
 
+	// convaiinnovations/laya-free is a temporary promo model expiring 2026-10-31;
+	// author only the long-lived stable evaluation models here.
+	seed api="typesafe" base-url="https://ai-gateway.vercel.sh" bundle="always" {
+		model "typesafe-ai/jev" name="Jev" {
+			reasoning #false
+			input "text"
+			cost input=0.042 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "microsoft/microsoft-decision-1" name="Decision-1" {
+			reasoning #false
+			input "text"
+			cost input=0.042 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "liquid/d1" name="Liquid d1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.04 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "openai/gpt-6-luna-decisions" name="GPT-6 Luna Decisions" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.1 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	// residue: evaluation rows are runtime-discovered ids no selector can
+	// isolate; the typesafe-scoped /v1/evaluate wire facts cover them all
+	// since chat rows are excluded.
+	on-api "typesafe" {
+		models "*" {
+			judgment {
+				route "/v1/evaluate"
+				type-map {
+					noul "boolean"
+				}
+				value-map {
+					noul "probability"
+				}
+				usage-map {
+					input "inputTokens"
+					output "outputTokens"
+				}
+			}
+		}
+		// residue: chat rows are anthropic-messages so excluded; future eval ids
+		// covered automatically.
+		models "*" {
+			kind "judge"
+		}
+	}
+
+	// Live /v1/models reports text-only modalities with no vision tag, but
+	// first-party luna seed + upstream description confirm image input.
+	models "openai/gpt-6-luna-decisions" {
+		input-modalities "text" "image"
+	}
+
 	// residue: the bare `deepseek/*` namespace rides the Anthropic route, whose
 	// ladder is the generic five-tier scale.
 	models "deepseek/*" {

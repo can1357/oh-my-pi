@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `NativeJudge` judgment support (`route`, `typeField`, `typeMap`, `valueMap`, `usageMap`) so compatible endpoints such as the Vercel AI Gateway's `/v1/evaluate` can answer System One judgments ([#15613](https://github.com/can1357/oh-my-pi/pull/15613) by [@szavadsky](https://github.com/szavadsky)).
+
 ### Removed
 
 - Removed the `toolNamespacesInfo` stream option; Codex requests no longer send `tool_namespaces_info` turn metadata, and `code_mode_tool_names`/`tool_namespaces_info` are no longer reserved client metadata keys.

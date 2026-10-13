@@ -45,6 +45,8 @@ export type Question = ChoiceQuestion | NoulQuestion | ScoreQuestion;
 /** Questions keyed by caller-chosen ids; answers come back under the same ids. */
 export type Questions = Record<string, Question>;
 
+export type WireQuestions = Record<string, Record<string, unknown>>;
+
 export interface ChoiceAnswer<L extends string = string> {
 	type: "choice";
 	/** Highest-probability option. */
@@ -77,7 +79,7 @@ export type Answer = ChoiceAnswer | NoulAnswer | ScoreAnswer;
 export type AnswerFor<Q extends Question> =
 	Q extends ChoiceQuestion<infer L> ? ChoiceAnswer<L> : Q extends NoulQuestion ? NoulAnswer : ScoreAnswer;
 
-export interface JudgmentRequest<Q extends Questions = Questions> {
+export interface JudgmentRequest<Q extends Questions | WireQuestions = Questions> {
 	state: JudgmentState;
 	questions: Q;
 }

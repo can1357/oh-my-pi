@@ -11,7 +11,7 @@ import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
 import { materializeTimeBasedCost } from "./pricing";
-import { type Api, MODEL_KINDS, type Model, type ModelSpec } from "./types";
+import { type Api, MODEL_KINDS, type JudgmentConfig, type Model, type ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
 
 function numberField(source: object, key: string): number | undefined {
@@ -64,6 +64,54 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
 	return Array.isArray(value) && value.every(entry => entry === "text" || entry === "image");
 }
 
+/** Narrow an unknown compiled-axis payload to a string→string record. */
+function stringRecord<K extends string = string>(value: unknown, allow?: readonly K[]): Record<K, string> | undefined {
+	const payload = objectPayload(value);
+	if (payload === undefined) return undefined;
+	const record = {} as Record<K, string>;
+	const allowSet = allow !== undefined ? new Set<string>(allow) : undefined;
+	for (const [key, entry] of Object.entries(payload)) {
+		if (allowSet !== undefined && !allowSet.has(key)) {
+			throw new Error(`judgment map entry for unknown key ${JSON.stringify(key)} is not allowed`);
+		}
+		if (typeof entry !== "string" || entry === "") {
+			throw new Error(
+				`judgment map entry for ${JSON.stringify(key)} must be a non-empty string: ${JSON.stringify(entry)}`,
+			);
+		}
+		record[key as K] = entry;
+	}
+	return Object.keys(record).length > 0 ? record : undefined;
+}
+
+/**
+ * Narrow a compiled `judgment` axis value to a JudgmentConfig. Unknown keys
+ * are ignored; `undefined` (absent, non-object, or no recognized field)
+ * makes the caller drop inherited policy when the spec does not explicitly
+ * set judgment, so stale policy cannot survive an api-switched rebuild.
+ */
+function judgmentConfig(value: unknown): JudgmentConfig | undefined {
+	const payload = objectPayload(value);
+	if (payload === undefined) return undefined;
+	const config: JudgmentConfig = {};
+	const route = Reflect.get(payload, "route");
+	if (typeof route === "string") {
+		// Gen-time failure, not a silent drop: a bad route would leave the
+		// spec value to win unexpectedly.
+		if (!route.startsWith("/")) throw new Error(`judgment.route must start with "/": ${JSON.stringify(route)}`);
+		config.route = route;
+	}
+	const typeField = Reflect.get(payload, "typeField");
+	if (typeof typeField === "string" && typeField !== "") config.typeField = typeField;
+	const typeMap = stringRecord(Reflect.get(payload, "typeMap"), ["noul", "choice", "score"]);
+	if (typeMap !== undefined) config.typeMap = typeMap;
+	const valueMap = stringRecord(Reflect.get(payload, "valueMap"), ["noul", "choice", "score"]);
+	if (valueMap !== undefined) config.valueMap = valueMap;
+	const usageMap = stringRecord(Reflect.get(payload, "usageMap"), ["input", "output"]);
+	if (usageMap !== undefined) config.usageMap = usageMap;
+	return Object.keys(config).length > 0 ? config : undefined;
+}
+
 /**
  * Applies resolved catalog-data axes onto the model: reviewed metadata
  * corrections (`cost-patch`, `limits-patch`, `long-context-cost`,
@@ -73,9 +121,23 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * `supports-assistant-prefill`) is rule-owned; `context-promotion-target` fills
  * only when the spec left it unset.
  */
-function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
+function applyCatalogAssignments<TApi extends Api>(
+	model: Model<TApi>,
+	catalog: Record<string, unknown>,
+	specHasJudgment = false,
+): void {
 	const kind = MODEL_KINDS.find(value => value === catalog.kind);
 	if (kind !== undefined) model.kind = kind;
+	// Catalog judgment wire facts are the baseline; spec keys win per-key, while
+	// map values replace wholesale (discovery and user modelOverrides, merged
+	// before this rebuild; no producer today).
+	const judgment = judgmentConfig(catalog.judgment);
+	if (judgment !== undefined) {
+		const prior = model.judgment;
+		model.judgment = { ...judgment, ...prior };
+	} else if (!specHasJudgment) {
+		delete model.judgment;
+	}
 	if (catalog.contextWindowAuthoritative === true) {
 		model.contextWindowAuthoritative = true;
 	} else {
@@ -375,7 +437,11 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 		compat: policy.compat,
 		compatConfig: spec.compat,
 	};
-	applyCatalogAssignments(model, policy.catalog);
+	applyCatalogAssignments(
+		model,
+		policy.catalog,
+		Object.hasOwn(spec, "judgment") && spec.judgment !== undefined,
+	);
 	applyCatalogCorrections(model, policy.catalog);
 	// Configured kinds and lifetimes replace catalog values rather than merging with them.
 	if (spec.kindConfig !== undefined) model.kind = spec.kindConfig;

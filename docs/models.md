@@ -167,6 +167,12 @@ A configured `kind`, explicit or implied by a runner API, outranks the bundled c
 
 Loading models.yml checks a `modelOverrides` `kind` only against an api the file names: the override's own `api`, or that of a `models` entry with the same id. A built-in or discovered model gets its api later, so its override `kind` is checked against that api when the override applies; a kind the api does not serve is ignored and logged. An `api` override without `kind` takes a runner API's kind, keeps a kind the new api still serves, and otherwise makes the model `chat`. A `models` entry that redefines a built-in id on a different api follows the same rule, so redefining an image row on `openai-completions` makes it `chat`.
 
+### Vercel AI Gateway evaluation models
+
+Discovery maps Vercel AI Gateway `type: "evaluation"` rows (e.g. `typesafe-ai/jev`, `convaiinnovations/laya`) from `/v1/models` to `api: typesafe` judge models routing to `/v1/evaluate`.
+
+The discovery mapper carries upstream fields only; the ai judgment decorator applies the KDL contract (`boolean`/`probability`, camelCase usage). `choice` and `score` questions are sent canonically and answered natively. Cost reprices from the catalog because Vercel reports billed cost at `providerMetadata.gateway.cost` (outside usage).
+
 ### Allowed auth/discovery values
 
 - `auth`: `apiKey` (default), `none`, or `oauth`. `none` and `oauth` waive the custom-provider `apiKey` requirement, but `oauth` does not create credentials or register a login flow. It forces OAuth-style request shaping; a usable credential must come from stored auth, environment, or a configured key. Custom `anthropic-messages` models also use OAuth-style shaping when `auth` is omitted; set `auth: apiKey` for plain API-key shaping.
