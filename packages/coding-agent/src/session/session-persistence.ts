@@ -406,11 +406,12 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 
 /**
  * True for nodes `truncateForPersistence` returns verbatim without
- * descending: image-generation results, externalizable image payloads,
- * anthropic server-tool/compaction carriers, and signed/encrypted blocks.
- * Must stay in sync with the early-return guards above the recursion.
+ * descending past the image/blob guards: anthropic server-tool/compaction
+ * carriers and signed/encrypted blocks. The entry-line memo's stamp mirrors
+ * this boundary — transient keys are stripped only on the recursion side —
+ * so it must stay in sync with the early-return guards above the recursion.
  */
-function isAtomicPersistenceNode(obj: object, key?: string): boolean {
+export function isAtomicPersistenceNode(obj: object, key?: string): boolean {
 	// NOTE: image_generation_call results and externalizable image payloads
 	// are NOT atomic — truncateForPersistence rewrites them via the blob
 	// store. They are checked explicitly in the predicate and must never be
