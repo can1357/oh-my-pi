@@ -98,6 +98,12 @@ export function buildStatusFooter(opts: {
 	 * visible block is never mistaken for a complete tail.
 	 */
 	throttledLineCount?: number;
+	/**
+	 * Set when the throttle skipped a partial-line suffix that contributes no
+	 * whole row: the retained last row's tail is gone, so the footer names the
+	 * corrupted tail even though the skipped-row count stayed zero.
+	 */
+	throttledFragmentLost?: boolean;
 }): Text | undefined {
 	const parts: string[] = [];
 
@@ -109,6 +115,9 @@ export function buildStatusFooter(opts: {
 	}
 	if (opts.throttledLineCount !== undefined && opts.throttledLineCount > 0) {
 		parts.push(theme.fg("dim", `… ${opts.throttledLineCount} lines skipped in output`));
+	}
+	if (opts.throttledFragmentLost === true) {
+		parts.push(theme.fg("dim", "… partial output skipped in output"));
 	}
 	if (opts.status === "cancelled") {
 		parts.push(theme.fg("warning", "(cancelled)"));
@@ -158,6 +167,8 @@ export interface ExecutionCardInput {
 	readonly droppedLineCount: number;
 	/** Rows the output throttle skipped after the retained rows — a mid/tail gap, named apart so the visible block is never mistaken for a complete tail. */
 	readonly throttledLineCount: number;
+	/** The throttle skipped a partial-line suffix contributing no whole row; the retained last row's tail is gone. */
+	readonly throttledFragmentLost: boolean;
 }
 
 /**
@@ -211,6 +222,7 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 	// same words.
 	if (input.droppedLineCount > 0) note(`… ${input.droppedLineCount} earlier lines dropped`, "dim");
 	if (input.throttledLineCount > 0) note(`… ${input.throttledLineCount} lines skipped in output`, "dim");
+	if (input.throttledFragmentLost) note("… partial output skipped in output", "dim");
 	const hiddenImages = images.length - visibleImages.length;
 	if (hiddenImages > 0) note(`… ${hiddenImages} more image${hiddenImages === 1 ? "" : "s"}`, "dim");
 	if (notes.length > 0) children.push(text(notes, { wrap: "word", key: "notes" }));
@@ -252,6 +264,8 @@ export interface ExecutionToolInput {
 	readonly droppedLineCount: number;
 	/** Rows the output throttle skipped after the retained rows — a mid/tail gap, named in the run foot apart from the dropped head. */
 	readonly throttledLineCount: number;
+	/** The throttle skipped a partial-line suffix contributing no whole row; the retained last row's tail is gone. */
+	readonly throttledFragmentLost: boolean;
 }
 
 const EXECUTION_RUN_STATE: Record<ExecutionStatus, RunState> = {
@@ -294,6 +308,7 @@ export function describeExecutionTool(input: ExecutionToolInput): NativeNode {
 					artifactError: input.artifactError,
 					droppedLines: input.droppedLineCount,
 					throttledLines: input.throttledLineCount,
+					throttledFragmentLost: input.throttledFragmentLost,
 				},
 			}),
 		],
