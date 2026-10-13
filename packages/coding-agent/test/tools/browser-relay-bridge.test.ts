@@ -818,6 +818,47 @@ describe("RelayBridge Runtime sessions", () => {
 	});
 });
 
+describe("RelayBridge command deadlines", () => {
+	/** Send one command on a fresh page session and let `ms` pass with Chrome not answering; returns its reply, if any. */
+	async function unansweredFor(method: string, params: Record<string, unknown>, ms: number) {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		jest.useFakeTimers();
+		try {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			jest.advanceTimersByTime(ms);
+			await flush();
+			return cdp.messages.find(m => m.id === id);
+		} finally {
+			jest.useRealTimers();
+		}
+	}
+
+	it.each([
+		["Runtime.callFunctionOn", { functionDeclaration: "() => new Promise(() => {})", awaitPromise: true }],
+		["Runtime.evaluate", { expression: "new Promise(() => {})", awaitPromise: true }],
+		["Runtime.awaitPromise", { promiseObjectId: "1" }],
+		["Page.navigate", { url: "https://example.com/slow" }],
+	])("keeps waiting on %s, whose answer waits on the page, past 20 s", async (method, params) => {
+		expect(await unansweredFor(method, params, 60_000)).toBeUndefined();
+		expect(JSON.stringify(await unansweredFor(method, params, 180_000))).toContain(
+			`${method} on tab 1: Chrome sent no answer within 180000ms`,
+		);
+	});
+
+	it("fails a command Chrome answers at once after 20 s, naming the command and the tab", async () => {
+		expect(
+			JSON.stringify(await unansweredFor("Input.dispatchMouseEvent", { type: "mouseMoved", x: 1, y: 1 }, 20_000)),
+		).toContain("Input.dispatchMouseEvent on tab 1: Chrome sent no answer within 20000ms");
+	});
+});
+
 describe("RelayBridge attachment release", () => {
 	it("keeps a tab Chrome detached on its own adoptable, but bans it after the user cancels the debugging bar", async () => {
 		const bridge = new RelayBridge({});
