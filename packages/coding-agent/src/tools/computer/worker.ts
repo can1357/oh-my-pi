@@ -37,6 +37,7 @@ import {
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
+	type ComputerEscapeScope,
 	type ComputerScreenshot,
 	type ComputerSessionSnapshot,
 	type ComputerWorkerInbound,
@@ -54,7 +55,7 @@ export interface NativeDesktopSession {
 	readonly capabilities: DesktopCapabilities;
 	/** Lock and display-sleep state, read without waiting behind queued native work. */
 	readonly screenState: DesktopScreenState;
-	/** Physical-Escape stops of takeover input so far; host cancels never count. */
+	/** Physical-Escape stops of takeover input under the session's key; host cancels never count. */
 	readonly escapeStops: number;
 	listDisplays(): Promise<DesktopDisplay[]>;
 	listWindows(): Promise<DesktopWindow[]>;
@@ -128,6 +129,8 @@ type ObservationResult = ScreenshotResult & { ax: string; nodeCount: number; tru
 type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
 interface ActiveRun {
 	id: string;
+	/** Escape stops the user acknowledged; any more stop the run. */
+	acknowledgedEscapeStops: number;
 	ac: AbortController;
 	signal: AbortSignal;
 	pendingTools: Map<string, PendingTool>;
@@ -760,8 +763,8 @@ export class ComputerWorkerCore {
 	#sessionInit?: Promise<NativeDesktopSession>;
 	#runtime?: JsRuntime;
 	#active: ActiveRun | null = null;
-	/** Native Escape stops already reported to the host. */
-	#escapeStopsSeen = 0;
+	/** `#session` as the desktop scope sees it, checking for the user's Escape on every access. */
+	#guarded?: NativeDesktopSession;
 	/**
 	 * Per-run context, carried through AsyncLocalStorage so async work leaked
 	 * from an ended run (timers, dangling promises) keeps that run's aborted
@@ -805,8 +808,9 @@ export class ComputerWorkerCore {
 		}
 	}
 
-	async #ensureSession(snapshot: ComputerSessionSnapshot): Promise<NativeDesktopSession> {
-		if (this.#session) return this.#session;
+	/** Returns the session guarded against the user's Escape; cancel, retire and close use the raw one. */
+	async #ensureSession(snapshot: ComputerSessionSnapshot, escape: ComputerEscapeScope): Promise<NativeDesktopSession> {
+		if (this.#guarded) return this.#guarded;
 		// Single-flight: share one creation promise so a run and a capabilities
 		// request racing on a cold worker cannot each build (and leak) a session.
 		this.#sessionInit ??= (async () => {
@@ -815,9 +819,11 @@ export class ComputerWorkerCore {
 				// addon; normal CLI startup and selector pings never execute desktop code.
 				const createSession =
 					this.#createSession ?? (await import("@oh-my-pi/pi-natives/desktop")).createDesktopSession;
-				const session = await createSession({ display: snapshot.display });
+				const session = await createSession({ display: snapshot.display, escapeStopKey: escape.key });
+				const guarded = this.#guard(session);
 				this.#session = session;
-				return session;
+				this.#guarded = guarded;
+				return guarded;
 			} catch (error) {
 				throw nativeError(error);
 			}
@@ -860,7 +866,13 @@ export class ComputerWorkerCore {
 		const ac = new AbortController();
 		const runAc = new AbortController();
 		const signal = AbortSignal.any([timeoutSignal, ac.signal, runAc.signal]);
-		const active: ActiveRun = { id: message.id, ac, signal, pendingTools: new Map() };
+		const active: ActiveRun = {
+			id: message.id,
+			acknowledgedEscapeStops: message.escape.acknowledged,
+			ac,
+			signal,
+			pendingTools: new Map(),
+		};
 		this.#active = active;
 		// Cancel synchronously while this run owns the native session, including
 		// fire-and-forget operations still pending when the script returns.
@@ -885,14 +897,12 @@ export class ComputerWorkerCore {
 		let returnValue: unknown;
 		let failure: { error: unknown } | undefined;
 		let completed = false;
-		let escapeStopped = false;
 		try {
 			throwIfAborted(signal);
-			const session = await this.#ensureSession(message.session);
+			const session = await this.#ensureSession(message.session, message.escape);
 			throwIfAborted(signal);
-			// An Escape between runs revoked held control; this run must not send input after it.
-			escapeStopped = this.#takeEscapeStops();
-			if (escapeStopped) throw new ToolError(ESCAPE_STOPPED_MESSAGE);
+			// An Escape after the host's check still ends the run before the script starts.
+			this.#checkEscape();
 			const runtime = this.#ensureRuntime(message.session);
 			runtime.setCwd(message.session.cwd);
 			const desktop = this.#createDesktopScope(session);
@@ -956,17 +966,6 @@ export class ComputerWorkerCore {
 			runAc.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Computer run ended")));
 			if (this.#active?.id === message.id) this.#active = null;
 		}
-		// A script that catches the cancelled operation still ends as the user's stop.
-		if (escapeStopped || this.#takeEscapeStops()) {
-			this.#transport.send({
-				type: "result",
-				id: message.id,
-				ok: false,
-				error: errorPayload(new ToolError(ESCAPE_STOPPED_MESSAGE)),
-				escapeStopped: true,
-			});
-			return;
-		}
 		if (failure !== undefined) {
 			this.#transport.send({
 				type: "result",
@@ -979,7 +978,7 @@ export class ComputerWorkerCore {
 		if (completed) {
 			let capabilities: DesktopCapabilities;
 			try {
-				capabilities = (await this.#ensureSession(message.session)).capabilities;
+				capabilities = (await this.#ensureSession(message.session, message.escape)).capabilities;
 			} catch (error) {
 				this.#transport.send({
 					type: "result",
@@ -998,12 +997,43 @@ export class ComputerWorkerCore {
 		}
 	}
 
-	/** Whether the user's physical Escape stopped native work since the last report. */
-	#takeEscapeStops(): boolean {
-		const stops = this.#session?.escapeStops ?? this.#escapeStopsSeen;
-		if (stops <= this.#escapeStopsSeen) return false;
-		this.#escapeStopsSeen = stops;
-		return true;
+	/**
+	 * The user's physical Escape ends the active run for good: the run is
+	 * aborted and this access refused, so a script that catches the cancelled
+	 * operation sends nothing more.
+	 */
+	#checkEscape(): void {
+		const active = this.#active;
+		if (!active || !this.#session || this.#session.escapeStops <= active.acknowledgedEscapeStops) return;
+		const stopped = new ToolError(ESCAPE_STOPPED_MESSAGE);
+		active.ac.abort(stopped);
+		throw stopped;
+	}
+
+	/** Checks for the user's Escape before every access to the session and again when each native promise settles. */
+	#guard(session: NativeDesktopSession): NativeDesktopSession {
+		return new Proxy(session, {
+			get: (target, property) => {
+				this.#checkEscape();
+				const value = Reflect.get(target, property, target);
+				if (typeof value !== "function") return value;
+				return (...args: unknown[]): unknown => {
+					this.#checkEscape();
+					const result = Reflect.apply(value, target, args);
+					if (!(result instanceof Promise)) return result;
+					return result.then(
+						settled => {
+							this.#checkEscape();
+							return settled;
+						},
+						error => {
+							this.#checkEscape();
+							throw error;
+						},
+					);
+				};
+			},
+		});
 	}
 
 	/**
@@ -1038,7 +1068,7 @@ export class ComputerWorkerCore {
 			return;
 		}
 		try {
-			const session = await this.#ensureSession(message.session);
+			const session = await this.#ensureSession(message.session, message.escape);
 			this.#transport.send({ type: "capabilities", id: message.id, ok: true, capabilities: session.capabilities });
 		} catch (error) {
 			this.#transport.send({
@@ -1294,6 +1324,7 @@ export class ComputerWorkerCore {
 			// Closing is best-effort; the worker is exiting and has no request to report this against.
 		} finally {
 			this.#session = undefined;
+			this.#guarded = undefined;
 			this.#sessionInit = undefined;
 			this.#unsubscribe();
 			this.#transport.send({ type: "closed" });

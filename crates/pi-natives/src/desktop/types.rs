@@ -153,7 +153,10 @@ impl ScreenState {
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct DesktopSessionOptions {
-	pub display: Option<String>,
+	pub display:         Option<String>,
+	/// Sessions created with the same key share one physical-Escape stop
+	/// count, which `desktopEscapeStops` reads after they close.
+	pub escape_stop_key: Option<String>,
 }
 
 #[napi(object)]

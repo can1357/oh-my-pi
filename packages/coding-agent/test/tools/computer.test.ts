@@ -255,6 +255,15 @@ class FakeNativeSession implements NativeDesktopSession {
 /** The user presses physical Escape during the next click, as the native takeover monitor reports it. */
 class EscapeNativeSession extends FakeNativeSession {
 	escapeOnClick = false;
+	capabilityReads = 0;
+
+	override get capabilities(): DesktopCapabilities {
+		this.capabilityReads += 1;
+		return super.capabilities;
+	}
+	override async axSetValue(ref: string, value: string): Promise<void> {
+		this.operations.push(`setValue:${ref}:${value}`);
+	}
 
 	override async click(target: string, x: number, y: number, opts?: PointerOptions | null): Promise<void> {
 		if (!this.escapeOnClick) return await super.click(target, x, y, opts);
@@ -336,6 +345,9 @@ class MemoryTransport implements ComputerWorkerTransport {
 	}
 }
 
+/** No Escape stop acknowledged, under a key no other test shares. */
+const escapeScope = () => ({ key: `computer-test-${crypto.randomUUID()}`, acknowledged: 0 });
+
 const snapshot = (readOnly = false): ComputerSessionSnapshot => ({
 	cwd: import.meta.dir,
 	sessionId: crypto.randomUUID(),
@@ -352,7 +364,7 @@ async function runWorker(
 	readOnly = false,
 	timeoutMs = 2_000,
 ): Promise<Extract<ComputerWorkerOutbound, { type: "result" }>> {
-	transport.inbound({ type: "run", id, code, timeoutMs, session: snapshot(readOnly) });
+	transport.inbound({ type: "run", id, code, timeoutMs, session: snapshot(readOnly), escape: escapeScope() });
 	const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
 	if (message.type !== "result") throw new Error(`Expected computer result, received ${message.type}`);
 	return message;
@@ -375,7 +387,7 @@ function workerPrelude(session: ToolSession, native: NativeDesktopSession): Eval
 	return createComputerPrelude(session, () => ({
 		async run(code, timeoutMs, runSnapshot) {
 			const id = crypto.randomUUID();
-			transport.inbound({ type: "run", id, code, timeoutMs, session: runSnapshot });
+			transport.inbound({ type: "run", id, code, timeoutMs, session: runSnapshot, escape: escapeScope() });
 			const result = await transport.waitFor(message => message.type === "result" && message.id === id);
 			if (result.type !== "result") throw new Error("Expected a computer result");
 			if (!result.ok) throw new Error(result.error.message);
@@ -1259,7 +1271,7 @@ describe("computer worker round trips", () => {
 		const transport = new MemoryTransport();
 		const native = new FakeNativeSession();
 		new ComputerWorkerCore(transport, options => {
-			expect(options).toEqual({ display: "active" });
+			expect(options).toEqual({ display: "active", escapeStopKey: expect.stringMatching(/^computer-test-/) });
 			return native;
 		});
 
@@ -1448,7 +1460,14 @@ describe("computer worker round trips", () => {
 	it("rejects an aborted run with an abort error", async () => {
 		const transport = new MemoryTransport();
 		new ComputerWorkerCore(transport, () => new FakeNativeSession());
-		transport.inbound({ type: "run", id: "abort", code: "await wait(5_000)", timeoutMs: 5_000, session: snapshot() });
+		transport.inbound({
+			type: "run",
+			id: "abort",
+			code: "await wait(5_000)",
+			timeoutMs: 5_000,
+			session: snapshot(),
+			escape: escapeScope(),
+		});
 		await Promise.resolve();
 		transport.inbound({ type: "abort", id: "abort" });
 		const result = await transport.waitFor(message => message.type === "result" && message.id === "abort");
@@ -2029,7 +2048,7 @@ describe("computer worker round trips", () => {
 	it("answers a direct capabilities request without a prior run", async () => {
 		const transport = new MemoryTransport();
 		new ComputerWorkerCore(transport, () => new FakeNativeSession());
-		transport.inbound({ type: "capabilities", id: "caps", session: snapshot(true) });
+		transport.inbound({ type: "capabilities", id: "caps", session: snapshot(true), escape: escapeScope() });
 		const reply = await transport.waitFor(message => message.type === "capabilities" && message.id === "caps");
 		expect(reply.type).toBe("capabilities");
 		if (reply.type !== "capabilities" || !reply.ok) throw new Error("expected a successful capabilities reply");
@@ -2049,8 +2068,15 @@ describe("computer worker round trips", () => {
 			return native;
 		});
 
-		transport.inbound({ type: "run", id: "race-run", code: "42", timeoutMs: 2_000, session: snapshot(true) });
-		transport.inbound({ type: "capabilities", id: "race-caps", session: snapshot(true) });
+		transport.inbound({
+			type: "run",
+			id: "race-run",
+			code: "42",
+			timeoutMs: 2_000,
+			session: snapshot(true),
+			escape: escapeScope(),
+		});
+		transport.inbound({ type: "capabilities", id: "race-caps", session: snapshot(true), escape: escapeScope() });
 		release.resolve();
 
 		const runReply = await transport.waitFor(message => message.type === "result" && message.id === "race-run");
@@ -2078,6 +2104,59 @@ function liveWorker(native: NativeDesktopSession): ComputerWorkerHandle {
 		onError: () => () => {},
 		terminate: async () => {
 			transport.inbound({ type: "close" });
+		},
+	};
+}
+
+const CLICK = {
+	action: "call",
+	chain: [
+		{ method: "window", args: ["42"] },
+		{ method: "click", args: [1, 2] },
+	],
+};
+
+/** A real supervisor, worker and prelude over a native session whose Escape stops the host reads, as it does natively. */
+function escapeHarness() {
+	const native = new EscapeNativeSession();
+	const ownerId = `escape-owner-${crypto.randomUUID()}`;
+	const session: ToolSession = { ...toolSession(), getEvalKernelOwnerId: () => ownerId };
+	const runListeners = new Set<() => void>();
+	const sent = {
+		types: [] as string[],
+		onRun(listener: () => void) {
+			runListeners.add(listener);
+			return () => runListeners.delete(listener);
+		},
+	};
+	const supervisor = new ComputerSupervisor(
+		session,
+		() => {
+			const worker = liveWorker(native);
+			return {
+				...worker,
+				send: message => {
+					sent.types.push(message.type);
+					worker.send(message);
+					if (message.type === "run") for (const listener of runListeners) listener();
+				},
+			};
+		},
+		undefined,
+		undefined,
+		{ read: () => native.escapeStops, forget: () => {} },
+	);
+	const unregister = registerComputerController(ownerId, supervisor);
+	const prelude = createComputerPrelude(session, () => supervisor);
+	return {
+		native,
+		prelude,
+		sent,
+		ownerId,
+		context: { session, toolCallId: "escape-stop" },
+		close: async () => {
+			unregister();
+			await supervisor.close();
 		},
 	};
 }
@@ -2192,77 +2271,141 @@ describe("expanded computer APIs", () => {
 	});
 
 	it("refuses computer use after the user's Escape until their next message, and not after a host abort", async () => {
-		const native = new EscapeNativeSession();
-		const ownerId = `escape-owner-${crypto.randomUUID()}`;
-		const session: ToolSession = { ...toolSession(), getEvalKernelOwnerId: () => ownerId };
-		const sent: string[] = [];
-		let runSent = Promise.withResolvers<void>();
-		const supervisor = new ComputerSupervisor(session, () => {
-			const worker = liveWorker(native);
-			return {
-				...worker,
-				send: message => {
-					sent.push(message.type);
-					worker.send(message);
-					if (message.type === "run") runSent.resolve();
-				},
-			};
-		});
-		const unregister = registerComputerController(ownerId, supervisor);
-		const prelude = createComputerPrelude(session, () => supervisor);
-		const context = { session, toolCallId: "escape-stop" };
-		const click = {
-			action: "call",
-			chain: [
-				{ method: "window", args: ["42"] },
-				{ method: "click", args: [1, 2] },
-			],
-		};
+		const { native, prelude, sent, ownerId, context, close } = escapeHarness();
 		try {
-			await prelude.invoke(click, context);
+			await prelude.invoke(CLICK, context);
 			const abort = new AbortController();
-			runSent = Promise.withResolvers<void>();
+			const runSent = Promise.withResolvers<void>();
+			const unsubscribe = sent.onRun(runSent.resolve);
 			const hung = prelude.invoke(
 				{ action: "run", code: "await wait(5_000)" },
 				{ ...context, signal: abort.signal },
 			);
 			await runSent.promise;
+			unsubscribe();
 			const cancels = native.cancelCount;
 			abort.abort();
 			await expect(hung).rejects.toThrow();
 			expect(native.cancelCount).toBeGreaterThan(cancels);
-			await prelude.invoke(click, context);
+			await prelude.invoke(CLICK, context);
 			expect(native.clickCount).toBe(2);
 
 			native.escapeOnClick = true;
-			await expect(prelude.invoke(click, context)).rejects.toThrow(ESCAPE_STOPPED_MESSAGE);
-			const sentAfterStop = sent.length;
-			for (const parameters of [click, { action: "run", code: "return 1" }, { action: "capabilities" }]) {
+			await expect(prelude.invoke(CLICK, context)).rejects.toThrow(ESCAPE_STOPPED_MESSAGE);
+			const sentAfterStop = sent.types.length;
+			for (const parameters of [CLICK, { action: "run", code: "return 1" }, { action: "capabilities" }]) {
 				await expect(prelude.invoke(parameters, context)).rejects.toThrow("the user pressed Escape");
 			}
-			expect(sent.length).toBe(sentAfterStop);
+			expect(sent.types.length).toBe(sentAfterStop);
 			expect(native.clickCount).toBe(2);
 
 			resumeComputerUseForOwner(ownerId);
-			await prelude.invoke(click, context);
-			expect(native.clickCount).toBe(3);
-
-			// A script that swallows the cancelled click still ends as the user's stop.
-			native.escapeOnClick = true;
-			await expect(
-				prelude.invoke(
-					{ action: "run", code: "try { await (await desktop.window(42)).click(1, 2); } catch {} return 1;" },
-					context,
-				),
-			).rejects.toThrow(ESCAPE_STOPPED_MESSAGE);
-			resumeComputerUseForOwner(ownerId);
-
-			// Escape between runs revokes held control; the next run sends nothing after it.
-			native.escapeStops += 1;
-			await expect(prelude.invoke(click, context)).rejects.toThrow(ESCAPE_STOPPED_MESSAGE);
+			await prelude.invoke(CLICK, context);
 			expect(native.clickCount).toBe(3);
 		} finally {
-			unregister();
+			await close();
+		}
+	});
+
+	it("sends nothing more from a run whose script catches the cancelled operation", async () => {
+		const { native, prelude, context, close } = escapeHarness();
+		try {
+			native.escapeOnClick = true;
+			const code = `
+				const win = await desktop.window(42);
+				try { await win.click(1, 2); } catch {}
+				for (const next of [() => win.click(1, 2), () => desktop.ref("e1").setValue("x"), () => desktop.capabilities()]) {
+					try { await next(); } catch {}
+				}
+				return 1;`;
+			const reads = native.capabilityReads;
+			await expect(prelude.invoke({ action: "run", code }, context)).rejects.toThrow(ESCAPE_STOPPED_MESSAGE);
+			expect(native.clickCount).toBe(0);
+			expect(native.operations).toEqual([]);
+			expect(native.capabilityReads).toBe(reads);
+		} finally {
+			await close();
+		}
+	});
+
+	it("refuses capabilities and runs after an Escape between calls that no run reported", async () => {
+		const { native, prelude, sent, ownerId, context, close } = escapeHarness();
+		try {
+			await prelude.invoke(CLICK, context);
+			const sentBefore = sent.types.length;
+			// Held control stopped between calls: no run observes it before the next call.
+			native.escapeStops += 1;
+			await expect(prelude.invoke({ action: "capabilities" }, context)).rejects.toThrow("the user pressed Escape");
+			await expect(prelude.invoke(CLICK, context)).rejects.toThrow("the user pressed Escape");
+			expect(sent.types.length).toBe(sentBefore);
+
+			// The user's message acknowledges that stop even though no run saw it.
+			resumeComputerUseForOwner(ownerId);
+			await prelude.invoke(CLICK, context);
+			expect(native.clickCount).toBe(2);
+			native.escapeStops += 1;
+			await expect(prelude.invoke(CLICK, context)).rejects.toThrow("the user pressed Escape");
+		} finally {
+			await close();
+		}
+	});
+
+	it("keeps an Escape stop that no result reported across a worker restart", async () => {
+		let stops = 0;
+		let workers = 0;
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => {
+				workers += 1;
+				const worker = new SupervisorWorker(false);
+				return {
+					send: message => {
+						// The user's Escape lands while the hung run holds the worker.
+						if (message.type === "run") stops += 1;
+						worker.send(message);
+					},
+					onMessage: handler => worker.onMessage(handler),
+					onError: handler => worker.onError(handler),
+					terminate: () => worker.terminate(),
+				};
+			},
+			{ startMs: 200, closeMs: 200 },
+			undefined,
+			{ read: () => stops, forget: () => {} },
+		);
+		try {
+			await expect(supervisor.run("while (true) {}", 5, snapshot())).rejects.toThrow(ESCAPE_STOPPED_MESSAGE);
+			await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow("the user pressed Escape");
+			await expect(supervisor.capabilities(snapshot(true))).rejects.toThrow("the user pressed Escape");
+			expect(workers).toBe(1);
+		} finally {
+			await supervisor.close();
+		}
+	});
+
+	it("reports a stop that lands after the worker answered", async () => {
+		let stops = 0;
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => {
+				const worker = new SupervisorWorker(true);
+				return {
+					send: message => {
+						worker.send(message);
+						if (message.type === "run") queueMicrotask(() => (stops += 1));
+					},
+					onMessage: handler => worker.onMessage(handler),
+					onError: handler => worker.onError(handler),
+					terminate: () => worker.terminate(),
+				};
+			},
+			{ startMs: 200, closeMs: 200 },
+			undefined,
+			{ read: () => stops, forget: () => {} },
+		);
+		try {
+			await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow(ESCAPE_STOPPED_MESSAGE);
+		} finally {
 			await supervisor.close();
 		}
 	});

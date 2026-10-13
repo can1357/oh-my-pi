@@ -5,10 +5,11 @@
 //! until its held input and focus have been restored.
 use std::{
 	cell::{Cell, RefCell},
+	collections::HashMap,
 	marker::PhantomData,
 	rc::Rc,
 	sync::{
-		Arc, Weak,
+		Arc, LazyLock, Weak,
 		atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 	},
 	thread,
@@ -39,8 +40,8 @@ struct CancellationState {
 	escape_failed: AtomicBool,
 	/// Takeover input stopped by the user's physical Escape. Host cancels,
 	/// retirement and release never count, so the host can tell the user's
-	/// stop from its own.
-	escape_stops:  AtomicU32,
+	/// stop from its own. Shared with every session under the same key.
+	escape_stops:  Arc<AtomicU32>,
 	#[cfg(target_os = "linux")]
 	async_wake:    tokio::sync::Notify,
 }
@@ -49,6 +50,11 @@ struct CancellationState {
 pub(crate) struct CancellationSource(Arc<CancellationState>);
 
 impl CancellationSource {
+	/// A source whose physical-Escape stops count into `stops`.
+	pub(crate) fn counting_escapes(stops: Arc<AtomicU32>) -> Self {
+		Self(Arc::new(CancellationState { escape_stops: stops, ..CancellationState::default() }))
+	}
+
 	pub(crate) fn token(&self) -> OperationToken {
 		OperationToken {
 			source:     self.clone(),
@@ -314,6 +320,30 @@ pub(crate) fn add_modifiers(
 pub(crate) fn with_token_for_test<T>(token: &OperationToken, action: impl FnOnce() -> T) -> T {
 	let _scope = token.enter();
 	action()
+}
+
+/// Physical-Escape stop counts by host-chosen key. A count outlives the
+/// session that observed it, so a host that replaces a hung worker's session
+/// still sees a stop the old session never reported.
+static ESCAPE_STOPS: LazyLock<Mutex<HashMap<String, Arc<AtomicU32>>>> =
+	LazyLock::new(Mutex::default);
+
+/// The shared count for `key`; a session without a key counts alone.
+pub(crate) fn escape_stop_counter(key: Option<&str>) -> Arc<AtomicU32> {
+	key.map_or_else(Arc::default, |key| {
+		Arc::clone(ESCAPE_STOPS.lock().entry(key.to_owned()).or_default())
+	})
+}
+
+pub(crate) fn escape_stops(key: &str) -> u32 {
+	ESCAPE_STOPS
+		.lock()
+		.get(key)
+		.map_or(0, |stops| stops.load(Ordering::Acquire))
+}
+
+pub(crate) fn forget_escape_stops(key: &str) {
+	ESCAPE_STOPS.lock().remove(key);
 }
 
 #[cfg(target_os = "macos")]
@@ -746,6 +776,22 @@ mod tests {
 		assert!(running.check().is_err(), "the user's Escape cancels running input");
 		source.cancel();
 		assert_eq!(source.escape_stops(), 1);
+	}
+
+	#[test]
+	fn escape_stops_outlive_the_session_under_its_key() {
+		let key = format!("escape-key-test-{}", std::process::id());
+		let first = CancellationSource::counting_escapes(escape_stop_counter(Some(&key)));
+		EmergencyStop(Arc::downgrade(&first.0)).escape();
+		drop(first);
+		assert_eq!(escape_stops(&key), 1, "the host reads a stop after its session is gone");
+		let replacement = CancellationSource::counting_escapes(escape_stop_counter(Some(&key)));
+		assert_eq!(replacement.escape_stops(), 1, "a replacement session keeps the count");
+		let keyless = CancellationSource::counting_escapes(escape_stop_counter(None));
+		EmergencyStop(Arc::downgrade(&keyless.0)).escape();
+		assert_eq!(escape_stops(&key), 1, "a session without the key counts alone");
+		forget_escape_stops(&key);
+		assert_eq!(escape_stops(&key), 0);
 	}
 
 	#[test]

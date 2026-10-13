@@ -3434,11 +3434,12 @@ export class AgentSession implements SettingsScope {
 		// never revoke a foreground-control grant acquired by a later prompt.
 		const computerControlRevocation =
 			event.type === "agent_end" ? revokeComputerControlForOwner(this.#eval.getKernelOwnerId()) : undefined;
-		// A user prompt, steer or follow-up lifts the computer-use stop their Escape set this turn.
+		// Only the user's own prompt, steer or follow-up lifts the computer-use stop their Escape set;
+		// synthetic continues and agent-sent messages (subagent budget steers) never do.
 		if (
 			event.type === "message_start" &&
 			isUserAuthoredMessage(event.message) &&
-			!(event.message.role === "user" && event.message.synthetic)
+			!(event.message.role === "user" && (event.message.synthetic || event.message.attribution === "agent"))
 		) {
 			resumeComputerUseForOwner(this.#eval.getKernelOwnerId());
 		}

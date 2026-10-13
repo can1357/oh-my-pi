@@ -11,6 +11,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 
 describe("AgentSession computer use after the user's Escape", () => {
 	let tempDir: TempDir;
@@ -35,10 +36,12 @@ describe("AgentSession computer use after the user's Escape", () => {
 		tempDir.removeSync();
 	});
 
-	it("resumes on the user's prompt and steer, not on a synthetic continue", async () => {
+	it("resumes on the user's prompt, steer, follow-up and collab prompt, never on agent-sent or synthetic ones", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({
-			responses: [{ content: ["stopped"] }, { content: ["steered"] }, { content: ["continued"] }],
+			responses: ["stopped", "budget", "steered", "followed", "collab", "continued"].map(text => ({
+				content: [text],
+			})),
 		});
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -63,23 +66,35 @@ describe("AgentSession computer use after the user's Escape", () => {
 			},
 		});
 		try {
-			let steered = false;
-			let resumesBeforeSteer = -1;
+			const atYield: number[] = [];
+			const inject = [
+				// A subagent's request-budget notice is a user-role steer the agent sends.
+				() => current.sendUserMessage("request budget low", { deliverAs: "steer", attribution: "agent" }),
+				() => current.steer("keep going"),
+				() => current.followUp("then save"),
+			];
 			current.agent.setOnBeforeYield(async () => {
-				if (steered) return;
-				steered = true;
-				resumesBeforeSteer = resumes;
-				await current.steer("keep going");
+				atYield.push(resumes);
+				await inject.shift()?.();
 			});
 			await current.prompt("click the button");
 			await current.waitForIdle();
-			expect(resumesBeforeSteer).toBe(1);
-			expect(resumes).toBe(2);
+			expect(atYield).toEqual([1, 1, 2, 3]);
+
+			await current.promptCustomMessage({
+				customType: COLLAB_PROMPT_MESSAGE_TYPE,
+				content: "guest asks",
+				display: true,
+				details: { from: "guest" },
+				attribution: "user",
+			});
+			await current.waitForIdle();
+			expect(resumes).toBe(4);
 
 			await current.prompt("Continue.", { synthetic: true });
 			await current.waitForIdle();
-			expect(mock.calls.length).toBe(3);
-			expect(resumes).toBe(2);
+			expect(mock.calls.length).toBe(6);
+			expect(resumes).toBe(4);
 		} finally {
 			unregister();
 		}

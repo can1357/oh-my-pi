@@ -45,8 +45,8 @@ export declare class DesktopSession {
   get screenState(): DesktopScreenState
   /**
    * How many times the user's physical Escape has stopped takeover input in
-   * this session. Host cancels, retirement and release never count, so a
-   * rise tells the host the user stopped the work.
+   * this session, or under its `escapeStopKey`. Host cancels, retirement and
+   * release never count, so a rise tells the host the user stopped the work.
    */
   get escapeStops(): number
   listDisplays(): Promise<Array<DesktopDisplay>>
@@ -1354,8 +1354,19 @@ export interface DesktopScreenState {
   displayAsleep: boolean
 }
 
+/**
+ * Physical-Escape stops counted under `key` by every desktop session created
+ * with it, including closed ones, until the key is forgotten.
+ */
+export declare function desktopEscapeStops(key: string): number
+
 export interface DesktopSessionOptions {
   display?: string
+  /**
+   * Sessions created with the same key share one physical-Escape stop
+   * count, which `desktopEscapeStops` reads after they close.
+   */
+  escapeStopKey?: string
 }
 
 /** One capturable top-level window in global logical desktop coordinates. */
@@ -1813,6 +1824,9 @@ export declare enum FileType {
   /** Symbolic link. */
   Symlink = 3
 }
+
+/** Drops the stop count kept under `key` once no session will use it again. */
+export declare function forgetDesktopEscapeStops(key: string): void
 
 /** Fuzzy file path search for autocomplete. */
 export declare function fuzzyFind(options: FuzzyFindOptions): Promise<FuzzyFindResult>
