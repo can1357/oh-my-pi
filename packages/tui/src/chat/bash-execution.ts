@@ -70,10 +70,12 @@ export class BashExecutionComponent extends Container {
 	#blockVersion = 0;
 	#displayDirty = false;
 	#chunkGate = false;
-	// Rows STREAMING_LINE_CAP discarded while streaming: gone for good, so the
-	// footer names them apart from the retained rows it counts, which the expand
-	// key still delivers. A replay or a completed run seeds its full output and
-	// clears the count, because a complete snapshot has dropped nothing.
+	// Rows the streaming window discarded while running: rows the live cap
+	// dropped outright plus rows in chunks the 50 ms throttle gate rejected —
+	// all of them absent from the retained tail, so the footer names them
+	// apart from the retained rows it counts, which the expand key still
+	// delivers. A replay or a completed run seeds its full output and clears
+	// the count, because a complete snapshot has dropped nothing.
 	#droppedLiveLines = 0;
 	#contentContainer: Container;
 	#outputPane: OutputPane;
@@ -237,7 +239,19 @@ export class BashExecutionComponent extends Container {
 		// chunk would saturate the event loop. Instead, accept one chunk per
 		// throttle window and drop the rest — the OutputSink captures everything
 		// for the artifact, and setComplete() replaces with the final output.
-		if (this.#chunkGate) return;
+		if (this.#chunkGate) {
+			// A rejected chunk never reaches the retained window, so a run that
+			// settles without a final snapshot (the error/abort path keeps the
+			// streamed tail) is missing those rows as well as the rows the live
+			// cap dropped. Counting them keeps the footer's "earlier lines
+			// dropped" notice equal to the rows the window actually lacks,
+			// instead of naming only the capped head. A chunk's first line merges
+			// into the retained last row exactly as the append path below does,
+			// so it contributes one row fewer than it splits into — unless the
+			// window is still empty and nothing merges.
+			this.#droppedLiveLines += Math.max(0, chunk.split("\n").length - (this.#outputLines.length > 0 ? 1 : 0));
+			return;
+		}
 		this.#chunkGate = true;
 		setTimeout(() => {
 			this.#chunkGate = false;
