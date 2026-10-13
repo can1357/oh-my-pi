@@ -130,6 +130,32 @@ describe("date-cwd-reminder", () => {
 			expect(replay.messages).not.toContain(marker);
 		});
 
+		it("hands each request its own array so a retained context is never rewritten", () => {
+			const injector = new DateCwdReminderInjector();
+			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
+			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
+
+			// A provider like `streamMock` records the `Context` it is handed per call, so
+			// array identity is part of what it observed.
+			const first = injector.transform({ ...context }, "2026-08-14", "/work/omp");
+			const replay = injector.transform({ ...context }, "2026-08-14", "/work/omp");
+			expect(replay.messages).not.toBe(first.messages);
+			expect(replay.messages[0]).toBe(first.messages[0]);
+
+			// A second custom provider appends its own marker to the array it was handed.
+			const marker: Message = { role: "developer", content: "provider-only", timestamp: 2 };
+			replay.messages.push(marker);
+			expect(first.messages).toHaveLength(1);
+			expect(first.messages).not.toContain(marker);
+
+			// A late mutation by the first provider must not reach a later request either.
+			first.messages.push({ role: "developer", content: "late", timestamp: 3 });
+			const third = injector.transform({ ...context }, "2026-08-14", "/work/omp");
+			expect(third.messages).toHaveLength(1);
+			expect(third.messages).not.toBe(first.messages);
+			expect(third.messages[0]).toBe(first.messages[0]);
+		});
+
 		it("keeps a duplicated anchor's controls on their own occurrences after a tail reorder", () => {
 			const injector = new DateCwdReminderInjector();
 			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };

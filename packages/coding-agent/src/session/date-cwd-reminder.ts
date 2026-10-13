@@ -55,30 +55,30 @@ export class DateCwdReminderInjector {
 	#seen = new WeakSet<object>();
 	/**
 	 * Bumped whenever `#injections`/`#controls` change shape, so the replay
-	 * memo below can't validate against state it has already outlived (an
-	 * in-place `push` into a shared array would otherwise look unchanged).
+	 * memo below can't validate against state it has already outlived.
 	 */
 	#stateVersion = 0;
 	/**
 	 * Last output built, tagged with the inputs that produced it. A repeat of
 	 * that exact (message set, root, reminder, state) tuple — a provider retry
-	 * replaying the same request, or a chain step that keeps the array identity
-	 * — hands back the same array instead of re-copying the whole transcript.
+	 * replaying the same request, or a chain step that keeps the element
+	 * identities — reuses the layout instead of re-running the per-message work.
 	 * `refs` is a snapshot, never the caller's live array: element identity is
 	 * what makes an in-place push/splice a miss, and the array reference alone
 	 * would survive it.
 	 *
-	 * `derived` lists the injected/control turns in output order, each tagged with
-	 * the occurrence index of the input turn it replaces or follows. Occurrence
-	 * index, not object identity: the same turn object can sit in the input more
-	 * than once, and identity alone would let a reordered tail satisfy the check.
-	 * It lets reuse re-check the *returned* array against the shape it was built
-	 * with (see {@link #replayable}) without re-copying anything.
+	 * `output` is private to this injector: it is the array a replay copies, and
+	 * it is never the array a caller is handed. Sharing it (or the caller's own
+	 * array) would let one provider request append to, splice, or reorder what a
+	 * previous request was sent, because a provider keeps the `Context` it was
+	 * handed — `packages/ai/src/providers/mock.ts` records one per call, as do
+	 * retry wrappers and every consumer that inspects the wire after the fact.
+	 * Holding it private is also why nothing downstream of the caller has to be
+	 * re-validated: no external reference can reach it.
 	 */
 	#memo:
 		| {
 				refs: Message[];
-				derived: Array<{ index: number; message: Message; isInjected: boolean }>;
 				root: UserMessage;
 				reminder: string;
 				version: number;
@@ -98,8 +98,8 @@ export class DateCwdReminderInjector {
 		const firstUser = messages.find((message): message is UserMessage => message.role === "user");
 		if (!firstUser) return messages;
 		// Replay: identical message set, root, reminder and injector state as
-		// the last build — hand back the same array and skip the per-message
-		// work entirely.
+		// the last build — skip the per-message work entirely and hand the caller
+		// a copy of the memo's array (never the array itself: see `#memo`).
 		const memo = this.#memo;
 		if (
 			memo !== undefined &&
@@ -110,7 +110,7 @@ export class DateCwdReminderInjector {
 			memo.version === this.#stateVersion &&
 			this.#replayable(memo, messages)
 		) {
-			return memo.output;
+			return memo.output.slice();
 		}
 		if (this.#root !== firstUser) {
 			// A new first user turn: a compaction summary or a different conversation.
@@ -162,97 +162,46 @@ export class DateCwdReminderInjector {
 			if (controls) controls.push(control.message);
 			else controlsByAnchor.set(control.anchor, [control.message]);
 		}
-
-		let changed = false;
 		const out: Message[] = [];
 		for (const message of messages) {
 			const injected = this.#injections.get(message);
 			out.push(injected ?? message);
-			if (injected) changed = true;
 			const controls = controlsByAnchor.get(message);
-			if (controls) {
-				out.push(...controls);
-				changed = true;
-			}
+			if (controls) out.push(...controls);
 			// Only user turns are ever scanned for un-seen ones, so the rest
 			// never needed a WeakSet entry — check before paying the add.
 			if (message.role === "user" && !this.#seen.has(message)) this.#seen.add(message);
 		}
-		const output = changed ? out : messages;
-		// `refs` snapshots the caller's array by reference; `#root` is the live
-		// root (equals `firstUser` on every path that reaches here) and
-		// `#currentReminder` the reminder this output was built with.
+		// `out` is the array a replay copies, so this injector is the only holder:
+		// every caller gets a fresh slice of it, and a provider that appends to,
+		// splices, or reorders what it was handed cannot reach back into the memo
+		// or into another request's array.
 		const root = this.#root;
 		const currentReminder = this.#currentReminder;
 		if (root !== undefined && currentReminder !== undefined) {
-			const derived: Array<{ index: number; message: Message; isInjected: boolean }> = [];
-			for (let index = 0; index < messages.length; index++) {
-				const message = messages[index]!;
-				const injected = this.#injections.get(message);
-				if (injected) derived.push({ index, message: injected, isInjected: true });
-				const controls = controlsByAnchor.get(message);
-				if (controls) for (const control of controls) derived.push({ index, message: control, isInjected: false });
-			}
 			this.#memo = {
 				refs: messages.slice(),
-				derived,
 				root,
 				reminder: currentReminder,
 				version: this.#stateVersion,
-				output,
+				output: out,
 			};
 		}
-		return output;
+		return out.slice();
 	}
 
 	/**
-	 * Whether the cached output is still the array this injector built. The
-	 * caller owns the returned `Context`, so a downstream consumer (a custom
-	 * provider appending its own marker, a retry wrapper splicing the array) can
-	 * mutate it in place; the input snapshot alone cannot see that, so the output
-	 * is re-checked against the shape it was built with: same arity, and every
-	 * slot still holding the input turn or the derived turn that follows it —
-	 * matched by input occurrence, so a turn object repeated in the input cannot
-	 * stand in for the other occurrence.
+	 * Whether the inputs are still the ones this memo was built from. The
+	 * memo's output needs no such check: it is never handed out, so it cannot
+	 * have been mutated by a consumer.
 	 */
-	#replayable(
-		memo: {
-			refs: Message[];
-			derived: Array<{ index: number; message: Message; isInjected: boolean }>;
-			output: Message[];
-		},
-		messages: Message[],
-	): boolean {
-		const { refs, derived, output } = memo;
+	#replayable(memo: { refs: Message[] }, messages: Message[]): boolean {
+		const { refs } = memo;
 		if (refs.length !== messages.length) return false;
 		for (let index = 0; index < refs.length; index++) {
 			if (refs[index] !== messages[index]) return false;
 		}
-		// Injections replace their original in the output; controls follow it.
-		const controlCount = derived.reduce((count, entry) => count + (entry.isInjected ? 0 : 1), 0);
-		if (output.length !== refs.length + controlCount) return false;
-		let slot = 0;
-		let position = 0;
-		for (let inputIndex = 0; inputIndex < refs.length; inputIndex++) {
-			const message = refs[inputIndex]!;
-			// An injection replaces the original: it occupies the slot instead.
-			if (slot < derived.length && derived[slot]!.index === inputIndex && derived[slot]!.isInjected) {
-				if (output[position] !== derived[slot]!.message) return false;
-				position++;
-				slot++;
-			} else if (output[position] !== message) {
-				return false;
-			} else {
-				position++;
-			}
-			// Controls follow the (possibly injected) message.
-			while (slot < derived.length && derived[slot]!.index === inputIndex) {
-				if (output[position] !== derived[slot]!.message) return false;
-				position++;
-				slot++;
-			}
-		}
-		return slot === derived.length;
+		return true;
 	}
 
 	/**
