@@ -78,6 +78,8 @@ interface AccountOpts {
 	credentialId?: number;
 	limitReached?: boolean;
 	fetchedAgoMs?: number;
+	/** `metadata.planType` (e.g. `plus`, `free`); omitted when undefined. */
+	planType?: string;
 }
 
 /** Build a synthetic openai-codex `UsageReport` for one account. */
@@ -135,6 +137,7 @@ function report(opts: AccountOpts = {}): UsageReport {
 			email,
 			resetCreditCredentialId: opts.credentialId ?? CREDENTIAL_ID_BY_ACCOUNT[accountId ?? ""] ?? 100,
 			limitReached: opts.limitReached ?? true,
+			...(opts.planType === undefined ? {} : { planType: opts.planType }),
 		},
 	};
 }
@@ -560,6 +563,24 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		expect(plan.actions).toMatchObject([
 			{ reason: "blocked-account", accountKey: "openai-codex|-|2", remainingMs: 6 * DAY, active: false },
 		]);
+	});
+
+	it("never restores a longer-blocked sibling whose plan cannot serve the blocked turn's model", () => {
+		const active = report({ weeklyResetInMs: 4 * HOUR, planType: "plus" });
+		const freeSibling = report({
+			accountId: "acct-sib",
+			email: "sib@example.com",
+			weeklyResetInMs: 6 * DAY,
+			planType: "free",
+		});
+		// gpt-5.6-sol needs a paid plan: routing would never send the retry to the Free sibling.
+		const plan = planCodexResetRedemptions(input([active, freeSibling], { modelId: "gpt-5.6-sol" }));
+		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: ACCOUNT_KEY, active: true }]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|2",
+			rule: "blocked-account",
+			reason: "plan-ineligible",
+		});
 	});
 
 	it("keeps the active account until a sibling skips more than the tolerance longer", () => {

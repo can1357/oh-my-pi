@@ -73,6 +73,7 @@ import type {
 	UsageReport,
 	UsageResetCreditDetail,
 } from "@oh-my-pi/pi-ai";
+import { codexRankingStrategy } from "@oh-my-pi/pi-ai/usage/openai-codex";
 import type { ResetAutoRedeemMode } from "./settings";
 import { reportMatchesActiveAccount } from "../slash-commands/helpers/active-oauth-account";
 
@@ -151,6 +152,7 @@ export type CodexResetSkipReason =
 	| "no-identity"
 	| "stale-report"
 	| "outside-account-pool"
+	| "plan-ineligible"
 	| "not-limit-reached"
 	| "no-exhausted-window"
 	| "deferred"
@@ -278,6 +280,8 @@ interface AccountSnapshot {
 	limitReached: boolean;
 	creditExpiresAtMs: number | undefined;
 	creditId: string | undefined;
+	/** Whether the account's plan serves the blocked turn's model; undefined when ungated or unknown. */
+	planEligible: boolean | undefined;
 }
 
 function classifyChatWindow(limit: UsageLimit, fallback: CodexChatWindow): CodexChatWindow {
@@ -387,6 +391,9 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		blockedRuleActive = false;
 		skipped.push({ accountKey: "*", rule: "blocked-account", reason: "spark-model" });
 	}
+	// Credential routing drops accounts whose plan cannot serve the model, so a
+	// restore there cannot unblock the retry.
+	const planGate = codexRankingStrategy.planGate?.({ modelId: input.modelId });
 
 	const snapshots: AccountSnapshot[] = [];
 	for (const report of input.reports ?? []) {
@@ -441,6 +448,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			limitReached: report.metadata?.limitReached === true,
 			creditExpiresAtMs: soonestCredit?.expiresAtMs,
 			creditId: soonestCredit?.id,
+			planEligible: planGate?.(report),
 		});
 	}
 
@@ -467,6 +475,10 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			// Restoring an account the session may not use cannot unblock it.
 			if (input.permitsCredential && !input.permitsCredential(snapshot.target.credentialId)) {
 				skip("outside-account-pool");
+				continue;
+			}
+			if (snapshot.planEligible === false) {
+				skip("plan-ineligible");
 				continue;
 			}
 			// Live evidence: the 429 that triggered this pass names the active
