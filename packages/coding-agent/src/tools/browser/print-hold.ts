@@ -7,6 +7,9 @@ import type { CDPSession, Page } from "puppeteer-core";
  */
 const USER_DRIVEN_RELEASE_MS = 1_500;
 
+/** The longest a tab's setup holds `print()` in a browser the user drives, should omp never finish it. */
+const SETUP_HOLD_MS = 60_000;
+
 /** How long `print()` is held: the tab's whole life (nobody else uses the browser) or only around omp's calls. */
 export type PrintHoldScope = "tab" | "calls";
 
@@ -65,7 +68,10 @@ function holdPrintInPage(
 	Reflect.set(globalThis, "print", holdPrintOf(globalThis, print));
 	// A page that prints through a window it opens (`open("")`, write, `print()`) calls that window's own `print()`
 	// before omp could reach the new window, and its print preview blocks this page too: hold it on this document's
-	// deadline. A cross-origin window refuses the access and prints in its own process.
+	// deadline. A cross-origin window refuses the access and prints in its own process. `open(url)` to this origin
+	// loads the page into the same window object (its first document replaces only the initial blank one), so the
+	// held `print()` stays. A document the window loads after that has no wrapper: omp hears of the window only once
+	// it is already running, too late to put a script ahead of it.
 	const open: unknown = Reflect.get(globalThis, "open");
 	if (typeof open === "function") {
 		const heldOpen = new Proxy(open, {
@@ -121,6 +127,8 @@ export class PrintHold {
 	readonly #binding: string;
 	readonly #holdKey: string;
 	#scriptId: string | undefined;
+	/** The wrapper the page's own session puts into every new document ahead of the tab's other scripts. */
+	#bootstrapId: string | undefined;
 	/** When the hold ends on the worker's clock; `null` holds for the documents' life. */
 	#until: number | null = 0;
 	/** The page's clock minus the worker's, as last measured: places a new document's deadline in the page's time. */
@@ -152,13 +160,32 @@ export class PrintHold {
 		session.on("Page.javascriptDialogClosed", this.#onDialogClosed);
 	}
 
+	/**
+	 * Installs the hold. In a browser the user drives it holds through the tab's setup, since a page can print before
+	 * omp's first call, until `endCall()`; install it before any other script the tab adds to new documents.
+	 */
 	static async install(page: Page, scope: PrintHoldScope): Promise<PrintHold> {
 		const session = await page.createCDPSession();
 		const printHold = new PrintHold(page, session, scope);
-		await session.send("Page.enable");
-		await session.send("Runtime.enable");
-		await session.send("Runtime.addBinding", { name: printHold.#binding });
-		await printHold.#apply(scope === "tab" ? null : 0);
+		try {
+			await session.send("Page.enable");
+			await session.send("Runtime.enable");
+			await session.send("Runtime.addBinding", { name: printHold.#binding });
+			// Chrome runs the scripts of the page's own session before any other session's, each session's in the order
+			// they were added: one added there first wraps `print()` before the tab's init scripts can keep the native
+			// one. It never changes, so it stays first; it holds a new document briefly until this session's script,
+			// which carries the current deadline and runs before the page's own scripts, sets it.
+			const bootstrapHoldMs = scope === "tab" ? null : USER_DRIVEN_RELEASE_MS;
+			const bootstrapArgs = [printHold.#binding, printHold.#holdKey, bootstrapHoldMs, null, USER_DRIVEN_RELEASE_MS];
+			const { identifier } = await page.mainFrame().client.send("Page.addScriptToEvaluateOnNewDocument", {
+				source: `(${holdPrintInPage})(${bootstrapArgs.map(arg => JSON.stringify(arg)).join(", ")});`,
+			});
+			printHold.#bootstrapId = identifier;
+			await printHold.#apply(scope === "tab" ? null : Date.now() + SETUP_HOLD_MS);
+		} catch (error) {
+			await printHold.dispose().catch(() => undefined);
+			throw error;
+		}
 		return printHold;
 	}
 
@@ -168,7 +195,7 @@ export class PrintHold {
 		await this.#apply(Date.now() + timeoutMs + USER_DRIVEN_RELEASE_MS);
 	}
 
-	/** A browser the user drives gets its page's `print()` back shortly after the call. */
+	/** A browser the user drives gets its page's `print()` back shortly after the call, or after the tab's setup. */
 	endCall(): void {
 		if (this.#scope === "tab") return;
 		void this.#apply(Date.now() + USER_DRIVEN_RELEASE_MS).catch(() => undefined);
@@ -194,6 +221,14 @@ export class PrintHold {
 	}
 
 	async #release(): Promise<void> {
+		// The page's own session stays, so its script goes first; a stopped page gets the removal once it runs again.
+		const bootstrapId = this.#bootstrapId;
+		this.#bootstrapId = undefined;
+		if (bootstrapId) {
+			await this.#page
+				.mainFrame()
+				.client.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: bootstrapId });
+		}
 		await this.#applying;
 		if (this.#scriptId) {
 			await this.#session.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: this.#scriptId });

@@ -1729,6 +1729,13 @@ export class WorkerCore {
 				this.#observeDialogs();
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			}
+			// Nobody else drives a browser omp launched, so its tabs hold every print(); the user's own browser only
+			// while omp acts, so the page's Print buttons still work for the user. The hold comes first: it covers the
+			// setup below, and its script must reach new documents before any init script the tab adds.
+			this.#printHold = await PrintHold.install(
+				this.#page,
+				payload.mode === "headless" || payload.userDriven !== true ? "tab" : "calls",
+			);
 			this.#page.mainFrame().client.on("Page.frameNavigated", this.#onFrameNavigated);
 			this.#page.mainFrame().client.on("OMP.debuggerDetached", this.#onDebuggerDetached);
 			this.#page.on("error", this.#onPageCrashed);
@@ -1739,12 +1746,6 @@ export class WorkerCore {
 				await this.#page.emulateFocusedPage(true);
 			}
 			this.#webmcp = await installWebMcp(this.#page);
-			// Nobody else drives a browser omp launched, so its tabs hold every print(); the user's own browser only
-			// while omp acts, so the page's Print buttons still work for the user.
-			this.#printHold = await PrintHold.install(
-				this.#page,
-				payload.mode === "headless" || payload.userDriven !== true ? "tab" : "calls",
-			);
 			await installVitalsObservers(this.#page);
 			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
 			if (payload.ignoreHttpsErrors) await applyIgnoreHttpsErrors(this.#page);
@@ -1768,6 +1769,7 @@ export class WorkerCore {
 			await this.#network.start();
 			const info = await this.#currentReadyInfo();
 			this.#started = true;
+			this.#printHold.endCall();
 			this.#transport.send({ type: "ready", info });
 		} catch (error) {
 			// A page this attempt created would be orphaned (the supervisor retries
