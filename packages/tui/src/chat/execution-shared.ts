@@ -92,6 +92,12 @@ export function buildStatusFooter(opts: {
 	 * counts retained rows the expand key still delivers.
 	 */
 	droppedLineCount?: number;
+	/**
+	 * Rows the output throttle skipped after the retained rows — a mid/tail
+	 * gap, not a dropped head. Named apart from `droppedLineCount` so the
+	 * visible block is never mistaken for a complete tail.
+	 */
+	throttledLineCount?: number;
 }): Text | undefined {
 	const parts: string[] = [];
 
@@ -100,6 +106,9 @@ export function buildStatusFooter(opts: {
 	}
 	if (opts.droppedLineCount !== undefined && opts.droppedLineCount > 0) {
 		parts.push(theme.fg("dim", `… ${opts.droppedLineCount} earlier lines dropped`));
+	}
+	if (opts.throttledLineCount !== undefined && opts.throttledLineCount > 0) {
+		parts.push(theme.fg("dim", `… ${opts.throttledLineCount} lines skipped in output`));
 	}
 	if (opts.status === "cancelled") {
 		parts.push(theme.fg("warning", "(cancelled)"));
@@ -147,6 +156,8 @@ export interface ExecutionCardInput {
 	readonly artifactError?: OutputArtifactError;
 	/** Rows the live streaming cap discarded; gone for good, so they are named apart from the hidden rows expansion still delivers. */
 	readonly droppedLineCount: number;
+	/** Rows the output throttle skipped after the retained rows — a mid/tail gap, named apart so the visible block is never mistaken for a complete tail. */
+	readonly throttledLineCount: number;
 }
 
 /**
@@ -187,9 +198,11 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 	else if (input.status === "error") note(`(exit ${input.exitCode})`, "error");
 	if (input.truncation) note(formatTruncationMetaNotice(input.truncation), "warning");
 	if (input.artifactError) note(formatArtifactErrorNotice(input.artifactError), "warning");
-	// Same note the legacy footer prints (buildStatusFooter), so a TSP surface
-	// and the fallback card name the dropped head in the same words.
+	// Same notes the legacy footer prints (buildStatusFooter), so a TSP surface
+	// and the fallback card name the dropped head and the throttle gap in the
+	// same words.
 	if (input.droppedLineCount > 0) note(`… ${input.droppedLineCount} earlier lines dropped`, "dim");
+	if (input.throttledLineCount > 0) note(`… ${input.throttledLineCount} lines skipped in output`, "dim");
 	if (notes.length > 0) children.push(text(notes, { wrap: "word", key: "notes" }));
 	return card(
 		{
@@ -227,6 +240,8 @@ export interface ExecutionToolInput {
 	readonly artifactError?: OutputArtifactError;
 	/** Rows the live streaming cap discarded; named in the run foot, apart from the hidden rows the preview still delivers. */
 	readonly droppedLineCount: number;
+	/** Rows the output throttle skipped after the retained rows — a mid/tail gap, named in the run foot apart from the dropped head. */
+	readonly throttledLineCount: number;
 }
 
 const EXECUTION_RUN_STATE: Record<ExecutionStatus, RunState> = {
@@ -268,6 +283,7 @@ export function describeExecutionTool(input: ExecutionToolInput): NativeNode {
 					truncation: input.truncation,
 					artifactError: input.artifactError,
 					droppedLines: input.droppedLineCount,
+					throttledLines: input.throttledLineCount,
 				},
 			}),
 		],

@@ -92,6 +92,8 @@ export interface OutputMeta {
 	diagnostics?: DiagnosticMeta;
 	/** Rows the live streaming cap discarded; gone for good, so they are named apart from the hidden rows the preview still delivers. */
 	droppedLines?: number;
+	/** Rows the output throttle skipped after the retained rows — a mid/tail gap, named apart from the dropped head. */
+	throttledLines?: number;
 	limits?: LimitsMeta;
 }
 
