@@ -874,6 +874,18 @@ const STAMP_ARRAY = Symbol("stamp.array");
 const STAMP_END = Symbol("stamp.end");
 
 /**
+ * Unboxed value `JSON.stringify` emits for a boxed primitive, or `undefined` for
+ * any other object. A `Number`/`String`/`Boolean` wrapper has no enumerable own
+ * keys and no `toJSON`, so stamping its container shape would call
+ * `new Number(1)` and `new Number(2)` equal while the projected line reads `1`
+ * and `2`.
+ */
+function unboxedPrimitive(value: object): number | string | boolean | undefined {
+	if (value instanceof Number || value instanceof String || value instanceof Boolean) return value.valueOf();
+	return undefined;
+}
+
+/**
  * Flatten `value`'s JSON graph — the graph `stringifyJson` in {@link #lineFor}
  * projects — into `out` as structure markers, own keys, and leaf values, never
  * object identity. Used by the entry-line memo to see nested mutation that
@@ -889,6 +901,13 @@ const STAMP_END = Symbol("stamp.end");
 function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
 	if (value === null || typeof value !== "object") {
 		out.push(value);
+		return out;
+	}
+	// Projected to the unboxed primitive before the container is walked, since
+	// `JSON.stringify` does the same — see {@link unboxedPrimitive}.
+	const unboxed = unboxedPrimitive(value);
+	if (unboxed !== undefined) {
+		out.push(unboxed);
 		return out;
 	}
 	// Duck-type read of JSON's own serializer hook; TypeScript has no structural
@@ -929,6 +948,10 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 		// (see {@link messageValueStamp}) — so compare that projection here
 		// instead of recursing, which would consume a second stamp entry.
 		if (live !== null && typeof live === "object") {
+			// Stamped as its unboxed value like `messageValueStamp` does — one leaf,
+			// not the empty container `unboxedPrimitive` explains.
+			const unboxed = unboxedPrimitive(live);
+			if (unboxed !== undefined) return unboxed === expected;
 			// Duck-type read of JSON's own serializer hook.
 			const serializer = live as { toJSON?: () => unknown };
 			if (typeof serializer.toJSON === "function") {
