@@ -3,6 +3,7 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import type { TspKind, TspSpan } from "@oh-my-pi/pi-wire";
 import { AssistantMessageComponent } from "../src/chat/assistant-message";
 import { BashExecutionComponent } from "../src/chat/bash-execution";
+import { PREVIEW_LINES } from "../src/chat/execution-shared";
 import { ReadToolGroupComponent } from "../src/chat/read-tool-group";
 import { ToolExecutionComponent } from "../src/chat/tool-execution";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
@@ -720,5 +721,39 @@ describe("user shell runs", () => {
 		expect(foot(box)?.time?.stopped).toBeNumber();
 		expect(image?.k).toBe("text");
 		expect(run.describe(cx(["card", "ansi"])).k).toBe("card");
+	});
+
+	it("keeps the dropped-lines note outside the card's clamped body", () => {
+		const run = new BashExecutionComponent("seq 1 250", ui, false);
+		run.appendOutput(Array.from({ length: 250 }, (_, i) => `line-${i}`).join("\n"));
+		// Settled without a full snapshot (the error/abort path): the rows the
+		// live cap dropped are gone for good.
+		run.setComplete(0, false);
+		const card = run.describe(cx(["card", "ansi"]));
+		expect(card.k).toBe("card");
+		// The collapsed card must not clamp its body: a body clamp hides the
+		// trailing note behind a long output, so users would only learn the rows
+		// are unrecoverable after expanding.
+		expect(props(card).preview).toBeUndefined();
+		// The output child keeps the clamp instead, so the collapsed view is
+		// still bounded to the tail window.
+		const output = nodes(card.c).find(child => child.key === "output");
+		expect(props(output).preview).toEqual({ lines: PREVIEW_LINES });
+		// The notice itself is a body child the collapse cannot hide.
+		const notes = nodes(card.c).find(child => props(child).key === "notes");
+		expect(spansText(notes)).toContain("… 150 earlier lines dropped");
+	});
+
+	it("withholds the dropped-lines notice until the run settles", () => {
+		const run = new BashExecutionComponent("seq 1 250", ui, false);
+		run.appendOutput(Array.from({ length: 250 }, (_, i) => `line-${i}`).join("\n"));
+		// Still running: the completed snapshot replaces the streamed tail window
+		// and clears the count, so naming dropped rows now would be retracted by
+		// the success path's very next frame.
+		expect(JSON.stringify(run.describe(cx(["tool", "ansi", "code"])))).not.toContain("earlier lines dropped");
+		// Settling without a full snapshot: the dropped head is gone for good, so
+		// the run foot must name it.
+		run.setComplete(1, false);
+		expect(JSON.stringify(run.describe(cx(["tool", "ansi", "code"])))).toContain("… 150 earlier lines dropped");
 	});
 });

@@ -206,7 +206,12 @@ export class BashExecutionComponent extends Container {
 				exitCode: this.#exitCode,
 				truncation: this.#truncation,
 				artifactError: this.#artifactError,
-				droppedLineCount: this.#droppedLiveLines,
+				// Gated on a settled run: while the command still runs, the
+				// completed snapshot replaces the streamed tail window and clears
+				// the count (`setComplete` → `#setOutput`), so a notice now would
+				// be retracted by the success path's very next frame. The legacy
+				// footer below is only ever built once the run has settled.
+				droppedLineCount: this.#status === "running" ? 0 : this.#droppedLiveLines,
 			};
 			return dataFirst
 				? describeExecutionTool({

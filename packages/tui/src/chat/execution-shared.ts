@@ -134,7 +134,10 @@ export interface ExecutionCardInput {
 	/** `performance.now()` when the run started; drives the live elapsed timer. */
 	readonly startedAt: number;
 	readonly expanded: boolean;
-	/** Body nodes before the output (the eval cell's code). */
+	/**
+	 * Body nodes before the output (the eval cell's code). The card body is not
+	 * clamped, so a lead that can grow long carries its own preview.
+	 */
 	readonly lead?: readonly NativeChild[];
 	/** Raw terminal output. */
 	readonly output: string;
@@ -149,8 +152,10 @@ export interface ExecutionCardInput {
 /**
  * Native card shared by user bash/eval runs: the head with a live `elapsed`
  * while running, the output as an `ansi` mini terminal that follows its tail
- * while running, a cancel hint spinner, then exit/truncation notes. The
- * terminal clamps the collapsed body and owns the "N more lines" affordance.
+ * while running, a cancel hint spinner, then exit/truncation notes. The card
+ * body itself is never clamped: the output (and any lead) child carries its
+ * own preview, so a collapsed card still shows the notes that a body clamp
+ * would hide behind a long output.
  */
 export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 	const running = input.status === "running";
@@ -193,7 +198,6 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 			status: EXECUTION_CARD_STATUS[input.status],
 			collapsible: true,
 			collapsed: !input.expanded,
-			preview: { lines: PREVIEW_LINES },
 		},
 		children,
 	);
