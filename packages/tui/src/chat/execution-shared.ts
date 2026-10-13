@@ -16,7 +16,7 @@ import { formatArtifactErrorNotice, formatTruncationMetaNotice, type TruncationM
 import { DynamicBorder } from "../chrome/dynamic-border";
 import { Ellipsis, truncateToWidth, visibleWidth } from "../utils";
 import { interruptKey } from "../chrome/keybinding-hints";
-import { DEFAULT_TERMINAL_PREVIEW_LINES, expandKeyHint } from "../render/render-utils";
+import { DEFAULT_TERMINAL_PREVIEW_LINES, expandKeyHint, PREVIEW_LIMITS } from "../render/render-utils";
 import type { TspCardStatus, TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { card, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
@@ -162,11 +162,11 @@ export interface ExecutionCardInput {
 
 /**
  * Native card shared by user bash/eval runs: the head with a live `elapsed`
- * while running, the output as an `ansi` mini terminal that follows its tail
- * while running, a cancel hint spinner, then exit/truncation notes. The card
- * body itself is never clamped: the output (and any lead) child carries its
- * own preview, so a collapsed card still shows the notes that a body clamp
- * would hide behind a long output.
+ * while running, the output as an `ansi` mini terminal pinned to its tail,
+ * a cancel hint spinner, then exit/truncation notes. The card body itself is
+ * never clamped: the output (and any lead) child carries its own preview, so
+ * a collapsed card still shows the notes that a body clamp would hide behind
+ * a long output.
  */
 export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 	const running = input.status === "running";
@@ -179,11 +179,19 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 		...(input.lead ?? []),
 	];
 	if (input.output) {
+		// Always pinned to the tail: a settled replay describes once, so
+		// `follow: false` would anchor the collapsed preview at the earliest
+		// rows and hide the result until expansion. Matches runOutput().
 		children.push(
-			node("ansi", { text: input.output, follow: running, preview: { lines: PREVIEW_LINES } }, undefined, "output"),
+			node("ansi", { text: input.output, follow: true, preview: { lines: PREVIEW_LINES } }, undefined, "output"),
 		);
 	}
-	if (input.images) children.push(...input.images);
+	// Images carry no preview of their own, so a collapsed card shows only the
+	// first COLLAPSED_ITEMS and names the rest — otherwise up to 32 decoded
+	// images fill screens behind a nominally collapsed command.
+	const images = input.images ?? [];
+	const visibleImages = input.expanded ? images : images.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS);
+	children.push(...visibleImages);
 	if (running) {
 		children.push(
 			node("spinner", { label: [span(`Running… (${interruptKey()} to cancel)`, "muted")] }, undefined, "running"),
@@ -203,6 +211,8 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 	// same words.
 	if (input.droppedLineCount > 0) note(`… ${input.droppedLineCount} earlier lines dropped`, "dim");
 	if (input.throttledLineCount > 0) note(`… ${input.throttledLineCount} lines skipped in output`, "dim");
+	const hiddenImages = images.length - visibleImages.length;
+	if (hiddenImages > 0) note(`… ${hiddenImages} more image${hiddenImages === 1 ? "" : "s"}`, "dim");
 	if (notes.length > 0) children.push(text(notes, { wrap: "word", key: "notes" }));
 	return card(
 		{

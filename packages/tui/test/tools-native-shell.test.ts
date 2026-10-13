@@ -743,6 +743,43 @@ describe("user shell runs", () => {
 		const notes = nodes(card.c).find(child => props(child).key === "notes");
 		expect(spansText(notes)).toContain("… 150 earlier lines dropped");
 	});
+	it("pins a settled replay's collapsed ANSI preview to the result tail", () => {
+		// A completed >100-line block replayed on a card/ansi-only surface
+		// describes once: follow:false would anchor the collapsed preview at
+		// the earliest rows and hide the recent result until expansion.
+		const run = new BashExecutionComponent("seq 1 250", ui, false);
+		run.setComplete(0, false, {
+			output: Array.from({ length: 250 }, (_, i) => `line-${i}`).join("\n"),
+		});
+		const card = run.describe(cx(["card", "ansi"]));
+		expect(card.k).toBe("card");
+		const output = nodes(card.c).find(child => child.key === "output");
+		expect(output?.k).toBe("ansi");
+		expect(props(output)).toMatchObject({ follow: true, preview: { lines: PREVIEW_LINES } });
+	});
+
+	it("bounds a collapsed card's image collection and names the hidden rest", () => {
+		// Images carry no preview of their own and the card body is unclamped,
+		// so without a bound a 32-image run fills screens while collapsed.
+		const images = Array.from({ length: 10 }, () => ({ type: "image" as const, data: PNG, mimeType: "image/png" }));
+		const run = new BashExecutionComponent("plot", ui, false);
+		run.setComplete(0, false, { output: "done", images, showImages: false });
+		const card = run.describe(cx(["card", "ansi"]));
+		expect(card.k).toBe("card");
+		// Past PREVIEW_LIMITS.COLLAPSED_ITEMS (8): only the first 8 image
+		// fallbacks stay, and the notes name the hidden pair. (The notes node
+		// is itself a text child, keyed in props rather than the node key.)
+		const fallbacks = (children: readonly NativeChild[] | undefined): NativeNode[] =>
+			nodes(children).filter(child => child.k === "text" && props(child).key === undefined);
+		expect(fallbacks(card.c)).toHaveLength(8);
+		const notes = nodes(card.c).find(child => props(child).key === "notes");
+		expect(spansText(notes)).toContain("… 2 more images");
+		// Expansion delivers every image and retires the notice.
+		run.setExpanded(true);
+		const open = run.describe(cx(["card", "ansi"]));
+		expect(fallbacks(open.c)).toHaveLength(10);
+		expect(spansText(nodes(open.c).find(child => props(child).key === "notes"))).not.toContain("more images");
+	});
 
 	it("withholds the dropped-lines notice until the run settles", () => {
 		const run = new BashExecutionComponent("seq 1 250", ui, false);
