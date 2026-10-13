@@ -1,6 +1,7 @@
 import { describe, expect, it, jest } from "bun:test";
 import { createHash } from "node:crypto";
 import { closeRelayTarget } from "@oh-my-pi/pi-coding-agent/tools/browser/orphan-registry";
+import { BROWSER_PROTOCOL_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { RelayBridge, type RelaySocket } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
 import type {
 	RelayRpcRequest,
@@ -840,15 +841,16 @@ describe("RelayBridge command deadlines", () => {
 		}
 	}
 
+	const pageBoundMs = BROWSER_PROTOCOL_TIMEOUT_MS + 5_000;
+
 	it.each([
 		["Runtime.callFunctionOn", { functionDeclaration: "() => new Promise(() => {})", awaitPromise: true }],
-		["Runtime.evaluate", { expression: "new Promise(() => {})", awaitPromise: true }],
 		["Runtime.awaitPromise", { promiseObjectId: "1" }],
 		["Page.navigate", { url: "https://example.com/slow" }],
-	])("keeps waiting on %s, whose answer waits on the page, past 20 s", async (method, params) => {
-		expect(await unansweredFor(method, params, 60_000)).toBeUndefined();
-		expect(JSON.stringify(await unansweredFor(method, params, 180_000))).toContain(
-			`${method} on tab 1: Chrome sent no answer within 180000ms`,
+	])("keeps waiting on %s, whose answer waits on the page, until omp's own client gave up", async (method, params) => {
+		expect(await unansweredFor(method, params, BROWSER_PROTOCOL_TIMEOUT_MS)).toBeUndefined();
+		expect(JSON.stringify(await unansweredFor(method, params, pageBoundMs))).toContain(
+			`${method} on tab 1: Chrome sent no answer within ${pageBoundMs}ms`,
 		);
 	});
 
@@ -856,6 +858,10 @@ describe("RelayBridge command deadlines", () => {
 		expect(
 			JSON.stringify(await unansweredFor("Input.dispatchMouseEvent", { type: "mouseMoved", x: 1, y: 1 }, 20_000)),
 		).toContain("Input.dispatchMouseEvent on tab 1: Chrome sent no answer within 20000ms");
+		// An evaluation that does not wait on its promise is answered at once, so it keeps the 20 s deadline.
+		expect(
+			JSON.stringify(await unansweredFor("Runtime.evaluate", { expression: "1", awaitPromise: false }, 20_000)),
+		).toContain("Runtime.evaluate on tab 1: Chrome sent no answer within 20000ms");
 	});
 });
 

@@ -23,6 +23,7 @@
  */
 import { createHash } from "node:crypto";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
+import { BROWSER_PROTOCOL_TIMEOUT_MS } from "../launch";
 import {
 	DISCARDED_TABS_PROTOCOL_VERSION,
 	EXTENSION_RELOAD_PROTOCOL_VERSION,
@@ -274,14 +275,18 @@ const AFFINE_RECONNECT_WAIT_MS = 12_000;
 const DETACHED_COMMAND_ERROR = /Detached while handling command/;
 /** How long such a failure waits for the extension to report the detach itself. */
 const CHROME_DETACH_REPORT_MS = 1_000;
-/** {@link RelayBridge.#rpc}'s failure when the extension sent no answer within the deadline. */
+/**
+ * {@link RelayBridge.#rpc}'s failure when the extension sent no answer within the deadline; the "names the method and
+ * the tab" bridge test fails if the two drift apart.
+ */
 const RPC_TIMED_OUT = /^extension rpc '\w+' timed out after \d+ms$/;
 /**
  * Deadline for a command whose answer waits on the page itself (a promise it settles, a navigation it commits),
- * where {@link RPC_TIMEOUT_MS} is for one Chrome answers at once. Its caller bounds it; this ceiling is Puppeteer's
- * default protocol timeout, so a client on that default gives up first.
+ * where {@link RPC_TIMEOUT_MS} is for one Chrome answers at once. omp's own clients give up at
+ * `BROWSER_PROTOCOL_TIMEOUT_MS`, as on a launched Chrome; the relay waits a little longer so their error, not the
+ * relay's, reaches the call.
  */
-const PAGE_BOUND_RPC_TIMEOUT_MS = 180_000;
+const PAGE_BOUND_RPC_TIMEOUT_MS = BROWSER_PROTOCOL_TIMEOUT_MS + 5_000;
 
 /**
  * Multiplexing CDP bridge between downstream puppeteer connections and the
@@ -1026,7 +1031,7 @@ export class RelayBridge {
 			return await this.#rpc({ op: "send", tabId: tab.tabId, sessionId, method, params }, inst, timeoutMs);
 		} catch (err) {
 			if (!(err instanceof Error && RPC_TIMED_OUT.test(err.message))) throw err;
-			throw new Error(`${method} on tab ${tab.tabId}: Chrome sent no answer within ${timeoutMs}ms`);
+			throw new Error(`${method} on tab ${tab.tabId}: Chrome sent no answer within ${timeoutMs}ms`, { cause: err });
 		}
 	}
 

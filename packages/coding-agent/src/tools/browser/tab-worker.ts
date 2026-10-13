@@ -14,6 +14,7 @@ import type {
 	HTTPResponse,
 	JSHandle,
 	KeyInput,
+	KeyPressOptions,
 	MouseButton,
 	Page,
 	Protocol,
@@ -793,11 +794,12 @@ export function toActionableHandle(
 		}
 		// Puppeteer's `ElementHandle.press` takes a single key name; focus and press
 		// through `pressKey` so combos and the macOS editing commands work on handles too.
+		// The guard below passes its signal, so a cut-off press releases what it held.
 		const focus = interactive.focus;
 		if (focus) {
-			const press: ElementHandle["press"] = async (key, options) => {
-				await focus();
-				await pressKey(enriched.frame.page(), key, options);
+			const press = async (key: KeyInput, options?: KeyPressOptions, signal?: AbortSignal): Promise<void> => {
+				await untilAborted(signal, () => focus());
+				await pressKey(enriched.frame.page(), key, options, signal);
 			};
 			interactive.press = press as RawHandleMethod;
 		}
@@ -806,7 +808,7 @@ export function toActionableHandle(
 	}
 
 	for (const method of GUARDED_HANDLE_METHODS) {
-		if (method === "type" || method === "press") continue;
+		if (method === "type") continue;
 		const original = originals.interactive[method];
 		if (!original) continue;
 		methods[method] = (...args) =>
@@ -816,24 +818,7 @@ export function toActionableHandle(
 					originals,
 					`handle.${method}()`,
 					signal,
-					() => original(...args),
-					invalidate,
-				),
-			);
-	}
-	const focus = originals.interactive.focus;
-	if (focus && originals.interactive.press) {
-		enriched.press = (key, options) =>
-			guard<void>("handle.press()", signal =>
-				runGuardedHandleAction(
-					enriched,
-					originals,
-					"handle.press()",
-					signal,
-					async () => {
-						await untilAborted(signal, () => focus());
-						await pressKey(enriched.frame.page(), key, options, signal);
-					},
+					() => (method === "press" ? original(args[0], args[1], signal) : original(...args)),
 					invalidate,
 				),
 			);
