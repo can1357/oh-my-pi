@@ -427,6 +427,11 @@ export function isAtomicPersistenceNode(obj: object, key?: string): boolean {
 	// are NOT atomic — truncateForPersistence rewrites them via the blob
 	// store. They are checked explicitly in the predicate and must never be
 	// classified here.
+	// The preserveData compaction carrier has no `type` marker of its own, so
+	// its key-based case sits outside the type guard below — mirroring the
+	// projection's early return, which checks the key without requiring one.
+	const untyped = obj as Record<string, unknown>;
+	if (key === "anthropicCompaction" && "content" in untyped && typeof untyped.content === "string") return true;
 	if (typeof obj === "object" && "type" in obj) {
 		const typed = obj as Record<string, unknown>;
 		// Mirror the truncate guard exactly: only a block that passes
@@ -455,12 +460,7 @@ export function isAtomicPersistenceNode(obj: object, key?: string): boolean {
 			}
 			return false;
 		}
-		if (
-			typed.type === "anthropicCompaction" ||
-			typed.type === "cursorHistory" ||
-			(key === "anthropicCompaction" && "content" in typed && typeof typed.content === "string")
-		)
-			return true;
+		if (typed.type === "anthropicCompaction" || typed.type === "cursorHistory") return true;
 		const signed =
 			(typed.type === "thinking" && "thinkingSignature" in typed && isNonEmptyString(typed.thinkingSignature)) ||
 			(typed.type === "text" && "textSignature" in typed && isNonEmptyString(typed.textSignature)) ||
