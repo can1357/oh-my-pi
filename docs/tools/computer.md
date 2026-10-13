@@ -179,7 +179,7 @@ On macOS a screenshot taken behind the lock screen sets `screenLocked: true` and
 
 Native errors are surfaced as `ToolError` text prefixed by the stable code name:
 
-- `PermissionDenied`, `CaptureFailed`, `InputFailed`, `BackgroundUnavailable`, `InputBusy`, `Cancelled`
+- `PermissionDenied`, `CaptureFailed`, `InputFailed`, `BackgroundUnavailable`, `InputBusy`, `Cancelled`, `UserIntervened`
 - `WindowNotFound`, `InvalidTarget`, `InvalidKey`, `InvalidCoordinateFrame`
 - `StaleRef`, `AxUnsupported`, `AxFailed`, `AxUnconfirmed`, `Timeout`, `Closed`, `Internal`
 - `Unsupported`, `SpaceUnsupported`, `SpaceMoveDenied`
@@ -188,9 +188,11 @@ Prelude/worker errors include `Computer session is closed`, `Computer worker is 
 
 `AxUnconfirmed` (macOS) means an AX action was requested but its outcome could not be confirmed: the app did not reply in time or messaging failed, for example because the action opened a modal dialog. It may already have taken effect, so observe the window before repeating it.
 
+`UserIntervened` (macOS) means the user pressed a key or clicked in the app the call was aimed at. A listen-only tap, started when the session first reads or acts on an app, records the user's keys and clicks (and input a tool such as dictation posts for them) per app the session has touched. Keys already being typed stop at the user's first key or click there: keys sent before it may have landed, nothing more is sent, and releases still go out. Clicks, drags and scrolls are not interrupted mid-gesture. Later input or mutation aimed at that app (window input, `menu.select`, `raise`, `bringToCurrentSpace`, and element `setValue`/`perform`/`press`/`click`/`focus`) waits until the user has left it alone for 5 s, or until 250 ms before the run's timeout, then throws `UserIntervened` without sending anything, naming the app and how long ago its last input came. Each such call throws until a `screenshot`, `zoom`, `observe`, `ax` or `find` of one of the app's windows begins at least 5 s after that input; reads before then still succeed. Other apps are unaffected, as is desktop- or display-level input. Without event-listening access (Input Monitoring) the tap cannot start and nothing is detected.
+
 `InputBusy` means another native operation owns input/focus and no input was sent. A listen-only Escape monitor, armed for takeover input only (`takeover: true`, any operation under held control, desktop/display-level input, raises and activating launches), cancels on physical Escape anywhere and ignores synthetic events. Background window input and semantic AX actions arm no monitor: the user's own Escape cancels nothing, and only the host interrupt (the tool call's abort signal) or the run timeout stops them. On macOS, without event-listening access (Input Monitoring turned off for the launching app) `globalEscape` reports `false` and takeover input runs without the monitor; a monitor that fails to start never refuses input, and `globalEscape` reads `false` once takeover input has run without it, until a later takeover operation starts it. `Cancelled` may follow partial input or an atomic OS/AX operation: cancellation cannot undo effects already delivered.
 
-Recover by refreshing the exact target screenshot after coordinate-frame errors, taking a new AX snapshot after `StaleRef`, and inspecting `desktop.capabilities()` for platform/permission failures. After `BackgroundUnavailable`, prefer AX; use `takeover: true` only for the refused call when supported. After partial-delivery or restoration errors, inspect the target before retrying because input may already have landed.
+Recover by refreshing the exact target screenshot after coordinate-frame errors, taking a new AX snapshot after `StaleRef`, and inspecting `desktop.capabilities()` for platform/permission failures. After `BackgroundUnavailable`, prefer AX; use `takeover: true` only for the refused call when supported. After partial-delivery or restoration errors, inspect the target before retrying because input may already have landed. After `UserIntervened`, read that window again and continue from what it shows, keeping the user's edits.
 
 ## Platform constraints
 

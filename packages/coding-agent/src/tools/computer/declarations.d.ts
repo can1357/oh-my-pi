@@ -177,7 +177,7 @@ interface ComputerCapabilities {
 	displayAsleep: boolean;
 }
 
-/** Live accessibility element resolved from a snapshot ref; expired refs throw `StaleRef`. */
+/** Live accessibility element resolved from a snapshot ref; expired refs throw `StaleRef`. Its mutations follow the window's macOS `UserIntervened` rule. */
 interface ComputerElement {
 	/** Snapshot ref tag, e.g. `e5`. */
 	readonly ref: string;
@@ -253,7 +253,12 @@ interface ComputerDisplayTarget extends ComputerInputTarget {
 	readonly id: string;
 }
 
-/** Window handle resolved by `window`/`focusedWindow`; identity fields are a snapshot taken at resolution. */
+/**
+ * Window handle resolved by `window`/`focusedWindow`; identity fields are a snapshot taken at resolution.
+ * On macOS, input and other mutations aimed at the window's app after the user typed or clicked there since its
+ * last `screenshot`/`observe`/`ax`/`find` wait up to 5 s for them to pause, then throw `UserIntervened` without
+ * sending; keys already being typed stop at the user's first key or click. A read once they paused clears it.
+ */
 interface ComputerWindow extends ComputerInputTarget {
 	readonly id: string;
 	readonly app: string;
