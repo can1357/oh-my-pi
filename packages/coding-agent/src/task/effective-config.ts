@@ -18,6 +18,7 @@ import { discoverAdvisorConfigs } from "../advisor/config";
 import type { OAuthAccountPools } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
 import {
+	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	pickStartupFallbackModel,
@@ -63,6 +64,7 @@ import {
 	cfgTaskAgentAdvisor,
 	cfgTaskAgentIdleTtlMs,
 	cfgTaskAgentPrewalk,
+	cfgTaskAgentSoftRequestBudget,
 	cfgTaskDisabledAgents,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskPrewalk,
@@ -149,7 +151,10 @@ async function resolveParentModel(
 		const allowed = await resolveAllowedModels(modelRegistry, settings, preferences);
 		if (defaultRole) {
 			const role = resolveModelRoleValue(defaultRole, allowed, { settings, matchPreferences: preferences });
-			if (role.model) return { pattern: defaultRole, source: { layer: "session", key: "modelRoles.default" } };
+			// A real parent hands its spawn the concrete model it runs on, without the role's thinking suffix.
+			if (role.model) {
+				return { pattern: formatModelString(role.model), source: { layer: "session", key: "modelRoles.default" } };
+			}
 		}
 		const pick = pickStartupFallbackModel(modelRegistry, allowed);
 		if (!refreshed && (defaultRole || !pick) && modelRegistry.getDiscoverableProviders().length > 0) {
@@ -288,20 +293,35 @@ export async function resolveEffectiveAgentConfig(
 	};
 
 	const configuredBudget = cfgTaskSoftRequestBudget.get(settings);
-	const budget = resolveSoftRequestBudget(name, configuredBudget);
+	const agentBudgets = cfgTaskAgentSoftRequestBudget.get(settings);
+	const budget = resolveSoftRequestBudget(name, configuredBudget, agentBudgets);
 	const builtInBudget = SOFT_REQUEST_BUDGET[name];
 	const requestBudget: AgentConfigEntry = {
 		value: budget,
 		source:
-			budget > 0 && builtInBudget !== undefined && builtInBudget < configuredBudget
-				? { layer: "default", key: `built-in ${name} budget` }
-				: settingSource(cfgTaskSoftRequestBudget, settings),
+			typeof agentBudgets[name] === "number"
+				? { layer: "agent-entry", key: `task.agentSoftRequestBudget.${name}` }
+				: budget > 0 && builtInBudget !== undefined && builtInBudget < configuredBudget
+					? { layer: "default", key: `built-in ${name} budget` }
+					: settingSource(cfgTaskSoftRequestBudget, settings),
 	};
 
 	const prewalkPattern = agentPrewalkPattern(agent, settings);
-	const prewalkResolution = prewalkPattern
+	let prewalkResolution = prewalkPattern
 		? resolveSubagentPrewalk(prewalkPattern, modelRegistry, settings, { model, thinkingLevel: spawnThinking })
 		: undefined;
+	// A spawn awaits model discovery before resolving its prewalk target, so an uncached discovered target still arms.
+	if (
+		prewalkPattern &&
+		prewalkResolution?.kind === "unavailable" &&
+		modelRegistry.getDiscoverableProviders().length > 0
+	) {
+		await modelRegistry.refresh("online-if-uncached");
+		prewalkResolution = resolveSubagentPrewalk(prewalkPattern, modelRegistry, settings, {
+			model,
+			thinkingLevel: spawnThinking,
+		});
+	}
 
 	const atMaxDepth = !canSpawnAtDepth(cfgTaskMaxRecursionDepth.get(settings), 1);
 	const toolNames = resolveSubagentToolNames(agent, settings, {

@@ -210,25 +210,32 @@ async function showAgent(name: string | undefined, json: boolean | undefined): P
 		return;
 	}
 
+	for (const line of formatAgentConfig(config)) writeStdout(line);
+}
+
+/** Terminal lines of `omp agents show`: a header, then one aligned row per spawn-time value. */
+export function formatAgentConfig(config: EffectiveAgentConfig): string[] {
 	const definedIn = config.filePath ? `${config.definedIn}: ${shortenPath(config.filePath)}` : config.definedIn;
-	writeStdout(`${chalk.bold(terminalSafe(config.name))} ${chalk.dim(`(${terminalSafe(definedIn)})`)}`);
+	const lines = [`${chalk.bold(terminalSafe(config.name))} ${chalk.dim(`(${terminalSafe(definedIn)})`)}`];
 	if (config.disabled) {
-		writeStdout(chalk.yellow(`${theme.status.warning} Disabled by task.disabledAgents: spawns are refused.`));
+		lines.push(chalk.yellow(`${theme.status.warning} Disabled by task.disabledAgents: spawns are refused.`));
 	}
-	const rows = SHOW_ROWS.map(({ field, label, none }) => ({
-		label,
-		value: terminalSafe(formatEntryValue(field, config[field].value, none)),
-		entry: config[field],
-	}));
+	const rows = SHOW_ROWS.map(({ field, label, none }) => {
+		const value = terminalSafe(formatEntryValue(field, config[field].value, none));
+		// Terminal cells, not UTF-16 units: account identities and advisor names may be CJK or emoji.
+		return { label, value, width: Bun.stringWidth(value), entry: config[field] };
+	});
 	const labelWidth = Math.max(...rows.map(row => row.label.length));
 	// Long tool lists and account pools overflow instead of pushing every source column right.
-	const valueWidth = Math.max(...rows.map(row => row.value.length).filter(length => length <= MAX_SHOW_VALUE_WIDTH));
-	for (const { label, value, entry } of rows) {
+	const valueWidth = Math.max(...rows.map(row => row.width).filter(width => width <= MAX_SHOW_VALUE_WIDTH));
+	for (const { label, value, width, entry } of rows) {
 		const note = entry.note ? chalk.dim(` · ${terminalSafe(entry.note)}`) : "";
-		writeStdout(
-			`  ${label.padEnd(labelWidth)}  ${value.padEnd(valueWidth)}  ${chalk.dim(terminalSafe(formatSource(entry.source)))}${note}`,
+		const padding = " ".repeat(Math.max(0, valueWidth - width));
+		lines.push(
+			`  ${label.padEnd(labelWidth)}  ${value}${padding}  ${chalk.dim(terminalSafe(formatSource(entry.source)))}${note}`,
 		);
 	}
+	return lines;
 }
 
 export async function runAgentsCommand(cmd: AgentsCommandArgs): Promise<void> {
