@@ -319,3 +319,85 @@ it("shutdown is idempotent and removes the temporary config after child exit", a
 	expect(await Bun.file(status.runtime_data_dir).exists()).toBe(false);
 	await expect(client.shutdown()).resolves.toBeUndefined();
 });
+
+/** Stub `mnemosyne-memory` 4.0 with the real SDK signatures; unsupported kwargs raise TypeError like the SDK. */
+const STUB_MEMORY_PY = `import json
+ROWS = {}
+
+class Mnemosyne:
+    def __init__(self, session_id="default", db_path=None, bank=None, author_id=None, author_type=None, channel_id=None):
+        pass
+
+    def remember(self, content, source="conversation", importance=0.5, metadata=None, valid_until=None, scope="session",
+                 extract_entities=False, extract=False, veracity="unknown", trust_tier=None, memory_type=None, dedupe=True):
+        memory_id = f"m{len(ROWS) + 1}"
+        ROWS[memory_id] = {"id": memory_id, "content": content, "source": source, "importance": importance,
+                           "metadata": json.dumps(metadata or {}), "memory_store": "working"}
+        return memory_id
+
+    def update(self, memory_id, content=None, importance=None):
+        if content == "BLOCKED":
+            return None
+        if memory_id not in ROWS:
+            return False
+        ROWS[memory_id]["content"] = content if content is not None else ROWS[memory_id]["content"]
+        return True
+
+    def get(self, memory_id):
+        return ROWS.get(memory_id)
+
+    def get_stats(self, author_id=None, author_type=None, channel_id=None):
+        return {"total_memories": len(ROWS), "beam": {"working_memory": {"total": len(ROWS)},
+                "episodic_memory": {"total": 0}, "triples": {"total": 0}}}
+`;
+
+it("drives the bundled worker against Mnemosyne 4.0 SDK signatures", async () => {
+	const directory = TempDir.createSync("mnemosyne-oss-stub-sdk-");
+	temporaryDirectories.push(directory);
+	const root = path.resolve(directory.path());
+	const site = path.join(root, "site");
+	await Bun.write(path.join(site, "mnemosyne", "__init__.py"), "");
+	await Bun.write(path.join(site, "mnemosyne", "core", "__init__.py"), "");
+	await Bun.write(path.join(site, "mnemosyne", "core", "memory.py"), STUB_MEMORY_PY);
+	await Bun.write(
+		path.join(site, "mnemosyne", "core", "banks.py"),
+		"class BankManager:\n    def __init__(self, data_dir=None):\n        pass\n",
+	);
+	await Bun.write(
+		path.join(site, "mnemosyne_memory-4.0.0.dist-info", "METADATA"),
+		"Metadata-Version: 2.1\nName: mnemosyne-memory\nVersion: 4.0.0\n",
+	);
+	const python = path.join(root, "python");
+	await Bun.write(python, `#!/bin/sh\nPYTHONPATH=${JSON.stringify(site)} exec python3 "$@"\n`);
+	await fs.chmod(python, 0o755);
+	const client = new MnemosyneOssWorkerClient({
+		context: workerContext(path.join(root, "store")),
+		cwd: root,
+		executable: python,
+		requestTimeoutMs: 5_000,
+		shutdownTimeoutMs: 250,
+	});
+	try {
+		const { id } = await client.request<{ id: string }>(
+			"remember",
+			{ content: "fact", options: { source: "test", scope: "global", metadata: { origin: "omp" } } },
+			{ mutation: true },
+		);
+		// update() takes only content/importance; a forwarded metadata kwarg made every update fail.
+		await expect(
+			client.request("update", { id, content: "edited", importance: 0.9, metadata: {} }, { mutation: true }),
+		).resolves.toMatchObject({ status: "updated" });
+		// update() returns None when the write policy rejects content; that is not a successful update.
+		await expect(client.request("update", { id, content: "BLOCKED" }, { mutation: true })).rejects.toThrow(
+			"write policy rejected",
+		);
+		await expect(client.request("get", { id })).resolves.toMatchObject({
+			status: "found",
+			record: { content: "edited", metadata: { origin: "omp" } },
+		});
+		const status = await client.request<{ banks: Array<{ working_count?: number }> }>("status");
+		expect(status.banks[0]?.working_count).toBe(1);
+	} finally {
+		await client.shutdown();
+	}
+});
