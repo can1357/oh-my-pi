@@ -166,6 +166,7 @@ import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
+import type { MnemosyneOssSessionState } from "./mnemosyne-oss/state";
 import autolearnCaptureRefused from "./prompts/system/autolearn-capture-refused.md" with { type: "text" };
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
@@ -862,6 +863,8 @@ export interface CreateAgentSessionOptions {
 	parentHindsightSessionState?: HindsightSessionState;
 	/** Parent Mnemopi state: subagents alias it; a top-level fork (`/tan`) inherits its delivered recall. */
 	parentMnemopiSessionState?: MnemopiSessionState;
+	/** Parent Mnemosyne OSS state to alias for subagent memory tools. */
+	parentMnemosyneOssSessionState?: MnemosyneOssSessionState;
 	/** Pre-allocated agent identity for IRC routing. Default: "Main" for top-level, parentTaskPrefix-derived for sub. */
 	agentId?: string;
 	/** Display name for the agent in IRC. Default: "main" or "sub". */
@@ -2632,6 +2635,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			isDisposed: () => session?.isDisposed ?? false,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
+			getMnemosyneOssSessionState: () => session?.getMnemosyneOssSessionState(),
 			getAgentId: () => resolvedAgentId,
 			getPromptCacheKey: () => {
 				if (!session) return undefined;
@@ -5650,6 +5654,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				taskDepth,
 				parentHindsightSessionState: options.parentHindsightSessionState,
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
+				parentMnemosyneOssSessionState: options.parentMnemosyneOssSessionState,
 			});
 		};
 

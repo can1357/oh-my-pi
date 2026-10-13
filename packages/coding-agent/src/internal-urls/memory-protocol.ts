@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { getAgentDir, isEnoent, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { getMemoryRoot } from "../memories";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionState } from "../mnemopi/state";
+import { getMnemosyneOssOwner } from "../mnemosyne-oss/state";
+import type { MnemosyneOssWorkerRecord } from "../mnemosyne-oss/worker-protocol";
 import memoryDoc from "../prompts/internal-urls/memory.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
@@ -37,7 +39,7 @@ const MEMORY_NAMESPACE = "root";
  * error (issue #7587).
  */
 const HINDSIGHT_UNADDRESSABLE =
-	"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.";
+	"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi or mnemosyne-oss.";
 
 /**
  * Snapshot of memory roots for every registered session, deduped.
@@ -240,7 +242,7 @@ function callerMnemopiState(session: AgentSession): MnemopiSessionState | undefi
 
 function unknownNamespaceError(namespace: string): Error {
 	return new Error(
-		`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE} (file-backed memory summary), or a mnemopi memory id when memory.backend=mnemopi is active.`,
+		`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE} (file-backed memory summary), or a memory id when memory.backend=mnemopi or mnemosyne-oss is active.`,
 	);
 }
 
@@ -259,8 +261,8 @@ function fileBackedRootUnavailableError(backend: string | undefined): Error {
 		);
 	}
 	const searchHint =
-		backend === "mnemopi"
-			? " Use `recall`/`reflect` to search Mnemopi memories, or `read memory://<memory-id>` for a full row."
+		backend === "mnemopi" || backend === "mnemosyne-oss"
+			? " Use `recall`/`reflect` to search memories, or `read memory://<memory-id>` for a full row."
 			: backend === "hindsight"
 				? " Use `recall`/`reflect` to search Hindsight memories."
 				: "";
@@ -314,6 +316,28 @@ function renderMnemopiMemory(url: InternalUrl, hit: MnemopiScopedMemoryHit): Int
 			notes: [],
 		};
 	});
+}
+
+/** Mnemosyne OSS row rendered with the same front matter shape as {@link renderMnemopiMemory}. */
+function renderMnemosyneOssMemory(url: InternalUrl, record: MnemosyneOssWorkerRecord): InternalResource {
+	const header =
+		"---\n" +
+		`id: ${record.id}\n` +
+		`bank: ${record.bank}\n` +
+		(record.store ? `store: ${record.store}\n` : "") +
+		(record.source ? `source: ${record.source}\n` : "") +
+		(record.timestamp ? `timestamp: ${record.timestamp}\n` : "") +
+		(record.importance != null ? `importance: ${record.importance}\n` : "") +
+		(record.metadata == null ? "" : `metadata: ${JSON.stringify(record.metadata)}\n`) +
+		"---\n\n";
+	const content = `${header}${record.content}`;
+	return {
+		url: url.href,
+		content,
+		contentType: "text/markdown",
+		size: Buffer.byteLength(content, "utf-8"),
+		notes: [],
+	};
 }
 
 /**
@@ -408,6 +432,14 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 						`Mnemopi memory ${namespace} not found in the calling session's scoped bank. Use \`recall\` to list available ids.`,
 					);
 				}
+				if (backend === "mnemosyne-oss") {
+					const owner = getMnemosyneOssOwner(caller.session);
+					const result = owner ? await owner.get(namespace) : undefined;
+					if (result?.status === "found" && result.record) return renderMnemosyneOssMemory(url, result.record);
+					throw new Error(
+						`Mnemosyne OSS memory ${namespace} not found in the calling session's recall banks. Use \`recall\` to list available ids.`,
+					);
+				}
 				throw unknownNamespaceError(namespace);
 			}
 
@@ -471,15 +503,15 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		if (caller.backend === "local") {
 			completions.push({ value: MEMORY_NAMESPACE, description: "Project memory summary" });
 		}
-		const mnemopiAvailable = caller.legacy
+		const idsAvailable = caller.legacy
 			? mnemopiSessionStatesFromRegistry().length > 0
-			: caller.backend === "mnemopi" &&
-				caller.session !== undefined &&
-				callerMnemopiState(caller.session) !== undefined;
-		if (mnemopiAvailable) {
+			: caller.session !== undefined &&
+				((caller.backend === "mnemopi" && callerMnemopiState(caller.session) !== undefined) ||
+					(caller.backend === "mnemosyne-oss" && getMnemosyneOssOwner(caller.session) !== undefined));
+		if (idsAvailable) {
 			completions.push({
 				value: "<memory-id>",
-				description: "Full mnemopi memory by id (from recall)",
+				description: "Full memory by id (from recall)",
 			});
 		}
 		return completions;
