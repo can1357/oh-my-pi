@@ -3615,13 +3615,16 @@ export class InteractiveMode implements InteractiveModeContext {
 			for (const child of this.chatContainer.children) {
 				if (child instanceof AssistantMessageComponent) child.setProseOnlyThinking(proseOnlyThinking);
 			}
-			// Reset the stable ledger and resync the live reveal BEFORE the
-			// paired display reset below. The emitted snapshots describe the old
-			// raw/prose layout; without the ledger reset, the display reset slices
-			// the block by the stale prefix height — a raw-to-prose shrink can
-			// slice past the answer and retirement then permanently omits it.
+			// Reset the stable ledger BEFORE the paired display reset below. It is
+			// unconditional on the live stream: #handleMessageEnd clears both
+			// streaming fields the moment the turn ends, while the finalized
+			// assistant entry stays in the transcript — still carrying the stable
+			// rows its append-only thinking head published — until it retires. A
+			// toggle in that window would replay the entry under the new prose
+			// mode while slicing it by the old prefix height, so a raw-to-prose
+			// shrink cuts past the answer and retirement omits it permanently.
+			this.chatContainer.resetStableEmission();
 			if (this.streamingComponent && this.streamingMessage) {
-				this.chatContainer.resetStableEmission();
 				this.#eventController.resyncStreamingRevealVisibility();
 			}
 		}
