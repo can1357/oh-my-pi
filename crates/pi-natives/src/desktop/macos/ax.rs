@@ -1160,11 +1160,21 @@ pub(super) fn set_focused(element: &AXUIElement) -> CoreResult<()> {
 	ax_result(error, "setting AXFocused=true failed")
 }
 
-/// Whether `pid` reports `element` as its `AXFocusedUIElement`.
-pub(super) fn holds_keyboard_focus(pid: libc::pid_t, element: &AXUIElement) -> bool {
-	probe_application(pid)
-		.and_then(|app| copy_element(&app, "AXFocusedUIElement"))
-		.is_some_and(|focused| *focused == *element)
+/// Whether `pid` reports `element` as its `AXFocusedUIElement`, waiting at
+/// most `within` for the application's reply.
+pub(super) fn holds_keyboard_focus(
+	pid: libc::pid_t,
+	element: &AXUIElement,
+	within: Duration,
+) -> bool {
+	let Ok(app) = create_application(pid) else {
+		return false;
+	};
+	// A zero timeout restores the system default, so the bound stays positive.
+	let timeout = within.as_secs_f32().clamp(0.001, PROBE_TIMEOUT_SECONDS);
+	// SAFETY: The retained application element is valid for the timeout update.
+	let _ = unsafe { app.set_messaging_timeout(timeout) };
+	copy_element(&app, "AXFocusedUIElement").is_some_and(|focused| *focused == *element)
 }
 
 /// Where `pid` has keyboard focus now: its focused window, else the window

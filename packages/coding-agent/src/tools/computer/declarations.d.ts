@@ -206,7 +206,7 @@ interface ComputerElement {
 	press(chord: string | string[], options?: ComputerInputOptions): Promise<void>;
 	/**
 	 * Type into this element, not whichever field has focus. On macOS a native text field takes the text by accessibility
-	 * insertion at its own selection (no keys, no focus change) unless `takeover: true`; other elements, web and Electron
+	 * insertion at its own selection (no keys, no focus change), with or without takeover; other elements, web and Electron
 	 * fields included, take keystrokes after the same focus check as `press(chord)`. Focus is checked once, before the
 	 * first key, so a code input that advances box to box still fills.
 	 */

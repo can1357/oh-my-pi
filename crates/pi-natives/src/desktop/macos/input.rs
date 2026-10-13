@@ -24,7 +24,7 @@ use super::{
 			PointerEvent,
 		},
 		control,
-		error::{CoreResult, DesktopError},
+		error::{CoreResult, DesktopError, ErrorCode},
 		keys::KeyName,
 		types::{DesktopWindow, Target},
 	},
@@ -173,8 +173,8 @@ impl MacInput {
 	}
 
 	/// Types `text` into `window`; with an `element`, into that element: AX
-	/// insertion when it takes it, else keys once it holds keyboard focus
-	/// ([`element_keys`]).
+	/// insertion when it takes it ([`inserts_first`]), else keys once it holds
+	/// keyboard focus ([`element_keys`]).
 	fn window_type(
 		&self,
 		window: &DesktopWindow,
@@ -183,20 +183,23 @@ impl MacInput {
 		element: Option<&AXUIElement>,
 	) -> CoreResult<ElementDelivery> {
 		let (pid, wid) = window_identity(window)?;
+		if mode == DeliveryMode::Background && process::is_screen_sharing(pid) {
+			return Err(screen_sharing_refusal(window, "synthesized text"));
+		}
+		let inserted = inserts_first(mode, element.is_some(), || {
+			if process::is_terminal(pid) {
+				return Ok(false);
+			}
+			match element {
+				Some(element) => ax::insert_into_element(element, text),
+				None => ax::insert_native_text(pid, wid, text),
+			}
+		})?;
+		if inserted {
+			return Ok(ElementDelivery::Delivered);
+		}
 		match mode {
 			DeliveryMode::Background => {
-				if process::is_screen_sharing(pid) {
-					return Err(screen_sharing_refusal(window, "synthesized text"));
-				}
-				if !process::is_terminal(pid) {
-					let inserted = match element {
-						Some(element) => ax::insert_into_element(element, text)?,
-						None => ax::insert_native_text(pid, wid, text)?,
-					};
-					if inserted {
-						return Ok(ElementDelivery::Delivered);
-					}
-				}
 				with_background_keyboard(&self.source, pid, wid, window, |to, guard| {
 					element_keys(pid, element, || background_type(&self.source, to, text, guard))
 				})
@@ -412,9 +415,25 @@ fn with_background_keyboard<T>(
 	})
 }
 
+/// Whether text tries AX insertion before keys: text addressed to an element
+/// always does, so a native field takes it at its own selection with no keys
+/// and no focus change; text for a window only in the background, where
+/// takeover sends keys to whatever the window has focused.
+fn inserts_first(
+	mode: DeliveryMode,
+	addressed: bool,
+	insert: impl FnOnce() -> CoreResult<bool>,
+) -> CoreResult<bool> {
+	if addressed || mode == DeliveryMode::Background {
+		insert()
+	} else {
+		Ok(false)
+	}
+}
+
 /// Runs `send` at once without an `element`. With one, focuses it and runs
-/// `send` only once `pid` reports it as its focused element, read every
-/// [`ELEMENT_FOCUS_POLL`] for up to [`ELEMENT_FOCUS_TIMEOUT`]
+/// `send` only once `pid` reports it as its focused element within
+/// [`ELEMENT_FOCUS_TIMEOUT`], read every [`ELEMENT_FOCUS_POLL`]
 /// ([`keys_after_focus`]).
 fn element_keys(
 	pid: libc::pid_t,
@@ -425,42 +444,60 @@ fn element_keys(
 		send()?;
 		return Ok(ElementDelivery::Delivered);
 	};
-	ax::set_focused(element)?;
 	let deadline = Instant::now() + ELEMENT_FOCUS_TIMEOUT;
 	keys_after_focus(
-		|| ax::holds_keyboard_focus(pid, element),
-		|| Instant::now() >= deadline,
-		|| control::wait(ELEMENT_FOCUS_POLL),
+		|| ax::set_focused(element),
+		|| {
+			deadline
+				.checked_duration_since(Instant::now())
+				.filter(|left| !left.is_zero())
+		},
+		|left| ax::holds_keyboard_focus(pid, element, left),
+		|left| control::wait(ELEMENT_FOCUS_POLL.min(left)),
 		|| ax::keyboard_focus(pid),
 		send,
 	)
 }
 
-/// Keys addressed to an element: `send` runs once `holds_focus` reports that
-/// the element has keyboard focus, read again after each `wait` until
-/// `expired`; when it never does, nothing is sent and `unfocused` reads where
-/// focus is instead.
+/// Keys addressed to an element: `focus` gives it keyboard focus, and `send`
+/// runs once `holds_focus` reports that it has it, read again after each
+/// `wait` while `remaining` time is left; when it never does, nothing is sent
+/// and `unfocused` reads where focus is instead.
 ///
-/// Focus is confirmed once, before the first key. A field that moves focus to
-/// the next one as each character lands, as split code inputs do, keeps
-/// receiving the rest; every press is still checked against the window that
+/// A focus setter the element refuses does not end the call on its own: the
+/// read decides, so the refusal names where focus is; only a destroyed
+/// element stops at once. Each read is bounded by the time left, and a read
+/// that returns after the deadline counts as unconfirmed. Focus is confirmed
+/// once, before the first key: a field that moves focus to the next one as
+/// each character lands, as split code inputs do, keeps receiving the rest,
+/// while every background press is still checked against the window that
 /// proved the keys reach it ([`keys_still_reach`]).
 fn keys_after_focus(
-	mut holds_focus: impl FnMut() -> bool,
-	mut expired: impl FnMut() -> bool,
-	mut wait: impl FnMut() -> CoreResult<()>,
+	focus: impl FnOnce() -> CoreResult<()>,
+	mut remaining: impl FnMut() -> Option<Duration>,
+	mut holds_focus: impl FnMut(Duration) -> bool,
+	mut wait: impl FnMut(Duration) -> CoreResult<()>,
 	unfocused: impl FnOnce() -> KeyboardFocus,
 	send: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<ElementDelivery> {
+	if let Err(error) = focus()
+		&& error.code == ErrorCode::StaleRef
+	{
+		return Err(error);
+	}
 	loop {
-		if holds_focus() {
+		let Some(left) = remaining() else {
+			return Ok(ElementDelivery::Unfocused(unfocused()));
+		};
+		let held = holds_focus(left);
+		let Some(left) = remaining() else {
+			return Ok(ElementDelivery::Unfocused(unfocused()));
+		};
+		if held {
 			send()?;
 			return Ok(ElementDelivery::Delivered);
 		}
-		if expired() {
-			return Ok(ElementDelivery::Unfocused(unfocused()));
-		}
-		wait()?;
+		wait(left)?;
 	}
 }
 
@@ -2567,18 +2604,43 @@ mod tests {
 		assert!(keys_still_reach(7, None, id(7), || unreported).is_ok());
 	}
 
+	/// Time since element keys started, advanced by the test's waits and
+	/// reads.
+	struct FocusClock(std::cell::Cell<Duration>);
+
+	impl FocusClock {
+		fn new() -> Self {
+			Self(std::cell::Cell::new(Duration::ZERO))
+		}
+
+		fn advance(&self, by: Duration) {
+			self.0.set(self.0.get() + by);
+		}
+
+		fn remaining(&self) -> Option<Duration> {
+			ELEMENT_FOCUS_TIMEOUT
+				.checked_sub(self.0.get())
+				.filter(|left| !left.is_zero())
+		}
+	}
+
 	#[test]
 	fn element_keys_wait_until_the_element_reports_focus() {
 		let source = source().expect("event source");
-		let reads = std::cell::Cell::new(0);
+		let clock = FocusClock::new();
+		let mut bounds = Vec::new();
 		let mut pressed = 0;
 		let delivery = keys_after_focus(
-			|| {
-				reads.set(reads.get() + 1);
-				reads.get() == 3
-			},
-			|| false,
 			|| Ok(()),
+			|| clock.remaining(),
+			|left| {
+				bounds.push(left);
+				bounds.len() == 3
+			},
+			|left| {
+				clock.advance(ELEMENT_FOCUS_POLL.min(left));
+				Ok(())
+			},
 			|| panic!("a focused element needs no fresh read"),
 			|| {
 				type_text(&source, "ab", |event| {
@@ -2588,23 +2650,27 @@ mod tests {
 			},
 		);
 		assert!(matches!(delivery, Ok(ElementDelivery::Delivered)));
-		assert_eq!(reads.get(), 3);
+		// Each read may take only the time left.
+		let ms = Duration::from_millis;
+		assert_eq!(bounds, [ms(250), ms(240), ms(230)]);
 		assert_eq!(pressed, 2);
 	}
 
 	#[test]
 	fn focus_is_confirmed_once_so_an_auto_advancing_code_input_fills() {
 		let source = source().expect("event source");
+		let clock = FocusClock::new();
 		let focused_box = std::cell::Cell::new(0);
 		let reads = std::cell::Cell::new(0);
 		let mut boxes = Vec::new();
 		let delivery = keys_after_focus(
-			|| {
+			|| Ok(()),
+			|| clock.remaining(),
+			|_| {
 				reads.set(reads.get() + 1);
 				focused_box.get() == 0
 			},
-			|| false,
-			|| Ok(()),
+			|_| panic!("the first box has focus at once"),
 			|| panic!("the first box took focus"),
 			|| {
 				type_text(&source, "123456", |event| {
@@ -2625,13 +2691,15 @@ mod tests {
 
 	#[test]
 	fn element_keys_are_never_sent_while_the_element_lacks_focus() {
-		use crate::desktop::error::ErrorCode;
+		let clock = FocusClock::new();
 		let polls = std::cell::Cell::new(0);
 		let delivery = keys_after_focus(
-			|| false,
-			|| polls.get() == 25,
-			|| {
+			|| Ok(()),
+			|| clock.remaining(),
+			|_| false,
+			|left| {
 				polls.set(polls.get() + 1);
+				clock.advance(ELEMENT_FOCUS_POLL.min(left));
 				Ok(())
 			},
 			|| KeyboardFocus { window: Some("9".to_owned()), element: None },
@@ -2644,13 +2712,108 @@ mod tests {
 		assert_eq!(polls.get(), 25);
 		// Cancelling the wait stops it with nothing sent either.
 		let cancelled = keys_after_focus(
-			|| false,
-			|| false,
-			|| Err(DesktopError::cancelled("cancelled")),
+			|| Ok(()),
+			|| Some(ELEMENT_FOCUS_TIMEOUT),
+			|_| false,
+			|_| Err(DesktopError::cancelled("cancelled")),
 			|| panic!("a cancelled wait reads nothing"),
 			|| panic!("nothing is sent once the wait is cancelled"),
 		);
 		assert!(matches!(cancelled, Err(error) if error.code == ErrorCode::Cancelled));
+	}
+
+	#[test]
+	fn focus_reported_only_after_the_deadline_sends_nothing() {
+		let refused = |elapsed_before_read: u64, read_takes: u64| {
+			let clock = FocusClock::new();
+			clock.advance(Duration::from_millis(elapsed_before_read));
+			let fresh_reads = std::cell::Cell::new(0);
+			let sent = std::cell::Cell::new(false);
+			let delivery = keys_after_focus(
+				|| Ok(()),
+				|| clock.remaining(),
+				|_| {
+					clock.advance(Duration::from_millis(read_takes));
+					true
+				},
+				|_| panic!("the first read answers"),
+				|| {
+					fresh_reads.set(fresh_reads.get() + 1);
+					KeyboardFocus::default()
+				},
+				|| {
+					sent.set(true);
+					Ok(())
+				},
+			);
+			let unfocused = matches!(delivery, Ok(ElementDelivery::Unfocused(_)));
+			assert_eq!(fresh_reads.get(), usize::from(unfocused));
+			assert_eq!(sent.get(), !unfocused);
+			unfocused
+		};
+		// A read that answers yes after the deadline is no confirmation.
+		assert!(refused(200, 60));
+		assert!(refused(0, 250));
+		// One that answers in time is, however close to the deadline.
+		assert!(!refused(249, 0));
+		assert!(!refused(200, 49));
+		// So does a deadline that passed before the first read.
+		assert!(refused(250, 0));
+	}
+
+	#[test]
+	fn a_refused_focus_setter_still_ends_in_the_focus_read() {
+		let reads = std::cell::Cell::new(0);
+		let delivery = keys_after_focus(
+			|| Err(DesktopError::ax_failed("setting AXFocused=true failed")),
+			|| (reads.get() < 3).then_some(ELEMENT_FOCUS_TIMEOUT),
+			|_| {
+				reads.set(reads.get() + 1);
+				false
+			},
+			|_| Ok(()),
+			|| KeyboardFocus { window: Some("9".to_owned()), element: None },
+			|| panic!("nothing is sent to an element without focus"),
+		);
+		let Ok(ElementDelivery::Unfocused(focus)) = delivery else {
+			panic!("a refused setter ends in the refusal naming where focus is");
+		};
+		assert_eq!(focus.window.as_deref(), Some("9"));
+		assert_eq!(reads.get(), 3);
+		// A destroyed element is a stale ref at once.
+		let gone = keys_after_focus(
+			|| Err(DesktopError::stale_ref("the element no longer exists")),
+			|| panic!("a destroyed element is not waited for"),
+			|_| panic!("a destroyed element is not read"),
+			|_| panic!("a destroyed element is not waited for"),
+			|| panic!("a destroyed element needs no focus read"),
+			|| panic!("nothing is sent to a destroyed element"),
+		);
+		assert!(matches!(gone, Err(error) if error.code == ErrorCode::StaleRef));
+	}
+
+	#[test]
+	fn element_text_tries_insertion_in_every_mode_and_window_text_only_in_background() {
+		let tried = |mode, addressed| {
+			let called = std::cell::Cell::new(false);
+			let inserted = inserts_first(mode, addressed, || {
+				called.set(true);
+				Ok(true)
+			})
+			.unwrap();
+			assert_eq!(inserted, called.get());
+			called.get()
+		};
+		assert!(tried(DeliveryMode::Background, true));
+		assert!(tried(DeliveryMode::Foreground, true));
+		assert!(tried(DeliveryMode::Background, false));
+		// Takeover `win.type` keys whatever the window has focused.
+		assert!(!tried(DeliveryMode::Foreground, false));
+		// A write that was attempted never falls through to keys.
+		let failed = inserts_first(DeliveryMode::Foreground, true, || {
+			Err(DesktopError::ax_failed("delivery may be partial"))
+		});
+		assert!(failed.is_err());
 	}
 
 	#[test]
