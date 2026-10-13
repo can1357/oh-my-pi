@@ -1,8 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { afterEach, beforeEach, describe, expect, it, spyOn, type Mock } from "bun:test";
+import * as path from "node:path";
+import { TempDir, __resetDirsFromEnvForTests, getBlobsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import * as sessionPersistence from "@oh-my-pi/pi-coding-agent/session/session-persistence";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+
+function restoreEnv(key: string, value: string | undefined): void {
+	if (value === undefined) {
+		delete process.env[key];
+	} else {
+		process.env[key] = value;
+	}
+}
 
 // Exceeds BLOB_EXTERNALIZE_THRESHOLD (1024) so image blocks are externalized to blob refs.
 const LARGE_BASE64 = "A".repeat(2048);
@@ -15,17 +24,46 @@ function makeUserMessageWithImage() {
 	};
 }
 
+/** `details` is the tool result's opaque slot, so it can hold any JSON value. */
+function makeToolResultWithBoxedDetails() {
+	return {
+		role: "toolResult" as const,
+		toolCallId: "call-fix15222",
+		toolName: "bash",
+		content: [{ type: "text" as const, text: "ok" }],
+		details: new Number(1),
+		isError: false,
+		timestamp: Date.now(),
+	};
+}
+
 describe("SessionManager entry-line memo", () => {
+	// `setAgentDir` overwrites all three keys below (it also clears the profile
+	// pair); every one is restored in `afterEach` so no later file inherits a
+	// redirected agent dir.
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const originalOmpProfile = process.env.OMP_PROFILE;
+	const originalPiProfile = process.env.PI_PROFILE;
+
 	let tempDirs: TempDir[] = [];
 	let storage: MemorySessionStorage;
 	let sessionDir: string;
-	let prepareSpy: ReturnType<typeof spyOn>;
-	let writeSpy: ReturnType<typeof spyOn>;
+	let prepareSpy: Mock<typeof sessionPersistence.prepareEntryForPersistence>;
+	let writeSpy: Mock<MemorySessionStorage["writeTextAtomic"]>;
 
 	beforeEach(() => {
 		const dir = TempDir.createSync("fix15222-memo-");
 		tempDirs.push(dir);
-		sessionDir = dir.path();
+		// Absolute, so the redirected agent dir in the environment is not
+		// interpreted against whichever cwd a later test runs from.
+		sessionDir = dir.absolute();
+		// The blob store `SessionManager` externalizes oversized payloads into is
+		// resolved from the process-global agent dir, which no env assignment
+		// alone can move (the dir resolver froze at import time). Point it at this
+		// test's temp root so those bytes — and the hardlinks the store keeps for
+		// them — are deleted with the temp dir instead of surviving the run in the
+		// developer's real blob directory.
+		setAgentDir(path.join(sessionDir, "agent"));
 		storage = new MemorySessionStorage();
 		prepareSpy = spyOn(sessionPersistence, "prepareEntryForPersistence");
 		writeSpy = spyOn(MemorySessionStorage.prototype, "writeTextAtomic");
@@ -34,6 +72,10 @@ describe("SessionManager entry-line memo", () => {
 	afterEach(() => {
 		prepareSpy.mockRestore();
 		writeSpy.mockRestore();
+		restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
+		restoreEnv("OMP_PROFILE", originalOmpProfile);
+		restoreEnv("PI_PROFILE", originalPiProfile);
+		__resetDirsFromEnvForTests();
 		for (const dir of tempDirs) dir.removeSync();
 		tempDirs = [];
 	});
@@ -47,6 +89,12 @@ describe("SessionManager entry-line memo", () => {
 		const afterFirst = prepareSpy.mock.calls.length;
 		expect(afterFirst).toBeGreaterThan(0);
 
+		// The first rewrite externalized the oversized image into the blob store the
+		// session resolved from the agent dir. That store must be this test's temp
+		// root: without the redirect above it is the developer's real blob
+		// directory, which the temp-dir cleanup below never reaches.
+		expect(getBlobsDir()).toBe(path.join(sessionDir, "agent", "blobs"));
+
 		// Second rewrite with no changes: memo hit — only the header is re-projected.
 		await session.appendEntriesAtomically(() => {});
 		expect(prepareSpy.mock.calls.length - afterFirst).toBe(1);
@@ -54,7 +102,8 @@ describe("SessionManager entry-line memo", () => {
 		// Mutate the nested image payload in place: same content array, same block object,
 		// only the base64 leaf changes. Identity checks at any depth still compare equal.
 		const entry = session.getEntries().find(e => e.id === messageId);
-		if (!entry || entry.type !== "message" || entry.message.role !== "user") throw new Error("Expected user message entry");
+		if (!entry || entry.type !== "message" || entry.message.role !== "user")
+			throw new Error("Expected user message entry");
 		const content = entry.message.content;
 		if (!Array.isArray(content)) throw new Error("Expected array content");
 		const imageBlock = content[0];
@@ -113,5 +162,34 @@ describe("SessionManager entry-line memo", () => {
 		expect(secondWrite).toBeDefined();
 		expect(secondWrite).toContain("gpt-5-mini");
 		expect(secondWrite).not.toContain("claude-sonnet-4-5");
+	});
+
+	it("re-projects a message whose boxed-primitive detail changed value in place", async () => {
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		const messageId = session.appendMessage(makeToolResultWithBoxedDetails());
+
+		// First rewrite: memo miss — header + entry are projected.
+		await session.appendEntriesAtomically(() => {});
+		const afterFirst = prepareSpy.mock.calls.length;
+		expect(afterFirst).toBeGreaterThan(0);
+
+		// Swap the boxed value in place: a `Number` wrapper has no enumerable own
+		// keys and no `toJSON`, so a stamp taken from its container shape treats
+		// `new Number(1)` and `new Number(2)` as the same empty object — while
+		// `stringifyJson` projects `1` and then `2` into the line.
+		const entry = session.getEntries().find(e => e.id === messageId);
+		if (!entry || entry.type !== "message" || entry.message.role !== "toolResult") {
+			throw new Error("Expected toolResult message entry");
+		}
+		entry.message.details = new Number(2);
+
+		// Second rewrite: the stamp must compare unboxed values, so the entry's line
+		// is re-projected and the persisted body carries `2`, not the stale `1`.
+		await session.appendEntriesAtomically(() => {});
+		expect(prepareSpy.mock.calls.length - afterFirst).toBe(2);
+		const secondWrite = writeSpy.mock.calls.at(-1)?.[1] as string | undefined;
+		expect(secondWrite).toBeDefined();
+		expect(secondWrite).toContain('"details":2');
+		expect(secondWrite).not.toContain('"details":1');
 	});
 });
