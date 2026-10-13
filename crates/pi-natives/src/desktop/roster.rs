@@ -34,26 +34,16 @@ pub struct DesktopRosterWindow {
 	pub listed: bool,
 }
 
-/// On-screen windows front to back, and the frontmost application, sampled
-/// together.
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct DesktopWindowRoster {
-	/// Frontmost application's process id; absent at the login window.
-	pub frontmost_pid: Option<u32>,
-	pub windows:       Vec<DesktopRosterWindow>,
-}
-
-/// Samples every on-screen window in one `WindowServer` pass, with no desktop
-/// session and no permission prompt. Empty off macOS.
+/// Samples every on-screen window, front to back, in one `WindowServer` pass,
+/// with no desktop session and no permission prompt. Empty off macOS.
 #[napi]
-pub fn desktop_window_roster() -> Result<DesktopWindowRoster> {
+pub fn desktop_window_roster() -> Result<Vec<DesktopRosterWindow>> {
 	#[cfg(target_os = "macos")]
 	{
 		super::macos::window_roster().map_err(napi::Error::from)
 	}
 	#[cfg(not(target_os = "macos"))]
 	{
-		Ok(DesktopWindowRoster { frontmost_pid: None, windows: Vec::new() })
+		Ok(Vec::new())
 	}
 }
