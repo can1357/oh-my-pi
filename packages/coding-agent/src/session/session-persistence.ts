@@ -170,6 +170,19 @@ function snapcompactArchiveNeedsRewrite(archive: Record<string, unknown>): boole
 }
 
 /**
+ * Keys `truncateForPersistence` strips from the projected graph at every
+ * depth: transient data that must never reach a persisted line — `jsonlEvents`
+ * are raw subprocess streaming events, already saved to artifact files.
+ *
+ * The entry-line memo's stamp walks exactly the projected graph (the graph
+ * `stringifyJson` serializes), so it skips these keys too — see
+ * `messageValueStamp` in session-manager.ts. Sharing the list is what keeps the
+ * stamp from walking a field persistence drops: a streaming-shaped cycle under
+ * `jsonlEvents` is persistable today, and walking it would never terminate.
+ */
+export const TRANSIENT_PERSISTENCE_KEYS: readonly string[] = ["jsonlEvents"];
+
+/**
  * Recursively truncate large strings in an object for session persistence.
  * - Truncates oversized string fields (key-agnostic), except signed/encrypted
  *   blocks and signature keys, which persist verbatim
@@ -291,7 +304,7 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 			const value = (obj as Record<string, unknown>)[childKey];
 			// Strip transient/redundant properties that shouldn't be persisted.
 			// - jsonlEvents: raw subprocess streaming events (already saved to artifact files)
-			if (childKey === "jsonlEvents") {
+			if (TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) {
 				changed = true;
 				continue;
 			}
@@ -356,7 +369,11 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 		return false;
 	}
 	if (typeof obj === "object") {
-		if ("jsonlEvents" in obj) return true;
+		// Transient keys are always stripped by the rebuild pass, so their
+		// presence alone forces the walk that drops them.
+		for (const transientKey of TRANSIENT_PERSISTENCE_KEYS) {
+			if (transientKey in obj) return true;
+		}
 		// Externalize shapes rewrite (not verbatim): check before the
 		// atomic/verbatim classification below.
 		if (typeof obj === "object" && "type" in obj) {

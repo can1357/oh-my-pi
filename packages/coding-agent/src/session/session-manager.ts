@@ -115,7 +115,11 @@ import {
 	worktreeSessionDirs,
 	writeTerminalBreadcrumb,
 } from "./session-paths";
-import { forgetExternalizedImages, prepareEntryForPersistence } from "./session-persistence";
+import {
+	forgetExternalizedImages,
+	prepareEntryForPersistence,
+	TRANSIENT_PERSISTENCE_KEYS,
+} from "./session-persistence";
 import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
 import {
 	FileSessionStorage,
@@ -879,7 +883,9 @@ const STAMP_END = Symbol("stamp.end");
  * any other object. A `Number`/`String`/`Boolean` wrapper has no enumerable own
  * keys and no `toJSON`, so stamping its container shape would call
  * `new Number(1)` and `new Number(2)` equal while the projected line reads `1`
- * and `2`.
+ * and `2`. A wrapper that *does* carry `toJSON` serializes through the hook
+ * instead — the stamp consults the hook before this function, exactly as
+ * `JSON.stringify` does — so only hookless wrappers reach here.
  */
 function unboxedPrimitive(value: object): number | string | boolean | undefined {
 	if (value instanceof Number || value instanceof String || value instanceof Boolean) return value.valueOf();
@@ -895,27 +901,32 @@ function unboxedPrimitive(value: object): number | string | boolean | undefined 
  * the line is considered for reuse.
  *
  * Values that `JSON.stringify` would replace are stamped as their projected
- * output instead of their live shape — a `toJSON()` object as its serialized
+ * output instead of their live shape — a `toJSON()` node as its serialized
  * value, `undefined` as the `null` (in arrays) or dropped key (in objects) it
- * emits — so the stamp tracks exactly the bytes the line was built from.
+ * emits — and the fields {@link TRANSIENT_PERSISTENCE_KEYS} strips from the
+ * projection are never walked, so the stamp tracks exactly the bytes the line
+ * was built from. A boxed primitive is read hook-first for the same reason:
+ * `JSON.stringify` runs `toJSON` before unboxing, so a wrapper whose hook
+ * output changes must re-stamp even though its `valueOf()` does not.
  */
 function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
 	if (value === null || typeof value !== "object") {
 		out.push(value);
 		return out;
 	}
-	// Projected to the unboxed primitive before the container is walked, since
-	// `JSON.stringify` does the same — see {@link unboxedPrimitive}.
-	const unboxed = unboxedPrimitive(value);
-	if (unboxed !== undefined) {
-		out.push(unboxed);
-		return out;
-	}
 	// Duck-type read of JSON's own serializer hook; TypeScript has no structural
-	// expression for "serializes through toJSON".
+	// expression for "serializes through toJSON". Consulted before
+	// `unboxedPrimitive` because `JSON.stringify` does the same.
 	const serializer = value as { toJSON?: () => unknown };
 	if (typeof serializer.toJSON === "function") {
 		out.push(serializer.toJSON.call(value));
+		return out;
+	}
+	// No hook: the wrapper is projected to the unboxed primitive before the
+	// container is walked — see {@link unboxedPrimitive}.
+	const unboxed = unboxedPrimitive(value);
+	if (unboxed !== undefined) {
+		out.push(unboxed);
 		return out;
 	}
 	if (Array.isArray(value)) {
@@ -925,6 +936,11 @@ function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
 		const fields = value as Record<string, unknown>;
 		out.push(STAMP_OBJECT);
 		for (const key of Object.keys(fields)) {
+			// Stripped from the persisted line by `truncateForPersistence` before
+			// serialization, so the projected bytes never depend on it — and the
+			// live field may be cyclic (a streaming event can reference the array
+			// holding it), which this walk could never escape.
+			if (TRANSIENT_PERSISTENCE_KEYS.includes(key)) continue;
 			out.push(key);
 			messageValueStamp(fields[key], out);
 		}
@@ -947,17 +963,20 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 		const expected = stamp[index++];
 		// A `toJSON` node was stamped as its projected value — a single leaf
 		// (see {@link messageValueStamp}) — so compare that projection here
-		// instead of recursing, which would consume a second stamp entry.
+		// instead of recursing, which would consume a second stamp entry. The
+		// hook is read before `unboxedPrimitive` because that is the order
+		// `JSON.stringify` uses, so the comparison re-runs the very projection
+		// the persisted bytes came from.
 		if (live !== null && typeof live === "object") {
-			// Stamped as its unboxed value like `messageValueStamp` does — one leaf,
-			// not the empty container `unboxedPrimitive` explains.
-			const unboxed = unboxedPrimitive(live);
-			if (unboxed !== undefined) return unboxed === expected;
 			// Duck-type read of JSON's own serializer hook.
 			const serializer = live as { toJSON?: () => unknown };
 			if (typeof serializer.toJSON === "function") {
 				return serializer.toJSON.call(live) === expected;
 			}
+			// Hookless wrappers were stamped as their unboxed value — one leaf,
+			// not the empty container `unboxedPrimitive` explains.
+			const unboxed = unboxedPrimitive(live);
+			if (unboxed !== undefined) return unboxed === expected;
 		}
 		if (expected === STAMP_OBJECT || expected === STAMP_ARRAY) {
 			if (live === null || typeof live !== "object") return false;
@@ -967,6 +986,10 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 			} else {
 				const fields = live as Record<string, unknown>;
 				for (const key of Object.keys(fields)) {
+					// Stripped before serialization by `truncateForPersistence`, so
+					// the stamp never recorded it (and must not walk it) — see
+					// {@link messageValueStamp}.
+					if (TRANSIENT_PERSISTENCE_KEYS.includes(key)) continue;
 					if (stamp[index++] !== key) return false;
 					if (!match(fields[key])) return false;
 				}
