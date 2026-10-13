@@ -64,17 +64,27 @@ describe("loadMnemosyneOssConfig", () => {
 		expect(config.consolidationMode).toBe("heuristic");
 	});
 
-	it("selects local consolidation only when a local LLM selector is configured", () => {
+	it("selects local consolidation only when both local LLM selectors are configured", () => {
+		const fileOnly = loadMnemosyneOssConfig(
+			Settings.isolated({
+				"memory.backend": "mnemosyne-oss",
+				"mnemosyne-oss.localConsolidation": true,
+				"mnemosyne-oss.localLlmFile": "model.gguf",
+			}),
+			"/tmp/agent",
+		);
+		// The SDK ignores a lone selector and would load its default model.
+		expect(fileOnly.consolidationMode).toBe("heuristic");
 		const config = loadMnemosyneOssConfig(
 			Settings.isolated({
 				"memory.backend": "mnemosyne-oss",
 				"mnemosyne-oss.localConsolidation": true,
-				"mnemosyne-oss.localLlmFile": "/models/local-llm.gguf",
+				"mnemosyne-oss.localLlmRepo": "org/model-GGUF",
+				"mnemosyne-oss.localLlmFile": "model.gguf",
 			}),
 			"/tmp/agent",
 		);
 		expect(config.consolidationMode).toBe("local");
-		expect(config.localLlmFile).toBe("/models/local-llm.gguf");
 	});
 
 	it("returns an inert diagnostic for an invalid explicit bank name", () => {
