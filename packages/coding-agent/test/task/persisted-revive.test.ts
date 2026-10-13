@@ -77,6 +77,7 @@ function fakeMcpManager(getTools: () => Array<{ name: string; label: string }>):
 const revivedMcpTool = {
 	name: "mcp__server_probe",
 	label: "server/probe",
+	loadMode: "discoverable" as const,
 	description: "revived MCP probe description sentinel",
 	parameters: type({ value: type("string").describe("revived value sentinel") }),
 	mcpServerName: "server",
