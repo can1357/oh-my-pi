@@ -440,7 +440,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			expectedAgentRef: expectedRef,
 			taskDepth,
 			toolNames: init.tools,
-			...(init.systemPreset === "minimal-task" ? { skills: [], rules: [] } : undefined),
+			...(init.systemPreset === "minimal-task" ? { contextFiles: [], skills: [], rules: [] } : undefined),
 			// The persisted enabled set includes tool commands: keep them as commands,
 			// or they come back as top-level tools and change the replayed tool list.
 			mountedToolNames: init.mountedTools,

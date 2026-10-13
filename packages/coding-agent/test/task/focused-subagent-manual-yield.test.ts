@@ -154,6 +154,7 @@ async function spawnKeptAliveChild(options?: { handler?: MockHandler; structured
 				"todo.enabled": false,
 				"todo.reminders": false,
 				"advisor.enabled": false,
+				inlineToolDescriptors: "on",
 				modelRoles: { default: "mock/mock-model" },
 			}),
 			enableLsp: false,
