@@ -465,6 +465,14 @@ export class WebMcpController {
 		// Cross-origin iframes run in their own process and register their tools on their own session.
 		const sessions = [...new Set([mainSession, ...frames.map(frame => frame.client)])];
 		for (const session of sessions) this.#watch(session);
+		// A session that serves no frame now (a removed or process-swapped iframe) is let go with its tools.
+		const live = new Set(sessions);
+		for (const [session, stop] of this.#watched) {
+			if (live.has(session)) continue;
+			stop();
+			this.#watched.delete(session);
+			for (const [key, announced] of this.#announced) if (announced.session === session) this.#announced.delete(key);
+		}
 		const reads = await Promise.allSettled(sessions.map(session => rootFrameTools(session, signal)));
 		signal?.throwIfAborted();
 		const main = reads[0]!;
