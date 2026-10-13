@@ -12,6 +12,7 @@ import {
 	parseEnvFile,
 	setInteractiveHost,
 	stripGitRepoLocationEnv,
+	stripNodeIpcChannelEnv,
 	withOmpOtelEnv,
 } from "@oh-my-pi/pi-utils/env";
 
@@ -364,6 +365,25 @@ describe("stripGitRepoLocationEnv", () => {
 		const posixEnv: Record<string, string> = { GIT_DIR: "a", git_dir: "b", KEEP: "d" };
 		stripGitRepoLocationEnv(posixEnv, "linux");
 		expect(posixEnv).toEqual({ git_dir: "b", KEEP: "d" });
+	});
+});
+
+describe("stripNodeIpcChannelEnv", () => {
+	it("matches case-insensitively on win32 and exactly on POSIX", () => {
+		// Windows resolves `node_channel_fd` as `NODE_CHANNEL_FD`; POSIX names
+		// are case-sensitive and must not be over-stripped.
+		const win32Env: Record<string, string> = {
+			NODE_CHANNEL_FD: "3",
+			node_channel_fd: "3",
+			Node_Channel_Serialization_Mode: "json",
+			KEEP: "d",
+		};
+		stripNodeIpcChannelEnv(win32Env, "win32");
+		expect(win32Env).toEqual({ KEEP: "d" });
+
+		const posixEnv: Record<string, string> = { NODE_CHANNEL_FD: "3", node_channel_fd: "3", KEEP: "d" };
+		stripNodeIpcChannelEnv(posixEnv, "linux");
+		expect(posixEnv).toEqual({ node_channel_fd: "3", KEEP: "d" });
 	});
 });
 
