@@ -41,11 +41,13 @@ export async function readResetMarker(lockPath: string): Promise<ResetMarker> {
 /**
  * Hold the account's lock, then run `onRecent` when another attempt started
  * within `ATTEMPT_COOLDOWN_MS`, or `spend` otherwise. Both run under the lock.
+ * `signal` cancels only the wait for the lock.
  */
 export async function withResetFence<T>(
 	lockPath: string,
 	onRecent: (marker: ResetMarker) => Promise<T>,
 	spend: (redeem: MarkedRedeem) => Promise<T>,
+	signal?: AbortSignal,
 ): Promise<T> {
 	await fs.mkdir(path.dirname(lockPath), { recursive: true });
 	return withFileLock(
@@ -65,7 +67,7 @@ export async function withResetFence<T>(
 				return { outcome, attemptedAt };
 			});
 		},
-		{ retries: 300, retryDelayMs: 100 },
+		{ retries: 300, retryDelayMs: 100, signal },
 	);
 }
 

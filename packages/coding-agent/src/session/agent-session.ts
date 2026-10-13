@@ -14452,6 +14452,7 @@ export class AgentSession implements SettingsScope {
 	async #adoptRecentReset(
 		statuses: readonly ResetCreditAccountStatus[],
 		coordinator: CodexAutoRedeemCoordinator,
+		signal?: AbortSignal,
 	): Promise<number | undefined> {
 		for (const status of statuses) {
 			if (status.provider !== this.model?.provider) continue;
@@ -14466,7 +14467,7 @@ export class AgentSession implements SettingsScope {
 			const adopted = await withFileLock(
 				lockPath,
 				async () => this.#adoptResetMarker(lockKey, await readResetMarker(lockPath)),
-				{ retries: 300, retryDelayMs: 100 },
+				{ retries: 300, retryDelayMs: 100, signal },
 			);
 			if (adopted) {
 				await this.#modelRegistry.authStorage.credentials.revalidate();
@@ -14514,6 +14515,8 @@ export class AgentSession implements SettingsScope {
 			let outcome: ResetCreditRedeemOutcome | undefined;
 			let sharedReset = false;
 			let dropped: "cancelled" | "outside-pool" | undefined;
+			// Set once the fence is held: an abort before it means nothing was sent.
+			let fenced = false;
 			try {
 				const redeemOptions = {
 					target: action.target,
@@ -14532,15 +14535,23 @@ export class AgentSession implements SettingsScope {
 					outcome = await withResetFence<ResetCreditRedeemOutcome | undefined>(
 						resetLockPath(lockKey, coordinator.resetLockPath),
 						async marker => {
+							fenced = true;
 							sharedReset = this.#adoptResetMarker(lockKey, marker);
 							if (sharedReset) await authStorage.credentials.revalidate();
 							return undefined;
 						},
 						async markedRedeem => {
+							fenced = true;
 							// Claude's redeem revalidates its exact offer. Codex needs its
 							// balance rechecked after acquiring the cross-process fence.
 							if (provider === "openai-codex") {
-								const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), provider);
+								const listingTimeout = AbortSignal.timeout(10_000);
+								const statuses = await this.listResetCredits(
+									signal ? AbortSignal.any([signal, listingTimeout]) : listingTimeout,
+									provider,
+								);
+								dropped = dropReason(action);
+								if (dropped) return undefined;
 								const balance = checkCodexBalance(statuses, action.target.credentialId, action.availableCount);
 								if (balance === "spent") return undefined;
 								if (balance) return { ok: false, code: balance, provider } satisfies ResetCreditRedeemOutcome;
@@ -14557,7 +14568,13 @@ export class AgentSession implements SettingsScope {
 							if (result.code === "reset") this.#adoptedResetMarkers.set(lockKey, attemptedAt);
 							return result;
 						},
-					);
+						signal,
+					).catch(error => {
+						// Cancelled while waiting for the fence: never attempted.
+						if (fenced || !signal?.aborted) throw error;
+						dropped = "cancelled";
+						return undefined;
+					});
 				}
 			} catch (error) {
 				coordinator.attemptedKeys.delete(action.attemptKey);
@@ -14667,9 +14684,12 @@ export class AgentSession implements SettingsScope {
 		// keeps its outcome only if the pass restored an account this session may
 		// use, or restored nothing without its pool excluding a candidate or its
 		// caller cancelling it.
+		const signal = beforeTakeover?.signal;
 		let existing = coordinator.inFlightByAccount.get(accountKey);
 		while (existing) {
-			const shared = await existing;
+			// A cancelled caller stops waiting; the peer's pass runs on for its owner.
+			const shared = await untilAborted(signal, existing).catch(() => undefined);
+			if (!shared) return { restored: false, cancelled: true };
 			const serves = shared.restored
 				? shared.restoredCredentialIds?.some(id => authStorage.sessions.permits(provider, this.sessionId, id))
 				: !shared.poolLimited && !shared.cancelled;
@@ -14677,7 +14697,6 @@ export class AgentSession implements SettingsScope {
 			existing = coordinator.inFlightByAccount.get(accountKey);
 		}
 
-		const signal = beforeTakeover?.signal;
 		const run = (async (): Promise<ResetRecoveryResult> => {
 			let reports: UsageReport[] | null = null;
 			if (provider === "openai-codex") {
@@ -14708,7 +14727,7 @@ export class AgentSession implements SettingsScope {
 				: plan.actions;
 			const poolLimited = plan.skipped.some(skip => skip.reason === "outside-account-pool");
 			if (actions.length === 0) {
-				const adoptedId = await this.#adoptRecentReset(statuses, coordinator);
+				const adoptedId = await this.#adoptRecentReset(statuses, coordinator, signal);
 				if (adoptedId !== undefined) return { restored: true, restoredCredentialIds: [adoptedId] };
 				let retryAfterMs: number | undefined;
 				if (provider === "anthropic" && cfg.autoRedeem === "yes") {
