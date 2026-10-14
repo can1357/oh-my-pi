@@ -114,11 +114,7 @@ import {
 } from "./system-prompt";
 import { type RestoreOutcome, restoreSession } from "./task/restore";
 import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
-import {
-	createTelemetryExportConfig,
-	initTelemetryExport,
-	isTelemetryExportEnabled,
-} from "./telemetry-export";
+import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { automaticThinkingLevel, concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "./tools";
@@ -2469,9 +2465,8 @@ export async function runRootCommand(
 				);
 				// First-use boundary: the probe (changelog parse + interpreter spawn) only
 				// runs for interactive launches without a recorded first-launch marker.
-				const { resolveFirstLaunchPythonEvalWarning: resolvePythonEvalWarning } = await import(
-					"./eval/startup-warning"
-				);
+				const { resolveFirstLaunchPythonEvalWarning: resolvePythonEvalWarning } =
+					await import("./eval/startup-warning");
 				pythonEvalWarningPromise = resolvePythonEvalWarning({
 					args: parsedArgs,
 					lastChangelogVersion: await readLastChangelogVersion(),
