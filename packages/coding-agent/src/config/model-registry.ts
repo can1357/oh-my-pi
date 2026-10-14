@@ -1682,6 +1682,38 @@ export class ModelRegistry {
 		};
 	}
 
+	/**
+	 * Rebuilds the omitted request headers of a cached cohort from the local
+	 * configuration, honoring the persisted header-config fingerprint: rows
+	 * whose complete source set cannot be proven are excluded rather than
+	 * published with headers silently missing.
+	 */
+	#restoreCachedHeaderModels(
+		providerId: string,
+		cache: {
+			models: readonly Model<Api>[];
+			headerOmittedModelIds: readonly string[];
+			headerConfigFingerprint?: string;
+		},
+	): { models: Model<Api>[]; hasUnrestoredHeaders: boolean } {
+		const omittedHeaderIds = new Set(cache.headerOmittedModelIds);
+		const restoreConfiguredHeaders = this.#configuredDiscoveryHeaderRestore(providerId);
+		let hasUnrestoredHeaders = false;
+		const models = cache.models.flatMap(model => {
+			if (!omittedHeaderIds.has(model.id)) return [model];
+			const restored = restoreConfiguredHeaders?.(model, cache.models, cache.headerConfigFingerprint);
+			const restorable = restored?.headers !== undefined || restored?.resolveHeaders !== undefined;
+			if (!restorable) {
+				hasUnrestoredHeaders = true;
+				return [];
+			}
+			// Attach the rebuilt headers like the manager's restore does: later
+			// override passes may not re-find an alias-keyed source on their own.
+			return [{ ...model, ...restored }];
+		});
+		return { models, hasUnrestoredHeaders };
+	}
+
 	#loadCachedDiscoverableModels(): Model<Api>[] {
 		const cachedModels: Model<Api>[] = [];
 		for (const providerConfig of this.#discoverableProviders) {
@@ -1703,8 +1735,6 @@ export class ModelRegistry {
 			// only the rows that get them back. A configured authHeader is
 			// re-derived asynchronously at the request boundary, so its rows are
 			// safe to retain without baking a credential snapshot into the cache.
-			const omittedHeaderIds = new Set(cache.headerOmittedModelIds);
-			const restoreConfiguredHeaders = this.#configuredDiscoveryHeaderRestore(providerConfig.provider);
 			// Live rows own their collapsed-variant aliases (e.g. bundled
 			// cursor/claude-4-sonnet's raw claude-4-sonnet-thinking): claim them for
 			// their owner before the cache cohort registers, so the first-write-wins
@@ -1720,19 +1750,10 @@ export class ModelRegistry {
 					[]),
 			].filter(model => model.provider === providerConfig.provider);
 			registerCollapsedVariantAliases(providerConfig.provider, liveRowsForAlias);
-			let hasUnrestoredHeaders = false;
-			const usableCacheModels = cache.models.flatMap(model => {
-				if (!omittedHeaderIds.has(model.id)) return [model];
-				const restored = restoreConfiguredHeaders?.(model, cache.models, cache.headerConfigFingerprint);
-				const restorable = restored?.headers !== undefined || restored?.resolveHeaders !== undefined;
-				if (!restorable) {
-					hasUnrestoredHeaders = true;
-					return [];
-				}
-				// Attach the rebuilt headers like the manager's restore does: later
-				// override passes may not re-find an alias-keyed source on their own.
-				return [{ ...model, ...restored }];
-			});
+			const { models: usableCacheModels, hasUnrestoredHeaders } = this.#restoreCachedHeaderModels(
+				providerConfig.provider,
+				cache,
+			);
 			// Register variant aliases only for retained rows: a rejected stale row
 			// must not claim its raw member id in the global selector index and make
 			// `provider/<alias>` select a model that is no longer published. Current
@@ -2243,7 +2264,12 @@ export class ModelRegistry {
 				});
 				this.#lastDiscoveryWarnings.delete(providerConfig.provider);
 				return {
-					models: cached ? this.#normalizeDiscoverableModels(providerConfig, cached.models) : [],
+					models: cached
+						? this.#normalizeDiscoverableModels(
+								providerConfig,
+								this.#restoreCachedHeaderModels(providerConfig.provider, cached).models,
+							)
+						: [],
 					replaceRuntimeModels: false,
 				};
 			}

@@ -660,4 +660,44 @@ describe("model registry discovery header restore", () => {
 		const second = await reloadFromCache(modelsPath);
 		expect(await second.resolveModelHeaders(second.find("my-provider", "gateway/model-a")!)).toBeUndefined();
 	});
+
+	test("restores cached headers on the unauthenticated path", async () => {
+		// No resolvable credential: the configured-discovery refresh takes the
+		// unauthenticated branch, which must still run the cached cohort through
+		// the fingerprint-aware restorer instead of republishing raw rows.
+		const modelsPath = path.join(tempDir, "models.yml");
+		await Bun.write(
+			modelsPath,
+			[
+				"providers:",
+				"  no-key:",
+				`    baseUrl: ${baseUrl}`,
+				"    api: openai-completions",
+				"    discovery:",
+				"      type: openai-models-list",
+				"    modelOverrides:",
+				"      row:",
+				"        headers:",
+				"          X-Account: a-1",
+			].join("\n"),
+		);
+		const findWithFingerprint = async (fingerprint: string) => {
+			seedCachedRows([{ id: "row" }], "no-key", { headerConfigFingerprint: fingerprint });
+			const registry = await newRegistry(modelsPath, mockDiscovery(["row"]));
+			await registry.refreshDiscoverableProviders(["no-key"], "online");
+			return { registry, row: registry.find("no-key", "row") };
+		};
+
+		// Mismatched provenance: the row cannot be proven complete and must not
+		// be selectable with its account/routing header missing.
+		const stale = await findWithFingerprint("stale");
+		expect(stale.row).toBeUndefined();
+
+		// Matching provenance: the cohort restores with its configured headers.
+		const matched = await findWithFingerprint(
+			computeHeaderConfigFingerprint(undefined, new Map([["row", { headers: { "X-Account": "a-1" } }]])),
+		);
+		expect(matched.row).toBeDefined();
+		expect(await matched.registry.resolveModelHeaders(matched.row!)).toMatchObject({ "X-Account": "a-1" });
+	});
 });
