@@ -578,9 +578,13 @@ function normalizeConsumeCode(result: string): string {
 	return result;
 }
 
-/** Spend exactly the server-selected Claude reset. Mutation requests are never retried. */
+/**
+ * Spend exactly the server-selected Claude reset. Mutation requests are never retried.
+ * `preflightSignal` also bounds the organization lookup; once it fires, this rejects
+ * with its `reason` without sending the reset request.
+ */
 export async function consumeClaudeResetCredit(
-	auth: ClaudeResetAuth & { credit: UsageResetCredit; redeemRequestId?: string },
+	auth: ClaudeResetAuth & { credit: UsageResetCredit; redeemRequestId?: string; preflightSignal?: AbortSignal },
 ): Promise<ClaudeResetConsumeResult> {
 	const program = auth.credit.program;
 	if (program !== CEDAR_PROGRAM && program !== JUNIPER_PROGRAM) {
@@ -613,7 +617,13 @@ export async function consumeClaudeResetCredit(
 			return { ok: false, code: "invalid_base_url", status: 0 };
 		}
 	}
-	const organization = await resolveOrganization(auth);
+	const { preflightSignal } = auth;
+	const organization = await resolveOrganization(
+		preflightSignal
+			? { ...auth, signal: auth.signal ? AbortSignal.any([auth.signal, preflightSignal]) : preflightSignal }
+			: auth,
+	);
+	preflightSignal?.throwIfAborted();
 	if (!organization.orgId) {
 		return {
 			ok: false,

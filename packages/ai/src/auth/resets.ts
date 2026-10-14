@@ -157,9 +157,14 @@ export class ResetCredits implements ResetsApi {
 		if (inFlight) {
 			if (inFlight.creditId !== creditId) return { ...resolvedIdentity, ok: false, code: "reset_in_progress" };
 			// The owner's cancellation before its request was sent spent nothing: this caller redeems itself.
-			return inFlight.promise.catch(error => {
+			const shared = inFlight.promise.catch(error => {
 				if (inFlight.preflightSignal?.aborted && error === inFlight.preflightSignal.reason)
 					return this.redeem(options);
+				throw error;
+			});
+			// This caller's cancellation stops only its own wait; the owner's attempt runs on.
+			return raceSignal(shared, preflightSignal, "Reset wait aborted").catch(error => {
+				preflightSignal?.throwIfAborted();
 				throw error;
 			});
 		}
@@ -251,6 +256,14 @@ export class ResetCredits implements ResetsApi {
 				orgId: list.orgId ?? access.orgId,
 				credit: selected,
 				redeemRequestId: requestId,
+				preflightSignal,
+			}).catch(error => {
+				// Cancelled before the reset request was sent: this claim was never made.
+				if (preflightSignal?.aborted && error === preflightSignal.reason) {
+					if (pending) this.#pendingClaudeResets.set(accountKey, pending);
+					else this.#pendingClaudeResets.delete(accountKey);
+				}
+				throw error;
 			});
 			if (
 				consumed.ok ||
@@ -348,15 +361,16 @@ export class ResetCredits implements ResetsApi {
 }
 
 /**
- * Runs a step that precedes the reset request. Once `preflightSignal` fires,
- * the step's outcome (an abort error, or a listing that swallowed one) gives
- * way to the signal's reason, so the caller knows nothing was sent.
+ * Runs a step that precedes the reset request, without waiting on it once
+ * `preflightSignal` fires. The step's outcome then (an abort error, or a listing
+ * that swallowed one) gives way to the signal's reason, so the caller knows
+ * nothing was sent.
  */
 async function beforeSend<T>(preflightSignal: AbortSignal | undefined, step: () => Promise<T>): Promise<T> {
 	preflightSignal?.throwIfAborted();
 	let result: T;
 	try {
-		result = await step();
+		result = await raceSignal(step(), preflightSignal, "Reset aborted before sending");
 	} catch (error) {
 		preflightSignal?.throwIfAborted();
 		throw error;
