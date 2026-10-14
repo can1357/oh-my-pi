@@ -7,6 +7,7 @@ import {
 	filterChildShellEnv,
 	filterProcessEnv,
 	getDbBusyTimeoutMs,
+	getDotenvEnvValues,
 	parseEnvFile,
 	setInteractiveHost,
 	stripGitRepoLocationEnv,
@@ -268,6 +269,23 @@ describe("filterChildShellEnv", () => {
 				cwd,
 			),
 		).toEqual({ UNCHANGED: "parent-value" });
+	});
+
+	it("removes dotenv values expanded from IPC markers without losing provenance", () => {
+		const cwd = path.dirname(writeTempEnv("FROM_FD=$NODE_CHANNEL_FD\n"));
+		const env = { NODE_CHANNEL_FD: "3", FROM_FD: "3", UNCHANGED: "parent-value" };
+
+		expect({
+			child: filterChildShellEnv(env, cwd),
+			hasExpandedValue: getDotenvEnvValues(cwd, env).includes("3"),
+		}).toEqual({ child: { UNCHANGED: "parent-value" }, hasExpandedValue: true });
+		expect(env.NODE_CHANNEL_FD).toBe("3");
+
+		const parentOverride = { ...env, FROM_FD: "parent-override" };
+		expect(filterChildShellEnv(parentOverride, cwd)).toEqual({
+			FROM_FD: "parent-override",
+			UNCHANGED: "parent-value",
+		});
 	});
 
 	it("uses the launch mode when dotenv changes NODE_ENV", async () => {
