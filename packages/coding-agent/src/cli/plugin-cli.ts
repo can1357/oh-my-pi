@@ -1166,6 +1166,21 @@ async function handleSetEnabled(
 	const restartBound: string[] = [];
 	const stillEnabled: { name: string; by: "user" | "project" }[] = [];
 
+	// A running session binds a plugin once at startup and never rechecks, so
+	// the flag above is honest for new sessions only (#9722). An install left
+	// enabled in another scope keeps loading the plugin across a restart. Runs
+	// before a later failure exits, so an earlier successful disable still
+	// carries the caveat.
+	const printNotices = () => {
+		if (flags.json) return;
+		if (restartBound.length > 0) {
+			console.log(chalk.dim(`Running sessions keep ${restartBound.join(", ")} bound until they restart.`));
+		}
+		for (const { name, by } of stillEnabled) {
+			console.log(chalk.dim(`${name} is still enabled by a ${by} install.`));
+		}
+	};
+
 	for (const name of plugins) {
 		try {
 			await setInstalledPluginEnabled(name, {
@@ -1194,21 +1209,12 @@ async function handleSetEnabled(
 			}
 		} catch (err) {
 			console.error(chalk.red(`${theme.status.error} Failed to ${action} ${name}: ${err}`));
+			printNotices();
 			process.exit(1);
 		}
 	}
 
-	// A running session binds a plugin once at startup and never rechecks, so
-	// the flag above is honest for new sessions only (#9722). An install left
-	// enabled in another scope keeps loading the plugin across a restart.
-	if (!flags.json) {
-		if (restartBound.length > 0) {
-			console.log(chalk.dim(`Running sessions keep ${restartBound.join(", ")} bound until they restart.`));
-		}
-		for (const { name, by } of stillEnabled) {
-			console.log(chalk.dim(`${name} is still enabled by a ${by} install.`));
-		}
-	}
+	printNotices();
 }
 
 // =============================================================================

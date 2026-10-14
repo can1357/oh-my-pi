@@ -81,7 +81,7 @@ describe("omp plugin disable restart caveat", () => {
 			]);
 		spyOn(MarketplaceManager.prototype, "setPluginEnabled").mockResolvedValue(undefined);
 
-		await runPluginCommand({ action: "disable", args: ["shared@mkt"], flags: {} });
+		await runPluginCommand({ action: "disable", args: ["shared@mkt"], flags: { scope: "user" } });
 
 		expect(logged.join("\n")).toContain("shared@mkt is still enabled by a project install.");
 		expect(logged.join("\n")).not.toContain("bound until they restart");
@@ -110,5 +110,26 @@ describe("omp plugin disable restart caveat", () => {
 
 		expect(logged.join("\n")).toContain("Running sessions keep shared@mkt bound until they restart.");
 		expect(logged.join("\n")).not.toContain("Failed to disable");
+	});
+
+	test("a later failure still prints the caveat for a disable that already succeeded", async () => {
+		// Without this the process exits on the second name before the notice, so the first
+		// plugin reports a clean disable while running sessions keep it bound.
+		spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([
+			{ id: "first@mkt", scope: "user", entries: [entry("user", false)] },
+			{ id: "second@mkt", scope: "user", entries: [entry("user", true)] },
+		]);
+		spyOn(MarketplaceManager.prototype, "setPluginEnabled")
+			.mockResolvedValueOnce(undefined)
+			.mockRejectedValueOnce(new Error("cannot disable second"));
+		spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			throw new Error(`exit ${code}`);
+		});
+
+		await expect(
+			runPluginCommand({ action: "disable", args: ["first@mkt", "second@mkt"], flags: { scope: "user" } }),
+		).rejects.toThrow("exit 1");
+
+		expect(logged.join("\n")).toContain("Running sessions keep first@mkt bound until they restart.");
 	});
 });
