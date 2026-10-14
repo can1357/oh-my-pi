@@ -1561,6 +1561,7 @@ export class ModelRegistry {
 		);
 		let restoredCohort: readonly Readonly<Model<Api>>[] | undefined;
 		let liveIds = liveModelIds;
+		let cohortAliasOwners = new Map<string, string>();
 		return (model, cohort) => {
 			// Per-pass state keys off the cohort the manager hands us: it is the
 			// cache batch being restored (the fallback re-read after concurrent
@@ -1571,12 +1572,29 @@ export class ModelRegistry {
 				restoredCohort = cohort;
 				registerCollapsedVariantAliases(providerId, cohort);
 				liveIds = new Set([...cohort.map(row => row.id), ...liveModelIds]);
+				// The global alias index cannot replace stale entries (an older
+				// omitted-header cache may already map a source to a row that no
+				// longer records it), so alias ownership comes from the cohort
+				// being restored and takes precedence over the index.
+				cohortAliasOwners = new Map();
+				for (const row of cohort) {
+					for (const source of [
+						...Object.values(row.thinking?.effortRouting ?? {}),
+						...(row.requestModelId ? [row.requestModelId] : []),
+					]) {
+						if (source && !cohortAliasOwners.has(source)) cohortAliasOwners.set(source, row.id);
+					}
+				}
 			}
+			const ownedElsewhere = (source: string): boolean => {
+				const owner = cohortAliasOwners.get(source);
+				return owner !== undefined && owner !== model.id;
+			};
 			let modelOverride = modelOverrides
 				? resolveModelOverrideWithAliases(
 						modelOverrides,
 						model,
-						(_provider, id) => liveIds.has(id) || liveAliasSources.has(id),
+						(_provider, id) => liveIds.has(id) || liveAliasSources.has(id) || ownedElsewhere(id),
 					)
 				: undefined;
 			// The alias index is first-write-wins, so an earlier cohort or catalog
@@ -1588,7 +1606,14 @@ export class ModelRegistry {
 					...Object.values(model.thinking?.effortRouting ?? {}),
 					...(model.requestModelId ? [model.requestModelId] : []),
 				]) {
-					if (!source || source === model.id || liveIds.has(source) || liveAliasSources.has(source)) continue;
+					if (
+						!source ||
+						source === model.id ||
+						liveIds.has(source) ||
+						liveAliasSources.has(source) ||
+						ownedElsewhere(source)
+					)
+						continue;
 					const candidate = modelOverrides.get(source);
 					if (candidate?.headers !== undefined) {
 						modelOverride = candidate;
@@ -1598,33 +1623,39 @@ export class ModelRegistry {
 			}
 			// The bundled row's transport headers are a trusted static source (the
 			// manager's restore uses them the same way), so a cached row for a
-			// bundled model keeps both its bundled and its local headers. An empty
-			// header map resolves to no request headers at all, so it is not a
-			// restoration source: accepting it would publish an omitted row whose
-			// transport headers stay missing.
+			// bundled model keeps both its bundled and its local headers. Bundled
+			// constants alone are not proof the omitted headers are reconstructable
+			// though: the configured manager writes with staticModels: [], so a
+			// removed per-model header would stay missing and the kept row would
+			// displace the bundled fallback. They only add onto a row a config
+			// source has already restored. An empty header map resolves to no
+			// request headers at all, so it is not a restoration source either.
+			const configSources = [modelOverride?.headers, providerOverride?.headers].filter(
+				(source): source is NonNullable<typeof source> =>
+					typeof source === "function"
+						? true
+						: source !== undefined && Object.values(source).some(declaration => declaration.trim().length > 0),
+			);
+			if (configSources.length === 0 && !hasBearerAuth) return undefined;
 			const requestModelIsReserved = model.requestModelId
-				? liveIds.has(model.requestModelId) || liveAliasSources.has(model.requestModelId)
+				? liveIds.has(model.requestModelId) ||
+					liveAliasSources.has(model.requestModelId) ||
+					ownedElsewhere(model.requestModelId)
 				: false;
 			const bundledModel =
 				bundledById.get(model.id) ??
 				(model.requestModelId && !requestModelIsReserved ? bundledById.get(model.requestModelId) : undefined);
-			const headerSources = [
-				bundledModel?.resolveHeaders ?? bundledModel?.headers,
-				modelOverride?.headers,
-				providerOverride?.headers,
-			].filter((source): source is NonNullable<typeof source> =>
-				typeof source === "function"
-					? true
-					: source !== undefined && Object.values(source).some(declaration => declaration.trim().length > 0),
+			const headerSources = [bundledModel?.resolveHeaders ?? bundledModel?.headers, ...configSources].filter(
+				(source): source is NonNullable<typeof source> =>
+					typeof source === "function"
+						? true
+						: source !== undefined && Object.values(source).some(declaration => declaration.trim().length > 0),
 			);
-			const resolveHeaders =
-				headerSources.length > 0 || hasBearerAuth
-					? createConfigHeaderResolver(headerSources, {
-							authHeader: providerOverride?.authHeader,
-							apiKeyConfig: providerOverride?.apiKey,
-						})
-					: undefined;
-			return resolveHeaders ? { resolveHeaders } : undefined;
+			const resolveHeaders = createConfigHeaderResolver(headerSources, {
+				authHeader: providerOverride?.authHeader,
+				apiKeyConfig: providerOverride?.apiKey,
+			});
+			return { resolveHeaders };
 		};
 	}
 

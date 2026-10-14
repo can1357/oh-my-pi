@@ -22,6 +22,7 @@ import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "../src/config/model-registry";
 import { resolveSessionModelSelector } from "../src/config/model-resolver";
 import type { AuthStorage } from "../src/session/auth-storage";
@@ -336,5 +337,45 @@ describe("model registry discovery header restore", () => {
 			id: "claude-4-sonnet",
 			provider: "cursor",
 		});
+	});
+
+	test("rejects stale reverse aliases when the routing alias moves", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      shared:", "        headers:", "          X-Account: b-1"].join("\n"),
+		);
+		// First generation registers shared -> gateway/model-a through its
+		// omitted-header restore; the global alias index keeps that mapping.
+		seedCachedRows([{ id: "gateway/model-a", alias: "shared" }]);
+		const first = await reloadFromCache(modelsPath);
+		expect(await first.resolveModelHeaders(first.find("my-provider", "gateway/model-a")!)).toMatchObject({
+			"X-Account": "b-1",
+		});
+
+		// Second generation keeps A but moves the persisted routing alias to B:
+		// A must be rejected instead of rebinding B's header through the stale
+		// reverse alias.
+		seedCachedRows([{ id: "gateway/model-a" }, { id: "gateway/model-b", alias: "shared" }]);
+		const second = await reloadFromCache(modelsPath);
+		expect(second.find("my-provider", "gateway/model-a")).toBeUndefined();
+		const b = second.find("my-provider", "gateway/model-b");
+		expect(b).toBeDefined();
+		expect(await second.resolveModelHeaders(b!)).toMatchObject({ "X-Account": "b-1" });
+	});
+
+	test("does not treat bundled headers alone as a restore source", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      claude-fable-5:", "        headers:", "          X-Other: o-1"].join("\n"),
+			"github-copilot",
+		);
+		seedCachedRows([{ id: "claude-haiku-4.5" }], "github-copilot");
+
+		const registry = await reloadFromCache(modelsPath);
+		// The bundled constants cannot account for the omitted headers (a removed
+		// per-model account header would stay missing), so without a config source
+		// for this row the bundled fallback must win over the cached row.
+		const bundled = (getBundledModels("github-copilot") as ReadonlyArray<{ id: string; api: string }>).find(
+			model => model.id === "claude-haiku-4.5",
+		);
+		expect(registry.find("github-copilot", "claude-haiku-4.5")).toMatchObject({ api: bundled!.api });
 	});
 });
