@@ -57,8 +57,9 @@ function measure(n: number): { missMs: number; hitMs: number } {
 	memoInjector.transform(context([...base]), "2026-08-14", "/work/omp");
 	const hit: number[] = [];
 	for (let i = 0; i < SAMPLES; i++) {
+		const input = [...base];
 		const start = Bun.nanoseconds();
-		memoInjector.transform(context([...base]), "2026-08-14", "/work/omp");
+		memoInjector.transform(context(input), "2026-08-14", "/work/omp");
 		hit.push(Bun.nanoseconds() - start);
 	}
 	return { missMs: medianMs(miss), hitMs: medianMs(hit) };
