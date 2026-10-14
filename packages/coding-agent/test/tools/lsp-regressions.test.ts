@@ -1149,6 +1149,59 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("does not report a reopened document's diagnostics from a publish versioned before the close", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-old-publish-");
+		try {
+			await initTheme();
+			const serverConfig: ServerConfig = {
+				command: "fake-lsp",
+				fileTypes: [".ts"],
+				rootMarkers: [],
+				isLinter: true,
+			};
+			installHandshakeLsp();
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { "fake-lsp": serverConfig } });
+			const client = await lspClient.getOrCreateClient(serverConfig, tempDir.path(), 1_000);
+			client.startedAt = Date.now() - PAST_DOCUMENT_IDLE_MS;
+			const targetPath = await openDocument(client, "target.ts");
+			const targetUri = fileToUri(targetPath);
+			ageDocument(client, targetPath, PAST_DOCUMENT_IDLE_MS);
+			await openDocument(client, "next.ts");
+			const errorAt = (message: string, version: number) => {
+				const diagnostic: Diagnostic = {
+					range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+					message,
+					severity: 1,
+				};
+				return { diagnostics: [diagnostic], version };
+			};
+
+			// A publish from the document's life before the close (version 1) lands after
+			// the reopen at version 2 and stays the latest past the settle window.
+			let now = Date.now();
+			let polls = 0;
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			vi.spyOn(Bun, "sleep").mockImplementation(async () => {
+				now += 100;
+				polls++;
+				if (polls === 1) client.diagnostics.set(targetUri, errorAt("error before close", 1));
+				if (polls === 6) client.diagnostics.set(targetUri, errorAt("reopened error", 2));
+				if (polls === 1 || polls === 6) client.diagnosticsVersion += 1;
+			});
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("diagnostics-old-publish", { action: "diagnostics", file: targetPath });
+
+			expect(client.openFiles.get(targetUri)?.version).toBe(2);
+			expect(textResult(result)).toContain("reopened error");
+			expect(textResult(result)).not.toContain("error before close");
+		} finally {
+			vi.restoreAllMocks();
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("pulls fresh diagnostics for code actions on a document reopened after an idle close", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-code-actions-");
 		const error: Diagnostic = {

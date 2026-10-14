@@ -247,11 +247,15 @@ function isProvisionalColdPublish(
 	expectedDocumentVersion: number | undefined,
 	now: number,
 ): boolean {
-	if (expectedDocumentVersion === undefined || published.diagnostics.length > 0) return false;
-	// A document reopened after an idle close can still receive the empty publish
-	// that cleared it when it closed.
+	if (expectedDocumentVersion === undefined) return false;
+	// A document reopened after an idle close can still receive publishes from before
+	// the close: the empty one that cleared it, or one versioned for its earlier life.
 	const reopenedAt = client.openFiles.get(uri)?.reopenedAt;
-	if (reopenedAt !== undefined && now - reopenedAt < DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS) return true;
+	if (reopenedAt !== undefined && now - reopenedAt < DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS) {
+		if (published.diagnostics.length === 0) return true;
+		if (published.version !== null && published.version < expectedDocumentVersion) return true;
+	}
+	if (published.diagnostics.length > 0) return false;
 	return (
 		published.version === null &&
 		client.startedAt !== undefined &&
@@ -287,8 +291,8 @@ export async function waitForDiagnostics(
 				return published.diagnostics;
 			}
 			// An empty unversioned publish from a newly started server is often its
-			// pre-analysis placeholder, and an empty publish for a reopened document may
-			// be the one that cleared it on close. Keep waiting so the writethrough
+			// pre-analysis placeholder, and a publish for a reopened document may
+			// predate its close. Keep waiting so the writethrough
 			// crosses its inline deadline and preserves this fetch for deferred delivery.
 			const now = Date.now();
 			if (published !== settledRef) {
