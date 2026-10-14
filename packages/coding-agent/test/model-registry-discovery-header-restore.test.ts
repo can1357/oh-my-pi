@@ -378,4 +378,55 @@ describe("model registry discovery header restore", () => {
 		);
 		expect(registry.find("github-copilot", "claude-haiku-4.5")).toMatchObject({ api: bundled!.api });
 	});
+
+	test("permits aliases owned by the row being restored", async () => {
+		const modelsPath = await writeModelsYaml(
+			[
+				"    modelOverrides:",
+				"      claude-4-sonnet-thinking:",
+				"        headers:",
+				"          X-Account: live-1",
+			].join("\n"),
+			"cursor",
+		);
+		// The cached discovery row IS the live collapsed model, so the raw alias
+		// is its own and must rebind for it.
+		seedCachedRows([{ id: "claude-4-sonnet", alias: "claude-4-sonnet-thinking" }], "cursor");
+
+		const registry = await reloadFromCache(modelsPath);
+		const restored = registry.find("cursor", "claude-4-sonnet");
+		expect(restored).toBeDefined();
+		// The discovered row is restored with its own metadata instead of being
+		// discarded for the bundled fallback with the header rebound on it.
+		expect(restored!.api).toBe("openai-completions");
+		expect(await registry.resolveModelHeaders(restored!)).toMatchObject({ "X-Account": "live-1" });
+	});
+
+	test("keeps stale cohort aliases out of later projections", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      shared:", "        headers:", "          X-Account: b-1"].join("\n"),
+		);
+		// First generation registers shared -> gateway/model-a through its
+		// omitted-header restore.
+		seedCachedRows([{ id: "gateway/model-a", alias: "shared" }]);
+		const first = await reloadFromCache(modelsPath);
+		expect(await first.resolveModelHeaders(first.find("my-provider", "gateway/model-a")!)).toMatchObject({
+			"X-Account": "b-1",
+		});
+
+		// Second generation keeps A as a plain row and moves the alias to omitted
+		// row B: A never runs the restore hook, so the projection must not hand it
+		// B's header through the stale reverse alias either.
+		seedCachedRows([
+			{ id: "gateway/model-a", plain: true },
+			{ id: "gateway/model-b", alias: "shared" },
+		]);
+		const second = await reloadFromCache(modelsPath);
+		const a = second.find("my-provider", "gateway/model-a");
+		expect(a).toBeDefined();
+		expect(await second.resolveModelHeaders(a!)).toBeUndefined();
+		const b = second.find("my-provider", "gateway/model-b");
+		expect(b).toBeDefined();
+		expect(await second.resolveModelHeaders(b!)).toMatchObject({ "X-Account": "b-1" });
+	});
 });

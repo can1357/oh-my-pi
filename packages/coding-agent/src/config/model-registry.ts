@@ -1545,14 +1545,18 @@ export class ModelRegistry {
 		].filter(model => model.provider === providerId);
 		const liveModelIds = new Set(liveRows.map(model => model.id));
 		// A live row owns not only its id but also its collapsed-variant aliases
-		// (e.g. bundled cursor/claude-4-sonnet's raw claude-4-sonnet-thinking):
-		// a cached row recording the same member id must not claim its headers.
-		const liveAliasSources = new Set(
-			liveRows.flatMap(model => [
-				...Object.values(model.thinking?.effortRouting ?? {}),
-				...("requestModelId" in model && model.requestModelId ? [model.requestModelId] : []),
-			]),
-		);
+		// (e.g. bundled cursor/claude-4-sonnet's raw claude-4-sonnet-thinking): a
+		// cached row recording the same member id must not claim its headers —
+		// unless that live row is the row being restored (same-owner rebinds).
+		const liveAliasOwners = new Map<string, string>();
+		for (const liveModel of liveRows) {
+			for (const source of [
+				...Object.values(liveModel.thinking?.effortRouting ?? {}),
+				...("requestModelId" in liveModel && liveModel.requestModelId ? [liveModel.requestModelId] : []),
+			]) {
+				if (source && !liveAliasOwners.has(source)) liveAliasOwners.set(source, liveModel.id);
+			}
+		}
 		const bundledById = new Map(
 			((getBundledModels(providerId as Parameters<typeof getBundledModels>[0]) as Model<Api>[]) ?? []).map(model => [
 				model.id,
@@ -1587,14 +1591,14 @@ export class ModelRegistry {
 				}
 			}
 			const ownedElsewhere = (source: string): boolean => {
-				const owner = cohortAliasOwners.get(source);
+				const owner = liveAliasOwners.get(source) ?? cohortAliasOwners.get(source);
 				return owner !== undefined && owner !== model.id;
 			};
 			let modelOverride = modelOverrides
 				? resolveModelOverrideWithAliases(
 						modelOverrides,
 						model,
-						(_provider, id) => liveIds.has(id) || liveAliasSources.has(id) || ownedElsewhere(id),
+						(_provider, id) => liveIds.has(id) || ownedElsewhere(id),
 					)
 				: undefined;
 			// The alias index is first-write-wins, so an earlier cohort or catalog
@@ -1606,14 +1610,7 @@ export class ModelRegistry {
 					...Object.values(model.thinking?.effortRouting ?? {}),
 					...(model.requestModelId ? [model.requestModelId] : []),
 				]) {
-					if (
-						!source ||
-						source === model.id ||
-						liveIds.has(source) ||
-						liveAliasSources.has(source) ||
-						ownedElsewhere(source)
-					)
-						continue;
+					if (!source || source === model.id || liveIds.has(source) || ownedElsewhere(source)) continue;
 					const candidate = modelOverrides.get(source);
 					if (candidate?.headers !== undefined) {
 						modelOverride = candidate;
@@ -1638,9 +1635,7 @@ export class ModelRegistry {
 			);
 			if (configSources.length === 0 && !hasBearerAuth) return undefined;
 			const requestModelIsReserved = model.requestModelId
-				? liveIds.has(model.requestModelId) ||
-					liveAliasSources.has(model.requestModelId) ||
-					ownedElsewhere(model.requestModelId)
+				? liveIds.has(model.requestModelId) || ownedElsewhere(model.requestModelId)
 				: false;
 			const bundledModel =
 				bundledById.get(model.id) ??
@@ -2703,12 +2698,31 @@ export class ModelRegistry {
 		const overrides = this.#modelOverrides.get(provider);
 		if (!overrides || overrides.size === 0) return models;
 		let liveIds: Set<string> | null = null;
-		const hasLiveModel = (_provider: string, id: string) => {
-			liveIds ??= new Set(models.map(m => m.id));
-			return liveIds.has(id);
+		let aliasOwners: Map<string, string> | null = null;
+		const indexCatalog = () => {
+			if (liveIds) return;
+			liveIds = new Set();
+			aliasOwners = new Map();
+			for (const indexed of models) {
+				liveIds.add(indexed.id);
+				// The global alias index keeps stale reverse entries, so alias
+				// ownership comes from the rows actually being projected: a raw id
+				// recorded by a different row may not rebind that row's override.
+				for (const source of [
+					...Object.values(indexed.thinking?.effortRouting ?? {}),
+					...(indexed.requestModelId ? [indexed.requestModelId] : []),
+				]) {
+					if (source && !aliasOwners.has(source)) aliasOwners.set(source, indexed.id);
+				}
+			}
 		};
 		return models.map(model => {
-			const override = resolveModelOverrideWithAliases(overrides, model, hasLiveModel);
+			const override = resolveModelOverrideWithAliases(overrides, model, (_provider, id) => {
+				indexCatalog();
+				if (liveIds?.has(id)) return true;
+				const owner = aliasOwners?.get(id);
+				return owner !== undefined && owner !== model.id;
+			});
 			if (!override) return model;
 			return this.#applyModelOverrideWithClamp(model, override);
 		});
@@ -2835,6 +2849,20 @@ export class ModelRegistry {
 		);
 	}
 
+	/** Maps each collapsed-variant/request member id to the row that records it. */
+	#modelAliasOwners(models: readonly Model<Api>[]): Map<string, string> {
+		const owners = new Map<string, string>();
+		for (const model of models) {
+			for (const source of [
+				...Object.values(model.thinking?.effortRouting ?? {}),
+				...(model.requestModelId ? [model.requestModelId] : []),
+			]) {
+				if (source && !owners.has(source)) owners.set(source, model.id);
+			}
+		}
+		return owners;
+	}
+
 	#applyModelOverrides(models: Model<Api>[], overrides: Map<string, Map<string, ModelOverride>>): Model<Api>[] {
 		const customWindows = new Map<string, number>();
 		for (const overlays of [this.#customModelOverlays, this.#runtimeModelOverlays]) {
@@ -2851,14 +2879,20 @@ export class ModelRegistry {
 		const extendedContext = isExtendedContextEnabledFromSettings(this.#settings);
 		const compactionPoints = getModelCompactionPointsFromSettings(this.#settings);
 		let liveKeys: Set<string> | null = null;
-		const hasLiveModel = (provider: string, id: string) => {
-			liveKeys ??= new Set(models.map(m => `${m.provider}\u0000${m.id}`));
-			return liveKeys.has(`${provider}\u0000${id}`);
-		};
+		let aliasOwners: Map<string, string> | null = null;
 		return models.map(model => {
 			const providerOverrides = overrides.get(model.provider);
 			const override = providerOverrides
-				? resolveModelOverrideWithAliases(providerOverrides, model, hasLiveModel)
+				? resolveModelOverrideWithAliases(providerOverrides, model, (provider, id) => {
+						// The global alias index keeps stale reverse entries, so alias
+						// ownership comes from the rows actually being projected: a raw
+						// id recorded by a different row may not rebind this row's override.
+						liveKeys ??= new Set(models.map(m => `${m.provider} ${m.id}`));
+						if (liveKeys.has(`${provider} ${id}`)) return true;
+						aliasOwners ??= this.#modelAliasOwners(models);
+						const owner = aliasOwners.get(id);
+						return owner !== undefined && owner !== model.id;
+					})
 				: undefined;
 			const overridden = override ? this.#applyModelOverrideWithClamp(model, override) : model;
 			// Resolve configuration before selecting a window. A context-only
