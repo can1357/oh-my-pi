@@ -58,6 +58,7 @@ export interface StatusLineSession {
 	isFastModeActive(): boolean;
 	/** Anthropic usage-limit label (`limit reached · wrapping up · resets 14:30`, `low priority until 14:30 · 62% left`). */
 	getAnthropicSlowModeLabel?(): string | undefined;
+	fastModeState?(): "off" | "active" | "blocked";
 	getPrewalkState?(): unknown;
 	getAsyncJobSnapshot(): { running: readonly { type: string; agentId?: string }[] } | null | undefined;
 	/** Widgets of the running background jobs, in job order; the jobs segment appends the freshest one's glance. */
