@@ -282,4 +282,37 @@ describe("model registry discovery header restore", () => {
 		expect(cached).toBeDefined();
 		expect(await restarted.resolveModelHeaders(cached!)).toMatchObject({ "X-Account": "acc-5" });
 	});
+
+	test("rebuilds request-model override headers on cached discovery rows", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      gateway/upstream-raw:", "        headers:", "          X-Account: acc-6"].join(
+				"\n",
+			),
+		);
+		seedCachedRows([{ id: "gateway/model-a", requestModelId: "gateway/upstream-raw" }]);
+
+		const registry = await reloadFromCache(modelsPath);
+		const cached = registry.find("my-provider", "gateway/model-a");
+		expect(cached).toBeDefined();
+		expect(await registry.resolveModelHeaders(cached!)).toMatchObject({ "X-Account": "acc-6" });
+		expect(resolveSessionModelSelector(registry, "my-provider/gateway/model-a")).toBeDefined();
+	});
+
+	test("keeps bundled transport headers alongside local override headers", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      claude-haiku-4.5:", "        headers:", "          X-Local: loc-1"].join("\n"),
+			"github-copilot",
+		);
+		seedCachedRows([{ id: "claude-haiku-4.5" }], "github-copilot");
+
+		const registry = await reloadFromCache(modelsPath);
+		const cached = registry.find("github-copilot", "claude-haiku-4.5");
+		expect(cached).toBeDefined();
+		// The bundled row's required transport headers must survive restoration
+		// next to the locally configured ones.
+		expect(await registry.resolveModelHeaders(cached!)).toMatchObject({
+			"Copilot-Integration-Id": "copilot-developer-cli",
+			"X-Local": "loc-1",
+		});
+	});
 });

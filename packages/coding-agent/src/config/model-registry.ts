@@ -1547,6 +1547,12 @@ export class ModelRegistry {
 				.filter(model => model.provider === providerId)
 				.map(model => model.id),
 		);
+		const bundledById = new Map(
+			((getBundledModels(providerId as Parameters<typeof getBundledModels>[0]) as Model<Api>[]) ?? []).map(model => [
+				model.id,
+				model,
+			]),
+		);
 		let restoredCohort: readonly Readonly<Model<Api>>[] | undefined;
 		let liveIds = liveModelIds;
 		return (model, cohort) => {
@@ -1580,12 +1586,22 @@ export class ModelRegistry {
 					}
 				}
 			}
-			// An empty header map resolves to no request headers at all, so it is
-			// not a restoration source: accepting it would publish an omitted row
-			// whose transport headers stay missing.
-			const headerSources = [modelOverride?.headers, providerOverride?.headers].filter(
-				(headers): headers is Record<string, string> =>
-					headers !== undefined && Object.values(headers).some(declaration => declaration.trim().length > 0),
+			// The bundled row's transport headers are a trusted static source (the
+			// manager's restore uses them the same way), so a cached row for a
+			// bundled model keeps both its bundled and its local headers. An empty
+			// header map resolves to no request headers at all, so it is not a
+			// restoration source: accepting it would publish an omitted row whose
+			// transport headers stay missing.
+			const bundledModel =
+				bundledById.get(model.id) ?? (model.requestModelId ? bundledById.get(model.requestModelId) : undefined);
+			const headerSources = [
+				bundledModel?.resolveHeaders ?? bundledModel?.headers,
+				modelOverride?.headers,
+				providerOverride?.headers,
+			].filter((source): source is NonNullable<typeof source> =>
+				typeof source === "function"
+					? true
+					: source !== undefined && Object.values(source).some(declaration => declaration.trim().length > 0),
 			);
 			const resolveHeaders =
 				headerSources.length > 0 || hasBearerAuth
