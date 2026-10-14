@@ -495,6 +495,33 @@ describe("omp agents show against the session a spawn starts", () => {
 		});
 	}
 
+	for (const enableLsp of [false, true]) {
+		it(`lists only tools the child constructs: no \`ask\`, \`lsp\` only when task.enableLsp is ${enableLsp ? "on" : "off (the default)"}`, async () => {
+			await setup();
+			const settings = Settings.isolated({
+				modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+				...(enableLsp ? { "task.enableLsp": true } : {}),
+			});
+			const agent: AgentDefinition = {
+				name: "asker",
+				description: "test",
+				systemPrompt: "test",
+				source: "project",
+				tools: ["read", "lsp", "ask"],
+			};
+			const view = await resolveEffectiveAgentConfig(agent, settings, registry, tempDir);
+			const { session } = await startSpawn(agent, settings);
+			try {
+				const active = session.getActiveToolNames().sort();
+				expect(active).not.toContain("ask");
+				expect(active.includes("lsp")).toBe(enableLsp);
+				expect([...(view.tools.value as string[])].sort()).toEqual(active);
+			} finally {
+				await session.dispose();
+			}
+		});
+	}
+
 	it("attributes compaction to compaction.enabled=false over the agent's threshold entry", async () => {
 		await setup();
 		const settings = Settings.isolated({
