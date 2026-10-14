@@ -72,6 +72,13 @@ export interface PendingExtraction {
 	 * project it was never written in.
 	 */
 	cwd: string;
+	/**
+	 * Built at drop time from the transcript the prompt was written in. `/new`, a
+	 * session switch, or compaction can replace `session.messages` before the slot
+	 * drains; rebuilding then would scan the replacement transcript for the
+	 * referent context and attribute the prompt's decisions to the wrong turns.
+	 */
+	envelope: SharpshooterEnvelope;
 }
 
 // Bound the model spend a burst of dropped prompts can trigger after the
@@ -96,11 +103,11 @@ interface ExtractionHost extends AgentSession {
 	 * by message identity. Enrollment is idempotent for the whole session rather
 	 * than only for the concurrently-in-flight window: a live restart (a primary
 	 * backend switch, or `sharpshooter.enabled` off→on) re-fires the catch-up for
-	 * a transcript whose newest prompt may already have settled. The set holds at
-	 * most one entry per user prompt of the session, and prompts are never
-	 * dropped from their transcript, so it stays bounded by the session.
+	 * a transcript whose newest prompt may already have settled. Weakly held, so a
+	 * prompt (and any image blocks it carries) is released once the transcript
+	 * drops it, rather than pinned for the session's lifetime.
 	 */
-	[kExtractionHandledMessages]?: Set<AgentMessage>;
+	[kExtractionHandledMessages]?: WeakSet<AgentMessage>;
 	/** Prompts dropped while the slot was busy, retried in order when it clears. */
 	[kExtractionPendingQueue]?: PendingExtraction[];
 }
@@ -116,7 +123,7 @@ async function drainSharpshooterExtractionQueue(session: AgentSession): Promise<
 		if (session.isDisposed || host[kExtractionInFlight]) return;
 		const pending = host[kExtractionPendingQueue]?.shift();
 		if (!pending) return;
-		maybeStartSharpshooterExtraction(pending.options, pending.cwd);
+		maybeStartSharpshooterExtraction(pending.options, pending.cwd, pending.envelope);
 		if (host[kExtractionInFlight]) await host[kExtractionInFlight];
 	}
 }
@@ -268,8 +275,15 @@ export async function resolveSharpshooterModel(
 	return fallback;
 }
 
-/** Start best-effort extraction for one committed user prompt without blocking the caller. */
-export function maybeStartSharpshooterExtraction(options: SharpshooterExtractionOptions, forcedCwd?: string): void {
+/**
+ * Start best-effort extraction for one committed user prompt without blocking the caller.
+ * `snapshot` is the envelope a queued retry captured at drop time; fresh starts omit it.
+ */
+export function maybeStartSharpshooterExtraction(
+	options: SharpshooterExtractionOptions,
+	forcedCwd?: string,
+	snapshot?: SharpshooterEnvelope,
+): void {
 	try {
 		const { session } = options;
 		if (session.isDisposed) return;
@@ -279,7 +293,7 @@ export function maybeStartSharpshooterExtraction(options: SharpshooterExtraction
 		// `session.messages.at(-1)` out of that same transcript array. Checked ahead
 		// of the in-flight branch so a settled prompt is skipped even though the slot
 		// it once held is free again.
-		const handled = (host[kExtractionHandledMessages] ??= new Set());
+		const handled = (host[kExtractionHandledMessages] ??= new WeakSet());
 		if (options.message && handled.has(options.message)) return;
 		if (host[kExtractionInFlight]) {
 			// One model call at a time. A prompt dropped here is otherwise lost
@@ -301,10 +315,12 @@ export function maybeStartSharpshooterExtraction(options: SharpshooterExtraction
 				});
 				return;
 			}
-			queue.push({ cwd: forcedCwd ?? session.sessionManager.getCwd(), options });
+			const queued = snapshot ?? buildSharpshooterEnvelope(session.messages, options.message);
+			if (!queued) return;
+			queue.push({ cwd: forcedCwd ?? session.sessionManager.getCwd(), options, envelope: queued });
 			return;
 		}
-		const envelope = buildSharpshooterEnvelope(session.messages, options.message);
+		const envelope = snapshot ?? buildSharpshooterEnvelope(session.messages, options.message);
 		if (!envelope) return;
 		const trimmedPrompt = envelope.prompt.trim();
 		if (trimmedPrompt.startsWith("/")) return;

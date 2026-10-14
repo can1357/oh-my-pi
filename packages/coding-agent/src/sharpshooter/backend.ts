@@ -158,7 +158,7 @@ function installSharpshooterSession(options: MemoryBackendStartOptions): void {
 			// dropped in, so enrollment at slot acquisition leaves nothing to
 			// double-extract.
 			for (const pending of carried) {
-				maybeStartSharpshooterExtraction(pending.options, pending.cwd);
+				maybeStartSharpshooterExtraction(pending.options, pending.cwd, pending.envelope);
 			}
 		} catch (error) {
 			disposeScheduler();
