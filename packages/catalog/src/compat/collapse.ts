@@ -1228,7 +1228,7 @@ const kAliasIndex = Symbol("compat-collapse.aliasIndex");
  * Persist aliases embedded in collapsed routing so generated catalog rows and
  * newly discovered families expose the same selector migrations as reviewed tables.
  */
-function registerCollapsedVariantAliases(provider: Provider, specs: readonly VariantSpecLike[]): void {
+export function registerCollapsedVariantAliases(provider: Provider, specs: readonly VariantSpecLike[]): void {
 	const providerId = provider.toLowerCase();
 	let index = dynamicAliasIndexes.get(providerId);
 	for (const spec of specs) {

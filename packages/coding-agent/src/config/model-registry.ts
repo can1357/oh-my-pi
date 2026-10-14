@@ -19,7 +19,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
-import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { collapseBuiltVariants, registerCollapsedVariantAliases } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
 	clampCodexContextWindow,
 	clampsContextOverride,
@@ -1545,10 +1545,20 @@ export class ModelRegistry {
 							)
 						: undefined))
 				: undefined;
-			const resolveHeaders = createConfigHeaderResolver([modelOverride?.headers, providerOverride?.headers], {
-				authHeader: providerOverride?.authHeader,
-				apiKeyConfig: providerOverride?.apiKey,
-			});
+			// An empty header map resolves to no request headers at all, so it is
+			// not a restoration source: accepting it would publish an omitted row
+			// whose transport headers stay missing.
+			const headerSources = [modelOverride?.headers, providerOverride?.headers].filter(
+				(headers): headers is Record<string, string> =>
+					headers !== undefined && Object.values(headers).some(declaration => declaration.trim().length > 0),
+			);
+			const resolveHeaders =
+				headerSources.length > 0 || hasBearerAuth
+					? createConfigHeaderResolver(headerSources, {
+							authHeader: providerOverride?.authHeader,
+							apiKeyConfig: providerOverride?.apiKey,
+						})
+					: undefined;
 			return resolveHeaders ? { resolveHeaders } : undefined;
 		};
 	}
@@ -1569,6 +1579,10 @@ export class ModelRegistry {
 				continue;
 			}
 			const configStale = this.#isDiscoveryCacheOlderThanModelsConfig(cache.updatedAt);
+			// A fresh process knows no collapsed variant aliases yet: replay the
+			// persisted effort routing/requestModelId so alias-keyed modelOverrides
+			// resolve during header restore, as they would after a live collapse.
+			registerCollapsedVariantAliases(providerConfig.provider, cache.models);
 			// Cached rows never persist headers (#5780): rebuild each omitted row's
 			// headers from the same local configuration that attached them and keep
 			// only the rows that get them back. A configured authHeader is
@@ -2119,6 +2133,9 @@ export class ModelRegistry {
 			}
 		};
 
+		// Replay persisted variant aliases before the manager restores cached
+		// headers: a fresh process has no live collapse to learn them from.
+		registerCollapsedVariantAliases(providerId, cached?.models ?? []);
 		const manager = createModelManager<Api>({
 			providerId,
 			staticModels: [],

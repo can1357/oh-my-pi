@@ -19,6 +19,9 @@ import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { ModelRegistry } from "../src/config/model-registry";
 import { resolveSessionModelSelector } from "../src/config/model-resolver";
 import type { AuthStorage } from "../src/session/auth-storage";
@@ -143,22 +146,64 @@ describe("model registry discovery header restore", () => {
 				"          X-Account: acc-1",
 			].join("\n"),
 		);
-		// The paired thinking sibling collapses into `gateway/model-a`, registering
-		// the retired-id alias that override and header-restore lookups resolve.
-		const registry0 = await newRegistry(modelsPath, mockDiscovery(["gateway/model-a", "gateway/model-a-thinking"]));
-		await registry0.refreshDiscoverableProviders(["my-provider"], "online");
-		expect(registry0.find("my-provider", "gateway/model-a")).toBeDefined();
+		// Cache creation stands in for a previous run whose discovery collapsed a
+		// `gateway/model-a`/`-thinking` pair: the persisted row keeps the effort
+		// routing naming the retired member id. It is written directly so this
+		// process never runs a collapse and starts the reload with cold aliases,
+		// like a real restart.
+		const cachedModel = buildModel({
+			id: "gateway/model-a",
+			name: "Gateway Model A",
+			api: "openai-completions",
+			provider: "my-provider",
+			baseUrl,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.High],
+				defaultLevel: Effort.High,
+				effortRouting: { high: "gateway/model-a-thinking" },
+			},
+		});
+		writeModelCache(
+			"my-provider:openai-models-list-context-v3",
+			Date.now(),
+			[{ ...cachedModel, headers: { Authorization: "Bearer test-api-key" } }],
+			true,
+			"",
+			path.join(tempDir, "models.db"),
+		);
 
+		const registry = await reloadFromCache(modelsPath);
+		const cached = registry.find("my-provider", "gateway/model-a");
+		expect(cached).toBeDefined();
+		expect(await registry.resolveModelHeaders(cached!)).toMatchObject({ "X-Account": "acc-1" });
+		expect(resolveSessionModelSelector(registry, "my-provider/gateway/model-a")).toBeDefined();
+	});
+
+	test("does not restore rows whose header declarations are empty", async () => {
+		const modelsPath = await writeModelsYaml(
+			[
+				"    headers: {}",
+				"    modelOverrides:",
+				"      gateway/model-a:",
+				"        headers:",
+				'          X-Account: ""',
+			].join("\n"),
+		);
 		const registry1 = await newRegistry(modelsPath, mockDiscovery(["gateway/model-a"]));
 		await registry1.refreshDiscoverableProviders(["my-provider"], "online");
-		const live = registry1.find("my-provider", "gateway/model-a");
-		expect(live).toBeDefined();
-		expect(await registry1.resolveModelHeaders(live!)).toMatchObject({ "X-Account": "acc-1" });
+		expect(registry1.find("my-provider", "gateway/model-a")).toBeDefined();
 
+		// Empty header declarations resolve to no request headers, so they are not
+		// a restoration source: the row must stay excluded instead of being
+		// published with its auth/account-routing header missing.
 		const registry2 = await reloadFromCache(modelsPath);
-		const cached = registry2.find("my-provider", "gateway/model-a");
-		expect(cached).toBeDefined();
-		expect(await registry2.resolveModelHeaders(cached!)).toMatchObject({ "X-Account": "acc-1" });
-		expect(resolveSessionModelSelector(registry2, "my-provider/gateway/model-a")).toBeDefined();
+		expect(registry2.find("my-provider", "gateway/model-a")).toBeUndefined();
+		expect(registry2.getProviderDiscoveryState("my-provider")?.stale).toBe(true);
 	});
 });
