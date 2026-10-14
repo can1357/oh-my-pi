@@ -898,6 +898,25 @@ function hasToJSONHook(value: object): boolean {
 	return false;
 }
 /**
+ * Whether `JSON.stringify` routes bigint values through a `toJSON` hook. A
+ * bigint carries no properties of its own — the primitive has no wrapper
+ * object to hang a hook on — so the only hook serialization can consult is
+ * one installed on `BigInt.prototype` itself (an extension hook, for example).
+ * Answered through the property descriptor, never by reading the key: a
+ * stateful `toJSON` getter on the prototype would otherwise run here and again
+ * in `#lineFor`, shifting what serialization observes. Any accessor there —
+ * or any callable data value, which the serializer invokes with the bigint as
+ * its receiver — leaves a bigint-bearing graph uncached (see
+ * {@link hasSerializerHook}).
+ */
+function hasBigIntToJSONHook(): boolean {
+	const descriptor = Object.getOwnPropertyDescriptor(BigInt.prototype, "toJSON");
+	if (descriptor === undefined) return false;
+	if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
+	return typeof descriptor.value === "function";
+}
+
+/**
  * Whether any indexed slot of `value` resolves through an accessor — answered
  * through property descriptors along the prototype chain, never by reading a
  * slot. A stateful or one-shot indexed getter would otherwise run here and
@@ -944,20 +963,26 @@ function projectorGenerationResult(value: object): string | undefined {
 	return undefined;
 }
 /**
- * Whether `value` is a toolResult `details` node whose `structuredContent` the
- * persistence projection removes before serialization — the mirror of
- * `stripSpilledMcpStructuredContent`'s predicate in
- * session-persistence.ts. The memo's three walks (hook probe, stamp, matcher)
- * must all apply it: the projected line never contains the field, so a hook
- * or cycle beneath it can neither reach the persisted bytes nor be allowed
- * to overflow a walk of the live graph. Reads through property descriptors
- * only where the answer must not invoke user code; the `meta.truncation`
- * spine is reached by key from a descriptor-read root because the hook probe
- * — which runs before every stamp — already leaves any accessor-backed
- * graph uncached.
+ * Whether `value` is the top-level `details` of a `toolResult` message whose
+ * `structuredContent` the persistence projection removes before serialization
+ * — the mirror of `stripSpilledMcpStructuredContent` in
+ * session-persistence.ts, which strips only that one node. A custom or hook
+ * message — or any nested property merely named `details` — keeps its
+ * `structuredContent` in the projected line, so the memo's three walks (hook
+ * probe, stamp, matcher) must skip the field only here: the projected line
+ * never contains it, so a hook or cycle beneath it can neither reach the
+ * persisted bytes nor be allowed to overflow a walk of the live graph. The
+ * `role` gate is answered through the own data descriptor of the message the
+ * walk started from — never by reading a key — because the hook probe, which
+ * runs before every stamp, already leaves any accessor-backed graph uncached.
+ * Reads through property descriptors only where the answer must not invoke
+ * user code; the `meta.truncation` spine is reached by key from a
+ * descriptor-read root for the same reason.
  */
-function isMcpSpillStrippedDetails(value: object, key?: string): boolean {
-	if (key !== "details" || !Object.hasOwn(value, "structuredContent")) return false;
+function isMcpSpillStrippedDetails(value: object, key?: string, isTopLevelToolResultDetails?: boolean): boolean {
+	if (key !== "details" || isTopLevelToolResultDetails !== true || !Object.hasOwn(value, "structuredContent")) {
+		return false;
+	}
 	const serverName = Object.getOwnPropertyDescriptor(value, "serverName")?.value;
 	const mcpToolName = Object.getOwnPropertyDescriptor(value, "mcpToolName")?.value;
 	if (typeof serverName !== "string" || typeof mcpToolName !== "string") return false;
@@ -967,6 +992,19 @@ function isMcpSpillStrippedDetails(value: object, key?: string): boolean {
 	if (truncation === null || typeof truncation !== "object" || Array.isArray(truncation)) return false;
 	const artifactId = (truncation as Record<string, unknown>).artifactId;
 	return typeof artifactId === "string" && artifactId.length > 0;
+}
+
+/**
+ * Whether `childKey` of `value` is the top-level `details` of a `toolResult`
+ * message — the only node `stripSpilledMcpStructuredContent` strips. True
+ * only when the walk is still at the message root (`key` is `undefined`) and
+ * the child's own `role` data descriptor reads `"toolResult"`: answered
+ * through the descriptor, never by reading the key, so a stateful `role`
+ * getter is left for the object loop to leave uncached rather than run here.
+ */
+function isTopLevelMessageChild(value: object, key: string | undefined, childKey: string): boolean {
+	if (key !== undefined || childKey !== "details") return false;
+	return Object.getOwnPropertyDescriptor(value, "role")?.value === "toolResult";
 }
 
 /**
@@ -993,7 +1031,13 @@ function isMcpSpillStrippedDetails(value: object, key?: string): boolean {
  * walk could never escape; the projected line never contains it, so no hook
  * beneath one can reach the persisted bytes.
  */
-function hasSerializerHook(value: unknown, key?: string): boolean {
+function hasSerializerHook(value: unknown, key?: string, isTopLevelToolResultDetails?: boolean): boolean {
+	// A bigint is the one primitive `JSON.stringify` routes through a hook:
+	// when an extension installs `BigInt.prototype.toJSON`, serialization
+	// invokes it — so a stateful hook's first output cannot be stamped as a
+	// leaf. Leave the graph uncached exactly when such a hook exists (see
+	// `hasBigIntToJSONHook`); other primitives never consult one.
+	if (typeof value === "bigint") return hasBigIntToJSONHook();
 	if (value === null || typeof value !== "object") return false;
 	// `JSON.stringify` consults the hook before the value shape, so the probe
 	// does too — through the property descriptor, never by reading the key: a
@@ -1014,13 +1058,14 @@ function hasSerializerHook(value: unknown, key?: string): boolean {
 		return false;
 	}
 	// Mirror the persistence projection's MCP spill strip
-	// (`stripSpilledMcpStructuredContent`): when a toolResult's details carries
-	// the spill markers, `structuredContent` is removed before serialization,
-	// so a hook beneath it cannot reach the persisted bytes — and the live
-	// graph may be cyclic where the projection is not. A stateful `meta`
-	// getter would shift serialization if read, so the object loop below
-	// answers it through the descriptor and leaves the graph uncached.
-	const skipStructuredContent = isMcpSpillStrippedDetails(value, key);
+	// (`stripSpilledMcpStructuredContent`): only the top-level `details` of a
+	// `toolResult` message loses `structuredContent` before serialization, so
+	// only there can a hook beneath it not reach the persisted bytes — and
+	// only there may the live graph be cyclic where the projection is not. A
+	// stateful `meta` getter would shift serialization if read, so the object
+	// loop below answers it through the descriptor and leaves the graph
+	// uncached.
+	const skipStructuredContent = isMcpSpillStrippedDetails(value, key, isTopLevelToolResultDetails);
 	// Mirror the projection's stripping boundary: a hook beneath a stripped key
 	// cannot affect the persisted bytes — and the live value may be cyclic
 	// where the projection is not.
@@ -1052,7 +1097,7 @@ function hasSerializerHook(value: unknown, key?: string): boolean {
 		const descriptor = Object.getOwnPropertyDescriptor(value, childKey);
 		if (descriptor === undefined) continue;
 		if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
-		if (hasSerializerHook(descriptor.value, childKey)) return true;
+		if (hasSerializerHook(descriptor.value, childKey, isTopLevelMessageChild(value, key, childKey))) return true;
 	}
 	return false;
 }
@@ -1084,41 +1129,39 @@ const STAMP_TRANSIENT = Symbol("stamp.transient");
  * instead — hooked graphs are left uncached (see {@link hasSerializerHook}) —
  * so only hookless wrappers reach here.
  *
- * The intrinsic call is the brand check, answered without invoking an
- * override: only a genuine wrapper unboxes, and anything else falls through
- * to the object walk. There is deliberately no `instanceof` gate: it answers
- * the wrong question twice — a proxy around a wrapper or an object built on
- * `Number.prototype` passes the chain check while carrying no `[[NumberData]]`
- * slot, so `valueOf()` throws on it while the serializer accepts it as `{}`;
- * and a wrapper from another realm (a `node:vm` context, an iframe) fails the
- * local-realm chain check although `valueOf` succeeds and `JSON.stringify`
- * emits the primitive. The `Symbol.toStringTag` dispatch below narrows the
- * candidates first so plain objects never pay for a throwing intrinsic call.
+ * Each intrinsic call is the brand check, answered without invoking an
+ * override and without reading `Symbol.toStringTag`: only a genuine wrapper
+ * unboxes, and anything else falls through to the object walk. There is
+ * deliberately no `instanceof` gate: it answers the wrong question twice — a
+ * proxy around a wrapper or an object built on `Number.prototype` passes the
+ * chain check while carrying no `[[NumberData]]` slot, so `valueOf()` throws
+ * on it while the serializer accepts it as `{}`; and a wrapper from another
+ * realm (a `node:vm` context, an iframe) fails the local-realm chain check
+ * although `valueOf` succeeds and `JSON.stringify` emits the primitive. There
+ * is deliberately no `Symbol.toStringTag` dispatch either: `JSON.stringify`
+ * never reads the tag, but `Object.prototype.toString` runs a getter installed
+ * there — even a non-enumerable one — so dispatching on it would invoke user
+ * code the serializer itself ignores, letting a throwing getter fail a probe
+ * over a value that serializes normally, or a stateful one mutate fields
+ * before `#lineFor` observes them. Plain objects pay for up to three throwing
+ * intrinsic calls instead — a local cost that runs no user code.
  */
 function unboxedPrimitive(value: object): number | string | boolean | undefined {
-	const tag = Object.prototype.toString.call(value);
-	if (tag === "[object Number]") {
-		try {
-			return Number.prototype.valueOf.call(value);
-		} catch {
-			return undefined;
-		}
+	try {
+		return Number.prototype.valueOf.call(value);
+	} catch {
+		// Not a genuine Number wrapper: fall through to the next brand.
 	}
-	if (tag === "[object String]") {
-		try {
-			return String.prototype.valueOf.call(value);
-		} catch {
-			return undefined;
-		}
+	try {
+		return String.prototype.valueOf.call(value);
+	} catch {
+		// Not a genuine String wrapper: fall through to the next brand.
 	}
-	if (tag === "[object Boolean]") {
-		try {
-			return Boolean.prototype.valueOf.call(value);
-		} catch {
-			return undefined;
-		}
+	try {
+		return Boolean.prototype.valueOf.call(value);
+	} catch {
+		return undefined;
 	}
-	return undefined;
 }
 
 /**
@@ -1162,7 +1205,12 @@ function rawJsonPayload(value: object): string | undefined {
  * indexed slots with a snapshotted length, the way `JSON.stringify` reads
  * them, never through the iterator protocol.
  */
-function messageValueStamp(value: unknown, out: unknown[] = [], key?: string): unknown[] {
+function messageValueStamp(
+	value: unknown,
+	out: unknown[] = [],
+	key?: string,
+	isTopLevelToolResultDetails?: boolean,
+): unknown[] {
 	if (value === null || typeof value !== "object") {
 		out.push(value);
 		return out;
@@ -1195,11 +1243,14 @@ function messageValueStamp(value: unknown, out: unknown[] = [], key?: string): u
 		// its key-stripping loop, so transient keys inside one reach the line and
 		// must be stamped. Only non-atomic containers strip them.
 		const atomic = isAtomicPersistenceNode(value, key);
-		// The MCP spill strip removes `structuredContent` before serialization
-		// (see `isMcpSpillStrippedDetails`), so the field is skipped outright:
-		// unlike the transient keys below it forces no rebuild pass, and the
-		// live graph may be cyclic where the projection is not.
-		const skipStructuredContent = isMcpSpillStrippedDetails(value, key);
+		// Only the top-level `details` of a `toolResult` message loses
+		// `structuredContent` before serialization (see
+		// `isMcpSpillStrippedDetails`), so only there is the field skipped
+		// outright: unlike the transient keys below it forces no rebuild
+		// pass, and the live graph may be cyclic where the projection is
+		// not. Any other marker-shaped `details` keeps its field in the
+		// projected line and is stamped whole.
+		const skipStructuredContent = isMcpSpillStrippedDetails(value, key, isTopLevelToolResultDetails);
 		out.push(STAMP_OBJECT);
 		for (const childKey of Object.keys(fields)) {
 			if (skipStructuredContent && childKey === "structuredContent") continue;
@@ -1215,7 +1266,7 @@ function messageValueStamp(value: unknown, out: unknown[] = [], key?: string): u
 				continue;
 			}
 			out.push(childKey);
-			messageValueStamp(fields[childKey], out, childKey);
+			messageValueStamp(fields[childKey], out, childKey, isTopLevelMessageChild(value, key, childKey));
 		}
 	}
 	out.push(STAMP_END);
@@ -1232,7 +1283,7 @@ function messageValueStamp(value: unknown, out: unknown[] = [], key?: string): u
  */
 function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 	let index = 0;
-	const match = (live: unknown, key?: string): boolean => {
+	const match = (live: unknown, key?: string, isTopLevelToolResultDetails?: boolean): boolean => {
 		const expected = stamp[index++];
 		// The stamp never invokes a `toJSON` hook: a hooked graph is left
 		// uncached (see {@link hasSerializerHook}), so reaching one here means
@@ -1270,10 +1321,12 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 				// inside atomic nodes (persistence keeps them) and as
 				// presence-only markers elsewhere.
 				const atomic = isAtomicPersistenceNode(live, key);
-				// The stamp skipped the MCP-stripped field outright (see
-				// {@link messageValueStamp}), so the matcher skips it too —
-				// the value was never recorded and may be cyclic.
-				const skipStructuredContent = isMcpSpillStrippedDetails(live, key);
+				// The stamp skipped the top-level toolResult's MCP-stripped
+				// field outright (see {@link messageValueStamp}), so the
+				// matcher skips it too — the value was never recorded and may
+				// be cyclic. Any other marker-shaped `details` was stamped
+				// whole and is matched whole.
+				const skipStructuredContent = isMcpSpillStrippedDetails(live, key, isTopLevelToolResultDetails);
 				for (const childKey of Object.keys(fields)) {
 					if (skipStructuredContent && childKey === "structuredContent") continue;
 					// Stripped before serialization by `truncateForPersistence`,
@@ -1285,7 +1338,7 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 						continue;
 					}
 					if (stamp[index++] !== childKey) return false;
-					if (!match(fields[childKey], childKey)) return false;
+					if (!match(fields[childKey], childKey, isTopLevelMessageChild(live, key, childKey))) return false;
 				}
 			}
 			return stamp[index++] === STAMP_END;
