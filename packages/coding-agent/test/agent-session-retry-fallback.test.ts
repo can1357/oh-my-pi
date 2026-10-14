@@ -2079,6 +2079,74 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
+	for (const contained of ["task", "advisor"] as const) {
+		it(`keeps advisor recovery independent of an active main pin when ${contained} is contained`, async () => {
+			const mainModel = getBundledModel("openai", "gpt-4o-mini");
+			const mainFallback = getBundledModel("openai", "gpt-4o");
+			const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const advisorFallback = getBundledModel("google", "gemini-2.5-flash");
+			if (!mainModel || !mainFallback || !advisorPrimary || !advisorFallback) {
+				throw new Error("Expected advisor regression models");
+			}
+			const requestedAdvisorModels: string[] = [];
+			const advisorMock = createMockModel();
+			const finished = Promise.withResolvers<void>();
+			const mainMock = createMockModel({ handler: { content: ["Main complete"] } });
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 1,
+				"retry.maxDelayMs": 100,
+				"retry.fallbackChains": {
+					task: ["openai/gpt-4o"],
+					advisor: ["google/gemini-2.5-flash"],
+				},
+				"retry.fallbackChainExhausted": { [contained]: "fail" },
+				"advisor.syncBacklog": "1",
+			});
+			settings.setModelRole("task", "openai/gpt-4o-mini");
+			settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: mainModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: mainMock.stream,
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				initialRetryFallback: {
+					role: "task",
+					originalSelector: "openai/gpt-4o-mini",
+					originalThinkingLevel: undefined,
+					pinned: true,
+				},
+				advisorTools: [],
+				advisorConfigs: [{ name: "independent-advisor", model: "anthropic/claude-sonnet-4-5" }],
+				advisorStreamFn: (model, context, options) => {
+					requestedAdvisorModels.push(`${model.provider}/${model.id}`);
+					advisorMock.push(model.id === advisorPrimary.id
+						? { throw: "rate limit exceeded retry-after-ms=11180001" }
+						: { content: ["Advisor recovered"] });
+					return advisorMock.stream(model, context, options);
+				},
+			});
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_succeeded" && event.role === "advisor") finished.resolve();
+				if (event.type === "notice" && event.source === "advisor" && event.message.includes("unavailable")) {
+					finished.resolve();
+				}
+			});
+			session.setAdvisorEnabled(true);
+			await session.prompt("Run the advisor while the main walk is pinned");
+			await session.waitForIdle();
+			await finished.promise;
+			expect(requestedAdvisorModels).toEqual(["anthropic/claude-sonnet-4-5", "google/gemini-2.5-flash"]);
+			expect(session.getAdvisorAgent()?.state.model?.id).toBe(advisorFallback.id);
+			expect(session.model?.id).toBe(mainModel.id);
+		});
+	}
+
 	it.each(["enabled", "remote-disabled", "model-disabled"])(
 		"skips incompatible advisor retries and replays compatible history with %s compaction",
 		async policy => {
@@ -5744,6 +5812,43 @@ describe("AgentSession retry fallback", () => {
 			isFallback: false,
 			contextWindow: baseModel.contextWindow,
 		});
+	});
+
+	it("retains contained ownership after a Fireworks Fast downgrade and base-model failure", async () => {
+		const fast = getBundledModel("fireworks", "kimi-k3-fast");
+		const base = getBundledModel("fireworks", "kimi-k3");
+		if (!fast || !base) throw new Error("Expected Fireworks regression models");
+		const requests: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: fast, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requests.push(`${model.provider}/${model.id}`);
+				mock.push({ throw: model.id === fast.id
+					? "Fast router rejected request retry-after-ms=200"
+					: "worker quota exhausted retry-after-ms=11180001" });
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 1,
+			"retry.maxDelayMs": 100,
+			"retry.fallbackChains": { default: ["openai/gpt-4o"], task: [] },
+			"retry.fallbackChainExhausted": { task: "fail" },
+		});
+		settings.setModelRole("task", "fireworks/kimi-k3-fast");
+		settings.setModelRole("default", "fireworks/kimi-k3-fast");
+		const manager = SessionManager.inMemory();
+		manager.appendModelChange("fireworks/kimi-k3-fast", "task");
+		session = new AgentSession({ agent, settings, sessionManager: manager, modelRegistry });
+		await session.prompt("Downgrade Fast, then fail on Standard");
+		await session.waitForIdle();
+		expect(requests).toEqual(["fireworks/kimi-k3-fast", "fireworks/kimi-k3"]);
+		expect(manager.getLastModelChangeRole()).toBe("task");
+		expect(getLastAssistantMessage(session).stopReason).toBe("error");
+		expect(getLastAssistantMessage(session).errorMessage).toContain("worker quota exhausted");
 	});
 
 	it("re-checks context before a cooldown-expiry revert onto a smaller-window model in the auto-continue path", async () => {

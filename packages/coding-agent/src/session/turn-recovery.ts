@@ -1863,7 +1863,11 @@ export class TurnRecovery {
 		currentModel: Model | null | undefined = this.#host.model(),
 		options?: { pinnedRole?: string; roleHint?: string },
 	): string[] {
-		const pinned = options?.pinnedRole ?? this.#activeRetryFallback?.role;
+		// An explicit foreign role (e.g. an advisor) owns a separate walk.
+		const pinned = options?.pinnedRole ??
+			(options?.roleHint && options.roleHint !== this.#activeRetryFallback?.role
+				? undefined
+				: this.#activeRetryFallback?.role);
 		const exhausted = cfgRetryFallbackChainExhausted.get(this.#host.settings);
 		if (pinned && exhausted[pinned] === "fail") return [pinned];
 		const roleHint = options?.roleHint ?? this.#liveRetryRoleHint(currentModel);
@@ -2394,12 +2398,18 @@ export class TurnRecovery {
 		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
 		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);
+		const role = this.#activeRetryFallback?.role ?? this.#liveRetryRoleHint(model);
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		// A capability degrade is fallback routing too, even though it arms no
 		// chain: the base model must not be reported as the configured primary.
 		this.#markFallbackRouted();
 		await this.#host.setModelWithProviderSessionReset(baseModel);
-		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		this.#host.sessionManager.appendModelChange(
+			baseSelector,
+			role && cfgRetryFallbackChainExhausted.get(this.#host.settings)[role] === "fail"
+				? role : EPHEMERAL_MODEL_CHANGE_ROLE,
+			true,
+		);
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
 		await this.#host.syncAfterModelChange(previousEditMode);
 		await this.#host.emitSessionEvent({
