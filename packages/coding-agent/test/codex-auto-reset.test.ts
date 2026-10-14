@@ -20,12 +20,13 @@
  *   consent, live credit eligibility, terminal dedupe, and account cooldown.
  */
 import { describe, expect, it } from "bun:test";
-import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
+import type { ResetCreditAccountStatus, ResetCreditTarget, StoredAuthCredential, UsageReport } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ATTEMPT_COOLDOWN_MS,
 	blockedAttemptKey,
 	type CodexResetPlanInput,
+	enforcedAccountAllowlist,
 	headlessApprovedResetActions,
 	IMMINENT_RESET_EXPIRY_MS,
 	isTerminalRedeemOutcome,
@@ -656,10 +657,9 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	});
 
 	it("never restores a longer-blocked sibling outside the model's discovered account allowlist", () => {
-		// Routing keeps the retry on allowlisted accounts while any stored account is on the list.
 		const active = report({ weeklyResetInMs: 4 * HOUR });
 		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: 6 * DAY });
-		const plan = planCodexResetRedemptions(input([active, sibling], { accountIds: [ACCOUNT_ID] }));
+		const plan = planCodexResetRedemptions(input([active, sibling], { accountAllowlist: new Set([ACCOUNT_ID]) }));
 		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: ACCOUNT_KEY, active: true }]);
 		expect(plan.skipped).toContainEqual({
 			accountKey: "openai-codex|-|2",
@@ -668,11 +668,34 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		});
 	});
 
-	it("ignores a discovered account allowlist that names no stored account", () => {
-		const active = report({ weeklyResetInMs: 4 * HOUR });
-		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: 6 * DAY });
-		const plan = planCodexResetRedemptions(input([active, sibling], { accountIds: ["acct-elsewhere"] }));
-		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: "openai-codex|-|2" }]);
+	describe("enforcedAccountAllowlist", () => {
+		const stored = (id: number, accountId: string): StoredAuthCredential => ({
+			id,
+			provider: "openai-codex",
+			credential: { type: "oauth", access: "a", refresh: "r", expires: NOW + HOUR, accountId },
+			disabledCause: null,
+		});
+		const credentials = [stored(CREDENTIAL_ID, ACCOUNT_ID), stored(2, "acct-sib")];
+
+		it("enforces the allowlist from stored credentials even when the allowlisted account has no usage report", () => {
+			// Routing derives enforcement from stored credentials, so the retry stays on the allowlisted account.
+			const accountAllowlist = enforcedAccountAllowlist([ACCOUNT_ID], credentials, () => true);
+			expect(accountAllowlist).toEqual(new Set([ACCOUNT_ID]));
+			const sibling = report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: 6 * DAY });
+			const plan = planCodexResetRedemptions(input([sibling], { accountAllowlist }));
+			expect(plan.actions).toEqual([]);
+			expect(plan.skipped).toContainEqual({
+				accountKey: "openai-codex|-|2",
+				rule: "blocked-account",
+				reason: "model-account-access",
+			});
+		});
+
+		it("does not enforce an allowlist naming no stored account the session may use", () => {
+			expect(enforcedAccountAllowlist(["acct-elsewhere"], credentials, () => true)).toBeUndefined();
+			expect(enforcedAccountAllowlist([ACCOUNT_ID], credentials, id => id !== CREDENTIAL_ID)).toBeUndefined();
+			expect(enforcedAccountAllowlist(undefined, credentials, () => true)).toBeUndefined();
+		});
 	});
 
 	it("keeps the active account until a sibling skips more than the tolerance longer", () => {
