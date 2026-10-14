@@ -12787,6 +12787,8 @@ export class AgentSession implements SettingsScope {
 	): CodexResetPlan {
 		const cfg = cfgCodexResets.get(this.settings);
 		const model = this.model;
+		// The same allowlist credential routing applies to the retry.
+		const accountAccess = model ? this.#modelRegistry.find(model.provider, model.id)?.accountAccess : undefined;
 		const plan = planCodexResetRedemptions({
 			nowMs: Date.now(),
 			trigger,
@@ -12796,6 +12798,7 @@ export class AgentSession implements SettingsScope {
 			identity,
 			permitsCredential: credentialId =>
 				this.#modelRegistry.authStorage.sessions.permits("openai-codex", this.sessionId, credentialId),
+			accountIds: accountAccess && Object.keys(accountAccess),
 			reports,
 			attemptedKeys: coordinator.attemptedKeys,
 			deferredUntilByKey: coordinator.deferredUntilByKey,

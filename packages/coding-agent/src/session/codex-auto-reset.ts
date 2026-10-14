@@ -73,6 +73,7 @@ import type {
 	UsageReport,
 	UsageResetCreditDetail,
 } from "@oh-my-pi/pi-ai";
+import { oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
 import { codexRankingStrategy } from "@oh-my-pi/pi-ai/usage/openai-codex";
 import type { ResetAutoRedeemMode } from "./settings";
 import { reportMatchesActiveAccount } from "../slash-commands/helpers/active-oauth-account";
@@ -153,6 +154,7 @@ export type CodexResetSkipReason =
 	| "stale-report"
 	| "outside-account-pool"
 	| "plan-ineligible"
+	| "model-account-access"
 	| "not-limit-reached"
 	| "no-exhausted-window"
 	| "deferred"
@@ -187,6 +189,8 @@ export interface CodexResetPlanInput {
 	identity: OAuthAccountIdentity | undefined;
 	/** `blocked-account`: whether a stored credential may serve the blocked session; absent allows every account. */
 	permitsCredential?: (credentialId: number) => boolean;
+	/** `blocked-account`: the blocked model's discovered account allowlist (`Model.accountAccess` keys), as credential routing receives it. */
+	accountIds?: readonly string[];
 	/** Usage reports for ALL stored accounts (one per account for Codex). */
 	reports: UsageReport[] | null;
 	attemptedKeys: ReadonlySet<string>;
@@ -393,20 +397,34 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 	}
 	// Credential routing enforces a model's plan once any account the session may
 	// use is confirmed eligible, and then skips every account not confirmed
-	// eligible; otherwise (trial or grandfathered access) it tries them all. A
-	// restore routing would skip cannot unblock the retry.
+	// eligible; otherwise (trial or grandfathered access) it tries them all. It
+	// enforces a model's discovered account allowlist the same way, once any
+	// stored account is on it. A restore routing would skip cannot unblock the retry.
+	const usableReports = (input.reports ?? []).filter(report => {
+		const credentialId = report.metadata?.resetCreditCredentialId;
+		return (
+			report.provider === "openai-codex" &&
+			typeof credentialId === "number" &&
+			(input.permitsCredential?.(credentialId) ?? true)
+		);
+	});
 	const planGate = codexRankingStrategy.planGate?.({ modelId: input.modelId });
-	const enforcePlan =
-		planGate !== undefined &&
-		(input.reports ?? []).some(report => {
-			const credentialId = report.metadata?.resetCreditCredentialId;
-			return (
+	const enforcePlan = planGate !== undefined && usableReports.some(report => planGate(report) === true);
+	const allowedAccounts = input.accountIds?.length ? new Set(input.accountIds) : undefined;
+	const accessAllows = (identity: { accountId?: string; email?: string }): boolean => {
+		const key = oauthAccountKey(identity);
+		return key !== undefined && allowedAccounts?.has(key) === true;
+	};
+	const enforceAccounts =
+		allowedAccounts !== undefined &&
+		(input.reports ?? []).some(
+			report =>
 				report.provider === "openai-codex" &&
-				typeof credentialId === "number" &&
-				(input.permitsCredential?.(credentialId) ?? true) &&
-				planGate(report) === true
-			);
-		});
+				accessAllows({
+					accountId: typeof report.metadata?.accountId === "string" ? report.metadata.accountId : undefined,
+					email: typeof report.metadata?.email === "string" ? report.metadata.email : undefined,
+				}),
+		);
 
 	const snapshots: AccountSnapshot[] = [];
 	for (const report of input.reports ?? []) {
@@ -492,6 +510,10 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			}
 			if (enforcePlan && snapshot.planEligible !== true) {
 				skip("plan-ineligible");
+				continue;
+			}
+			if (enforceAccounts && !accessAllows(snapshot.target)) {
+				skip("model-account-access");
 				continue;
 			}
 			// Live evidence: the 429 that triggered this pass names the active

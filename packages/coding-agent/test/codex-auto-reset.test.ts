@@ -655,6 +655,26 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		});
 	});
 
+	it("never restores a longer-blocked sibling outside the model's discovered account allowlist", () => {
+		// Routing keeps the retry on allowlisted accounts while any stored account is on the list.
+		const active = report({ weeklyResetInMs: 4 * HOUR });
+		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: 6 * DAY });
+		const plan = planCodexResetRedemptions(input([active, sibling], { accountIds: [ACCOUNT_ID] }));
+		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: ACCOUNT_KEY, active: true }]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|2",
+			rule: "blocked-account",
+			reason: "model-account-access",
+		});
+	});
+
+	it("ignores a discovered account allowlist that names no stored account", () => {
+		const active = report({ weeklyResetInMs: 4 * HOUR });
+		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: 6 * DAY });
+		const plan = planCodexResetRedemptions(input([active, sibling], { accountIds: ["acct-elsewhere"] }));
+		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: "openai-codex|-|2" }]);
+	});
+
 	it("keeps the active account until a sibling skips more than the tolerance longer", () => {
 		const restoredFor = (siblingWaitMs: number) =>
 			planCodexResetRedemptions(
