@@ -700,4 +700,31 @@ describe("model registry discovery header restore", () => {
 		expect(matched.row).toBeDefined();
 		expect(await matched.registry.resolveModelHeaders(matched.row!)).toMatchObject({ "X-Account": "a-1" });
 	});
+
+	test("collapses live pairs before replaying alias owners", async () => {
+		const modelsPath = await writeModelsYaml(
+			[
+				"    models:",
+				"      - id: pair-x",
+				"        name: Pair X",
+				"      - id: pair-x-thinking",
+				"        name: Pair X Thinking",
+				"        reasoning: true",
+				"    modelOverrides:",
+				"      pair-c:",
+				"        headers:",
+				"          X-Account: c-1",
+			].join("\n"),
+			"pair-p",
+		);
+		// A retained cache row records the live pair's raw member id in its own
+		// routing; the live pair must own the alias once collapsed.
+		seedCachedRows([{ id: "pair-c", alias: "pair-x-thinking" }], "pair-p");
+
+		const registry = await reloadFromCache(modelsPath);
+		expect(registry.find("pair-p", "pair-c")).toBeDefined();
+		expect(resolveSessionModelSelector(registry, "pair-p/pair-x-thinking")?.model).toMatchObject({
+			id: "pair-x",
+		});
+	});
 });

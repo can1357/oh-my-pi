@@ -1738,7 +1738,9 @@ export class ModelRegistry {
 			// Live rows own their collapsed-variant aliases (e.g. bundled
 			// cursor/claude-4-sonnet's raw claude-4-sonnet-thinking): claim them for
 			// their owner before the cache cohort registers, so the first-write-wins
-			// alias index cannot steal an alias from its intended owner.
+			// alias index cannot steal an alias from its intended owner. Collapse
+			// first: an automatic X/X-thinking pair only owns its raw member id once
+			// folded into the logical model.
 			const liveRowsForAlias = [
 				...this.#customModelOverlays
 					.filter(model => model.provider === providerConfig.provider)
@@ -1749,7 +1751,7 @@ export class ModelRegistry {
 				...((getBundledModels(providerConfig.provider as Parameters<typeof getBundledModels>[0]) as Model<Api>[]) ??
 					[]),
 			].filter(model => model.provider === providerConfig.provider);
-			registerCollapsedVariantAliases(providerConfig.provider, liveRowsForAlias);
+			collapseBuiltVariants(liveRowsForAlias);
 			const { models: usableCacheModels, hasUnrestoredHeaders } = this.#restoreCachedHeaderModels(
 				providerConfig.provider,
 				cache,
@@ -1759,9 +1761,10 @@ export class ModelRegistry {
 			// `provider/<alias>` select a model that is no longer published. Current
 			// rows supersede earlier cohort claims so a member id can move between
 			// rows across cache generations, but never across live owners: replay the
-			// live rows last so a cached row recording a live alias cannot steal it.
+			// collapsed live rows last so a cached row recording a live alias cannot
+			// steal it.
 			registerCollapsedVariantAliases(providerConfig.provider, usableCacheModels, { replace: true });
-			registerCollapsedVariantAliases(providerConfig.provider, liveRowsForAlias, { replace: true });
+			collapseBuiltVariants(liveRowsForAlias, { replaceAliases: true });
 			const providerOverride = this.#providerOverrides.get(providerConfig.provider);
 			const restoredCacheModels = providerOverride
 				? usableCacheModels.map(model => this.#applyProviderTransportOverrideToModel(model, providerOverride))
