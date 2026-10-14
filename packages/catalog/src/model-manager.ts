@@ -410,8 +410,9 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		authoritativeDynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
 		// A successful online cohort is authoritative for member-id placement:
 		// replay with replacement so a moved raw id stops resolving to the row
-		// that owned it before this refresh.
-		{ replaceAliases: anyRemoteFetchSucceeded },
+		// that owned it before this refresh, and retire claims this cohort no
+		// longer records.
+		{ replaceAliases: anyRemoteFetchSucceeded, retireStale: anyRemoteFetchSucceeded },
 	);
 	const resolutionAuthoritative = !hasRemoteFetcher || remoteResolutionComplete || shouldUseFreshCacheAsAuthoritative;
 	const remoteUpdatedAt = anyRemoteFetchSucceeded ? now() : undefined;

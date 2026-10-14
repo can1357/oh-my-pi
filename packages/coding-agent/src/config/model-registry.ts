@@ -1769,8 +1769,12 @@ export class ModelRegistry {
 			// rows supersede earlier cohort claims so a member id can move between
 			// rows across cache generations, but never across live owners: replay the
 			// collapsed live rows last so a cached row recording a live alias cannot
-			// steal it.
-			registerCollapsedVariantAliases(providerConfig.provider, usableCacheModels, { replace: true });
+			// steal it. The retained cohort is authoritative for its provider's
+			// claims: sources it no longer records are retired.
+			registerCollapsedVariantAliases(providerConfig.provider, usableCacheModels, {
+				replace: true,
+				retireStale: true,
+			});
 			collapseBuiltVariants(liveRowsForAlias, { replaceAliases: true });
 			const providerOverride = this.#providerOverrides.get(providerConfig.provider);
 			const restoredCacheModels = providerOverride

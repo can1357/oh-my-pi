@@ -834,4 +834,35 @@ describe("model registry discovery header restore", () => {
 		const rekeyed = computeHeaderConfigFingerprint(undefined, new Map([["m", { headers: { "X-B": "old-secret" } }]]));
 		expect(rekeyed).not.toBe(original);
 	});
+
+	test("fingerprint tracks partially blanked header declarations", () => {
+		const twoKeys = computeHeaderConfigFingerprint(
+			undefined,
+			new Map([["m", { headers: { "X-A": "v", "X-B": "w" } }]]),
+		);
+		// Blanking one declaration removes that key from the effective layer:
+		// the request path drops it, so the digest must change.
+		const blanked = computeHeaderConfigFingerprint(
+			undefined,
+			new Map([["m", { headers: { "X-A": "v", "X-B": "" } }]]),
+		);
+		expect(blanked).not.toBe(twoKeys);
+	});
+
+	test("retires aliases an authoritative cohort no longer records", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      gateway/model-a:", "        headers:", "          X-Account: a-1"].join("\n"),
+		);
+		// First generation: the row routes the raw member id.
+		seedCachedRows([{ id: "gateway/model-a", alias: "raw-22" }]);
+		const first = await reloadFromCache(modelsPath);
+		expect(first.find("my-provider", "gateway/model-a")).toBeDefined();
+
+		// Second generation keeps the row but drops the routing alias: the stale
+		// claim must be retired so provider/raw-22 stops resolving to it.
+		seedCachedRows([{ id: "gateway/model-a" }]);
+		const second = await reloadFromCache(modelsPath);
+		expect(second.find("my-provider", "gateway/model-a")).toBeDefined();
+		expect(parseModelPattern("my-provider/raw-22", second.getAll("all")).model).toBeUndefined();
+	});
 });

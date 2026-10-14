@@ -194,23 +194,25 @@ export function computeHeaderConfigFingerprint(
 	modelOverrides: ReadonlyMap<string, { headers?: Record<string, string> }> | undefined,
 ): string {
 	// Only effective header-resolution inputs: a headerless override (e.g. a
-	// context-window tweak for an unrelated model) or one with an empty header
-	// map changes no cached row's header composition — the restore hook
-	// discards empty maps too — and must not invalidate restored rows. Values
-	// stay out of the digest: rotating a literal credential rebuilds the same
-	// layer, and the key set is the provenance being pinned.
+	// context-window tweak for an unrelated model) or one whose declarations
+	// are all blank changes no cached row's header composition — the restore
+	// hook discards such maps too. Each key's active/nonblank state is pinned
+	// (the request path drops blank declarations), never its secret value:
+	// rotating a credential rebuilds the same layer.
+	const activeKeys = (headers: Record<string, string> | undefined): string[] | undefined =>
+		headers === undefined
+			? undefined
+			: Object.entries(headers)
+					.filter(([, declaration]) => declaration.trim().length > 0)
+					.map(([key]) => key)
+					.sort();
 	const models = [...(modelOverrides?.entries() ?? [])]
-		.filter(([, override]) => {
-			const headers = override.headers;
-			return headers !== undefined && Object.values(headers).some(declaration => declaration.trim().length > 0);
-		})
-		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-		.map(([id, override]) => [id, Object.keys(override.headers ?? {}).sort()]);
-	const providerHeaders = providerOverride?.headers;
+		.map(([id, override]) => [id, activeKeys(override.headers)] as const)
+		.filter(([, keys]) => keys !== undefined && keys.length > 0)
+		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+	const providerActiveKeys = activeKeys(providerOverride?.headers);
 	const canonical = stableStringifyJson([
-		providerHeaders !== undefined && Object.values(providerHeaders).some(declaration => declaration.trim().length > 0)
-			? Object.keys(providerHeaders).sort()
-			: null,
+		providerActiveKeys !== undefined && providerActiveKeys.length > 0 ? providerActiveKeys : null,
 		providerOverride?.authHeader === true,
 		providerOverride?.apiKey !== undefined,
 		models,

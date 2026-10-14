@@ -1088,7 +1088,7 @@ function resolveCollapsedModelReference(
  */
 export function collapseVariants<TSpec extends VariantSpecLike>(
 	specs: readonly TSpec[],
-	opts?: { table?: VariantCollapseTable; replaceAliases?: boolean },
+	opts?: { table?: VariantCollapseTable; replaceAliases?: boolean; retireStale?: boolean },
 ): TSpec[] {
 	if (opts?.table !== undefined) return collapseWithTable(specs, opts.table);
 	const byProvider = new Map<string, TSpec[]>();
@@ -1114,7 +1114,10 @@ export function collapseVariants<TSpec extends VariantSpecLike>(
 		if (derived.length > 0) {
 			result = collapseWithTable(result, { families: derived });
 		}
-		registerCollapsedVariantAliases(provider, result, { replace: opts?.replaceAliases === true });
+		registerCollapsedVariantAliases(provider, result, {
+			replace: opts?.replaceAliases === true,
+			retireStale: opts?.retireStale === true,
+		});
 		out.push(...result);
 	}
 	retargetCollapsedModelReferences(out);
@@ -1130,7 +1133,7 @@ export function collapseVariants<TSpec extends VariantSpecLike>(
  */
 export function collapseBuiltVariants<TApi extends Api>(
 	models: readonly Model<TApi>[],
-	opts?: { replaceAliases?: boolean },
+	opts?: { replaceAliases?: boolean; retireStale?: boolean },
 ): Model<TApi>[] {
 	const collapsed = collapseVariants(models, opts);
 	const inputRefs = new Set<Model<TApi>>(models);
@@ -1202,6 +1205,24 @@ class VariantAliasIndex {
 		return true;
 	}
 
+	/**
+	 * Retire every dynamic claim whose source an authoritative replacement
+	 * batch does not record: a row that no longer routes a member id must stop
+	 * resolving `provider/<alias>` to it.
+	 */
+	retireUnclaimed(claimedSources: ReadonlySet<string>): void {
+		for (const [key, owner] of [...this.#forward]) {
+			if (claimedSources.has(key)) continue;
+			this.#forward.delete(key);
+			const sources = this.#reverse.get(owner);
+			if (sources) {
+				const at = sources.findIndex(source => source.toLowerCase() === key);
+				if (at >= 0) sources.splice(at, 1);
+				if (sources.length === 0) this.#reverse.delete(owner);
+			}
+		}
+	}
+
 	/** Register a family: its logical id plus every member and extra alias. */
 	addFamily(family: EffortVariantFamily): void {
 		this.#familyIds.add(family.id);
@@ -1251,10 +1272,26 @@ const kAliasIndex = Symbol("compat-collapse.aliasIndex");
 export function registerCollapsedVariantAliases(
 	provider: Provider,
 	specs: readonly VariantSpecLike[],
-	options?: { replace?: boolean },
+	options?: { replace?: boolean; retireStale?: boolean },
 ): void {
 	const providerId = provider.toLowerCase();
 	const replace = options?.replace === true;
+	if (options?.retireStale === true) {
+		const claimedSources = new Set<string>();
+		for (const spec of specs) {
+			const routing = spec.thinking?.effortRouting;
+			if (routing) {
+				for (const effort of VARIANT_ROUTING_KEYS) {
+					const source = routing[effort];
+					if (source && source !== spec.id) claimedSources.add(source.toLowerCase());
+				}
+			}
+			if (spec.requestModelId && spec.requestModelId !== spec.id) {
+				claimedSources.add(spec.requestModelId.toLowerCase());
+			}
+		}
+		dynamicAliasIndexes.get(providerId)?.retireUnclaimed(claimedSources);
+	}
 	// Replace supersedes claims from earlier cohorts only: within one replay
 	// batch the ordinary collapse semantics stay first-write-wins, so a shared
 	// member id keeps pointing at the first row that records it.
