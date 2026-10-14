@@ -85,7 +85,7 @@ function createYieldingSession(
 				type: "tool_execution_end",
 				toolCallId: "tool-yield",
 				toolName: "yield",
-				result: { content: [{ type: "text", text: "Result submitted." }], details: { status: "success" } },
+				result: { content: [{ type: "text", text: "Result submitted." }], details: { status: "success", data: { ok: true } } },
 				isError: false,
 			});
 		},
