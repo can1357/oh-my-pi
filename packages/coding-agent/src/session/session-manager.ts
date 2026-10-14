@@ -897,6 +897,77 @@ function hasToJSONHook(value: object): boolean {
 	}
 	return false;
 }
+/**
+ * Whether any indexed slot of `value` resolves through an accessor — answered
+ * through property descriptors along the prototype chain, never by reading a
+ * slot. A stateful or one-shot indexed getter would otherwise run here and
+ * again when `#lineFor` serializes the array, persisting bytes native
+ * serialization alone never produces. The object-side discipline (see
+ * {@link hasSerializerHook}) applies slot by slot: any accessor-backed array
+ * is left uncached instead.
+ */
+function hasIndexedAccessorSlot(value: unknown[]): boolean {
+	const length = value.length;
+	for (let index = 0; index < length; index++) {
+		const slot = String(index);
+		let current: object | null = value;
+		while (current !== null) {
+			const descriptor = Object.getOwnPropertyDescriptor(current, slot);
+			if (descriptor !== undefined) {
+				if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
+				break;
+			}
+			current = Object.getPrototypeOf(current);
+		}
+	}
+	return false;
+}
+/**
+ * The projector-visible `result` of an `image_generation_call` node as
+ * `truncateForPersistence` accepts it — through the prototype chain, but only
+ * from a string-valued data descriptor. Answered without invoking anything:
+ * an accessor anywhere on the chain yields `undefined` rather than running
+ * user code, so a stateful getter keeps the node out of the stamp (see
+ * {@link hasSerializerHook}) instead of shifting what serialization observes.
+ * Mirrors `projectorImageField` in session-persistence.ts for the `data` key.
+ */
+function projectorGenerationResult(value: object): string | undefined {
+	let current: object | null = value;
+	while (current !== null) {
+		const descriptor = Object.getOwnPropertyDescriptor(current, "result");
+		if (descriptor !== undefined) {
+			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return undefined;
+			return typeof descriptor.value === "string" ? descriptor.value : undefined;
+		}
+		current = Object.getPrototypeOf(current);
+	}
+	return undefined;
+}
+/**
+ * Whether `value` is a toolResult `details` node whose `structuredContent` the
+ * persistence projection removes before serialization — the mirror of
+ * `stripSpilledMcpStructuredContent`'s predicate in
+ * session-persistence.ts. The memo's three walks (hook probe, stamp, matcher)
+ * must all apply it: the projected line never contains the field, so a hook
+ * or cycle beneath it can neither reach the persisted bytes nor be allowed
+ * to overflow a walk of the live graph. Reads through property descriptors
+ * only where the answer must not invoke user code; the `meta.truncation`
+ * spine is reached by key from a descriptor-read root because the hook probe
+ * — which runs before every stamp — already leaves any accessor-backed
+ * graph uncached.
+ */
+function isMcpSpillStrippedDetails(value: object, key?: string): boolean {
+	if (key !== "details" || !Object.hasOwn(value, "structuredContent")) return false;
+	const serverName = Object.getOwnPropertyDescriptor(value, "serverName")?.value;
+	const mcpToolName = Object.getOwnPropertyDescriptor(value, "mcpToolName")?.value;
+	if (typeof serverName !== "string" || typeof mcpToolName !== "string") return false;
+	const meta = Object.getOwnPropertyDescriptor(value, "meta")?.value;
+	if (meta === null || typeof meta !== "object" || Array.isArray(meta)) return false;
+	const truncation = (meta as Record<string, unknown>).truncation;
+	if (truncation === null || typeof truncation !== "object" || Array.isArray(truncation)) return false;
+	const artifactId = (truncation as Record<string, unknown>).artifactId;
+	return typeof artifactId === "string" && artifactId.length > 0;
+}
 
 /**
  * Whether `value`'s JSON graph passes through a `toJSON` serializer hook — or
@@ -932,12 +1003,24 @@ function hasSerializerHook(value: unknown, key?: string): boolean {
 	// and a rawJSON node as its payload, neither of which can harbor a hook.
 	if (unboxedPrimitive(value) !== undefined || rawJsonPayload(value) !== undefined) return false;
 	if (Array.isArray(value)) {
+		// Indexed slots first pass through the accessor scan: a stateful or
+		// one-shot indexed getter must leave the graph uncached before the
+		// recursion below reads any slot.
+		if (hasIndexedAccessorSlot(value)) return true;
 		const length = value.length;
 		for (let index = 0; index < length; index++) {
 			if (hasSerializerHook(value[index])) return true;
 		}
 		return false;
 	}
+	// Mirror the persistence projection's MCP spill strip
+	// (`stripSpilledMcpStructuredContent`): when a toolResult's details carries
+	// the spill markers, `structuredContent` is removed before serialization,
+	// so a hook beneath it cannot reach the persisted bytes — and the live
+	// graph may be cyclic where the projection is not. A stateful `meta`
+	// getter would shift serialization if read, so the object loop below
+	// answers it through the descriptor and leaves the graph uncached.
+	const skipStructuredContent = isMcpSpillStrippedDetails(value, key);
 	// Mirror the projection's stripping boundary: a hook beneath a stripped key
 	// cannot affect the persisted bytes — and the live value may be cyclic
 	// where the projection is not.
@@ -948,7 +1031,20 @@ function hasSerializerHook(value: unknown, key?: string): boolean {
 	// no own key moving. Leave the graph uncached so the line is always
 	// re-projected from the live bytes.
 	if (projectorImageField(value, "data") !== undefined && !Object.hasOwn(value, "data")) return true;
+	// Same for an `image_generation_call` whose `result` rides an inherited or
+	// non-enumerable data descriptor: `truncateForPersistence` reads it via
+	// `"result" in obj` and rewrites it into an own blob ref, but the own-key
+	// stamp cannot see the backing field — and a longer inherited `result`
+	// chain could itself harbor an accessor the stamp would invoke. Leave the
+	// graph uncached so the line is always re-projected from the live input.
+	if (
+		Object.getOwnPropertyDescriptor(value, "type")?.value === "image_generation_call" &&
+		projectorGenerationResult(value) !== undefined &&
+		Object.getOwnPropertyDescriptor(value, "result") === undefined
+	)
+		return true;
 	for (const childKey of Object.keys(value)) {
+		if (skipStructuredContent && childKey === "structuredContent") continue;
 		if (!atomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
 		// Never read through an accessor: the child lookup below would invoke
 		// the getter, and a stateful one then yields a different value when
@@ -988,29 +1084,34 @@ const STAMP_TRANSIENT = Symbol("stamp.transient");
  * instead — hooked graphs are left uncached (see {@link hasSerializerHook}) —
  * so only hookless wrappers reach here.
  *
- * `instanceof` alone is not the brand: a proxy around a wrapper or an object
- * built on `Number.prototype` passes the chain check while carrying no
- * `[[NumberData]]` slot, so `valueOf()` throws on it — while the serializer
- * accepts it as `{}`. The intrinsic call below is the brand check, answered
- * without invoking an override: only a genuine wrapper unboxes, and anything
- * else falls through to the object walk.
+ * The intrinsic call is the brand check, answered without invoking an
+ * override: only a genuine wrapper unboxes, and anything else falls through
+ * to the object walk. There is deliberately no `instanceof` gate: it answers
+ * the wrong question twice — a proxy around a wrapper or an object built on
+ * `Number.prototype` passes the chain check while carrying no `[[NumberData]]`
+ * slot, so `valueOf()` throws on it while the serializer accepts it as `{}`;
+ * and a wrapper from another realm (a `node:vm` context, an iframe) fails the
+ * local-realm chain check although `valueOf` succeeds and `JSON.stringify`
+ * emits the primitive. The `Symbol.toStringTag` dispatch below narrows the
+ * candidates first so plain objects never pay for a throwing intrinsic call.
  */
 function unboxedPrimitive(value: object): number | string | boolean | undefined {
-	if (value instanceof Number) {
+	const tag = Object.prototype.toString.call(value);
+	if (tag === "[object Number]") {
 		try {
 			return Number.prototype.valueOf.call(value);
 		} catch {
 			return undefined;
 		}
 	}
-	if (value instanceof String) {
+	if (tag === "[object String]") {
 		try {
 			return String.prototype.valueOf.call(value);
 		} catch {
 			return undefined;
 		}
 	}
-	if (value instanceof Boolean) {
+	if (tag === "[object Boolean]") {
 		try {
 			return Boolean.prototype.valueOf.call(value);
 		} catch {
@@ -1094,8 +1195,14 @@ function messageValueStamp(value: unknown, out: unknown[] = [], key?: string): u
 		// its key-stripping loop, so transient keys inside one reach the line and
 		// must be stamped. Only non-atomic containers strip them.
 		const atomic = isAtomicPersistenceNode(value, key);
+		// The MCP spill strip removes `structuredContent` before serialization
+		// (see `isMcpSpillStrippedDetails`), so the field is skipped outright:
+		// unlike the transient keys below it forces no rebuild pass, and the
+		// live graph may be cyclic where the projection is not.
+		const skipStructuredContent = isMcpSpillStrippedDetails(value, key);
 		out.push(STAMP_OBJECT);
 		for (const childKey of Object.keys(fields)) {
+			if (skipStructuredContent && childKey === "structuredContent") continue;
 			// Stripped from the persisted line by `truncateForPersistence` before
 			// serialization, so the projected bytes never depend on the value —
 			// but the key's presence alone forces the rebuild pass that drops it
@@ -1163,7 +1270,12 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 				// inside atomic nodes (persistence keeps them) and as
 				// presence-only markers elsewhere.
 				const atomic = isAtomicPersistenceNode(live, key);
+				// The stamp skipped the MCP-stripped field outright (see
+				// {@link messageValueStamp}), so the matcher skips it too —
+				// the value was never recorded and may be cyclic.
+				const skipStructuredContent = isMcpSpillStrippedDetails(live, key);
 				for (const childKey of Object.keys(fields)) {
+					if (skipStructuredContent && childKey === "structuredContent") continue;
 					// Stripped before serialization by `truncateForPersistence`,
 					// so only the key's presence was recorded — its value was
 					// never walked (and may be cyclic) — see

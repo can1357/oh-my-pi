@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, type Mock } from "bun:test";
 import * as path from "node:path";
+import * as vm from "node:vm";
 import { TempDir, __resetDirsFromEnvForTests, getBlobsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { parseBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -816,5 +817,176 @@ describe("SessionManager entry-line memo", () => {
 		const bodyAfterSecond = storage.readTextSync(sessionFile);
 		expect(bodyAfterSecond).toContain('"seq":2');
 		expect(bodyAfterSecond).not.toContain('"seq":1');
+	});
+	it("persists a stateful indexed getter's serialization-observed values instead of the probe-shifted ones", async () => {
+		// The opaque `details` slot can hold a signed object with a nested
+		// array whose slot resolves through a getter that yields a fresh
+		// payload on every read. The hook pre-scan must answer through the
+		// indexed property's descriptor, never by reading the slot: each probe
+		// read shifts the sequence, so the persisted line carries values
+		// native serialization alone never produces.
+		let calls = 0;
+		const slots: unknown[] = [];
+		Object.defineProperty(slots, "0", {
+			enumerable: true,
+			configurable: true,
+			get() {
+				calls++;
+				return `slot-payload-${calls}`;
+			},
+		});
+		slots.length = 1;
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-indexed-getter",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: { type: "thinking", thinkingSignature: "sig-fix15222-indexed", items: slots },
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// One atomic publish performs two full-body serializations (materialize,
+		// then commit), so the getter runs exactly twice and the persisted line
+		// carries the second serialization's payload — a probe that reads the
+		// slot runs it four times and persists slot-payload-4.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(calls).toBe(2);
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"items":["slot-payload-2"]');
+	});
+	it("rewrites a spilled MCP tool result whose stripped structuredContent is cyclic", async () => {
+		// An extension-created tool result with the MCP spill markers and a
+		// cyclic `details.structuredContent` was previously persistable:
+		// `stripSpilledMcpStructuredContent` removes the field before
+		// serialization. The hook pre-scan must mirror that strip — walking
+		// the original graph recurses into the cycle, overflows the stack, and
+		// latches a persistence failure on every full rewrite.
+		const structuredContent: Record<string, unknown> = { rows: [{ id: 1 }] };
+		structuredContent.self = structuredContent;
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-cyclic-spill",
+			toolName: "mcp-tool",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: {
+				serverName: "fix15222-server",
+				mcpToolName: "fix15222-tool",
+				structuredContent,
+				meta: { truncation: { artifactId: "artifact-fix15222" } },
+			},
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// Full rewrite succeeds: the persisted line drops the stripped field
+		// and carries the surviving markers — no latched failure, no truncated
+		// body.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		expect(body).not.toContain("structuredContent");
+		expect(body).toContain('"mcpToolName":"fix15222-tool"');
+	});
+	it("persists the new value of a foreign-realm boxed-number detail changed in place", async () => {
+		// A `node:vm`-created `Number` wrapper fails the local-realm
+		// `instanceof` gate although `Number.prototype.valueOf` succeeds and
+		// `JSON.stringify` emits the primitive. The stamp must answer the
+		// unbox question with the intrinsic brand check alone: a realm-gated
+		// stamp records both values as the same empty object and reuses the
+		// line containing `1` after the swap to `2`.
+		const foreignNumber = (source: string): unknown => vm.runInNewContext(source) as unknown;
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		const messageId = session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-foreign-number",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: foreignNumber("new Number(1)"),
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the persisted body carries the original boxed value.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain('"details":1');
+
+		// Swap the foreign-realm boxed value in place.
+		const entry = session.getEntries().find(e => e.id === messageId);
+		if (!entry || entry.type !== "message" || entry.message.role !== "toolResult") {
+			throw new Error("Expected toolResult message entry");
+		}
+		entry.message.details = foreignNumber("new Number(2)");
+
+		// Second rewrite: the persisted body carries `2`, not the stale `1`.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"details":2');
+		expect(bodyAfterSecond).not.toContain('"details":1');
+	});
+	it("persists the current blob ref of a class-backed image_generation_call mutated in place", async () => {
+		// An extension can supply a class-backed `image_generation_call`
+		// whose oversized `result` rides an inherited data descriptor.
+		// `truncateForPersistence` reads it via `"result" in obj` and rewrites
+		// it into an own blob ref, but an own-key stamp cannot see the backing
+		// field: mutating it leaves the stamp equal, so a rewrite reuses the
+		// previous ref and reload restores the old generated image. The memo
+		// leaves such nodes uncached so the line is always re-projected from
+		// the live input.
+		const backing = { result: LARGE_BASE64 };
+		class GenerationCall {
+			readonly type = "image_generation_call" as const;
+		}
+		Object.setPrototypeOf(GenerationCall.prototype, backing);
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		const messageId = session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-generation",
+			toolName: "image",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: { generation: new GenerationCall() },
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the live result is externalized to a blob ref.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		const refsAfterFirst = persistedBlobRefs(bodyAfterFirst);
+		expect(refsAfterFirst).toHaveLength(1);
+		const originalRef = refsAfterFirst[0];
+		if (!originalRef) throw new Error("Expected blob reference");
+		expect(await blobBytesBase64(originalRef)).toBe(LARGE_BASE64);
+
+		// Mutate the backing result behind the inherited descriptor: no own
+		// key changes, so an own-key stamp still matches the original line.
+		const entry = session.getEntries().find(e => e.id === messageId);
+		if (!entry || entry.type !== "message" || entry.message.role !== "toolResult") {
+			throw new Error("Expected toolResult message entry");
+		}
+		const mutatedBase64 = "C".repeat(2048);
+		backing.result = mutatedBase64;
+
+		// Second rewrite: the persisted line carries a new ref for the new
+		// bytes — reloading restores the mutated image, not the previous one.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		const refsAfterSecond = persistedBlobRefs(bodyAfterSecond);
+		expect(refsAfterSecond).toHaveLength(1);
+		const mutatedRef = refsAfterSecond[0];
+		if (!mutatedRef) throw new Error("Expected blob reference");
+		expect(mutatedRef).not.toBe(originalRef);
+		expect(await blobBytesBase64(mutatedRef)).toBe(mutatedBase64);
+		expect(bodyAfterSecond).not.toContain(originalRef);
 	});
 });
