@@ -163,18 +163,44 @@ describe("BashExecutionComponent PTY SIXEL", () => {
 		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
 
 		// The PTY executor decodes every frame it saw into an image as well; the
-		// raw payload already rasterizes in the host terminal, so the decode is
-		// dropped instead of drawn a second time below the output.
+		// raw payload already rasterizes in the host terminal, so the sixel
+		// decode is dropped instead of drawn a second time below the output.
 		const component = new BashExecutionComponent("img", ui, false);
 		component.appendPtyChunk(`${SIXEL}\r\nvisible\r\n`);
 		component.setComplete(0, false, {
-			images: [{ type: "image", data: PNG, mimeType: "image/png" }],
+			images: [{ type: "image", data: PNG, mimeType: "image/png", source: "sixel" }],
 			showImages: false,
 		});
 
 		const text = await renderUntil(component, () => component.isTranscriptBlockFinalized());
 		expect(text).toContain(SIXEL);
 		expect(text).not.toContain("[Image:");
+	});
+
+	it("keeps a Kitty decode beside a raw sixel payload", async () => {
+		// #15327 round 8 item 4: one command can emit both a raw SIXEL frame
+		// and a Kitty frame. Only the sixel decode is a duplicate of the raw
+		// render; the Kitty APC was already consumed by the replay terminal,
+		// so its decode is the only rendering and must stay visible.
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		const component = new BashExecutionComponent("img", ui, false);
+		component.appendPtyChunk(`${SIXEL}\r\nvisible\r\n`);
+		component.setComplete(0, false, {
+			images: [
+				{ type: "image", data: PNG, mimeType: "image/png", source: "sixel" },
+				{ type: "image", data: PNG, mimeType: "image/png", source: "kitty" },
+			],
+			showImages: false,
+		});
+
+		const text = await renderUntil(component, () => component.isTranscriptBlockFinalized());
+		expect(text).toContain(SIXEL);
+		// The sixel fallback is gone; exactly one image fallback (the Kitty
+		// decode) renders below the output.
+		expect(text.match(/\[Image:/g)).toHaveLength(1);
 	});
 
 	it("renders the payload raw and uncapped with no expand hint", async () => {

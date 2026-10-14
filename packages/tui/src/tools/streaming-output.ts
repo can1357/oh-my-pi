@@ -1070,7 +1070,7 @@ export class OutputSink {
 		// cap applies to it; the complete chunk still mirrors to the artifact.
 		const bufferSpans: RawSixelSegment[] = substituted ? [{ kind: "text", text: inlineChunk }] : spans;
 
-		this.#store(chunk, bufferSpans, substituted);
+		this.#store(chunk, bufferSpans, joinSixelSegments(bufferSpans), substituted);
 
 		// Throttled onChunk: coalesce chunks arriving inside the throttle window.
 		// A timer flushes quiet tails at the throttle boundary; dump() catches a
@@ -1093,7 +1093,8 @@ export class OutputSink {
 		if (!isSixelPassthroughEnabled()) return;
 		const held = this.#sixelParser.finish();
 		if (held.length === 0) return;
-		this.#store(joinSixelSegments(held), this.#sanitizeSpans(held), false);
+		const sanitized = this.#sanitizeSpans(held);
+		this.#store(joinSixelSegments(held), sanitized, joinSixelSegments(sanitized), false);
 	}
 
 	/** Sanitize the text spans of a split, leaving payload spans byte-for-byte. */
@@ -1105,19 +1106,20 @@ export class OutputSink {
 
 	/**
 	 * Count, cap, mirror, and retain one sanitized chunk split into spans. The
-	 * complete chunk — payloads included — is mirrored to the artifact before any
-	 * cap is applied.
+	 * raw chunk is mirrored to the artifact before any cap is applied; the
+	 * totals count the normalized content, so elision compares the bytes the
+	 * inline view actually holds.
 	 */
-	#store(chunk: string, spans: readonly RawSixelSegment[], substituted: boolean): void {
-		const rawBytes = Buffer.byteLength(chunk, "utf-8");
-		this.#totalBytes += rawBytes;
+	#store(chunk: string, spans: readonly RawSixelSegment[], content: string, substituted: boolean): void {
+		const normalizedBytes = Buffer.byteLength(content, "utf-8");
+		this.#totalBytes += normalizedBytes;
 		// Line the chunk starts on, as numbered in the artifact; 0 when the capped
 		// inline text is a substitute whose lines do not map onto the artifact.
 		let line = substituted ? 0 : this.#totalLines + 1;
 
-		if (chunk.length > 0) {
+		if (content.length > 0) {
 			this.#sawData = true;
-			this.#totalLines += countNewlines(chunk);
+			this.#totalLines += countNewlines(content);
 		}
 
 		// Per-line column cap. State persists across chunks so a mid-line split
@@ -1135,6 +1137,17 @@ export class OutputSink {
 				const payloadBytes = Buffer.byteLength(span.payload, "utf-8");
 				inlineBytes += payloadBytes;
 				cappedBytes += payloadBytes;
+				// A multi-row frame still moves the cursor: advance the cap's
+				// line state for the newlines inside the payload so the text
+				// after it is capped on its own row, not the pre-frame one.
+				// The payload bytes themselves stay exempt.
+				if (span.payload.includes(NL)) {
+					if (line > 0) line += countNewlines(span.payload);
+					this.#currentLineBytes = 0;
+					this.#columnEllipsisAdded = false;
+				} else if (line > 0) {
+					line += countNewlines(span.payload);
+				}
 				retained.push(span);
 				continue;
 			}
@@ -1212,10 +1225,13 @@ export class OutputSink {
 	 * Retain a complete payload outside the spill window. It goes into the head
 	 * window while one is still draining and the payload fits what is left of
 	 * it, so the stream keeps its order, and into the tail window otherwise;
-	 * either way it is never sliced. Parking an oversized payload in the head
-	 * is what starves the tail: head bytes are subtracted from the spill
-	 * threshold, so a frame past the remaining room would zero the tail budget
-	 * and drop every text region that follows it.
+	 * either way it is never sliced. Once a payload has gone to the tail the
+	 * head stays closed — like {@link #retainText} — because the composed body
+	 * is `head + tail`, so a later payload in the head would be emitted ahead
+	 * of an earlier payload that arrived first. Parking an oversized payload in
+	 * the head is what starves the tail: head bytes are subtracted from the
+	 * spill threshold, so a frame past the remaining room would zero the tail
+	 * budget and drop every text region that follows it.
 	 */
 	#retainSixel(payload: string): void {
 		const payloadBytes = Buffer.byteLength(payload, "utf-8");
@@ -1223,6 +1239,7 @@ export class OutputSink {
 		if (
 			this.#headLimit > 0 &&
 			!this.#headRetentionDisabled &&
+			!this.#tailWindowOpened &&
 			room > 0 &&
 			// Slicing the payload is out of the question; taking more than the
 			// room that is left is.
