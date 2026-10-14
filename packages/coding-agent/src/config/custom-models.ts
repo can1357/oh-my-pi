@@ -194,10 +194,14 @@ export function computeHeaderConfigFingerprint(
 	modelOverrides: ReadonlyMap<string, { headers?: Record<string, string> }> | undefined,
 ): string {
 	// Only effective header-resolution inputs: a headerless override (e.g. a
-	// context-window tweak for an unrelated model) changes no cached row's
-	// header composition and must not invalidate restored rows.
+	// context-window tweak for an unrelated model) or one with an empty header
+	// map changes no cached row's header composition — the restore hook
+	// discards empty maps too — and must not invalidate restored rows.
 	const models = [...(modelOverrides?.entries() ?? [])]
-		.filter(([, override]) => override.headers !== undefined)
+		.filter(([, override]) => {
+			const headers = override.headers;
+			return headers !== undefined && Object.values(headers).some(declaration => declaration.trim().length > 0);
+		})
 		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
 		.map(([id, override]) => [id, override.headers ?? null]);
 	const canonical = stableStringifyJson([

@@ -753,6 +753,16 @@ describe("model registry discovery header restore", () => {
 		const base = computeHeaderConfigFingerprint(undefined, new Map());
 		const withHeaderless = computeHeaderConfigFingerprint(undefined, new Map([["unrelated", {}]]));
 		expect(withHeaderless).toBe(base);
+		// Explicit empty or blank-only header maps are discarded by the restore
+		// hook as well and must not invalidate restored rows either.
+		const withEmptyHeaders = computeHeaderConfigFingerprint(
+			undefined,
+			new Map<string, { headers?: Record<string, string> }>([
+				["unrelated", { headers: {} }],
+				["blank", { headers: { "X-Blank": " " } }],
+			]),
+		);
+		expect(withEmptyHeaders).toBe(base);
 	});
 
 	test("resolves raw member ids within their own registry", async () => {
