@@ -905,12 +905,7 @@ try {
 					overlay: "explicit-value",
 					posixAlias: process.platform === "win32" ? null : "ordinary-posix-alias",
 				};
-				expect(
-					stdout
-						.trim()
-						.split("\n")
-						.map(line => JSON.parse(line)),
-				).toEqual([
+				expect(Bun.JSONL.parse(stdout.trim())).toEqual([
 					{ backend: "shell", observed, inheritedMarkers: [], hostFd: "3", hostMode: "advanced" },
 					{ backend: "argv", observed, inheritedMarkers: [], hostFd: "3", hostMode: "advanced" },
 				]);
