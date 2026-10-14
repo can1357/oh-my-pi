@@ -230,6 +230,23 @@ describe("tokenizeShellSegments", () => {
 		]);
 	});
 
+	it("reads a dollar-single-quote string as plain quoting when ANSI-C quoting is off", () => {
+		// dash: `$'a\\'` is a literal dollar and the word `a\\`, so the semicolon after it splits.
+		expect(tokenizeShellSegments("echo $'a\\'; sudo whoami", { ansiC: false })).toEqual([
+			["echo", "$a\\"],
+			["sudo", "whoami"],
+		]);
+		expect(tokenizeShellSegments("echo $'a\\'; sudo whoami")).toEqual([["echo", "$a\\'; sudo whoami"]]);
+	});
+
+	it("starts no comment at a hash when comments are off", () => {
+		expect(tokenizeShellSegments("echo @(#); sudo whoami", { comments: false })).toEqual([
+			["echo", "@"],
+			["#"],
+			["sudo", "whoami"],
+		]);
+	});
+
 	it("does not open a quote inside a comment", () => {
 		// Codex review: a `#` comment runs to end of line and the `$'\'`
 		// inside it opens nothing, so `sudo whoami` on the next line stays a
