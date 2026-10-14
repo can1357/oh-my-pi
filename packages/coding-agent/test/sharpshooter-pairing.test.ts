@@ -93,7 +93,7 @@ describe("sharpshooter paired with a store backend", () => {
 		await Bun.write(path.join(bankDir, "architecture.md"), "- Keep storage project-scoped.\n");
 
 		const paired = withSharpshooter(stubPrimary([]));
-		const instructions = await paired.buildDeveloperInstructions(agentDir, settings);
+		const instructions = await paired.buildDeveloperInstructions(agentDir, cwd, settings);
 		expect(instructions).toContain("PRIMARY INSTRUCTIONS");
 		expect(instructions).toContain("Keep storage project-scoped.");
 	});
@@ -138,7 +138,9 @@ describe("sharpshooter paired with a store backend", () => {
 			},
 		};
 		const paired = withSharpshooter(failing);
-		await expect(paired.buildDeveloperInstructions("/agent", {} as never)).rejects.toThrow("instructions failed");
+		await expect(paired.buildDeveloperInstructions("/agent", "/cwd", {} as never)).rejects.toThrow(
+			"instructions failed",
+		);
 		expect(seen).toEqual(["sharpshooter"]);
 	});
 
@@ -439,7 +441,9 @@ describe("sharpshooter paired with a store backend", () => {
 		const paired = withSharpshooter(failing);
 		// Pairing must not turn a real failure into a logged one the caller never sees.
 		await expect(paired.enqueue("/agent", "/cwd")).rejects.toThrow("retain failed");
-		await expect(paired.buildDeveloperInstructions("/agent", {} as never)).rejects.toThrow("instructions failed");
+		await expect(paired.buildDeveloperInstructions("/agent", "/cwd", {} as never)).rejects.toThrow(
+			"instructions failed",
+		);
 	});
 
 	it("keeps the primary working when the paired backend throws", async () => {
@@ -449,7 +453,9 @@ describe("sharpshooter paired with a store backend", () => {
 		});
 		const calls: string[] = [];
 		const paired = withSharpshooter(stubPrimary(calls));
-		await expect(paired.buildDeveloperInstructions("/agent", {} as never)).resolves.toBe("PRIMARY INSTRUCTIONS");
+		await expect(paired.buildDeveloperInstructions("/agent", "/cwd", {} as never)).resolves.toBe(
+			"PRIMARY INSTRUCTIONS",
+		);
 		await paired.start(startOptions());
 		expect(calls).toContain("start");
 	});
