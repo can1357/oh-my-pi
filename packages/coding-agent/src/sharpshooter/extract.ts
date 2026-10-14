@@ -53,6 +53,7 @@ const kExtractionInFlight = Symbol("sharpshooter.extractionInFlight");
 const kExtractionInFlightMessage = Symbol("sharpshooter.extractionInFlightMessage");
 const kExtractionHandledMessages = Symbol("sharpshooter.extractionHandledMessages");
 const kExtractionPendingQueue = Symbol("sharpshooter.extractionPendingQueue");
+const kExtractionParked = Symbol("sharpshooter.extractionParked");
 
 export interface SharpshooterExtractionOptions {
 	session: AgentSession;
@@ -79,7 +80,16 @@ export interface PendingExtraction {
 	 * referent context and attribute the prompt's decisions to the wrong turns.
 	 */
 	envelope: SharpshooterEnvelope;
+	/**
+	 * Captured at drop time. `/new` or a session switch can change `session.sessionId`
+	 * before the slot drains; stamping the retried deltas with the new id would file a
+	 * prompt from one session under another, and the consolidator groups by session.
+	 */
+	sessionId: string;
 }
+
+/** What a retried prompt carries from the moment it was dropped. */
+export type ExtractionRetry = Pick<PendingExtraction, "cwd" | "envelope" | "sessionId">;
 
 // Bound the model spend a burst of dropped prompts can trigger after the
 // slot clears; beyond this the newest prompts are still transcript history
@@ -110,6 +120,13 @@ interface ExtractionHost extends AgentSession {
 	[kExtractionHandledMessages]?: WeakSet<AgentMessage>;
 	/** Prompts dropped while the slot was busy, retried in order when it clears. */
 	[kExtractionPendingQueue]?: PendingExtraction[];
+	/**
+	 * Set while the queue waits for the leg that replaces the released one. An
+	 * extraction that settles in that window must not drain it: with no subscription
+	 * the queued prompts have no leg, and if pairing is switched off meanwhile they
+	 * would be extracted after it was disabled.
+	 */
+	[kExtractionParked]?: true;
 }
 
 /**
@@ -120,10 +137,10 @@ interface ExtractionHost extends AgentSession {
 async function drainSharpshooterExtractionQueue(session: AgentSession): Promise<void> {
 	const host = session as ExtractionHost;
 	for (;;) {
-		if (session.isDisposed || host[kExtractionInFlight]) return;
+		if (session.isDisposed || host[kExtractionInFlight] || host[kExtractionParked]) return;
 		const pending = host[kExtractionPendingQueue]?.shift();
 		if (!pending) return;
-		maybeStartSharpshooterExtraction(pending.options, pending.cwd, pending.envelope);
+		maybeStartSharpshooterExtraction(pending.options, pending);
 		if (host[kExtractionInFlight]) await host[kExtractionInFlight];
 	}
 }
@@ -134,7 +151,17 @@ async function drainSharpshooterExtractionQueue(session: AgentSession): Promise<
  * prompt for a project the session no longer pairs with.
  */
 export function clearPendingSharpshooterExtraction(session: AgentSession): void {
-	delete (session as ExtractionHost)[kExtractionPendingQueue];
+	const host = session as ExtractionHost;
+	delete host[kExtractionPendingQueue];
+	delete host[kExtractionParked];
+}
+
+/**
+ * Keep the queue for the leg that is about to replace the released one, and stop it
+ * from draining until that leg takes it. The caller owns clearing it if no leg arrives.
+ */
+export function parkPendingSharpshooterQueue(session: AgentSession): void {
+	(session as ExtractionHost)[kExtractionParked] = true;
 }
 
 /**
@@ -149,6 +176,7 @@ export function takePendingSharpshooterQueue(session: AgentSession): PendingExtr
 	const host = session as ExtractionHost;
 	const queue = host[kExtractionPendingQueue] ?? [];
 	delete host[kExtractionPendingQueue];
+	delete host[kExtractionParked];
 	return queue;
 }
 
@@ -277,12 +305,11 @@ export async function resolveSharpshooterModel(
 
 /**
  * Start best-effort extraction for one committed user prompt without blocking the caller.
- * `snapshot` is the envelope a queued retry captured at drop time; fresh starts omit it.
+ * `retry` is what a queued prompt captured at drop time; fresh starts omit it.
  */
 export function maybeStartSharpshooterExtraction(
 	options: SharpshooterExtractionOptions,
-	forcedCwd?: string,
-	snapshot?: SharpshooterEnvelope,
+	retry?: ExtractionRetry,
 ): void {
 	try {
 		const { session } = options;
@@ -315,12 +342,17 @@ export function maybeStartSharpshooterExtraction(
 				});
 				return;
 			}
-			const queued = snapshot ?? buildSharpshooterEnvelope(session.messages, options.message);
+			const queued = retry?.envelope ?? buildSharpshooterEnvelope(session.messages, options.message);
 			if (!queued) return;
-			queue.push({ cwd: forcedCwd ?? session.sessionManager.getCwd(), options, envelope: queued });
+			queue.push({
+				cwd: retry?.cwd ?? session.sessionManager.getCwd(),
+				options,
+				envelope: queued,
+				sessionId: retry?.sessionId ?? session.sessionId,
+			});
 			return;
 		}
-		const envelope = snapshot ?? buildSharpshooterEnvelope(session.messages, options.message);
+		const envelope = retry?.envelope ?? buildSharpshooterEnvelope(session.messages, options.message);
 		if (!envelope) return;
 		const trimmedPrompt = envelope.prompt.trim();
 		if (trimmedPrompt.startsWith("/")) return;
@@ -334,8 +366,8 @@ export function maybeStartSharpshooterExtraction(
 
 		// Bind the bank now. The model call below can outlive a `/move`, and the
 		// deltas belong to the project whose prompt produced them.
-		const cwd = forcedCwd ?? session.sessionManager.getCwd();
-		const run = runSharpshooterExtraction(options, envelope, cwd)
+		const cwd = retry?.cwd ?? session.sessionManager.getCwd();
+		const run = runSharpshooterExtraction(options, envelope, cwd, retry?.sessionId ?? session.sessionId)
 			.catch(error => {
 				logger.debug("Sharpshooter extraction failed", {
 					error: String(error),
@@ -371,6 +403,8 @@ async function runSharpshooterExtraction(
 	 * source project is not a decision about the destination.
 	 */
 	cwd: string,
+	/** The session the prompt was written in; deltas are stamped with it, not with the live id. */
+	promptSessionId: string,
 ): Promise<void> {
 	const { session, settings, modelRegistry, agentDir } = options;
 	const model = await resolveSharpshooterModel(settings, modelRegistry);
@@ -408,7 +442,7 @@ async function runSharpshooterExtraction(
 			continue;
 		}
 		for (const candidate of args.deltas) {
-			const delta = admitDelta(candidate, envelope.prompt, session.sessionId);
+			const delta = admitDelta(candidate, envelope.prompt, promptSessionId);
 			if (!delta) continue;
 			if (session.isDisposed) return;
 			await appendSharpshooterDelta(agentDir, cwd, delta);

@@ -358,6 +358,17 @@ export class SessionMemory {
 	}
 
 	/**
+	 * The reason a backend start decided now should carry. A session cwd that has moved
+	 * past the applied one means the start IS the move's rebind, not a fresh start, and
+	 * must not catch up on the transcript the source project left behind. Evaluate it
+	 * right before the start, after the last await: a move can land during a teardown
+	 * or a lazy backend import, and a reason fixed earlier is stale by then.
+	 */
+	startReason(requested: MemoryBackendStartReason = "start"): MemoryBackendStartReason {
+		return (this.#runtimeCwd ?? this.#host.cwd()) !== this.#host.cwd() ? "rebind" : requested;
+	}
+
+	/**
 	 * Start, restart or release only the paired decision backend, leaving the
 	 * selected store's live state untouched.
 	 *
@@ -398,9 +409,9 @@ export class SessionMemory {
 		if (backend === "sharpshooter") return;
 		// A move's settings reload is drained by its first settle, ahead of the explicit
 		// rebind, so a pairing toggle can arrive here while the session cwd is already past
-		// the applied one. That start is the move's rebind, not a fresh start, and must not
-		// catch up on the transcript the source project left behind.
-		if ((this.#runtimeCwd ?? this.#host.cwd()) !== this.#host.cwd()) reason = "rebind";
+		// the applied one: startReason turns that start into the move's rebind.
+		const finishesMove = reason === "rebind";
+		reason = this.startReason(reason);
 		const session = this.#host.memoryBackendSession();
 		if (cfgSharpshooterEnabled.get(settings)) {
 			startSharpshooterLeg(
@@ -417,6 +428,10 @@ export class SessionMemory {
 		} else {
 			releaseSharpshooterSession(session);
 		}
+		// The explicit rebind is the move's last step for a Hindsight session, which never
+		// reaches the full apply that otherwise commits the applied cwd. Left at the source,
+		// every later pairing toggle would read as part of a move and skip its catch-up.
+		if (finishesMove) this.#runtimeCwd = this.#host.cwd();
 		if (this.#host.isDisposed()) return;
 		await this.#host.refreshBaseSystemPrompt();
 	}
@@ -449,13 +464,16 @@ export class SessionMemory {
 			if (!startsLeg()) releaseSharpshooterSession(this.#host.memoryBackendSession());
 			if (this.#memoryAgentDir && this.#memoryTaskDepth === 0 && !this.#host.isDisposed()) {
 				const backend = await resolveMemoryBackend(this.#host.settings);
+				// Resolution is an await too: pairing can be switched off while a cold store
+				// import loads, and the queue kept above then has no leg left to run it.
+				if (!startsLeg()) releaseSharpshooterSession(this.#host.memoryBackendSession());
 				await backend.start({
 					session: this.#host.memoryBackendSession(),
 					settings: this.#host.settings,
 					modelRegistry: this.#host.modelRegistry,
 					agentDir: this.#memoryAgentDir,
 					taskDepth: this.#memoryTaskDepth,
-					reason,
+					reason: this.startReason(reason),
 				});
 			}
 			if (this.#host.isDisposed()) return;

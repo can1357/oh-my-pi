@@ -691,6 +691,256 @@ describe("maybeStartSharpshooterExtraction", () => {
 		expect(await listSharpshooterDeltas(agentDir, cwd)).toEqual([]);
 	});
 
+	it("does not drain a parked queue when the extraction settles before a replacement leg exists", async () => {
+		// A full apply releases the session and keeps the queue for the leg that replaces it. The
+		// extraction that held the slot can settle in the gap, and with no subscription its drain
+		// would run the queue for a pairing that may be switched off by the time the apply ends.
+		using temp = TempDir.createSync("@sharpshooter-parked-drop-");
+		const cwd = path.join(temp.path(), "project");
+		const agentDir = path.join(temp.path(), "agent");
+		const messages: AgentMessage[] = [];
+		const deps = extractionDependencies(cwd, messages);
+		await writeSharpshooterState(agentDir, cwd, { v: 1, lastConsolidatedAt: Date.now() });
+		installPairedSharpshooter(deps, agentDir);
+
+		const pendingFirst = Promise.withResolvers<AssistantMessage>();
+		const recordTuesdays = assistantResponse([
+			{
+				type: "toolCall",
+				id: "call-record",
+				name: "record_deltas",
+				arguments: {
+					deltas: [
+						{
+							kind: "product_decision",
+							statement: "This project ships on Tuesdays only.",
+							source: "explicit_user",
+							evidence: "ships on Tuesdays",
+							friction: { corrective: false, regression: false, subtle: false },
+						},
+					],
+				},
+			},
+		]);
+		const completion = vi
+			.spyOn(ai, "completeSimple")
+			.mockImplementation(() =>
+				completion.mock.calls.length === 1 ? pendingFirst.promise : Promise.resolve(recordTuesdays),
+			);
+
+		const firstMessage = message("user", [
+			{ type: "text", text: "Keep this product behavior stable across every release." },
+		]);
+		messages.push(firstMessage);
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			message: firstMessage,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+		await waitFor(() => completion.mock.calls.length === 1, "first completion was not called");
+		const queuedMessage = message("user", [
+			{ type: "text", text: "Record that this project ships on Tuesdays only." },
+		]);
+		messages.push(queuedMessage);
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			message: queuedMessage,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+
+		releaseSharpshooterSession(deps.session, { keepPending: true });
+		pendingFirst.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
+		await flushSharpshooterExtraction(deps.session, 500);
+		await flushSharpshooterExtraction(deps.session, 500);
+		expect(completion).toHaveBeenCalledTimes(1);
+
+		// No leg arrives and pairing is off: the parked prompt is dropped, never extracted.
+		releaseSharpshooterSession(deps.session);
+		await flushSharpshooterExtraction(deps.session, 500);
+		expect(completion).toHaveBeenCalledTimes(1);
+		expect(await listSharpshooterDeltas(agentDir, cwd)).toEqual([]);
+	});
+
+	it("hands a parked queue to the replacement leg after the extraction already settled", async () => {
+		using temp = TempDir.createSync("@sharpshooter-parked-carry-");
+		const cwd = path.join(temp.path(), "project");
+		const agentDir = path.join(temp.path(), "agent");
+		const keptPrompt = "Keep the cyan status indicator on the source dashboard.";
+		const messages: AgentMessage[] = [];
+		const deps = extractionDependencies(cwd, messages);
+		await writeSharpshooterState(agentDir, cwd, { v: 1, lastConsolidatedAt: Date.now() });
+		installPairedSharpshooter(deps, agentDir);
+
+		const pendingFirst = Promise.withResolvers<AssistantMessage>();
+		const completion = vi
+			.spyOn(ai, "completeSimple")
+			.mockImplementation(() =>
+				completion.mock.calls.length === 1
+					? pendingFirst.promise
+					: Promise.resolve(assistantResponse([{ type: "text", text: "No tool call." }])),
+			);
+		const firstMessage = message("user", [
+			{ type: "text", text: "Keep this product behavior stable across every release." },
+		]);
+		messages.push(firstMessage);
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			message: firstMessage,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+		await waitFor(() => completion.mock.calls.length === 1, "first completion was not called");
+		const keptMessage = message("user", [{ type: "text", text: keptPrompt }]);
+		messages.push(keptMessage);
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			message: keptMessage,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+
+		releaseSharpshooterSession(deps.session, { keepPending: true });
+		pendingFirst.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
+		await flushSharpshooterExtraction(deps.session, 500);
+		expect(completion).toHaveBeenCalledTimes(1);
+
+		installPairedSharpshooter(deps, agentDir, "rebind");
+		await waitFor(() => completion.mock.calls.length === 2, "the parked prompt was not extracted");
+		expect(JSON.stringify(completion.mock.calls[1])).toContain(keptPrompt);
+		releaseSharpshooterSession(deps.session);
+	});
+
+	it("files a queued prompt's deltas under the session it was written in, even if /new changes the id", async () => {
+		using temp = TempDir.createSync("@sharpshooter-queued-session-id-");
+		const cwd = path.join(temp.path(), "project");
+		const agentDir = path.join(temp.path(), "agent");
+		const messages: AgentMessage[] = [];
+		const deps = extractionDependencies(cwd, messages, "session-a");
+		await writeSharpshooterState(agentDir, cwd, { v: 1, lastConsolidatedAt: Date.now() });
+
+		const pendingFirst = Promise.withResolvers<AssistantMessage>();
+		const recordTuesdays = assistantResponse([
+			{
+				type: "toolCall",
+				id: "call-record",
+				name: "record_deltas",
+				arguments: {
+					deltas: [
+						{
+							kind: "product_decision",
+							statement: "This project ships on Tuesdays only.",
+							source: "explicit_user",
+							evidence: "ships on Tuesdays",
+							friction: { corrective: false, regression: false, subtle: false },
+						},
+					],
+				},
+			},
+		]);
+		const completion = vi
+			.spyOn(ai, "completeSimple")
+			.mockImplementation(() =>
+				completion.mock.calls.length === 1 ? pendingFirst.promise : Promise.resolve(recordTuesdays),
+			);
+		const firstMessage = message("user", [
+			{ type: "text", text: "Keep this product behavior stable across every release." },
+		]);
+		messages.push(firstMessage);
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			message: firstMessage,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+		await waitFor(() => completion.mock.calls.length === 1, "first completion was not called");
+		const queuedMessage = message("user", [
+			{ type: "text", text: "Record that this project ships on Tuesdays only." },
+		]);
+		messages.push(queuedMessage);
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			message: queuedMessage,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+
+		// `/new` lands while the prompt waits: the live session now answers to another id.
+		(deps.session as unknown as { sessionId: string }).sessionId = "session-b";
+		pendingFirst.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
+		await waitFor(
+			async () => (await listSharpshooterDeltas(agentDir, cwd)).length === 1,
+			"the queued prompt's delta was not written",
+		);
+
+		const groups = await listSharpshooterDeltas(agentDir, cwd);
+		expect(groups.map(group => group.sessionId)).toEqual(["session-a"]);
+	});
+
+	it("replays carried prompts in drop order ahead of the startup catch-up", async () => {
+		// Deltas are ordered by completion time and the newest wins. A catch-up that queued the
+		// transcript's latest prompt before the older carried ones would present the older
+		// instruction as the newer one.
+		using temp = TempDir.createSync("@sharpshooter-carry-order-");
+		const cwd = path.join(temp.path(), "project");
+		const agentDir = path.join(temp.path(), "agent");
+		const olderPrompt = "Keep the older cyan status indicator on the dashboard.";
+		const newerPrompt = "Actually make the newer status indicator magenta instead.";
+		const messages: AgentMessage[] = [];
+		const deps = extractionDependencies(cwd, messages);
+		await writeSharpshooterState(agentDir, cwd, { v: 1, lastConsolidatedAt: Date.now() });
+		installPairedSharpshooter(deps, agentDir);
+
+		const pendingFirst = Promise.withResolvers<AssistantMessage>();
+		const completion = vi
+			.spyOn(ai, "completeSimple")
+			.mockImplementation(() =>
+				completion.mock.calls.length === 1
+					? pendingFirst.promise
+					: Promise.resolve(assistantResponse([{ type: "text", text: "No tool call." }])),
+			);
+		const firstMessage = message("user", [
+			{ type: "text", text: "Keep this product behavior stable across every release." },
+		]);
+		messages.push(firstMessage);
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			message: firstMessage,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+		await waitFor(() => completion.mock.calls.length === 1, "first completion was not called");
+		for (const text of [olderPrompt, newerPrompt]) {
+			const queued = message("user", [{ type: "text", text }]);
+			messages.push(queued);
+			maybeStartSharpshooterExtraction({
+				agentDir,
+				message: queued,
+				modelRegistry: deps.modelRegistry,
+				session: deps.session,
+				settings: deps.settings,
+			});
+		}
+
+		// A full restart: the transcript ends in the newer prompt, which is also in the carried queue.
+		releaseSharpshooterSession(deps.session, { keepPending: true });
+		installPairedSharpshooter(deps, agentDir, "start");
+		pendingFirst.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
+		await waitFor(() => completion.mock.calls.length === 3, "the carried prompts were not both extracted");
+
+		expect(JSON.stringify(completion.mock.calls[1])).toContain(olderPrompt);
+		expect(JSON.stringify(completion.mock.calls[2])).toContain(newerPrompt);
+		releaseSharpshooterSession(deps.session);
+	});
+
 	it("queues only deltas whose evidence is a verbatim prompt substring", async () => {
 		using temp = TempDir.createSync("@sharpshooter-extract-");
 		const root = temp.path();

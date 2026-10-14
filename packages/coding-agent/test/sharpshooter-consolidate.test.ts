@@ -20,7 +20,8 @@ import {
 	type SharpshooterSessionDeltas,
 } from "@oh-my-pi/pi-coding-agent/sharpshooter/queue";
 import type { SharpshooterDelta } from "@oh-my-pi/pi-coding-agent/sharpshooter/types";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { startSharpshooterScheduler } from "@oh-my-pi/pi-coding-agent/sharpshooter/scheduler";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 interface Harness {
@@ -392,5 +393,49 @@ describe("renderSharpshooterSessions", () => {
 		expect(rendered).toContain("friction(corrective=true, regression=true, subtle=false)");
 		expect(rendered).toContain('rejectedAlternative="A"');
 		expect(rendered).toContain('rationale="B avoids drift"');
+	});
+});
+
+describe("sharpshooter scheduler failure logging", () => {
+	it("stays quiet for a failure the bank state already records", async () => {
+		// An in-lock failure writes `lastError`, which status and diagnose report. Warning for it
+		// as well would repeat the same line on every due tick.
+		using temp = TempDir.createSync("@sharpshooter-scheduler-recorded-");
+		const harness = createHarness(temp.path());
+		await appendSharpshooterDelta(harness.agentDir, harness.cwd, delta(harness.sessionId, 1, "Use tabs."));
+		vi.spyOn(ai, "completeSimple").mockRejectedValue(new Error("model exploded"));
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		const dispose = startSharpshooterScheduler(harness);
+		try {
+			for (let attempt = 0; attempt < 400; attempt++) {
+				const state = await readSharpshooterState(harness.agentDir, harness.cwd);
+				if (state.lastError) break;
+				await Bun.sleep(5);
+			}
+			expect((await readSharpshooterState(harness.agentDir, harness.cwd)).lastError?.message).toContain(
+				"model exploded",
+			);
+			await Bun.sleep(20);
+			expect(warn).not.toHaveBeenCalledWith("sharpshooter consolidation failed", expect.anything());
+		} finally {
+			dispose();
+		}
+	});
+
+	it("warns for a failure before the lock, which has nowhere else to be recorded", async () => {
+		using temp = TempDir.createSync("@sharpshooter-scheduler-unrecorded-");
+		const harness = createHarness(temp.path());
+		// The bank directory cannot be created, which fails before the lock is taken.
+		vi.spyOn(fs, "mkdir").mockRejectedValue(new Error("EACCES: cannot create the bank directory"));
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		const dispose = startSharpshooterScheduler(harness);
+		try {
+			for (let attempt = 0; attempt < 400 && warn.mock.calls.length === 0; attempt++) await Bun.sleep(5);
+			expect(warn).toHaveBeenCalledWith("sharpshooter consolidation failed", expect.anything());
+		} finally {
+			dispose();
+		}
 	});
 });

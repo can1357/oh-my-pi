@@ -7521,6 +7521,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#memory.applyMemoryBackend(options);
 	}
 
+	/**
+	 * Reason a memory backend start decided now must carry; "rebind" when the session cwd has
+	 * moved past the applied one. Evaluate it after the last await before the start.
+	 */
+	memoryStartReason(requested: MemoryBackendStartReason = "start"): MemoryBackendStartReason {
+		return this.#memory.startReason(requested);
+	}
+
 	/** Resolves once every memory-setting edit so far, and the backend transitions it started, has settled. */
 	settleMemoryBackend(): Promise<void> {
 		return this.#memory.settle();

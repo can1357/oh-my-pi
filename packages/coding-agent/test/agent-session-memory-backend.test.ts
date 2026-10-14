@@ -11,7 +11,9 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { hindsightBackend, rebindMemoryBackendForCwd } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
+import * as resolveModule from "@oh-my-pi/pi-coding-agent/memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/memory-backend/tool-names";
+import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { computeMnemopiBankScope } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
 import { getMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
@@ -19,6 +21,11 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import * as sharpshooterModule from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
 import { sharpshooterBackend } from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
+import {
+	flushSharpshooterExtraction,
+	maybeStartSharpshooterExtraction,
+} from "@oh-my-pi/pi-coding-agent/sharpshooter/extract";
+import { writeSharpshooterState } from "@oh-my-pi/pi-coding-agent/sharpshooter/paths";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -39,6 +46,7 @@ import { cfgMnemopiBank, cfgMnemopiRecallLimit, cfgMnemopiScoping } from "@oh-my
 import {
 	cfgSharpshooterEnabled,
 	cfgSharpshooterInjectionTokenLimit,
+	cfgSharpshooterModel,
 } from "@oh-my-pi/pi-coding-agent/sharpshooter/settings";
 
 function createTool(name: string): AgentTool {
@@ -621,49 +629,182 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(startedAt.every(entry => entry === `rebind ${destination}`)).toBe(true);
 	});
 
-	it("drops queued prompts when a full apply leaves no Sharpshooter leg to run them", async () => {
-		// A full apply keeps prompts queued behind a slow extraction only for the leg that
-		// replaces the old one. When the destination turns pairing off, nothing is left to
-		// retry them, and keeping them through the slow store teardown lets the extraction
-		// that settles in that window drain them after Sharpshooter was disabled.
+	/** A real extraction queue: the first prompt holds the slot behind `slow`, the second waits for it. */
+	async function queueBehindSlowExtraction(current: AgentSession) {
+		const model = getBundledModel("anthropic", "claude-haiku-4-5");
+		if (!model) throw new Error("Expected bundled Claude Haiku model");
+		cfgSharpshooterModel.override(settings, `${model.provider}/${model.id}`);
+		spyOn(current.modelRegistry, "getAll").mockReturnValue([model]);
+		spyOn(current.modelRegistry, "getAvailable").mockReturnValue([model]);
+		const slow = Promise.withResolvers<AssistantMessage>();
+		const completion = vi
+			.spyOn(ai, "completeSimple")
+			.mockImplementation(() =>
+				completion.mock.calls.length === 1 ? slow.promise : Promise.resolve(memoryReply(model)),
+			);
+		const enqueue = (text: string) =>
+			maybeStartSharpshooterExtraction({
+				session: current,
+				settings,
+				modelRegistry: current.modelRegistry,
+				agentDir: tempDir.path(),
+				message: { role: "user", content: [{ type: "text", text }], timestamp: Date.now() } as never,
+			});
+		enqueue("Keep the cyan status indicator on the first dashboard.");
+		for (let attempt = 0; attempt < 200 && completion.mock.calls.length < 1; attempt++) await Bun.sleep(5);
+		expect(completion).toHaveBeenCalledTimes(1);
+		enqueue("Record that this project ships on Tuesdays only.");
+		return { completion, slow, model };
+	}
+
+	it("never extracts a queued prompt when pairing is switched off while a full apply is suspended", async () => {
+		// The queue is parked for the leg that a full apply restarts. If the extraction holding the
+		// slot settles while the apply is suspended in backend resolution and pairing has just been
+		// switched off, draining it would spend a model call and write a decision after the flag
+		// was disabled.
 		cfgMemoryBackend.override(settings, "hindsight");
 		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
 		cfgHindsightMentalModelsEnabled.override(settings, false);
 		cfgSharpshooterEnabled.override(settings, true);
 		await settings.reloadForCwd(path.join(tempDir.path(), "project"));
-		trackSharpshooterStarts();
-		const releaseSpy = spyOn(sharpshooterModule, "releaseSharpshooterSession").mockImplementation(() => {});
-
 		const current = createSession(async () => []);
+		// The leg's scheduler would otherwise consolidate the bank on its first tick.
+		await writeSharpshooterState(tempDir.path(), current.sessionManager.getCwd(), {
+			v: 1,
+			lastConsolidatedAt: Date.now(),
+		});
 		await current.applyMemoryBackend();
-		releaseSpy.mockClear();
+		const { completion, slow, model } = await queueBehindSlowExtraction(current);
 
+		const gate = gateBackendResolution([]);
+		const applying = current.applyMemoryBackend();
+		await Bun.sleep(20);
 		cfgSharpshooterEnabled.override(settings, false);
-		cfgMemoryBackend.override(settings, "local");
+		slow.resolve(memoryReply(model));
+		await flushSharpshooterExtraction(current, 500);
+		await flushSharpshooterExtraction(current, 500);
+		gate.resolve();
+		await applying;
 		await current.settleMemoryBackend();
+		await flushSharpshooterExtraction(current, 500);
 
-		expect(releaseSpy).toHaveBeenCalled();
-		expect(releaseSpy.mock.calls.some(([, options]) => options?.keepPending)).toBe(false);
+		expect(completion).toHaveBeenCalledTimes(1);
 	});
 
-	it("keeps queued prompts when a full apply starts the Sharpshooter leg again", async () => {
-		// The carry that the test above must not extend: the new leg takes the queue.
+	it("extracts a queued prompt on the replacement leg when a full apply keeps pairing", async () => {
+		// The carry that the test above must not extend: the restarted leg takes the queue.
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, true);
+		await settings.reloadForCwd(path.join(tempDir.path(), "project"));
+		const current = createSession(async () => []);
+		await writeSharpshooterState(tempDir.path(), current.sessionManager.getCwd(), {
+			v: 1,
+			lastConsolidatedAt: Date.now(),
+		});
+		await current.applyMemoryBackend();
+		const { completion, slow, model } = await queueBehindSlowExtraction(current);
+
+		cfgMemoryBackend.override(settings, "local");
+		await current.settleMemoryBackend();
+		slow.resolve(memoryReply(model));
+		for (let attempt = 0; attempt < 200 && completion.mock.calls.length < 2; attempt++) await Bun.sleep(5);
+
+		expect(completion).toHaveBeenCalledTimes(2);
+		expect(JSON.stringify(completion.mock.calls[1])).toContain("ships on Tuesdays");
+	});
+
+	it("catches up on a destination prompt when pairing is enabled after a Hindsight move completed", async () => {
+		// A Hindsight-to-Hindsight move never reaches the full apply that commits the applied
+		// cwd, so the explicit rebind has to. Left at the source, every later toggle reads as
+		// part of a move and skips the catch-up that a destination prompt needs.
+		const source = path.join(tempDir.path(), "source");
+		const destination = path.join(tempDir.path(), "destination");
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, false);
+		await settings.reloadForCwd(source);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		await settings.reloadForCwd(destination);
+		current.sessionManager.setCwdWithoutRelocation(destination);
+		await rebindMemoryBackendForCwd(current);
+		expect(startedAt).toEqual([]);
+
+		cfgSharpshooterEnabled.override(settings, true);
+		await current.settleMemoryBackend();
+
+		expect(startedAt).toEqual([`start ${destination}`]);
+	});
+
+	/** Replaces backend resolution with a gate, so a test can act while the apply is suspended in it. */
+	function gateBackendResolution(events: string[]) {
+		const gate = Promise.withResolvers<void>();
+		const stub = {
+			id: "off",
+			start: (options: { reason?: string }) => {
+				events.push(`start ${options.reason ?? "start"}`);
+			},
+		} as unknown as MemoryBackend;
+		spyOn(resolveModule, "resolveMemoryBackend").mockImplementation(async () => {
+			await gate.promise;
+			events.push("resolved");
+			return stub;
+		});
+		return gate;
+	}
+
+	it("starts as a rebind when the move lands while the backend is still resolving", async () => {
+		// The reason used to be fixed before the teardown and the lazy store import, so a move that
+		// landed in that window started the backend with a catch-up on the source project's prompt.
+		const destination = path.join(tempDir.path(), "destination");
+		cfgMemoryBackend.override(settings, "local");
+		cfgSharpshooterEnabled.override(settings, false);
+		await settings.reloadForCwd(path.join(tempDir.path(), "source"));
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+
+		const events: string[] = [];
+		const gate = gateBackendResolution(events);
+		const applying = current.applyMemoryBackend();
+		await Bun.sleep(20);
+		current.sessionManager.setCwdWithoutRelocation(destination);
+		gate.resolve();
+		await applying;
+
+		expect(events).toEqual(["resolved", "start rebind"]);
+	});
+
+	it("releases the queue when pairing is switched off while the backend is still resolving", async () => {
+		// The queue is kept because a leg was due to restart. If the flag flips during the store
+		// import, an extraction that settles before the queued settings edit applies would drain
+		// that queue after pairing was disabled.
 		cfgMemoryBackend.override(settings, "hindsight");
 		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
 		cfgHindsightMentalModelsEnabled.override(settings, false);
 		cfgSharpshooterEnabled.override(settings, true);
 		await settings.reloadForCwd(path.join(tempDir.path(), "project"));
 		trackSharpshooterStarts();
-		const releaseSpy = spyOn(sharpshooterModule, "releaseSharpshooterSession").mockImplementation(() => {});
-
 		const current = createSession(async () => []);
 		await current.applyMemoryBackend();
-		releaseSpy.mockClear();
 
-		cfgMemoryBackend.override(settings, "local");
-		await current.settleMemoryBackend();
+		const events: string[] = [];
+		const gate = gateBackendResolution(events);
+		spyOn(sharpshooterModule, "releaseSharpshooterSession").mockImplementation((_session, options) => {
+			events.push(options?.keepPending ? "release keep" : "release");
+		});
+		const applying = current.applyMemoryBackend();
+		await Bun.sleep(20);
+		cfgSharpshooterEnabled.override(settings, false);
+		gate.resolve();
+		await applying;
 
-		expect(releaseSpy.mock.calls.some(([, options]) => options?.keepPending)).toBe(true);
+		const afterResolve = events.slice(events.indexOf("resolved") + 1);
+		expect(afterResolve.slice(0, 2)).toEqual(["release", "start start"]);
 	});
 
 	it("leaves Sharpshooter alone on a cwd move when the flag is off", async () => {

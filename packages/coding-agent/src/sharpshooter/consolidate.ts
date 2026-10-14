@@ -48,6 +48,8 @@ export interface SharpshooterConsolidationResult {
 	sessions?: number;
 	deltas?: number;
 	error?: string;
+	/** The failure is already in the bank state (`lastError`), where status and diagnose report it. */
+	recorded?: boolean;
 }
 
 interface ReplacementFile {
@@ -199,7 +201,7 @@ async function consolidateLocked(
 	} catch (error) {
 		const message = errorMessage(error);
 		await recordConsolidationError(options.agentDir, options.cwd, state, message);
-		return { ran: false, reason: "error", error: message };
+		return { ran: false, reason: "error", error: message, recorded: true };
 	}
 }
 
