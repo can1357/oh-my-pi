@@ -14495,15 +14495,14 @@ export class AgentSession implements SettingsScope {
 		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
 		// Consent, earlier actions, the fence and the live listing all wait after
-		// planning: a cancelled run, or a restore the session's account pool no
-		// longer allows, is dropped. Checked with no await before the redeem call.
-		const dropReason = (action: CodexResetAction | ClaudeResetAction): "cancelled" | "outside-pool" | undefined => {
-			if (signal?.aborted) return "cancelled";
-			return action.reason === "blocked-account" &&
-				!authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId)
-				? "outside-pool"
-				: undefined;
-		};
+		// planning: a restore the session's account pool no longer allows is dropped.
+		// Checked with no await before the redeem call.
+		const outsidePool = (action: CodexResetAction | ClaudeResetAction): boolean =>
+			action.reason === "blocked-account" &&
+			!authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId);
+		// So is every action once the run is cancelled.
+		const dropReason = (action: CodexResetAction | ClaudeResetAction): "cancelled" | "outside-pool" | undefined =>
+			signal?.aborted ? "cancelled" : outsidePool(action) ? "outside-pool" : undefined;
 		const restored: number[] = [];
 		let poolLimited = false;
 		let cancelled = false;
