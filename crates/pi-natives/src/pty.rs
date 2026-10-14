@@ -396,9 +396,13 @@ fn run_pty_sync(
 		cmd.env_remove(name);
 	}
 	// The filtered overlay omits IPC markers, but omission does not remove
-	// `CommandBuilder`'s inherited values. Reuse the shell's platform casing rule.
+	// `CommandBuilder`'s inherited values. Reuse the shell's platform casing
+	// rule.
 	for (key, _) in std::env::vars_os() {
-		if key.to_str().is_some_and(pi_shell::shell::is_node_ipc_channel_var) {
+		if key
+			.to_str()
+			.is_some_and(pi_shell::shell::is_node_ipc_channel_var)
+		{
 			cmd.env_remove(key);
 		}
 	}
