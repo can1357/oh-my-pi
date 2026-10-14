@@ -727,4 +727,25 @@ describe("model registry discovery header restore", () => {
 			id: "pair-x",
 		});
 	});
+
+	test("normalizes owner keys across casing", async () => {
+		const modelsPath = await writeModelsYaml(
+			[
+				"    modelOverrides:",
+				"      CLAUDE-4-SONNET-THINKING:",
+				"        headers:",
+				"          X-Account: live-1",
+			].join("\n"),
+			"cursor",
+		);
+		// The live bundled row owns the lowercase raw alias; a cohort spelling it
+		// in uppercase must not slip past the owner and claim its headers.
+		seedCachedRows([{ id: "stale-row", alias: "CLAUDE-4-SONNET-THINKING" }], "cursor");
+
+		const registry = await reloadFromCache(modelsPath);
+		expect(registry.find("cursor", "stale-row")).toBeUndefined();
+		expect(resolveSessionModelSelector(registry, "cursor/claude-4-sonnet-thinking")?.model).toMatchObject({
+			id: "claude-4-sonnet",
+		});
+	});
 });

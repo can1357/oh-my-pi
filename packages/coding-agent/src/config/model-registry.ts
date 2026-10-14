@@ -1549,7 +1549,7 @@ export class ModelRegistry {
 			...this.#runtimeModelOverlays,
 			...(getBundledModels(providerId as Parameters<typeof getBundledModels>[0]) as Model<Api>[]),
 		].filter(model => model.provider === providerId);
-		const liveModelIds = new Set(liveRows.map(model => model.id));
+		const liveModelIds = new Set(liveRows.map(model => model.id.toLowerCase()));
 		// A live row owns not only its id but also its collapsed-variant aliases
 		// (e.g. bundled cursor/claude-4-sonnet's raw claude-4-sonnet-thinking): a
 		// cached row recording the same member id must not claim its headers —
@@ -1563,9 +1563,12 @@ export class ModelRegistry {
 				...getReviewedVariantAliasSources(liveModel.provider, liveModel.id),
 			]) {
 				if (!source) continue;
-				const owners = liveAliasOwners.get(source);
-				if (owners) owners.add(liveModel.id);
-				else liveAliasOwners.set(source, new Set([liveModel.id]));
+				// Selector ownership lowercases aliases; the owner maps must match
+				// or a differently-spelled cohort source slips past the owner.
+				const key = source.toLowerCase();
+				const owners = liveAliasOwners.get(key);
+				if (owners) owners.add(liveModel.id.toLowerCase());
+				else liveAliasOwners.set(key, new Set([liveModel.id.toLowerCase()]));
 			}
 		}
 		const bundledById = new Map(
@@ -1595,7 +1598,7 @@ export class ModelRegistry {
 			// lookup below needs, without touching storage from this hook.
 			if (cohort !== restoredCohort) {
 				restoredCohort = cohort;
-				liveIds = new Set([...cohort.map(row => row.id), ...liveModelIds]);
+				liveIds = new Set([...cohort.map(row => row.id.toLowerCase()), ...liveModelIds]);
 				// The global alias index cannot replace stale entries (an older
 				// omitted-header cache may already map a source to a row that no
 				// longer records it), so alias ownership comes from the cohort
@@ -1608,25 +1611,28 @@ export class ModelRegistry {
 						...getReviewedVariantAliasSources(row.provider, row.id),
 					]) {
 						if (!source) continue;
-						const owners = cohortAliasOwners.get(source);
-						if (owners) owners.add(row.id);
-						else cohortAliasOwners.set(source, new Set([row.id]));
+						const key = source.toLowerCase();
+						const owners = cohortAliasOwners.get(key);
+						if (owners) owners.add(row.id.toLowerCase());
+						else cohortAliasOwners.set(key, new Set([row.id.toLowerCase()]));
 					}
 				}
 			}
 			const ownedElsewhere = (source: string): boolean => {
-				const liveOwners = liveAliasOwners.get(source);
-				if (liveOwners !== undefined) return !liveOwners.has(model.id);
-				const cohortOwners = cohortAliasOwners.get(source);
+				const normalized = source.toLowerCase();
+				const self = model.id.toLowerCase();
+				const liveOwners = liveAliasOwners.get(normalized);
+				if (liveOwners !== undefined) return !liveOwners.has(self);
+				const cohortOwners = cohortAliasOwners.get(normalized);
 				// No current owner at all: a stale alias with nobody recording it is
 				// a collision too, so an old alias-keyed override cannot rebind.
-				return cohortOwners === undefined || !cohortOwners.has(model.id);
+				return cohortOwners === undefined || !cohortOwners.has(self);
 			};
 			let modelOverride = modelOverrides
 				? resolveModelOverrideWithAliases(
 						modelOverrides,
 						model,
-						(_provider, id) => liveIds.has(id) || ownedElsewhere(id),
+						(_provider, id) => liveIds.has(id.toLowerCase()) || ownedElsewhere(id),
 					)
 				: undefined;
 			// The alias index is first-write-wins, so an earlier cohort or catalog
@@ -1638,7 +1644,8 @@ export class ModelRegistry {
 					...Object.values(model.thinking?.effortRouting ?? {}),
 					...(model.requestModelId ? [model.requestModelId] : []),
 				]) {
-					if (!source || source === model.id || liveIds.has(source) || ownedElsewhere(source)) continue;
+					if (!source || source === model.id || liveIds.has(source.toLowerCase()) || ownedElsewhere(source))
+						continue;
 					const candidate = modelOverrides.get(source);
 					if (candidate?.headers !== undefined) {
 						modelOverride = candidate;
@@ -1663,7 +1670,7 @@ export class ModelRegistry {
 			);
 			if (configSources.length === 0 && !hasBearerAuth) return undefined;
 			const requestModelIsReserved = model.requestModelId
-				? liveIds.has(model.requestModelId) || ownedElsewhere(model.requestModelId)
+				? liveIds.has(model.requestModelId.toLowerCase()) || ownedElsewhere(model.requestModelId)
 				: false;
 			const bundledModel =
 				bundledById.get(model.id) ??
@@ -2768,7 +2775,7 @@ export class ModelRegistry {
 		let aliasOwners: Map<string, Set<string>> | null = null;
 		const indexCatalog = () => {
 			if (liveIds) return;
-			liveIds = new Set(models.map(indexed => indexed.id));
+			liveIds = new Set(models.map(indexed => indexed.id.toLowerCase()));
 			// The global alias index keeps stale reverse entries, so alias
 			// ownership comes from the rows actually being projected: a raw id
 			// recorded by a different row may not rebind that row's override.
@@ -2777,11 +2784,12 @@ export class ModelRegistry {
 		return models.map(model => {
 			const override = resolveModelOverrideWithAliases(overrides, model, (modelProvider, id) => {
 				indexCatalog();
-				if (liveIds?.has(id)) return true;
-				const owners = aliasOwners?.get(`${modelProvider}\u0000${id}`);
+				const normalized = id.toLowerCase();
+				if (liveIds?.has(normalized)) return true;
+				const owners = aliasOwners?.get(`${modelProvider.toLowerCase()}\u0000${normalized}`);
 				// An alias with no current owner is stale; rebinding it would revive
 				// an override the routing no longer authorizes.
-				return owners === undefined || !owners.has(model.id);
+				return owners === undefined || !owners.has(model.id.toLowerCase());
 			});
 			if (!override) return model;
 			return this.#applyModelOverrideWithClamp(model, override);
@@ -2933,11 +2941,14 @@ export class ModelRegistry {
 				...(model.requestModelId ? [model.requestModelId] : []),
 				...getReviewedVariantAliasSources(model.provider, model.id),
 			]) {
-				const key = `${model.provider}\u0000${source}`;
 				if (!source) continue;
+				// Selector ownership lowercases aliases; normalize the composite key
+				// and owner ids the same way or casing variants cross owners.
+				const key = `${model.provider.toLowerCase()}\u0000${source.toLowerCase()}`;
+				const owner = model.id.toLowerCase();
 				const existing = owners.get(key);
-				if (existing) existing.add(model.id);
-				else owners.set(key, new Set([model.id]));
+				if (existing) existing.add(owner);
+				else owners.set(key, new Set([owner]));
 			}
 		}
 		return owners;
@@ -2967,11 +2978,12 @@ export class ModelRegistry {
 						// The global alias index keeps stale reverse entries, so alias
 						// ownership comes from the rows actually being projected: a raw
 						// id recorded by no current row may not rebind this row's override.
-						liveKeys ??= new Set(models.map(m => `${m.provider}\u0000${m.id}`));
-						if (liveKeys.has(`${provider}\u0000${id}`)) return true;
+						const normalized = `${provider.toLowerCase()}\u0000${id.toLowerCase()}`;
+						liveKeys ??= new Set(models.map(m => `${m.provider.toLowerCase()}\u0000${m.id.toLowerCase()}`));
+						if (liveKeys.has(normalized)) return true;
 						aliasOwners ??= this.#modelAliasOwners(models);
-						const owners = aliasOwners.get(`${provider}\u0000${id}`);
-						return owners === undefined || !owners.has(model.id);
+						const owners = aliasOwners.get(normalized);
+						return owners === undefined || !owners.has(model.id.toLowerCase());
 					})
 				: undefined;
 			const overridden = override ? this.#applyModelOverrideWithClamp(model, override) : model;
