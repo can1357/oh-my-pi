@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `preflightSignal` option to `resets.redeem()`: cancelling it stops a saved-reset redeem before the reset request is sent, without cancelling a request already in flight ([#15130](https://github.com/can1357/oh-my-pi/pull/15130) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.12.0] - 2026-10-17
 
 ### Breaking Changes
