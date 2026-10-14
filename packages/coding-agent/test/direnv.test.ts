@@ -204,7 +204,7 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 			path.join(root, ".envrc"),
 			'export PI_DIRENV_IPC_OBSERVED="${NODE_CHANNEL_FD-unset}|${NODE_CHANNEL_SERIALIZATION_MODE-unset}|$PI_DIRENV_PARENT_TEST"\nexport PI_DIRENV_BUN_RESULT="$("$PI_DIRENV_BUN" probe.ts)"\n',
 		);
-		await Bun.write(path.join(root, "probe.ts"), 'console.log(process.env.PI_DIRENV_PARENT_TEST);\n');
+		await Bun.write(path.join(root, "probe.ts"), "console.log(process.env.PI_DIRENV_PARENT_TEST);\n");
 		await allowEnvrc(root);
 		const inherited = {
 			NODE_CHANNEL_FD: "3",
