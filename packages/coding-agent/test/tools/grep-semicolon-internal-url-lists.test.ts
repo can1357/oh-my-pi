@@ -191,6 +191,80 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 		expect(text).not.toContain("relative tail needle");
 	});
 
+	it("keeps semicolons in an internal URL query or fragment through real consumers", async () => {
+		await Bun.write(path.join(tmpDir, "README.md"), "cwd readme needle\n");
+		const router = InternalUrlRouter.instance();
+		router.register({
+			scheme: "vault",
+			spec: { backing: "virtual", selectors: "lines", immutable: true },
+			async resolve(url) {
+				const value = url.searchParams.get("q") ?? url.hash.slice(1);
+				const content = value === "foo;README.md" ? "whole query needle\n" : "truncated query needle\n";
+				return { url: url.href, content, contentType: "text/plain", size: Buffer.byteLength(content) };
+			},
+		});
+		for (const target of ["vault://Work?op=search&q=foo;README.md", "vault://Work#foo;README.md"]) {
+			const result = await new GrepTool(createSession()).execute("query-semicolon-search", {
+				pattern: "needle",
+				path: target,
+			});
+			expect(getResultText(result)).toContain("whole query needle");
+			expect(getResultText(result)).not.toContain("truncated query needle");
+			expect(getResultText(result)).not.toContain("cwd readme needle");
+			const found = await new GlobTool(createSession()).execute("query-semicolon-find", { path: target });
+			expect(found.details?.files).toEqual([target]);
+			const read = await new ReadTool(createSession()).execute("query-semicolon-read", { path: target });
+			expect(getResultText(read)).toContain("whole query needle");
+			expect(getResultText(read)).not.toContain("cwd readme needle");
+		}
+		// Read's routed-only recovery must also keep a semicolon inside the query.
+		expect(
+			await splitDelimitedPathEntry("vault://Work?q=foo;skill://demo", tmpDir, {
+				routedUrlPredicate: entry => router.canHandle(entry),
+			}),
+		).toBeNull();
+	});
+
+	it("fans out the supported local:/ alias without mistaking its slash for a URL path", async () => {
+		const artifactsDir = path.join(tmpDir, "alias-artifacts");
+		await Bun.write(path.join(artifactsDir, "local", "notes"), "alias artifact needle\n");
+		await Bun.write(path.join(tmpDir, "README.md"), "cwd readme needle\n");
+		const session = {
+			...createSession(),
+			getArtifactsDir: () => artifactsDir,
+			getSessionId: () => "alias-session",
+		} as ToolSession;
+		const target = "local:/notes;README.md";
+		const result = await new GrepTool(session).execute("alias-semicolon-search", { pattern: "needle", path: target });
+		expect(getResultText(result)).toContain("alias artifact needle");
+		expect(getResultText(result)).toContain("cwd readme needle");
+		const found = await new GlobTool(session).execute("alias-semicolon-find", { path: target });
+		expect(found.details?.files?.toSorted()).toEqual(["README.md", "local://notes"]);
+
+		// The same spelling must retain a whole existing artifact in this caller's root.
+		await Bun.write(path.join(artifactsDir, "local", "notes;README.md"), "whole alias needle\n");
+		const whole = await new GrepTool(session).execute("alias-semicolon-whole", { pattern: "needle", path: target });
+		expect(getResultText(whole)).toContain("whole alias needle");
+		expect(getResultText(whole)).not.toContain("cwd readme needle");
+	});
+
+	it("fans out explicit Windows dot-relative tails after URL paths", async () => {
+		const url = "skill://demo/subdir";
+		const tailStat = await fs.lstat(absFile);
+		const realLstat = nodeFs.promises.lstat.bind(nodeFs.promises);
+		for (const tail of [String.raw`.\b.md`, String.raw`..\b.md`]) {
+			// Supply only Windows literal existence on Linux; keep the production parser and classifier.
+			const resolvedTail = resolveReadPath(tail, tmpDir);
+			const literalProbe = spyOn(nodeFs.promises, "lstat").mockImplementation((async (target: nodeFs.PathLike) =>
+				target === resolvedTail ? tailStat : realLstat(target)) as typeof nodeFs.promises.lstat);
+			try {
+				expect(await expandDelimitedPathEntries([`${url};${tail}`], tmpDir)).toEqual([url, tail]);
+			} finally {
+				literalProbe.mockRestore();
+			}
+		}
+	});
+
 	it("fans out a URL with path segments followed by either UNC spelling", async () => {
 		const url = "skill://demo/subdir";
 		const uncStat = await fs.lstat(absFile);
