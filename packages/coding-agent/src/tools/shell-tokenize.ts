@@ -50,6 +50,7 @@ export function lexShellCommand(command: string): ShellToken[] {
 	let inDouble = false;
 	let ansi = false;
 	let inComment = false;
+	let escapedAt = -1;
 	const startWord = (index: number) => {
 		if (wordStart >= 0) return;
 		if (separatorStart >= 0) {
@@ -103,23 +104,29 @@ export function lexShellCommand(command: string): ShellToken[] {
 			if (separatorStart < 0) separatorStart = i;
 			continue;
 		}
+		// A comment starts only where a new word starts. A word already in progress
+		// (`foo\ #`, `''#`) keeps the `#` as text, however the previous byte reads.
+		const startsWord = wordStart < 0;
 		startWord(i);
 		if (inComment) {
 			value += ch;
 		} else if (ch === "'") {
 			inSingle = true;
 			// `$'...'` is an ANSI-C string: escapes are active inside it. An
-			// ESCAPED dollar (`\$'...'`) degrades to plain quoting. A `#`
+			// ESCAPED dollar (`\$'...'`) degrades to plain quoting, and
+			// `escapedAt` records which dollar a backslash consumed, so `\\$'...'`
+			// (an escaped backslash, then a live dollar) still opens one. A `#`
 			// comment runs to end of line and eats any quote after it; this
 			// branch is unreachable inside one because a `#` at a word start
 			// sets `inComment` below. Both probed against bash.
-			ansi = command[i - 1] === "$" && (i === 1 || command[i - 2] !== "\\");
+			ansi = command[i - 1] === "$" && escapedAt !== i - 1;
 		} else if (ch === '"') {
 			inDouble = true;
 		} else if (ch === "\\" && i + 1 < command.length) {
 			value += command[i + 1];
+			escapedAt = i + 1;
 			i++;
-		} else if (ch === "#" && (i === 0 || /[ \t\n;|&]/.test(command[i - 1]))) {
+		} else if (ch === "#" && startsWord) {
 			// A `#` glued to a word (`$#`, `${x#y}` shape words) stays plain text.
 			inComment = true;
 		} else {

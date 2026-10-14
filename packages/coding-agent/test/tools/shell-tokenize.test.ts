@@ -209,6 +209,27 @@ describe("tokenizeShellSegments", () => {
 		]);
 	});
 
+	it("opens an ANSI-C string after an escaped backslash, then splits at the semicolon", () => {
+		// `\\` is one literal backslash, so the dollar after it is live and `$'a\'X'`
+		// is one ANSI-C string. The `; sudo whoami` that follows must be its own
+		// segment, or a `sudo *` deny rule never sees it.
+		const command = "echo \\\\$'a\\'X' ; sudo whoami";
+		expect(tokenizeShellSegments(command)).toEqual([
+			["echo", "\\$a\\'X"],
+			["sudo", "whoami"],
+		]);
+	});
+
+	it("keeps a # after an escaped space as text, so the next command still splits", () => {
+		// `foo\ #` is one word (`foo #`): the `#` does not start a word, so no comment
+		// swallows the `; sudo whoami` that bash then runs.
+		const command = "echo foo\\ #; sudo whoami";
+		expect(tokenizeShellSegments(command)).toEqual([
+			["echo", "foo #"],
+			["sudo", "whoami"],
+		]);
+	});
+
 	it("does not open a quote inside a comment", () => {
 		// Codex review: a `#` comment runs to end of line and the `$'\'`
 		// inside it opens nothing, so `sudo whoami` on the next line stays a
