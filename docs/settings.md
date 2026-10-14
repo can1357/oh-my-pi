@@ -981,6 +981,8 @@ Provider credentials and custom model definitions are configured separately — 
 
 `codexResets.autoRedeem` and `claudeResets.autoRedeem` independently control saved-reset consumption: `yes` enables automatic spending, `no` disables it, and `unset` requires consent before the first spend. A session with no prompt UI to ask (such as `omp -p`) spends a reset under `unset` only when that reset expires within 5 minutes and would otherwise be lost; everything else waits for consent, with a notice pointing at `/usage reset`.
 
+When a turn hits a usage limit and no other account can take over, auto-redeem restores one blocked account the session may use (inside its account pool, if it has one) whose wait is at least `minBlockedMinutes`. A Claude reset keeps the window timers, so its allowance lasts only until the account would refill anyway: it picks the account with the longest wait. A Codex reset restarts both windows, giving a full weekly allowance now and moving the next weekly refill a week out: it picks the account whose weekly refill comes furthest forward, less the weekly allowance the restart discards, which for a weekly wall is its wait. The session's own account wins when it is within an hour of the best.
+
 When a usage refresh detects an eligible banked reset expiring within the next **5 minutes**, auto-consumption attempts it even with little or no usage, a credit reserve, or `salvageHorizonHours: 0`. Provider eligibility, covered-limit requirements, cooldowns, and duplicate-spend protections still apply.
 
 `salvageHorizonHours` controls earlier, usage-based salvage; setting it to `0` leaves the five-minute last-chance rule active. Set the provider's `autoRedeem` to `no` to disable all automatic spending.

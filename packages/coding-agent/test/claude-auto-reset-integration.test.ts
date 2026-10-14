@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
+	ApiKey,
 	ResetCreditAccountStatus,
 	ResetCreditTarget,
 	SessionRestrictionLease,
@@ -99,6 +100,15 @@ function withInventory(report: UsageReport, status: ResetCreditAccountStatus): U
 	return { ...report, resetCredits: { availableCount, redeemableCount, eligible, nextCreditId, credits } };
 }
 
+/** The bearer a request was sent with. */
+function resolvedApiKey(apiKey: ApiKey | undefined): string {
+	const resolved = typeof apiKey === "function" ? apiKey({ lastChance: false, error: undefined }) : apiKey;
+	const bearer =
+		typeof resolved === "string" ? resolved : resolved && "apiKey" in resolved ? resolved.apiKey : undefined;
+	if (typeof bearer !== "string") throw new Error("Expected the API key to be resolved before streaming");
+	return bearer;
+}
+
 describe("Claude saved-reset trigger integration", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
@@ -149,16 +159,24 @@ describe("Claude saved-reset trigger integration", () => {
 		consent?: () => Promise<string | undefined>;
 		/** Shares another session's coordinator, as sessions of one process do. */
 		coordinator?: CodexAutoRedeemCoordinator;
+		/**
+		 * Resolves each request's key through the stored accounts, as a real
+		 * session does, and fails exactly the requests sent with a key in this set.
+		 */
+		blockedKeys?: Set<string>;
 	}): {
 		session: AgentSession;
 		coordinator: CodexAutoRedeemCoordinator;
 		targets: ResetCreditTarget[];
 		modelCalls: () => number;
 		listCalls: () => number;
+		requestKeys: string[];
 	} {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
-		authStorage.keys.setRuntime("anthropic", "test-key");
+		const blockedKeys = options.blockedKeys;
+		if (blockedKeys) authStorage.keys.removeRuntime("anthropic");
+		else authStorage.keys.setRuntime("anthropic", "test-key");
 		vi.spyOn(authStorage.oauth, "identity").mockReturnValue({
 			accountId: ACCOUNT_ID,
 			email: EMAIL,
@@ -197,13 +215,24 @@ describe("Claude saved-reset trigger integration", () => {
 
 		const mock = createMockModel();
 		let calls = 0;
+		const requestKeys: string[] = [];
 		const agent = new Agent({
-			getApiKey: () => "test-key",
+			getApiKey: blockedKeys
+				? requestedModel => modelRegistry.resolver(requestedModel, agent.sessionId)
+				: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: (requestedModel, context, streamOptions) => {
 				calls++;
 				const transientFailures = options.transientFailures ?? 0;
-				if (calls <= transientFailures) mock.push({ throw: "503 Service unavailable" });
+				if (blockedKeys) {
+					const key = resolvedApiKey(streamOptions?.apiKey);
+					requestKeys.push(key);
+					mock.push(
+						blockedKeys.has(key)
+							? { throw: CLAUDE_USAGE_LIMIT_ERROR }
+							: { content: ["recovered after Claude reset"], stopReason: "stop" },
+					);
+				} else if (calls <= transientFailures) mock.push({ throw: "503 Service unavailable" });
 				else if (options.streamErrorFirst && (calls === transientFailures + 1 || !quota.restored)) {
 					mock.push({ throw: CLAUDE_USAGE_LIMIT_ERROR });
 				} else mock.push({ content: ["recovered after Claude reset"], stopReason: "stop" });
@@ -238,7 +267,11 @@ describe("Claude saved-reset trigger integration", () => {
 				modelRegistry,
 			);
 			vi.spyOn(extensionRunner, "hasUI").mockReturnValue(true);
-			vi.spyOn(extensionRunner.getUIContext(), "select").mockImplementation(options.consent);
+			// Runners share one default UI context; give this session its own prompt.
+			const ui = extensionRunner.getUIContext();
+			vi.spyOn(extensionRunner, "getUIContext").mockReturnValue(
+				Object.create(ui, { select: { value: options.consent } }),
+			);
 		} else if (options.withExtensionRunner) {
 			extensionRunner = new ExtensionRunner(
 				[],
@@ -257,19 +290,16 @@ describe("Claude saved-reset trigger integration", () => {
 			extensionRunner,
 		});
 		sessions.push(session);
-		return { session, coordinator, targets, modelCalls: () => calls, listCalls: () => listAttempts };
+		return { session, coordinator, targets, modelCalls: () => calls, listCalls: () => listAttempts, requestKeys };
 	}
 
 	/**
-	 * Stores the session's account and one outside its pool, pools the session to
-	 * its own, and lists both as blocked with a saved reset. The outside account's
-	 * weekly wall clears in `outsideWaitMs` and its reset is far from expiry, so
-	 * only a restore could spend it.
+	 * Stores the session's account and a second one, and lists both as blocked
+	 * with a saved reset. The second account's weekly wall clears in
+	 * `outsideWaitMs` and its reset is far from expiry, so only a restore could
+	 * spend it. Remove both with `authStorage.credentials.remove("anthropic")`.
 	 */
-	async function poolToSessionAccount(
-		session: AgentSession,
-		outsideWaitMs: number,
-	): Promise<{ pooledId: number; outsideId: number; release: () => Promise<void> }> {
+	async function storeLongerBlockedAccount(outsideWaitMs: number): Promise<{ ownId: number; outsideId: number }> {
 		await authStorage.credentials.set(
 			"anthropic",
 			[
@@ -308,15 +338,49 @@ describe("Claude saved-reset trigger integration", () => {
 			{ ...claudeStatus(true), credentialId: pooled.id },
 			outsideStatus,
 		]);
+		return { ownId: pooled.id, outsideId: outside.id };
+	}
+
+	/** {@link storeLongerBlockedAccount}, with the session pooled to its own account. */
+	async function poolToSessionAccount(
+		session: AgentSession,
+		outsideWaitMs: number,
+	): Promise<{ pooledId: number; outsideId: number; release: () => Promise<void> }> {
+		const { ownId, outsideId } = await storeLongerBlockedAccount(outsideWaitMs);
 		const lease = authStorage.sessions.restrict("anthropic", session.sessionId, [`email:${EMAIL}|org:${ORG_ID}`]);
 		return {
-			pooledId: pooled.id,
-			outsideId: outside.id,
+			pooledId: ownId,
+			outsideId,
 			release: async () => {
 				authStorage.sessions.unrestrict("anthropic", session.sessionId, lease);
 				await authStorage.credentials.remove("anthropic");
 			},
 		};
+	}
+
+	/**
+	 * Puts `sessions` on a second account, the rest on the stored one: sessions
+	 * on different accounts run separate blocked passes that can plan the same restore.
+	 */
+	function onSecondAccount(sessions: AgentSession[]): void {
+		const ids = new Set(sessions.map(session => session.sessionId));
+		vi.spyOn(authStorage.oauth, "identity").mockImplementation((_provider, sessionId) =>
+			sessionId && ids.has(sessionId)
+				? { accountId: "claude-second", email: "second@example.com", orgId: "org-second" }
+				: { accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID },
+		);
+	}
+
+	/** Resolves once a session waits on a peer's spend of a restore it also planned. */
+	function onPeerWait(coordinator: CodexAutoRedeemCoordinator): Promise<void> {
+		const waiting = Promise.withResolvers<void>();
+		const spends = coordinator.restoreSpends;
+		const get = spends.get.bind(spends);
+		vi.spyOn(spends, "get").mockImplementation(key => {
+			waiting.resolve();
+			return get(key);
+		});
+		return waiting.promise;
 	}
 
 	/** Records each redeemed credential and restores the quota it serves. */
@@ -489,6 +553,28 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
 	});
 
+	it("restores the session's own account, not a longer-blocked one outside its account pool", async () => {
+		const { session, targets } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			// Only the restore may spend; salvage would spend the session's expiring reset anyway.
+			salvageHorizonHours: 0,
+		});
+		const pool = await poolToSessionAccount(session, 6 * 24 * HOUR);
+		mockSchedulerWaitWithClock();
+
+		try {
+			await session.prompt("recover inside the account pool");
+			await session.waitForIdle();
+		} finally {
+			await pool.release();
+		}
+
+		expect(targets.map(target => target.credentialId)).toEqual([pool.pooledId]);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
 	it("drops a planned restore whose account leaves the session's pool before it is spent", async () => {
 		let replaced: SessionRestrictionLease | undefined;
 		const { session, coordinator, targets } = buildSession({
@@ -638,6 +724,403 @@ describe("Claude saved-reset trigger integration", () => {
 			expect(modelCalls()).toBe(2);
 			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 		}
+	});
+
+	it("restores a pooled session's own account when the pass it joined restored a longer-blocked one outside its pool", async () => {
+		// No salvage: the shared account's expiring reset would otherwise be spent in the same pass.
+		const openQuota = { restored: false };
+		const pooledQuota = { restored: false };
+		const open = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			quota: openQuota,
+		});
+		const pooled = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			quota: pooledQuota,
+			coordinator: open.coordinator,
+		});
+		const pool = await poolToSessionAccount(pooled.session, 6 * 24 * HOUR);
+		const spent = recordSpends(credentialId => (credentialId === pool.pooledId ? pooledQuota : openQuota));
+		mockSchedulerWaitWithClock();
+
+		try {
+			await promptJoined(open.session, pooled.session, open.coordinator);
+		} finally {
+			await pool.release();
+		}
+
+		// Two spends where active-first spends one: the unrestricted runner restores the
+		// account that skips the longest wait, as it would alone, and the pooled joiner
+		// restores its own. Each buys its session the wait it skips.
+		// The pooled session never retries its still-blocked account on the peer's restore.
+		expect(spent).toEqual([pool.outsideId, pool.pooledId]);
+		expect(pooled.modelCalls()).toBe(2);
+		for (const { session } of [open, pooled]) {
+			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		}
+	});
+
+	it("shares one restore of a longer-blocked account between sessions on different accounts that both asked consent", async () => {
+		const quota = { restored: false };
+		// The sessions share one prompt UI: the first prompt answers once both are
+		// waiting, the second only after the first has spent.
+		let prompts = 0;
+		const bothAsked = Promise.withResolvers<void>();
+		const firstSpent = Promise.withResolvers<void>();
+		const consent = async (): Promise<string> => {
+			prompts++;
+			if (prompts === 2) bothAsked.resolve();
+			await (prompts === 1 ? bothAsked.promise : firstSpent.promise);
+			return "Yes";
+		};
+		const first = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			quota,
+			consent,
+		});
+		const second = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			quota,
+			coordinator: first.coordinator,
+			consent,
+		});
+		// Different session accounts, so each runs its own blocked pass; both plan the longer-blocked one.
+		onSecondAccount([second.session]);
+		const { outsideId } = await storeLongerBlockedAccount(6 * 24 * HOUR);
+		const spent = recordSpends(credentialId => {
+			if (credentialId !== outsideId) return undefined;
+			firstSpent.resolve();
+			return quota;
+		});
+		mockSchedulerWaitWithClock();
+
+		try {
+			await Promise.all([first.session.prompt("first blocked turn"), second.session.prompt("second blocked turn")]);
+			await Promise.all([first.session.waitForIdle(), second.session.waitForIdle()]);
+		} finally {
+			await authStorage.credentials.remove("anthropic");
+		}
+
+		expect(spent).toEqual([outsideId]);
+		for (const { session } of [first, second]) {
+			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		}
+	});
+
+	it("does not retry on a peer's restore its pool drops while revalidating credentials", async () => {
+		const quota = { restored: false };
+		let prompts = 0;
+		const bothAsked = Promise.withResolvers<void>();
+		const firstSpent = Promise.withResolvers<void>();
+		const consent = async (): Promise<string> => {
+			prompts++;
+			if (prompts === 2) bothAsked.resolve();
+			await (prompts === 1 ? bothAsked.promise : firstSpent.promise);
+			return "Yes";
+		};
+		const first = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			quota,
+			consent,
+		});
+		const second = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			quota,
+			coordinator: first.coordinator,
+			consent,
+		});
+		onSecondAccount([second.session]);
+		const { outsideId } = await storeLongerBlockedAccount(6 * 24 * HOUR);
+		const spent = recordSpends(credentialId => {
+			if (credentialId !== outsideId) return undefined;
+			firstSpent.resolve();
+			return quota;
+		});
+		// The second session adopts the first's restore; while it revalidates, its
+		// pool narrows to the stored account it shares, excluding the restored one.
+		const revalidate = authStorage.credentials.revalidate.bind(authStorage.credentials);
+		let lease: SessionRestrictionLease | undefined;
+		vi.spyOn(authStorage.credentials, "revalidate").mockImplementation(async () => {
+			await revalidate();
+			lease ??= authStorage.sessions.restrict("anthropic", second.session.sessionId, [
+				`email:${EMAIL}|org:${ORG_ID}`,
+			]);
+		});
+		mockSchedulerWaitWithClock();
+
+		try {
+			await Promise.all([first.session.prompt("first blocked turn"), second.session.prompt("second blocked turn")]);
+			await Promise.all([first.session.waitForIdle(), second.session.waitForIdle()]);
+		} finally {
+			if (lease) authStorage.sessions.unrestrict("anthropic", second.session.sessionId, lease);
+			await authStorage.credentials.remove("anthropic");
+		}
+
+		expect(lease).toBeDefined();
+		expect(spent).toEqual([outsideId]);
+		expect(first.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		// Nothing the second session may use was restored: its blocked turn is not retried.
+		expect(second.modelCalls()).toBe(1);
+	});
+
+	it("spends a restore that a peer on another account released unspent because its pool dropped it", async () => {
+		const secondAsked = Promise.withResolvers<void>();
+		const firstPending = Promise.withResolvers<void>();
+		const first = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			consent: async () => {
+				await secondAsked.promise;
+				return "Yes";
+			},
+		});
+		const quota = { restored: false };
+		const second = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			quota,
+			coordinator: first.coordinator,
+			consent: async () => {
+				secondAsked.resolve();
+				await firstPending.promise;
+				return "Yes";
+			},
+		});
+		onSecondAccount([second.session]);
+		const { outsideId } = await storeLongerBlockedAccount(6 * 24 * HOUR);
+		const spent = recordSpends(credentialId => (credentialId === outsideId ? quota : undefined));
+		const secondWaiting = onPeerWait(first.coordinator);
+		// The first session's pool drops everything once its attempt is recorded,
+		// and its spend is held until the second waits on it.
+		const write = Bun.write.bind(Bun);
+		let lease: SessionRestrictionLease | undefined;
+		vi.spyOn(Bun, "write").mockImplementation(async (destination, input) => {
+			const written = await write(destination as string, input as string);
+			if (!lease && typeof input === "string" && input.startsWith("pending:")) {
+				lease = authStorage.sessions.restrict("anthropic", first.session.sessionId, []);
+				firstPending.resolve();
+				await secondWaiting;
+			}
+			return written;
+		});
+		mockSchedulerWaitWithClock();
+
+		try {
+			await Promise.all([first.session.prompt("first blocked turn"), second.session.prompt("second blocked turn")]);
+			await Promise.all([first.session.waitForIdle(), second.session.waitForIdle()]);
+		} finally {
+			if (lease) authStorage.sessions.unrestrict("anthropic", first.session.sessionId, lease);
+			await authStorage.credentials.remove("anthropic");
+		}
+
+		expect(spent).toEqual([outsideId]);
+		expect(second.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it("lets a joiner replan when its pass's pool dropped a restore a peer on another account spent", async () => {
+		const secondAsked = Promise.withResolvers<void>();
+		const firstPending = Promise.withResolvers<void>();
+		const thirdJoined = Promise.withResolvers<void>();
+		const firstQuota = { restored: false };
+		const thirdQuota = { restored: false };
+		const first = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			quota: firstQuota,
+			consent: async () => {
+				await secondAsked.promise;
+				return "Yes";
+			},
+		});
+		const second = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			coordinator: first.coordinator,
+			consent: async () => {
+				secondAsked.resolve();
+				await firstPending.promise;
+				return "Yes";
+			},
+		});
+		const third = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			quota: thirdQuota,
+			coordinator: first.coordinator,
+			consent: async () => "Yes",
+		});
+		// The second and third sessions share an account, so the third joins the second's pass.
+		onSecondAccount([second.session, third.session]);
+		const { ownId, outsideId } = await storeLongerBlockedAccount(6 * 24 * HOUR);
+		const secondWaiting = onPeerWait(first.coordinator);
+		const inFlight = first.coordinator.inFlightByAccount;
+		const get = inFlight.get.bind(inFlight);
+		vi.spyOn(inFlight, "get").mockImplementation(key => {
+			const pass = get(key);
+			if (pass) thirdJoined.resolve();
+			return pass;
+		});
+		// The first session spends the longer-blocked account once the second waits on
+		// it and the third has joined, while the second's pool drops that account.
+		let lease: SessionRestrictionLease | undefined;
+		const spent: number[] = [];
+		vi.spyOn(authStorage.resets, "redeem").mockImplementation(async request => {
+			spent.push(request.target.credentialId);
+			if (request.target.credentialId === outsideId) {
+				firstPending.resolve();
+				await Promise.all([secondWaiting, thirdJoined.promise]);
+				lease = authStorage.sessions.restrict("anthropic", second.session.sessionId, [
+					`email:${EMAIL}|org:${ORG_ID}`,
+				]);
+				firstQuota.restored = true;
+			} else if (request.target.credentialId === ownId) {
+				thirdQuota.restored = true;
+			}
+			return {
+				ok: true,
+				code: "reset",
+				provider: "anthropic",
+				creditId: "cedar-grant-1",
+				cleared: ["anthropic:7d"],
+			};
+		});
+		mockSchedulerWaitWithClock();
+
+		try {
+			const running = [first.session.prompt("first blocked turn"), second.session.prompt("second blocked turn")];
+			await secondAsked.promise;
+			await Promise.all([...running, third.session.prompt("join the second's pass")]);
+			await Promise.all([first.session.waitForIdle(), second.session.waitForIdle(), third.session.waitForIdle()]);
+		} finally {
+			if (lease) authStorage.sessions.unrestrict("anthropic", second.session.sessionId, lease);
+			await authStorage.credentials.remove("anthropic");
+		}
+
+		expect(lease).toBeDefined();
+		// The third replans instead of keeping the second's empty-handed result.
+		expect(spent).toEqual([outsideId, ownId]);
+		expect(third.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	/**
+	 * Both stored accounts blocked: the session's own by the 429 its first request
+	 * gets, the longer-blocked one by a stored block. A spend unblocks its account
+	 * as a real redeem does. Returns the credentials spent.
+	 */
+	async function blockBothAccounts(
+		blockedKeys: Set<string>,
+	): Promise<{ ownId: number; outsideId: number; spent: number[] }> {
+		const { ownId, outsideId } = await storeLongerBlockedAccount(6 * 24 * HOUR);
+		const keyById = new Map([
+			[ownId, `access-${ACCOUNT_ID}`],
+			[outsideId, "access-claude-excluded"],
+		]);
+		for (const key of keyById.values()) blockedKeys.add(key);
+		authStorage.blocks.upsert({
+			credentialId: outsideId,
+			providerKey: "anthropic:oauth",
+			blockScope: "",
+			blockedUntilMs: Date.now() + 6 * 24 * HOUR,
+		});
+		const spent: number[] = [];
+		vi.spyOn(authStorage.resets, "redeem").mockImplementation(async request => {
+			const credentialId = request.target.credentialId;
+			spent.push(credentialId);
+			blockedKeys.delete(keyById.get(credentialId) ?? "");
+			authStorage.blocks.deleteAll(credentialId);
+			return {
+				ok: true,
+				code: "reset",
+				provider: "anthropic",
+				creditId: "cedar-grant-1",
+				cleared: ["anthropic:7d"],
+			};
+		});
+		return { ownId, outsideId, spent };
+	}
+
+	it("sends the retry with the credential of the longer-blocked account it restored", async () => {
+		const blockedKeys = new Set<string>();
+		const { session, requestKeys } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			salvageHorizonHours: 0,
+			blockedKeys,
+		});
+		const { outsideId, spent } = await blockBothAccounts(blockedKeys);
+		mockSchedulerWaitWithClock();
+
+		try {
+			await session.prompt("blocked on both accounts");
+			await session.waitForIdle();
+		} finally {
+			await authStorage.credentials.remove("anthropic");
+		}
+
+		expect(spent).toEqual([outsideId]);
+		expect(requestKeys).toEqual([`access-${ACCOUNT_ID}`, "access-claude-excluded"]);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it("routes a session pinned to its own blocked account to the longer-blocked one it restored", async () => {
+		const blockedKeys = new Set<string>();
+		const { session, requestKeys } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			salvageHorizonHours: 0,
+			blockedKeys,
+		});
+		const { ownId, outsideId, spent } = await blockBothAccounts(blockedKeys);
+		// An explicit user pin yields to hard unavailability, so the restored account serves the retry.
+		expect(authStorage.sessions.pin("anthropic", session.sessionId, ownId)).toBe(true);
+		mockSchedulerWaitWithClock();
+
+		try {
+			await session.prompt("blocked on both accounts");
+			await session.waitForIdle();
+		} finally {
+			await authStorage.credentials.remove("anthropic");
+		}
+		expect(spent).toEqual([outsideId]);
+		expect(requestKeys).toEqual([`access-${ACCOUNT_ID}`, "access-claude-excluded"]);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 
 	it("cancels reset discovery backoff without spending a credit or resuming the task", async () => {

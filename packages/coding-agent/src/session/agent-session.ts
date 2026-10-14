@@ -329,6 +329,7 @@ import {
 	ATTEMPT_COOLDOWN_MS,
 	resetAccountLockKey,
 	defaultCodexAutoRedeemCoordinator,
+	enforcedAccountAllowlist,
 	headlessApprovedResetActions,
 	isTerminalRedeemOutcome,
 	overlayLiveResetCredits,
@@ -12787,6 +12788,11 @@ export class AgentSession implements SettingsScope {
 	): CodexResetPlan {
 		const cfg = cfgCodexResets.get(this.settings);
 		const model = this.model;
+		const authStorage = this.#modelRegistry.authStorage;
+		const permitsCredential = (credentialId: number) =>
+			authStorage.sessions.permits("openai-codex", this.sessionId, credentialId);
+		// The same allowlist credential routing applies to the retry.
+		const accountAccess = model ? this.#modelRegistry.find(model.provider, model.id)?.accountAccess : undefined;
 		const plan = planCodexResetRedemptions({
 			nowMs: Date.now(),
 			trigger,
@@ -12794,8 +12800,12 @@ export class AgentSession implements SettingsScope {
 			modelId: model?.id ?? "",
 			settings: resetPlanSettings(cfg),
 			identity,
-			permitsCredential: credentialId =>
-				this.#modelRegistry.authStorage.sessions.permits("openai-codex", this.sessionId, credentialId),
+			permitsCredential,
+			accountAllowlist: enforcedAccountAllowlist(
+				accountAccess && Object.keys(accountAccess),
+				authStorage.credentials.list("openai-codex"),
+				permitsCredential,
+			),
 			reports,
 			attemptedKeys: coordinator.attemptedKeys,
 			deferredUntilByKey: coordinator.deferredUntilByKey,
@@ -12879,6 +12889,30 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Another session in this process planned the same restore and holds its
+	 * attempt (both waited for consent, say). Waits for that spend: `reset` to
+	 * share it, `free` when it was released unspent and undeferred (its pool
+	 * dropped it) so this session may spend it, `taken` otherwise.
+	 */
+	async #awaitPeerRestore(
+		attemptKey: string,
+		coordinator: CodexAutoRedeemCoordinator,
+	): Promise<"reset" | "free" | "taken"> {
+		while (coordinator.attemptedKeys.has(attemptKey)) {
+			const spend = coordinator.restoreSpends.get(attemptKey);
+			if (!spend) return "taken";
+			if (await spend) return "reset";
+			// Still held by the same failed spend, or released with a deferral: not ours to retry.
+			if (coordinator.attemptedKeys.has(attemptKey) && coordinator.restoreSpends.get(attemptKey) === spend) {
+				return "taken";
+			}
+			if ((coordinator.deferredUntilByKey.get(attemptKey) ?? 0) > Date.now()) return "taken";
+			// Otherwise another waiter may have claimed it since: wait on that spend instead.
+		}
+		return "free";
+	}
+
+	/**
 	 * Shared consume executor for Codex and Claude plans. Attempt keys enter the
 	 * process-wide set before mutation, while nonterminal outcomes release and
 	 * defer the episode so a still-banked grant is not buried permanently.
@@ -12902,10 +12936,21 @@ export class AgentSession implements SettingsScope {
 		const restored: number[] = [];
 		let poolLimited = false;
 		for (const action of actions) {
-			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
+			if (coordinator.attemptedKeys.has(action.attemptKey)) {
+				const peer = await this.#awaitPeerRestore(action.attemptKey, coordinator);
+				if (peer === "reset") {
+					// The pool can change while credentials revalidate: check it again after.
+					if (!outsidePool(action)) await authStorage.credentials.revalidate();
+					if (outsidePool(action)) poolLimited = true;
+					else restored.push(action.target.credentialId);
+				}
+				if (peer !== "free") continue;
+			}
 			const previousAttemptAt = coordinator.lastAttemptAtByAccount.get(action.accountKey);
 			coordinator.attemptedKeys.add(action.attemptKey);
 			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
+			const spend = action.reason === "blocked-account" ? Promise.withResolvers<boolean>() : undefined;
+			if (spend) coordinator.restoreSpends.set(action.attemptKey, spend.promise);
 			let outcome: ResetCreditRedeemOutcome | undefined;
 			let sharedReset = false;
 			let leftPool = false;
@@ -12956,6 +13001,8 @@ export class AgentSession implements SettingsScope {
 				}
 			} catch (error) {
 				coordinator.attemptedKeys.delete(action.attemptKey);
+				coordinator.restoreSpends.delete(action.attemptKey);
+				spend?.resolve(false);
 				coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
 				logger.warn(`${source}: redeem threw, deferred`, {
 					account: action.accountKey,
@@ -12964,11 +13011,13 @@ export class AgentSession implements SettingsScope {
 				continue;
 			}
 			if (!outcome) {
+				spend?.resolve(sharedReset);
 				if (sharedReset) restored.push(action.target.credentialId);
 				if (leftPool) {
 					// Never attempted: the episode and cooldown stay free if the pool allows it again.
 					poolLimited = true;
 					coordinator.attemptedKeys.delete(action.attemptKey);
+					coordinator.restoreSpends.delete(action.attemptKey);
 					if (previousAttemptAt === undefined) coordinator.lastAttemptAtByAccount.delete(action.accountKey);
 					else coordinator.lastAttemptAtByAccount.set(action.accountKey, previousAttemptAt);
 					logger.debug(`${source}: restore dropped, account left the session's pool`, {
@@ -12977,8 +13026,10 @@ export class AgentSession implements SettingsScope {
 				}
 				continue;
 			}
+			spend?.resolve(outcome.code === "reset");
 			if (!isTerminalRedeemOutcome(outcome.code)) {
 				coordinator.attemptedKeys.delete(action.attemptKey);
+				coordinator.restoreSpends.delete(action.attemptKey);
 				coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
 			}
 			switch (outcome.code) {
