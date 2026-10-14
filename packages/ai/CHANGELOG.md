@@ -61,6 +61,10 @@
 - Fixed broker-backed auth-gateway processes retaining a cache entry for every distinct client session indefinitely under sustained traffic ([#15841](https://github.com/can1357/oh-my-pi/issues/15841)).
 - Fixed turns ending on a pinned error when a provider reports "temporarily unavailable" or finishes with an `unknown`, `other` or `unspecified` finish reason: these now retry automatically ([#15424](https://github.com/can1357/oh-my-pi/pull/15424) by [@lockwo](https://github.com/lockwo))
 
+### Fixed
+
+- Fixed the SQLite auth credential store leaving its database handle open on Windows after `close()`, which blocked temporary-directory cleanup with `EBUSY`; closing the store now finalizes outstanding statements ([#14828](https://github.com/can1357/oh-my-pi/pull/14828) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ## [18.11.0] - 2026-10-14
 
 ### Fixed
@@ -94,8 +98,6 @@
 ### Breaking Changes
 
 - `isOfficialCodexApiUrl` moved from `@oh-my-pi/pi-ai` to `@oh-my-pi/pi-catalog/wire/codex`, next to `CODEX_BASE_URL`, so the catalog's compat resolver classifies Codex endpoints with the same check ([#15434](https://github.com/can1357/oh-my-pi/pull/15434) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Devin-routed OpenAI models rejecting every turn with `invalid_argument` after switching an existing session from `openai-codex` ([#15234](https://github.com/can1357/oh-my-pi/issues/15234))
-- Fixed the SQLite auth credential store leaving its database handle open on Windows after `close()`, which blocked temporary-directory cleanup with `EBUSY`; the store and its test helpers now force-close ([#14828](https://github.com/can1357/oh-my-pi/pull/14828) by [@jchanghong023](https://github.com/jchanghong023)).
 
 ### Added
 
