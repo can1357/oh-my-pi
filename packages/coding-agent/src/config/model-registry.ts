@@ -1538,13 +1538,17 @@ export class ModelRegistry {
 		const hasProviderHeaders = providerOverride?.headers !== undefined;
 		const hasBearerAuth = providerOverride?.authHeader === true && providerOverride.apiKey !== undefined;
 		if (!hasModelOverrideHeaders && !hasProviderHeaders && !hasBearerAuth) return undefined;
-		const liveOverlayIds = new Set(
-			[...this.#customModelOverlays, ...this.#runtimeModelOverlays]
-				.filter(overlay => overlay.provider === providerId)
-				.map(overlay => overlay.id),
+		const liveModelIds = new Set(
+			[
+				...this.#customModelOverlays,
+				...this.#runtimeModelOverlays,
+				...(getBundledModels(providerId as Parameters<typeof getBundledModels>[0]) as Model<Api>[]),
+			]
+				.filter(model => model.provider === providerId)
+				.map(model => model.id),
 		);
 		let restoredCohort: readonly Readonly<Model<Api>>[] | undefined;
-		let liveIds = liveOverlayIds;
+		let liveIds = liveModelIds;
 		return (model, cohort) => {
 			// Per-pass state keys off the cohort the manager hands us: it is the
 			// cache batch being restored (the fallback re-read after concurrent
@@ -1554,18 +1558,28 @@ export class ModelRegistry {
 			if (cohort !== restoredCohort) {
 				restoredCohort = cohort;
 				registerCollapsedVariantAliases(providerId, cohort);
-				liveIds = new Set([...cohort.map(row => row.id), ...liveOverlayIds]);
+				liveIds = new Set([...cohort.map(row => row.id), ...liveModelIds]);
 			}
-			const modelOverride = modelOverrides
-				? (resolveModelOverrideWithAliases(modelOverrides, model, (_provider, id) => liveIds.has(id)) ??
-					(model.requestModelId && !liveIds.has(model.requestModelId)
-						? resolveModelOverrideWithAliases(
-								modelOverrides,
-								{ ...model, id: model.requestModelId },
-								(_provider, id) => liveIds.has(id),
-							)
-						: undefined))
+			let modelOverride = modelOverrides
+				? resolveModelOverrideWithAliases(modelOverrides, model, (_provider, id) => liveIds.has(id))
 				: undefined;
+			// The alias index is first-write-wins, so an earlier cohort or catalog
+			// composition can own a remapped member id. The persisted routing and
+			// requestModelId of the row being restored are authoritative for its own
+			// member ids, so resolve those directly before giving up.
+			if (!modelOverride && modelOverrides) {
+				for (const source of [
+					...Object.values(model.thinking?.effortRouting ?? {}),
+					...(model.requestModelId ? [model.requestModelId] : []),
+				]) {
+					if (!source || source === model.id || liveIds.has(source)) continue;
+					const candidate = modelOverrides.get(source);
+					if (candidate?.headers !== undefined) {
+						modelOverride = candidate;
+						break;
+					}
+				}
+			}
 			// An empty header map resolves to no request headers at all, so it is
 			// not a restoration source: accepting it would publish an omitted row
 			// whose transport headers stay missing.
@@ -1600,10 +1614,6 @@ export class ModelRegistry {
 				continue;
 			}
 			const configStale = this.#isDiscoveryCacheOlderThanModelsConfig(cache.updatedAt);
-			// A fresh process knows no collapsed variant aliases yet: replay the
-			// persisted effort routing/requestModelId so alias-keyed modelOverrides
-			// resolve during header restore, as they would after a live collapse.
-			registerCollapsedVariantAliases(providerConfig.provider, cache.models);
 			// Cached rows never persist headers (#5780): rebuild each omitted row's
 			// headers from the same local configuration that attached them and keep
 			// only the rows that get them back. A configured authHeader is
@@ -1612,12 +1622,17 @@ export class ModelRegistry {
 			const omittedHeaderIds = new Set(cache.headerOmittedModelIds);
 			const restoreConfiguredHeaders = this.#configuredDiscoveryHeaderRestore(providerConfig.provider);
 			let hasUnrestoredHeaders = false;
-			const usableCacheModels = cache.models.filter(model => {
-				if (!omittedHeaderIds.has(model.id)) return true;
+			const usableCacheModels = cache.models.flatMap(model => {
+				if (!omittedHeaderIds.has(model.id)) return [model];
 				const restored = restoreConfiguredHeaders?.(model, cache.models);
 				const restorable = restored?.headers !== undefined || restored?.resolveHeaders !== undefined;
-				if (!restorable) hasUnrestoredHeaders = true;
-				return restorable;
+				if (!restorable) {
+					hasUnrestoredHeaders = true;
+					return [];
+				}
+				// Attach the rebuilt headers like the manager's restore does: later
+				// override passes may not re-find an alias-keyed source on their own.
+				return [{ ...model, ...restored }];
 			});
 			const providerOverride = this.#providerOverrides.get(providerConfig.provider);
 			const restoredCacheModels = providerOverride
@@ -2151,9 +2166,6 @@ export class ModelRegistry {
 			}
 		};
 
-		// Replay persisted variant aliases before the manager restores cached
-		// headers: a fresh process has no live collapse to learn them from.
-		registerCollapsedVariantAliases(providerId, cached?.models ?? []);
 		const manager = createModelManager<Api>({
 			providerId,
 			staticModels: [],

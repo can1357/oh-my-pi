@@ -53,13 +53,13 @@ describe("model registry discovery header restore", () => {
 		await fsp.rm(tempDir, { recursive: true, force: true });
 	});
 
-	async function writeModelsYaml(headerBlock: string): Promise<string> {
+	async function writeModelsYaml(headerBlock: string, provider = "my-provider"): Promise<string> {
 		const modelsPath = path.join(tempDir, "models.yml");
 		await Bun.write(
 			modelsPath,
 			[
 				"providers:",
-				"  my-provider:",
+				`  ${provider}:`,
 				`    baseUrl: ${baseUrl}`,
 				"    api: openai-completions",
 				"    apiKey: test-api-key",
@@ -90,16 +90,19 @@ describe("model registry discovery header restore", () => {
 	// carries request headers, so the rows land in `header_omitted_model_ids`.
 	// Direct writes keep this process free of live collapses, so reloads start
 	// with cold variant aliases like a real restart.
-	function seedCachedRows(rows: ReadonlyArray<{ id: string; alias?: string; requestModelId?: string }>): void {
+	function seedCachedRows(
+		rows: ReadonlyArray<{ id: string; alias?: string; requestModelId?: string; plain?: boolean }>,
+		provider = "my-provider",
+	): void {
 		writeModelCache(
-			"my-provider:openai-models-list-context-v3",
+			`${provider}:openai-models-list-context-v3`,
 			Date.now(),
 			rows.map(row => ({
 				...buildModel({
 					id: row.id,
 					name: row.id,
 					api: "openai-completions",
-					provider: "my-provider",
+					provider,
 					baseUrl,
 					reasoning: true,
 					input: ["text"],
@@ -118,7 +121,7 @@ describe("model registry discovery header restore", () => {
 							}
 						: {}),
 				}),
-				headers: { Authorization: "Bearer test-api-key" },
+				...(row.plain ? {} : { headers: { Authorization: "Bearer test-api-key" } }),
 			})),
 			true,
 			"",
@@ -244,30 +247,39 @@ describe("model registry discovery header restore", () => {
 		expect(await registry.resolveModelHeaders(owner!)).toMatchObject({ "X-Account": "acc-3" });
 	});
 
-	test("restores headers from the cache cohort the manager reads", async () => {
+	test("does not rebind alias-keyed headers owned by a bundled model", async () => {
 		const modelsPath = await writeModelsYaml(
-			[
-				"    modelOverrides:",
-				"      gateway/model-b-thinking:",
-				"        headers:",
-				"          X-Account: acc-2",
-			].join("\n"),
+			["    modelOverrides:", "      gpt-4o:", "        headers:", "          X-Account: acc-4"].join("\n"),
+			"openai",
 		);
-		seedCachedRows([{ id: "gateway/model-a", alias: "gateway/model-a-thinking" }]);
+		seedCachedRows([{ id: "openai/gpt-4o-old", alias: "gpt-4o" }], "openai");
+
+		const registry = await reloadFromCache(modelsPath);
+		// The alias id is a live bundled model: its override headers belong to that
+		// model and must not be rebound onto the cached logical row.
+		expect(registry.find("openai", "openai/gpt-4o-old")).toBeUndefined();
+		expect(registry.find("openai", "gpt-4o")).toBeDefined();
+	});
+
+	test("restores remapped aliases from the cohort the manager reads", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      gateway/model-shared:", "        headers:", "          X-Account: acc-5"].join(
+				"\n",
+			),
+		);
+		// The stale cohort's row is not header-omitted, so no restore pass adopts
+		// its alias mapping; only the newer cohort (written mid-fetch) must claim
+		// `gateway/model-shared` — for its own logical model.
+		seedCachedRows([{ id: "gateway/model-a", alias: "gateway/model-shared", plain: true }]);
 		const registry = await newRegistry(modelsPath, async () => {
-			// Another process replaces the provider's cache rows while the
-			// discovery request is in flight; the failed-fetch fallback re-reads
-			// and restores this newer cohort.
-			seedCachedRows([{ id: "gateway/model-b", alias: "gateway/model-b-thinking" }]);
+			seedCachedRows([{ id: "gateway/model-b", alias: "gateway/model-shared" }]);
 			return new Response("not found", { status: 404 });
 		});
-		await registry.refreshDiscoverableProviders(["my-provider"], "online-if-uncached");
+		await registry.refreshDiscoverableProviders(["my-provider"], "online");
 
-		// The fallback must persist the restored newer cohort instead of an empty
-		// snapshot, so the next startup restores B from the cache.
 		const restarted = await reloadFromCache(modelsPath);
 		const cached = restarted.find("my-provider", "gateway/model-b");
 		expect(cached).toBeDefined();
-		expect(await restarted.resolveModelHeaders(cached!)).toMatchObject({ "X-Account": "acc-2" });
+		expect(await restarted.resolveModelHeaders(cached!)).toMatchObject({ "X-Account": "acc-5" });
 	});
 });
