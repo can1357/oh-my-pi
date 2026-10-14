@@ -47,6 +47,13 @@
 
 ### Fixed
 
+- Fixed a warm stats sync worker being reused after the agent directory moved (for example an SDK that re-points at a different sessions root), which persisted new transcripts under `..` and as subagent usage instead of their real folder and type ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
+- Fixed a stats sync that kept dispatching transcripts to a worker which had already crashed mid-run, stalling the run until a reply that never came; the drain now fails cleanly and the caller retries with a fresh worker ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
+
+## [18.10.4] - 2026-10-13
+
+### Fixed
+
 - Usage recorded at $0 for a model whose catalog price changes on a date (Gemini 4 Argon, Devin SWE-2) is now priced at the rate in force on the request's date, instead of staying $0 like peak/off-peak tariff usage ([#15620](https://github.com/can1357/oh-my-pi/pull/15620) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.9.0] - 2026-10-11
@@ -54,9 +61,6 @@
 ### Fixed
 
 - Fixed the stats dashboard favicon so dashboard tabs and bookmarks display the OMP icon correctly.
-- Fixed a warm stats sync worker being reused after the agent directory moved (for example an SDK that re-points at a different sessions root), which persisted new transcripts under `..` and as subagent usage instead of their real folder and type ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
-- Fixed a stats sync that kept dispatching transcripts to a worker which had already crashed mid-run, stalling the run until a reply that never came; the drain now fails cleanly and the caller retries with a fresh worker ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
-- Fixed the stats dashboard serving index.html at /favicon.ico; it now returns the omp icon (image/x-icon), so dashboard tabs and bookmarks show a real icon ([#15162](https://github.com/can1357/oh-my-pi/pull/15162) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 
 ## [18.8.0] - 2026-10-07
 
