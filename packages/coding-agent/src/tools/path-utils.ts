@@ -18,6 +18,8 @@ import {
 	windowsPathToWslMount,
 } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter } from "../internal-urls";
+import { hasExactMcpResource } from "../internal-urls/mcp-protocol";
+import { MCPManager } from "../mcp/manager";
 import type { ResolveContext } from "../internal-urls/types";
 import { type InternalUrlFilesystem, joinUrlPath, UrlFsError } from "../internal-urls/url-filesystem";
 import { ToolAbortError } from "./tool-errors";
@@ -703,8 +705,9 @@ function hasAmbiguousInternalUrlTail(parts: readonly string[]): boolean {
 			continue;
 		}
 		const localPart = normalizePosixPath(part);
+		if (isReadableUrlPath(part)) continue;
 		const anchored =
-			isFilesystemSourcePath(part) ||
+			isFilesystemSourcePath(expandPath(part)) ||
 			localPart.startsWith("./") ||
 			localPart.startsWith("../") ||
 			localPart.startsWith("~");
@@ -792,6 +795,18 @@ async function internalUrlLocatesExisting(entry: string, cwd: string, context?: 
 	}
 }
 
+async function internalUrlIsExactMcpResource(entry: string): Promise<boolean> {
+	if (!MCPManager.available()) return false;
+	try {
+		const manager = await MCPManager.load();
+		return manager
+			? hasExactMcpResource(manager, parseInternalUrl(InternalUrlRouter.instance().normalize(entry)))
+			: false;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Split a `;` list that names URLs alongside local paths
  * (`https://x;src/a.ts:1-20`, `omp://;Makefile:1-3`). Engages only when URL
@@ -812,6 +827,9 @@ export async function splitMixedUrlPathList(
 	if (isInternalUrlPath(normalizedEntry)) {
 		// Existing file-backed resources keep literal precedence over list recovery.
 		if (await internalUrlLocatesExisting(normalizedEntry, cwd, context)) return null;
+		// An exact MCP URI may be non-locatable locally; its advertised identity
+		// still takes precedence over interpreting its semicolon as a list.
+		if (await internalUrlIsExactMcpResource(normalizedEntry)) return null;
 	} else {
 		if ((await probeLiteralPathExists(normalizedEntry, cwd)) !== "missing") return null;
 		const selectorSplit = splitPathAndSel(normalizedEntry);
@@ -822,7 +840,7 @@ export async function splitMixedUrlPathList(
 	const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, parseSearchPath, "semicolon", "none");
 	if (!parts || parts.length < 2) return null;
 	for (const part of parts) {
-		if (isUrl(part)) continue;
+		if (isUrl(part) || isReadableUrlPath(part)) continue;
 		const partPath = splitPathAndSel(part).path;
 		if (hasGlobPathChars(partPath) || (await probeLiteralPathExists(partPath, cwd)) !== "exists") return null;
 	}

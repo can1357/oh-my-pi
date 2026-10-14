@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resetActiveSkillsForTests, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { InternalUrlRouter, LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -31,6 +32,7 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 	beforeEach(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "grep-semicolon-"));
 		AgentRegistry.resetGlobalForTests();
+		MCPManager.resetForTests();
 		LocalProtocolHandler.resetOverrideForTests();
 		InternalUrlRouter.resetForTests();
 
@@ -55,6 +57,7 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 	afterEach(async () => {
 		await removeWithRetries(tmpDir);
 		AgentRegistry.resetGlobalForTests();
+		MCPManager.resetForTests();
 		LocalProtocolHandler.resetOverrideForTests();
 		InternalUrlRouter.resetForTests();
 		resetActiveSkillsForTests();
@@ -81,6 +84,44 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 		const text = getResultText(result);
 		expect(text).toContain(skillBodyNeedle);
 		expect(text).toContain("abs path needle");
+	});
+
+	it("anchors file URL tails after expanding them to filesystem paths", async () => {
+		const fileUrl = `file://${absFile}`;
+		const target = `skill://demo/SKILL.md;${fileUrl}`;
+		expect(await expandDelimitedPathEntries([target], tmpDir)).toEqual(["skill://demo/SKILL.md", fileUrl]);
+
+		const searched = await new GrepTool(createSession()).execute("file-url-tail-search", {
+			pattern: "needle",
+			path: target,
+		});
+		expect(getResultText(searched)).toContain(skillBodyNeedle);
+		expect(getResultText(searched)).toContain("abs path needle");
+
+		const found = await new GlobTool(createSession()).execute("file-url-tail-find", { path: target });
+		expect(found.details?.files).toContain("skill://demo/SKILL.md");
+		expect(found.details?.files?.some(file => file.endsWith("abs-target.md"))).toBe(true);
+	});
+
+	it("keeps exact MCP resources whole and fans out readable HTTPS URL tails", async () => {
+		const exactUri = `skill://figma/resource;${absFile}`;
+		MCPManager.setInstance({
+			getConnectedServers: () => ["figma"],
+			getServerResources: () => ({ resources: [{ uri: exactUri, name: "exact" }], templates: [] }),
+			readServerResource: async () => ({ contents: [{ uri: exactUri, text: "exact MCP resource needle" }] }),
+			waitForPendingConnections: async () => {},
+			ensureServerResources: async () => {},
+		} as unknown as MCPManager);
+		await Bun.write(absFile, "local tail needle\n");
+		const read = await new ReadTool(createSession()).execute("exact-mcp-resource", { path: exactUri });
+		expect(getResultText(read)).toContain("exact MCP resource needle");
+		expect(getResultText(read)).not.toContain("local tail needle");
+
+		const httpsList = "skill://demo/SKILL.md;https://example.test/doc";
+		expect(await expandDelimitedPathEntries([httpsList], tmpDir)).toEqual([
+			"skill://demo/SKILL.md",
+			"https://example.test/doc",
+		]);
 	});
 
 	it("keeps a local:// artifact whose name contains `;` whole even when the suffix names a cwd file", async () => {
