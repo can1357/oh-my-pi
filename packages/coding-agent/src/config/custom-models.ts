@@ -214,7 +214,10 @@ export function computeHeaderConfigFingerprint(
 	const canonical = stableStringifyJson([
 		providerActiveKeys !== undefined && providerActiveKeys.length > 0 ? providerActiveKeys : null,
 		providerOverride?.authHeader === true,
-		providerOverride?.apiKey !== undefined,
+		// The resolver only folds the configured key into request headers when
+		// authHeader is enabled; moving it to AuthStorage otherwise rebuilds the
+		// same layer and must not invalidate restored rows.
+		providerOverride?.authHeader === true && providerOverride?.apiKey !== undefined,
 		models,
 	]);
 	return new Bun.CryptoHasher("sha256").update(canonical).digest("hex");

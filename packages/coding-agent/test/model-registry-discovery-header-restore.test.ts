@@ -865,4 +865,40 @@ describe("model registry discovery header restore", () => {
 		expect(second.find("my-provider", "gateway/model-a")).toBeDefined();
 		expect(parseModelPattern("my-provider/raw-22", second.getAll("all")).model).toBeUndefined();
 	});
+
+	test("keeps a local owner for shared dynamic aliases", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      raw-25:", "        headers:", "          X-Account: a-1"].join("\n"),
+		);
+		seedCachedRows([
+			{ id: "gateway/first-25", alias: "raw-25" },
+			{ id: "gateway/second-25", alias: "raw-25" },
+		]);
+		const first = await reloadFromCache(modelsPath);
+		expect(first.find("my-provider", "gateway/first-25")).toBeDefined();
+
+		// A second registry replays raw-25 elsewhere; the first catalog's shared
+		// source keeps its local first owner instead of deferring to the global
+		// mapping for a row it does not have.
+		seedCachedRows([{ id: "gateway/third-25", alias: "raw-25" }]);
+		const second = await reloadFromCache(modelsPath);
+		expect(second.find("my-provider", "gateway/third-25")).toBeDefined();
+		expect(parseModelPattern("raw-25", first.getAll("all")).model).toMatchObject({
+			id: "gateway/first-25",
+		});
+	});
+
+	test("gates api key provenance on bearer auth", () => {
+		const withoutAuth = computeHeaderConfigFingerprint({ headers: { "X-A": "v" } }, new Map());
+		// authHeader off: the configured key never reaches reconstructed request
+		// headers, so moving it in or out of models.yml rebuilds the same layer.
+		const keyMoved = computeHeaderConfigFingerprint({ headers: { "X-A": "v" }, apiKey: "cfg-key" }, new Map());
+		expect(keyMoved).toBe(withoutAuth);
+		const bearer = computeHeaderConfigFingerprint({ headers: { "X-A": "v" }, authHeader: true }, new Map());
+		const bearerKeyed = computeHeaderConfigFingerprint(
+			{ headers: { "X-A": "v" }, authHeader: true, apiKey: "cfg-key" },
+			new Map(),
+		);
+		expect(bearerKeyed).not.toBe(bearer);
+	});
 });

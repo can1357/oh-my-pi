@@ -1,6 +1,6 @@
 import { logger, VERSION } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
-import { collapseBuiltVariants } from "./compat/collapse";
+import { collapseBuiltVariants, registerCollapsedVariantAliases } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
@@ -414,6 +414,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		// longer records.
 		{ replaceAliases: anyRemoteFetchSucceeded, retireStale: anyRemoteFetchSucceeded },
 	);
+	if (anyRemoteFetchSucceeded && !models.some(model => model.provider === options.providerId)) {
+		// A successful cohort with zero rows for this provider still retires its
+		// prior dynamic claims: the endpoint no longer advertises those aliases.
+		registerCollapsedVariantAliases(options.providerId, [], { replace: true, retireStale: true });
+	}
 	const resolutionAuthoritative = !hasRemoteFetcher || remoteResolutionComplete || shouldUseFreshCacheAsAuthoritative;
 	const remoteUpdatedAt = anyRemoteFetchSucceeded ? now() : undefined;
 	if (shouldFetchFromNetwork) {

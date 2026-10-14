@@ -432,40 +432,48 @@ function getProviderWireRouteIndex(availableModels: readonly Model<Api>[]): Map<
 
 const kProviderAliasSourceIndex = Symbol("model-resolver.aliasSourceIndex");
 
+type AliasSourceIndex = { owners: Map<string, Model<Api>>; reviewed: Set<string> };
+
 type ModelsWithAliasSourceIndex = readonly Model<Api>[] & {
-	[kProviderAliasSourceIndex]?: Map<string, Model<Api> | null>;
+	[kProviderAliasSourceIndex]?: AliasSourceIndex;
 };
 
 /**
  * Every raw member id (effort routing values, `requestModelId`, reviewed extra
  * aliases) a row owns, keyed `provider\0source`. Used to resolve bare aliases
  * within the registry first: the process-global alias index may map a raw id
- * to a row from a different registry's cache replay.
+ * to a row from a different registry's cache replay. Shared sources keep the
+ * catalog-local first owner; sources a reviewed table declares are left to the
+ * canonical reviewed target instead.
  */
-function getProviderAliasSourceIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
+function getProviderAliasSourceIndex(availableModels: readonly Model<Api>[]): AliasSourceIndex {
 	const tagged = availableModels as ModelsWithAliasSourceIndex;
 	const cached = tagged[kProviderAliasSourceIndex];
 	if (cached) return cached;
-	const index = new Map<string, Model<Api> | null>();
+	const owners = new Map<string, Model<Api>>();
+	const reviewed = new Set<string>();
 	for (const m of availableModels) {
 		const providerKey = m.provider.toLowerCase();
 		const routing = m.thinking?.effortRouting;
-		const sources = [
-			...(routing ? Object.values(routing) : []),
-			...(m.requestModelId ? [m.requestModelId] : []),
-			...getReviewedVariantAliasSources(m.provider, m.id),
-		];
-		for (const source of sources) {
+		const dataSources = [...(routing ? Object.values(routing) : []), ...(m.requestModelId ? [m.requestModelId] : [])];
+		for (const source of dataSources) {
 			if (!source) continue;
 			const key = `${providerKey}\u0000${source.toLowerCase()}`;
-			const existing = index.get(key);
-			if (existing === undefined) {
-				index.set(key, m);
-			} else if (existing !== null && existing !== m) {
-				index.set(key, null); // ambiguous sentinel; do not overwrite back
+			// The `X-thinking` grammar target is the canonical owner of its raw
+			// member id (a live pair over a cache row that merely records it);
+			// other shared sources keep the catalog-local first owner.
+			const grammarTarget = stripThinkingVariantSuffix(source.toLowerCase());
+			const existing = owners.get(key);
+			if (existing === undefined || (grammarTarget !== undefined && m.id.toLowerCase() === grammarTarget)) {
+				owners.set(key, m);
 			}
 		}
+		for (const source of getReviewedVariantAliasSources(m.provider, m.id)) {
+			if (!source) continue;
+			reviewed.add(`${providerKey}\u0000${source.toLowerCase()}`);
+		}
 	}
+	const index = { owners, reviewed };
 	tagged[kProviderAliasSourceIndex] = index;
 	return index;
 }
@@ -496,9 +504,10 @@ export function resolveProviderModelReference(
 	// Raw member ids recorded by this registry's own rows resolve locally
 	// first: the process-global alias index may point at a row from a
 	// different registry's cache replay, which this catalog does not have.
-	const localOwner = getProviderAliasSourceIndex(availableModels).get(
-		`${normalizedProvider}\u0000${normalizedModelId}`,
-	);
+	// Reviewed-declared sources keep their canonical target instead.
+	const localAliases = getProviderAliasSourceIndex(availableModels);
+	const localKey = `${normalizedProvider}\u0000${normalizedModelId}`;
+	const localOwner = localAliases.reviewed.has(localKey) ? undefined : localAliases.owners.get(localKey);
 	if (localOwner) {
 		return localOwner;
 	}
@@ -822,20 +831,21 @@ function matchModel(
 		return bedrockInferenceProfile;
 	}
 
-	// A raw member id recorded by exactly one available row resolves to its
-	// local owner before the process-global alias index: a different registry's
-	// cache replay may have moved the alias to a row this catalog lacks. Shared
-	// sources keep the canonical (reviewed) target instead of letting list
-	// order pick an arbitrary owner.
-	const localOwners = availableModels.filter(m =>
-		[
-			...(m.thinking?.effortRouting ? Object.values(m.thinking.effortRouting) : []),
-			...(m.requestModelId ? [m.requestModelId] : []),
-			...getReviewedVariantAliasSources(m.provider, m.id),
-		].some(source => source !== undefined && source.toLowerCase() === lowerPattern),
-	);
-	if (localOwners.length === 1) {
-		return pickPreferredModel(localOwners, context);
+	// A raw member id recorded by the available rows resolves to its
+	// catalog-local owner before the process-global alias index: a different
+	// registry's cache replay may have moved the alias to a row this catalog
+	// lacks. Reviewed-declared sources keep their canonical target; other
+	// shared sources keep their catalog-local owners and let preference pick.
+	const localIndex = getProviderAliasSourceIndex(availableModels);
+	const bareKeySuffix = `\u0000${lowerPattern}`;
+	const bareReviewed = [...localIndex.reviewed].some(key => key.endsWith(bareKeySuffix));
+	if (!bareReviewed) {
+		const bareOwners = [...localIndex.owners.entries()]
+			.filter(([key]) => key.endsWith(bareKeySuffix))
+			.map(([, model]) => model);
+		if (bareOwners.length > 0) {
+			return pickPreferredModel(bareOwners, context);
+		}
 	}
 
 	// Retired effort-tier variant ids (bare, no provider prefix) resolve to

@@ -9,6 +9,7 @@ import {
 	deriveThinkingPairFamilies,
 	getVariantAliasSources,
 	isCollapsedVariantSpec,
+	registerCollapsedVariantAliases,
 	resolveBareVariantSelector,
 	resolveVariantSelector,
 	reviewedCollapseTable,
@@ -1845,5 +1846,14 @@ describe("alias replay replacement", () => {
 			replaceAliases: true,
 		});
 		expect(resolveBareVariantSelector("batch-raw")?.id).toBe("batch-first");
+	});
+
+	it("retires prior claims for an explicit empty replacement batch", () => {
+		collapseBuiltVariants([memberModel("empty-row", "empty-raw")], { replaceAliases: true, retireStale: true });
+		expect(resolveBareVariantSelector("empty-raw")?.id).toBe("empty-row");
+		// A successful cohort that drops every row retires the old claims too:
+		// the manager invokes this for providers absent from the fresh batch.
+		registerCollapsedVariantAliases("p", [], { replace: true, retireStale: true });
+		expect(resolveBareVariantSelector("empty-raw")).toBeUndefined();
 	});
 });
