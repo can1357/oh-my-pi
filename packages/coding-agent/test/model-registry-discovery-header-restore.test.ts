@@ -11,10 +11,11 @@
  * from every cached read — `find`/`resolveSessionModelSelector` missed it after
  * restart until a successful online refetch repopulated the catalog, surfacing
  * as `Could not restore model <provider/id>` on `--continue`/`--resume` while
- * `--model` still resolved the model.
+ * `--model` still resolved the model. Rows without a rebuildable header source
+ * must stay excluded instead of surviving with their transport headers missing.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
@@ -35,25 +36,23 @@ function mockDiscovery(ids: string[]): FetchImpl {
 	};
 }
 
-const unreachableDiscovery: FetchImpl = async () => new Response("not found", { status: 404 });
-
 describe("model registry discovery header restore", () => {
 	let tempDir: string;
 	const authStoragesToClose: AuthStorage[] = [];
 
-	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-discovery-headers-"));
+	beforeEach(async () => {
+		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-discovery-headers-"));
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		for (const authStorage of authStoragesToClose) authStorage.close();
 		authStoragesToClose.length = 0;
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		await fsp.rm(tempDir, { recursive: true, force: true });
 	});
 
-	function writeModelsYaml(headerBlock: string): string {
+	async function writeModelsYaml(headerBlock: string): Promise<string> {
 		const modelsPath = path.join(tempDir, "models.yml");
-		fs.writeFileSync(
+		await Bun.write(
 			modelsPath,
 			[
 				"providers:",
@@ -69,48 +68,97 @@ describe("model registry discovery header restore", () => {
 		return modelsPath;
 	}
 
-	async function discoverOnce(modelsPath: string): Promise<void> {
+	async function newRegistry(modelsPath: string, fetchImpl: FetchImpl): Promise<ModelRegistry> {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		authStorage.keys.setRuntime("my-provider", "test-api-key");
-		const registry = new ModelRegistry(authStorage, modelsPath, {
-			fetch: mockDiscovery(["gateway/model-a"]),
-		});
-		await registry.refreshDiscoverableProviders(["my-provider"], "online");
-		const live = registry.find("my-provider", "gateway/model-a");
-		expect(live).toBeDefined();
-		expect(await registry.resolveModelHeaders(live!)).toMatchObject({ "X-Account": "acc-1" });
+		return new ModelRegistry(authStorage, modelsPath, { fetch: fetchImpl });
 	}
 
 	async function reloadFromCache(modelsPath: string): Promise<ModelRegistry> {
-		// A second registry over the same models.db with the discovery endpoint
+		// A fresh registry over the same models.db with the discovery endpoint
 		// unreachable: every model must come back from the cache alone, with its
 		// request headers rebuilt from local configuration.
-		const authStorage = createInMemoryAuthStorage();
-		authStoragesToClose.push(authStorage);
-		authStorage.keys.setRuntime("my-provider", "test-api-key");
-		return new ModelRegistry(authStorage, modelsPath, { fetch: unreachableDiscovery });
+		return newRegistry(modelsPath, async () => new Response("not found", { status: 404 }));
 	}
 
 	test("rebuilds modelOverrides headers on cached discovery rows", async () => {
-		const modelsPath = writeModelsYaml(
+		const modelsPath = await writeModelsYaml(
 			["    modelOverrides:", "      gateway/model-a:", "        headers:", "          X-Account: acc-1"].join("\n"),
 		);
-		await discoverOnce(modelsPath);
-		const registry = await reloadFromCache(modelsPath);
-		const cached = registry.find("my-provider", "gateway/model-a");
+		const registry1 = await newRegistry(modelsPath, mockDiscovery(["gateway/model-a"]));
+		await registry1.refreshDiscoverableProviders(["my-provider"], "online");
+		const live = registry1.find("my-provider", "gateway/model-a");
+		expect(live).toBeDefined();
+		expect(await registry1.resolveModelHeaders(live!)).toMatchObject({ "X-Account": "acc-1" });
+
+		const registry2 = await reloadFromCache(modelsPath);
+		const cached = registry2.find("my-provider", "gateway/model-a");
 		expect(cached).toBeDefined();
-		expect(await registry.resolveModelHeaders(cached!)).toMatchObject({ "X-Account": "acc-1" });
-		expect(resolveSessionModelSelector(registry, "my-provider/gateway/model-a")).toBeDefined();
+		expect(await registry2.resolveModelHeaders(cached!)).toMatchObject({ "X-Account": "acc-1" });
+		expect(resolveSessionModelSelector(registry2, "my-provider/gateway/model-a")).toBeDefined();
 	});
 
 	test("rebuilds provider-level headers on cached discovery rows", async () => {
-		const modelsPath = writeModelsYaml(["    headers:", "      X-Account: acc-1"].join("\n"));
-		await discoverOnce(modelsPath);
-		const registry = await reloadFromCache(modelsPath);
-		const cached = registry.find("my-provider", "gateway/model-a");
+		const modelsPath = await writeModelsYaml(["    headers:", "      X-Account: acc-1"].join("\n"));
+		const registry1 = await newRegistry(modelsPath, mockDiscovery(["gateway/model-a"]));
+		await registry1.refreshDiscoverableProviders(["my-provider"], "online");
+		const live = registry1.find("my-provider", "gateway/model-a");
+		expect(live).toBeDefined();
+		expect(await registry1.resolveModelHeaders(live!)).toMatchObject({ "X-Account": "acc-1" });
+
+		const registry2 = await reloadFromCache(modelsPath);
+		const cached = registry2.find("my-provider", "gateway/model-a");
 		expect(cached).toBeDefined();
-		expect(await registry.resolveModelHeaders(cached!)).toMatchObject({ "X-Account": "acc-1" });
-		expect(resolveSessionModelSelector(registry, "my-provider/gateway/model-a")).toBeDefined();
+		expect(await registry2.resolveModelHeaders(cached!)).toMatchObject({ "X-Account": "acc-1" });
+		expect(resolveSessionModelSelector(registry2, "my-provider/gateway/model-a")).toBeDefined();
+	});
+
+	test("keeps only the cached rows whose headers can be rebuilt", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      gateway/model-a:", "        headers:", "          X-Account: acc-1"].join("\n"),
+		);
+		const registry1 = await newRegistry(modelsPath, mockDiscovery(["gateway/model-a", "gateway/model-b"]));
+		await registry1.refreshDiscoverableProviders(["my-provider"], "online");
+		// The authenticated /models fetch attaches request headers to every row,
+		// so both rows are header-omitted at cache write time.
+		const liveB = registry1.find("my-provider", "gateway/model-b");
+		expect(liveB).toBeDefined();
+		expect(await registry1.resolveModelHeaders(liveB!)).toHaveProperty("Authorization");
+
+		const registry2 = await reloadFromCache(modelsPath);
+		expect(registry2.find("my-provider", "gateway/model-a")).toBeDefined();
+		// B has no local header source: it must stay excluded rather than survive
+		// with its auth/account-routing header missing.
+		expect(registry2.find("my-provider", "gateway/model-b")).toBeUndefined();
+		expect(registry2.getProviderDiscoveryState("my-provider")?.stale).toBe(true);
+	});
+
+	test("rebuilds alias-keyed override headers on cached discovery rows", async () => {
+		const modelsPath = await writeModelsYaml(
+			[
+				"    modelOverrides:",
+				"      gateway/model-a-thinking:",
+				"        headers:",
+				"          X-Account: acc-1",
+			].join("\n"),
+		);
+		// The paired thinking sibling collapses into `gateway/model-a`, registering
+		// the retired-id alias that override and header-restore lookups resolve.
+		const registry0 = await newRegistry(modelsPath, mockDiscovery(["gateway/model-a", "gateway/model-a-thinking"]));
+		await registry0.refreshDiscoverableProviders(["my-provider"], "online");
+		expect(registry0.find("my-provider", "gateway/model-a")).toBeDefined();
+
+		const registry1 = await newRegistry(modelsPath, mockDiscovery(["gateway/model-a"]));
+		await registry1.refreshDiscoverableProviders(["my-provider"], "online");
+		const live = registry1.find("my-provider", "gateway/model-a");
+		expect(live).toBeDefined();
+		expect(await registry1.resolveModelHeaders(live!)).toMatchObject({ "X-Account": "acc-1" });
+
+		const registry2 = await reloadFromCache(modelsPath);
+		const cached = registry2.find("my-provider", "gateway/model-a");
+		expect(cached).toBeDefined();
+		expect(await registry2.resolveModelHeaders(cached!)).toMatchObject({ "X-Account": "acc-1" });
+		expect(resolveSessionModelSelector(registry2, "my-provider/gateway/model-a")).toBeDefined();
 	});
 });

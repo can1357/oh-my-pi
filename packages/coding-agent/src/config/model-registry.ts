@@ -1518,6 +1518,7 @@ export class ModelRegistry {
 	 */
 	#configuredDiscoveryHeaderRestore(
 		providerId: string,
+		liveModelIds: ReadonlySet<string>,
 	): ((model: Readonly<Model<Api>>) => Pick<Model<Api>, "headers" | "resolveHeaders"> | undefined) | undefined {
 		const providerOverride = this.#providerOverrides.get(providerId);
 		const modelOverrides = this.#modelOverrides.get(providerId);
@@ -1535,8 +1536,14 @@ export class ModelRegistry {
 		if (!hasModelOverrideHeaders && !hasProviderHeaders && !hasBearerAuth) return undefined;
 		return model => {
 			const modelOverride = modelOverrides
-				? (modelOverrides.get(model.id) ??
-					(model.requestModelId ? modelOverrides.get(model.requestModelId) : undefined))
+				? (resolveModelOverrideWithAliases(modelOverrides, model, (_provider, id) => liveModelIds.has(id)) ??
+					(model.requestModelId
+						? resolveModelOverrideWithAliases(
+								modelOverrides,
+								{ ...model, id: model.requestModelId },
+								(_provider, id) => liveModelIds.has(id),
+							)
+						: undefined))
 				: undefined;
 			const resolveHeaders = createConfigHeaderResolver([modelOverride?.headers, providerOverride?.headers], {
 				authHeader: providerOverride?.authHeader,
@@ -1562,16 +1569,24 @@ export class ModelRegistry {
 				continue;
 			}
 			const configStale = this.#isDiscoveryCacheOlderThanModelsConfig(cache.updatedAt);
-			// Cached rows never persist headers (#5780). A configured authHeader
-			// is re-derived asynchronously at the request boundary, so its rows are
+			// Cached rows never persist headers (#5780): rebuild each omitted row's
+			// headers from the same local configuration that attached them and keep
+			// only the rows that get them back. A configured authHeader is
+			// re-derived asynchronously at the request boundary, so its rows are
 			// safe to retain without baking a credential snapshot into the cache.
-			const canRestoreHeaders = this.#configuredDiscoveryHeaderRestore(providerConfig.provider) !== undefined;
 			const omittedHeaderIds = new Set(cache.headerOmittedModelIds);
-			const hasUnrestoredHeaders = omittedHeaderIds.size > 0 && !canRestoreHeaders;
-			const usableCacheModels =
-				omittedHeaderIds.size === 0 || canRestoreHeaders
-					? cache.models
-					: cache.models.filter(model => !omittedHeaderIds.has(model.id));
+			const restoreConfiguredHeaders = this.#configuredDiscoveryHeaderRestore(
+				providerConfig.provider,
+				new Set(cache.models.map(model => model.id)),
+			);
+			let hasUnrestoredHeaders = false;
+			const usableCacheModels = cache.models.filter(model => {
+				if (!omittedHeaderIds.has(model.id)) return true;
+				const restored = restoreConfiguredHeaders?.(model);
+				const restorable = restored?.headers !== undefined || restored?.resolveHeaders !== undefined;
+				if (!restorable) hasUnrestoredHeaders = true;
+				return restorable;
+			});
 			const providerOverride = this.#providerOverrides.get(providerConfig.provider);
 			const restoredCacheModels = providerOverride
 				? usableCacheModels.map(model => this.#applyProviderTransportOverrideToModel(model, providerOverride))
@@ -2107,7 +2122,10 @@ export class ModelRegistry {
 		const manager = createModelManager<Api>({
 			providerId,
 			staticModels: [],
-			restoreCachedHeaders: this.#configuredDiscoveryHeaderRestore(providerId),
+			restoreCachedHeaders: this.#configuredDiscoveryHeaderRestore(
+				providerId,
+				new Set((cached?.models ?? []).map(model => model.id)),
+			),
 			cacheDbPath: this.#cacheDbPath,
 			cacheProviderId,
 			cacheTtlMs: 24 * 60 * 60 * 1000,
