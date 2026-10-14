@@ -629,6 +629,94 @@ describe("omp agents show inputs", () => {
 		}
 	});
 
+	it("refreshes discovery for an advisor whose model is not cached yet, as the session retries it", async () => {
+		const dir = path.join(os.tmpdir(), `pi-agents-show-advisors-${Snowflake.next()}`);
+		await fs.mkdir(dir, { recursive: true });
+		try {
+			await Bun.write(
+				path.join(dir, "WATCHDOG.yml"),
+				["advisors:", "  - name: fast", "    model: anthropic/claude-haiku-4-5"].join("\n"),
+			);
+			let refreshed = false;
+			vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => (refreshed ? models : [sonnet, opus]));
+			vi.spyOn(modelRegistry, "getDiscoverableProviders").mockReturnValue(["local"]);
+			vi.spyOn(modelRegistry, "refresh").mockImplementation(async () => {
+				refreshed = true;
+			});
+			const settings = Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } });
+			const view = await resolveEffectiveAgentConfig(worker, settings, modelRegistry, dir);
+			expect(view.advisor.value).toEqual(["fast: anthropic/claude-haiku-4-5"]);
+			expect(view.advisor.note).toBe("roster from WATCHDOG.yml");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("names a role only when the selector that matched came from it", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5", slow: "anthropic/claude-haiku-4-5" },
+		});
+		const concreteFirst = await resolveEffectiveAgentConfig(
+			{ ...worker, model: ["anthropic/claude-opus-4-5", "@slow"] },
+			settings,
+			modelRegistry,
+			"/tmp",
+		);
+		expect(concreteFirst.model.value).toBe("anthropic/claude-opus-4-5");
+		expect(concreteFirst.model.note).toBeUndefined();
+		const roleWins = await resolveEffectiveAgentConfig(
+			{ ...worker, model: ["anthropic/no-such-model", "@slow"] },
+			settings,
+			modelRegistry,
+			"/tmp",
+		);
+		expect(roleWins.model.value).toBe("anthropic/claude-haiku-4-5");
+		expect(roleWins.model.note).toBe("@slow via modelRoles.slow");
+	});
+
+	it("probes the agent model's credentials under a child session id, as the spawn does", async () => {
+		// Session-sticky OAuth: the agent's provider resolves a key only for a session.
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async (model, sessionId) =>
+			model.id === opus.id && !sessionId ? undefined : "sk-test",
+		);
+		const settings = Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } });
+		const view = await resolveEffectiveAgentConfig(worker, settings, modelRegistry, "/tmp");
+		expect(view.model.value).toBe("anthropic/claude-opus-4-5");
+		expect(view.model.source).toEqual({ layer: "frontmatter", key: "model" });
+	});
+
+	it("computes compaction on the model's refreshed metadata, as session start does", async () => {
+		const live = { ...opus, contextWindow: 64_000 };
+		vi.spyOn(modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model =>
+			model.id === opus.id ? live : model,
+		);
+		const settings = Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } });
+		const view = await resolveEffectiveAgentConfig(worker, settings, modelRegistry, "/tmp");
+		expect(describeModelCompactionPoint(settings, opus).tokens).not.toBe(
+			describeModelCompactionPoint(settings, live).tokens,
+		);
+		expect(view.compaction.value).toBe(describeModelCompactionPoint(settings, live).tokens ?? null);
+	});
+
+	it("leaves thinking unset on an unverified ladder when no layer picks a level, as session start does", async () => {
+		const unverified: Model = {
+			...opus,
+			id: "claude-opus-unverified",
+			thinking: { ...opus.thinking!, defaultLevel: undefined, unverified: true },
+		};
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([...models, unverified]);
+		const settings = Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } });
+		const agent: AgentDefinition = {
+			...worker,
+			model: [`anthropic/${unverified.id}`],
+			thinkingLevel: undefined,
+		};
+		const view = await resolveEffectiveAgentConfig(agent, settings, modelRegistry, "/tmp");
+		expect(view.model.value).toBe(`anthropic/${unverified.id}`);
+		expect(view.thinking.value).toBeNull();
+		expect(view.thinking.note).toBe("not applied: the model's thinking levels are unverified");
+	});
+
 	it("opens settings read-only and touches no auth storage for an unknown agent", async () => {
 		const init = vi.spyOn(Settings, "init");
 		const readOnly = vi.spyOn(Settings, "loadReadOnly");

@@ -1346,6 +1346,25 @@ interface EffectiveAgentModelSelection {
 	from: AgentModelSelectionSource;
 	source?: string | string[];
 	patterns: string[];
+	patternRoles: (string | undefined)[];
+}
+
+/** `resolveConfiguredModelPatterns`, plus the role alias of the raw selector each pattern expanded from. */
+function expandAgentModelPatterns(
+	value: string | string[] | undefined,
+	settings: ModelRoleLookup | undefined,
+): { patterns: string[]; patternRoles: (string | undefined)[] } {
+	const patterns: string[] = [];
+	const patternRoles: (string | undefined)[] = [];
+	for (const selector of normalizeModelPatternList(value)) {
+		const expanded = resolveConfiguredRolePattern(selector, settings) ?? [];
+		const role = resolveExplicitModelRole(selector, settings);
+		for (const pattern of expanded) {
+			patterns.push(pattern);
+			patternRoles.push(role);
+		}
+	}
+	return { patterns, patternRoles };
 }
 
 function resolveEffectiveAgentModelSelection(
@@ -1353,33 +1372,34 @@ function resolveEffectiveAgentModelSelection(
 ): EffectiveAgentModelSelection {
 	const { requestModel, settingsOverride, agentModel, settings, activeModelPattern, fallbackModelPattern } = options;
 
-	const requestPatterns = resolveConfiguredModelPatterns(requestModel, settings);
-	if (requestPatterns.length > 0) {
-		return { from: "request", source: requestModel, patterns: requestPatterns };
+	const request = expandAgentModelPatterns(requestModel, settings);
+	if (request.patterns.length > 0) {
+		return { from: "request", source: requestModel, ...request };
 	}
 
-	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings);
-	if (overridePatterns.length > 0) {
-		return { from: "settings", source: settingsOverride, patterns: overridePatterns };
+	const override = expandAgentModelPatterns(settingsOverride, settings);
+	if (override.patterns.length > 0) {
+		return { from: "settings", source: settingsOverride, ...override };
 	}
 
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
-	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
+	const configuredAgent = expandAgentModelPatterns(agentModel, settings);
 	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
 	const agentInheritsSessionModel = singleAgentPattern ? isSessionInheritedAgentPattern(singleAgentPattern) : false;
-	if (configuredAgentPatterns.length > 0) {
+	if (configuredAgent.patterns.length > 0) {
 		if (
 			singleAgentPattern === formatModelRoleAlias("task") ||
 			singleAgentPattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
 		) {
-			return { from: "agent", source: agentModel, patterns: configuredAgentPatterns };
+			return { from: "agent", source: agentModel, ...configuredAgent };
 		}
-		if (!agentInheritsSessionModel) return { from: "agent", source: agentModel, patterns: configuredAgentPatterns };
+		if (!agentInheritsSessionModel) return { from: "agent", source: agentModel, ...configuredAgent };
 	}
 
 	const fallback =
 		activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
-	return { from: "session", patterns: resolveConfiguredModelPatterns(fallback, settings) };
+	const patterns = resolveConfiguredModelPatterns(fallback, settings);
+	return { from: "session", patterns, patternRoles: patterns.map(() => undefined) };
 }
 
 /** Effective agent model patterns paired with the pre-expansion role alias behind them. */
@@ -1388,6 +1408,8 @@ export interface AgentModelSelection {
 	patterns: string[];
 	/** Role alias the patterns came from (`@task` -> `task`), when the source named one. */
 	role: string | undefined;
+	/** Role alias of the raw selector each entry of `patterns` expanded from, index for index. */
+	patternRoles: (string | undefined)[];
 	/** Input the patterns came from. */
 	from: AgentModelSelectionSource;
 }
@@ -1399,8 +1421,8 @@ export interface AgentModelSelection {
  * discards, and deriving the two halves separately is how they drift apart.
  */
 export function resolveAgentModelSelection(options: AgentModelPatternResolutionOptions): AgentModelSelection {
-	const { from, source, patterns } = resolveEffectiveAgentModelSelection(options);
-	return { patterns, role: resolveExplicitModelRole(source, options.settings), from };
+	const { from, source, patterns, patternRoles } = resolveEffectiveAgentModelSelection(options);
+	return { patterns, patternRoles, role: resolveExplicitModelRole(source, options.settings), from };
 }
 
 /** Effective agent model patterns alone, for callers with no interest in role identity. */
@@ -1698,13 +1720,21 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
  * `exactOnly` matches each pattern only as a literal `provider/model-id`,
  * optionally followed by a supported `:level` and an aggregator `@upstream` pin:
  * no role aliases, globs, or fuzzy ids.
+ *
+ * `patternIndex` is the index in `modelPatterns` of the pattern that matched.
  */
 export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelLookupRegistry,
 	settings?: Settings,
 	options?: { exactOnly?: boolean },
-): { model?: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel; explicitThinkingLevel: boolean; warning?: string } {
+): {
+	model?: Model<Api>;
+	thinkingLevel?: ConfiguredThinkingLevel;
+	explicitThinkingLevel: boolean;
+	warning?: string;
+	patternIndex?: number;
+} {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
 	const availableModels = modelRegistry.getAvailable();
 	if (options?.exactOnly) {
@@ -1739,7 +1769,7 @@ export function resolveModelOverride(
 	}
 	const matchPreferences = getModelMatchPreferences(settings);
 	let warning: string | undefined;
-	for (const pattern of modelPatterns) {
+	for (const [patternIndex, pattern] of modelPatterns.entries()) {
 		const {
 			model,
 			thinkingLevel,
@@ -1750,7 +1780,7 @@ export function resolveModelOverride(
 			matchPreferences,
 		});
 		if (model) {
-			return { model, thinkingLevel, explicitThinkingLevel, warning: patternWarning };
+			return { model, thinkingLevel, explicitThinkingLevel, warning: patternWarning, patternIndex };
 		}
 		if (!warning && patternWarning) warning = patternWarning;
 	}
@@ -1857,6 +1887,8 @@ export async function resolveModelOverrideWithAuthFallback(
 	explicitThinkingLevel: boolean;
 	authFallbackUsed: boolean;
 	warning?: string;
+	/** Index in `modelPatterns` of the pattern that matched; unset when the parent's model was used. */
+	patternIndex?: number;
 }> {
 	const disabledProviders = disabledProviderIds(settings);
 	let lookupRegistry: ModelLookupRegistry = modelRegistry;
@@ -1896,7 +1928,12 @@ export async function resolveModelOverrideWithAuthFallback(
 		return { ...primary, authFallbackUsed: false };
 	}
 
-	return { ...fallback, authFallbackUsed: true, warning: primary.warning ?? fallback.warning };
+	return {
+		...fallback,
+		patternIndex: undefined,
+		authFallbackUsed: true,
+		warning: primary.warning ?? fallback.warning,
+	};
 }
 
 /**
