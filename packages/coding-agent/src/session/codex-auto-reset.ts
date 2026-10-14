@@ -280,7 +280,7 @@ interface AccountSnapshot {
 	limitReached: boolean;
 	creditExpiresAtMs: number | undefined;
 	creditId: string | undefined;
-	/** Whether the account's plan serves the blocked turn's model; undefined when ungated or unknown. */
+	/** The model's plan gate verdict for this account: undefined when ungated or the plan is unknown. */
 	planEligible: boolean | undefined;
 }
 
@@ -391,9 +391,22 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		blockedRuleActive = false;
 		skipped.push({ accountKey: "*", rule: "blocked-account", reason: "spark-model" });
 	}
-	// Credential routing drops accounts whose plan cannot serve the model, so a
-	// restore there cannot unblock the retry.
+	// Credential routing enforces a model's plan once any account the session may
+	// use is confirmed eligible, and then skips every account not confirmed
+	// eligible; otherwise (trial or grandfathered access) it tries them all. A
+	// restore routing would skip cannot unblock the retry.
 	const planGate = codexRankingStrategy.planGate?.({ modelId: input.modelId });
+	const enforcePlan =
+		planGate !== undefined &&
+		(input.reports ?? []).some(report => {
+			const credentialId = report.metadata?.resetCreditCredentialId;
+			return (
+				report.provider === "openai-codex" &&
+				typeof credentialId === "number" &&
+				(input.permitsCredential?.(credentialId) ?? true) &&
+				planGate(report) === true
+			);
+		});
 
 	const snapshots: AccountSnapshot[] = [];
 	for (const report of input.reports ?? []) {
@@ -477,7 +490,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				skip("outside-account-pool");
 				continue;
 			}
-			if (snapshot.planEligible === false) {
+			if (enforcePlan && snapshot.planEligible !== true) {
 				skip("plan-ineligible");
 				continue;
 			}
