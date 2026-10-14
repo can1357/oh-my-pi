@@ -40,6 +40,7 @@ import {
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "../session/retry-fallback-chains";
+import { cfgRetryFallbackChainExhausted } from "../session/settings";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -196,9 +197,10 @@ interface FallbackExpansion {
  * inherited effort, so the same model reached at another effort still walks
  * its own descendants. `allowMissingPrimary` lets the concrete primary
  * stand in when a role assignment is too unqualified to parse as a chain
- * primary. `roleHint` is the tier, valid only for the root expansion:
- * nested candidates resolve their own exact/wildcard/role chain so a leaf
- * cannot jump back into the root tier chain and reorder its siblings.
+ * primary. `roleHint` is the tier, valid only for the root expansion.
+ * Contained tiers append their full configured chain without walking any
+ * candidate's off-role chains. Otherwise nested candidates resolve their own
+ * exact/wildcard/role chain without jumping back into the root tier chain.
  */
 function appendFallbackCandidates(
 	deps: FallbackExpansion,
@@ -228,7 +230,9 @@ function appendFallbackCandidates(
 		if (seen.has(identity)) continue;
 		seen.add(identity);
 		out.push({ selector: entry.raw, model: candidate, ...reasoning });
-		appendFallbackCandidates(deps, entry.raw, candidate, reasoning, undefined, seen, expanded, out);
+		if (deps.context.fallbackChainExhausted?.[deps.tier] !== "fail") {
+			appendFallbackCandidates(deps, entry.raw, candidate, reasoning, undefined, seen, expanded, out);
+		}
 	}
 }
 
@@ -289,6 +293,7 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 		{
 			context: {
 				chains: getRetryFallbackChains(session.settings),
+				fallbackChainExhausted: cfgRetryFallbackChainExhausted.get(session.settings),
 				getModelRole: (role: string) => session.settings.getModelRole(role),
 				modelLookup: modelRegistry,
 			},

@@ -24,7 +24,11 @@ import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/e
 import type { ToolSession } from "../../src/tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
-import { cfgRetryFallbackChains, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
+import {
+	cfgRetryFallbackChainExhausted,
+	cfgRetryFallbackChains,
+	cfgRetryMaxRetries,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
 
 async function runEvalCompletionAndWait(
 	args: unknown,
@@ -351,6 +355,64 @@ describe("runEvalCompletion", () => {
 		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "b", "d", "e"]);
 		expect(result.text).toBe("e answer");
 	});
+
+	it("does not request the default chain after a contained tier's candidates fail", async () => {
+		const a = makeModel("p", "a");
+		const b = makeModel("p", "b");
+		const session = makeSession({ available: [SMOL, a, b] });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/a"], default: ["p/b"] });
+		cfgRetryFallbackChainExhausted.set(session.settings, { smol: "fail" });
+		cfgRetryMaxRetries.set(session.settings, 10);
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "smol down" }))
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "a down" }))
+			.mockResolvedValue(assistant({ text: "off-role answer" }));
+
+		await expect(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session })).rejects.toThrow("a down");
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "a"]);
+	});
+
+	it("still reaches the default chain when the completion tier is unlisted", async () => {
+		const a = makeModel("p", "a");
+		const b = makeModel("p", "b");
+		const session = makeSession({ available: [SMOL, a, b] });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/a"], default: ["p/b"] });
+		cfgRetryFallbackChainExhausted.set(session.settings, { slow: "fail" });
+		cfgRetryMaxRetries.set(session.settings, 10);
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "smol down" }))
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "a down" }))
+			.mockResolvedValue(assistant({ text: "default-chain answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "a", "b"]);
+		expect(result.text).toBe("default-chain answer");
+	});
+
+	for (const offRoleChain of ["default", "p/a", "p/*", "vision"]) {
+		it(`preserves the full contained tier candidate order without expanding ${offRoleChain}`, async () => {
+			const [a, b, c] = ["a", "b", "c"].map(id => makeModel("p", id));
+			const session = makeSession({ available: [SMOL, a, b, c] });
+			session.settings.setModelRole("vision", "p/a");
+			cfgRetryFallbackChains.set(session.settings, { smol: ["p/a", "p/c"], [offRoleChain]: ["p/b"] });
+			cfgRetryFallbackChainExhausted.set(session.settings, { smol: "fail" });
+			cfgRetryMaxRetries.set(session.settings, 10);
+			const spy = vi
+				.spyOn(ai, "completeSimple")
+				.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "smol down" }))
+				.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "a down" }))
+				.mockResolvedValue(assistant({ text: "last candidate answer" }));
+
+			const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+			expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "a", "c"]);
+			expect(result.details.model).toBe("p/c");
+			expect(result.text).toBe("last candidate answer");
+		});
+	}
 
 	it("inherits the failed candidate's effort for bare nested entries", async () => {
 		const thinking = {

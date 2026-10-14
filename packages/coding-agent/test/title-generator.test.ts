@@ -779,6 +779,45 @@ describe("title generator", () => {
 		expect(attempted).not.toContain(roleOnly.id);
 	});
 
+	it.each([true, false])("contains smol title requests only when its fail policy is enabled (%s)", async contained => {
+		const primary = getModelOrThrow("claude-haiku-4-5");
+		const secondary = getModelOrThrow("claude-sonnet-4-5");
+		const offRole = getModelFor("openai", "gpt-4o-mini");
+		const primarySelector = `${primary.provider}/${primary.id}`;
+		const secondarySelector = `${secondary.provider}/${secondary.id}`;
+		const offRoleSelector = `${offRole.provider}/${offRole.id}`;
+		const settings = Settings.isolated({
+			modelRoles: {
+				tiny: "missing/unavailable",
+				commit: "missing/unavailable",
+				smol: primarySelector,
+				default: secondarySelector,
+			},
+			"retry.modelFallback": true,
+			"retry.fallbackChains": {
+				smol: [secondarySelector],
+				default: [offRoleSelector],
+			},
+			"retry.fallbackChainExhausted": contained ? { smol: "fail" } : {},
+		});
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "title model unavailable",
+			content: [],
+		} as never);
+
+		const title = await generateSessionTitle(
+			"Investigate fallback containment",
+			createRegistry(primary, [primary, secondary, offRole]),
+			settings,
+		);
+
+		expect(title).toBeNull();
+		expect(completeSimpleMock.mock.calls.map(call => formatModelStringWithRouting(call[0]))).toEqual(
+			contained ? [primarySelector, secondarySelector] : [primarySelector, secondarySelector, offRoleSelector],
+		);
+	});
+
 	it.each([true, false])("honors modelFallback=%s when the title model returns a provider error", async enabled => {
 		const smolModel = getModelOrThrow("claude-opus-4-8");
 		const fallbackModel = getModelOrThrow("claude-sonnet-4-5");

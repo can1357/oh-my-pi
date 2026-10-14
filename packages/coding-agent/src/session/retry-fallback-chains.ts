@@ -13,7 +13,7 @@ import {
 import { resolveConfiguredModelPatterns, resolveModelRoleValue } from "../config/model-resolver";
 import { getRoleInfo, isKindRole } from "../config/model-roles";
 
-import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy, type RetrySettings } from "./settings";
+import { cfgRetryFallbackChainExhausted, cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy, type RetrySettings } from "./settings";
 
 /** Configured fallback chains keyed by role or model selector. */
 export type RetryFallbackChains = Record<string, string[]>;
@@ -42,6 +42,7 @@ export interface RetryFallbackModelLookup {
  */
 export interface RetryFallbackResolutionContext {
 	chains: RetryFallbackChains;
+	fallbackChainExhausted?: Record<string, "fail" | "default">;
 	getModelRole(role: string): string | undefined;
 	modelLookup: RetryFallbackModelLookup;
 }
@@ -155,12 +156,15 @@ export function isKnownProvider(
 export function expandDefaultRetryFallbackChains(
 	configuredChains: RetryFallbackChains,
 	roleNames: readonly string[],
+	fallbackChainExhausted: Record<string, "fail" | "default"> = {},
 ): RetryFallbackChains {
 	const chains: RetryFallbackChains = { ...configuredChains };
 	const defaultChain = chains.default;
-	if (!Array.isArray(defaultChain)) return chains;
 	for (const role of roleNames) {
-		if (role !== "default" && !isKindRole(role) && chains[role] === undefined) chains[role] = defaultChain;
+		if (fallbackChainExhausted[role] === "fail" && chains[role] === undefined) chains[role] = [];
+		if (role !== "default" && !isKindRole(role) && chains[role] === undefined && Array.isArray(defaultChain)) {
+			chains[role] = defaultChain;
+		}
 	}
 	return chains;
 }
@@ -169,7 +173,11 @@ export function expandDefaultRetryFallbackChains(
 export function getRetryFallbackChains(settings: Settings): RetryFallbackChains {
 	const configuredChains = cfgRetryFallbackChains.get(settings);
 	if (!configuredChains || typeof configuredChains !== "object") return {};
-	return expandDefaultRetryFallbackChains(configuredChains, Object.keys(settings.getModelRoles()));
+	return expandDefaultRetryFallbackChains(
+		configuredChains,
+		Object.keys(settings.getModelRoles()),
+		cfgRetryFallbackChainExhausted.get(settings),
+	);
 }
 
 /**
@@ -182,14 +190,18 @@ export interface RetryFallbackRole {
 	primary: string;
 	/** Fallback selectors walked after the primary. */
 	chain: string[];
+	/** Preserve containment when a dynamic role is restored from session_init. */
+	exhausted?: "fail" | "default";
 }
 
 /** Reads the primary and non-empty chain installed for `role`, if any. */
 export function getRetryFallbackRole(settings: Settings, role: string): RetryFallbackRole | undefined {
 	const primary = settings.getModelRole(role);
 	const chain = cfgRetryFallbackChains.get(settings)[role];
-	if (!primary || !Array.isArray(chain) || chain.length === 0) return undefined;
-	return { primary, chain };
+	if (!primary || !Array.isArray(chain)) return undefined;
+	const exhausted = cfgRetryFallbackChainExhausted.get(settings)[role];
+	if (chain.length === 0 && exhausted !== "fail") return undefined;
+	return { primary, chain, ...(exhausted ? { exhausted } : {}) };
 }
 
 /**
@@ -200,7 +212,7 @@ export function getRetryFallbackRole(settings: Settings, role: string): RetryFal
 export function installRetryFallbackRole(
 	settings: Settings,
 	role: string,
-	{ primary, chain }: RetryFallbackRole,
+	{ primary, chain, exhausted }: RetryFallbackRole,
 ): void {
 	const modelRoles: Record<string, string> = {};
 	const existingRoles = settings.getModelRoles();
@@ -216,6 +228,12 @@ export function installRetryFallbackRole(
 		if (key !== role) fallbackChains[key] = existingChains[key];
 	}
 	cfgRetryFallbackChains.override(settings, fallbackChains);
+	if (exhausted) {
+		cfgRetryFallbackChainExhausted.override(settings, {
+			...cfgRetryFallbackChainExhausted.get(settings),
+			[role]: exhausted,
+		});
+	}
 }
 
 /**
@@ -430,6 +448,10 @@ export function resolveRetryFallbackChainKey(
 	currentModel?: Model | null,
 	roleHint?: string,
 ): string | undefined {
+	// A contained role with no chain must not be captured by a shared default assignment.
+	if (roleHint && context.fallbackChainExhausted?.[roleHint] === "fail") {
+		return Array.isArray(context.chains[roleHint]) ? roleHint : undefined;
+	}
 	const parsedConfigured = parseRetryFallbackSelector(currentSelector, context.modelLookup);
 	const currentPlainSelector = currentModel
 		? formatModelSelectorValue(formatModelString(currentModel), parsedConfigured?.thinkingLevel)

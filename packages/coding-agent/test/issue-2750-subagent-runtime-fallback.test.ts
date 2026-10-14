@@ -85,7 +85,7 @@ function createYieldingSession(
 				type: "tool_execution_end",
 				toolCallId: "tool-yield",
 				toolName: "yield",
-				result: { content: [{ type: "text", text: "Result submitted." }], details: { status: "success" } },
+				result: { content: [{ type: "text", text: "Result submitted." }], details: { status: "success", data: { ok: true } } },
 				isError: false,
 			});
 		},
@@ -96,6 +96,33 @@ function createYieldingSession(
 describe("subagent runtime model resolution", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+	});
+
+	it("preserves the upstream main-pin then advisor lookup when neither role opts in", () => {
+		const primary = model("primary", "worker-model");
+		const advisor = model("advisor", "advisor-model");
+		for (const policies of [{}, { task: "default", advisor: "default" }]) {
+			const settings = Settings.isolated({
+				modelRoles: { task: "primary/worker-model", advisor: "advisor/advisor-model" },
+				"retry.fallbackChains": { task: ["global/main-fallback"], advisor: ["global/advisor-fallback"] },
+				"retry.fallbackChainExhausted": policies,
+			});
+			const recovery = new TurnRecovery({
+				model: () => primary,
+				configuredThinkingLevel: () => undefined,
+				sessionManager: { getSessionId: () => "no-containment" },
+				settings,
+				modelRegistry: {
+					find: (provider: string, id: string) => [primary, advisor].find(m => m.provider === provider && m.id === id),
+					hasProvider: () => true,
+				},
+			} as unknown as TurnRecoveryHost, {
+				initialRetryFallback: { role: "task", originalSelector: "primary/worker-model", originalThinkingLevel: undefined },
+				deferFallbackChainValidation: true,
+			});
+			expect(recovery.retryFallbackChainKeys("advisor/advisor-model", advisor, { roleHint: "advisor" }))
+				.toEqual(["task", "advisor"]);
+		}
 	});
 
 	for (const { level, collide } of [
@@ -218,6 +245,98 @@ describe("subagent runtime model resolution", () => {
 		});
 		expect(candidates).toEqual(["fallback/working-model"]);
 	});
+
+	for (const chain of [undefined, ["fallback/working-model"]]) {
+		it(`contains a fail-role subagent with ${chain ? "an exhausted" : "no"} role chain`, async () => {
+			const primary = model("primary", "bad-runtime-model");
+			const fallback = model("fallback", "working-model");
+			const root = model("global", "root-model");
+			vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+				if (!options?.settings) throw new Error("Expected child settings");
+				const settings = options.settings;
+				const dynamicRole = "subagent:contained";
+				expect(cfgRetryFallbackChains.get(settings)[dynamicRole]).toEqual(chain ?? []);
+				const recovery = new TurnRecovery({
+					model: () => fallback,
+					thinkingLevel: () => undefined,
+					settings,
+					sessionManager: options.sessionManager,
+					modelRegistry: {
+						find: (provider: string, id: string) =>
+							[primary, fallback, root].find(m => m.provider === provider && m.id === id),
+						hasProvider: () => true,
+						getAvailable: () => [primary, fallback, root],
+					},
+					configWarnings: [],
+				} as unknown as TurnRecoveryHost);
+				expect(recovery.retryFallbackChainKeys("fallback/working-model", fallback, { pinnedRole: dynamicRole }))
+					.toEqual([dynamicRole]);
+				return { session: createYieldingSession("none"), extensionsResult: {}, setToolUIContext: () => {} } as never;
+			});
+			await runSubprocess({
+				cwd: "/tmp",
+				agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+				task: "work",
+				index: 0,
+				id: "contained",
+				modelOverride: "@task",
+				settings: Settings.isolated({
+					modelRoles: { task: "primary/bad-runtime-model", default: "global/root-model" },
+					"retry.fallbackChains": { default: ["global/root-model"], ...(chain ? { task: chain } : {}) },
+					"retry.fallbackChainExhausted": { task: "fail" },
+				}),
+				modelRegistry: {
+					refresh: async () => {},
+					getAvailable: () => [primary, fallback, root],
+					getApiKey: async () => "test-key",
+				} as never,
+				enableLsp: false,
+			});
+		});
+	}
+
+	for (const fallbackAuthenticated of [false, true]) {
+		it(`does not authenticate a contained worker through its parent (${fallbackAuthenticated ? "own fallback available" : "no own credentials"})`, async () => {
+			const primary = model("primary", "bad-runtime-model");
+			const fallback = model("fallback", "working-model");
+			const parent = model("global", "parent-model");
+			const create = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+				expect(options?.model?.provider).toBe("fallback");
+				expect(options?.settings?.getModelRole("subagent:contained-auth")).toBe("fallback/working-model");
+				return { session: createYieldingSession("none"), extensionsResult: {}, setToolUIContext: () => {} } as never;
+			});
+			const result = await runSubprocess({
+				cwd: "/tmp",
+				agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+				task: "work",
+				index: 0,
+				id: "contained-auth",
+				modelOverride: "@task",
+				parentActiveModelPattern: "global/parent-model",
+				settings: Settings.isolated({
+					modelRoles: { task: "primary/bad-runtime-model", default: "global/parent-model" },
+					"retry.fallbackChains": { task: ["fallback/working-model"], default: ["global/parent-model"] },
+					"retry.fallbackChainExhausted": { task: "fail" },
+				}),
+				modelRegistry: {
+					refresh: async () => {},
+					getAvailable: () => [primary, fallback, parent],
+					getApiKey: async (candidate: Model) =>
+						candidate.provider === "global" || (fallbackAuthenticated && candidate.provider === "fallback")
+							? "test-key" : undefined,
+				} as never,
+				enableLsp: false,
+			});
+			if (fallbackAuthenticated) {
+				expect(create).toHaveBeenCalledTimes(1);
+				expect(result.exitCode).toBe(0);
+			} else {
+				expect(create).not.toHaveBeenCalled();
+				expect(result.exitCode).toBe(1);
+				expect(result.stderr).toContain('No model with usable credentials in contained role "task"');
+			}
+		});
+	}
 
 	it("passes ordered subagent candidates as a child retry fallback chain", async () => {
 		const primary = model("primary", "bad-runtime-model");

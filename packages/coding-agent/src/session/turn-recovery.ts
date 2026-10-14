@@ -83,6 +83,7 @@ import {
 	cfgModelLoopGuardEnabled,
 	cfgRetry,
 	cfgRetryEnabled,
+	cfgRetryFallbackChainExhausted,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
 	cfgRetryUsageReservePct,
@@ -1720,6 +1721,7 @@ export class TurnRecovery {
 	#getRetryFallbackResolutionContext(): RetryFallbackResolutionContext {
 		return {
 			chains: this.#getRetryFallbackChains(),
+			fallbackChainExhausted: cfgRetryFallbackChainExhausted.get(this.#host.settings),
 			getModelRole: role => this.#host.settings.getModelRole(role),
 			modelLookup: this.#host.modelRegistry,
 		};
@@ -1861,8 +1863,15 @@ export class TurnRecovery {
 		currentModel: Model | null | undefined = this.#host.model(),
 		options?: { pinnedRole?: string; roleHint?: string },
 	): string[] {
-		const pinned = options?.pinnedRole ?? this.#activeRetryFallback?.role;
-		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, options?.roleHint);
+		const exhausted = cfgRetryFallbackChainExhausted.get(this.#host.settings);
+		const activeRole = this.#activeRetryFallback?.role;
+		// Foreign walks are isolated only when containment is enabled for either owner.
+		const isolateRole = options?.roleHint && options.roleHint !== activeRole &&
+			(exhausted[options.roleHint] === "fail" || (activeRole && exhausted[activeRole] === "fail"));
+		const pinned = options?.pinnedRole ?? (isolateRole ? undefined : activeRole);
+		if (pinned && exhausted[pinned] === "fail") return [pinned];
+		const roleHint = options?.roleHint ?? this.#liveRetryRoleHint(currentModel);
+		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, roleHint);
 		if (!pinned) return current ? [current] : [];
 		return current && current !== pinned ? [pinned, current] : [pinned];
 	}
@@ -1873,6 +1882,7 @@ export class TurnRecovery {
 		if (!role || role === EPHEMERAL_MODEL_CHANGE_ROLE || !currentModel) return undefined;
 		const configured = this.#host.settings.getModelRole(role);
 		if (!configured) return undefined;
+		if (cfgRetryFallbackChainExhausted.get(this.#host.settings)[role] === "fail") return role;
 		const resolved = resolveModelOverride([configured], this.#host.modelRegistry, this.#host.settings);
 		return resolved.model && modelsAreEqual(resolved.model, currentModel) ? role : undefined;
 	}
@@ -2149,7 +2159,11 @@ export class TurnRecovery {
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
 			return false;
 		}
-		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		this.#host.sessionManager.appendModelChange(
+			candidateSelector,
+			cfgRetryFallbackChainExhausted.get(this.#host.settings)[role] === "fail" ? role : EPHEMERAL_MODEL_CHANGE_ROLE,
+			true,
+		);
 		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
 		this.#host.setThinkingLevel(nextThinkingLevel);
 		if (!this.#activeRetryFallback) {
@@ -2384,12 +2398,18 @@ export class TurnRecovery {
 		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
 		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);
+		const role = this.#activeRetryFallback?.role ?? this.#liveRetryRoleHint(model);
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		// A capability degrade is fallback routing too, even though it arms no
 		// chain: the base model must not be reported as the configured primary.
 		this.#markFallbackRouted();
 		await this.#host.setModelWithProviderSessionReset(baseModel);
-		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		this.#host.sessionManager.appendModelChange(
+			baseSelector,
+			role && cfgRetryFallbackChainExhausted.get(this.#host.settings)[role] === "fail"
+				? role : EPHEMERAL_MODEL_CHANGE_ROLE,
+			true,
+		);
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
 		await this.#host.syncAfterModelChange(previousEditMode);
 		await this.#host.emitSessionEvent({
@@ -2408,6 +2428,7 @@ export class TurnRecovery {
 		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
 
 		const {
+			role,
 			originalSelector: originalSelectorRaw,
 			originalThinkingLevel,
 			lastAppliedFallbackThinkingLevel,
@@ -2456,7 +2477,10 @@ export class TurnRecovery {
 		// as fallback-served.
 		this.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(primaryModel);
-		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
+		this.#host.sessionManager.appendModelChange(
+			primarySelector,
+			cfgRetryFallbackChainExhausted.get(this.#host.settings)[role] === "fail" ? role : EPHEMERAL_MODEL_CHANGE_ROLE,
+		);
 		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
 		this.#host.setThinkingLevel(thinkingToApply);
 		await this.#host.syncAfterModelChange(previousEditMode);
