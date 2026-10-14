@@ -344,6 +344,7 @@ import {
 	ATTEMPT_COOLDOWN_MS,
 	resetAccountLockKey,
 	defaultCodexAutoRedeemCoordinator,
+	enforcedAccountAllowlist,
 	headlessApprovedResetActions,
 	isTerminalRedeemOutcome,
 	overlayLiveResetCredits,
@@ -13745,6 +13746,9 @@ export class AgentSession implements SettingsScope {
 	): CodexResetPlan {
 		const cfg = cfgCodexResets.get(this.settings);
 		const model = this.model;
+		const authStorage = this.#modelRegistry.authStorage;
+		const permitsCredential = (credentialId: number) =>
+			authStorage.sessions.permits("openai-codex", this.sessionId, credentialId);
 		// The same allowlist credential routing applies to the retry.
 		const accountAccess = model ? this.#modelRegistry.find(model.provider, model.id)?.accountAccess : undefined;
 		const plan = planCodexResetRedemptions({
@@ -13754,9 +13758,12 @@ export class AgentSession implements SettingsScope {
 			modelId: model?.id ?? "",
 			settings: resetPlanSettings(cfg),
 			identity,
-			permitsCredential: credentialId =>
-				this.#modelRegistry.authStorage.sessions.permits("openai-codex", this.sessionId, credentialId),
-			accountIds: accountAccess && Object.keys(accountAccess),
+			permitsCredential,
+			accountAllowlist: enforcedAccountAllowlist(
+				accountAccess && Object.keys(accountAccess),
+				authStorage.credentials.list("openai-codex"),
+				permitsCredential,
+			),
 			reports,
 			attemptedKeys: coordinator.attemptedKeys,
 			deferredUntilByKey: coordinator.deferredUntilByKey,
