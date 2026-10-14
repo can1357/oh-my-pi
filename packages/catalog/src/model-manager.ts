@@ -408,6 +408,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	);
 	const models = collapseBuiltVariants(
 		authoritativeDynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
+		// A successful online cohort is authoritative for member-id placement:
+		// replay with replacement so a moved raw id stops resolving to the row
+		// that owned it before this refresh.
+		{ replaceAliases: anyRemoteFetchSucceeded },
 	);
 	const resolutionAuthoritative = !hasRemoteFetcher || remoteResolutionComplete || shouldUseFreshCacheAsAuthoritative;
 	const remoteUpdatedAt = anyRemoteFetchSucceeded ? now() : undefined;
@@ -435,14 +439,15 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			// model until it ages out. Writing nothing lets the next launch retry
 			// immediately (#10964).
 			const latestCache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
+			const preservedCache = latestCache ?? cache;
 			const latestRestoredCache = restoreCachedModelHeaders(
-				latestCache?.models ?? cache?.models ?? [],
+				preservedCache?.models ?? [],
 				staticModels,
-				latestCache?.headerOmittedModelIds ?? cache?.headerOmittedModelIds ?? [],
-				latestCache?.unrestorableHeaderModelIds ?? cache?.unrestorableHeaderModelIds ?? [],
-				latestCache?.legacyHeaderRestoreMarkers ?? cache?.legacyHeaderRestoreMarkers ?? false,
+				preservedCache?.headerOmittedModelIds ?? [],
+				preservedCache?.unrestorableHeaderModelIds ?? [],
+				preservedCache?.legacyHeaderRestoreMarkers ?? false,
 				restorableHeaderFallback,
-				latestCache?.headerConfigFingerprint ?? cache?.headerConfigFingerprint,
+				preservedCache?.headerConfigFingerprint,
 				options.restoreCachedHeaders,
 			);
 			const latestUsableCacheModels = latestRestoredCache.models.filter(

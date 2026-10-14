@@ -645,4 +645,19 @@ describe("model registry discovery header restore", () => {
 			id: "gateway/first",
 		});
 	});
+
+	test("rejects stale aliases with no current owner", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      shared:", "        headers:", "          X-Account: a-1"].join("\n"),
+		);
+		// First generation registers shared -> gateway/model-a.
+		seedCachedRows([{ id: "gateway/model-a", alias: "shared" }]);
+		await reloadFromCache(modelsPath);
+
+		// Second generation drops the routing alias entirely: no current row owns
+		// it, so the stale reverse entry must not rebind the old override.
+		seedCachedRows([{ id: "gateway/model-a", plain: true }]);
+		const second = await reloadFromCache(modelsPath);
+		expect(await second.resolveModelHeaders(second.find("my-provider", "gateway/model-a")!)).toBeUndefined();
+	});
 });

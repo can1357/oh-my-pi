@@ -1618,7 +1618,9 @@ export class ModelRegistry {
 				const liveOwners = liveAliasOwners.get(source);
 				if (liveOwners !== undefined) return !liveOwners.has(model.id);
 				const cohortOwners = cohortAliasOwners.get(source);
-				return cohortOwners !== undefined && !cohortOwners.has(model.id);
+				// No current owner at all: a stale alias with nobody recording it is
+				// a collision too, so an old alias-keyed override cannot rebind.
+				return cohortOwners === undefined || !cohortOwners.has(model.id);
 			};
 			let modelOverride = modelOverrides
 				? resolveModelOverrideWithAliases(
@@ -2748,7 +2750,9 @@ export class ModelRegistry {
 				indexCatalog();
 				if (liveIds?.has(id)) return true;
 				const owners = aliasOwners?.get(`${modelProvider}\u0000${id}`);
-				return owners !== undefined && !owners.has(model.id);
+				// An alias with no current owner is stale; rebinding it would revive
+				// an override the routing no longer authorizes.
+				return owners === undefined || !owners.has(model.id);
 			});
 			if (!override) return model;
 			return this.#applyModelOverrideWithClamp(model, override);
@@ -2938,7 +2942,7 @@ export class ModelRegistry {
 						if (liveKeys.has(`${provider}\u0000${id}`)) return true;
 						aliasOwners ??= this.#modelAliasOwners(models);
 						const owners = aliasOwners.get(`${provider}\u0000${id}`);
-						return owners !== undefined && !owners.has(model.id);
+						return owners === undefined || !owners.has(model.id);
 					})
 				: undefined;
 			const overridden = override ? this.#applyModelOverrideWithClamp(model, override) : model;

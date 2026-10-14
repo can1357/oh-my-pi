@@ -1088,7 +1088,7 @@ function resolveCollapsedModelReference(
  */
 export function collapseVariants<TSpec extends VariantSpecLike>(
 	specs: readonly TSpec[],
-	opts?: { table?: VariantCollapseTable },
+	opts?: { table?: VariantCollapseTable; replaceAliases?: boolean },
 ): TSpec[] {
 	if (opts?.table !== undefined) return collapseWithTable(specs, opts.table);
 	const byProvider = new Map<string, TSpec[]>();
@@ -1114,7 +1114,7 @@ export function collapseVariants<TSpec extends VariantSpecLike>(
 		if (derived.length > 0) {
 			result = collapseWithTable(result, { families: derived });
 		}
-		registerCollapsedVariantAliases(provider, result);
+		registerCollapsedVariantAliases(provider, result, { replace: opts?.replaceAliases === true });
 		out.push(...result);
 	}
 	retargetCollapsedModelReferences(out);
@@ -1128,8 +1128,11 @@ export function collapseVariants<TSpec extends VariantSpecLike>(
  * logical specs so thinking wire defaults stay resolved. Untouched entries
  * pass through by reference.
  */
-export function collapseBuiltVariants<TApi extends Api>(models: readonly Model<TApi>[]): Model<TApi>[] {
-	const collapsed = collapseVariants(models);
+export function collapseBuiltVariants<TApi extends Api>(
+	models: readonly Model<TApi>[],
+	opts?: { replaceAliases?: boolean },
+): Model<TApi>[] {
+	const collapsed = collapseVariants(models, opts);
 	const inputRefs = new Set<Model<TApi>>(models);
 	return collapsed.map(model => (inputRefs.has(model) ? model : buildModel(projectModelSpec(model))));
 }
