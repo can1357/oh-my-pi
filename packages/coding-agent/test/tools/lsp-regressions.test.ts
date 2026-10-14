@@ -966,45 +966,46 @@ describe("lsp regressions", () => {
 		}
 	});
 
-	it("keeps tracking an idle document and its diagnostics when its close never reached the server", async () => {
+	it("sends an idle document's close even when the opener that chose it is cancelled first", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-aborted-");
 		try {
 			const server = installHandshakeLsp();
 			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
 			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
 			const stalePath = await openDocument(client, "stale.ts");
+			const staleUri = fileToUri(stalePath);
 			ageDocument(client, stalePath, PAST_DOCUMENT_IDLE_MS);
-			const staleDiagnostics = { diagnostics: [], version: 1 };
-			client.diagnostics.set(fileToUri(stalePath), staleDiagnostics);
+			client.diagnostics.set(staleUri, { diagnostics: [], version: 1 });
 
 			const controller = new AbortController();
-			const opening = lspClient.syncContent(
-				client,
-				path.join(tempDir.path(), "new.ts"),
-				"export const created = 1;\n",
-				controller.signal,
-			);
+			const newPath = path.join(tempDir.path(), "new.ts");
+			const opening = lspClient.syncContent(client, newPath, "export const created = 1;\n", controller.signal);
 			controller.abort();
 			await rejectionOf(opening);
 
-			expect(server.received.some(message => message.method === "textDocument/didClose")).toBe(false);
-			expect(client.openFiles.has(fileToUri(stalePath))).toBe(true);
-			// The server still has the document open and will not publish it again.
-			expect(client.diagnostics.get(fileToUri(stalePath))).toBe(staleDiagnostics);
+			await server.waitFor(
+				message => message.method === "textDocument/didClose" && documentUri(message.params) === staleUri,
+			);
+			expect(client.openFiles.has(staleUri)).toBe(false);
+			expect(client.diagnostics.has(staleUri)).toBe(false);
+			expect(server.received.some(message => documentUri(message.params) === fileToUri(newPath))).toBe(false);
 		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
 	});
 
-	it("does not reopen a document whose concurrent idle close never reached the server", async () => {
+	it("reopens a document whose close outlived its cancelled opener with the disk text and a fresh use", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-reopen-race-");
 		try {
 			const server = installHandshakeLsp();
 			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
 			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
 			const stalePath = await openDocument(client, "stale.ts");
+			const staleUri = fileToUri(stalePath);
 			ageDocument(client, stalePath, PAST_DOCUMENT_IDLE_MS);
+			const edited = 'export const value = "edited outside omp";\n';
+			await Bun.write(stalePath, edited);
 
 			const controller = new AbortController();
 			const opening = lspClient.syncContent(
@@ -1014,19 +1015,77 @@ describe("lsp regressions", () => {
 				controller.signal,
 			);
 			// Starts while the stale document's close is still queued behind the aborted opener.
-			const reopening = lspClient.ensureFileOpen(client, stalePath);
+			const reconciling = lspClient.reconcileFileFromDisk(client, stalePath);
 			controller.abort();
 			await rejectionOf(opening);
-			await reopening;
+			expect(await reconciling).toBe(true);
 
-			const staleUri = fileToUri(stalePath);
 			const lifecycle = server.received.filter(
 				message =>
 					(message.method === "textDocument/didOpen" || message.method === "textDocument/didClose") &&
-					JSON.stringify(message.params).includes(staleUri),
+					documentUri(message.params) === staleUri,
 			);
-			expect(lifecycle.map(message => message.method)).toEqual(["textDocument/didOpen"]);
+			expect(lifecycle.map(message => message.method)).toEqual([
+				"textDocument/didOpen",
+				"textDocument/didClose",
+				"textDocument/didOpen",
+			]);
+			// The server gets the text queries will compute positions from.
+			expect(lifecycle[2].params).toMatchObject({ textDocument: { version: 2, text: edited } });
+
+			// The reopen counts as a use, so the next open does not close it again.
+			await openDocument(client, "third.ts");
 			expect(client.openFiles.has(staleUri)).toBe(true);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("refreshes a document whose close outlived its cancelled opener by reopening it", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-refresh-race-");
+		try {
+			const server = installHandshakeLsp();
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			const stalePath = await openDocument(client, "stale.ts");
+			const staleUri = fileToUri(stalePath);
+			ageDocument(client, stalePath, PAST_DOCUMENT_IDLE_MS);
+			client.diagnostics.set(staleUri, {
+				diagnostics: [
+					{
+						range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+						message: "stale error",
+						severity: 1,
+					},
+				],
+				version: 1,
+			});
+
+			const controller = new AbortController();
+			const opening = lspClient.syncContent(
+				client,
+				path.join(tempDir.path(), "new.ts"),
+				"export const created = 1;\n",
+				controller.signal,
+			);
+			const refreshing = lspClient.refreshFile(client, stalePath);
+			controller.abort();
+			await rejectionOf(opening);
+			await refreshing;
+
+			const lifecycle = server.received.filter(
+				message =>
+					(message.method === "textDocument/didOpen" || message.method === "textDocument/didClose") &&
+					documentUri(message.params) === staleUri,
+			);
+			// The refresh reaches the server as a reopen, which it answers with fresh diagnostics.
+			expect(lifecycle.map(message => message.method)).toEqual([
+				"textDocument/didOpen",
+				"textDocument/didClose",
+				"textDocument/didOpen",
+			]);
+			expect(client.diagnostics.has(staleUri)).toBe(false);
 		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
