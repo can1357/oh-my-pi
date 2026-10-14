@@ -459,4 +459,51 @@ describe("browser open — a cancel during the relay extension read", () => {
 		expect(getTabsMapForTest().has("relay-read")).toBe(false);
 		expect(surfaceClosed).toEqual(["surface-relay"]);
 	});
+
+	it("leaves the tab to a later open of the same name that reused it", async () => {
+		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
+		spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
+		const surfaceClosed: string[] = [];
+		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
+			async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
+				if (method === "browser.open_split") return { surface_id: "surface-shared", url: "about:blank" };
+				if (method === "surface.close") surfaceClosed.push(String(params.surface_id));
+				return {};
+			},
+		);
+		const cmuxKind = resolveCmuxKind();
+		if (!cmuxKind) throw new Error("CMUX_SOCKET_PATH is set in beforeEach");
+		const acquireBrowser = registry.acquireBrowser;
+		spyOn(registry, "acquireBrowser").mockImplementation((_kind, opts) => acquireBrowser(cmuxKind, opts));
+		// The second open checks its relay kind against the tab's browser before reusing it.
+		const browserKey = registry.browserKey;
+		spyOn(registry, "browserKey").mockImplementation(kind => browserKey(kind.kind === "relay" ? cmuxKind : kind));
+		// The first open parks in its extension read; the second open's read returns at once.
+		const firstRead = Promise.withResolvers<void>();
+		const firstReading = Promise.withResolvers<void>();
+		let reads = 0;
+		spyOn(probe, "relayExtensionNotice").mockImplementation(async () => {
+			if (++reads === 1) {
+				firstReading.resolve();
+				await firstRead.promise;
+			}
+			return null;
+		});
+		const invokeBrowser = createBrowserHost();
+		const params = { action: "open", name: "relay-shared", app: { relay: true }, timeout: 30 };
+
+		const controller = new AbortController();
+		const first = rejectionOf(invokeBrowser(params, controller.signal));
+		await firstReading.promise;
+		const second = await invokeBrowser(params);
+		expect(
+			second.content.some(part => part.type === "text" && /Reused tab "relay-shared"/.test(part.text ?? "")),
+		).toBe(true);
+
+		controller.abort();
+		firstRead.resolve();
+		expect(await first).toBeInstanceOf(ToolAbortError);
+		expect(getTabsMapForTest().get("relay-shared")?.state).toBe("alive");
+		expect(surfaceClosed).toEqual([]);
+	});
 });

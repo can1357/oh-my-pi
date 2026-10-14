@@ -35,7 +35,7 @@ import {
 	releaseAllTabs,
 	releaseIdleTabsForOwner,
 	releaseTab,
-	rollBackCreatedTab,
+	rollBackAcquiredTab,
 	runInTab,
 	type TabSession,
 	type TernTabSession,
@@ -529,9 +529,10 @@ async function openOnKind(
 		// Advisory only: an open deadline that passes during the read drops the note, not the opened tab.
 		const relayNotice =
 			kind.kind === "relay" ? await relayExtensionNotice(normalizeConnectedCdpUrl(kind.cdpUrl), openSignal) : null;
-		// A cancel that lands during the read still cancels the open, so the tab it created goes too.
+		// A cancel that lands during the read still cancels the open, so the tab it created goes too,
+		// unless a later open of the same name has taken it over meanwhile.
 		if (signal?.aborted) {
-			if (result.created) await rollBackCreatedTab(name, tab);
+			await rollBackAcquiredTab(name, result);
 			throw new ToolAbortError();
 		}
 		const lines = [
