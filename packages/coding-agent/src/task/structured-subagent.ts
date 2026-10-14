@@ -12,6 +12,7 @@ import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
+	resolveAgentModelPatterns,
 	resolveAgentModelSelection,
 	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
@@ -451,10 +452,7 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 }
 
 /** The per-call gate's refusal for `invocationKind` calls, or `undefined` when `task.perCallModel` allows them. */
-function perCallModelDisabledReason(
-	settings: Settings,
-	invocationKind: "task" | "eval" | "panel",
-): string | undefined {
+function perCallModelDisabledReason(settings: Settings, invocationKind: "task" | "eval" | "panel"): string | undefined {
 	if (invocationKind !== "panel" && perCallModelEnabled(settings, invocationKind)) return undefined;
 	const mode = cfgTaskPerCallModel.get(settings);
 	const operatorMode = cfgTaskPerCallModel.get(settings.grantAuthority());
@@ -591,6 +589,7 @@ function resolvePanelSubagentPolicy(request: StructuredSubagentRequest): Effecti
 		applyChanges: false,
 		enableLsp: agent.allowLsp === true,
 		enableIrc: false,
+		effort: request.effort,
 		enableMCP: false,
 		restrictToolNames: true,
 	};
@@ -954,7 +953,7 @@ function buildExecutorOptions(
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		perCallModelGrants: policy.perCallModelGrants,
 		thinkingLevel: request.thinkingLevel ?? policy.effectiveAgent.thinkingLevel,
-		effort: policy.effort ?? request.effort,
+		effort: policy.effort,
 		solutionSpace: request.solutionSpace?.trim() || undefined,
 		structured: policy.structured,
 		...(policy.schema.source === "none"
