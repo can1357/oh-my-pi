@@ -73,7 +73,7 @@ import type {
 	UsageReport,
 	UsageResetCreditDetail,
 } from "@oh-my-pi/pi-ai";
-import { oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
+import { oauthAccountKey, type StoredAuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
 import { codexRankingStrategy } from "@oh-my-pi/pi-ai/usage/openai-codex";
 import type { ResetAutoRedeemMode } from "./settings";
 import { reportMatchesActiveAccount } from "../slash-commands/helpers/active-oauth-account";
@@ -189,8 +189,8 @@ export interface CodexResetPlanInput {
 	identity: OAuthAccountIdentity | undefined;
 	/** `blocked-account`: whether a stored credential may serve the blocked session; absent allows every account. */
 	permitsCredential?: (credentialId: number) => boolean;
-	/** `blocked-account`: the blocked model's discovered account allowlist (`Model.accountAccess` keys), as credential routing receives it. */
-	accountIds?: readonly string[];
+	/** `blocked-account`: the accounts the blocked model may route to, when routing enforces its allowlist ({@link enforcedAccountAllowlist}). */
+	accountAllowlist?: ReadonlySet<string>;
 	/** Usage reports for ALL stored accounts (one per account for Codex). */
 	reports: UsageReport[] | null;
 	attemptedKeys: ReadonlySet<string>;
@@ -397,34 +397,20 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 	}
 	// Credential routing enforces a model's plan once any account the session may
 	// use is confirmed eligible, and then skips every account not confirmed
-	// eligible; otherwise (trial or grandfathered access) it tries them all. It
-	// enforces a model's discovered account allowlist the same way, once any
-	// stored account is on it. A restore routing would skip cannot unblock the retry.
-	const usableReports = (input.reports ?? []).filter(report => {
-		const credentialId = report.metadata?.resetCreditCredentialId;
-		return (
-			report.provider === "openai-codex" &&
-			typeof credentialId === "number" &&
-			(input.permitsCredential?.(credentialId) ?? true)
-		);
-	});
+	// eligible; otherwise (trial or grandfathered access) it tries them all. A
+	// restore routing would skip cannot unblock the retry.
 	const planGate = codexRankingStrategy.planGate?.({ modelId: input.modelId });
-	const enforcePlan = planGate !== undefined && usableReports.some(report => planGate(report) === true);
-	const allowedAccounts = input.accountIds?.length ? new Set(input.accountIds) : undefined;
-	const accessAllows = (identity: { accountId?: string; email?: string }): boolean => {
-		const key = oauthAccountKey(identity);
-		return key !== undefined && allowedAccounts?.has(key) === true;
-	};
-	const enforceAccounts =
-		allowedAccounts !== undefined &&
-		(input.reports ?? []).some(
-			report =>
+	const enforcePlan =
+		planGate !== undefined &&
+		(input.reports ?? []).some(report => {
+			const credentialId = report.metadata?.resetCreditCredentialId;
+			return (
 				report.provider === "openai-codex" &&
-				accessAllows({
-					accountId: typeof report.metadata?.accountId === "string" ? report.metadata.accountId : undefined,
-					email: typeof report.metadata?.email === "string" ? report.metadata.email : undefined,
-				}),
-		);
+				typeof credentialId === "number" &&
+				(input.permitsCredential?.(credentialId) ?? true) &&
+				planGate(report) === true
+			);
+		});
 
 	const snapshots: AccountSnapshot[] = [];
 	for (const report of input.reports ?? []) {
@@ -512,7 +498,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				skip("plan-ineligible");
 				continue;
 			}
-			if (enforceAccounts && !accessAllows(snapshot.target)) {
+			if (input.accountAllowlist && !input.accountAllowlist.has(oauthAccountKey(snapshot.target) ?? "")) {
 				skip("model-account-access");
 				continue;
 			}
@@ -716,6 +702,27 @@ export function resetAccountLockKey(identity: {
 	const account = (identity.accountId ?? identity.email)?.trim().toLowerCase();
 	if (!account) return undefined;
 	return `${identity.provider}|${identity.orgId?.trim().toLowerCase() ?? "-"}|${account}`;
+}
+
+/**
+ * A model's discovered account allowlist (`Model.accountAccess` keys) as
+ * credential routing enforces it: only once a stored OAuth account the session
+ * may use is on it, whatever that account's usage report says. Otherwise
+ * routing tries every account, so the result is undefined.
+ */
+export function enforcedAccountAllowlist(
+	accountIds: readonly string[] | undefined,
+	credentials: readonly StoredAuthCredential[],
+	permitsCredential: (credentialId: number) => boolean,
+): ReadonlySet<string> | undefined {
+	if (!accountIds?.length) return undefined;
+	const allowlist = new Set(accountIds);
+	const enforced = credentials.some(row => {
+		if (row.credential.type !== "oauth" || !permitsCredential(row.id)) return false;
+		const accountKey = oauthAccountKey(row.credential);
+		return accountKey !== undefined && allowlist.has(accountKey);
+	});
+	return enforced ? allowlist : undefined;
 }
 
 /** One attempt per (account, weekly-reset-minute) block episode. */
