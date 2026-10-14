@@ -841,17 +841,19 @@ try {
 					path.join(root, "probe.ts"),
 					'await Bun.write("observed.json", JSON.stringify({ fd: process.env.NODE_CHANNEL_FD ?? null, mode: process.env.NODE_CHANNEL_SERIALIZATION_MODE ?? null, ordinary: process.env.OMP_PTY_PARENT, overlay: process.env.OMP_PTY_OVERLAY, posixAlias: process.env.node_channel_fd ?? null }));\n',
 				);
-				// Seed markers only after a separate host has started: neither the
-				// test runner's IPC channel nor neighboring tests are mutated.
+				// Spawn env seeds native OS inheritance without mutating the test runner.
+				// Bun.env writes only its JS map; Bun also hides IPC keys at startup.
+				const fdKey = process.platform === "win32" ? "Node_Channel_Fd" : "NODE_CHANNEL_FD";
+				const modeKey = process.platform === "win32" ? "Node_Channel_Serialization_Mode" : "NODE_CHANNEL_SERIALIZATION_MODE";
 				const hostScript = `
 					import * as path from "node:path";
 					import { PtySession } from ${JSON.stringify(addonUrl)};
 					const fdKey = process.platform === "win32" ? "Node_Channel_Fd" : "NODE_CHANNEL_FD";
 					const modeKey = process.platform === "win32" ? "Node_Channel_Serialization_Mode" : "NODE_CHANNEL_SERIALIZATION_MODE";
+					// Mirror the spawn-seeded IPC values only for the unchanged JS-map assertion.
+					// These assignments do not deliver the native inherited environment.
 					Bun.env[fdKey] = "3";
 					Bun.env[modeKey] = "advanced";
-					Bun.env.OMP_PTY_PARENT = "ordinary-parent-value";
-					if (process.platform !== "win32") Bun.env.node_channel_fd = "ordinary-posix-alias";
 					const options = {
 						cwd: ${JSON.stringify(root)}, timeoutMs: 5000, cols: 80, rows: 24,
 						env: { PATH: path.dirname(process.execPath) + path.delimiter + Bun.env.PATH, OMP_PTY_OVERLAY: "explicit-value" },
@@ -879,7 +881,13 @@ try {
 				`;
 				const host = Bun.spawn([process.execPath, "-e", hostScript], {
 					cwd: root,
-					env: filterChildShellEnv(Bun.env, root),
+					env: {
+						...filterChildShellEnv(Bun.env, root),
+						[fdKey]: "3",
+						[modeKey]: "advanced",
+						OMP_PTY_PARENT: "ordinary-parent-value",
+						...(process.platform === "win32" ? {} : { node_channel_fd: "ordinary-posix-alias" }),
+					},
 					stdout: "pipe",
 					stderr: "pipe",
 					signal: AbortSignal.timeout(20_000),
