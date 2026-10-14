@@ -726,6 +726,21 @@ export class SessionAdvisors {
 	}
 
 	/**
+	 * Rebuilds live advisor runtimes so they re-read host capabilities that are
+	 * captured once per runtime construction — notably the secret obfuscator
+	 * after a `secrets.enabled` flip rebuilt it mid-session.
+	 */
+	rebuildRuntimesForHostChange(): void {
+		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
+		// Stop unconditionally: a host change (the rebuilt obfuscator) leaves the
+		// model/config signature untouched, and #buildAdvisorRuntime returns early
+		// while any advisor is live, so a signature-gated stop would keep the old
+		// runtime sending unredacted requests.
+		if (this.#advisors.length > 0) this.#stopAdvisorRuntime();
+		this.#buildAdvisorRuntime(true);
+	}
+
+	/**
 	 * True when the enabled advisor roster still has an entry left at `no_model`.
 	 *
 	 * At construction the advisor role is resolved against whatever the model
@@ -1239,6 +1254,13 @@ export class SessionAdvisors {
 		if (descriptors.length !== this.#advisors.length) return false;
 		for (let i = 0; i < descriptors.length; i++) {
 			if (descriptors[i].signature !== this.#advisors[i].signature) return false;
+			// A models.yml/discovery refresh re-issues the same provider/id as a new
+			// Model record; the string signature above only sees the selector string,
+			// so a metadata-only edit (baseUrl, limits, compat) would compare equal
+			// and leave the advisor streaming against the stale record. Compare by
+			// reference — the same guard `sameScopedModelCycle` applies to the
+			// Ctrl+P cycle — so any swapped-in record forces a rebuild.
+			if (descriptors[i].model !== this.#advisors[i].model) return false;
 		}
 		return true;
 	}
