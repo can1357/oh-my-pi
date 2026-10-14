@@ -12,7 +12,7 @@
  * `usage-report.ts`.
  */
 
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
@@ -22,6 +22,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveUsageModelSelectors } from "@oh-my-pi/pi-coding-agent/utils/usage-display";
 
 const SELECTORS = ["test-provider/gpt-5.6", "test-provider/claude-sonnet-4.6"];
+/** Fixed clock for the enabled/disabled byte comparison; 30s after usageReport().fetchedAt. */
+const FIXED_NOW = 1_700_000_030_000;
 
 function settingsDouble(showUsageModels: boolean): Settings {
 	return Settings.isolated({ display: { showUsageModels } });
@@ -70,6 +72,10 @@ describe("display.showUsageModels", () => {
 		setThemeInstance(darkTheme);
 	});
 
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	for (const [label, build] of [
 		["ACP text", buildAcpText],
 		["TUI dashboard detail", buildTuiText],
@@ -81,6 +87,9 @@ describe("display.showUsageModels", () => {
 		});
 
 		it(`${label}: disabled drops the block and nothing else`, async () => {
+			// Each build stamps the report header with its own Date.now(); freeze the
+			// clock so the two renders cannot differ on a coarse-duration rounding tick.
+			vi.spyOn(Date, "now").mockReturnValue(FIXED_NOW);
 			const enabled = await build(true);
 			const disabled = await build(false);
 
