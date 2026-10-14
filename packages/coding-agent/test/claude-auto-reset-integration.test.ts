@@ -821,6 +821,70 @@ describe("Claude saved-reset trigger integration", () => {
 		}
 	});
 
+	it("does not retry on a peer's restore its pool drops while revalidating credentials", async () => {
+		const quota = { restored: false };
+		let prompts = 0;
+		const bothAsked = Promise.withResolvers<void>();
+		const firstSpent = Promise.withResolvers<void>();
+		const consent = async (): Promise<string> => {
+			prompts++;
+			if (prompts === 2) bothAsked.resolve();
+			await (prompts === 1 ? bothAsked.promise : firstSpent.promise);
+			return "Yes";
+		};
+		const first = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			quota,
+			consent,
+		});
+		const second = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			autoRedeem: "unset",
+			quota,
+			coordinator: first.coordinator,
+			consent,
+		});
+		onSecondAccount([second.session]);
+		const { outsideId } = await storeLongerBlockedAccount(6 * 24 * HOUR);
+		const spent = recordSpends(credentialId => {
+			if (credentialId !== outsideId) return undefined;
+			firstSpent.resolve();
+			return quota;
+		});
+		// The second session adopts the first's restore; while it revalidates, its
+		// pool narrows to the stored account it shares, excluding the restored one.
+		const revalidate = authStorage.credentials.revalidate.bind(authStorage.credentials);
+		let lease: SessionRestrictionLease | undefined;
+		vi.spyOn(authStorage.credentials, "revalidate").mockImplementation(async () => {
+			await revalidate();
+			lease ??= authStorage.sessions.restrict("anthropic", second.session.sessionId, [
+				`email:${EMAIL}|org:${ORG_ID}`,
+			]);
+		});
+		mockSchedulerWaitWithClock();
+
+		try {
+			await Promise.all([first.session.prompt("first blocked turn"), second.session.prompt("second blocked turn")]);
+			await Promise.all([first.session.waitForIdle(), second.session.waitForIdle()]);
+		} finally {
+			if (lease) authStorage.sessions.unrestrict("anthropic", second.session.sessionId, lease);
+			await authStorage.credentials.remove("anthropic");
+		}
+
+		expect(lease).toBeDefined();
+		expect(spent).toEqual([outsideId]);
+		expect(first.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		// Nothing the second session may use was restored: its blocked turn is not retried.
+		expect(second.modelCalls()).toBe(1);
+	});
+
 	it("spends a restore that a peer on another account released unspent because its pool dropped it", async () => {
 		const secondAsked = Promise.withResolvers<void>();
 		const firstPending = Promise.withResolvers<void>();

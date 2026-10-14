@@ -12929,12 +12929,10 @@ export class AgentSession implements SettingsScope {
 			if (coordinator.attemptedKeys.has(action.attemptKey)) {
 				const peer = await this.#awaitPeerRestore(action.attemptKey, coordinator);
 				if (peer === "reset") {
-					if (outsidePool(action)) {
-						poolLimited = true;
-					} else {
-						await authStorage.credentials.revalidate();
-						restored.push(action.target.credentialId);
-					}
+					// The pool can change while credentials revalidate: check it again after.
+					if (!outsidePool(action)) await authStorage.credentials.revalidate();
+					if (outsidePool(action)) poolLimited = true;
+					else restored.push(action.target.credentialId);
 				}
 				if (peer !== "free") continue;
 			}

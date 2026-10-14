@@ -583,6 +583,32 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		});
 	});
 
+	it("never restores a longer-blocked sibling of unknown plan while another account is confirmed eligible", () => {
+		// Routing enforces the plan once one account is confirmed eligible and then skips unknown plans.
+		const active = report({ weeklyResetInMs: 4 * HOUR, planType: "plus" });
+		const unknownSibling = report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: 6 * DAY });
+		const plan = planCodexResetRedemptions(input([active, unknownSibling], { modelId: "gpt-5.6-sol" }));
+		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: ACCOUNT_KEY, active: true }]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|2",
+			rule: "blocked-account",
+			reason: "plan-ineligible",
+		});
+	});
+
+	it("restores the longest wait when no account is confirmed eligible for the model", () => {
+		// With no confirmed-eligible account routing tries them all (trial or grandfathered access).
+		const active = report({ weeklyResetInMs: 4 * HOUR, planType: "free" });
+		const sibling = report({
+			accountId: "acct-sib",
+			email: "sib@example.com",
+			weeklyResetInMs: 6 * DAY,
+			planType: "free",
+		});
+		const plan = planCodexResetRedemptions(input([active, sibling], { modelId: "gpt-5.6-sol" }));
+		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: "openai-codex|-|2" }]);
+	});
+
 	it("keeps the active account until a sibling skips more than the tolerance longer", () => {
 		const restoredFor = (siblingWaitMs: number) =>
 			planCodexResetRedemptions(
