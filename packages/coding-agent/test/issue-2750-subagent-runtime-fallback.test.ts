@@ -98,6 +98,33 @@ describe("subagent runtime model resolution", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("preserves the upstream main-pin then advisor lookup when neither role opts in", () => {
+		const primary = model("primary", "worker-model");
+		const advisor = model("advisor", "advisor-model");
+		for (const policies of [{}, { task: "default", advisor: "default" }]) {
+			const settings = Settings.isolated({
+				modelRoles: { task: "primary/worker-model", advisor: "advisor/advisor-model" },
+				"retry.fallbackChains": { task: ["global/main-fallback"], advisor: ["global/advisor-fallback"] },
+				"retry.fallbackChainExhausted": policies,
+			});
+			const recovery = new TurnRecovery({
+				model: () => primary,
+				configuredThinkingLevel: () => undefined,
+				sessionManager: { getSessionId: () => "no-containment" },
+				settings,
+				modelRegistry: {
+					find: (provider: string, id: string) => [primary, advisor].find(m => m.provider === provider && m.id === id),
+					hasProvider: () => true,
+				},
+			} as unknown as TurnRecoveryHost, {
+				initialRetryFallback: { role: "task", originalSelector: "primary/worker-model", originalThinkingLevel: undefined },
+				deferFallbackChainValidation: true,
+			});
+			expect(recovery.retryFallbackChainKeys("advisor/advisor-model", advisor, { roleHint: "advisor" }))
+				.toEqual(["task", "advisor"]);
+		}
+	});
+
 	for (const { level, collide } of [
 		{ level: undefined, collide: false },
 		{ level: ThinkingLevel.High, collide: false },

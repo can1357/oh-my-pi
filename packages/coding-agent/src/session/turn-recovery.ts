@@ -1863,12 +1863,12 @@ export class TurnRecovery {
 		currentModel: Model | null | undefined = this.#host.model(),
 		options?: { pinnedRole?: string; roleHint?: string },
 	): string[] {
-		// An explicit foreign role (e.g. an advisor) owns a separate walk.
-		const pinned = options?.pinnedRole ??
-			(options?.roleHint && options.roleHint !== this.#activeRetryFallback?.role
-				? undefined
-				: this.#activeRetryFallback?.role);
 		const exhausted = cfgRetryFallbackChainExhausted.get(this.#host.settings);
+		const activeRole = this.#activeRetryFallback?.role;
+		// Foreign walks are isolated only when containment is enabled for either owner.
+		const isolateRole = options?.roleHint && options.roleHint !== activeRole &&
+			(exhausted[options.roleHint] === "fail" || (activeRole && exhausted[activeRole] === "fail"));
+		const pinned = options?.pinnedRole ?? (isolateRole ? undefined : activeRole);
 		if (pinned && exhausted[pinned] === "fail") return [pinned];
 		const roleHint = options?.roleHint ?? this.#liveRetryRoleHint(currentModel);
 		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, roleHint);
