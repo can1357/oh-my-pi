@@ -59,6 +59,7 @@
 - Fixed hashline edits silently dropping the tail of a line that `read` or `grep` had cut at the column limit; such an edit is now refused until a `:raw` read shows the full line ([#15649](https://github.com/can1357/oh-my-pi/issues/15649))
 - Fixed isolated tasks failing on linked worktrees with initialized recursive submodules and leaving updated submodule pins unreachable after cleanup ([#15457](https://github.com/can1357/oh-my-pi/issues/15457))
 - Fixed `/tan` missing the parent's prompt cache by advertising `xd://` tools top-level and omitting `ask` ([#15578](https://github.com/can1357/oh-my-pi/issues/15578)).
+- Fixed configured discovery models whose request headers come from models.yml (`modelOverrides.<id>.headers` or provider-level `headers`) disappearing from the catalog after their model cache row was written: the cache readers now rebuild those headers from the same local configuration that attached them instead of dropping the rows, so `--continue`/`--resume` restore the saved model instead of failing with `Could not restore model <provider/id>`
 
 ## [18.10.4] - 2026-10-13
 

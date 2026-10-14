@@ -1505,9 +1505,45 @@ export class ModelRegistry {
 		return models;
 	}
 
-	#canRestoreConfiguredDiscoveryHeaders(providerId: string): boolean {
-		const override = this.#providerOverrides.get(providerId);
-		return override?.authHeader === true && override.apiKey !== undefined;
+	/**
+	 * Rebuild request headers for cache-omitted models from the same local
+	 * configuration that attached them at discovery time (see
+	 * `mergeDiscoveredModel`): per-model `modelOverrides` headers first, then
+	 * provider-level `headers`, with the provider's bearer key minted at the
+	 * request boundary when `authHeader` is set. Cached rows never persist
+	 * header values (#5780), so without this hook a model whose headers are
+	 * authored in models.yml would be dropped from every cache-only read even
+	 * though its headers remain in local configuration. Returns undefined when
+	 * none of those sources exist, keeping the drop-unsafe-rows behavior.
+	 */
+	#configuredDiscoveryHeaderRestore(
+		providerId: string,
+	): ((model: Readonly<Model<Api>>) => Pick<Model<Api>, "headers" | "resolveHeaders"> | undefined) | undefined {
+		const providerOverride = this.#providerOverrides.get(providerId);
+		const modelOverrides = this.#modelOverrides.get(providerId);
+		let hasModelOverrideHeaders = false;
+		if (modelOverrides) {
+			for (const modelOverride of modelOverrides.values()) {
+				if (modelOverride.headers !== undefined) {
+					hasModelOverrideHeaders = true;
+					break;
+				}
+			}
+		}
+		const hasProviderHeaders = providerOverride?.headers !== undefined;
+		const hasBearerAuth = providerOverride?.authHeader === true && providerOverride.apiKey !== undefined;
+		if (!hasModelOverrideHeaders && !hasProviderHeaders && !hasBearerAuth) return undefined;
+		return model => {
+			const modelOverride = modelOverrides
+				? (modelOverrides.get(model.id) ??
+					(model.requestModelId ? modelOverrides.get(model.requestModelId) : undefined))
+				: undefined;
+			const resolveHeaders = createConfigHeaderResolver([modelOverride?.headers, providerOverride?.headers], {
+				authHeader: providerOverride?.authHeader,
+				apiKeyConfig: providerOverride?.apiKey,
+			});
+			return resolveHeaders ? { resolveHeaders } : undefined;
+		};
 	}
 
 	#loadCachedDiscoverableModels(): Model<Api>[] {
@@ -1529,7 +1565,7 @@ export class ModelRegistry {
 			// Cached rows never persist headers (#5780). A configured authHeader
 			// is re-derived asynchronously at the request boundary, so its rows are
 			// safe to retain without baking a credential snapshot into the cache.
-			const canRestoreHeaders = this.#canRestoreConfiguredDiscoveryHeaders(providerConfig.provider);
+			const canRestoreHeaders = this.#configuredDiscoveryHeaderRestore(providerConfig.provider) !== undefined;
 			const omittedHeaderIds = new Set(cache.headerOmittedModelIds);
 			const hasUnrestoredHeaders = omittedHeaderIds.size > 0 && !canRestoreHeaders;
 			const usableCacheModels =
@@ -2068,17 +2104,10 @@ export class ModelRegistry {
 			}
 		};
 
-		const providerOverride = this.#providerOverrides.get(providerId);
-		const cachedHeaderResolver = this.#canRestoreConfiguredDiscoveryHeaders(providerId)
-			? createConfigHeaderResolver([providerOverride?.headers], {
-					authHeader: providerOverride?.authHeader,
-					apiKeyConfig: providerOverride?.apiKey,
-				})
-			: undefined;
 		const manager = createModelManager<Api>({
 			providerId,
 			staticModels: [],
-			restoreCachedHeaders: cachedHeaderResolver ? () => ({ resolveHeaders: cachedHeaderResolver }) : undefined,
+			restoreCachedHeaders: this.#configuredDiscoveryHeaderRestore(providerId),
 			cacheDbPath: this.#cacheDbPath,
 			cacheProviderId,
 			cacheTtlMs: 24 * 60 * 60 * 1000,
