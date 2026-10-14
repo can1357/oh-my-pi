@@ -46,14 +46,20 @@ interface SharpshooterAgentSession extends AgentSession {
 	[kSharpshooterSessionResources]?: SharpshooterSessionResources;
 }
 
-/** Release session-owned extraction and scheduler subscriptions. */
-export function releaseSharpshooterSession(session: AgentSession): void {
+/**
+ * Release session-owned extraction and scheduler subscriptions.
+ *
+ * `keepPending` is for a release that a restart immediately follows: the queued
+ * prompts then travel to the new leg (see `installSharpshooterSession`). The
+ * caller owns clearing them if no new leg arrives.
+ */
+export function releaseSharpshooterSession(session: AgentSession, options?: { keepPending?: boolean }): void {
 	const ownedSession = session as SharpshooterAgentSession;
 	// Before the no-resources return: queued prompts belong to the pairing being
 	// released, so a release that has nothing left to unsubscribe still has to
 	// drop them. Otherwise the in-flight extraction's `finally` retries a prompt
 	// for a session whose pairing is gone (e.g. `sharpshooter.enabled` off here).
-	clearPendingSharpshooterExtraction(session);
+	if (!options?.keepPending) clearPendingSharpshooterExtraction(session);
 	const resources = ownedSession[kSharpshooterSessionResources];
 	if (!resources) return;
 	delete ownedSession[kSharpshooterSessionResources];

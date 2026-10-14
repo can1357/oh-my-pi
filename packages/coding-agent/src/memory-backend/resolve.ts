@@ -28,13 +28,13 @@ import { cfgSharpshooterEnabled } from "../sharpshooter/settings";
  * store's `id`, so tool gating that reads `memory.backend` is unaffected.
  */
 export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBackend> {
-	const id = cfgMemoryBackend.get(settings);
-	const selected = await selectMemoryBackend(id);
-	if (id === "sharpshooter" || !cfgSharpshooterEnabled.get(settings)) return selected;
+	const selected = await selectMemoryBackend(settings);
+	if (cfgMemoryBackend.get(settings) === "sharpshooter" || !cfgSharpshooterEnabled.get(settings)) return selected;
 	return withSharpshooter(selected);
 }
 
-async function selectMemoryBackend(id: string | undefined): Promise<MemoryBackend> {
+async function selectMemoryBackend(settings: Settings): Promise<MemoryBackend> {
+	const id = cfgMemoryBackend.get(settings);
 	if (id === "hindsight") return (await import("../hindsight/backend")).hindsightBackend;
 	if (id === "mnemopi") return (await import("../mnemopi/backend")).mnemopiBackend;
 	if (id === "sharpshooter") return (await import("../sharpshooter/backend")).sharpshooterBackend;
