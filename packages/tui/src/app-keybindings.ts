@@ -29,6 +29,7 @@ interface AppKeybindings {
 	"app.exit": true;
 	"app.suspend": true;
 	"app.display.reset": true;
+	"app.display.toggleDetail": true;
 	"app.thinking.cycle": true;
 	"app.thinking.toggle": true;
 	"app.model.cycleForward": true;
@@ -107,6 +108,10 @@ export const KEYBINDINGS = {
 	"app.display.reset": {
 		defaultKeys: "alt+l",
 		description: "Reset terminal display",
+	},
+	"app.display.toggleDetail": {
+		defaultKeys: [],
+		description: "Toggle thinking blocks and tool output details",
 	},
 	"app.thinking.cycle": {
 		defaultKeys: "shift+tab",

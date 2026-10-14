@@ -18,6 +18,7 @@ import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { text } from "@oh-my-pi/pi-tui/native/describe";
+import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { TspNode, TspOp } from "@oh-my-pi/pi-wire";
@@ -194,6 +195,60 @@ describe("native transcript", () => {
 		} finally {
 			tool.dispose();
 		}
+	});
+
+	it("folds a tool card's body when tool output details are hidden (Ctrl+H)", () => {
+		const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
+		const cx: DescribeContext = {
+			cols: 100,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		};
+		const tool = new ToolExecutionComponent("lookup_thing", { q: "x" }, {}, undefined, ui);
+		try {
+			tool.updateResult({ content: [{ type: "text", text: "row one\nrow two" }], isError: false });
+			const settled = tool.describe(cx).p as Record<string, unknown>;
+			expect(settled.collapsed).toBe(true);
+			expect(settled.preview).not.toBe("none");
+
+			// The fallback card (a terminal without the data-first `tool` feature) drops its clamp too.
+			const fallback = tool.describe().p as Record<string, unknown>;
+			expect(fallback.collapsed).toBe(true);
+			expect(fallback.preview).toBeDefined();
+
+			tool.setToolOutputDetailsHidden(true);
+			expect(tool.describe(cx).p).toMatchObject({ collapsed: true, preview: "none" });
+			expect(tool.describe().p).toMatchObject({ collapsed: true, preview: undefined });
+
+			tool.setToolOutputDetailsHidden(false);
+			expect(tool.describe(cx).p).toMatchObject({ collapsed: true });
+			expect((tool.describe(cx).p as Record<string, unknown>).preview).not.toBe("none");
+			expect((tool.describe().p as Record<string, unknown>).preview).toBeDefined();
+		} finally {
+			tool.dispose();
+		}
+	});
+
+	it("drops a tool card's body clamp when the transcript folds tool output details", async () => {
+		let builder: ChatTranscriptBuilder | undefined;
+		const h = await startWith(h => {
+			builder = new ChatTranscriptBuilder({ ui: h.tui, cwd: "/tmp", requestRender: () => h.tui.requestRender() });
+			builder.append(toolTranscript());
+			h.tui.addChild(builder.container);
+		});
+		const cardId = h.find(node => node.k === "tool" && node.p?.role === "omp.tool.lookup_thing")!.id;
+		expect((h.byId(cardId)?.p as Record<string, unknown> | undefined)?.preview).not.toBe("none");
+
+		builder!.container.setToolOutputDetailsHidden(true);
+		await h.render();
+		expect(h.byId(cardId)?.p).toMatchObject({ collapsed: true, preview: "none" });
+
+		builder!.container.setToolOutputDetailsHidden(false);
+		await h.render();
+		expect((h.byId(cardId)?.p as Record<string, unknown> | undefined)?.preview).not.toBe("none");
+		expect(h.errors).toEqual([]);
 	});
 
 	it("keeps a finished todo call's checklist open", () => {

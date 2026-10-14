@@ -657,6 +657,18 @@ export const cfgDisplayHideToolActivity = register({
 	},
 });
 
+export const cfgDisplayHideToolOutputDetails = register({
+	id: "display.hideToolOutputDetails",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Hide Tool Output Details",
+		description: "Render each tool call as a one-line summary, hiding its output body",
+	},
+});
+
 export const cfgDisplayShowTokenUsage = register({
 	id: "display.showTokenUsage",
 	type: "boolean",
@@ -695,6 +707,7 @@ export const cfgDisplayCacheMissMarker = register({
 effect(
 	combine({
 		hideToolActivity: cfgDisplayHideToolActivity,
+		hideToolOutputDetails: cfgDisplayHideToolOutputDetails,
 		readToolResultPreview: cfgReadToolResultPreview,
 		showImages: cfgTerminalShowImages,
 		cacheMissMarker: cfgDisplayCacheMissMarker,

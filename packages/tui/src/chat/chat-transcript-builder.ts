@@ -114,6 +114,7 @@ export class ChatTranscriptBuilder {
 	constructor(deps: ChatTranscriptBuilderDeps) {
 		this.#deps = deps;
 		this.container.setToolActivityVisible(!displayPreferences.hideToolActivity);
+		this.container.setToolOutputDetailsHidden(displayPreferences.hideToolOutputDetails);
 	}
 
 	/** Whether the transcript currently holds any rendered rows. */
@@ -418,7 +419,9 @@ export class ChatTranscriptBuilder {
 			expandThinkingBlocks,
 		);
 		assistantComponent.setImagesVisible(displayPreferences.showImages);
-		assistantComponent.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
+		assistantComponent.setToolResultImagesVisible(
+			!displayPreferences.hideToolActivity && !displayPreferences.hideToolOutputDetails,
+		);
 		assistantComponent.setTableChartsVisible(this.#deps.tableCharts !== false);
 		this.#trackExpandable(assistantComponent);
 		assistantComponent.pickReactionTarget(this.container.children);
@@ -457,7 +460,9 @@ export class ChatTranscriptBuilder {
 				expandThinkingBlocks,
 			);
 			component.setImagesVisible(displayPreferences.showImages);
-			component.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
+			component.setToolResultImagesVisible(
+				!displayPreferences.hideToolActivity && !displayPreferences.hideToolOutputDetails,
+			);
 			component.setTableChartsVisible(this.#deps.tableCharts !== false);
 			this.#trackExpandable(component);
 			this.container.addChild(component);
