@@ -594,6 +594,78 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(promptRebuilds).toBeGreaterThan(rebuildsBefore);
 	});
 
+	it("does not catch up on the source prompt when the destination turns pairing on", async () => {
+		// The destination flips `sharpshooter.enabled` on while the primary stays. The settings
+		// reload is drained by the move's first settle, before its explicit rebind, and starts
+		// the leg itself: with a "start" reason it would file the source project's trailing
+		// prompt into the destination bank.
+		const source = path.join(tempDir.path(), "source");
+		const destination = path.join(tempDir.path(), "destination");
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, false);
+		await settings.reloadForCwd(source);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(startedAt).toEqual([]);
+
+		await settings.reloadForCwd(destination);
+		current.sessionManager.setCwdWithoutRelocation(destination);
+		cfgSharpshooterEnabled.override(settings, true);
+		await rebindMemoryBackendForCwd(current);
+
+		expect(startedAt.length).toBeGreaterThan(0);
+		expect(startedAt.every(entry => entry === `rebind ${destination}`)).toBe(true);
+	});
+
+	it("drops queued prompts when a full apply leaves no Sharpshooter leg to run them", async () => {
+		// A full apply keeps prompts queued behind a slow extraction only for the leg that
+		// replaces the old one. When the destination turns pairing off, nothing is left to
+		// retry them, and keeping them through the slow store teardown lets the extraction
+		// that settles in that window drain them after Sharpshooter was disabled.
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, true);
+		await settings.reloadForCwd(path.join(tempDir.path(), "project"));
+		trackSharpshooterStarts();
+		const releaseSpy = spyOn(sharpshooterModule, "releaseSharpshooterSession").mockImplementation(() => {});
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		releaseSpy.mockClear();
+
+		cfgSharpshooterEnabled.override(settings, false);
+		cfgMemoryBackend.override(settings, "local");
+		await current.settleMemoryBackend();
+
+		expect(releaseSpy).toHaveBeenCalled();
+		expect(releaseSpy.mock.calls.some(([, options]) => options?.keepPending)).toBe(false);
+	});
+
+	it("keeps queued prompts when a full apply starts the Sharpshooter leg again", async () => {
+		// The carry that the test above must not extend: the new leg takes the queue.
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, true);
+		await settings.reloadForCwd(path.join(tempDir.path(), "project"));
+		trackSharpshooterStarts();
+		const releaseSpy = spyOn(sharpshooterModule, "releaseSharpshooterSession").mockImplementation(() => {});
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		releaseSpy.mockClear();
+
+		cfgMemoryBackend.override(settings, "local");
+		await current.settleMemoryBackend();
+
+		expect(releaseSpy.mock.calls.some(([, options]) => options?.keepPending)).toBe(true);
+	});
+
 	it("leaves Sharpshooter alone on a cwd move when the flag is off", async () => {
 		cfgMemoryBackend.override(settings, "hindsight");
 		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");

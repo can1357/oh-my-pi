@@ -396,6 +396,11 @@ export class SessionMemory {
 		const settings = this.#host.settings;
 		const backend = cfgMemoryBackend.get(settings);
 		if (backend === "sharpshooter") return;
+		// A move's settings reload is drained by its first settle, ahead of the explicit
+		// rebind, so a pairing toggle can arrive here while the session cwd is already past
+		// the applied one. That start is the move's rebind, not a fresh start, and must not
+		// catch up on the transcript the source project left behind.
+		if ((this.#runtimeCwd ?? this.#host.cwd()) !== this.#host.cwd()) reason = "rebind";
 		const session = this.#host.memoryBackendSession();
 		if (cfgSharpshooterEnabled.get(settings)) {
 			startSharpshooterLeg(
@@ -427,18 +432,21 @@ export class SessionMemory {
 		// transcript the destination never earned.
 		if ((this.#runtimeCwd ?? cwd) !== cwd) reason = "rebind";
 		try {
-			// Keep prompts queued behind a slow extraction: when this apply starts
-			// Sharpshooter again, the new leg carries them; when it does not, they
-			// are dropped below, since no leg is left to retry them.
-			await this.#disposeMemoryBackendState(true, retain, true);
-			this.#runtimeCwd = cwd;
-			const startsLeg =
+			const startsLeg = () =>
 				this.#memoryAgentDir !== undefined &&
 				this.#memoryTaskDepth === 0 &&
 				!this.#host.isDisposed() &&
 				(cfgMemoryBackend.get(this.#host.settings) === "sharpshooter" ||
 					cfgSharpshooterEnabled.get(this.#host.settings));
-			if (!startsLeg) releaseSharpshooterSession(this.#host.memoryBackendSession());
+			// Keep prompts queued behind a slow extraction only when this apply starts
+			// Sharpshooter again: the new leg carries them. Decided before the release,
+			// because teardown of a slow store leaves a window in which an extraction
+			// that settles would drain a queue whose subscription is already gone.
+			await this.#disposeMemoryBackendState(true, retain, startsLeg());
+			this.#runtimeCwd = cwd;
+			// Settings can change during the teardown, so a leg expected above may no
+			// longer start; whatever is still queued then has no leg to retry it.
+			if (!startsLeg()) releaseSharpshooterSession(this.#host.memoryBackendSession());
 			if (this.#memoryAgentDir && this.#memoryTaskDepth === 0 && !this.#host.isDisposed()) {
 				const backend = await resolveMemoryBackend(this.#host.settings);
 				await backend.start({
