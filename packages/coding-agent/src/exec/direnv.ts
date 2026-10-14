@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { inflateSync } from "node:zlib";
-import { $which, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $which, isEnoent, logger, stripNodeIpcChannelEnv } from "@oh-my-pi/pi-utils";
 
 /** Default cap on a single `direnv` invocation. The first export for a devenv
  *  `.envrc` can build a shell; callers may raise this via `bash.direnvLoadTimeoutMs`. */
@@ -209,6 +209,9 @@ function cleanSpawnEnv(): Record<string, string> {
 	for (const [key, value] of Object.entries(Bun.env)) {
 		if (value !== undefined && !key.startsWith("DIRENV_")) out[key] = value;
 	}
+	// .envrc commands run before the final shell env is built; they must not
+	// inherit the host worker's stale IPC descriptor either.
+	stripNodeIpcChannelEnv(out);
 	cleanSpawnEnvCache = { size, checksum, env: out };
 	return out;
 }

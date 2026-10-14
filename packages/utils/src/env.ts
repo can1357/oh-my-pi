@@ -109,7 +109,10 @@ export function stripGitRepoLocationEnv(
 	}
 }
 
-const NODE_IPC_CHANNEL_ENV_NAMES = ["NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE"] as const;
+const NODE_IPC_CHANNEL_ENV_NAMES: Record<string, true> = {
+	NODE_CHANNEL_FD: true,
+	NODE_CHANNEL_SERIALIZATION_MODE: true,
+};
 
 /**
  * Drop Node's IPC channel pointers from a copied environment. Windows resolves
@@ -121,14 +124,13 @@ export function stripNodeIpcChannelEnv(
 	platform: NodeJS.Platform = process.platform,
 ): void {
 	if (platform !== "win32") {
-		for (const name of NODE_IPC_CHANNEL_ENV_NAMES) {
+		for (const name in NODE_IPC_CHANNEL_ENV_NAMES) {
 			delete env[name];
 		}
 		return;
 	}
-	const folded = new Set<string>(NODE_IPC_CHANNEL_ENV_NAMES.map(name => name.toLowerCase()));
 	for (const key of Object.keys(env)) {
-		if (folded.has(key.toLowerCase())) {
+		if (Object.hasOwn(NODE_IPC_CHANNEL_ENV_NAMES, key.toUpperCase())) {
 			delete env[key];
 		}
 	}
