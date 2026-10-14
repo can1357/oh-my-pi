@@ -20,7 +20,7 @@
  *   consent, live credit eligibility, terminal dedupe, and account cooldown.
  */
 import { describe, expect, it } from "bun:test";
-import type { ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
+import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ATTEMPT_COOLDOWN_MS,
@@ -29,6 +29,7 @@ import {
 	headlessApprovedResetActions,
 	IMMINENT_RESET_EXPIRY_MS,
 	isTerminalRedeemOutcome,
+	overlayLiveResetCredits,
 	planCodexResetRedemptions,
 	RESTORE_WAIT_TOLERANCE_MS,
 	SALVAGE_MIN_USED_FRACTION,
@@ -607,6 +608,51 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		});
 		const plan = planCodexResetRedemptions(input([active, sibling], { modelId: "gpt-5.6-sol" }));
 		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: "openai-codex|-|2" }]);
+	});
+
+	it("keeps enforcing the model's plan when the eligible account's reset listing failed", () => {
+		// Usage reports carry no credential id until the live listing overlays one.
+		const usageOnly = (opts: AccountOpts): UsageReport => {
+			const { resetCreditCredentialId: _, ...metadata } = report(opts).metadata ?? {};
+			return { ...report(opts), metadata };
+		};
+		const paid = usageOnly({ weeklyResetInMs: 4 * HOUR, planType: "plus" });
+		const freeSibling = usageOnly({
+			accountId: "acct-sib",
+			email: "sib@example.com",
+			weeklyResetInMs: 6 * DAY,
+			planType: "free",
+		});
+		const statuses: ResetCreditAccountStatus[] = [
+			{
+				provider: "openai-codex",
+				credentialId: CREDENTIAL_ID,
+				accountId: ACCOUNT_ID,
+				email: EMAIL,
+				active: true,
+				availableCount: 0,
+				credits: [],
+				error: "list failed",
+			},
+			{
+				provider: "openai-codex",
+				credentialId: 2,
+				accountId: "acct-sib",
+				email: "sib@example.com",
+				active: false,
+				availableCount: 1,
+				credits: [],
+			},
+		];
+		const plan = planCodexResetRedemptions(
+			input(overlayLiveResetCredits([paid, freeSibling], statuses), { modelId: "gpt-5.6-sol" }),
+		);
+		expect(plan.actions).toEqual([]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|2",
+			rule: "blocked-account",
+			reason: "plan-ineligible",
+		});
 	});
 
 	it("keeps the active account until a sibling skips more than the tolerance longer", () => {
