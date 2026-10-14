@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/pi-natives",
-  "version": "18.8.6",
+  "version": "18.10.4",
   "description": "Native Rust bindings for PDF conversion, audio, WebRTC, grep, clipboard, image processing, syntax highlighting, PTY, and shell operations via N-API",
   "type": "module",
   "homepage": "https://omp.sh",
@@ -39,7 +39,8 @@
     "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'",
     "gen:npm": "bun scripts/gen-npm-packages.ts",
     "bench": "bun bench/grep.ts",
-    "bench:text": "bun bench/text.ts"
+    "bench:text": "bun bench/text.ts",
+    "bench:ipc": "bun bench/ipc.ts"
   },
   "devDependencies": {
     "@napi-rs/cli": "catalog:",

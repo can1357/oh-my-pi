@@ -9,9 +9,8 @@
  * a locally spawned server. Every failure degrades to `null` so callers fall
  * back to a process-local spawn.
  */
-import * as net from "node:net";
 import * as os from "node:os";
-import * as path from "node:path";
+import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { logger, ptree } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing";
 import { daemonClientForProject } from "../../launch/client";
@@ -25,7 +24,6 @@ import {
 	LSP_MUX_READY_PATTERN,
 	LSP_MUX_SOCKET_ENV,
 	LSP_MUX_WORKER_ARG,
-	lspMuxEndpoint,
 	MUX_CONNECT_METHOD,
 	MUX_PING_METHOD,
 	MUX_PING_RESULT,
@@ -40,34 +38,56 @@ const READY_TIMEOUT_MS = 15_000;
 /** probe→describe→start rounds; bounds cross-process start races and wedged-mux replacement. */
 const ENSURE_ATTEMPTS = 3;
 
-/** Dial a mux endpoint (Unix socket or Windows named pipe) with a bounded connect. */
-function connectEndpoint(endpoint: string, timeoutMs: number): Promise<net.Socket> {
-	const { promise, resolve, reject } = Promise.withResolvers<net.Socket>();
-	const socket = net.connect(endpoint);
-	const timer = setTimeout(() => {
-		socket.destroy();
-		reject(new Error(`Timed out connecting to LSP mux at ${endpoint}`));
-	}, timeoutMs);
-	socket.once("connect", () => {
-		clearTimeout(timer);
-		socket.removeListener("error", onError);
-		resolve(socket);
-	});
-	const onError = (error: Error) => {
-		clearTimeout(timer);
-		reject(error);
-	};
-	socket.once("error", onError);
-	return promise;
+interface MuxLinkReader {
+	data(chunk: Uint8Array): void;
+	close(): void;
 }
 
 /**
- * Send one request on a fresh socket and await its response. Used only
- * before the transport takes over the socket; leftover bytes after the
+ * Raw mux connection whose single `startRaw()` feeds swappable readers: the
+ * handshake reads first, then the transport takes over. Chunks and the close
+ * event arriving while no reader is attached are held for the next one.
+ */
+class MuxLink {
+	readonly connection: IpcConnection;
+	readonly #held: Uint8Array[] = [];
+	#reader?: MuxLinkReader;
+	#closed = false;
+
+	constructor(connection: IpcConnection) {
+		this.connection = connection;
+		connection.startRaw(
+			chunk => {
+				if (this.#reader) this.#reader.data(chunk);
+				else this.#held.push(chunk);
+			},
+			() => {
+				this.#closed = true;
+				this.#reader?.close();
+			},
+		);
+	}
+
+	/** Route data and close to `reader`, replaying anything held first; `undefined` detaches. */
+	attach(reader: MuxLinkReader | undefined): void {
+		this.#reader = reader;
+		if (!reader) return;
+		while (this.#reader === reader) {
+			const chunk = this.#held.shift();
+			if (!chunk) break;
+			reader.data(chunk);
+		}
+		if (this.#closed && this.#reader === reader) reader.close();
+	}
+}
+
+/**
+ * Send one request on a fresh link and await its response. Used only
+ * before the transport takes over the link; leftover bytes after the
  * response are returned so the transport's stream can replay them.
  */
-function requestOnSocket(
-	socket: net.Socket,
+function requestOnLink(
+	link: MuxLink,
 	request: LspJsonRpcRequest,
 	timeoutMs: number,
 ): Promise<{ response: LspJsonRpcResponse; leftover: Buffer }> {
@@ -77,7 +97,7 @@ function requestOnSocket(
 		cleanup();
 		reject(new Error(`LSP mux ${request.method} timed out`));
 	}, timeoutMs);
-	const onData = (chunk: Buffer) => {
+	const data = (chunk: Uint8Array) => {
 		try {
 			framer.push(chunk);
 			for (const text of framer.drain(() => {})) {
@@ -97,73 +117,59 @@ function requestOnSocket(
 			}
 		} catch (error) {
 			cleanup();
-			socket.destroy();
+			link.connection.destroy();
 			reject(error instanceof Error ? error : new Error(String(error)));
 		}
 	};
-	const onClose = () => {
+	const close = () => {
 		cleanup();
 		reject(new Error("LSP mux connection closed during handshake"));
 	};
 	const cleanup = () => {
 		clearTimeout(timer);
-		socket.removeListener("data", onData);
-		socket.removeListener("close", onClose);
-		socket.removeListener("error", onClose);
+		link.attach(undefined);
 	};
-	socket.on("data", onData);
-	socket.once("close", onClose);
-	socket.once("error", onClose);
-	socket.write(encodeMessageFrame(request));
+	link.attach({ data, close });
+	link.connection.send(encodeMessageFrame(request));
 	return promise;
 }
 
 /**
- * Wrap a connected, handshaken mux socket as an {@link LspTransport}.
- * Socket close maps to a clean "process exit" (code 0) so the LSP client's
+ * Wrap a connected, handshaken mux link as an {@link LspTransport}.
+ * Connection close maps to a clean "process exit" (code 0) so the LSP client's
  * crash-recovery path treats a dead mux exactly like a dead server.
  */
-function socketTransport(socket: net.Socket, leftover: Buffer, pid: number | undefined): LspTransport {
+function linkTransport(link: MuxLink, leftover: Buffer, pid: number | undefined): LspTransport {
+	const { connection } = link;
 	const exited = Promise.withResolvers<number>();
 	let exitCode: number | null = null;
 	let needDrain = false;
-	socket.on("error", () => {
-		// "close" always follows; swallowing here prevents an unhandled error event.
-	});
-	socket.once("close", () => {
-		exitCode = 0;
-		exited.resolve(0);
-	});
 	const stdout = new ReadableStream<Uint8Array>({
 		start(controller) {
 			if (leftover.byteLength > 0) controller.enqueue(new Uint8Array(leftover));
-			socket.on("data", (chunk: Buffer) =>
-				controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)),
-			);
-			socket.once("close", () => {
-				try {
-					controller.close();
-				} catch {
-					// already errored/closed
-				}
+			link.attach({
+				data: chunk => controller.enqueue(chunk),
+				close: () => {
+					try {
+						controller.close();
+					} catch {
+						// already errored/closed
+					}
+					exitCode = 0;
+					exited.resolve(0);
+				},
 			});
 		},
 	});
 	const stdin: LspWriteSink = {
 		write(data) {
-			needDrain = !socket.write(data);
+			needDrain = !connection.send(data);
 			return typeof data === "string" ? Buffer.byteLength(data, "utf-8") : data.byteLength;
 		},
 		flush() {
-			if (!needDrain || socket.destroyed) return;
-			return new Promise<void>(resolveDrain => {
-				const onDrain = () => {
-					needDrain = false;
-					socket.removeListener("close", onDrain);
-					resolveDrain();
-				};
-				socket.once("drain", onDrain);
-				socket.once("close", onDrain);
+			if (!needDrain || connection.closed) return;
+			return connection.drained().then(() => {
+				needDrain = false;
 			});
 		},
 	};
@@ -177,7 +183,7 @@ function socketTransport(socket: net.Socket, leftover: Buffer, pid: number | und
 		pid,
 		sharedMux: true,
 		kill() {
-			socket.destroy();
+			connection.destroy();
 		},
 		peekStderr() {
 			return "";
@@ -189,18 +195,17 @@ let nextHandshakeId = 1;
 
 /** Dial and handshake one server link; throws on any failure. */
 async function dialMuxServer(endpoint: string, params: MuxConnectParams): Promise<LspTransport> {
-	const socket = await connectEndpoint(endpoint, CONNECT_TIMEOUT_MS);
-	socket.setNoDelay(true);
+	const link = new MuxLink(await IpcConnection.connect(endpoint, { framing: "raw", timeoutMs: CONNECT_TIMEOUT_MS }));
 	try {
-		const { response, leftover } = await requestOnSocket(
-			socket,
+		const { response, leftover } = await requestOnLink(
+			link,
 			{ jsonrpc: "2.0", id: `connect:${nextHandshakeId++}`, method: MUX_CONNECT_METHOD, params },
 			HANDSHAKE_TIMEOUT_MS,
 		);
 		const result = response.result as MuxConnectResult;
-		return socketTransport(socket, leftover, result.pid);
+		return linkTransport(link, leftover, result.pid);
 	} catch (error) {
-		socket.destroy();
+		link.connection.destroy();
 		throw error;
 	}
 }
@@ -208,16 +213,16 @@ async function dialMuxServer(endpoint: string, params: MuxConnectParams): Promis
 /** True when a mux answers the ping handshake at `endpoint`. */
 async function probeMux(endpoint: string): Promise<boolean> {
 	try {
-		const socket = await connectEndpoint(endpoint, PROBE_TIMEOUT_MS);
+		const link = new MuxLink(await IpcConnection.connect(endpoint, { framing: "raw", timeoutMs: PROBE_TIMEOUT_MS }));
 		try {
-			const { response } = await requestOnSocket(
-				socket,
+			const { response } = await requestOnLink(
+				link,
 				{ jsonrpc: "2.0", id: "probe", method: MUX_PING_METHOD, params: null },
 				PROBE_TIMEOUT_MS,
 			);
 			return response.result === MUX_PING_RESULT;
 		} finally {
-			socket.destroy();
+			link.connection.destroy();
 		}
 	} catch {
 		return false;
@@ -230,7 +235,7 @@ async function probeMux(endpoint: string): Promise<boolean> {
  */
 async function ensureLspMuxDaemon(projectDir: string, signal?: AbortSignal): Promise<string | null> {
 	const client = await daemonClientForProject(projectDir);
-	const endpoint = lspMuxEndpoint(client.projectDir, daemonRuntimeDir(client.projectDir));
+	const endpoint = ipcEndpoint(daemonRuntimeDir(client.projectDir), "lsp-mux");
 	// The broker connection doubles as the presence lease keeping the daemon alive.
 	await client.request({ op: "ping" }, signal);
 	if (await probeMux(endpoint)) return endpoint;
@@ -320,10 +325,7 @@ export async function connectSharedLspTransport(opts: {
 
 /** Exercise worker-host mux startup and the ping handshake for distribution smoke tests. */
 export async function smokeTestLspMux(): Promise<void> {
-	const endpoint =
-		process.platform === "win32"
-			? `\\\\.\\pipe\\omp-lsp-mux-smoke-${process.pid.toString(16)}`
-			: path.join(os.tmpdir(), `omp-lsp-mux-smoke-${process.pid.toString(36)}.sock`);
+	const endpoint = ipcEndpoint(os.tmpdir(), `omp-lsp-mux-smoke-${process.pid.toString(36)}`);
 	const spawn = resolveWorkerSpawnCmd(LSP_MUX_WORKER_ARG);
 	const proc = ptree.spawn(spawn.cmd, {
 		cwd: spawn.cwd,

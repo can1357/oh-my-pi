@@ -108,7 +108,7 @@ describe("task.batch schema gating", () => {
 	it("swaps between the flat and batch wire shapes", async () => {
 		mockDiscovery();
 
-		const off = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
+		const off = await TaskTool.create(createSession({ settings: { "task.batch": false, "task.structured": true } }));
 		const offProperties = getSchemaProperties(off);
 		expect(offProperties.tasks).toBeUndefined();
 		expect(offProperties.context).toBeUndefined();
@@ -118,7 +118,7 @@ describe("task.batch schema gating", () => {
 		expect(typeof offProperties.outputSchema).toBe("object");
 		expect(offProperties.schemaMode).toBeDefined();
 
-		const on = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		const on = await TaskTool.create(createSession({ settings: { "task.batch": true, "task.structured": true } }));
 		const onProperties = getSchemaProperties(on);
 		expect(onProperties.tasks).toBeDefined();
 		expect(onProperties.context).toBeDefined();
@@ -193,12 +193,26 @@ describe("task.batch schema gating", () => {
 	it("exposes outputSchema but never the stale schema field", async () => {
 		mockDiscovery();
 
-		const flat = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
+		const flat = await TaskTool.create(createSession({ settings: { "task.batch": false, "task.structured": true } }));
 		expect(getSchemaProperties(flat).outputSchema).toBeDefined();
 		expect(getSchemaProperties(flat).schema).toBeUndefined();
 
-		const batch = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		const batch = await TaskTool.create(createSession({ settings: { "task.batch": true, "task.structured": true } }));
 		expect(getSchemaProperties(batch).schema).toBeUndefined();
+	});
+
+	it("hides outputSchema and schemaMode from the wire shape and description unless task.structured is on", async () => {
+		mockDiscovery();
+
+		const flat = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
+		expect(getSchemaProperties(flat).outputSchema).toBeUndefined();
+		expect(getSchemaProperties(flat).schemaMode).toBeUndefined();
+		expect(flat.description).not.toContain("outputSchema");
+
+		const batch = await TaskTool.create(createSession({ settings: { "task.batch": true, "async.enabled": true } }));
+		expect(getBatchItemProperties(batch).outputSchema).toBeUndefined();
+		expect(getBatchItemProperties(batch).schemaMode).toBeUndefined();
+		expect(batch.description).not.toContain("outputSchema");
 	});
 });
 
@@ -383,7 +397,11 @@ describe("task.batch spawning", () => {
 
 		const manager = createManager();
 		const tool = await TaskTool.create(
-			createSession({ manager, agentId: "ParentA", settings: { "async.enabled": true, "task.batch": true } }),
+			createSession({
+				manager,
+				agentId: "ParentA",
+				settings: { "async.enabled": true, "task.batch": true, "task.structured": true },
+			}),
 		);
 		const alphaSchema = { type: "object", properties: { alpha: { type: "string" } } };
 		const betaSchema = { type: "object", properties: { beta: { type: "number" } } };
@@ -480,7 +498,7 @@ describe("task.batch spawning", () => {
 
 		const manager = createManager();
 		const tool = await TaskTool.create(
-			createSession({ manager, settings: { "async.enabled": true, "task.batch": true } }),
+			createSession({ manager, settings: { "async.enabled": true, "task.batch": true, "task.structured": true } }),
 		);
 		const result = await tool.execute("tc-mixed-agents", {
 			context: "Shared routing context.",
@@ -575,6 +593,7 @@ describe("task.batch spawning", () => {
 				settings: {
 					"async.enabled": true,
 					"task.batch": true,
+					"task.structured": true,
 					"task.agentModelOverrides": { task: "openai/gpt-4.1-mini" },
 				},
 			}),
@@ -598,6 +617,34 @@ describe("task.batch spawning", () => {
 		expect(captured?.outputSchemaMode).toBe("strict");
 		expect(captured?.outputSchemaSource).toBe("caller");
 		expect(captured?.outputSchemaOverridesAgent).toBe(true);
+	});
+
+	it("spawns schema-less, yield-less children by default even with caller and agent schemas", async () => {
+		mockDiscovery({ ...taskAgent, output: { type: "object", properties: { agent: { type: "string" } } } });
+		let captured: { structured?: boolean; outputSchema?: unknown; outputSchemaSource?: string } | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			captured = {
+				structured: options.structured,
+				outputSchema: options.outputSchema,
+				outputSchemaSource: options.outputSchemaSource,
+			};
+			return makeResult(options.id ?? "?");
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({ manager, settings: { "async.enabled": true, "task.batch": true } }),
+		);
+		const result = await tool.execute("tc-prose", {
+			agent: "task",
+			name: "Prose",
+			task: "Do the thing.",
+			outputSchema: { type: "object", properties: { caller: { type: "number" } } },
+			schemaMode: "strict",
+		} as TaskParams);
+
+		await manager.getJob(result.details!.async!.jobId)!.promise;
+		expect(captured).toEqual({ structured: false, outputSchema: undefined, outputSchemaSource: undefined });
 	});
 
 	it("blocks batch execution when async.enabled is false even with a job manager", async () => {

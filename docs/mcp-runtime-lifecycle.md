@@ -24,6 +24,7 @@ This document describes how MCP servers are discovered, connected, exposed as to
 
 - **Headless/SDK** (no UI, no provided manager): awaits `discoverAndLoadMCPTools(cwd, { ... })` and merges the returned tools into the startup `customTools` set. Print mode alone then waits for configured servers' tool handshakes or failures before its first prompt (bounded by `OMP_MCP_TIMEOUT_MS`, default 30 seconds), refreshes the session's tool registry, and warns per unavailable server; `OMP_MCP_REQUIRE_READY=1` instead exits 1 without sending the prompt. `OMP_MCP_TIMEOUT_MS=0` disables this barrier deadline and may wait indefinitely.
 - **Interactive/TUI** (`hasUI: true`, no provided manager): constructs `MCPManager` immediately (with cache + auth storage), defers `discoverAndConnect()` to a background task started after the session exists, then binds tools via `session.refreshMCPTools(...)` (disposing the manager if the session was torn down mid-connect).
+  The first turn of such a session (interactive or `--mode rpc-ui`) waits up to 1.5 s for this MCP startup, so its system prompt includes servers connected by then; slower servers register later and change the next turn's prompt.
 
 Both paths:
 
@@ -141,7 +142,7 @@ Each pending `toolsPromise` also has a background continuation that eventually:
 
 Server and tool name components are lowercased and sanitized to letters, digits, and underscores; repeated/edge underscores are collapsed/trimmed, and a redundant server prefix on the tool is stripped. Names longer than 64 characters are capped with a deterministic hash suffix. If two distinct origins mint the same runtime name, OMP logs the collision and keeps a deterministic winner based on the original server/tool identity, so reconnect ordering cannot change ownership.
 
-Connected manager tools become enabled immediately. Presentation is reconciled with the session's current tool policy: tools may be mounted under `xd://` rather than exposed as top-level function definitions; Code Mode can route them through the Eval bridge. Registry identity and original server/tool ownership remain intact regardless of presentation.
+Connected manager tools become enabled immediately. Presentation is reconciled with the session's current tool policy: tools may be mounted under `xd://` rather than exposed as top-level function definitions. Registry identity and original server/tool ownership remain intact regardless of presentation.
 
 ### Tool calls
 

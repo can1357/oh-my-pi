@@ -212,7 +212,7 @@ The `speech` role accepts TTS catalog models and the `dictation` role accepts ST
 | -------------- | ----------------------------------------- | --------- | -------- | -------------------------------------- |
 | `local/kokoro` | `onnx-community/Kokoro-82M-v1.0-ONNX`    | q8        | ~100 MB  | 24 kHz Kokoro-82M, fully local ONNX TTS |
 
-Kokoro voice selection remains independent of the model role. Set `tts.localVoice` for the `tts` tool and `speech.voice` for assistant-output vocalization. Available local voice ids are `af_heart` (default), `af_bella`, `af_nicole`, `af_aoede`, `af_kore`, `af_sarah`, `am_michael`, `am_fenrir`, `am_puck`, `bf_emma`, `bm_george`, and `bm_fable`. Changing voices does not download another model.
+Kokoro voice selection remains independent of the model role. Set `tts.localVoice` for the `tts` tool and `speech.voice` for assistant-output vocalization. Available local voice ids are `af_heart` (default), `af_bella`, `af_nicole`, `af_aoede`, `af_kore`, `af_sarah`, `am_michael`, `am_fenrir`, `am_puck`, `bf_emma`, `bm_george`, and `bm_fable`. Changing voices does not download another model. Speaking rate is likewise split: `tts.localSpeed` for the `tts` tool and `omp say`, `speech.speed` for vocalization (both default `1`, clamped to `0.5`–`2.5`).
 
 ### Speech to text
 

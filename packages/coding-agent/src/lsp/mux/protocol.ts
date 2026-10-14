@@ -9,7 +9,6 @@
  * ({@link MUX_CONNECT_METHOD}); everything below is shared by the worker
  * entry (`server.ts`), the client connector (`daemon.ts`), and tests.
  */
-import * as path from "node:path";
 export { LSP_MUX_WORKER_ARG } from "../../cli/worker-selectors";
 
 /** Environment key carrying the socket endpoint the mux must listen on. */
@@ -27,15 +26,6 @@ export const LSP_MUX_READY_PATTERN = String.raw`omp lsp mux listening on \S+`;
 /** Banner printed on stdout once the mux socket accepts connections. */
 export function lspMuxReadyBanner(endpoint: string): string {
 	return `omp lsp mux listening on ${endpoint}`;
-}
-
-/** Resolve the Unix socket or Windows named pipe for one project scope. */
-export function lspMuxEndpoint(projectDir: string, runtimeDir: string): string {
-	if (process.platform === "win32") {
-		const key = Bun.hash.wyhash(path.resolve(projectDir)).toString(16).padStart(16, "0");
-		return `\\\\.\\pipe\\omp-lsp-mux-${key}`;
-	}
-	return path.join(runtimeDir, "lsp-mux.sock");
 }
 
 // =============================================================================

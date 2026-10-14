@@ -271,7 +271,7 @@ describe("snapcompact frame persistence", () => {
 		await resolveBlobRefsInEntries(loaded, blobStore);
 		const loadedArchive = snapcompact.getPreservedArchive(loaded[0]!.preserveData)!;
 		const blocks = snapcompact.historyBlocks(loadedArchive, {
-			maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+			maxFrameDataBytes: snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET,
 			resolveFrameData: data => lazyImageDataSync(blobStore, data),
 		});
 		const imageBlocks = blocks.filter((block): block is ImageContent => block.type === "image");
@@ -282,7 +282,7 @@ describe("snapcompact frame persistence", () => {
 		// Without a resolver the reference must never leave as image data: a
 		// dropped picture is recoverable, a rejected request is not.
 		const unresolved = snapcompact
-			.historyBlocks(loadedArchive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
+			.historyBlocks(loadedArchive, { maxFrameDataBytes: snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET })
 			.filter((block): block is ImageContent => block.type === "image");
 		expect(unresolved).toHaveLength(0);
 	});
@@ -408,7 +408,7 @@ describe("snapcompact frame persistence", () => {
 		await resolveBlobRefsInEntries([entry], blobStore);
 		const recovered = snapcompact.getPreservedArchive(entry.preserveData)!;
 		const blocks = snapcompact.historyBlocks(recovered, {
-			maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+			maxFrameDataBytes: snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET,
 		});
 		expect(blocks).toEqual([{ type: "text", text: sourceText }]);
 	});

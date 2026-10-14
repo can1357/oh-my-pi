@@ -9,6 +9,9 @@ provider "google-antigravity" {
 		image "google-gemini-cli"
 	}
 	web-search "gemini"
+	// No size rejection up to a 64 MB body; 60 images at the 500 KiB resize
+	// target stay near 41 MB. Gemini counts images only against its context.
+	image-count-budget 60
 
 	seed api="google-gemini-cli" base-url="https://daily-cloudcode-pa.googleapis.com" bundle="always" {
 		model "gemini-3-pro-image" name="Gemini 3 Pro Image" {
@@ -26,6 +29,18 @@ provider "google-antigravity" {
 	preserves-max-output-tokens #false
 
 	class "anthropic" {
+		// Claude here is Vertex Anthropic: one image whose base64 passes
+		// 5,242,880 bytes is a 400 "image exceeds 5 MB maximum" (half the
+		// direct API's 10 MiB), and 8001 px is a 400 like on the direct API.
+		// Declaring the contract makes the Cloud Code Assist wire clamp images
+		// for Claude the way `anthropic-messages` does; Gemini on the same
+		// gateway has no such limits and keeps them unset.
+		max-image-dimension 8000
+		max-image-payload-bytes 5242880
+		// The Claude upstream rejects a message over 30 MB and, past 20 images,
+		// any image edge over 3,000 px. The clamp above caps each image; with no
+		// byte budget on this wire, the count bounds the body.
+		image-count-budget 20
 		family "opus" {
 			thinking-mode "budget"
 		}
@@ -57,6 +72,17 @@ provider "google-antigravity" {
 			revision ">=3 <3.2" {
 				thinking-suppress-when-off #true
 			}
+		}
+	}
+	// Cloud Code Assist bills a Gemini 2.5 or 3.x image a fixed 1,089 tokens
+	// from 32px to 2048px (extreme strips bill less); priority=1 outranks the
+	// lineage's 1,120 at equal specificity. verified: billing matched this rule
+	// on Gemini 2.5 Flash Lite, 3.1 Flash Lite and 3.8 Flash.
+	class "gemini" priority=1 {
+		image-tokenization {
+			regime "fixed"
+			verified #true
+			tokens 1089
 		}
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.

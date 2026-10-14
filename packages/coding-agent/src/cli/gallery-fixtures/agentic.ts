@@ -1,6 +1,6 @@
-// Gallery fixtures for agentic orchestration (task, wait, goal).
+// Gallery fixtures for agentic orchestration (task, wait, goal, yield).
 import type { Usage } from "@oh-my-pi/pi-ai";
-import type { TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import type { TaskToolDetails, YieldItem } from "@oh-my-pi/pi-tui/tools/task";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { GalleryFixture } from "./types";
 
@@ -16,6 +16,16 @@ const fixtureUsage = (tokens: { input: number; output: number }, costTotal: numb
 	totalTokens: tokens.input + tokens.output,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: costTotal },
 });
+
+/** A subagent's structured result, as `yield` submits it. */
+const YIELD_DATA = {
+	summary: "Two races in the session store's flush path.\nBoth need the store lock held across the read.",
+	confidence: 0.85,
+	findings: [
+		{ file: "src/session/store.ts", line: 142, issue: "flush() reads entries without holding the lock" },
+		{ file: "src/session/store.ts", line: 188, issue: "concurrent flushes can write the same batch twice" },
+	],
+};
 
 export const agenticFixtures: Record<string, GalleryFixture> = {
 	task: {
@@ -274,6 +284,26 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 					},
 				],
 			},
+		},
+	},
+
+	yield: {
+		label: "Submit Result",
+		// Streaming: the payload object is still arriving.
+		streamingArgs: { data: { summary: "Two races in the session store's flush path." } },
+		args: { data: YIELD_DATA },
+		result: {
+			content: [{ type: "text", text: "Result submitted." }],
+			details: { status: "success", data: YIELD_DATA } satisfies YieldItem,
+		},
+		errorResult: {
+			isError: true,
+			content: [
+				{
+					type: "text",
+					text: "Output does not match schema: /confidence must be number. Call yield again with the corrected shape — 2 retry attempt(s) remain before the schema constraint is dropped.",
+				},
+			],
 		},
 	},
 };

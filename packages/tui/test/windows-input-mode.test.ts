@@ -77,6 +77,20 @@ describe("Win32InputModeDecoder", () => {
 		expect(decodeOne("\x1b[81;16;64;1;9;1_")).toBe("@");
 	});
 
+	it("emits text a dead key composed onto Space, Enter and Tab", () => {
+		// US-International: `'` then Space types `'`; `"` then Space types `"`.
+		expect(decodeOne("\x1b[32;57;39;1;0;1_")).toBe("'");
+		expect(decodeOne("\x1b[32;57;34;1;0;1_")).toBe('"');
+		// `'` then Enter: the quote rides an Enter record, then Enter itself follows.
+		const decoder = new Win32InputModeDecoder();
+		expect(decoder.decode("\x1b[13;28;39;1;0;1_")).toEqual(["'"]);
+		expect(decoder.decode(ENTER)).toEqual(["\r"]);
+		expect(decodeOne("\x1b[9;15;39;1;0;1_")).toBe("'");
+		// Plain Space and Shift+Space stay a space.
+		expect(decodeOne("\x1b[32;57;32;1;0;1_")).toBe(" ");
+		expect(decodeOne("\x1b[32;57;32;1;16;1_")).toBe(" ");
+	});
+
 	it("joins surrogate halves delivered as separate records", () => {
 		const decoder = new Win32InputModeDecoder();
 		expect(decoder.decode("\x1b[231;0;55357;1;0;1_")).toEqual([]);

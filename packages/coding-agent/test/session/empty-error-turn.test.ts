@@ -83,4 +83,35 @@ describe("sanitizeAssistantForReparentedHistory", () => {
 			providerPayload: undefined,
 		});
 	});
+
+	it("keeps whether a thinking block is a summary or the confirmed trace", () => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "summary", itemId: "rs_1", summary: true },
+				{ type: "thinking", thinking: "trace", itemId: "rs_2", summary: false },
+				{ type: "thinking", thinking: "unknown", itemId: "rs_3" },
+				{ type: "text", text: "done" },
+			],
+			api: "openai-responses",
+			provider: "openrouter",
+			model: "moonshotai/kimi-k3",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 1,
+		};
+
+		expect(sanitizeAssistantForReparentedHistory(message).content.slice(0, 3)).toEqual([
+			{ type: "thinking", thinking: "summary", summary: true },
+			{ type: "thinking", thinking: "trace", summary: false },
+			{ type: "thinking", thinking: "unknown" },
+		]);
+	});
 });

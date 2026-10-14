@@ -14,10 +14,25 @@
 // consecutive tool_use or tool_result blocks is one position. Warm-cache
 // tool-result pruning keeps its rewrites inside this window.
 // https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+// A replayed signed thinking block bills the full reasoning its signature
+// carries (the server rebuilds it from the signature), at the size its turn
+// billed as output, not the signature's bytes. Thinking a request drops bills
+// nothing (earlier turns on lines that strip it: Opus before 4.5, Sonnet
+// before 4.6, Haiku before 5.5; turns before a compaction or prune on
+// prefix-bound lines; another model's blocks the reader cannot read), so
+// those turns count high.
+// https://platform.claude.com/docs/en/build-with-claude/context-windows#the-context-window-with-thinking
+// https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models
 class "anthropic" {
 	prompt-cache-lookback 20
+	// Claude's input classifier refuses requests that quote earlier reasoning
+	// back as text (`reasoning_extraction`, issue #6093).
+	classifier-cot-extraction #true
+	thinking-replay-tokens "output"
+	// verified: billing matched this formula on Opus 4.7+ and Fable 5.1.
 	image-tokenization {
 		regime "anthropic-patch"
+		verified #true
 		max-edge 2576
 		max-tokens 4784
 	}
@@ -37,17 +52,35 @@ class "anthropic" {
 			}
 		}
 	}
+	// Standard tier. verified: billing matched it on Sonnet 4.6 only; older
+	// Sonnet lines keep the floor until measured.
 	family "sonnet" {
-		revision "<4.7" {
+		revision "<4.6" {
 			image-tokenization {
 				regime "anthropic-patch"
 				max-edge 1568
 				max-tokens 1568
 			}
 		}
-		revision ">=10 <47" {
+		revision ">=4.6 <4.7" {
 			image-tokenization {
 				regime "anthropic-patch"
+				verified #true
+				max-edge 1568
+				max-tokens 1568
+			}
+		}
+		revision ">=10 <46" {
+			image-tokenization {
+				regime "anthropic-patch"
+				max-edge 1568
+				max-tokens 1568
+			}
+		}
+		revision ">=46 <47" {
+			image-tokenization {
+				regime "anthropic-patch"
+				verified #true
 				max-edge 1568
 				max-tokens 1568
 			}
@@ -85,6 +118,14 @@ class "anthropic" {
 	family "opus" {
 		revision ">=4.7 <10" {
 			supports-sampling-params #false
+		}
+	}
+	// Opus 5.5 made every first edit exactly right from `read` results it saw
+	// only as snapcompact frames (24/24); Haiku 5.5 lost leading whitespace
+	// (22/54), so other lines keep `read` as text until measured.
+	family "opus" {
+		revision ">=5.5 <10" {
+			snapcompact-image-reads #true
 		}
 	}
 	family "sonnet" {

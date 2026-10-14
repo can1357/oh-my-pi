@@ -3,6 +3,7 @@
 provider "google-vertex" {
 	default-model "gemini-3.1-pro-preview"
 	allow-unauthenticated #true
+	image-count-budget 200
 
 	// Replaces google-shared.ts stripping functionCall/functionResponse ids for Vertex.
 	supports-function-part-id #false

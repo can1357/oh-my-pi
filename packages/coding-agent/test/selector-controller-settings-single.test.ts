@@ -3,6 +3,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import type { Component, OverlayHandle, OverlayOptions, TUI } from "@oh-my-pi/pi-tui";
 import { AgentsHubComponent } from "@oh-my-pi/pi-tui/overlays/agents-hub";
+import * as activityClient from "@oh-my-pi/pi-coding-agent/stats/activity-client";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
@@ -149,5 +150,39 @@ describe("single-instance menus", () => {
 		await controller.showAgentsDashboard();
 		expect(create).toHaveBeenCalledTimes(2);
 		expect(shown).toHaveLength(1);
+	});
+
+	// Regression: a second /usage (or status-line cost click) while the dashboard
+	// was open stacked another fullscreen dashboard on top of the first.
+	it("opens one usage dashboard per close, focusing it on repeat requests", () => {
+		spyOn(activityClient, "loadDailyActivity").mockResolvedValue(undefined);
+		const { ui, shown, setFocus } = overlayUi();
+		const controller = new SelectorController(
+			createInteractiveModeContext({
+				session: {
+					model: undefined,
+					getUsageReportingModelSelectors: () => [],
+					fetchUsageReports: async () => null,
+					modelRegistry: {
+						authStorage: {
+							credentials: { all: () => ({}) },
+							usage: { providerFor: () => undefined },
+							oauth: { identity: () => undefined },
+						},
+					},
+				},
+				ui,
+			}),
+		);
+		const reports = [{ provider: "anthropic", fetchedAt: Date.now(), limits: [] }];
+
+		controller.showUsageDashboard(reports);
+		controller.showUsageDashboard(reports);
+		expect(shown).toHaveLength(1);
+		expect(setFocus).toHaveBeenLastCalledWith(shown[0]);
+
+		shown[0]?.handleInput?.("\x1b");
+		controller.showUsageDashboard(reports);
+		expect(shown).toHaveLength(2);
 	});
 });

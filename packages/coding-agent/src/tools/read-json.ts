@@ -6,7 +6,7 @@ import { Shell } from "@oh-my-pi/pi-natives";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { DEFAULT_MAX_LINES, truncateHead, truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../sdk";
 import { quotePosixArgument } from "../utils/shell-quote";
 import { resolveReadPath } from "./path-utils";
@@ -31,7 +31,7 @@ const JSON_QUERY_TIMEOUT_MS = 30_000;
  * filled page usually means jaq is about to exit; let it finish first.
  */
 const PAGE_FULL_ABORT_DELAY_MS = 50;
-/** Bounds the jq stderr quoted in a failure; the tail keeps the error after any `debug` lines. */
+/** Bounds the jq stderr quoted in a result; the tail keeps the error after any `debug` lines. */
 const JSON_QUERY_ERROR_MAX_BYTES = 8 * 1024;
 /** jaq's default pretty-print indent. */
 const PRETTY_INDENT = "  ";
@@ -230,6 +230,9 @@ async function readStderr(stderrPath: string): Promise<string> {
  * temp file so diagnostics never mix into result values. Capture stops at
  * {@link MAX_QUERY_CAPTURE_CHARS} or after `stopAfterLines` newlines.
  *
+ * Like jq, jaq reports an input that fails and goes on with the rest, exiting
+ * 0 unless the last input failed; `stderr` carries those reports.
+ *
  * @throws ToolError when jq fails, times out, or the caller aborts.
  */
 async function runJq(
@@ -237,7 +240,7 @@ async function runJq(
 	query: string,
 	flags: string[],
 	options: { signal?: AbortSignal; stopAfterLines?: number },
-): Promise<{ output: string; stopped?: JqStop }> {
+): Promise<{ output: string; stopped?: JqStop; stderr: string }> {
 	const { signal, stopAfterLines } = options;
 	throwIfAborted(signal);
 
@@ -278,20 +281,28 @@ async function runJq(
 		);
 
 		throwIfAborted(signal);
-		if (stopped) return { output, stopped };
-		if (result.timedOut) throw new ToolError(`JSON query timed out after ${JSON_QUERY_TIMEOUT_MS / 1000} seconds`);
-		if (result.exitCode !== 0 || callbackError) {
-			const stderr = truncateTail((await readStderr(stderrPath)).trim(), {
-				maxBytes: JSON_QUERY_ERROR_MAX_BYTES,
-			}).content;
+		if (result.timedOut && !stopped) {
+			throw new ToolError(`JSON query timed out after ${JSON_QUERY_TIMEOUT_MS / 1000} seconds`);
+		}
+		const stderr = truncateTail(sanitizeText(await readStderr(stderrPath)).trim(), {
+			maxBytes: JSON_QUERY_ERROR_MAX_BYTES,
+		}).content;
+		if (!stopped && (result.exitCode !== 0 || callbackError)) {
 			throw new ToolError(`Failed to execute JSON query: ${stderr || `jq exited with code ${result.exitCode}`}`);
 		}
-		return { output };
+		return { output, stopped, stderr };
 	} finally {
 		clearTimeout(abortTimer);
 		signal?.removeEventListener("abort", onAbort);
 		await fs.rm(stderrPath, { force: true });
 	}
+}
+
+/** Puts what jq wrote to stderr, such as an input that failed, ahead of the results. */
+function withStderr(text: string, stderr: string): string {
+	if (!stderr) return text;
+	const notice = `[jq stderr: ${stderr}]`;
+	return text ? `${notice}\n${text}` : notice;
 }
 
 /**
@@ -301,6 +312,7 @@ async function runJq(
  * With one, jaq runs compact so each line is exactly one value and stops once
  * the page plus one lookahead value is captured; a single array result pages
  * its elements instead. Values are re-rendered from text, never reparsed.
+ * Anything jaq wrote to stderr leads the result.
  *
  * @throws ToolError on jq errors and timeouts, or when the values before the
  * requested page exceed the capture cap.
@@ -313,11 +325,11 @@ export async function executeJsonQuery(
 	const { page } = selector;
 	if (!page) {
 		const flags = [...(selector.raw ? ["-r"] : []), ...(selector.compact ? ["-c"] : [])];
-		const { output } = await runJq(filePath, selector.query, flags, { signal });
-		return output.endsWith("\n") ? output.slice(0, -1) : output;
+		const { output, stderr } = await runJq(filePath, selector.query, flags, { signal });
+		return withStderr(output.endsWith("\n") ? output.slice(0, -1) : output, stderr);
 	}
 
-	const { output, stopped } = await runJq(filePath, selector.query, ["-c"], {
+	const { output, stopped, stderr } = await runJq(filePath, selector.query, ["-c"], {
 		signal,
 		stopAfterLines: page.offset + page.limit + 1,
 	});
@@ -330,8 +342,11 @@ export async function executeJsonQuery(
 			`JSON query output before the requested page exceeds ${MAX_QUERY_CAPTURE_CHARS / (1024 * 1024)} MB; narrow the filter or stream large arrays with .[]`,
 		);
 	}
-	if (!stopped && values.length === 1 && values[0].startsWith("[")) return pageArray(values[0], selector, page);
-	return pageStream(values, selector, page, stopped !== undefined || values.length > page.offset + page.limit);
+	const text =
+		!stopped && values.length === 1 && values[0].startsWith("[")
+			? pageArray(values[0], selector, page)
+			: pageStream(values, selector, page, stopped !== undefined || values.length > page.offset + page.limit);
+	return withStderr(text, stderr);
 }
 
 /** A JSON file path with its parsed `?q=` selector, ready for {@link readJson}. */

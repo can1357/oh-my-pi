@@ -228,13 +228,9 @@ describe("job renderer task-result preview", () => {
 			const rows = view!.body!;
 			expect(rows[0]).toMatchObject({
 				c: [
-					{
-						c: [
-							{ k: "badge" },
-							{ k: "text", p: { spans: [isPartial ? { fx: "shimmer" } : { t: "Job1" }, expect.any(Object)] } },
-							{ k: "elapsed", p: isPartial ? { age: 1200 } : { age: 1200, stopped: 1200 } },
-						],
-					},
+					{ k: "badge" },
+					{ k: "text", p: { spans: [isPartial ? { fx: "shimmer" } : { t: "Job1" }, expect.any(Object)] } },
+					{ k: "elapsed", p: isPartial ? { age: 1200 } : { age: 1200, stopped: 1200 } },
 				],
 			});
 			expect(rows[2]).toMatchObject({
@@ -249,6 +245,36 @@ describe("job renderer task-result preview", () => {
 				expect(JSON.stringify(rows[0])).not.toContain('"stopped"');
 				expect(JSON.stringify(rows[2])).not.toContain('"stopped"');
 			}
+		});
+
+		it("keeps a settled native job to its one line: output and errors fill the call's own card", () => {
+			const result = {
+				content: [{ type: "text" as const, text: "" }],
+				details: {
+					op: "wait" as const,
+					jobs: [
+						{
+							id: "bg_2",
+							type: "bash" as const,
+							status: "failed" as const,
+							label: "hyperfine --runs 30 bench",
+							durationMs: 61_000,
+							exitCode: 1,
+							resultText: "Benchmark 1: calc_ir",
+							errorText: "Command exited with code 1",
+							meta: { artifactError: "write" as const },
+						},
+					],
+				},
+			};
+			const view = waitToolRenderer.describeResult!(result, { expanded: true, isPartial: false });
+			const [job] = view!.body!;
+			expect(job).toMatchObject({ k: "row", p: { role: "omp.wait.job", tone: "error" } });
+			const json = JSON.stringify(view);
+			expect(json).toContain("hyperfine --runs 30 bench");
+			expect(json).not.toContain("Benchmark 1");
+			expect(json).not.toContain("exited with code 1");
+			expect(json).not.toContain("artifact write failed");
 		});
 
 		it("renders agent rows for running agents outside job control", () => {

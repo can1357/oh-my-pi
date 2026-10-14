@@ -350,6 +350,25 @@ describe("financial schedule validation", () => {
 			}),
 		).toBe(false);
 	});
+
+	it("rejects malformed cost-patch and cost-fallback dated cards instead of keeping the old price", () => {
+		const card = { effectiveFrom: "2026-12-01T08:00:00Z", input: 4, output: 20 };
+		const invalid = [
+			{ ...card, effectiveFrom: "2026-12-01" },
+			{ ...card, effectiveFrom: "2026-02-30T08:00:00Z" },
+			{ ...card, input: -1 },
+			{ ...card, cache_read: 0.2 },
+		];
+		for (const axis of ["costPatch", "costFallback"] as const) {
+			const name = axis === "costPatch" ? "cost-patch" : "cost-fallback";
+			for (const effectiveRate of invalid) {
+				const catalog = { [axis]: { input: 2, output: 10, effectiveRates: { listPrice: effectiveRate } } };
+				expect(() => applyCatalogCorrections(spec("custom-model", "custom"), catalog)).toThrow(`Invalid ${name}`);
+			}
+			const duplicate = { [axis]: { input: 2, output: 10, effectiveRates: { first: card, second: card } } };
+			expect(() => applyCatalogCorrections(spec("custom-model", "custom"), duplicate)).toThrow(`Invalid ${name}`);
+		}
+	});
 });
 
 describe("pricing discovery and cache", () => {

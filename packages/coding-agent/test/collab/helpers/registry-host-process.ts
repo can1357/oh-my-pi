@@ -7,8 +7,10 @@
  * argv[3]  URL marker; falls back to OMP_SMOKE_MARKER, then "smoke".
  * argv[4]  instance ID; falls back to OMP_SMOKE_INSTANCE_ID, then "smoke-host".
  *
- * Emits `READY\n` once published. SIGTERM closes the publication and exits 0.
+ * Emits `READY\n` once published. SIGTERM runs postmortem cleanup, which closes
+ * the publication, then exits 143 like every omp process.
  */
+import { postmortem } from "@oh-my-pi/pi-utils";
 import { type CollabHostRegistrySource, publishCollabHost } from "../../../src/collab/registry";
 
 const dirArg = process.argv[2];
@@ -37,14 +39,9 @@ const source: CollabHostRegistrySource = {
 };
 const publication = await publishCollabHost(source, { dir, instanceId });
 
-const shutdown = (): void => {
-	publication.close().then(
-		() => process.exit(0),
-		() => process.exit(0),
-	);
-};
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+// postmortem owns the signal exit and awaits registered cleanups first; a
+// separate signal handler would race its exit against the native close.
+postmortem.register("collab-smoke-host", () => publication.close());
 process.stdout.write("READY\n");
 
 // Stay alive until a signal arrives (or the parent SIGKILLs us).

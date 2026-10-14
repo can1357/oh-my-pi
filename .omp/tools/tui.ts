@@ -20,9 +20,9 @@
  */
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import * as net from "node:net";
 import { inflateSync } from "node:zlib";
 import type * as CanvasModule from "@napi-rs/canvas";
+import { IpcConnection } from "@oh-my-pi/pi-natives";
 import type * as KittyVt from "kitty-vt-wasm";
 import type { Color, KittyEvent, KittyTerminal } from "kitty-vt-wasm";
 import { tmpdir } from "node:os";
@@ -667,8 +667,7 @@ interface Session {
 	rows: number;
 	dir: string;
 	screen: Screen;
-	sock: net.Socket | null;
-	sockBuf: string;
+	sock: IpcConnection | null;
 	waiters: Waiter[];
 	raw: Buffer[];
 	rawBytes: number;
@@ -697,41 +696,37 @@ function connectSocket(
 ): Promise<boolean> {
 	const deadline = Date.now() + timeoutMs;
 	const { promise, resolve } = Promise.withResolvers<boolean>();
-	const attempt = () => {
-		const sock = net.createConnection(path);
-		sock.on("connect", () => {
-			sock.setEncoding("utf8");
-			sock.on("data", (data: string) => {
-				session.sockBuf += data;
-				for (;;) {
-					const index = session.sockBuf.indexOf("\n");
-					if (index < 0) return;
-					const line = session.sockBuf.slice(0, index);
-					session.sockBuf = session.sockBuf.slice(index + 1);
-					const waiter = session.waiters.shift();
-					if (!waiter) continue;
-					clearTimeout(waiter.timer);
-					try {
-						waiter.resolve(JSON.parse(line));
-					} catch (error) {
-						waiter.reject(new Error(`bad response line: ${error}`));
-					}
-				}
+	const attempt = async () => {
+		let conn: IpcConnection;
+		try {
+			conn = await IpcConnection.connect(path, {
+				framing: "lines",
+				timeoutMs: Math.max(1, Math.min(1_000, deadline - Date.now())),
 			});
-			sock.on("close", () => {
-				if (session.sock === sock) session.sock = null;
-			});
-			sock.on("error", () => {});
-			session.sock = sock;
-			resolve(true);
-		});
-		sock.on("error", () => {
-			sock.destroy();
+		} catch {
 			if (Date.now() >= deadline || session.exit !== null) resolve(false);
 			else setTimeout(attempt, 150);
-		});
+			return;
+		}
+		conn.start(
+			(frame) => {
+				const waiter = session.waiters.shift();
+				if (!waiter) return;
+				clearTimeout(waiter.timer);
+				try {
+					waiter.resolve(JSON.parse(frame));
+				} catch (error) {
+					waiter.reject(new Error(`bad response line: ${error}`));
+				}
+			},
+			() => {
+				if (session.sock === conn) session.sock = null;
+			},
+		);
+		session.sock = conn;
+		resolve(true);
 	};
-	attempt();
+	void attempt();
 	return promise;
 }
 
@@ -758,7 +753,7 @@ function request(
 		reject(new Error(`debug request timed out: ${JSON.stringify(body)}`));
 	}, timeoutMs);
 	session.waiters.push({ resolve, reject, timer });
-	sock.write(`${JSON.stringify(body)}\n`);
+	sock.send(JSON.stringify(body));
 	return promise;
 }
 
@@ -1036,7 +1031,6 @@ const factory = (omp: ToolHost) => {
 			dir,
 			screen,
 			sock: null,
-			sockBuf: "",
 			waiters: [],
 			raw: [],
 			rawBytes: 0,

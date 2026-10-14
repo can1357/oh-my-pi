@@ -203,11 +203,19 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
 }
 
 /**
+ * Kinds newer than some Tern builds that answer `TERM_PROGRAM=tern`: used only
+ * once the real `hello` lists them, so the optimistic start never emits a node
+ * an older terminal cannot draw (`media`: files Tern loads by path).
+ */
+const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true };
+
+/**
  * The reply a v1 terminal is assumed to give before its real `hello` arrives
- * (the `TERM_PROGRAM=tern` optimistic start): the whole vocabulary, the
- * default APC limit and credits, the terminal's width, the appearance omp
- * already detected, full motion, and `blobs`, so a resumed session's images
- * are asked about rather than resent before the reply comes.
+ * (the `TERM_PROGRAM=tern` optimistic start): the whole vocabulary except
+ * {@link UNASSUMED_KINDS}, the default APC limit and credits, the terminal's
+ * width, the appearance omp already detected, full motion, and `blobs`, so a
+ * resumed session's images are asked about rather than resent before the
+ * reply comes.
  */
 export function assumedTspHello(terminal: Terminal): TspHello {
 	const appearance = terminal.appearance;
@@ -215,7 +223,7 @@ export function assumedTspHello(terminal: Terminal): TspHello {
 		r: "hello",
 		v: TSP_VERSION,
 		term: "tern",
-		kinds: TSP_KINDS,
+		kinds: TSP_KINDS.filter(kind => !UNASSUMED_KINDS[kind]),
 		features: ["blobs"],
 		apc: TSP_DEFAULT_APC_LIMIT,
 		credits: TSP_DEFAULT_CREDITS,

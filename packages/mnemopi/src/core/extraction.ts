@@ -1,3 +1,4 @@
+import { withLoopPhase } from "@oh-my-pi/pi-utils";
 import { getDiagnostics, safeForLog } from "./extraction/diagnostics";
 import { callHostLlm, getHostLlmBackend } from "./llm-backends";
 import {
@@ -10,6 +11,7 @@ import {
 	type RemoteLlmOptions,
 } from "./local-llm";
 import { getMnemopiRuntimeOptions } from "./runtime-options";
+import { clipToWindow, DEFAULT_INPUT_CHARS } from "./text-window";
 
 const TRUE_VALUES: Record<string, true> = { "1": true, true: true, yes: true, on: true };
 
@@ -218,51 +220,58 @@ export function countExtractedFactCategories(extracted: ExtractedFactCategories)
 
 /** Parse extractor output without discarding MEMORIA categories or KG triples. */
 export function parseExtractedFactCategories(rawOutput: string | null | undefined): ExtractedFactCategories {
-	if (rawOutput === null || rawOutput === undefined) {
-		return emptyFactCategories();
-	}
-	const raw = rawOutput.trim();
-	if (raw === "" || raw.toUpperCase() === "NO_FACTS") {
-		return emptyFactCategories();
-	}
-	const rawClean = stripFence(raw);
-	if (rawClean.startsWith("{")) {
-		try {
-			const parsed: unknown = JSON.parse(rawClean);
-			if (isRecord(parsed)) {
-				return {
-					facts: normalizeFactArray(parsed.facts, { fields: FACT_TEXT_FIELD_KEYS }),
-					instructions: normalizeFactArray(parsed.instructions, { fields: INSTRUCTION_TEXT_FIELD_KEYS }),
-					preferences: normalizeFactArray(parsed.preferences, { fields: PREFERENCE_TEXT_FIELD_KEYS }),
-					timelines: normalizeFactArray(parsed.timelines, { fields: TIMELINE_TEXT_FIELD_KEYS, joinFields: true }),
-					kg: normalizeKgArray(parsed.kg),
-				};
-			}
-		} catch {
-			const matches = [...raw.matchAll(/"([^"]{10,})"/g)].map(m => m[1]).filter((v): v is string => v !== undefined);
-			if (matches.length > 0) {
-				return {
-					...emptyFactCategories(),
-					facts: matches
-						.map(normalizeFact)
-						.filter(f => f !== "")
-						.slice(0, FLAT_FACT_LIMIT),
-				};
+	return withLoopPhase("mnemopi.extract", () => {
+		if (rawOutput === null || rawOutput === undefined) {
+			return emptyFactCategories();
+		}
+		const raw = rawOutput.trim();
+		if (raw === "" || raw.toUpperCase() === "NO_FACTS") {
+			return emptyFactCategories();
+		}
+		const rawClean = stripFence(raw);
+		if (rawClean.startsWith("{")) {
+			try {
+				const parsed: unknown = JSON.parse(rawClean);
+				if (isRecord(parsed)) {
+					return {
+						facts: normalizeFactArray(parsed.facts, { fields: FACT_TEXT_FIELD_KEYS }),
+						instructions: normalizeFactArray(parsed.instructions, { fields: INSTRUCTION_TEXT_FIELD_KEYS }),
+						preferences: normalizeFactArray(parsed.preferences, { fields: PREFERENCE_TEXT_FIELD_KEYS }),
+						timelines: normalizeFactArray(parsed.timelines, {
+							fields: TIMELINE_TEXT_FIELD_KEYS,
+							joinFields: true,
+						}),
+						kg: normalizeKgArray(parsed.kg),
+					};
+				}
+			} catch {
+				const matches = [...raw.matchAll(/"([^"]{10,})"/g)]
+					.map(m => m[1])
+					.filter((v): v is string => v !== undefined);
+				if (matches.length > 0) {
+					return {
+						...emptyFactCategories(),
+						facts: matches
+							.map(normalizeFact)
+							.filter(f => f !== "")
+							.slice(0, FLAT_FACT_LIMIT),
+					};
+				}
 			}
 		}
-	}
-	const cleaned: string[] = [];
-	for (const line of raw.split("\n")) {
-		const fact = line.replace(/^[\s\d.\-*]+/, "").trim();
-		if (fact.length > 10) {
-			const normalized = normalizeFact(fact);
-			if (normalized !== "") {
-				cleaned.push(normalized);
+		const cleaned: string[] = [];
+		for (const line of raw.split("\n")) {
+			const fact = line.replace(/^[\s\d.\-*]+/, "").trim();
+			if (fact.length > 10) {
+				const normalized = normalizeFact(fact);
+				if (normalized !== "") {
+					cleaned.push(normalized);
+				}
 			}
+			if (cleaned.length >= FLAT_FACT_LIMIT) break;
 		}
-		if (cleaned.length >= FLAT_FACT_LIMIT) break;
-	}
-	return { ...emptyFactCategories(), facts: cleaned };
+		return { ...emptyFactCategories(), facts: cleaned };
+	});
 }
 
 /** Parse extractor output into the legacy flat string fact list. */
@@ -282,42 +291,44 @@ function addUnique(out: string[], value: string): void {
 }
 
 export function heuristicExtractFacts(text: string): string[] {
-	const normalized = text.replace(/\s+/g, " ").trim();
-	if (normalized === "") {
-		return [];
-	}
-	const facts: string[] = [];
-	const clauses = normalized.split(/(?:[.!?;]+|\s+and\s+|\s+but\s+)/i);
-	for (const clause of clauses) {
-		const c = clause.trim();
-		let value = /\bmy name is\s+([^,.!?;]+)/i.exec(c)?.[1];
-		if (value !== undefined) addUnique(facts, `The user's name is ${value}`);
-		value = /\bi (?:am|work as)\s+(?:an?\s+)?([^,.!?;]+)/i.exec(c)?.[1];
-		if (value !== undefined) addUnique(facts, `The user is ${value}`);
-		value = /\bi work (?:at|for)\s+([^,.!?;]+)/i.exec(c)?.[1];
-		if (value !== undefined) addUnique(facts, `The user works at ${value}`);
-		value = /\bi (?:live in|am based in)\s+([^,.!?;]+)/i.exec(c)?.[1];
-		if (value !== undefined) addUnique(facts, `The user lives in ${value}`);
-		value = /\bi (?:use|uses|am using)\s+([^,.!?;]+)/i.exec(c)?.[1];
-		if (value !== undefined) addUnique(facts, `The user uses ${value}`);
-		value = /\bi (?:like|love|prefer|enjoy)\s+([^,.!?;]+)/i.exec(c)?.[1];
-		if (value !== undefined) addUnique(facts, `The user prefers ${value}`);
-		value = /\bi (?:hate|dislike|do not like|don't like)\s+([^,.!?;]+)/i.exec(c)?.[1];
-		if (value !== undefined) addUnique(facts, `The user dislikes ${value}`);
-		// Require an explicit `i` or `you` subject before `always|never`. The
-		// other heuristics in this block all need an `i` subject (`i live in …`,
-		// `i use …`) which keeps them from matching narrative prose; the
-		// `Instruction:` pattern used to match any `always|never` token, so
-		// assistant prose like "the panel never populates" became stored as a
-		// user `Instruction:` memory (coding-agent issue #3372). Subject
-		// constraint mirrors how the rest of the heuristics filter for first- /
-		// second-person assertions and keeps narrative third-person prose out.
-		const instruction = /\b(?:i|you)\s+(always|never)\s+([^,.!?;]+)/i.exec(c);
-		if (instruction?.[1] !== undefined && instruction[2] !== undefined) {
-			addUnique(facts, `Instruction: ${instruction[1].toLowerCase()} ${instruction[2]}`);
+	return withLoopPhase("mnemopi.extract", () => {
+		const normalized = text.replace(/\s+/g, " ").trim();
+		if (normalized === "") {
+			return [];
 		}
-	}
-	return facts.slice(0, 5);
+		const facts: string[] = [];
+		const clauses = normalized.split(/(?:[.!?;]+|\s+and\s+|\s+but\s+)/i);
+		for (const clause of clauses) {
+			const c = clause.trim();
+			let value = /\bmy name is\s+([^,.!?;]+)/i.exec(c)?.[1];
+			if (value !== undefined) addUnique(facts, `The user's name is ${value}`);
+			value = /\bi (?:am|work as)\s+(?:an?\s+)?([^,.!?;]+)/i.exec(c)?.[1];
+			if (value !== undefined) addUnique(facts, `The user is ${value}`);
+			value = /\bi work (?:at|for)\s+([^,.!?;]+)/i.exec(c)?.[1];
+			if (value !== undefined) addUnique(facts, `The user works at ${value}`);
+			value = /\bi (?:live in|am based in)\s+([^,.!?;]+)/i.exec(c)?.[1];
+			if (value !== undefined) addUnique(facts, `The user lives in ${value}`);
+			value = /\bi (?:use|uses|am using)\s+([^,.!?;]+)/i.exec(c)?.[1];
+			if (value !== undefined) addUnique(facts, `The user uses ${value}`);
+			value = /\bi (?:like|love|prefer|enjoy)\s+([^,.!?;]+)/i.exec(c)?.[1];
+			if (value !== undefined) addUnique(facts, `The user prefers ${value}`);
+			value = /\bi (?:hate|dislike|do not like|don't like)\s+([^,.!?;]+)/i.exec(c)?.[1];
+			if (value !== undefined) addUnique(facts, `The user dislikes ${value}`);
+			// Require an explicit `i` or `you` subject before `always|never`. The
+			// other heuristics in this block all need an `i` subject (`i live in …`,
+			// `i use …`) which keeps them from matching narrative prose; the
+			// `Instruction:` pattern used to match any `always|never` token, so
+			// assistant prose like "the panel never populates" became stored as a
+			// user `Instruction:` memory (coding-agent issue #3372). Subject
+			// constraint mirrors how the rest of the heuristics filter for first- /
+			// second-person assertions and keeps narrative third-person prose out.
+			const instruction = /\b(?:i|you)\s+(always|never)\s+([^,.!?;]+)/i.exec(c);
+			if (instruction?.[1] !== undefined && instruction[2] !== undefined) {
+				addUnique(facts, `Instruction: ${instruction[1].toLowerCase()} ${instruction[2]}`);
+			}
+		}
+		return facts.slice(0, 5);
+	});
 }
 
 async function tryHostExtraction(prompt: string): Promise<[boolean, string | null]> {
@@ -344,7 +355,7 @@ async function localFallback(
 	try {
 		const raw = await callLocalLlm(prompt);
 		if (raw !== null) {
-			const extracted = parseExtractedFactCategories(cleanOutput(raw));
+			const extracted = withLoopPhase("mnemopi.extract", () => parseExtractedFactCategories(cleanOutput(raw)));
 			const count = countExtractedFactCategories(extracted);
 			if (count > 0) {
 				diag.recordSuccess("local", count);
@@ -378,7 +389,8 @@ export async function extractFactCategories(
 	if (typeof text !== "string" || text.trim() === "") {
 		return emptyFactCategories();
 	}
-	const prompt = buildExtractionPrompt(text);
+	const input = clipToWindow(text, DEFAULT_INPUT_CHARS);
+	const prompt = withLoopPhase("mnemopi.extract", () => buildExtractionPrompt(input));
 
 	// Configured completion (host-injected runtime LLM, e.g. the coding-agent's smol
 	// or a local on-device model). Mirrors consolidation's precedence: when a
@@ -389,7 +401,7 @@ export async function extractFactCategories(
 		try {
 			const raw = await callConfiguredCompletion(prompt, 0, {
 				maxTokens: llmMaxTokens(),
-				task: { kind: "memory-extraction", input: text },
+				task: { kind: "memory-extraction", input },
 			});
 			if (typeof raw === "string" && raw.trim() !== "") {
 				const extracted = parseExtractedFactCategories(raw);
@@ -407,7 +419,7 @@ export async function extractFactCategories(
 			console.warn(`extractFacts: configured completion raised: ${safeForLog(exc)}`);
 			return emptyFactCategories();
 		}
-		return localFallback(prompt, text, diag);
+		return localFallback(prompt, input, diag);
 	}
 
 	try {
@@ -424,7 +436,7 @@ export async function extractFactCategories(
 				}
 			}
 			diag.recordNoOutput("host");
-			return localFallback(prompt, text, diag);
+			return localFallback(prompt, input, diag);
 		}
 	} catch (exc) {
 		diag.recordAttempt("host");
@@ -436,7 +448,7 @@ export async function extractFactCategories(
 
 	if (!llmAvailable()) {
 		diag.recordAttempt("local");
-		const heuristic = heuristicExtractFacts(text);
+		const heuristic = heuristicExtractFacts(input);
 		if (heuristic.length > 0) {
 			diag.recordSuccess("local", heuristic.length);
 			diag.recordCall({ succeeded: true });
@@ -451,7 +463,7 @@ export async function extractFactCategories(
 	try {
 		const raw = await callRemoteLlm(prompt, 0, options);
 		if (raw !== null) {
-			const extracted = parseExtractedFactCategories(cleanOutput(raw));
+			const extracted = withLoopPhase("mnemopi.extract", () => parseExtractedFactCategories(cleanOutput(raw)));
 			const count = countExtractedFactCategories(extracted);
 			if (count > 0) {
 				diag.recordSuccess("remote", count);
@@ -465,7 +477,7 @@ export async function extractFactCategories(
 		console.warn(`extractFacts: remote LLM raised: ${safeForLog(exc)}`);
 	}
 
-	return localFallback(prompt, text, diag);
+	return localFallback(prompt, input, diag);
 }
 
 /** Extract legacy flat fact strings from text. */

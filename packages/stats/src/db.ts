@@ -6,6 +6,7 @@ import {
 	calculateUsageCost,
 	type GeneratedProvider,
 	getBundledModel,
+	hasRecurringTariff,
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
@@ -463,9 +464,11 @@ function resolveStoredCost(stats: MessageStatsInput): ResolvedCost {
 	const storedCost = raw ? normalizeUsageCost(raw) : undefined;
 	const catalogCost = getCatalogCost(stats.provider, stats.model);
 
-	// Scheduled prices are frozen per request, including explicitly free usage.
-	// Preserve legacy zero-cost subscription correction for unscheduled models.
-	if (storedCost && Number.isFinite(storedCost.total) && (storedCost.total !== 0 || catalogCost?.timeBased)) {
+	// Recurring-tariff prices are frozen per request, including explicitly free
+	// usage. Preserve legacy zero-cost subscription correction for other models;
+	// dated rate cards reprice it at the card for the request's timestamp.
+	const recurring = catalogCost?.timeBased !== undefined && hasRecurringTariff(catalogCost.timeBased);
+	if (storedCost && Number.isFinite(storedCost.total) && (storedCost.total !== 0 || recurring)) {
 		return { cost: storedCost, unpriced: false };
 	}
 
@@ -528,12 +531,14 @@ function backfillMissingCatalogCosts(database: Database): void {
 	const applyBackfill = database.transaction(() => {
 		for (const row of rows) {
 			// A stored zero cannot distinguish missing historical prices from an
-			// explicitly free request. Never reprice recorded scheduled usage: a
-			// zero ingested for a scheduled card is permanent, because this
+			// explicitly free request. Never reprice recorded recurring-tariff
+			// usage: a zero ingested for such a card is permanent, because this
 			// backfill skips those rows. Re-parsing the session file is the only
 			// repair, and it works only once the entry's absent `cost` reaches
 			// `resolveStoredCost` as absence rather than as a synthesized zero.
-			if (getCatalogCost(row.provider, row.model)?.timeBased) continue;
+			// Dated rate cards need the row's timestamp to pick their card.
+			const schedule = getCatalogCost(row.provider, row.model)?.timeBased;
+			if (schedule && (hasRecurringTariff(schedule) || !hasRequestTimestamp(row.timestamp))) continue;
 			const cost = calculateCatalogCost(
 				row.provider,
 				row.model,

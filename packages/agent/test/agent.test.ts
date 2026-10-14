@@ -1041,6 +1041,46 @@ describe("Agent", () => {
 		}
 	});
 
+	it("delivers a returned call's updates to subscribers after its run ended", async () => {
+		// A backgrounded job keeps reporting through the call's `onUpdate` once
+		// the run yielded; its frames must still reach the transcript.
+		const toolSchema = type({});
+		let report: ((text: string) => void) | undefined;
+		const tool: AgentTool<typeof toolSchema, { state: string }> = {
+			name: "job",
+			label: "Job",
+			description: "Starts a background job",
+			parameters: toolSchema,
+			async execute(_toolCallId, _params, _signal, onUpdate) {
+				report = text => onUpdate?.({ content: [{ type: "text", text }], details: { state: "completed" } });
+				return { content: [{ type: "text", text: "started" }], details: { state: "running" } };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-job", name: "job", arguments: {} }] },
+				{ content: ["yielding"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+		});
+		const events: AgentEvent[] = [];
+		agent.subscribe(event => events.push(event));
+
+		await agent.prompt("start the job");
+		expect(events.at(-1)?.type).toBe("agent_end");
+		report?.("job output");
+
+		const late = events.at(-1);
+		expect(late).toMatchObject({
+			type: "tool_execution_update",
+			toolCallId: "tool-job",
+			partialResult: { content: [{ type: "text", text: "job output" }], details: { state: "completed" } },
+		});
+	});
+
 	it("sends passive tool context with the default LLM conversion", async () => {
 		const toolSchema = type({ value: type("string") });
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {

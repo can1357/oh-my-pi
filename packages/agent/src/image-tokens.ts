@@ -13,12 +13,10 @@ import { parseImageMetadata } from "@oh-my-pi/pi-utils";
  * Both sides must price the same image the same way: when they disagreed
  * (1.2k flat locally vs a 12k flat worst case remotely) an image-heavy session
  * stayed under the local compaction trigger yet was refused as over-window by
- * the remote probe.
- *
- * Follows the catalog's image rule for the OpenAI Responses wire (GPT-5.5's
- * 32px patches, a per-detail pixel limit and patch budget, x1.2 multiplier),
- * which is also a close upper estimate for other providers once omp has
- * downscaled the image (≤1568px by default).
+ * the remote probe. Both price with the reading model's catalog image rule
+ * ({@link Tokenizer.imageTokens}); a reader without one falls back to the
+ * OpenAI Responses wire's rule (GPT-5.5's 32px patches, a per-detail pixel
+ * limit and patch budget, x1.2 multiplier).
  */
 
 /** OpenAI image `detail` values; `undefined` means the provider default (`auto`). */
@@ -42,11 +40,16 @@ function openAiWireRule(): ImageTokenization {
 }
 
 /**
- * Estimated input tokens for one image. Unknown dimensions (undecodable data,
- * remote URLs, provider file ids) charge the detail level's full patch budget.
+ * Estimated input tokens for one image under `rule`, the OpenAI Responses
+ * wire's by default. Unknown dimensions (undecodable data, remote URLs,
+ * provider file ids) charge the rule's most expensive size.
  */
-export function estimateImageTokens(size: ImageSize | null | undefined, detail?: ImageDetail): number {
-	return imageTokens(openAiWireRule(), size && size.width > 0 && size.height > 0 ? size : UNKNOWN_SIZE, detail);
+export function estimateImageTokens(
+	size: ImageSize | null | undefined,
+	detail?: ImageDetail,
+	rule: ImageTokenization = openAiWireRule(),
+): number {
+	return imageTokens(rule, size && size.width > 0 && size.height > 0 ? size : UNKNOWN_SIZE, detail);
 }
 
 // Enough decoded bytes to reach a JPEG SOF marker behind typical EXIF/ICC
@@ -69,9 +72,4 @@ export function dataUrlImageSize(url: string): ImageSize | null {
 	const comma = url.indexOf(",");
 	if (comma < 0 || !url.slice(0, comma).endsWith(";base64")) return null;
 	return base64ImageSize(url.slice(comma + 1));
-}
-
-/** {@link estimateImageTokens} for an in-memory image block. */
-export function estimateImageContentTokens(image: Pick<ImageContent, "data" | "detail">): number {
-	return estimateImageTokens(base64ImageSize(image.data), image.detail);
 }

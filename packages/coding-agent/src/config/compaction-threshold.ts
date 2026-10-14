@@ -3,7 +3,8 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 /**
  * One `task.agentCompactionThresholdOverrides` or `compaction.modelThresholds`
  * entry: a positive token count (`90000`) or a percentage string (`"80%"`).
- * `null` clears an entry inherited from a lower-priority settings layer.
+ * Model entries also accept a fixed token trigger (`"f90000"`). `null` clears
+ * an entry inherited from a lower-priority settings layer.
  */
 export type AgentCompactionThresholdOverride = number | string | null;
 
@@ -11,17 +12,32 @@ export type AgentCompactionThresholdOverride = number | string | null;
 export interface CompactionThresholdPair {
 	thresholdPercent: number;
 	thresholdTokens: number;
+	/**
+	 * Model entries only: `thresholdTokens` is the exact trigger (`"f90000"`)
+	 * instead of the base the configured policy scales (see
+	 * {@link applyModelCompactionThreshold}). Agent entries are always triggers.
+	 */
+	fixed?: true;
 }
 
 const PERCENT_PATTERN = /^(\d+(?:\.\d+)?)%$/;
-const TOKEN_INPUT_PATTERN = /^(\d+)([kmb])?$/i;
+const FIXED_ENTRY_PATTERN = /^f(\d+)$/i;
+const TOKEN_INPUT_PATTERN = /^(f)?(\d+)([kmb])?$/i;
 const TOKEN_SUFFIX_SCALE: Record<string, number> = { k: 1_000, m: 1_000_000, b: 1_000_000_000 };
 
-function parseThresholdEntry(entry: unknown): CompactionThresholdPair | undefined {
+function parseThresholdEntry(entry: unknown, allowFixed: boolean): CompactionThresholdPair | undefined {
 	if (typeof entry === "number") {
 		if (Number.isSafeInteger(entry) && entry > 0) return { thresholdPercent: -1, thresholdTokens: entry };
 	} else if (typeof entry === "string") {
-		const match = PERCENT_PATTERN.exec(entry.trim());
+		const text = entry.trim();
+		const fixed = allowFixed ? FIXED_ENTRY_PATTERN.exec(text) : null;
+		if (fixed) {
+			const tokens = Number(fixed[1]);
+			if (Number.isSafeInteger(tokens) && tokens > 0)
+				return { thresholdPercent: -1, thresholdTokens: tokens, fixed: true };
+			return undefined;
+		}
+		const match = PERCENT_PATTERN.exec(text);
 		const percent = match ? Number(match[1]) : Number.NaN;
 		if (percent > 0 && percent <= 100) return { thresholdPercent: percent, thresholdTokens: -1 };
 	}
@@ -33,7 +49,7 @@ function validateThresholdMap(
 	settingId: string,
 	keyNoun: string,
 	value: unknown,
-	checkKey?: (key: string) => string | undefined,
+	options: { checkKey?: (key: string) => string | undefined; allowFixed: boolean },
 ): Record<string, CompactionThresholdPair> {
 	if (value === undefined || value === null) return {};
 	if (!isRecord(value)) {
@@ -45,15 +61,16 @@ function validateThresholdMap(
 
 	const thresholds: Record<string, CompactionThresholdPair> = {};
 	for (const [key, entry] of Object.entries(value)) {
-		const keyError = checkKey?.(key);
+		const keyError = options.checkKey?.(key);
 		if (keyError) throw new Error(`Invalid ${settingId} key "${key}": ${keyError}.`);
 		if (entry === null) continue;
-		const threshold = parseThresholdEntry(entry);
+		const threshold = parseThresholdEntry(entry, options.allowFixed);
 		if (!threshold) {
 			const received = Array.isArray(entry) ? "an array" : typeof entry === "string" ? `"${entry}"` : String(entry);
-			throw new Error(
-				`Invalid ${settingId}.${key}: expected a positive integer token count (e.g. 90000) or a percentage in (0, 100] (e.g. "80%"), got ${received}.`,
-			);
+			const forms = options.allowFixed
+				? `a positive integer token count (e.g. 90000), a fixed trigger (e.g. "f90000") or a percentage in (0, 100] (e.g. "80%")`
+				: `a positive integer token count (e.g. 90000) or a percentage in (0, 100] (e.g. "80%")`;
+			throw new Error(`Invalid ${settingId}.${key}: expected ${forms}, got ${received}.`);
 		}
 		thresholds[key] = threshold;
 	}
@@ -62,7 +79,7 @@ function validateThresholdMap(
 
 /** Validate the exact-agent compaction threshold map and normalize each entry to both threshold fields. */
 export function validateAgentCompactionThresholdOverrides(value: unknown): Record<string, CompactionThresholdPair> {
-	return validateThresholdMap("task.agentCompactionThresholdOverrides", "agent name", value);
+	return validateThresholdMap("task.agentCompactionThresholdOverrides", "agent name", value, { allowFixed: false });
 }
 
 function checkModelThresholdKey(key: string): string | undefined {
@@ -78,7 +95,10 @@ function checkModelThresholdKey(key: string): string | undefined {
  * or a `*`-terminated prefix of one (`deepseek/*`, `openrouter/anthropic/*`).
  */
 export function validateModelCompactionThresholds(value: unknown): Record<string, CompactionThresholdPair> {
-	return validateThresholdMap("compaction.modelThresholds", "model selector", value, checkModelThresholdKey);
+	return validateThresholdMap("compaction.modelThresholds", "model selector", value, {
+		checkKey: checkModelThresholdKey,
+		allowFixed: true,
+	});
 }
 
 /** The `compaction.modelThresholds` entry governing one model. */
@@ -119,14 +139,37 @@ export function matchModelCompactionThreshold(
 	return best;
 }
 
-const appliedThresholds = new WeakMap<object, Map<string, CompactionThresholdPair>>();
+const appliedThresholds = new WeakMap<object, Map<string, { threshold: CompactionThresholdPair; applied: object }>>();
+
+/** One persisted `compaction.modelThresholds` value (`400000`, `"f400000"`, `"80%"`) as its threshold pair. */
+export function parseModelCompactionEntry(entry: unknown): CompactionThresholdPair | undefined {
+	return parseThresholdEntry(entry, true);
+}
 
 /**
- * `settings` with the threshold fields of the `compaction.modelThresholds` entry
- * governing `model`; the same object when no entry applies. Results are cached
- * per settings snapshot so hot paths allocate once per entry.
+ * `settings` with one model entry applied. A token entry is the base the
+ * configured policy scales (`baseWindowTokens`, standing in for the window:
+ * `thresholdPercent` of it, else it minus the reserve) and drops a global fixed
+ * `thresholdTokens`; a fixed entry (`"f90000"`) is the exact trigger; a
+ * percentage entry replaces both threshold fields.
  */
-export function applyModelCompactionThreshold<T extends CompactionThresholdPair>(
+export function applyCompactionThresholdPair<T extends CompactionThresholdPair & { baseWindowTokens?: number }>(
+	settings: T,
+	threshold: CompactionThresholdPair,
+): T {
+	const { thresholdPercent, thresholdTokens, fixed } = threshold;
+	return thresholdTokens > 0 && !fixed
+		? { ...settings, thresholdTokens: -1, baseWindowTokens: thresholdTokens }
+		: { ...settings, thresholdPercent, thresholdTokens };
+}
+
+/**
+ * `settings` with the `compaction.modelThresholds` entry governing `model`
+ * applied ({@link applyCompactionThresholdPair}); the same object when no entry
+ * applies. Results are cached per settings snapshot so hot paths allocate once
+ * per entry.
+ */
+export function applyModelCompactionThreshold<T extends CompactionThresholdPair & { baseWindowTokens?: number }>(
 	settings: T,
 	raw: unknown,
 	model: { provider: string; id: string } | null | undefined,
@@ -140,21 +183,16 @@ export function applyModelCompactionThreshold<T extends CompactionThresholdPair>
 		appliedThresholds.set(settings, byKey);
 	}
 	const cached = byKey.get(match.key);
-	if (
-		cached &&
-		cached.thresholdPercent === match.threshold.thresholdPercent &&
-		cached.thresholdTokens === match.threshold.thresholdTokens
-	) {
-		return cached as T;
-	}
-	const applied: T = { ...settings, ...match.threshold };
-	byKey.set(match.key, applied);
+	if (cached?.threshold === match.threshold) return cached.applied as T;
+	const applied = applyCompactionThresholdPair(settings, match.threshold);
+	byKey.set(match.key, { threshold: match.threshold, applied });
 	return applied;
 }
 
 /**
  * Parse a typed compaction point into its persisted entry: an integer token
- * count with an optional `k`/`m`/`b` suffix (any case) becomes a number, a
+ * count with an optional `k`/`m`/`b` suffix (any case) becomes a number (the
+ * base), the same with an `f` prefix becomes a fixed trigger `"fN"`, a
  * percentage stays `"N%"`, and empty input is `null` (reset). Throws on
  * anything else.
  */
@@ -162,27 +200,32 @@ export function parseCompactionPointInput(input: string): number | string | null
 	const text = input.trim();
 	if (text.length === 0) return null;
 	if (text.endsWith("%")) {
-		if (parseThresholdEntry(text)) return text;
+		if (parseThresholdEntry(text, false)) return text;
 		throw new Error(`Invalid compaction point "${text}": percentage must be in (0, 100]`);
 	}
 	const match = TOKEN_INPUT_PATTERN.exec(text);
 	if (match) {
-		const scale = match[2] ? TOKEN_SUFFIX_SCALE[match[2].toLowerCase()] : 1;
-		const tokens = Number(match[1]) * scale;
-		if (parseThresholdEntry(tokens)) return tokens;
+		const scale = match[3] ? TOKEN_SUFFIX_SCALE[match[3].toLowerCase()] : 1;
+		const tokens = Number(match[2]) * scale;
+		if (parseThresholdEntry(tokens, false)) return match[1] ? `f${tokens}` : tokens;
 	}
-	throw new Error(`Invalid compaction point "${text}": use a token count (90000, 90k, 1m) or a percentage (80%)`);
+	throw new Error(
+		`Invalid compaction point "${text}": use a token count (90000, 90k, 1m), a fixed trigger (f400k) or a percentage (80%)`,
+	);
 }
 
-/** A threshold pair as text {@link parseCompactionPointInput} reads back: `90k`, `1500k`, `123456`, `80%`. */
+/** A threshold pair as text {@link parseCompactionPointInput} reads back: `90k`, `f1500k`, `123456`, `80%`. */
 export function formatCompactionPointInput(threshold: CompactionThresholdPair): string {
 	if (threshold.thresholdTokens > 0) {
-		const tokens = threshold.thresholdTokens;
-		for (const suffix of ["b", "m", "k"] as const) {
-			const scale = TOKEN_SUFFIX_SCALE[suffix];
-			if (tokens % scale === 0) return `${tokens / scale}${suffix}`;
-		}
-		return String(tokens);
+		return `${threshold.fixed ? "f" : ""}${formatTokenCount(threshold.thresholdTokens)}`;
 	}
 	return `${threshold.thresholdPercent}%`;
+}
+
+function formatTokenCount(tokens: number): string {
+	for (const suffix of ["b", "m", "k"] as const) {
+		const scale = TOKEN_SUFFIX_SCALE[suffix];
+		if (tokens % scale === 0) return `${tokens / scale}${suffix}`;
+	}
+	return String(tokens);
 }

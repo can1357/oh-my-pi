@@ -8,13 +8,21 @@ import { ProcProtocolHandler } from "../../src/internal-urls/proc-protocol";
 import { parseInternalUrl } from "../../src/internal-urls/parse";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
-import { createDaemonBrokerClient } from "../../src/launch/client";
+import { createDaemonBrokerClient, type DaemonBrokerClient } from "../../src/launch/client";
 import * as daemonClient from "../../src/launch/client";
-import { DAEMON_IDLE_GRACE_ENV, DAEMON_PROJECT_DIR_ENV, DAEMON_RUNTIME_DIR_ENV } from "../../src/launch/protocol";
+import {
+	DAEMON_IDLE_GRACE_ENV,
+	DAEMON_PROJECT_DIR_ENV,
+	DAEMON_RUNTIME_DIR_ENV,
+	type DaemonOperation,
+	type DaemonRpcResult,
+} from "../../src/launch/protocol";
 import * as bashExecutor from "../../src/exec/bash-executor";
 import { BashTool } from "../../src/tools/bash";
 import { WriteTool } from "../../src/tools/write";
+import { sharedBrowserDaemonName } from "../../src/tools/browser/shared-daemon";
 import type { ToolSession } from "../../src/tools";
+import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
 
 function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
 	const previous = [
@@ -551,6 +559,47 @@ describe("bash services via proc://", () => {
 			expect(textOf(blank)).not.toContain("Ignored");
 
 			expect(commands).toEqual(["printf 'PLAIN\\n'", "printf 'BLANK\\n'"]);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("refuses to detach the project-shared browser, which the broker would relaunch on an unprepared profile", async () => {
+		const name = sharedBrowserDaemonName(true);
+		const now = Date.now();
+		const daemon: DaemonSnapshot = {
+			name,
+			id: "shared",
+			state: "ready",
+			createdAt: now,
+			startedAt: now,
+			readyAt: now,
+			restartCount: 0,
+			outputBytes: 0,
+			persist: false,
+			detached: false,
+		};
+		const operations: DaemonOperation["op"][] = [];
+		const client = {
+			projectDir: process.cwd(),
+			onCompletion: () => () => {},
+			close() {},
+			async request(operation: DaemonOperation): Promise<DaemonRpcResult> {
+				operations.push(operation.op);
+				if (operation.op === "list") return { op: "list", daemons: [daemon] };
+				// The real broker answers by relaunching the browser as a detached process.
+				if (operation.op === "mode") return { op: "mode", daemon: { ...daemon, detached: true } };
+				throw new Error(`Unexpected broker op ${operation.op}`);
+			},
+		} as unknown as DaemonBrokerClient;
+		const spy = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		try {
+			await rejectionMessage(
+				new ProcProtocolHandler().write(parseInternalUrl(`proc://${name}/mode`), "detached", {
+					session: toolSession(process.cwd()),
+				}),
+			);
+			expect(operations).not.toContain("mode");
 		} finally {
 			spy.mockRestore();
 		}

@@ -179,6 +179,56 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 		}
 	});
 
+	it("discovers one Gemini 4 Argon model and sends each thinking level to its served SKU", async () => {
+		const tiers = [Effort.Low, Effort.Medium, Effort.High] as const;
+		const result = await fetchAntigravityDiscoveryModels({
+			token: "token",
+			userAgent: "test",
+			fetcher: async () =>
+				Response.json({
+					models: Object.fromEntries(
+						tiers.map(tier => [
+							`gemini-4-argon-${tier}`,
+							{
+								supportsThinking: true,
+								supportsImages: true,
+								maxTokens: 1_048_576,
+								maxOutputTokens: 65_536,
+							},
+						]),
+					),
+				}),
+		});
+		if (!result || result.rejectedStatus !== undefined) throw new Error("discovery failed");
+		expect(result.models.map(spec => spec.id)).toEqual(["gemini-4-argon"]);
+		const model = buildModel(result.models[0]);
+
+		for (const tier of tiers) {
+			expect(resolveVariantSelector("google-antigravity", `gemini-4-argon-${tier}`)).toBe("gemini-4-argon");
+			const request = await captureRequest(model, tier);
+			expect(request.body.model).toBe(`gemini-4-argon-${tier}`);
+			expect(request.attributedModel).toBe("gemini-4-argon");
+			expect(request.body.request?.generationConfig?.thinkingConfig).toEqual({
+				includeThoughts: true,
+				thinkingLevel: tier.toUpperCase(),
+			});
+		}
+
+		// Argon always thinks: off and external scratchpads keep the low SKU
+		// instead of sending the unserved logical id.
+		for (const [reasoning, options] of [
+			[undefined, {}],
+			[Effort.High, { forceReasoningOff: true }],
+		] as const) {
+			const request = await captureRequest(model, reasoning, options);
+			expect(request.body.model).toBe("gemini-4-argon-low");
+			expect(request.body.request?.generationConfig?.thinkingConfig).toEqual({
+				includeThoughts: true,
+				thinkingLevel: "LOW",
+			});
+		}
+	});
+
 	it("routes each effort to its backing wire id with the per-tier budget and attributes usage to the logical id", async () => {
 		const high = await captureRequest(collapsedFlashModel(), Effort.High);
 		expect(high.body.model).toBe("gemini-3-flash-agent");

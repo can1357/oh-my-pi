@@ -10,11 +10,12 @@ import {
 	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
-import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import nativeDelegationTemplate from "../../prompts/tools/native-delegation.md" with { type: "text" };
 import {
 	denyError,
-	formatApprovalPrompt,
+	requestApproval,
 	resolveApproval,
 	resolveApprovalFromContext,
 	truncateForPrompt,
@@ -61,7 +62,13 @@ function renderOptionsWithTheme<T extends object>(options: T, theme: Theme): T &
  */
 export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 	declare name: string;
-	declare description: string;
+	get description(): string {
+		const description = this.registeredTool.definition.description;
+		const guidance = this.runner.getNativeDelegationGuidance(this.name);
+		return guidance
+			? prompt.render(nativeDelegationTemplate, { description, name: this.name, guidance })
+			: description;
+	}
 	declare parameters: any;
 	declare label: string;
 	declare strict: boolean;
@@ -400,20 +407,16 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 
 			const uiContext = this.runner.getUIContext();
-			const basePrompt = formatApprovalPrompt(this.tool, resolvedArgs, approvalCheck.reason);
-			const safetyPrompt =
-				pendingSafetyChecks.length > 0
-					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
-					: basePrompt;
-			let choice: string | undefined;
+			const safetyAppendix =
+				pendingSafetyChecks.length > 0 ? ["Provider safety checks:", ...safetyCheckLines(pendingSafetyChecks)] : [];
+			let approved: boolean;
 			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				approved = await requestApproval(uiContext, this.tool, resolvedArgs, approvalCheck.reason, safetyAppendix);
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				cancelPreflight();
 				throw err;
 			}
-			const approved = choice === "Approve";
 			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
 			if (!approved) {
 				cancelPreflight();

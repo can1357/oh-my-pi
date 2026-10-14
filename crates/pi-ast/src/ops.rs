@@ -412,15 +412,46 @@ fn compile_rust_contextual_pattern(pattern: &str) -> Option<Pattern> {
 
 #[cfg(test)]
 mod tests {
-	use ast_grep_core::source::Edit;
+	use std::collections::HashMap;
 
-	use super::{SupportLang, apply_edits, compile_search_patterns};
+	use ast_grep_core::{MatchStrictness, source::Edit, tree_sitter::LanguageExt};
+
+	use super::{
+		SupportLang, apply_edits, compile_pattern, compile_rewrite_rules, compile_search_patterns,
+		rewrite_source,
+	};
 
 	#[test]
 	fn compile_search_patterns_compiles_rust_patterns() {
 		let patterns = compile_search_patterns("foo($$$ARGS)", SupportLang::Rust)
 			.expect("rust pattern should compile");
 		assert!(!patterns.is_empty());
+	}
+
+	#[test]
+	fn emacs_lisp_pattern_binds_metavariables() {
+		let lang = SupportLang::EmacsLisp;
+		let pattern = compile_pattern("(defun $NAME $$$BODY)", None, &MatchStrictness::Smart, lang)
+			.expect("elisp pattern should compile");
+		let ast = lang.ast_grep("(defun greet (name)\n  (message \"Hello %s\" name)\n)");
+		let matched = ast.root().find(pattern).expect("defun should match");
+		let env = HashMap::<String, String>::from(matched.get_env().clone());
+		assert_eq!(env.get("NAME").map(String::as_str), Some("greet"));
+	}
+
+	#[test]
+	fn emacs_lisp_rewrite_substitutes_captures() {
+		let lang = SupportLang::EmacsLisp;
+		let rules = compile_rewrite_rules(
+			&[("(message $FORMAT $ARG)".to_owned(), "(format-message $FORMAT $ARG)".to_owned())],
+			lang,
+		)
+		.expect("elisp rewrite should compile");
+		let (output, replacements) =
+			rewrite_source("(defun greet (name)\n  (message \"Hello %s\" name))\n", lang, &rules)
+				.expect("rewrite succeeds");
+		assert_eq!(replacements, 1);
+		assert_eq!(output, "(defun greet (name)\n  (format-message \"Hello %s\" name))\n");
 	}
 
 	#[test]

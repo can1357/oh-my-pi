@@ -179,11 +179,42 @@ describe("native transcript redesign", () => {
 		await harness.render();
 		const frame = harness.find(node => node.k === "card" && node.p?.role === "omp.user");
 		expect(prop(frame, "head")).toBeUndefined();
-		const tool = (label: string) =>
-			harness!.find(node => node.p?.role === "omp.user.tool" && prop(node, "text") === label)!;
-		harness.event({ ev: "action", sf: harness.terminal.surface!, id: tool("Copy").id, act: "copy-message" });
-		harness.event({ ev: "action", sf: harness.terminal.surface!, id: tool("Rewind").id, act: "rewind" });
+		const tool = (icon: string) =>
+			harness!.find(node => node.p?.role === "omp.user.tool" && prop(node, "name") === icon)!;
+		harness.event({ ev: "action", sf: harness.terminal.surface!, id: tool("copy").id, act: "copy-message" });
+		harness.event({ ev: "action", sf: harness.terminal.surface!, id: tool("rewind").id, act: "rewind" });
 		expect(actions).toEqual([{ act: "copy", text: "Fix the build" }, { act: "rewind" }]);
+	});
+
+	it("copies a turn's answer from its footer: the text blocks a blank line apart, no thinking", async () => {
+		const actions: TranscriptAction[] = [];
+		setTranscriptActionHandler(action => actions.push(action));
+		const answer = (...content: AssistantMessage["content"]): AssistantMessage => ({
+			...failed(""),
+			stopReason: "stop",
+			errorMessage: undefined,
+			content,
+		});
+		const component = new AssistantMessageComponent(
+			answer(
+				{ type: "text", text: "First part.\n" },
+				{ type: "thinking", thinking: "Checking the rest" },
+				{ type: "text", text: "  Second part." },
+			),
+		);
+		component.setTurnUsage({ elapsedMs: 133_000, input: 70_000, output: 1_000, cost: 0.85 });
+		harness = await TspHarness.start();
+		harness.tui.addChild(component);
+		await harness.render();
+		const copy = harness.find(node => node.p?.role === "omp.turn.copy");
+		harness.event({ ev: "action", sf: harness.terminal.surface!, id: copy!.id, act: "copy-answer" });
+		expect(actions).toEqual([{ act: "copy", text: "First part.\n\nSecond part." }]);
+
+		component.updateContent(answer({ type: "thinking", thinking: "Nothing to say" }));
+		await harness.render();
+		expect(harness.find(node => node.p?.role === "omp.turn.usage")).toBeDefined();
+		expect(harness.find(node => node.p?.role === "omp.turn.copy")).toBeUndefined();
+		expect(harness.errors).toEqual([]);
 	});
 
 	it("shows a user message's time on the terminal's clock", async () => {

@@ -37,7 +37,7 @@ import { clampSelection, contentRowWidth, padLinesToHeight, renderScrollableList
 import type { TspScrollBy, TspSpan } from "@oh-my-pi/pi-wire";
 import type { NativeChild, NativeNode, NativeScroll, NativeUiEvent } from "../native/node";
 import { col, md, node, span, text } from "../native/describe";
-import { actionBar, actionButton, actionHint, hintsRow, type NativeHint, statusHintsRow } from "../native/overlay";
+import { actionBar, actionButton } from "../native/overlay";
 
 interface BtwHistoryPanelOptions {
 	records: readonly BtwHistoryRecord[];
@@ -96,6 +96,25 @@ const STATUS: Record<BtwHistoryRecord["status"], { label: string; color: ThemeCo
 	error: { label: "Error", color: "error" },
 	interrupted: { label: "Interrupted", color: "warning" },
 };
+
+const SHEET = { role: "omp.overlay.btwHistory", anchor: "center", size: "lg", head: "BTW history" } as const;
+const EMPTY_SHEET = { role: "omp.overlay.btwHistory", anchor: "center", size: "md", head: "BTW history" } as const;
+
+/** A status worth naming next to an answer natively; an answered question needs none. */
+function describeStatus(status: BtwHistoryTurn["status"]): TspSpan[] | undefined {
+	switch (status) {
+		case "running":
+			return [span("●", "accent", { fx: "pulse" }), span(" Answering", "accent")];
+		case "cancelled":
+			return [span("Cancelled", "warning")];
+		case "error":
+			return [span("Failed", "error")];
+		case "interrupted":
+			return [span("Interrupted", "warning")];
+		case "complete":
+			return undefined;
+	}
+}
 
 /** Session-local side questions. Selecting or copying never promotes them into chat. */
 export class BtwHistoryPanel implements Component, Focusable {
@@ -283,6 +302,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 	#openComposer(record: BtwHistoryRecord): void {
 		const input = new Input();
 		input.prompt = theme.fg("accent", "Follow up: ");
+		input.placeholder = "Ask about this answer…";
 		if (this.#options.spaceHoldKeys !== undefined) input.spaceHold.keys = this.#options.spaceHoldKeys;
 		input.spaceHold.handler = this.#options.spaceHold?.(input);
 		const composer: FollowUpComposer = { recordId: record.id, input, abortController: new AbortController() };
@@ -422,8 +442,10 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#options.requestRender();
 	}
 
-	/** A large glass sheet titled "BTW history". */
-	readonly nativeOverlay = { role: "omp.overlay.btwHistory", size: "lg", head: "BTW history" } as const;
+	/** A large glass sheet (the list beside the reader), palette-sized while there is nothing to list. */
+	get nativeOverlay(): NonNullable<Component["nativeOverlay"]> {
+		return this.#records.length > 0 ? SHEET : EMPTY_SHEET;
+	}
 
 	describe(): NativeNode {
 		const record = this.#selected();
@@ -445,55 +467,30 @@ export class BtwHistoryPanel implements Component, Focusable {
 		) {
 			return memo.node;
 		}
-		// Plain columns, not `section`s: Tern draws a section as a foldable `##` heading,
-		// and a flex item's min-content width (a long code line in the answer) would
-		// crush the list pane. The answer pane may shrink to nothing; the list may not.
-		// With one side question the list and the pane labels are noise: the answer alone.
-		const showList = this.#records.length > 1;
-		const detail = this.#describeDetail(record, copied);
-		const answerPane: NativeNode = {
-			...node(
-				"col",
-				{ gap: "sm", grow: 1, basis: 0, min: { w: 0 } },
-				showList ? [text(this.#describeFocusLabel("answer"), { truncate: "end", lines: 1 }), detail] : [detail],
-				"details",
-			),
-			// Natively the sheet body is the scroller; arrow/page keys on the answer pane move it.
-			scroll: this.#scroll,
-		};
-		const panes: NativeChild[] = showList
-			? [
-					node(
-						"col",
-						{ gap: "sm", shrink: 0, basis: 0.3, max: { w: "40ch" } },
-						[text(this.#describeFocusLabel("list"), { truncate: "end", lines: 1 }), this.#describeList()],
-						"history",
-					),
-					answerPane,
-				]
-			: [answerPane];
-		const children: NativeChild[] = [node("row", { gap: "lg", align: "start" }, panes, "body")];
-		if (composer) {
-			composer.input.focused = this.#focused;
-			const lines: NativeChild[] = [
-				text([span(`Topic: ${sanitizeDisplayLine(record?.question ?? "")}`, "dim")], { truncate: "end" }),
-			];
-			if (composer.notice) {
-				lines.push(text([span(composer.notice, this.#followUpPending ? "dim" : "warning")], { wrap: "word" }));
-			}
-			lines.push(composer.input);
-			children.push(node("col", undefined, lines, "composer"));
+		// The body row fills the sheet: the list and the reader scroll on their own,
+		// so the list stays put while a long answer scrolls. Plain columns, not
+		// `section`s (Tern draws those as foldable `##` headings). With one side
+		// question the list is noise: the reader alone.
+		const children: NativeChild[] = [];
+		if (record) {
+			const reader: NativeNode = {
+				...node(
+					"col",
+					{ role: "omp.btw.reader", grow: 1, basis: 0, min: { w: 0 } },
+					[this.#describeThread(record)],
+					"details",
+				),
+				// Arrow/page keys on the answer pane move its scroller.
+				scroll: this.#scroll,
+			};
+			const panes = this.#records.length > 1 ? [this.#describeList(), reader] : [reader];
+			children.push(node("row", { role: "omp.btw.body" }, panes, "body"));
+		} else {
+			children.push(this.#describeEmpty());
 		}
-		children.push({ ...this.#describeFooter(record, canFollowUp, copied), key: "footer" });
-		// Clicking Close always dismisses the sheet; the Esc keycap only shows where Esc does too.
-		const running = record !== undefined && getBtwLatestTurn(record).status === "running";
-		const escapeCloses = !composer && !(running && !this.#options.escapeHides);
-		children.push({
-			...actionBar([null, actionButton("Close", "close", escapeCloses ? { keys: "escape" } : undefined)]),
-			key: "actions",
-		});
-		// The sheet is the frame (`nativeOverlay`): a borderless column.
-		const described = col(children, { gap: "md" });
+		children.push(this.#describeActions(record, canFollowUp, copied));
+		// The sheet is the frame (`nativeOverlay`); its last row is the pinned footer.
+		const described = col(children, { gap: "none" });
 		this.#native = {
 			records: this.#records,
 			selectedId: this.#selectedId,
@@ -511,8 +508,31 @@ export class BtwHistoryPanel implements Component, Focusable {
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action" && event.act === "close") {
-			this.#options.onClose();
+		if (event.type === "action") {
+			const record = this.#selected();
+			switch (event.act) {
+				case "close":
+					this.#options.onClose();
+					return;
+				case "copy-answer":
+					if (record && getBtwCopyText(record) !== undefined) this.#options.onCopy(record);
+					break;
+				case "follow-up":
+					if (record) this.openFollowUp(record.id);
+					break;
+				case "stop":
+					if (record && getBtwLatestTurn(record).status === "running") this.#options.onCancel(record);
+					break;
+				case "send":
+					this.#composer?.input.submit();
+					break;
+				case "discard":
+					this.#composer?.input.onEscape?.();
+					break;
+				default:
+					return;
+			}
+			this.#options.requestRender();
 			return;
 		}
 		if ((event.type !== "select" && event.type !== "activate") || this.#composer) return;
@@ -525,96 +545,130 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#options.requestRender();
 	}
 
-	#describeFocusLabel(focus: "list" | "answer"): TspSpan[] {
-		const label = focus === "list" ? `History (${this.#records.length})` : "Details";
-		return this.#focus === focus ? [span(`${theme.nav.cursor} ${label}`, "accent strong")] : [span(label, "muted")];
-	}
-
+	/**
+	 * The questions, newest first, as two-line palette rows: the question, then
+	 * its time, follow-up count and any status other than answered. While the
+	 * reader has the keys the selection rests (`omp.btw.list.idle`).
+	 */
 	#describeList(): NativeNode {
 		const items = this.#records.map(record => {
-			const status = STATUS[getBtwLatestTurn(record).status];
-			return node(
-				"item",
-				{
-					label: sanitizeDisplayLine(record.question),
-					detail: [span(this.#timeFormat.format(record.createdAt), "dim")],
-					value: [span(status.label, status.color)],
-				},
-				undefined,
-				record.id,
-			);
+			const followUps = record.followUps?.length ?? 0;
+			const detail: TspSpan[] = [span(this.#timeFormat.format(record.createdAt), "mono")];
+			if (followUps > 0) detail.push(span(` · ${followUps} follow-up${followUps === 1 ? "" : "s"}`));
+			const status = describeStatus(getBtwLatestTurn(record).status);
+			// The question is markdown: its `code` reads as mono, without the backticks.
+			const label = sanitizeDisplayLine(record.question)
+				.split(/`([^`]+)`/)
+				.flatMap((part, index) => (part ? [span(part, index % 2 === 1 ? "mono" : undefined)] : []));
+			return node("item", { label, detail, ...(status ? { value: status } : {}) }, undefined, record.id);
 		});
+		const role = this.#focus === "list" ? "omp.btw.list" : "omp.btw.list.idle";
 		return node(
-			"list",
-			{
-				selected: this.#selectedId ?? null,
-				empty: [span("No side questions yet. Use /btw QUESTION to start one.", "muted")],
-			},
-			items,
-			"records",
+			"col",
+			{ role: "omp.btw.history", shrink: 0 },
+			[node("list", { role, selected: this.#selectedId ?? null }, items, "records")],
+			"history",
 		);
 	}
 
-	#describeDetail(record: BtwHistoryRecord | undefined, copied: boolean): NativeNode {
-		if (!record)
-			return text([span("No side questions yet. Use /btw QUESTION to start one.", "muted")], { wrap: "word" });
-		const children: NativeChild[] = [];
-		if (copied)
-			children.push(node("text", { spans: [span("✓ Copied to clipboard", "success")] }, undefined, "copied"));
+	/** The selected side question as a short document: the asked question titles each answer. */
+	#describeThread(record: BtwHistoryRecord): NativeNode {
 		const turns = getBtwTurns(record);
-		for (let index = 0; index < turns.length; index++) {
-			if (index > 0) children.push(node("rule", undefined, undefined, `rule-${index}`));
-			children.push(this.#describeTurn(turns[index]!, `turn-${index}`));
-		}
-		return col(children, { gap: "md" });
+		const children: NativeChild[] = turns.map((turn, index) => this.#describeTurn(turn, index, `turn-${index}`));
+		if (this.#composer) children.push(this.#describeComposer(this.#composer));
+		return node("col", { role: "omp.btw.thread" }, children, "thread");
 	}
 
-	#describeTurn(turn: BtwHistoryTurn, key: string): NativeNode {
-		const status = STATUS[turn.status];
-		const answer = turn.answer.trim()
-			? md(sanitizeDisplayText(turn.answer), { stream: turn.status === "running" })
-			: text([span(turn.status === "running" ? "Waiting for response…" : "No answer text.", "dim")]);
-		// Plain labels, not `section`s (Tern draws those as foldable `##` headings);
-		// the question stays markdown so its inline code and links render.
+	#describeTurn(turn: BtwHistoryTurn, index: number, key: string): NativeNode {
+		const meta: TspSpan[] =
+			index === 0
+				? [span(this.#dateFormat.format(turn.createdAt))]
+				: [span("Follow-up · "), span(this.#timeFormat.format(turn.createdAt))];
+		const status = describeStatus(turn.status);
+		if (status) meta.push(span("  ·  "), ...status);
+		// The question stays markdown so its inline code and links render.
 		const children: NativeChild[] = [
-			text(
-				[
-					span("Question", "accent strong"),
-					span(" · ", "dim"),
-					span(status.label, status.color),
-					span(` · ${this.#dateFormat.format(turn.createdAt)}`, "dim"),
-				],
-				{ wrap: "word" },
-			),
-			md(sanitizeDisplayText(turn.question)),
-			text([span("Answer", "accent strong")]),
-			answer,
+			md(sanitizeDisplayText(turn.question), { role: index === 0 ? "omp.btw.question" : "omp.btw.followup" }),
+			text(meta, { role: "omp.btw.meta", truncate: "end", lines: 1 }),
 		];
-		if (turn.error) children.push(text([span(sanitizeErrorLine(turn.error), "error")], { wrap: "word" }));
-		if (turn.status === "interrupted") children.push(text([span("Not resumed in this view.", "muted")]));
-		return node("col", { gap: "sm" }, children, key);
+		// A failed turn with no text says only why it failed.
+		if (turn.answer.trim() || !turn.error) {
+			const answer = turn.answer.trim()
+				? md(sanitizeDisplayText(turn.answer), { stream: turn.status === "running" })
+				: text([span(turn.status === "running" ? "Thinking…" : "No answer text.", "dim")], {
+						role: "omp.btw.pending",
+					});
+			children.push(node("col", { role: "omp.btw.answer" }, [answer], "answer"));
+		}
+		if (turn.error) {
+			children.push(text([span(sanitizeErrorLine(turn.error), "error")], { role: "omp.btw.error", wrap: "word" }));
+		}
+		if (turn.status === "interrupted") {
+			children.push(text([span("Not resumed in this view.", "muted")], { role: "omp.btw.note" }));
+		}
+		return node("col", { role: "omp.btw.turn" }, children, key);
 	}
 
-	#describeFooter(record: BtwHistoryRecord | undefined, canFollowUp: boolean, copied: boolean): NativeNode {
+	/** The follow-up field under the newest answer, where the conversation continues. */
+	#describeComposer(composer: FollowUpComposer): NativeNode {
+		composer.input.focused = this.#focused;
+		const children: NativeChild[] = [composer.input];
+		if (composer.notice) {
+			children.push(
+				text([span(composer.notice, this.#followUpPending ? "dim" : "warning")], {
+					role: "omp.btw.notice",
+					wrap: "word",
+				}),
+			);
+		}
+		return node("col", { role: "omp.btw.composer", gap: "sm" }, children, "composer");
+	}
+
+	#describeEmpty(): NativeNode {
+		return node(
+			"col",
+			{ role: "omp.btw.empty", align: "center", gap: "sm" },
+			[
+				text("No side questions yet", { role: "omp.btw.empty.title" }),
+				text(
+					[
+						span("Ask one with "),
+						span("/btw <question>", "code"),
+						span(". The answer stays out of the main conversation."),
+					],
+					{ role: "omp.btw.empty.hint", wrap: "word" },
+				),
+			],
+			"empty",
+		);
+	}
+
+	/**
+	 * The footer: what the selected answer allows on the left, Close and the one
+	 * primary action (Follow up, or Send while composing) in the corner. Keys
+	 * live in the buttons' tooltips.
+	 */
+	#describeActions(record: BtwHistoryRecord | undefined, canFollowUp: boolean, copied: boolean): NativeNode {
 		if (this.#composer) {
-			return hintsRow([
-				actionHint("tui.input.submit", this.#followUpPending ? "starting…" : "send"),
-				actionHint("tui.select.cancel", "cancel"),
+			return actionBar([
+				null,
+				actionButton("Cancel", "discard", { keys: "escape" }),
+				actionButton(this.#followUpPending ? "Sending…" : "Send", "send", { keys: "enter", tone: "accent" }),
 			]);
 		}
-		const latest = record ? getBtwLatestTurn(record) : undefined;
-		const running = latest?.status === "running";
-		const hints: (NativeHint | undefined)[] = [
-			actionHint("tui.select.cancel", running && !this.#options.escapeHides ? "cancel" : "close"),
-			running && this.#options.escapeHides ? { keys: ["x"], label: "cancel" } : undefined,
-			this.#records.length > 1 ? { keys: ["tab", "ctrl+/"], label: "switch pane" } : undefined,
-			actionHint(["tui.select.up", "tui.select.down"], this.#focus === "list" ? "select" : "scroll"),
-		];
-		if (canFollowUp) hints.push({ keys: ["f", "enter"], label: "follow up" });
+		const running = record !== undefined && getBtwLatestTurn(record).status === "running";
+		const hides = this.#options.escapeHides === true;
+		const buttons: (NativeNode | null)[] = [];
+		if (running) buttons.push(actionButton("Stop answer", "stop", { keys: hides ? "x" : "escape" }));
 		if (record && getBtwCopyText(record) !== undefined) {
-			hints.push({ keys: ["c"], label: copied ? "copy again" : "copy answer" });
+			buttons.push(actionButton(copied ? "Copy again" : "Copy answer", "copy-answer", { keys: "c" }));
+			if (copied) buttons.push(text([span("✓ Copied", "success")], { role: "omp.btw.copied" }));
 		}
-		return copied ? statusHintsRow([span("✓ copied", "success")], hints) : hintsRow(hints);
+		buttons.push(null);
+		// Clicking Close always dismisses the sheet; its tooltip names Esc only where Esc does too.
+		buttons.push(actionButton("Close", "close", running && !hides ? undefined : { keys: "escape" }));
+		if (canFollowUp) buttons.push(actionButton("Follow up", "follow-up", { keys: "f", tone: "accent" }));
+		return actionBar(buttons);
 	}
 
 	#renderList(width: number, height: number): readonly string[] {

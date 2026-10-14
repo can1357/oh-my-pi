@@ -85,6 +85,23 @@ describe("grep native view", () => {
 		const kinds = (first.c ?? []).filter(isNode).map(n => n.k);
 		expect(kinds).toEqual(["row", "code", "text", "code"]);
 	});
+
+	it("puts a single-file search, which prints no header, under that file's row", () => {
+		const single = [" 9│ctx", "*10│hit", "   │...", "*40│far"].join("\n");
+		const view = grepToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: single }],
+				details: { matchCount: 2, fileCount: 1, files: ["src/a.ts"], displayContent: single },
+			},
+			expanded,
+			{ pattern: "hit" },
+		);
+		const body = (view.body ?? []).filter(isNode);
+		expect(body.map(role)).toEqual(["omp.tool.search.file"]);
+		const kinds = (body[0]!.c ?? []).filter(isNode).map(n => n.k);
+		expect(kinds).toEqual(["row", "code", "text", "code"]);
+		expect(codeStarts(body[0]!.c)).toEqual([9, 40]);
+	});
 });
 
 describe("read native view", () => {
@@ -156,6 +173,40 @@ describe("read group tool node", () => {
 		group.setExpanded(true);
 		const open = group.describe(toolCx);
 		expect(codeProps(open.c).map(p => p.text)).toEqual(["1\n2\n3\n4\n5"]);
+	});
+
+	it("clamps Markdown previews after parsing full documents for each grouped read", () => {
+		const group = new ReadToolGroupComponent({ showContentPreview: true });
+		const table = "# Overview\n\n\n| A | B |\n|---|---|\n| one | two |";
+		const fence = "```ts\nconst value = 1;\n```\n\nEnd.";
+		for (const [id, source] of [
+			["table", table],
+			["fence", fence],
+		]) {
+			group.updateArgs({ path: `src/${id}.md` }, id);
+			group.updateResult(
+				{ content: [{ type: "text", text: source }], details: { contentType: "text/markdown" } },
+				false,
+				id,
+			);
+		}
+
+		const collapsed = group.describe(toolCx);
+		const previews = collect(collapsed.c, n => n.k === "card");
+		expect(previews.map(preview => preview.p)).toEqual([
+			expect.objectContaining({ collapsed: true, preview: { lines: 3 } }),
+			expect.objectContaining({ collapsed: true, preview: { lines: 3 } }),
+		]);
+		expect(collect(collapsed.c, n => n.k === "md").flatMap(n => (n.k === "md" ? [n.p?.text] : []))).toEqual([
+			table,
+			fence,
+		]);
+		expect(collect(collapsed.c, n => role(n) === "omp.tool.stats")).toHaveLength(0);
+
+		group.setExpanded(true);
+		expect(
+			collect(group.describe(toolCx).c, n => n.k === "card").flatMap(n => (n.k === "card" ? [n.p?.collapsed] : [])),
+		).toEqual([false, false]);
 	});
 
 	it("keeps the fallback card for terminals without the tool kind", () => {

@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import {
+	type OpenAIResponsesOptions,
+	openAIResponsesReplaysNativeHistory,
+	streamOpenAIResponses,
+} from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
 import {
@@ -242,6 +246,33 @@ function markResponsesProviderSessionStateWarmed(providerSessionState: Map<strin
 		| undefined;
 	if (!state) throw new Error("Expected OpenAI Responses provider session state");
 	state.nativeHistoryReplayWarmed = true;
+}
+
+function asConnectionBound(model: Model<"openai-responses">): Model<"openai-responses"> {
+	return { ...model, compat: { ...model.compat, connectionBoundNativeHistory: true } };
+}
+
+function resumedEncryptedReasoningContext(model: Model<"openai-responses">): Context {
+	return {
+		messages: [
+			{ role: "user", content: "first question", timestamp: Date.now() },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "generic assistant that should be rebuilt" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: issue5002ZeroUsage,
+				stopReason: "stop",
+				providerPayload: createOpenAIResponsesHistoryPayload(model.provider, [
+					{ type: "reasoning", id: "rs_1", summary: [], encrypted_content: "enc_turn_1" },
+					...snapshotHistoryItems.slice(1),
+				]),
+				timestamp: Date.now(),
+			},
+			{ role: "user", content: "follow-up user", timestamp: Date.now() },
+		],
+	};
 }
 
 function captureResponsesPayload(
@@ -639,8 +670,8 @@ describe("OpenAI responses history payload", () => {
 		expect(payload.input).toEqual(preservedHistoryItems);
 	});
 
-	it("falls back to rebuilt history on resumed same-provider sessions with fresh session state", async () => {
-		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+	it("falls back to rebuilt history on resumed connection-bound sessions with fresh session state", async () => {
+		const model = asConnectionBound(getOpenAIReasoningModel("openai", "gpt-5-mini"));
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const payload = (await captureResponsesPayload(model, resumedSameProviderContext, providerSessionState)) as {
 			input?: unknown[];
@@ -652,7 +683,7 @@ describe("OpenAI responses history payload", () => {
 	});
 
 	it("does not replay stale thinking signatures when native replay is cold", async () => {
-		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const model = asConnectionBound(getOpenAIReasoningModel("openai", "gpt-5-mini"));
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const payload = (await captureResponsesPayload(
 			model,
@@ -668,7 +699,7 @@ describe("OpenAI responses history payload", () => {
 	});
 
 	it("preserves remote replacement history on cold openai session state", async () => {
-		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const model = asConnectionBound(getOpenAIReasoningModel("openai", "gpt-5-mini"));
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const payload = (await captureResponsesPayload(
 			model,
@@ -690,8 +721,8 @@ describe("OpenAI responses history payload", () => {
 		]);
 	});
 
-	it("replays native history after the same-provider session state is warmed", async () => {
-		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+	it("replays native history after a connection-bound session state is warmed", async () => {
+		const model = asConnectionBound(getOpenAIReasoningModel("openai", "gpt-5-mini"));
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		await captureResponsesPayload(model, resumedSameProviderContext, providerSessionState);
 		markResponsesProviderSessionStateWarmed(providerSessionState);
@@ -703,6 +734,110 @@ describe("OpenAI responses history payload", () => {
 			...snapshotHistoryItems,
 			{ role: "user", content: [{ type: "input_text", text: "follow-up user" }] },
 		]);
+	});
+
+	it("replays encrypted reasoning on the first resumed request unless the host binds items to a connection", async () => {
+		const replayed: Record<string, boolean> = {};
+		for (const model of [
+			getOpenAIReasoningModel("xai-oauth", "grok-4.7"),
+			getOpenAIReasoningModel("openai", "gpt-5-mini"),
+			getOpenAIReasoningModel("github-copilot", "gpt-5.4"),
+		]) {
+			const payload = (await captureResponsesPayload(model, resumedEncryptedReasoningContext(model), new Map())) as {
+				input?: unknown[];
+			};
+			replayed[model.provider] = containsEncryptedReasoning(payload.input);
+		}
+
+		expect(replayed).toEqual({ "xai-oauth": true, openai: true, "github-copilot": false });
+	});
+
+	it("rebuilds history after the provider session state closes on a host without connection binding", async () => {
+		const model = getOpenAIReasoningModel("xai-oauth", "grok-4.7");
+		const context = resumedEncryptedReasoningContext(model);
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const warm = (await captureResponsesPayload(model, context, providerSessionState)) as { input?: unknown[] };
+		for (const state of providerSessionState.values()) state.close();
+		const closed = (await captureResponsesPayload(model, context, providerSessionState)) as { input?: unknown[] };
+
+		expect(containsEncryptedReasoning(warm.input)).toBe(true);
+		expect(containsEncryptedReasoning(closed.input)).toBe(false);
+		expect(containsAssistantOutputText(closed.input, "generic assistant that should be rebuilt")).toBe(true);
+	});
+
+	it("reports the replay decision each request makes through openAIResponsesReplaysNativeHistory", async () => {
+		const observed: Array<{ step: string; reported: boolean; replayed: boolean }> = [];
+		for (const model of [
+			getOpenAIReasoningModel("github-copilot", "gpt-5.4"),
+			getOpenAIReasoningModel("xai-oauth", "grok-4.7"),
+		]) {
+			const context = resumedEncryptedReasoningContext(model);
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const observe = async (step: string, state: Map<string, ProviderSessionState> | undefined) => {
+				const reported = openAIResponsesReplaysNativeHistory(model, state);
+				const payload = (await captureResponsesPayload(model, context, state)) as { input?: unknown[] };
+				observed.push({
+					step: `${model.provider} ${step}`,
+					reported,
+					replayed: containsEncryptedReasoning(payload.input),
+				});
+			};
+			await observe("without session state", undefined);
+			await observe("first request", providerSessionState);
+			markResponsesProviderSessionStateWarmed(providerSessionState);
+			await observe("warmed", providerSessionState);
+			for (const state of providerSessionState.values()) state.close();
+			await observe("closed", providerSessionState);
+		}
+
+		for (const { step, reported, replayed } of observed)
+			expect({ step, reported }).toEqual({ step, reported: replayed });
+		// Only the connection-bound host starts cold; every host is cold after a close.
+		expect(observed.filter(o => !o.replayed).map(o => o.step)).toEqual([
+			"github-copilot first request",
+			"github-copilot closed",
+			"xai-oauth closed",
+		]);
+	});
+
+	it("keeps a closed provider session state cold when a request started before the close succeeds", async () => {
+		const model = getOpenAIReasoningModel("xai-oauth", "grok-4.7");
+		const context = resumedEncryptedReasoningContext(model);
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const requested = Promise.withResolvers<void>();
+		const released = Promise.withResolvers<void>();
+		const completed = [
+			{ type: "response.created", response: { id: "resp_side" } },
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "message",
+					id: "msg_side",
+					role: "assistant",
+					status: "completed",
+					content: [{ type: "output_text", text: "side answer" }],
+				},
+			},
+			{ type: "response.completed", response: { id: "resp_side", status: "completed" } },
+		];
+		const inFlight = streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			providerSessionState,
+			fetch: async () => {
+				requested.resolve();
+				await released.promise;
+				return new Response(`${completed.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+					headers: { "content-type": "text/event-stream" },
+				});
+			},
+		}).result();
+		await requested.promise;
+		for (const state of providerSessionState.values()) state.close();
+		released.resolve();
+		expect((await inFlight).stopReason).toBe("stop");
+
+		const retry = (await captureResponsesPayload(model, context, providerSessionState)) as { input?: unknown[] };
+		expect(containsEncryptedReasoning(retry.input)).toBe(false);
 	});
 
 	it("does not warm GitHub Copilot replay when only OpenAI replay state is warmed", async () => {
@@ -778,7 +913,7 @@ describe("OpenAI responses history payload", () => {
 			],
 		};
 
-		const cold = (await captureResponsesPayload(plaintextReasoningModel, context, new Map())) as {
+		const cold = (await captureResponsesPayload(asConnectionBound(plaintextReasoningModel), context, new Map())) as {
 			input?: unknown[];
 		};
 		const warm = (await captureResponsesPayload(plaintextReasoningModel, context)) as { input?: unknown[] };
@@ -875,7 +1010,11 @@ describe("OpenAI responses history payload", () => {
 			],
 		};
 
-		const payload = (await captureResponsesPayload(plaintextReasoningModel, context, new Map())) as {
+		const payload = (await captureResponsesPayload(
+			asConnectionBound(plaintextReasoningModel),
+			context,
+			new Map(),
+		)) as {
 			input?: unknown[];
 		};
 		const input = payload.input ?? [];
@@ -968,7 +1107,9 @@ describe("OpenAI responses history payload", () => {
 			const model = getOpenAIReasoningModel("commandcode", "deepseek/deepseek-v4.1-flash");
 			const context = summaryOnlyReasoningContext(model);
 			const options = { reasoning: Effort.Medium };
-			const cold = (await captureResponsesPayload(model, context, new Map(), options)) as { input?: unknown[] };
+			const cold = (await captureResponsesPayload(asConnectionBound(model), context, new Map(), options)) as {
+				input?: unknown[];
+			};
 			const warm = (await captureResponsesPayload(model, context, undefined, options)) as { input?: unknown[] };
 
 			expect(replayedReasoningTexts(cold.input)).toEqual(["Open a.txt.", "It says A."]);

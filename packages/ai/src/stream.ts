@@ -12,8 +12,9 @@ import {
 	mapEffortToGoogleThinkingLevel,
 	requireSupportedEffort,
 	resolveWireModelId,
+	withoutUnverifiedThinking,
 } from "@oh-my-pi/pi-catalog/model-thinking";
-import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
+import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
@@ -127,23 +128,6 @@ function isOfficialOpenAIApiUrl(baseUrl: string | undefined): boolean {
 	if (!baseUrl) return true;
 	try {
 		return new URL(baseUrl).hostname === "api.openai.com";
-	} catch {
-		return false;
-	}
-}
-
-const OFFICIAL_CODEX_URL = new URL(CODEX_BASE_URL);
-
-/** Strict official-Codex endpoint check; exact origin or a path boundary after {@link CODEX_BASE_URL}. */
-export function isOfficialCodexApiUrl(baseUrl: string | undefined): boolean {
-	if (!baseUrl) return true;
-	try {
-		const candidate = new URL(baseUrl);
-		const candidatePath = candidate.pathname.replace(/\/+$/, "");
-		return (
-			candidate.origin === OFFICIAL_CODEX_URL.origin &&
-			(candidatePath === OFFICIAL_CODEX_URL.pathname || candidatePath.startsWith(`${OFFICIAL_CODEX_URL.pathname}/`))
-		);
 	} catch {
 		return false;
 	}
@@ -1237,6 +1221,11 @@ export function streamSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const sessionOptions = withInferenceSessionId(options);
+	// Unverified thinking is opt-in: without a requested effort the request is
+	// byte-identical to a non-reasoning model's.
+	const effortRequested =
+		sessionOptions.reasoning !== undefined && !sessionOptions.disableReasoning && !sessionOptions.forceReasoningOff;
+	if (!effortRequested) model = withoutUnverifiedThinking(model);
 	if (!model.requiresGlyphTokenization) {
 		return streamSimpleRequest(model, context, sessionOptions);
 	}
@@ -1842,9 +1831,10 @@ function mapOptionsForApi<TApi extends Api>(
 		streamIdleTimeoutMs: options?.streamIdleTimeoutMs,
 		codexSseMaxAttempts: options?.codexSseMaxAttempts,
 		providerSessionState: options?.providerSessionState,
+		parentSessionId: options?.parentSessionId,
+		minimizeEffort: options?.minimizeEffort,
 		liveSteering: options?.liveSteering,
 		maxInFlightRequests: options?.maxInFlightRequests,
-		toolNamespacesInfo: options?.toolNamespacesInfo,
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,
 		onSseEvent: options?.onSseEvent,

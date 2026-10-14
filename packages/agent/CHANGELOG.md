@@ -2,6 +2,71 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `ApprovalDetailsOptions`; `formatApprovalDetails` takes only `args` again, since the compact approval prompt no longer shows tool details ([#15642](https://github.com/can1357/oh-my-pi/pull/15642) by [@H4vC](https://github.com/H4vC))
+### Added
+
+- `AgentTool.delegationGuidance`: instructions a same-name extension replacement inherits in its description when it delegates to the native tool ([#15477](https://github.com/can1357/oh-my-pi/pull/15477) by [@iliaal](https://github.com/iliaal))
+
+## [18.10.4] - 2026-10-13
+
+### Added
+
+- `AgentTool.formatApprovalDetails` receives `ApprovalDetailsOptions`; `compact: true` asks for untruncated bodies so a compact approval prompt can count their lines ([#15550](https://github.com/can1357/oh-my-pi/pull/15550) by [@H4vC](https://github.com/H4vC))
+
+### Changed
+
+- Before-model-call hooks now receive the loop context as a second argument, and `buildProviderContext` receives the summarizer model ([#15436](https://github.com/can1357/oh-my-pi/pull/15436) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed a Claude compaction or branch summarizer receiving assistant reasoning from a snapcompact archive rendered under another model, which Claude refuses (`reasoning_extraction`) ([#15436](https://github.com/can1357/oh-my-pi/pull/15436) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.10.3] - 2026-10-12
+
+### Breaking Changes
+
+- Removed `estimateImageContentTokens()` from `@oh-my-pi/pi-agent-core/image-tokens`; use `Tokenizer.imageTokens(size, detail)`, which prices with the reading model's catalog image rule ([#15446](https://github.com/can1357/oh-my-pi/pull/15446) by [@will-bogusz](https://github.com/will-bogusz))
+- `applyShakeRegion()` and `applyShakeRegions()` take the replacement's token count (`replacementTokens`); a block rewrite of an assistant turn adds the tokens it removes to `elidedOutputTokens`, so a replayed Claude turn's count stays lowered after a reload ([#15446](https://github.com/can1357/oh-my-pi/pull/15446) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed Claude context counts reading Opus 5.5 requests about 55% over their billed input: a replayed thinking turn now counts at the output size Claude billed for it, not its signature's bytes ([#15446](https://github.com/can1357/oh-my-pi/pull/15446) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed screenshots and other non-frame images being counted at the OpenAI rate for every model instead of the reading model's own; Claude billed them about 16% higher ([#15446](https://github.com/can1357/oh-my-pi/pull/15446) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed OpenAI Responses and Codex context estimates leaving out replayed reasoning: each turn whose encrypted reasoning actually replays now counts its reported reasoning tokens (its ciphertext when the backend reports none), and none while a cold session rebuilds it out of the request, so compaction and snapcompact sizing match billing; branch summaries no longer budget for encrypted reasoning they never send ([#15447](https://github.com/can1357/oh-my-pi/pull/15447) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.10.2] - 2026-10-12
+
+### Added
+
+- Added `AgentLoopConfig.onDetachedToolUpdate`: a tool's `onUpdate` frames that arrive after its run's event stream ended (a returned call whose background job keeps reporting) reach it instead of being dropped; `Agent` forwards them to its subscribers as `tool_execution_update` events
+
+## [18.9.2] - 2026-10-11
+
+### Changed
+
+- Improved context caching for repeat turns, reducing redundant prompt processing and making subsequent turns faster when the system prompt is unchanged.
+
+## [18.9.0] - 2026-10-11
+
+### Fixed
+
+- Fixed stale queue updates when queued steering is adopted, withdrawn, or added to the transcript, ensuring queue listeners consistently receive the latest state.
+
+## [18.8.8] - 2026-10-10
+
+### Added
+
+- Added `Agent.setModelResolver()` to fit every model an agent adopts (via `setModel`, starting with the current one) before it is used ([#15048](https://github.com/can1357/oh-my-pi/pull/15048) by [@H4vC](https://github.com/H4vC))
+- Added `CompactionSettings.baseWindowTokens`: when set, `resolveThresholdTokens()` scales its percentage or reserve-based threshold from that base instead of the full context window ([#15065](https://github.com/can1357/oh-my-pi/pull/15065) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed OpenAI V1 remote compaction re-attaching a prior Anthropic native payload after a successful compact ([#15041](https://github.com/can1357/oh-my-pi/pull/15041) by [@PaleRoses](https://github.com/PaleRoses))
+- Fixed `resolveThresholdTokens()` clamping a positive `thresholdTokens` to `baseWindowTokens`; a fixed threshold is checked against the real window, and the base only rescales the percentage and reserve policies ([#15074](https://github.com/can1357/oh-my-pi/pull/15074) by [@H4vC](https://github.com/H4vC))
+- Fixed `resolveThresholdTokens()` clamping a fixed `thresholdTokens` at or past the context window to one token below it, so compaction fired only after the next request overflowed; it now clamps to the window less the reserve ([#15146](https://github.com/can1357/oh-my-pi/pull/15146) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.8.6] - 2026-10-08
 
 ### Added

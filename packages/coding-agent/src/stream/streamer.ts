@@ -1,6 +1,5 @@
-import * as fs from "node:fs";
-import * as net from "node:net";
 import * as readline from "node:readline";
+import { IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
 import {
 	STREAM_CHAT_TEXT_MAX,
 	STREAM_CLOSE_HOST_CONFLICT,
@@ -13,10 +12,9 @@ import {
 } from "@oh-my-pi/pi-wire";
 import {
 	applyScreenFrame,
-	encodeStreamFrame,
 	isSessionFrame,
+	MAX_LOCAL_LINE_BYTES,
 	STREAM_LOCAL_PROTO,
-	StreamLineReader,
 	type StreamScreen,
 	type StreamSessionFrame,
 	type StreamStreamerFrame,
@@ -32,9 +30,8 @@ interface PaneState extends StreamScreen {
 }
 
 interface LocalConnection {
-	socket: net.Socket;
+	conn: IpcConnection;
 	pane?: PaneState;
-	lines: StreamLineReader;
 }
 
 export interface StreamUrls {
@@ -103,8 +100,7 @@ export class StreamMuxHost {
 	readonly #connections = new Set<LocalConnection>();
 	readonly #panes = new Map<number, PaneState>();
 	readonly #finished = Promise.withResolvers<number>();
-	#server?: net.Server;
-	#endpoint?: string;
+	#server?: IpcServer;
 	#nextPaneId = 1;
 	#viewerCount?: number;
 	#channel = "";
@@ -137,28 +133,19 @@ export class StreamMuxHost {
 	async start(): Promise<string> {
 		if (this.#started) throw new Error("stream host is already started");
 		this.#started = true;
-		const endpoint = await streamSocketEndpoint(this.#options.projectDir, { create: true });
-		this.#endpoint = endpoint;
-		if (process.platform !== "win32") await clearStaleSocket(endpoint);
-
-		const server = net.createServer(socket => this.#accept(socket));
-		this.#server = server;
-		const listening = Promise.withResolvers<void>();
-		const onError = (error: Error): void => listening.reject(error);
-		server.once("error", onError);
-		server.listen(endpoint, () => {
-			server.off("error", onError);
-			listening.resolve();
-		});
+		const endpoint = await streamSocketEndpoint(this.#options.projectDir);
 		try {
-			await listening.promise;
-			if (process.platform !== "win32") await fs.promises.chmod(endpoint, 0o600);
+			this.#server = await IpcServer.listen(
+				endpoint,
+				{ framing: "lines", maxFrameBytes: MAX_LOCAL_LINE_BYTES },
+				conn => this.#accept(conn),
+			);
 		} catch (error) {
-			server.close();
-			if (process.platform !== "win32") fs.rmSync(endpoint, { force: true });
+			if (error instanceof Error && "code" in error && error.code === "EADDRINUSE") {
+				throw new Error(`another omp stream process is already running for this directory (${endpoint})`);
+			}
 			throw error;
 		}
-		process.once("exit", this.#removeSocketSync);
 		this.#onEvent({ t: "notice", message: "connecting your stencil.so channel" });
 		this.#onEvent({ t: "title", title: this.#title });
 		this.#onEvent({ t: "link", state: "connecting" });
@@ -197,11 +184,10 @@ export class StreamMuxHost {
 	async close(reason = "stream ended", exitCode = 0): Promise<void> {
 		if (this.#closing) return;
 		this.#closing = true;
-		process.off("exit", this.#removeSocketSync);
 		const bye: StreamStreamerFrame = { t: "bye", reason };
 		for (const connection of this.#connections) {
-			connection.socket.end(encodeStreamFrame(bye));
-			connection.socket.destroySoon();
+			connection.conn.send(JSON.stringify(bye));
+			connection.conn.end();
 		}
 		this.#connections.clear();
 		this.#panes.clear();
@@ -210,39 +196,24 @@ export class StreamMuxHost {
 
 		const server = this.#server;
 		this.#server = undefined;
-		if (server) {
-			const closed = Promise.withResolvers<void>();
-			server.close(() => closed.resolve());
-			await closed.promise;
-		}
-		if (process.platform !== "win32" && this.#endpoint) {
-			await fs.promises.rm(this.#endpoint, { force: true });
-		}
+		if (server) await server.close();
 		this.#finished.resolve(exitCode);
 	}
 
-	readonly #removeSocketSync = (): void => {
-		if (process.platform !== "win32" && this.#endpoint) fs.rmSync(this.#endpoint, { force: true });
-	};
-
-	#accept(socket: net.Socket): void {
+	#accept(conn: IpcConnection): void {
 		if (this.#closing) {
-			socket.destroy();
+			conn.destroy();
 			return;
 		}
-		const connection: LocalConnection = { socket, lines: new StreamLineReader() };
+		const connection: LocalConnection = { conn };
 		this.#connections.add(connection);
-		socket.setNoDelay(true);
-		socket.on("data", chunk => this.#consume(connection, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-		socket.on("error", () => {
-			// The paired close event performs pane cleanup.
-		});
-		socket.once("close", () => this.#detach(connection));
-	}
-
-	#consume(connection: LocalConnection, chunk: Buffer): void {
-		if (connection.socket.destroyed) return;
-		if (!connection.lines.push(chunk, line => this.#handleLocalLine(connection, line))) connection.socket.destroy();
+		conn.start(
+			frame => {
+				if (conn.closed) return;
+				if (!this.#handleLocalLine(connection, frame)) conn.destroy();
+			},
+			() => this.#detach(connection),
+		);
 	}
 
 	#handleLocalLine(connection: LocalConnection, line: string): boolean {
@@ -272,9 +243,9 @@ export class StreamMuxHost {
 		};
 		connection.pane = pane;
 		this.#panes.set(pane.id, pane);
-		connection.socket.write(encodeStreamFrame(this.#sessionWelcome()));
+		connection.conn.send(JSON.stringify(this.#sessionWelcome()));
 		if (this.#viewerCount !== undefined) {
-			connection.socket.write(encodeStreamFrame({ t: "viewers", n: this.#viewerCount }));
+			connection.conn.send(JSON.stringify({ t: "viewers", n: this.#viewerCount }));
 		}
 		this.#client.send({ t: "pane-open", pane: pane.id, title: pane.title, cols: pane.cols, rows: pane.rows });
 		this.#onEvent({
@@ -363,9 +334,9 @@ export class StreamMuxHost {
 	}
 
 	#broadcast(frame: StreamStreamerFrame): void {
-		const line = encodeStreamFrame(frame);
+		const line = JSON.stringify(frame);
 		for (const connection of this.#connections) {
-			if (connection.pane) connection.socket.write(line);
+			if (connection.pane) connection.conn.send(line);
 		}
 	}
 
@@ -456,30 +427,6 @@ export async function runStreamConsole(options: StreamConsoleOptions): Promise<n
 		process.off("SIGINT", stop);
 		process.off("SIGTERM", stop);
 	}
-}
-
-async function clearStaleSocket(endpoint: string): Promise<void> {
-	const status = await probeSocket(endpoint);
-	if (status === "live")
-		throw new Error(`another omp stream process is already running for this directory (${endpoint})`);
-	if (status === "stale") await fs.promises.unlink(endpoint);
-}
-
-function probeSocket(endpoint: string): Promise<"missing" | "stale" | "live"> {
-	const result = Promise.withResolvers<"missing" | "stale" | "live">();
-	const socket = net.createConnection({ path: endpoint });
-	socket.once("connect", () => {
-		socket.destroy();
-		result.resolve("live");
-	});
-	socket.once("error", error => {
-		socket.destroy();
-		const code = (error as NodeJS.ErrnoException).code;
-		if (code === "ENOENT") result.resolve("missing");
-		else if (code === "ECONNREFUSED") result.resolve("stale");
-		else result.reject(error);
-	});
-	return result.promise;
 }
 
 function formatChat(message: StreamChatMessage): string {

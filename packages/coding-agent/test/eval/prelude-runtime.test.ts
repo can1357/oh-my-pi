@@ -35,7 +35,6 @@ function definition(
 fixture = _FixturePrelude()
 del _FixturePrelude`,
 		exports: ["fixture"],
-		codeModeDeclarations: `declare const fixture: { version: ${JSON.stringify(version)} };`,
 		async invoke(parameters, context) {
 			calls.push({ parameters, session: context.session, toolCallId: context.toolCallId });
 			return {

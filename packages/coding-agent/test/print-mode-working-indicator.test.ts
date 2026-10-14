@@ -126,6 +126,7 @@ function createDelayedSession(
 			messages.push(finalMessage);
 			return true;
 		},
+		disableStopTimeTodoReminders: () => {},
 		prepareForHeadlessAdvisorDrain: () => {
 			advisorDrainPrepared = true;
 		},
@@ -317,6 +318,7 @@ describe("print mode working indicator", () => {
 				messages.push(message);
 				return true;
 			},
+			disableStopTimeTodoReminders: () => {},
 			prepareForHeadlessAdvisorDrain: () => {},
 			waitForAdvisorCatchup: async (timeoutMs: number) => {
 				catchupTimeoutMs = timeoutMs;
@@ -378,6 +380,7 @@ describe("print mode working indicator", () => {
 				return true;
 			},
 			setTextOutputCommitted: () => {},
+			disableStopTimeTodoReminders: () => {},
 			prepareForHeadlessAdvisorDrain: () => {},
 			waitForAdvisorCatchup: async (timeoutMs: number) => {
 				catchupTimeoutMs = timeoutMs;
@@ -423,6 +426,7 @@ describe("print mode working indicator", () => {
 				messages.push(message);
 				return true;
 			},
+			disableStopTimeTodoReminders: () => {},
 			prepareForHeadlessAdvisorDrain: () => {},
 			waitForAdvisorCatchup: async () => true,
 			dispose: async () => {

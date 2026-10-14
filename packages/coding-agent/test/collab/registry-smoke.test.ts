@@ -194,7 +194,7 @@ describe("collab host registry (two-process smoke)", () => {
 		// catchable SIGTERM (kill() terminates the process), so there only crash pruning applies.
 		child.kill("SIGTERM");
 		const stopCode = await child.exited;
-		if (process.platform !== "win32") expect(stopCode).toBe(0);
+		if (process.platform !== "win32") expect(stopCode).toBe(143);
 		const afterStop = await waitUntil(async () => {
 			const result = await runCli(["list", "--json"]);
 			const json: CollabListJsonOutput = JSON.parse(result.stdout);

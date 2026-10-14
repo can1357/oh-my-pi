@@ -133,6 +133,14 @@ export function resolveThinkingLevelForModel(
 }
 
 /**
+ * Level applied to `model` when the user has not picked one for it (carried,
+ * global default, auto). Unverified thinking stays unset until the user picks.
+ */
+export function automaticThinkingLevel<T>(model: Model | undefined, fallback: T): T | undefined {
+	return model?.thinking?.unverified ? undefined : fallback;
+}
+
+/**
  * Sentinel selector for the coding-agent "auto" thinking mode. Kept entirely
  * inside the coding-agent layer: it is never an {@link Effort} or
  * {@link ThinkingLevel}, so provider mapping/clamping keeps seeing concrete
@@ -374,7 +382,7 @@ export function modelSupportsEffortCeiling(model: Model, ceiling: Effort): boole
  * models.
  */
 export function resolveProvisionalAutoLevel(model: Model | undefined): Effort | undefined {
-	if (!model?.reasoning) return undefined;
+	if (!model?.reasoning || model.thinking?.unverified) return undefined;
 	const preferred = model.thinking?.defaultLevel ?? Effort.High;
 	return clampAutoThinkingEffort(model, preferred === Effort.Max ? Effort.XHigh : preferred, Effort.XHigh);
 }

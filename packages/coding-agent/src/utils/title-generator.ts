@@ -668,6 +668,12 @@ export function nerdGlyphsActive(): boolean {
 
 /** The OSC 1337 user variable Tern reads the session file from. */
 const TERN_SESSION_FILE_VAR = "omp_session_file";
+/**
+ * The OSC 1337 user variable telling Tern this omp understands `--restore`, set to
+ * `1` before each session file report: Tern's daemon then relaunches it after a
+ * crash with `--restore <file>` instead of `--resume <file>`.
+ */
+const TERN_RESTORE_VAR = "omp_restore";
 
 /** The live session as Tern hears about it (read from the interactive session manager). */
 export interface TerminalSessionSource {
@@ -699,8 +705,8 @@ export function setTerminalSessionSource(source: TerminalSessionSource | undefin
 /**
  * Tell Tern (`TERM_PROGRAM=tern`, nowhere else) what changed about the session:
  * the file as an OSC 1337 user variable holding its absolute path in base64 (no
- * file removes the variable), and the working directory as OSC 7
- * (`file://host/path`), as a shell reports it at each prompt.
+ * file removes the variable), preceded by {@link TERN_RESTORE_VAR}, and the working
+ * directory as OSC 7 (`file://host/path`), as a shell reports it at each prompt.
  */
 export function reportTernSession(): void {
 	if (terminalTitleRuntime.disposed || $env.TERM_PROGRAM?.toLowerCase() !== "tern") return;
@@ -710,6 +716,7 @@ export function reportTernSession(): void {
 	if (resolvedFile !== reportedSessionFile) {
 		reportedSessionFile = resolvedFile;
 		const value = resolvedFile ? `=${Buffer.from(resolvedFile).toString("base64")}` : "";
+		if (resolvedFile) writeTerminalSequence(`\x1b]1337;SetUserVar=${TERN_RESTORE_VAR}=MQ==\x07`);
 		writeTerminalSequence(`\x1b]1337;SetUserVar=${TERN_SESSION_FILE_VAR}${value}\x07`);
 	}
 	// Without a session the shell takes the directory back at its next prompt.

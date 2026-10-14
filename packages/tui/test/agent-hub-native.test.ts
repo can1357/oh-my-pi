@@ -1,10 +1,15 @@
-import { beforeAll, expect, test } from "bun:test";
+import { afterEach, beforeAll, expect, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import type { TspKind, TspPickerProps } from "@oh-my-pi/pi-wire";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { AgentHubOverlayComponent } from "../src/overlays/agent-hub";
 import type { AgentRecordLike } from "../src/overlays/agent-hub-types";
-import { SessionObserverRegistry } from "../src/overlays/session-observer-registry";
+import {
+	type EventBusLike,
+	SessionObserverRegistry,
+	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+	TASK_SUBAGENT_PROGRESS_CHANNEL,
+} from "../src/overlays/session-observer-registry";
 import { initTheme } from "../src/theme";
 
 const pickerCx: DescribeContext = {
@@ -24,6 +29,10 @@ beforeAll(async () => {
 	await initTheme(false);
 });
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 function agent(id: string, lastActivity: number, extra?: Partial<AgentRecordLike>): AgentRecordLike {
 	return {
 		id,
@@ -38,9 +47,13 @@ function agent(id: string, lastActivity: number, extra?: Partial<AgentRecordLike
 	};
 }
 
-function createHub(agents: AgentRecordLike[], focused: string[] = []): AgentHubOverlayComponent {
+function createHub(
+	agents: AgentRecordLike[],
+	focused: string[] = [],
+	observers = new SessionObserverRegistry(),
+): AgentHubOverlayComponent {
 	return new AgentHubOverlayComponent({
-		observers: new SessionObserverRegistry(),
+		observers,
 		transcript: { fs, parseEntries: () => [] },
 		loadPersisted: async () => {},
 		hubKeys: [],
@@ -132,6 +145,71 @@ test("the By parent action and the t key both switch the picker to the parent tr
 
 		hub.handleInput("t");
 		expect(pickerProps(hub).layout).toBe("rows");
+	} finally {
+		hub.dispose();
+	}
+});
+
+/** An observer registry fed by a fake bus, with one running `Worker` progress frame of `durationMs` at t=1_000_000. */
+function observedWorker(durationMs: number) {
+	const listeners = new Map<string, (data: unknown) => void>();
+	const bus: EventBusLike = {
+		on(channel, listener) {
+			listeners.set(channel, listener);
+			return () => listeners.delete(channel);
+		},
+	};
+	const observers = new SessionObserverRegistry();
+	observers.subscribeToEventBus(bus, bus);
+	const now = spyOn(Date, "now").mockReturnValue(1_000_000);
+	listeners.get(TASK_SUBAGENT_PROGRESS_CHANNEL)?.({
+		index: 0,
+		agent: "task",
+		agentSource: "bundled",
+		task: "work",
+		progress: {
+			id: "Worker",
+			index: 0,
+			status: "running",
+			tokens: 10,
+			requests: 1,
+			toolCount: 1,
+			cost: 0,
+			durationMs,
+		},
+	});
+	const hub = createHub([agent("Worker", 1_000_000, { status: "running" }), agent("Idle", 900_000)], [], observers);
+	return { hub, now, emit: (channel: string, data: unknown) => listeners.get(channel)?.(data) };
+}
+
+// 0 ms is a first frame emitted in the spawn's start millisecond; it must still clock rather than freeze as text.
+test.each([60_000, 0])(
+	"a running row's Time (last frame %p ms) is the age at send, not re-based to the frame",
+	durationMs => {
+		const { hub, now } = observedWorker(durationMs);
+		try {
+			expect(pickerProps(hub).items?.find(item => item.id === "Worker")?.facts?.time).toBe(durationMs);
+			// A long tool call emits no progress; an unrelated repaint (here a selection change) re-sends
+			// the row and must keep the terminal clock moving forward instead of rewinding it.
+			now.mockReturnValue(1_045_000);
+			hub.handleNativeEvent({ type: "select", key: "", item: "Idle" });
+			expect(pickerProps(hub).items?.find(item => item.id === "Worker")?.facts?.time).toBe(durationMs + 45_000);
+		} finally {
+			hub.dispose();
+		}
+	},
+);
+
+test("a follow-up turn does not age the previous turn's snapshot across the idle gap", () => {
+	const { hub, now, emit } = observedWorker(60_000);
+	const lifecycle = { id: "Worker", agent: "task", agentSource: "bundled", index: 0 };
+	try {
+		emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...lifecycle, status: "completed" });
+		// Parked for an hour, then revived for another turn before its first progress frame.
+		now.mockReturnValue(4_600_000);
+		emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...lifecycle, status: "started" });
+		hub.handleNativeEvent({ type: "select", key: "", item: "Idle" });
+		expect(pickerProps(hub).items?.find(item => item.id === "Worker")?.facts?.time).toBe(60_000);
 	} finally {
 		hub.dispose();
 	}

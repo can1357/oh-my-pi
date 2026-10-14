@@ -1,21 +1,17 @@
 export interface EmbeddedAddonFile {
 	variant: "modern" | "baseline" | "default";
+	/** Basename of the extracted `.node` file. */
 	filename: string;
-	size?: number;
-	filePath?: string;
-}
-
-export interface EmbeddedAddonArchive {
-	format: "tar.gz";
-	filename: string;
-	filePath: string;
+	/** Decompressed addon size in bytes. */
+	size: number;
+	/** Embedded zstd frame holding the addon bytes. */
+	zstdPath: string;
 }
 
 export interface EmbeddedAddon {
 	platformTag: string;
 	version: string;
 	files: EmbeddedAddonFile[];
-	archive?: EmbeddedAddonArchive;
 }
 
 export interface DetectCompiledBinaryInput {
@@ -90,13 +86,13 @@ export function cleanupStaleNativeVersions(input: CleanupStaleNativeVersionsInpu
 
 export function prepareNativeVersionDir(versionedDir: string): void;
 
-export interface ExtractEmbeddedAddonArchiveInput {
-	archivePath: string;
+export interface ExtractEmbeddedAddonsInput {
 	files: EmbeddedAddonFile[];
 	targetDir: string;
 }
 
-export function extractEmbeddedAddonArchive(input: ExtractEmbeddedAddonArchiveInput): string[];
+/** Decompress every manifest addon missing or wrong-sized in `targetDir`; returns the paths written. */
+export function extractEmbeddedAddons(input: ExtractEmbeddedAddonsInput): string[];
 
 export interface SelectCpuVariantInput {
 	arch: string;

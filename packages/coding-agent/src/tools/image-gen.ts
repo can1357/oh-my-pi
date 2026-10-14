@@ -13,6 +13,7 @@ import {
 	parseAntigravityCredentials,
 } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
 import { isEnoent, logger, parseImageMetadata, prompt, ptree, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
@@ -149,9 +150,14 @@ function resolveHostedImageCarrier(
 ): Model | undefined {
 	if (activeModel?.provider === selectedModel.provider && activeModel.hostedImage) return activeModel;
 	let carrier: Model | undefined;
+	let carrierInput = Infinity;
 	for (const model of modelRegistry.getAvailable()) {
 		if (model.provider !== selectedModel.provider || !model.hostedImage) continue;
-		if (!carrier || model.cost.input < carrier.cost.input) carrier = model;
+		const input = getEffectiveTokenCost(model.cost).input;
+		if (!carrier || input < carrierInput) {
+			carrier = model;
+			carrierInput = input;
+		}
 	}
 	return carrier;
 }

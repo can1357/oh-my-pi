@@ -2,13 +2,13 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { TUI } from "@oh-my-pi/pi-tui";
 import { CleanseBoardModel } from "../src/apps/cleanse-board";
 import { showGitOverlay } from "../src/apps/git/git-tui";
-import type { ChangedFile, GitTuiModel } from "../src/apps/git/state";
+import type { AssetFileContents, ChangedFile, GitTuiModel } from "../src/apps/git/state";
 import { initTheme } from "../src/theme/theme";
 import { TspHarness } from "./native/tsp-harness";
 import type { PsScope, PsScopeReport } from "../src/apps/ps-data";
 import { type PsTopHost, PsTopComponent } from "../src/apps/ps-top";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
-import type { TspKind } from "@oh-my-pi/pi-wire";
+import { TSP_KINDS, type TspKind } from "@oh-my-pi/pi-wire";
 import type { DaemonSnapshot, DaemonSpec } from "../src/tools/daemon";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -241,6 +241,130 @@ describe("git native", () => {
 		expect(patches[0]).toContain("+changed 40");
 		expect(patches[0]).not.toContain("+changed 5");
 		expect(patches[0]).not.toContain("+changed 6");
+	});
+
+	/** A 1×1 PNG side of an image change. */
+	const pngSide: AssetFileContents["old"] = {
+		kind: "image",
+		image: {
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+			mimeType: "image/png",
+			sourceMimeType: "image/png",
+			widthPx: 1,
+			heightPx: 1,
+			byteLength: 68,
+			key: "logo",
+		},
+	};
+
+	/** Open the overlay on one changed image in `area` under a terminal advertising `kinds`, and return its asset nodes. */
+	async function describeImageChange(
+		area: ChangedFile["area"],
+		contents: AssetFileContents,
+		kinds: readonly TspKind[] = TSP_KINDS,
+	) {
+		await initTheme();
+		const h = await TspHarness.start(undefined, { cols: 150, rows: 40, kinds });
+		const changed = file("assets/logo.png", area);
+		const closed = showGitOverlay(h.tui, {
+			model: {
+				...model,
+				unstaged: area === "unstaged" ? [changed] : [],
+				staged: area === "staged" ? [changed] : [],
+				streamContents: async () => contents,
+			},
+			createAvatarSource: () => ({ get: () => null }),
+			aiStage: async () => ({ matchedFiles: 0, totalFiles: 0, stagedHunks: 0, totalHunks: 0, wholeFiles: 0 }),
+			generateCommitMessage: async () => {
+				throw new Error("unused");
+			},
+		});
+		try {
+			const role = (n: { p?: unknown }) => (n.p as { role?: string } | undefined)?.role;
+			const shown = () => h.find(n => role(n) === "omp.app.git.compare" || n.k === "kv");
+			for (let i = 0; i < 10 && !shown(); i++) {
+				await Promise.resolve();
+				h.tui.requestRender();
+				h.flush(10);
+			}
+			return {
+				media: h
+					.findAll(n => n.k === "media")
+					.map(n => {
+						const { path, rev, link } = n.p as { path: string; rev?: string; link?: string };
+						return { path, rev, link };
+					}),
+				heads: h.findAll(n => role(n) === "omp.app.git.media-head").map(n => JSON.stringify(n.p)),
+				notes: h.findAll(n => role(n) === "omp.app.git.media-none").map(n => JSON.stringify(n.p)),
+				kv: h.find(n => n.k === "kv")?.p,
+			};
+		} finally {
+			h.terminal.send("q");
+			h.flush();
+			await closed;
+			h.tui.stop();
+		}
+	}
+
+	it("compares an unstaged image change as index and worktree media nodes when the terminal has media", async () => {
+		const shown = await describeImageChange("unstaged", {
+			kind: "asset",
+			old: pngSide,
+			new: pngSide,
+			oldRef: { path: "/repo/assets/logo.png", rev: ":0" },
+			newRef: { path: "/repo/assets/logo.png" },
+		});
+		expect(shown.media).toEqual([
+			{ path: "/repo/assets/logo.png", rev: ":0", link: "git-compare" },
+			{ path: "/repo/assets/logo.png", rev: undefined, link: "git-compare" },
+		]);
+		expect(shown.heads).toHaveLength(2);
+		expect(shown.heads[0]).toContain("Before · PNG");
+		expect(shown.heads[1]).toContain("After · PNG");
+		expect(shown.kv).toBeUndefined();
+	});
+
+	it("compares a staged image change as HEAD and index media nodes when the terminal has media", async () => {
+		const shown = await describeImageChange("staged", {
+			kind: "asset",
+			old: pngSide,
+			new: pngSide,
+			oldRef: { path: "/repo/assets/old-logo.png", rev: "HEAD" },
+			newRef: { path: "/repo/assets/logo.png", rev: ":0" },
+		});
+		expect(shown.media).toEqual([
+			{ path: "/repo/assets/old-logo.png", rev: "HEAD", link: "git-compare" },
+			{ path: "/repo/assets/logo.png", rev: ":0", link: "git-compare" },
+		]);
+		expect(shown.notes).toEqual([]);
+	});
+
+	it("shows an added image's missing side as a note beside its media node", async () => {
+		const shown = await describeImageChange("staged", {
+			kind: "asset",
+			old: { kind: "empty" },
+			new: pngSide,
+			newRef: { path: "/repo/assets/logo.png", rev: ":0" },
+		});
+		expect(shown.media).toEqual([{ path: "/repo/assets/logo.png", rev: ":0", link: "git-compare" }]);
+		expect(shown.notes).toHaveLength(1);
+		expect(shown.notes[0]).toContain("Did not exist");
+	});
+
+	it("falls back to the before/after facts when the terminal lacks media", async () => {
+		const shown = await describeImageChange(
+			"staged",
+			{
+				kind: "asset",
+				old: pngSide,
+				new: pngSide,
+				oldRef: { path: "/repo/assets/logo.png", rev: "HEAD" },
+				newRef: { path: "/repo/assets/logo.png", rev: ":0" },
+			},
+			TSP_KINDS.filter(kind => kind !== "media"),
+		);
+		expect(shown.media).toEqual([]);
+		expect(JSON.stringify(shown.kv)).toContain("image 1×1");
 	});
 });
 

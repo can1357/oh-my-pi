@@ -109,6 +109,13 @@ export class Text implements Component {
 		this.#cachedLines = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#cachedText = undefined;
+		this.#cachedWidth = undefined;
+		this.#cachedWidthConfigEpoch = undefined;
+		this.#cachedLines = undefined;
+	}
+
 	/**
 	 * Wrapped text; styling re-derived from the styled source so a theme swap
 	 * re-resolves tokens. A background fill becomes the node's tone.

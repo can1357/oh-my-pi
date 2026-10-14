@@ -9,6 +9,14 @@ provider "openai-codex" {
 	}
 	web-search "codex"
 
+	// Policy budgets: the Codex backend documents no request-size or image
+	// limit, and requests with several thousand images fail mid-stream at
+	// random. Inline images keep Anthropic's 24 MB; the official endpoint's
+	// image count stays well below those failures. A custom baseUrl keeps 200.
+	inline-image-byte-budget 24000000
+	image-count-budget 200
+	official-image-count-budget 2000
+
 	seed api="openai-codex-responses" base-url="https://chatgpt.com/backend-api" bundle="always" {
 		// Label only: the Codex backend ignores `tool.model` and runs gpt-image-2-codex.
 		model "gpt-image-2" name="GPT Image 2" {
@@ -77,16 +85,6 @@ provider "openai-codex" {
 			cache-read 1.0
 			cache-write 0
 		}
-		service-tier-cost {
-			flex 0.5
-			priority 2.5
-			// Ultrafast is Astra-only. This table uses OpenAI's included-usage
-			// multipliers for Codex: Ultrafast 8x and Fast 2.5x Standard (purchased
-			// credits / Enterprise pay-as-you-go bill 6x and 2x instead). See
-			// https://learn.chatgpt.com/docs/agent-configuration/speed and
-			// https://learn.chatgpt.com/docs/pricing.
-			ultrafast 8
-		}
 		limits-patch {
 			context-window 272000
 		}
@@ -101,10 +99,12 @@ provider "openai-codex" {
 		}
 	}
 	// GPT-6.1 Sol keeps GPT-6 Sol's $2/$10 list price but halves cached input
-	// to $0.10 (OpenAI API docs, 2026-09-29). Like Astra, Codex reports a 272K
-	// default and an 872K maximum while OpenAI documents 922K max input (1.05M
-	// total); the curated maximum applies only with extended context on, and a
-	// higher live maximum still wins.
+	// to $0.10 (OpenAI API docs, 2026-09-29). OpenAI raised the Codex/Work
+	// default window from 272K to 500K at no extra charge (2026-10-11,
+	// https://x.com/thsottiaux/status/2109430343346581527). Codex reports an
+	// 872K maximum while OpenAI documents 922K max input (1.05M total); the
+	// curated maximum applies only with extended context on, and a higher live
+	// maximum still wins.
 	models "gpt-6.1-sol" "gpt-6.1-sol-wm" {
 		cost-patch {
 			input 2.0
@@ -113,9 +113,21 @@ provider "openai-codex" {
 			cache-write 0
 		}
 		limits-patch {
-			context-window 272000
+			context-window 500000
 		}
 		max-context-window 922000
+	}
+	// Codex Ultrafast ships on GPT-6 Astra and GPT-6.1 Sol. This table uses
+	// OpenAI's included-usage multipliers for Codex: Ultrafast 8x and Fast 2.5x
+	// Standard (purchased credits / Enterprise pay-as-you-go bill 6x and 2x
+	// instead). See https://learn.chatgpt.com/docs/agent-configuration/speed
+	// and https://learn.chatgpt.com/docs/pricing.
+	models "gpt-6-astra" "gpt-6-astra-wm" "gpt-6.1-sol" "gpt-6.1-sol-wm" {
+		service-tier-cost {
+			flex 0.5
+			priority 2.5
+			ultrafast 8
+		}
 	}
 	models "gpt-6-luna" "gpt-6-luna-wm" {
 		cost-patch {

@@ -1659,3 +1659,32 @@ export type LsToolResultEvent = ToolResultEvent & { toolName: "ls" };
 export function isLsToolResult(e: ToolResultEvent): e is LsToolResultEvent {
 	return e.toolName === "ls";
 }
+
+/** Upstream `ParsedSkillBlock`: the `<skill>` block parsed from a message. */
+export interface ParsedSkillBlock {
+	name: string;
+	location: string;
+	content: string;
+	userMessage: string | undefined;
+}
+
+/**
+ * Parse a skill block from message text, ported verbatim from upstream
+ * pi-coding-agent 1.0.2+ (`src/core/agent-session.ts`). omp folds skill
+ * invocation into its own hook pipeline and never exports the parser, so
+ * legacy extensions importing it from the package root fail Bun's static
+ * named-export check (observed consumer: `pi-optchat`, which matches journaled
+ * skill invocations back to their typed input).
+ *
+ * Returns null if the text doesn't contain a skill block.
+ */
+export function parseSkillBlock(text: string): ParsedSkillBlock | null {
+	const match = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/);
+	if (!match) return null;
+	return {
+		name: match[1],
+		location: match[2],
+		content: match[3],
+		userMessage: match[4]?.trim() || undefined,
+	};
+}

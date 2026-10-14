@@ -7,7 +7,7 @@
  * - Convenience helpers: captureText / execText, AbortSignal, timeouts.
  */
 
-import { Process } from "@oh-my-pi/pi-natives";
+import { Process, type ProcessTerminateOptions } from "@oh-my-pi/pi-natives";
 import type { Spawn, Subprocess } from "bun";
 
 type InMask = "pipe" | "ignore" | Buffer | Uint8Array | null;
@@ -387,10 +387,38 @@ export class ChildProcess<In extends InMask = InMask> {
 						? { group: true }
 						: undefined
 					: { gracefulMs, group: this.#terminateGroup };
-			this.#terminating = (this.#windowsRootProcess ?? Process.fromPid(this.proc.pid))
-				?.terminate(options)
-				?.catch(e => void e);
+			this.#terminating = this.#terminateTree(options);
 		}
+	}
+
+	/**
+	 * Native tree termination. A native handle that cannot be resolved or used
+	 * — the PID left the process table, or a `bun test --isolate` realm whose
+	 * napi classes another realm superseded ("Value is not an instance of class
+	 * `Process`") — must not leave the child running, so signal it directly.
+	 */
+	#terminateTree(options: ProcessTerminateOptions | undefined): Promise<boolean | void> {
+		const gracefulMs = options?.gracefulMs ?? 1000;
+		try {
+			const root = this.#windowsRootProcess ?? Process.fromPid(this.proc.pid);
+			if (root) return root.terminate(options).catch(() => this.#signalChild(gracefulMs));
+		} catch {}
+		return this.#signalChild(gracefulMs);
+	}
+
+	/** SIGTERM the child (its group when it leads one), then SIGKILL if it outlives `gracefulMs`. */
+	async #signalChild(gracefulMs: number): Promise<void> {
+		const signal = (name: NodeJS.Signals) => {
+			try {
+				if (this.#terminateGroup && process.platform !== "win32") process.kill(-this.proc.pid, name);
+				else this.proc.kill(name);
+			} catch {}
+		};
+		if (gracefulMs >= 0) {
+			signal("SIGTERM");
+			await Promise.race([this.proc.exited, Bun.sleep(gracefulMs)]);
+		}
+		if (this.proc.exitCode === null && this.proc.signalCode === null) signal("SIGKILL");
 	}
 
 	async #hardKillSubreaperTree(root: Process): Promise<void> {

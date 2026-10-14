@@ -418,6 +418,26 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.imageCount).toBe(1);
 	});
 
+	it("labels a LiteLLM hosted image request with the conversation session header", async () => {
+		const proxied = catalogModel("litellm", "gpt-5.6-sol", "openai-responses", "chat");
+		const sessionHeaders: (string | null)[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			sessionHeaders.push(new Headers(init?.headers).get("x-litellm-session-id"));
+			return hostedResponse();
+		};
+		const ctx = createContext({
+			models: [proxied],
+			settings: Settings.isolated(),
+			fetch: fetchMock,
+			activeModel: proxied,
+		});
+
+		const result = await imageGenTool.execute("litellm-hosted", { subject: "proxy" }, undefined, ctx);
+		collectPaths(result);
+
+		expect(sessionHeaders).toEqual([ctx.sessionManager.getSessionId()]);
+	});
+
 	it("omits the image tool model for Codex hosted image requests", async () => {
 		const image = catalogModel("openai-codex", "gpt-image-selected", "openai-codex-responses");
 		const carrier = catalogModel("openai-codex", "gpt-5.5", "openai-codex-responses", "chat");

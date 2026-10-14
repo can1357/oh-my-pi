@@ -150,12 +150,18 @@ test("the model hub describes a data-first picker when the terminal has the kind
 		["provider:demo", 1, "Providers"],
 		["provider:openai", 2, "Providers"],
 	]);
-	expect(p.scopes?.find(scope => scope.id === "provider:anthropic")?.mark).toEqual({ text: "An", seed: "anthropic" });
+	expect(p.scopes?.find(scope => scope.id === "provider:anthropic")?.mark).toEqual({
+		text: "An",
+		seed: "anthropic",
+		icon: "provider:anthropic",
+	});
 	// The recent/role block, then one group per provider.
 	expect(groups(p)).toEqual(["Recent", "anthropic", "openai"]);
 	expect(p.current).toEqual(["demo/demo"]);
 	expect(p.total).toBe(5);
 	const demo = p.items?.find(entry => entry.id === "demo/demo");
+	// Model rows lead with their provider's mark too.
+	expect(demo?.mark).toEqual({ text: "De", seed: "demo", icon: "provider:demo" });
 	// The default role runs with thinking off (`defaultThinkingLevel`): its chip carries that level's dot.
 	expect(demo?.chips).toEqual([{ text: "default", on: true, dot: "thinkingOff" }]);
 	expect(p.items?.find(entry => entry.id === "anthropic/claude-sonnet-5-5")?.facts?.int).toBe("60");

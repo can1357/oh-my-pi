@@ -476,6 +476,7 @@ export const grepToolRenderer = {
 				...describeGroupedOutput(textContent.split("\n"), {
 					lang: getLanguageFromPath,
 					maxFiles: options.expanded ? undefined : NATIVE_COLLAPSED_FILES,
+					file: details?.files?.length === 1 ? details.files[0] : undefined,
 				}),
 				foot,
 			]),

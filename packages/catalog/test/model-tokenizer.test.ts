@@ -31,6 +31,11 @@ describe("resolveModelTokenizer", () => {
 		expect(resolveModelTokenizer("moonshot-v1-128k")).toBeUndefined();
 		expect(resolveModelTokenizer("glm-5.2")).toBe("glm5");
 		expect(resolveModelTokenizer("glm-4.7")).toBeUndefined();
+		expect(resolveModelTokenizer("gpt-6.1-sol", "openai-codex")).toBe("o200k");
+		expect(resolveModelTokenizer("gpt-5.1-codex-max")).toBe("o200k");
+		expect(resolveModelTokenizer("openai/gpt-5.5", "openrouter")).toBe("o200k");
+		expect(resolveModelTokenizer("gpt-4-turbo")).toBeUndefined();
+		expect(resolveModelTokenizer("openai/gpt-oss-120b")).toBeUndefined();
 		expect(resolveModelTokenizer("yolo")).toBeUndefined();
 		expect(resolveModelTokenizer("yolo-auto/yolo", "yolo-auto")).toBe("qwen3");
 	});

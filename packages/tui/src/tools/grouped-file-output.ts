@@ -356,17 +356,21 @@ export function numberedCode(lines: readonly NumberedLine[], opts: { lang?: stri
  * header's suffix or the match count as a chip), then its lines as
  * {@link numberedCode} with match lines marked and `…` between non-adjacent
  * runs. Unnumbered body lines stay plain `code`. `maxFiles` keeps only the
- * first files (the caller says how many were left out).
+ * first files (the caller says how many were left out). `file` owns the lines
+ * before any header: a single-file search prints none, yet its lines get the
+ * same file row as a directory search's.
  */
 export function describeGroupedOutput(
 	lines: readonly string[],
-	options: { lang?: (path: string) => string | undefined; maxFiles?: number } = {},
+	options: { lang?: (path: string) => string | undefined; maxFiles?: number; file?: string } = {},
 ): NativeNode[] {
 	const files: NativeNode[] = [];
 	const loose: NativeNode[] = [];
 	let current: { path: string; suffix?: string; children: NativeNode[]; marks: number } | undefined;
 	let numbered: NumberedLine[] = [];
 	let plain: string[] = [];
+	// `options.file` until the first line or header claims it.
+	let headless = options.file;
 
 	const flushLines = () => {
 		const target = current?.children ?? loose;
@@ -397,10 +401,15 @@ export function describeGroupedOutput(
 
 	for (const event of walkGroupedOutput(lines)) {
 		if (event.kind !== "line") {
+			headless = undefined;
 			flushFile();
 			if (options.maxFiles !== undefined && files.length >= options.maxFiles) break;
 			if (event.kind === "file") current = { path: event.path, suffix: event.suffix, children: [], marks: 0 };
 			continue;
+		}
+		if (headless !== undefined) {
+			current = { path: headless, children: [], marks: 0 };
+			headless = undefined;
 		}
 		if (GROUPED_GAP_LINE_RE.test(event.text)) {
 			numbered.push({ n: null, text: "" });

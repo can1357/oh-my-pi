@@ -124,6 +124,16 @@ describe("native composer", () => {
 		});
 	});
 
+	it("sends a shown prediction as ghost text in place of the placeholder", () => {
+		const editor = composer({ running: false, title: "Fix login" });
+		editor.prediction = () => "run the tests";
+		const input = () => nodes(editor.describe(cx)).find(n => n.k === "editor")?.p;
+
+		expect(input()).toMatchObject({ ghost: "run the tests", placeholder: undefined });
+		editor.setText("run");
+		expect(input()).toMatchObject({ ghost: " the tests", placeholder: undefined });
+	});
+
 	it("names the viewed subagent over the draft and routes its links to the focus handler", () => {
 		expect(byRole(composer({ running: false }).describe(cx), "omp.composer.focus")).toBeUndefined();
 
@@ -440,7 +450,7 @@ describe("native composer without a status strip", () => {
 			const model = byRole(bar, "omp.composer.model")!;
 			expect(model.p).toMatchObject({ actions: { click: "status.model" } });
 			expect(nodes(model).map(n => n.k)).toEqual(["row", "icon", "text", "icon"]);
-			// Path and branch belong to Tern's pane header; the rest stays as a fact.
+			// The path belongs to Tern's pane header; the rest stays as a fact (git shows nothing without a repo).
 			const extras = byRole(bar, "omp.composer.extras")!;
 			expect((extras.c ?? []).filter(isNode).map(n => n.key)).toEqual(["hostname"]);
 			expect(byRole(bar, "omp.composer.usage")?.p).toMatchObject({ actions: { click: "status.cost" } });

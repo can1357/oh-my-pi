@@ -35,6 +35,7 @@ import {
 	DAEMON_BROKER_WORKER_ARG,
 	IDA_HOST_WORKER_ARG,
 	LSP_MUX_WORKER_ARG,
+	MNEMOPI_EMBED_SERVER_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	TERMINAL_OUTPUT_WORKER_ARG,
@@ -269,6 +270,11 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === MNEMOPI_EMBED_WORKER_ARG) {
 		const { startMnemopiEmbedWorker } = await import("./mnemopi/embed-worker");
 		await runIpcSubprocessWorker(startMnemopiEmbedWorker);
+		return true;
+	}
+	if (arg === MNEMOPI_EMBED_SERVER_WORKER_ARG) {
+		const { startMnemopiEmbedServerFromEnvironment } = await import("./mnemopi/embed-server");
+		await startMnemopiEmbedServerFromEnvironment();
 		return true;
 	}
 	if (arg === STATS_ACTIVITY_WORKER_ARG) {

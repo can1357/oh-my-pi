@@ -131,6 +131,7 @@ import {
 	cfgTaskMaxEffort,
 	cfgTaskSoftRequestBudgetNotice,
 	cfgTaskSoftRequestBudget,
+	cfgTaskAgentSoftRequestBudget,
 	cfgTaskAgentIdleTtlMs,
 	cfgTaskMaxRuntimeMs,
 	cfgTaskMaxRecursionDepth,
@@ -167,7 +168,8 @@ const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
  * Entries are ceilings, not fixed values: the `default` key applies to agents
  * without an explicit entry, and the `task.softRequestBudget` setting can only
  * lower an agent's budget, never raise it above its bundled entry (0 disables
- * the guard entirely).
+ * the guard entirely). An agent's `task.agentSoftRequestBudget` entry replaces
+ * both.
  */
 export const SOFT_REQUEST_BUDGET: Record<string, number> = {
 	scout: 100,
@@ -176,12 +178,19 @@ export const SOFT_REQUEST_BUDGET: Record<string, number> = {
 };
 
 /**
- * Resolves the effective soft request budget for an agent. The configured
- * `task.softRequestBudget` and the agent's bundled entry are both upper
- * bounds, so the tighter one wins; a configured budget of 0 disables the
- * guard regardless of the bundled entry.
+ * Resolves the effective soft request budget for an agent. Its exact-name
+ * `task.agentSoftRequestBudget` entry wins as given (0 disables its guard).
+ * Otherwise the configured `task.softRequestBudget` and the agent's bundled
+ * entry are both upper bounds, so the tighter one wins; a configured budget of
+ * 0 disables the guard regardless of the bundled entry.
  */
-export function resolveSoftRequestBudget(agentName: string, configuredBudget: number): number {
+export function resolveSoftRequestBudget(
+	agentName: string,
+	configuredBudget: number,
+	agentBudgets: Readonly<Record<string, number | null>> = {},
+): number {
+	const agentBudget = agentBudgets[agentName];
+	if (typeof agentBudget === "number") return agentBudget;
 	const normalized = Math.max(0, Math.trunc(configuredBudget));
 	if (normalized === 0) return 0;
 	return Math.min(normalized, SOFT_REQUEST_BUDGET[agentName] ?? normalized);
@@ -192,7 +201,7 @@ export const BUDGET_STOP_GRACE_REQUESTS = 5;
 
 /** Steering notice injected when a subagent crosses its soft request budget. */
 export function buildBudgetNotice(requests: number, budget: number): string {
-	return `[budget notice] You have used ${requests} requests in this run (soft budget: ${budget}). Wrap up now: finish the current step and yield your final report. At ${Math.ceil(budget * 1.5)} requests the run is force-stopped and you will be asked to yield whatever you have.`;
+	return `[budget notice] You have used ${requests} requests in this run (soft budget: ${budget}). Wrap up now: finish the current step and deliver your final report. At ${Math.ceil(budget * 1.5)} requests the run is force-stopped and you will be asked to report whatever you have.`;
 }
 
 /** Flatten whitespace and clip salvage text for the cancelled-child summary line. */
@@ -392,6 +401,8 @@ export interface ExecutorOptions {
 	additionalDirectories?: string[];
 	/** Exact provider credential resolver inherited from the parent session. */
 	getApiKey?: CreateAgentSessionOptions["getApiKey"];
+	/** Parent session's manager; the child and its revived turns use this exact delivery scope. */
+	asyncJobManager?: AsyncJobManager;
 	/** Parent session whose stored credential affinities seed the child session. */
 	credentialSourceSessionId?: string;
 	worktree?: string;
@@ -433,6 +444,12 @@ export interface ExecutorOptions {
 	effort?: TaskEffort;
 	/** Caller's description of how open-ended the work is; rides the initial prompt into the child's `auto` thinking classifier. */
 	solutionSpace?: string;
+	/**
+	 * `false` = the child has no `yield` tool and its final assistant message is
+	 * the result (`task.structured` off); callers then supply no {@link outputSchema}.
+	 * Default `true`.
+	 */
+	structured?: boolean;
 	/** Schema used to validate the final structured completion. */
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */
@@ -563,6 +580,8 @@ export interface ExecutorOptions {
 	 * passes its own `getAgentId()`).
 	 */
 	parentAgentId?: string;
+	/** Same-type siblings share a cache route without sharing conversation state. */
+	parentPromptCacheKey?: string;
 	/**
 	 * Keep the finished subagent addressable in the registry for IRC/revival.
 	 * Defaults to true. Eval bridge agents are programmatic one-shot helpers and
@@ -640,6 +659,8 @@ interface FinalizeSubprocessOutputArgs {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	lastAssistantText?: string;
+	/** `false` = no `yield` tool: `rawOutput` is the final assistant message, returned verbatim. Default `true`. */
+	structured?: boolean;
 }
 
 interface FinalizeSubprocessOutputResult {
@@ -655,6 +676,7 @@ export const SUBAGENT_WARNING_SCHEMA_OVERRIDDEN =
 export const SUBAGENT_WARNING_NULL_YIELD = "SYSTEM WARNING: Subagent called yield with null data.";
 export const SUBAGENT_WARNING_MISSING_YIELD =
 	"SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
+export const SUBAGENT_WARNING_EMPTY_MESSAGE = "SYSTEM WARNING: Subagent ended without a final message.";
 
 /** Build a schema_violation outcome — surfaced as a non-zero exit so callers treat it as a failure. */
 function buildSchemaViolationOutcome(
@@ -779,6 +801,13 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 					}
 				}
 			}
+		}
+	} else if (args.structured === false) {
+		// The final assistant message is the result verbatim; only an empty one fails.
+		if (exitCode === 0 && !rawOutput.trim()) {
+			rawOutput = SUBAGENT_WARNING_EMPTY_MESSAGE;
+			stderr = SUBAGENT_WARNING_EMPTY_MESSAGE;
+			exitCode = 1;
 		}
 	} else {
 		const allowFallback = exitCode === 0 && !doneAborted && !signalAborted;
@@ -1438,7 +1467,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	// Soft-budget stop: cancel the free-running turn WITHOUT aborting the
-	// monitor, so driveSessionToYield can still drive one forced final yield.
+	// monitor, so driveSessionToResult can still drive one forced final report.
 	// Deliberately not routed through abortActiveSession(): that memoizes its
 	// promise, and a later hard abort (grace exhausted) must be able to abort
 	// the session again.
@@ -1462,7 +1491,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// Yield turn-stop: a terminal yield recorded while owner async work is
 	// still pending is a scheduling pause, not run completion. Stop the
 	// free-running turn exactly like a budget stop (session abort, monitor
-	// signal untouched) so driveSessionToYield's quiescence barrier can settle
+	// signal untouched) so driveSessionToResult's quiescence barrier can settle
 	// the jobs, fold their results in, and demand a fresh yield. Terminating
 	// here instead would abort the run signal and make the barrier
 	// unreachable, completing the run with a payload that predates the job
@@ -2306,6 +2335,16 @@ interface DriveOutcome {
 	abortReasonText?: string;
 }
 
+/**
+ * Whether a settled drive handed over its final result — an accepted `yield`,
+ * or for a message-result run a clean finish on a non-empty report turn — so
+ * the caller can mark the registry ref accepted.
+ */
+function resultDelivered(outcome: DriveOutcome, monitor: SubagentRunMonitor, structured: boolean): boolean {
+	if (structured) return monitor.yieldCalled();
+	return outcome.exitCode === 0 && !outcome.aborted && monitor.lastReportTurnText() !== undefined;
+}
+
 const MAX_YIELD_RETRIES = 3;
 const MAX_PROMPT_DISPATCH_ATTEMPTS = 4;
 const PROMPT_DISPATCH_IDLE_TIMEOUT_MS = 5_000;
@@ -2313,28 +2352,37 @@ const PROMPT_DISPATCH_IDLE_TIMEOUT_MS = 5_000;
 class PromptDispatchError extends Error {}
 
 /**
- * Drive one assignment through a live session: send the prompt, wait for idle,
+ * Drive one assignment through a live session: send the prompt (with `restore`,
+ * go on with the turn the previous process left unfinished instead:
+ * {@link AgentSession.restoreInterruptedTurn}), wait for idle,
  * remind the agent to `yield` (up to {@link MAX_YIELD_RETRIES} times), then
  * classify the terminal assistant state. A soft-budget stop short-circuits the
  * reminder ladder into a single forced final yield so partial findings still
- * come back as a real report.
+ * come back as a real report. Without a `yield` tool (`structured: false`) an
+ * idle turn already ended on the final message, so only a budget stop prompts
+ * again: one tool-less wrap-up turn.
  */
-async function driveSessionToYield(
+async function driveSessionToResult(
 	session: AgentSession,
 	monitor: SubagentRunMonitor,
 	task: string,
 	options: {
 		/** Open-endedness description forwarded to the session's `auto` thinking classifier. */
 		solutionSpace?: string;
+		/** `false` = no `yield` tool; the final assistant message is the result. Default `true`. */
+		structured?: boolean;
 		/**
 		 * Invoked when the initial prompt loses a prompt race (AgentBusyError) before
 		 * retrying. Lets the caller restore a safe contract and detach its monitor
 		 * while backing off. Absent, the busy error keeps the old path.
 		 */
 		onPromptBusy?: () => Promise<void>;
+		/** Go on with the interrupted turn instead of sending `task`, which only labels the run. */
+		restore?: boolean;
 	} = {},
 ): Promise<DriveOutcome> {
-	const { solutionSpace, onPromptBusy } = options;
+	const { solutionSpace, onPromptBusy, restore } = options;
+	const structured = options.structured !== false;
 	using _keepalive = new EventLoopKeepalive();
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
@@ -2416,7 +2464,8 @@ async function driveSessionToYield(
 			let promptAttempts = 0;
 			for (;;) {
 				try {
-					await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt");
+					if (restore) await awaitAbortable(session.restoreInterruptedTurn());
+					else await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt");
 					break;
 				} catch (error) {
 					promptAttempts++;
@@ -2436,7 +2485,8 @@ async function driveSessionToYield(
 			if (!recoverableStop || abortSignal.aborted || err instanceof PromptDispatchError) throw err;
 		}
 
-		const reminderToolChoice = buildNamedToolChoice("yield", session.model);
+		// The forced final turn must answer through `yield`, or with no tools at all.
+		const reminderToolChoice = structured ? buildNamedToolChoice("yield", session.model) : "none";
 
 		const runYieldLadder = async (): Promise<void> => {
 			let retryCount = 0;
@@ -2446,6 +2496,7 @@ async function driveSessionToYield(
 				// final yield: wait for the stop's session abort to settle, then
 				// prompt once with the wrap-up reminder + named tool choice.
 				const budgetStop = monitor.budgetStopRequested();
+				if (!structured && !budgetStop) break;
 				if (budgetStop) {
 					retryCount = MAX_YIELD_RETRIES - 1;
 					await monitor.waitForBudgetStop();
@@ -2466,6 +2517,7 @@ async function driveSessionToYield(
 						retryCount,
 						maxRetries: MAX_YIELD_RETRIES,
 						budgetStop,
+						structured,
 					});
 
 					const isFinalRetry = retryCount >= MAX_YIELD_RETRIES;
@@ -2612,9 +2664,11 @@ async function driveSessionToYield(
 			}
 		}
 
-		// A budget-stopped run that still produced no yield is a budget abort:
-		// surface the precise reason instead of a generic missing-yield failure.
-		if (!monitor.yieldCalled() && monitor.budgetStopRequested() && !aborted) {
+		// A budget-stopped run that still produced no result (no yield, or no
+		// clean final message) is a budget abort: surface the precise reason
+		// instead of a generic missing-result failure.
+		const delivered = structured ? monitor.yieldCalled() : lastAssistant?.stopReason === "stop";
+		if (!delivered && monitor.budgetStopRequested() && !aborted) {
 			aborted = true;
 			abortReasonText ??= monitor.resolveAbortReasonText();
 			exitCode = 1;
@@ -2665,6 +2719,8 @@ interface FinalizeRunArgs {
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
+	/** `false` = no `yield` tool: the run's last report turn is the result verbatim. Default `true`. */
+	structured?: boolean;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -2697,8 +2753,11 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	let exitCode = done.exitCode;
 	let stderr = done.error ?? "";
 
-	// Use final output if available, otherwise accumulated output
-	let rawOutput = monitor.rawOutput();
+	// A structured run finalizes from its yield (falling back to the run's
+	// output); a message-result run is exactly its final report turn, never
+	// the narration of earlier turns.
+	const structured = args.structured !== false;
+	let rawOutput = structured ? monitor.rawOutput() : (monitor.lastReportTurnText() ?? "");
 	const yieldItems = progress.extractedToolData?.yield as YieldItem[] | undefined;
 	// Breadcrumb the synchronous yield-payload shaping (O(rawOutput)) so a block
 	// here is attributed to this subagent rather than logged as "unknown".
@@ -2716,6 +2775,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			outputSchemaMode: args.outputSchemaMode,
 			outputSchemaSource: args.outputSchemaSource,
 			lastAssistantText: monitor.lastReportTurnText(),
+			structured,
 		});
 	} finally {
 		popLoopPhase();
@@ -2908,6 +2968,8 @@ export interface IrcWakeTurnMonitorOptions {
 	/** Fallback session file when the registry ref carries none. */
 	sessionFile?: string;
 	maxRuntimeMs?: number;
+	/** `false` = the session has no `yield` tool; see {@link ExecutorOptions.structured}. */
+	structured?: boolean;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -3238,6 +3300,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					task: ircTask,
 					modelOverride: options.modelOverride,
 					modelRole: options.modelRole,
+					structured: options.structured,
 					outputSchema: options.outputSchema,
 					outputSchemaMode: options.outputSchemaMode,
 					outputSchemaSource: options.outputSchemaSource,
@@ -3444,13 +3507,19 @@ export interface FollowUpTurnOptions {
 	id: string;
 	/** Agent definition the session was originally spawned with (drives progress labels + finalize). */
 	agent: AgentDefinition;
-	/** The follow-up message; sent as the turn's user prompt. */
+	/** The follow-up message; sent as the turn's user prompt (with {@link restore}, only the run's label). */
 	message: string;
+	/**
+	 * Go on with the turn the previous process left unfinished instead of sending
+	 * `message` (`omp --restore`: {@link AgentSession.restoreInterruptedTurn}).
+	 */
+	restore?: boolean;
 	index?: number;
 	description?: string;
 	/** Explicit pre-expansion model role alias retained from the original run. */
 	modelRole?: string;
-	/** Structured-output state retained from the original invocation. */
+	/** Structured-output state retained from the original invocation; see {@link ExecutorOptions.structured}. */
+	structured?: boolean;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -3475,7 +3544,8 @@ export interface FollowUpTurnOptions {
 
 /**
  * Continue a previously spawned (keep-alive) subagent with one more monitored
- * turn: revive it if parked, send `message` as a real prompt, drive it to
+ * turn: revive it if parked, send `message` as a real prompt (or, with
+ * `restore`, go on with its interrupted turn), drive it to
  * `yield`, and finalize a {@link SingleResult} exactly like a first run.
  *
  * The session's full conversation history is retained (live session, or JSONL
@@ -3583,8 +3653,11 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	// ordinary contract so the wake cannot consume pooled items, wait it out,
 	// then reinstall and reattach for the retry.
 	let attemptUnsubscribe = monitor.attach(session);
+	const structured = options.structured !== false;
 	try {
-		outcome = await driveSessionToYield(session, monitor, message, {
+		outcome = await driveSessionToResult(session, monitor, message, {
+			structured,
+			restore: options.restore,
 			onPromptBusy: async () => {
 				attemptUnsubscribe();
 				logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
@@ -3599,8 +3672,8 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 				attemptUnsubscribe = monitor.attach(session);
 			},
 		});
-		if (monitor.yieldCalled()) {
-			// A follow-up turn's accepted yield is the run's final result too:
+		if (resultDelivered(outcome, monitor, structured)) {
+			// A follow-up turn's accepted result is the run's final result too:
 			// terminalize the ref here, not just on the initial run (#11079).
 			AgentRegistry.global().markResultAccepted(id, session, monitor.yieldAcceptedAt());
 		}
@@ -3624,6 +3697,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		agent,
 		task: message,
 		modelRole: options.modelRole,
+		structured,
 		outputSchema: options.outputSchema,
 		outputSchemaMode: options.outputSchemaMode,
 		outputSchemaSource: options.outputSchemaSource,
@@ -3647,6 +3721,8 @@ interface SubagentPromptInputs {
 	planReference: string;
 	planReferencePath: string;
 	worktree: string;
+	/** Whether the session has a `yield` tool; selects the Completion protocol. */
+	structured: boolean;
 	outputSchema: unknown;
 	outputSchemaOverridesAgent: boolean;
 	ircEnabled: boolean;
@@ -3698,6 +3774,7 @@ function buildSubagentSessionOptions(
 	const customTools = spec.options.customTools ?? [];
 	return {
 		...spec.options,
+		taskPromptCacheKey: launch ? spec.options.taskPromptCacheKey : undefined,
 		mcpTools: mcpTools.length > 0 ? mcpTools : undefined,
 		customTools: customTools.length > 0 ? customTools : undefined,
 		settings,
@@ -3715,6 +3792,7 @@ function buildSubagentSessionOptions(
 				planReference: inputs.planReference,
 				planReferencePath: inputs.planReferencePath,
 				worktree: inputs.worktree,
+				structured: inputs.structured,
 				outputSchema: inputs.outputSchema,
 				outputSchemaOverridesAgent: inputs.outputSchemaOverridesAgent,
 				// Read the live item set through the registry instead of capturing the session, which
@@ -3877,6 +3955,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		onProgress,
 	} = options;
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
+	const structured = options.structured !== false;
 	const startTime = Date.now();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
@@ -3949,16 +4028,21 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// <= 0 disables parking (the session stays live until process teardown).
 	const agentIdleTtlMs = Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(settings)) || 0);
 	const configuredDefaultBudget = Math.max(0, Math.trunc(Number(cfgTaskSoftRequestBudget.get(settings)) || 0));
-	const softRequestBudget = resolveSoftRequestBudget(agent.name, configuredDefaultBudget);
+	const softRequestBudget = resolveSoftRequestBudget(
+		agent.name,
+		configuredDefaultBudget,
+		cfgTaskAgentSoftRequestBudget.get(settings),
+	);
 	const softRequestBudgetNotice = cfgTaskSoftRequestBudgetNotice.get(settings);
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
 
-	// Add tools if specified
+	// Add tools if specified. Unstructured runs never get `yield`, even when
+	// the frontmatter lists it.
 	let toolNames: string[] | undefined;
 	if (agent.tools) {
-		toolNames = agent.tools;
+		toolNames = structured ? agent.tools : agent.tools.filter(name => name !== "yield");
 		// Auto-include task tool if spawns defined but task not in tools
 		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
 			toolNames = [...toolNames, "task"];
@@ -4046,6 +4130,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		parentToolCallId: options.parentToolCallId,
 		sessionFile: subtaskSessionFile,
 		maxRuntimeMs,
+		structured,
 		outputSchema,
 		outputSchemaMode: options.outputSchemaMode,
 		outputSchemaSource: options.outputSchemaSource,
@@ -4302,6 +4387,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// prompt, artifacts dir) — only the SessionManager and settings differ.
 			const sessionSpec: SubagentSessionSpec = {
 				options: {
+					taskPromptCacheKey:
+						options.parentPromptCacheKey === undefined
+							? undefined
+							: `${options.parentPromptCacheKey}:${agent.name}`,
 					cwd: worktree ?? cwd,
 					additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 					authStorage,
@@ -4326,7 +4415,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					outputSchema,
 					outputSchemaMode: options.outputSchemaMode,
 					restrictToolNames: options.restrictToolNames,
-					requireYieldTool: true,
+					requireYieldTool: structured,
 					contextFiles: options.contextFiles,
 					skills: options.skills,
 					promptTemplates: options.promptTemplates,
@@ -4347,6 +4436,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					parentHindsightSessionState: options.parentHindsightSessionState,
 					parentMnemopiSessionState: options.parentMnemopiSessionState,
 					parentTaskPrefix: id,
+					asyncJobManager: options.asyncJobManager,
 					parentAgentId: options.parentAgentId,
 					agentId: id,
 					agentDisplayName: agent.name,
@@ -4368,6 +4458,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					planReference: options.planReference?.content ?? "",
 					planReferencePath: options.planReference?.path ?? "",
 					worktree: worktree ?? "",
+					structured,
 					outputSchema: normalizedOutputSchema,
 					outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
 					ircEnabled,
@@ -4575,11 +4666,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			readyAt = performance.now();
-			const outcome = await driveSessionToYield(session, monitor, task, { solutionSpace: options.solutionSpace });
+			const outcome = await driveSessionToResult(session, monitor, task, {
+				solutionSpace: options.solutionSpace,
+				structured,
+			});
 			// Acceptance boundary (#11079): the run's final result is settled, so
 			// stamp the lifecycle and terminalize a ref the run-state mirror left
 			// `running` before the (possibly slow) cleanup below.
-			if (monitor.yieldCalled()) {
+			if (resultDelivered(outcome, monitor, structured)) {
 				AgentRegistry.global().markResultAccepted(id, session, monitor.yieldAcceptedAt());
 			}
 			exitCode = outcome.exitCode;
@@ -4650,7 +4744,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 				unsubscribe = null;
 			}
-			const jobManager = AsyncJobManager.instance();
+			const jobManager = options.asyncJobManager;
 			if (jobManager) {
 				const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt);
 				if (!reap.settled) {
@@ -4761,6 +4855,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		assignment,
 		modelOverride,
 		modelRole,
+		structured,
 		outputSchema,
 		outputSchemaMode: options.outputSchemaMode,
 		outputSchemaSource: options.outputSchemaSource,

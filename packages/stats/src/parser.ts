@@ -672,12 +672,33 @@ export async function listSessionFolders(): Promise<string[]> {
 }
 
 /**
- * List all session files in a folder.
+ * Name prefix of the scratch directories `omp gc --compress` creates beside
+ * the files it copies on APFS. Their `.jsonl` files are transient copies of
+ * transcripts, never transcripts of their own; a killed run can leave one
+ * behind until the next `omp gc --compress --apply` removes it.
+ */
+export const COMPRESS_SCRATCH_PREFIX = ".omp-gc-compress-";
+
+/** Whether `relativePath` (from any ancestor directory) lies inside a compress scratch directory. */
+export function isCompressScratchPath(relativePath: string): boolean {
+	return relativePath.split(/[\\/]/).some(part => part.startsWith(COMPRESS_SCRATCH_PREFIX));
+}
+
+/**
+ * List all session files in a folder, excluding copies inside
+ * `omp gc --compress` scratch directories.
  */
 export async function listSessionFiles(folderPath: string): Promise<string[]> {
 	try {
 		const entries = await fs.readdir(folderPath, { recursive: true, withFileTypes: true });
-		return entries.filter(e => e.isFile() && e.name.endsWith(".jsonl")).map(e => path.join(e.parentPath, e.name));
+		return entries
+			.filter(
+				e =>
+					e.isFile() &&
+					e.name.endsWith(".jsonl") &&
+					!isCompressScratchPath(path.relative(folderPath, e.parentPath)),
+			)
+			.map(e => path.join(e.parentPath, e.name));
 	} catch {
 		return [];
 	}

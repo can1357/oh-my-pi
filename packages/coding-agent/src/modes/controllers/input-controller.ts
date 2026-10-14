@@ -16,6 +16,7 @@ import { formatModelRoleAlias, roleCandidatePool } from "../../config/model-role
 import { resolveModelRoleValue } from "../../config/model-resolver";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { InternalUrlRouter, resolveLocalRoot } from "../../internal-urls";
+import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { extractImagePathFromText } from "@oh-my-pi/pi-tui/prompt/custom-editor";
@@ -440,6 +441,10 @@ export class InputController {
 				// transcript, so expand it in-place instead of (or before)
 				// toggling tool-output previews.
 				if (focused instanceof AskDialogComponent && focused.toggleQuestionExpansion()) {
+					return { consume: true };
+				}
+				// Likewise an approval prompt that summarized its call's details.
+				if (focused instanceof ApprovalDialogComponent && focused.toggleDetails()) {
 					return { consume: true };
 				}
 				this.toggleToolOutputExpansion();

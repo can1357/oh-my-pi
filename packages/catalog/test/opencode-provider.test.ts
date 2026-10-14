@@ -490,6 +490,53 @@ describe("Shared models.dev catalog fallback", () => {
 });
 
 describe("OpenCode provider discovery", () => {
+	test("discovers the Zen Jev judge seed beside the served roster", async () => {
+		const fetchMock: FetchImpl = async () =>
+			Response.json({ data: [{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", context_length: 400_000 }] });
+		const options = opencodeZenModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
+		const models = ((await options.fetchDynamicModels?.()) ?? []).map(spec => buildModel(spec));
+
+		const jevRows = models.filter(model => model.id === "jev-1.13");
+		expect(jevRows).toHaveLength(1);
+		expect(jevRows[0]).toMatchObject({
+			name: "Jev 1.13",
+			api: "typesafe",
+			baseUrl: "https://opencode.ai/zen",
+			kind: "judge",
+			cost: { input: 0.042, output: 0 },
+		});
+
+		const proxied = opencodeZenModelManagerOptions({
+			apiKey: "user_test",
+			baseUrl: "https://proxy.example/zen/v1",
+			fetch: fetchMock,
+		});
+		const proxiedModels = ((await proxied.fetchDynamicModels?.()) ?? []).map(spec => buildModel(spec));
+		expect(proxiedModels.find(model => model.id === "jev-1.13")?.baseUrl).toBe("https://proxy.example/zen");
+	});
+
+	test("keeps one Zen System One jev row when the models route also lists it", async () => {
+		const fetchMock: FetchImpl = async () =>
+			Response.json({
+				data: [
+					{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", context_length: 400_000 },
+					{ id: "jev-1.13", name: "Jev 1.13", context_length: 32_000 },
+				],
+			});
+		const options = opencodeZenModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
+		const models = ((await options.fetchDynamicModels?.()) ?? []).map(spec => buildModel(spec));
+
+		const jevRows = models.filter(model => model.id === "jev-1.13");
+		expect(jevRows).toHaveLength(1);
+		expect(jevRows[0]).toMatchObject({ api: "typesafe", kind: "judge" });
+	});
+
+	test("returns null from a failed Zen discovery instead of the jev seed alone", async () => {
+		const fetchMock: FetchImpl = async () => new Response("unavailable", { status: 503 });
+		const options = opencodeZenModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
+		expect(await options.fetchDynamicModels?.()).toBeNull();
+	});
+
 	test("invalidates cached GLM-5.3 Flash effort metadata on upgrade (issue #9960)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-glm53-flash-cache-"));
 		const cacheDbPath = path.join(tempDir, "models.db");
@@ -910,9 +957,13 @@ describe("OpenCode provider discovery", () => {
 
 			expect(freeOptions.cacheProviderId).not.toBe(paidOptions.cacheProviderId);
 			expect(freeResult.stale).toBe(false);
-			expect(freeResult.models.map(model => model.id).sort()).toEqual([...LIVE_FREE_MODEL_IDS].sort());
+			expect(freeResult.models.map(model => model.id).sort()).toEqual(
+				[...LIVE_FREE_MODEL_IDS, "jev-1.13", "jev-1.13-free"].sort(),
+			);
 			expect(paidResult.stale).toBe(false);
-			expect(paidResult.models.map(model => model.id).sort()).toEqual([...LIVE_PAID_MODEL_IDS].sort());
+			expect(paidResult.models.map(model => model.id).sort()).toEqual(
+				[...LIVE_PAID_MODEL_IDS, "jev-1.13", "jev-1.13-free"].sort(),
+			);
 			expect([freeFetches, paidFetches]).toEqual([1, 1]);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
@@ -994,5 +1045,63 @@ describe("issue #10416 — retired bare opencode provider", () => {
 		);
 
 		expect(merged.map(model => `${model.provider}/${model.id}`)).toEqual(["fixture-provider/live-fallback-model"]);
+	});
+});
+
+describe("mergePreviousSnapshotModels — static-seed-complete providers", () => {
+	// CoralBricks' reviewed KDL seed is the complete documented fallback
+	// catalog (`bundle="always"`; `/v1/models` is key-protected), and
+	// Yolo-Auto's is the same. A host-retired id must not return as a
+	// previous-snapshot zombie while other providers' unfetched rows are
+	// still restored.
+	test("drops previous-snapshot rows for providers whose seed is the complete fallback catalog", () => {
+		const coralZombie = buildModel({
+			id: "retired-coral-model",
+			name: "Retired Coral Model",
+			api: "openai-completions",
+			provider: "coralbricks",
+			baseUrl: "https://inference.coralbricks.ai/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.15, output: 0.5, cacheRead: 0, cacheWrite: 0.23 },
+			contextWindow: 1_048_576,
+			maxTokens: 131_072,
+		});
+		const yoloZombie = buildModel({
+			id: "retired-yolo-model",
+			name: "Retired Yolo Model",
+			api: "openai-completions",
+			provider: "yolo-auto",
+			baseUrl: "https://yolo.invalid/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+		const kept = buildModel({
+			id: "kept-fallback-model",
+			name: "Kept Fallback Model",
+			api: "openai-completions",
+			provider: "fixture-provider",
+			baseUrl: "https://fixture.invalid/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+
+		const merged = mergePreviousSnapshotModels(
+			[],
+			{
+				coralbricks: { [coralZombie.id]: coralZombie },
+				"yolo-auto": { [yoloZombie.id]: yoloZombie },
+				"fixture-provider": { [kept.id]: kept },
+			},
+			new Set(),
+		);
+
+		expect(merged.map(model => `${model.provider}/${model.id}`)).toEqual(["fixture-provider/kept-fallback-model"]);
 	});
 });

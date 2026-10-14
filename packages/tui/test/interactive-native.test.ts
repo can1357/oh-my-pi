@@ -111,8 +111,9 @@ describe("native interactive primitives", () => {
 		expect(onTick).toHaveBeenCalledTimes(1);
 		const described = countdown.describe();
 		if (described.k !== "elapsed") throw new Error("expected an elapsed node");
-		expect(described.p?.stopped).toBe(0);
-		expect(described.p?.age).toBeLessThanOrEqual(0);
+		// A live countdown: `stopped` would freeze the display at that value from the start.
+		expect(described.p?.stopped).toBeUndefined();
+		expect(described.p?.age).toBeLessThan(0);
 
 		vi.advanceTimersByTime(2000);
 		expect(onExpire).toHaveBeenCalledTimes(1);

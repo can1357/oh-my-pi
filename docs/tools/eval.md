@@ -8,7 +8,6 @@
 - Entry and dynamic schema: `packages/coding-agent/src/tools/eval.ts`
 - Backend enablement: `packages/coding-agent/src/tools/eval-backends.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/eval.md`
-- Code Mode transport (enabled Codex Code Mode sessions demote non-essential tools into an eval bridge): `packages/tui/src/tools/eval-format/code-mode-declarations.ts`, prompt `packages/coding-agent/src/prompts/tools/eval-code-mode.md`
 - Shared contracts: `packages/coding-agent/src/eval/backend.ts`, `types.ts`, `executor-base.ts`, `kernel-base.ts`
 - Host bridges: `packages/coding-agent/src/eval/agent-bridge.ts`, `completion-bridge.ts`, `handle-bridge.ts`, `workpool-bridge.ts`, `judgment-bridge.ts`, `judgment-batch-bridge.ts`, `budget-bridge.ts`
 - File/percent-command preparation: `packages/coding-agent/src/eval/input.ts`; extension preludes: `packages/coding-agent/src/eval/preludes.ts`
@@ -198,6 +197,8 @@ A stateless, tool-free one-shot model call that returns a `CompletionHandle` imm
 
 - JS: `completion(prompt, { model?, system?, schema? })`; Python: keyword form with `model`, `system`, and `schema`.
 - `model`: `"smol"`, `"default"`, or `"slow"` tier; default is the active/default tier.
+- For the `"slow"` tier, configured role selectors honor explicit concrete effort suffixes including `:max` and `:off`; `:max` is clamped to the target model's supported levels. Bare, `:auto`, and `:inherit` primary selectors retain tier-default behavior, including recomputing the default for root fallback models. With an explicit concrete or `:off` primary effort, bare and `:auto` root fallbacks inherit that effective setting and clamp it for their model. Nested fallbacks inherit their immediate parent candidate's effective setting. An explicit concrete effort or `:off` fallback suffix overrides inheritance. `"smol"` and `"default"` retain their existing provider-option behavior.
+- Effort extraction follows the shared selector grammar: strict suffixes such as `:low` and `:off` take precedence even when model matching retains that suffix in an exact model ID. Literal-ID protection applies to the ambiguous `:max` and `:auto` suffixes, with case-insensitive provider and model ID matching.
 - `schema`: JSON Schema for a synthetic `respond` tool; `.wait()` then returns parsed data.
 - Unresolved tier and invalid arguments fail handle allocation; JS's immediate pending-handle wrapper exposes that rejection when awaited/used. Missing credentials, error/abort stops, empty output, and invalid structured output surface from `.wait()`.
 - Handles are process-local, owned by the calling agent, and evicted 30 minutes after settling (or when the owner session ends).

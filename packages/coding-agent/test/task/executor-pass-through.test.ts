@@ -214,7 +214,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 
 		expect(emptyResult.exitCode).toBe(0);
 		expect(absentResult.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["yield"]);
+		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual([]);
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toBeUndefined();
 	});
 
@@ -336,17 +336,17 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(persistedInits[0]).toMatchObject({ restrictToolNames: true, tools: ["read", "yield"] });
 	});
 
-	it("persists bridge-only tools in the enabled Code Mode set", async () => {
+	it("persists xd://-mounted tools from the enabled set", async () => {
 		const session = yieldEmittingSession();
-		vi.spyOn(session, "getActiveToolNames").mockReturnValue(["eval", "yield"]);
-		vi.spyOn(session, "getEnabledToolNames").mockReturnValue(["eval", "read", "yield"]);
+		vi.spyOn(session, "getActiveToolNames").mockReturnValue(["read", "yield"]);
+		vi.spyOn(session, "getEnabledToolNames").mockReturnValue(["read", "lsp", "yield"]);
 		const appendSessionInit = vi.spyOn(session.sessionManager, "appendSessionInit");
 		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 
-		const result = await runSubprocess({ ...baseOptions, id: "code-mode-child" });
+		const result = await runSubprocess({ ...baseOptions, id: "xdev-child" });
 
 		expect(result.exitCode).toBe(0);
-		expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ tools: ["eval", "read", "yield"] }));
+		expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ tools: ["read", "lsp", "yield"] }));
 	});
 
 	it("omits transport-only write from the persisted cold-revival contract", async () => {

@@ -6,8 +6,9 @@ import { resolveCatalogAxes, resolveModelPolicy } from "../compat/resolve";
 import { classifyModel } from "../compat/taxonomy";
 import { Effort, THINKING_EFFORTS } from "../effort";
 import { getBundledModels } from "../models";
+import { datedCost, parseDatedCostCards } from "../pricing";
 import { toModelSpec } from "../provider-models/bundled-references";
-import type { CursorModelRoute, Model, ModelSpec, TokenCost } from "../types";
+import type { CursorModelRoute, Model, ModelCost, ModelSpec, TokenCost } from "../types";
 import {
 	CURSOR_AVAILABLE_MODELS_PATH,
 	CURSOR_DEFAULT_BASE_URL,
@@ -435,13 +436,21 @@ function cursorVariantCostMultiplier(
 	return multiplier;
 }
 
-function scaleTokenCost(cost: TokenCost, multiplier: number): TokenCost {
+function scaleTokenCost(cost: ModelCost, multiplier: number): ModelCost {
 	if (multiplier === 1) return cost;
+	const scale = <T extends TokenCost>(card: T): T => ({
+		...card,
+		input: card.input * multiplier,
+		output: card.output * multiplier,
+		cacheRead: card.cacheRead * multiplier,
+		cacheWrite: card.cacheWrite * multiplier,
+	});
+	const effectiveRates = cost.timeBased?.effectiveRates;
 	return {
-		input: cost.input * multiplier,
-		output: cost.output * multiplier,
-		cacheRead: cost.cacheRead * multiplier,
-		cacheWrite: cost.cacheWrite * multiplier,
+		...scale({ input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite }),
+		...(cost.timeBased && {
+			timeBased: { ...cost.timeBased, ...(effectiveRates && { effectiveRates: effectiveRates.map(scale) }) },
+		}),
 	};
 }
 
@@ -462,7 +471,7 @@ function resolveRichCursorCardCost(
 	details: AvailableModelsResponse_ModelDetails,
 	entry: NormalizedRichVariant,
 	laneId: string,
-): TokenCost | undefined {
+): ModelCost | undefined {
 	const costAxes = details.parameterDefinitions
 		.filter(definition =>
 			[
@@ -503,7 +512,7 @@ function resolveRichCursorCardCost(
 	return base && scaleTokenCost(base, cursorVariantCostMultiplier(details, entry));
 }
 
-function resolveCursorCardAxes(slug: string): { patch?: TokenCost; fallback?: TokenCost } {
+function resolveCursorCardAxes(slug: string): { patch?: ModelCost; fallback?: ModelCost } {
 	const axes = resolveCatalogAxes({
 		id: slug,
 		name: slug,
@@ -516,7 +525,9 @@ function resolveCursorCardAxes(slug: string): { patch?: TokenCost; fallback?: To
 		contextWindow: DEFAULT_CONTEXT_WINDOW,
 		maxTokens: DEFAULT_MAX_TOKENS,
 	});
-	const card = (payload: unknown): TokenCost | undefined => {
+	// Dated cards ride along as a schedule, so a lane priced from a sibling
+	// slug's card (whose own id no rule matches) still changes price on time.
+	const card = (payload: unknown, axis: "cost-patch" | "cost-fallback"): ModelCost | undefined => {
 		if (typeof payload !== "object" || payload === null) return undefined;
 		const field = (key: string): number | undefined => {
 			const value = Reflect.get(payload, key);
@@ -525,9 +536,12 @@ function resolveCursorCardAxes(slug: string): { patch?: TokenCost; fallback?: To
 		const input = field("input");
 		const output = field("output");
 		if (input === undefined || output === undefined) return undefined;
-		return { input, output, cacheRead: field("cacheRead") ?? 0, cacheWrite: field("cacheWrite") ?? 0 };
+		return datedCost(
+			{ input, output, cacheRead: field("cacheRead") ?? 0, cacheWrite: field("cacheWrite") ?? 0 },
+			parseDatedCostCards(payload, axis),
+		);
 	};
-	return { patch: card(axes.costPatch), fallback: card(axes.costFallback) };
+	return { patch: card(axes.costPatch, "cost-patch"), fallback: card(axes.costFallback, "cost-fallback") };
 }
 
 function normalizeRichCursorModels(
@@ -882,7 +896,8 @@ function buildRichCursorLane(
 			cursorRequiresDataRetention: details.requiresDataRetention,
 			cursorSupportsAgent: details.supportsAgent,
 			cursorSupportsSandboxing: details.supportsSandboxing,
-			isProviderDefault,
+			// Not marked `isProviderDefault`: Cursor keeps its bundled startup default, so
+			// the account default only picks the lane's default wire id and the badge.
 			isRecommended: isProviderDefault || details.defaultOn,
 			description:
 				variant?.tagline ??

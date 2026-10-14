@@ -1,4 +1,3 @@
-import * as path from "node:path";
 import type { TinyLocalModelKey } from "./models";
 
 /**
@@ -32,30 +31,12 @@ export const TINY_WORKER_IDLE_MS = 15 * 60 * 1_000;
 /** Inference engine a worker runs; part of the socket name so ONNX and MLX workers for one model coexist. */
 export type TinyWorkerBackend = "onnx" | "mlx";
 
-const workerName = (modelKey: TinyLocalModelKey, backend: TinyWorkerBackend): string =>
-	`${modelKey}-${backend}`.replace(/[^A-Za-z0-9._-]/g, "_");
-
-/** Resolve the Unix socket or Windows named pipe for one (model, backend) worker. */
-export function tinyWorkerEndpoint(
-	runtimeDir: string,
-	modelKey: TinyLocalModelKey,
-	backend: TinyWorkerBackend,
-): string {
-	const name = workerName(modelKey, backend);
-	if (process.platform === "win32") {
-		const key = Bun.hash.crc32(path.resolve(runtimeDir, name)).toString(16).padStart(8, "0");
-		return `\\\\.\\pipe\\omp-tiny-${name}-${key}`;
-	}
-	return path.join(runtimeDir, `${name}.sock`);
-}
-
 /**
- * Stdout/stderr log file for one (model, backend) worker. Derived from
- * `runtimeDir`, not the endpoint: on Windows the endpoint is a named pipe
- * (`\\.\pipe\…`), which cannot be opened as a file.
+ * Shared-worker name of one (model, backend) worker under the tiny runtime dir:
+ * its socket is `<name>.sock`, its log `<name>.log` (see `shared-worker.ts`).
  */
-export function tinyWorkerLogPath(runtimeDir: string, modelKey: TinyLocalModelKey, backend: TinyWorkerBackend): string {
-	return path.join(runtimeDir, `${workerName(modelKey, backend)}.log`);
+export function tinyWorkerName(modelKey: TinyLocalModelKey, backend: TinyWorkerBackend): string {
+	return `${modelKey}-${backend}`;
 }
 
 export type TinyTitleProgressStatus =

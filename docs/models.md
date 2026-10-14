@@ -110,6 +110,9 @@ Custom `models` entries can set their own `baseUrl`; otherwise they inherit the 
 For built-in models, a provider `baseUrl` override is scoped to the effective APIs of custom models
 that inherit it, or to the provider's `api` for an override-only configuration. Without either
 scope it applies provider-wide. `transport: pi-native` always applies the gateway URL provider-wide.
+An unscoped OpenRouter `baseUrl` names the `/api/v1` chat root, so OpenRouter Decisions (judge)
+models use its `/api/alpha` sibling on the same host, e.g. a `.../api/v1` relay serves judges at
+`.../api/alpha/decisions`.
 
 `preferWebsockets` (on a model or `modelOverrides` entry) controls whether Codex requests prefer
 the WebSocket transport. `omitMaxOutputTokens` omits the model-derived output cap.
@@ -140,8 +143,10 @@ override matching model tags. These fields do not configure the Anthropic Messag
 - `google-vertex`
 - `typesafe`
 - `openrouter-decisions`
+- `openai-decisions`
+- `workers-ai-systemone`
 
-`typesafe` and `openrouter-decisions` are judgment APIs, not chat transports: a model declared with one answers System One judgment requests (`{baseUrl}/v1/systemone` and `{baseUrl}/decisions` respectively) and is selected by the `judge` model role. Its `headers` carry gateway routing or custom authentication headers for that traffic.
+`typesafe`, `openrouter-decisions`, `openai-decisions`, and `workers-ai-systemone` are judgment APIs, not chat transports: a model declared with one answers judgment requests and is selected by the `judge` model role. `typesafe` posts TypeSafe's System One body to `{baseUrl}/v1/systemone` (any System One server: TypeSafe, OpenJEV, Kev, self-hosted Clef); `openrouter-decisions` posts the same body to `{baseUrl}/decisions`; `openai-decisions` translates questions and answers to OpenAI's Decisions API at `{baseUrl}/decisions` (the bundled `openai/gpt-6-luna-decisions` row sends the wire model `gpt-6-luna`); `workers-ai-systemone` posts the System One body to Cloudflare Workers AI at `{baseUrl}/{model id}`, where `<account>` in the base URL is filled from the stored credential's account id or `CLOUDFLARE_ACCOUNT_ID`. Its `headers` carry gateway routing or custom authentication headers for that traffic.
 
 A model or `modelOverrides` entry may also use a runner API, which serves one model `kind`; `RUNNER_API_KINDS` in `packages/catalog/src/types.ts` lists them (for example `openai-images` serves `image`, `openai-embeddings` serves `embedding`, `openai-speech` serves `tts`). `web-search` is built in and cannot be named here, so neither can `kind: search`. `kind` defaults to the api's kind (`chat` for chat transports), and an explicit `kind` must be one its api serves. Chat transports serve `chat` and `tiny` (small models for the `tiny`, `memory`, and `judge` roles); those that `generate_image` runs (`openai-responses`, `openai-codex-responses`, `google-generative-ai`, `google-gemini-cli`) also serve `image`: on `openai-responses`, the image is generated through the Responses `image_generation` tool, carried by a GPT-5+ chat model on the same provider, instead of `/images/generations`. This moves discovered gateway models to the image role:
 
@@ -169,7 +174,7 @@ Loading models.yml checks a `modelOverrides` `kind` only against an api the file
 - `discovery.injectV1`: optional boolean, default `true`, for `openai-models-list`. Set `false` to fetch the model list from `{baseUrl}/models` without injecting `/v1` — for gateways that root their OpenAI-compatible surface at a versioned path (e.g. `https://api.opper.ai/v3/compat`) where the forced `/v1/models` returns a different, smaller model list. Query strings in `baseUrl` are ignored, matching the default mode.
 - `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
 - `imageInputDecoder`: `stb` only. Set this on a custom model or `modelOverrides` entry when the serving backend uses an STB-compatible image decoder that cannot accept WebP; OMP converts attached and historical WebP images before provider dispatch.
-- `tokenizer`: opt into a specific embedded local tokenizer when a proxy's model id is ambiguous or noncanonical. Allowed values: `claude-v3`, `claude-v47`, `claude-v5`, `claude-v5-sonnet`, `qwen3`, `deepseek-v3`, `kimi-k2`, and `glm5`. Omit it to use catalog identity policy; unknown models retain the fast local estimate.
+- `tokenizer`: opt into a specific embedded local tokenizer when a proxy's model id is ambiguous or noncanonical. Allowed values: `claude-v3`, `claude-v47`, `claude-v5`, `claude-v5-sonnet`, `qwen3`, `deepseek-v3`, `kimi-k2`, `glm5`, and `o200k` (OpenAI GPT-5 and later). Omit it to use catalog identity policy; unknown models retain the fast local estimate.
 
 ## Validation rules (current)
 
@@ -348,9 +353,11 @@ For the first-party `deepseek` provider, the catalog follows [DeepSeek's officia
 - Flash pricing covers `deepseek-flash` and the retired-but-still-accepted `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` ids, all billed at the Flash card. Peak rates per million tokens are $0.30 uncached input, $0.006 cached input, and $1.20 output.
 - `deepseek-v4-pro` initially uses peak rates of $1.32 uncached input, $0.044 cached input, and $3.96 output per million tokens. From **2026-09-14 04:00 UTC**, its estimates use the Flash rate card, with the same peak/off-peak schedule.
 
+Some catalog prices change on a date without a peak/off-peak tariff. Gemini 4 Argon on `google`, `google-vertex`, `google-antigravity`, and `cursor` is estimated at $2 input / $0.10 cached input / $10 output per million tokens through 2026-11-30, and at Google's $4 / $0.20 / $20 list price from **2026-12-01 08:00 UTC** (midnight US Pacific). The request's timestamp picks the price, so a model loaded before the change prices later requests at the new rate without a catalog update, and the model browser and `omp models --json` show the price in force.
+
 Local estimates use the assistant message's **request-start timestamp** to choose both the rate card and tariff for the whole request. This is OMP's estimation convention: DeepSeek's pricing page does not specify how its server bills a request spanning a boundary. When importing historical usage without recorded cost, the stats importer leaves scheduled pricing unpriced if no request timestamp can be recovered, rather than choosing a wall-clock tariff.
 
-The status line's `cost` segment appends **↑** for peak or **↓** for off-peak pricing on the **currently active provider/model**, using the current wall clock. It refreshes at tariff boundaries even while idle; the arrow is not a label for the accumulated session total. Models without scheduled pricing, including explicit flat-price overrides, show no arrow.
+The status line's `cost` segment appends **↑** for peak or **↓** for off-peak pricing on the **currently active provider/model**, using the current wall clock. It refreshes at tariff boundaries even while idle; the arrow is not a label for the accumulated session total. Models without a peak/off-peak tariff, including dated price changes and explicit flat-price overrides, show no arrow.
 
 An explicit model `cost` in `models.yml`, including `modelOverrides`, is a flat-price override and disables inherited time-based pricing for that model. Omitting `cost` preserves catalog pricing. `models.yml` does **not** configure a `timeBased` schedule; that metadata belongs to the catalog's [KDL pricing rules](../packages/catalog/src/compat/rules/README.md#time-based-pricing).
 
@@ -616,7 +623,7 @@ When a bare id matches models from multiple providers, preference order is:
 1. explicit CLI provider+model
 2. first scoped model (if not resuming)
 3. saved default provider/model
-4. known provider defaults (e.g. OpenAI/Anthropic/etc.) among available models
+4. known provider defaults (e.g. OpenAI/Anthropic/etc.) among available models; a provider whose discovery marks the account's default model (`isProviderDefault`, e.g. Devin) uses it in place of its bundled `default-model`
 5. first available model
 
 The automatic fallback first restricts the pool to providers with concrete credentials (including
@@ -901,8 +908,14 @@ drops override keys the resolved shape does not declare.
 
 The same `compat` slot accepts `promptCacheMode` (`none`, `automatic`, or `explicit`),
 `supportsLongPromptCacheRetention`, `promptCacheMinimumTokens`,
-`promptCacheMaximumCheckpoints`, and `supportsForcedToolChoice` (forced `any`/`tool` choices
-fall back to `auto` when `false`; built in for Claude Opus/Sonnet 5.5) for Bedrock models.
+`promptCacheMaximumCheckpoints`, `supportsForcedToolChoice` (forced `any`/`tool` choices
+fall back to `auto` when `false`; built in for Claude Opus/Sonnet 5.5), and
+`supportsThinkingBindingControls` for Bedrock models. Prefix-bound Claude models (Fable 5.1+,
+Opus/Sonnet/Haiku 5.5) send `thinking.block_binding`, the `thinking-binding-controls-2026-08-01`
+beta and the `/input_transformations` response path by default; set
+`supportsThinkingBindingControls: false` for a gateway or region that rejects them. Local
+prefix-binding safeguards stay on, and a prefix-mismatch rejection is retried once with
+bound thinking stripped.
 
 By default `bedrock-converse-stream` requests go to `bedrock-runtime.{region}.amazonaws.com`.
 An explicit per-request region or a model ARN's region wins. Otherwise an ambient region from

@@ -99,6 +99,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsLongPromptCacheRetention?": "boolean",
 		"promptCacheMinimumTokens?": "number >= 0",
 		"promptCacheMaximumCheckpoints?": "number >= 0",
+		"supportsThinkingBindingControls?": "boolean",
 	});
 
 	// Provider-level overrides can target bundled models whose API is not repeated
@@ -106,7 +107,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema);
 
 	const ApiSchema = type(
-		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "typesafe"',
+		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "workers-ai-systemone" | "typesafe"',
 	);
 
 	// Models may also name a runner API (web search is built in). `validateProviderConfiguration`
@@ -168,7 +169,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		});
 
 	const ModelTokenizerSchema = type(
-		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5"',
+		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5" | "o200k"',
 	);
 
 	const RemoteCompactionSchema = type({

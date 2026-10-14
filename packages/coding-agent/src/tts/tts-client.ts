@@ -29,6 +29,8 @@ type TtsRequest =
 
 export interface TtsSynthesizeOptions {
 	voice?: string;
+	/** Speaking rate (1 = normal); clamped by the worker. Omitted means normal speed. */
+	speed?: number;
 	signal?: AbortSignal;
 }
 
@@ -39,6 +41,8 @@ export interface TtsDownloadOptions {
 
 export interface TtsStreamOptions {
 	voice?: string;
+	/** Speaking rate (1 = normal); clamped by the worker. Omitted means normal speed. */
+	speed?: number;
 	signal?: AbortSignal;
 }
 
@@ -177,10 +181,14 @@ export class TtsClient {
 		try {
 			return await this.#host.request<TtsAudio | null>(
 				options.signal,
-				(id): TtsWorkerInbound =>
-					options.voice
-						? { type: "synthesize", id, modelKey, text, voice: options.voice }
-						: { type: "synthesize", id, modelKey, text },
+				(id): TtsWorkerInbound => ({
+					type: "synthesize",
+					id,
+					modelKey,
+					text,
+					...(options.voice ? { voice: options.voice } : {}),
+					...(options.speed !== undefined ? { speed: options.speed } : {}),
+				}),
 				resolve => ({ kind: "synthesize", modelKey, resolve }),
 				resolve => resolve(null),
 			);
@@ -238,9 +246,13 @@ export class TtsClient {
 		this.#host.addPending(id, { kind: "stream", modelKey, channel });
 		signal?.addEventListener("abort", abort, { once: true });
 
-		const start: TtsWorkerInbound = options.voice
-			? { type: "stream-start", id, modelKey, voice: options.voice }
-			: { type: "stream-start", id, modelKey };
+		const start: TtsWorkerInbound = {
+			type: "stream-start",
+			id,
+			modelKey,
+			...(options.voice ? { voice: options.voice } : {}),
+			...(options.speed !== undefined ? { speed: options.speed } : {}),
+		};
 		worker.send(start);
 
 		return {

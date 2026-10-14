@@ -91,13 +91,15 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `CURSOR_ACCESS_TOKEN`           | Cursor provider auth                             | Using Cursor provider                                          | `CURSOR_API_KEY` is accepted as an alias                                                            |
 | `AI_GATEWAY_API_KEY`            | Vercel AI Gateway auth                           | Using `vercel-ai-gateway` provider                             | `VERCEL_AI_GATEWAY_API_KEY` is accepted as an alias                                                 |
 | `CLOUDFLARE_AI_GATEWAY_API_KEY` | Cloudflare AI Gateway auth                       | Using `cloudflare-ai-gateway` provider                         | Gateway token with AI Gateway Run permission; `/login` stores it with the routing IDs               |
-| `CLOUDFLARE_ACCOUNT_ID`         | Cloudflare AI Gateway account routing            | Using an environment-supplied gateway token                    | Not required when the account ID was stored by `/login`                                             |
+| `CLOUDFLARE_API_TOKEN`          | Cloudflare Workers AI auth                       | Using `cloudflare-workers-ai` provider (Clef judges)            | API token with Workers AI Read and Edit permissions; `CLOUDFLARE_AUTH_TOKEN` is accepted as a fallback |
+| `CLOUDFLARE_ACCOUNT_ID`         | Cloudflare AI Gateway / Workers AI account routing | Using an environment-supplied gateway or Workers AI token    | Not required when the account ID was stored by `/login`                                             |
 | `CLOUDFLARE_GATEWAY_ID`         | Cloudflare AI Gateway selection                  | Using an environment-supplied gateway token                    | Gateway slug, commonly `default`; not required when stored by `/login`                               |
 | `SNOWFLAKE_PAT`                 | Snowflake Cortex auth                            | Using `snowflake` provider without `/login`                    | Programmatic access token; prefer short-lived and role-restricted                                   |
 | `SNOWFLAKE_ACCOUNT`             | Snowflake Cortex account routing                 | Using `SNOWFLAKE_PAT`                                          | Account identifier (`orgname-accountname`) or account URL; not required after `/login`              |
 | `ALIBABA_CODING_PLAN_API_KEY`   | Alibaba Coding Plan auth                         | Using `alibaba-coding-plan` provider                           |                                                                                                     |
 | `ALIBABA_TOKEN_PLAN_API_KEY`    | QwenCloud Token Plan auth                        | Using `alibaba-token-plan` provider                            | Preferred provider-specific name                                                                    |
 | `BAILIAN_TOKEN_PLAN_API_KEY`    | QwenCloud Token Plan auth                        | Using `alibaba-token-plan` provider                            | Compatible with Qwen Code's Token Plan preset                                                       |
+| `CORAL_API_KEY`                 | CoralBricks auth (alias: `CORALBRICKS_API_KEY`)  | Using `coralbricks` provider                                   |                                                                                                     |
 | `DEEPINFRA_API_KEY`             | DeepInfra auth                                   | Using `deepinfra` provider                                     |                                                                                                     |
 | `DEEPSEEK_API_KEY`              | DeepSeek auth                                    | Using DeepSeek models                                          |                                                                                                     |
 | `SILICONFLOW_API_KEY`           | SiliconFlow auth                                 | Using `siliconflow` provider                                   |                                                                                                     |
@@ -182,6 +184,18 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
   `ANTHROPIC_BASE_URL` points to a non-Anthropic host (e.g. a corporate API
   gateway), so enterprise gateways requiring proprietary auth headers work
   without enabling Foundry mode.
+- `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` (same contract as Claude Code) makes
+  provider `anthropic` requests omit pre-release body fields and their
+  `anthropic-beta` tokens: `context_management`, the beta tool fields
+  (`strict`, `defer_loading`, `eager_input_streaming`) and mid-conversation
+  tool changes, `output_config.format` and `output_config.task_budget`, plus
+  `thinking.block_binding` and Anthropic server compaction. Effort, adaptive
+  thinking, interleaved thinking, and extended context stay. Unlike Claude
+  Code, the matching betas are also removed from caller-supplied betas and
+  `anthropic-beta` headers. Use it when an `ANTHROPIC_BASE_URL` gateway
+  rejects them; it works with or without Foundry mode. Which providers honor
+  it is the `honors-claude-code-beta-kill-switch` compat axis
+  (`compat.honorsClaudeCodeBetaKillSwitch` in `models.yml`).
 - TLS client/server material can be injected from env values:
   `NODE_EXTRA_CA_CERTS`, `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`.
   Each accepts either:
@@ -200,6 +214,7 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
 | `FOUNDRY_BASE_URL`          | URL string                                     | Anthropic endpoint base URL in Foundry mode                                                                                                                   |
 | `ANTHROPIC_FOUNDRY_API_KEY` | Token string                                   | Used for `Authorization: Bearer <token>`                                                                                                                      |
 | `ANTHROPIC_CUSTOM_HEADERS`  | Header list string                             | Extra headers; format `header-a: value, header-b: value` or newline-separated. Also forwarded outside Foundry whenever `ANTHROPIC_BASE_URL` is non-Anthropic. |
+| `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` | Boolean-like string (`1`, `true`, `yes`, `on`) | Omits pre-release fields (`context_management`, beta tool fields, task budgets, structured-output format, `thinking.block_binding`, server compaction) and their beta headers on provider `anthropic` |
 | `NODE_EXTRA_CA_CERTS`       | PEM path or inline PEM                         | Extra CA chain for server certificate validation                                                                                                              |
 | `CLAUDE_CODE_CLIENT_CERT`   | PEM path or inline PEM                         | mTLS client certificate                                                                                                                                       |
 | `CLAUDE_CODE_CLIENT_KEY`    | PEM path or inline PEM                         | mTLS client private key (must be paired with cert)                                                                                                            |
@@ -412,6 +427,8 @@ Small typed decisions the app makes about its own state (the `auto` thinking-lev
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `TYPESAFE_API_KEY`       | TypeSafe API key for discovery and System One requests; alternatively use `/login typesafe`                                                                                                                                                             |
 | `TYPESAFE_BASE_URL`      | API root override (default `https://api.typesafe.ai`), used by model discovery, `/login` validation, and System One requests                                                                                                                             |
+| `OPENAI_API_KEY`         | Also authenticates the OpenAI Decisions judge `openai/gpt-6-luna-decisions` (GPT-6 Luna over `POST /v1/decisions`); assign it to the `judge` role to use it                                                                                             |
+| `CLOUDFLARE_API_TOKEN`   | Authenticates the Cloudflare Workers AI Clef judges (`cloudflare-workers-ai/@cf/cloudflare/clef`, `.../clef-flash`) with `CLOUDFLARE_ACCOUNT_ID`; alternatively use `/login cloudflare-workers-ai`                                                      |
 | `TYPESAFE_DEFAULT_MODEL` | Standalone `pi-ai` TypeSafe client default when its caller does not pass a model (default `jev-latest`). The coding-agent app passes the model selected by the `judge` role, so this variable does not override app role selection or discovered model IDs. |
 
 ---
@@ -543,6 +560,7 @@ These affect where coding-agent stores data and which process-local settings ove
 | `PWD`                                               | Used when matching canonical current working directory in path helpers                                                     |
 | `OMP_WORKTREE_DIR`                                  | Agent-managed worktrees directory override (default `~/.omp/wt`); must be absolute or `~`-relative, relative paths are ignored; wins over the `worktree.base` setting                      |
 | `OMP_GITHUB_CACHE_DB`                               | Overrides the GitHub view cache database path (default `~/.omp/cache/github-cache.db`)                                                                                                     |
+| `PI_BUILD_URL`                                      | Origin of the build service standalone binaries come from (default `https://build.stencil.so`; trailing slashes are trimmed). `omp update` on a binary install, the binary takeover of a binary-only release, and a compiled binary's startup update check ask `<origin>/api/products/omp/latest/<target>?channel=stable\|canary`; downloads are verified against the answer's size and SHA-256, from a patch against the installed binary when one is offered. The install scripts (`install.sh`, `install.ps1`) download from the same origin |
 | `PI_GRAMMARS_URL`                                   | Base URL for on-demand WebAssembly tree-sitter grammars (default `https://github.com/stencil-hq/wasm-grammars/releases/download`); assets are fetched as `<base>/<release>/<file>.zst` and verified against the addon's pinned SHA-256 before landing in `<natives dir>/grammars` (`~/.omp/natives/grammars`) |
 
 ---

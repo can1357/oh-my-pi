@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [18.10.2] - 2026-10-12
+
+### Added
+
+- Added `TspPickerMark.icon`: an icon a picker mark draws instead of its initials when the terminal has it (`provider:<id>` names a model provider's logo)
+
+## [18.8.8] - 2026-10-10
+
+### Added
+
+- Added `TspToolProps.command` (the command line Copy command copies), `TspToolProps.preview: "children"` (the collapsed body stays whole while its children clamp) and `TspCodeProps.preview`
+
 ## [18.8.0] - 2026-10-07
 
 ### Changed

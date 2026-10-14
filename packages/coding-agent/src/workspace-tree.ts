@@ -78,6 +78,7 @@ export async function buildDirectoryTree(cwd: string, options: BuildDirectoryTre
 		// Tool output (read tool directory listing), not a cached prefix —
 		// the human-friendly relative "ago" is appropriate here.
 		ageMode: "relative",
+		compactMetadata: true,
 	});
 }
 
@@ -106,6 +107,7 @@ export async function buildWorkspaceTree(cwd: string, options: BuildWorkspaceTre
 			// mtimes so the block is byte-identical across sessions and does not
 			// bust the prompt cache (a relative "Nm ago" drifts every build).
 			ageMode: "absolute",
+			compactMetadata: false,
 		});
 		return { ...tree, agentsMdFiles: result.agentsMdFiles };
 	} catch {
@@ -146,6 +148,29 @@ interface AssembleOptions {
 	 *   the system-prompt workspace tree). See {@link makeAgeFormatter}.
 	 */
 	ageMode: "relative" | "absolute";
+	/** Whether metadata columns use compact or aligned separators. */
+	compactMetadata: boolean;
+}
+
+function formatLines(lines: readonly RenderedLine[], compactMetadata: boolean): string {
+	if (compactMetadata) {
+		return lines
+			.map(line => {
+				if (!line.age) return line.label;
+				const sizeColumn = line.size ? ` ${line.size}` : "";
+				return `${line.label}${sizeColumn} ${line.age}`;
+			})
+			.join("\n");
+	}
+
+	const maxLabelLength = lines.reduce((max, line) => Math.max(max, line.label.length), 0);
+	return lines
+		.map(line => {
+			if (!line.age) return line.label;
+			const sizeColumn = (line.size ?? "").padEnd(8);
+			return `${line.label.padEnd(maxLabelLength + 2)}${sizeColumn}  ${line.age.padEnd(4)}`.trimEnd();
+		})
+		.join("\n");
 }
 
 function assembleTree(rootPath: string, entries: readonly GlobMatch[], opts: AssembleOptions): DirectoryTree {
@@ -206,7 +231,7 @@ function assembleTree(rootPath: string, entries: readonly GlobMatch[], opts: Ass
 
 	return {
 		rootPath,
-		rendered: formatLines(lines),
+		rendered: formatLines(lines, opts.compactMetadata),
 		truncated: truncated || elidedCount > 0,
 		totalLines: lines.length,
 	};
@@ -303,17 +328,6 @@ function applyLineCap(
 		isRoot: false,
 	});
 	return { lines: kept, elidedCount: removable.length };
-}
-
-function formatLines(lines: readonly RenderedLine[]): string {
-	const maxLabelLength = lines.reduce((max, line) => Math.max(max, line.label.length), 0);
-	return lines
-		.map(line => {
-			if (!line.age) return line.label;
-			const sizeColumn = (line.size ?? "").padEnd(8);
-			return `${line.label.padEnd(maxLabelLength + 2)}${sizeColumn}  ${line.age.padEnd(4)}`.trimEnd();
-		})
-		.join("\n");
 }
 
 function emptyTree(rootPath: string): DirectoryTree {

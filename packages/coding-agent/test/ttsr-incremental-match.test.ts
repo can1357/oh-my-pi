@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { TtsrManager, type TtsrMatchContext } from "@oh-my-pi/pi-coding-agent/export/ttsr";
@@ -59,26 +59,30 @@ describe("TTSR incremental stream matching", () => {
 		expect(manager.checkSnapshot("clean", TEXT)).toEqual([]);
 	});
 
-	it("matches a condition that arrives late in a snapshot growing in small chunks, with linear cost", () => {
-		const chunk = "const value = compute(input);\n";
-		const run = (chunks: number): number => {
-			const manager = new TtsrManager({ enabled: true });
-			manager.addRule(rule("forbidden", "FORBIDDEN_\\w+\\("));
+	it("matches a condition that arrives late in a snapshot growing in small chunks, scanning each chunk once", () => {
+		const manager = new TtsrManager({ enabled: true });
+		manager.addRule(rule("forbidden", "FORBIDDEN_\\w+\\("));
+		// Count regex input instead of timing it: wall-clock ratios flake under load.
+		const test = RegExp.prototype.test;
+		let scanned = 0;
+		const spy = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (this: RegExp, input: string) {
+			if (this.source.includes("FORBIDDEN_")) scanned += input.length;
+			return test.call(this, input);
+		});
+		try {
 			let snapshot = "";
-			const start = Bun.nanoseconds();
-			for (let index = 0; index < chunks; index++) {
-				snapshot += chunk;
+			for (let index = 0; index < 2_000; index++) {
+				snapshot += "const value = compute(input);\n";
 				expect(manager.checkSnapshot(snapshot, TEXT, { final: false })).toEqual([]);
 			}
 			snapshot += "FORBIDDEN_api(1);\n";
 			expect(names(manager.checkSnapshot(snapshot, TEXT))).toEqual(["forbidden"]);
-			return Bun.nanoseconds() - start;
-		};
-		const smallNs = Math.min(run(250), run(250), run(250));
-		// 8 times the chunks: a full regex rescan per update would take ~64 times as long.
-		let largeNs = Number.POSITIVE_INFINITY;
-		for (let attempt = 0; attempt < 3 && largeNs >= 32 * smallNs; attempt++) largeNs = Math.min(largeNs, run(2_000));
-		expect(largeNs).toBeLessThan(32 * smallNs);
+			// Every chunk is read; a whole-buffer rescan per update would read the stream ~1000 times over.
+			expect(scanned).toBeGreaterThanOrEqual(snapshot.length);
+			expect(scanned).toBeLessThan(2 * snapshot.length);
+		} finally {
+			spy.mockRestore();
+		}
 	});
 });
 

@@ -145,6 +145,9 @@ pub(crate) struct Host {
 	/// Requests to the adapter's [`CommandRunner`]; `None` unless the utility
 	/// set [`Utility::RUNS_COMMANDS`].
 	commands:              Option<flume::Sender<CommandRequest>>,
+	/// Raised when the utility reports an error yet goes on; `None` when the
+	/// shell asked for no such report.
+	reported_error:        Option<Arc<AtomicBool>>,
 }
 
 fn output_handle(file: &OpenFile) -> Option<OpenFile> {
@@ -582,6 +585,13 @@ impl Host {
 		Arc::clone(&self.cancel)
 	}
 
+	/// The flag to raise when the utility reports an error yet goes on, so
+	/// its exit status does not show the failure; `None` when the shell asked
+	/// for no such report.
+	pub fn reported_error_flag(&self) -> Option<Arc<AtomicBool>> {
+		self.reported_error.clone()
+	}
+
 	/// A `pi_walker` heartbeat that fails with `Interrupted` once the host
 	/// cancels. Without it the walker's per-entry heartbeat never sees the
 	/// flag, and a cancelled walk traverses the whole tree before the utility
@@ -639,6 +649,26 @@ impl Host {
 	pub fn error(&mut self, message: impl std::fmt::Display, code: i32) {
 		let _ = writeln!(self.stderr, "{}: {message}", self.name);
 		self.fail(code);
+	}
+
+	/// Writes `<name>: <message>` followed by GNU's `Try '<name> --help' for
+	/// more information.`, records exit status `code`, and returns it.
+	///
+	/// For usage errors found after parsing (operand combinations, invalid
+	/// option values); clap's own errors are rendered by the [`Util`] adapter.
+	pub fn usage_error(&mut self, message: impl std::fmt::Display, code: i32) -> i32 {
+		let _ = writeln!(self.stderr, "{0}: {message}\nTry '{0} --help' for more information.", self.name);
+		self.fail(code);
+		code
+	}
+
+	/// Writes only the `Try '<name> --help' for more information.` pointer,
+	/// after diagnostics already printed; records exit status `code` and
+	/// returns it.
+	pub fn try_help(&mut self, code: i32) -> i32 {
+		let _ = writeln!(self.stderr, "Try '{} --help' for more information.", self.name);
+		self.fail(code);
+		code
 	}
 
 	/// Duplicates stdout, for utilities that hand a writer to a helper thread.
@@ -791,13 +821,60 @@ impl RunningCommand {
 /// -exec` give their children.
 pub(crate) struct ShellCommand {
 	argv:  Vec<OsString>,
+	argv0: Option<OsString>,
 	cwd:   Option<PathBuf>,
 	stdin: Option<OpenFile>,
+	env:   Vec<EnvChange>,
+}
+
+/// One environment change a [`ShellCommand`] makes for its own command.
+enum EnvChange {
+	Clear,
+	Remove(String),
+	Set(String, String),
 }
 
 impl ShellCommand {
 	pub fn new(argv: Vec<OsString>) -> Self {
-		Self { argv, cwd: None, stdin: None }
+		Self { argv, argv0: None, cwd: None, stdin: None, env: Vec::new() }
+	}
+
+	/// Presents `argv0` to the command as its `argv[0]` (`env -a`); the
+	/// command is still looked up by the `argv[0]` given to
+	/// [`ShellCommand::new`]. A builtin receives it as its first argument.
+	pub fn argv0(mut self, argv0: impl Into<OsString>) -> Self {
+		self.argv0 = Some(argv0.into());
+		self
+	}
+
+	/// Starts the command from an empty environment (`env -i`): every
+	/// exported variable is gone. Unexported shell variables, which were never
+	/// part of the environment, stay.
+	///
+	/// This and [`ShellCommand::env_remove`] and [`ShellCommand::env`] apply
+	/// in call order, to this command only: the worker subshell gets its
+	/// variables back once the command finishes, so neither later commands
+	/// nor the invoking shell see the change. A command with environment
+	/// changes is looked up on its own `PATH`, or with no `PATH` on the
+	/// default search path `execvp` uses, never through the shell's hash
+	/// table.
+	pub fn env_clear(mut self) -> Self {
+		self.env.push(EnvChange::Clear);
+		self
+	}
+
+	/// Removes the variable `name` for the command (`env -u`), exported or
+	/// not. See [`ShellCommand::env_clear`] for the scope of the change.
+	pub fn env_remove(mut self, name: impl Into<String>) -> Self {
+		self.env.push(EnvChange::Remove(name.into()));
+		self
+	}
+
+	/// Sets `name` to `value` in the command's environment (`env NAME=VALUE`).
+	/// See [`ShellCommand::env_clear`] for the scope of the change.
+	pub fn env(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+		self.env.push(EnvChange::Set(name.into(), value.into()));
+		self
 	}
 
 	/// Runs in `dir` (relative to the shell's working directory) instead of
@@ -932,18 +1009,90 @@ async fn run_in<SE: ShellExtensions>(
 	if shell.working_dir() != dir {
 		shell.set_working_dir(dir).await?;
 	}
+	if command.env.is_empty() {
+		return dispatch(shell, base, command, None).await;
+	}
+	// The worker is reused for later commands: run on a scratch environment
+	// and put the worker's own back whatever the outcome.
+	let saved = shell.env().clone();
+	*shell.env_mut() = changed_env(&saved, &command.env)?;
+	let path_dirs = search_path(shell);
+	let status = dispatch(shell, base, command, Some(path_dirs)).await;
+	*shell.env_mut() = saved;
+	status
+}
+
+/// `env` with `changes` applied, flattened into one global scope: a change
+/// must win over every scope, and the command runs no shell functions whose
+/// locals could need the stack.
+fn changed_env(
+	env: &brush_core::env::ShellEnvironment,
+	changes: &[EnvChange],
+) -> Result<brush_core::env::ShellEnvironment, Error> {
+	let mut vars: HashMap<String, brush_core::ShellVariable> =
+		env.iter().map(|(name, var)| (name.clone(), var.clone())).collect();
+	for change in changes {
+		match change {
+			EnvChange::Clear => vars.retain(|_, var| !var.is_exported()),
+			EnvChange::Remove(name) => {
+				vars.remove(name);
+			},
+			EnvChange::Set(name, value) => {
+				let mut var = brush_core::ShellVariable::new(brush_core::ShellValue::String(value.clone()));
+				var.export();
+				vars.insert(name.clone(), var);
+			},
+		}
+	}
+	let mut changed = brush_core::env::ShellEnvironment::new();
+	for (name, var) in vars {
+		changed.set_global(name, var)?;
+	}
+	Ok(changed)
+}
+
+/// The directories `execvp` would search for a command run with `shell`'s
+/// environment: its `PATH`, else the C library's default. Relative and empty
+/// entries name directories under the working directory.
+fn search_path<SE: ShellExtensions>(shell: &Shell<SE>) -> Vec<PathBuf> {
+	const DEFAULT_PATH: &str = if cfg!(any(target_os = "linux", target_os = "android")) {
+		"/bin:/usr/bin"
+	} else {
+		"/usr/bin:/bin"
+	};
+	let path = shell.env().get_str("PATH", shell);
+	let path = path.as_deref().unwrap_or(DEFAULT_PATH);
+	brush_core::sys::fs::split_paths(path)
+		.map(|dir| shell.working_dir().join(dir))
+		.collect()
+}
+
+/// Dispatches `command` in the worker `shell` as a simple command, searching
+/// `path_dirs` for programs when given.
+async fn dispatch<SE: ShellExtensions>(
+	shell: &mut Shell<SE>,
+	base: &ExecutionParameters,
+	command: ShellCommand,
+	path_dirs: Option<Vec<PathBuf>>,
+) -> Result<CommandStatus, Error> {
 	let mut params = base.clone();
 	params.set_fd(OpenFiles::STDIN_FD, or_null(command.stdin)?);
 	let cancel = params.cancel_token();
-	let args: Vec<CommandArg> = command
+	let mut args: Vec<CommandArg> = command
 		.argv
 		.into_iter()
 		.map(|arg| CommandArg::from(arg.to_string_lossy().into_owned()))
 		.collect();
 	let name = args.first().map(ToString::to_string).unwrap_or_default();
+	let argv0 = command.argv0.map(|argv0| argv0.to_string_lossy().into_owned());
+	if let (Some(argv0), Some(first)) = (&argv0, args.first_mut()) {
+		*first = CommandArg::from(argv0.clone());
+	}
 	let mut simple =
 		SimpleCommand::new(ShellForCommand::ParentShell(shell), params, name, args);
 	simple.use_functions = false;
+	simple.argv0 = argv0;
+	simple.path_dirs = path_dirs;
 	let spawned = match simple.execute().await {
 		Ok(spawned) => spawned,
 		// Nothing ran; the utility reports that in its own words.
@@ -1774,6 +1923,7 @@ fn build_host<SE: ShellExtensions>(
 		merged_out,
 		sigpipe,
 		commands: None,
+		reported_error: context.params.reported_error().cloned(),
 	})
 }
 
@@ -1927,6 +2077,7 @@ mod testing {
 				merged_out:            None,
 				sigpipe,
 				commands:              None,
+				reported_error:        None,
 			};
 			(host, capture)
 		}

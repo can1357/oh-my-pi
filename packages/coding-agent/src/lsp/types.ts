@@ -370,7 +370,7 @@ export interface ServerConfig {
 // Transport
 // =============================================================================
 
-/** Minimal write sink for the server-bound byte stream (satisfied by `Bun.FileSink` and the mux socket adapter). */
+/** Minimal write sink for the server-bound byte stream (satisfied by `Bun.FileSink` and the mux link adapter). */
 export interface LspWriteSink {
 	write(data: string | Uint8Array): number | Promise<number>;
 	flush(): number | void | Promise<number | void>;
@@ -378,7 +378,7 @@ export interface LspWriteSink {
 
 /**
  * Byte transport carrying one LSP JSON-RPC link. Structurally satisfied by
- * `ptree.ChildProcess<"pipe">` (local server spawn) and by the socket adapter
+ * `ptree.ChildProcess<"pipe">` (local server spawn) and by the IPC link adapter
  * in `mux/daemon.ts` (broker-shared server). `exited` may reject (ptree kill).
  */
 export interface LspTransport {

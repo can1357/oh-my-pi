@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
+import { popLoopPhase, pushLoopPhase, withLoopPhase } from "@oh-my-pi/pi-utils";
 
 import { dbPath as configuredDbPath } from "../config";
 import { closeQuietly } from "../db";
@@ -406,55 +407,62 @@ export class Mnemopi {
 	#closed = false;
 
 	constructor(options: MnemopiOptions = {}) {
-		this.sessionId = options.sessionId ?? options.session_id ?? "default";
-		this.bank = options.bank ?? "default";
+		pushLoopPhase("mnemopi.open");
+		try {
+			this.sessionId = options.sessionId ?? options.session_id ?? "default";
+			this.bank = options.bank ?? "default";
 
-		this.authorId = options.authorId ?? options.author_id ?? null;
-		this.authorType = options.authorType ?? options.author_type ?? null;
-		this.channelId = options.channelId ?? options.channel_id ?? this.sessionId;
-		this.dbPath = resolveDbPath(options, this.bank);
-		this.runtimeOptions = resolveRuntimeOptions(options);
+			this.authorId = options.authorId ?? options.author_id ?? null;
+			this.authorType = options.authorType ?? options.author_type ?? null;
+			this.channelId = options.channelId ?? options.channel_id ?? this.sessionId;
+			this.dbPath = resolveDbPath(options, this.bank);
+			this.runtimeOptions = resolveRuntimeOptions(options);
 
-		this.beam = new BeamMemory({
-			sessionId: this.sessionId,
-			dbPath: options.db === undefined ? this.dbPath : ":memory:",
-			authorId: this.authorId,
-			authorType: this.authorType,
-			channelId: this.channelId,
-			proactiveLinking: options.proactiveLinking,
-			polyphonicRecall: options.polyphonicRecall,
-			enhancedRecall: options.enhancedRecall,
-		});
-		this.#ownsDb = options.db === undefined;
-		if (options.db !== undefined) {
-			const opened = this.beam.db;
-			initBeam(options.db);
-			Object.defineProperty(this.beam, "db", { value: options.db });
-			Object.defineProperty(this.beam, "annotations", {
-				value: buildBeamAnnotations(options.db, this.dbPath),
+			this.beam = new BeamMemory({
+				sessionId: this.sessionId,
+				dbPath: options.db === undefined ? this.dbPath : ":memory:",
+				authorId: this.authorId,
+				authorType: this.authorType,
+				channelId: this.channelId,
+				proactiveLinking: options.proactiveLinking,
+				polyphonicRecall: options.polyphonicRecall,
+				enhancedRecall: options.enhancedRecall,
 			});
-			Object.defineProperty(this.beam, "episodicGraph", {
-				value: buildEpisodicGraph(options.db, this.dbPath),
-			});
-			closeQuietly(opened);
-		}
-		this.conn = this.beam.db;
-		this.db = this.beam.db;
-		// Wipe-and-rebuild stale embeddings when the configured model changed since
-		// the vectors were written. Runs inside the runtime scope so
-		// `currentEmbeddingModel()` reflects this instance's configured model.
-		// Skipped for read-only opens (`reconcile: false`) so an ephemeral stats
-		// reader never triggers a destructive migration whose async rebuild it would
-		// exit before completing — which would otherwise lose the embeddings.
-		if (options.reconcile !== false) {
-			this.#withRuntimeOptions(() => reconcileEmbeddingModel(this.beam));
+			this.#ownsDb = options.db === undefined;
+			if (options.db !== undefined) {
+				const opened = this.beam.db;
+				initBeam(options.db);
+				Object.defineProperty(this.beam, "db", { value: options.db });
+				Object.defineProperty(this.beam, "annotations", {
+					value: buildBeamAnnotations(options.db, this.dbPath),
+				});
+				Object.defineProperty(this.beam, "episodicGraph", {
+					value: buildEpisodicGraph(options.db, this.dbPath),
+				});
+				closeQuietly(opened);
+			}
+			this.conn = this.beam.db;
+			this.db = this.beam.db;
+			// Wipe-and-rebuild stale embeddings when the configured model changed since
+			// the vectors were written. Runs inside the runtime scope so
+			// `currentEmbeddingModel()` reflects this instance's configured model.
+			// Skipped for read-only opens (`reconcile: false`) so an ephemeral stats
+			// reader never triggers a destructive migration whose async rebuild it would
+			// exit before completing — which would otherwise lose the embeddings.
+			if (options.reconcile !== false) {
+				withMnemopiRuntimeOptions(this.runtimeOptions, () => reconcileEmbeddingModel(this.beam));
+			}
+		} finally {
+			popLoopPhase();
 		}
 	}
 
 	close(): void {
-		if (this.#closed) return;
-		this.#closed = true;
-		if (this.#ownsDb) this.beam.close();
+		withLoopPhase("mnemopi.close", () => {
+			if (this.#closed) return;
+			this.#closed = true;
+			if (this.#ownsDb) this.beam.close();
+		});
 	}
 
 	async flushExtractions(): Promise<void> {
@@ -462,12 +470,14 @@ export class Mnemopi {
 	}
 
 	remember(memory: string | RememberInput, options: RememberFacadeOptions = {}): string {
-		const content = typeof memory === "string" ? memory : memory.content;
-		return this.#withRuntimeOptions(() => this.beam.remember(content, toRememberOptions(memory, options)));
+		return this.#withRuntimeOptions("mnemopi.retain", () => {
+			const content = typeof memory === "string" ? memory : memory.content;
+			return this.beam.remember(content, toRememberOptions(memory, options));
+		});
 	}
 
 	recall(query: string, topK = 5, options: RecallFacadeOptions = {}): Promise<RecallResult[]> {
-		return this.#withRuntimeOptions(() => this.beam.recall(query, topK, toRecallOptions(options)));
+		return this.#withRuntimeOptions("mnemopi.recall", () => this.beam.recall(query, topK, toRecallOptions(options)));
 	}
 
 	recallEnhanced(
@@ -475,7 +485,7 @@ export class Mnemopi {
 		topK = 5,
 		options: RecallFacadeOptions & RecallEnhancedOptions = {},
 	): Promise<RecallResult[]> {
-		return this.#withRuntimeOptions(() =>
+		return this.#withRuntimeOptions("mnemopi.recall", () =>
 			this.beam.recallEnhanced(query, topK, {
 				...toRecallOptions(options),
 				useCache: options.useCache,
@@ -485,7 +495,7 @@ export class Mnemopi {
 	}
 
 	getContext(limit = 10): unknown[] {
-		return this.#withRuntimeOptions(() => this.beam.getContext(limit));
+		return this.#withRuntimeOptions("mnemopi.read", () => this.beam.getContext(limit));
 	}
 
 	getStats(
@@ -493,62 +503,70 @@ export class Mnemopi {
 		authorType: string | null = null,
 		channelId: string | null = null,
 	): MemoryFacadeStats {
-		const working = this.#withRuntimeOptions(() => this.beam.getWorkingStats(authorId, authorType, channelId));
-		const episodic = this.#withRuntimeOptions(() => this.beam.getEpisodicStats(authorId, authorType, channelId));
-		const totalMemories = countRows(this.conn, "SELECT COUNT(*) AS total FROM working_memory");
-		const totalSessions = countRows(this.conn, "SELECT COUNT(DISTINCT session_id) AS total FROM working_memory");
-		using lastStatement = this.conn.prepare("SELECT timestamp FROM working_memory ORDER BY timestamp DESC LIMIT 1");
-		const last = lastStatement.get() as {
-			timestamp: string | null;
-		} | null;
-		const tripleTotal = countRows(this.conn, "SELECT COUNT(*) AS total FROM triples");
-		let banks = ["default"];
-		if (this.dbPath !== undefined && this.dbPath !== ":memory:") {
-			const dataDir = dataDirForDbPath(this.dbPath);
-			banks = new BankManager(dataDir).listBanks();
-		}
-		return {
-			total_memories: totalMemories,
-			total_sessions: totalSessions,
-			sources: sourceCounts(this.conn),
-			last_memory: last?.timestamp ?? null,
-			database: this.dbPath ?? ":memory:",
-			mode: "beam",
-			banks,
-			beam: { working_memory: working, episodic_memory: episodic, triples: { total: tripleTotal } },
-		};
+		return withLoopPhase("mnemopi.stats", () => {
+			const working = withMnemopiRuntimeOptions(this.runtimeOptions, () =>
+				this.beam.getWorkingStats(authorId, authorType, channelId),
+			);
+			const episodic = withMnemopiRuntimeOptions(this.runtimeOptions, () =>
+				this.beam.getEpisodicStats(authorId, authorType, channelId),
+			);
+			const totalMemories = countRows(this.conn, "SELECT COUNT(*) AS total FROM working_memory");
+			const totalSessions = countRows(this.conn, "SELECT COUNT(DISTINCT session_id) AS total FROM working_memory");
+			using lastStatement = this.conn.prepare(
+				"SELECT timestamp FROM working_memory ORDER BY timestamp DESC LIMIT 1",
+			);
+			const last = lastStatement.get() as {
+				timestamp: string | null;
+			} | null;
+			const tripleTotal = countRows(this.conn, "SELECT COUNT(*) AS total FROM triples");
+			let banks = ["default"];
+			if (this.dbPath !== undefined && this.dbPath !== ":memory:") {
+				const dataDir = dataDirForDbPath(this.dbPath);
+				banks = new BankManager(dataDir).listBanks();
+			}
+			return {
+				total_memories: totalMemories,
+				total_sessions: totalSessions,
+				sources: sourceCounts(this.conn),
+				last_memory: last?.timestamp ?? null,
+				database: this.dbPath ?? ":memory:",
+				mode: "beam",
+				banks,
+				beam: { working_memory: working, episodic_memory: episodic, triples: { total: tripleTotal } },
+			};
+		});
 	}
 
 	get(memoryId: string): unknown | null {
-		return this.#withRuntimeOptions(() => this.beam.get(memoryId));
+		return this.#withRuntimeOptions("mnemopi.read", () => this.beam.get(memoryId));
 	}
 
 	forget(memoryId: string): boolean {
-		return this.#withRuntimeOptions(() => this.beam.forgetWorking(memoryId));
+		return this.#withRuntimeOptions("mnemopi.edit", () => this.beam.forgetWorking(memoryId));
 	}
 
 	update(memoryId: string, content: string | null = null, importance: number | null = null): boolean {
-		return this.#withRuntimeOptions(() => this.beam.updateWorking(memoryId, content, importance));
+		return this.#withRuntimeOptions("mnemopi.edit", () => this.beam.updateWorking(memoryId, content, importance));
 	}
 
 	sleep(dryRun = false): SleepResult {
-		return this.#withRuntimeOptions(() => this.beam.sleep(dryRun));
+		return this.#withRuntimeOptions("mnemopi.consolidate", () => this.beam.sleep(dryRun));
 	}
 
 	sleepAllSessions(dryRun = false): SleepResult {
-		return this.#withRuntimeOptions(() => this.beam.sleepAllSessions(dryRun));
+		return this.#withRuntimeOptions("mnemopi.consolidate", () => this.beam.sleepAllSessions(dryRun));
 	}
 
 	scratchpadWrite(content: string): string {
-		return this.#withRuntimeOptions(() => this.beam.scratchpadWrite(content));
+		return this.#withRuntimeOptions("mnemopi.retain", () => this.beam.scratchpadWrite(content));
 	}
 
 	scratchpadRead(): unknown[] {
-		return this.#withRuntimeOptions(() => this.beam.scratchpadRead());
+		return this.#withRuntimeOptions("mnemopi.read", () => this.beam.scratchpadRead());
 	}
 
 	scratchpadClear(): void {
-		this.#withRuntimeOptions(() => this.beam.scratchpadClear());
+		this.#withRuntimeOptions("mnemopi.edit", () => this.beam.scratchpadClear());
 	}
 
 	addMemory(memory: string | RememberInput, options: RememberFacadeOptions = {}): string {
@@ -574,8 +592,8 @@ export class Mnemopi {
 	consolidate(dryRun = false): SleepResult {
 		return this.sleep(dryRun);
 	}
-	#withRuntimeOptions<T>(fn: () => T): T {
-		return withMnemopiRuntimeOptions(this.runtimeOptions, fn);
+	#withRuntimeOptions<T>(label: string, fn: () => T): T {
+		return withLoopPhase(label, () => withMnemopiRuntimeOptions(this.runtimeOptions, fn));
 	}
 }
 

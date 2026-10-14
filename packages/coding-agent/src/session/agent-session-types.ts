@@ -154,8 +154,6 @@ export interface InitialRetryFallbackState {
 /** Dependencies and initial state used to construct an AgentSession. */
 export interface AgentSessionConfig {
 	agent: Agent;
-	/** Shared with the provider stream wrapper: current Codex Code Mode tool exposure snapshot for turn metadata. */
-	codeModeState?: { namespacesInfo?: unknown };
 	sessionManager: SessionManager;
 	settings: Settings;
 	/**
@@ -198,6 +196,11 @@ export interface AgentSessionConfig {
 	initialRetryFallback?: InitialRetryFallbackState;
 	/** Skip retry.fallbackChains validation at construction; the host calls `validateRetryFallbackChains()` later. */
 	deferRetryFallbackValidation?: boolean;
+	/**
+	 * Override for the unexpected-stop judge verdict budget. Test seam so the
+	 * slow-verdict boundary runs in milliseconds; production never sets it.
+	 */
+	unexpectedStopJudgeTimeoutMs?: number;
 	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */
@@ -251,6 +254,13 @@ export interface AgentSessionConfig {
 	 * `allowSessionModelFallback` option. Default: false.
 	 */
 	allowSessionModelFallback?: boolean;
+	/**
+	 * `false` when the extension UI context cannot reach a human: ACP installs one
+	 * for every client, but without form elicitation its prompts resolve empty.
+	 * Saved-reset consent then takes its no-prompt-UI path. `createAgentSession`
+	 * passes its `interactivePrompts` option. Default: true.
+	 */
+	interactivePrompts?: boolean;
 	/** Whether the startup model may be replaced by refreshed same-selector registry metadata. */
 	rebindModelAfterDiscovery?: boolean;
 	/** Tool registry for LSP and settings. */
@@ -577,6 +587,8 @@ export interface EphemeralTurnOptions {
 	tools?: false;
 	/** Optional positive safe-integer output-token cap. Transports that omit or overwrite caller output limits reject this option before inference. On budget-thinking models a cap disables optional thinking (models that require it reject the cap). */
 	maxTokens?: number;
+	/** Run at the model's lowest effort where the provider carries the change as a per-message control that keeps the prompt cache (Anthropic per-message effort, OpenAI `configuration_update`) and the session thinks. Elsewhere the session's reasoning applies, since changing request-level reasoning forfeits the cache. */
+	minimizeEffort?: boolean;
 	/** Positive safe-integer UTF-8 byte cap. Reject before inference when the serialized post-transform, secret-obfuscated provider context exceeds it. Measured before `before_provider_request` hooks; payload replacements are not re-measured. */
 	maxContextBytes?: number;
 	/** Awaited in order; a delivery failure rejects the side turn and aborts the request. */

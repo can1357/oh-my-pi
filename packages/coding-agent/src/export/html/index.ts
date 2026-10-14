@@ -180,6 +180,8 @@ function sessionHeaderForExport(header: SessionHeader | null): SessionHeader | n
 	if (!header) return null;
 	const exported = { ...header };
 	delete exported.previousSessionFiles;
+	delete exported.providerPromptCacheKey;
+	delete exported.taskPromptCacheKey;
 	return exported;
 }
 

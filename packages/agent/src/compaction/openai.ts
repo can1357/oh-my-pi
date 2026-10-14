@@ -20,6 +20,7 @@ import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-code
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import { createOpenAICodexCompatibilityMetadata } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { applySessionHeader } from "@oh-my-pi/pi-ai/providers/inference-headers";
 import {
 	encodeResponsesToolResultOutput,
 	hoistInterleavedResponsesToolBatchMessages,
@@ -53,7 +54,7 @@ import {
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, isRecord, logger, prompt, ptree, stringifyJson, structuredCloneJSON } from "@oh-my-pi/pi-utils";
-import { dataUrlImageSize, estimateImageTokens } from "../image-tokens";
+import { dataUrlImageSize } from "../image-tokens";
 import { Tokenizer } from "../tokenizer";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
 import { prepareBedrockCompactionRequest } from "./bedrock";
@@ -81,8 +82,11 @@ export const REMOTE_COMPACTION_TIMEOUT_MS = 300_000;
 export const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE = prompt.render(contextWindowTruncatedOutputPrompt);
 
 const REMOTE_COMPACTION_REQUEST_OVERHEAD_TOKENS = 256;
-/** Per-`input_image` record estimates; trim re-probes share untouched items by reference. */
-const remoteImageTokenCache = new WeakMap<Record<string, unknown>, number>();
+/**
+ * Per-`input_image` record estimates, tagged with the pricing tokenizer's
+ * billing key; trim re-probes share untouched items by reference.
+ */
+const remoteImageTokenCache = new WeakMap<Record<string, unknown>, { billingKey: string; tokens: number }>();
 const TOOL_RESULT_IMAGE_ATTACHMENT_TEXT = "Attached image(s) from tool result:";
 
 interface NormalizedEstimateValue {
@@ -90,12 +94,16 @@ interface NormalizedEstimateValue {
 	imageTokens: number;
 }
 
-function normalizeRemoteCompactionEstimateValue(value: unknown, dropEncrypted = true): NormalizedEstimateValue {
+function normalizeRemoteCompactionEstimateValue(
+	value: unknown,
+	tokenizer: Tokenizer,
+	dropEncrypted = true,
+): NormalizedEstimateValue {
 	if (Array.isArray(value)) {
 		const normalized: unknown[] = [];
 		let imageTokens = 0;
 		for (const item of value) {
-			const result = normalizeRemoteCompactionEstimateValue(item, dropEncrypted);
+			const result = normalizeRemoteCompactionEstimateValue(item, tokenizer, dropEncrypted);
 			normalized.push(result.value);
 			imageTokens += result.imageTokens;
 		}
@@ -105,18 +113,20 @@ function normalizeRemoteCompactionEstimateValue(value: unknown, dropEncrypted = 
 
 	const record = value as Record<string, unknown>;
 	if (record.type === "input_image") {
-		let imageTokens = remoteImageTokenCache.get(record);
-		if (imageTokens === undefined) {
+		let cached = remoteImageTokenCache.get(record);
+		if (cached?.billingKey !== tokenizer.frameBillingKey) {
 			const detail = record.detail;
-			imageTokens = estimateImageTokens(
-				typeof record.image_url === "string" ? dataUrlImageSize(record.image_url) : null,
-				detail === "low" || detail === "high" || detail === "original" || detail === "auto" ? detail : undefined,
-			);
-			remoteImageTokenCache.set(record, imageTokens);
+			cached = {
+				billingKey: tokenizer.frameBillingKey,
+				tokens: tokenizer.imageTokens(
+					typeof record.image_url === "string" ? dataUrlImageSize(record.image_url) : null,
+					detail === "low" || detail === "high" || detail === "original" || detail === "auto" ? detail : undefined,
+				),
+			};
+			remoteImageTokenCache.set(record, cached);
 		}
-		return { value: { ...record, image_url: "<image>" }, imageTokens };
+		return { value: { ...record, image_url: "<image>" }, imageTokens: cached.tokens };
 	}
-
 	const normalized: Record<string, unknown> = {};
 	let imageTokens = 0;
 	for (const [key, item] of Object.entries(record)) {
@@ -124,7 +134,7 @@ function normalizeRemoteCompactionEstimateValue(value: unknown, dropEncrypted = 
 		// exceeds what the provider bills, so it stays out of the fit estimate
 		// (same policy as `MessageCountOptions.excludeEncryptedReasoning`).
 		if (dropEncrypted && key === "encrypted_content" && typeof item === "string") continue;
-		const result = normalizeRemoteCompactionEstimateValue(item, dropEncrypted);
+		const result = normalizeRemoteCompactionEstimateValue(item, tokenizer, dropEncrypted);
 		normalized[key] = result.value;
 		imageTokens += result.imageTokens;
 	}
@@ -137,7 +147,7 @@ function normalizeRemoteCompactionEstimateValue(value: unknown, dropEncrypted = 
  * opaque compaction state included, counts as serialized.
  */
 export function countResponsesHistoryTokens(items: unknown[], tokenizer: Tokenizer): number {
-	const normalized = normalizeRemoteCompactionEstimateValue(items, false);
+	const normalized = normalizeRemoteCompactionEstimateValue(items, tokenizer, false);
 	const serialized = stringifyJson(normalized.value);
 	return (serialized === undefined ? 0 : tokenizer.countTokens(serialized)) + normalized.imageTokens;
 }
@@ -180,7 +190,10 @@ function probeRemoteCompactionInputBudget(
 	tools: unknown[] | undefined,
 	contextWindow: number | null | undefined,
 ): RemoteCompactionBudgetProbe {
-	const normalized = normalizeRemoteCompactionEstimateValue({ instructions, input, ...(tools ? { tools } : {}) });
+	const normalized = normalizeRemoteCompactionEstimateValue(
+		{ instructions, input, ...(tools ? { tools } : {}) },
+		tokenizer,
+	);
 	const serialized = stringifyJson(normalized.value) ?? "";
 	const flatTokens = normalized.imageTokens + REMOTE_COMPACTION_REQUEST_OVERHEAD_TOKENS;
 	if (!contextWindow || contextWindow <= 0) {
@@ -862,6 +875,7 @@ export async function requestOpenAiRemoteCompaction(
 				Authorization: `Bearer ${apiKey}`,
 				...model.headers,
 			};
+	applySessionHeader(headers, model.compat, opts?.sessionId);
 
 	// Codex endpoints require additional auth headers
 	if (isCodexResponses) {

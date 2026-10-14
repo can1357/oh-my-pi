@@ -271,6 +271,12 @@ class SkillCallout implements Component {
 		this.#lines = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#source = undefined;
+		this.#lines = undefined;
+		this.#box.releaseRenderCaches();
+	}
+
 	render(width: number): readonly string[] {
 		const inner = this.#box.render(Math.max(1, width - 1));
 		if (this.#source === inner && this.#lines !== undefined) return this.#lines;

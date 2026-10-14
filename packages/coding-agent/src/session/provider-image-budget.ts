@@ -10,11 +10,12 @@ import type {
 	ToolResultProviderMetadata,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
+import { reachesOfficialEndpoint } from "@oh-my-pi/pi-ai";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { resolveInlineImageByteBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { providerImageBudget } from "@oh-my-pi/snapcompact";
+import { capFrameDataBytes, frameDataBytesBudget, providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { imageDecodeFailureReason } from "@oh-my-pi/pi-tui/chat/image-loading";
 
@@ -133,7 +134,7 @@ function clampImages(context: Context, state: ImageBudgetState): Context {
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
 	const totalImages = countImages(context);
-	const remainingDrops = totalImages - providerImageBudget(model.provider);
+	const remainingDrops = totalImages - providerImageBudget(model);
 	if (remainingDrops <= 0) return context;
 	return clampImages(context, { remainingDrops, inlineBytes: 0, byteBudget: Number.POSITIVE_INFINITY, model });
 }
@@ -144,7 +145,7 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
  */
 export function clampProviderContextImageBytes(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
-	const byteBudget = resolveInlineImageByteBudget(model);
+	const byteBudget = resolveInlineImageByteBudget(model, reachesOfficialEndpoint(model));
 	if (byteBudget === undefined) return context;
 	let inlineBytes = 0;
 	for (const message of context.messages) {
@@ -156,6 +157,30 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	}
 	if (inlineBytes <= byteBudget) return context;
 	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model });
+}
+
+/**
+ * Caps snapcompact archive frames at `model`'s frame payload budget.
+ *
+ * The archive is sized when the agent context is built, for the model active then. A later switch to a host with a
+ * smaller budget (`/model`, cycling, retry and role fallbacks, prewalk hand-offs, context promotion, an advisor on
+ * another host) would otherwise resend the larger archive, and hosts without an inline byte budget have no other clamp.
+ * Archive frames are the images of summary (rewritten-history) user messages.
+ */
+export function capArchiveFrameBytes(context: Context, model: Model): Context {
+	const budget = frameDataBytesBudget(model);
+	let messages: Message[] | undefined;
+	for (let index = 0; index < context.messages.length; index++) {
+		const message = context.messages[index];
+		if (message.role !== "user" || message.historyRewriteAt === undefined || !Array.isArray(message.content)) {
+			continue;
+		}
+		const content = capFrameDataBytes(message.content, budget);
+		if (content === message.content) continue;
+		messages ??= context.messages.slice();
+		messages[index] = { ...message, content };
+	}
+	return messages ? { ...context, messages } : context;
 }
 
 /**

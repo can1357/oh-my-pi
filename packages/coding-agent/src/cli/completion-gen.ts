@@ -67,7 +67,7 @@ export interface CompletionSpec {
 /** Single-value flags resolved against the live model catalog. */
 const MODEL_FLAGS: Record<string, true> = { model: true, smol: true, slow: true, plan: true };
 /** Single-value flags resolved against on-disk sessions. */
-const SESSION_FLAGS: Record<string, true> = { resume: true, fork: true, session: true };
+const SESSION_FLAGS: Record<string, true> = { resume: true, restore: true, fork: true, session: true };
 /** Flags whose value is a directory path. */
 const DIR_FLAGS: Record<string, true> = { "session-dir": true, "plugin-dir": true };
 

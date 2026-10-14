@@ -1436,8 +1436,9 @@ export class CustomEditor extends Editor {
 	 *  `pendingImages` (Codex PR #3602 review). */
 	#pasteInFlight = 0;
 	/** Input chunks and explicit prompts deferred behind an in-flight paste,
-	 *  drained in FIFO order once the paste count returns to zero. */
-	#pendingInput: (string | Extract<NativeUiEvent, { type: "send" }>)[] = [];
+	 *  drained in FIFO order once the paste count returns to zero. A `draft` chunk
+	 *  arrived through {@link handleDraftEdit} and drains back through it. */
+	#pendingInput: (string | { draft: string } | Extract<NativeUiEvent, { type: "send" }>)[] = [];
 	#actionKeys = new Map<ConfigurableEditorAction, KeyId[]>(
 		Object.entries(DEFAULT_ACTION_KEYS).map(([action, keys]) => [action as ConfigurableEditorAction, [...keys]]),
 	);
@@ -1516,6 +1517,7 @@ export class CustomEditor extends Editor {
 		const drained = this.#pendingInput.splice(0);
 		for (const input of drained) {
 			if (typeof input === "string") this.handleInput(input);
+			else if ("draft" in input) this.handleDraftEdit(input.draft);
 			else this.handleNativeEvent(input);
 		}
 	}
@@ -1528,6 +1530,11 @@ export class CustomEditor extends Editor {
 	#trackAsyncPaste(promise: Promise<unknown>): void {
 		this.#pasteInFlight++;
 		void promise.then(this.#onPasteSettled, this.#onPasteSettled);
+	}
+
+	/** True while a clipboard-image or image-path paste is still landing; later keys queue behind it. */
+	get pasteInFlight(): boolean {
+		return this.#pasteInFlight > 0;
 	}
 
 	capturesInput(data: string): boolean {
@@ -1550,52 +1557,7 @@ export class CustomEditor extends Editor {
 			this.onCapsLock();
 			return;
 		}
-
-		// Bracketed-paste assembly. Some terminals fragment the start marker,
-		// the payload, and the end marker across separate stdin chunks
-		// (Windows Terminal under heavy load, certain SSH muxes, …); the
-		// inherited handler then sees a zero-length payload and silently
-		// drops it through the normal text-insert path. Running our own
-		// `BracketedPasteHandler` ahead of `super.handleInput` lets us route
-		// the assembled content regardless of chunk boundaries:
-		//  - empty payload → `onPasteImage` (#3601: `Cmd+V`/`Ctrl+V` on an
-		//    image-only macOS pasteboard the terminal stripped to `""` first);
-		//  - explicit image-file paths → `onPasteImagePath` (#3506);
-		//  - anything else → the base editor's `pasteText` so `[Paste #N]`
-		//    markers, autocomplete, and undo state stay intact.
-		const paste = this.#pasteHandler.process(data);
-		if (paste.handled) {
-			if (paste.pasteContent === undefined) return; // still buffering — wait for end marker
-			const content = paste.pasteContent;
-			const remaining = paste.remaining;
-			// Queue any trailing bytes from the same read (typically a follow-up keystroke such as
-			// Enter that the user pressed right after Cmd+V) so they only fire *after* the paste
-			// completes — fixes the race where submit runs against an empty `pendingImages`.
-			if (remaining.length > 0) this.#pendingInput.push(remaining);
-			if (content.length === 0 && this.onPasteImage) {
-				this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
-				return;
-			}
-			const attachmentPaths = extractImagePastePathsFromText(content);
-			if (attachmentPaths && this.onPasteImagePath) {
-				this.#trackAsyncPaste(
-					(async () => {
-						for (const p of attachmentPaths) await this.onPasteImagePath?.(p);
-					})(),
-				);
-				return;
-			}
-			// A submit key that shared the read (see `StdinBuffer`'s paste event) is
-			// about to be drained below, so a large-paste host must stage the paste
-			// synchronously instead of opening a menu the submit would land in.
-			if (this.#isSubmitKey(remaining)) this.pasteText(content, { submitAfterPaste: true });
-			else this.pasteText(content);
-			this.#collapseSkillTokens();
-			this.#collapseModelMentions();
-			// No async paste was started; drain the queued trailing bytes ourselves.
-			this.#drainPendingInput();
-			return;
-		}
+		if (this.#routeBracketedPaste(data, false)) return;
 
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
@@ -1828,6 +1790,57 @@ export class CustomEditor extends Editor {
 		this.#normalizeQueuePrefix(hadBareQueuePrefix);
 	}
 
+	/**
+	 * Bracketed-paste assembly. Some terminals fragment the start marker,
+	 * the payload, and the end marker across separate stdin chunks
+	 * (Windows Terminal under heavy load, certain SSH muxes, …); the
+	 * inherited handler then sees a zero-length payload and silently
+	 * drops it through the normal text-insert path. Running our own
+	 * `BracketedPasteHandler` ahead of `super.handleInput` lets us route
+	 * the assembled content regardless of chunk boundaries:
+	 *  - empty payload → `onPasteImage` (#3601: `Cmd+V`/`Ctrl+V` on an
+	 *    image-only macOS pasteboard the terminal stripped to `""` first);
+	 *  - explicit image-file paths → `onPasteImagePath` (#3506);
+	 *  - anything else → the base editor's `pasteText` so `[Paste #N]`
+	 *    markers, autocomplete, and undo state stay intact.
+	 * True when `data` was consumed. `draft` queues trailing bytes back through
+	 * {@link handleDraftEdit} instead of {@link handleInput}.
+	 */
+	#routeBracketedPaste(data: string, draft: boolean): boolean {
+		const paste = this.#pasteHandler.process(data);
+		if (!paste.handled) return false;
+		if (paste.pasteContent === undefined) return true; // still buffering — wait for end marker
+		const content = paste.pasteContent;
+		const remaining = paste.remaining;
+		// Queue any trailing bytes from the same read (typically a follow-up keystroke such as
+		// Enter that the user pressed right after Cmd+V) so they only fire *after* the paste
+		// completes — fixes the race where submit runs against an empty `pendingImages`.
+		if (remaining.length > 0) this.#pendingInput.push(draft ? { draft: remaining } : remaining);
+		if (content.length === 0 && this.onPasteImage) {
+			this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
+			return true;
+		}
+		const attachmentPaths = extractImagePastePathsFromText(content);
+		if (attachmentPaths && this.onPasteImagePath) {
+			this.#trackAsyncPaste(
+				(async () => {
+					for (const p of attachmentPaths) await this.onPasteImagePath?.(p);
+				})(),
+			);
+			return true;
+		}
+		// A submit key that shared the read (see `StdinBuffer`'s paste event) is
+		// about to be drained below, so a large-paste host must stage the paste
+		// synchronously instead of opening a menu the submit would land in.
+		if (this.#isSubmitKey(remaining)) this.pasteText(content, { submitAfterPaste: true });
+		else this.pasteText(content);
+		this.#collapseSkillTokens();
+		this.#collapseModelMentions();
+		// No async paste was started; drain the queued trailing bytes ourselves.
+		this.#drainPendingInput();
+		return true;
+	}
+
 	/** Promote a newly formed bare `->` / `=>` prefix to a reserved header line by opening the
 	 *  queue body beneath it. `hadBareQueuePrefix` is the pre-edit state: a prompt that was
 	 *  already just the prefix is left alone so the user can keep editing it. */
@@ -1846,9 +1859,16 @@ export class CustomEditor extends Editor {
 	 * an Ask dialog opened over a non-empty prompt — so finishing or submitting
 	 * the draft cannot fire an editor-slot shortcut that clears
 	 * `editorContainer` and orphans the overlay. Only text editing, cursor
-	 * movement, submission, and the clear action reach the buffer.
+	 * movement, submission, the clear action, and pastes (clipboard images and
+	 * image paths attach as on the composer) reach the buffer.
 	 */
 	handleDraftEdit(data: string): void {
+		// Same serialization as handleInput: keys typed behind an image paste wait for it.
+		if (this.#pasteInFlight > 0) {
+			this.#pendingInput.push({ draft: data });
+			return;
+		}
+		if (this.#routeBracketedPaste(data, true)) return;
 		// The base editor reserves Ctrl+C for parent handling and returns without
 		// touching the buffer, so the configured clear action must be dispatched
 		// explicitly here — otherwise the guard's "finish or clear the prompt"
@@ -1860,6 +1880,10 @@ export class CustomEditor extends Editor {
 		if (canonical !== undefined && this.#matchesAction(canonical, "app.clear")) {
 			if (this.onClear) this.onClear();
 			else this.setText("");
+			return;
+		}
+		if (canonical !== undefined && this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
+			this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
 			return;
 		}
 		this.#forwardInput(data);

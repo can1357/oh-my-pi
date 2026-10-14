@@ -79,8 +79,8 @@ describe("speech role candidate ordering", () => {
 });
 
 describe("tts speech chain execution", () => {
-	test("uses the default local model for WAV output", async () => {
-		const settings = Settings.isolated();
+	test("uses the default local model for WAV output at the configured speed", async () => {
+		const settings = Settings.isolated({ "tts.localSpeed": 1.5 });
 		const registry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { settings });
 		const localSynthesis = spyOn(ttsClient, "synthesize").mockResolvedValue({
 			pcm: new Float32Array([0, 0.25, -0.25]),
@@ -101,6 +101,7 @@ describe("tts speech chain execution", () => {
 		expect(result.details).toMatchObject({ backend: "local-inference", voiceId: "kokoro/af_heart", codec: "wav" });
 		expect(localSynthesis).toHaveBeenCalledWith("kokoro", "Hello locally", {
 			voice: "af_heart",
+			speed: 1.5,
 			signal: undefined,
 		});
 		expect(fs.existsSync(path.join(tempDir, "voice.wav"))).toBe(true);
@@ -182,6 +183,7 @@ describe("tts speech chain execution", () => {
 		expect(result.details).toMatchObject({ backend: "local-inference", codec: "wav" });
 		expect(localSynthesis).toHaveBeenCalledWith("kokoro", "Fall back locally", {
 			voice: "af_heart",
+			speed: 1,
 			signal: undefined,
 		});
 		expect(fs.existsSync(path.join(tempDir, "voice.wav"))).toBe(true);

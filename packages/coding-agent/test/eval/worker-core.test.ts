@@ -415,6 +415,41 @@ describe("WorkerCore", () => {
 		}
 	});
 
+	it("reads artifact:// from the artifacts dir of the run's snapshot, not the first one", async () => {
+		const dirA = await fs.mkdtemp(path.join(os.tmpdir(), "omp-artifacts-a-"));
+		const dirB = await fs.mkdtemp(path.join(os.tmpdir(), "omp-artifacts-b-"));
+		await Bun.write(path.join(dirA, "5.eval.log"), "from A");
+		await Bun.write(path.join(dirB, "5.eval.log"), "from B");
+		const harness = createWorkerHarness();
+		const probe = globalThis as { __omp_artifact_probe?: unknown };
+		const run = async (runId: string, artifacts: string) => {
+			const result = waitForMessage(harness, message => message.type === "result" && message.runId === runId);
+			harness.send({
+				type: "run",
+				runId,
+				code: `globalThis.__omp_artifact_probe = await read("artifact://5");`,
+				filename: `[${runId}].js`,
+				snapshot: { cwd: process.cwd(), sessionId: "artifact-roots", localRoots: { artifact: artifacts } },
+			});
+			expect(await result).toMatchObject({ type: "result", runId, ok: true });
+			return probe.__omp_artifact_probe;
+		};
+		try {
+			await initializeWorker(harness, {
+				cwd: process.cwd(),
+				sessionId: "artifact-roots",
+				localRoots: { artifact: dirA },
+			});
+			expect(await run("artifact-a", dirA)).toBe("from A");
+			expect(await run("artifact-b", dirB)).toBe("from B");
+		} finally {
+			delete probe.__omp_artifact_probe;
+			harness.send({ type: "close" });
+			await fs.rm(dirA, { recursive: true, force: true });
+			await fs.rm(dirB, { recursive: true, force: true });
+		}
+	});
+
 	it("survives concurrent same-realm setCwd in a child process with postmortem loaded", async () => {
 		// Process-level oracle: the production crash was postmortem killing the process
 		// after an unhandled rejection from concurrent inline setCwd. This must stay green

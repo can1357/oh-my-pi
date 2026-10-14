@@ -1,6 +1,7 @@
 // Image billing for readers whose lineage has no `image-tokenization` rule in
 // classes/*.kdl, by the wire API carrying the request. priority=-1: these are
-// fallbacks, so a class-wide lineage rule (same specificity) always wins.
+// fallbacks, so a class-wide lineage rule (same specificity) always wins. None
+// is `verified`: nobody measured the billing of the readers they price.
 
 // OpenAI-compatible wires bill like GPT-5.5: 32px patches × 1.2, `auto` sized
 // like `original`.

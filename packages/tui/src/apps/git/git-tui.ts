@@ -32,7 +32,7 @@ import { Stack } from "../../components/layout/stack";
 import { matchesKey } from "../../keys";
 import { ProcessTerminal } from "../../terminal";
 import { routeSgrMouseInput } from "../../mouse";
-import { col, compact, keyed, node, row, span, text } from "../../native/describe";
+import { col, compact, keyed, node, row, span, stableKey, text } from "../../native/describe";
 import { Memo } from "../../native/memo";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../../native/node";
 import { actionButton } from "../../native/overlay";
@@ -42,6 +42,7 @@ import { theme, warmHighlighter } from "../../theme/theme";
 import type { AvatarSource } from "./avatar";
 import { pill, softPill, tintChip } from "./colors";
 import {
+	assetTitle,
 	buildDiffDocument,
 	type DiffDocument,
 	buildLineSelectionPatch,
@@ -53,7 +54,7 @@ import {
 } from "./diff-pane";
 import { GitHelpSheet } from "./help";
 import { Sidebar, type SidebarAction, type GitCommitMessage } from "./sidebar";
-import type { AssetFileContents, ChangedFile, FileContents, GitTuiModel } from "./state";
+import type { AssetFileContents, ChangedFile, FileAssetSide, FileContents, GitTuiModel, MediaRef } from "./state";
 
 /** AI staging counts displayed after filtering the working tree. */
 export interface AiStageOutcome {
@@ -929,8 +930,9 @@ class GitTuiComponent implements Component {
 				this.#contents,
 				this.#currentFile,
 				this.#pane.emptyMessage,
+				cx.supports("media"),
 			],
-			() => this.#describeBody(),
+			() => this.#describeBody(cx),
 		);
 		const side = this.#sidebar.describe(cx);
 		return this.#nativeRoot.get([bar, body, side, narrow, status, this.#status, this.#statusTone], () => {
@@ -1086,7 +1088,7 @@ class GitTuiComponent implements Component {
 	}
 
 	/** The diff for the view mode, or the loading, empty and media states. */
-	#describeBody(): NativeNode {
+	#describeBody(cx: DescribeContext): NativeNode {
 		const doc = this.#pane.doc;
 		const file = this.#currentFile;
 		if (doc && this.#pane.state === "ready") {
@@ -1104,6 +1106,18 @@ class GitTuiComponent implements Component {
 		}
 		const contents = this.#contents;
 		if (this.#pane.state === "asset" && file && contents?.kind === "asset") {
+			if (cx.supports("media")) {
+				return keyed(
+					row(
+						[
+							mediaColumn("before", contents.old, contents.oldRef),
+							mediaColumn("after", contents.new, contents.newRef),
+						],
+						{ gap: "sm", align: "stretch", grow: 1, role: "omp.app.git.compare" },
+					),
+					"compare",
+				);
+			}
 			return keyed(
 				col(
 					[
@@ -1188,6 +1202,41 @@ function unifiedDiff(doc: DiffDocument, whole: boolean): string {
 		}
 	}
 	return out.join("\n");
+}
+
+/** `media` nodes of the before/after compare share this link, so they pan and zoom together. */
+const MEDIA_COMPARE_LINK = "git-compare";
+
+/**
+ * One column of the native media compare: its heading (`Before · PNG`) over a
+ * `media` node Tern loads from `ref`, keyed by path so another file remounts,
+ * or a muted line when the side has no file.
+ */
+function mediaColumn(side: "before" | "after", asset: FileAssetSide, ref: MediaRef | undefined): NativeNode {
+	const head = keyed(
+		text([span(assetTitle(side === "before" ? "Before" : "After", asset), "strong")], {
+			truncate: "end",
+			role: "omp.app.git.media-head",
+		}),
+		"head",
+	);
+	const body = ref
+		? node(
+				"media",
+				{ ...ref, link: MEDIA_COMPARE_LINK, grow: 1, role: "omp.app.git.media" },
+				undefined,
+				`media-${stableKey(ref.path)}`,
+			)
+		: keyed(
+				text(
+					asset.kind === "empty"
+						? [span(side === "before" ? "Did not exist" : "Deleted", "muted")]
+						: assetText(asset).map(fact => span(fact.t, "muted")),
+					{ role: "omp.app.git.media-none" },
+				),
+				"none",
+			);
+	return keyed(col([head, body], { gap: "xs", grow: 1, basis: 0, role: "omp.app.git.media-side" }), side);
 }
 
 /** One side of a media/binary change as a short fact line. */

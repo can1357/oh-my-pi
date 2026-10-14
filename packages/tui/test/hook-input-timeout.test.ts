@@ -1,8 +1,25 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 
+import { stripVTControlCharacters } from "node:util";
 import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
+import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { TUI } from "@oh-my-pi/pi-tui";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+
+const CX: DescribeContext = { cols: 100, reduceMotion: false, dark: true, supports: () => true, feature: () => true };
+
+/** Every described node under `child`, components expanded through their own `describe`. */
+function nodes(child: NativeChild): NativeNode[] {
+	const described = "k" in child ? child : child.describe?.(CX);
+	if (!described) return [];
+	return [described, ...(described.c ?? []).flatMap(nodes)];
+}
+
+/** The spans of a `text` node (none for other kinds). */
+function spans(node: NativeNode): readonly TspSpan[] {
+	return node.k === "text" ? (node.p?.spans ?? []) : [];
+}
 
 beforeAll(async () => {
 	const theme = await getThemeByName("dark");
@@ -103,5 +120,61 @@ describe("HookInputComponent timeout", () => {
 		expect(onSubmit).toHaveBeenCalledWith("sk-line1sk-line2");
 
 		component.dispose();
+	});
+});
+
+describe("HookInputComponent native sheet", () => {
+	it("Submit and Cancel run what Enter and Esc run; keys live only in tooltips", () => {
+		const onSubmit = vi.fn();
+		const onCancel = vi.fn();
+		const component = new HookInputComponent("Search pull requests", undefined, onSubmit, onCancel);
+		const buttons = nodes(component.describe(CX)).filter(node => node.p?.role === "omp.btn");
+		expect(buttons.map(button => [button.key, button.p?.title])).toEqual([
+			["cancel", "Cancel  esc"],
+			["submit", "Submit  ⏎"],
+		]);
+		// No key legend text in the native body: the terminal-only hint stays in render().
+		const texts = nodes(component.describe(CX)).flatMap(node => spans(node).map(s => s.t));
+		expect(texts.some(t => t.includes("submit"))).toBe(false);
+		expect(stripVTControlCharacters(component.render(80).join("\n"))).toContain("submit");
+
+		component.handleInput("4");
+		component.handleInput("2");
+		component.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
+		expect(onSubmit).toHaveBeenCalledWith("42");
+		component.handleNativeEvent({ type: "action", key: "actions/cancel", act: "cancel", mods: [] });
+		expect(onCancel).toHaveBeenCalledTimes(1);
+	});
+
+	it("splits the title into head and detail and draws the placeholder natively", () => {
+		const component = new HookInputComponent(
+			"Search pull requests\nTitle, author or #123",
+			"e.g. #482",
+			vi.fn(),
+			vi.fn(),
+		);
+		const all = nodes(component.describe(CX));
+		const title = all.find(node => node.p?.role === "omp.hook-input.title");
+		const detail = all.find(node => node.p?.role === "omp.hook-input.detail");
+		expect(title && spans(title).map(s => s.t)).toEqual(["Search pull requests"]);
+		expect(detail && spans(detail).map(s => s.t)).toEqual(["Title, author or #123"]);
+		expect(all.find(node => node.k === "input")?.p).toMatchObject({ placeholder: "e.g. #482" });
+	});
+
+	it("a refused submit keeps the value and tints the field with the reason under it", () => {
+		const component = new HookInputComponent(
+			"PR number",
+			undefined,
+			value => {
+				throw new Error(`"${value}" isn't a number`);
+			},
+			vi.fn(),
+		);
+		component.handleInput("x");
+		component.handleInput("\n");
+		const all = nodes(component.describe(CX));
+		expect(all.find(node => node.p?.role === "omp.hook-input.field")?.p).toMatchObject({ tone: "error" });
+		expect(all.some(node => spans(node).some(s => s.t === `"x" isn't a number` && s.s === "error"))).toBe(true);
+		expect(all.find(node => node.k === "input")?.p).toMatchObject({ text: "x" });
 	});
 });

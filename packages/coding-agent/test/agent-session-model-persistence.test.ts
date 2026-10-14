@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
-import { type Api, type AssistantMessage, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type Api, type AssistantMessage, type Context, Effort, type ImageContent, type Model } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -11,8 +12,11 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import * as snapcompact from "@oh-my-pi/snapcompact";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 describe("AgentSession model persistence", () => {
 	let tempDir: TempDir;
@@ -532,6 +536,232 @@ describe("AgentSession model persistence", () => {
 			},
 		});
 	});
+
+	/** A valid 800x500 RGB PNG of noise deflate cannot shrink: ~1.6 MB of base64, decodable by the send path's image checks. */
+	function framePng(seed: number): string {
+		const pixels = new Uint32Array((800 * 500 * 3) / 4);
+		let state = seed;
+		for (let i = 0; i < pixels.length; i++) {
+			// xorshift32, so every run encodes the same bytes.
+			state ^= state << 13;
+			state ^= state >>> 17;
+			state ^= state << 5;
+			pixels[i] = state;
+		}
+		return encodeRawPng(new Uint8Array(pixels.buffer), 800, 500, 3).toString("base64");
+	}
+
+	/** Appends a 4.8 MB three-frame archive: over the 3 MB default, inside half of Anthropic's 24 MB inline-image budget. */
+	function appendFrameArchive(sessionManager: SessionManager, firstKeptEntryId: string): void {
+		const frame = (seed: number) => ({
+			data: framePng(seed),
+			mimeType: "image/png",
+			cols: 8,
+			rows: 8,
+			chars: 8,
+		});
+		sessionManager.appendCompaction("Archived history.", "archive", firstKeptEntryId, 150_000, {
+			preserveData: {
+				[snapcompact.PRESERVE_KEY]: {
+					frames: [frame(0x40), frame(0x80), frame(0xc0)],
+					totalChars: 24,
+					truncatedChars: 0,
+				},
+			},
+		});
+	}
+
+	function archiveImages(messages: readonly AgentMessage[]): number {
+		const summary = messages.find(message => message.role === "compactionSummary");
+		if (summary?.role !== "compactionSummary") throw new Error("Expected a restored compaction summary");
+		return summary.blocks?.filter(block => block.type === "image").length ?? 0;
+	}
+
+	/** Resumes a session whose archive was compacted on the official Anthropic API. */
+	async function resumeArchivedSession(
+		authStorage: AuthStorage,
+		modelRegistry: ModelRegistry,
+	): Promise<CreateAgentSessionResult> {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated();
+		settings.setModelRole("default", modelValue(defaultModel));
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "archived"));
+		sessionManager.appendModelChange(modelValue(defaultModel));
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: "continue",
+			timestamp: Date.now(),
+		});
+		appendFrameArchive(sessionManager, firstKeptEntryId);
+		return createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+	}
+
+	it("restores a snapcompact archive at the resumed model's frame payload budget", async () => {
+		const result = await resumeArchivedSession(sharedAuthStorage, sharedModelRegistry);
+		session = result.session;
+
+		expect(archiveImages(result.session.messages)).toBe(3);
+	});
+
+	/** Switches a session archived on the official Anthropic API to `target`, then returns the archive frames of its next request. */
+	async function archiveFramesAfterSwitch(
+		target: Model<Api>,
+		switchModel: (session: AgentSession, target: Model<Api>) => Promise<unknown>,
+	): Promise<ImageContent[]> {
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		try {
+			for (const provider of ["anthropic", "openrouter", "amazon-bedrock"]) {
+				authStorage.keys.setRuntime(provider, "test-key");
+			}
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+			const result = await resumeArchivedSession(authStorage, modelRegistry);
+			session = result.session;
+			const summary = session.messages.find(message => message.role === "compactionSummary");
+
+			await switchModel(session, target);
+			let request: Context | undefined;
+			session.agent.streamFn = (_model, context) => {
+				request = context;
+				const stream = new AssistantMessageEventStream();
+				const message = createAssistantMessage("done");
+				stream.push({ type: "done", reason: "stop", message });
+				stream.end(message);
+				return stream;
+			};
+			await session.agent.continue();
+
+			// The agent keeps the archive it was built with; only the request is capped.
+			expect(session.messages.find(message => message.role === "compactionSummary")).toBe(summary);
+			const requestSummary = request?.messages.find(
+				message => message.role === "user" && message.historyRewriteAt !== undefined,
+			);
+			if (requestSummary?.role !== "user" || !Array.isArray(requestSummary.content)) {
+				throw new Error("Expected the archive summary in the request");
+			}
+			return requestSummary.content.filter((block): block is ImageContent => block.type === "image");
+		} finally {
+			await session?.dispose();
+			session = undefined;
+			authStorage.close();
+		}
+	}
+
+	it.each([
+		["setModel", getBundledModel("openrouter", "anthropic/claude-sonnet-4.5")],
+		["setModelTemporary", getBundledModel("amazon-bedrock", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")],
+	] as const)(
+		"after %s from the official Anthropic API to a host without a byte budget, the next request carries only the newest archive frame",
+		async (switchPath, target) => {
+			const frames = await archiveFramesAfterSwitch(target, (active, model) =>
+				switchPath === "setModel"
+					? active.setModel(model)
+					: active.setModelTemporary(model, undefined, { ephemeral: true }),
+			);
+
+			expect(frames).toHaveLength(1);
+			expect(frames.reduce((bytes, frame) => bytes + frame.data.length, 0)).toBeLessThanOrEqual(
+				snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET,
+			);
+		},
+	);
+
+	it("keeps every archive frame in the next request after a switch between official Anthropic models", async () => {
+		const frames = await archiveFramesAfterSwitch(
+			getAnthropicModelOrThrow("claude-sonnet-4-5-20250929"),
+			(active, model) => active.setModel(model),
+		);
+
+		expect(frames).toHaveLength(3);
+	});
+
+	it.each([
+		["a proxy to the official Anthropic API", "anthropic-proxy", "anthropic", 3],
+		["the official Anthropic API to a proxy", "anthropic", "anthropic-proxy", 1],
+	] as const)(
+		"switching sessions from %s installs the archive at the resumed model's frame payload budget",
+		async (_, fromProvider, toProvider, frames) => {
+			const modelsPath = path.join(tempDir.path(), "models.yml");
+			await Bun.write(
+				modelsPath,
+				`providers:
+  anthropic-proxy:
+    api: anthropic-messages
+    baseUrl: https://anthropic-proxy.example.com
+    apiKey: test-key
+    models:
+      - id: claude-sonnet-4-5
+        input: [text, image]
+        contextWindow: 200000
+        maxTokens: 64000
+`,
+			);
+			const modelRegistry = new ModelRegistry(sharedAuthStorage, modelsPath);
+			const findModel = (provider: string): Model<Api> => {
+				const model = modelRegistry.find(provider, "claude-sonnet-4-5");
+				if (!model) throw new Error(`Expected ${provider}/claude-sonnet-4-5`);
+				return model;
+			};
+			const targetModel = findModel(toProvider);
+			const target = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "target"));
+			target.appendModelChange(modelValue(targetModel));
+			const firstKeptEntryId = target.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
+			target.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "done" }],
+				api: targetModel.api,
+				provider: targetModel.provider,
+				model: targetModel.id,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			appendFrameArchive(target, firstKeptEntryId);
+			await target.flush();
+			const targetFile = target.getSessionFile();
+			if (!targetFile) throw new Error("Expected target session file");
+			session = new AgentSession({
+				agent: new Agent({
+					initialState: {
+						model: findModel(fromProvider),
+						systemPrompt: ["Test"],
+						tools: [],
+						messages: [],
+						thinkingLevel: Effort.Medium,
+					},
+				}),
+				sessionManager: SessionManager.create(tempDir.path(), path.join(tempDir.path(), "active")),
+				settings: Settings.isolated(),
+				modelRegistry,
+			});
+
+			await expect(session.switchSession(targetFile)).resolves.toBe(true);
+
+			expect(session.model?.provider).toBe(toProvider);
+			expect(archiveImages(session.messages)).toBe(frames);
+		},
+	);
 
 	it("marks an interrupted first turn aborted when switching sessions", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");

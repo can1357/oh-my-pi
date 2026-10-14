@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -15,6 +16,7 @@ import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/p
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { buildBudgetNotice, resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { cfgTaskAgentSoftRequestBudget } from "@oh-my-pi/pi-coding-agent/task/settings";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -682,5 +684,65 @@ describe("resolveSoftRequestBudget", () => {
 		expect(resolveSoftRequestBudget("scout", 0)).toBe(0);
 		expect(resolveSoftRequestBudget("scout", -5)).toBe(0);
 		expect(resolveSoftRequestBudget("scout", 20.9)).toBe(20);
+	});
+
+	it("lets an agent's own entry replace the configured budget and the bundled ceiling", () => {
+		expect(resolveSoftRequestBudget("lead", 200, { lead: 400 })).toBe(400);
+		expect(resolveSoftRequestBudget("scout", 200, { scout: 150 })).toBe(150);
+		expect(resolveSoftRequestBudget("task", 200, { task: 50 })).toBe(50);
+	});
+
+	it("keeps agents without an entry on the configured budget and bundled ceilings", () => {
+		const agentBudgets = { lead: 400 };
+		expect(resolveSoftRequestBudget("task", 200, agentBudgets)).toBe(200);
+		expect(resolveSoftRequestBudget("scout", 200, agentBudgets)).toBe(100);
+		expect(resolveSoftRequestBudget("sonic", 200, agentBudgets)).toBe(100);
+	});
+
+	it("disables only the named agent's guard with an entry of 0", () => {
+		expect(resolveSoftRequestBudget("lead", 200, { lead: 0 })).toBe(0);
+		expect(resolveSoftRequestBudget("task", 200, { lead: 0 })).toBe(200);
+	});
+
+	it("applies an agent's entry when the configured budget disables the guard", () => {
+		expect(resolveSoftRequestBudget("lead", 0, { lead: 400 })).toBe(400);
+		expect(resolveSoftRequestBudget("task", 0, { lead: 400 })).toBe(0);
+	});
+});
+
+describe("task.agentSoftRequestBudget", () => {
+	it("rejects entries that are not non-negative integer request counts", () => {
+		for (const budget of [-1, 1.5, "400", [400]]) {
+			expect(() => Settings.isolated({ "task.agentSoftRequestBudget": { lead: budget } })).toThrow(
+				"Invalid task.agentSoftRequestBudget.lead",
+			);
+		}
+		expect(() => Settings.isolated({ "task.agentSoftRequestBudget": [400] })).toThrow(
+			"Invalid task.agentSoftRequestBudget:",
+		);
+	});
+
+	it("lets a higher settings layer clear a lower layer's entry with null", async () => {
+		using tempDir = TempDir.createSync("@pi-agent-budget-");
+		const agentDir = path.join(tempDir.path(), "agent");
+		const overlay = path.join(tempDir.path(), "overlay.yml");
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			JSON.stringify({ task: { agentSoftRequestBudget: { scout: 150, lead: 400 } } }),
+		);
+		await Bun.write(overlay, JSON.stringify({ task: { agentSoftRequestBudget: { scout: null } } }));
+
+		// Ambient overlays would join the layers under test.
+		const previousConfigFiles = process.env.PI_CONFIG_FILES;
+		delete process.env.PI_CONFIG_FILES;
+		try {
+			const settings = await Settings.loadReadOnly({ agentDir, cwd: tempDir.path(), configFiles: [overlay] });
+			const agentBudgets = cfgTaskAgentSoftRequestBudget.get(settings);
+			expect(resolveSoftRequestBudget("scout", 200, agentBudgets)).toBe(100);
+			expect(resolveSoftRequestBudget("lead", 200, agentBudgets)).toBe(400);
+		} finally {
+			if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
+			else process.env.PI_CONFIG_FILES = previousConfigFiles;
+		}
 	});
 });

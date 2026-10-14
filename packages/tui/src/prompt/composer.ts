@@ -86,18 +86,8 @@ export interface ComposerOptions {
 	readonly now?: () => number;
 }
 
-/** How {@link Composer.setRuntimeChildren} bills below-transcript roots against transcript retirement. */
+/** How {@link Composer.setRuntimeChildren} lays out the roots below the transcript. */
 export interface RuntimeChildrenOptions {
-	/**
-	 * Below-transcript roots whose growth is momentary (inline dialogs, a tall
-	 * multi-line editor). They are billed at their smallest height so expansion
-	 * clips the live tail instead of retiring rows a later shrink could not
-	 * reclaim (#11007). Every other root is billed at its current height, so
-	 * settled rows it displaces retire to native scrollback. Decision panels
-	 * declaring `retireDisplacedTranscript` opt out of this floor even when
-	 * mounted as a child of a transient editor container.
-	 */
-	readonly transient?: readonly Component[];
 	/**
 	 * Dock order on a TSP terminal (no status strip; the composer carries its
 	 * facts): the native dock stacks HUD pills, the working row and queued messages over
@@ -257,19 +247,17 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#retiredHeaderStart = 0;
 	#resizeRetiredHeaderStart: number | undefined;
 	#lastNormalRows = 0;
-	// Roots from `RuntimeChildrenOptions.transient`, and the smallest height
-	// they have rendered at since mount. Retirement bills transient roots at
-	// this floor, never their peak, so a transient dialog or tall editor that later
-	// shrinks never leaves committed transcript rows the live viewport cannot
-	// reclaim (#11007). Persistent roots (loader, todo/subagent HUDs) bill at
-	// their current height: they stay up for a whole turn, and billing them at
-	// an idle floor hid the settled rows they displaced until the turn ended.
-	// The floor is terminal-height independent — editor and dialog heights do
-	// not scale with rows — so it is retained across resizes rather than
-	// rediscovered from whatever chrome is expanded when the height changes.
-	#transientChrome: ReadonlySet<Component> = new Set();
-	#transientChromeFloor: number | undefined;
-	#anchorAfterInlineRetirement = false;
+	// The smallest height the chrome below the transcript has rendered at since
+	// mount. Retirement bills that chrome at this floor, never its current
+	// height: a dialog, report, HUD or tall draft that grows clips the live tail
+	// instead of committing rows it displaces, so when it shrinks those rows
+	// refill the screen rather than leaving a band no frame can fill (#11007).
+	// Displaced rows reach scrollback once newer output pushes them past the
+	// floor, or when the chrome shrinks back and they scroll off normally.
+	// The floor is terminal-height independent — chrome heights do not scale
+	// with rows — so it is retained across resizes rather than rediscovered
+	// from whatever chrome is expanded when the height changes.
+	#chromeFloor: number | undefined;
 	/** Rows the chrome below each below-transcript root took in the last frame (see {@link rowsBelow}). */
 	#rowsBelow = new Map<Component, number>();
 	#lastInterruptAt = 0;
@@ -349,18 +337,6 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		return this.#rowsBelow.get(root);
 	}
 
-	/**
-	 * Keep the input on the bottom row while the live rows cannot fill the
-	 * screen, as after an inline decision panel closes. A tall block that just
-	 * left the chrome above the editor (a command report) may have scrolled
-	 * rows into native history that cannot be pulled back; without the pin the
-	 * editor would jump up to where the shorter frame now ends. The pin lifts
-	 * once live rows fill the screen again.
-	 */
-	pinInputToBottom(): void {
-		this.#anchorAfterInlineRetirement = true;
-	}
-
 	/** Compose the bounded mutable viewport and the next ordered history append. */
 	renderFrame(viewport: ViewportSize): TerminalFramePlan {
 		if (!this.#started || this.#stopped) return { viewport: [] };
@@ -384,55 +360,32 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const afterRoots = roots.slice(transcriptIndex + 1);
 		const after: string[] = [];
 		const afterSpans: ViewportClickSpan[] = [];
-		let transientRows = 0;
-		let displacingRows = 0;
-		let decisionPanelOpen = false;
 		const ends: { root: Component; end: number }[] = [];
 		for (const root of afterRoots) {
-			const chrome: Component = root;
-			const start = after.length;
 			this.#renderBelowRoot(root, width, after, afterSpans);
 			ends.push({ root, end: after.length });
-			if (this.#transientChrome.has(root)) transientRows += after.length - start;
-			if (
-				chrome.retireDisplacedTranscript ||
-				(root instanceof Container && root.children.some(child => child.retireDisplacedTranscript))
-			) {
-				if (this.#transientChrome.has(root)) displacingRows += after.length - start;
-				decisionPanelOpen = true;
-			}
 		}
 		this.#rowsBelow = new Map(ends.map(({ root, end }) => [root, after.length - end]));
 		// Offer history under capacity pressure only: blocks stay live (and keep
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
 		// rows are never painted twice.
-		//
-		// Retirement bills ordinary transient roots at their floor, not their
-		// peak: a confirmation dialog or a tall multi-line editor clips the live tail for
-		// its lifetime, but must not permanently commit transcript rows to native
-		// history — otherwise a later shrink cannot refill the freed rows and the
-		// editor drifts up above a band of blank rows (#11007).
-		this.#transientChromeFloor = Math.min(this.#transientChromeFloor ?? transientRows, transientRows);
-		// An ask panel remains open while the user reads the preceding response.
-		// Its displaced settled rows must be reachable in scrollback now, rather
-		// than clipped until the panel closes. Ordinary drafts retain their floor.
-		const belowFloor = after.length - transientRows + Math.max(this.#transientChromeFloor, displacingRows);
+		this.#chromeFloor = Math.min(this.#chromeFloor ?? after.length, after.length);
+		const belowFloor = this.#chromeFloor;
 		const now = performance.now();
 		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
 		// Retirement measures the same live blocks the viewport lays out below;
 		// one open frame renders each of them once for both.
 		transcript.beginFrame(frame);
 		const history = this.#offerHistory(transcript, width, rows, preRoots.length + belowFloor);
-		if (decisionPanelOpen && history !== undefined) this.#anchorAfterInlineRetirement = true;
 		const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
 		const headerRows = headerVisible ? this.#header.render(width) : [];
 		const before = [...headerRows, ...preRoots];
 		// The live tail is laid out against the same baseline retirement is
 		// billed against, so its compaction allocator (one row per block, no
 		// inter-block blanks) engages only when a block genuinely cannot retire.
-		// Rows the transient chrome peak displaces are clipped from the top by
-		// the `drop` slice below, which is what scrollback would have done.
+		// Rows the chrome above its floor displaces are clipped from the top by
+		// the `drop` slice below; they stay live until the chrome shrinks.
 		const active = transcript.renderViewport(width, Math.max(0, rows - before.length - belowFloor), frame);
 		const activeSpans: ViewportClickSpan[] = [];
 		for (const span of transcript.getLastViewportSpans()) {
@@ -442,12 +395,24 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		}
 		const drop = Math.max(0, before.length + active.length + after.length - rows);
 		const mutable = [...before, ...active, ...after].slice(drop);
-		// Once live rows fill the screen again, the retired gap is gone.
-		if (!decisionPanelOpen && mutable.length >= rows) this.#anchorAfterInlineRetirement = false;
-		// Rows retired during a decision panel cannot be pulled back from native
-		// history when it closes. Keep the input pinned to the bottom without
-		// replaying those rows (which would duplicate them) or clearing history.
-		const topPadding = this.#anchorAfterInlineRetirement ? Math.max(0, rows - mutable.length) : 0;
+		// Once a paint reaches the bottom row over committed history, rows above
+		// it may already be in native scrollback, which no later frame can pull
+		// back down. Keep the input on the bottom row instead of stranding a
+		// band of blank rows under it whenever the frame shrinks — a closing
+		// dialog, report or HUD, or a live block collapsing. The band sits
+		// between the history still on screen and the live rows; replaying
+		// those rows would duplicate them, clearing history would lose them.
+		// Replays position themselves.
+		// Without native history the live viewport is the whole document and
+		// shrinks in place.
+		const filledHistoryRows =
+			history?.kind === "replay" || !(history !== undefined || this.ui.hasProviderHistory())
+				? undefined
+				: this.ui.getFilledHistoryRows();
+		const topPadding =
+			filledHistoryRows === undefined
+				? 0
+				: Math.max(0, rows - Math.min(rows, filledHistoryRows + (history?.rows.length ?? 0)) - mutable.length);
 		if (topPadding > 0) mutable.unshift(...Array<string>(topPadding).fill(""));
 		const viewportLength = mutable.length;
 		const spans: ViewportClickSpan[] = [];
@@ -899,6 +864,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 
 	/** Update the canonical editor reference after InteractiveMode remounts a custom editor. */
 	setEditor(editor: CustomEditor): void {
+		this.ui.replaceHeldFocus(this.#editor, editor);
 		this.#editor = editor;
 	}
 
@@ -923,9 +889,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	/** Mount or replace session-aware root children while preserving the header and status hosts. */
 	setRuntimeChildren(children: readonly Component[], options: RuntimeChildrenOptions = {}): void {
 		if (this.#stopped) return;
-		this.#transientChrome = new Set(options.transient);
-		this.#transientChromeFloor = undefined;
-		this.#anchorAfterInlineRetirement = false;
+		this.#chromeFloor = undefined;
 		this.#nativeDock = options.nativeDock;
 		this.ui.removeChild(this.#statusHost);
 		if (this.#runtimeMounted) {

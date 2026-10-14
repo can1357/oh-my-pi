@@ -49,6 +49,11 @@ function glmTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
 	return identity.class === "glm" && revisionAtLeast(identity.revision, "5") ? "glm5" : undefined;
 }
 
+// GPT-5 and later bill text in o200k_base; older generations (cl100k GPT-4, unparsed gpt-4o) keep the estimate.
+function openAITokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
+	return identity.class === "openai" && revisionAtLeast(identity.revision, "5") ? "o200k" : undefined;
+}
+
 /**
  * Resolve the exact locally embedded tokenizer for a canonical model id.
  *
@@ -68,7 +73,8 @@ export function resolveModelTokenizer(modelId: string, provider = ""): ModelToke
 		qwenTokenizer(identity) ??
 		deepSeekTokenizer(identity) ??
 		kimiTokenizer(identity) ??
-		glmTokenizer(identity);
+		glmTokenizer(identity) ??
+		openAITokenizer(identity);
 	if (modelTokenizerCache.size === MAX_TOKENIZER_CACHE_ENTRIES) modelTokenizerCache.clear();
 	modelTokenizerCache.set(cacheKey, tokenizer ?? null);
 	return tokenizer;

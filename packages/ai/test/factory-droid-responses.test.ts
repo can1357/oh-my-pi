@@ -68,4 +68,15 @@ describe("Factory Droid responses wire", () => {
 		const request = await capture("gpt-5.2", { temperature: 0.3 });
 		expect(request.body.temperature).toBeUndefined();
 	});
+
+	it.each([
+		["gpt-5.2", "openai"],
+		["gpt-5.2", "azure_openai"],
+		["gpt-5.6-sol", "azure_openai"],
+		["gpt-6-luna", "openai"],
+	] as const)("%s via %s sends the literal none tier when reasoning is off", async (id, upstream) => {
+		const request = await capture(id, { reasoning: undefined, disableReasoning: true }, upstream);
+		expect(request.body.reasoning).toEqual({ effort: "none" });
+		expect(request.body.include).toBeUndefined();
+	});
 });

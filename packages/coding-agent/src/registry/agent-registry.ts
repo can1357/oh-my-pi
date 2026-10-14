@@ -49,6 +49,8 @@ export interface AgentHistorySummary {
 	/** Whether the last resolved model was selected by retry fallback routing. */
 	resolvedModelIsFallback?: boolean;
 	metrics?: AgentMetricsSummary;
+	/** Cumulative own-session assistant and model_usage cost, excluding nested task results. */
+	directCost?: number;
 	readOnly?: boolean;
 	/** Durable task output artifact, when the executor wrote one. */
 	outputPath?: string;
@@ -176,6 +178,22 @@ export class AgentRegistry {
 		const definedHistory = Object.fromEntries(
 			Object.entries(history).filter(([, value]) => value !== undefined),
 		) as AgentHistorySummary;
+		const previousDirectCost = ref.history?.directCost;
+		const incomingDirectCost = definedHistory.directCost;
+		// Both writes are cumulative snapshots of this exact transcript. A delayed
+		// scan must not replace a newer park-time snapshot; unscoped updates retain
+		// their normal last-write semantics.
+		if (
+			expectedSessionFile !== undefined &&
+			typeof previousDirectCost === "number" &&
+			Number.isFinite(previousDirectCost) &&
+			previousDirectCost >= 0 &&
+			typeof incomingDirectCost === "number" &&
+			Number.isFinite(incomingDirectCost) &&
+			incomingDirectCost >= 0
+		) {
+			definedHistory.directCost = Math.max(previousDirectCost, incomingDirectCost);
+		}
 		ref.history = { ...ref.history, ...definedHistory };
 		this.#emit({ type: "metadata_changed", ref });
 		return true;
@@ -292,7 +310,13 @@ export class AgentRegistry {
 		// createAgentSession after an explicit kill.
 		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
 		ref.session = session;
-		if (sessionFile !== undefined) ref.sessionFile = sessionFile;
+		if (sessionFile !== undefined) {
+			// A replacement transcript starts a new cumulative-cost identity.
+			if (ref.sessionFile !== sessionFile && ref.history?.directCost !== undefined) {
+				ref.history = { ...ref.history, directCost: undefined };
+			}
+			ref.sessionFile = sessionFile;
+		}
 		ref.lastActivity = Date.now();
 		return true;
 	}

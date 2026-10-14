@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { getSessionsDir, logger } from "@oh-my-pi/pi-utils";
 import { syncAllSessions } from "./aggregator";
 import { getDataVersion, initDb } from "./db";
+import { isCompressScratchPath } from "./parser";
 import { getRollupStatus, refreshRollups } from "./rollup";
 import type { LiveStatus, LiveSyncStatus } from "./shared-types";
 
@@ -231,7 +232,7 @@ export class StatsLive {
 		const pending = new Set<string>();
 		try {
 			this.#watcher = fs.watch(root, { recursive: true }, (_event, filename) => {
-				if (!filename?.endsWith(".jsonl")) return;
+				if (!filename?.endsWith(".jsonl") || isCompressScratchPath(filename)) return;
 				pending.add(path.join(root, filename));
 				clearTimeout(this.#debounceTimer ?? undefined);
 				this.#debounceTimer = setTimeout(() => {

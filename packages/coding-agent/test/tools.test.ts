@@ -622,6 +622,22 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Some lines truncated to 768 chars");
 		});
 
+		it("names a raw selector per cut line that returns it whole", async () => {
+			const wideLine = "w".repeat(1500);
+			const testFile = path.join(testDir, "wide-hint.txt");
+			fs.writeFileSync(testFile, `one\n${wideLine}\nthree\n${wideLine}z\nfive`);
+
+			const output = getTextOutput(await readTool.execute("test-call-column-hint", { path: testFile }));
+			expect(output).toContain(
+				"Some lines truncated to 768 chars. Use :raw:2-2 to read line 2 whole; cut lines run to line 4, each read the same way",
+			);
+
+			const line2 = await readTool.execute("test-call-column-hint-raw-2", { path: `${testFile}:raw:2-2` });
+			const line4 = await readTool.execute("test-call-column-hint-raw-4", { path: `${testFile}:raw:4-4` });
+			expect(getTextOutput(line2).split("\n")[0]).toBe(wideLine);
+			expect(getTextOutput(line4).split("\n")[0]).toBe(`${wideLine}z`);
+		});
+
 		it("returns wide lines verbatim with the :raw selector", async () => {
 			const wideLine = "y".repeat(1500);
 			const testFile = path.join(testDir, "wide-raw.txt");
@@ -2332,14 +2348,13 @@ function b() {
 			expect(result.details?.timeoutSeconds).toBe(300);
 		});
 
-		it("should record wall time in text content and details", async () => {
-			const result = await bashTool.execute("test-call-walltime", { command: "echo wt" });
-
-			const output = getTextOutput(result);
-			expect(output).toContain("wt");
-			expect(output).toMatch(/Wall time: \d+\.\d{2} seconds/);
-			expect(typeof result.details?.wallTimeMs).toBe("number");
-			expect(result.details?.wallTimeMs).toBeGreaterThanOrEqual(0);
+		it("retains wall time and exit status for slow failed commands", async () => {
+			const result = await bashTool.execute("test-call-walltime-slow", { command: "sleep 1.1; echo wt; exit 7" });
+			expect(getTextOutput(result)).toContain("wt");
+			expect(getTextOutput(result)).toMatch(/Wall time: \d+\.\d{2} seconds/);
+			expect(result.details?.wallTimeMs).toBeGreaterThanOrEqual(1000);
+			expect(result.details?.exitCode).toBe(7);
+			expect(result.isError).toBe(true);
 		});
 
 		it("should block built-in interceptor commands when enabled with default patterns", async () => {
@@ -2519,7 +2534,7 @@ function b() {
 
 		it("should auto-background at the threshold even with a longer timeout", async () => {
 			const deliveries: Array<{ jobId: string; text: string }> = [];
-			const updates: string[] = [];
+			const updates: Array<{ text: string; state?: string }> = [];
 			const asyncJobManager = new AsyncJobManager({
 				onJobComplete: async (jobId, text) => {
 					deliveries.push({ jobId, text });
@@ -2549,7 +2564,10 @@ function b() {
 				},
 				undefined,
 				update => {
-					updates.push(update.content?.find(block => block.type === "text")?.text ?? "");
+					updates.push({
+						text: update.content?.find(block => block.type === "text")?.text ?? "",
+						state: update.details?.async?.state,
+					});
 				},
 			);
 
@@ -2567,14 +2585,18 @@ function b() {
 			}
 			const runningJob = asyncJobManager.getJob(jobId);
 			expect(runningJob?.status).toBe("running");
-			const updatesAtBackground = updates.slice();
+			const updatesAtBackground = updates.length;
 			await runningJob?.promise;
 			await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
 			expect(deliveries).toHaveLength(1);
 			expect(deliveries[0]?.jobId).toBe(jobId);
 			expect(deliveries[0]?.text).toContain("start");
 			expect(deliveries[0]?.text).toContain("done");
-			expect(updates).toEqual(updatesAtBackground);
+			// The job keeps filling the call's card and settles it with its outcome.
+			const jobFrames = updates.slice(updatesAtBackground);
+			expect(jobFrames.every(frame => frame.state !== undefined)).toBe(true);
+			expect(jobFrames.at(-1)?.state).toBe("completed");
+			expect(jobFrames.at(-1)?.text).toContain("done");
 			await asyncJobManager.dispose();
 		});
 

@@ -26,7 +26,10 @@ use uucore::{display::Quotable, parser::shortcut_value_parser::ShortcutValuePars
 use brush_core::{ShellExtensions, builtins::Registration};
 use thiserror::Error as ThisError;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::{
+	host::{Host, Utility, format_usage, matches_parser, util},
+	time_zone::shell_time_zone,
+};
 
 #[derive(Debug, ThisError)]
 enum TouchError {
@@ -167,15 +170,6 @@ fn filetime_to_zoned(ft: &FileTime, time_zone: &TimeZone) -> Option<Zoned> {
 	Some(Zoned::new(ts, time_zone.clone()))
 }
 
-fn host_time_zone(host: &Host) -> TimeZone {
-	let Some(name) = host.var("TZ") else {
-		return TimeZone::system();
-	};
-	TimeZone::get(name)
-		.or_else(|_| TimeZone::posix(name))
-		.unwrap_or(TimeZone::UTC)
-}
-
 /// Whether all characters in the string are digits.
 fn all_digits(s: &str) -> bool {
 	s.as_bytes().iter().all(u8::is_ascii_digit)
@@ -281,7 +275,7 @@ fn touch_main(matches: &ArgMatches, host: &mut Host) -> Result<(), TouchError> {
 		filenames = filenames[1..].to_vec();
 	}
 
-	let time_zone = host_time_zone(host);
+	let time_zone = shell_time_zone(host);
 	let source = if let Some(reference) = reference {
 		Source::Reference(PathBuf::from(reference))
 	} else if let Some(ts) = timestamp {

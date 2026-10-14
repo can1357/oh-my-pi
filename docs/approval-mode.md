@@ -102,6 +102,8 @@ Tools can add approval-prompt body lines with `formatApprovalDetails(args)`. The
 - `Reason: <reason>` when the tool decision supplies one
 - tool-specific details such as command, path, code, browser action, or subagent assignment
 
+In the interactive UI the prompt docks above the composer until answered: `Ctrl+Enter` (or `Ctrl+Q`; rebind `app.approval.approve`) approves, `Esc` denies, and `Enter` on an empty composer does nothing, so typing into the composer as the prompt appears cannot approve a call. The approve key is ignored for the first half second, since it is also the follow-up key. The composer keeps taking typing: sending a message while calls wait (from the composer, Tern, or a collab guest) denies every pending approval, and any the same tool batch asks for before the message is delivered, then steers the turn with that message, so the agent learns why instead of guessing at a bare denial; `Ctrl+C` clears a typed message rather than denying. To leave the composer its room, the prompt summarizes the tool's details to one row (each detail's first line, `…` when more is left out), always built from the input that will run; `Ctrl+O` (`app.tools.expand`, or Details in Tern) shows every detail in full, and with an empty composer the arrow keys scroll them. RPC, ACP, and other hosts without an approval dialog get an Approve/Deny select with the full details.
+
 ## Defining approval on tools
 
 Built-in and custom tools share the same shape:

@@ -163,6 +163,14 @@ export interface CompactionSettings {
 	strategy?: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
 	thresholdPercent?: number;
 	thresholdTokens?: number;
+	/**
+	 * Stands in for the context window when the percentage or reserve-based
+	 * threshold is computed (when `> 0` and smaller than the window); a positive
+	 * `thresholdTokens` still wins and is checked against the real window (at
+	 * or past it, the window less its reserve applies). Set by per-model
+	 * compaction limits; request and overflow budgets keep the real window.
+	 */
+	baseWindowTokens?: number;
 	midTurnEnabled?: boolean;
 	/**
 	 * Tokens reserved below the context window for the next prompt + response.
@@ -358,27 +366,42 @@ export function compactionContextTokens(providerContextTokens: number, storedCon
 	return Math.max(Math.max(0, providerContextTokens), Math.max(0, storedConversationEstimate));
 }
 
+/**
+ * The prompt budget below `contextWindow`: the window less
+ * {@link resolveBudgetReserveTokens}, capped at `contextWindow - 1` so it never
+ * reaches the whole window even when the reserve resolves to 0.
+ */
+function promptBudgetTokens(contextWindow: number, settings: CompactionSettings): number {
+	return Math.max(0, Math.min(contextWindow - 1, contextWindow - resolveBudgetReserveTokens(contextWindow, settings)));
+}
+
 export function resolveThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
-	// Fixed token limit takes priority over percentage
+	// Fixed token limit takes priority over percentage, and is checked against
+	// the real window: `baseWindowTokens` only rescales the policies below.
 	const thresholdTokens = settings.thresholdTokens;
 	if (typeof thresholdTokens === "number" && Number.isFinite(thresholdTokens) && thresholdTokens > 0) {
-		// Clamp to [1, contextWindow - 1] so there's always room
+		// A trigger at or past the window can never fire before the request
+		// overflows (a provider may cap the window below the configured point);
+		// fall back to the window's prompt budget, as the reserve policy does.
+		// A trigger below the window is exact, as the `f` model entries promise,
+		// even one inside the reserve: the user chose that headroom. The step at
+		// the window is inherent; a monotone fallback would sit at window - 1.
+		if (thresholdTokens >= contextWindow) return promptBudgetTokens(contextWindow, settings);
 		return Math.min(contextWindow - 1, Math.max(1, thresholdTokens));
+	}
+	const baseWindowTokens = settings.baseWindowTokens;
+	if (typeof baseWindowTokens === "number" && Number.isFinite(baseWindowTokens) && baseWindowTokens > 0) {
+		contextWindow = Math.min(contextWindow, baseWindowTokens);
 	}
 
 	// Percentage-based threshold. The default absolute reserve can exceed bundled
 	// small-context windows, or nearly consume a 16k-class window; in those
 	// known-impossible default configurations, fall back to the proportional
 	// reserve so threshold/recovery-band checks stay usable. Explicit valid
-	// configured reserves still define the usable prompt budget. Cap at
-	// contextWindow - 1 (matching the fixed-token clamp above) so the threshold
-	// never reaches the whole window even when the reserve resolves to 0.
+	// configured reserves still define the usable prompt budget.
 	const thresholdPercent = settings.thresholdPercent;
 	if (typeof thresholdPercent !== "number" || !Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
-		return Math.max(
-			0,
-			Math.min(contextWindow - 1, contextWindow - resolveBudgetReserveTokens(contextWindow, settings)),
-		);
+		return promptBudgetTokens(contextWindow, settings);
 	}
 	const clampedThresholdPercent = Math.min(99, Math.max(1, thresholdPercent));
 	return Math.floor(contextWindow * (clampedThresholdPercent / 100));
@@ -650,14 +673,15 @@ export interface SummaryOptions {
 	convertToLlm?: ConvertToLlm;
 	/**
 	 * The provider context a live turn sends for `summarized` + `retained`, cut to
-	 * `summarized`. Anthropic on-demand compaction sends it so retained signed
-	 * thinking keeps its prefix; without it the request uses `remoteSystemPrompt`,
-	 * `tools` and `convertToLlm`.
+	 * `summarized`, as read by the summarizer `model`. Anthropic on-demand
+	 * compaction sends it so retained signed thinking keeps its prefix; without
+	 * it the request uses `remoteSystemPrompt`, `tools` and `convertToLlm`.
 	 */
 	buildProviderContext?: (
 		summarized: AgentMessage[],
 		retained: AgentMessage[],
-		signal?: AbortSignal,
+		signal: AbortSignal | undefined,
+		model: Model,
 	) => Promise<Context>;
 	/**
 	 * Whether a message is a turn the user wrote. Remote Compaction V2 keeps these
@@ -1624,12 +1648,28 @@ export async function compact(
 		oneshotRetry: options?.oneshotRetry,
 	};
 
-	const previousSnapcompactArchive = snapcompact.getPreservedArchive(previousPreserveData);
+	// An archive keeps the reasoning policy of the model it was rendered for;
+	// Claude refuses inputs that reproduce reasoning (issue #6093), so a
+	// summarizer whose classifier refuses quoted reasoning (the
+	// `classifier-cot-extraction` catalog axis) reads the archive's no-reasoning view (scrubbed
+	// while its tool-output spans are still marked), and a summary with no
+	// archive behind it is scrubbed of `¶think:` sections.
+	const withoutThinking = !snapcompact.readerIncludesThinking(model);
+	const storedSnapcompactArchive = snapcompact.getPreservedArchive(previousPreserveData);
+	const snapcompactView =
+		storedSnapcompactArchive && withoutThinking
+			? snapcompact.viewWithoutThinking(previousSummary ?? "", storedSnapcompactArchive)
+			: undefined;
+	const previousSnapcompactArchive = snapcompactView?.archive ?? storedSnapcompactArchive;
+	const previousSummaryForReader =
+		withoutThinking && previousSummary !== undefined
+			? (snapcompactView?.summary ?? snapcompact.textWithoutThinking(previousSummary))
+			: previousSummary;
 	const previousSnapcompactArchiveText = previousSnapcompactArchive
 		? snapcompact.archiveSourceText(previousSnapcompactArchive)
 		: undefined;
 	const previousSummaryForCompaction = mergePreviousSummaryWithSnapcompactArchive(
-		previousSummary,
+		previousSummaryForReader,
 		previousSnapcompactArchiveText,
 	);
 	const snapcompactArchiveMigrationMessage = previousSnapcompactArchiveText
@@ -1640,8 +1680,8 @@ export async function compact(
 	// A local summary has no native payload to carry it into the first remote
 	// request. Encode it as history; do not resend opaque native placeholders.
 	const previousSummaryMigrationMessage =
-		settings.remoteEnabled !== false && previousSummary && !previousNativeHistory
-			? createCompactionSummaryMessage(previousSummary, tokensBefore, new Date().toISOString())
+		settings.remoteEnabled !== false && previousSummaryForReader && !previousNativeHistory
+			? createCompactionSummaryMessage(previousSummaryForReader, tokensBefore, new Date().toISOString())
 			: undefined;
 
 	let preserveData = withAnthropicCompactionPreserveData(
@@ -1845,7 +1885,7 @@ export async function compact(
 						),
 					{ signal },
 				);
-				preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, remote);
+				preserveData = withOpenAiRemoteCompactionPreserveData(preserveData, remote);
 				usedRemoteCompaction = true;
 			} catch (err) {
 				// A user/session abort is a cancellation, not a remote failure —
@@ -1958,7 +1998,7 @@ export async function compact(
 			// history when the host can build them: kept thinking remains valid
 			// only when the summarized prefix matches what was sent byte for byte.
 			const context = summaryOptions.buildProviderContext
-				? await summaryOptions.buildProviderContext(summarizedMessages, allMessages.slice(safeCut), signal)
+				? await summaryOptions.buildProviderContext(summarizedMessages, allMessages.slice(safeCut), signal, model)
 				: {
 						systemPrompt: summaryOptions.remoteSystemPrompt ?? [],
 						messages: (summaryOptions.convertToLlm ?? defaultConvertToLlm)(summarizedMessages),

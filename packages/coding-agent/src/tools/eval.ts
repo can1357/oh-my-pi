@@ -26,7 +26,6 @@ import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import evalAgentsTopic from "../prompts/tools/eval-agents.md" with { type: "text" };
 import evalJudgeTopic from "../prompts/tools/eval-judge.md" with { type: "text" };
 import evalHelpersTopic from "../prompts/tools/eval-helpers.md" with { type: "text" };
-import evalCodeModeDescription from "../prompts/tools/eval-code-mode.md" with { type: "text" };
 import {
 	DEFAULT_MAX_BYTES,
 	OutputSink,
@@ -42,8 +41,7 @@ import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends";
-import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
-import { upsertStatusEvent } from "@oh-my-pi/pi-tui/tools/eval";
+import { recordStatusEvent, type StatusEventLog } from "@oh-my-pi/pi-tui/tools/eval";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
@@ -358,14 +356,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		return summarizeEvalLanguages(this.#enabledLanguages());
 	}
 
-	supportsCodeModeTransport(): boolean {
-		return this.#enabledLanguages().includes("js");
-	}
 	readonly loadMode = "essential";
 	readonly label = "Eval";
 	get description(): string {
-		const base = getEvalToolDescription(this.#descriptionOptions());
-		return this.#codeModeDescription(base) ?? base;
+		return getEvalToolDescription(this.#descriptionOptions());
 	}
 
 	/**
@@ -410,30 +404,6 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		return session.getAdvertisedEvalPreludes?.() ?? getEnabledEvalPreludes(session.getEvalPreludes?.() ?? []);
 	}
 
-	/**
-	 * Codex Code Mode advertisement, pulled from the session's applied direct
-	 * partition on every read so the declarations can never advertise a tool the
-	 * model can already call directly (a plan-mode transport `write`), nor drift
-	 * from the active model or tool registry.
-	 */
-	#codeModeDescription(baseDescription: string): string | undefined {
-		const session = this.session;
-		const directToolNames = session?.getCodeModeDirectToolNames?.();
-		if (!session || !directToolNames) return undefined;
-		const direct = new Set(directToolNames);
-		const declarations = generateCodeModeDeclarations(
-			(session.getEvalBridgeToolNames?.() ?? [...(session.toolRegistry?.keys() ?? [])]).flatMap(name => {
-				if (direct.has(name)) return [];
-				const tool = session.toolRegistry?.get(name);
-				return tool ? [{ name, parameters: (tool as { parameters?: unknown }).parameters }] : [];
-			}),
-		);
-		const preludeDeclarations = this.#advertisedPreludes(session)
-			.map(definition => definition.codeModeDeclarations?.trim())
-			.filter((declaration): declaration is string => Boolean(declaration))
-			.join("\n\n");
-		return prompt.render(evalCodeModeDescription, { baseDescription, declarations, preludeDeclarations });
-	}
 	/** Only syntax not obvious from the field schema; filtered by enabled language. */
 	static readonly #examples: readonly ToolExample<typeof evalSchema.infer>[] = [
 		{
@@ -634,19 +604,29 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 		let latestText = "";
 		let latestDetails: EvalToolDetails | undefined;
-		let forwardUpdates = !startBackgrounded;
+		let backgrounded = startBackgrounded;
 		const completion = Promise.withResolvers<ManagedEvalJobCompletion>();
 
 		const jobId = autoBgManager.register(
 			"eval",
 			label,
 			async ({ jobId, signal: runSignal, reportProgress }) => {
+				// Once backgrounded, the job's frames carry `details.async` so the call's
+				// card keeps filling and settles with the job.
+				const showJobFrame = (
+					text: string,
+					details: EvalToolDetails | undefined,
+					state: "running" | "completed" | "failed" | "cancelled",
+				): void => {
+					if (backgrounded) emitToolUpdate?.(text, { ...details, async: { state, jobId, type: "eval" } });
+				};
 				try {
 					const result = await run(runSignal, (text, details) => {
 						latestText = text;
 						latestDetails = details;
 						void reportProgress(text, { async: { state: "running", jobId, type: "eval" } });
-						if (forwardUpdates) emitToolUpdate?.(text, details);
+						if (backgrounded) showJobFrame(text, details, "running");
+						else emitToolUpdate?.(text, details);
 					});
 					const finalText =
 						(result.content.find(block => block.type === "text")?.text ?? "") +
@@ -662,6 +642,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						// records it as failed and delivers the error text.
 						throw new ToolError(finalText || "Eval cell failed");
 					}
+					showJobFrame(finalText, result.details, "completed");
 					await reportProgress(finalText, {
 						...result.details,
 						async: { state: "completed", jobId, type: "eval" },
@@ -671,6 +652,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					const message = error instanceof Error ? error.message : String(error);
 					latestText = message;
 					completion.resolve({ kind: "failed", error });
+					showJobFrame(message, latestDetails, runSignal.aborted ? "cancelled" : "failed");
 					await reportProgress(message, {
 						...latestDetails,
 						async: { state: "failed", jobId, type: "eval" },
@@ -717,7 +699,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			autoBgManager.releaseForegroundJob(jobId);
 			throw new ToolAbortError(latestText || "Eval cell aborted");
 		}
-		forwardUpdates = false;
+		backgrounded = true;
 		autoBgManager.backgroundJob(jobId);
 		// "steer": a queued user/peer message arrived mid-wait — background the
 		// cell (it keeps running) so the message injects promptly.
@@ -807,7 +789,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES * 2);
 			const jsonOutputs: unknown[] = [];
 			const images: ImageContent[] = [];
-			const statusEvents: EvalStatusEvent[] = [];
+			const callStatus: StatusEventLog = {};
 			// Oversized displays land in `jsonOutputs` as bounded previews and stream
 			// their full value to the output artifact. Until the artifact write is
 			// confirmed (see `commitDisplaySpills`), the full value is kept here so a
@@ -862,8 +844,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				if (images.length > 0) {
 					details.images = images;
 				}
-				if (statusEvents.length > 0) {
-					details.statusEvents = statusEvents;
+				if (callStatus.statusEvents) {
+					details.statusEvents = callStatus.statusEvents;
+					details.statusEventsElided = callStatus.statusEventsElided;
 				}
 				if (notice) {
 					details.notice = notice;
@@ -937,6 +920,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				cellResult.status = "running";
 				cellResult.output = "";
 				cellResult.statusEvents = undefined;
+				cellResult.statusEventsElided = undefined;
 				cellResult.exitCode = undefined;
 				cellResult.durationMs = undefined;
 				activeLiveCell = { result: cellResult, chars: 0 };
@@ -969,8 +953,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 								idle?.resume();
 								return;
 							}
-							cellResult.statusEvents ??= [];
-							upsertStatusEvent(cellResult.statusEvents, {
+							recordStatusEvent(cellResult, {
 								...event,
 								resolvedThinkingLevel: parseConfiguredThinkingLevel(
 									typeof event.resolvedThinkingLevel === "string" ? event.resolvedThinkingLevel : undefined,
@@ -987,7 +970,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				}
 				const durationMs = Date.now() - startTime;
 
-				const cellStatusEvents: EvalStatusEvent[] = [];
+				const cellStatus: StatusEventLog = {};
 				const cellDisplayTexts: string[] = [];
 				const cellImageNotes: string[] = [];
 				let cellHasMarkdown = false;
@@ -1039,8 +1022,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 									: undefined,
 							),
 						};
-						upsertStatusEvent(statusEvents, event);
-						upsertStatusEvent(cellStatusEvents, event);
+						recordStatusEvent(callStatus, event);
+						recordStatusEvent(cellStatus, event);
 					}
 					if (output.type === "markdown") {
 						cellHasMarkdown = true;
@@ -1063,7 +1046,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				cellResult.output = cellOutput;
 				cellResult.exitCode = result.exitCode;
 				cellResult.durationMs = durationMs;
-				cellResult.statusEvents = cellStatusEvents.length > 0 ? cellStatusEvents : undefined;
+				cellResult.statusEvents = cellStatus.statusEvents;
+				cellResult.statusEventsElided = cellStatus.statusEventsElided;
 				cellResult.hasMarkdown = cellHasMarkdown || undefined;
 
 				if (cellOutput) {
@@ -1089,7 +1073,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						languages,
 						cells: cellResults,
 						jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
-						statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
+						statusEvents: callStatus.statusEvents,
+						statusEventsElided: callStatus.statusEventsElided,
 						isError: true,
 					};
 					if (notice) details.notice = notice;
@@ -1123,7 +1108,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				languages,
 				cells: cellResults,
 				jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
-				statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
+				statusEvents: callStatus.statusEvents,
+				statusEventsElided: callStatus.statusEventsElided,
 			};
 			if (notice) details.notice = notice;
 
@@ -1170,6 +1156,7 @@ async function summarizeFinal(
 		artifactError: rawSummary.artifactError,
 		columnDroppedBytes: rawSummary.columnDroppedBytes,
 		columnTruncatedLines: rawSummary.columnTruncatedLines,
+		columnTruncatedRange: rawSummary.columnTruncatedRange,
 		columnMax: rawSummary.columnMax,
 	};
 }

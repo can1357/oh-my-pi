@@ -4283,9 +4283,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hifijson"
-version = "0.2.3"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a7763b98ba8a24f59e698bf9ab197e7676c640d6455d1580b4ce7dc560f0f0d"
+checksum = "242402749acf71e6f32f5857598b7002c4058a4e3c3b22b4c7d51cab9aea754e"
 
 [[package]]
 name = "hkdf"
@@ -5014,9 +5014,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jaq-core"
-version = "2.2.1"
+version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77526a72eb79412c29fd141767a6549bbfcb1cb40e00556fe16532d5e878e098"
+checksum = "f72ba7158fe9fc1bc4baace1b71e6d0d3d27c6839dd87dc1f233dd408f5dd85b"
 dependencies = [
  "dyn-clone",
  "once_cell",
@@ -5024,31 +5024,54 @@ dependencies = [
 ]
 
 [[package]]
-name = "jaq-json"
-version = "1.1.3"
+name = "jaq-fmts"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01dbdbd07b076e8403abac68ce7744d93e2ecd953bbc44bf77bf00e1e81172bc"
+checksum = "abe3b8669aa003e5d7a4ac187d411c4d50ae08aa08595ce3705f7298b70a0f3e"
 dependencies = [
+ "aho-corasick",
+ "bstr",
+ "bytes",
+ "jaq-core",
+ "jaq-json",
+ "jaq-std",
+ "memmap2",
+ "num-bigint",
+]
+
+[[package]]
+name = "jaq-json"
+version = "2.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4be2f53207ffb1313a2d2ad819cfa8bfaa7936cb85a110eda10fd5da822cec94"
+dependencies = [
+ "bstr",
+ "bytes",
  "foldhash 0.1.5",
  "hifijson",
  "indexmap",
  "jaq-core",
  "jaq-std",
+ "num-bigint",
+ "num-traits",
+ "ryu",
+ "self_cell",
 ]
 
 [[package]]
 name = "jaq-std"
-version = "2.1.2"
+version = "3.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c264fe397c981705976c71f1bfe020382b9eda52ae950e57fe885e147bdd67d"
+checksum = "9f90e485abfd3189510c996e77be55056a51038b0fa5805e6c97b5dcf0d9ab55"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
- "chrono",
+ "bstr",
  "jaq-core",
+ "jiff",
  "libm",
  "log",
- "regex-lite",
+ "regex-bites",
  "urlencoding",
 ]
 
@@ -5705,7 +5728,7 @@ dependencies = [
 
 [[package]]
 name = "napi"
-version = "3.13.0"
+version = "3.14.2"
 dependencies = [
  "anyhow",
  "bitflags 2.13.2",
@@ -5729,42 +5752,42 @@ dependencies = [
 
 [[package]]
 name = "napi-build"
-version = "2.5.0"
+version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0941983559cd62bfa7f04646a16428967a847365adeef27711e4e3927046bbed"
+checksum = "b899b545d3aa6dca985939059f258c5488d34e4ecf39c274e20009748f4b846d"
 
 [[package]]
 name = "napi-derive"
-version = "3.6.9"
+version = "3.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b1d232c24dc6754979b27efdf2047a5849efc7c92c1245de87e6bedbb9f5c3c"
+checksum = "92cec6048ac04041ac8055bdce1ec4f353416cd443ba9222bf73af790c3d4495"
 dependencies = [
  "convert_case 0.12.0",
  "ctor",
  "napi-derive-backend",
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
 name = "napi-derive-backend"
-version = "6.1.4"
+version = "6.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd6856fe1686867da90ed0dc292d7c0c87a695eb7c578b913360f33619ee01e3"
+checksum = "fae2444f4ba7333754bb73414ff8059dec2cb23b83a95bd1a0bf08169eed1be0"
 dependencies = [
  "convert_case 0.12.0",
  "proc-macro2",
  "quote",
  "semver",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
 name = "napi-sys"
-version = "3.3.2"
+version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6801fc65ba4d7035636e93635e281113f00410401a237dcd4f55b1565ead2115"
+checksum = "e22a4f25c16a5c5411d987cd6fbd48313522ae1789ade2d6dd3efdc6d40a0fc8"
 dependencies = [
  "libloading 0.9.0",
 ]
@@ -6793,7 +6816,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.8.6"
+version = "18.10.4"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6828,7 +6851,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.8.6"
+version = "18.10.4"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6859,7 +6882,6 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "hex",
- "hifijson",
  "hostname",
  "icu_collator",
  "icu_decimal",
@@ -6869,6 +6891,7 @@ dependencies = [
  "indicatif",
  "itertools 0.14.0",
  "jaq-core",
+ "jaq-fmts",
  "jaq-json",
  "jaq-std",
  "jiff",
@@ -6916,11 +6939,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.8.6"
+version = "18.10.4"
 
 [[package]]
 name = "pi-edit"
-version = "18.8.6"
+version = "18.10.4"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6940,7 +6963,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.8.6"
+version = "18.10.4"
 dependencies = [
  "async-trait",
  "libc",
@@ -6952,7 +6975,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.8.6"
+version = "18.10.4"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6985,6 +7008,7 @@ dependencies = [
  "inferno",
  "libc",
  "log",
+ "memchr",
  "napi",
  "napi-build",
  "napi-derive",
@@ -7042,7 +7066,7 @@ dependencies = [
 
 [[package]]
 name = "pi-predict"
-version = "18.8.6"
+version = "18.10.4"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -7060,7 +7084,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.8.6"
+version = "18.10.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7091,7 +7115,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.8.6"
+version = "18.10.4"
 dependencies = [
  "futures",
  "gix",
@@ -7107,7 +7131,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vfs"
-version = "18.8.6"
+version = "18.10.4"
 dependencies = [
  "async-trait",
  "libc",
@@ -7120,7 +7144,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.8.6"
+version = "18.10.4"
 dependencies = [
  "bytes",
  "flume",
@@ -7134,7 +7158,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.8.6"
+version = "18.10.4"
 dependencies = [
  "globset",
  "ignore",
@@ -7856,10 +7880,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "regex-lite"
-version = "0.1.9"
+name = "regex-bites"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
+checksum = "b6a15a2fa0bfda9361941c45550896ae87b15cc6c8c939ea350079670332e211"
 
 [[package]]
 name = "regex-syntax"
@@ -8132,6 +8156,12 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "safe_arch"

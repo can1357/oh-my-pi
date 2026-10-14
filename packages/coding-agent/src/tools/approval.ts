@@ -8,6 +8,7 @@
  */
 import type { AgentTool, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 import type { Settings } from "../config/settings";
+import type { ExtensionUIContext } from "../extensibility/extensions/types";
 
 import { cfgToolsApproval, cfgToolsApprovalMode } from "./settings";
 
@@ -360,10 +361,8 @@ export function truncateForPrompt(value: string, maxChars = DEFAULT_PROMPT_TRUNC
 	return `${value.slice(0, maxChars)}[…${omitted}ch elided…]`;
 }
 
-/**
- * Format the approval prompt body shown to the user.
- */
-export function formatApprovalPrompt(tool: ApprovalSubject, args: unknown, reason?: string): string {
+/** The prompt's header rows: tool name, MCP origin, and the reason it asks. */
+function approvalHeader(tool: ApprovalSubject, reason?: string): string[] {
 	const lines = [`Allow tool: ${tool.name}`];
 
 	if (tool.name.startsWith("mcp__") && tool.approval === undefined) {
@@ -373,15 +372,59 @@ export function formatApprovalPrompt(tool: ApprovalSubject, args: unknown, reaso
 	if (reason) {
 		lines.push(`Reason: ${reason}`);
 	}
+	return lines;
+}
 
+/** The tool's own detail rows for `args` (command, path, content), blanks dropped. */
+function approvalDetails(tool: ApprovalSubject, args: unknown): string[] {
 	const details = tool.formatApprovalDetails?.(args);
-	if (typeof details === "string") {
-		if (details.length > 0) lines.push(details);
-	} else if (Array.isArray(details)) {
-		for (const detail of details) {
-			if (detail.length > 0) lines.push(detail);
-		}
-	}
+	return (typeof details === "string" ? [details] : (details ?? [])).filter(detail => detail.length > 0);
+}
 
-	return lines.join("\n");
+/** Format the approval prompt body shown to the user: the header, then the tool's own details. */
+export function formatApprovalPrompt(tool: ApprovalSubject, args: unknown, reason?: string): string {
+	return [...approvalHeader(tool, reason), ...approvalDetails(tool, args)].join("\n");
+}
+
+/**
+ * The details as one row for a prompt that must stay small: each detail's first line, joined
+ * by ` · `, ending in `…` when any detail has more lines. A label alone (`Code:`, its body on
+ * the following lines) takes the body's first line after it.
+ */
+function approvalSummary(details: readonly string[]): string | undefined {
+	if (details.length === 0) return undefined;
+	let omitted = false;
+	const heads = details.map(detail => {
+		const lines = detail.split("\n", 3);
+		const head = lines[0]!.trimEnd();
+		const labelOnly = head.endsWith(":") && lines.length > 1;
+		if (lines.length > (labelOnly ? 2 : 1)) omitted = true;
+		return labelOnly ? `${head} ${lines[1]!.trim()}` : head;
+	});
+	const row = heads.join(" · ");
+	return omitted ? `${row} …` : row;
+}
+
+/**
+ * Ask the user to approve a call: the host's approval dialog when it has one (it gets the full
+ * prompt and a compact one with the details summarized to a row, so the composer beneath it
+ * keeps its room), else an Approve/Deny select with the full prompt (RPC, ACP, extension hosts).
+ * `appendix` lines follow the prompt on both. True only for an explicit approval.
+ */
+export async function requestApproval(
+	ui: Pick<ExtensionUIContext, "select" | "approve">,
+	tool: ApprovalSubject,
+	args: unknown,
+	reason?: string,
+	appendix: readonly string[] = [],
+): Promise<boolean> {
+	const header = approvalHeader(tool, reason);
+	const details = approvalDetails(tool, args);
+	const full = [...header, ...details, ...appendix].join("\n");
+	if (ui.approve) {
+		const summary = approvalSummary(details);
+		const compact = [...header, ...(summary === undefined ? [] : [summary]), ...appendix].join("\n");
+		return (await ui.approve({ full, compact })) === true;
+	}
+	return (await ui.select(full, ["Approve", "Deny"])) === "Approve";
 }

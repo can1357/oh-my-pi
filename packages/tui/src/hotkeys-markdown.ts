@@ -135,6 +135,8 @@ function hotkeyGroups(bindings: HotkeysMarkdownBindings): HotkeyGroup[] {
 				{ keys: [act("app.history.search")], action: "Search prompt history" },
 				{ keys: [act("app.tools.expand")], action: "Toggle tool output expansion" },
 				{ keys: [act("app.tools.toggleVisibility")], action: "Toggle tool activity visibility" },
+				{ keys: [act("app.ask.hide")], action: "Hide/show a pending ask question" },
+				{ keys: [act("app.approval.approve")], action: "Approve a pending tool call" },
 				{ keys: [act("app.thinking.toggle")], action: "Toggle thinking block visibility" },
 				{ keys: [act("app.editor.external")], action: "Edit message in external editor" },
 				{ keys: [act("app.retry")], action: "Retry last failed assistant turn" },

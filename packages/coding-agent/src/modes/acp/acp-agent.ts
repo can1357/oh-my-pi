@@ -76,7 +76,15 @@ import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/th
 import { OTHER_OPTION } from "../../tools/ask";
 import { resolvePlanFilePath } from "../../plan-mode/plan-files";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { DEFAULT_TTS_VOICE, TTS_LOCAL_MODELS, TTS_LOCAL_VOICE_OPTIONS } from "../../tts/models";
+import {
+	DEFAULT_TTS_SPEED,
+	DEFAULT_TTS_VOICE,
+	TTS_LOCAL_MODELS,
+	TTS_LOCAL_VOICE_OPTIONS,
+	TTS_SPEED_MAX,
+	TTS_SPEED_MIN,
+	TTS_SPEED_OPTIONS,
+} from "../../tts/models";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
@@ -254,17 +262,22 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
 	const defaultSpeechModel = localSelector(TTS_LOCAL_MODELS[0].key);
 	const defaultDictationModel = localSelector(DEFAULT_STT_MODEL_KEY);
 	const voices = TTS_LOCAL_VOICE_OPTIONS.map(({ value, label }) => ({ value, label }));
+	// Speed settings are numeric, so presets are advertised as numbers clients can write back as-is.
+	const speeds = TTS_SPEED_OPTIONS.map(({ value, label }) => ({ value: Number(value), label }));
 	return {
 		settings: {
 			speechToTextModel: "modelRoles.dictation",
 			textToSpeechModel: "modelRoles.speech",
 			textToSpeechVoice: "tts.localVoice",
 			speechVoice: "speech.voice",
+			textToSpeechSpeed: "tts.localSpeed",
+			speechSpeed: "speech.speed",
 		},
 		defaults: {
 			speechToTextModel: defaultDictationModel,
 			textToSpeechModel: defaultSpeechModel,
 			voice: DEFAULT_TTS_VOICE,
+			speed: DEFAULT_TTS_SPEED,
 		},
 		speechToText: {
 			setting: "modelRoles.dictation",
@@ -279,8 +292,12 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
 			modelSetting: "modelRoles.speech",
 			voiceSetting: "tts.localVoice",
 			speechVoiceSetting: "speech.voice",
+			speedSetting: "tts.localSpeed",
+			speechSpeedSetting: "speech.speed",
 			defaultModel: defaultSpeechModel,
 			defaultVoice: DEFAULT_TTS_VOICE,
+			defaultSpeed: DEFAULT_TTS_SPEED,
+			speedRange: { min: TTS_SPEED_MIN, max: TTS_SPEED_MAX },
 			models: TTS_LOCAL_MODELS.map(({ key, label, description, voices: modelVoices }): AcpSpeechTtsModelOption => ({
 				value: localSelector(key),
 				label,
@@ -288,6 +305,7 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
 				voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),
 			})),
 			voices,
+			speeds,
 		},
 	};
 }
@@ -429,6 +447,7 @@ export function createAcpExtensionUiContext(
 ): ExtensionUIContext {
 	const supportsForm = clientCapabilities?.elicitation?.form != null;
 	return {
+		supportsEditor: false,
 		select: async (title, options, dialogOptions) => {
 			if (!supportsForm) return undefined;
 			const value = await elicitFromAcpClient(

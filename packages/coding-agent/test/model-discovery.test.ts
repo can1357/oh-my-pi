@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
+import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -13,12 +14,14 @@ import { resolveModelCacheProviderId, resolveOllamaModelCacheProviderId } from "
 import type { ModelKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
+	discoverLiteLLMModels,
 	discoverOllamaModels,
 	discoverOpenAIModelsList,
 	discoveryProbeTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
 import { RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { resolveCliModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -1001,6 +1004,53 @@ describe("ModelRegistry runtime discovery", () => {
 		const model = registry.find("ollama", "phi4-mini");
 		expect(model?.baseUrl).toBe("http://omp-ollama.example:2222/v1");
 		expect(registry.getProviderDiscoveryState("ollama")?.optional).toBe(false);
+	});
+
+	test("resolves a bare id shared with implicit ollama to the models.yml provider", async () => {
+		using _baseUrl = withEnv("OLLAMA_BASE_URL", "http://ollama.lan:11434");
+		writeRawModelsJson({
+			omlx: {
+				baseUrl: "http://omlx.lan:11434/v1",
+				api: "openai-completions",
+				apiKey: "sk-omlx-test",
+				models: [{ id: "phi-4-4bit", name: "Phi-4 4-bit", contextWindow: 128000, maxTokens: 8192 }],
+			},
+		});
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: mockOllamaDiscovery(["phi-4-4bit"], "http://ollama.lan:11434"),
+		});
+		await registry.refresh();
+		expect(registry.find("ollama", "phi-4-4bit")).toBeDefined();
+
+		const resolved = resolveCliModel({ cliModel: "phi-4-4bit", modelRegistry: registry });
+		expect(resolved.model?.provider).toBe("omlx");
+		expect(resolved.model?.baseUrl).toBe("http://omlx.lan:11434/v1");
+	});
+
+	test("warns with the env var only when an env-redirected implicit endpoint fails discovery", async () => {
+		// Echo the request URL like real fetch errors do, so credential leaks through the error are caught too.
+		const unreachable: FetchImpl = async input => {
+			throw new Error(`EHOSTUNREACH: connect failed ${String(input)}`);
+		};
+		{
+			using _baseUrl = withEnv("OLLAMA_BASE_URL", "http://reviewer:topsecret@ollama.typo:11434");
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: unreachable });
+			await registry.refresh();
+			const warnings = registry.drainConfigWarnings().filter(warning => warning.includes("ollama"));
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]).toContain("OLLAMA_BASE_URL");
+			expect(warnings[0]).toContain("http://ollama.typo:11434");
+			expect(warnings[0]).toContain("EHOSTUNREACH");
+			expect(warnings[0]).not.toContain("topsecret");
+			expect(warnings[0]).not.toContain("reviewer");
+		}
+		{
+			// The default loopback probe is optional: a missing local Ollama stays silent.
+			using _baseUrl = withEnv("OLLAMA_BASE_URL", undefined);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: unreachable });
+			await registry.refresh();
+			expect(registry.drainConfigWarnings()).toEqual([]);
+		}
 	});
 
 	test("refreshes implicit Ollama discovery when the configured endpoint changes", async () => {
@@ -3099,14 +3149,6 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("litellm discovery maps rich model metadata and keeps runtime /v1 baseUrl", async () => {
-		writeRawModelsJson({
-			"litellm-test": {
-				baseUrl: "http://127.0.0.1:4000",
-				api: "openai-completions",
-				auth: "none",
-				discovery: { type: "litellm" },
-			},
-		});
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);
 			if (url === "http://127.0.0.1:4000/model_group/info") {
@@ -3126,9 +3168,17 @@ describe("ModelRegistry runtime discovery", () => {
 			}
 			throw new Error(`Unexpected URL: ${url}`);
 		};
-		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
-		await registry.refresh();
-		const model = registry.find("litellm-test", "gpt-big");
+		const models = await discoverLiteLLMModels(
+			{
+				provider: "litellm-test",
+				baseUrl: "http://127.0.0.1:4000",
+				api: "openai-completions",
+				discovery: { type: "litellm" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+		);
+		const model = models.find(model => model.id === "gpt-big");
+		if (!model) throw new Error("Missing discovered LiteLLM model");
 
 		expect(model?.baseUrl).toBe("http://127.0.0.1:4000/v1");
 		expect(model?.contextWindow).toBe(262_144);
@@ -3136,17 +3186,19 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(model?.input).toEqual(["text", "image"]);
 		expect(model?.reasoning).toBe(true);
 		expect(model?.api).toBe("openai-responses");
+		expect(model.provider).toBe("litellm-test");
+		expect(model.providerType).toBe("litellm");
+		if (model.api !== "openai-responses") throw new Error("Expected discovered Responses API");
+		expect(
+			resolveOpenAIRequestSetup(model as Model<"openai-responses">, {
+				apiKey: "test",
+				messages: [],
+				sessionId: "rich-alias-session",
+			}).requestHeaders["x-litellm-session-id"],
+		).toBe("rich-alias-session");
 	});
 
 	test("litellm discovery falls back to /v1/models when the rich phase times out (#10964)", async () => {
-		writeRawModelsJson({
-			"litellm-test": {
-				baseUrl: "http://127.0.0.1:4013/v1",
-				api: "openai-completions",
-				auth: "none",
-				discovery: { type: "litellm", timeoutMs: 50 },
-			},
-		});
 		const { promise: richHang } = Promise.withResolvers<Response>(); // never resolves
 		const richEndpoints = ["/model_group/info", "/v2/model/info", "/model/info", "/v1/model/info"];
 		let v1ModelsHits = 0;
@@ -3166,11 +3218,31 @@ describe("ModelRegistry runtime discovery", () => {
 			}
 			throw new Error(`Unexpected URL: ${url}`);
 		};
-		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
-		await registry.refresh();
+		const models = await discoverLiteLLMModels(
+			{
+				provider: "litellm-test",
+				baseUrl: "http://127.0.0.1:4013/v1",
+				api: "openai-responses",
+				discovery: { type: "litellm", timeoutMs: 50 },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+		);
+		const model = models.find(model => model.id === "vendor-7/model-7");
+		if (!model) throw new Error("Missing fallback LiteLLM model");
 
 		expect(v1ModelsHits).toBeGreaterThan(0);
-		expect(registry.find("litellm-test", "vendor-7/model-7")?.baseUrl).toBe("http://127.0.0.1:4013/v1");
+		expect(model.baseUrl).toBe("http://127.0.0.1:4013/v1");
+		expect(model.provider).toBe("litellm-test");
+		expect(model.providerType).toBe("litellm");
+		expect(model.api).toBe("openai-responses");
+		if (model.api !== "openai-responses") throw new Error("Expected fallback Responses API");
+		expect(
+			resolveOpenAIRequestSetup(model as Model<"openai-responses">, {
+				apiKey: "test",
+				messages: [],
+				sessionId: "fallback-alias-session",
+			}).requestHeaders["x-litellm-session-id"],
+		).toBe("fallback-alias-session");
 	});
 
 	test("configured litellm discovery omits non-conversational rich modes", async () => {

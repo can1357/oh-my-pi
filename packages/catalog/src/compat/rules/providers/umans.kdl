@@ -5,6 +5,7 @@ provider "umans" {
 	env "UMANS_AI_CODING_PLAN_API_KEY"
 	dynamic-models-authoritative #true
 	discovery label="Umans AI Coding Plan" allow-unauthenticated=#true
+	image-count-budget 10
 
 	// Replaces resolve.ts's Umans provider baseline for Anthropic built-in tool names.
 	escape-builtin-tool-names #true

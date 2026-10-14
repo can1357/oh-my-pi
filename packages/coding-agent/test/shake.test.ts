@@ -237,6 +237,44 @@ describe("AgentSession shake", () => {
 			expect(mixedResult.content.some(block => block.type === "image")).toBe(false);
 		});
 
+		it("saves the tokens it elides from an assistant turn with the turn", async () => {
+			const fence = `\`\`\`ts\n${"const value = compute(a, b, c, d, e);\n".repeat(200)}\`\`\``;
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "write it" }],
+				timestamp: Date.now() - 2,
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: `Here it is:\n${fence}\nDone.` }],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now() - 1,
+			});
+			appendRecentProtectedTail();
+
+			const result = await session.shake("elide");
+
+			expect(result.blocksDropped).toBe(1);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted shake session");
+			const persisted = await SessionManager.open(sessionFile, tempDir.path());
+			try {
+				const turn = persisted
+					.getBranch()
+					.find(entry => entry.type === "message" && entry.message.role === "assistant");
+				expect(
+					turn?.type === "message" && turn.message.role === "assistant"
+						? turn.message.elidedOutputTokens
+						: undefined,
+				).toBe(result.tokensFreed);
+			} finally {
+				await persisted.close();
+			}
+		});
+
 		it("updates provider-anchored context usage immediately after rewriting prompt history", async () => {
 			seedHeavyToolResult("X".repeat(20_000));
 			sessionManager.appendMessage({

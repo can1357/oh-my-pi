@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
+import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { Settings } from "../../../src/config/settings";
 import {
 	PauseScreenComponent,
@@ -97,6 +98,61 @@ describe("pause screen", () => {
 			const text = lines.map(stripAnsi).join("\n");
 			expect(text).toContain("Compact Session Title");
 			expect(text).toContain("▌▌ P A U S E D");
+		});
+	});
+
+	describe("native sheet", () => {
+		// Every described node, depth-first (components inside are not walked).
+		const nodes = (root: NativeChild): NativeNode[] => {
+			if (!("k" in root)) return [];
+			return [root, ...(root.c ?? []).flatMap(nodes)];
+		};
+		const texts = (root: NativeNode): string =>
+			nodes(root)
+				.map(n => {
+					const p = n.p as { text?: string; spans?: { t: string }[] } | undefined;
+					return p?.text ?? p?.spans?.map(s => s.t).join("") ?? "";
+				})
+				.join("\n");
+
+		it("shows the live hold clock, the session it holds, what the hold means, and one Resume", () => {
+			const { host } = makeHost();
+			const sheet = new PauseScreenComponent({ ...host, sessionName: "Credit backpressure" });
+			const root = sheet.describe();
+			const all = nodes(root);
+
+			const clock = all.find(n => n.k === "elapsed");
+			expect(clock?.p).toMatchObject({ format: "clock" });
+			const shown = texts(root);
+			expect(shown).toContain("Credit backpressure");
+			expect(shown).toContain("Every agent holds");
+			expect(shown).toContain("The repo is yours");
+
+			const buttons = all.filter(n => (n.p as { role?: string } | undefined)?.role === "omp.btn");
+			expect(buttons.length).toBe(1);
+			const resume = buttons[0]!.p as { tone?: string; title?: string; actions?: { click?: string } };
+			expect(resume.tone).toBe("accent");
+			expect(resume.actions?.click).toBe("resume");
+			// The keys live in the tooltip: `Label  key` clauses.
+			expect(resume.title).toStartWith("Resume  esc");
+			expect(sheet.nativeOverlay).toMatchObject({ role: "omp.overlay.pause", head: "Paused" });
+		});
+
+		it("names the whole session when it has no name", () => {
+			const { host } = makeHost();
+			expect(texts(new PauseScreenComponent(host).describe())).toContain("Every agent in this session");
+		});
+
+		it("resumes from the Resume button", async () => {
+			const { host, shown } = makeHost();
+			const run = runPauseScreen(host); // shows the sheet synchronously, before its first await
+			const component = shown[0];
+			expect(component).toBeInstanceOf(PauseScreenComponent);
+			if (component instanceof PauseScreenComponent) {
+				component.handleNativeEvent({ type: "action", key: "actions/resume", act: "resume", mods: [] });
+			}
+			await run;
+			expect(agentPauseGate.paused).toBe(false);
 		});
 	});
 

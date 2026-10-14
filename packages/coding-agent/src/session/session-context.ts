@@ -22,6 +22,7 @@ import {
 	type CompactionEntry,
 	type CustomMessageEntry,
 	EPHEMERAL_MODEL_CHANGE_ROLE,
+	resolveSessionLeafId,
 	type SessionEntry,
 	type SessionMessageEntry,
 } from "./session-entries";
@@ -66,7 +67,7 @@ function hasCrashRiskSnapcompactFramePayload(
 ): boolean {
 	return (
 		archive.frames.length >= LEGACY_SNAPCOMPACT_FRAME_COUNT_GUARD ||
-		snapcompactFrameDataBytes(archive, resolveFrameData) >= snapcompact.FRAME_DATA_BYTES_BUDGET
+		snapcompactFrameDataBytes(archive, resolveFrameData) >= snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET
 	);
 }
 
@@ -89,7 +90,8 @@ function isCrashRiskLegacySnapcompactArchive(
 	);
 }
 
-function snapcompactHistoryBlockOptions(
+/** Byte budget and frame resolution for one archive's prompt blocks, as context rebuilding applies them. */
+export function snapcompactHistoryBlockOptions(
 	archive: snapcompact.Archive,
 	options: BuildSessionContextOptions | undefined,
 ): snapcompact.HistoryBlockOptions {
@@ -99,7 +101,7 @@ function snapcompactHistoryBlockOptions(
 		return { maxFrameDataBytes: 0, ...(resolveFrameData ? { resolveFrameData } : {}) };
 	}
 	return {
-		maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+		maxFrameDataBytes: options?.maxFrameDataBytes ?? snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET,
 		...(resolveFrameData ? { resolveFrameData } : {}),
 	};
 }
@@ -182,6 +184,9 @@ export interface BuildSessionContextOptions {
 	inFlightToolCallIds?: ReadonlySet<string>;
 	/** Price and resolve persisted snapcompact frame payloads on demand. */
 	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
+	/** Archive frame bytes the LLM context attaches: the active model's {@link snapcompact.frameDataBytesBudget}
+	 *  (unset: {@link snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET}). */
+	maxFrameDataBytes?: number;
 }
 
 /**
@@ -244,10 +249,9 @@ export function buildSessionContext(
 		}
 	}
 
-	// Find leaf
-	let leaf: SessionEntry | undefined;
-	if (leafId === null) {
-		// Explicitly null - return no messages (navigated to before first entry)
+	// An explicit null or a replayed clear marker selects no active branch.
+	const resolvedLeafId = leafId === undefined ? resolveSessionLeafId(entries) : leafId;
+	if (resolvedLeafId === null) {
 		return {
 			messages: [],
 			thinkingLevel: "off",
@@ -257,14 +261,12 @@ export function buildSessionContext(
 			mode: "none",
 		};
 	}
-	if (leafId) {
-		leaf = byId.get(leafId);
+	let leaf = byId.get(resolvedLeafId);
+	if (!leaf && leafId !== undefined) {
+		// An explicitly requested leaf is unavailable: use the replayed leaf, never a trailing usage marker.
+		const replayedLeafId = resolveSessionLeafId(entries);
+		leaf = replayedLeafId === null ? undefined : byId.get(replayedLeafId);
 	}
-	if (!leaf) {
-		// Fallback to last entry (when leafId is undefined)
-		leaf = entries[entries.length - 1];
-	}
-
 	if (!leaf) {
 		return {
 			messages: [],

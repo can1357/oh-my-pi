@@ -229,6 +229,7 @@ describe("cursor API-equivalent pricing", () => {
 			"gemini-3.6-flash",
 			"gemini-3.7-flash",
 			"gemini-3.8-flash",
+			"gemini-4-argon",
 			"glm-5.2",
 			"gpt-5-mini",
 			"gpt-5.1",

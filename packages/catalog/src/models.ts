@@ -1,5 +1,6 @@
 import { classifyModel } from "./compat/taxonomy";
 import MODELS from "./models.json" with { type: "json" };
+import { dueEffectiveRate } from "./pricing";
 import type {
 	Api,
 	EffectiveTokenCost,
@@ -65,22 +66,25 @@ export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 }
 /** Resolve display semantics without mistaking an absent rate card for a free model. */
 export function getModelPricingStatus(model: Pick<Model<Api>, "cost" | "pricingStatus">): ModelPricingStatus {
-	const cost = model.cost;
+	const cost = getEffectiveTokenCost(model.cost);
 	if (cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0) return "fixed";
 	return model.pricingStatus ?? "unknown";
 }
 
+/**
+ * The base token card in force at `timestamp` (Unix ms, default now): the
+ * latest due `timeBased` effective rate, else the row's own legs. Price
+ * displays read this rather than the scalar legs, which keep the card current
+ * when the row was built while bundles, caches, and long sessions outlive it.
+ * Applies no long-context tier or peak/off-peak multiplier.
+ */
+export function getEffectiveTokenCost(cost: ModelCost, timestamp = Date.now()): TokenCost {
+	return resolveTokenCost(cost, 0, timestamp);
+}
+
 function resolveTokenCost(cost: ModelCost, promptInputTokens: number, timestamp: number | undefined): TokenCost {
-	let rates: ModelCost | EffectiveTokenCost = cost;
-	let effectiveFrom = -Infinity;
-	if (timestamp !== undefined && cost.timeBased?.effectiveRates) {
-		for (const candidate of cost.timeBased.effectiveRates) {
-			if (candidate.effectiveFrom <= timestamp && candidate.effectiveFrom > effectiveFrom) {
-				rates = candidate;
-				effectiveFrom = candidate.effectiveFrom;
-			}
-		}
-	}
+	const rates: ModelCost | EffectiveTokenCost =
+		(timestamp === undefined ? undefined : dueEffectiveRate(cost.timeBased, timestamp)) ?? cost;
 	const longContext = rates.longContext;
 	if (!longContext) return rates;
 	const reachesThreshold =
@@ -105,10 +109,20 @@ function timeBasedMultiplier(schedule: TimeBasedCost | undefined, timestamp: num
 	return isPeakPricingPeriod(schedule, timestamp) ? 1 : schedule.offPeakMultiplier;
 }
 
+/**
+ * Whether a schedule carries a recurring peak/off-peak tariff. A schedule with
+ * no peak windows at a 1x off-peak multiplier only carries dated rate cards
+ * (`cost-patch`/`cost-fallback` `effective-rates`): its price changes on a
+ * date, never by time of day.
+ */
+export function hasRecurringTariff(schedule: TimeBasedCost): boolean {
+	return schedule.peakWindows.length > 0 || schedule.offPeakMultiplier !== 1;
+}
+
 /** Return the recurring UTC tariff period, independently of its monetary multiplier. */
 export function getTimeBasedPricingPeriod(cost: ModelCost, timestamp?: number): "peak" | "off-peak" | undefined {
 	const schedule = cost.timeBased;
-	if (!schedule) return undefined;
+	if (!schedule || !hasRecurringTariff(schedule)) return undefined;
 	return isPeakPricingPeriod(schedule, timestamp ?? Date.now()) ? "peak" : "off-peak";
 }
 

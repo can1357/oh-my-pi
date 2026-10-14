@@ -8,9 +8,10 @@
  * references it.
  */
 import type { TspProps } from "@oh-my-pi/pi-wire";
+import { resolveImageOptions } from "../render/render-utils";
 import { getImageDimensions } from "../terminal-capabilities";
 import { node } from "./describe";
-import type { NativeNode } from "./node";
+import type { NativeChild, NativeNode } from "./node";
 
 export interface NativeBlob {
 	readonly id: string;
@@ -102,4 +103,36 @@ export class NativeImageCache {
 		this.#entries.set(key, { data, node: image });
 		return image;
 	}
+}
+
+/** The disk file a tool result's image was read from (`read` details `mediaPath`), when it has one. */
+export function readMediaPath(details: unknown): string | undefined {
+	if (typeof details !== "object" || details === null) return undefined;
+	const mediaPath = (details as { mediaPath?: unknown }).mediaPath;
+	return typeof mediaPath === "string" && mediaPath.length > 0 ? mediaPath : undefined;
+}
+
+/**
+ * A `media` node the host loads by path, capped at the inline image preview
+ * height. Callers check `cx.supports("media")` first.
+ */
+export function nativeMediaNode(path: string, key: string): NativeNode {
+	const maxRows = resolveImageOptions().maxHeightCells;
+	return node("media", { path, max: maxRows && maxRows > 0 ? { h: `${maxRows}lines` } : undefined }, undefined, key);
+}
+
+/** Blob ids of the `image` nodes and paths of the `media` nodes under `children` (described nodes only). */
+export function shownMedia(children: readonly NativeChild[] | undefined): { blobs: Set<string>; paths: Set<string> } {
+	const shown = { blobs: new Set<string>(), paths: new Set<string>() };
+	const visit = (list: readonly NativeChild[] | undefined): void => {
+		for (const child of list ?? []) {
+			if (!("k" in child)) continue;
+			const p = child.p as { blob?: unknown; path?: unknown } | undefined;
+			if (child.k === "image" && typeof p?.blob === "string") shown.blobs.add(p.blob);
+			else if (child.k === "media" && typeof p?.path === "string") shown.paths.add(p.path);
+			visit(child.c);
+		}
+	};
+	visit(children);
+	return shown;
 }

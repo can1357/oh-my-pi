@@ -15,7 +15,12 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import { installRetryFallbackRole } from "../session/retry-fallback-chains";
 import type { AuthStorage } from "../session/auth-storage";
-import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
+import {
+	extractSessionInit,
+	hasConversationalHistory,
+	type PersistedSessionInit,
+	SessionManager,
+} from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
 import {
 	attachIrcWakeTurnMonitor,
@@ -49,6 +54,20 @@ export interface PersistedSubagentReviveContext {
 	eventBus?: EventBus;
 	/** Root-scoped observability bus the revived run's frames also publish to. */
 	subagentEventBus?: EventBus;
+}
+
+/**
+ * The agent definition a cold-revived subagent's monitored turns report (IRC wakes,
+ * `omp --restore`): persisted files predate an agent-source field, so frames carry
+ * the runtime-neutral `user` source; the name is the registry ref's.
+ */
+export function persistedAgentDefinition(displayName: string, init: PersistedSessionInit): AgentDefinition {
+	return {
+		name: displayName,
+		description: "",
+		systemPrompt: init.systemPrompt.join("\n\n"),
+		source: "user",
+	};
 }
 
 /**
@@ -174,6 +193,8 @@ export function createPersistedSubagentReviverFactory(
 			// A restricted persisted contract must not consult process-global MCP
 			// state: same-name MCP tools are untrusted capability sources.
 			const restrictToolNames = init.restrictToolNames === true;
+			// The spawn's result contract: a session persisted without `yield` returned its final message.
+			const structured = revivedToolNames.includes("yield");
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			// Subscribe before minting proxies so a manager change during startup is replayed on bind.
 			const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
@@ -212,6 +233,7 @@ export function createPersistedSubagentReviverFactory(
 							? init.agent
 							: ref.displayName,
 					parentTaskPrefix: ref.id,
+					asyncJobManager: ctx.session.asyncJobManager,
 					parentAgentId: ref.parentId,
 					oauthAccountPools,
 					expectedAgentRef: expectedRef,
@@ -220,7 +242,7 @@ export function createPersistedSubagentReviverFactory(
 					outputSchema: init.outputSchema,
 					outputSchemaMode: init.outputSchemaMode,
 					restrictToolNames: restrictToolNames || undefined,
-					requireYieldTool: true,
+					requireYieldTool: structured,
 					systemPrompt: () => [...init.systemPrompt],
 					// Inherit current owner policy, never extension authority from a transcript.
 					extensionRoots: () => ctx.session.effectiveExtensionRoots,
@@ -270,20 +292,13 @@ export function createPersistedSubagentReviverFactory(
 			// The internal run-state signal precedes deferrable public `agent_end`,
 			// keeping idle-TTL ownership synchronized even while prompts unwind.
 			registry.syncSessionStatus(ref.id, session);
-			// Persisted files predate an agent-source field, so cold-revived frames
-			// report the runtime-neutral `user` source; name comes from the ref.
-			const wakeAgent: AgentDefinition = {
-				name: ref.displayName,
-				description: "",
-				systemPrompt: init.systemPrompt.join("\n\n"),
-				source: "user",
-			};
 			attachIrcWakeTurnMonitor(session, {
 				id: ref.id,
-				agent: wakeAgent,
+				agent: persistedAgentDefinition(ref.displayName, init),
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
 				sessionFile,
+				structured,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
 				// Anchor artifacts to the revived ref's own dir (its parent's children

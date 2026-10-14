@@ -323,14 +323,46 @@ describe("Codex model discovery", () => {
 			// Discovery has no rates; the generated KDL policy supplies them
 			// when the discovered spec becomes a usable model.
 			expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-			expect(buildModel(model).cost).toEqual(
+			const builtModel = buildModel(model);
+			expect(builtModel.cost).toEqual(
 				model.id.startsWith("gpt-6.1-sol")
 					? { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 }
 					: model.id.startsWith("gpt-6-sol")
 						? { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 0 }
 						: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0 },
 			);
+			// GPT-6.1 Sol ships Ultrafast at Codex's 8x included-usage rate;
+			// GPT-6 Sol and Luna have only Fast and Flex.
+			expect(builtModel.serviceTierCost).toEqual(
+				model.id.startsWith("gpt-6.1-sol")
+					? { flex: 0.5, priority: 2.5, ultrafast: 8 }
+					: { flex: 0.5, priority: 2.5 },
+			);
 		}
+	});
+
+	it("defaults Codex GPT-6.1 Sol to the 500K window while Astra stays at 272K (#15421)", async () => {
+		const fetchFn: typeof fetch = Object.assign(
+			async () =>
+				Response.json({
+					// Discovery may still report the pre-2026-10-11 272K default.
+					models: ["gpt-6.1-sol", "gpt-6.1-sol-wm", "gpt-6-astra"].map(slug => ({
+						slug,
+						context_window: 272_000,
+						max_context_window: 872_000,
+					})),
+				}),
+			{ preconnect() {} },
+		);
+		const result = await fetchCodexModels({ accessToken: "test-token", fetchFn });
+		const windows = Object.fromEntries(
+			(result?.models ?? []).map(model => [model.id, buildModel(model).contextWindow]),
+		);
+		expect(windows).toMatchObject({
+			"gpt-6.1-sol": 500_000,
+			"gpt-6.1-sol-wm": 500_000,
+			"gpt-6-astra": 272_000,
+		});
 	});
 
 	it("floors stale reported windows for GPT-5.6 luna/sol/terra and honors reports above the floor", async () => {

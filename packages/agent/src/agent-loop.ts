@@ -3570,13 +3570,15 @@ async function executeToolCalls(
 							executionArgs,
 							record.signal,
 							partialResult => {
-								stream.push({
+								const event: Extract<AgentEvent, { type: "tool_execution_update" }> = {
 									type: "tool_execution_update",
 									toolCallId: toolCall.id,
 									toolName: toolCall.name,
 									args: executionArgs,
 									partialResult: coerceToolResult(partialResult).result,
-								});
+								};
+								if (stream.done) config.onDetachedToolUpdate?.(event);
+								else stream.push(event);
 							},
 							toolContext,
 						);

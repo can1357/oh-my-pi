@@ -126,6 +126,26 @@ describe("terminal image rendering", () => {
 		expect(placeholder).not.toBe(direct);
 	});
 
+	it("replays released image rows without replacing graphics or retransmitting image data", () => {
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		const budget = new ImageBudget(1);
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ budget, imageKey: "released-image", maxWidthCells: 10, maxHeightCells: 2 },
+			SQUARE_DIMENSIONS,
+		);
+
+		const first = image.render(20);
+		expect(first.join("")).toContain("\x1b_Ga=p");
+		expect(budget.takeTransmits()).toHaveLength(1);
+
+		image.releaseRenderCaches();
+		expect(image.render(20)).toEqual(first);
+		expect(budget.takeTransmits()).toEqual([]);
+	});
+
 	it("uses intrinsic image size when no bounds are provided", () => {
 		terminal.imageProtocol = ImageProtocol.Kitty;
 		const result = renderImage(BASE64_DUMMY, SQUARE_DIMENSIONS);

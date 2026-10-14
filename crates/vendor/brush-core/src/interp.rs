@@ -2,7 +2,7 @@ use std::{
 	collections::VecDeque,
 	io::Write,
 	path::{Path, PathBuf},
-	sync::Arc,
+	sync::{Arc, atomic::AtomicBool},
 };
 
 use brush_parser::ast::{self, CommandPrefixOrSuffixItem};
@@ -106,6 +106,9 @@ pub struct ExecutionParameters {
 	pub suppress_errexit:     bool,
 	/// Optional hook reporting spawned external children for scoped teardown.
 	spawn_observer:           Option<Arc<dyn SpawnObserver>>,
+	/// Optional flag a command raises when it reports an error yet goes on,
+	/// so its exit status does not show the failure.
+	reported_error:           Option<Arc<AtomicBool>>,
 }
 
 impl ExecutionParameters {
@@ -154,6 +157,17 @@ impl ExecutionParameters {
 	/// Returns the active spawn-observer hook, if any.
 	pub fn spawn_observer(&self) -> Option<&Arc<dyn SpawnObserver>> {
 		self.spawn_observer.as_ref()
+	}
+
+	/// Assigns the flag commands raise when they report an error yet go on.
+	pub fn set_reported_error(&mut self, flag: Arc<AtomicBool>) {
+		self.reported_error = Some(flag);
+	}
+
+	/// Returns the flag commands raise when they report an error yet go on,
+	/// if any.
+	pub fn reported_error(&self) -> Option<&Arc<AtomicBool>> {
+		self.reported_error.as_ref()
 	}
 
 	/// Returns the standard input file; usable with `write!` et al.

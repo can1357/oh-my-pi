@@ -15,16 +15,20 @@ installStatsTestIsolation("@pi-stats-port-conflict-");
 /**
  * Directly probe a TCP endpoint, bypassing any configured HTTP proxy so the
  * loopback-only bind is asserted against the real listener rather than a proxy
- * response. Resolves true when the connection is accepted, false when refused.
+ * response. Resolves true when the connection is accepted, false when refused or
+ * unanswered: a firewall in stealth mode drops the SYN to a closed port instead of
+ * refusing it, and an unanswered SYN raises no event to await or fake clock to
+ * advance, so a real one-second bound keeps the probe inside the test timeout.
  */
 async function tcpConnects(hostname: string, port: number): Promise<boolean> {
-	try {
-		const socket = await connect({ hostname, port, socket: { data() {}, open() {}, close() {}, error() {} } });
-		socket.end();
-		return true;
-	} catch {
-		return false;
-	}
+	const attempt = connect({ hostname, port, socket: { data() {}, open() {}, close() {}, error() {} } }).then(
+		socket => {
+			socket.end();
+			return true;
+		},
+		() => false,
+	);
+	return Promise.race([attempt, Bun.sleep(1_000).then(() => false)]);
 }
 function getNonLoopbackHostname(): string | undefined {
 	const interfaces = networkInterfaces();

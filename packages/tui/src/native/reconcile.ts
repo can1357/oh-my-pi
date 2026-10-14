@@ -405,13 +405,31 @@ export class Reconciler {
 		return this.#findEditorIn(node, state.id, "", state.owner, depth);
 	}
 
-	#findEditorIn(node: NativeNode, id: string, keypath: string, owner: Owner, depth: number): string | null {
+	/**
+	 * The first editor under `node`. An `overlay`/`picker` child outside a hoisted
+	 * sheet is hoisted into `layer` under its `^` keypath (see {@link #entries}), so
+	 * a field in a sheet a dock component describes is found under that id.
+	 */
+	#findEditorIn(
+		node: NativeNode,
+		id: string,
+		keypath: string,
+		owner: Owner,
+		depth: number,
+		hoist = true,
+	): string | null {
 		if (node.k === "editor" || node.k === "input") return id;
-		for (const entry of this.#entries(node.c, keypath, owner, true, null)) {
-			const found =
-				entry.comp === undefined
-					? this.#findEditorIn(entry.node, entry.id, entry.keypath, owner, depth)
-					: this.#findEditorOf(entry.comp, depth + 1);
+		for (const entry of this.#entries(node.c, keypath, owner, false, null)) {
+			let found: string | null;
+			if (entry.comp !== undefined) {
+				found = this.#findEditorOf(entry.comp, depth + 1);
+			} else if (hoist && (entry.node.k === "overlay" || entry.node.k === "picker")) {
+				const path = entry.keypath;
+				const portalPath = keypath === "" ? `^${path}` : `${keypath}/^${path.slice(keypath.length + 1)}`;
+				found = this.#findEditorIn(entry.node, nodeId(owner.base, portalPath), portalPath, owner, depth, false);
+			} else {
+				found = this.#findEditorIn(entry.node, entry.id, entry.keypath, owner, depth, hoist);
+			}
 			if (found !== null) return found;
 		}
 		return null;

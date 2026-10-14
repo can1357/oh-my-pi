@@ -1,4 +1,5 @@
 import { type Api, type AuthStorage, type Model, withAuth } from "@oh-my-pi/pi-ai";
+import { applySessionHeader } from "@oh-my-pi/pi-ai/providers/inference-headers";
 import { asRecord } from "@oh-my-pi/pi-utils";
 import {
 	type SearchCitation,
@@ -232,6 +233,7 @@ export async function searchOpenAIResponses(params: SearchParams): Promise<Searc
 			const headers = new Headers(configuredHeaders);
 			headers.set("Authorization", `Bearer ${apiKey}`);
 			headers.set("Content-Type", "application/json");
+			applySessionHeader(headers, params.model.compat, params.sessionId);
 			const response = await (params.fetch ?? fetch)(responsesEndpoint(params.model.baseUrl), {
 				method: "POST",
 				headers,

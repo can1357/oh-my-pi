@@ -9,8 +9,8 @@
  *
  * The fix relocates the worker to its own process: `title-client.ts` spawns
  * `process.execPath … __omp_worker_tiny_inference` (detached, owning a
- * per-model socket), `cli.ts` dispatches that flag into `runTinyWorker`, and
- * the omp process only ever holds a socket to it — the native finalizer never
+ * per-model IPC endpoint), `cli.ts` dispatches that flag into `runTinyWorker`,
+ * and the omp process only ever holds a connection to it — the native finalizer never
  * runs in an omp address space. These tests pin that contract so a future
  * refactor cannot quietly land the original crash again.
  */
@@ -18,12 +18,8 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	connectTinyWorker,
-	onnxLaunch,
-	smokeTestTinyTitleWorker,
-	TINY_WORKER_CLOSED,
-} from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { WORKER_CONNECTION_CLOSED } from "@oh-my-pi/pi-coding-agent/subprocess/shared-worker";
+import { connectTinyWorker, onnxLaunch, smokeTestTinyTitleWorker } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 
 describe("issue #1606 — tiny model lives in an isolated process", () => {
 	it("ping/pongs through the spawned worker process and tears it down cleanly", async () => {
@@ -52,7 +48,7 @@ describe("issue #1606 — tiny model lives in an isolated process", () => {
 			noisy.send({ type: "shutdown", id: "1" });
 			const error = await promise;
 
-			expect(error.message).toStartWith(TINY_WORKER_CLOSED);
+			expect(error.message).toStartWith(WORKER_CONNECTION_CLOSED);
 			expect(quietErrors).toBe(0);
 		} finally {
 			await fs.rm(runtimeDir, { recursive: true, force: true });

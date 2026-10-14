@@ -951,12 +951,16 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			return { ...item, depth, open: this.#childrenByParent.has(ref.id) ? true : undefined };
 		}
 		if (!metrics) return item;
+		// A running agent's active time ticks terminal-side from the age at send; a settled one
+		// is frozen text. Progress `durationMs` was current when its frame arrived, so age it to now
+		// — re-sending the stale value on every repaint rewinds Tern's clock. A first frame can
+		// report 0 ms, so a progress timestamp alone makes the row clockable.
+		const progressAt = observed?.progress ? observed.progressAt : undefined;
 		const facts: Record<string, string | number> = {
 			cost: formatCost(metrics.cost),
-			// A running agent's active time ticks terminal-side; a settled one is frozen text.
 			time:
-				ref.status === "running" && metrics.durationMs > 0
-					? metrics.durationMs
+				ref.status === "running" && (metrics.durationMs > 0 || progressAt !== undefined)
+					? metrics.durationMs + (progressAt === undefined ? 0 : Math.max(0, Date.now() - progressAt))
 					: formatDuration(metrics.durationMs),
 			req: metrics.requests,
 			tools: metrics.tools,

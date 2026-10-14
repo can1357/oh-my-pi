@@ -2,6 +2,7 @@
 
 provider "amazon-bedrock" {
 	default-model "us.anthropic.claude-opus-5-5"
+	image-count-budget 90
 
 	// The Converse assembler positions content blocks by wire index
 	// (`amazon-bedrock.ts`), so a block can land above text already rendered.

@@ -1045,6 +1045,31 @@ describe("requestCompactionV2Streaming", () => {
 		expect(result.usage?.cachedInputTokens).toBe(7);
 		expect(result.usage?.reasoningOutputTokens).toBe(1);
 	});
+	test("keeps the LiteLLM conversation session header on the compaction request", async () => {
+		const model = makeOpenAiModel({
+			provider: "litellm",
+			baseUrl: "https://litellm.example/v1",
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		const userItem = { type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] };
+		const request = buildCompactionV2Request(model, [userItem], "instructions", { sessionId: "session-1" });
+		const sessionHeaders: (string | null)[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			sessionHeaders.push(new Headers(init?.headers).get("x-litellm-session-id"));
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc" },
+				},
+				{ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
+			]);
+		};
+
+		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
+
+		expect(sessionHeaders).toEqual(["session-1"]);
+	});
 	test.each(["The socket connection was closed unexpectedly", "socket connection closed unexpectedly"] as const)(
 		"retries a transient socket closure: %s",
 		async socketCloseMessage => {
@@ -1970,6 +1995,28 @@ test("uses configured OpenAI-compatible compaction for custom providers", async 
 	expect(requestBody).toMatchObject({ model: "gpt-5.5" });
 });
 
+test("keeps the LiteLLM conversation session header on V1 compaction unless configured", async () => {
+	const sessionHeaders: (string | null)[] = [];
+	const fetchMock: FetchImpl = async (_input, init) => {
+		sessionHeaders.push(new Headers(init?.headers).get("x-litellm-session-id"));
+		return Response.json({ output: [{ type: "compaction_summary", summary: "compacted" }] });
+	};
+	const input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }];
+	for (const headers of [undefined, { "X-LiteLLM-Session-Id": "run-42" }]) {
+		const model = makeOpenAiModel({
+			provider: "litellm",
+			baseUrl: "https://litellm.example/v1",
+			headers,
+			remoteCompaction: { enabled: true },
+		});
+		await requestOpenAiRemoteCompaction(model, "test-key", input, "instructions", undefined, {
+			fetch: fetchMock,
+			sessionId: "session-1",
+		});
+	}
+	expect(sessionHeaders).toEqual(["session-1", "run-42"]);
+});
+
 test("uses Azure request shape for Azure Responses remote compaction", async () => {
 	const previousDeploymentMap = Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP;
 	Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP = "gpt-5-compact=azure-gpt-5-compact";
@@ -2189,6 +2236,52 @@ describe("compact() remote compaction failure handling", () => {
 			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteStreamingV2Enabled: false },
 		};
 	}
+
+	test("V1 compact drops mixed-provider Anthropic state and keeps unrelated preserve data", async () => {
+		const compactionItem = { type: "compaction", encrypted_content: "enc-current-v1" };
+		const compactPaths: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(req) {
+				const url = new URL(req.url);
+				compactPaths.push(`${req.method} ${url.pathname}`);
+				if (req.method === "POST" && url.pathname.endsWith("/responses/compact")) {
+					return Response.json({ output: [compactionItem] });
+				}
+				return new Response("unexpected", { status: 404 });
+			},
+		});
+		try {
+			const preparation = makePreparation();
+			preparation.previousPreserveData = {
+				anthropicCompaction: { provider: "anthropic", content: "prior anthropic summary" },
+				openaiRemoteCompaction: {
+					provider: "openai",
+					replacementHistory: [{ type: "compaction", encrypted_content: "stale-enc" }],
+					compactionItem: { type: "compaction", encrypted_content: "stale-enc" },
+				},
+				sessionHint: "keep-me",
+			};
+			const model = makeOpenAiModel({
+				baseUrl: `http://127.0.0.1:${server.port}/v1`,
+				remoteCompaction: { enabled: true, v2StreamingEnabled: false },
+			});
+
+			const result = await compact(preparation, model, "test-key");
+
+			expect(compactPaths).toEqual(["POST /v1/responses/compact"]);
+			expect(result.preserveData?.anthropicCompaction).toBeUndefined();
+			expect(result.preserveData?.sessionHint).toBe("keep-me");
+			expect(result.preserveData?.openaiRemoteCompaction).toEqual({
+				provider: "openai",
+				replacementHistory: [compactionItem],
+				compactionItem,
+			});
+		} finally {
+			server.stop(true);
+		}
+	});
 
 	test.each(["v1", "v2", "codex-v2"])(
 		"preserves local summary history when entering native replay (%s)",

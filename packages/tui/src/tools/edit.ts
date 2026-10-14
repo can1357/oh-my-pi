@@ -36,6 +36,7 @@ import {
 	invalidateRenderedStringCache,
 	PREVIEW_LIMITS,
 	previewWindowRows,
+	releaseRenderedStringCache,
 	type RenderedStringCache,
 	replaceTabs,
 	shortenPath,
@@ -1110,41 +1111,49 @@ export const editToolRenderer = {
 			return renderInlineEditRow(uiTheme, { op, rename, rawPath, pending: true });
 		}
 		const callPreviewCaches: RenderedStringCache[] = [];
-		return framedToolCard(uiTheme, ({ width }) => {
-			// No status icon on the head row: it's the head of the framed block,
-			// and native-scrollback commits are prefix-only — an animated glyph
-			// would pin the commit boundary at the top, and the pending hourglass
-			// just adds noise. The liveness cue rides the trailing "(preview)" /
-			// "(streaming)" line instead.
-			const header = renderEditHeader(width, uiTheme, {
-				op,
-				rawPath,
-				rename,
-				extraSuffix: fileCount > 1 ? uiTheme.fg("dim", ` (+${fileCount - 1} more)`) : undefined,
-			});
-			let body = getCallPreview(
-				editArgs,
-				rawPath,
-				width,
-				uiTheme,
-				renderContext,
-				options.expanded,
-				options?.spinnerFrame,
-				callPreviewCaches,
-			);
-			if (applyPatchError) {
-				body += `\n${uiTheme.fg("error", truncateToWidth(replaceTabs(applyPatchError), Math.max(1, width - 2)))}`;
-			}
-			const bodyLines = body ? body.split("\n") : [];
-			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
-			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
-				phase: applyPatchError ? "error" : "pending",
-				borderColor: applyPatchError ? "error" : "borderMuted",
-				contentPaddingLeft: 0,
-			};
-		});
+		return framedToolCard(
+			uiTheme,
+			({ width }) => {
+				// No status icon on the head row: it's the head of the framed block,
+				// and native-scrollback commits are prefix-only — an animated glyph
+				// would pin the commit boundary at the top, and the pending hourglass
+				// just adds noise. The liveness cue rides the trailing "(preview)" /
+				// "(streaming)" line instead.
+				const header = renderEditHeader(width, uiTheme, {
+					op,
+					rawPath,
+					rename,
+					extraSuffix: fileCount > 1 ? uiTheme.fg("dim", ` (+${fileCount - 1} more)`) : undefined,
+				});
+				let body = getCallPreview(
+					editArgs,
+					rawPath,
+					width,
+					uiTheme,
+					renderContext,
+					options.expanded,
+					options?.spinnerFrame,
+					callPreviewCaches,
+				);
+				if (applyPatchError) {
+					body += `\n${uiTheme.fg("error", truncateToWidth(replaceTabs(applyPatchError), Math.max(1, width - 2)))}`;
+				}
+				const bodyLines = body ? body.split("\n") : [];
+				while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
+				return {
+					header,
+					sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
+					phase: applyPatchError ? "error" : "pending",
+					borderColor: applyPatchError ? "error" : "borderMuted",
+					contentPaddingLeft: 0,
+				};
+			},
+			{
+				onReleaseRenderCaches: () => {
+					for (const cache of callPreviewCaches) releaseRenderedStringCache(cache);
+				},
+			},
+		);
 	},
 
 	describeCall(
@@ -1452,74 +1461,54 @@ function renderSingleFileResult(
 	const renderedDiffCache = createRenderedStringCache();
 	const statsSuffixCache = createRenderedStringCache();
 
-	return framedToolCard(uiTheme, ({ width }) => {
-		const { expanded, renderContext } = options;
-		// A finalized result is authoritative: its `details` describe exactly
-		// what happened. The shared streaming `editDiffPreview` is a call-phase
-		// artifact (in a batch it reflects only the first file), so consulting it
-		// for an empty-diff delete/move/no-op result mislabels the card. Fall
-		// back to the preview only when no details exist yet.
-		const editDiffPreview = details ? undefined : renderContext?.editDiffPreview;
-		const renderDiffFn = renderContext?.renderDiff ?? renderFallbackDiff;
+	return framedToolCard(
+		uiTheme,
+		({ width }) => {
+			const { expanded, renderContext } = options;
+			// A finalized result is authoritative: its `details` describe exactly
+			// what happened. The shared streaming `editDiffPreview` is a call-phase
+			// artifact (in a batch it reflects only the first file), so consulting it
+			// for an empty-diff delete/move/no-op result mislabels the card. Fall
+			// back to the preview only when no details exist yet.
+			const editDiffPreview = details ? undefined : renderContext?.editDiffPreview;
+			const renderDiffFn = renderContext?.renderDiff ?? renderFallbackDiff;
 
-		if (diffSectionRenderDiffFn !== renderDiffFn) {
-			diffSectionRenderDiffFn = renderDiffFn;
-			invalidateRenderedStringCache(diffSectionCache);
-			invalidateRenderedStringCache(renderedDiffCache);
-		}
-		const firstChangedLine =
-			(editDiffPreview && "firstChangedLine" in editDiffPreview ? editDiffPreview.firstChangedLine : undefined) ||
-			(details && !isError ? details.firstChangedLine : undefined);
-		const linkPath = details && "path" in details ? details.path : undefined;
-
-		// Change stats ride inline on the header bar next to the path.
-		const previewDiff = editDiffPreview && !("error" in editDiffPreview) ? editDiffPreview.diff : undefined;
-		const headerDiff = isError ? undefined : details?.diff || previewDiff;
-		const statsSuffix = headerDiff
-			? cachedRenderedString(statsSuffixCache, uiTheme, false, "", headerDiff, () =>
-					formatDiffStatsSuffix(headerDiff, uiTheme),
-				)
-			: "";
-		const header = renderEditHeader(width, uiTheme, {
-			icon: isError ? "error" : "success",
-			iconOverride: !isError && !options.isPartial ? uiTheme.styledSymbol("tool.edit", "accent") : undefined,
-			op,
-			rawPath,
-			rename,
-			firstChangedLine,
-			linkPath,
-			statsSuffix,
-		});
-		const innerWidth = Math.max(1, width - 2);
-
-		let body = "";
-		if (isError) {
-			if (errorText) body = uiTheme.fg("error", replaceTabs(errorText));
-		} else if (details?.diff) {
-			body = renderDiffSection(
-				details.diff,
-				rawPath,
-				expanded,
-				innerWidth,
-				uiTheme,
-				renderDiffFn,
-				renderedDiffCache,
-				diffSectionCache,
-			);
-		} else if (details) {
-			// Authoritative result with no textual diff: a delete, a move-only
-			// rename, or a genuine no-op. The header already names the op
-			// (Delete / `src → dst`); only a true no-op needs an explanatory
-			// body so an empty card isn't mistaken for a stalled edit.
-			if (op !== "delete" && op !== "create" && !rename) {
-				const noChangePath = linkPath ? shortenPath(linkPath) : rawPath ? shortenPath(rawPath) : "";
-				body = uiTheme.fg("dim", `No changes were made${noChangePath ? ` to ${noChangePath}` : ""}.`);
+			if (diffSectionRenderDiffFn !== renderDiffFn) {
+				diffSectionRenderDiffFn = renderDiffFn;
+				invalidateRenderedStringCache(diffSectionCache);
+				invalidateRenderedStringCache(renderedDiffCache);
 			}
-		} else if (editDiffPreview) {
-			if ("error" in editDiffPreview) body = uiTheme.fg("error", replaceTabs(editDiffPreview.error));
-			else if (editDiffPreview.diff)
+			const firstChangedLine =
+				(editDiffPreview && "firstChangedLine" in editDiffPreview ? editDiffPreview.firstChangedLine : undefined) ||
+				(details && !isError ? details.firstChangedLine : undefined);
+			const linkPath = details && "path" in details ? details.path : undefined;
+
+			// Change stats ride inline on the header bar next to the path.
+			const previewDiff = editDiffPreview && !("error" in editDiffPreview) ? editDiffPreview.diff : undefined;
+			const headerDiff = isError ? undefined : details?.diff || previewDiff;
+			const statsSuffix = headerDiff
+				? cachedRenderedString(statsSuffixCache, uiTheme, false, "", headerDiff, () =>
+						formatDiffStatsSuffix(headerDiff, uiTheme),
+					)
+				: "";
+			const header = renderEditHeader(width, uiTheme, {
+				icon: isError ? "error" : "success",
+				iconOverride: !isError && !options.isPartial ? uiTheme.styledSymbol("tool.edit", "accent") : undefined,
+				op,
+				rawPath,
+				rename,
+				firstChangedLine,
+				linkPath,
+				statsSuffix,
+			});
+			const innerWidth = Math.max(1, width - 2);
+
+			let body = "";
+			if (isError) {
+				if (errorText) body = uiTheme.fg("error", replaceTabs(errorText));
+			} else if (details?.diff) {
 				body = renderDiffSection(
-					editDiffPreview.diff,
+					details.diff,
 					rawPath,
 					expanded,
 					innerWidth,
@@ -1528,27 +1517,56 @@ function renderSingleFileResult(
 					renderedDiffCache,
 					diffSectionCache,
 				);
-		}
-		if (details?.diagnostics) {
-			body += formatDiagnostics(details.diagnostics, expanded, uiTheme, (fp: string) =>
-				uiTheme.getLangIcon(getLanguageFromPath(fp)),
-			);
-		}
+			} else if (details) {
+				// Authoritative result with no textual diff: a delete, a move-only
+				// rename, or a genuine no-op. The header already names the op
+				// (Delete / `src → dst`); only a true no-op needs an explanatory
+				// body so an empty card isn't mistaken for a stalled edit.
+				if (op !== "delete" && op !== "create" && !rename) {
+					const noChangePath = linkPath ? shortenPath(linkPath) : rawPath ? shortenPath(rawPath) : "";
+					body = uiTheme.fg("dim", `No changes were made${noChangePath ? ` to ${noChangePath}` : ""}.`);
+				}
+			} else if (editDiffPreview) {
+				if ("error" in editDiffPreview) body = uiTheme.fg("error", replaceTabs(editDiffPreview.error));
+				else if (editDiffPreview.diff)
+					body = renderDiffSection(
+						editDiffPreview.diff,
+						rawPath,
+						expanded,
+						innerWidth,
+						uiTheme,
+						renderDiffFn,
+						renderedDiffCache,
+						diffSectionCache,
+					);
+			}
+			if (details?.diagnostics) {
+				body += formatDiagnostics(details.diagnostics, expanded, uiTheme, (fp: string) =>
+					uiTheme.getLangIcon(getLanguageFromPath(fp)),
+				);
+			}
 
-		// Diff lines self-wrap with a continuation gutter; pre-wrap to the frame's
-		// inner width so renderOutputBlock's generic wrap is a no-op. Edit frames
-		// use a flush left border because code-frame gutters already provide padding.
-		const bodyLines = body.length > 0 ? body.split("\n").flatMap(line => wrapEditRendererLine(line, innerWidth)) : [];
-		while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
+			// Diff lines self-wrap with a continuation gutter; pre-wrap to the frame's
+			// inner width so renderOutputBlock's generic wrap is a no-op. Edit frames
+			// use a flush left border because code-frame gutters already provide padding.
+			const bodyLines =
+				body.length > 0 ? body.split("\n").flatMap(line => wrapEditRendererLine(line, innerWidth)) : [];
+			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 
-		return {
-			header,
-			sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
-			phase: isError ? "error" : options.isPartial ? "partial" : "success",
-			borderColor: isError ? "error" : "borderMuted",
-			contentPaddingLeft: 0,
-		};
-	});
+			return {
+				header,
+				sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
+				phase: isError ? "error" : options.isPartial ? "partial" : "success",
+				borderColor: isError ? "error" : "borderMuted",
+				contentPaddingLeft: 0,
+			};
+		},
+		{
+			// Only the width-keyed diff section goes; the highlighted diff and stats suffix do not depend on width, and
+			// re-highlighting every committed card on each resize replay costs seconds.
+			onReleaseRenderCaches: () => releaseRenderedStringCache(diffSectionCache),
+		},
+	);
 }
 
 function renderMultiFileResult(
@@ -1602,6 +1620,10 @@ function renderMultiFileResult(
 		invalidate() {
 			cached = undefined;
 			for (const c of fileComponents) c.invalidate?.();
+		},
+		releaseRenderCaches() {
+			cached = undefined;
+			for (const c of fileComponents) c.releaseRenderCaches?.();
 		},
 	};
 }

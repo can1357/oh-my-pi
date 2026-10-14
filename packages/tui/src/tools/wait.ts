@@ -589,7 +589,11 @@ export function createIrcMessageCard(
 	return Object.assign(component, { describe: () => described });
 }
 
-/** One job row: type badge, id + label, terminal-clocked duration (live while running), preview below. */
+/**
+ * One job row on one line: type badge, id + label, terminal-clocked duration
+ * (live while running). The job's output and errors fill the card of the call
+ * that started it (`parksAsBackground`), so the row carries no preview.
+ */
 function describeJob(job: JobSnapshot, isPartial: boolean): NativeNode {
 	const running = job.status === "running" && isPartial;
 	const label = job.label.trim() !== job.id ? plainText(job.label.split(/\r?\n/)[0] ?? "") : "";
@@ -606,39 +610,21 @@ function describeJob(job: JobSnapshot, isPartial: boolean): NativeNode {
 				: job.status === "cancelled"
 					? "warning"
 					: "accent";
-	const artifactError = job.meta?.artifactError ?? job.artifactError;
-	const preview = flattenStructuredPreview(
-		stripTaskResultEnvelope(
-			stripOutputNotice(job.errorText?.trim() || job.resultText?.trim() || "", job.meta).trim(),
-		),
-	);
 	return node(
-		"col",
-		{ role: "omp.wait.job", tone },
+		"row",
+		{ role: "omp.wait.job", tone, gap: "sm" },
 		compact([
-			row(
-				compact([
-					node("badge", { text: job.type, tone }),
-					text(spans, { truncate: "end", grow: 1 }),
-					job.status === "running" && job.completionPercent !== undefined
-						? node("progress", {
-								value: job.completionPercent / 100,
-								label: `${job.completionPercent}%`,
-								tone: "accent",
-								title: "Agent's own completion estimate",
-							})
-						: undefined,
-					elapsed(job.durationMs, !running),
-				]),
-				{ gap: "sm" },
-			),
-			artifactError && text([span(formatArtifactErrorNotice(artifactError), "warning")], { wrap: "word" }),
-			preview
-				? text([span(plainText(preview), job.errorText ? "error" : "dim")], {
-						wrap: "word",
-						lines: PREVIEW_LINES_EXPANDED,
+			node("badge", { text: job.type, tone }),
+			text(spans, { truncate: "end", grow: 1 }),
+			job.status === "running" && job.completionPercent !== undefined
+				? node("progress", {
+						value: job.completionPercent / 100,
+						label: `${job.completionPercent}%`,
+						tone: "accent",
+						title: "Agent's own completion estimate",
 					})
 				: undefined,
+			elapsed(job.durationMs, !running),
 		]),
 		job.id,
 	);

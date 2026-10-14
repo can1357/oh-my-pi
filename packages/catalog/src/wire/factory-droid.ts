@@ -10,7 +10,7 @@ import { isRecord } from "../utils";
  * native request corpus with `packages/ai/scripts/capture-factory-droid-native.ts`
  * against the matching CLI binary and make `factory-droid-native-parity.test.ts` pass.
  */
-export const FACTORY_DROID_CLIENT_VERSION = "0.230.0";
+export const FACTORY_DROID_CLIENT_VERSION = "0.237.0";
 
 /** Wire protocols the Factory proxy multiplexes; `api-routes provider="factory-droid"` picks one per model. */
 export const FACTORY_DROID_WIRES = [

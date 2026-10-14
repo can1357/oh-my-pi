@@ -63,6 +63,7 @@ The selector recenters around current selection and shows up to:
 
 - `Up` / `Down`: move selection (wraps)
 - `Alt+Up` / `Alt+Down`: jump to previous/next user or assistant turn
+- `app.tree.previousBranch` / `app.tree.nextBranch` (unbound by default; bind them in [`keybindings.yml`](./keybindings.md), e.g. to `Shift+Left` / `Shift+Right`): jump to the previous/next visible branch in rendered order (wraps), across nested forks. A branch whose head is filtered out lands on its first visible descendant.
 - `Page Up` / `Page Down`, or `Left` / `Right`: page
 - `Home` / `End`: first/last visible item
 - `Enter`: select node

@@ -40,11 +40,8 @@ import {
 	cfgFeaturesUnexpectedStopDetection,
 	cfgRetryFallbackChains,
 	cfgProviderAppendOnlyContext,
-	cfgCodeModeInputs,
 	cfgDefaultThinkingLevel,
 	cfgInlineToolDescriptors,
-	cfgProvidersOpenaiCodexCodeMode,
-	cfgProvidersOpenaiCodexCodeModeDirectTools,
 	cfgRetryModelFallback,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import {
@@ -81,7 +78,6 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgModelRoles, cfgDisabledProviders, cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
-import { cfgEvalJs } from "@oh-my-pi/pi-coding-agent/eval/settings";
 
 /** Lets microtask-coalesced setting listeners run. */
 const tick = () => Promise.resolve();
@@ -1282,78 +1278,6 @@ describe("Settings", () => {
 				expect(signalCount).toBe(1);
 				expect(settings.getModelRole("default")).toBe("openai/updated");
 				expect(settings.getModelRole("runtime")).toBe("openai/runtime");
-			} finally {
-				unsubscribe();
-			}
-		});
-
-		it("signals Code Mode partition inputs picked up from disk", async () => {
-			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } }, eval: { js: true } });
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			let signalCount = 0;
-			const unsubscribe = cfgCodeModeInputs.listen(settings, () => {
-				signalCount++;
-			});
-
-			try {
-				await settings.reloadFromDisk();
-				await tick();
-				expect(signalCount).toBe(0);
-
-				await writeSettings({ providers: { "openai-codex": { codeMode: "on" } }, eval: { js: true } });
-				await settings.reloadFromDisk();
-				await tick();
-
-				expect(cfgProvidersOpenaiCodexCodeMode.get(settings)).toBe("on");
-				expect(signalCount).toBe(1);
-
-				// A single reload that changes several partition inputs signals once.
-				await writeSettings({
-					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
-					eval: { js: false },
-				});
-				await settings.reloadFromDisk();
-				await tick();
-
-				expect(cfgEvalJs.get(settings)).toBe(false);
-				expect(cfgProvidersOpenaiCodexCodeModeDirectTools.get(settings)).toEqual(["bash"]);
-				expect(signalCount).toBe(2);
-
-				// `edit.mode` renames the direct edit tool on the wire.
-				await writeSettings({
-					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
-					eval: { js: false },
-					edit: { mode: "apply_patch" },
-				});
-				await settings.reloadFromDisk();
-				await tick();
-
-				expect(cfgEditMode.get(settings)).toBe("apply_patch");
-				expect(signalCount).toBe(3);
-			} finally {
-				unsubscribe();
-			}
-		});
-
-		it("signals Code Mode partition inputs supplied by the destination project", async () => {
-			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } } });
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			const otherProject = tempDir.join("code-mode-project");
-			await Bun.write(
-				path.join(getProjectAgentDir(otherProject), "config.yml"),
-				YAML.stringify({ providers: { "openai-codex": { codeMode: "on" } } }, null, 2),
-			);
-			let signalCount = 0;
-			const unsubscribe = cfgCodeModeInputs.listen(settings, () => {
-				signalCount++;
-			});
-
-			try {
-				await settings.reloadForCwd(otherProject);
-				await tick();
-
-				expect(cfgProvidersOpenaiCodexCodeMode.get(settings)).toBe("on");
-				expect(signalCount).toBe(1);
 			} finally {
 				unsubscribe();
 			}

@@ -2748,19 +2748,27 @@ describe("large documents", () => {
 	];
 	for (const [name, doc] of displayMathScans) {
 		it(`lexes ${name} in time proportional to the document`, () => {
-			const elapsed = (text: string): number => {
-				const start = Bun.nanoseconds();
+			// CPU time, not wall time: a parallel run deschedules this process,
+			// which stretches wall time without adding work.
+			const cost = (text: string): number => {
+				const start = process.cpuUsage();
 				extractMarkdownLinks(text);
-				return Bun.nanoseconds() - start;
+				const { user, system } = process.cpuUsage(start);
+				return user + system;
 			};
 			const small = doc(32 * 1024);
 			const large = doc(512 * 1024);
-			const smallNs = Math.min(elapsed(small), elapsed(small), elapsed(small));
-			// 16 times the text: linear work takes about 16 times as long. The
-			// best of up to three runs absorbs a load spike.
-			let largeNs = Number.POSITIVE_INFINITY;
-			for (let run = 0; run < 3 && largeNs >= 48 * smallNs; run++) largeNs = Math.min(largeNs, elapsed(large));
-			expect(largeNs).toBeLessThan(48 * smallNs);
+			cost(small); // warm the lexer so the first small sample is not the cold one
+			// 16 times the text: linear work costs about 16 times as much, a rescan
+			// per opener about 256 times. Interleaved best-of-five rounds keep a
+			// burst from landing on one size only.
+			let smallCost = Number.POSITIVE_INFINITY;
+			let largeCost = Number.POSITIVE_INFINITY;
+			for (let round = 0; round < 5 && !(largeCost < 48 * smallCost); round++) {
+				smallCost = Math.min(smallCost, cost(small));
+				largeCost = Math.min(largeCost, cost(large));
+			}
+			expect(largeCost).toBeLessThan(48 * smallCost);
 		});
 	}
 

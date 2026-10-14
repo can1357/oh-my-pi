@@ -28,7 +28,7 @@ import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry } from "../session/session-entries";
-import { mintSessionId } from "../session/session-manager";
+import { mintSessionId, SessionManager } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
 import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import { emitSubagentFrame } from "../utils/event-bus";
@@ -477,7 +477,7 @@ export class CollabGuestLink {
 			...pending.header,
 			id: this.#replicaId,
 			parentSession: pending.header.id,
-			providerPromptCacheKey: pending.header.providerPromptCacheKey ?? pending.header.id,
+			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(pending.header),
 		};
 		const lines = [header, ...pending.entries].map(entry => JSON.stringify(entry)).join("\n");
 		const storage = new FileSessionStorage();

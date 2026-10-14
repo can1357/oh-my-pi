@@ -1082,6 +1082,7 @@ use super::{
 	display::{Format, IndicatorStyle, LocaleQuoting, LongFormat},
 	options::QUOTING_STYLE,
 };
+use crate::time_zone::shell_time_zone;
 
 pub mod options {
 	pub mod format {
@@ -1711,19 +1712,6 @@ fn parse_width(width_match: Option<&String>, host: &Host, runtime: &LsRuntime) -
 }
 
 impl Config {
-	fn shell_time_zone(host: &Host) -> TimeZone {
-		let Some(value) = host.var("TZ") else {
-			return TimeZone::system();
-		};
-		let value = value.strip_prefix(':').unwrap_or(value);
-		if value.is_empty() {
-			return TimeZone::UTC;
-		}
-		TimeZone::get(value)
-			.or_else(|_| TimeZone::posix(value))
-			.unwrap_or(TimeZone::UTC)
-	}
-
 	#[allow(clippy::cognitive_complexity)]
 	pub(super) fn from(
 		options: &clap::ArgMatches,
@@ -2086,7 +2074,7 @@ impl Config {
 			indicator_style,
 			time_format_recent,
 			time_format_older,
-			time_zone: Self::shell_time_zone(host),
+			time_zone: shell_time_zone(host),
 			context,
 			group_directories_first: options.get_flag(options::GROUP_DIRECTORIES_FIRST),
 			line_ending: LineEnding::from_zero_flag(options.get_flag(options::ZERO)),

@@ -224,6 +224,35 @@ describe("runSubprocess request guards", () => {
 		expect(handle.steerCalls[0].content).toContain("[budget notice]");
 	});
 
+	it("uses the agent's own task.agentSoftRequestBudget entry instead of the global budget", async () => {
+		// The global budget 2 would stop this run at request 3; the agent's
+		// entry of 4 moves the notice to request 4 and the stop to 6.
+		const settings = Settings.isolated({
+			"task.maxRuntimeMs": 0,
+			"task.softRequestBudget": 2,
+			"task.agentSoftRequestBudget": { task: 4 },
+		});
+		const handle = createFakeSession({
+			events: [
+				assistantMessageEnd("1"),
+				assistantMessageEnd("2"),
+				assistantMessageEnd("3"),
+				assistantMessageEnd("4"),
+				assistantMessageEnd("5"),
+				yieldToolEnd(),
+			],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-agent-budget", settings });
+
+		expect(result.requests).toBe(5);
+		expect(result.aborted).toBe(false);
+		expect(handle.steerCalls.length).toBe(1);
+		expect(handle.steerCalls[0].content).toContain("used 4 requests");
+		expect(handle.steerCalls[0].content).toContain("soft budget: 4");
+	});
+
 	it("still force-stops at 1.5x the soft budget when budget notices are disabled", async () => {
 		// Budget 2: notice would normally fire at 2, but the force-stop at 3 must
 		// remain active even with the notice disabled.

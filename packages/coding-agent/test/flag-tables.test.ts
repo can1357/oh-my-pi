@@ -1,5 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { parseArgs, reportInvalidFlagValues, validateToolNames } from "../src/cli/args";
+import {
+	parseArgs,
+	reportInvalidFlagValues,
+	validateGoalLaunch,
+	validateRestoreLaunch,
+	validateRestorePrompt,
+	validateToolNames,
+} from "../src/cli/args";
 import { OPTIONAL_VALUE_FLAGS, restartArgv, STRING_VALUE_FLAGS } from "../src/cli/flag-tables";
 import { CliUsageError } from "../src/cli/usage-error";
 
@@ -262,10 +269,51 @@ describe("restartArgv (/restart relaunch argv)", () => {
 		]);
 	});
 
+	it("drops a fresh-session --goal so the resumed relaunch passes goal validation", () => {
+		const relaunch = restartArgv(["--goal", "ship the release", "--model", "gpt-5"], "sid");
+		expect(relaunch).toEqual(["--model", "gpt-5", "--resume", "sid"]);
+		expect(() => validateGoalLaunch(parseArgs(relaunch), true)).not.toThrow();
+	});
+
+	it("drops caller-supplied overrides together with their values", () => {
+		expect(
+			restartArgv(["--model=a/b", "--thinking", "low", "--no-tools", "--cwd", "/old"], undefined, {
+				"--model": true,
+				"--thinking": true,
+				"--cwd": true,
+			}),
+		).toEqual(["--no-tools"]);
+	});
+
 	it("omits --resume for a session that never materialized on disk", () => {
 		expect(restartArgv(["--no-session", "hello"], undefined)).toEqual(["--no-session"]);
 	});
 });
+describe("--restore", () => {
+	it("selects its session as --resume does, and a relaunch only resumes it", () => {
+		const args = parseArgs(["--restore", "/s/a.jsonl"]);
+		expect(args.resume).toBe("/s/a.jsonl");
+		expect(args.restore).toBe(true);
+		expect(args.messages).toEqual([]);
+		expect(parseArgs(["--restore"]).resume).toBe(true);
+		expect(restartArgv(["--restore", "/s/a.jsonl", "--model", "x"], "sid")).toEqual([
+			"--model",
+			"x",
+			"--resume",
+			"sid",
+		]);
+	});
+
+	it("needs the interactive TUI, one existing session, and no prompt", () => {
+		expect(() => validateRestoreLaunch(parseArgs(["--restore", "a"]), false)).toThrow(CliUsageError);
+		expect(() => validateRestoreLaunch(parseArgs(["--restore", "a", "--fork", "b"]), true)).toThrow(CliUsageError);
+		expect(() => validateRestoreLaunch(parseArgs(["--restore", "a", "--no-session"]), true)).toThrow(CliUsageError);
+		expect(() => validateRestorePrompt(parseArgs(["--restore", "a", "keep going"]))).toThrow(CliUsageError);
+		validateRestoreLaunch(parseArgs(["--restore", "a"]), true);
+		validateRestorePrompt(parseArgs(["--resume", "a", "keep going"]));
+	});
+});
+
 describe("--system-prompt-template", () => {
 	it("parses a template path without leaking it into the prompt", () => {
 		const result = parseArgs(["--system-prompt-template", "/tmp/SYSTEM_TEMPLATE.md", "hello"]);

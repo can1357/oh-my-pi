@@ -383,6 +383,50 @@ describe("ReadToolGroupComponent", () => {
 		expect(extractLinkTexts(rendered)).toContain("src/preview.ts");
 		expect(extractLinkTexts(rendered)).not.toContain("src/preview.ts:20-22");
 	});
+
+	// #15007: plain-file reads land in the group, so its preview must honor read.renderMarkdown.
+	it("previews Markdown-tagged reads as rendered Markdown unless raw source was requested", () => {
+		const markdown = "# Title\n\nSome **bold** text.";
+		const preview = (args: { path: string; raw?: boolean }): string => {
+			const component = new ReadToolGroupComponent({ showContentPreview: true });
+			component.updateArgs(args, "read-md");
+			component.updateResult(
+				{ content: [{ type: "text", text: markdown }], details: { contentType: "text/markdown" } },
+				false,
+				"read-md",
+			);
+			return Bun.stripANSI(component.render(120).join("\n"));
+		};
+		const readme = path.resolve("/tmp/README.md");
+
+		const rendered = preview({ path: readme });
+		expect(rendered).toContain("Some bold text.");
+		expect(rendered).not.toContain("# Title");
+
+		for (const args of [{ path: `${readme}:raw` }, { path: readme, raw: true }]) {
+			const source = preview(args);
+			expect(source).toContain("# Title");
+			expect(source).toContain("Some **bold** text.");
+		}
+	});
+
+	it("switches a Markdown preview back to source when raw args arrive after the result", () => {
+		const component = new ReadToolGroupComponent({ showContentPreview: true });
+		const readme = path.resolve("/tmp/README.md");
+		component.updateArgs({ path: readme }, "read-md");
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "# Title\n\nSome **bold** text." }],
+				details: { contentType: "text/markdown" },
+			},
+			false,
+			"read-md",
+		);
+		expect(Bun.stripANSI(component.render(120).join("\n"))).not.toContain("# Title");
+
+		component.updateArgs({ path: readme, raw: true }, "read-md");
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("Some **bold** text.");
+	});
 });
 
 describe("readArgsCollapseIntoGroup", () => {

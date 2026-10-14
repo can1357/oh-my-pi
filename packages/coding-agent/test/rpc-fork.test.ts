@@ -23,15 +23,19 @@ describe("RPC fork", () => {
 	beforeEach(async () => {
 		directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-fork-"));
 		client = new RpcClient({
-			command: [process.execPath, path.join(import.meta.dir, "fixtures", "fork-rpc-agent.ts")],
+			command: [process.execPath, path.join(import.meta.dir, "fixtures", "fork-rpc-agent.ts"), directory],
 			cwd: directory,
 			env: { PI_CODING_AGENT_DIR: directory, PI_NO_TITLE: "1" },
 		});
 	});
 
 	afterEach(async () => {
-		await client?.stop();
-		await removeWithRetries(directory);
+		// Bind this test's resources before awaiting: a stop that outlives the
+		// hook timeout resumes after the next beforeEach has reassigned both.
+		const ownClient = client;
+		const ownDirectory = directory;
+		await ownClient?.stop();
+		await removeWithRetries(ownDirectory);
 	});
 
 	/** Starts the agent and runs two finished turns; returns the [user, assistant, user, assistant] message entry ids. */

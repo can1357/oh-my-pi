@@ -29,13 +29,14 @@ import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
 import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
+import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "./terminal-multiplexer";
 import {
 	encodeKittyDeleteAllImages,
 	encodeKittyDeleteImage,
+	encodeKittyDeletePlacement,
 	encodeKittyPlacementLine,
 	ImageProtocol,
 	isImageProtocolForced,
-	isInsideHerdr,
 	isInsideTerminalMultiplexer,
 	parseKittyDirectPlacementLine,
 	setCellDimensions,
@@ -44,8 +45,8 @@ import {
 	synchronizedOutputUserOverride,
 	TERMINAL,
 } from "./terminal-capabilities";
-import { classifyTerminalMultiplexer } from "./terminal-multiplexer";
 import { compositeLineAt } from "./render/composite";
+import { tmuxMultiplexer } from "./multiplexers/tmux";
 import {
 	Ellipsis,
 	getWidthConfigEpoch,
@@ -56,6 +57,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "./utils";
+import { tmuxClientRendersSixel } from "./tmux";
 
 /** Full-attribute reset terminating each rendered content row. */
 export const SEGMENT_RESET = "\x1b[0m";
@@ -196,6 +198,10 @@ export interface TUIStartOptions {
 	 * Paint without owning stdin: the terminal stays in cooked mode (kernel
 	 * echo + line editing at the hardware cursor) until {@link TUI.enableInput}
 	 * switches to raw input and replays the kernel-buffered keystrokes.
+	 *
+	 * A terminal expected to speak TSP needs raw input from the start, so it
+	 * gets it; its keystrokes are held instead (TSP events and the cell-size
+	 * reply still apply) until {@link TUI.releaseHeldInput} replays them.
 	 */
 	deferInput?: boolean;
 }
@@ -246,10 +252,6 @@ export interface Component {
 	 * last time.
 	 */
 	render(width: number): readonly string[];
-
-	/** Inline decision panels must keep displaced settled transcript rows in
-	 * native scrollback even when mounted inside a transient editor container. */
-	readonly retireDisplacedTranscript?: boolean;
 
 	/**
 	 * Describe the component semantically for a Tern Surface Protocol
@@ -314,6 +316,16 @@ export interface Component {
 	 * Called when theme changes or when component needs to re-render from scratch.
 	 */
 	invalidate?(): void;
+	/**
+	 * Optional hook to drop memoized render output (rows, parse and wrap state)
+	 * that the next `render()` can rebuild from state the component keeps.
+	 * Unlike {@link invalidate}, it must not rebuild anything eagerly: no
+	 * renderer or extension callbacks, no image conversions, and no child
+	 * replacement or disposal. The next render must return the same rows it
+	 * would have returned without the release. Components without it are
+	 * simply not released.
+	 */
+	releaseRenderCaches?(): void;
 	/**
 	 * Optional hook to set whether this component ignores tight layout mode.
 	 */
@@ -544,6 +556,7 @@ export class Container implements Component {
 	clear(): void {
 		this.children = [];
 		this.#memoLines = undefined;
+		this.#memoChildLines = [];
 	}
 
 	/** Dispose every child, then detach it from this container. */
@@ -553,9 +566,20 @@ export class Container implements Component {
 	}
 
 	invalidate(): void {
+		// The per-child refs pin every row the children last rendered; dropping
+		// only the concatenation would keep all of them reachable.
 		this.#memoLines = undefined;
+		this.#memoChildLines = [];
 		for (const child of this.children) {
 			child.invalidate?.();
+		}
+	}
+
+	releaseRenderCaches(): void {
+		this.#memoLines = undefined;
+		this.#memoChildLines = [];
+		for (const child of this.children) {
+			child.releaseRenderCaches?.();
 		}
 	}
 
@@ -615,6 +639,13 @@ interface HardwareCursorState {
 	row: number;
 	col: number;
 	visible: boolean;
+}
+
+/** A cursor-positioned image owned by a mutable viewport, never by history. */
+interface LiveImagePlacement {
+	imageId: number;
+	placementId: number;
+	line: string;
 }
 
 interface PreparedLine {
@@ -787,6 +818,10 @@ export class TUI extends Container {
 	// rows the paint prepended for a short viewport. Negative while prepended
 	// blanks outweigh replaced rows; zero on ordinary frames.
 	#providerViewportPadTop = 0;
+	// Whether native history holds rows the provider committed since the last
+	// destructive reset. Only paints write history and only a destructive reset
+	// erases it; an `append` resize replay keeps the rows it replays beneath.
+	#providerHistoryWritten = false;
 	// Viewport-relative row of the hardware cursor after the last normal paint
 	// (0 = parked at the viewport top). A resize reflows the normal buffer
 	// before the app hears about it; terminals keep the cursor attached to its
@@ -956,6 +991,9 @@ export class TUI extends Container {
 	// Caps how many inline images render as live graphics; older ones fall back
 	// to text via a purge + full redraw. Cap is configured by the host app.
 	#imageBudget = new ImageBudget(DEFAULT_MAX_INLINE_IMAGES, () => this.requestRender());
+	#screenImagePlacements = new Map<number, LiveImagePlacement>();
+	#altImagePlacements = new Map<number, LiveImagePlacement>();
+	#nextImagePlacementId = 1;
 	#ghosttyInitialImageDelayDone = false;
 	#ghosttyInitialImageDelayTimer: RenderTimer | undefined;
 	#ghosttyImageReadyAtMs = 0;
@@ -969,6 +1007,17 @@ export class TUI extends Container {
 	#cancelPostmortemRestore?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
 	#inputDeferred = false;
+	/**
+	 * Keystrokes held since a TSP `deferInput` start, replayed by
+	 * releaseHeldInput(); undefined when not holding.
+	 */
+	#heldInput: string[] | undefined;
+	/**
+	 * The component focused when holding began. Only its keystrokes are held:
+	 * a dialog that takes focus meanwhile (a startup hook's select or confirm)
+	 * gets its input live.
+	 */
+	#heldFocus: Component | null = null;
 	// Always-on event-loop lag probe. The high default threshold keeps it quiet;
 	// it only logs `ui.loop-blocked` (with the current loop phase) when a frame
 	// budget is genuinely starved. Armed in start(), disarmed in stop().
@@ -1126,6 +1175,8 @@ export class TUI extends Container {
 
 	#purgeInlineImages(): void {
 		const transmittedIds = this.#imageBudget.takeAllTransmittedIds();
+		this.#screenImagePlacements.clear();
+		this.#altImagePlacements.clear();
 		if (TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
 		for (const id of transmittedIds) {
 			this.terminal.write(encodeKittyDeleteImage(id));
@@ -1317,6 +1368,27 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Rows of native history the last paint left on screen above a mutable
+	 * viewport that reached the bottom row, or `undefined` when that paint left
+	 * rows free below it (or none happened, or a destructive reset will repaint
+	 * from row zero). Rows above a bottom-reaching viewport may already sit in
+	 * native scrollback, which a later shrink cannot pull back down.
+	 */
+	getFilledHistoryRows(): number | undefined {
+		if (!this.#hasEverRendered || this.#clearScrollbackOnNextRender) return undefined;
+		const height = this.terminal.rows;
+		if (this.#providerWindow.length === 0 || this.#providerViewportTop + this.#providerWindow.length < height) {
+			return undefined;
+		}
+		return Math.min(this.#providerViewportTop, height);
+	}
+
+	/** Whether native history holds rows the frame provider committed since the last destructive reset. */
+	hasProviderHistory(): boolean {
+		return this.#providerHistoryWritten && !this.#clearScrollbackOnNextRender;
+	}
+
+	/**
 	 * Probe for opt-in normal-buffer click capture. The provider is read every
 	 * frame; while it returns true (and no fullscreen overlay owns the
 	 * display) the terminal reports button clicks as SGR events for inline
@@ -1413,6 +1485,12 @@ export class TUI extends Container {
 		// `hello` query must go out now to confirm the surface.
 		const nativeExpected = this.terminal.tspExpected === true;
 		this.#inputDeferred = options?.deferInput === true && !nativeExpected;
+		// A restart (a startup dialog's external editor stops and restarts the
+		// TUI) keeps an existing hold: those keys still belong to the editor.
+		if (options?.deferInput === true && nativeExpected) {
+			this.#heldInput = [];
+			this.#heldFocus = this.#focusedComponent;
+		}
 		this.#watchdog.start();
 		this.#ghosttyInitialImageDelayDone = false;
 		this.#ghosttyImageReadyAtMs = this.#renderScheduler.now() + TUI.#GHOSTTY_INITIAL_IMAGE_DELAY_MS;
@@ -1426,12 +1504,19 @@ export class TUI extends Container {
 		this.terminal.onPrivateModeReport?.((mode, supported, confirmed = true, status) => {
 			if (mode !== 2026 || !confirmed) return;
 			if (synchronizedOutputUserOverride() !== null) return;
-			// Herdr's Ghostty VTE honors DEC 2026 even when DECRQM is unanswered or
-			// reports unrecognized (status 0). Other confirmed unsupported reports
-			// still disable: status 4 is permanently reset, and a three-argument
-			// callback (`status` omitted) is a definitive unsupported from a
-			// custom Terminal that does not distinguish DECRPM codes.
-			if (!supported && isInsideHerdr() && status === 0) return;
+			// Some multiplexer VTEs (Herdr's Ghostty pane) honor DEC 2026 even when
+			// DECRQM is unanswered or reports unrecognized (status 0). Other
+			// confirmed unsupported reports still disable: status 4 is permanently
+			// reset, and a three-argument callback (`status` omitted) is a
+			// definitive unsupported from a custom Terminal that does not
+			// distinguish DECRPM codes.
+			if (
+				!supported &&
+				status === 0 &&
+				terminalMultiplexerSessions().some(multiplexer => multiplexer.honorsSynchronizedOutput)
+			) {
+				return;
+			}
 			this.#setSynchronizedOutput(supported);
 		});
 		// Icons painted before the Glyph Protocol registration landed may sit in
@@ -1440,6 +1525,16 @@ export class TUI extends Container {
 			if (!supported || this.#stopped) return;
 			this.invalidate();
 			this.requestRender(true);
+		});
+		this.terminal.onSixelSupport?.(supported => {
+			if (!supported || this.#stopped || this.#nativeLive || this.terminal.tspExpected) return;
+			if (isImageProtocolForced()) return;
+			// tmux answers DA1 for its own emulator; only its record of the
+			// attached client says whether SIXEL reaches the outer terminal.
+			if (tmuxMultiplexer.isInside() && !tmuxClientRendersSixel()) return;
+			// Keep consuming an already-requested XTSMGRAPHICS reply until it
+			// arrives or times out, even though DA1 has established support.
+			this.#enableSixelProtocol();
 		});
 		this.terminal.onTspHello?.(hello => this.#onTspHello(hello));
 		this.terminal.start(
@@ -1743,7 +1838,7 @@ export class TUI extends Container {
 			resizeInPlaceOverride() !== false &&
 			this.#resizeScrollbackMode === "rebuild" &&
 			this.#synchronizedOutputEnabled &&
-			classifyTerminalMultiplexer() === "tmux"
+			classifyTerminalMultiplexerModule()?.altRestoreEndsSynchronizedOutput === true
 		);
 	}
 
@@ -2125,7 +2220,7 @@ export class TUI extends Container {
 				// an intact bottom anchor still need no replay or additional wait.
 				if (
 					this.#resizeScrollbackMode === "rebuild" &&
-					classifyTerminalMultiplexer() === "tmux" &&
+					classifyTerminalMultiplexerModule()?.growsBeforeSigwinch === true &&
 					!this.#resizeRepaintsInPlace() &&
 					this.#frameProvider?.beginHistoryReplay &&
 					this.#resizeBurstGrew &&
@@ -2251,6 +2346,32 @@ export class TUI extends Container {
 		this.requestRender(true);
 	}
 
+	/**
+	 * Replay the keystrokes held since a TSP `deferInput` start through the
+	 * normal input path, then deliver input live. Call once the app's key
+	 * handlers are installed so a hotkey pressed during startup still fires.
+	 * Only keys typed while the start-time focus owner had focus are held. The
+	 * hold survives a stop/start until released. Idempotent; no-op when nothing
+	 * is held.
+	 */
+	releaseHeldInput(): void {
+		const held = this.#heldInput;
+		if (held === undefined) return;
+		this.#heldInput = undefined;
+		if (this.#stopped) return;
+		for (const data of held) this.#handleInput(data);
+	}
+
+	/**
+	 * Hand held-key ownership from `previous` to `next` when the app replaces
+	 * the component focused at start (a swapped-in custom editor), so keys
+	 * typed into the replacement stay queued behind the held ones instead of
+	 * overtaking them. No-op unless `previous` owns the held keys.
+	 */
+	replaceHeldFocus(previous: Component, next: Component): void {
+		if (this.#heldInput !== undefined && this.#heldFocus === previous) this.#heldFocus = next;
+	}
+
 	addStartListener(listener: StartListener): () => void {
 		this.#startListeners.add(listener);
 		return () => {
@@ -2274,17 +2395,19 @@ export class TUI extends Container {
 		// PI_FORCE_IMAGE_PROTOCOL choice — including its `off` kill switch — wins
 		// over the probe.
 		if (TERMINAL.imageProtocol) return;
+		// A Tern surface (live, or about to open optimistically at start) sends
+		// images through TSP; this also keeps held startup input free of probe
+		// listeners.
+		if (this.#nativeLive || this.terminal.tspExpected) return;
 		if (isImageProtocolForced()) return;
 		if (!process.stdin.isTTY || !process.stdout.isTTY) return;
 
 		this.#clearSixelProbeState();
 		this.#sixelProbePendingGraphics = true;
 		this.#sixelProbeUnsubscribe = this.addInputListener(data => this.#handleSixelProbeInput(data));
-		// XTSMGRAPHICS item 2 reports the terminal's maximum SIXEL geometry. DA1
-		// attribute 4 advertises SIXEL as well, but ProcessTerminal swallows every
-		// `CSI ? … c` reply for the whole session so a late one cannot leak into the
-		// composer (#8542): those bytes never reach an input listener, so this probe
-		// cannot read them.
+		// XTSMGRAPHICS item 2 reports the maximum SIXEL geometry. DA1 attribute 4
+		// arrives through onSixelSupport instead: ProcessTerminal consumes the
+		// reply bytes so they cannot leak into application input.
 		this.terminal.write("\x1b[?2;1;0S");
 		this.#sixelProbeTimeout = setTimeout(() => {
 			this.#finishSixelProbe(false);
@@ -2368,7 +2491,11 @@ export class TUI extends Container {
 
 	#finishSixelProbe(supported: boolean): void {
 		this.#clearSixelProbeState();
-		if (!supported || TERMINAL.imageProtocol) return;
+		if (supported) this.#enableSixelProtocol();
+	}
+
+	#enableSixelProtocol(): void {
+		if (TERMINAL.imageProtocol) return;
 
 		setTerminalImageProtocol(ImageProtocol.Sixel);
 		this.#queryCellSize();
@@ -2759,6 +2886,11 @@ export class TUI extends Container {
 		}
 		if (data.length === 0) return;
 
+		if (this.#heldInput !== undefined && this.#focusedComponent === this.#heldFocus) {
+			this.#holdInput(data);
+			return;
+		}
+
 		// If focused component is an overlay, verify it's still visible (visibility can change due to
 		// terminal resize or visible() callback). Runs before the capture preflight below, which must
 		// target the effective focus owner, not a hidden overlay.
@@ -2836,6 +2968,18 @@ export class TUI extends Container {
 			focused.handleInput(data);
 			this.requestRender();
 		}
+	}
+
+	/**
+	 * Queue a keystroke typed before the app installed its key handlers; input
+	 * listeners see it once, on replay. The cell-size reply is a terminal report,
+	 * consumed now. Ctrl+C/Ctrl+D release the queue so a stalled startup stays
+	 * interruptible.
+	 */
+	#holdInput(data: string): void {
+		if (this.#consumeCellSizeResponse(data)) return;
+		this.#heldInput!.push(data);
+		if (matchesKey(data, "ctrl+c") || matchesKey(data, "ctrl+d")) this.releaseHeldInput();
 	}
 
 	#consumeCellSizeResponse(data: string): boolean {
@@ -3043,34 +3187,49 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Rewrite a Kitty direct-placement line for the viewport row it is written
-	 * at, clipping to the visible slice (see {@link encodeKittyPlacementLine})
-	 * under the placement id resolved by the budget's epoch tracking (see
-	 * {@link ImageBudget.resolvePlacementEmit}). `screenRow` -1 (write position
-	 * unknown) and non-placement image lines (placeholder grids, sixel, iTerm2,
-	 * tmux-wrapped) pass through verbatim.
+	 * Remove placements before their viewport cells are replaced. History uses
+	 * separate placement ids, so deleting a live copy cannot erase scrollback.
 	 */
-	#imageLineSequence(line: string, screenRow: number, frameRow: number, committedTo: number): string {
+	#retireImagePlacements(
+		placements: Map<number, LiveImagePlacement>,
+		lines: readonly string[],
+		top: number,
+		repaint: boolean,
+	): string {
+		let output = "";
+		for (const [row, placement] of placements) {
+			if (!repaint && lines[row - top] === placement.line) continue;
+			output += encodeKittyDeletePlacement(placement.imageId, placement.placementId);
+			placements.delete(row);
+		}
+		return output;
+	}
+
+	/** Clip a direct placement and record its live owner; history placements have no mutable owner. */
+	#imageLineSequence(
+		line: string,
+		screenRow: number,
+		placements: Map<number, LiveImagePlacement> | undefined,
+		placementRow: number,
+	): string {
 		if (screenRow < 0) return line;
 		const parsed = parseKittyDirectPlacementLine(line);
 		if (!parsed) return line;
-		// The emitted placement attaches from the block's first *visible* row
-		// (the clip drops the rows above the viewport), so epoch tracking keys
-		// on that row — not the block origin, which may be long committed.
-		const placement = this.#imageBudget.resolvePlacementEmit(
-			parsed.imageId,
-			frameRow >= 0 ? frameRow - Math.min(parsed.rows - 1, screenRow) : -1,
-			committedTo,
+		const previous = placements?.get(placementRow);
+		const placementId = previous?.placementId ?? this.#nextImagePlacementId++;
+		const erase = previous ? encodeKittyDeletePlacement(previous.imageId, previous.placementId) : "";
+		placements?.set(placementRow, { imageId: parsed.imageId, placementId, line });
+		return (
+			erase +
+			encodeKittyPlacementLine({
+				imageId: parsed.imageId,
+				placementId,
+				columns: parsed.columns,
+				rows: parsed.rows,
+				screenRow,
+				imageHeightPx: this.#imageBudget.getPlacementGeometry(parsed.imageId)?.heightPx ?? 0,
+			})
 		);
-		if (!placement) return line;
-		return encodeKittyPlacementLine({
-			imageId: parsed.imageId,
-			placementId: placement.placementId,
-			columns: parsed.columns,
-			rows: parsed.rows,
-			screenRow,
-			imageHeightPx: placement.heightPx,
-		});
 	}
 
 	#terminalLine(line: PreparedLine): string {
@@ -3303,11 +3462,12 @@ export class TUI extends Container {
 		// resize in rebuild mode): erase native history and the viewport,
 		// then repaint from row zero.
 		const destructiveReset = this.#clearScrollbackOnNextRender;
-		const compactReplay = destructiveReset && classifyTerminalMultiplexer() === "tmux";
+		const compactReplay = destructiveReset && classifyTerminalMultiplexerModule()?.expandsRepPadding === true;
 		if (destructiveReset) {
 			this.#providerViewportTop = 0;
 			this.#providerWindow = [];
 			this.#providerPreparedRows = [];
+			this.#providerHistoryWritten = false;
 		}
 		// The viewport stays anchored directly below whatever history remains on
 		// screen. Appending K history rows moves the anchor down by K; the write
@@ -3323,7 +3483,7 @@ export class TUI extends Container {
 			destructiveReset &&
 			this.#resizeScrollbackMode === "rebuild" &&
 			this.#synchronizedOutputEnabled &&
-			classifyTerminalMultiplexer() === "tmux";
+			classifyTerminalMultiplexerModule()?.expiresSynchronizedOutput === true;
 		let syncBytes = Buffer.byteLength(buffer);
 		const append = (sequence: string): void => {
 			buffer += sequence;
@@ -3344,7 +3504,7 @@ export class TUI extends Container {
 			// reset forgot are named explicitly here — their tracking is gone, so
 			// nothing downstream could find them again.
 			for (const id of this.#imageBudget.takeResetPurgeIds()) buffer += encodeKittyDeleteImage(id);
-			this.#imageBudget.resetPlacementEpochs();
+			this.#screenImagePlacements.clear();
 		}
 		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			for (const id of this.#imageBudget.takePurgeIds()) buffer += encodeKittyDeleteImage(id);
@@ -3367,7 +3527,6 @@ export class TUI extends Container {
 		// image the terminal no longer had and every inline image vanished
 		// after a settled width resize.
 		if (destructiveReset) buffer += `${LINE_TERMINATOR}\x1b[H\x1b[2J\x1b[3J`;
-		for (const sequence of this.#imageBudget.takeTransmits()) append(sequence);
 		const diffable =
 			geometryStable &&
 			historyRows.length === 0 &&
@@ -3375,6 +3534,8 @@ export class TUI extends Container {
 			!this.#forceViewportRepaintOnNextRender &&
 			!destructiveReset &&
 			this.#providerWindow.length > 0;
+		buffer += this.#retireImagePlacements(this.#screenImagePlacements, prepared.lines, newTop, !diffable);
+		for (const sequence of this.#imageBudget.takeTransmits()) append(sequence);
 		if (diffable) {
 			for (let index = 0; index < rows; index++) {
 				if (
@@ -3393,9 +3554,8 @@ export class TUI extends Container {
 					current,
 					width,
 					newTop + index,
-					-1,
-					-1,
 					this.#osc66SpacerGlyphWidth(prepared.lines, index),
+					{ imagePlacements: this.#screenImagePlacements },
 				)}`;
 			}
 			if (this.#providerWindow.length > rows && newTop + rows < height) {
@@ -3420,8 +3580,6 @@ export class TUI extends Container {
 						preparedHistory.rows[index]!,
 						width,
 						Math.min(screenRow, height - 1),
-						-1,
-						-1,
 						this.#osc66SpacerGlyphWidth(preparedHistory.lines, index),
 						{ blankRow: compactReplay },
 					),
@@ -3435,10 +3593,12 @@ export class TUI extends Container {
 						prepared.rows[index]!,
 						width,
 						Math.min(screenRow, height - 1),
-						-1,
-						-1,
 						this.#osc66SpacerGlyphWidth(prepared.lines, index),
-						{ blankRow: compactReplay },
+						{
+							blankRow: compactReplay,
+							imagePlacements: index < replayViewportRows ? undefined : this.#screenImagePlacements,
+							imageRow: newTop + index,
+						},
 					),
 				);
 				screenRow++;
@@ -3500,6 +3660,7 @@ export class TUI extends Container {
 		this.#resizeBurstWidthChanged = false;
 		this.#resizeBurstResized = false;
 		this.#previousFrameLength = mutablePreparedLines.length;
+		if (preparedHistory.lines.length > 0 || replayViewportRows > 0) this.#providerHistoryWritten = true;
 		this.#clearScrollbackOnNextRender = false;
 		this.#forceViewportRepaintOnNextRender = false;
 		this.#hasEverRendered = true;
@@ -4059,10 +4220,8 @@ export class TUI extends Container {
 		line: PreparedLine,
 		width: number,
 		screenRow = -1,
-		frameRow = -1,
-		committedTo = -1,
 		spacerGlyphWidth = -1,
-		options?: { blankRow?: boolean },
+		options?: { blankRow?: boolean; imagePlacements?: Map<number, LiveImagePlacement>; imageRow?: number },
 	): string {
 		// End every rewrite at column zero. ConPTY can materialize a pending
 		// wrap before a following cursor-addressing sequence even while DECAWM is
@@ -4079,7 +4238,9 @@ export class TUI extends Container {
 		if (spacerGlyphWidth >= 0) {
 			rewrite = spacerGlyphWidth >= width ? "" : `${SEGMENT_RESET}\x1b[${spacerGlyphWidth}C${ERASE_TO_END_OF_LINE}`;
 		} else if (line.isImage) {
-			rewrite = ERASE_LINE + this.#imageLineSequence(line.line, screenRow, frameRow, committedTo);
+			rewrite =
+				ERASE_LINE +
+				this.#imageLineSequence(line.line, screenRow, options?.imagePlacements, options?.imageRow ?? screenRow);
 		} else {
 			const terminalLine = this.#terminalLine(line);
 			if (options?.blankRow) {
@@ -4226,6 +4387,7 @@ export class TUI extends Container {
 				prepared.rows.some((_row, r) =>
 					this.#rowNeedsRewrite(this.#altPreviousLines, this.#altPreparedRows, prepared.lines, prepared.rows, r),
 				));
+		prelude += this.#retireImagePlacements(this.#altImagePlacements, prepared.lines, 0, full);
 		let rowsBuffer = "";
 		for (let r = 0; r < height; r++) {
 			if (full) {
@@ -4241,9 +4403,8 @@ export class TUI extends Container {
 				prepared.rows[r]!,
 				width,
 				r,
-				-1,
-				-1,
 				this.#osc66SpacerGlyphWidth(prepared.lines, r),
+				{ imagePlacements: this.#altImagePlacements },
 			);
 		}
 		this.#altPreviousLines = prepared.lines;

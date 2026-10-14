@@ -1,4 +1,5 @@
 import { combine, effect, register, type Setting } from "../config/registry";
+import type { Settings } from "../config/settings";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import { cfgReadToolResultPreview } from "../tools/settings";
 import { MAGIC_KEYWORDS, type MagicKeywordId } from "./magic-keywords";
@@ -466,7 +467,8 @@ export const cfgTuiAutoGraph = register({
 			{
 				value: "smart",
 				label: "Smart",
-				description: "The judge model picks the chart kind and columns for tables with several numeric columns",
+				description:
+					"The judge model refines each chart: kind, columns, row names and grouping, scales, which way is better, and its title",
 			},
 			{
 				value: "always",
@@ -809,7 +811,7 @@ export const cfgTuiVimModeDisplay = register({
 		description: "How the current Vim mode appears in the status line",
 		condition: "vimModeEnabled",
 		options: [
-			{ value: "text", label: "Text", description: "Full mode name — NORMAL, INSERT, VISUAL, V-LINE" },
+			{ value: "text", label: "Text", description: "Full mode name — NORMAL, INSERT, VISUAL, V-LINE, REPLACE" },
 			{ value: "icon", label: "Icon", description: "Single compact glyph per mode" },
 			{ value: "none", label: "Hidden", description: "Do not show the mode in the status line" },
 		],
@@ -992,6 +994,20 @@ export const cfgSpellingAutocomplete = register({
 				? [{ value: "apple" as const, label: "Apple", description: "macOS dictionary completions" }]
 				: []),
 		],
+	},
+});
+
+export const cfgComposerPredictions = register({
+	id: "composer.predictions",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Composer Predictions",
+		get description() {
+			return `After a completed turn, ask the active model to predict your next message and show it as ghost text in the empty composer; ${formatKeyHint("tab")} or ${formatKeyHint("right")} inserts it without sending. Extra usage: every completed turn sends one more billed request over the whole conversation (counted in /stats)`;
+		},
 	},
 });
 
@@ -1215,7 +1231,8 @@ export const cfgAskTimeout = register({
 		tab: "interaction",
 		group: "Notifications",
 		label: "Ask Timeout",
-		description: "Auto-select the recommended ask option after this many seconds (0 disables)",
+		description:
+			"Auto-select the recommended ask option after this many seconds (0 disables). Also bounds cfg:// approval prompts; an unanswered approval denies the write instead of auto-selecting",
 		options: [
 			{ value: "0", label: "Disabled" },
 			{ value: "15", label: "15 seconds" },
@@ -1225,6 +1242,16 @@ export const cfgAskTimeout = register({
 		],
 	},
 });
+
+/**
+ * `ask.timeout` in the milliseconds dialogs consume, or `undefined` for no
+ * deadline. Shared by the ask tool and the `cfg://` approval prompt so the
+ * setting means the same thing everywhere it is honored.
+ */
+export function askTimeoutMs(settings: Settings): number | undefined {
+	const timeoutSeconds = cfgAskTimeout.get(settings);
+	return timeoutSeconds === 0 ? undefined : timeoutSeconds * 1000;
+}
 
 export const cfgAskNotify = register({
 	id: "ask.notify",

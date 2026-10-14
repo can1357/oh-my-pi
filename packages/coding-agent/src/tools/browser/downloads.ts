@@ -1,8 +1,11 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { hasFsCode, isEnoent, toError, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Browser, CDPSession, Page } from "puppeteer-core";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { replaceFileAcrossDevices, replaceFileAtomically } from "../../utils/atomic-file";
+import { devtoolsFrameId } from "./frames";
 
 /** Completed download metadata returned by tab download helpers. */
 export interface BrowserDownload {
@@ -22,7 +25,7 @@ interface DownloadProgress {
 	guid: string;
 	state: "inProgress" | "completed" | "canceled";
 	receivedBytes: number;
-	/** Saved location on completion; tabs share one download directory per browser context, so this can differ from ours. */
+	/** Saved location on completion, in whichever folder Chromium was pointed at last. */
 	filePath?: string;
 }
 
@@ -37,36 +40,48 @@ interface DownloadWaiter {
 	onAbort?: () => void;
 }
 
+/** Chromium names an `allowAndName` download after its GUID, a lowercase UUID. */
+const DOWNLOAD_GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** Owns tab-scoped Chromium download behavior and completion events. */
 export class DownloadManager {
 	readonly #browser: Browser;
 	readonly #page: Page;
 	readonly #defaultDirectory: string;
+	readonly #perTab: boolean;
 	#directory?: string;
 	#arming?: Promise<void>;
 	#session?: CDPSession;
-	#frameId?: string;
 	readonly #pending = new Map<string, PendingDownload>();
 	readonly #completed: BrowserDownload[] = [];
 	readonly #unclaimed: BrowserDownload[] = [];
 	readonly #waiters: DownloadWaiter[] = [];
-	#willBegin?: (event: DownloadStarted & { frameId?: string }) => void;
+	#willBegin?: (event: DownloadStarted & { frameId: string }) => void;
 	#progress?: (event: DownloadProgress) => void;
 
-	constructor(browser: Browser, page: Page, tabId: string) {
+	/**
+	 * `perTab` gives each tab its own folder by saving under download GUIDs and moving each tab's own files. Leave it off
+	 * for a browser the user drives (connected, relay): there the folder also receives the user's own downloads, which
+	 * would otherwise be saved under bare GUIDs nobody renames.
+	 */
+	constructor(browser: Browser, page: Page, tabId: string, options: { perTab: boolean }) {
 		this.#browser = browser;
 		this.#page = page;
 		this.#defaultDirectory = path.join(os.tmpdir(), `omp-downloads-${tabId}`);
+		this.#perTab = options.perTab;
 	}
 
-	/** Enable downloads into an absolute directory, replacing the previous destination. */
+	/**
+	 * Point the browser's one download folder at this tab's folder. Per tab, files are saved under their download GUID
+	 * so tabs never overwrite each other's, and each tab moves its own into its folder under the suggested name.
+	 */
 	async enable(directory?: string): Promise<void> {
 		const resolved = path.resolve(directory ?? this.#defaultDirectory);
 		await fs.mkdir(resolved, { recursive: true });
 		if (!this.#session) await this.#attach();
 		const context = this.#page.browserContext() as { id?: string };
 		await this.#session!.send("Browser.setDownloadBehavior", {
-			behavior: "allow",
+			behavior: this.#perTab ? "allowAndName" : "allow",
 			downloadPath: resolved,
 			eventsEnabled: true,
 			...(context.id ? { browserContextId: context.id } : {}),
@@ -81,11 +96,20 @@ export class DownloadManager {
 
 	/** Wait for the next unclaimed completed download. */
 	async wait(signal?: AbortSignal): Promise<BrowserDownload> {
-		if (!this.#directory) {
-			this.#arming ??= this.enable().finally(() => {
+		if (this.#unclaimed.length === 0) {
+			// A rejected `arming` nobody awaits would surface as an unhandled rejection.
+			if (signal?.aborted) throw signal.reason;
+			// The tab that pointed Chromium last resets it to the browser's default folder when it closes, so re-point it.
+			const arming = (this.#arming ??= this.enable(this.#directory).finally(() => {
 				this.#arming = undefined;
-			});
-			await this.#arming;
+			}));
+			try {
+				await untilAborted(signal, arming);
+			} catch (error) {
+				// Abort with the caller's reason, as the waits below do.
+				if (signal?.aborted) throw signal.reason;
+				throw error;
+			}
 		}
 		const ready = this.#unclaimed.shift();
 		if (ready) return { ...ready };
@@ -123,16 +147,10 @@ export class DownloadManager {
 	}
 
 	async #attach(): Promise<void> {
-		const pageSession = await this.#page.createCDPSession();
-		try {
-			const tree = (await pageSession.send("Page.getFrameTree")) as { frameTree?: { frame?: { id?: string } } };
-			this.#frameId = tree.frameTree?.frame?.id;
-		} finally {
-			await pageSession.detach().catch(() => undefined);
-		}
 		const session = await this.#browser.target().createCDPSession();
 		this.#willBegin = event => {
-			if (this.#frameId && event.frameId && event.frameId !== this.#frameId) return;
+			// Every session hears every download in the browser; keep the ones this tab's frames started.
+			if (!this.#page.frames().some(frame => devtoolsFrameId(frame) === event.frameId)) return;
 			this.#pending.set(event.guid, { ...event, receivedBytes: 0 });
 		};
 		this.#progress = event => {
@@ -145,7 +163,9 @@ export class DownloadManager {
 				this.#rejectNext(new ToolError(`Download canceled: ${pending.url}`));
 				return;
 			}
-			void this.#complete(pending, event.filePath);
+			void this.#complete(pending, event.filePath).catch(error => {
+				this.#rejectNext(new ToolError(`Download failed: ${pending.url}: ${toError(error).message}`));
+			});
 		};
 		session.on("Browser.downloadWillBegin", this.#willBegin);
 		session.on("Browser.downloadProgress", this.#progress);
@@ -153,15 +173,32 @@ export class DownloadManager {
 	}
 
 	async #complete(pending: PendingDownload, filePath: string | undefined): Promise<void> {
-		const downloadPath = filePath ?? path.join(this.#directory ?? this.#defaultDirectory, pending.suggestedFilename);
+		const directory = this.#directory ?? this.#defaultDirectory;
+		const source = filePath ?? path.join(directory, this.#perTab ? pending.guid : pending.suggestedFilename);
 		for (let attempt = 0; attempt < 100; attempt++) {
 			try {
-				await fs.stat(downloadPath);
+				await fs.stat(source);
 				break;
 			} catch {
 				await Bun.sleep(10);
 			}
 		}
+		const name = typeof pending.suggestedFilename === "string" ? path.basename(pending.suggestedFilename) : "";
+		const target = path.join(directory, name);
+		// Only the last segment of the suggested name is used; anything else, or a download that cannot be moved, is
+		// reported where Chromium saved it.
+		const movable =
+			this.#perTab &&
+			name !== "" &&
+			name !== "." &&
+			name !== ".." &&
+			(await canMoveDownload(source, pending.guid, target));
+		const downloadPath = movable
+			? await moveDownload(source, target).then(
+					() => target,
+					() => source,
+				)
+			: source;
 		const download: BrowserDownload = {
 			path: downloadPath,
 			suggestedFilename: pending.suggestedFilename,
@@ -188,5 +225,34 @@ export class DownloadManager {
 	#removeWaiter(waiter: DownloadWaiter): void {
 		const index = this.#waiters.indexOf(waiter);
 		if (index >= 0) this.#waiters.splice(index, 1);
+	}
+}
+
+/**
+ * Whether `source` is a regular file saved under a UUID-shaped download GUID, and `target` is free or a file it may
+ * replace. The peer names the GUID, the saved path and the suggested name, so a symlink or directory stays where it is.
+ */
+async function canMoveDownload(source: string, guid: string, target: string): Promise<boolean> {
+	if (!DOWNLOAD_GUID.test(guid) || path.basename(source) !== guid) return false;
+	return (await entryKind(source)) === "file" && (await entryKind(target)) !== "other";
+}
+
+/** What a path names, without following a symlink there. */
+async function entryKind(file: string): Promise<"file" | "missing" | "other"> {
+	try {
+		return (await fs.lstat(file)).isFile() ? "file" : "other";
+	} catch (error) {
+		return isEnoent(error) ? "missing" : "other";
+	}
+}
+
+/** Move a completed download into a tab's folder, replacing a same-named file as Chromium's own saves do. */
+async function moveDownload(source: string, target: string): Promise<void> {
+	await fs.mkdir(path.dirname(target), { recursive: true });
+	try {
+		await replaceFileAtomically(source, target);
+	} catch (error) {
+		if (!hasFsCode(error, "EXDEV")) throw error;
+		await replaceFileAcrossDevices(source, target);
 	}
 }

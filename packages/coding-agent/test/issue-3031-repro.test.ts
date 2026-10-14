@@ -8,12 +8,12 @@
  *     session start, before any prompt rendered.
  *   - NPM install: NAPI finalizer segfault at process teardown.
  *
- * The fix relocates the embeddings stack into a Bun.spawn child process. The
- * agent's main process hands `mnemopi.setLocalModelInitializer` a wrapper that
- * round-trips through `__omp_worker_mnemopi_embed`, and `SIGKILL`s the child
- * on dispose so the destructor never runs in either address space. These tests
- * pin the three pieces of that contract so a future refactor cannot quietly
- * re-introduce the crash.
+ * The fix relocates the embeddings stack into a Bun.spawn child process
+ * (`__omp_worker_mnemopi_embed`) owned by the machine-shared embedding server;
+ * the agent hands `mnemopi.setLocalModelInitializer` a wrapper that round-trips
+ * through that server, and the server `SIGKILL`s the child so the destructor
+ * never runs in any address space. These tests pin the child's contract so a
+ * future refactor cannot quietly re-introduce the crash.
  */
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
@@ -114,8 +114,7 @@ describe("issue #3031 — mnemopi embeddings live in an isolated subprocess", ()
 					// Synthesize the worker's reply on the next tick so the
 					// client's awaited promise resolves before the test asserts.
 					queueMicrotask(() => {
-						if (message.type === "ping") messageHandler?.({ type: "pong", id: message.id });
-						else if (message.type === "init") messageHandler?.({ type: "ready", id: message.id });
+						if (message.type === "init") messageHandler?.({ type: "ready", id: message.id });
 						else if (message.type === "embed") {
 							messageHandler?.({ type: "vectors", id: message.id, vectors: [[0, 0, 0]] });
 						}

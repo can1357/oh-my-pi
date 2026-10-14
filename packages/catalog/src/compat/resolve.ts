@@ -17,6 +17,7 @@
  */
 import { Effort, THINKING_EFFORTS } from "../effort";
 import { hostMatchesUrl, modelMatchesHost } from "../hosts";
+import { withoutUnverifiedThinking } from "../model-thinking";
 import type {
 	Api,
 	CompatOf,
@@ -31,6 +32,7 @@ import type {
 	ResolvedOpenAISharedCompat,
 	ThinkingConfig,
 } from "../types";
+import { isOfficialCodexApiUrl } from "../wire/codex";
 import {
 	isAnthropicSigningProxyUrl,
 	isAzureAnthropicRoute,
@@ -117,11 +119,24 @@ class IdentityFacts {
 	}
 }
 
+/**
+ * The id a spec resolves identity and rules under: its own, unless that names
+ * no model and the row sends a model that does on the wire. A Devin Fusion
+ * pairing runs only its lead, so the lead's reviewed rules (cache-write rate,
+ * long-context tier) apply to it at build time.
+ */
+function policyModelId<TApi extends Api>(spec: ModelSpec<TApi>): string {
+	const wireId = spec.requestModelId;
+	if (wireId === undefined || wireId === spec.id) return spec.id;
+	if (classifyModel(spec.provider, spec.id).class !== "unknown") return spec.id;
+	return classifyModel(spec.provider, wireId).class === "unknown" ? spec.id : wireId;
+}
+
 function resolveIdentity<TApi extends Api>(spec: ModelSpec<TApi>): ModelIdentity {
 	// Strict on purpose: ambiguous identity is a rule-authoring defect surfaced
 	// at build/CI time, never silently degraded to `unknown`. Discovery
 	// normalization opts into leniency through `classifyModel` directly.
-	return classifyModel(spec.provider, spec.id);
+	return classifyModel(spec.provider, policyModelId(spec));
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +518,7 @@ function detectOpenAICompat(
 		supportsDeveloperRole: isOpenAIHost || isAzureHost,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
 		supportsReasoningEffort: !isGrok && !d.isXiaomiMimo && (!(d.isZai || d.isZhipu) || supportsZaiReasoningEffort),
+		trustExplicitThinkingOnly: undefined,
 		// API-conditional: this completions-only Copilot exclusion cannot be a
 		// provider rule without changing Copilot Responses rows.
 		supportsReasoningParams: provider !== "github-copilot",
@@ -732,6 +748,7 @@ function resolveOpenAIResponsesPolicy(
 			hostMatchesUrl(baseUrl, "openrouter") ||
 			hostMatchesUrl(baseUrl, "deepseekFamily"),
 		supportsReasoningEffort: !isXaiHost,
+		trustExplicitThinkingOnly: undefined,
 		supportsLongPromptCacheRetention: isOpenAIUrl,
 		supportsPromptCacheBreakpoints,
 		promptCacheBreakpointTtl: supportsPromptCacheBreakpoints ? "30m" : undefined,
@@ -793,7 +810,12 @@ function resolveOpenAIResponsesPolicy(
 			(LOCAL_OPENAI_COMPAT_PROVIDERS[backendProvider] === true || hasLocalLoopbackBaseUrl(baseUrl)),
 		supportsObfuscationOptOut: isOpenAIUrl || provider === "openai",
 		storeResponses: false,
-		officialEndpoint: isOfficialOpenAIEndpoint(provider, baseUrl),
+		connectionBoundNativeHistory: false,
+		// The Codex backend is official at the URL its requests default to when `baseUrl` is unset, and at paths
+		// under it such as `/codex` and `/codex/responses`, which its requests resolve to the same endpoint.
+		officialEndpoint:
+			isOfficialOpenAIEndpoint(provider, baseUrl) ||
+			(api === "openai-codex-responses" && isOfficialCodexApiUrl(baseUrl)),
 		harmonyLeakMitigation: false,
 		rejectRootObjectUnion: false,
 		retryWithoutStrictOnGrammarError: false,
@@ -855,6 +877,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
 		storeResponses: compat.storeResponses,
+		connectionBoundNativeHistory: compat.connectionBoundNativeHistory,
 		supportsAllTurnsReasoningContext: compat.supportsAllTurnsReasoningContext,
 		supportsConfigurationUpdate: compat.supportsConfigurationUpdate,
 		supportsSteering: compat.supportsSteering,
@@ -888,6 +911,7 @@ function resolveAnthropicPolicy(
 		supportsContextManagement: true,
 		supportsServerCompaction: false,
 		firstPartyProvider: false,
+		honorsClaudeCodeBetaKillSwitch: false,
 		supportsOutputEffort: true,
 		disableStrictTools: rejectsStrictTools,
 		// Present as a key so models.yml `compat` can set it; unset unless detected.
@@ -911,6 +935,11 @@ function resolveAnthropicPolicy(
 		escapeBuiltinToolNames: false,
 		injectClaudeCodeInstruction: true,
 		stripImageInput: false,
+		// Unset means "canonical Anthropic image contract"; the request builder
+		// owns those numbers. The keys must exist for a KDL rule or a
+		// user-authored `compat` block to override them.
+		maxImageDimension: undefined,
+		maxImagePayloadBytes: undefined,
 		thinkingLoopGuard: undefined,
 		// Present as keys so models.yml `compat` can set them; unset unless a rule assigns them.
 		stripThinkingHistory: undefined,
@@ -933,6 +962,9 @@ function resolveBedrockPolicy(spec: ModelSpec<"bedrock-converse-stream">, axes: 
 		promptCacheMinimumTokens: 0,
 		promptCacheMaximumCheckpoints: 0,
 		supportsForcedToolChoice: true,
+		// Opt-out: every prefix-bound Claude line on Converse takes the controls,
+		// including custom Bedrock-wire providers; KDL or models.yml sets `false`.
+		supportsThinkingBindingControls: true,
 	};
 	// Reasoning capability is a mechanism gate; adaptive-lineage duration is rule-owned.
 	compat.streamIdleTimeoutMs = compatReasoning(spec, axes) ? BEDROCK_REASONING_STREAM_IDLE_TIMEOUT_MS : undefined;
@@ -967,6 +999,10 @@ function resolveGooglePolicy(
 		claudeThinkingBetaHeader: false,
 		antigravityClaudeToolMode: false,
 		stripImageInput: false,
+		// Unset means "no image contract": images go out as sent. Keys exist so
+		// a KDL rule or a user `compat` block can declare one.
+		maxImageDimension: undefined,
+		maxImagePayloadBytes: undefined,
 	};
 	applyWireAxes(compat, axes.wire, spec.api);
 	applyCompatOverrides(compat, spec.compat);
@@ -1076,6 +1112,7 @@ interface RuleThinking {
 	supportsDisplay?: boolean;
 	prefixBinding?: boolean;
 	upgradeNeutral?: boolean;
+	unverified?: boolean;
 }
 
 function readRuleThinking(axes: ResolvedAxes): RuleThinking {
@@ -1096,6 +1133,7 @@ function readRuleThinking(axes: ResolvedAxes): RuleThinking {
 	if (typeof raw.supportsDisplay === "boolean") out.supportsDisplay = raw.supportsDisplay;
 	if (typeof raw.prefixBinding === "boolean") out.prefixBinding = raw.prefixBinding;
 	if (typeof raw.upgradeNeutral === "boolean") out.upgradeNeutral = raw.upgradeNeutral;
+	if (typeof raw.unverified === "boolean") out.unverified = raw.unverified;
 	return out;
 }
 
@@ -1143,8 +1181,16 @@ function resolveThinkingPolicy<TApi extends Api>(
 	// not re-expand it into an unadvertised ladder. Absent metadata is
 	// repaired only where KDL opts in with `thinking-upgrade-neutral`
 	// alongside a reviewed `thinking-efforts` ladder (the cascade upgrade for
-	// stale source capability data); otherwise the neutral default holds.
-	if (!spec.reasoning && (explicitThinking !== undefined || rule.upgradeNeutral !== true)) return undefined;
+	// stale source capability data). On deployments whose discovery reports no
+	// capabilities (`thinking-unverified`), an unclassified neutral spec — nothing
+	// says whether it reasons — gets an unverified ladder the user may opt into.
+	const unverified = !compatReasoning(spec, axes);
+	if (
+		unverified &&
+		(explicitThinking !== undefined || facts.identity.class !== "unknown" || rule.unverified !== true)
+	) {
+		return undefined;
+	}
 	if (
 		spec.provider === "cline-pass" &&
 		compat !== undefined &&
@@ -1168,9 +1214,14 @@ function resolveThinkingPolicy<TApi extends Api>(
 	if (config.efforts.length === 0) {
 		throw new Error(`Model ${spec.provider}/${spec.id} resolved to an empty thinking range`);
 	}
-	if (rule.defaultLevel !== undefined) config.defaultLevel = rule.defaultLevel;
 	const effortMap = mergeEffortMap(spec, rule.effortMap, compat, config.efforts);
 	if (effortMap !== undefined) config.effortMap = effortMap;
+	if (unverified) {
+		// Off-by-default opt-in: no default level, mandatory effort, or wire off-switch.
+		config.unverified = true;
+		return config;
+	}
+	if (rule.defaultLevel !== undefined) config.defaultLevel = rule.defaultLevel;
 	if (rule.effortBudgets !== undefined) config.effortBudgets = rule.effortBudgets;
 	const supportsDisplay = rule.supportsDisplay ?? defaultSupportsDisplay(spec, facts);
 	if (supportsDisplay) config.supportsDisplay = true;
@@ -1267,7 +1318,7 @@ function buildResolveTarget<TApi extends Api>(
 		provider: providerType,
 		api: spec.api,
 		class: identity.class,
-		model: spec.id,
+		model: policyModelId(spec),
 		reasoning: Boolean(spec.reasoning),
 	};
 	if (identity.family !== undefined) target.family = identity.family;
@@ -1303,7 +1354,8 @@ export function resolveModelPolicy<TApi extends Api>(
 	spec: ModelSpec<TApi>,
 	route?: ResolveRoute,
 ): ResolvedModelPolicy<TApi>;
-export function resolveModelPolicy(spec: ModelSpec<Api>, route?: ResolveRoute): ResolvedModelPolicy<Api> {
+export function resolveModelPolicy(input: ModelSpec<Api>, route?: ResolveRoute): ResolvedModelPolicy<Api> {
+	const spec = withoutUnverifiedThinking(input);
 	const identity = resolveIdentity(spec);
 	const facts = new IdentityFacts(identity);
 	const target = buildResolveTarget(spec, identity);

@@ -81,6 +81,34 @@ class "gemini" {
 			}
 		}
 	}
+	// Gemini 4 Argon's introductory list price ($2/$10, $0.10 cached) ends
+	// 2026-11-30; from 2026-12-01 Google bills $4/$20, $0.20 cached, on the
+	// Gemini API and Vertex global endpoint alike. Cloud Billing days start at
+	// midnight US Pacific. Both cards are pinned over whatever stencil.so or
+	// the bundled pricing peer reports: the switch needs no regeneration, and
+	// a row built after upstream catches up still prices earlier requests at
+	// the introductory rate.
+	// https://ai.google.dev/gemini-api/docs/pricing
+	// https://cloud.google.com/vertex-ai/generative-ai/pricing
+	on "google" "google-vertex" "google-antigravity" {
+		models "gemini-4-argon" {
+			cost-patch {
+				input 2
+				output 10
+				cache-read 0.1
+				cache-write 0
+				effective-rates {
+					list-price {
+						effective-from "2026-12-01T08:00:00Z"
+						input 4
+						output 20
+						cache-read 0.2
+						cache-write 0
+					}
+				}
+			}
+		}
+	}
 
 	revision ">=3" {
 		// Replaces the Google multimodal function-response baseline.

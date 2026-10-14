@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import type { AssistantMessage, Message, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message, Model, Usage } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import * as snapcompact from "../src";
 
@@ -9,6 +12,23 @@ const TEST_FRAME_SIZE = 320;
 
 function createUserMessage(content: string): Message {
 	return { role: "user", content, timestamp: 0 };
+}
+
+/** Runs `fn` with `overrides` applied to `Bun.env` (`undefined` deletes), then restores the previous values. */
+function withEnv(overrides: Readonly<Record<string, string | undefined>>, fn: () => void): void {
+	const previous = Object.keys(overrides).map(key => [key, Bun.env[key]] as const);
+	const apply = (entries: Iterable<readonly [string, string | undefined]>) => {
+		for (const [key, value] of entries) {
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
+	};
+	try {
+		apply(Object.entries(overrides));
+		fn();
+	} finally {
+		apply(previous);
+	}
 }
 
 const ZERO_USAGE: Usage = {
@@ -325,9 +345,15 @@ describe("shape resolution", () => {
 		// geometry, billed under the standard tier's 1,568-token cap (39²).
 		const opus46 = snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-6" });
 		expect(opus46).toEqual({ ...snapcompact.SHAPES.anthropic, frameTokenEstimate: 1521 });
+		// Older Sonnet lines share that tier but only Sonnet 4.6 was billing-verified.
 		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-3-5-sonnet" })).toEqual({
 			...snapcompact.SHAPES.anthropic,
 			frameTokenEstimate: 1521,
+		});
+		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-sonnet-4-6" })).toEqual({
+			...snapcompact.SHAPES.anthropic,
+			frameTokenEstimate: 1521,
+			frameTokensVerified: true,
 		});
 
 		// Gemini reads 2048px frames at the same fixed bill, single-column with
@@ -384,6 +410,35 @@ describe("shape resolution", () => {
 		expect(legacyOnAnthropic.frameTokenEstimate).toBe(69 * 69);
 	});
 
+	it("renders frames no wider than the host's image edge, priced at that size", async () => {
+		// Cursor fits Claude and GPT images into 1024×1024 before the model reads them.
+		const claude = snapcompact.resolveShape({ provider: "cursor", api: "cursor-agent", id: "claude-opus-5-high" });
+		expect(claude).toMatchObject({ cellWidth: 11, frameSize: 1024, frameTokenEstimate: 37 * 37 });
+		const gpt = snapcompact.resolveShape({ provider: "cursor", api: "cursor-agent", id: "gpt-5.4-nano" });
+		expect(gpt).toMatchObject({ cellHeight: 22, frameSize: 1024, frameTokenEstimate: Math.ceil(32 * 32 * 1.2) });
+		expect(
+			snapcompact.resolveShape({ provider: "cursor", api: "cursor-agent", id: "claude-opus-5-high" }, "5x8-bw")
+				.frameSize,
+		).toBe(1024);
+		const [frame] = await snapcompact.renderMany("cursor ".repeat(2000), { shape: claude, maxFrames: 1 });
+		expect(decodePng(Buffer.from(frame.data, "base64")).width).toBe(1024);
+		// Targets naming only the host or only Cursor's wire reach the same backend.
+		expect(snapcompact.resolveShape({ provider: "cursor", id: "claude-opus-5-high" }).frameSize).toBe(1024);
+		const [apiOnly] = await snapcompact.renderMany("cursor ".repeat(2000), {
+			model: { api: "cursor-agent", id: "claude-opus-5-high" },
+			maxFrames: 1,
+		});
+		expect(decodePng(Buffer.from(apiOnly.data, "base64")).width).toBe(1024);
+
+		// Readers whose host passes images through keep their own frame size.
+		expect(
+			snapcompact.resolveShape({ provider: "cursor", api: "cursor-agent", id: "gemini-3.7-flash" }).frameSize,
+		).toBe(2048);
+		expect(
+			snapcompact.resolveShape({ provider: "anthropic", api: "anthropic-messages", id: "claude-opus-5" }),
+		).toMatchObject({ frameSize: 1932, frameTokenEstimate: 69 * 69 });
+	});
+
 	it("prices frames by the reading model's lineage, not the wire API", () => {
 		const codex = snapcompact.resolveShape({ api: "openai-codex-responses", id: "gpt-6-astra" });
 		expect(codex.frameSize).toBe(1568);
@@ -431,6 +486,44 @@ describe("shape resolution", () => {
 		expect(snapcompact.resolveShape({ api: "some-future-api", id: "qwen/qwen3-vl" }).frameTokenEstimate).toBe(
 			snapcompact.FRAME_TOKEN_ESTIMATE,
 		);
+	});
+
+	it("plans archives at a billing-verified frame price and at least the ceiling otherwise", () => {
+		const codex = snapcompact.resolveShape({ api: "openai-codex-responses", id: "gpt-6.1-sol" });
+		expect(codex.frameTokensVerified).toBe(true);
+		expect(snapcompact.plannedFrameTokens(codex)).toBe(2882);
+		expect(snapcompact.plannedFrameTokens({ ...codex, frameTokensVerified: false })).toBe(
+			snapcompact.FRAME_TOKEN_ESTIMATE,
+		);
+		expect(
+			snapcompact.plannedFrameTokens(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-5-5" })),
+		).toBe(4761);
+		// Same 2,882 price, but Grok 4.5 is priced by the OpenAI-wire fallback and Opus 4.6 by the standard tier.
+		const grok = snapcompact.resolveShape({ api: "openai-responses", provider: "xai", id: "grok-4.5" });
+		expect(grok.frameTokenEstimate).toBe(2882);
+		expect(grok.frameTokensVerified).toBeUndefined();
+		expect(snapcompact.plannedFrameTokens(grok)).toBe(snapcompact.FRAME_TOKEN_ESTIMATE);
+		// Grok 4.7's own rule is verified at its frame price.
+		expect(
+			snapcompact.plannedFrameTokens(
+				snapcompact.resolveShape({ api: "openai-responses", provider: "xai", id: "grok-4.7" }),
+			),
+		).toBe(2442);
+		expect(
+			snapcompact.plannedFrameTokens(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-6" })),
+		).toBe(snapcompact.FRAME_TOKEN_ESTIMATE);
+		// A forced 2576px shape bills above the ceiling, verified or not.
+		const forced = Math.ceil(81 * 81 * 1.2);
+		expect(
+			snapcompact.plannedFrameTokens(
+				snapcompact.resolveShape({ api: "openai-codex-responses", id: "gpt-6.1-sol" }, "5x8-bw"),
+			),
+		).toBe(forced);
+		expect(
+			snapcompact.plannedFrameTokens(
+				snapcompact.resolveShape({ api: "openai-responses", provider: "xai", id: "grok-4.5" }, "5x8-bw"),
+			),
+		).toBe(forced);
 	});
 
 	it("every catalog variant resolves to a complete, renderable shape", () => {
@@ -1180,13 +1273,16 @@ describe("compact", () => {
 		expect(second.preserveData?.appKey).toBe("kept");
 	});
 
-	it("scrubs legacy ¶think: sections from the prior archive when thinking is excluded", async () => {
+	it("scrubs every paragraph of ¶think: sections from the prior archive when thinking is excluded", async () => {
 		const first = await snapcompact.compact(
 			makePreparation({
 				messagesToSummarize: [
 					createUserMessage("Investigate the flaky auth test."),
 					createAssistantMessage([
-						{ type: "thinking", thinking: "legacy private chain of thought" },
+						{
+							type: "thinking",
+							thinking: "First reasoning paragraph.\n\nSecond reasoning paragraph.\nThird reasoning line.",
+						},
 						{ type: "text", text: "The token clock is skewed." },
 					]),
 				],
@@ -1204,9 +1300,51 @@ describe("compact", () => {
 		);
 		const archiveText = snapcompact.getPreservedArchive(second.preserveData)?.text ?? "";
 		expect(archiveText).not.toContain("¶think:");
-		expect(archiveText).not.toContain("legacy private chain of thought");
+		expect(archiveText).not.toContain("reasoning");
 		expect(archiveText).toContain("Investigate the flaky auth test.");
 		expect(archiveText).toContain("The token clock is skewed.");
+	});
+
+	it("scrubs multi-paragraph ¶think: sections from legacy archive text with real newlines", async () => {
+		const text =
+			"¶user: Investigate the flaky auth test.\n¶think: First reasoning paragraph.\n\nSecond reasoning paragraph.\n¶ai: The token clock is skewed.";
+		const second = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [createUserMessage("Continue after switching to Claude.")],
+				previousPreserveData: { snapcompact: { frames: [], totalChars: text.length, truncatedChars: 0, text } },
+			}),
+			{ frameSize: TEST_FRAME_SIZE, includeThinking: false },
+		);
+		const archiveText = snapcompact.getPreservedArchive(second.preserveData)?.text ?? "";
+		expect(archiveText).not.toContain("reasoning");
+		expect(archiveText).toContain("Investigate the flaky auth test.");
+		expect(archiveText).toContain("The token clock is skewed.");
+	});
+
+	it("keeps a ¶think: line printed inside archived tool output", async () => {
+		const first = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [
+					createAssistantMessage([
+						{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "cat dump.txt" } },
+					]),
+					createToolResultMessage("dump start\n¶think: dumped line\ndump end"),
+					createAssistantMessage([{ type: "text", text: "Read the dump." }]),
+				],
+			}),
+			{ frameSize: TEST_FRAME_SIZE },
+		);
+		const second = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [createUserMessage("Continue after switching to Claude.")],
+				previousPreserveData: first.preserveData,
+			}),
+			{ frameSize: TEST_FRAME_SIZE, includeThinking: false },
+		);
+		const archiveText = snapcompact.getPreservedArchive(second.preserveData)?.text ?? "";
+		expect(archiveText).toContain("¶think: dumped line");
+		expect(archiveText).toContain("dump end");
+		expect(archiveText).toContain("Read the dump.");
 	});
 
 	it("keeps legacy ¶think: sections when thinking stays included", async () => {
@@ -1234,22 +1372,72 @@ describe("compact", () => {
 
 describe("frame data budget", () => {
 	const codex = { api: "openai-codex-responses", id: "gpt-6-astra" } as const;
-	const highResFrames = Math.floor(snapcompact.FRAME_DATA_BYTES_BUDGET / snapcompact.FRAME_DATA_BYTES_ESTIMATE);
+	const budget = snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET;
+	const highResFrames = Math.floor(budget / snapcompact.FRAME_DATA_BYTES_ESTIMATE);
 
 	it("gives the default 1568px shapes more of the same byte budget", () => {
 		const opus = snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-8" });
 		const sonnet = snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-sonnet-4-5" });
-		expect(snapcompact.maxFramesForDataBudget(opus)).toBe(highResFrames);
-		expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex))).toBe(26);
-		expect(snapcompact.maxFramesForDataBudget(sonnet)).toBe(26);
+		expect(snapcompact.maxFramesForDataBudget(opus, budget)).toBe(highResFrames);
+		expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex), budget)).toBe(26);
+		expect(snapcompact.maxFramesForDataBudget(sonnet, budget)).toBe(26);
 		// Frames larger than 1932px keep the 1932px charge rather than losing frames.
 		const gemini = snapcompact.resolveShape({ api: "google-generative-ai", id: "gemini-3.5-flash" });
-		expect(snapcompact.maxFramesForDataBudget(gemini)).toBe(highResFrames);
+		expect(snapcompact.maxFramesForDataBudget(gemini, budget)).toBe(highResFrames);
 		// Inkier 1568px variants keep the 1932px charge.
 		for (const variant of ["8x13-bw", "6x12-dim", "doc-8on16-sent-dim", "8on16-bw", "silver16-bw"] as const) {
-			expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex, variant))).toBe(highResFrames);
+			expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex, variant), budget)).toBe(
+				highResFrames,
+			);
 		}
 	});
+
+	it("gives frames half the deployment's inline-image budget, and the default elsewhere", () => {
+		const opus = getBundledModel("anthropic", "claude-opus-5-5");
+		const sol = getBundledModel("openai-codex", "gpt-6.1-sol");
+		const throughProxy = (model: Model) => buildModel({ ...toModelSpec(model), baseUrl: "https://proxy.example/v1" });
+		expect(snapcompact.frameDataBytesBudget(opus)).toBe(12_000_000);
+		expect(snapcompact.frameDataBytesBudget(sol)).toBe(12_000_000);
+		// A rerouted baseUrl has its own body limit; so does a host without a budget rule.
+		expect(snapcompact.frameDataBytesBudget(throughProxy(opus))).toBe(budget);
+		expect(snapcompact.frameDataBytesBudget(throughProxy(sol))).toBe(budget);
+		expect(snapcompact.frameDataBytesBudget(getBundledModel("openrouter", "anthropic/claude-opus-5.5"))).toBe(budget);
+		expect(snapcompact.frameDataBytesBudget(undefined)).toBe(budget);
+		// Opus's 1932px frames: 17 under the default, 70 under Anthropic's share.
+		const opusShape = snapcompact.resolveShape(opus);
+		expect(snapcompact.maxFramesForDataBudget(opusShape, budget)).toBe(17);
+		expect(snapcompact.maxFramesForDataBudget(opusShape, snapcompact.frameDataBytesBudget(opus))).toBe(70);
+	});
+
+	it.each([
+		["ANTHROPIC_BASE_URL", { ANTHROPIC_BASE_URL: "https://anthropic-proxy.example/v1" }],
+		[
+			"Foundry's FOUNDRY_BASE_URL",
+			{ CLAUDE_CODE_USE_FOUNDRY: "1", FOUNDRY_BASE_URL: "https://foundry-proxy.example" },
+		],
+	] as const)(
+		"an official Anthropic model rerouted by %s gets the proxy's 3 MB frame budget and 90 images",
+		(_, reroute) => {
+			const opus = getBundledModel("anthropic", "claude-opus-5-5");
+			const sol = getBundledModel("openai-codex", "gpt-6.1-sol");
+			const official = {
+				ANTHROPIC_BASE_URL: undefined,
+				CLAUDE_CODE_USE_FOUNDRY: undefined,
+				FOUNDRY_BASE_URL: undefined,
+			};
+			withEnv(official, () => {
+				expect(snapcompact.frameDataBytesBudget(opus)).toBe(12_000_000);
+				expect(snapcompact.providerImageBudget(opus)).toBe(600);
+			});
+			withEnv({ ...official, ...reroute }, () => {
+				expect(snapcompact.frameDataBytesBudget(opus)).toBe(budget);
+				expect(snapcompact.providerImageBudget(opus)).toBe(90);
+				// Anthropic's env reroute leaves the Codex backend official.
+				expect(snapcompact.frameDataBytesBudget(sol)).toBe(12_000_000);
+				expect(snapcompact.providerImageBudget(sol)).toBe(2000);
+			});
+		},
+	);
 });
 
 describe("archive helpers", () => {
@@ -1263,6 +1451,143 @@ describe("archive helpers", () => {
 			truncatedChars: 0,
 		};
 		expect(snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: valid })).toEqual(valid);
+	});
+
+	it("getPreservedArchive carries a valid no-reasoning variant and drops a malformed one", () => {
+		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 10 };
+		const variant: snapcompact.ArchiveView = {
+			summary: "plain legend",
+			archive: { frames: [frame], totalChars: 10, truncatedChars: 0, text: "¶ai: hi" },
+		};
+		const base = { frames: [frame], totalChars: 10, truncatedChars: 0 };
+		expect(
+			snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: { ...base, withoutThinking: variant } }),
+		).toEqual({ ...base, withoutThinking: variant });
+		for (const malformed of [
+			{ summary: "", archive: variant.archive },
+			{ summary: "s", archive: { frames: [] } },
+		]) {
+			expect(
+				snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: { ...base, withoutThinking: malformed } }),
+			).toEqual(base);
+		}
+	});
+
+	describe("viewWithoutThinking", () => {
+		const THINKING_SUMMARY =
+			"Archived transcript scopes:\n- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.\nHISTORY";
+		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 10 };
+
+		it("reads the stored variant, or the original when its summary declares no reasoning", () => {
+			const variant: snapcompact.ArchiveView = {
+				summary: "plain",
+				archive: { frames: [frame], totalChars: 10, truncatedChars: 0 },
+			};
+			const archive = { frames: [frame], totalChars: 10, truncatedChars: 0, withoutThinking: variant };
+			expect(snapcompact.viewWithoutThinking(THINKING_SUMMARY, archive)).toBe(variant);
+			const plain = { frames: [frame], totalChars: 10, truncatedChars: 0 };
+			expect(snapcompact.viewWithoutThinking("no scopes", plain)).toEqual({ summary: "no scopes", archive: plain });
+		});
+
+		it("fails closed to text edges without frames, reasoning or its legend", () => {
+			// The head edge ends inside a reasoning section: stripping the whole
+			// source before cutting the edges keeps its continuation out too.
+			const text =
+				"¶user: ask\n¶think: secret one\n\nsecret two\n¶ai: answer one\nfiller middle line\n¶ai: answer two";
+			const textHead = text.slice(0, text.indexOf("secret two") + 6);
+			const textTail = "¶ai: answer two";
+			const view = snapcompact.viewWithoutThinking(
+				THINKING_SUMMARY,
+				{ frames: [frame], totalChars: 100, truncatedChars: 5, text, textHead, textTail },
+				{ readFiles: ["src/a.ts"], modifiedFiles: [] },
+			);
+			expect(view.archive.frames).toEqual([]);
+			const blocks = snapcompact.historyBlocks(view.archive);
+			const sent = `${view.summary}\n${blocks.map(block => (block.type === "text" ? block.text : "")).join("\n")}`;
+			expect(sent).not.toContain("¶think:");
+			expect(sent).not.toContain("secret");
+			expect(sent).not.toContain("assistant reasoning");
+			expect(sent).toContain("`¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.");
+			expect(sent).toContain("a.ts (Read)");
+			expect(view.archive.textHead).toStartWith("¶user: ask\n¶ai: answer one");
+			expect(view.archive.textTail).toBe(textTail);
+			const stripped = "¶user: ask\n¶ai: answer one\nfiller middle line\n¶ai: answer two";
+			expect(view.archive.truncatedChars).toBe(5 + stripped.length - textHead.length - textTail.length);
+		});
+
+		it("leaves out a tail's opening lines when the archive kept no whole source to scope them", async () => {
+			// Without `text` the tail may open inside a thought whose label sat in
+			// the dropped middle; both the fail-closed view and a re-render skip it.
+			const legacy = {
+				frames: [frame],
+				totalChars: 100,
+				truncatedChars: 0,
+				textHead: "¶user: ask\n¶ai: answer one",
+				textTail: "secret continuation\n¶ai: answer two",
+			};
+			const view = snapcompact.viewWithoutThinking(THINKING_SUMMARY, legacy);
+			const sent = snapcompact
+				.historyBlocks(view.archive)
+				.map(block => (block.type === "text" ? block.text : ""))
+				.join("\n");
+			expect(sent).not.toContain("secret");
+			expect(sent).toContain("answer two");
+
+			const rendered = await snapcompact.compact(
+				{
+					firstKeptEntryId: "kept",
+					messagesToSummarize: [createUserMessage("Continue.")],
+					turnPrefixMessages: [],
+					tokensBefore: 0,
+					previousPreserveData: { [snapcompact.PRESERVE_KEY]: legacy },
+					fileOps: snapcompact.createFileOps(),
+				},
+				{ frameSize: TEST_FRAME_SIZE, includeThinking: false },
+			);
+			const source = snapcompact.getPreservedArchive(rendered.preserveData)?.text ?? "";
+			expect(source).not.toContain("secret");
+			expect(source).toContain("answer two");
+		});
+	});
+
+	it("textWithoutThinking drops reasoning sections and the reasoning scope from either legend wording", () => {
+		const summary = [
+			"- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.",
+			"- `¶user:`, `¶think:`, `¶ai:`, and `¶call:` open user, assistant reasoning, assistant reply, and tool-call scopes.",
+			"¶user: hi",
+			"¶think: hidden",
+			"¶ai: shown",
+		].join("\n");
+		expect(snapcompact.textWithoutThinking(summary)).toBe(
+			[
+				"- `¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.",
+				"- `¶user:`, `¶ai:`, and `¶call:` open user, assistant reply, and tool-call scopes.",
+				"¶user: hi",
+				"¶ai: shown",
+			].join("\n"),
+		);
+	});
+
+	it("re-renders an archive without the reasoning legend of a summary archived inside it", async () => {
+		// A compaction summary later archived as conversation keeps its legend
+		// mid-line in the normalized source, where no section boundary marks it.
+		const legend = "- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.";
+		const text = `¶user: 41822 Resume prior conversation.${snapcompact.NEWLINE_GLYPH}${legend}${snapcompact.NEWLINE_GLYPH}¶ai: done`;
+		const rendered = await snapcompact.compact(
+			{
+				firstKeptEntryId: "kept",
+				messagesToSummarize: [createUserMessage("Continue.")],
+				turnPrefixMessages: [],
+				tokensBefore: 0,
+				previousPreserveData: { snapcompact: { frames: [], totalChars: text.length, truncatedChars: 0, text } },
+				fileOps: snapcompact.createFileOps(),
+			},
+			{ frameSize: TEST_FRAME_SIZE, includeThinking: false },
+		);
+		const archiveText = snapcompact.getPreservedArchive(rendered.preserveData)?.text ?? "";
+		expect(archiveText).not.toContain("¶think:");
+		expect(archiveText).not.toContain("assistant reasoning");
+		expect(archiveText).toContain("`¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.");
 	});
 
 	it("stripPreservedArchive drops the frame archive and collapses to undefined when empty", () => {
@@ -1300,21 +1625,19 @@ describe("archive helpers", () => {
 		expect((blocks[2] as { text: string }).text).toContain("tail text");
 	});
 
-	it("provider image budgets stay permissive while unknown providers keep the safe floor", () => {
-		expect(snapcompact.providerImageBudget("openrouter")).toBe(90);
-		expect(snapcompact.providerImageBudget("umans")).toBe(10);
-		// Unknown providers fall to the safe floor.
+	it("caps images at the deployment's budget and unknown hosts at the safe floor", () => {
+		const ramp = buildModel({ ...toModelSpec(getBundledModel("anthropic", "claude-opus-5-5")), provider: "ramp" });
+		expect(snapcompact.providerImageBudget(ramp)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
 		expect(snapcompact.providerImageBudget(undefined)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
-		expect(snapcompact.providerImageBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
-		expect(snapcompact.providerImageBudget("openai-codex")).toBe(200);
-		expect(snapcompact.providerFrameBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
-		expect(snapcompact.providerFrameBudget("umans")).toBe(10);
-		expect(snapcompact.providerFrameBudget("anthropic")).toBe(snapcompact.MAX_FRAMES_DEFAULT);
-		// Anthropic's image cap is the high-water mark the default frame count
-		// must stay under; unknown providers are clamped separately via
-		// providerFrameBudget so their lower image floors cannot archive frames
-		// the send path will drop.
-		expect(snapcompact.MAX_FRAMES_DEFAULT).toBeLessThanOrEqual(snapcompact.providerImageBudget("anthropic"));
+		expect(snapcompact.providerFrameBudget(ramp)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+		// The frame cap never exceeds the default frame count, even under a 600-image budget.
+		const opus = getBundledModel("anthropic", "claude-opus-5-5");
+		expect(snapcompact.providerImageBudget(opus)).toBe(600);
+		expect(snapcompact.providerFrameBudget(opus)).toBe(snapcompact.MAX_FRAMES_DEFAULT);
+		// The strictest Anthropic budget (200k-window models) still holds a full default archive.
+		expect(snapcompact.MAX_FRAMES_DEFAULT).toBeLessThanOrEqual(
+			snapcompact.providerImageBudget(getBundledModel("anthropic", "claude-haiku-4-5")),
+		);
 	});
 });
 

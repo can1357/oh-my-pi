@@ -8,6 +8,9 @@ provider "xai" {
 		tts "xai-tts"
 	}
 	web-search "xai"
+	// api.x.ai rejects a body over 50 MiB and counts images only against the
+	// context window; 60 images at the 500 KiB resize target stay near 41 MB.
+	image-count-budget 60
 
 	seed api="xai-tts" base-url="https://api.x.ai/v1" bundle="always" {
 		model "grok-tts" name="Grok TTS" {

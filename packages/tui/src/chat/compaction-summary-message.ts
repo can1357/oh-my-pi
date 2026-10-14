@@ -53,6 +53,10 @@ class DividerSummary implements Component {
 		this.#cache = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#cache = undefined;
+	}
+
 	render(width: number): readonly string[] {
 		width = Math.max(1, width);
 		if (this.#cache?.width === width) return this.#cache.lines;
@@ -148,6 +152,10 @@ class SummaryMessageComponent implements Component {
 		this.#disclosure.dispose();
 		this.#disclosure = this.#createDisclosure(expanded);
 		if (this.#ignoreTight !== undefined) this.#disclosure.setIgnoreTight(this.#ignoreTight);
+	}
+
+	releaseRenderCaches(): void {
+		this.#disclosure.releaseRenderCaches();
 	}
 
 	dispose(): void {

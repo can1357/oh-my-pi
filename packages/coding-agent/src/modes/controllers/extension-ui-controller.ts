@@ -6,6 +6,7 @@ import { formatKeyHint, formatKeyHints, KeybindingsManager } from "@oh-my-pi/pi-
 import type {
 	CompactOptions,
 	ExtensionActions,
+	ExtensionApprovalPrompt,
 	ExtensionAskDialogQuestion,
 	ExtensionAskDialogResult,
 	ExtensionAskDialogResultItem,
@@ -24,6 +25,7 @@ import type {
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import {
 	type AskDialogPrompt,
 	type AskDialogPromptValue,
@@ -41,8 +43,12 @@ import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../sessi
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
+import { launchTerminal } from "../../subprocess/terminal-launch";
 
 const MAX_WIDGET_LINES = 10;
+/** Approval answers, as a collab guest's select shows them. */
+const APPROVE_OPTION = "Approve";
+const DENY_OPTION = "Deny";
 
 /**
  * Footer hint for a guest-rendered ask selector. The guest's selector handles
@@ -55,6 +61,18 @@ function guestAskHelpText(enterAction: string, extra = ""): string {
 const ASK_OTHER_OPTION = "Other (type your own)";
 const ASK_CHAT_OPTION = "Chat about this";
 const ASK_NEXT_OPTION = "Next →";
+
+function withTerminalLauncher(uiContext: ExtensionUIContext, hasUI: boolean): ExtensionUIContext {
+	if (!hasUI || uiContext.openTerminal) return uiContext;
+	const descriptors = Object.getOwnPropertyDescriptors(uiContext);
+	descriptors.openTerminal = {
+		configurable: true,
+		enumerable: true,
+		value: launchTerminal,
+		writable: true,
+	};
+	return Object.create(Object.getPrototypeOf(uiContext), descriptors) as ExtensionUIContext;
+}
 
 async function editDialogExternally(text: string): Promise<string | null> {
 	const command = getEditorCommand();
@@ -98,6 +116,12 @@ export class ExtensionUiController {
 	#dialogActive = false;
 	#dialogQueue: Array<() => void> = [];
 	/**
+	 * The queued steering (chip texts) when a steer last denied an approval. Steering waits for
+	 * the tool batch to end, so while the queue still starts with it, later approvals of that
+	 * batch (an exclusive call asks only after the denied one settles) are denied by it as well.
+	 */
+	#denyingSteering: readonly string[] | undefined;
+	/**
 	 * Built once in `initHooksAndCustomTools()`. Reused directly by `/tree`
 	 * `ask` re-answer (issue #5642) to drive a standalone `AskTool.execute()`
 	 * call with the same picker/dialog primitives a live tool call would get.
@@ -125,10 +149,12 @@ export class ExtensionUiController {
 		// Create and set hook & tool UI context
 		const uiContext: ExtensionUIContext = {
 			timeoutStartsOnPresentation: true,
+			supportsEditor: true,
 			select: (title, options, dialogOptions) => this.showCollabAwareSelector(title, options, dialogOptions),
 			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
 			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
+			approve: (prompt, dialogOptions) => this.showCollabAwareApproval(prompt, dialogOptions),
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
 			setStatus: (key, text) => this.setHookStatus(key, text),
@@ -166,8 +192,9 @@ export class ExtensionUiController {
 			getToolsExpanded: () => this.ctx.toolOutputExpanded,
 			setToolsExpanded: expanded => this.ctx.setToolsExpanded(expanded),
 		};
-		this.ctx.setToolUIContext(uiContext, true);
-		this.#toolUIContext = uiContext;
+		const enrichedUiContext = withTerminalLauncher(uiContext, true);
+		this.ctx.setToolUIContext(enrichedUiContext, true);
+		this.#toolUIContext = enrichedUiContext;
 		this.ctx.session.setUsageFallbackConfirmer?.((confirmation, signal) => {
 			const reserve =
 				confirmation.remainingPercent === undefined
@@ -218,6 +245,9 @@ export class ExtensionUiController {
 			abort: () => this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL }),
 			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
 			shutdown: () => this.ctx.requestShutdown(),
+			resolvePlanReview: (reviewId, choice, input) => this.ctx.resolvePlanReview(reviewId, choice, input),
+			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
+			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
@@ -317,7 +347,7 @@ export class ExtensionUiController {
 			},
 		};
 
-		extensionRunner.initialize(actions, contextActions, commandActions, uiContext, "tui");
+		extensionRunner.initialize(actions, contextActions, commandActions, enrichedUiContext, "tui");
 
 		// Subscribe to extension errors
 		extensionRunner.onError((error: ExtensionError) => {
@@ -446,6 +476,9 @@ export class ExtensionUiController {
 			abort: () => this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL }),
 			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
 			shutdown: () => this.ctx.requestShutdown(),
+			resolvePlanReview: (reviewId, choice, input) => this.ctx.resolvePlanReview(reviewId, choice, input),
+			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
+			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
@@ -541,7 +574,8 @@ export class ExtensionUiController {
 			},
 		};
 
-		extensionRunner.initialize(actions, contextActions, commandActions, uiContext, "tui");
+		const runnerUiContext = withTerminalLauncher(uiContext, _hasUI);
+		extensionRunner.initialize(actions, contextActions, commandActions, runnerUiContext, "tui");
 		this.#syncExtensionComposerShapes();
 	}
 
@@ -621,6 +655,83 @@ export class ExtensionUiController {
 		return this.#raceCollabDialog(request, dialogOptions?.signal, signal =>
 			this.showHookEditor(title, prefill, { ...dialogOptions, signal }, editorOptions),
 		);
+	}
+
+	/**
+	 * The tool-approval prompt in the composer's place; a collab guest answers it as an Approve/Deny
+	 * select over the full prompt. Locally it shows the compact prompt (the details summarized to a
+	 * row, so the composer beneath keeps its room), and the expand key swaps in the full one,
+	 * wrapped — even when the two match, since a row the summary kept whole can still clip.
+	 * The composer stays mounted beneath it and takes the typing: a user message queued as steering
+	 * while the call waits (sent here, from Tern, or by a collab guest) denies the call, so the
+	 * message tells the agent why instead of a bare denial. The watch starts with the request, so
+	 * approvals still queued behind another dialog are denied by the same message.
+	 */
+	async showCollabAwareApproval(
+		prompt: ExtensionApprovalPrompt,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<boolean> {
+		const request: CollabUiRequestDraft = {
+			kind: "select",
+			title: prompt.full,
+			options: [APPROVE_OPTION, DENY_OPTION],
+		};
+		const session = this.ctx.session;
+		const queued = session.getQueuedMessages().steering;
+		const denying = this.#denyingSteering;
+		if (denying && denying.length <= queued.length && denying.every((text, i) => text === queued[i])) return false;
+		this.#denyingSteering = undefined;
+		const steered = new AbortController();
+		let steeringBaseline = queued.length;
+		const unsubscribe = session.subscribe(event => {
+			if (event.type !== "queue_update") return;
+			if (event.steering.length > steeringBaseline) {
+				this.#denyingSteering = event.steering;
+				steered.abort();
+			} else steeringBaseline = event.steering.length;
+		});
+		const signal = dialogOptions?.signal ? AbortSignal.any([dialogOptions.signal, steered.signal]) : steered.signal;
+		try {
+			const choice = await this.#raceCollabDialog(request, signal, localSignal =>
+				this.#presentDialog(localSignal, settle => {
+					const editor = this.ctx.editor;
+					const dialog = new ApprovalDialogComponent(
+						prompt.compact,
+						{ onApprove: () => settle(APPROVE_OPTION), onDeny: () => settle(DENY_OPTION) },
+						{
+							tui: this.ctx.ui,
+							fullPrompt: prompt.full,
+							timeout: dialogOptions?.timeout,
+							onTimeout: dialogOptions?.onTimeout,
+							onTimeoutStart: dialogOptions?.onTimeoutStart,
+							onTimeoutReset: dialogOptions?.onTimeoutReset,
+							draft: {
+								hasDraft: () =>
+									editor.getText().length > 0 || editor.pendingImages.length > 0 || editor.pasteInFlight,
+								handleInput: keyData => editor.handleDraftEdit(keyData),
+							},
+						},
+					);
+					this.ctx.editorContainer.clear();
+					this.ctx.editorContainer.addChild(dialog);
+					this.ctx.editorContainer.addChild(editor);
+					this.ctx.ui.setFocus(dialog);
+					// The dialog owns focus but forwards typing: keep the composer's cursor visible.
+					editor.focused = true;
+					this.ctx.ui.requestRender();
+					return () => {
+						dialog.dispose();
+						this.ctx.editorContainer.clear();
+						this.ctx.editorContainer.addChild(editor);
+						this.ctx.ui.setFocus(editor);
+						this.ctx.ui.requestRender();
+					};
+				}),
+			);
+			return choice === APPROVE_OPTION;
+		} finally {
+			unsubscribe();
+		}
 	}
 
 	async showAskDialog(
@@ -1011,6 +1122,7 @@ export class ExtensionUiController {
 					checkedIndices: dialogOptions?.checkedIndices,
 					markableCount: dialogOptions?.markableCount,
 					maxVisible,
+					inline: dialogOptions?.inline,
 					slider: extra?.slider,
 				},
 			);
@@ -1036,7 +1148,11 @@ export class ExtensionUiController {
 	/**
 	 * Show a confirmation dialog for hooks.
 	 */
-	async showHookConfirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean> {
+	async showHookConfirm(
+		title: string,
+		message: string,
+		dialogOptions?: InteractiveSelectorDialogOptions,
+	): Promise<boolean> {
 		const result = await this.showHookSelector(`${title}\n${message}`, ["Yes", "No"], dialogOptions);
 		return result === "Yes";
 	}

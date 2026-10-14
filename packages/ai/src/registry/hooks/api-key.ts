@@ -14,6 +14,7 @@ export const API_KEY_LOGIN_HOOKS: Record<string, Lazy<LoginHook>> = {
 	"alibaba-coding-plan": () => import("../oauth/alibaba-coding-plan").then(m => m.loginAlibabaCodingPlan),
 	"alibaba-token-plan": () => import("../oauth/alibaba-token-plan").then(m => m.loginAlibabaTokenPlan),
 	"cloudflare-ai-gateway": () => import("../oauth/cloudflare-ai-gateway").then(m => m.loginCloudflareAiGateway),
+	"cloudflare-workers-ai": () => import("../oauth/cloudflare-workers-ai").then(m => m.loginCloudflareWorkersAi),
 	kilo: () => import("../oauth/kilo").then(m => m.loginKilo),
 	xiaomi: () => import("../oauth/xiaomi").then(m => m.loginXiaomi),
 };
