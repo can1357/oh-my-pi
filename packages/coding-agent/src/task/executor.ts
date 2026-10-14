@@ -32,6 +32,7 @@ import {
 	resolveModelOverride,
 	resolveModelOverrideWithAuthFallback,
 } from "../config/model-resolver";
+import { isAuthenticated, kNoAuth } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
 import {
 	buildServiceTierByFamily,
@@ -4226,6 +4227,25 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 							modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings),
 						)
 					: undefined;
+			const contained = requestedRole !== undefined &&
+				cfgRetryFallbackChainExhausted.get(subagentSettings)[requestedRole] === "fail";
+			let resolutionPatterns = modelPatterns;
+			if (contained) {
+				const candidates = resolveSubagentRetryFallbackCandidates(
+					[...configuredModelPatterns, ...(inheritedRetryFallbackChain ?? [])],
+					modelRegistry,
+					subagentSettings,
+				);
+				const authenticated: string[] = [];
+				for (const candidate of candidates) {
+					const key = await awaitAbortable(modelRegistry.getApiKey(candidate.model, id));
+					if (key === kNoAuth || isAuthenticated(key)) authenticated.push(candidate.selector);
+				}
+				if (candidates.length > 0 && authenticated.length === 0) {
+					throw new Error(`No model with usable credentials in contained role "${requestedRole}".`);
+				}
+				if (authenticated.length > 0) resolutionPatterns = authenticated;
+			}
 			const {
 				model,
 				thinkingLevel: resolvedThinkingLevel,
@@ -4234,8 +4254,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				warning: modelResolutionWarning,
 			} = await awaitAbortable(
 				resolveModelOverrideWithAuthFallback(
-					modelPatterns,
-					options.parentActiveModelPattern,
+					resolutionPatterns,
+					contained ? undefined : options.parentActiveModelPattern,
 					modelRegistry,
 					settings,
 					id,
@@ -4273,7 +4293,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const retryFallbackRole = installSubagentRetryFallbackChain({
 				settings: subagentSettings,
 				id,
-				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings),
+				candidates: resolveSubagentRetryFallbackCandidates(
+					contained ? [...configuredModelPatterns, ...(inheritedRetryFallbackChain ?? [])] : modelPatterns,
+					modelRegistry,
+					subagentSettings,
+				),
 				inheritedFallbackChain: inheritedRetryFallbackChain,
 				model,
 				authFallbackUsed,
@@ -4418,7 +4442,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					model,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 					modelPatternAuthFallback:
-						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+						model || modelOverride === undefined || contained ? undefined : options.parentActiveModelPattern,
 					modelPatternFallbackRole:
 						model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
 					modelPatternDefaultFallbackChain:

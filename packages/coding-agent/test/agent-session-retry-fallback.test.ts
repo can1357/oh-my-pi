@@ -5493,6 +5493,54 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
 	});
+
+	it("retains contained ownership after cooldown restoration and a second failure", async () => {
+		const primary = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		const root = getBundledModel("openai", "gpt-4o");
+		if (!primary || !fallback || !root) throw new Error("Expected bundled test models");
+		const requests: string[] = [];
+		const mock = createMockModel();
+		let fallbackAttempts = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requests.push(`${model.provider}/${model.id}`);
+				if (model.id === fallback.id && fallbackAttempts++ === 0) mock.push({ content: ["first fallback success"] });
+				else if (model.id === root.id) mock.push({ content: ["unexpected default success"] });
+				else mock.push({ throw: "worker quota exhausted retry-after-ms=200" });
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 1,
+			"retry.maxDelayMs": 100,
+			"retry.fallbackChains": { task: ["openai/gpt-4o-mini"], default: ["openai/gpt-4o"] },
+			"retry.fallbackChainExhausted": { task: "fail" },
+		});
+		settings.setModelRole("task", "anthropic/claude-sonnet-4-5");
+		settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
+		const manager = SessionManager.inMemory();
+		manager.appendModelChange("anthropic/claude-sonnet-4-5", "task");
+		session = new AgentSession({ agent, settings, sessionManager: manager, modelRegistry });
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		await session.prompt("First worker turn");
+		await session.waitForIdle();
+		expect(getLastAssistantMessage(session).stopReason).toBe("stop");
+		now += 1000;
+		await session.prompt("Restore, then exhaust the worker again");
+		await session.waitForIdle();
+		expect(requests).toEqual([
+			"anthropic/claude-sonnet-4-5", "openai/gpt-4o-mini",
+			"anthropic/claude-sonnet-4-5", "openai/gpt-4o-mini",
+		]);
+		expect(manager.getLastModelChangeRole()).toBe("task");
+		expect(getLastAssistantMessage(session).stopReason).toBe("error");
+		expect(getLastAssistantMessage(session).errorMessage).toContain("worker quota exhausted");
+	});
 	it("suppresses cooled selectors and lazily reverts to the role primary after cooldown expiry", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");

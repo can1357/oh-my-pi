@@ -171,6 +171,12 @@ export function createPersistedSubagentReviverFactory(
 			// inherited role chains are resolved only at spawn).
 			if (init.retryFallback) {
 				installRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(ref.id), init.retryFallback);
+				if (init.retryFallback.exhausted === "fail") {
+					const lastModelChange = reopened.getEntries().findLast(entry => entry.type === "model_change");
+					if (lastModelChange?.type === "model_change" && lastModelChange.role !== subagentRetryFallbackRole(ref.id)) {
+						reopened.appendModelChange(lastModelChange.model, subagentRetryFallbackRole(ref.id), true);
+					}
+				}
 			}
 			// Account pools are owner policy, like the extension roots below: take the
 			// live exact-name `task.agentAccountPools` entry, never a transcript copy.
@@ -209,7 +215,7 @@ export function createPersistedSubagentReviverFactory(
 					subagentEventBus: ctx.subagentEventBus,
 					modelRegistry: ctx.modelRegistry,
 					...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
-					modelPatternAuthFallback: init.resolvedModel,
+					modelPatternAuthFallback: init.retryFallback?.exhausted === "fail" ? undefined : init.resolvedModel,
 					settings: subagentSettings,
 					sessionManager: reopened,
 					agentId: ref.id,

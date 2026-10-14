@@ -268,6 +268,49 @@ describe("subagent runtime model resolution", () => {
 		});
 	}
 
+	for (const fallbackAuthenticated of [false, true]) {
+		it(`does not authenticate a contained worker through its parent (${fallbackAuthenticated ? "own fallback available" : "no own credentials"})`, async () => {
+			const primary = model("primary", "bad-runtime-model");
+			const fallback = model("fallback", "working-model");
+			const parent = model("global", "parent-model");
+			const create = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+				expect(options?.model?.provider).toBe("fallback");
+				expect(options?.settings?.getModelRole("subagent:contained-auth")).toBe("fallback/working-model");
+				return { session: createYieldingSession("none"), extensionsResult: {}, setToolUIContext: () => {} } as never;
+			});
+			const result = await runSubprocess({
+				cwd: "/tmp",
+				agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+				task: "work",
+				index: 0,
+				id: "contained-auth",
+				modelOverride: "@task",
+				parentActiveModelPattern: "global/parent-model",
+				settings: Settings.isolated({
+					modelRoles: { task: "primary/bad-runtime-model", default: "global/parent-model" },
+					"retry.fallbackChains": { task: ["fallback/working-model"], default: ["global/parent-model"] },
+					"retry.fallbackChainExhausted": { task: "fail" },
+				}),
+				modelRegistry: {
+					refresh: async () => {},
+					getAvailable: () => [primary, fallback, parent],
+					getApiKey: async (candidate: Model) =>
+						candidate.provider === "global" || (fallbackAuthenticated && candidate.provider === "fallback")
+							? "test-key" : undefined,
+				} as never,
+				enableLsp: false,
+			});
+			if (fallbackAuthenticated) {
+				expect(create).toHaveBeenCalledTimes(1);
+				expect(result.exitCode).toBe(0);
+			} else {
+				expect(create).not.toHaveBeenCalled();
+				expect(result.exitCode).toBe(1);
+				expect(result.stderr).toContain('No model with usable credentials in contained role "task"');
+			}
+		});
+	}
+
 	it("passes ordered subagent candidates as a child retry fallback chain", async () => {
 		const primary = model("primary", "bad-runtime-model");
 		const fallback = model("fallback", "working-model");

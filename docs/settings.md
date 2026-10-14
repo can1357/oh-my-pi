@@ -590,6 +590,8 @@ A prefixed wildcard such as `openrouter/google/*` can be used as a chain key or 
 
 Set `retry.fallbackChainExhausted` to a role map such as `{ task: "fail", smol: "fail" }` to contain those roles. A `"fail"` role never inherits or enters `default`, including after its chain is exhausted and in subagents launched through that role alias; a missing role chain means no fallbacks. A known contained role uses only its own chain, ahead of model-selector and provider-wildcard chains. Recovery retains the provider's error when no eligible role candidate remains. Unlisted roles (or `"default"` entries) retain existing routing, including root `/model` switches. Explicit-selector children without a known role are not covered by this policy.
 
+Contained subagents never substitute the authenticated parent model when their own candidates lack credentials: they select an authenticated candidate from their own chain or fail. Containment survives automatic primary restoration, deferred child model resolution, and cold revival after a fallback hop. Completion and online tiny helpers also keep candidate expansion inside a contained role's chain.
+
 ### Tools and approvals
 
 ```yaml

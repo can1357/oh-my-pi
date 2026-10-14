@@ -184,6 +184,43 @@ describe("online tiny fallback candidates", () => {
 		expect(collectOnlineTinyCandidates(["tiny"], settings, models).map(candidate => candidate.model)).toEqual(models);
 	});
 
+	it.each(["default", "commit", secondarySelector])(
+		"contains smol hops without expanding the %s chain while preserving unlisted expansion",
+		offRoleChain => {
+			for (const exhausted of ["fail", "default", undefined] as const) {
+				const settings = Settings.isolated({
+					"retry.fallbackChains": {
+						smol: [secondarySelector],
+						[offRoleChain]: [fallbackSelector],
+					},
+					"retry.fallbackChainExhausted": exhausted ? { smol: exhausted } : {},
+				});
+				settings.setModelRole("smol", primarySelector);
+				if (offRoleChain === "default" || offRoleChain === "commit") {
+					settings.setModelRole(offRoleChain, secondarySelector);
+				}
+				expect(
+					collectOnlineTinyCandidates(["smol"], settings, models).map(candidate => candidate.model),
+				).toEqual(exhausted === "fail" ? [primary, secondary] : models);
+			}
+		},
+	);
+
+	it("keeps the complete contained role chain in order without expanding its hops", () => {
+		const offRole = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				smol: [secondarySelector, fallbackSelector],
+				[secondarySelector]: [`${offRole.provider}/${offRole.id}`],
+			},
+			"retry.fallbackChainExhausted": { smol: "fail" },
+		});
+		settings.setModelRole("smol", primarySelector);
+		expect(
+			collectOnlineTinyCandidates(["smol"], settings, [...models, offRole]).map(candidate => candidate.model),
+		).toEqual(models);
+	});
+
 	it("expands a seed model's own chain without merging role defaults", () => {
 		const settings = Settings.isolated({
 			"retry.fallbackChains": {

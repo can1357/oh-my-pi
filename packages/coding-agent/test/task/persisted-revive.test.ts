@@ -26,6 +26,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import {
 	findRetryFallbackCandidates,
 	getRetryFallbackChains,
@@ -797,6 +798,73 @@ describe("persisted subagent revival", () => {
 		expect(findRetryFallbackCandidates(context, chainKey, live, grok).map(candidate => candidate.raw)).toEqual([
 			"openai/gpt-4o-mini",
 		]);
+	});
+
+	it("retains contained routing when cold revival follows an ephemeral fallback hop", async () => {
+		const cwd = makeTempDir("@pi-revive-contained-hop-");
+		const sessionFile = await createPersistedSession(cwd, false, "task", undefined, {
+			retryFallback: {
+				primary: "anthropic/claude-sonnet-4-5",
+				chain: ["openai/gpt-4o-mini"],
+				exhausted: "fail",
+			},
+		});
+		const writer = await SessionManager.open(sessionFile);
+		writer.appendModelChange("openai/gpt-4o-mini", EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		await writer.close();
+		const auth = await AuthStorage.create(path.join(cwd, "auth.db"));
+		auth.keys.setRuntime("anthropic", "test-key");
+		auth.keys.setRuntime("openai", "test-key");
+		const registry = new ModelRegistry(auth, path.join(cwd, "models.yml"));
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 1,
+			"retry.maxDelayMs": 100,
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+			"retry.fallbackChains": { default: ["openai/gpt-4o"] },
+		});
+		let revived: AgentSession | undefined;
+		const requests: string[] = [];
+		MCPManager.setInstance(fakeMcpManager(() => []));
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options?.settings || !options.sessionManager) throw new Error("Expected restored child contract");
+			expect(options.sessionManager.getLastModelChangeRole()).toBe("subagent:persisted-restricted");
+			expect(options.modelPatternAuthFallback).toBeUndefined();
+			const fallback = registry.find("openai", "gpt-4o-mini");
+			if (!fallback) throw new Error("Expected fallback fixture");
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: fallback, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, streamOptions) => {
+					requests.push(model.id);
+					mock.push({ throw: "worker quota exhausted retry-after-ms=11180001" });
+					return mock.stream(model, context, streamOptions);
+				},
+			});
+			revived = new AgentSession({
+				agent,
+				settings: options.settings,
+				sessionManager: options.sessionManager,
+				modelRegistry: registry,
+			});
+			return { session: revived } as CreateAgentSessionResult;
+		});
+		try {
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd, undefined, { authStorage: auth, modelRegistry: registry, settings })(ref);
+			if (!reviver) throw new Error("Expected persisted reviver");
+			await reviver(ref);
+			if (!revived) throw new Error("Expected revived session");
+			await revived.prompt("Exhaust the revived worker");
+			await revived.waitForIdle();
+			expect(requests).toEqual(["gpt-4o-mini"]);
+			const last = revived.messages.at(-1);
+			expect(last?.role === "assistant" ? last.errorMessage : undefined).toContain("worker quota exhausted");
+		} finally {
+			await revived?.dispose();
+			auth.close();
+		}
 	});
 
 	it("installs an IRC wake monitor that emits cold-revive lifecycle frames on the shared bus", async () => {

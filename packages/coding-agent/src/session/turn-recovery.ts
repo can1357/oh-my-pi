@@ -1878,6 +1878,7 @@ export class TurnRecovery {
 		if (!role || role === EPHEMERAL_MODEL_CHANGE_ROLE || !currentModel) return undefined;
 		const configured = this.#host.settings.getModelRole(role);
 		if (!configured) return undefined;
+		if (cfgRetryFallbackChainExhausted.get(this.#host.settings)[role] === "fail") return role;
 		const resolved = resolveModelOverride([configured], this.#host.modelRegistry, this.#host.settings);
 		return resolved.model && modelsAreEqual(resolved.model, currentModel) ? role : undefined;
 	}
@@ -2154,7 +2155,11 @@ export class TurnRecovery {
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
 			return false;
 		}
-		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		this.#host.sessionManager.appendModelChange(
+			candidateSelector,
+			cfgRetryFallbackChainExhausted.get(this.#host.settings)[role] === "fail" ? role : EPHEMERAL_MODEL_CHANGE_ROLE,
+			true,
+		);
 		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
 		this.#host.setThinkingLevel(nextThinkingLevel);
 		if (!this.#activeRetryFallback) {
@@ -2413,6 +2418,7 @@ export class TurnRecovery {
 		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
 
 		const {
+			role,
 			originalSelector: originalSelectorRaw,
 			originalThinkingLevel,
 			lastAppliedFallbackThinkingLevel,
@@ -2461,7 +2467,10 @@ export class TurnRecovery {
 		// as fallback-served.
 		this.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(primaryModel);
-		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
+		this.#host.sessionManager.appendModelChange(
+			primarySelector,
+			cfgRetryFallbackChainExhausted.get(this.#host.settings)[role] === "fail" ? role : EPHEMERAL_MODEL_CHANGE_ROLE,
+		);
 		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
 		this.#host.setThinkingLevel(thinkingToApply);
 		await this.#host.syncAfterModelChange(previousEditMode);

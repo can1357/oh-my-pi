@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -1070,6 +1071,76 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			await session.dispose();
 		}
 	});
+
+	test("records deferred contained ownership before real retry recovery", async () => {
+		const options = buildSessionOptions("runtime-provider/runtime-model");
+		vi.spyOn(options.modelRegistry, "getApiKey").mockResolvedValue("test-key");
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxDelayMs": 100,
+			"retry.baseDelayMs": 1,
+			"retry.fallbackChains": { default: ["runtime-provider/runtime-fallback-model"] },
+			"retry.fallbackChainExhausted": { "subagent:deferred-contained": "fail" },
+		});
+		settings.setModelRole("default", "runtime-provider/runtime-model");
+		const { session } = await createAgentSession({
+			...options,
+			modelPatternFallbackRole: "subagent:deferred-contained",
+			settings,
+		});
+		try {
+			expect(session.sessionManager.getLastModelChangeRole()).toBe("subagent:deferred-contained");
+			const requests: string[] = [];
+			const mock = createMockModel();
+			session.agent.streamFn = (model, context, streamOptions) => {
+				requests.push(model.id);
+				mock.push({ throw: "worker quota exhausted retry-after-ms=11180001" });
+				return mock.stream(model, context, streamOptions);
+			};
+			await session.prompt("Exhaust deferred worker");
+			await session.waitForIdle();
+			expect(requests).toEqual(["runtime-model"]);
+			const last = session.messages.at(-1);
+			expect(last?.role === "assistant" ? last.errorMessage : undefined).toContain("worker quota exhausted");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	for (const fallbackAuthenticated of [false, true]) {
+		test(`contains deferred auth selection (${fallbackAuthenticated ? "own fallback authenticated" : "missing credentials"})`, async () => {
+			const options = buildSessionOptions("runtime-provider/runtime-model");
+			const parent = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!parent) throw new Error("Expected bundled parent");
+			const requestedAuth: string[] = [];
+			vi.spyOn(options.modelRegistry, "getApiKey").mockImplementation(async model => {
+				requestedAuth.push(model.id);
+				return model.id === parent.id || (fallbackAuthenticated && model.id === "runtime-fallback-model")
+					? "test-key" : undefined;
+			});
+			const pending = createAgentSession({
+				...options,
+				modelPatternFallbackRole: "subagent:deferred-auth",
+				modelPatternDefaultFallbackChain: ["runtime-provider/runtime-fallback-model"],
+				modelPatternAuthFallback: `${parent.provider}/${parent.id}`,
+				settings: Settings.isolated({
+					"retry.fallbackChainExhausted": { "subagent:deferred-auth": "fail" },
+				}),
+			});
+			if (fallbackAuthenticated) {
+				const { session } = await pending;
+				try {
+					expect(session.model?.id).toBe("runtime-fallback-model");
+					expect(session.sessionManager.getLastModelChangeRole()).toBe("subagent:deferred-auth");
+				} finally {
+					await session.dispose();
+				}
+			} else {
+				await expect(pending).rejects.toThrow("No model with usable credentials in contained role");
+			}
+			expect(requestedAuth).not.toContain(parent.id);
+		});
+	}
 
 	test.each([
 		["depleted", "runtime-model"],

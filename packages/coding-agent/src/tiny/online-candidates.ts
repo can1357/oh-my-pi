@@ -94,6 +94,9 @@ function expandFallbackCandidates(
 			const fallback = resolved.model ?? context.modelLookup.find(candidate.provider, candidate.id);
 			if (!fallback) continue;
 			if (!add(role, fallback)) continue;
+			// The complete contained role chain is already emitted above; each hop
+			// must not inherit a model-keyed, default, or other role's chain.
+			if (roleHint && context.fallbackChainExhausted?.[roleHint] === "fail") continue;
 			// After landing on this fallback, consult its own chain key so configs
 			// like `tiny: [B]` + `B: [C]` reach C (session recovery does the same).
 			queue.push({
@@ -109,7 +112,7 @@ function expandFallbackCandidates(
  * Collect unique online models for lightweight background tasks.
  *
  * Order: each requested role's primary, then canonical retry fallback chains
- * traversed transitively (so a hop onto B also consults B's own chain).
+ * traversed transitively, except contained roles keep only their own complete chain.
  * Disabling model fallback restricts attempts to the first resolvable primary,
  * unless `tryAllRoles` asks for the explicit role chain without configured
  * retry-chain expansion.
