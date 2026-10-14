@@ -126,7 +126,6 @@ import { ModelHubComponent, type ModelRoleSelectionScope } from "@oh-my-pi/pi-tu
 import { createModelBrowserSource } from "../model-browser-source";
 import { formatSessionContinuationNotice } from "../persistence-failure";
 import { ModelPickerComponent } from "@oh-my-pi/pi-tui/overlays/model-picker";
-import type { OAuthSelectorComponent as OAuthSelectorComponentType } from "@oh-my-pi/pi-tui/overlays/oauth-selector";
 import { PanelConfirmationComponent } from "../components/panel-confirmation";
 import { PanelLineupBuilderOverlayComponent } from "../components/panel-lineup-builder";
 import { PanelPersonaEditorComponent } from "../components/panel-persona-editor";
