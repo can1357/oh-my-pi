@@ -7,7 +7,6 @@ import {
 	type ServerSentEvent,
 	structuredCloneJSON,
 } from "@oh-my-pi/pi-utils";
-import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../env-api-key";
 import type {
