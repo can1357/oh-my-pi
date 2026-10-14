@@ -188,6 +188,10 @@
 ### Changed
 
 - The in-composer tool approval prompt summarizes the command, path, or content to one row so the composer keeps its room; `Ctrl+O` shows them in full ([#15642](https://github.com/can1357/oh-my-pi/pull/15642) by [@H4vC](https://github.com/H4vC))
+- Fewer modules evaluated before a plain launch's first prompt: the release check, `@file` attachments, marketplace auto-update, project-daemon presence, `--from-claude`/`--from-opencode` resume, the ratchet eval prelude, image generation and TTS now load on first use ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+### Changed
+
 - Background task guidance now lives in the Task tool description (and in same-name extension replacements that delegate to Task) instead of being repeated in every spawn acknowledgment ([#15477](https://github.com/can1357/oh-my-pi/pull/15477) by [@iliaal](https://github.com/iliaal))
 - The Auto-Promote Context and Retry Model Fallback settings now state that they are independent; turn off Retry Model Fallback (`retry.modelFallback`) to stop `retry.fallbackChains` model switches ([#15636](https://github.com/can1357/oh-my-pi/issues/15636))
 
@@ -314,9 +318,6 @@
 ### Fixed
 
 - Fixed `grep` on a single file showing in Tern as separate boxed snippets with no file row or syntax colors; it now looks the same as a `grep` over a directory
-- Faster startup: off-boot-path modules like the OTel exporter and model catalog now load lazily instead of during initial boot ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fewer modules evaluated before a plain launch's first prompt: the release check, `@file` attachments, marketplace auto-update, project-daemon presence, `--from-claude`/`--from-opencode` resume, the ratchet/archive eval preludes, image generation and TTS now load on first use ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fewer modules evaluated before a plain launch's first prompt: the release check, `@file` attachments, marketplace auto-update, project-daemon presence, `--from-claude`/`--from-opencode` resume, the ratchet eval prelude, image generation and TTS now load on first use ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.10.0] - 2026-10-12
 
