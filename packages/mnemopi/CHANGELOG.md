@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed recall missing older memories that match a query by meaning but share no words with it, once a bank holds more than 500 newer memories.
+- Fixed recall missing older memories that match a query by meaning but share no words with it, once a bank holds more than 500 newer memories ([#15729](https://github.com/can1357/oh-my-pi/pull/15729) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.11.2] - 2026-10-16
 
