@@ -315,4 +315,26 @@ describe("model registry discovery header restore", () => {
 			"X-Local": "loc-1",
 		});
 	});
+
+	test("reserves collapsed aliases owned by live models", async () => {
+		const modelsPath = await writeModelsYaml(
+			[
+				"    modelOverrides:",
+				"      claude-4-sonnet-thinking:",
+				"        headers:",
+				"          X-Account: live-1",
+			].join("\n"),
+			"cursor",
+		);
+		seedCachedRows([{ id: "cursor/cached-row", alias: "claude-4-sonnet-thinking" }], "cursor");
+
+		const registry = await reloadFromCache(modelsPath);
+		// The raw-id override and alias belong to the live collapsed model: the
+		// cached row that merely records the same member id gets neither.
+		expect(registry.find("cursor", "cursor/cached-row")).toBeUndefined();
+		expect(resolveSessionModelSelector(registry, "cursor/claude-4-sonnet-thinking")?.model).toMatchObject({
+			id: "claude-4-sonnet",
+			provider: "cursor",
+		});
+	});
 });

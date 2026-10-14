@@ -1538,14 +1538,20 @@ export class ModelRegistry {
 		const hasProviderHeaders = providerOverride?.headers !== undefined;
 		const hasBearerAuth = providerOverride?.authHeader === true && providerOverride.apiKey !== undefined;
 		if (!hasModelOverrideHeaders && !hasProviderHeaders && !hasBearerAuth) return undefined;
-		const liveModelIds = new Set(
-			[
-				...this.#customModelOverlays,
-				...this.#runtimeModelOverlays,
-				...(getBundledModels(providerId as Parameters<typeof getBundledModels>[0]) as Model<Api>[]),
-			]
-				.filter(model => model.provider === providerId)
-				.map(model => model.id),
+		const liveRows = [
+			...this.#customModelOverlays,
+			...this.#runtimeModelOverlays,
+			...(getBundledModels(providerId as Parameters<typeof getBundledModels>[0]) as Model<Api>[]),
+		].filter(model => model.provider === providerId);
+		const liveModelIds = new Set(liveRows.map(model => model.id));
+		// A live row owns not only its id but also its collapsed-variant aliases
+		// (e.g. bundled cursor/claude-4-sonnet's raw claude-4-sonnet-thinking):
+		// a cached row recording the same member id must not claim its headers.
+		const liveAliasSources = new Set(
+			liveRows.flatMap(model => [
+				...Object.values(model.thinking?.effortRouting ?? {}),
+				...("requestModelId" in model && model.requestModelId ? [model.requestModelId] : []),
+			]),
 		);
 		const bundledById = new Map(
 			((getBundledModels(providerId as Parameters<typeof getBundledModels>[0]) as Model<Api>[]) ?? []).map(model => [
@@ -1567,7 +1573,11 @@ export class ModelRegistry {
 				liveIds = new Set([...cohort.map(row => row.id), ...liveModelIds]);
 			}
 			let modelOverride = modelOverrides
-				? resolveModelOverrideWithAliases(modelOverrides, model, (_provider, id) => liveIds.has(id))
+				? resolveModelOverrideWithAliases(
+						modelOverrides,
+						model,
+						(_provider, id) => liveIds.has(id) || liveAliasSources.has(id),
+					)
 				: undefined;
 			// The alias index is first-write-wins, so an earlier cohort or catalog
 			// composition can own a remapped member id. The persisted routing and
@@ -1578,7 +1588,7 @@ export class ModelRegistry {
 					...Object.values(model.thinking?.effortRouting ?? {}),
 					...(model.requestModelId ? [model.requestModelId] : []),
 				]) {
-					if (!source || source === model.id || liveIds.has(source)) continue;
+					if (!source || source === model.id || liveIds.has(source) || liveAliasSources.has(source)) continue;
 					const candidate = modelOverrides.get(source);
 					if (candidate?.headers !== undefined) {
 						modelOverride = candidate;
@@ -1592,8 +1602,12 @@ export class ModelRegistry {
 			// header map resolves to no request headers at all, so it is not a
 			// restoration source: accepting it would publish an omitted row whose
 			// transport headers stay missing.
+			const requestModelIsReserved = model.requestModelId
+				? liveIds.has(model.requestModelId) || liveAliasSources.has(model.requestModelId)
+				: false;
 			const bundledModel =
-				bundledById.get(model.id) ?? (model.requestModelId ? bundledById.get(model.requestModelId) : undefined);
+				bundledById.get(model.id) ??
+				(model.requestModelId && !requestModelIsReserved ? bundledById.get(model.requestModelId) : undefined);
 			const headerSources = [
 				bundledModel?.resolveHeaders ?? bundledModel?.headers,
 				modelOverride?.headers,
@@ -1637,6 +1651,24 @@ export class ModelRegistry {
 			// safe to retain without baking a credential snapshot into the cache.
 			const omittedHeaderIds = new Set(cache.headerOmittedModelIds);
 			const restoreConfiguredHeaders = this.#configuredDiscoveryHeaderRestore(providerConfig.provider);
+			// Live rows own their collapsed-variant aliases (e.g. bundled
+			// cursor/claude-4-sonnet's raw claude-4-sonnet-thinking): claim them for
+			// their owner before the cache cohort registers, so the first-write-wins
+			// alias index cannot steal an alias from its intended owner.
+			registerCollapsedVariantAliases(
+				providerConfig.provider,
+				[
+					...this.#customModelOverlays
+						.filter(model => model.provider === providerConfig.provider)
+						.map(model => finalizeCustomModel(model, { useDefaults: true })),
+					...this.#runtimeModelOverlays
+						.filter(model => model.provider === providerConfig.provider)
+						.map(model => finalizeCustomModel(model, { useDefaults: true })),
+					...((getBundledModels(
+						providerConfig.provider as Parameters<typeof getBundledModels>[0],
+					) as Model<Api>[]) ?? []),
+				].filter(model => model.provider === providerConfig.provider),
+			);
 			let hasUnrestoredHeaders = false;
 			const usableCacheModels = cache.models.flatMap(model => {
 				if (!omittedHeaderIds.has(model.id)) return [model];
