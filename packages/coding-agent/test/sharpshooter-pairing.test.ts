@@ -382,6 +382,21 @@ describe("sharpshooter paired with a store backend", () => {
 		});
 	});
 
+	it("forwards the primary's settings hook, and offers none when the primary has none", async () => {
+		// A wrapper without the hook makes a live edit to the primary's own settings take the
+		// full re-apply fallback, which rebuilds the whole backend.
+		const seen: string[][] = [];
+		const primary: MemoryBackend = {
+			...stubPrimary([]),
+			applySettings: async (_session, changed) => {
+				seen.push([...changed]);
+			},
+		};
+		await withSharpshooter(primary).applySettings?.({} as never, ["mnemopi.model"]);
+		expect(seen).toEqual([["mnemopi.model"]]);
+		expect(withSharpshooter(stubPrimary([])).applySettings).toBeUndefined();
+	});
+
 	it("merges search hits from both backends", async () => {
 		spyOn(sharpshooterBackend, "search").mockResolvedValue({
 			backend: "sharpshooter",

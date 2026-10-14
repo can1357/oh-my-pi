@@ -254,5 +254,9 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 			? { beforeAgentStartPrompt: primary.beforeAgentStartPrompt.bind(primary) }
 			: {}),
 		...(primary.preCompactionContext ? { preCompactionContext: primary.preCompactionContext.bind(primary) } : {}),
+		// Without this, a live edit to the primary's own settings finds no hook and falls back to a
+		// full re-apply, tearing the backend down and discarding state such as Hindsight's
+		// confirmed banks.
+		...(primary.applySettings ? { applySettings: primary.applySettings.bind(primary) } : {}),
 	};
 }
