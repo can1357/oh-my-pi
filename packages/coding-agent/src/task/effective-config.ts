@@ -8,13 +8,14 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import { resolveModelServiceTier, type ServiceTierFamily, serviceTierFamily } from "@oh-my-pi/pi-ai/types";
 import {
+	automaticThinkingLevel,
 	parseConfiguredThinkingLevel,
 	parseThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
-import { discoverAdvisorConfigs } from "../advisor/config";
+import { type DiscoveredAdvisors, discoverAdvisorConfigs } from "../advisor/config";
 import type { OAuthAccountPools } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
 import {
@@ -181,6 +182,8 @@ export async function resolveEffectiveAgentConfig(
 ): Promise<EffectiveAgentConfig> {
 	const { name } = agent;
 	const entries = resolveAgentSettingsEntries(settings, name);
+	// The auth probe runs as the spawn's, under a child session id, so session-sticky OAuth resolves as it would there.
+	const probeSessionId = `agents-show-${name}`;
 	let parent = await resolveParentModel(settings, modelRegistry);
 	let selection = resolveAgentModelSelection({
 		settingsOverride: entries.model,
@@ -193,6 +196,7 @@ export async function resolveEffectiveAgentConfig(
 		parent.pattern,
 		modelRegistry,
 		settings,
+		probeSessionId,
 	);
 	// A cold models.yml discovery cache resolves nothing until one discovery pass runs, as at session start.
 	if (!resolved.model && modelRegistry.getDiscoverableProviders().length > 0) {
@@ -209,10 +213,14 @@ export async function resolveEffectiveAgentConfig(
 			parent.pattern,
 			modelRegistry,
 			settings,
+			probeSessionId,
 		);
 	}
 	const sessionModel = parent.source;
-	const { model } = resolved;
+	// Session start refreshes a lazily discovered model's live metadata (context window, thinking) before using it.
+	const model = resolved.model && (await modelRegistry.refreshSelectedModelMetadata(resolved.model));
+	// The role note names a role only when the selector that matched came from it.
+	const matchedRole = resolved.patternIndex !== undefined ? selection.patternRoles[resolved.patternIndex] : undefined;
 	const usesParent = resolved.authFallbackUsed || (selection.from !== "settings" && selection.from !== "agent");
 	const modelEntry: AgentConfigEntry = {
 		value: model ? formatModelStringWithRouting(model) : null,
@@ -225,7 +233,7 @@ export async function resolveEffectiveAgentConfig(
 			? `no available model matches ${selection.patterns.join(", ") || "the session model"}`
 			: resolved.authFallbackUsed
 				? `${selection.patterns.join(", ")} has no working credentials`
-				: (selection.role && `@${selection.role} via modelRoles.${selection.role}`) ||
+				: (matchedRole && `@${matchedRole} via modelRoles.${matchedRole}`) ||
 					(usesParent ? parent.note : undefined),
 	};
 
@@ -240,8 +248,16 @@ export async function resolveEffectiveAgentConfig(
 			: modelThinking !== undefined
 				? { value: modelThinking, source: { layer: "default", key: "model thinking default" } }
 				: {
-						value: parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(settings)) ?? null,
+						// As session start: the global default, except on a model whose thinking ladder is unverified (opt-in only).
+						value:
+							automaticThinkingLevel(
+								model,
+								parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(settings)),
+							) ?? null,
 						source: settingSource(cfgDefaultThinkingLevel, settings),
+						note: model?.thinking?.unverified
+							? "not applied: the model's thinking levels are unverified"
+							: undefined,
 					};
 	// The session clamps a concrete level to what the model supports; `auto` resolves per turn.
 	const thinking = clampThinking(chosenThinking, model);
@@ -424,31 +440,48 @@ export async function resolveEffectiveAgentConfig(
 /**
  * Advisors the child session starts: each enabled WATCHDOG.yml roster entry on
  * its explicit model or the advisor role, or the role alone when no roster exists.
+ * Like the session, which retries a `no_model` advisor once its initial discovery
+ * settles, an advisor left without a model awaits one discovery pass and resolves again.
  */
 async function resolveAdvisorRoster(
 	cwd: string,
 	settings: Settings,
 	modelRegistry: ModelRegistry,
 ): Promise<{ value: string[]; note?: string }> {
-	const roleModel = resolveAdvisorRoleSelection(settings, modelRegistry.getAvailable());
-	const roleString = roleModel && formatModelStringWithRouting(roleModel.model);
 	const { advisors } = await discoverAdvisorConfigs(cwd, getAgentDir());
+	let roster = resolveAdvisorModels(advisors, settings, modelRegistry);
+	if (roster.unresolved.length > 0 && modelRegistry.getDiscoverableProviders().length > 0) {
+		await modelRegistry.refresh("online-if-uncached");
+		roster = resolveAdvisorModels(advisors, settings, modelRegistry);
+	}
 	if (advisors.length === 0) {
-		return roleString ? { value: [roleString] } : { value: [], note: "no available model for the advisor role" };
+		return roster.value.length > 0 ? roster : { value: [], note: "no available model for the advisor role" };
+	}
+	const notes = ["roster from WATCHDOG.yml"];
+	if (roster.unresolved.length > 0) notes.push(`no model for ${roster.unresolved.join(", ")}`);
+	return { value: roster.value, note: notes.join("; ") };
+}
+
+function resolveAdvisorModels(
+	advisors: DiscoveredAdvisors["advisors"],
+	settings: Settings,
+	modelRegistry: ModelRegistry,
+): { value: string[]; unresolved: string[] } {
+	const roleModel = resolveAdvisorRoleSelection(settings, modelRegistry.getAvailable())?.model;
+	if (advisors.length === 0) {
+		return roleModel
+			? { value: [formatModelStringWithRouting(roleModel)], unresolved: [] }
+			: { value: [], unresolved: ["advisor role"] };
 	}
 	const value: string[] = [];
 	const unresolved: string[] = [];
 	for (const config of advisors) {
 		if (config.enabled === false) continue;
-		const model = config.model
-			? resolveModelOverride([config.model], modelRegistry, settings).model
-			: roleModel?.model;
+		const model = config.model ? resolveModelOverride([config.model], modelRegistry, settings).model : roleModel;
 		if (model) value.push(`${config.name}: ${formatModelStringWithRouting(model)}`);
 		else unresolved.push(config.name);
 	}
-	const notes = ["roster from WATCHDOG.yml"];
-	if (unresolved.length > 0) notes.push(`no model for ${unresolved.join(", ")}`);
-	return { value, note: notes.join("; ") };
+	return { value, unresolved };
 }
 
 function clampThinking(entry: AgentConfigEntry, model: Model | undefined): AgentConfigEntry {

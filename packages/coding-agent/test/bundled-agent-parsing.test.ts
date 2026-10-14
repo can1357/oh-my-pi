@@ -101,6 +101,7 @@ describe("bundled agent parsing", () => {
 			const agent = getBundledAgent(name);
 			expect(resolveAgentModelSelection({ agentModel: agent?.model, settings })).toEqual({
 				patterns: [model],
+				patternRoles: [role],
 				role,
 				from: "agent",
 			});
