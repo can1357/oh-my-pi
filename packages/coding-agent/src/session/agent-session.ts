@@ -14521,14 +14521,27 @@ export class AgentSession implements SettingsScope {
 				const redeemOptions = {
 					target: action.target,
 					baseUrlResolver: (candidate: string) => this.#modelRegistry.getProviderBaseUrl?.(candidate),
-					// Caller cancellation must not leave an ambiguous consume in flight.
+					// Caller cancellation must not leave an ambiguous consume in flight:
+					// it stops only the steps before the reset request is sent.
 					signal: AbortSignal.timeout(15_000),
+					preflightSignal: signal,
+				};
+				// A cancellation redeem saw before sending reports a no-op, dropped below.
+				const redeem = async (): Promise<ResetCreditRedeemOutcome> => {
+					try {
+						return await authStorage.resets.redeem(redeemOptions);
+					} catch (error) {
+						if (!signal?.aborted || error !== signal.reason) throw error;
+						dropped = "cancelled";
+						return { ok: false, code: "nothing_to_reset", provider };
+					}
 				};
 				const lockKey = resetAccountLockKey(action.target);
 				if (!lockKey) {
 					// An account without an upstream identity cannot share a cross-process fence.
 					dropped = dropReason(action);
-					if (!dropped) outcome = await authStorage.resets.redeem(redeemOptions);
+					if (!dropped) outcome = await redeem();
+					if (dropped) outcome = undefined;
 				} else {
 					// The coordinator is process-local. Fence concurrent processes and
 					// remember a recent attempt so a late 429 cannot spend again.
@@ -14562,7 +14575,7 @@ export class AgentSession implements SettingsScope {
 								// fence clears its marker, and drop it below.
 								dropped = dropReason(action);
 								if (dropped) return { ok: false, code: "nothing_to_reset", provider };
-								return authStorage.resets.redeem(redeemOptions);
+								return redeem();
 							});
 							if (dropped) return undefined;
 							if (result.code === "reset") this.#adoptedResetMarkers.set(lockKey, attemptedAt);

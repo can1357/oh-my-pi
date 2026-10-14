@@ -2312,10 +2312,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	let agent: Agent;
 	let session!: AgentSession;
+	// Requests without turn recovery (cache-warming replays, auto-learn captures)
+	// cannot spend a saved reset, so they keep the stream's own sibling rotation.
+	const registryGetApiKey = (requestModel: Model): ApiKeyResolver =>
+		modelRegistry.resolver(requestModel, agent.sessionId);
 	const effectiveGetApiKey =
 		options.getApiKey ??
 		((requestModel: Model): ApiKeyResolver => {
-			const resolve = modelRegistry.resolver(requestModel, agent.sessionId);
+			const resolve = registryGetApiKey(requestModel);
 			// A usage limit only a sibling inside its reserve could take over skips
 			// the in-stream rotation when turn recovery can still take it over, so
 			// a saved reset can be spent first.
@@ -4719,8 +4723,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// Every request through this streamFn is this session's own main
 				// loop (side-channel, advisor, and maintenance requests use
 				// dedicated wrappers), so it owns the warmer. The replay omits the
-				// one-shot fallback-credit redemption.
-				session.startCacheWarming(streamModel, context, merged);
+				// one-shot fallback-credit redemption and rotates credentials itself.
+				session.startCacheWarming(
+					streamModel,
+					context,
+					options.getApiKey ? merged : { ...merged, apiKey: registryGetApiKey(streamModel) },
+				);
 				return stream;
 			},
 			cursorExecHandlers,
@@ -5516,9 +5524,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const runAutoLearnCapture = createAutoLearnCaptureRunner({
 			sourceAgent: agent,
-			// The capture has no turn recovery to spend a saved reset, so it keeps
-			// the stream's own sibling rotation.
-			getApiKey: options.getApiKey ?? (requestModel => modelRegistry.resolver(requestModel, agent.sessionId)),
+			getApiKey: options.getApiKey ?? registryGetApiKey,
 			captureTools: () =>
 				(["manage_skill", "learn"] as const)
 					.map(name => session.getToolByName(name))

@@ -11,6 +11,8 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import { claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -1118,10 +1120,13 @@ describe("saved reset before a reserve-protected sibling", () => {
 				| "usage invalidation"
 				| "usage refresh"
 				| "peer pass"
-				| "reset fence";
+				| "reset fence"
+				| "redeem listing";
 			/** The primary serves the prompt and hits its wall on the next request. */
 			primaryServesFirst?: boolean;
 			settings?: Record<string, unknown>;
+			/** Replays the turn's last request as the cache warmer does, after the turn settles. */
+			replayCacheWarming?: boolean;
 		},
 	) {
 		const accounts: Record<string, Account> = {
@@ -1162,6 +1167,7 @@ describe("saved reset before a reserve-protected sibling", () => {
 		}
 		const resetPosts: string[] = [];
 		let healthReads = 0;
+		let redeeming = false;
 		const live: { session?: AgentSession } = {};
 		const requests: string[] = [];
 		const model = getBundledModel(provider, provider === "anthropic" ? "claude-sonnet-4-5" : "gpt-5.6-sol");
@@ -1207,6 +1213,8 @@ describe("saved reset before a reserve-protected sibling", () => {
 			const listing = url.searchParams.has("cedar_ember") || url.pathname.endsWith("/wham/rate-limit-reset-credits");
 			// Recovery has read pool health twice and now discovers the blocked account's reset.
 			if (options.abortAt === "reset listing" && listing && healthReads >= 2) void live.session?.abort();
+			// The reset call re-lists the live offer right before it sends the reset request.
+			if (options.abortAt === "redeem listing" && listing && redeeming) void live.session?.abort();
 			const consume = url.pathname.endsWith("/reset_rate_limits") || url.pathname.endsWith("/consume");
 			if (init?.method === "POST" && consume) {
 				resetPosts.push(account.accountId);
@@ -1304,6 +1312,11 @@ describe("saved reset before a reserve-protected sibling", () => {
 				permitted.map(credential => resolveCredentialIdentityKey(provider, credential) ?? ""),
 			);
 		}
+		const redeem = storage.resets.redeem.bind(storage.resets);
+		vi.spyOn(storage.resets, "redeem").mockImplementation(async redeemOptions => {
+			redeeming = true;
+			return redeem(redeemOptions);
+		});
 		const healthModel = storage.health.model.bind(storage.health);
 		live.session = session;
 		vi.spyOn(storage.health, "model").mockImplementation(async (...args) => {
@@ -1347,13 +1360,28 @@ describe("saved reset before a reserve-protected sibling", () => {
 			return withFileLock(file, fn, lockOptions);
 		});
 		const captures = vi.spyOn(session, "runAutolearnCapture");
+		const warmings = vi.spyOn(session, "startCacheWarming");
 
 		await session.prompt("keep working through the limit");
 		await session.waitForIdle();
 		await Promise.all(captures.mock.results.map(result => result.value));
 		// Restores this pass deferred as failed attempts; a cancelled one was never attempted.
 		const deferred = defaultCodexAutoRedeemCoordinator.deferredUntilByKey.size;
-		return { resetPosts, requests, healthReads, stalled, deferred, last: session.agent.state.messages.at(-1) };
+		let replay: AssistantMessage | undefined;
+		if (options.replayCacheWarming) {
+			const [warmModel, warmContext, warmOptions] = warmings.mock.calls.at(-1) ?? [];
+			if (!warmModel || !warmContext) throw new Error("Expected the turn to arm the cache warmer");
+			replay = await streamSimple(warmModel, warmContext, { ...warmOptions, maxTokens: 1 }).result();
+		}
+		return {
+			resetPosts,
+			requests,
+			healthReads,
+			stalled,
+			deferred,
+			replay,
+			last: session.agent.state.messages.at(-1),
+		};
 	}
 
 	it("spends the blocked Claude account's reset before a backup inside its reserve serves", async () => {
@@ -1418,6 +1446,13 @@ describe("saved reset before a reserve-protected sibling", () => {
 		expect(result.requests).toEqual(["primary"]);
 	});
 
+	it("spends nothing when the turn is cancelled while the reset call re-lists the offer", async () => {
+		const result = await hitWall("anthropic", { restoreBeforeReserve: true, abortAt: "redeem listing" });
+		expect(result.resetPosts).toEqual([]);
+		expect(result.deferred).toBe(0);
+		expect(result.requests).toEqual(["primary"]);
+	});
+
 	it.each(["usage invalidation", "usage refresh"] as const)(
 		"stops without waiting for a stalled Codex %s when the turn is cancelled during recovery",
 		async abortAt => {
@@ -1460,6 +1495,17 @@ describe("saved reset before a reserve-protected sibling", () => {
 		});
 		expect(result.resetPosts).toEqual([]);
 		expect(result.requests).toEqual(["primary", "primary", "backup"]);
+	});
+
+	it("lets the backup take over a cache-warming replay in-stream", async () => {
+		const result = await hitWall("anthropic", {
+			restoreBeforeReserve: true,
+			primaryServesFirst: true,
+			replayCacheWarming: true,
+		});
+		expect(result.resetPosts).toEqual([]);
+		expect(result.requests).toEqual(["primary", "primary", "backup"]);
+		expect(result.replay?.stopReason).not.toBe("error");
 	});
 
 	it("never spends an outside account's expiring reset while the backup could take over", async () => {
