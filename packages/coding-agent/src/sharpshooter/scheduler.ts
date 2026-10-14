@@ -45,9 +45,11 @@ export function startSharpshooterScheduler(options: {
 			const due = Date.now() >= sharpshooterNextConsolidationAt(state, intervalMinutes);
 			if (depth === 0 && !due) return;
 			// A failure before the lock (bank directory, lock file) comes back as a
-			// result with nowhere to record it in the bank state, so log it here.
+			// result with nowhere to record it in the bank state, so log it here. A
+			// recorded failure surfaces through status and diagnose; warning for it too
+			// would repeat the same line on every due tick.
 			const result = await runSharpshooterConsolidation(options);
-			if (!result.ran && result.reason === "error") {
+			if (!result.ran && result.reason === "error" && !result.recorded) {
 				logger.warn("sharpshooter consolidation failed", { error: result.error });
 			}
 		} catch (error) {
