@@ -982,6 +982,15 @@ export interface ImageContent {
 	 * turn differs byte-wise).
 	 */
 	url?: string;
+	/**
+	 * Which terminal graphics protocol produced this image, when it was
+	 * decoded from subprocess output. Display layers use it to suppress only
+	 * the decoded copies of frames already rendered raw (a sixel payload
+	 * rasterizes through PTY passthrough; a Kitty APC is consumed by the
+	 * replay terminal, so its decode is the only rendering). Absent for
+	 * user-attached images. Providers ignore it.
+	 */
+	source?: "kitty" | "sixel";
 }
 
 export type ComputerAction =

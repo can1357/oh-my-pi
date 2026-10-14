@@ -37,6 +37,7 @@ export const messageDefs = {
 			"detail?": "'auto' | 'low' | 'high' | 'original'",
 			"url?": "string",
 			"providerFile?": JSON_OBJECT,
+			"source?": "'kitty' | 'sixel'",
 		},
 		"Inline image; also the shape hosts send with prompts.",
 	),

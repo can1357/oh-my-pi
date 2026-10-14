@@ -498,11 +498,13 @@ export class BashExecutionComponent extends Container {
 		const hiddenLineCount = showingAllLines ? 0 : Math.max(0, availableLines.length - PREVIEW_LINES);
 		this.#outputPane.configure({ uncapSixel: hasSixelOutput });
 		this.#outputPane.setLines(availableLines);
-		// The PTY executor also decodes every sixel frame it saw into an image.
-		// A payload rendered raw through the replay rows already rasterizes in
-		// the host terminal, so handing that decode through here would draw the
-		// same image a second time below the output.
-		const images = hasSixelOutput ? [] : this.#images;
+		// The PTY executor also decodes every graphics frame it saw into an
+		// image. A sixel payload rendered raw through the replay rows already
+		// rasterizes in the host terminal, so handing that decode through here
+		// would draw the same image a second time below the output. Only
+		// sixel-sourced decodes are suppressed: a Kitty frame's APC was already
+		// consumed by the replay terminal, so its decode is the only rendering.
+		const images = hasSixelOutput ? this.#images.filter(image => image.source !== "sixel") : this.#images;
 
 		// Rebuild content container
 		this.#contentContainer.clear();

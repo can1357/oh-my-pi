@@ -1347,3 +1347,72 @@ describe("OutputSink SIXEL mixed-write column cap", () => {
 		expect(dumped.output).not.toContain("a".repeat(500));
 	});
 });
+
+describe("OutputSink SIXEL elision accounting", () => {
+	function enableSixelPassthrough(): void {
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+	}
+
+	test("sanitized bytes do not trip the middle-elision marker", async () => {
+		// #15327 round 8 item 1: the totals counted the raw chunk while the
+		// head/tail windows held the sanitized content, so ANSI controls and
+		// CRLF alone produced a bogus […NB elided…] marker and truncated: true
+		// on output that fit the budget whole.
+		// Passthrough gates stay off: the shrink under test is the text
+		// sanitize/normalize path, not sixel retention.
+		delete Bun.env.PI_FORCE_IMAGE_PROTOCOL;
+		delete Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH;
+		const sink = new OutputSink({ spillThreshold: 100, headBytes: 50 });
+		sink.push("\x1b[31mred\x1b[0m\r\nplain\r\n");
+		const dumped = await sink.dump();
+		expect(dumped.output).toBe("red\nplain\n");
+		expect(dumped.output).not.toContain("elided");
+		expect(dumped.truncated).toBe(false);
+		expect(dumped.elidedBytes).toBeUndefined();
+		expect(dumped.totalBytes).toBe("red\nplain\n".length);
+	});
+
+	test("a later small frame does not jump ahead of a tailed frame", async () => {
+		// #15327 round 8 item 2: once an oversized frame opened the tail
+		// window, a later smaller frame still fit the head room and was
+		// emitted ahead of it — reordering the multi-image output.
+		enableSixelPassthrough();
+		const big = `\x1bPq${"~".repeat(500)}\x1b\\`;
+		const small = "\x1bPq#0~~\x1b\\";
+		const sink = new OutputSink({ spillThreshold: 1000, headBytes: 200 });
+		sink.push("AAA\n");
+		sink.push(big);
+		sink.push("MID\n");
+		sink.push(small);
+		sink.push("\nZZZ");
+		const dumped = await sink.dump();
+		expect(dumped.output.indexOf("AAA")).toBeLessThan(dumped.output.indexOf(big));
+		expect(dumped.output.indexOf(big)).toBeLessThan(dumped.output.indexOf("MID"));
+		expect(dumped.output.indexOf("MID")).toBeLessThan(dumped.output.indexOf(small));
+		expect(dumped.output.indexOf(small)).toBeLessThan(dumped.output.indexOf("ZZZ"));
+		expect(dumped.truncated).toBeFalsy();
+	});
+
+	test("text after a multi-row frame is capped on its own row", async () => {
+		// #15327 round 8 item 3: the payload branch kept the pre-frame cap
+		// state, so text after a multi-row frame inherited a tripped row (and
+		// was dropped entirely) or a half-spent one (and was cut too early).
+		enableSixelPassthrough();
+		const sink = new OutputSink({ maxColumns: 8, spillThreshold: 100_000 });
+		sink.push("z".repeat(10));
+		sink.push("\x1bPqA\nB\nC\x1b\\");
+		sink.push("TAIL");
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain("TAIL");
+		expect(dumped.columnTruncatedLines).toBe(1);
+
+		const fresh = new OutputSink({ maxColumns: 8, spillThreshold: 100_000 });
+		fresh.push("123456");
+		fresh.push("\x1bPqA\nB\x1b\\");
+		fresh.push("WXYZ1234");
+		const redumped = await fresh.dump();
+		expect(redumped.output).toContain("WXYZ1234");
+		expect(redumped.columnTruncatedLines).toBeFalsy();
+	});
+});

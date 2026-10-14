@@ -859,6 +859,13 @@
 					"type": "object",
 					"properties": {},
 					"additionalProperties": {}
+				},
+				"source": {
+					"enum": [
+						"kitty",
+						"sixel"
+					],
+					"type": "string"
 				}
 			},
 			"required": [
