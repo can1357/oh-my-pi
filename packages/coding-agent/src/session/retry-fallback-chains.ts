@@ -448,6 +448,10 @@ export function resolveRetryFallbackChainKey(
 	currentModel?: Model | null,
 	roleHint?: string,
 ): string | undefined {
+	// A contained role with no chain must not be captured by a shared default assignment.
+	if (roleHint && context.fallbackChainExhausted?.[roleHint] === "fail") {
+		return Array.isArray(context.chains[roleHint]) ? roleHint : undefined;
+	}
 	const parsedConfigured = parseRetryFallbackSelector(currentSelector, context.modelLookup);
 	const currentPlainSelector = currentModel
 		? formatModelSelectorValue(formatModelString(currentModel), parsedConfigured?.thinkingLevel)
@@ -510,10 +514,6 @@ export function resolveRetryFallbackChainKey(
 	// then `default` when it also matches. A role assigned the live model at a
 	// different explicit effort (spawn `effort`, `/thinking`) still owns it,
 	// but only after every role whose effort matches.
-	// A contained role with no chain must not be captured by a shared default assignment.
-	if (roleHint && context.fallbackChainExhausted?.[roleHint] === "fail") {
-		return Array.isArray(context.chains[roleHint]) ? roleHint : undefined;
-	}
 	if (roleHint && Array.isArray(context.chains[roleHint])) return roleHint;
 	let matchedRole: string | undefined;
 	let effortRole: string | undefined;
