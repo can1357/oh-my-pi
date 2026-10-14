@@ -182,9 +182,11 @@ export function normalizeSuppressedSelector(
 }
 
 /**
- * Stable fingerprint of the local header configuration that composes a
+ * Stable one-way digest of the local header configuration that composes a
  * provider's cached request headers. Persisted with caches so offline reads
  * can tell whether the configured sources still reconstruct the omitted set.
+ * The digest never encodes the raw maps: header values may carry literal
+ * credentials that must not reach `models.db`.
  */
 export function computeHeaderConfigFingerprint(
 	providerOverride: { headers?: Record<string, string>; authHeader?: boolean; apiKey?: unknown } | undefined,
@@ -193,12 +195,13 @@ export function computeHeaderConfigFingerprint(
 	const models = [...(modelOverrides?.entries() ?? [])]
 		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
 		.map(([id, override]) => [id, override.headers ?? null]);
-	return JSON.stringify([
+	const canonical = JSON.stringify([
 		providerOverride?.headers ?? null,
 		providerOverride?.authHeader === true,
 		providerOverride?.apiKey !== undefined,
 		models,
 	]);
+	return new Bun.CryptoHasher("sha256").update(canonical).digest("hex");
 }
 
 /**

@@ -543,4 +543,79 @@ describe("model registry discovery header restore", () => {
 			expect(await registry.resolveModelHeaders(row!)).toMatchObject({ "X-Account": "s-1" });
 		}
 	});
+
+	test("keeps raw header values out of the persisted fingerprint", () => {
+		const digest = computeHeaderConfigFingerprint(
+			{ headers: { Authorization: "Bearer top-secret-value" }, apiKey: "present" },
+			new Map([["model-a", { headers: { "X-Account": "acct-secret-9" } }]]),
+		);
+		expect(digest).not.toContain("secret");
+		expect(digest.length).toBe(64);
+	});
+
+	test("persists the fingerprint on configured discovery refreshes", async () => {
+		const configA = await writeModelsYaml(
+			["    modelOverrides:", "      claude-haiku-4.5:", "        headers:", "          X-Local: loc-1"].join("\n"),
+			"github-copilot",
+		);
+		const online = await newRegistry(configA, mockDiscovery(["claude-haiku-4.5"]));
+		await online.refreshDiscoverableProviders(["github-copilot"], "online");
+		const onlineRow = online.find("github-copilot", "claude-haiku-4.5");
+		expect(onlineRow).toBeDefined();
+
+		// The model-level source is removed from the config after the write; the
+		// refreshed cache carries a fingerprint, so the offline read must drop the
+		// discovered row instead of keeping it with partial headers.
+		const configB = await writeModelsYaml(["    headers:", "      X-Provider: p-1"].join("\n"), "github-copilot");
+		const offline = await reloadFromCache(configB);
+		const bundled = (getBundledModels("github-copilot") as ReadonlyArray<{ id: string; api: string }>).find(
+			model => model.id === "claude-haiku-4.5",
+		)!;
+		expect(offline.find("github-copilot", "claude-haiku-4.5")!.api).toBe(bundled.api);
+		expect(onlineRow!.api).not.toBe(bundled.api);
+	});
+
+	test("preserves live alias owners during cache replay", async () => {
+		const modelsPath = await writeModelsYaml("", "cursor");
+		seedCachedRows([{ id: "stale-row", alias: "claude-4-sonnet-thinking", plain: true }], "cursor");
+
+		const registry = await reloadFromCache(modelsPath);
+		expect(registry.find("cursor", "stale-row")).toBeDefined();
+		expect(resolveSessionModelSelector(registry, "cursor/claude-4-sonnet-thinking")?.model).toMatchObject({
+			id: "claude-4-sonnet",
+		});
+	});
+
+	test("normalizes alias casing when ownership moves", async () => {
+		const modelsPath = await writeModelsYaml(
+			[
+				"    modelOverrides:",
+				"      Shared:",
+				"        headers:",
+				"          X-Account: a-1",
+				"      gateway/model-b:",
+				"        headers:",
+				"          X-B: b-1",
+			].join("\n"),
+		);
+		// First generation registers Shared -> gateway/model-a.
+		seedCachedRows([{ id: "gateway/model-a", alias: "Shared" }]);
+		const first = await reloadFromCache(modelsPath);
+		expect(await first.resolveModelHeaders(first.find("my-provider", "gateway/model-a")!)).toMatchObject({
+			"X-Account": "a-1",
+		});
+
+		// Second generation moves the alias to B under different casing: A keeps
+		// neither the alias nor its old override binding even though B itself
+		// restores through its direct source.
+		seedCachedRows([
+			{ id: "gateway/model-a", plain: true },
+			{ id: "gateway/model-b", alias: "shared" },
+		]);
+		const second = await reloadFromCache(modelsPath);
+		expect(await second.resolveModelHeaders(second.find("my-provider", "gateway/model-b")!)).toMatchObject({
+			"X-B": "b-1",
+		});
+		expect(await second.resolveModelHeaders(second.find("my-provider", "gateway/model-a")!)).toBeUndefined();
+	});
 });

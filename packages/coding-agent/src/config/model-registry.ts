@@ -1707,20 +1707,17 @@ export class ModelRegistry {
 			// cursor/claude-4-sonnet's raw claude-4-sonnet-thinking): claim them for
 			// their owner before the cache cohort registers, so the first-write-wins
 			// alias index cannot steal an alias from its intended owner.
-			registerCollapsedVariantAliases(
-				providerConfig.provider,
-				[
-					...this.#customModelOverlays
-						.filter(model => model.provider === providerConfig.provider)
-						.map(model => finalizeCustomModel(model, { useDefaults: true })),
-					...this.#runtimeModelOverlays
-						.filter(model => model.provider === providerConfig.provider)
-						.map(model => finalizeCustomModel(model, { useDefaults: true })),
-					...((getBundledModels(
-						providerConfig.provider as Parameters<typeof getBundledModels>[0],
-					) as Model<Api>[]) ?? []),
-				].filter(model => model.provider === providerConfig.provider),
-			);
+			const liveRowsForAlias = [
+				...this.#customModelOverlays
+					.filter(model => model.provider === providerConfig.provider)
+					.map(model => finalizeCustomModel(model, { useDefaults: true })),
+				...this.#runtimeModelOverlays
+					.filter(model => model.provider === providerConfig.provider)
+					.map(model => finalizeCustomModel(model, { useDefaults: true })),
+				...((getBundledModels(providerConfig.provider as Parameters<typeof getBundledModels>[0]) as Model<Api>[]) ??
+					[]),
+			].filter(model => model.provider === providerConfig.provider);
+			registerCollapsedVariantAliases(providerConfig.provider, liveRowsForAlias);
 			let hasUnrestoredHeaders = false;
 			const usableCacheModels = cache.models.flatMap(model => {
 				if (!omittedHeaderIds.has(model.id)) return [model];
@@ -1738,8 +1735,10 @@ export class ModelRegistry {
 			// must not claim its raw member id in the global selector index and make
 			// `provider/<alias>` select a model that is no longer published. Current
 			// rows supersede earlier cohort claims so a member id can move between
-			// rows across cache generations.
+			// rows across cache generations, but never across live owners: replay the
+			// live rows last so a cached row recording a live alias cannot steal it.
 			registerCollapsedVariantAliases(providerConfig.provider, usableCacheModels, { replace: true });
+			registerCollapsedVariantAliases(providerConfig.provider, liveRowsForAlias, { replace: true });
 			const providerOverride = this.#providerOverrides.get(providerConfig.provider);
 			const restoredCacheModels = providerOverride
 				? usableCacheModels.map(model => this.#applyProviderTransportOverrideToModel(model, providerOverride))
@@ -2279,6 +2278,7 @@ export class ModelRegistry {
 			cacheDbPath: this.#cacheDbPath,
 			cacheProviderId,
 			cacheTtlMs: 24 * 60 * 60 * 1000,
+			headerConfigFingerprint: this.#headerConfigFingerprint(providerId),
 			fetchDynamicModels,
 		});
 		const result = await manager.refresh(effectiveStrategy);

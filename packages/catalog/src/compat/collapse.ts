@@ -1183,7 +1183,8 @@ class VariantAliasIndex {
 			if (!replace || existing === to) return false;
 			const previousSources = this.#reverse.get(existing);
 			if (previousSources) {
-				const at = previousSources.indexOf(from);
+				const keyOf = (source: string) => source.toLowerCase();
+				const at = previousSources.findIndex(source => keyOf(source) === key);
 				if (at >= 0) previousSources.splice(at, 1);
 				if (previousSources.length === 0) this.#reverse.delete(existing);
 			}
