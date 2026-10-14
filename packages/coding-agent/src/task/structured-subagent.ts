@@ -565,7 +565,9 @@ function preflightPerCallModel(
 function resolvePanelSubagentPolicy(request: StructuredSubagentRequest): EffectiveSubagentPolicy {
 	const agent = assertPanelInvocationAllowed(request);
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;
-	const schema = resolveSchema(request, agent);
+	// An agent declaring `structured: true` keeps its result contract when the caller opts out (`task.structured` off).
+	const structured = request.structured !== false || agent.structured === true;
+	const schema = resolveSchema(request, agent, structured);
 	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
 		const { error } = buildOutputValidator(schema.schema);
 		if (error) {
@@ -591,6 +593,7 @@ function resolvePanelSubagentPolicy(request: StructuredSubagentRequest): Effecti
 		}),
 		parentActiveModelPattern,
 		schema,
+		structured,
 		planMode,
 		isIsolated: false,
 		mergeMode: "patch",
