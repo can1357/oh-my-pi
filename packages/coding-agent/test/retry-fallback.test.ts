@@ -47,6 +47,19 @@ describe("retry fallback selector resolution", () => {
 		expect(findRetryFallbackCandidates(context, "task", "google/gemini-3.5-flash")).toEqual([]);
 	});
 
+	it("keeps a contained hinted role pinned ahead of model-owned chains", () => {
+		const selector = "google/gemini-3.5-flash";
+		const context = createContext({
+			task: [],
+			default: ["openai/gpt-4o-mini"],
+			[selector]: ["openai/gpt-4o-mini"],
+			"google/*": ["openai/gpt-4o-mini"],
+		}, { task: selector });
+		context.fallbackChainExhausted = { task: "fail" };
+		expect(resolveRetryFallbackChainKey(context, selector, undefined, "task")).toBe("task");
+		expect(resolveRetryFallbackChainKey(context, selector, undefined, "smol")).toBe(selector);
+	});
+
 	it("keeps step-4 default routing for unlisted roles and root model switches", () => {
 		const context = createContext(
 			{ default: ["openai/gpt-4o-mini"] },
