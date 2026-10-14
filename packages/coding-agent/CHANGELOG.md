@@ -1140,6 +1140,7 @@ Older entries are archived in [packages/coding-agent/CHANGELOG.md@72d5cf31d861](
 - Added agent frontmatter `structured: true`: that agent's task spawns keep the `yield` tool and its `output` schema validation while `task.structured` is off ([#15717](https://github.com/can1357/oh-my-pi/pull/15717) by [@alphastorm](https://github.com/alphastorm))
 - The composer stays usable while a tool approval is pending: sending a message denies the call and steers the turn with it, so the agent knows why it was denied ([#15642](https://github.com/can1357/oh-my-pi/pull/15642) by [@H4vC](https://github.com/H4vC))
 - Session entries record which omp build wrote them, so a transcript shows whether a fix was live even in a session left open across an upgrade: the version, plus commit, branch, and uncommitted-diff hash when run from a source checkout, and `OMP_BUILD_LABEL` when set. `/session` lists the builds that wrote the session ([#15680](https://github.com/can1357/oh-my-pi/pull/15680) by [@will-bogusz](https://github.com/will-bogusz))
+- `sharpshooter.enabled` runs Sharpshooter next to the selected memory backend, so one session has searchable recall and always-on project decisions ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML))
 
 ### Changed
 
@@ -1188,6 +1189,9 @@ Older entries are archived in [packages/coding-agent/CHANGELOG.md@72d5cf31d861](
 - Fixed hashline edits silently dropping the tail of a line that `read` or `grep` had cut at the column limit; such an edit is now refused until a `:raw` read shows the full line ([#15649](https://github.com/can1357/oh-my-pi/issues/15649))
 - Fixed isolated tasks failing on linked worktrees with initialized recursive submodules and leaving updated submodule pins unreachable after cleanup ([#15457](https://github.com/can1357/oh-my-pi/issues/15457))
 - Fixed `/tan` missing the parent's prompt cache by advertising `xd://` tools top-level and omitting `ask` ([#15578](https://github.com/can1357/oh-my-pi/issues/15578)).
+- Sharpshooter consolidation keeps its queued decisions for the next cycle when the model returns only some of the memory files ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML))
+- Memory search after `/move` answers for the project the session moved to ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML))
+- `/move` no longer drops the first destination prompt or re-files the departed project's last prompt as a decision ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML))
 
 ## [18.10.4] - 2026-10-13
 
@@ -1847,14 +1851,6 @@ Older entries are archived in [packages/coding-agent/CHANGELOG.md@6693ddbfd58c](
 ### Fixed
 
 - Fixed an `EPIPE: broken pipe` unhandled rejection crashing the session when a debug adapter, eval kernel, IDA worker, or RPC server exits mid-write (seen on Windows) ([#14196](https://github.com/can1357/oh-my-pi/pull/14196) by [@andrebrait](https://github.com/andrebrait))
-- `sharpshooter.enabled` runs Sharpshooter next to the selected memory backend, so a session can have searchable recall and always-on project decisions at once; `/memory clear` and `/memory sync` still reach only the selected backend ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
-
-### Fixed
-
-- Sharpshooter consolidation no longer drops decisions when the model returns only some of the memory files: an incomplete reply is refused and its queued deltas are kept for the next cycle, instead of being consumed while the files they were meant for went unchanged ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
-- Memory search after `/move` now answers for the project the session moved to. The runtime context captured its cwd at session creation, so Sharpshooter, which keys its decision bank on cwd, could surface the source project's decisions and keep consolidating it ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
-- A `/move` landing while a source-prompt extraction is in flight no longer drops the first destination prompt: the dropped prompt is stashed and extracted once the in-flight source extraction clears ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
-- `/move` no longer re-extracts the prompt the session typed in the project it left. Sharpshooter catches up on a transcript that already ends in a user prompt, which is right at startup and wrong on a cwd move: an interrupted or failed turn left that prompt trailing, and the catch-up filed it as a decision about the destination ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
 
 ## [18.5.1] - 2026-10-03
 

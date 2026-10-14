@@ -7,16 +7,22 @@ import { all as allSettings, combine, type Derived } from "../config/registry";
 import type { Settings } from "../config/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
-import type { MemoryBackendStartOptions, MemoryBackendStartReason } from "../memory-backend/types";
+import type { MemoryBackend, MemoryBackendStartOptions, MemoryBackendStartReason } from "../memory-backend/types";
 import { startSharpshooterLeg } from "../memory-backend/with-sharpshooter";
 import type { MnemopiSessionState } from "../mnemopi/state";
-import { releaseSharpshooterSession } from "../sharpshooter/backend";
+import { releaseSharpshooterSession, sharpshooterBackend } from "../sharpshooter/backend";
 import { cfgSharpshooterEnabled } from "../sharpshooter/settings";
 
 import { cfgMemoryBackend } from "../memory-backend/settings";
 
 /** Id prefixes of the memory backends' own settings; their live edits reconfigure the active backend. */
 const MEMORY_BACKEND_SETTING_PREFIXES: readonly string[] = ["hindsight.", "mnemopi.", "sharpshooter."];
+
+/** A backend's `applySettings` call for the edits that belong to it. */
+interface SettingsHook {
+	backend: MemoryBackend;
+	own: string[];
+}
 
 let memorySettings: Derived<Record<string, unknown>> | undefined;
 
@@ -146,17 +152,31 @@ export class SessionMemory {
 			}
 			// Queue synchronously, like a backend switch, so the next prompt's
 			// transition drain orders after this edit.
-			const hook = await this.#enqueueTransition(async () => {
-				if (this.#host.isDisposed()) return undefined;
+			const hooks = await this.#enqueueTransition(async (): Promise<SettingsHook[]> => {
+				if (this.#host.isDisposed()) return [];
 				const backend = await resolveMemoryBackend(this.#host.settings);
+				const hooks: SettingsHook[] = [];
 				const own = changed.filter(path => path.startsWith(`${backend.id}.`));
-				if (own.length === 0) return undefined;
-				if (backend.applySettings) return { backend, own };
-				await this.#applyMemoryBackend(true);
-				return undefined;
+				if (own.length > 0) {
+					if (!backend.applySettings) {
+						await this.#applyMemoryBackend(true);
+						return hooks;
+					}
+					hooks.push({ backend, own });
+				}
+				// A paired Sharpshooter leg keeps the store's id, so its `sharpshooter.*`
+				// edits never match the prefix above and need their own route.
+				if (backend.id !== sharpshooterBackend.id) {
+					const paired = changed.filter(path => path.startsWith(`${sharpshooterBackend.id}.`));
+					if (paired.includes(cfgSharpshooterEnabled.id)) await this.applyPairedMemoryBackend("start");
+					else if (paired.length > 0 && cfgSharpshooterEnabled.get(this.#host.settings)) {
+						hooks.push({ backend: sharpshooterBackend, own: paired });
+					}
+				}
+				return hooks;
 			});
 			// Backend hooks may re-enter `applyMemoryBackend`, so they run outside the transition.
-			await hook?.backend.applySettings?.(this.#host.memoryBackendSession(), hook.own);
+			for (const hook of hooks) await hook.backend.applySettings?.(this.#host.memoryBackendSession(), hook.own);
 		} catch (error) {
 			logger.warn("Memory lifecycle: applying setting change failed", { changed, error: String(error) });
 			this.#host.emitNotice("error", `Failed to apply memory settings: ${String(error)}`, "Memory");

@@ -36,7 +36,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
 import { cfgMnemopiBank, cfgMnemopiRecallLimit, cfgMnemopiScoping } from "@oh-my-pi/pi-coding-agent/mnemopi/settings";
-import { cfgSharpshooterEnabled } from "@oh-my-pi/pi-coding-agent/sharpshooter/settings";
+import {
+	cfgSharpshooterEnabled,
+	cfgSharpshooterInjectionTokenLimit,
+} from "@oh-my-pi/pi-coding-agent/sharpshooter/settings";
 
 function createTool(name: string): AgentTool {
 	return {
@@ -519,10 +522,34 @@ describe("AgentSession memory backend lifecycle", () => {
 		const rebuildsBefore = promptRebuilds;
 
 		cfgSharpshooterEnabled.override(settings, true);
-		await current.applyPairedMemoryBackend("start");
+		// No explicit apply: the live edit alone must start the paired leg, ordered
+		// behind the next prompt rather than fired and forgotten by the UI.
+		await current.settleMemoryBackend();
 
 		expect(current.getHindsightSessionState()).toBe(store);
 		expect(startedAt).toEqual([`start ${cwd}`]);
+		expect(promptRebuilds).toBeGreaterThan(rebuildsBefore);
+	});
+
+	it("rebuilds the prompt when a paired Sharpshooter setting changes under another backend", async () => {
+		// `sharpshooter.*` edits miss the selected backend's `<id>.` prefix because
+		// the wrapper keeps the store's id; without their own route the injected
+		// decision budget stays at its old value until some unrelated rebuild.
+		const cwd = path.join(tempDir.path(), "project");
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, true);
+		await settings.reloadForCwd(cwd);
+		trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		const rebuildsBefore = promptRebuilds;
+
+		cfgSharpshooterInjectionTokenLimit.override(settings, 1234);
+		await current.settleMemoryBackend();
+
 		expect(promptRebuilds).toBeGreaterThan(rebuildsBefore);
 	});
 
@@ -547,10 +574,13 @@ describe("AgentSession memory backend lifecycle", () => {
 		// prompt has to be rebuilt or the session keeps being told the source
 		// project's rules after pairing was turned off. The Hindsight rebuild does
 		// not do it when its own bank scope is unchanged.
-		const rebuildsBefore = promptRebuilds;
-
 		await settings.reloadForCwd(path.join(tempDir.path(), "destination"));
 		cfgSharpshooterEnabled.override(settings, false);
+		// The edit listener applies the toggle on its own; settle it so the move's
+		// rebind is measured separately.
+		await current.settleMemoryBackend();
+		releaseSpy.mockClear();
+		const rebuildsBefore = promptRebuilds;
 		await rebindMemoryBackendForCwd(current);
 
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
