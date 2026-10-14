@@ -281,6 +281,62 @@ describe("maybeStartSharpshooterExtraction", () => {
 		await pendingThird.promise;
 	});
 
+	it("extracts a queued prompt against the transcript it was written in, even if /new replaces the messages before the slot clears", async () => {
+		using temp = TempDir.createSync("@sharpshooter-stash-replace-");
+		const root = temp.path();
+		const agentDir = path.join(root, "agent");
+		const messages = [
+			message("assistant", [{ type: "text", text: "ORIGINAL-ASSISTANT referent for the release discussion." }]),
+			message("user", [{ type: "text", text: "ORIGINAL-HUMAN keep releases on Tuesdays only." }]),
+		];
+		const deps = extractionDependencies(path.join(root, "project"), messages);
+
+		const pendingFirst = Promise.withResolvers<AssistantMessage>();
+		const completion = vi.spyOn(ai, "completeSimple").mockImplementation(() => pendingFirst.promise);
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+		await waitFor(() => completion.mock.calls.length === 1, "first completion was not called");
+
+		// Dropped while the slot is busy; its referent context is the transcript above.
+		const queuedPrompt = "Record that hotfixes may ship on any weekday.";
+		const queuedMessage = message("user", [{ type: "text", text: queuedPrompt }]);
+		messages.push(queuedMessage);
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			message: queuedMessage,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+		expect(completion).toHaveBeenCalledTimes(1);
+
+		// `/new`, a session switch or compaction swaps the transcript before the slot drains.
+		messages.splice(
+			0,
+			messages.length,
+			message("assistant", [{ type: "text", text: "REPLACEMENT-ASSISTANT unrelated context." }]),
+			message("user", [{ type: "text", text: "REPLACEMENT-HUMAN unrelated question." }]),
+		);
+
+		const pendingSecond = Promise.withResolvers<AssistantMessage>();
+		completion.mockImplementation(() => pendingSecond.promise);
+		pendingFirst.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
+		await waitFor(() => completion.mock.calls.length === 2, "queued prompt was not extracted");
+
+		const retried = JSON.stringify(completion.mock.calls[1]);
+		expect(retried).toContain(queuedPrompt);
+		expect(retried).toContain("ORIGINAL-HUMAN");
+		expect(retried).toContain("ORIGINAL-ASSISTANT");
+		expect(retried).not.toContain("REPLACEMENT");
+
+		pendingSecond.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
+		await pendingSecond.promise;
+	});
+
 	it("files a stashed prompt's deltas to the project it was queued in, even if /move lands before the slot clears", async () => {
 		using temp = TempDir.createSync("@sharpshooter-stash-move-");
 		const source = path.join(temp.path(), "source");

@@ -29,7 +29,9 @@ import { cfgSharpshooterEnabled } from "../sharpshooter/settings";
  */
 export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBackend> {
 	const selected = await selectMemoryBackend(settings);
-	if (cfgMemoryBackend.get(settings) === "sharpshooter" || !cfgSharpshooterEnabled.get(settings)) return selected;
+	// Guard on the backend actually selected: a live settings reload between the
+	// selector read and here could otherwise wrap sharpshooter in itself.
+	if (selected.id === "sharpshooter" || !cfgSharpshooterEnabled.get(settings)) return selected;
 	return withSharpshooter(selected);
 }
 
