@@ -170,7 +170,11 @@ export class SessionMemory {
 					const paired = changed.filter(path => path.startsWith(`${sharpshooterBackend.id}.`));
 					if (paired.includes(cfgSharpshooterEnabled.id)) await this.applyPairedMemoryBackend("start");
 					else if (paired.length > 0 && cfgSharpshooterEnabled.get(this.#host.settings)) {
-						hooks.push({ backend: sharpshooterBackend, own: paired });
+						// Inside the transition, unlike the primary's hook: it only
+						// rebuilds the prompt (never re-enters an apply), and turn
+						// preparation waits on the transition, not on hooks, so a
+						// prompt submitted mid-rebuild would see the old budget.
+						await sharpshooterBackend.applySettings?.(this.#host.memoryBackendSession(), paired);
 					}
 				}
 				return hooks;
@@ -281,10 +285,14 @@ export class SessionMemory {
 		if (this.#localMemoryStartupAbort?.signal === signal) this.#localMemoryStartupAbort = undefined;
 	}
 
-	async #disposeMemoryBackendState(consolidateMnemopi = true, retainMnemopi = true): Promise<void> {
+	async #disposeMemoryBackendState(
+		consolidateMnemopi = true,
+		retainMnemopi = true,
+		keepPendingExtractions = false,
+	): Promise<void> {
 		this.cancelLocalMemoryStartup();
 		try {
-			releaseSharpshooterSession(this.#host.memoryBackendSession());
+			releaseSharpshooterSession(this.#host.memoryBackendSession(), { keepPending: keepPendingExtractions });
 		} catch (error) {
 			logger.warn("Memory lifecycle: Sharpshooter dispose failed", { error: String(error) });
 		}
@@ -419,8 +427,18 @@ export class SessionMemory {
 		// transcript the destination never earned.
 		if ((this.#runtimeCwd ?? cwd) !== cwd) reason = "rebind";
 		try {
-			await this.#disposeMemoryBackendState(true, retain);
+			// Keep prompts queued behind a slow extraction: when this apply starts
+			// Sharpshooter again, the new leg carries them; when it does not, they
+			// are dropped below, since no leg is left to retry them.
+			await this.#disposeMemoryBackendState(true, retain, true);
 			this.#runtimeCwd = cwd;
+			const startsLeg =
+				this.#memoryAgentDir !== undefined &&
+				this.#memoryTaskDepth === 0 &&
+				!this.#host.isDisposed() &&
+				(cfgMemoryBackend.get(this.#host.settings) === "sharpshooter" ||
+					cfgSharpshooterEnabled.get(this.#host.settings));
+			if (!startsLeg) releaseSharpshooterSession(this.#host.memoryBackendSession());
 			if (this.#memoryAgentDir && this.#memoryTaskDepth === 0 && !this.#host.isDisposed()) {
 				const backend = await resolveMemoryBackend(this.#host.settings);
 				await backend.start({

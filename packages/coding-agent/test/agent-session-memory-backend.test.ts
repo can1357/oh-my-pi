@@ -519,6 +519,11 @@ describe("AgentSession memory backend lifecycle", () => {
 		const store = current.getHindsightSessionState();
 		expect(store).toBeDefined();
 		expect(startedAt).toEqual([]);
+		// Progress a reset would erase, whether by replacing the state or by
+		// clearing it in place: it decides what the next `agent_end` retains and
+		// whether first-turn recall fires again.
+		store!.lastRetainedTurn = 3;
+		store!.hasRecalledForFirstTurn = true;
 		const rebuildsBefore = promptRebuilds;
 
 		cfgSharpshooterEnabled.override(settings, true);
@@ -526,7 +531,8 @@ describe("AgentSession memory backend lifecycle", () => {
 		// behind the next prompt rather than fired and forgotten by the UI.
 		await current.settleMemoryBackend();
 
-		expect(current.getHindsightSessionState()).toBe(store);
+		expect(current.getHindsightSessionState()?.lastRetainedTurn).toBe(3);
+		expect(current.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(true);
 		expect(startedAt).toEqual([`start ${cwd}`]);
 		expect(promptRebuilds).toBeGreaterThan(rebuildsBefore);
 	});
