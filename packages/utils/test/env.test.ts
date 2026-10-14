@@ -286,6 +286,17 @@ describe("filterChildShellEnv", () => {
 			FROM_FD: "parent-override",
 			UNCHANGED: "parent-value",
 		});
+
+		const windowsEnv = { node_channel_fd: "3", FROM_FD: "3", UNCHANGED: "parent-value" };
+		expect({
+			child: filterChildShellEnv(windowsEnv, cwd, "win32"),
+			hasExpandedValue: getDotenvEnvValues(cwd, windowsEnv, "win32").includes("3"),
+		}).toEqual({ child: { UNCHANGED: "parent-value" }, hasExpandedValue: true });
+		expect(windowsEnv.node_channel_fd).toBe("3");
+
+		const posixEnv = { node_channel_fd: "3", FROM_FD: "3", UNCHANGED: "parent-value" };
+		expect(filterChildShellEnv(posixEnv, cwd, "linux")).toEqual(posixEnv);
+		expect(getDotenvEnvValues(cwd, posixEnv, "linux")).not.toContain("3");
 	});
 
 	it("uses the launch mode when dotenv changes NODE_ENV", async () => {
