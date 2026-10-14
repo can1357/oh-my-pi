@@ -163,7 +163,17 @@ function readLaunchEnv(): ReadonlyMap<string, string> | undefined {
 const launchEnvValues = readLaunchEnv();
 const projectEnvNamesLoadedByOmp = new Set<string>();
 
-function expandDotenvValues(values: Record<string, string>, env: Record<string, string>): Record<string, string> {
+function envValue(env: Record<string, string>, name: string, platform: NodeJS.Platform): string | undefined {
+	if (platform !== "win32") return env[name];
+	const key = Object.keys(env).find(candidate => candidate.toUpperCase() === name.toUpperCase());
+	return key === undefined ? undefined : env[key];
+}
+
+function expandDotenvValues(
+	values: Record<string, string>,
+	env: Record<string, string>,
+	platform: NodeJS.Platform,
+): Record<string, string> {
 	const expanded: Record<string, string> = {};
 	for (const key in values) {
 		expanded[key] = values[key].replace(
@@ -172,7 +182,7 @@ function expandDotenvValues(values: Record<string, string>, env: Record<string, 
 				if (escaped) return match.slice(1);
 				const name = braced ?? bare;
 				if (!name) return match;
-				return env[name] ?? expanded[name] ?? "";
+				return envValue(env, name, platform) ?? envValue(expanded, name, platform) ?? "";
 			},
 		);
 	}
@@ -183,6 +193,7 @@ function filterChildShellEnvInternal(
 	env: Record<string, string | undefined>,
 	cwd: string,
 	onDotenvValue?: (value: string) => void,
+	platform: NodeJS.Platform = process.platform,
 ): Record<string, string> {
 	const runtimeLaunchEnvValues = env === Bun.env || env === process.env ? launchEnvValues : undefined;
 	const result = filterProcessEnv(env);
@@ -194,10 +205,10 @@ function filterChildShellEnvInternal(
 	const modeLocalEnv = parseEnvFile(path.join(cwd, `${nodeEnvName}.local`));
 	const launchEnv = { ...projectEnv, ...modeEnv, ...localEnv, ...modeLocalEnv };
 	const expandedLaunchEnv = {
-		...expandDotenvValues(projectEnv, result),
-		...expandDotenvValues(modeEnv, result),
-		...expandDotenvValues(localEnv, result),
-		...expandDotenvValues(modeLocalEnv, result),
+		...expandDotenvValues(projectEnv, result, platform),
+		...expandDotenvValues(modeEnv, result, platform),
+		...expandDotenvValues(localEnv, result, platform),
+		...expandDotenvValues(modeLocalEnv, result, platform),
 	};
 	let fallbackLaunchEnv: Record<string, string> | undefined;
 	let expandedFallbackLaunchEnv: Record<string, string> | undefined;
@@ -206,10 +217,10 @@ function filterChildShellEnvInternal(
 		const fallbackModeLocalEnv = parseEnvFile(path.join(cwd, ".env.development.local"));
 		const candidate = { ...projectEnv, ...fallbackModeEnv, ...localEnv, ...fallbackModeLocalEnv };
 		const expandedCandidate = {
-			...expandDotenvValues(projectEnv, result),
-			...expandDotenvValues(fallbackModeEnv, result),
-			...expandDotenvValues(localEnv, result),
-			...expandDotenvValues(fallbackModeLocalEnv, result),
+			...expandDotenvValues(projectEnv, result, platform),
+			...expandDotenvValues(fallbackModeEnv, result, platform),
+			...expandDotenvValues(localEnv, result, platform),
+			...expandDotenvValues(fallbackModeLocalEnv, result, platform),
 		};
 		if (candidate.NODE_ENV === env.NODE_ENV || expandedCandidate.NODE_ENV === env.NODE_ENV) {
 			// Without a launch snapshot, NODE_ENV may itself have come from dotenv.
@@ -269,9 +280,9 @@ function filterChildShellEnvInternal(
 	// The IPC worker spawn that needs its channel sets these itself, so child
 	// shells must never carry them.
 	// Preserve these values during dotenv expansion so provenance stays accurate.
-	stripNodeIpcChannelEnv(result);
+	stripNodeIpcChannelEnv(result, platform);
 	// No source may pin the child shell to the agent's own repository.
-	stripGitRepoLocationEnv(result);
+	stripGitRepoLocationEnv(result, platform);
 	return result;
 }
 
@@ -279,17 +290,19 @@ function filterChildShellEnvInternal(
 export function filterChildShellEnv(
 	env: Record<string, string | undefined>,
 	cwd: string = getProjectDir(),
+	platform: NodeJS.Platform = process.platform,
 ): Record<string, string> {
-	return filterChildShellEnvInternal(env, cwd);
+	return filterChildShellEnvInternal(env, cwd, undefined, platform);
 }
 
 /** Return every value defined by `cwd`'s dotenv files, plus environment values that came from them. */
 export function getDotenvEnvValues(
 	cwd: string = getProjectDir(),
 	env: Record<string, string | undefined> = process.env,
+	platform: NodeJS.Platform = process.platform,
 ): string[] {
 	const values = new Set<string>();
-	filterChildShellEnvInternal(env, cwd, value => values.add(value));
+	filterChildShellEnvInternal(env, cwd, value => values.add(value), platform);
 	return [...values];
 }
 
