@@ -115,12 +115,13 @@ async function runWithDetachedModeDraft(
 	}
 }
 
-/** `/fast status` label for the active model: "ultra" for the Ultrafast tier, "on" for priority, else "off". */
+/** /fast status for the active model, including provider refusal. */
 function formatFastModeStatus(session: AgentSession): string {
 	const model = session.model;
 	if (!model || !serviceTierFamily(model)) return "off";
 	if (session.isUltrafastModeEnabled()) return "ultra";
-	return session.isFastModeActive() ? "on" : "off";
+	const state = session.fastModeState();
+	return state === "active" ? "on" : state;
 }
 
 const FAST_USAGE = "Usage: /fast [on|ultra|off|status]";
