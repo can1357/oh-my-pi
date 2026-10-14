@@ -966,6 +966,40 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("tears down a server that stops reading stdin while a close outliving its cancelled opener is written", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-wedge-after-abort-");
+		try {
+			const server = installHandshakeLsp();
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			ageDocument(client, await openDocument(client, "stale.ts"), PAST_DOCUMENT_IDLE_MS);
+			vi.spyOn(client.proc.stdin, "flush").mockImplementation(() => Promise.withResolvers<number>().promise);
+			// The close's own drain budget, expired on demand instead of on the wall clock.
+			const closeBudget = new AbortController();
+			vi.spyOn(AbortSignal, "timeout").mockImplementation(() => closeBudget.signal);
+
+			const controller = new AbortController();
+			const opening = lspClient.syncContent(
+				client,
+				path.join(tempDir.path(), "new.ts"),
+				"export const created = 1;\n",
+				controller.signal,
+			);
+			// Aborted before the close's write starts, so the opener's signal no longer bounds it.
+			controller.abort();
+			await rejectionOf(opening);
+			await server.waitFor(message => message.method === "textDocument/didClose");
+			closeBudget.abort(new Error("close drain budget spent"));
+
+			expect(await client.proc.exited).toBe(0);
+			expect(lspClient.getActiveClients()).toEqual([]);
+		} finally {
+			vi.restoreAllMocks();
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("sends an idle document's close even when the opener that chose it is cancelled first", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-aborted-");
 		try {

@@ -364,10 +364,15 @@ function teardownWedgedClient(client: LspClient): void {
 	}
 }
 
+/** Drain budget for a message written after its caller aborted (see {@link queueWriteMessage}). */
+const DELIVER_QUEUED_TIMEOUT_MS = 2_000;
+
 /**
  * Queue `message` behind earlier writes. A `signal` aborted while the message is
  * still queued skips its write, unless `deliverQueued` is set: then the message is
- * written anyway, unbounded, so writes queued after it never overtake it.
+ * written anyway, bounded by {@link DELIVER_QUEUED_TIMEOUT_MS} instead of `signal`,
+ * so writes queued after it never overtake it and a server that stops reading stdin
+ * is still torn down.
  */
 function queueWriteMessage(
 	client: LspClient,
@@ -377,7 +382,13 @@ function queueWriteMessage(
 ): Promise<void> {
 	const write = client.writeQueue
 		.catch(() => {})
-		.then(() => writeMessage(client.proc.stdin, message, deliverQueued && signal?.aborted ? undefined : signal));
+		.then(() =>
+			writeMessage(
+				client.proc.stdin,
+				message,
+				deliverQueued && signal?.aborted ? AbortSignal.timeout(DELIVER_QUEUED_TIMEOUT_MS) : signal,
+			),
+		);
 	const result = write.catch((err: unknown) => {
 		if (err instanceof LspDrainAbortError) {
 			// Only an abort that raced this write's in-flight drain leaves
@@ -1284,9 +1295,9 @@ const OPEN_FILE_IDLE_MS = 5 * 60 * 1000;
  * Close documents no OMP operation has used within {@link OPEN_FILE_IDLE_MS}. Overlays
  * ahead of disk and documents mid-open, sync or refresh stay open. Each close is queued
  * before the caller's didOpen and is written even if the caller aborts first, so the
- * server always sees the close a later reopen assumes. A drain that is in flight when
- * the caller aborts is bounded by `signal`, so a server that stops reading stdin is torn
- * down as it would be for that didOpen.
+ * server always sees the close a later reopen assumes. Its drain is bounded by `signal`,
+ * or by its own timeout once `signal` aborted before the write, so a server that stops
+ * reading stdin is torn down as it would be for that didOpen.
  */
 function closeIdleFiles(client: LspClient, signal?: AbortSignal): void {
 	const idleBefore = Date.now() - OPEN_FILE_IDLE_MS;
