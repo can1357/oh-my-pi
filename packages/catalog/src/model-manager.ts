@@ -96,10 +96,15 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	/**
 	 * Reconstruct omitted request headers from authoritative local configuration
 	 * when no trusted static source remains. Return undefined to keep the row
-	 * unavailable. This hook must not perform I/O; attach `resolveHeaders` for
+	 * unavailable. `cohort` is the cache batch whose rows are being restored, so
+	 * implementations can key per-pass state (alias hydration, live-id guards) off
+	 * its identity. This hook must not perform I/O; attach `resolveHeaders` for
 	 * command-backed credentials that must wait until an actual request.
 	 */
-	restoreCachedHeaders?: (model: Readonly<Model>) => Pick<Model, "headers" | "resolveHeaders"> | undefined;
+	restoreCachedHeaders?: (
+		model: Readonly<Model>,
+		cohort: readonly Readonly<Model>[],
+	) => Pick<Model, "headers" | "resolveHeaders"> | undefined;
 	/** Optional dynamic endpoint fetcher. */
 	fetchDynamicModels?: () => Promise<readonly ModelSpec<TApi>[] | null>;
 	/** Optional stencil.so fallback hook. */
@@ -222,7 +227,7 @@ function restoreCachedModelHeaders<TApi extends Api>(
 			if (!unrestorable && restorableHeaderFallback) {
 				return { ...model, headers: { ...restorableHeaderFallback } };
 			}
-			const configured = restoreCachedHeaders?.(model);
+			const configured = restoreCachedHeaders?.(model, cachedModels);
 			if (configured?.headers || configured?.resolveHeaders) return { ...model, ...configured };
 			unresolvedModelIds.add(model.id);
 			return model;

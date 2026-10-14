@@ -1518,8 +1518,12 @@ export class ModelRegistry {
 	 */
 	#configuredDiscoveryHeaderRestore(
 		providerId: string,
-		cacheProviderId: string,
-	): ((model: Readonly<Model<Api>>) => Pick<Model<Api>, "headers" | "resolveHeaders"> | undefined) | undefined {
+	):
+		| ((
+				model: Readonly<Model<Api>>,
+				cohort: readonly Readonly<Model<Api>>[],
+		  ) => Pick<Model<Api>, "headers" | "resolveHeaders"> | undefined)
+		| undefined {
 		const providerOverride = this.#providerOverrides.get(providerId);
 		const modelOverrides = this.#modelOverrides.get(providerId);
 		let hasModelOverrideHeaders = false;
@@ -1539,18 +1543,22 @@ export class ModelRegistry {
 				.filter(overlay => overlay.provider === providerId)
 				.map(overlay => overlay.id),
 		);
-		return model => {
-			// Restore against the cache cohort the manager is actually working
-			// from: it re-reads after concurrent writes (the failed-fetch fallback),
-			// and the persisted effort routing/requestModelId must register the
-			// retired-id aliases before the override lookup below uses them.
-			const cohort =
-				readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath)?.models ?? [];
-			registerCollapsedVariantAliases(providerId, cohort);
-			const liveIds = new Set([...cohort.map(row => row.id), ...liveOverlayIds]);
+		let restoredCohort: readonly Readonly<Model<Api>>[] | undefined;
+		let liveIds = liveOverlayIds;
+		return (model, cohort) => {
+			// Per-pass state keys off the cohort the manager hands us: it is the
+			// cache batch being restored (the fallback re-read after concurrent
+			// writes restores a different one). Replaying its persisted effort
+			// routing/requestModelId registers the retired-id aliases the override
+			// lookup below needs, without touching storage from this hook.
+			if (cohort !== restoredCohort) {
+				restoredCohort = cohort;
+				registerCollapsedVariantAliases(providerId, cohort);
+				liveIds = new Set([...cohort.map(row => row.id), ...liveOverlayIds]);
+			}
 			const modelOverride = modelOverrides
 				? (resolveModelOverrideWithAliases(modelOverrides, model, (_provider, id) => liveIds.has(id)) ??
-					(model.requestModelId
+					(model.requestModelId && !liveIds.has(model.requestModelId)
 						? resolveModelOverrideWithAliases(
 								modelOverrides,
 								{ ...model, id: model.requestModelId },
@@ -1602,14 +1610,11 @@ export class ModelRegistry {
 			// re-derived asynchronously at the request boundary, so its rows are
 			// safe to retain without baking a credential snapshot into the cache.
 			const omittedHeaderIds = new Set(cache.headerOmittedModelIds);
-			const restoreConfiguredHeaders = this.#configuredDiscoveryHeaderRestore(
-				providerConfig.provider,
-				cacheProviderId,
-			);
+			const restoreConfiguredHeaders = this.#configuredDiscoveryHeaderRestore(providerConfig.provider);
 			let hasUnrestoredHeaders = false;
 			const usableCacheModels = cache.models.filter(model => {
 				if (!omittedHeaderIds.has(model.id)) return true;
-				const restored = restoreConfiguredHeaders?.(model);
+				const restored = restoreConfiguredHeaders?.(model, cache.models);
 				const restorable = restored?.headers !== undefined || restored?.resolveHeaders !== undefined;
 				if (!restorable) hasUnrestoredHeaders = true;
 				return restorable;
@@ -2152,7 +2157,7 @@ export class ModelRegistry {
 		const manager = createModelManager<Api>({
 			providerId,
 			staticModels: [],
-			restoreCachedHeaders: this.#configuredDiscoveryHeaderRestore(providerId, cacheProviderId),
+			restoreCachedHeaders: this.#configuredDiscoveryHeaderRestore(providerId),
 			cacheDbPath: this.#cacheDbPath,
 			cacheProviderId,
 			cacheTtlMs: 24 * 60 * 60 * 1000,

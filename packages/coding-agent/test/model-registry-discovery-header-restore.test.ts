@@ -90,7 +90,7 @@ describe("model registry discovery header restore", () => {
 	// carries request headers, so the rows land in `header_omitted_model_ids`.
 	// Direct writes keep this process free of live collapses, so reloads start
 	// with cold variant aliases like a real restart.
-	function seedCachedRows(rows: ReadonlyArray<{ id: string; alias: string }>): void {
+	function seedCachedRows(rows: ReadonlyArray<{ id: string; alias?: string; requestModelId?: string }>): void {
 		writeModelCache(
 			"my-provider:openai-models-list-context-v3",
 			Date.now(),
@@ -106,12 +106,17 @@ describe("model registry discovery header restore", () => {
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 					contextWindow: 4096,
 					maxTokens: 1024,
-					thinking: {
-						mode: "effort",
-						efforts: [Effort.High],
-						defaultLevel: Effort.High,
-						effortRouting: { high: row.alias },
-					},
+					requestModelId: row.requestModelId,
+					...(row.alias
+						? {
+								thinking: {
+									mode: "effort",
+									efforts: [Effort.High],
+									defaultLevel: Effort.High,
+									effortRouting: { high: row.alias },
+								},
+							}
+						: {}),
 				}),
 				headers: { Authorization: "Bearer test-api-key" },
 			})),
@@ -213,6 +218,30 @@ describe("model registry discovery header restore", () => {
 		const owner = registry.find("my-provider", "gateway/model-a-thinking");
 		expect(owner).toBeDefined();
 		expect(await registry.resolveModelHeaders(owner!)).toMatchObject({ "X-Account": "acc-1" });
+	});
+
+	test("does not rebind request-model headers owned by a live custom model", async () => {
+		const modelsPath = await writeModelsYaml(
+			[
+				"    models:",
+				"      - id: gateway/upstream-raw",
+				"        name: Gateway Upstream",
+				"    modelOverrides:",
+				"      gateway/upstream-raw:",
+				"        headers:",
+				"          X-Account: acc-3",
+			].join("\n"),
+		);
+		seedCachedRows([{ id: "gateway/model-a", requestModelId: "gateway/upstream-raw" }]);
+
+		const registry = await reloadFromCache(modelsPath);
+		// The request-model id is a live custom model: its override headers belong
+		// to that model, so the request-model fallback must not rebind them onto
+		// the cached row, which stays excluded without a restoration source.
+		expect(registry.find("my-provider", "gateway/model-a")).toBeUndefined();
+		const owner = registry.find("my-provider", "gateway/upstream-raw");
+		expect(owner).toBeDefined();
+		expect(await registry.resolveModelHeaders(owner!)).toMatchObject({ "X-Account": "acc-3" });
 	});
 
 	test("restores headers from the cache cohort the manager reads", async () => {
