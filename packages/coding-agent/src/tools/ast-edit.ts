@@ -276,6 +276,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				rawPaths: params.paths,
 				cwd: this.session.cwd,
 				internalUrlAction: "rewrite",
+				context: resolveContext,
 				filesystem: urlFilesystem,
 				fileWritableOnly: true,
 				resolveExternalUrl: async rawPath => {

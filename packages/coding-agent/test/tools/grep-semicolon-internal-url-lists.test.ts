@@ -9,6 +9,8 @@ import { InternalUrlRouter, LocalProtocolHandler } from "@oh-my-pi/pi-coding-age
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { AstEditTool } from "../../src/tools/ast-edit";
+import { AstGrepTool } from "../../src/tools/ast-grep";
 import { GlobTool } from "../../src/tools/glob";
 import { GrepTool } from "../../src/tools/grep";
 import { ReadTool } from "../../src/tools/read";
@@ -79,6 +81,72 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 		const text = getResultText(result);
 		expect(text).toContain(skillBodyNeedle);
 		expect(text).toContain("abs path needle");
+	});
+
+	it("keeps a local:// artifact whose name contains `;` whole even when the suffix names a cwd file", async () => {
+		const artifactsDir = path.join(tmpDir, "artifacts");
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(localRoot, { recursive: true });
+		await Bun.write(path.join(localRoot, "notes;README.md"), "local artifact needle\n");
+		await Bun.write(path.join(tmpDir, "README.md"), "cwd readme needle\n");
+		const session = {
+			...createSession(),
+			getArtifactsDir: () => artifactsDir,
+			getSessionId: () => "semicolon-session",
+		} as ToolSession;
+		LocalProtocolHandler.setOverride({
+			getArtifactsDir: () => path.join(tmpDir, "other-session"),
+			getSessionId: () => "other-session",
+		});
+		const tool = new GrepTool(session);
+
+		const result = await tool.execute("literal-semicolon-local", {
+			pattern: "needle",
+			path: "local://notes;README.md",
+		});
+
+		const text = getResultText(result);
+		expect(text).toContain("local artifact needle");
+		expect(text).not.toContain("cwd readme needle");
+
+		const read = await new ReadTool(session).execute("literal-semicolon-read", { path: "local://notes;README.md" });
+		expect(getResultText(read)).toContain("local artifact needle");
+		expect(getResultText(read)).not.toContain("cwd readme needle");
+		const found = await new GlobTool(session).execute("literal-semicolon-find", { path: "local://notes;README.md" });
+		expect(found.details?.files).toEqual(["local://notes;README.md"]);
+	});
+
+	it("searches and rewrites a whole semicolon artifact in the caller's pinned local root", async () => {
+		const artifactsDir = path.join(tmpDir, "pinned-artifacts");
+		const artifactFile = path.join(artifactsDir, "local", "bundle;tail.ts");
+		await Bun.write(artifactFile, "legacyWrap(localValue, 1);\n");
+		await Bun.write(path.join(tmpDir, "tail.ts"), "legacyWrap(cwdValue, 2);\n");
+		const session = {
+			...createSession(),
+			getArtifactsDir: () => path.join(tmpDir, "own-artifacts"),
+			getSessionId: () => "own-session",
+			localProtocolOptions: {
+				getArtifactsDir: () => artifactsDir,
+				getSessionId: () => "pinned-session",
+			},
+		} as ToolSession;
+		LocalProtocolHandler.setOverride({
+			getArtifactsDir: () => path.join(tmpDir, "other-artifacts"),
+			getSessionId: () => "other-session",
+		});
+		const target = "local://bundle;tail.ts";
+		const found = await new AstGrepTool(session).execute("literal-semicolon-ast-search", {
+			pat: "legacyWrap($A, $B)",
+			path: target,
+		});
+		expect(getResultText(found)).toContain("localValue");
+		expect(getResultText(found)).not.toContain("cwdValue");
+		const preview = await new AstEditTool(session).execute("literal-semicolon-ast-edit", {
+			ops: [{ pat: "legacyWrap($A, $B)", out: "modernWrap($A, $B)" }],
+			paths: [target],
+		});
+		expect(getResultText(preview)).toContain("modernWrap(localValue, 1)");
+		expect(getResultText(preview)).not.toContain("cwdValue");
 	});
 
 	it("fans out for find (GlobTool) too", async () => {
