@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AuthStorage, type OAuthCredential, type ResetCreditTarget } from "@oh-my-pi/pi-ai/auth-storage";
 import { claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
 import { isRecord } from "@oh-my-pi/pi-ai/utils";
@@ -323,6 +323,60 @@ describe("Claude saved reset account safety", () => {
 		release.resolve();
 		const outcomes = await Promise.all([first, second]);
 		expect(outcomes.map(outcome => outcome.code)).toEqual(["reset", "reset"]);
+		expect(f.posts).toHaveLength(1);
+	});
+
+	it("sends no reset when the caller cancels while the live offer is re-listed", async () => {
+		const f = await fixture();
+		const arrived = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		f.state.usageArrived = arrived.resolve;
+		f.state.usageGate = release.promise;
+		const controller = new AbortController();
+		const redeem = f.storage.resets.redeem({
+			target: f.target,
+			baseUrlResolver: f.baseUrlResolver,
+			signal: AbortSignal.timeout(5_000),
+			preflightSignal: controller.signal,
+		});
+		await arrived.promise;
+		controller.abort();
+		release.resolve();
+		expect(
+			await redeem.then(
+				() => undefined,
+				(error: unknown) => error,
+			),
+		).toBe(controller.signal.reason);
+		expect(f.posts).toHaveLength(0);
+	});
+
+	it("spends once for a caller that joined an attempt its owner cancelled before sending", async () => {
+		const f = await fixture();
+		const arrived = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		f.state.usageArrived = arrived.resolve;
+		f.state.usageGate = release.promise;
+		const controller = new AbortController();
+		const options = { target: f.target, baseUrlResolver: f.baseUrlResolver };
+		const cancelled = f.storage.resets
+			.redeem({ ...options, preflightSignal: controller.signal })
+			.catch(() => "cancelled");
+		await arrived.promise;
+		// The joiner attaches to the owner's attempt once its own access resolves.
+		const accessed = Promise.withResolvers<void>();
+		const accessById = f.storage.oauth.accessById.bind(f.storage.oauth);
+		vi.spyOn(f.storage.oauth, "accessById").mockImplementation(async (...args) => {
+			const access = await accessById(...args);
+			accessed.resolve();
+			return access;
+		});
+		const joined = f.storage.resets.redeem(options);
+		await accessed.promise;
+		controller.abort();
+		release.resolve();
+		expect(await cancelled).toBe("cancelled");
+		expect((await joined).code).toBe("reset");
 		expect(f.posts).toHaveLength(1);
 	});
 
