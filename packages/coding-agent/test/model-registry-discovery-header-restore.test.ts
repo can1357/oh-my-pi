@@ -429,4 +429,42 @@ describe("model registry discovery header restore", () => {
 		expect(b).toBeDefined();
 		expect(await second.resolveModelHeaders(b!)).toMatchObject({ "X-Account": "b-1" });
 	});
+
+	test("reserves reviewed extra aliases for their live owners", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      grok-4.5:", "        headers:", "          X-Account: live-1"].join("\n"),
+			"cursor",
+		);
+		// The stale cache row records the reviewed extra alias of the bundled
+		// cursor-grok-4.5 family; the override belongs to that bundled owner.
+		seedCachedRows([{ id: "stale-row", alias: "grok-4.5" }], "cursor");
+
+		const registry = await reloadFromCache(modelsPath);
+		expect(registry.find("cursor", "stale-row")).toBeUndefined();
+		const owner = registry.find("cursor", "cursor-grok-4.5");
+		expect(owner).toBeDefined();
+		expect(await registry.resolveModelHeaders(owner!)).toMatchObject({ "X-Account": "live-1" });
+	});
+
+	test("scopes alias owners by provider", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      gemini-3.5-flash-low:", "        headers:", "          X-Account: a-1"].join(
+				"\n",
+			),
+			"google-antigravity",
+		);
+
+		// gemini-3-flash and gemini-3.5-flash both record the raw member id
+		// gemini-3.5-flash-low: both are current owners and must rebind the
+		// alias-keyed headers instead of the catalog-ordered first claimant
+		// suppressing the other. Providers reusing a raw id must not collide
+		// either, which the provider-scoped owner map enforces.
+		const registry = await reloadFromCache(modelsPath);
+		const first = registry.find("google-antigravity", "gemini-3-flash");
+		expect(first).toBeDefined();
+		expect(await registry.resolveModelHeaders(first!)).toMatchObject({ "X-Account": "a-1" });
+		const second = registry.find("google-antigravity", "gemini-3.5-flash");
+		expect(second).toBeDefined();
+		expect(await registry.resolveModelHeaders(second!)).toMatchObject({ "X-Account": "a-1" });
+	});
 });

@@ -19,7 +19,11 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
-import { collapseBuiltVariants, registerCollapsedVariantAliases } from "@oh-my-pi/pi-catalog/compat/collapse";
+import {
+	collapseBuiltVariants,
+	getReviewedVariantAliasSources,
+	registerCollapsedVariantAliases,
+} from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
 	clampCodexContextWindow,
 	clampsContextOverride,
@@ -1553,6 +1557,7 @@ export class ModelRegistry {
 			for (const source of [
 				...Object.values(liveModel.thinking?.effortRouting ?? {}),
 				...("requestModelId" in liveModel && liveModel.requestModelId ? [liveModel.requestModelId] : []),
+				...getReviewedVariantAliasSources(liveModel.provider, liveModel.id),
 			]) {
 				if (source && !liveAliasOwners.has(source)) liveAliasOwners.set(source, liveModel.id);
 			}
@@ -1585,6 +1590,7 @@ export class ModelRegistry {
 					for (const source of [
 						...Object.values(row.thinking?.effortRouting ?? {}),
 						...(row.requestModelId ? [row.requestModelId] : []),
+						...getReviewedVariantAliasSources(row.provider, row.id),
 					]) {
 						if (source && !cohortAliasOwners.has(source)) cohortAliasOwners.set(source, row.id);
 					}
@@ -2698,30 +2704,21 @@ export class ModelRegistry {
 		const overrides = this.#modelOverrides.get(provider);
 		if (!overrides || overrides.size === 0) return models;
 		let liveIds: Set<string> | null = null;
-		let aliasOwners: Map<string, string> | null = null;
+		let aliasOwners: Map<string, Set<string>> | null = null;
 		const indexCatalog = () => {
 			if (liveIds) return;
-			liveIds = new Set();
-			aliasOwners = new Map();
-			for (const indexed of models) {
-				liveIds.add(indexed.id);
-				// The global alias index keeps stale reverse entries, so alias
-				// ownership comes from the rows actually being projected: a raw id
-				// recorded by a different row may not rebind that row's override.
-				for (const source of [
-					...Object.values(indexed.thinking?.effortRouting ?? {}),
-					...(indexed.requestModelId ? [indexed.requestModelId] : []),
-				]) {
-					if (source && !aliasOwners.has(source)) aliasOwners.set(source, indexed.id);
-				}
-			}
+			liveIds = new Set(models.map(indexed => indexed.id));
+			// The global alias index keeps stale reverse entries, so alias
+			// ownership comes from the rows actually being projected: a raw id
+			// recorded by a different row may not rebind that row's override.
+			aliasOwners = this.#modelAliasOwners(models);
 		};
 		return models.map(model => {
-			const override = resolveModelOverrideWithAliases(overrides, model, (_provider, id) => {
+			const override = resolveModelOverrideWithAliases(overrides, model, (modelProvider, id) => {
 				indexCatalog();
 				if (liveIds?.has(id)) return true;
-				const owner = aliasOwners?.get(id);
-				return owner !== undefined && owner !== model.id;
+				const owners = aliasOwners?.get(`${modelProvider} ${id}`);
+				return owners !== undefined && !owners.has(model.id);
 			});
 			if (!override) return model;
 			return this.#applyModelOverrideWithClamp(model, override);
@@ -2849,15 +2846,26 @@ export class ModelRegistry {
 		);
 	}
 
-	/** Maps each collapsed-variant/request member id to the row that records it. */
-	#modelAliasOwners(models: readonly Model<Api>[]): Map<string, string> {
-		const owners = new Map<string, string>();
+	/**
+	 * Maps `provider source` of each collapsed-variant/request member id (and
+	 * reviewed extra alias) to the rows that record it. Keyed by provider: two
+	 * providers may reuse the same raw member id for different logical models.
+	 * A source keeps every current owner, so a row that records it may rebind
+	 * even when another row shares the member id.
+	 */
+	#modelAliasOwners(models: readonly Model<Api>[]): Map<string, Set<string>> {
+		const owners = new Map<string, Set<string>>();
 		for (const model of models) {
 			for (const source of [
 				...Object.values(model.thinking?.effortRouting ?? {}),
 				...(model.requestModelId ? [model.requestModelId] : []),
+				...getReviewedVariantAliasSources(model.provider, model.id),
 			]) {
-				if (source && !owners.has(source)) owners.set(source, model.id);
+				const key = `${model.provider} ${source}`;
+				if (!source) continue;
+				const existing = owners.get(key);
+				if (existing) existing.add(model.id);
+				else owners.set(key, new Set([model.id]));
 			}
 		}
 		return owners;
@@ -2879,19 +2887,19 @@ export class ModelRegistry {
 		const extendedContext = isExtendedContextEnabledFromSettings(this.#settings);
 		const compactionPoints = getModelCompactionPointsFromSettings(this.#settings);
 		let liveKeys: Set<string> | null = null;
-		let aliasOwners: Map<string, string> | null = null;
+		let aliasOwners: Map<string, Set<string>> | null = null;
 		return models.map(model => {
 			const providerOverrides = overrides.get(model.provider);
 			const override = providerOverrides
 				? resolveModelOverrideWithAliases(providerOverrides, model, (provider, id) => {
 						// The global alias index keeps stale reverse entries, so alias
 						// ownership comes from the rows actually being projected: a raw
-						// id recorded by a different row may not rebind this row's override.
+						// id recorded by no current row may not rebind this row's override.
 						liveKeys ??= new Set(models.map(m => `${m.provider} ${m.id}`));
 						if (liveKeys.has(`${provider} ${id}`)) return true;
 						aliasOwners ??= this.#modelAliasOwners(models);
-						const owner = aliasOwners.get(id);
-						return owner !== undefined && owner !== model.id;
+						const owners = aliasOwners.get(`${provider} ${id}`);
+						return owners !== undefined && !owners.has(model.id);
 					})
 				: undefined;
 			const overridden = override ? this.#applyModelOverrideWithClamp(model, override) : model;

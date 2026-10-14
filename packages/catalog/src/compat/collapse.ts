@@ -1334,6 +1334,18 @@ export function getVariantAliasSources(provider: Provider, modelId: string): rea
 	return [...new Set([...staticSources, ...dynamicSources])];
 }
 
+/**
+ * Reviewed-table alias sources only (members and `extraAliases`), excluding
+ * runtime registrations that may carry stale cohort mappings. Ownership
+ * derivation uses these so a stale dynamic entry cannot re-attribute an alias
+ * a reviewed family still owns.
+ */
+export function getReviewedVariantAliasSources(provider: Provider, modelId: string): readonly string[] {
+	const providerId = provider.toLowerCase();
+	const table = reviewedCollapseTable(provider) ?? reviewedCollapseTable(providerId);
+	return table ? (getAliasIndex(table).sourcesOf(modelId) ?? []) : [];
+}
+
 function maxOrNull(values: ReadonlyArray<number | null>): number | null {
 	const known = values.filter((v): v is number => v != null);
 	return known.length ? Math.max(...known) : null;
