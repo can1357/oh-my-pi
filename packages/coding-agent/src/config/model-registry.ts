@@ -1518,7 +1518,7 @@ export class ModelRegistry {
 	 */
 	#configuredDiscoveryHeaderRestore(
 		providerId: string,
-		liveModelIds: ReadonlySet<string>,
+		cacheProviderId: string,
 	): ((model: Readonly<Model<Api>>) => Pick<Model<Api>, "headers" | "resolveHeaders"> | undefined) | undefined {
 		const providerOverride = this.#providerOverrides.get(providerId);
 		const modelOverrides = this.#modelOverrides.get(providerId);
@@ -1534,14 +1534,27 @@ export class ModelRegistry {
 		const hasProviderHeaders = providerOverride?.headers !== undefined;
 		const hasBearerAuth = providerOverride?.authHeader === true && providerOverride.apiKey !== undefined;
 		if (!hasModelOverrideHeaders && !hasProviderHeaders && !hasBearerAuth) return undefined;
+		const liveOverlayIds = new Set(
+			[...this.#customModelOverlays, ...this.#runtimeModelOverlays]
+				.filter(overlay => overlay.provider === providerId)
+				.map(overlay => overlay.id),
+		);
 		return model => {
+			// Restore against the cache cohort the manager is actually working
+			// from: it re-reads after concurrent writes (the failed-fetch fallback),
+			// and the persisted effort routing/requestModelId must register the
+			// retired-id aliases before the override lookup below uses them.
+			const cohort =
+				readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath)?.models ?? [];
+			registerCollapsedVariantAliases(providerId, cohort);
+			const liveIds = new Set([...cohort.map(row => row.id), ...liveOverlayIds]);
 			const modelOverride = modelOverrides
-				? (resolveModelOverrideWithAliases(modelOverrides, model, (_provider, id) => liveModelIds.has(id)) ??
+				? (resolveModelOverrideWithAliases(modelOverrides, model, (_provider, id) => liveIds.has(id)) ??
 					(model.requestModelId
 						? resolveModelOverrideWithAliases(
 								modelOverrides,
 								{ ...model, id: model.requestModelId },
-								(_provider, id) => liveModelIds.has(id),
+								(_provider, id) => liveIds.has(id),
 							)
 						: undefined))
 				: undefined;
@@ -1591,7 +1604,7 @@ export class ModelRegistry {
 			const omittedHeaderIds = new Set(cache.headerOmittedModelIds);
 			const restoreConfiguredHeaders = this.#configuredDiscoveryHeaderRestore(
 				providerConfig.provider,
-				new Set(cache.models.map(model => model.id)),
+				cacheProviderId,
 			);
 			let hasUnrestoredHeaders = false;
 			const usableCacheModels = cache.models.filter(model => {
@@ -2139,10 +2152,7 @@ export class ModelRegistry {
 		const manager = createModelManager<Api>({
 			providerId,
 			staticModels: [],
-			restoreCachedHeaders: this.#configuredDiscoveryHeaderRestore(
-				providerId,
-				new Set((cached?.models ?? []).map(model => model.id)),
-			),
+			restoreCachedHeaders: this.#configuredDiscoveryHeaderRestore(providerId, cacheProviderId),
 			cacheDbPath: this.#cacheDbPath,
 			cacheProviderId,
 			cacheTtlMs: 24 * 60 * 60 * 1000,

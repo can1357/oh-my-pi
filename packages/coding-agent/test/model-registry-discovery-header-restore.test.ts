@@ -85,6 +85,42 @@ describe("model registry discovery header restore", () => {
 		return newRegistry(modelsPath, async () => new Response("not found", { status: 404 }));
 	}
 
+	// Writes cache rows the way a previous run's discovery collapse would: the
+	// persisted row keeps the effort routing naming its retired member id and
+	// carries request headers, so the rows land in `header_omitted_model_ids`.
+	// Direct writes keep this process free of live collapses, so reloads start
+	// with cold variant aliases like a real restart.
+	function seedCachedRows(rows: ReadonlyArray<{ id: string; alias: string }>): void {
+		writeModelCache(
+			"my-provider:openai-models-list-context-v3",
+			Date.now(),
+			rows.map(row => ({
+				...buildModel({
+					id: row.id,
+					name: row.id,
+					api: "openai-completions",
+					provider: "my-provider",
+					baseUrl,
+					reasoning: true,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 4096,
+					maxTokens: 1024,
+					thinking: {
+						mode: "effort",
+						efforts: [Effort.High],
+						defaultLevel: Effort.High,
+						effortRouting: { high: row.alias },
+					},
+				}),
+				headers: { Authorization: "Bearer test-api-key" },
+			})),
+			true,
+			"",
+			path.join(tempDir, "models.db"),
+		);
+	}
+
 	test("rebuilds modelOverrides headers on cached discovery rows", async () => {
 		const modelsPath = await writeModelsYaml(
 			["    modelOverrides:", "      gateway/model-a:", "        headers:", "          X-Account: acc-1"].join("\n"),
@@ -146,37 +182,7 @@ describe("model registry discovery header restore", () => {
 				"          X-Account: acc-1",
 			].join("\n"),
 		);
-		// Cache creation stands in for a previous run whose discovery collapsed a
-		// `gateway/model-a`/`-thinking` pair: the persisted row keeps the effort
-		// routing naming the retired member id. It is written directly so this
-		// process never runs a collapse and starts the reload with cold aliases,
-		// like a real restart.
-		const cachedModel = buildModel({
-			id: "gateway/model-a",
-			name: "Gateway Model A",
-			api: "openai-completions",
-			provider: "my-provider",
-			baseUrl,
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 4096,
-			maxTokens: 1024,
-			thinking: {
-				mode: "effort",
-				efforts: [Effort.High],
-				defaultLevel: Effort.High,
-				effortRouting: { high: "gateway/model-a-thinking" },
-			},
-		});
-		writeModelCache(
-			"my-provider:openai-models-list-context-v3",
-			Date.now(),
-			[{ ...cachedModel, headers: { Authorization: "Bearer test-api-key" } }],
-			true,
-			"",
-			path.join(tempDir, "models.db"),
-		);
+		seedCachedRows([{ id: "gateway/model-a", alias: "gateway/model-a-thinking" }]);
 
 		const registry = await reloadFromCache(modelsPath);
 		const cached = registry.find("my-provider", "gateway/model-a");
@@ -185,25 +191,54 @@ describe("model registry discovery header restore", () => {
 		expect(resolveSessionModelSelector(registry, "my-provider/gateway/model-a")).toBeDefined();
 	});
 
-	test("does not restore rows whose header declarations are empty", async () => {
+	test("does not rebind alias-keyed headers owned by a live custom model", async () => {
 		const modelsPath = await writeModelsYaml(
 			[
-				"    headers: {}",
+				"    models:",
+				"      - id: gateway/model-a-thinking",
+				"        name: Gateway Thinking",
 				"    modelOverrides:",
-				"      gateway/model-a:",
+				"      gateway/model-a-thinking:",
 				"        headers:",
-				'          X-Account: ""',
+				"          X-Account: acc-1",
 			].join("\n"),
 		);
-		const registry1 = await newRegistry(modelsPath, mockDiscovery(["gateway/model-a"]));
-		await registry1.refreshDiscoverableProviders(["my-provider"], "online");
-		expect(registry1.find("my-provider", "gateway/model-a")).toBeDefined();
+		seedCachedRows([{ id: "gateway/model-a", alias: "gateway/model-a-thinking" }]);
 
-		// Empty header declarations resolve to no request headers, so they are not
-		// a restoration source: the row must stay excluded instead of being
-		// published with its auth/account-routing header missing.
-		const registry2 = await reloadFromCache(modelsPath);
-		expect(registry2.find("my-provider", "gateway/model-a")).toBeUndefined();
-		expect(registry2.getProviderDiscoveryState("my-provider")?.stale).toBe(true);
+		const registry = await reloadFromCache(modelsPath);
+		// The alias id is a live custom model: its override headers belong to that
+		// model and must not be rebound onto the cached logical row, which has no
+		// restoration source of its own and stays excluded.
+		expect(registry.find("my-provider", "gateway/model-a")).toBeUndefined();
+		const owner = registry.find("my-provider", "gateway/model-a-thinking");
+		expect(owner).toBeDefined();
+		expect(await registry.resolveModelHeaders(owner!)).toMatchObject({ "X-Account": "acc-1" });
+	});
+
+	test("restores headers from the cache cohort the manager reads", async () => {
+		const modelsPath = await writeModelsYaml(
+			[
+				"    modelOverrides:",
+				"      gateway/model-b-thinking:",
+				"        headers:",
+				"          X-Account: acc-2",
+			].join("\n"),
+		);
+		seedCachedRows([{ id: "gateway/model-a", alias: "gateway/model-a-thinking" }]);
+		const registry = await newRegistry(modelsPath, async () => {
+			// Another process replaces the provider's cache rows while the
+			// discovery request is in flight; the failed-fetch fallback re-reads
+			// and restores this newer cohort.
+			seedCachedRows([{ id: "gateway/model-b", alias: "gateway/model-b-thinking" }]);
+			return new Response("not found", { status: 404 });
+		});
+		await registry.refreshDiscoverableProviders(["my-provider"], "online-if-uncached");
+
+		// The fallback must persist the restored newer cohort instead of an empty
+		// snapshot, so the next startup restores B from the cache.
+		const restarted = await reloadFromCache(modelsPath);
+		const cached = restarted.find("my-provider", "gateway/model-b");
+		expect(cached).toBeDefined();
+		expect(await restarted.resolveModelHeaders(cached!)).toMatchObject({ "X-Account": "acc-2" });
 	});
 });
