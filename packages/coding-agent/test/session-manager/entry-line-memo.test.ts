@@ -989,4 +989,153 @@ describe("SessionManager entry-line memo", () => {
 		expect(await blobBytesBase64(mutatedRef)).toBe(mutatedBase64);
 		expect(bodyAfterSecond).not.toContain(originalRef);
 	});
+	it("persists a custom message's marker-shaped structuredContent mutated in place", async () => {
+		// A custom message's opaque `details` can carry the same MCP spill
+		// markers a tool result's does — but `stripSpilledMcpStructuredContent`
+		// strips only the top-level `details` of `role === "toolResult"`, so
+		// the custom line keeps `structuredContent` in its persisted bytes. A
+		// key-only stamp mirror skips the field for every role, so an in-place
+		// change survives every cache check and the rewrite reuses stale JSONL.
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		const messageId = session.appendMessage({
+			role: "custom" as const,
+			customType: "fix15222-spill-custom",
+			content: "spilled",
+			display: false,
+			details: {
+				serverName: "fix15222-server",
+				mcpToolName: "fix15222-tool",
+				structuredContent: { marker: "original" },
+				meta: { truncation: { artifactId: "artifact-fix15222" } },
+			},
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the persisted line keeps the custom message's
+		// `structuredContent` — the projector strips only tool results.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain('"marker":"original"');
+
+		// Mutate the kept field in place: the key-only mirror never walked
+		// it, so its stamp still matches the original line.
+		const entry = session.getEntries().find(e => e.id === messageId);
+		if (!entry || entry.type !== "message" || entry.message.role !== "custom") {
+			throw new Error("Expected custom message entry");
+		}
+		const details = entry.message.details;
+		if (details === null || typeof details !== "object" || !("structuredContent" in details)) {
+			throw new Error("Expected marker-shaped details");
+		}
+		const structuredContent = details.structuredContent;
+		if (
+			structuredContent === null ||
+			typeof structuredContent !== "object" ||
+			!("marker" in structuredContent) ||
+			typeof structuredContent.marker !== "string"
+		) {
+			throw new Error("Expected structuredContent marker");
+		}
+		structuredContent.marker = "mutated";
+
+		// Second rewrite: the persisted line carries the mutated marker, not
+		// the stale original reused from the cache.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"marker":"mutated"');
+		expect(bodyAfterSecond).not.toContain('"marker":"original"');
+	});
+	it("rewrites a session whose details defines a throwing Symbol.toStringTag getter without latching a persistence failure", async () => {
+		// The opaque `details` slot can define a `Symbol.toStringTag` getter —
+		// even a non-enumerable one — that `JSON.stringify` never consults
+		// (symbol-keyed fields are invisible to serialization). The brand
+		// check must answer with the intrinsic `valueOf` calls alone: reading
+		// the tag runs user code the serializer ignores, so a throwing getter
+		// fails the probe over a value that serializes normally and latches a
+		// persistence failure on every full rewrite.
+		const details: Record<string, unknown> = { payload: "fix15222-tag" };
+		Object.defineProperty(details, Symbol.toStringTag, {
+			enumerable: false,
+			configurable: true,
+			get(): string {
+				throw new Error("boom-fix15222-tag");
+			},
+		});
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-tag",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// Full rewrite succeeds and the line carries the payload, exactly
+		// what the serializer emits — no latched failure, no truncated body.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"payload":"fix15222-tag"');
+		expect(body).toContain('"toolName":"bash"');
+	});
+	it("never reuses a line for a bigint detail whose BigInt.prototype serializer is stateful", async () => {
+		// `details` is the tool result's opaque slot, so an extension can hand
+		// it a bigint — and a runtime can install `BigInt.prototype.toJSON`,
+		// which `JSON.stringify` invokes even though the value is primitive.
+		// The hook's output is a function call, not a field value: this one
+		// emits a fresh revision on every call, while no field is ever
+		// written. The probe must detect the prototype hook and leave the
+		// graph uncached; a stamp taken from one call cannot describe the
+		// bytes another call produces.
+		let revision = 0;
+		Object.defineProperty(BigInt.prototype, "toJSON", {
+			enumerable: false,
+			configurable: true,
+			value(this: bigint): string {
+				revision++;
+				return `bigint-rev-${revision}`;
+			},
+		});
+		try {
+			const session = SessionManager.create(process.cwd(), sessionDir, storage);
+			session.appendMessage({
+				role: "toolResult" as const,
+				toolCallId: "call-fix15222-bigint-hook",
+				toolName: "bash",
+				content: [{ type: "text" as const, text: "ok" }],
+				details: { count: 42n },
+				isError: false,
+				timestamp: Date.now(),
+			});
+
+			// Every rewrite re-projects through the serializer: each published
+			// body carries the output of the serialization that produced it —
+			// here the second serialization's revision, since one atomic
+			// publish serializes the body twice (materialize, then commit).
+			await session.appendEntriesAtomically(() => {});
+			const sessionFile = session.getSessionFile();
+			if (!sessionFile) throw new Error("Expected session file");
+			const bodyAfterFirst = storage.readTextSync(sessionFile);
+			expect(bodyAfterFirst).toContain('"count":"bigint-rev-2"');
+
+			// Second rewrite: a fresh revision again — the first call's output
+			// restored from a reused line would pin `bigint-rev-2` forever.
+			// (The no-op second publish serializes the untouched body once
+			// more rather than twice, so the counter advances by one.)
+			await session.appendEntriesAtomically(() => {});
+			const bodyAfterSecond = storage.readTextSync(sessionFile);
+			expect(bodyAfterSecond).toContain('"count":"bigint-rev-3"');
+			expect(bodyAfterSecond).not.toContain('"count":"bigint-rev-2"');
+		} finally {
+			// The hook was installed by this test via defineProperty above;
+			// removing the own property restores the pristine prototype for
+			// later files. `Reflect.deleteProperty` keeps the untyped shape.
+			Reflect.deleteProperty(BigInt.prototype, "toJSON");
+		}
+	});
 });
