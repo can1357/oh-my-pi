@@ -170,6 +170,18 @@ export interface ExecutionCardInput {
 	/** The throttle skipped a partial-line suffix contributing no whole row; the retained last row's tail is gone. */
 	readonly throttledFragmentLost: boolean;
 }
+/**
+ * Bound one collapsed card image's drawn height to the card's own preview
+ * window. The image node carries its intrinsic pixel size with no max, so
+ * without this a single tall emission fills screens behind a nominally
+ * collapsed card. Expansion describes the untouched node, revealing it whole.
+ * Reuses the image `max` bound convention (not a second mechanism).
+ */
+function clampCollapsedExecutionImage(child: NativeChild): NativeChild {
+	if (typeof child !== "object" || child === null || !("k" in child)) return child;
+	if (child.k !== "image") return child;
+	return { ...child, p: { ...child.p, max: { ...child.p?.max, h: `${PREVIEW_LINES}lines` } } };
+}
 
 /**
  * Native card shared by user bash/eval runs: the head with a live `elapsed`
@@ -200,9 +212,12 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 	// Images carry no preview of their own, so a collapsed card shows only the
 	// first COLLAPSED_ITEMS and names the rest — otherwise up to 32 decoded
 	// images fill screens behind a nominally collapsed command.
+	// Each visible image also keeps its intrinsic pixel height unbounded, so the
+	// collapsed group carries the drawn-height clamp per image; expansion
+	// delivers the untouched nodes.
 	const images = input.images ?? [];
 	const visibleImages = input.expanded ? images : images.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS);
-	children.push(...visibleImages);
+	children.push(...(input.expanded ? visibleImages : visibleImages.map(clampCollapsedExecutionImage)));
 	if (running) {
 		children.push(
 			node("spinner", { label: [span(`Running… (${interruptKey()} to cancel)`, "muted")] }, undefined, "running"),

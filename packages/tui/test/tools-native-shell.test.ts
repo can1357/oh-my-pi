@@ -793,6 +793,28 @@ describe("user shell runs", () => {
 		expect(fallbacks(open.c)).toHaveLength(10);
 		expect(spansText(nodes(open.c).find(child => props(child).key === "notes"))).not.toContain("more images");
 	});
+	it("clamps one tall image's drawn height while collapsed and reveals it whole on expansion", () => {
+		// A single tall emission keeps its intrinsic pixel height with no max,
+		// so without a drawn-height clamp the collapsed card fills screens.
+		const tall = Buffer.from(PNG, "base64");
+		tall.writeUInt32BE(4000, 20);
+		const run = new BashExecutionComponent("plot", ui, false);
+		run.setComplete(0, false, {
+			output: "done",
+			images: [{ type: "image" as const, data: tall.toString("base64"), mimeType: "image/png" }],
+		});
+		const card = run.describe(cx(["card", "ansi"]));
+		expect(card.k).toBe("card");
+		const collapsed = nodes(card.c).filter(child => child.k === "image");
+		expect(collapsed).toHaveLength(1);
+		expect(props(collapsed[0]).max).toMatchObject({ h: `${PREVIEW_LINES}lines` });
+		// Expansion delivers the untouched node with no clamp.
+		run.setExpanded(true);
+		const open = run.describe(cx(["card", "ansi"]));
+		const expanded = nodes(open.c).filter(child => child.k === "image");
+		expect(expanded).toHaveLength(1);
+		expect(props(expanded[0]).max).toBeUndefined();
+	});
 
 	it("withholds the dropped-lines notice until the run settles", () => {
 		const run = new BashExecutionComponent("seq 1 250", ui, false);
