@@ -426,58 +426,51 @@ describe("browser open — concurrent different-name acquisitions each own a lea
 });
 
 describe("browser open — a cancel during the relay extension read", () => {
-	it("closes the tab the cancelled open created", async () => {
+	// Relay opens run on a cmux browser, so a real tab gets published without a live relay.
+	function relayOpensOnCmux(): { opened: string[]; closed: string[] } {
+		const surfaces = { opened: [] as string[], closed: [] as string[] };
 		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
 		spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
-		const surfaceClosed: string[] = [];
 		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
 			async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
-				if (method === "browser.open_split") return { surface_id: "surface-relay", url: "about:blank" };
-				if (method === "surface.close") surfaceClosed.push(String(params.surface_id));
+				if (method === "browser.open_split") {
+					const surfaceId = `surface-${surfaces.opened.length + 1}`;
+					surfaces.opened.push(surfaceId);
+					return { surface_id: surfaceId, url: "about:blank" };
+				}
+				if (method === "surface.close") surfaces.closed.push(String(params.surface_id));
 				return {};
 			},
 		);
-		// The relay open runs on a cmux browser, so a real tab gets published without a live relay.
 		const cmuxKind = resolveCmuxKind();
 		if (!cmuxKind) throw new Error("CMUX_SOCKET_PATH is set in beforeEach");
 		const acquireBrowser = registry.acquireBrowser;
 		spyOn(registry, "acquireBrowser").mockImplementation((_kind, opts) => acquireBrowser(cmuxKind, opts));
+		// A later open checks its relay kind against the tab's browser before reusing it.
+		const browserKey = registry.browserKey;
+		spyOn(registry, "browserKey").mockImplementation(kind => browserKey(kind.kind === "relay" ? cmuxKind : kind));
+		return surfaces;
+	}
+
+	const relayOpen = { action: "open", name: "relay-read", app: { relay: true }, timeout: 30 };
+
+	it("opens no tab", async () => {
+		const surfaces = relayOpensOnCmux();
 		const controller = new AbortController();
 		spyOn(probe, "relayExtensionNotice").mockImplementation(async () => {
 			controller.abort();
 			return null;
 		});
 
-		const failure = await rejectionOf(
-			createBrowserHost()(
-				{ action: "open", name: "relay-read", app: { relay: true }, timeout: 30 },
-				controller.signal,
-			),
-		);
+		const failure = await rejectionOf(createBrowserHost()(relayOpen, controller.signal));
 
 		expect(failure).toBeInstanceOf(ToolAbortError);
 		expect(getTabsMapForTest().has("relay-read")).toBe(false);
-		expect(surfaceClosed).toEqual(["surface-relay"]);
+		expect(surfaces.opened).toEqual([]);
 	});
 
-	it("leaves the tab to a later open of the same name that reused it", async () => {
-		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
-		spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
-		const surfaceClosed: string[] = [];
-		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
-			async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
-				if (method === "browser.open_split") return { surface_id: "surface-shared", url: "about:blank" };
-				if (method === "surface.close") surfaceClosed.push(String(params.surface_id));
-				return {};
-			},
-		);
-		const cmuxKind = resolveCmuxKind();
-		if (!cmuxKind) throw new Error("CMUX_SOCKET_PATH is set in beforeEach");
-		const acquireBrowser = registry.acquireBrowser;
-		spyOn(registry, "acquireBrowser").mockImplementation((_kind, opts) => acquireBrowser(cmuxKind, opts));
-		// The second open checks its relay kind against the tab's browser before reusing it.
-		const browserKey = registry.browserKey;
-		spyOn(registry, "browserKey").mockImplementation(kind => browserKey(kind.kind === "relay" ? cmuxKind : kind));
+	it("leaves the tab of a later open of the same name alone", async () => {
+		const surfaces = relayOpensOnCmux();
 		// The first open parks in its extension read; the second open's read returns at once.
 		const firstRead = Promise.withResolvers<void>();
 		const firstReading = Promise.withResolvers<void>();
@@ -490,20 +483,42 @@ describe("browser open — a cancel during the relay extension read", () => {
 			return null;
 		});
 		const invokeBrowser = createBrowserHost();
-		const params = { action: "open", name: "relay-shared", app: { relay: true }, timeout: 30 };
 
 		const controller = new AbortController();
-		const first = rejectionOf(invokeBrowser(params, controller.signal));
+		const first = rejectionOf(invokeBrowser(relayOpen, controller.signal));
 		await firstReading.promise;
-		const second = await invokeBrowser(params);
-		expect(
-			second.content.some(part => part.type === "text" && /Reused tab "relay-shared"/.test(part.text ?? "")),
-		).toBe(true);
-
+		await invokeBrowser(relayOpen);
 		controller.abort();
 		firstRead.resolve();
+
 		expect(await first).toBeInstanceOf(ToolAbortError);
-		expect(getTabsMapForTest().get("relay-shared")?.state).toBe("alive");
-		expect(surfaceClosed).toEqual([]);
+		expect(getTabsMapForTest().get("relay-read")?.state).toBe("alive");
+		expect(surfaces.closed).toEqual([]);
+	});
+
+	it("leaves no tab behind when two opens of the same name are both cancelled", async () => {
+		const surfaces = relayOpensOnCmux();
+		const reads = Promise.withResolvers<void>();
+		const bothReading = Promise.withResolvers<void>();
+		let reading = 0;
+		spyOn(probe, "relayExtensionNotice").mockImplementation(async () => {
+			if (++reading === 2) bothReading.resolve();
+			await reads.promise;
+			return null;
+		});
+		const invokeBrowser = createBrowserHost();
+
+		const controller = new AbortController();
+		const opens = [
+			rejectionOf(invokeBrowser(relayOpen, controller.signal)),
+			rejectionOf(invokeBrowser(relayOpen, controller.signal)),
+		];
+		await bothReading.promise;
+		controller.abort();
+		reads.resolve();
+
+		for (const failure of await Promise.all(opens)) expect(failure).toBeInstanceOf(ToolAbortError);
+		expect(getTabsMapForTest().has("relay-read")).toBe(false);
+		expect(surfaces.closed).toEqual(surfaces.opened);
 	});
 });

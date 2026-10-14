@@ -35,7 +35,6 @@ import {
 	releaseAllTabs,
 	releaseIdleTabsForOwner,
 	releaseTab,
-	rollBackAcquiredTab,
 	runInTab,
 	type TabSession,
 	type TernTabSession,
@@ -460,8 +459,15 @@ async function openOnKind(
 		// rolling the fresh browser back on failure.
 		holdBrowser(browser);
 		let result: AcquireTabResult;
-		stage = `opening tab ${JSON.stringify(name)}`;
+		let relayNotice: string | null = null;
 		try {
+			// Read before the tab is acquired, so a cancel or the deadline landing during the read leaves no tab to close.
+			if (kind.kind === "relay") {
+				stage = "reading the relay extension version";
+				relayNotice = await relayExtensionNotice(normalizeConnectedCdpUrl(kind.cdpUrl), openSignal);
+				throwIfAborted(openSignal);
+			}
+			stage = `opening tab ${JSON.stringify(name)}`;
 			const initScripts = await untilAborted(openSignal, () =>
 				resolveInitScriptSources(params.init_scripts, session.cwd),
 			);
@@ -526,15 +532,6 @@ async function openOnKind(
 		details.url = url;
 		details.viewport = tab.info.viewport;
 		const verb = result.created ? "Opened" : "Reused";
-		// Advisory only: an open deadline that passes during the read drops the note, not the opened tab.
-		const relayNotice =
-			kind.kind === "relay" ? await relayExtensionNotice(normalizeConnectedCdpUrl(kind.cdpUrl), openSignal) : null;
-		// A cancel that lands during the read still cancels the open, so the tab it created goes too,
-		// unless a later open of the same name has taken it over meanwhile.
-		if (signal?.aborted) {
-			await rollBackAcquiredTab(name, result);
-			throw new ToolAbortError();
-		}
 		const lines = [
 			`${verb} tab ${JSON.stringify(name)} on ${describeBrowser(tab)}`,
 			`URL: ${url}`,
