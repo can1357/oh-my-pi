@@ -8,7 +8,7 @@
  */
 import * as path from "node:path";
 
-import { isInsideTmux } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { postmortem } from "@oh-my-pi/pi-utils";
 
 const TMUX_NAME_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
@@ -143,7 +143,7 @@ export class TmuxWindowNamer {
 	 * the name sticks until {@link restore} puts the original back.
 	 */
 	sync(sessionName: string | undefined, cwd?: string): void {
-		if (!this.#enabled || this.#restored || !isInsideTmux()) return;
+		if (!this.#enabled || this.#restored || !hasTerminalMultiplexerSession("tmux")) return;
 		const pane = Bun.env.TMUX_PANE;
 		if (!pane) return;
 		const next = sanitizeTmuxWindowName(sessionName) ?? getFallbackTmuxWindowName(cwd);
