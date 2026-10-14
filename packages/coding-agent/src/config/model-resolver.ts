@@ -822,9 +822,11 @@ function matchModel(
 		return bedrockInferenceProfile;
 	}
 
-	// A raw member id recorded by the available rows resolves to its local
-	// owner before the process-global alias index: a different registry's
-	// cache replay may have moved the alias to a row this catalog lacks.
+	// A raw member id recorded by exactly one available row resolves to its
+	// local owner before the process-global alias index: a different registry's
+	// cache replay may have moved the alias to a row this catalog lacks. Shared
+	// sources keep the canonical (reviewed) target instead of letting list
+	// order pick an arbitrary owner.
 	const localOwners = availableModels.filter(m =>
 		[
 			...(m.thinking?.effortRouting ? Object.values(m.thinking.effortRouting) : []),
@@ -832,7 +834,7 @@ function matchModel(
 			...getReviewedVariantAliasSources(m.provider, m.id),
 		].some(source => source !== undefined && source.toLowerCase() === lowerPattern),
 	);
-	if (localOwners.length > 0) {
+	if (localOwners.length === 1) {
 		return pickPreferredModel(localOwners, context);
 	}
 

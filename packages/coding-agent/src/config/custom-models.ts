@@ -196,18 +196,20 @@ export function computeHeaderConfigFingerprint(
 	// Only effective header-resolution inputs: a headerless override (e.g. a
 	// context-window tweak for an unrelated model) or one with an empty header
 	// map changes no cached row's header composition — the restore hook
-	// discards empty maps too — and must not invalidate restored rows.
+	// discards empty maps too — and must not invalidate restored rows. Values
+	// stay out of the digest: rotating a literal credential rebuilds the same
+	// layer, and the key set is the provenance being pinned.
 	const models = [...(modelOverrides?.entries() ?? [])]
 		.filter(([, override]) => {
 			const headers = override.headers;
 			return headers !== undefined && Object.values(headers).some(declaration => declaration.trim().length > 0);
 		})
 		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-		.map(([id, override]) => [id, override.headers ?? null]);
+		.map(([id, override]) => [id, Object.keys(override.headers ?? {}).sort()]);
 	const providerHeaders = providerOverride?.headers;
 	const canonical = stableStringifyJson([
 		providerHeaders !== undefined && Object.values(providerHeaders).some(declaration => declaration.trim().length > 0)
-			? providerHeaders
+			? Object.keys(providerHeaders).sort()
 			: null,
 		providerOverride?.authHeader === true,
 		providerOverride?.apiKey !== undefined,

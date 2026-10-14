@@ -809,4 +809,29 @@ describe("model registry discovery header restore", () => {
 			id: "gateway/model-a",
 		});
 	});
+
+	test("honors reviewed targets for shared bare aliases", () => {
+		// gemini-3.5-flash-low is recorded by two live rows; the reviewed table
+		// declares it under gemini-3.5-flash and a bare selector must follow that
+		// canonical target instead of letting list order pick the other row.
+		expect(
+			parseModelPattern("gemini-3.5-flash-low", getBundledModels("google-antigravity") as never).model,
+		).toMatchObject({
+			id: "gemini-3.5-flash",
+		});
+	});
+
+	test("keeps header values out of the provenance fingerprint", () => {
+		const original = computeHeaderConfigFingerprint(
+			undefined,
+			new Map([["m", { headers: { "X-A": "old-secret" } }]]),
+		);
+		// Rotating a literal credential rebuilds the same layer: the key set is
+		// the provenance being pinned, not the declaration values.
+		const rotated = computeHeaderConfigFingerprint(undefined, new Map([["m", { headers: { "X-A": "new-secret" } }]]));
+		expect(rotated).toBe(original);
+		// A key change is a real composition change and must invalidate.
+		const rekeyed = computeHeaderConfigFingerprint(undefined, new Map([["m", { headers: { "X-B": "old-secret" } }]]));
+		expect(rekeyed).not.toBe(original);
+	});
 });
