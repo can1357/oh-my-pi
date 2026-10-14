@@ -1169,13 +1169,29 @@ class VariantAliasIndex {
 		this.#templates = templates;
 	}
 
-	/** Register `from` → `to`; false when `from` is already claimed. */
-	add(from: string, to: string): boolean {
-		if (from === to || this.#forward.has(from.toLowerCase())) return false;
-		this.#forward.set(from.toLowerCase(), to);
+	/**
+	 * Register `from` → `to`; false when `from` is already claimed. With
+	 * `replace`, a later mapping supersedes an earlier one (its reverse entry is
+	 * dropped): cache cohorts replay current routing on every read and must be
+	 * able to move a member id between rows.
+	 */
+	add(from: string, to: string, replace = false): boolean {
+		if (from === to) return false;
+		const key = from.toLowerCase();
+		const existing = this.#forward.get(key);
+		if (existing !== undefined) {
+			if (!replace || existing === to) return false;
+			const previousSources = this.#reverse.get(existing);
+			if (previousSources) {
+				const at = previousSources.indexOf(from);
+				if (at >= 0) previousSources.splice(at, 1);
+				if (previousSources.length === 0) this.#reverse.delete(existing);
+			}
+		}
+		this.#forward.set(key, to);
 		const sources = this.#reverse.get(to);
 		if (sources) {
-			sources.push(from);
+			if (!sources.includes(from)) sources.push(from);
 		} else {
 			this.#reverse.set(to, [from]);
 		}
@@ -1228,8 +1244,13 @@ const kAliasIndex = Symbol("compat-collapse.aliasIndex");
  * Persist aliases embedded in collapsed routing so generated catalog rows and
  * newly discovered families expose the same selector migrations as reviewed tables.
  */
-export function registerCollapsedVariantAliases(provider: Provider, specs: readonly VariantSpecLike[]): void {
+export function registerCollapsedVariantAliases(
+	provider: Provider,
+	specs: readonly VariantSpecLike[],
+	options?: { replace?: boolean },
+): void {
 	const providerId = provider.toLowerCase();
+	const replace = options?.replace === true;
 	let index = dynamicAliasIndexes.get(providerId);
 	for (const spec of specs) {
 		const routing = spec.thinking?.effortRouting;
@@ -1239,11 +1260,11 @@ export function registerCollapsedVariantAliases(provider: Provider, specs: reado
 			const source = routing[effort];
 			if (!source || source === spec.id) continue;
 			index ??= new VariantAliasIndex();
-			registered = index.add(source, spec.id) || registered;
+			registered = index.add(source, spec.id, replace) || registered;
 		}
 		if (spec.requestModelId && spec.requestModelId !== spec.id) {
 			index ??= new VariantAliasIndex();
-			registered = index.add(spec.requestModelId, spec.id) || registered;
+			registered = index.add(spec.requestModelId, spec.id, replace) || registered;
 		}
 		if (registered) index?.markFamily(spec.id);
 	}

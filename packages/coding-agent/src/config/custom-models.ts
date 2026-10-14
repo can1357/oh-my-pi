@@ -182,6 +182,26 @@ export function normalizeSuppressedSelector(
 }
 
 /**
+ * Stable fingerprint of the local header configuration that composes a
+ * provider's cached request headers. Persisted with caches so offline reads
+ * can tell whether the configured sources still reconstruct the omitted set.
+ */
+export function computeHeaderConfigFingerprint(
+	providerOverride: { headers?: Record<string, string>; authHeader?: boolean; apiKey?: unknown } | undefined,
+	modelOverrides: ReadonlyMap<string, { headers?: Record<string, string> }> | undefined,
+): string {
+	const models = [...(modelOverrides?.entries() ?? [])]
+		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+		.map(([id, override]) => [id, override.headers ?? null]);
+	return JSON.stringify([
+		providerOverride?.headers ?? null,
+		providerOverride?.authHeader === true,
+		providerOverride?.apiKey !== undefined,
+		models,
+	]);
+}
+
+/**
  * Look up a model's override, falling back to entries keyed by retired
  * effort-tier variant ids (models.yml authored before collapsing). A raw key
  * only re-binds when no live model holds that id.

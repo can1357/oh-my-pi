@@ -23,6 +23,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { computeHeaderConfigFingerprint } from "../src/config/custom-models";
 import { ModelRegistry } from "../src/config/model-registry";
 import { resolveSessionModelSelector } from "../src/config/model-resolver";
 import type { AuthStorage } from "../src/session/auth-storage";
@@ -94,6 +95,7 @@ describe("model registry discovery header restore", () => {
 	function seedCachedRows(
 		rows: ReadonlyArray<{ id: string; alias?: string; requestModelId?: string; plain?: boolean }>,
 		provider = "my-provider",
+		options?: { headerConfigFingerprint?: string },
 	): void {
 		writeModelCache(
 			`${provider}:openai-models-list-context-v3`,
@@ -127,6 +129,9 @@ describe("model registry discovery header restore", () => {
 			true,
 			"",
 			path.join(tempDir, "models.db"),
+			[],
+			undefined,
+			options?.headerConfigFingerprint,
 		);
 	}
 
@@ -466,5 +471,76 @@ describe("model registry discovery header restore", () => {
 		const second = registry.find("google-antigravity", "gemini-3.5-flash");
 		expect(second).toBeDefined();
 		expect(await registry.resolveModelHeaders(second!)).toMatchObject({ "X-Account": "a-1" });
+	});
+
+	test("drops cached rows whose header config changed since the write", async () => {
+		const modelsPath = await writeModelsYaml(["    headers:", "      X-Provider: p-1"].join("\n"), "github-copilot");
+		// The cache was written when more local sources composed the omitted
+		// headers; with the stored fingerprint no longer matching the current
+		// config the complete source set cannot be proven, so the bundled
+		// fallback must win over a partially rebuilt row.
+		seedCachedRows([{ id: "claude-haiku-4.5" }], "github-copilot", { headerConfigFingerprint: "stale" });
+		const stale = await reloadFromCache(modelsPath);
+		// The bundled fallback wins: its constant transport headers serve the
+		// model without the configured layer that cannot be proven complete.
+		const staleRow = stale.find("github-copilot", "claude-haiku-4.5");
+		expect(staleRow).toBeDefined();
+		// The bundled fallback serves the model: only its metadata is published.
+		const bundled = (getBundledModels("github-copilot") as ReadonlyArray<{ id: string; name: string }>).find(
+			model => model.id === "claude-haiku-4.5",
+		);
+		expect(staleRow!.name).toBe(bundled!.name);
+
+		// A matching fingerprint proves the current sources compose the omitted
+		// set, so the row restores with its configured headers.
+		seedCachedRows([{ id: "claude-haiku-4.5" }], "github-copilot", {
+			headerConfigFingerprint: computeHeaderConfigFingerprint(
+				{ headers: { "X-Provider": "p-1" }, apiKey: "present" },
+				new Map(),
+			),
+		});
+		const matched = await reloadFromCache(modelsPath);
+		const restored = matched.find("github-copilot", "claude-haiku-4.5");
+		// The cached row itself is published with its configured headers.
+		expect(restored!.name).toBe("claude-haiku-4.5");
+		expect(await matched.resolveModelHeaders(restored!)).toMatchObject({ "X-Provider": "p-1" });
+	});
+
+	test("keeps rejected cache aliases out of the selector index", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      gateway/model-b:", "        headers:", "          X-Account: b-1"].join("\n"),
+		);
+		// First generation: a stale omitted row records the alias but has no
+		// current header source and is rejected on read.
+		seedCachedRows([{ id: "gateway/model-a", alias: "shared" }]);
+		await reloadFromCache(modelsPath);
+		// Second generation (refetch): A is a plain row and B owns the alias. The
+		// rejected row's mapping must not survive in the global selector index,
+		// or `my-provider/shared` selects the wrong live model.
+		seedCachedRows([
+			{ id: "gateway/model-a", plain: true },
+			{ id: "gateway/model-b", alias: "shared" },
+		]);
+		const registry = await reloadFromCache(modelsPath);
+		expect(registry.find("my-provider", "gateway/model-a")).toBeDefined();
+		expect(resolveSessionModelSelector(registry, "my-provider/shared")?.model).toMatchObject({
+			id: "gateway/model-b",
+		});
+	});
+
+	test("lets rows sharing a member id each restore it", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      shared-raw:", "        headers:", "          X-Account: s-1"].join("\n"),
+		);
+		seedCachedRows([
+			{ id: "gateway/one", alias: "shared-raw" },
+			{ id: "gateway/two", alias: "shared-raw" },
+		]);
+		const registry = await reloadFromCache(modelsPath);
+		for (const id of ["gateway/one", "gateway/two"]) {
+			const row = registry.find("my-provider", id);
+			expect(row).toBeDefined();
+			expect(await registry.resolveModelHeaders(row!)).toMatchObject({ "X-Account": "s-1" });
+		}
 	});
 });

@@ -62,6 +62,7 @@ interface CacheRowMeta {
 	models_hash: string;
 	header_omitted_model_ids: string;
 	unrestorable_header_model_ids: string;
+	header_config_fingerprint: string;
 	header_restore_version: number;
 	/** `model_cache_refresh` columns joined onto the payload row; null when absent. */
 	refresh_payload_updated_at: number | null;
@@ -95,7 +96,7 @@ const SELECT_CACHE_ROW = `SELECT m.*, ${CACHE_ROW_REFRESH_COLUMNS} ${CACHE_ROW_F
 const SELECT_CACHE_ROW_META = `
 	SELECT m.provider_id, m.version, m.materialization_policy, m.updated_at, m.authoritative,
 		m.static_fingerprint, m.models_hash, m.header_omitted_model_ids,
-		m.unrestorable_header_model_ids, m.header_restore_version, ${CACHE_ROW_REFRESH_COLUMNS}
+		m.unrestorable_header_model_ids, m.header_config_fingerprint, m.header_restore_version, ${CACHE_ROW_REFRESH_COLUMNS}
 	${CACHE_ROW_FROM}
 `;
 
@@ -150,6 +151,12 @@ export interface CacheEntry<TApi extends Api = Api> {
 	headerOmittedModelIds: readonly string[];
 	/** Header-bearing model ids that cannot be rebuilt from the static source. */
 	unrestorableHeaderModelIds: readonly string[];
+	/**
+	 * Fingerprint of the local header configuration in effect when the rows
+	 * were written. Readers only rebuild configured headers when it still
+	 * matches; absent for rows written before it existed.
+	 */
+	headerConfigFingerprint?: string;
 	/** Whether unrestorable markers predate request-model header matching. */
 	legacyHeaderRestoreMarkers: boolean;
 	/**
@@ -233,6 +240,7 @@ function initializeDb(db: Database): void {
 			static_fingerprint TEXT NOT NULL DEFAULT '',
 			header_omitted_model_ids TEXT NOT NULL DEFAULT '[]',
 			unrestorable_header_model_ids TEXT NOT NULL DEFAULT '[]',
+			header_config_fingerprint TEXT NOT NULL DEFAULT '',
 			header_restore_version INTEGER NOT NULL DEFAULT 0,
 			models_hash TEXT NOT NULL DEFAULT '',
 			models TEXT NOT NULL
@@ -346,6 +354,9 @@ function migrateCacheSchema(db: Database): void {
 		}
 		if (!columns.some(column => column.name === "unrestorable_header_model_ids")) {
 			db.run("ALTER TABLE model_cache ADD COLUMN unrestorable_header_model_ids TEXT NOT NULL DEFAULT '[]'");
+		}
+		if (!columns.some(column => column.name === "header_config_fingerprint")) {
+			db.run("ALTER TABLE model_cache ADD COLUMN header_config_fingerprint TEXT NOT NULL DEFAULT ''");
 		}
 		if (!columns.some(column => column.name === "header_restore_version")) {
 			// Existing v10 rows get 0, distinguishing markers produced by the
@@ -543,6 +554,7 @@ function cacheRowsEqual(left: CacheRowMeta, right: CacheRowMeta): boolean {
 		left.static_fingerprint === right.static_fingerprint &&
 		left.header_omitted_model_ids === right.header_omitted_model_ids &&
 		left.unrestorable_header_model_ids === right.unrestorable_header_model_ids &&
+		left.header_config_fingerprint === right.header_config_fingerprint &&
 		left.header_restore_version === right.header_restore_version &&
 		left.models_hash !== "" &&
 		left.models_hash === right.models_hash
@@ -600,6 +612,7 @@ function parseCacheRow<TApi extends Api>(
 		headerOmittedModelIds,
 		unrestorableHeaderModelIds,
 		legacyHeaderRestoreMarkers: row.header_restore_version < HEADER_RESTORE_VERSION,
+		headerConfigFingerprint: row.header_config_fingerprint || undefined,
 		staticFingerprint: row.static_fingerprint ?? "",
 	};
 }
@@ -660,6 +673,7 @@ export function writeModelCache<TApi extends Api>(
 	dbPath?: string,
 	staticHeaderSources: readonly Model<TApi>[] = [],
 	restorableHeaderFallback?: Record<string, string>,
+	headerConfigFingerprint?: string,
 ): void {
 	try {
 		invalidateReadRow(providerId, dbPath);
@@ -717,7 +731,7 @@ export function writeModelCache<TApi extends Api>(
 				.transaction((): "skipped" | "refreshed" | "written" => {
 					const matchStmt = db.prepare<
 						StoredRowState,
-						[string, number, string, string, string, string, number, string]
+						[string, number, string, string, string, string, string, number, string]
 					>(
 						`SELECT m.updated_at, m.authoritative,
 							r.payload_updated_at AS refresh_payload_updated_at,
@@ -727,7 +741,8 @@ export function writeModelCache<TApi extends Api>(
 						LEFT JOIN model_cache_refresh r ON r.provider_id = m.provider_id
 						WHERE m.provider_id = ? AND m.version = ? AND m.materialization_policy = ?
 							AND m.static_fingerprint = ? AND m.header_omitted_model_ids = ?
-							AND m.unrestorable_header_model_ids = ? AND m.header_restore_version = ? AND m.models_hash = ?`,
+							AND m.unrestorable_header_model_ids = ? AND m.header_config_fingerprint = ?
+							AND m.header_restore_version = ? AND m.models_hash = ?`,
 					);
 					let stored: StoredRowState | null;
 					try {
@@ -738,6 +753,7 @@ export function writeModelCache<TApi extends Api>(
 							staticFingerprint,
 							serializedHeaderOmitted,
 							serializedUnrestorable,
+							headerConfigFingerprint ?? "",
 							HEADER_RESTORE_VERSION,
 							modelsHash,
 						);
@@ -761,9 +777,9 @@ export function writeModelCache<TApi extends Api>(
 					db.run(
 						`INSERT OR REPLACE INTO model_cache (
 							provider_id, version, materialization_policy, updated_at, authoritative, static_fingerprint,
-							header_omitted_model_ids, unrestorable_header_model_ids,
+							header_omitted_model_ids, unrestorable_header_model_ids, header_config_fingerprint,
 							header_restore_version, models_hash, models
-						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 						[
 							providerId,
 							CACHE_SCHEMA_VERSION,
@@ -773,6 +789,7 @@ export function writeModelCache<TApi extends Api>(
 							staticFingerprint,
 							serializedHeaderOmitted,
 							serializedUnrestorable,
+							headerConfigFingerprint ?? "",
 							HEADER_RESTORE_VERSION,
 							modelsHash,
 							serializedModels,

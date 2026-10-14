@@ -104,7 +104,14 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	restoreCachedHeaders?: (
 		model: Readonly<Model>,
 		cohort: readonly Readonly<Model>[],
+		headerConfigFingerprint?: string,
 	) => Pick<Model, "headers" | "resolveHeaders"> | undefined;
+	/**
+	 * Fingerprint of the local header configuration; persisted with caches so a
+	 * later offline read can tell whether configured header sources still
+	 * compose the omitted rows the same way.
+	 */
+	headerConfigFingerprint?: string;
 	/** Optional dynamic endpoint fetcher. */
 	fetchDynamicModels?: () => Promise<readonly ModelSpec<TApi>[] | null>;
 	/** Optional stencil.so fallback hook. */
@@ -199,6 +206,7 @@ function restoreCachedModelHeaders<TApi extends Api>(
 	unrestorableHeaderModelIds: readonly string[],
 	legacyHeaderRestoreMarkers: boolean,
 	restorableHeaderFallback: Record<string, string> | undefined,
+	headerConfigFingerprint: string | undefined,
 	restoreCachedHeaders: ModelManagerOptions<TApi>["restoreCachedHeaders"],
 ): CachedHeaderRestoreResult<TApi> {
 	if (headerOmittedModelIds.length === 0) {
@@ -227,7 +235,7 @@ function restoreCachedModelHeaders<TApi extends Api>(
 			if (!unrestorable && restorableHeaderFallback) {
 				return { ...model, headers: { ...restorableHeaderFallback } };
 			}
-			const configured = restoreCachedHeaders?.(model, cachedModels);
+			const configured = restoreCachedHeaders?.(model, cachedModels, headerConfigFingerprint);
 			if (configured?.headers || configured?.resolveHeaders) return { ...model, ...configured };
 			unresolvedModelIds.add(model.id);
 			return model;
@@ -271,6 +279,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		cache?.unrestorableHeaderModelIds ?? [],
 		cache?.legacyHeaderRestoreMarkers ?? false,
 		restorableHeaderFallback,
+		cache?.headerConfigFingerprint,
 		options.restoreCachedHeaders,
 	);
 	const usableCachedModels = restoredCache.models.filter(model => !restoredCache.unresolvedModelIds.has(model.id));
@@ -413,6 +422,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				dbPath,
 				staticModels,
 				restorableHeaderFallback,
+				options.headerConfigFingerprint,
 			);
 		} else {
 			// Remote fetch failed. Re-persist any prior catalog as a
@@ -432,6 +442,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				latestCache?.unrestorableHeaderModelIds ?? cache?.unrestorableHeaderModelIds ?? [],
 				latestCache?.legacyHeaderRestoreMarkers ?? cache?.legacyHeaderRestoreMarkers ?? false,
 				restorableHeaderFallback,
+				latestCache?.headerConfigFingerprint ?? cache?.headerConfigFingerprint,
 				options.restoreCachedHeaders,
 			);
 			const latestUsableCacheModels = latestRestoredCache.models.filter(
@@ -463,6 +474,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 					dbPath,
 					staticModels,
 					restorableHeaderFallback,
+					options.headerConfigFingerprint,
 				);
 			}
 		}
