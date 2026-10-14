@@ -736,7 +736,16 @@ export function overlayLiveResetCredits(
 			}
 			return !!s.email && s.email === report.metadata?.email;
 		});
-		if (!status || status.error) return { ...report, resetCredits: undefined };
+		if (!status) return { ...report, resetCredits: undefined };
+		// A failed listing proves no credits but still names the account's
+		// credential: the planner needs it to apply the model's plan gate.
+		if (status.error) {
+			return {
+				...report,
+				metadata: { ...report.metadata, resetCreditCredentialId: status.credentialId },
+				resetCredits: undefined,
+			};
+		}
 		return {
 			...report,
 			metadata: { ...report.metadata, resetCreditCredentialId: status.credentialId },
