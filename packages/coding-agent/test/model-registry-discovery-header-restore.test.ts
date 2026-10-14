@@ -748,4 +748,29 @@ describe("model registry discovery header restore", () => {
 			id: "claude-4-sonnet",
 		});
 	});
+
+	test("ignores headerless overrides in the fingerprint", () => {
+		const base = computeHeaderConfigFingerprint(undefined, new Map());
+		const withHeaderless = computeHeaderConfigFingerprint(undefined, new Map([["unrelated", {}]]));
+		expect(withHeaderless).toBe(base);
+	});
+
+	test("resolves raw member ids within their own registry", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      raw:", "        headers:", "          X-Account: a-1"].join("\n"),
+		);
+		seedCachedRows([{ id: "gateway/model-a", requestModelId: "raw" }]);
+		const first = await reloadFromCache(modelsPath);
+		expect(first.find("my-provider", "gateway/model-a")).toBeDefined();
+
+		// A second registry's cache replay moves the raw id to another row in the
+		// process-global alias index; the first session's selector must keep
+		// resolving within its own catalog.
+		seedCachedRows([{ id: "gateway/model-b", requestModelId: "raw" }]);
+		const second = await reloadFromCache(modelsPath);
+		expect(second.find("my-provider", "gateway/model-b")).toBeDefined();
+		expect(resolveSessionModelSelector(first, "my-provider/raw")?.model).toMatchObject({
+			id: "gateway/model-a",
+		});
+	});
 });

@@ -26,7 +26,11 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
+import {
+	getReviewedVariantAliasSources,
+	resolveBareVariantSelector,
+	resolveVariantSelector,
+} from "@oh-my-pi/pi-catalog/compat/collapse";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { collapseVariantId, stripThinkingVariantSuffix } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
@@ -426,6 +430,46 @@ function getProviderWireRouteIndex(availableModels: readonly Model<Api>[]): Map<
 	return index;
 }
 
+const kProviderAliasSourceIndex = Symbol("model-resolver.aliasSourceIndex");
+
+type ModelsWithAliasSourceIndex = readonly Model<Api>[] & {
+	[kProviderAliasSourceIndex]?: Map<string, Model<Api> | null>;
+};
+
+/**
+ * Every raw member id (effort routing values, `requestModelId`, reviewed extra
+ * aliases) a row owns, keyed `provider\0source`. Used to resolve bare aliases
+ * within the registry first: the process-global alias index may map a raw id
+ * to a row from a different registry's cache replay.
+ */
+function getProviderAliasSourceIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
+	const tagged = availableModels as ModelsWithAliasSourceIndex;
+	const cached = tagged[kProviderAliasSourceIndex];
+	if (cached) return cached;
+	const index = new Map<string, Model<Api> | null>();
+	for (const m of availableModels) {
+		const providerKey = m.provider.toLowerCase();
+		const routing = m.thinking?.effortRouting;
+		const sources = [
+			...(routing ? Object.values(routing) : []),
+			...(m.requestModelId ? [m.requestModelId] : []),
+			...getReviewedVariantAliasSources(m.provider, m.id),
+		];
+		for (const source of sources) {
+			if (!source) continue;
+			const key = `${providerKey}\u0000${source.toLowerCase()}`;
+			const existing = index.get(key);
+			if (existing === undefined) {
+				index.set(key, m);
+			} else if (existing !== null && existing !== m) {
+				index.set(key, null); // ambiguous sentinel; do not overwrite back
+			}
+		}
+	}
+	tagged[kProviderAliasSourceIndex] = index;
+	return index;
+}
+
 export function resolveProviderModelReference(
 	provider: string,
 	modelId: string,
@@ -449,6 +493,15 @@ export function resolveProviderModelReference(
 	// Retired effort-tier variant ids resolve to their collapsed logical
 	// model: hand-table aliases first, then the `X-thinking` → `X` grammar
 	// for auto-derived pairs. Exact lookup above always wins while raw is live.
+	// Raw member ids recorded by this registry's own rows resolve locally
+	// first: the process-global alias index may point at a row from a
+	// different registry's cache replay, which this catalog does not have.
+	const localOwner = getProviderAliasSourceIndex(availableModels).get(
+		`${normalizedProvider}\u0000${normalizedModelId}`,
+	);
+	if (localOwner) {
+		return localOwner;
+	}
 	const collapsedVariant = collapseVariantId(normalizedProvider, normalizedModelId);
 	const variantAliasId =
 		resolveVariantSelector(normalizedProvider, normalizedModelId) ??
