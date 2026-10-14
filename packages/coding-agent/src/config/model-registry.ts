@@ -2747,7 +2747,7 @@ export class ModelRegistry {
 			const override = resolveModelOverrideWithAliases(overrides, model, (modelProvider, id) => {
 				indexCatalog();
 				if (liveIds?.has(id)) return true;
-				const owners = aliasOwners?.get(`${modelProvider} ${id}`);
+				const owners = aliasOwners?.get(`${modelProvider}\u0000${id}`);
 				return owners !== undefined && !owners.has(model.id);
 			});
 			if (!override) return model;
@@ -2900,7 +2900,7 @@ export class ModelRegistry {
 				...(model.requestModelId ? [model.requestModelId] : []),
 				...getReviewedVariantAliasSources(model.provider, model.id),
 			]) {
-				const key = `${model.provider} ${source}`;
+				const key = `${model.provider}\u0000${source}`;
 				if (!source) continue;
 				const existing = owners.get(key);
 				if (existing) existing.add(model.id);
@@ -2934,10 +2934,10 @@ export class ModelRegistry {
 						// The global alias index keeps stale reverse entries, so alias
 						// ownership comes from the rows actually being projected: a raw
 						// id recorded by no current row may not rebind this row's override.
-						liveKeys ??= new Set(models.map(m => `${m.provider} ${m.id}`));
-						if (liveKeys.has(`${provider} ${id}`)) return true;
+						liveKeys ??= new Set(models.map(m => `${m.provider}\u0000${m.id}`));
+						if (liveKeys.has(`${provider}\u0000${id}`)) return true;
 						aliasOwners ??= this.#modelAliasOwners(models);
-						const owners = aliasOwners.get(`${provider} ${id}`);
+						const owners = aliasOwners.get(`${provider}\u0000${id}`);
 						return owners !== undefined && !owners.has(model.id);
 					})
 				: undefined;

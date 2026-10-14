@@ -1252,6 +1252,10 @@ export function registerCollapsedVariantAliases(
 ): void {
 	const providerId = provider.toLowerCase();
 	const replace = options?.replace === true;
+	// Replace supersedes claims from earlier cohorts only: within one replay
+	// batch the ordinary collapse semantics stay first-write-wins, so a shared
+	// member id keeps pointing at the first row that records it.
+	const claimedThisBatch = new Set<string>();
 	let index = dynamicAliasIndexes.get(providerId);
 	for (const spec of specs) {
 		const routing = spec.thinking?.effortRouting;
@@ -1260,12 +1264,18 @@ export function registerCollapsedVariantAliases(
 		for (const effort of VARIANT_ROUTING_KEYS) {
 			const source = routing[effort];
 			if (!source || source === spec.id) continue;
+			if (claimedThisBatch.has(source.toLowerCase())) continue;
+			claimedThisBatch.add(source.toLowerCase());
 			index ??= new VariantAliasIndex();
 			registered = index.add(source, spec.id, replace) || registered;
 		}
 		if (spec.requestModelId && spec.requestModelId !== spec.id) {
-			index ??= new VariantAliasIndex();
-			registered = index.add(spec.requestModelId, spec.id, replace) || registered;
+			const source = spec.requestModelId;
+			if (!claimedThisBatch.has(source.toLowerCase())) {
+				claimedThisBatch.add(source.toLowerCase());
+				index ??= new VariantAliasIndex();
+				registered = index.add(source, spec.id, replace) || registered;
+			}
 		}
 		if (registered) index?.markFamily(spec.id);
 	}

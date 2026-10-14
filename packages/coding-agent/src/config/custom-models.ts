@@ -1,6 +1,7 @@
 import type { Api, Model, ModelSpec, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getVariantAliasSources, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import {
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
@@ -195,7 +196,7 @@ export function computeHeaderConfigFingerprint(
 	const models = [...(modelOverrides?.entries() ?? [])]
 		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
 		.map(([id, override]) => [id, override.headers ?? null]);
-	const canonical = JSON.stringify([
+	const canonical = stableStringifyJson([
 		providerOverride?.headers ?? null,
 		providerOverride?.authHeader === true,
 		providerOverride?.apiKey !== undefined,

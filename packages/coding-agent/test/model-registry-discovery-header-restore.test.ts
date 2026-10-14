@@ -618,4 +618,31 @@ describe("model registry discovery header restore", () => {
 		});
 		expect(await second.resolveModelHeaders(second.find("my-provider", "gateway/model-a")!)).toBeUndefined();
 	});
+
+	test("canonicalizes header ordering in the fingerprint", () => {
+		const first = computeHeaderConfigFingerprint(
+			{ headers: { "X-One": "1", "X-Two": "2" } },
+			new Map([["m", { headers: { "X-A": "a", "X-B": "b" } }]]),
+		);
+		const reordered = computeHeaderConfigFingerprint(
+			{ headers: { "X-Two": "2", "X-One": "1" } },
+			new Map([["m", { headers: { "X-B": "b", "X-A": "a" } }]]),
+		);
+		expect(first).toBe(reordered);
+	});
+
+	test("keeps first-owner semantics within a cache replay batch", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      t27-raw:", "        headers:", "          X-Account: s-1"].join("\n"),
+		);
+		seedCachedRows([
+			{ id: "gateway/first", alias: "t27-raw" },
+			{ id: "gateway/second", alias: "t27-raw" },
+		]);
+		const registry = await reloadFromCache(modelsPath);
+		expect(registry.find("my-provider", "gateway/first")).toBeDefined();
+		expect(resolveSessionModelSelector(registry, "my-provider/t27-raw")?.model).toMatchObject({
+			id: "gateway/first",
+		});
+	});
 });
