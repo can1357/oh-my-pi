@@ -307,7 +307,7 @@ describe("AgentSession retry fallback", () => {
 				"retry.fallbackChainExhausted": { task: exhausted },
 			});
 			settings.setModelRole("task", "anthropic/claude-sonnet-4-5");
-			settings.setModelRole("default", "openai/gpt-4o");
+			settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
 			const manager = SessionManager.inMemory();
 			manager.appendModelChange("anthropic/claude-sonnet-4-5", "task");
 			session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry });

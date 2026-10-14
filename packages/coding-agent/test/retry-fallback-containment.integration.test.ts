@@ -61,7 +61,7 @@ data: [DONE]
 				...(policy === "fail" ? { "retry.fallbackChainExhausted": { task: "fail" } } : {}),
 			});
 			settings.setModelRole("task", "containment-loopback/worker-primary");
-			settings.setModelRole("default", "containment-loopback/B");
+			settings.setModelRole("default", "containment-loopback/worker-primary");
 			const manager = SessionManager.inMemory();
 			manager.appendModelChange("containment-loopback/worker-primary", "task");
 			const agent = new Agent({
