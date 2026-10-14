@@ -47,7 +47,7 @@ import {
 	cfgTierOpenai,
 	cfgTierSubagent,
 } from "../session/settings";
-import { resolveBuiltinToolPlan } from "../tools";
+import { BUILTIN_TOOLS, HIDDEN_TOOLS, resolveBuiltinToolPlan, type ToolFactory, type ToolSession } from "../tools";
 import { cfgToolsXdev } from "../tools/settings";
 import {
 	inheritedSubagentServiceTiers,
@@ -66,6 +66,7 @@ import {
 	cfgTaskAgentPrewalk,
 	cfgTaskAgentSoftRequestBudget,
 	cfgTaskDisabledAgents,
+	cfgTaskEnableLsp,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskPrewalk,
 	cfgTaskSoftRequestBudget,
@@ -332,32 +333,34 @@ export async function resolveEffectiveAgentConfig(
 		restrictToolNames: false,
 		structured,
 	});
-	// The built-ins the child session constructs from that request, under the child's settings.
-	const toolPlan = await resolveBuiltinToolPlan(
-		{
-			cwd,
-			hasUI: false,
-			getSessionFile: () => null,
-			getSessionSpawns: () => subagentSpawnsEnv(agent, atMaxDepth),
-			settings: childSettings,
-			taskDepth: 1,
-			requireYieldTool: structured,
-			// A yield-gated child gets `todo` only while a prewalk hand-off is armed; an unstructured one always may.
-			prewalkArmed: prewalkResolution?.kind === "armed",
-			enableLsp: true,
-			modelRegistry,
-			getActiveModel: () => model,
-			skipPythonPreflight: Array.isArray(toolNames) && !toolNames.includes("eval"),
-		},
-		toolNames,
-	);
+	// The child session a task spawn starts, under the child's settings: no UI, and LSP only under task.enableLsp.
+	const childToolSession: ToolSession = {
+		cwd,
+		hasUI: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => subagentSpawnsEnv(agent, atMaxDepth),
+		settings: childSettings,
+		taskDepth: 1,
+		requireYieldTool: structured,
+		// A yield-gated child gets `todo` only while a prewalk hand-off is armed; an unstructured one always may.
+		prewalkArmed: prewalkResolution?.kind === "armed",
+		enableLsp: cfgTaskEnableLsp.get(settings),
+		modelRegistry,
+		getActiveModel: () => model,
+		skipPythonPreflight: Array.isArray(toolNames) && !toolNames.includes("eval"),
+	};
+	const toolPlan = await resolveBuiltinToolPlan(childToolSession, toolNames);
+	// createTools drops every planned tool whose factory declines this session (`ask` without a UI, `lsp` without LSP).
+	const factories: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
+	const constructed = await Promise.all(toolPlan.names.map(toolName => factories[toolName](childToolSession)));
+	const childToolNames = toolPlan.names.filter((_, index) => constructed[index] !== null);
 	// createTools also builds a device-only `write` (the xd:// transport, inactive until a device mounts)
 	// for an explicit list with `read` but no `write`.
 	const deviceOnlyWrite =
 		cfgToolsXdev.get(childSettings) &&
 		toolPlan.requestedTools !== undefined &&
-		toolPlan.names.includes("read") &&
-		!toolPlan.names.includes("write");
+		childToolNames.includes("read") &&
+		!childToolNames.includes("write");
 
 	const prewalk: AgentConfigEntry = {
 		value:
@@ -391,7 +394,7 @@ export async function resolveEffectiveAgentConfig(
 		compaction,
 		requestBudget,
 		tools: {
-			value: toolPlan.names,
+			value: childToolNames,
 			source: agent.tools ? { layer: "frontmatter", key: "tools" } : { layer: "session" },
 			note: `built-ins only; MCP and extension tools come from the session${deviceOnlyWrite ? "; write is granted for xd:// devices only" : ""}`,
 		},
