@@ -9,7 +9,7 @@ import {
 	resolveRetryFallbackChainKey,
 } from "../session/retry-fallback-chains";
 
-import { cfgRetryFallbackChains, cfgRetryModelFallback } from "../session/settings";
+import { cfgRetryFallbackChainExhausted, cfgRetryFallbackChains, cfgRetryModelFallback } from "../session/settings";
 
 /** Role-resolved model used by online tiny tasks (auto-thinking, titles). */
 export interface OnlineTinyCandidate {
@@ -33,6 +33,7 @@ function createFallbackContext(
 ): RetryFallbackResolutionContext {
 	return {
 		chains,
+		fallbackChainExhausted: cfgRetryFallbackChainExhausted.get(settings),
 		getModelRole: role => settings.getModelRole(role),
 		modelLookup: {
 			find: (provider, id) => availableModels.find(model => model.provider === provider && model.id === id),
@@ -145,7 +146,7 @@ export function collectOnlineTinyCandidates(
 	if (!configuredChains || typeof configuredChains !== "object") return out;
 
 	const context = createFallbackContext(
-		expandDefaultRetryFallbackChains(configuredChains, roles),
+		expandDefaultRetryFallbackChains(configuredChains, roles, cfgRetryFallbackChainExhausted.get(settings)),
 		settings,
 		availableModels,
 	);

@@ -33,6 +33,31 @@ function createContext(
 }
 
 describe("retry fallback selector resolution", () => {
+	it("does not inherit default for a contained role without its own chain", () => {
+		const chains = expandDefaultRetryFallbackChains(
+			{ default: ["openai/gpt-4o-mini"] },
+			["task", "smol"],
+			{ task: "fail" },
+		);
+		expect(chains.task).toEqual([]);
+		expect(chains.smol).toEqual(chains.default);
+		const context = createContext(chains, { task: "google/gemini-3.5-flash" });
+		context.fallbackChainExhausted = { task: "fail" };
+		expect(resolveRetryFallbackChainKey(context, "google/gemini-3.5-flash", undefined, "task")).toBe("task");
+		expect(findRetryFallbackCandidates(context, "task", "google/gemini-3.5-flash")).toEqual([]);
+	});
+
+	it("keeps step-4 default routing for unlisted roles and root model switches", () => {
+		const context = createContext(
+			{ default: ["openai/gpt-4o-mini"] },
+			{ default: "google/gemini-3.5-flash" },
+		);
+		context.fallbackChainExhausted = { task: "fail" };
+		expect(resolveRetryFallbackChainKey(context, "openrouter/google/gemini-3.5-flash", undefined, "smol")).toBe("default");
+		expect(resolveRetryFallbackChainKey(context, "openrouter/google/gemini-3.5-flash")).toBe("default");
+		expect(resolveRetryFallbackChainKey(context, "openrouter/google/gemini-3.5-flash", undefined, "task")).toBeUndefined();
+	});
+
 	it("resolves chain keys by exact model, longest wildcard, role, then default", () => {
 		const selector = "openrouter/google/gemini-3.5-flash";
 		const exactContext = createContext(

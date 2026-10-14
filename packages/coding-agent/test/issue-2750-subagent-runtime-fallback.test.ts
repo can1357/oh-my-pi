@@ -219,6 +219,55 @@ describe("subagent runtime model resolution", () => {
 		expect(candidates).toEqual(["fallback/working-model"]);
 	});
 
+	for (const chain of [undefined, ["fallback/working-model"]]) {
+		it(`contains a fail-role subagent with ${chain ? "an exhausted" : "no"} role chain`, async () => {
+			const primary = model("primary", "bad-runtime-model");
+			const fallback = model("fallback", "working-model");
+			const root = model("global", "root-model");
+			vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+				if (!options?.settings) throw new Error("Expected child settings");
+				const settings = options.settings;
+				const dynamicRole = "subagent:contained";
+				expect(cfgRetryFallbackChains.get(settings)[dynamicRole]).toEqual(chain ?? []);
+				const recovery = new TurnRecovery({
+					model: () => fallback,
+					thinkingLevel: () => undefined,
+					settings,
+					sessionManager: options.sessionManager,
+					modelRegistry: {
+						find: (provider: string, id: string) =>
+							[primary, fallback, root].find(m => m.provider === provider && m.id === id),
+						hasProvider: () => true,
+						getAvailable: () => [primary, fallback, root],
+					},
+					configWarnings: [],
+				} as unknown as TurnRecoveryHost);
+				expect(recovery.retryFallbackChainKeys("fallback/working-model", fallback, { pinnedRole: dynamicRole }))
+					.toEqual([dynamicRole]);
+				return { session: createYieldingSession("none"), extensionsResult: {}, setToolUIContext: () => {} } as never;
+			});
+			await runSubprocess({
+				cwd: "/tmp",
+				agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+				task: "work",
+				index: 0,
+				id: "contained",
+				modelOverride: "@task",
+				settings: Settings.isolated({
+					modelRoles: { task: "primary/bad-runtime-model", default: "global/root-model" },
+					"retry.fallbackChains": { default: ["global/root-model"], ...(chain ? { task: chain } : {}) },
+					"retry.fallbackChainExhausted": { task: "fail" },
+				}),
+				modelRegistry: {
+					refresh: async () => {},
+					getAvailable: () => [primary, fallback, root],
+					getApiKey: async () => "test-key",
+				} as never,
+				enableLsp: false,
+			});
+		});
+	}
+
 	it("passes ordered subagent candidates as a child retry fallback chain", async () => {
 		const primary = model("primary", "bad-runtime-model");
 		const fallback = model("fallback", "working-model");

@@ -281,6 +281,45 @@ describe("AgentSession retry fallback", () => {
 		}
 		vi.restoreAllMocks();
 	});
+	for (const exhausted of ["fail", "default"] as const) {
+		it(`contains an exhausted worker chain with policy ${exhausted}`, async () => {
+			const primary = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallback = getBundledModel("openai", "gpt-4o-mini");
+			const root = getBundledModel("openai", "gpt-4o");
+			if (!primary || !fallback || !root) throw new Error("Expected bundled test models");
+			const requestedModels: string[] = [];
+			const mock = createMockModel();
+			const realError = "worker quota exhausted retry-after-ms=11180001";
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					mock.push(model.id === root.id ? { content: ["root success"] } : { throw: realError });
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 1,
+				"retry.maxDelayMs": 100,
+				"retry.fallbackChains": { task: ["openai/gpt-4o-mini"], default: ["openai/gpt-4o"] },
+				"retry.fallbackChainExhausted": { task: exhausted },
+			});
+			settings.setModelRole("task", "anthropic/claude-sonnet-4-5");
+			settings.setModelRole("default", "openai/gpt-4o");
+			const manager = SessionManager.inMemory();
+			manager.appendModelChange("anthropic/claude-sonnet-4-5", "task");
+			session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry });
+			await session.prompt("Exhaust the worker chain");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual(exhausted === "fail"
+				? ["anthropic/claude-sonnet-4-5", "openai/gpt-4o-mini"]
+				: ["anthropic/claude-sonnet-4-5", "openai/gpt-4o-mini", "openai/gpt-4o"]);
+			expect(getLastAssistantMessage(session).stopReason).toBe(exhausted === "fail" ? "error" : "stop");
+			if (exhausted === "fail") expect(getLastAssistantMessage(session).errorMessage).toContain(realError);
+		});
+	}
 
 	it("advances through a role-keyed fallback chain across retries", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");

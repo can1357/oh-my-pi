@@ -345,6 +345,7 @@ import {
 	cfgProvidersCacheWarming,
 	cfgProvidersKimiApiFormat,
 	cfgRetryFallbackChains,
+	cfgRetryFallbackChainExhausted,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
 	cfgRetryUsageReservePct,
@@ -2920,10 +2921,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							return primaryPatterns;
 						}
 						const fallbackContext: RetryFallbackResolutionContext = {
-							chains: expandDefaultRetryFallbackChains(cfgRetryFallbackChains.get(settings), [
-								...Object.keys(settings.getModelRoles()),
-								resolved.configuredRole,
-							]),
+							chains: expandDefaultRetryFallbackChains(
+								cfgRetryFallbackChains.get(settings),
+								[...Object.keys(settings.getModelRoles()), resolved.configuredRole],
+								cfgRetryFallbackChainExhausted.get(settings),
+							),
+							fallbackChainExhausted: cfgRetryFallbackChainExhausted.get(settings),
 							getModelRole: role => settings.getModelRole(role),
 							modelLookup: modelRegistry,
 						};
@@ -3116,10 +3119,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							fallbackSelectors.push(selector);
 						}
 					}
-					if (fallbackSelectors.length > 0) {
+					const exhausted = cfgRetryFallbackChainExhausted.get(settings)[options.modelPatternFallbackRole];
+					if (fallbackSelectors.length > 0 || exhausted === "fail") {
 						installRetryFallbackRole(settings, options.modelPatternFallbackRole, {
 							primary: primarySelector,
 							chain: fallbackSelectors,
+							...(exhausted ? { exhausted } : {}),
 						});
 					}
 				}

@@ -83,6 +83,7 @@ import {
 	cfgModelLoopGuardEnabled,
 	cfgRetry,
 	cfgRetryEnabled,
+	cfgRetryFallbackChainExhausted,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
 	cfgRetryUsageReservePct,
@@ -1720,6 +1721,7 @@ export class TurnRecovery {
 	#getRetryFallbackResolutionContext(): RetryFallbackResolutionContext {
 		return {
 			chains: this.#getRetryFallbackChains(),
+			fallbackChainExhausted: cfgRetryFallbackChainExhausted.get(this.#host.settings),
 			getModelRole: role => this.#host.settings.getModelRole(role),
 			modelLookup: this.#host.modelRegistry,
 		};
@@ -1862,7 +1864,12 @@ export class TurnRecovery {
 		options?: { pinnedRole?: string; roleHint?: string },
 	): string[] {
 		const pinned = options?.pinnedRole ?? this.#activeRetryFallback?.role;
-		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, options?.roleHint);
+		const roleHint = options?.roleHint ?? this.#liveRetryRoleHint(currentModel);
+		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, roleHint);
+		const exhausted = cfgRetryFallbackChainExhausted.get(this.#host.settings);
+		if (current === "default" && ((pinned && exhausted[pinned] === "fail") || (roleHint && exhausted[roleHint] === "fail"))) {
+			return pinned ? [pinned] : [];
+		}
 		if (!pinned) return current ? [current] : [];
 		return current && current !== pinned ? [pinned, current] : [pinned];
 	}

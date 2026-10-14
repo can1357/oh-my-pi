@@ -802,6 +802,19 @@ export const cfgRetryFallbackChains = register({
 	},
 });
 
+export const cfgRetryFallbackChainExhausted = register({
+	id: "retry.fallbackChainExhausted",
+	type: "record",
+	default: {} as Record<string, "fail" | "default">,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Fallback Chain Exhaustion",
+		description:
+			'JSON object mapping roles to "fail" (never inherit or enter the default chain) or "default" (existing behavior). Unlisted roles use "default".',
+	},
+});
+
 export const cfgRetryFallbackRevertPolicy = register({
 	id: "retry.fallbackRevertPolicy",
 	type: "enum",

@@ -40,6 +40,7 @@ import {
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "../session/retry-fallback-chains";
+import { cfgRetryFallbackChainExhausted } from "../session/settings";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -289,6 +290,7 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 		{
 			context: {
 				chains: getRetryFallbackChains(session.settings),
+				fallbackChainExhausted: cfgRetryFallbackChainExhausted.get(session.settings),
 				getModelRole: (role: string) => session.settings.getModelRole(role),
 				modelLookup: modelRegistry,
 			},
