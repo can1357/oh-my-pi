@@ -684,7 +684,13 @@ async function tryDelimitedPathSplit(
 	return parts;
 }
 
-/** Whether an internal-URL list has a URL with its own path segments followed by an unanchored local part. */
+/**
+ * Whether an internal-URL list has a URL with its own path segments followed by
+ * an unanchored local part. A local part is anchored when
+ * {@link isFilesystemSourcePath} (POSIX absolute, Windows drive, UNC) or an
+ * explicit `./`, `../`, `~` prefix makes it unambiguously its own target; only
+ * such anchored tails fan out after a URL with path segments.
+ */
 function hasAmbiguousRelativeTail(parts: readonly string[]): boolean {
 	let urlHasPath = false;
 	for (const part of parts) {
@@ -693,7 +699,9 @@ function hasAmbiguousRelativeTail(parts: readonly string[]): boolean {
 			urlHasPath = urlHasPath || afterScheme.includes("/");
 			continue;
 		}
-		if (urlHasPath && !/^(?:\/|\.\.?\/|~|[A-Za-z]:[\\/])/.test(part)) return true;
+		const anchored =
+			isFilesystemSourcePath(part) || part.startsWith("./") || part.startsWith("../") || part.startsWith("~");
+		if (urlHasPath && !anchored) return true;
 	}
 	return false;
 }
@@ -724,7 +732,7 @@ export async function splitDelimitedPathEntry(
 	if (options.routedUrlPredicate?.(normalizedEntry)) {
 		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
 		const routed = options.routedUrlPredicate;
-		return parts?.every(part => routed(part) || (options.exclusionParts === true && isExclusionPart(part)))
+		return parts && parts.length >= 2 && parts.every(part => routed(part) || (options.exclusionParts === true && isExclusionPart(part)))
 			? parts
 			: null;
 	}
@@ -738,7 +746,9 @@ export async function splitDelimitedPathEntry(
 	// (absolute, `./`, `../`, `~`) fan out and the URL keeps literal precedence.
 	if (isInternalUrlPath(normalizedEntry)) {
 		const parts = await splitMixedUrlPathList(normalizedEntry, cwd, isInternalUrlPath);
-		if (!parts) return null;
+		// One nonempty target is not a list: `skill://demo/a;` keeps its literal
+		// trailing `;` instead of fanning out to the truncated `skill://demo/a`.
+		if (!parts || parts.length < 2) return null;
 		return hasAmbiguousRelativeTail(parts) ? null : parts;
 	}
 	// A real POSIX file may contain a delimiter and a selector-shaped tail
