@@ -117,16 +117,24 @@ export class DateCwdReminderInjector {
 		// the last build — skip the per-message work entirely and hand the caller
 		// a copy of the memo's array (never the array itself: see `#memo`).
 		const memo = this.#memo;
-		if (
-			memo !== undefined &&
-			memo.root === firstUser &&
-			memo.root === this.#root &&
-			memo.reminder === reminder &&
-			memo.reminder === this.#currentReminder &&
-			memo.version === this.#stateVersion &&
-			this.#replayable(memo, messages)
-		) {
-			return memo.output.slice();
+		if (memo !== undefined) {
+			if (
+				memo.root === firstUser &&
+				memo.root === this.#root &&
+				memo.reminder === reminder &&
+				memo.reminder === this.#currentReminder &&
+				memo.version === this.#stateVersion &&
+				this.#replayable(memo, messages)
+			) {
+				return memo.output.slice();
+			}
+			// The memo's inputs are gone — an ordinary turn appended messages or
+			// the transcript changed shape — so it can never hit again. Drop it
+			// now instead of pinning both O(n) arrays (and any provider
+			// clones snapshotted before this injector) until an identical
+			// rebuild happens to come along. Re-admission stays two-hit: the
+			// rebuild below records #pending, the next identical build admits.
+			this.#memo = undefined;
 		}
 		if (this.#root !== firstUser) {
 			// A new first user turn: a compaction summary or a different conversation.
