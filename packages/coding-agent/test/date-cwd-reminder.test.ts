@@ -12,6 +12,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { formatLocalCalendarDate } from "@oh-my-pi/pi-tui/chrome/local-date";
 import { normalizePromptPath } from "@oh-my-pi/pi-coding-agent/utils/prompt-path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { becomesCollectible } from "../../tui/test/gc";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 describe("date-cwd-reminder", () => {
@@ -106,43 +107,59 @@ describe("date-cwd-reminder", () => {
 
 			expect(replay.messages[0]).toBe(first.messages[0]);
 		});
-
-		it("hands back its build array on a miss so an ordinary turn allocates no more than the parent path", () => {
-			// Contract: an ordinary turn (new messages appended) can never hit the
-			// replay memo, so the miss path must allocate exactly what the parent
-			// path did — one output array — and retain no transcript snapshot. If
-			// the miss path goes back to snapshotting `refs` plus copying `out`,
-			// each per-request transform pays two extra O(n) copies per request.
-			const injector = new DateCwdReminderInjector();
-			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
-			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
-
-			const first = injector.transform(context, "2026-08-14", "/work/omp");
-			const appended: Message = { role: "user", content: "second", timestamp: 2 };
-			const slices = new Array<unknown>();
-			const originalSlice = Array.prototype.slice;
-			const sliceSpy = function (this: unknown, ...args: []) {
-				slices.push(this);
-				return (originalSlice as (...callArgs: []) => unknown).apply(this, args);
-			};
-			Object.defineProperty(Array.prototype, "slice", { value: sliceSpy, configurable: true, writable: true });
-			try {
-				const replay = injector.transform(
-					{ ...context, messages: [firstUser, appended] },
-					"2026-08-14",
-					"/work/omp",
-				);
-				expect(replay.messages).toHaveLength(2);
-				expect(replay.messages[0]).toBe(first.messages[0]);
-				expect(replay.messages[1]).toBe(appended);
-				expect(slices).toHaveLength(0);
-			} finally {
-				Object.defineProperty(Array.prototype, "slice", {
-					value: originalSlice,
-					configurable: true,
-					writable: true,
-				});
+		it("drops the admitted memo when an ordinary turn grows past it instead of pinning it", async () => {
+			// Contract: once an ordinary turn appends messages, the admitted memo
+			// can never hit again, so the miss must release both O(n) arrays —
+			// not keep the old transcript reachable until an identical rebuild
+			// happens along. The sentinel below sits mid-transcript and is never
+			// injected, so only the memo's `refs` (and the O(1) boundary
+			// signature's endpoints, which it is not) pins it; after the growing
+			// turn plus a full GC it must be collectable.
+			function buildAdmittedSentinel(): {
+				ref: WeakRef<Message>;
+				injector: DateCwdReminderInjector;
+				messages: () => Message[];
+			} {
+				const injector = new DateCwdReminderInjector();
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const sentinel: Message = { role: "user", content: "sentinel-mid", timestamp: 2 };
+				const last: Message = { role: "user", content: "last", timestamp: 3 };
+				const context: Context = { systemPrompt: ["system"], messages: [first, sentinel, last] };
+				injector.transform(context, "2026-08-14", "/work/omp");
+				injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
+				return {
+					ref: new WeakRef(sentinel),
+					injector,
+					// The growing turn keeps the endpoints (the builder's closure
+					// holds them) and hands the sentinel to no one: only the memo
+					// could still reach it.
+					messages: () => [first, last, { role: "user", content: "appended", timestamp: 4 }],
+				};
 			}
+			const { ref, injector, messages } = buildAdmittedSentinel();
+			// The next ordinary turn grows the transcript: the memo misses, and
+			// the miss must clear it rather than leave it pinning the old arrays.
+			const grown = injector.transform(
+				{ systemPrompt: ["system"], messages: messages() },
+				"2026-08-14",
+				"/work/omp",
+			);
+			expect(grown.messages).toHaveLength(3);
+			// Drop the frame's strong hold on the grown wire (its injected root
+			// is a fresh object, but the endpoints ride it) so only the memo —
+			// were it still admitted — could keep the sentinel alive.
+			grown.messages.length = 0;
+			expect(await becomesCollectible(ref, 2_000)).toBe(true);
+			// Liveness anchor: the injector must stay alive across the probe
+			// (otherwise the sentinel frees vacuously with its owner), so it is
+			// used again here — and it must still serve fresh transforms after.
+			const freshUser: Message = { role: "user", content: "fresh", timestamp: 5 };
+			const post = injector.transform(
+				{ systemPrompt: ["system"], messages: [freshUser] },
+				"2026-08-14",
+				"/work/omp",
+			);
+			expect(post.messages[0]).not.toBe(freshUser);
 		});
 
 		it("rebuilds the wire when the caller edits the input array in place", () => {
@@ -155,6 +172,17 @@ describe("date-cwd-reminder", () => {
 			expect(first.messages).toHaveLength(2);
 			expect(first.messages[0]).not.toBe(firstUser);
 			expect(first.messages[1]).toBe(secondUser);
+
+			// A second identical transform admits the replay memo (two-hit
+			// admission: the first only records the O(1) boundary signature),
+			// so the in-place edit below must defeat the memo's
+			// element-identity check — not merely miss an unadmitted one.
+			const admitted = injector.transform(
+				{ ...context, messages: [...context.messages] },
+				"2026-08-14",
+				"/work/omp",
+			);
+			expect(admitted.messages[0]).toBe(first.messages[0]);
 
 			// The caller replaces an element of its own input array in place: the
 			// memo's element-identity check must miss and rebuild, or the replay
@@ -233,40 +261,29 @@ describe("date-cwd-reminder", () => {
 			// Contract: once the owner reports a wholesale history replacement, the
 			// injector must hold no reference — memo or otherwise — that keeps a
 			// discarded turn alive. The sentinel tail below is never injected, so
-			// only the replay memo pins it; after `release()` plus a full GC it
-			// must be collectable. Collection runs from a fresh timer callback per
-			// `packages/tui/test/gc.ts`: JSC scans stale async frames conservatively,
-			// so `Bun.gc(true)` issued from this resumed async frame can retain the
-			// released tail; a timer callback runs on the event loop's shallow stack,
-			// out of reach of those frames. The 2s deadline sits far inside Bun's 5s
-			// per-test default, leaving timeout margin.
+			// only the admitted replay memo pins it; after `release()` plus a full
+			// GC it must be collectable. Collection runs from a fresh timer
+			// callback per the shared `becomesCollectible` probe: JSC scans stale
+			// async frames conservatively, so `Bun.gc(true)` issued from this
+			// resumed async frame can retain the released tail; a timer callback
+			// runs on the event loop's shallow stack, out of reach of those
+			// frames. The 2s deadline sits far inside Bun's 5s per-test default,
+			// leaving timeout margin.
 			function buildPinnedTail(): { ref: WeakRef<Message>; injector: DateCwdReminderInjector } {
 				const injector = new DateCwdReminderInjector();
 				const tail: Message = { role: "user", content: "sentinel-tail", timestamp: 2 };
-				injector.transform(
-					{ systemPrompt: ["system"], messages: [{ role: "user", content: "first", timestamp: 1 }, tail] },
-					"2026-08-14",
-					"/work/omp",
-				);
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const context: Context = { systemPrompt: ["system"], messages: [first, tail] };
+				// Two-hit admission: the first transform only records the O(1)
+				// boundary signature into #pending, so the sentinel must be built
+				// twice to land in the admitted memo this test names.
+				injector.transform(context, "2026-08-14", "/work/omp");
+				injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
 				return { ref: new WeakRef(tail), injector };
-			}
-			function collectGarbage(): Promise<void> {
-				const { promise, resolve } = Promise.withResolvers<void>();
-				setTimeout(() => {
-					Bun.gc(true);
-					resolve();
-				}, 0);
-				return promise;
 			}
 			const { ref, injector } = buildPinnedTail();
 			injector.release();
-			let collected = false;
-			const deadline = performance.now() + 2_000;
-			do {
-				await collectGarbage();
-				collected = ref.deref() === undefined;
-			} while (!collected && performance.now() < deadline);
-			expect(collected).toBe(true);
+			expect(await becomesCollectible(ref, 2_000)).toBe(true);
 			// Liveness anchor: the injector must stay alive across the loop above
 			// (otherwise the tail frees vacuously with its owner), so it is used
 			// again here — and it must still serve fresh transforms afterwards.
