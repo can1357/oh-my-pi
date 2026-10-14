@@ -381,7 +381,7 @@ describe("learn tool (local backend)", () => {
 				memory: "A cross-project lesson must not become project-local.",
 				scope: "global",
 			}),
-		).rejects.toThrow(/only available with the Mnemopi backend/i);
+		).rejects.toThrow(/not available with the local memory backend/i);
 		expect(await Bun.file(learnedFile).exists()).toBe(false);
 	});
 

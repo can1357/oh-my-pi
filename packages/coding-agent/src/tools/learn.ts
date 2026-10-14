@@ -9,8 +9,8 @@ import learnDescription from "../prompts/tools/learn.md" with { type: "text" };
 import type { ToolSession } from ".";
 
 import { cfgAutolearnEnabled } from "../autolearn/settings";
+import { isGlobalMemoryScopeAvailable } from "../memory-backend/global-scope";
 import { cfgMemoryBackend } from "../memory-backend/settings";
-import { isGlobalMemoryScopeAvailable } from "../mnemopi/settings";
 
 const learnSkillSchema = type({
 	action: "'create' | 'update'",
@@ -79,8 +79,8 @@ export class LearnTool implements AgentTool<LearnSchema> {
 	async execute(_id: string, params: LearnParams): Promise<AgentToolResult> {
 		// 1) Persist or queue the lesson to long-term memory (mirrors MemoryRetainTool).
 		const backend = cfgMemoryBackend.get(this.session.settings);
-		if (params.scope === "global" && backend !== "mnemopi") {
-			throw new Error("Global memory scope is only available with the Mnemopi backend.");
+		if (params.scope === "global" && backend !== "mnemopi" && backend !== "hindsight") {
+			throw new Error(`Global memory scope is not available with the ${backend} memory backend.`);
 		}
 		let memoryMessage = "Lesson stored";
 		if (backend === "mnemopi") {
@@ -130,7 +130,8 @@ export class LearnTool implements AgentTool<LearnSchema> {
 			if (!state) {
 				throw new Error("Hindsight backend is not initialised for this session.");
 			}
-			state.enqueueRetain(params.memory, params.context);
+			// Throws before queueing when the scoping mode has no global destination, so no skill is written either.
+			state.enqueueRetain(params.memory, params.context, params.scope);
 			memoryMessage = "Lesson queued for retention";
 		}
 

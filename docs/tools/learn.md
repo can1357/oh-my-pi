@@ -22,7 +22,7 @@
 |---|---|---:|---|
 | `memory` | `string` | Yes | Durable, self-contained lesson to remember: what, when, and why. The schema has no minimum length; backend-specific sanitization/storage determines whether an empty value succeeds. |
 | `context` | `string` | No | Source context for the lesson. |
-| `scope` | `"project" \| "global"` | No | `global` stores the lesson in the Mnemopi bank every project recalls. In the schema and tool description only when `memory.backend = "mnemopi"` and `mnemopi.scoping` is `global` or `per-project-tagged`; omitted means `project`. |
+| `scope` | `"project" \| "global"` | No | `global` stores the lesson where every project recalls it: the shared Mnemopi bank, or an untagged Hindsight memory. In the schema and tool description only when `memory.backend` is `"mnemopi"` or `"hindsight"` and that backend's scoping (`mnemopi.scoping` / `hindsight.scoping`) is `global` or `per-project-tagged`; omitted means `project`. |
 | `skill` | `{ action: "create" \| "update"; name: string; description: string; body: string }` | No | Managed skill to create or enhance after the lesson succeeds. `body` is Markdown without frontmatter. |
 
 ## Outputs
@@ -39,8 +39,8 @@
 2. `execute(...)` stores the lesson before attempting any skill mutation:
    - Mnemopi: for `scope: "global"`, first resolves `state.getGlobalRetainTarget()`, which throws under `per-project` scoping before anything is stored or any skill is written; then calls `rememberScoped(...)` (with that target for a global lesson) with `source: "coding-agent-learn"`, `importance: 0.8`, `scope: "bank"`, fact and entity extraction enabled, `veracity: "tool"`, `memoryType: "fact"`, and session/cwd/context metadata. A thrown storage error is reported as `Mnemopi did not store the lesson: <reason>`; the return value is not checked.
    - Local backend: calls `localBackend.save(...)`, which normalizes and writes a project-scoped `learned.md`; `stored === 0` is treated as failure.
-   - Local backend and Hindsight reject `scope: "global"` with `Global memory scope is only available with the Mnemopi backend.` before storing, queueing, or writing a skill.
-   - Hindsight: enqueues retention with `state.enqueueRetain(memory, context)` and reports the lesson as queued.
+   - Local backend: rejects `scope: "global"` with `Global memory scope is not available with the local memory backend.` before storing or writing a skill.
+   - Hindsight: enqueues retention with `state.enqueueRetain(memory, context, scope)` and reports the lesson as queued. A global lesson is retained untagged; under `per-project` scoping `enqueueRetain` throws `Hindsight global scope requires global or per-project-tagged scoping.` before queueing or writing a skill.
 3. If `skill` is absent, the tool returns after the memory write/queue.
 4. If `skill.action == "create"`, the tool checks the lowercased/validated name against active authored skills. A conflict returns an error result after the lesson has already been stored or queued.
 5. Otherwise, it calls `writeManagedSkill(...)`. Skill-write failure is rethrown as a partial outcome because lesson persistence already happened.

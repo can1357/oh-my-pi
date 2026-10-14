@@ -2,8 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
-import { register, type ScopeLike } from "../config/registry";
-import { cfgMemoryBackend } from "../memory-backend/settings";
+import { register } from "../config/registry";
 
 // Mnemopi local SQLite memory backend.
 export const cfgMnemopiDbPath = register({
@@ -63,14 +62,6 @@ export const cfgMnemopiScoping = register({
 		condition: "mnemopiActive",
 	},
 });
-
-/**
- * Whether `retain`/`learn` can take `scope: "global"`: only Mnemopi with a bank every project
- * recalls (`global` or `per-project-tagged` scoping). Tools hide the option everywhere else.
- */
-export function isGlobalMemoryScopeAvailable(scope: ScopeLike): boolean {
-	return cfgMemoryBackend.get(scope) === "mnemopi" && cfgMnemopiScoping.get(scope) !== "per-project";
-}
 
 export const cfgMnemopiEmbeddingVariant = register({
 	id: "mnemopi.embeddingVariant",

@@ -31,7 +31,7 @@
 
 | Field | Type | Required | Description |
 |---|---|---:|---|
-| `items` | `Array<{ content: string; context?: string; scope?: "project" \| "global" }>` | Yes | One or more memories to store. `minItems: 1`. Each item must be self-contained; `context` is optional per-item provenance. `scope` is in the schema and tool description only when `memory.backend = "mnemopi"` and `mnemopi.scoping` is `global` or `per-project-tagged`; omitted means `project`. |
+| `items` | `Array<{ content: string; context?: string; scope?: "project" \| "global" }>` | Yes | One or more memories to store. `minItems: 1`. Each item must be self-contained; `context` is optional per-item provenance. `scope` is in the schema and tool description only when the active backend has a destination every project recalls: `memory.backend = "mnemopi"` with `mnemopi.scoping` `global` or `per-project-tagged`, or `memory.backend = "hindsight"` with `hindsight.scoping` `global` or `per-project-tagged`; omitted means `project`. |
 
 ## Outputs
 The output depends on the active `memory.backend`.
@@ -59,10 +59,10 @@ Mnemopi:
    - content and options are passed through `redactRememberWrite(...)` before storage.
 4. If the backend is `hindsight`:
    - it fetches `session.getHindsightSessionState()` and throws if the backend was not started;
-   - any `scope: "global"` item rejects the batch with `Global memory scope is only available with the Mnemopi backend.` before anything is queued (untagged Hindsight retains are not supported yet);
-   - each input item is handed to `HindsightSessionState.enqueueRetain(...)`;
-   - `HindsightRetainQueue.enqueue(...)` appends the item and either flushes immediately when the queue reaches `RETAIN_FLUSH_BATCH_SIZE`, or starts a debounce timer for `RETAIN_FLUSH_INTERVAL_MS`;
-   - on flush, `HindsightRetainQueue.#doFlush(...)` verifies ownership, best-effort ensures the bank exists via `ensureBankExists(...)`, maps items to `MemoryItemInput` with `context ?? config.retainContext`, `metadata.session_id`, and bank-scope tags, then sends one async `retainBatch(...)` request.
+   - if any item has `scope: "global"`, it calls `state.assertGlobalRetainAvailable()` first; under `per-project` scoping that throws `Hindsight global scope requires global or per-project-tagged scoping.` and nothing in the batch is queued;
+   - each input item is handed to `HindsightSessionState.enqueueRetain(content, context, scope)`;
+   - `HindsightRetainQueue.enqueue(...)` throws the same error for a `global` item under `per-project` scoping (the exported queue enforces it too, not only the tool); otherwise it appends the item and either flushes immediately when the queue reaches `RETAIN_FLUSH_BATCH_SIZE`, or starts a debounce timer for `RETAIN_FLUSH_INTERVAL_MS`;
+   - on flush, `HindsightRetainQueue.#doFlush(...)` verifies ownership, best-effort ensures the bank exists via `ensureBankExists(...)`, maps items to `MemoryItemInput` with `context ?? config.retainContext` and `metadata.session_id`, then sends async `retainBatch(...)` requests: project items carry the bank-scope tags, global items carry no tags. When the scope has project tags, the two kinds go in separate, concurrent requests, because Hindsight tags a request's generated document with the union of its items' tags and document-level re-tags cascade to every memory in it. A failed request emits a warning notice for its own items only, naming them as global when they were.
 
 ## Modes / Variants
 - Hindsight tool path: queued batch write only.
@@ -70,7 +70,7 @@ Mnemopi:
 - Hindsight bank scoping from `computeBankScope(...)`:
   - `global` — one shared bank, no project tags.
   - `per-project` — bank id gets `-<project label>` appended, where the label is the git primary checkout root basename (cwd basename outside a repo).
-  - `per-project-tagged` — shared bank plus `project:<project label>` tags on retained memories.
+  - `per-project-tagged` — shared bank plus `project:<project label>` tags on retained memories; `scope: "global"` items are retained untagged, which recall (`tagsMatch = "any"`) surfaces in every project.
 - Mnemopi bank scoping from `computeMnemopiBankScope(...)`:
   - `global` — retain and recall use the shared bank; `scope: "global"` writes there too.
   - `per-project` — retain and recall use a project bank derived from the absolute cwd basename plus a hash of that absolute cwd; `scope: "global"` is not offered.
