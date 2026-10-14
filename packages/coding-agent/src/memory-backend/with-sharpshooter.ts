@@ -141,8 +141,8 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 			return Promise.resolve(primary.start(options));
 		},
 
-		buildDeveloperInstructions(agentDir, settings, session) {
-			return joined("instructions", backend => backend.buildDeveloperInstructions(agentDir, settings, session));
+		buildDeveloperInstructions(agentDir, cwd, settings, session) {
+			return joined("instructions", backend => backend.buildDeveloperInstructions(agentDir, cwd, settings, session));
 		},
 
 		/**
