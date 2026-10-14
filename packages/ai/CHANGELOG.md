@@ -5,6 +5,7 @@
 ### Added
 
 - Added `PI_ANTHROPIC_API_VERSION=2026-10-21` to send Anthropic API version 2026-10-21 to the official Anthropic API; sampling parameters are omitted under that version, which rejects them ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- Added a `preflightSignal` option to `resets.redeem()`: cancelling it stops a saved-reset redeem before the reset request is sent, without cancelling a request already in flight ([#15130](https://github.com/can1357/oh-my-pi/pull/15130) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.5] - 2026-10-21
 
