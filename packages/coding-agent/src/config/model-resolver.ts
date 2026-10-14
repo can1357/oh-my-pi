@@ -822,6 +822,20 @@ function matchModel(
 		return bedrockInferenceProfile;
 	}
 
+	// A raw member id recorded by the available rows resolves to its local
+	// owner before the process-global alias index: a different registry's
+	// cache replay may have moved the alias to a row this catalog lacks.
+	const localOwners = availableModels.filter(m =>
+		[
+			...(m.thinking?.effortRouting ? Object.values(m.thinking.effortRouting) : []),
+			...(m.requestModelId ? [m.requestModelId] : []),
+			...getReviewedVariantAliasSources(m.provider, m.id),
+		].some(source => source !== undefined && source.toLowerCase() === lowerPattern),
+	);
+	if (localOwners.length > 0) {
+		return pickPreferredModel(localOwners, context);
+	}
+
 	// Retired effort-tier variant ids (bare, no provider prefix) resolve to
 	// their collapsed logical model; models from the providers whose table
 	// declared the alias win ties. Auto-derived `X-thinking` pairs resolve

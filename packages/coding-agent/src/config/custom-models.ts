@@ -204,8 +204,11 @@ export function computeHeaderConfigFingerprint(
 		})
 		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
 		.map(([id, override]) => [id, override.headers ?? null]);
+	const providerHeaders = providerOverride?.headers;
 	const canonical = stableStringifyJson([
-		providerOverride?.headers ?? null,
+		providerHeaders !== undefined && Object.values(providerHeaders).some(declaration => declaration.trim().length > 0)
+			? providerHeaders
+			: null,
 		providerOverride?.authHeader === true,
 		providerOverride?.apiKey !== undefined,
 		models,

@@ -25,7 +25,7 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { computeHeaderConfigFingerprint } from "../src/config/custom-models";
 import { ModelRegistry } from "../src/config/model-registry";
-import { resolveSessionModelSelector } from "../src/config/model-resolver";
+import { parseModelPattern, resolveSessionModelSelector } from "../src/config/model-resolver";
 import type { AuthStorage } from "../src/session/auth-storage";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -763,6 +763,32 @@ describe("model registry discovery header restore", () => {
 			]),
 		);
 		expect(withEmptyHeaders).toBe(base);
+		// The provider-level map goes through the same predicate: an accepted but
+		// ineffective provider header map must not invalidate restored rows.
+		expect(computeHeaderConfigFingerprint({ headers: {} }, new Map())).toBe(base);
+		expect(computeHeaderConfigFingerprint({ headers: { "X-P": " " } }, new Map())).toBe(base);
+	});
+
+	test("resolves unqualified aliases from the local catalog", async () => {
+		const modelsPath = await writeModelsYaml(
+			["    modelOverrides:", "      raw:", "        headers:", "          X-Account: a-1"].join("\n"),
+		);
+		seedCachedRows([{ id: "gateway/model-a", requestModelId: "raw" }]);
+		const first = await reloadFromCache(modelsPath);
+		expect(first.find("my-provider", "gateway/model-a")).toBeDefined();
+
+		// A second registry's cache replay moves the raw id in the process-global
+		// alias index; the first session's unqualified selector must keep
+		// resolving within its own catalog.
+		seedCachedRows([{ id: "gateway/model-b", requestModelId: "raw" }]);
+		const second = await reloadFromCache(modelsPath);
+		expect(second.find("my-provider", "gateway/model-b")).toBeDefined();
+		expect(parseModelPattern("raw", first.getAll("all")).model).toMatchObject({
+			id: "gateway/model-a",
+		});
+		expect(parseModelPattern("my-provider/raw", first.getAll("all")).model).toMatchObject({
+			id: "gateway/model-a",
+		});
 	});
 
 	test("resolves raw member ids within their own registry", async () => {
