@@ -103,7 +103,7 @@ import { captureBrowserSession } from "../../utils/browser-session";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
-import { resolveUsageModelSelectors } from "../../utils/usage-display";
+import { filterUsageReportsForDisplay, resolveUsageModelSelectors } from "../../utils/usage-display";
 import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { createAgentsHubDeps } from "../agents-hub-deps";
@@ -142,6 +142,7 @@ import { cfgBranchSummaryEnabled } from "../../session/context-settings";
 import { cfgCycleOrder, cfgDisabledProviders, cfgModelRoleStorage } from "../../config/model-settings";
 import { cfgDefaultThinkingLevel, cfgRetryFallbackChains } from "../../session/settings";
 import {
+	cfgDisplayShowZeroUsageMeters,
 	cfgStatusLineCompactThinkingLevel,
 	cfgStatusLineContextLine,
 	cfgStatusLineLeftSegments,
@@ -449,7 +450,9 @@ export class SelectorController {
 		const activeAccount = currentProvider
 			? this.ctx.session.modelRegistry.authStorage.oauth.identity(currentProvider, this.ctx.session.sessionId)
 			: undefined;
-		const usageModelSelectors = resolveUsageModelSelectors(reports, this.ctx.settings, next =>
+		const displayOptions = { showZeroUsageMeters: cfgDisplayShowZeroUsageMeters.get(this.ctx.settings) };
+		const displayReports = filterUsageReportsForDisplay(collapseSharedUsageReports(reports), displayOptions);
+		const usageModelSelectors = resolveUsageModelSelectors(displayReports, this.ctx.settings, next =>
 			this.ctx.session.getUsageReportingModelSelectors(next),
 		);
 		const done = () => {
@@ -459,7 +462,7 @@ export class SelectorController {
 			this.ctx.ui.requestRender();
 		};
 		const dashboard = new UsageDashboardComponent({
-			reports,
+			reports: displayReports,
 			unavailableAccounts,
 			renderDetail: (width, current) =>
 				renderUsageReports(
@@ -472,7 +475,12 @@ export class SelectorController {
 					unavailableAccounts,
 				),
 			loadActivity: loadDailyActivity,
-			refresh: () => this.ctx.session.fetchUsageReports(),
+			refresh: async () => {
+				const refreshed = await this.ctx.session.fetchUsageReports();
+				return refreshed
+					? filterUsageReportsForDisplay(collapseSharedUsageReports(refreshed), displayOptions)
+					: refreshed;
+			},
 			requestRender: () => this.ctx.ui.requestRender(),
 			onClose: done,
 		});

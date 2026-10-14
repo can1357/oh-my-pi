@@ -862,6 +862,7 @@
 
 ## [18.8.4] - 2026-10-08
 - Added a `display.showUsageModels` setting (default `true`) that opts out of the "Models with usage data" list in `/usage`, for users who only want the quota bars ([#7852](https://github.com/can1357/oh-my-pi/pull/7852) by [@mvid](https://github.com/mvid)).
+- Added a `display.showZeroUsageMeters` setting to hide untouched supplemental model and tier quota meters from live usage reports ([#10423](https://github.com/can1357/oh-my-pi/pull/10423) by [@mvid](https://github.com/mvid)).
 
 ### Changed
 
