@@ -12,10 +12,10 @@
  * and arithmetic expansion are out of scope; callers fall through when they
  * cannot find the structure they need.
  */
-export function tokenizeShellSegments(command: string): string[][] {
+export function tokenizeShellSegments(command: string, options?: ShellLexOptions): string[][] {
 	const segments: string[][] = [];
 	let current: string[] = [];
-	for (const token of lexShellCommand(command)) {
+	for (const token of lexShellCommand(command, options)) {
 		if (token.kind === "word") {
 			// Empty quoted words (`''`) carry no argument text.
 			if (token.value.length > 0) current.push(token.value);
@@ -31,6 +31,30 @@ export function tokenizeShellSegments(command: string): string[][] {
 /** Operator characters that end a word and split command segments outside quotes and comments. */
 const SHELL_OPERATOR_CHARS = new Set([";", "&", "|", "(", ")"]);
 
+/**
+ * Dialect switches for {@link lexShellCommand}. Shells disagree on both: dash has no
+ * `$'...'` quoting, and bash reads `@(#)` under `extglob` as one glob word, not a comment.
+ * The default reads the command the way bash does with its defaults.
+ */
+export interface ShellLexOptions {
+	/** Treat `$'...'` as ANSI-C quoting, where a backslash escapes the next character. Default true. */
+	ansiC?: boolean;
+	/** Start a `#` comment at a word start. Default true. */
+	comments?: boolean;
+}
+
+/**
+ * Every reading of a command that a deny or prompt rule must be tried against. A rule that
+ * only trusted one reading could be hidden behind a construct that another shell, or another
+ * option, parses differently; trying all of them can only add matches, never remove one.
+ */
+export const CONSERVATIVE_SHELL_LEX_VARIANTS: readonly ShellLexOptions[] = [
+	{},
+	{ ansiC: false },
+	{ comments: false },
+	{ ansiC: false, comments: false },
+];
+
 /** One lexical piece of a shell command: a word, or the whitespace/operator run between words. */
 export type ShellToken = { kind: "word"; raw: string; value: string } | { kind: "separator"; raw: string };
 
@@ -41,7 +65,9 @@ export type ShellToken = { kind: "word"; raw: string; value: string } | { kind: 
  * the operator characters `\n ; & | ( )`. A `#` comment is part of its words: operators inside it
  * do not split, and a newline ends it.
  */
-export function lexShellCommand(command: string): ShellToken[] {
+export function lexShellCommand(command: string, options: ShellLexOptions = {}): ShellToken[] {
+	const ansiC = options.ansiC !== false;
+	const comments = options.comments !== false;
 	const tokens: ShellToken[] = [];
 	let value = "";
 	let wordStart = -1;
@@ -119,14 +145,14 @@ export function lexShellCommand(command: string): ShellToken[] {
 			// comment runs to end of line and eats any quote after it; this
 			// branch is unreachable inside one because a `#` at a word start
 			// sets `inComment` below. Both probed against bash.
-			ansi = command[i - 1] === "$" && escapedAt !== i - 1;
+			ansi = ansiC && command[i - 1] === "$" && escapedAt !== i - 1;
 		} else if (ch === '"') {
 			inDouble = true;
 		} else if (ch === "\\" && i + 1 < command.length) {
 			value += command[i + 1];
 			escapedAt = i + 1;
 			i++;
-		} else if (ch === "#" && startsWord) {
+		} else if (ch === "#" && comments && startsWord) {
 			// A `#` glued to a word (`$#`, `${x#y}` shape words) stays plain text.
 			inComment = true;
 		} else {
