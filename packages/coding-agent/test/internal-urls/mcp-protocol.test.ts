@@ -14,6 +14,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { withTimeout } from "@oh-my-pi/pi-utils";
+import { hasExactMcpResource } from "../../src/internal-urls/mcp-protocol";
 
 function createMockManager(opts: {
 	servers?: string[];
@@ -117,7 +118,6 @@ describe("McpProtocolHandler", () => {
 	});
 
 	it("checks connected catalogs before unrelated pending connections for exact URI detection", async () => {
-		const { hasExactMcpResource } = await import("@oh-my-pi/pi-coding-agent/internal-urls/mcp-protocol");
 		const uri = "skill://demo/a;literal";
 		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
 		const manager = createMockManager({
@@ -133,6 +133,20 @@ describe("McpProtocolHandler", () => {
 			true,
 		);
 		expect((await readMcpResource(manager, parseInternalUrl(uri)))?.content).toBe("connected resource");
+	});
+
+	it("bounds exact catalog discovery without reporting an uncertain URI absent", async () => {
+		const manager = createMockManager({
+			servers: [],
+			waitForPendingConnections: () => Promise.withResolvers<void>().promise,
+		});
+		await expect(
+			withTimeout(
+				hasExactMcpResource(manager, parseInternalUrl("skill://demo;/tmp/x"), undefined, 20),
+				500,
+				"unbounded exact check",
+			),
+		).rejects.toThrow("cannot safely split");
 	});
 
 	it("preserves the speculative read wait budget for a connection that never settles", async () => {

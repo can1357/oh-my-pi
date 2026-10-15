@@ -102,15 +102,23 @@ function resolveTargetServer(mcpManager: MCPManagerApi, uri: string, exact: bool
 	return bestTemplateMatch?.serverName;
 }
 
+/** Same finite discovery window as speculative unknown-skill reads. */
+export const MCP_RESOURCE_DISCOVERY_WAIT_MS = 5_000;
+
+/** A spent discovery budget is unknown, not evidence that an exact URI is absent. */
+export const MCP_RESOURCE_DISCOVERY_TIMEOUT = "MCP resource discovery timed out; cannot safely split the semicolon URL";
+
 /** Whether a settled MCP catalog advertises this exact URI, without reading it. */
 export async function hasExactMcpResource(
 	mcpManager: MCPManagerApi,
 	url: InternalUrl,
 	signal?: AbortSignal,
+	waitMs = MCP_RESOURCE_DISCOVERY_WAIT_MS,
 ): Promise<boolean> {
+	signal?.throwIfAborted();
 	const uri = extractResourceUri(url);
 	if (resolveTargetServer(mcpManager, uri, true)) return true;
-	await untilAborted(signal, settleCatalogs(mcpManager, uri, true));
+	await withTimeout(settleCatalogs(mcpManager, uri, true), waitMs, MCP_RESOURCE_DISCOVERY_TIMEOUT, signal);
 	return resolveTargetServer(mcpManager, uri, true) !== undefined;
 }
 

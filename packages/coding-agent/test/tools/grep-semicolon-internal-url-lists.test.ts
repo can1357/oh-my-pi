@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -160,6 +160,108 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 		});
 		expect(getResultText(result)).toContain("deferred exact needle");
 		expect(getResultText(result)).not.toContain("abs path needle");
+	});
+
+	it("bounds deferred manager loading without guessing whether the semicolon URI is a list", async () => {
+		vi.useFakeTimers();
+		try {
+			const started = Promise.withResolvers<void>();
+			MCPManager.setDeferredInstance(() => {
+				started.resolve();
+				return Promise.withResolvers<MCPManager>().promise;
+			});
+			let outcome: string | undefined;
+			const checking = expandDelimitedPathEntries([`skill://demo;${absFile}`], tmpDir).then(
+				() => {
+					outcome = "split";
+				},
+				(error: unknown) => {
+					outcome = String(error);
+				},
+			);
+			await started.promise;
+			vi.advanceTimersByTime(5_000);
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+			expect(outcome).toContain("cannot safely split");
+			await checking;
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("shares one discovery budget between deferred startup and unsettled catalogs", async () => {
+		vi.useFakeTimers();
+		try {
+			const loading = Promise.withResolvers<MCPManager>();
+			const loadStarted = Promise.withResolvers<void>();
+			const catalogsStarted = Promise.withResolvers<void>();
+			MCPManager.setDeferredInstance(() => {
+				loadStarted.resolve();
+				return loading.promise;
+			});
+			let outcome: string | undefined;
+			const checking = expandDelimitedPathEntries([`skill://demo;${absFile}`], tmpDir).then(
+				() => {
+					outcome = "split";
+				},
+				(error: unknown) => {
+					outcome = String(error);
+				},
+			);
+			await loadStarted.promise;
+			vi.advanceTimersByTime(4_000);
+			loading.resolve({
+				getConnectedServers: () => [],
+				getServerResources: () => undefined,
+				waitForPendingConnections: () => {
+					catalogsStarted.resolve();
+					return Promise.withResolvers<void>().promise;
+				},
+				ensureServerResources: async () => {},
+			} as unknown as MCPManager);
+			await catalogsStarted.promise;
+			vi.advanceTimersByTime(1_000);
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+			expect(outcome).toContain("cannot safely split");
+			await checking;
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("cancels deferred manager loading before classifying a semicolon input", async () => {
+		const started = Promise.withResolvers<void>();
+		MCPManager.setDeferredInstance(() => {
+			started.resolve();
+			return Promise.withResolvers<MCPManager>().promise;
+		});
+		const controller = new AbortController();
+		const checking = expandDelimitedPathEntries([`skill://demo;${absFile}`], tmpDir, {
+			context: { signal: controller.signal },
+		});
+		await started.promise;
+		controller.abort();
+		await expect(checking).rejects.toMatchObject({ name: "AbortError" });
+	});
+
+	it("preserves an exact MCP resource URI before a trailing read selector", async () => {
+		const uri = `skill://figma/foo;${absFile}`;
+		MCPManager.setInstance({
+			getConnectedServers: () => ["figma"],
+			getServerResources: () => ({ resources: [{ uri, name: "literal" }], templates: [] }),
+			waitForPendingConnections: async () => {},
+			ensureServerResources: async () => {},
+			readServerResource: async () => ({
+				contents: [{ uri, text: "selected exact needle\nsecond line\nexcluded needle" }],
+			}),
+		} as unknown as MCPManager);
+		const result = await new GrepTool(createSession()).execute("exact-selected-search", {
+			pattern: "needle",
+			path: `${uri}:1-2`,
+		});
+		expect(getResultText(result)).toContain("selected exact needle");
+		expect(getResultText(result)).not.toContain("abs path needle");
+		expect(getResultText(result)).not.toContain("excluded needle");
 	});
 
 	it("cancels delimiter recovery waiting for an MCP catalog without splitting the URI", async () => {
