@@ -12,6 +12,8 @@ import {
 	cfgDisabledProviders,
 	cfgModelProviderOrder,
 	cfgModelRoleStorage,
+	cfgModelSort,
+	cfgModelSortGrouped,
 } from "../config/model-settings";
 import {
 	cfgDefaultThinkingLevel,
@@ -77,6 +79,18 @@ export function createModelBrowserSource(
 		},
 		get cycleOrder() {
 			return cfgCycleOrder.get(settings);
+		},
+		get modelSort() {
+			return cfgModelSort.get(settings);
+		},
+		get modelSortGrouped() {
+			return cfgModelSortGrouped.get(settings);
+		},
+		onModelSortChange(value) {
+			settings.writeValue(cfgModelSort, value, "global");
+		},
+		onModelSortGroupingChange(grouped) {
+			settings.writeValue(cfgModelSortGrouped, grouped, "global");
 		},
 		getModelRole: role => settings.getModelRole(role),
 		getProjectModelRole: role => settings.getProjectModelRole(role),
