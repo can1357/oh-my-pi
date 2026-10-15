@@ -14,9 +14,6 @@ function mcpResult(output: string, expanded: boolean): DefaultToolRenderInput {
 	};
 }
 
-/** SGR selection, built at runtime so no control character appears in a regex literal. */
-const ANSI_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
-
 describe("generic fallback card", () => {
 	it("expands past 12 lines — Ctrl+O reveals the whole output", async () => {
 		const theme = await getThemeByName("dark");
@@ -24,13 +21,14 @@ describe("generic fallback card", () => {
 		// 40 numbered rows: well past both the 12-row expanded cap and the 4-row collapsed window.
 		const rows = Array.from({ length: 40 }, (_, i) => `row-${i}`);
 
-		const collapsed = formatDefaultToolExecution(mcpResult(rows.join("\n"), false), 80, theme).replace(ANSI_RE, "");
+		const collapsed = Bun.stripANSI(formatDefaultToolExecution(mcpResult(rows.join("\n"), false), 80, theme));
 		expect(collapsed).toContain("row-0");
 		expect(collapsed).toContain("row-3");
 		expect(collapsed).not.toContain("row-10");
 
-		const expanded = formatDefaultToolExecution(mcpResult(rows.join("\n"), true), 80, theme).replace(ANSI_RE, "");
-		for (const row of rows) expect(expanded).toContain(row);
+		const expanded = Bun.stripANSI(formatDefaultToolExecution(mcpResult(rows.join("\n"), true), 80, theme));
+		// One exact ordered assertion: every row on its own line, no missing, extra, or reordered rows.
+		expect(expanded.split("\n").slice(5).map(row => row.trimEnd())).toEqual(rows);
 		expect(expanded).toContain("row-39");
 		expect(expanded).not.toMatch(/more lines/);
 	});

@@ -86,6 +86,7 @@
 - Fixed streamed links and inline math showing raw `[text](url` or LaTeX and then rewrapping the paragraph when they close, in the terminal UI and native (TSP) terminals: they now render in their closed form while they stream ([#15864](https://github.com/can1357/oh-my-pi/pull/15864) by [@H4vC](https://github.com/H4vC)).
 - Paint-only overlays no longer swallow typing intended for the focused input beneath them ([#15793](https://github.com/can1357/oh-my-pi/issues/15793)).
 - Fixed Ctrl+O on a generic (MCP, custom, or extension) tool card truncating the expanded result at 12 rows, and stopped pre-slicing the native card body at 64 KiB, so an expanded card reveals every row ([#15335](https://github.com/can1357/oh-my-pi/pull/15335) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
+- Generic tool cards now reveal the complete result when expanded ([#15335](https://github.com/can1357/oh-my-pi/issues/15335)).
 
 ## [18.11.0] - 2026-10-14
 
