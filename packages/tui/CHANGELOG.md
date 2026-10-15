@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed a replayed bash block (resumed session, `/rewind`, an agent transcript) keeping only the last 100 lines of the recorded output, so Ctrl+O could never expand back to the rest and the collapsed footer under-counted the hidden rows; the recorded output is now seeded whole, expansion recovers every line, and rows the live streaming cap dropped while the command ran, including rows the output throttle discarded when a run fails without a final snapshot, are reported as dropped instead of being counted as recoverable. A transcript-wide expand toggle now reaches those blocks, so the rewind, copy and agent-transcript views expand them too. TSP/native surfaces name the dropped rows in the same words the terminal footer uses, so users of those terminals learn earlier rows are unrecoverable ([#15326](https://github.com/can1357/oh-my-pi/pull/15326) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.3] - 2026-10-16
 
@@ -90,8 +93,6 @@
 - Fixed streamed assistant text or thinking containing a tab stopping all later rows of the reply from retiring into native scrollback until the turn ended ([#15693](https://github.com/can1357/oh-my-pi/issues/15693))
 - Fixed wrapped lines in Write, Read, Edit, Todo, Ask and LSP tool cards losing their alignment under line numbers, tree connectors, and option or code rails ([#15677](https://github.com/can1357/oh-my-pi/issues/15677))
 - Fixed SIXEL images leaving their previous raster on screen, drawn again over itself, when the transcript moves them within the viewport ([#15657](https://github.com/can1357/oh-my-pi/issues/15657))
-
-- Fixed a replayed bash block (resumed session, `/rewind`, an agent transcript) keeping only the last 100 lines of the recorded output, so Ctrl+O could never expand back to the rest and the collapsed footer under-counted the hidden rows; the recorded output is now seeded whole, expansion recovers every line, and rows the live streaming cap dropped while the command ran, including rows the output throttle discarded when a run fails without a final snapshot, are reported as dropped instead of being counted as recoverable. A transcript-wide expand toggle now reaches those blocks, so the rewind, copy and agent-transcript views expand them too. TSP/native surfaces name the dropped rows in the same words the terminal footer uses, so users of those terminals learn earlier rows are unrecoverable ([#15326](https://github.com/can1357/oh-my-pi/pull/15326) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.10.4] - 2026-10-13
 

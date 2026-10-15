@@ -1688,8 +1688,11 @@ export class OutputSink {
 	 * retained tail silently ends one chunk early with no skipped count.
 	 */
 	async dispose(): Promise<void> {
-		this.#flushPendingChunk();
-		await this.#finalizeFile();
+		try {
+			this.#flushPendingChunk();
+		} finally {
+			await this.#finalizeFile();
+		}
 	}
 }
 
