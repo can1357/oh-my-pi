@@ -2078,6 +2078,7 @@ export class AgentSession implements SettingsScope {
 			agentKind: () => this.#agentKind,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
+			steeringArrivalSignal: () => this.#steeringArrivalSignal(),
 			queuedMessageCount: () => this.queuedMessageCount,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			model: () => this.model,
@@ -8373,6 +8374,56 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Atomically enqueue a user-authored message onto the steering or follow-up
+	 * queue of the currently running turn. The primitive behind the ACP
+	 * `_session/steering` extension method (`packages/coding-agent/src/modes/acp/acp-agent.ts`).
+	 *
+	 * The busy-check is not a TOCTOU snapshot: the message is admitted through
+	 * `#queueUserMessage`, which — for this admission — re-checks liveness after
+	 * its awaits (image normalization / vision description) and never schedules
+	 * the idle queue drain, so:
+	 *
+	 * - a run that settled mid-admission classifies as `false` (not admitted)
+	 *   and the caller keeps its content — no invisible autonomous continuation
+	 *   can claim it;
+	 * - a run that stays live owns delivery: its agent loop polls the steering
+	 *   queue at tool-batch and model-call boundaries.
+	 *
+	 * Everything else that enqueues user input (`prompt()`, `steer()`,
+	 * `followUp()`, the idle paths) schedules the idle drain as before; only
+	 * this admission does not, because it only ever targets a live run.
+	 *
+	 * @returns `true` when the message was admitted onto the live run's queue;
+	 *   `false` when no run was live at (or survived) admission.
+	 */
+	async joinActiveTurn(
+		text: string,
+		images?: ImageContent[],
+		options?: { queue?: "steering" | "followUp" },
+	): Promise<boolean> {
+		if (text.startsWith("/")) {
+			this.#throwIfExtensionCommand(text);
+		}
+		// `#abortInProgress` is set synchronously at abort() entry, before its
+		// first await, so this read is race-free against a concurrent cancel.
+		// A steer admitted during the abort window would land in the
+		// post-abort stranded-message drain, whose continuation has no
+		// owner on the client side (the ACP promptTurn has already settled
+		// and unsubscribed) — refuse instead so the caller keeps its content.
+		if (!this.isStreaming || this.#abortInProgress) {
+			return false;
+		}
+		const mode = options?.queue === "followUp" ? "followUp" : "steer";
+		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
+		return await this.#queueUserMessage(expandedText, images, mode, {
+			timestamp: Date.now(),
+			rawText: text,
+			requireActiveRun: true,
+			skipIdleDrain: true,
+		});
+	}
+
+	/**
 	 * Run a mode-exit `teardown` (abort the active turn, swap the toolset, clear
 	 * mode state) with queued-message auto-resume suppressed, then re-arm the
 	 * drain so a queued user turn resumes cleanly once the previous toolset is
@@ -8426,6 +8477,22 @@ export class AgentSession implements SettingsScope {
 			/** Called synchronously once the message is pushed onto its queue. See {@link PromptOptions.onPromptAdmitted}. */
 			onPromptAdmitted?: () => void;
 			/**
+			 * `joinActiveTurn` admission: the caller treats "not admitted" as "keep
+			 * your content". A run that settled while normalization/vision
+			 * description was in flight must not strand a late message on an idle
+			 * queue (the idle drain is skipped via `skipIdleDrain`), so classify
+			 * as not-admitted instead. Synchronous from this check to the enqueue —
+			 * no interleaving drain can race it.
+			 */
+			requireActiveRun?: boolean;
+			/**
+			 * `joinActiveTurn` admission: never schedule the idle queue drain —
+			 * the live run owns delivery (its loop polls the steering queue at
+			 * batch/model-call boundaries), and a message admitted while no run
+			 * streams must not auto-continue as an autonomous turn.
+			 */
+			skipIdleDrain?: boolean;
+			/**
 			 * `#promptGeneration` captured when prompt() took this submission. abort() (or a
 			 * history rewrite) bumps it; if that lands while images are being prepared, the
 			 * message is not queued, matching prompt()'s idle drop.
@@ -8468,6 +8535,14 @@ export class AgentSession implements SettingsScope {
 				? await this.#buildImageDescriptionNotice(normalizedImages)
 				: undefined;
 		if (options?.promptGeneration !== undefined && this.#promptGeneration !== options.promptGeneration) {
+			return false;
+		}
+		// `joinActiveTurn` admission: after every await above, the run that was
+		// live at call time may have settled. Classify as not-admitted so the
+		// caller (the ACP bridge) keeps its content for the host; the enqueue
+		// below is synchronous, so nothing interleaves between this check and
+		// the message landing on the queue.
+		if (options?.requireActiveRun && !this.isStreaming) {
 			return false;
 		}
 		if (mode === "aside") {
@@ -8513,10 +8588,42 @@ export class AgentSession implements SettingsScope {
 			};
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			this.agent.steer(userMessage);
+			// Wake any listener parked on steering arrival (the ACP permission
+			// gate): the message is on the queue now, so its wait ends even
+			// though the streaming boundary poll has not run yet.
+			this.#fireSteeringArrival();
 		}
 		options?.onPromptAdmitted?.();
-		this.#scheduleIdleQueueDrain();
+		// joinActiveTurn admission must never start an autonomous turn: the
+		// live run owns delivery, and an idle queue stays put until the host
+		// decides what to do with its content.
+		if (!options?.skipIdleDrain) {
+			this.#scheduleIdleQueueDrain();
+		}
 		return true;
+	}
+
+	/**
+	 * Aborted (and replaced) once per user steering-message arrival. The ACP
+	 * permission gate (`SessionTools.#wrapToolForAcpPermission`) races a wait
+	 * on this signal against its elicit, so a steer sent while a permission
+	 * dialog is open ends the wait: the elicit is superseded, its tool call
+	 * throws, and the queued message is injected at the next batch boundary
+	 * instead of sitting behind the dialog until the user answers. A fire while
+	 * no listener is parked is a no-op (the fresh controller replaces the old).
+	 */
+	#steeringArrivalController = new AbortController();
+
+	/** Current {@link #steeringArrivalController} signal; see that field. */
+	#steeringArrivalSignal(): AbortSignal {
+		return this.#steeringArrivalController.signal;
+	}
+
+	/** Abort the current steering-arrival signal and arm the next. */
+	#fireSteeringArrival(): void {
+		const previous = this.#steeringArrivalController;
+		this.#steeringArrivalController = new AbortController();
+		previous.abort();
 	}
 
 	#scheduleIdleQueueDrain(): void {

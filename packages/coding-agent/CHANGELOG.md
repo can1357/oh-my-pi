@@ -8,6 +8,7 @@
 ### Changed
 
 - Reduced status-line refresh overhead while subagents have long conversations ([#15874](https://github.com/can1357/oh-my-pi/pull/15874) by [@iliaal](https://github.com/iliaal)).
+- Added `_session/steering` ACP extension method (advertised as `_meta.steering.supported`) so clients like agent-shell steer running turns through omp's native steer/follow-up queues; idle sessions always answer `promptRequired` so the host keeps owning new turns, `_meta.steering.queue: "followUp"` targets the follow-up queue, and a steer sent while a permission dialog is open supersedes the dialog instead of waiting behind it ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin)).
 
 ## [18.11.1] - 2026-10-15
 

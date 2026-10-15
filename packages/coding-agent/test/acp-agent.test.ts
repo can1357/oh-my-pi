@@ -138,17 +138,32 @@ class FakeAgentSession {
 	promptCalls: string[] = [];
 	steerCalls: Array<{ text: string; images: unknown[] }> = [];
 	followUpCalls: Array<{ text: string; images: unknown[] }> = [];
-	removedQueuedMessages: Array<{ text: string; queue: string }> = [];
-	removeQueuedMessageResult = true;
+	joinActiveTurnCalls: Array<{ text: string; images: unknown[]; queue: "steering" | "followUp" }> = [];
+	/** Extra refusal switch for the fake `joinActiveTurn`; `isStreaming` remains the busy gate. */
+	joinActiveTurnAdmitted = true;
 	async steer(text: string, images?: unknown[]): Promise<void> {
 		this.steerCalls.push({ text, images: images ?? [] });
 	}
 	async followUp(text: string, images?: unknown[]): Promise<void> {
 		this.followUpCalls.push({ text, images: images ?? [] });
 	}
-	removeQueuedMessage(text: string, queue: "steering" | "followUp"): boolean {
-		this.removedQueuedMessages.push({ text, queue });
-		return this.removeQueuedMessageResult;
+	async joinActiveTurn(
+		text: string,
+		images?: unknown[],
+		options?: { queue?: "steering" | "followUp" },
+	): Promise<boolean> {
+		const queue = options?.queue ?? "steering";
+		this.joinActiveTurnCalls.push({ text, images: images ?? [], queue });
+		const admitted = this.isStreaming && this.joinActiveTurnAdmitted;
+		if (!admitted) {
+			return false;
+		}
+		if (queue === "followUp") {
+			await this.followUp(text, images);
+		} else {
+			await this.steer(text, images);
+		}
+		return true;
 	}
 	customMessages: Array<{ customType: string; content: string; details?: unknown }> = [];
 	customMessageOptions: Array<{ streamingBehavior?: "steer" | "followUp"; queueChipText?: string } | undefined> = [];
@@ -1325,7 +1340,16 @@ describe("ACP agent", () => {
 			],
 		});
 
+		// Admission goes through AgentSession.joinActiveTurn — the atomic
+		// check+enqueue primitive — never a raw steer() plus bridge heuristics.
 		expect(result).toEqual({ outcome: "injected", queue: "steering" });
+		expect(session.joinActiveTurnCalls).toEqual([
+			{
+				text: "use the existing parser\n\nplan",
+				images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
+				queue: "steering",
+			},
+		]);
 		expect(session.steerCalls).toEqual([
 			{
 				text: "use the existing parser\n\nplan",
@@ -1352,6 +1376,7 @@ describe("ACP agent", () => {
 		});
 
 		expect(result).toEqual({ outcome: "injected", queue: "followUp" });
+		expect(session.joinActiveTurnCalls).toEqual([{ text: "then run the tests", images: [], queue: "followUp" }]);
 		expect(session.followUpCalls).toEqual([{ text: "then run the tests", images: [] }]);
 		expect(session.steerCalls).toEqual([]);
 
@@ -1363,15 +1388,14 @@ describe("ACP agent", () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		// Hold the turn inside AgentSession.prompt: the ACP promptTurn is already
-		// reserved (the dispatch passed skill/builtin routing) but isStreaming
-		// is still false — the exact window between prompt() admission and the
-		// session starting to stream.
+		// Hold the turn inside AgentSession.prompt — the same window the real
+		// session occupies in flight (#beginInFlight at prompt entry), so
+		// joinActiveTurn classifies it live and the steer joins it.
 		const dispatchHeld = Promise.withResolvers<void>();
 		session.prompt = async (text: string) => {
 			session.promptCalls.push(text);
-			await dispatchHeld.promise;
 			session.isStreaming = true;
+			await dispatchHeld.promise;
 			return true;
 		};
 
@@ -1397,52 +1421,44 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("withdraws a steer that outlives its turn and hands the content back to the host", async () => {
+	it("hands a steer that outlives its turn back to the host instead of stranding it", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		// Busy at classification time; the turn ends while steer() is still
-		// admitting the message (image preprocessing can await real time), so
-		// the message lands on a now-idle session that would auto-continue
-		// invisibly. The bridge must withdraw it and answer promptRequired.
+		// The run settles while joinActiveTurn is still admitting the message
+		// (image preprocessing awaits real time before the enqueue): the
+		// message must classify as not-admitted and never reach an idle queue.
 		session.isStreaming = true;
-		const realSteer = session.steer.bind(session);
-		session.steer = async (text: string, images?: unknown[]) => {
+		const realJoin = session.joinActiveTurn.bind(session);
+		session.joinActiveTurn = async (
+			text: string,
+			images?: unknown[],
+			options?: { queue?: "steering" | "followUp" },
+		) => {
 			session.isStreaming = false;
-			await realSteer(text, images);
+			return await realJoin(text, images, options);
 		};
 
 		const raced = await harness.agent.extMethod("_session/steering", {
 			sessionId: created.sessionId,
 			prompt: [{ type: "text", text: "use the existing parser" }],
 		});
-
-		expect(raced).toEqual({ outcome: "promptRequired", queue: "steering" });
-		expect(session.steerCalls).toEqual([{ text: "use the existing parser", images: [] }]);
-		expect(session.removedQueuedMessages).toEqual([{ text: "use the existing parser", queue: "steering" }]);
-
-		// A withdrawal miss means the run already took the message (dequeued
-		// for its next model call, or live-steered into the ending response):
-		// injected stays the accurate answer and nothing is re-submitted.
-		session.isStreaming = true;
-		session.removeQueuedMessageResult = false;
-		const realFollowUp = session.followUp.bind(session);
-		session.followUp = async (text: string, images?: unknown[]) => {
-			session.isStreaming = false;
-			await realFollowUp(text, images);
-		};
-		const consumed = await harness.agent.extMethod("_session/steering", {
+		const racedFollowUp = await harness.agent.extMethod("_session/steering", {
 			sessionId: created.sessionId,
-			prompt: [{ type: "text", text: "already consumed" }],
+			prompt: [{ type: "text", text: "and then the tests" }],
 			_meta: { steering: { queue: "followUp" } },
 		});
 
-		expect(consumed).toEqual({ outcome: "injected", queue: "followUp" });
-		expect(session.followUpCalls).toEqual([{ text: "already consumed", images: [] }]);
-		expect(session.removedQueuedMessages).toEqual([
-			{ text: "use the existing parser", queue: "steering" },
-			{ text: "already consumed", queue: "followUp" },
+		expect(raced).toEqual({ outcome: "promptRequired", queue: "steering" });
+		expect(racedFollowUp).toEqual({ outcome: "promptRequired", queue: "followUp" });
+		expect(session.joinActiveTurnCalls).toEqual([
+			{ text: "use the existing parser", images: [], queue: "steering" },
+			{ text: "and then the tests", images: [], queue: "followUp" },
 		]);
+		// Nothing was enqueued on the now-idle session: no autonomous
+		// continuation can claim content the client still owns.
+		expect(session.steerCalls).toEqual([]);
+		expect(session.followUpCalls).toEqual([]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -1500,12 +1516,15 @@ describe("ACP agent", () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 
+		// An unknown session is a client error, not a server fault: it must
+		// surface as -32602 invalid params, not the generic -32603 a plain
+		// Error becomes.
 		await expect(
 			harness.agent.extMethod("_session/steering", {
 				sessionId: "missing-session",
 				prompt: [{ type: "text", text: "hi" }],
 			}),
-		).rejects.toThrow("Unsupported ACP session");
+		).rejects.toThrow("unknown session");
 		await expect(
 			harness.agent.extMethod("_session/steering", { sessionId: created.sessionId, prompt: 42 }),
 		).rejects.toThrow("Invalid params");
@@ -1518,7 +1537,7 @@ describe("ACP agent", () => {
 
 		// Block-level malformations must surface as typed invalid-params errors
 		// on the wire (code -32602), not TypeErrors or silently queued
-		// undefined fields.
+		// undefined fields — including inherited names like `constructor`.
 		for (const prompt of [
 			[null],
 			[{ type: "image" }],
@@ -1527,6 +1546,7 @@ describe("ACP agent", () => {
 			[{ type: "resource", resource: { uri: "file:///x" } }],
 			[{ type: "resource", resource: { uri: "file:///x", mimeType: "text/plain" } }],
 			[{ type: "nope", text: "hi" }],
+			[{ type: "constructor" }],
 			[{ type: "resource_link", uri: "file:///x", title: 5 }],
 		] as unknown[]) {
 			const error = await harness.agent
@@ -1538,6 +1558,17 @@ describe("ACP agent", () => {
 			expect(error).toBeInstanceOf(RequestError);
 			expect((error as RequestError).code).toBe(-32602);
 		}
+		const unknownSessionError = await harness.agent
+			.extMethod("_session/steering", {
+				sessionId: "missing-session",
+				prompt: [{ type: "text", text: "hi" }],
+			})
+			.then(
+				() => undefined,
+				(rejection: unknown) => rejection,
+			);
+		expect(unknownSessionError).toBeInstanceOf(RequestError);
+		expect((unknownSessionError as RequestError).code).toBe(-32602);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

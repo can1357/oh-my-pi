@@ -199,20 +199,23 @@ function toSteeringPromptBlocks(prompt: unknown): PromptRequest["prompt"] {
 		throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, "prompt must be content blocks");
 	}
 	for (const block of prompt) {
-		if (typeof block !== "object" || block === null) {
+		if (typeof block !== "object" || block === null || Array.isArray(block)) {
 			throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, "prompt blocks must be objects");
 		}
 		const record = block as Record<string, unknown>;
 		if (typeof record.type !== "string") {
 			throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, "prompt block requires a string type");
 		}
-		const required = STEERING_BLOCK_STRING_FIELDS[record.type];
-		if (required === undefined) {
+		// Own-key lookup: inherited names (`constructor`, `toString`, …) would
+		// index inherited prototype values, and the `for…of` below would then
+		// throw a TypeError that surfaces as a generic -32603 internal error.
+		if (!Object.hasOwn(STEERING_BLOCK_STRING_FIELDS, record.type)) {
 			throw RequestError.invalidParams(
 				{ method: SESSION_STEERING_METHOD },
 				`unsupported prompt block type: ${record.type}`,
 			);
 		}
+		const required = STEERING_BLOCK_STRING_FIELDS[record.type];
 		for (const field of required) {
 			if (typeof record[field] !== "string") {
 				throw RequestError.invalidParams(
@@ -1338,29 +1341,42 @@ export class AcpAgent implements Agent {
 	/**
 	 * `_session/steering` — the steering extension method implemented by
 	 * claude-agent-acp and codex-acp (spec proposal: ACP `session/inject`,
-	 * agentclientprotocol/agent-client-protocol#1261). While a turn is in
-	 * flight the prompt is queued on the session's native steering queue (or
-	 * its follow-up queue with `_meta.steering.queue: "followUp"`) and reported
-	 * `injected`; "in flight" covers both a streaming session and a
-	 * `session/prompt` turn that is reserved but still dispatching, so a steer
-	 * always joins the client's own pending turn instead of queueing a second
-	 * prompt behind it. If the turn ends while the steer is still being
-	 * admitted, the just-queued message is withdrawn and the response is
-	 * `promptRequired` too — it never becomes an autonomous continuation the
-	 * client cannot see. An idle session is never started or consumed here: the
-	 * response is always `promptRequired`, so the host submits the content
-	 * through `session/prompt` and keeps owning the turn. omp deliberately
-	 * never returns `startedNewTurn` (claude-agent-acp's behavior without the
-	 * `idleBehavior` opt-in) because a detached turn has no `session/prompt`
-	 * response to carry a failure, so a rejected start would be invisible to
-	 * the client (claude-agent-acp#903).
+	 * agentclientprotocol/agent-client-protocol#1261). Admission goes through
+	 * `AgentSession.joinActiveTurn()`, which atomically classifies the target
+	 * run and enqueues onto its native steering/follow-up queue:
+	 *
+	 * - a live run (streaming, or a `session/prompt` turn reserved but still
+	 *   dispatching) owns delivery — its agent loop polls the queue at
+	 *   tool-batch and model-call boundaries — and the outcome is
+	 *   `injected`;
+	 * - a run that settles while the steer is being admitted (image
+	 *   preprocessing awaits real time) classifies as not-admitted, the
+	 *   message never reaches the queue, and no autonomous continuation can
+	 *   claim it — the outcome is `promptRequired`;
+	 * - an idle session is never started or consumed here: the response is
+	 *   always `promptRequired`, so the host submits the content through
+	 *   `session/prompt` and keeps owning the turn.
+	 *
+	 * omp deliberately never returns `startedNewTurn` (claude-agent-acp's
+	 * behavior without the `idleBehavior` opt-in) because a detached turn has
+	 * no `session/prompt` response to carry a failed start, so a rejection
+	 * would be invisible to the client (claude-agent-acp#903). `queue` is
+	 * `followUp` when the request opts into the omp-specific
+	 * `_meta.steering.queue: "followUp"` routing.
 	 */
 	async #handleSessionSteering(params: { [key: string]: unknown }): Promise<{ [key: string]: unknown }> {
 		const sessionId = params.sessionId;
 		if (typeof sessionId !== "string" || sessionId.length === 0) {
 			throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, "sessionId required");
 		}
-		const record = this.#getSessionRecord(sessionId);
+		let record: ManagedSessionRecord;
+		try {
+			record = this.#getSessionRecord(sessionId);
+		} catch {
+			// Map unknown sessions to the method's error contract instead of
+			// the generic internal error a plain `Error` would surface as.
+			throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, `unknown session: ${sessionId}`);
+		}
 		this.#throwIfRecordClosed(record);
 
 		const promptBlocks = toSteeringPromptBlocks(params.prompt);
@@ -1370,40 +1386,18 @@ export class AcpAgent implements Agent {
 		}
 		const queue = steeringQueueFromMeta(params._meta);
 
-		if (isPromptTurnInFlight(record.promptTurn) || record.session.isStreaming) {
-			try {
-				if (queue === "followUp") {
-					await record.session.followUp(converted.text, converted.images);
-				} else {
-					await record.session.steer(converted.text, converted.images);
-				}
-			} catch (error: unknown) {
-				return {
-					outcome: "failed",
-					reason: error instanceof Error ? error.message : String(error),
-				};
+		try {
+			const admitted = await record.session.joinActiveTurn(converted.text, converted.images, { queue });
+			if (!admitted) {
+				return { outcome: "promptRequired", queue };
 			}
-			// Admission can outlive the turn it joined: image preprocessing
-			// (AgentSession.#queueUserMessage) awaits real time before the
-			// message is enqueued. If that turn ended while we waited, the
-			// message would sit on an idle session and auto-continue as an
-			// autonomous run with no ACP forwarder — the client cannot see or
-			// cancel it, yet we already answered. Withdraw the just-queued
-			// message while the session is still idle and hand the content
-			// back (`promptRequired`) so the host resubmits through
-			// session/prompt and keeps owning the turn. A withdrawal miss
-			// means the run already took the message — dequeued for its next
-			// model call or live-steered into the ending response — so
-			// `injected` stays accurate.
-			if (!isPromptTurnInFlight(record.promptTurn) && !record.session.isStreaming) {
-				if (record.session.removeQueuedMessage(converted.text, queue)) {
-					return { outcome: "promptRequired", queue };
-				}
-			}
-			return { outcome: "injected", queue };
+		} catch (error: unknown) {
+			return {
+				outcome: "failed",
+				reason: error instanceof Error ? error.message : String(error),
+			};
 		}
-
-		return { outcome: "promptRequired", queue };
+		return { outcome: "injected", queue };
 	}
 
 	async extNotification(_method: string, _params: { [key: string]: unknown }): Promise<void> {}

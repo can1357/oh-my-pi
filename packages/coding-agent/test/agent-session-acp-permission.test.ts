@@ -955,3 +955,57 @@ it("setActiveToolsByName normalizes legacy tool names", async () => {
 
 	expect(session.getActiveToolNames()).toEqual(["grep", "glob"]);
 });
+
+// ---------------------------------------------------------------------------
+// 5. Steering supersedes an open permission dialog (ACP `_session/steering`)
+// ---------------------------------------------------------------------------
+
+it("a steer sent while a permission dialog is open supersedes it instead of waiting behind it", async () => {
+	const deleteTool = makeFakeTool("delete");
+	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();
+	const permissionOpened = Promise.withResolvers<void>();
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(_toolCall, _options, _signal) {
+			permissionOpened.resolve();
+			return await permissionPending.promise;
+		},
+	};
+	session = await createSessionWithMockModel([deleteTool as AgentTool], bridge, [
+		{
+			content: [{ type: "toolCall", id: "call-delete-1", name: "delete", arguments: { path: "/tmp/gone.ts" } }],
+		},
+		{ content: ["done after steer"] },
+	]);
+
+	// Drive the turn; the delete tool's permission elicit pends inside it.
+	let promptSettled = false;
+	const promptDone = session.prompt("delete something").then(() => {
+		promptSettled = true;
+	});
+	// Await the observable signal that the elicit is open — not a guessed delay.
+	await permissionOpened.promise;
+
+	// The turn is live, so the steer joins it — and must supersede the open
+	// dialog: the elicit is abandoned, its tool call surfaces as a cancelled
+	// permission (a normal tool error), and the queued message is injected at
+	// the next batch boundary (the model call that produced the final
+	// response), not behind the dialog until the user answers.
+	const admitted = await session.joinActiveTurn("wait — use the other parser instead");
+	expect(admitted).toBe(true);
+
+	await promptDone;
+	expect(promptSettled).toBe(true);
+	// The superseded call never executed.
+	expect(deleteTool.executeCalls).toBe(0);
+	// The steer reached the model inside the same turn.
+	const messages = session.agent.state.messages;
+	expect(
+		messages.some(
+			message => message.role === "user" && JSON.stringify(message.content).includes("use the other parser"),
+		),
+	).toBe(true);
+
+	// Resolve the abandoned elicit so nothing dangles into the next test.
+	permissionPending.resolve({ outcome: "cancelled" });
+});

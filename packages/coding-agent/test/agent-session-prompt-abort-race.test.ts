@@ -180,4 +180,45 @@ describe("AgentSession prompt admission racing abort", () => {
 		expect(dropped).toEqual(["describe this"]);
 		expect(streamCalls).toEqual([]);
 	});
+
+	it("joinActiveTurn refuses a steer that races abort instead of stranding it behind the cancel", async () => {
+		const turnStarted = Promise.withResolvers<void>();
+		const releaseTurn = Promise.withResolvers<void>();
+		let calls = 0;
+		const { session } = await createSession([
+			async () => {
+				calls++;
+				turnStarted.resolve();
+				await releaseTurn.promise;
+				return { content: ["first turn"] };
+			},
+		]);
+
+		const running = session.prompt("start");
+		await withTimeout(turnStarted.promise, 2_000, "First turn never started");
+
+		// Live run: the steer joins it and stays queued for the boundary poll.
+		expect(await session.joinActiveTurn("steer the live run")).toBe(true);
+
+		// A steer racing the abort window must classify as not-admitted:
+		// `#abortInProgress` is set synchronously at abort() entry, and a
+		// message admitted behind it would ride the post-abort stranded
+		// drain — a continuation the cancelled turn no longer owns or
+		// forwards. The caller keeps its content instead.
+		const aborting = session.abort({ reason: USER_INTERRUPT_LABEL });
+		expect(await session.joinActiveTurn("steer during abort")).toBe(false);
+		releaseTurn.resolve();
+		await aborting;
+		await running;
+		await session.waitForIdle();
+
+		// The refused steer never reached any queue, so nothing from this
+		// admission can ride the post-abort drain: the user interrupt
+		// withdraws the earlier queued steer (documented interrupt
+		// semantics), and no second model call happens.
+		const queued = session.getQueuedMessages();
+		expect(queued.steering).toEqual([]);
+		expect(queued.followUp).toEqual([]);
+		expect(calls).toBe(1);
+	});
 });
