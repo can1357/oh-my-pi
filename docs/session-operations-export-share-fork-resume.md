@@ -231,10 +231,11 @@ keeping the conversation you can see.
   abort it first.
 - Closes every cached provider-session state entry (server-side conversation /
   prompt-cache handles) and reports how many were pruned.
-- Mints a fresh provider session id, re-keys memory state, and invalidates the
+- Mints a fresh provider session id, re-keys hindsight, mnemopi and dakera memory state, and invalidates the
   append-only context so the next turn rebuilds from the local conversation.
 - Leaves the local transcript, session file, and OMP session-manager identity
-  unchanged; the provider-facing `AgentSession.sessionId` changes.
+  unchanged; the provider-facing `AgentSession.sessionId` changes, so
+  nothing you have said or received is lost.
 
 Because it keeps both the visible and model-facing conversation, `/fresh`
 differs from `/clear` (clear the live/model conversation in place), `/new`
