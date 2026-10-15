@@ -552,6 +552,8 @@ export interface SteerOptions {
 	attribution?: MessageAttribution;
 	/** Called synchronously with the messages pushed onto the steering queue. See {@link PromptOptions.onPromptQueued}. */
 	onPromptQueued?: PromptOptions["onPromptQueued"];
+	/** Approval context shown to the model only. */
+	approvalLine?: string;
 }
 
 /** Options for AgentSession.sendUserMessage(). */

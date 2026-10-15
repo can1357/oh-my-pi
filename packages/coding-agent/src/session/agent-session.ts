@@ -10426,6 +10426,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			prependMessages: queued.prependMessages,
 			rawText: text,
 			onPromptQueued: options?.onPromptQueued,
+			approvalLine: options?.approvalLine,
 		});
 	}
 
@@ -10697,6 +10698,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			 * message is not queued, matching prompt()'s idle drop.
 			 */
 			promptGeneration?: number;
+			approvalLine?: string;
 		},
 	): Promise<boolean> {
 		const attribution = options?.attribution ?? "user";
@@ -10777,6 +10779,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			attribution,
 			timestamp ?? Date.now(),
 			rawText,
+			options?.approvalLine,
 		);
 		options?.onPromptQueued?.(queued);
 		options?.onPromptAdmitted?.();
@@ -10800,12 +10803,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		attribution: MessageAttribution,
 		timestamp: number,
 		rawText: string,
+		approvalLine?: string,
 	): AgentMessage[] {
 		this.#allowQueuedMessageDrainRetry();
 		const userMessage: AgentMessage =
 			mode === "followUp"
 				? { role: "user", content, attribution, timestamp }
-				: { role: "user", content, steering: true, attribution, timestamp };
+				: {
+						role: "user",
+						content,
+						steering: true,
+						attribution,
+						timestamp,
+						...(approvalLine ? { approvalLine } : {}),
+					};
 		this.#queuedMessageRawText.set(userMessage, rawText);
 		const group = [...companions, userMessage];
 		if (mode === "followUp") {
