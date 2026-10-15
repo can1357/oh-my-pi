@@ -30,7 +30,7 @@ function isEvictionCandidate(message: AgentMessage, tokens: number): message is 
  * delta. Everything from here on belongs to the review that just finished and
  * is protected, since the next delta usually touches the same files.
  */
-function latestReviewStart(messages: readonly AgentMessage[]): number {
+export function latestReviewStart(messages: readonly AgentMessage[]): number {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
 		if (message.role === "user" && message.synthetic !== true) return i;
