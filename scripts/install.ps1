@@ -264,6 +264,15 @@ function Install-ViaBun {
                 throw "Expected package at $packagePath"
             }
 
+            # Validate against the ref's own Bun floor, not the global minimum.
+            $refPackageJson = Get-Content (Join-Path $packagePath "package.json") -Raw | ConvertFrom-Json
+            $refBunFloor = $refPackageJson.engines.bun
+            if ($refBunFloor) {
+                # Extract version from ">=1.4.3" format
+                $refVersion = $refBunFloor -replace '^>=?\s*', ''
+                Assert-BunVersion $refVersion
+            }
+
             Invoke-Native { bun install -g $packagePath }
             if ($LASTEXITCODE -ne 0) {
                 throw "Failed to install from $packagePath via bun"

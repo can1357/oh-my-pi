@@ -141,6 +141,15 @@ version_ge() {
     [ "$current_patch" -ge "$minimum_patch" ]
 }
 
+# True when bun meets the minimum version requirement (no exit).
+bun_version_ok() {
+    version_raw=$(bun --version 2>/dev/null || true)
+    [ -z "$version_raw" ] && return 1
+    version_clean=${version_raw%%-*}
+    version_ge "$version_clean" "$MIN_BUN_VERSION"
+}
+
+
 require_bun_version() {
     version_raw=$(bun --version 2>/dev/null || true)
     if [ -z "$version_raw" ]; then
@@ -377,8 +386,12 @@ case "$MODE" in
         # Default: use bun only when it matches the host architecture, otherwise
         # fall back to the prebuilt binary so Rosetta bun can't force an x86_64 build.
         if has_bun && bun_arch_matches_host; then
-            require_bun_version
-            install_via_bun
+            if bun_version_ok; then
+                install_via_bun
+            else
+                echo "Bun $(bun --version 2>/dev/null || echo 'unknown') is below the minimum required ${MIN_BUN_VERSION}; using the prebuilt binary instead."
+                install_binary
+            fi
         else
             if has_bun; then
                 echo "Detected bun with architecture '$(bun_arch)' on a '$(host_arch)' host; using the prebuilt binary instead."
