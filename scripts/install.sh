@@ -141,7 +141,8 @@ version_ge() {
     [ "$current_patch" -ge "$minimum_patch" ]
 }
 
-# True when bun meets the minimum version requirement (no exit).
+# True when bun meets the minimum version requirement (no exit). This is the
+# single version predicate; callers that must fail hard call require_bun_version.
 bun_version_ok() {
     version_raw=$(bun --version 2>/dev/null || true)
     [ -z "$version_raw" ] && return 1
@@ -149,20 +150,20 @@ bun_version_ok() {
     version_ge "$version_clean" "$MIN_BUN_VERSION"
 }
 
-
+# Exit with a diagnostic unless bun meets the minimum version requirement.
 require_bun_version() {
+    if bun_version_ok; then
+        return 0
+    fi
+
     version_raw=$(bun --version 2>/dev/null || true)
     if [ -z "$version_raw" ]; then
         echo "Failed to read bun version"
-        exit 1
-    fi
-
-    version_clean=${version_raw%%-*}
-    if ! version_ge "$version_clean" "$MIN_BUN_VERSION"; then
-        echo "Bun ${MIN_BUN_VERSION} or newer is required. Current version: ${version_clean}"
+    else
+        echo "Bun ${MIN_BUN_VERSION} or newer is required. Current version: ${version_raw%%-*}"
         echo "Upgrade Bun at https://bun.sh/docs/installation"
-        exit 1
     fi
+    exit 1
 }
 
 # Check if git is available
