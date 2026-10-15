@@ -112,6 +112,13 @@ describe("TmuxWindowNamer.sync", () => {
 		expect(runner.calls).toContainEqual(["rename-window", "-t", "%7", "--", "-debug"]);
 	});
 
+	it("drops the session title card so the window shows the plain title", async () => {
+		namer.sync("🧪 FLAKY: Fix flaky park tests", "/tmp/project");
+		await namer.drain();
+
+		expect(renamedNames()).toEqual(["Fix flaky park tests"]);
+	});
+
 	it("falls back to the cwd basename when the session name sanitizes away", async () => {
 		namer.sync("\u0000", "/tmp/my-project");
 		await namer.drain();

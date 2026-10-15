@@ -561,7 +561,7 @@ export const cfgTuiTmuxWindowName = register({
 		group: "Display",
 		label: "Tmux Window Name",
 		description:
-			"Rename the enclosing tmux window to the current session name so `tmux list-windows -a` identifies live sessions; the original window name is restored on exit",
+			"Rename the enclosing tmux window to the current session name, without its title card, so `tmux list-windows -a` identifies live sessions; the original window name is restored on exit",
 	},
 });
 
