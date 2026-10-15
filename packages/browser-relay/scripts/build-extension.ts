@@ -13,6 +13,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
+import {
+	stampRelayExtensionManifest,
+	stampRelayExtensionScript,
+} from "../../coding-agent/src/tools/browser/relay/protocol";
 
 const root = path.resolve(import.meta.dir, "..");
 const repoRoot = path.resolve(root, "../..");
@@ -34,12 +38,23 @@ if (!bundle.success) {
 	process.exit(1);
 }
 
-for (const file of ["manifest.json", "options.html", "options.js"]) {
+for (const file of ["options.html", "options.js"]) {
 	await Bun.write(path.join(distExtension, file), Bun.file(path.join(root, "extension", file)));
 }
 for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.txt"]) {
 	await Bun.write(path.join(distExtension, file), Bun.file(path.join(repoRoot, file)));
 }
+// The release zip carries the omp version it ships with, as `omp browser-relay install` stamps its copy;
+// the extension reports it to the relay. The embedded assets stay unstamped so releases do not rewrite them.
+const sourceManifest = path.join(root, "extension/manifest.json");
+const distScript = path.join(distExtension, "background.js");
+const unstampedScript = await Bun.file(distScript).text();
+const { version: ompVersion } = await Bun.file(path.join(root, "../coding-agent/package.json")).json();
+await Bun.write(distScript, stampRelayExtensionScript(unstampedScript, ompVersion));
+await Bun.write(
+	path.join(distExtension, "manifest.json"),
+	stampRelayExtensionManifest(await Bun.file(sourceManifest).text(), ompVersion),
+);
 
 const zip = await $`zip -qr ../omp-browser-relay-extension.zip .`.cwd(distExtension).nothrow();
 if (zip.exitCode !== 0) {
@@ -48,16 +63,16 @@ if (zip.exitCode !== 0) {
 }
 
 await fs.rm(assetsDir, { recursive: true, force: true });
+await Bun.write(path.join(assetsDir, "background.js.txt"), unstampedScript);
 const embeddedAssets = [
-	["background.js", "background.js.txt"],
-	["manifest.json", "manifest.json.txt"],
-	["options.html", "options.html.txt"],
-	["options.js", "options.js.txt"],
-	["LICENSE", "LICENSE.txt"],
-	["THIRD-PARTY-NOTICES.txt", "THIRD-PARTY-NOTICES.txt"],
+	[sourceManifest, "manifest.json.txt"],
+	[path.join(distExtension, "options.html"), "options.html.txt"],
+	[path.join(distExtension, "options.js"), "options.js.txt"],
+	[path.join(distExtension, "LICENSE"), "LICENSE.txt"],
+	[path.join(distExtension, "THIRD-PARTY-NOTICES.txt"), "THIRD-PARTY-NOTICES.txt"],
 ] as const;
 for (const [source, destination] of embeddedAssets) {
-	await Bun.write(path.join(assetsDir, destination), Bun.file(path.join(distExtension, source)));
+	await Bun.write(path.join(assetsDir, destination), Bun.file(source));
 }
 
 console.log("built:");

@@ -139,6 +139,8 @@ async function buildHello() {
     userAgent: navigator.userAgent,
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
     discardedTabsProtocol: 1,
+    ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
+    reloadProtocol: 1,
     tabs: snapshots,
     attachedTabIds
   };
@@ -191,6 +193,10 @@ function handleRelayMessage(raw) {
   }
   if (msg.t === "pong")
     return;
+  if (msg.t === "reload") {
+    chrome.runtime.reload();
+    return;
+  }
   runRpc(msg).then((result) => post({ t: "rpcResult", id: msg.id, ok: true, result })).catch((err) => {
     post({ t: "rpcResult", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
   });

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- The extension now reports which omp version installed it, so omp can tell when an extension from before an upgrade is still loaded ([#15105](https://github.com/can1357/oh-my-pi/pull/15105) by [@will-bogusz](https://github.com/will-bogusz))
+- The extension reloads itself when the relay asks after updating its files, so omp upgrades no longer need a manual reinstall and *Reload* (one last time for an extension installed before this) ([#15105](https://github.com/can1357/oh-my-pi/pull/15105) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.8.8] - 2026-10-10
 
 ### Fixed

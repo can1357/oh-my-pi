@@ -12,11 +12,13 @@ import {
 	type BrowserKind,
 	type BrowserKindTag,
 	holdBrowser,
+	normalizeConnectedCdpUrl,
 	releaseBrowser,
 } from "./browser/registry";
 import { ensureChromiumExecutable } from "./browser/launch";
 import { resolveInitScriptSources } from "./browser/open-options";
 import { resolveRelayKind } from "./browser/relay/kind";
+import { relayExtensionNotice } from "./browser/relay/probe";
 import { describeTernTargets, listTernBlocks, type TernTarget, ternTargets } from "./browser/tern/blocks";
 import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
@@ -457,8 +459,15 @@ async function openOnKind(
 		// rolling the fresh browser back on failure.
 		holdBrowser(browser);
 		let result: AcquireTabResult;
-		stage = `opening tab ${JSON.stringify(name)}`;
+		let relayNotice: string | null = null;
 		try {
+			// Read before the tab is acquired, so a cancel or the deadline landing during the read leaves no tab to close.
+			if (kind.kind === "relay") {
+				stage = "reading the relay extension version";
+				relayNotice = await relayExtensionNotice(normalizeConnectedCdpUrl(kind.cdpUrl), openSignal);
+				throwIfAborted(openSignal);
+			}
+			stage = `opening tab ${JSON.stringify(name)}`;
 			const initScripts = await untilAborted(openSignal, () =>
 				resolveInitScriptSources(params.init_scripts, session.cwd),
 			);
@@ -530,6 +539,7 @@ async function openOnKind(
 			...(tab.backend === "tern" ? ternNotes(tab) : []),
 			...notes,
 			result.note,
+			relayNotice,
 		].filter((line): line is string => typeof line === "string");
 		return toolResult(details).text(lines.join("\n")).done();
 	} catch (error) {
