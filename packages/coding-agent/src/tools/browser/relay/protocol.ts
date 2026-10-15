@@ -69,6 +69,11 @@ export function stampRelayExtensionScript(script: string, ompVersion: string): s
 	return `const OMP_INSTALL_VERSION = ${JSON.stringify(ompVersion)};\n${script}`;
 }
 
+/** The extension's manifest text with `ompVersion` as its `version_name`, which chrome://extensions shows. */
+export function stampRelayExtensionManifest(manifestJson: string, ompVersion: string): string {
+	return `${JSON.stringify({ ...JSON.parse(manifestJson), version_name: ompVersion }, null, "\t")}\n`;
+}
+
 /** Messages sent extension → relay. */
 export type ExtToRelayMessage =
 	| {

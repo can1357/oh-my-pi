@@ -13,7 +13,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
-import { stampRelayExtensionScript } from "../../coding-agent/src/tools/browser/relay/protocol";
+import {
+	stampRelayExtensionManifest,
+	stampRelayExtensionScript,
+} from "../../coding-agent/src/tools/browser/relay/protocol";
 
 const root = path.resolve(import.meta.dir, "..");
 const repoRoot = path.resolve(root, "../..");
@@ -50,7 +53,7 @@ const { version: ompVersion } = await Bun.file(path.join(root, "../coding-agent/
 await Bun.write(distScript, stampRelayExtensionScript(unstampedScript, ompVersion));
 await Bun.write(
 	path.join(distExtension, "manifest.json"),
-	`${JSON.stringify({ ...(await Bun.file(sourceManifest).json()), version_name: ompVersion }, null, "\t")}\n`,
+	stampRelayExtensionManifest(await Bun.file(sourceManifest).text(), ompVersion),
 );
 
 const zip = await $`zip -qr ../omp-browser-relay-extension.zip .`.cwd(distExtension).nothrow();

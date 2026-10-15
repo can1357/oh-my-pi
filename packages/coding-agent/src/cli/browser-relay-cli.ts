@@ -14,7 +14,7 @@ import optionsHtml from "../tools/browser/relay/extension-assets/options.html.tx
 import optionsJs from "../tools/browser/relay/extension-assets/options.js.txt" with { type: "text" };
 import thirdPartyNotices from "../tools/browser/relay/extension-assets/THIRD-PARTY-NOTICES.txt" with { type: "text" };
 import { DEFAULT_RELAY_URL } from "../tools/browser/relay/kind";
-import { stampRelayExtensionScript } from "../tools/browser/relay/protocol";
+import { stampRelayExtensionManifest, stampRelayExtensionScript } from "../tools/browser/relay/protocol";
 import { type RelayServer, startRelayServer } from "../tools/browser/relay/server";
 
 export const BROWSER_RELAY_ACTIONS = ["serve", "install"] as const;
@@ -38,7 +38,7 @@ export function relayExtensionFiles(ompVersion: string): Record<string, string> 
 		"background.js": stampRelayExtensionScript(backgroundJs, ompVersion),
 		LICENSE: licenseText,
 		// Shown in chrome://extensions.
-		"manifest.json": `${JSON.stringify({ ...JSON.parse(manifestJson), version_name: ompVersion }, null, "\t")}\n`,
+		"manifest.json": stampRelayExtensionManifest(manifestJson, ompVersion),
 		"options.html": optionsHtml,
 		"options.js": optionsJs,
 		"THIRD-PARTY-NOTICES.txt": thirdPartyNotices,
