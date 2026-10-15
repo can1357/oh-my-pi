@@ -1344,7 +1344,10 @@ export class AcpAgent implements Agent {
 	 * `injected`; "in flight" covers both a streaming session and a
 	 * `session/prompt` turn that is reserved but still dispatching, so a steer
 	 * always joins the client's own pending turn instead of queueing a second
-	 * prompt behind it. An idle session is never started or consumed here: the
+	 * prompt behind it. If the turn ends while the steer is still being
+	 * admitted, the just-queued message is withdrawn and the response is
+	 * `promptRequired` too — it never becomes an autonomous continuation the
+	 * client cannot see. An idle session is never started or consumed here: the
 	 * response is always `promptRequired`, so the host submits the content
 	 * through `session/prompt` and keeps owning the turn. omp deliberately
 	 * never returns `startedNewTurn` (claude-agent-acp's behavior without the
@@ -1379,6 +1382,23 @@ export class AcpAgent implements Agent {
 					outcome: "failed",
 					reason: error instanceof Error ? error.message : String(error),
 				};
+			}
+			// Admission can outlive the turn it joined: image preprocessing
+			// (AgentSession.#queueUserMessage) awaits real time before the
+			// message is enqueued. If that turn ended while we waited, the
+			// message would sit on an idle session and auto-continue as an
+			// autonomous run with no ACP forwarder — the client cannot see or
+			// cancel it, yet we already answered. Withdraw the just-queued
+			// message while the session is still idle and hand the content
+			// back (`promptRequired`) so the host resubmits through
+			// session/prompt and keeps owning the turn. A withdrawal miss
+			// means the run already took the message — dequeued for its next
+			// model call or live-steered into the ending response — so
+			// `injected` stays accurate.
+			if (!isPromptTurnInFlight(record.promptTurn) && !record.session.isStreaming) {
+				if (record.session.removeQueuedMessage(converted.text, queue)) {
+					return { outcome: "promptRequired", queue };
+				}
 			}
 			return { outcome: "injected", queue };
 		}

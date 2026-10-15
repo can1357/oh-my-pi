@@ -138,11 +138,17 @@ class FakeAgentSession {
 	promptCalls: string[] = [];
 	steerCalls: Array<{ text: string; images: unknown[] }> = [];
 	followUpCalls: Array<{ text: string; images: unknown[] }> = [];
+	removedQueuedMessages: Array<{ text: string; queue: string }> = [];
+	removeQueuedMessageResult = true;
 	async steer(text: string, images?: unknown[]): Promise<void> {
 		this.steerCalls.push({ text, images: images ?? [] });
 	}
 	async followUp(text: string, images?: unknown[]): Promise<void> {
 		this.followUpCalls.push({ text, images: images ?? [] });
+	}
+	removeQueuedMessage(text: string, queue: "steering" | "followUp"): boolean {
+		this.removedQueuedMessages.push({ text, queue });
+		return this.removeQueuedMessageResult;
 	}
 	customMessages: Array<{ customType: string; content: string; details?: unknown }> = [];
 	customMessageOptions: Array<{ streamingBehavior?: "steer" | "followUp"; queueChipText?: string } | undefined> = [];
@@ -1386,6 +1392,57 @@ describe("ACP agent", () => {
 		// Only the client's own prompt was ever started — the steer joins that
 		// turn rather than queueing a second prompt behind it.
 		expect(session.promptCalls).toEqual(["original task"]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("withdraws a steer that outlives its turn and hands the content back to the host", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// Busy at classification time; the turn ends while steer() is still
+		// admitting the message (image preprocessing can await real time), so
+		// the message lands on a now-idle session that would auto-continue
+		// invisibly. The bridge must withdraw it and answer promptRequired.
+		session.isStreaming = true;
+		const realSteer = session.steer.bind(session);
+		session.steer = async (text: string, images?: unknown[]) => {
+			session.isStreaming = false;
+			await realSteer(text, images);
+		};
+
+		const raced = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "use the existing parser" }],
+		});
+
+		expect(raced).toEqual({ outcome: "promptRequired", queue: "steering" });
+		expect(session.steerCalls).toEqual([{ text: "use the existing parser", images: [] }]);
+		expect(session.removedQueuedMessages).toEqual([{ text: "use the existing parser", queue: "steering" }]);
+
+		// A withdrawal miss means the run already took the message (dequeued
+		// for its next model call, or live-steered into the ending response):
+		// injected stays the accurate answer and nothing is re-submitted.
+		session.isStreaming = true;
+		session.removeQueuedMessageResult = false;
+		const realFollowUp = session.followUp.bind(session);
+		session.followUp = async (text: string, images?: unknown[]) => {
+			session.isStreaming = false;
+			await realFollowUp(text, images);
+		};
+		const consumed = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "already consumed" }],
+			_meta: { steering: { queue: "followUp" } },
+		});
+
+		expect(consumed).toEqual({ outcome: "injected", queue: "followUp" });
+		expect(session.followUpCalls).toEqual([{ text: "already consumed", images: [] }]);
+		expect(session.removedQueuedMessages).toEqual([
+			{ text: "use the existing parser", queue: "steering" },
+			{ text: "already consumed", queue: "followUp" },
+		]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
