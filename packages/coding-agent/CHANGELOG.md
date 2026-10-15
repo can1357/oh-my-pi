@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added collapsible `/tree` branches: `Space` or `Tab` folds the selected subtree (marked `▸` with the number of hidden entries), and `Shift+Tab` folds every branch off the active thread ([#7762](https://github.com/can1357/oh-my-pi/pull/7762) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
 ### Changed
 
 - Reduced status-line refresh overhead while subagents have long conversations ([#15874](https://github.com/can1357/oh-my-pi/pull/15874) by [@iliaal](https://github.com/iliaal)).
