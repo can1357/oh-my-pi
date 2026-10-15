@@ -10,6 +10,7 @@ import { runExtensionCompact, runExtensionSetModel } from "../extensibility/exte
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
+import { computeSessionContextBreakdown } from "../session/context-usage-runtime";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 
 /** Action name for an extension-originated send failure. */
@@ -146,6 +147,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			shutdown,
 			getContextUsage: () => session.getContextUsage(),
 			getSystemPrompt: () => session.systemPrompt,
+			getContextBreakdown: () => computeSessionContextBreakdown(session, { snapcompactSavings: true }),
 			runEphemeralTurn: args => session.runEphemeralTurn(args),
 			compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 		},
