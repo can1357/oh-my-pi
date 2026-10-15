@@ -60,6 +60,15 @@ export function isOlderOmpVersion(version: string, than: string): boolean {
 	return isOmpVersion(version) && isOmpVersion(than) && Bun.semver.order(version, than) < 0;
 }
 
+/**
+ * The extension's service worker script with `ompVersion` declared above it as `OMP_INSTALL_VERSION`, which the
+ * extension reports in its hello. The stamp sits in the script, not only the manifest, because after the files
+ * change a Chrome restart re-reads manifest.json but keeps running the service worker it registered before.
+ */
+export function stampRelayExtensionScript(script: string, ompVersion: string): string {
+	return `const OMP_INSTALL_VERSION = ${JSON.stringify(ompVersion)};\n${script}`;
+}
+
 /** Messages sent extension → relay. */
 export type ExtToRelayMessage =
 	| {
@@ -80,7 +89,7 @@ export type ExtToRelayMessage =
 			 * latest-wins socket replacement.
 			 */
 			instanceId?: string;
-			/** The omp version that installed this extension (manifest `version_name`). Absent on builds without the stamp. */
+			/** The omp version that installed the running script ({@link stampRelayExtensionScript}). Absent on builds without the stamp. */
 			ompVersion?: string;
 	  }
 	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }

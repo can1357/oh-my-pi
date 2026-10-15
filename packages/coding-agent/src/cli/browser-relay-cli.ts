@@ -14,6 +14,7 @@ import optionsHtml from "../tools/browser/relay/extension-assets/options.html.tx
 import optionsJs from "../tools/browser/relay/extension-assets/options.js.txt" with { type: "text" };
 import thirdPartyNotices from "../tools/browser/relay/extension-assets/THIRD-PARTY-NOTICES.txt" with { type: "text" };
 import { DEFAULT_RELAY_URL } from "../tools/browser/relay/kind";
+import { stampRelayExtensionScript } from "../tools/browser/relay/protocol";
 import { type RelayServer, startRelayServer } from "../tools/browser/relay/server";
 
 export const BROWSER_RELAY_ACTIONS = ["serve", "install"] as const;
@@ -30,15 +31,19 @@ export interface BrowserRelayCommandArgs {
 	verbose?: boolean;
 }
 
-const EXTENSION_FILES: Record<string, string> = {
-	"background.js": backgroundJs,
-	LICENSE: licenseText,
-	// The extension reports `version_name` in its hello, so omp can tell when an older install keeps running.
-	"manifest.json": `${JSON.stringify({ ...JSON.parse(manifestJson), version_name: VERSION }, null, "\t")}\n`,
-	"options.html": optionsHtml,
-	"options.js": optionsJs,
-	"THIRD-PARTY-NOTICES.txt": thirdPartyNotices,
-};
+/** The extension files `omp browser-relay install` writes, stamped with the installing omp's version. */
+export function relayExtensionFiles(ompVersion: string): Record<string, string> {
+	return {
+		// The extension reports this stamp in its hello, so omp can tell when an older install keeps running.
+		"background.js": stampRelayExtensionScript(backgroundJs, ompVersion),
+		LICENSE: licenseText,
+		// Shown in chrome://extensions.
+		"manifest.json": `${JSON.stringify({ ...JSON.parse(manifestJson), version_name: ompVersion }, null, "\t")}\n`,
+		"options.html": optionsHtml,
+		"options.js": optionsJs,
+		"THIRD-PARTY-NOTICES.txt": thirdPartyNotices,
+	};
+}
 
 /** Default port of the relay endpoint (kept in sync with DEFAULT_RELAY_URL). */
 export const DEFAULT_RELAY_PORT = Number(new URL(DEFAULT_RELAY_URL).port);
@@ -53,8 +58,9 @@ export async function runBrowserRelayCommand(args: BrowserRelayCommandArgs): Pro
 
 async function runInstall(dirOverride: string | undefined): Promise<void> {
 	const dir = dirOverride ? path.resolve(dirOverride) : path.join(getBrowserRelayDir(), "extension");
-	for (const name in EXTENSION_FILES) {
-		await Bun.write(path.join(dir, name), EXTENSION_FILES[name]!);
+	const files = relayExtensionFiles(VERSION);
+	for (const name in files) {
+		await Bun.write(path.join(dir, name), files[name]!);
 	}
 	console.log(`Installed the OMP Browser Relay extension to ${dir}`);
 	console.log("");

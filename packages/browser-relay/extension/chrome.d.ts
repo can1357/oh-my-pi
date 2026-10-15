@@ -100,7 +100,6 @@ declare const chrome: {
 		onClicked: ChromeEvent<(tab: ChromeTab) => void>;
 	};
 	runtime: {
-		getManifest(): { version: string; version_name?: string };
 		openOptionsPage(): Promise<void>;
 		onInstalled: ChromeEvent<() => void>;
 		onStartup: ChromeEvent<() => void>;

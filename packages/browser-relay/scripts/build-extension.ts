@@ -13,6 +13,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
+import { stampRelayExtensionScript } from "../../coding-agent/src/tools/browser/relay/protocol";
 
 const root = path.resolve(import.meta.dir, "..");
 const repoRoot = path.resolve(root, "../..");
@@ -41,9 +42,12 @@ for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.txt"]) {
 	await Bun.write(path.join(distExtension, file), Bun.file(path.join(repoRoot, file)));
 }
 // The release zip carries the omp version it ships with, as `omp browser-relay install` stamps its copy;
-// the extension reports it to the relay. The embedded asset stays unstamped so releases do not rewrite it.
+// the extension reports it to the relay. The embedded assets stay unstamped so releases do not rewrite them.
 const sourceManifest = path.join(root, "extension/manifest.json");
+const distScript = path.join(distExtension, "background.js");
+const unstampedScript = await Bun.file(distScript).text();
 const { version: ompVersion } = await Bun.file(path.join(root, "../coding-agent/package.json")).json();
+await Bun.write(distScript, stampRelayExtensionScript(unstampedScript, ompVersion));
 await Bun.write(
 	path.join(distExtension, "manifest.json"),
 	`${JSON.stringify({ ...(await Bun.file(sourceManifest).json()), version_name: ompVersion }, null, "\t")}\n`,
@@ -56,8 +60,8 @@ if (zip.exitCode !== 0) {
 }
 
 await fs.rm(assetsDir, { recursive: true, force: true });
+await Bun.write(path.join(assetsDir, "background.js.txt"), unstampedScript);
 const embeddedAssets = [
-	[path.join(distExtension, "background.js"), "background.js.txt"],
 	[sourceManifest, "manifest.json.txt"],
 	[path.join(distExtension, "options.html"), "options.html.txt"],
 	[path.join(distExtension, "options.js"), "options.js.txt"],
