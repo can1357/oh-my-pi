@@ -1,7 +1,8 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { Database } from "bun:sqlite";
@@ -61,6 +62,50 @@ describe("read with a `;` list mixing URLs and local paths", () => {
 		const text = await readText("https://127.0.0.1:9/x;a.ts:1-1");
 		expect(text).toContain("interpreted as 2 paths");
 		expect(text).toContain("export const a = 1;");
+	});
+
+	it("forwards rawImages tool context and cancellation signal to every recovered target", async () => {
+		for (const target of ["Makefile:1-1;a.ts:1-1", "omp://;a.ts:1-1"]) {
+			const tool = new ReadTool(session);
+			const context = { rawImages: true } as AgentToolContext;
+			const controller = new AbortController();
+			const execute = tool.execute.bind(tool);
+			const children: Array<{ signal: AbortSignal | undefined; context: unknown }> = [];
+			const spy = spyOn(tool, "execute").mockImplementation(async (id, params, signal, update, toolContext) => {
+				if (id === "read-delimited-part") children.push({ signal, context: toolContext });
+				return execute(id, params, signal, update, toolContext);
+			});
+			try {
+				await tool.execute("context-read", { path: target }, controller.signal, undefined, context);
+				expect(children).toHaveLength(2);
+				for (const child of children) {
+					expect(child.context).toBe(context);
+					expect(child.signal).toBe(controller.signal);
+				}
+			} finally {
+				spy.mockRestore();
+			}
+		}
+	});
+
+	it("keeps raw image routing for an image inside a recovered list", async () => {
+		const png = Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+			"base64",
+		);
+		await Bun.write(path.join(cwd, "pixel.png"), png);
+		const context = { rawImages: true } as AgentToolContext;
+		const result = await new ReadTool(session).execute(
+			"raw-image-list",
+			{ path: "pixel.png:raw;a.ts:1-1" },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(result.content.some(block => block.type === "image")).toBe(true);
+		expect(result.content.some(block => block.type === "text" && block.text.includes("export const a = 1;"))).toBe(
+			true,
+		);
 	});
 
 	it("keeps a URL that contains `;` whole", async () => {
