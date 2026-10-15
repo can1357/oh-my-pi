@@ -223,7 +223,12 @@ describe("Mnemosyne OSS backend", () => {
 		const second = await mnemosyneOssBackend.beforeAgentStartPrompt!(session.session, "current question");
 		expect(second).toBeUndefined();
 		expect(
-			(await mnemosyneOssBackend.buildDeveloperInstructions("/tmp", "/tmp", Settings.isolated({}), session.session))!,
+			(await mnemosyneOssBackend.buildDeveloperInstructions(
+				"/tmp",
+				"/tmp",
+				Settings.isolated({}),
+				session.session,
+			))!,
 		).toContain("stored background");
 		const compacted = await mnemosyneOssBackend.preCompactionContext!(
 			[{ role: "user", content: "question" }] as AgentMessage[],
