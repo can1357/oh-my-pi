@@ -99,6 +99,9 @@
 - Fixed the usage dashboard averaging distinct quota buckets that share a label and window (Google Antigravity's Gemini and Gemini 4 Argon weeklies) into one row, which masked a drained bucket as "50% left"; buckets now group by quota identity, and shared Claude/GPT copies still merge ([#16790](https://github.com/can1357/oh-my-pi/issues/16790))
 - Command and eval output panes no longer re-style and re-join their whole output on every frame, so a long command's output stops costing frame time while it sits in the transcript ([#16779](https://github.com/can1357/oh-my-pi/pull/16779) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ### Fixed
+### Fixed
+
+- Fixed a replayed bash block (resumed session, `/rewind`, an agent transcript) keeping only the last 100 lines of the recorded output, so Ctrl+O could never expand back to the rest and the collapsed footer under-counted the hidden rows; the recorded output is now seeded whole, expansion recovers every line, and rows the live streaming cap dropped while the command ran, including rows the output throttle discarded when a run fails without a final snapshot, are reported as dropped instead of being counted as recoverable. A transcript-wide expand toggle now reaches those blocks, so the rewind, copy and agent-transcript views expand them too. TSP/native surfaces name the dropped rows in the same words the terminal footer uses, so users of those terminals learn earlier rows are unrecoverable ([#15326](https://github.com/can1357/oh-my-pi/pull/15326) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Breaking Changes
 
