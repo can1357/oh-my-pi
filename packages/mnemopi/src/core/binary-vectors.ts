@@ -179,7 +179,7 @@ export class BinaryVectorStore {
 	readonly conn: Database;
 	readonly dbPath: DatabasePath;
 	readonly tableName: string;
-	private readonly ownsConnection: boolean;
+	readonly #ownsConnection: boolean;
 	// `Database.query()` memoizes one Statement per SQL string on the connection, so two
 	// stores sharing a borrowed connection would receive the SAME object here and closing
 	// either store would finalize it out from under the sibling. `prepare()` hands out a
@@ -191,8 +191,8 @@ export class BinaryVectorStore {
 		this.dbPath = options.dbPath ?? ":memory:";
 		this.tableName = assertSqlIdentifier(options.tableName ?? "binary_vectors");
 		this.conn = options.conn ?? openDatabase(this.dbPath, { create: true, readwrite: true });
-		this.ownsConnection = options.conn === undefined;
-		this.initTable();
+		this.#ownsConnection = options.conn === undefined;
+		this.#initTable();
 		this.#searchStmt = this.conn.prepare<VectorRow, []>(
 			`SELECT memory_id, binary_vector, original_dim, magnitude FROM ${this.tableName}`,
 		);
@@ -205,7 +205,7 @@ export class BinaryVectorStore {
 		);
 	}
 
-	private initTable(): void {
+	#initTable(): void {
 		this.conn.exec(`
 			CREATE TABLE IF NOT EXISTS ${this.tableName} (
 				memory_id TEXT PRIMARY KEY,
@@ -277,32 +277,32 @@ export class BinaryVectorStore {
 	close(): void {
 		this.#searchStmt.finalize();
 		this.#statsStmt.finalize();
-		if (this.ownsConnection) {
+		if (this.#ownsConnection) {
 			closeQuietly(this.conn);
 		}
 	}
 }
 
 export class FastBinarySearch {
-	private readonly memoryIds: string[];
-	private readonly vectors: Uint8Array[];
+	readonly #memoryIds: string[];
+	readonly #vectors: Uint8Array[];
 
 	constructor(
 		binaryVectors: ReadonlyMap<string, Uint8Array | ArrayBuffer> | Record<string, Uint8Array | ArrayBuffer>,
 	) {
-		this.memoryIds = [];
-		this.vectors = [];
+		this.#memoryIds = [];
+		this.#vectors = [];
 		if (isReadonlyMap(binaryVectors)) {
 			for (const [memoryId, vector] of binaryVectors) {
-				this.memoryIds.push(memoryId);
-				this.vectors.push(vector instanceof Uint8Array ? vector : new Uint8Array(vector));
+				this.#memoryIds.push(memoryId);
+				this.#vectors.push(vector instanceof Uint8Array ? vector : new Uint8Array(vector));
 			}
 		} else {
 			for (const memoryId in binaryVectors) {
 				const vector = binaryVectors[memoryId];
 				if (vector !== undefined) {
-					this.memoryIds.push(memoryId);
-					this.vectors.push(vector instanceof Uint8Array ? vector : new Uint8Array(vector));
+					this.#memoryIds.push(memoryId);
+					this.#vectors.push(vector instanceof Uint8Array ? vector : new Uint8Array(vector));
 				}
 			}
 		}
@@ -311,10 +311,10 @@ export class FastBinarySearch {
 	search(queryBinary: Uint8Array | ArrayBuffer, topK = 10): BinaryVectorSearchResult[] {
 		const query = queryBinary instanceof Uint8Array ? queryBinary : new Uint8Array(queryBinary);
 		const results: BinaryVectorSearchResult[] = [];
-		for (let i = 0; i < this.vectors.length; i += 1) {
-			const distance = hammingDistance(query, this.vectors[i] ?? new Uint8Array());
+		for (let i = 0; i < this.#vectors.length; i += 1) {
+			const distance = hammingDistance(query, this.#vectors[i] ?? new Uint8Array());
 			results.push({
-				memory_id: this.memoryIds[i] ?? "",
+				memory_id: this.#memoryIds[i] ?? "",
 				distance,
 				score: informationTheoreticScore(distance),
 			});
