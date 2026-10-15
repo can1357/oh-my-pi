@@ -992,28 +992,74 @@ describe("update-cli release binary integrity", () => {
 		expect(await Bun.file(targetPath).exists()).toBe(false);
 	});
 
-	it("wraps a timeout during body streaming with a friendly message", async () => {
+	/**
+	 * Fake fetch whose body sends one byte per read, advancing the fake clock by
+	 * `secondsPerByte` first. With null, the body sends one byte, then hangs and
+	 * resolves `hanging`. Like a real fetch body, it errors once the request
+	 * signal aborts.
+	 */
+	const dripFetch =
+		(secondsPerByte: number | null, hanging?: PromiseWithResolvers<void>) =>
+		async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			let sent = 0;
+			const body = new ReadableStream<Uint8Array>(
+				{
+					start(controller) {
+						init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason));
+					},
+					pull(controller) {
+						if (secondsPerByte === null && sent > 0) {
+							hanging?.resolve();
+							return Promise.withResolvers<void>().promise;
+						}
+						if (secondsPerByte !== null) vi.advanceTimersByTime(secondsPerByte * 1000);
+						controller.enqueue(new Uint8Array([content.charCodeAt(sent++)]));
+						if (sent === content.length) controller.close();
+					},
+				},
+				{ highWaterMark: 0 },
+			);
+			return new Response(body);
+		};
+
+	it("finishes a slow download that keeps receiving bytes past the stall timeout", async () => {
 		const dir = await makeTempDir();
 		const targetPath = path.join(dir, binaryName);
-		const body = new ReadableStream<Uint8Array>(
-			{
-				pull(controller) {
-					controller.enqueue(new Uint8Array(1));
-					controller.error(new DOMException("The operation timed out.", "TimeoutError"));
-				},
-			},
-			{ highWaterMark: 0 },
-		);
-
-		await expect(
-			downloadVerifiedBinary({
+		vi.useFakeTimers();
+		try {
+			// One byte every 20 seconds: minutes in total, but never a 60-second gap.
+			await downloadVerifiedBinary({
 				url,
 				targetPath,
 				expectedSize: Buffer.byteLength(content),
 				expectedDigest: digest,
-				fetchImpl: async () => new Response(body),
-			}),
-		).rejects.toThrow("Timed out downloading release binary after 15 minutes");
+				fetchImpl: dripFetch(20),
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+		expect(await Bun.file(targetPath).text()).toBe(content);
+	});
+
+	it("aborts a download whose body stops sending bytes and leaves no file behind", async () => {
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, binaryName);
+		const hanging = Promise.withResolvers<void>();
+		vi.useFakeTimers();
+		try {
+			const download = downloadVerifiedBinary({
+				url,
+				targetPath,
+				expectedSize: Buffer.byteLength(content),
+				expectedDigest: digest,
+				fetchImpl: dripFetch(null, hanging),
+			});
+			await hanging.promise;
+			vi.advanceTimersByTime(60_000);
+			await expect(download).rejects.toThrow("Download stalled: no data received for 60 seconds");
+		} finally {
+			vi.useRealTimers();
+		}
 		expect(await Bun.file(targetPath).exists()).toBe(false);
 	});
 
@@ -1284,19 +1330,26 @@ describe("update-cli stale update artifact sweep", () => {
 		await Bun.write(`${targetPath}.1700000000000.4242.bak`, "timestamped backup");
 		await Bun.write(`${targetPath}.1800000000000.99.bak`, "another backup");
 		// Orphaned temp files from a hard-killed download: reaped once older than
-		// the download window. Legacy fixed name and timestamped name both count.
+		// the age window and their updater has exited. Legacy fixed name and
+		// timestamped name both count.
+		const exited = Bun.spawn([process.execPath, "-e", ""], { stdout: "ignore", stderr: "ignore" });
+		await exited.exited;
+		const deadPid = exited.pid;
 		const stale = new Date(Date.now() - 60 * 60 * 1000);
 		await Bun.write(`${targetPath}.new`, "legacy temp");
 		await fs.utimes(`${targetPath}.new`, stale, stale);
-		await Bun.write(`${targetPath}.1700000000000.4242.new`, "timestamped temp");
-		await fs.utimes(`${targetPath}.1700000000000.4242.new`, stale, stale);
-		await Bun.write(`${targetPath}.1700000000000.4242.0.patch`, "orphaned patch");
-		await fs.utimes(`${targetPath}.1700000000000.4242.0.patch`, stale, stale);
+		await Bun.write(`${targetPath}.1700000000000.${deadPid}.new`, "timestamped temp");
+		await fs.utimes(`${targetPath}.1700000000000.${deadPid}.new`, stale, stale);
+		await Bun.write(`${targetPath}.1700000000000.${deadPid}.0.patch`, "orphaned patch");
+		await fs.utimes(`${targetPath}.1700000000000.${deadPid}.0.patch`, stale, stale);
 		// Must survive: a fresh temp or patch still belongs to a concurrent,
-		// in-progress download (unique per attempt), plus foreign basenames,
+		// in-progress download (unique per attempt), as does an old temp whose
+		// updater is still running (a long download), plus foreign basenames,
 		// non-numeric middle segments, and a bare `.patch` (never ours).
 		await Bun.write(`${targetPath}.9999999999999.7.new`, "in-progress temp");
 		await Bun.write(`${targetPath}.9999999999999.7.0.patch`, "in-progress patch");
+		await Bun.write(`${targetPath}.1700000000000.${process.pid}.0.new`, "long-running download");
+		await fs.utimes(`${targetPath}.1700000000000.${process.pid}.0.new`, stale, stale);
 		await Bun.write(`${targetPath}.patch`, "the user's patch");
 		await fs.utimes(`${targetPath}.patch`, stale, stale);
 		await Bun.write(path.join(dir, "notes.bak"), "keep me");
@@ -1310,10 +1363,11 @@ describe("update-cli stale update artifact sweep", () => {
 		expect(await Bun.file(`${targetPath}.1700000000000.4242.bak`).exists()).toBe(false);
 		expect(await Bun.file(`${targetPath}.1800000000000.99.bak`).exists()).toBe(false);
 		expect(await Bun.file(`${targetPath}.new`).exists()).toBe(false);
-		expect(await Bun.file(`${targetPath}.1700000000000.4242.new`).exists()).toBe(false);
-		expect(await Bun.file(`${targetPath}.1700000000000.4242.0.patch`).exists()).toBe(false);
+		expect(await Bun.file(`${targetPath}.1700000000000.${deadPid}.new`).exists()).toBe(false);
+		expect(await Bun.file(`${targetPath}.1700000000000.${deadPid}.0.patch`).exists()).toBe(false);
 		expect(await Bun.file(`${targetPath}.9999999999999.7.new`).exists()).toBe(true);
 		expect(await Bun.file(`${targetPath}.9999999999999.7.0.patch`).exists()).toBe(true);
+		expect(await Bun.file(`${targetPath}.1700000000000.${process.pid}.0.new`).exists()).toBe(true);
 		expect(await Bun.file(`${targetPath}.patch`).exists()).toBe(true);
 		expect(await Bun.file(path.join(dir, "notes.bak")).exists()).toBe(true);
 		expect(await Bun.file(`${targetPath}.config.bak`).exists()).toBe(true);

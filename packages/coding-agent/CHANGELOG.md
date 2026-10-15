@@ -87,6 +87,7 @@
 
 ### Changed
 
+- `omp update` now shows download progress (bytes, percentage, speed, time left) and only gives up when no data arrives for 60 seconds, instead of failing every download that takes longer than 15 minutes ([#9499](https://github.com/can1357/oh-my-pi/issues/9499), [#15382](https://github.com/can1357/oh-my-pi/pull/15382) by [@ealeksandrov](https://github.com/ealeksandrov))
 - The in-composer tool approval prompt summarizes the command, path, or content to one row so the composer keeps its room; `Ctrl+O` shows them in full ([#15642](https://github.com/can1357/oh-my-pi/pull/15642) by [@H4vC](https://github.com/H4vC))
 - Background task guidance now lives in the Task tool description (and in same-name extension replacements that delegate to Task) instead of being repeated in every spawn acknowledgment ([#15477](https://github.com/can1357/oh-my-pi/pull/15477) by [@iliaal](https://github.com/iliaal))
 - The Auto-Promote Context and Retry Model Fallback settings now state that they are independent; turn off Retry Model Fallback (`retry.modelFallback`) to stop `retry.fallbackChains` model switches ([#15636](https://github.com/can1357/oh-my-pi/issues/15636))

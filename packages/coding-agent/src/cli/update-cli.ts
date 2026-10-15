@@ -18,6 +18,7 @@ import {
 	getProjectDir,
 	isCompiledBinary,
 	isEnoent,
+	procmgr,
 	VERSION,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -31,6 +32,7 @@ import {
 	unsupportedProxyMessage,
 	withTimeoutSignal,
 } from "../utils/fetch-timeout";
+import { createDownloadProgressReporter } from "./progress-reporter";
 import { type BuildAnswer, type BuildPatch, type Fetch, fetchBuild, type UpdateChannel } from "./build-service";
 import {
 	DEFAULT_NPM_REGISTRY,
@@ -47,7 +49,9 @@ const HOMEBREW_FORMULA = "can1357/tap/omp";
 const MISE_TOOL = "github:can1357/oh-my-pi";
 const NIX_STORE_DIR = "/nix/store";
 const RELEASE_METADATA_TIMEOUT_MS = 30_000;
-const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
+const BINARY_DOWNLOAD_STALL_TIMEOUT_MS = 60_000;
+/** Age after which a `.new`/`.patch` temp file whose updater has exited is treated as abandoned. */
+const STALE_UPDATE_TEMP_AGE_MS = 15 * 60_000;
 
 /**
  * Core native addon package. Bumped in lock-step with {@link PACKAGE} so the
@@ -193,47 +197,43 @@ export interface VerifiedBinaryDownloadOptions {
  * Download a file and verify its build-service-reported size and SHA-256
  * digest (`sha256:<hex>`), leaving it executable. Nothing is left at
  * `targetPath` when the download fails or does not match.
+ *
+ * There is no cap on total duration, so a slow but steady connection can
+ * finish. The download aborts only when no bytes arrive for 60 seconds.
  */
 export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOptions): Promise<void> {
 	const fetchImpl = options.fetchImpl ?? fetch;
 	await unlinkIfExists(options.targetPath);
 
-	let response: Response;
+	const stall = new AbortController();
+	const stallTimer = setTimeout(() => stall.abort(), BINARY_DOWNLOAD_STALL_TIMEOUT_MS);
+	const progress = createDownloadProgressReporter(options.expectedSize);
 	try {
-		response = await fetchImpl(options.url, {
-			redirect: "follow",
-			signal: withTimeoutSignal(BINARY_DOWNLOAD_TIMEOUT_MS),
-		});
-	} catch (err) {
-		if (isTimeoutError(err)) {
-			throw new Error("Timed out downloading release binary after 15 minutes", { cause: err });
+		const response = await fetchImpl(options.url, { redirect: "follow", signal: stall.signal });
+		if (!response.ok || !response.body) {
+			throw new Error(`Download failed: ${response.statusText}`);
 		}
-		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
-		throw err;
-	}
-	if (!response.ok || !response.body) {
-		throw new Error(`Download failed: ${response.statusText}`);
-	}
 
-	const hash = new Bun.SHA256();
-	let size = 0;
-	const verifier = new Transform({
-		transform(chunk, _encoding, callback) {
-			size += chunk.byteLength;
-			if (size > options.expectedSize) {
-				callback(
-					new Error(
-						`Downloaded binary size mismatch: expected ${options.expectedSize} bytes, received at least ${size}`,
-					),
-				);
-				return;
-			}
-			hash.update(chunk);
-			callback(null, chunk);
-		},
-	});
+		const hash = new Bun.SHA256();
+		let size = 0;
+		const verifier = new Transform({
+			transform(chunk, _encoding, callback) {
+				stallTimer.refresh();
+				size += chunk.byteLength;
+				if (size > options.expectedSize) {
+					callback(
+						new Error(
+							`Downloaded binary size mismatch: expected ${options.expectedSize} bytes, received at least ${size}`,
+						),
+					);
+					return;
+				}
+				hash.update(chunk);
+				progress.update(size);
+				callback(null, chunk);
+			},
+		});
 
-	try {
 		await pipeline(response.body, verifier, fs.createWriteStream(options.targetPath, { mode: 0o600 }));
 		const digest = `sha256:${hash.digest("hex")}`;
 		if (size !== options.expectedSize) {
@@ -245,11 +245,16 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOpti
 		await fs.promises.chmod(options.targetPath, 0o755);
 	} catch (err) {
 		await unlinkIfExists(options.targetPath);
-		if (isTimeoutError(err)) {
-			throw new Error("Timed out downloading release binary after 15 minutes", { cause: err });
+		if (stall.signal.aborted) {
+			throw new Error(`Download stalled: no data received for ${BINARY_DOWNLOAD_STALL_TIMEOUT_MS / 1000} seconds`, {
+				cause: err,
+			});
 		}
 		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
 		throw err;
+	} finally {
+		clearTimeout(stallTimer);
+		progress.finish();
 	}
 }
 
@@ -1236,10 +1241,11 @@ async function removeBackupBestEffort(filePath: string): Promise<boolean> {
  * unlinking it would break the live process's TCC permission attribution — so
  * a live image survives until its process exits. A `.new` temp file or a
  * `.patch` download (`<binary>.<timestamp>.<pid>.patch`) only survives a hard
- * kill mid-update; it is reaped once older than the download window, which a
- * live download cannot exceed without timing out and cleaning up after
- * itself — so a concurrent run's in-progress temp is never deleted. Legacy
- * fixed `<binary>.bak` / `<binary>.new` names (from before suffixes were made
+ * kill mid-update; it is reaped once older than 15 minutes, unless the pid in
+ * its name is still running. Downloads have no total time limit, and Windows
+ * may not update a file's mtime until its writer closes it, so a concurrent
+ * run's in-progress temp is never judged by age alone. Legacy fixed
+ * `<binary>.bak` / `<binary>.new` names (from before suffixes were made
  * unique) are matched too, so users upgrading from a buggy release get the
  * orphaned files cleaned up.
  */
@@ -1270,15 +1276,17 @@ export async function sweepStaleUpdateArtifacts(targetPath: string): Promise<voi
 		if (middle.length > 0 ? !/^\d+(\.\d+)*$/.test(middle) : suffix === ".patch") continue;
 		const full = path.join(dir, entry);
 		if (suffix !== ".bak") {
-			// A temp file may belong to a concurrent update still downloading, so
-			// only reap ones older than the download window.
+			// A temp file may belong to a concurrent update still downloading:
+			// spare it while its updater runs or while it is recent.
+			const ownerPid = Number(middle.split(".")[1]);
+			if (ownerPid > 0 && procmgr.isPidRunning(ownerPid)) continue;
 			let mtimeMs: number;
 			try {
 				mtimeMs = (await fs.promises.stat(full)).mtimeMs;
 			} catch {
 				continue;
 			}
-			if (now - mtimeMs < BINARY_DOWNLOAD_TIMEOUT_MS) continue;
+			if (now - mtimeMs < STALE_UPDATE_TEMP_AGE_MS) continue;
 		}
 		await removeBackupBestEffort(full);
 	}
