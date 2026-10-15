@@ -232,6 +232,42 @@ describe("streaming reveal", () => {
 		}
 	});
 
+	it("restores the reveal-shaped thinking prefix across a hide/show round trip", async () => {
+		// Smooth reveal still part-way through a thinking-only prefix, then two
+		// Ctrl+T presses before the answer advances. The hide pass drops the
+		// block from view; the show pass must restore the prefix the user already
+		// watched stream out. Crediting the whole regenerated block instead
+		// flashes the remaining reasoning to completion (#15336).
+		const thinking = "reasoning through the problem ".repeat(12);
+		const full = formatThinkingForDisplay(thinking, true);
+		let hideThinking = false;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+		const partial = thinkingAt(latestMessage(component), 0);
+		expect(partial.length).toBeGreaterThan(0);
+		expect(partial.length).toBeLessThan(full.length);
+
+		// Hide, then show again while the frontier is still inside thinking.
+		hideThinking = true;
+		controller.resyncVisibility();
+		hideThinking = false;
+		controller.resyncVisibility();
+		expect(thinkingAt(latestMessage(component), 0)).toBe(partial);
+
+		// The reveal keeps pacing from the restored prefix instead of snapping.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		expect(thinkingAt(latestMessage(component), 0).length).toBeGreaterThan(partial.length);
+	});
+
 	it("keeps a fully revealed thinking block whole when prose-only expands its fence", async () => {
 		// Prose-only mode elides a fenced-code prefix down to a trailing ellipsis.
 		// Turning it off expands that prefix back to the full fence, so a block

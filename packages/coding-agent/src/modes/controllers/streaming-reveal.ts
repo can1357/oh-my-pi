@@ -270,6 +270,12 @@ export class StreamingRevealController {
 	// content is frozen (every flush of a tool-arg stream) they prove equality
 	// in O(blocks) without walking the text; any mismatch defers to the clone.
 	#snappedToolBoundaryBlocks: SnappedBlock[] | undefined;
+	// Reveal units a block had earned while visible, kept while it is hidden.
+	// Keyed by block index: streaming messages only append, so a hidden block
+	// keeps its slot until the message is replaced (begin → stop clears it).
+	// Without it a hide/show round trip loses the reveal-shaped prefix and the
+	// show pass credits the whole regenerated block.
+	#hiddenBlockSpend = new Map<number, { spent: number; before: number }>();
 	#hideThinkingBlock = false;
 	#proseOnlyThinking = true;
 	#smoothStreaming = true;
@@ -392,6 +398,7 @@ export class StreamingRevealController {
 		this.#component = undefined;
 		this.#revealed = 0;
 		this.#targetDirty = false;
+		this.#hiddenBlockSpend.clear();
 		this.#snappedToolBoundaryContent = undefined;
 		this.#snappedToolBoundaryBlocks = undefined;
 		this.#unitCounter.reset();
@@ -411,15 +418,17 @@ export class StreamingRevealController {
 	 * visibility toggle moves every later block by the units it adds or drops.
 	 * Re-anchor per block: the revealed amount of every block that stays
 	 * visible is preserved, so a hide/show after the reveal reached the answer
-	 * keeps the answer where it was instead of clamping the whole old count to
-	 * the text total (answer snapped to 100%) or spending the answer budget on
-	 * the freshly shown thinking prefix (answer re-hidden). A block the old
+	 * answer where it was instead of clamping the whole old count to the text
+	 * total (answer snapped to 100%) or spending the answer budget on the
+	 * freshly shown thinking prefix (answer re-hidden). A block the old
 	 * layout consumed whole stays whole under its new size, so a prose toggle
 	 * that expands or shrinks it does not hand the difference to the block after
 	 * it; a partially revealed one keeps its position, clamped to its new
 	 * length. A block that just became visible is snapped whole only while the
 	 * old budget still covers it — one revealed past that frontier would push
-	 * the aggregate past the answer and make it jump forward.
+	 * the aggregate past the answer and make it jump forward — unless it was
+	 * hidden mid-reveal, in which case the reveal it had earned is restored so a
+	 * hide/show round trip keeps the prefix the user already watched stream out.
 	 */
 	resyncVisibility(): void {
 		if (!this.#target || !this.#component) return;
@@ -456,14 +465,30 @@ export class StreamingRevealController {
 				// clamped to the new length.
 				revealed += spent >= before ? after : Math.min(spent, after);
 			} else if (before === 0 && after > 0) {
-				// Newly visible. Snap it whole only if the old budget had units
-				// left to spend at this point (the frontier lies at or past it) or
-				// covered the whole old layout. Snapping one past the frontier
-				// credits units the reveal never earned, and buildDisplayMessage
-				// spends them on the blocks before it — the visible answer jumps
-				// forward or completes.
-				if (revealedOldLayout || remaining > 0) revealed += after;
-			} else {
+				// Newly visible. A block the hide pass took away keeps the reveal
+				// it had earned: restoring that spend keeps the user's watched
+				// prefix instead of crediting the whole regenerated block, which
+				// would flash the remaining reasoning to completion (and, with a
+				// later unrevealed text block, restart the reveal from zero).
+				const latent = this.#hiddenBlockSpend.get(i);
+				if (latent !== undefined) {
+					this.#hiddenBlockSpend.delete(i);
+					revealed += latent.spent >= latent.before ? after : Math.min(latent.spent, after);
+				} else if (revealedOldLayout || remaining > 0) {
+					// Never revealed while hidden: snap it whole only if the old
+					// budget had units left to spend at this point (the frontier
+					// lies at or past it) or covered the whole old layout.
+					// Snapping one past the frontier credits units the reveal
+					// never earned, and buildDisplayMessage spends them on the
+					// blocks before it — the visible answer jumps forward or
+					// completes.
+					revealed += after;
+				}
+			} else if (before > 0) {
+				// Just hidden: retain the reveal it had earned for a later show
+				// pass, which restores the shaped prefix instead of restarting
+				// the block from zero.
+				this.#hiddenBlockSpend.set(i, { spent: Math.min(remaining, before), before });
 				remaining = Math.max(0, remaining - before);
 			}
 		}
