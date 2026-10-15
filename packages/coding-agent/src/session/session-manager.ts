@@ -1031,7 +1031,12 @@ function isTopLevelMessageChild(value: object, key: string | undefined, childKey
  * walk could never escape; the projected line never contains it, so no hook
  * beneath one can reach the persisted bytes.
  */
-function hasSerializerHook(value: unknown, key?: string, isTopLevelToolResultDetails?: boolean): boolean {
+function hasSerializerHook(
+	value: unknown,
+	key?: string,
+	isTopLevelToolResultDetails?: boolean,
+	atomic = false,
+): boolean {
 	// A bigint is the one primitive `JSON.stringify` routes through a hook:
 	// when an extension installs `BigInt.prototype.toJSON`, serialization
 	// invokes it — so a stateful hook's first output cannot be stamped as a
@@ -1053,7 +1058,7 @@ function hasSerializerHook(value: unknown, key?: string, isTopLevelToolResultDet
 		if (hasIndexedAccessorSlot(value)) return true;
 		const length = value.length;
 		for (let index = 0; index < length; index++) {
-			if (hasSerializerHook(value[index])) return true;
+			if (hasSerializerHook(value[index], undefined, undefined, atomic)) return true;
 		}
 		return false;
 	}
@@ -1069,7 +1074,7 @@ function hasSerializerHook(value: unknown, key?: string, isTopLevelToolResultDet
 	// Mirror the projection's stripping boundary: a hook beneath a stripped key
 	// cannot affect the persisted bytes — and the live value may be cyclic
 	// where the projection is not.
-	const atomic = isAtomicPersistenceNode(value, key);
+	const nodeAtomic = atomic || isAtomicPersistenceNode(value, key);
 	// An image-shaped value whose `data` rides an inherited data descriptor is
 	// projector-accepted (`isImageDataPayload` reads through the chain) but
 	// invisible to the own-key stamp below: the backing bytes can change with
@@ -1090,14 +1095,15 @@ function hasSerializerHook(value: unknown, key?: string, isTopLevelToolResultDet
 		return true;
 	for (const childKey of Object.keys(value)) {
 		if (skipStructuredContent && childKey === "structuredContent") continue;
-		if (!atomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
+		if (!nodeAtomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
 		// Never read through an accessor: the child lookup below would invoke
 		// the getter, and a stateful one then yields a different value when
 		// `#lineFor` serializes the node — so leave the graph uncached instead.
 		const descriptor = Object.getOwnPropertyDescriptor(value, childKey);
 		if (descriptor === undefined) continue;
 		if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
-		if (hasSerializerHook(descriptor.value, childKey, isTopLevelMessageChild(value, key, childKey))) return true;
+		if (hasSerializerHook(descriptor.value, childKey, isTopLevelMessageChild(value, key, childKey), nodeAtomic))
+			return true;
 	}
 	return false;
 }
@@ -1210,6 +1216,7 @@ function messageValueStamp(
 	out: unknown[] = [],
 	key?: string,
 	isTopLevelToolResultDetails?: boolean,
+	atomic = false,
 ): unknown[] {
 	if (value === null || typeof value !== "object") {
 		out.push(value);
@@ -1236,13 +1243,13 @@ function messageValueStamp(
 		// the iterator protocol — an overridden `Symbol.iterator` changes the
 		// latter while the former (and the persisted bytes) stays fixed.
 		const length = value.length;
-		for (let index = 0; index < length; index++) messageValueStamp(value[index], out);
+		for (let index = 0; index < length; index++) messageValueStamp(value[index], out, undefined, undefined, atomic);
 	} else {
 		const fields = value as Record<string, unknown>;
 		// Atomic nodes persist verbatim: `truncateForPersistence` returns before
 		// its key-stripping loop, so transient keys inside one reach the line and
 		// must be stamped. Only non-atomic containers strip them.
-		const atomic = isAtomicPersistenceNode(value, key);
+		const atomicNode = atomic || isAtomicPersistenceNode(value, key);
 		// Only the top-level `details` of a `toolResult` message loses
 		// `structuredContent` before serialization (see
 		// `isMcpSpillStrippedDetails`), so only there is the field skipped
@@ -1261,12 +1268,12 @@ function messageValueStamp(
 			// records the presence without traversing the value. The live field
 			// may be cyclic (a streaming event can reference the array holding
 			// it), which this walk could never escape.
-			if (!atomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) {
+			if (!atomicNode && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) {
 				out.push(childKey, STAMP_TRANSIENT);
 				continue;
 			}
 			out.push(childKey);
-			messageValueStamp(fields[childKey], out, childKey, isTopLevelMessageChild(value, key, childKey));
+			messageValueStamp(fields[childKey], out, childKey, isTopLevelMessageChild(value, key, childKey), atomicNode);
 		}
 	}
 	out.push(STAMP_END);
@@ -1283,7 +1290,7 @@ function messageValueStamp(
  */
 function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 	let index = 0;
-	const match = (live: unknown, key?: string, isTopLevelToolResultDetails?: boolean): boolean => {
+	const match = (live: unknown, key?: string, isTopLevelToolResultDetails?: boolean, atomic = false): boolean => {
 		const expected = stamp[index++];
 		// The stamp never invokes a `toJSON` hook: a hooked graph is left
 		// uncached (see {@link hasSerializerHook}), so reaching one here means
@@ -1314,13 +1321,14 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 				// `JSON.stringify` and {@link messageValueStamp} — never the
 				// iterator protocol.
 				const length = live.length;
-				for (let position = 0; position < length; position++) if (!match(live[position])) return false;
+				for (let position = 0; position < length; position++)
+					if (!match(live[position], undefined, undefined, atomic)) return false;
 			} else {
 				const fields = live as Record<string, unknown>;
 				// Mirror the stamp side: transient keys were recorded whole
 				// inside atomic nodes (persistence keeps them) and as
 				// presence-only markers elsewhere.
-				const atomic = isAtomicPersistenceNode(live, key);
+				const nodeAtomic = atomic || isAtomicPersistenceNode(live, key);
 				// The stamp skipped the top-level toolResult's MCP-stripped
 				// field outright (see {@link messageValueStamp}), so the
 				// matcher skips it too — the value was never recorded and may
@@ -1333,12 +1341,13 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 					// so only the key's presence was recorded — its value was
 					// never walked (and may be cyclic) — see
 					// {@link messageValueStamp}.
-					if (!atomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) {
+					if (!nodeAtomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) {
 						if (stamp[index++] !== childKey || stamp[index++] !== STAMP_TRANSIENT) return false;
 						continue;
 					}
 					if (stamp[index++] !== childKey) return false;
-					if (!match(fields[childKey], childKey, isTopLevelMessageChild(live, key, childKey))) return false;
+					if (!match(fields[childKey], childKey, isTopLevelMessageChild(live, key, childKey), nodeAtomic))
+						return false;
 				}
 			}
 			return stamp[index++] === STAMP_END;
