@@ -35,11 +35,17 @@ export type RelayRpcRequest =
 	/** Return tabs to their pre-omp group (or ungroup); no-op for tabs the relay never grouped. */
 	| { op: "ungroup"; tabIds: number[] };
 
-/** Messages sent relay → extension. */
-export type RelayToExtMessage = ({ t: "rpc"; id: number } & RelayRpcRequest) | { t: "pong" };
+/**
+ * Messages sent relay → extension. `reload` asks the extension to run `chrome.runtime.reload()`, which
+ * re-reads its files from disk; the relay sends it only after rewriting them (extension self-update).
+ */
+export type RelayToExtMessage = ({ t: "rpc"; id: number } & RelayRpcRequest) | { t: "pong" } | { t: "reload" };
 
 /** Required capability for safe relay target discovery and auto-attach. */
 export const DISCARDED_TABS_PROTOCOL_VERSION = 1;
+
+/** Hello capability of an extension that reloads itself on a relay `reload` message. */
+export const EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
 
 /**
  * Whether a relay or extension reported a well-formed omp release version.
@@ -96,6 +102,8 @@ export type ExtToRelayMessage =
 			instanceId?: string;
 			/** The omp version that installed the running script ({@link stampRelayExtensionScript}). Absent on builds without the stamp. */
 			ompVersion?: string;
+			/** {@link EXTENSION_RELOAD_PROTOCOL_VERSION} when the extension reloads itself on `reload`. Absent in older extensions. */
+			reloadProtocol?: number;
 	  }
 	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
 	| { t: "detached"; tabId: number; reason: string; relayInitiated?: boolean }

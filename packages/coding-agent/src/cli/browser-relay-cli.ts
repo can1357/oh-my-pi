@@ -4,17 +4,10 @@
  * intentional user-facing output.
  */
 import * as path from "node:path";
-import { getBrowserRelayDir } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { probeRelayServer } from "../tools/browser/relay/daemon";
-import backgroundJs from "../tools/browser/relay/extension-assets/background.js.txt" with { type: "text" };
-import licenseText from "../tools/browser/relay/extension-assets/LICENSE.txt" with { type: "text" };
-import manifestJson from "../tools/browser/relay/extension-assets/manifest.json.txt" with { type: "text" };
-import optionsHtml from "../tools/browser/relay/extension-assets/options.html.txt" with { type: "text" };
-import optionsJs from "../tools/browser/relay/extension-assets/options.js.txt" with { type: "text" };
-import thirdPartyNotices from "../tools/browser/relay/extension-assets/THIRD-PARTY-NOTICES.txt" with { type: "text" };
+import { defaultRelayExtensionDir, writeRelayExtension } from "../tools/browser/relay/extension-files";
 import { DEFAULT_RELAY_URL } from "../tools/browser/relay/kind";
-import { stampRelayExtensionManifest, stampRelayExtensionScript } from "../tools/browser/relay/protocol";
 import { type RelayServer, startRelayServer } from "../tools/browser/relay/server";
 
 export const BROWSER_RELAY_ACTIONS = ["serve", "install"] as const;
@@ -31,20 +24,6 @@ export interface BrowserRelayCommandArgs {
 	verbose?: boolean;
 }
 
-/** The extension files `omp browser-relay install` writes, stamped with the installing omp's version. */
-export function relayExtensionFiles(ompVersion: string): Record<string, string> {
-	return {
-		// The extension reports this stamp in its hello, so omp can tell when an older install keeps running.
-		"background.js": stampRelayExtensionScript(backgroundJs, ompVersion),
-		LICENSE: licenseText,
-		// Shown in chrome://extensions.
-		"manifest.json": stampRelayExtensionManifest(manifestJson, ompVersion),
-		"options.html": optionsHtml,
-		"options.js": optionsJs,
-		"THIRD-PARTY-NOTICES.txt": thirdPartyNotices,
-	};
-}
-
 /** Default port of the relay endpoint (kept in sync with DEFAULT_RELAY_URL). */
 export const DEFAULT_RELAY_PORT = Number(new URL(DEFAULT_RELAY_URL).port);
 
@@ -57,11 +36,8 @@ export async function runBrowserRelayCommand(args: BrowserRelayCommandArgs): Pro
 }
 
 async function runInstall(dirOverride: string | undefined): Promise<void> {
-	const dir = dirOverride ? path.resolve(dirOverride) : path.join(getBrowserRelayDir(), "extension");
-	const files = relayExtensionFiles(VERSION);
-	for (const name in files) {
-		await Bun.write(path.join(dir, name), files[name]!);
-	}
+	const dir = dirOverride ? path.resolve(dirOverride) : defaultRelayExtensionDir();
+	await writeRelayExtension(dir, VERSION);
 	console.log(`Installed the OMP Browser Relay extension to ${dir}`);
 	console.log("");
 	console.log("Finish setup in Chrome:");
@@ -72,6 +48,7 @@ async function runInstall(dirOverride: string | undefined): Promise<void> {
 	console.log("omp starts the relay automatically when the browser prelude needs it;");
 	console.log("run `omp browser-relay` yourself only for --token or --no-group.");
 	console.log("The extension badge shows 'on' once it reaches a relay.");
+	if (!dirOverride) console.log("Newer omp versions update the extension in this folder and reload it on their own.");
 	console.log(
 		"Old connection-refused entries in chrome://extensions > Errors may persist after reconnect; use Clear all.",
 	);

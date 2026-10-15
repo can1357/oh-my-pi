@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
-import { relayExtensionFiles, runBrowserRelayCommand } from "@oh-my-pi/pi-coding-agent/cli/browser-relay-cli";
+import { runBrowserRelayCommand } from "@oh-my-pi/pi-coding-agent/cli/browser-relay-cli";
+import { relayExtensionFiles } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/extension-files";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { relayExtensionNotice } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
