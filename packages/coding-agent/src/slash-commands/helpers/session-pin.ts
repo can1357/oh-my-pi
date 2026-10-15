@@ -26,16 +26,18 @@ export function matchSessionPinAccounts(accounts: readonly SessionPinAccount[], 
 		if (positioned) return [positioned];
 	}
 
-	return accounts.filter(account =>
-		[
+	return accounts.filter(account => {
+		const emailLocalPart = account.email?.split("@", 1)[0]?.toLowerCase();
+		return [
 			account.label,
 			account.email,
+			emailLocalPart,
 			account.accountId,
 			account.projectId,
 			account.enterpriseUrl,
 			account.orgId,
 			account.orgName,
 			`OAuth credential #${account.credentialId}`,
-		].some(value => value?.trim().toLowerCase() === wanted),
-	);
+		].some(value => value?.trim().toLowerCase() === wanted || emailLocalPart?.startsWith(wanted) === true);
+	});
 }

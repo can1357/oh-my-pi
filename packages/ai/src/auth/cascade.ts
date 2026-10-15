@@ -399,6 +399,18 @@ export class KeyCascade implements KeysApi {
 			}
 			return oauthResolved.apiKey;
 		}
+		// A strict OAuth session pin forbids any other credential — including
+		// login keys, env vars, and stored static API keys. If strict OAuth
+		// resolution failed (blocked, exhausted, or credential removed), stop
+		// the cascade here so the request surfaces the failure instead of
+		// silently authenticating through a different auth source.
+		if (sessionId) {
+			const sessionCredential = this.#deps.affinity.get(provider, sessionId);
+			if (sessionCredential?.type === "oauth" && sessionCredential.strict === true) {
+				if (oauthRefreshFailure) throw oauthRefreshFailure;
+				return undefined;
+			}
+		}
 		if (restricted) {
 			if (oauthRefreshFailure) throw oauthRefreshFailure;
 			throw new AIError.MissingApiKeyError(

@@ -89,8 +89,8 @@ export interface CredentialRowStore {
 export interface CredentialCacheStore {
 	getCache(key: string, options?: { includeExpired?: boolean }): string | null;
 	setCache(key: string, value: string, expiresAtSec: number): void;
-	/** Drop all cache rows whose keys start with the supplied prefix. */
-	deleteCachePrefix?(prefix: string): void;
+	/** Drop prefix-matching rows, optionally only those whose value passes `shouldDelete`. */
+	deleteCachePrefix?(prefix: string, shouldDelete?: (value: string) => boolean): void;
 	cleanExpiredCache(): void;
 }
 

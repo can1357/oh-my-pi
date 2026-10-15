@@ -9,6 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 let session: AgentSession | undefined;
@@ -44,7 +45,7 @@ const TOKENIZER_REPLY =
 	"The screenshot shows a TypeError thrown by the tokenizer. It happens because the input stream is read after it was already closed, so the next token lookup dereferences an undefined buffer. Guarding the read and resetting the cursor when the stream closes should fix it without changing the public API.";
 
 describe("AgentSession title generation disposal", () => {
-	it("isolates the title provider session without changing credentials and aborts it during disposal", async () => {
+	it.each([false, true])("isolates the title provider session and preserves strict=%s during disposal", async strict => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		await store.saveOAuth("anthropic", {
 			access: "account-a-token",
@@ -78,7 +79,7 @@ describe("AgentSession title generation disposal", () => {
 		});
 		const pinnedAccount = storage.oauth.accounts("anthropic").find(account => account.accountId === "account-b");
 		if (!pinnedAccount) throw new Error("Expected account-b credential");
-		expect(storage.sessions.pin("anthropic", providerSessionId, pinnedAccount.credentialId)).toBe(true);
+		expect(storage.sessions.pin("anthropic", providerSessionId, pinnedAccount.credentialId, { strict })).toBe(true);
 		let titleProvider: string | undefined;
 		let titleCredentialId: number | undefined;
 		const getApiKey = vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async (requestModel, sessionId) => {
@@ -117,10 +118,49 @@ describe("AgentSession title generation disposal", () => {
 		expect(resolver.mock.calls[0]?.[1]).toBe(titleSessionId);
 		expect(titleProvider).toBe("anthropic");
 		expect(titleCredentialId).toBe(pinnedAccount.credentialId);
+		expect(storage.sessions.mode("anthropic", titleSessionId!)).toBe(strict ? "strict" : "pinned");
 		session.beginDispose();
 
 		expect(requestSignal?.aborted).toBe(true);
 		expect(await generation).toBeNull();
+	});
+
+	it("keeps a revoked strict foreground lock on the title side request", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		for (const accountId of ["locked", "sibling"]) {
+			await store.saveOAuth("anthropic", {
+				access: `${accountId}-token`,
+				refresh: `${accountId}-refresh`,
+				expires: Date.now() + 60_000,
+				accountId,
+			});
+		}
+		authStorage = new AuthStorage(store);
+		await authStorage.credentials.reload();
+		const locked = authStorage.oauth.accounts("anthropic").find(account => account.accountId === "locked")!;
+		expect(authStorage.sessions.pin("anthropic", "foreground", locked.credentialId, { strict: true })).toBe(true);
+		expect(await authStorage.credentials.removeById("anthropic", locked.credentialId)).toBe(true);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const modelRegistry = new ModelRegistry(authStorage);
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([model]);
+		const completeSimple = vi.spyOn(ai, "completeSimple");
+		const title = await generateSessionTitle(
+			"Investigate shutdown",
+			modelRegistry,
+			Settings.isolated({ modelRoles: { tiny: `${model.provider}/${model.id}` } }),
+			"title-side",
+			model,
+			undefined,
+			undefined,
+			undefined,
+			"foreground",
+		);
+
+		expect(title).toBeNull();
+		expect(completeSimple).not.toHaveBeenCalled();
+		expect(authStorage.sessions.mode("anthropic", "title-side")).toBe("strict");
+		expect(authStorage.oauth.accounts("anthropic", "title-side").some(account => account.active)).toBe(false);
 	});
 
 	it("does not start a second auto-title request while the first is still in flight", async () => {

@@ -48,6 +48,7 @@ import type {
 	AssistantMessageRewriteEvent,
 	AssistantMessageRewriteResult,
 	AssistantThinkingRenderer,
+	AssistantTextDisplayRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
 	BeforeProviderRequestEvent,
@@ -282,12 +283,18 @@ function createHandlerContext(
 		enumerable: true,
 		configurable: true,
 	});
+	Object.defineProperty(scoped, "abortSignal", {
+		value: handlerSignal,
+		enumerable: true,
+		configurable: true,
+	});
 	return scoped;
 }
 
 /**
  * Race `work` against a `timeoutMs` budget and optional cancellation signal,
  * clearing the timer and abort listener as soon as one branch settles.
+ * A zero budget disables the deadline, but retains cancellation and cleanup.
  *
  * We deliberately avoid `Bun.sleep(timeoutMs).then(...)` here: that leaves an
  * uncancellable timer registered with the event loop, so every successful
@@ -329,7 +336,7 @@ async function raceHandlerWithTimeout<T>(
 		resolveInterrupt(EXTENSION_HANDLER_TIMEOUT);
 	};
 	const armTimer = () => {
-		if (settled || pauseDepth > 0) return;
+		if (timeoutMs === 0 || settled || pauseDepth > 0) return;
 		activeSince = performance.now();
 		timer = setTimeout(expire, Math.max(0, remainingMs));
 	};
@@ -340,7 +347,7 @@ async function raceHandlerWithTimeout<T>(
 	};
 	const timeoutBudget: HandlerTimeoutBudget = {
 		pause: () => {
-			if (settled) return;
+			if (timeoutMs === 0 || settled) return;
 			pauseDepth++;
 			if (pauseDepth !== 1) return;
 			remainingMs = Math.max(0, remainingMs - (performance.now() - activeSince));
@@ -1319,6 +1326,10 @@ export class ExtensionRunner {
 		return this.extensions.flatMap(ext => ext.assistantThinkingRenderers);
 	}
 
+	getAssistantTextDisplayRenderers(): AssistantTextDisplayRenderer[] {
+		return this.extensions.flatMap(ext => ext.assistantTextDisplayRenderers);
+	}
+
 	getRegisteredCommands(reserved?: ReadonlySet<string>): RegisteredCommand[] {
 		this.#commandDiagnostics = [];
 
@@ -1530,9 +1541,14 @@ export class ExtensionRunner {
 		ctx: ExtensionContext,
 		ext: Extension,
 		timeoutMs: number,
-		onFailure?: (kind: "timeout" | "error", message: string) => R,
+		onFailure?: (kind: "timeout" | "error", message: string, timeoutMs: number) => R,
 		outerSignal?: AbortSignal,
 	): Promise<R | undefined> {
+		const override = ext.handlerTimeouts?.get(event.type)?.get(handler);
+		if (override !== undefined) {
+			timeoutMs =
+				event.type === "session_shutdown" ? (override === 0 ? timeoutMs : Math.min(timeoutMs, override)) : override;
+		}
 		// `session_stop` carries its own signal on the event; `tool_call` receives
 		// the outer dispatch signal (loop request or wrapper execute) so an abort
 		// while a handler awaits a human dialog cancels the dialog and settles the
@@ -1596,7 +1612,7 @@ export class ExtensionRunner {
 				event: event.type,
 				error,
 			});
-			return onFailure?.("timeout", error);
+			return onFailure?.("timeout", error, timeoutMs);
 		}
 		if (handlerFailure) {
 			const message =
@@ -1608,7 +1624,7 @@ export class ExtensionRunner {
 				error: message,
 				stack,
 			});
-			return onFailure?.("error", message);
+			return onFailure?.("error", message, timeoutMs);
 		}
 		return handlerResult as R | undefined;
 	}
@@ -1873,11 +1889,11 @@ export class ExtensionRunner {
 					ctx,
 					ext,
 					timeoutMs,
-					(kind, message) => ({
+					(kind, message, handlerTimeoutMs) => ({
 						block: true,
 						reason:
 							kind === "timeout"
-								? `Extension ${ext.path} timed out after ${timeoutMs}ms`
+								? `Extension ${ext.path} timed out after ${handlerTimeoutMs}ms`
 								: `Extension ${ext.path} failed: ${message}`,
 					}),
 					signal,
@@ -1977,7 +1993,7 @@ export class ExtensionRunner {
 		return { skillPaths, promptPaths, themePaths };
 	}
 
-	/** Emit input event. Transforms chain, "handled" short-circuits. */
+	/** Emit input event. Transforms chain; rejection, failure and "handled" short-circuit. */
 	async emitInput(
 		text: string,
 		images: ImageContent[] | undefined,
@@ -1991,10 +2007,15 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			for (const handler of ext.handlers.get("input") ?? []) {
 				const event: InputEvent = { type: "input", text: currentText, images: currentImages, source };
-				const result = (await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs)) as
-					| InputEventResult
-					| undefined;
-				if (result?.handled) return result;
+				const result = (await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					extensionHandlerTimeoutMs,
+					(_kind, message) => ({ reject: message }),
+				)) as InputEventResult | undefined;
+				if (result?.reject !== undefined || result?.handled) return result;
 				if (result?.text !== undefined) currentText = result.text;
 				if (result?.images !== undefined) currentImages = result.images;
 			}

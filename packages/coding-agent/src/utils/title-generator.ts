@@ -157,7 +157,7 @@ function getTitleModels(registry: ModelRegistry, settings: Settings, currentMode
  * @param customSystemPrompt Optional title-specific system prompt override
  * @param signal Session-lifecycle cancellation for background title requests
  * @param credentialSourceSessionId Optional foreground session whose selected
- *   OAuth credential should seed an isolated title-request session.
+ *   OAuth account (or unavailable strict lock) should seed an isolated title-request session.
  */
 export async function generateSessionTitle(
 	firstMessage: string,
@@ -304,11 +304,21 @@ async function generateTitleOnlineWithModels(
 
 		try {
 			if (credentialSourceSessionId && sessionId && credentialSourceSessionId !== sessionId) {
-				const foregroundCredential = registry.authStorage.oauth
-					.accounts(model.provider, credentialSourceSessionId)
-					.find(account => account.active);
-				if (foregroundCredential) {
-					registry.authStorage.sessions.pin(model.provider, sessionId, foregroundCredential.credentialId);
+				if (registry.authStorage.sessions.mode(model.provider, credentialSourceSessionId) === "strict") {
+					// Copy the lock itself, not merely an active account: a revoked
+					// strict credential must still forbid sibling/API-key fallback.
+					registry.authStorage.sessions.inherit(
+						credentialSourceSessionId,
+						sessionId,
+						provider => provider === model.provider,
+					);
+				} else {
+					const foregroundCredential = registry.authStorage.oauth
+						.accounts(model.provider, credentialSourceSessionId)
+						.find(account => account.active);
+					if (foregroundCredential) {
+						registry.authStorage.sessions.pin(model.provider, sessionId, foregroundCredential.credentialId);
+					}
 				}
 			}
 			const apiKey = await registry.getApiKey(model, sessionId);

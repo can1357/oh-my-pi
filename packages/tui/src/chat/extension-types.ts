@@ -1,3 +1,4 @@
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { Component, TUI } from "../tui";
 import type { Theme } from "../theme/theme";
 import type { CustomMessage, HookMessage } from "./messages";
@@ -29,6 +30,25 @@ export type AssistantThinkingRenderer = (
 	context: AssistantThinkingRenderContext,
 	theme: Theme,
 ) => Component | undefined;
+
+/** Original assistant data and the lifecycle of the displayed text block. */
+export interface AssistantTextDisplayContext {
+	message: AssistantMessage;
+	blockIndex: number;
+	transient: boolean;
+}
+
+export interface AssistantTextDisplayResult {
+	text: string;
+	/** Keep this block mutable until its terminal display is available. */
+	pending?: boolean;
+}
+
+/** Synchronous display-only projection; undefined delegates to the next renderer. */
+export type AssistantTextDisplayRenderer = (
+	sourceText: string,
+	context: AssistantTextDisplayContext,
+) => AssistantTextDisplayResult | undefined;
 
 export interface HookMessageRenderOptions {
 	/** Whether the view is expanded */

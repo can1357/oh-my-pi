@@ -41,10 +41,12 @@ import { resolvePath, withHostGuard } from "../utils";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
 	AssistantThinkingRenderer,
+	AssistantTextDisplayRenderer,
 	Extension,
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionFactory,
+	ExtensionHandlerOptions,
 	ExtensionRuntime as IExtensionRuntime,
 	LoadExtensionsResult,
 	MessageRenderer,
@@ -207,7 +209,17 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		}
 	}
 
-	on<F extends HandlerFn>(event: string, handler: F): void {
+	on<F extends HandlerFn>(event: string, handler: F, options?: ExtensionHandlerOptions): void {
+		const timeoutMs = options?.timeoutMs;
+		if (timeoutMs !== undefined) {
+			if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 2_147_483_647) {
+				throw new RangeError("Handler timeoutMs must be finite, nonnegative, and at most 2147483647");
+			}
+			const timeouts = (this.extension.handlerTimeouts ??= new Map());
+			const eventTimeouts = timeouts.get(event) ?? new WeakMap<object, number>();
+			eventTimeouts.set(handler, timeoutMs);
+			timeouts.set(event, eventTimeouts);
+		}
 		const list = this.extension.handlers.get(event) ?? [];
 		list.push(handler);
 		this.extension.handlers.set(event, list);
@@ -272,6 +284,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void {
 		this.extension.assistantThinkingRenderers.push(renderer);
+	}
+
+	registerAssistantTextDisplay(renderer: AssistantTextDisplayRenderer): void {
+		this.extension.assistantTextDisplayRenderers.push(renderer);
 	}
 
 	registerComposerShape(definition: ComposerShapeDefinition): void {
@@ -379,6 +395,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		tools: new Map(),
 		toolRegistrationListeners: new Set(),
 		assistantThinkingRenderers: [],
+		assistantTextDisplayRenderers: [],
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),

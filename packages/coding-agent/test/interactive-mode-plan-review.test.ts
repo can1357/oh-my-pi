@@ -107,6 +107,7 @@ function planReviewExtension(
 		handlers,
 		tools: new Map(),
 		assistantThinkingRenderers: [],
+		assistantTextDisplayRenderers: [],
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),

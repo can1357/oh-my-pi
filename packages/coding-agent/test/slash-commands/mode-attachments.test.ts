@@ -59,6 +59,7 @@ function createHarness(
 			},
 		},
 		sessionManager: {
+			getSessionId: () => "mode-attachment-test",
 			putBlob: vi.fn(async () => ({ displayPath: "file:///replacement.png" })),
 		},
 		focusedAgentId: undefined,
