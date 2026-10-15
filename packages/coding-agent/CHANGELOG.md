@@ -828,6 +828,9 @@
 ### Changed
 
 - Tool approval prompts list Approve, Approve `<tool>` for this session, and Deny again: with an empty composer, pick with the arrow keys and Enter; typing in the composer denies and steers instead, and the Deny row reads "Deny and send message" while you do
+### Changed
+
+- Mnemopi recall now fuses its vector, graph, fact and temporal voices by default (`mnemopi.polyphonicRecall`), finding noticeably more relevant memories; set it to `false` to restore the previous ranking ([#<POLY-PR>](https://github.com/can1357/oh-my-pi/pull/<POLY-PR>) by [@andrebrait](https://github.com/andrebrait))
 
 ### Fixed
 
