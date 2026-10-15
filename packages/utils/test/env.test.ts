@@ -299,6 +299,51 @@ describe("filterChildShellEnv", () => {
 		expect(getDotenvEnvValues(cwd, posixEnv, "linux")).not.toContain("3");
 	});
 
+	it("removes dotenv values derived from IPC keys hidden by Bun", () => {
+		const cwd = path.dirname(
+			writeTempEnv(
+				[
+					"FROM_FD=$NODE_CHANNEL_FD",
+					"INDIRECT=${FROM_FD}/suffix",
+					"ESCAPED=\\$NODE_CHANNEL_FD",
+					"ORDINARY=$MISSING_PARENT",
+				].join("\n"),
+			),
+		);
+		const env = {
+			FROM_FD: "3",
+			INDIRECT: "3/suffix",
+			ESCAPED: "parent-escaped",
+			ORDINARY: "parent-override",
+			KEEP: "parent-value",
+		};
+
+		expect({
+			child: filterChildShellEnv(env, cwd, "darwin"),
+			values: getDotenvEnvValues(cwd, env, "darwin"),
+		}).toEqual({
+			child: { ESCAPED: "parent-escaped", ORDINARY: "parent-override", KEEP: "parent-value" },
+			values: expect.arrayContaining(["3", "3/suffix"]),
+		});
+		expect(env.FROM_FD).toBe("3");
+
+		fs.writeFileSync(path.join(cwd, ".env.local"), "FROM_FD=local-value\n");
+		expect(filterChildShellEnv({ FROM_FD: "parent-override" }, cwd, "darwin")).toEqual({
+			FROM_FD: "parent-override",
+		});
+
+		const windowsCwd = path.dirname(
+			writeTempEnv("FROM_FD=$nOdE_cHaNnEl_Fd\nFROM_MODE=${node_channel_serialization_mode}\n"),
+		);
+		expect(
+			filterChildShellEnv({ FROM_FD: "4", FROM_MODE: "advanced", KEEP: "parent-value" }, windowsCwd, "win32"),
+		).toEqual({
+			KEEP: "parent-value",
+		});
+		expect(getDotenvEnvValues(windowsCwd, { FROM_FD: "4" }, "win32")).toContain("4");
+		expect(filterChildShellEnv({ FROM_FD: "4" }, windowsCwd, "darwin")).toEqual({ FROM_FD: "4" });
+	});
+
 	it("uses the launch mode when dotenv changes NODE_ENV", async () => {
 		const cwd = path.dirname(writeTempEnv("NODE_ENV=production\n"));
 		fs.writeFileSync(
