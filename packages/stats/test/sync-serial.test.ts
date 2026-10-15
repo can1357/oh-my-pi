@@ -313,13 +313,15 @@ describe("stats sync serial mode", () => {
 	// failing. Below it, the only way out is the child's own exit.
 	it.skipIf(process.platform === "darwin")("drains on its own after the warm pool reuses a worker", async () => {
 		const script = [
+			`import { readdirSync, readlinkSync } from "node:fs";`,
 			`import * as fs from "node:fs/promises";`,
 			`import * as os from "node:os";`,
 			`import * as path from "node:path";`,
+			`import { Database } from "bun:sqlite";`,
 			`import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";`,
 			`import { closeDb } from "@oh-my-pi/omp-stats/db";`,
 			`import { getOverallStats } from "@oh-my-pi/omp-stats/rollup";`,
-			`import { getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";`,
+			`import { getSessionsDir, getStatsDbPath, setAgentDir } from "@oh-my-pi/pi-utils";`,
 			"",
 			`const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stats-pool-sub-"));`,
 			`const configDir = path.join(tempDir, "config");`,
@@ -348,7 +350,27 @@ describe("stats sync serial mode", () => {
 			`// database before the recursive removal — without it the child exits nonzero`,
 			`// on Windows even when pooling is correct.`,
 			`closeDb();`,
-			`console.log("dbClosed=1");`,
+			`// A stdout marker cannot prove that: it prints before the removal whether`,
+			`// the handle was closed or the reference was merely dropped, and on Linux`,
+			`// the removal still succeeds against a leaked handle. What the close has to`,
+			`// leave behind is observable in the OS, so read it there instead.`,
+			`const dbPath = getStatsDbPath();`,
+			`// A released handle leaves no descriptor on stats.db or on either WAL sidecar.`,
+			`// /proc is Linux-only; elsewhere this line is simply not printed.`,
+			`try {`,
+			`    const held = readdirSync("/proc/self/fd")`,
+			`        .flatMap((fd) => {`,
+			`            try { return [readlinkSync(\`/proc/self/fd/\${fd}\`)]; } catch { return []; }`,
+			`        })`,
+			`        .filter((target) => target === dbPath || target.startsWith(dbPath));`,
+			`    console.log("leakedDbHandles=" + held.length);`,
+			`} catch { /* descriptor table not exposed on this platform */ }`,
+			`// A fresh connection on the same path is the platform-free half of the check:`,
+			`// the close has to leave the file free to open again and the synced rows`,
+			`// readable from that new connection.`,
+			`const reopened = new Database(dbPath);`,
+			`console.log("reopenedRequests=" + reopened.query("SELECT COUNT(*) AS n FROM messages").get().n);`,
+			`reopened.close();`,
 			`// No process.exit: the child must drain on its own. A pooled worker left`,
 			`// referenced would hold the event loop open and hang this script.`,
 			`await fs.rm(tempDir, { recursive: true, force: true });`,
@@ -371,10 +393,14 @@ describe("stats sync serial mode", () => {
 				expect(exitCode).toBe(0);
 				expect(stderr).toBe("");
 				expect(stdout).toContain("totalRequests=2");
-				// The child closed the sync database before its recursive removal; on
-				// Windows an open sqlite handle (or WAL sidecar) fails that removal
-				// outright, which is the only outcome this ordering guards.
-				expect(stdout).toContain("dbClosed=1");
+				// The close has to prove itself against the OS, not against a marker
+				// printed before the removal: no descriptor may still point at stats.db
+				// (where /proc exposes the table) and the file has to open again with the
+				// synced rows still in it. A `closeDb` that drops the reference instead of
+				// closing the handle fails the first; the exit status stays 0 and the old
+				// stdout marker would have passed either way.
+				if (process.platform === "linux") expect(stdout).toContain("leakedDbHandles=0");
+				expect(stdout).toContain("reopenedRequests=2");
 			} catch (error) {
 				throw new Error("pooled worker held the process open: child did not exit within 4s", { cause: error });
 			}
