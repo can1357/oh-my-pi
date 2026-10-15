@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Anthropic prompt caching after long in-place history rewrites such as pruned tool results; a cache breakpoint now sits before the earliest unsent rewrite so the re-billed region stops there instead of falling back to an older checkpoint ([#14867](https://github.com/can1357/oh-my-pi/pull/14867) by [@alnaggar-dev](https://github.com/alnaggar-dev))
+
 ## [18.11.1] - 2026-10-15
 
 ### Added
