@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Daemon project presence records now carry the live session's id and name, and follow it across session transitions such as `/new` ([#8682](https://github.com/can1357/oh-my-pi/pull/8682) by [@jwaldrip](https://github.com/jwaldrip)).
+
 ### Changed
 
 - Reduced status-line refresh overhead while subagents have long conversations ([#15874](https://github.com/can1357/oh-my-pi/pull/15874) by [@iliaal](https://github.com/iliaal)).
