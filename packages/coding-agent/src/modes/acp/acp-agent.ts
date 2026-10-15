@@ -113,11 +113,11 @@ const SPEECH_MODELS_LIST_METHOD = "speech.models.list";
  * codex-acp (spec proposal: ACP `session/inject`,
  * agentclientprotocol/agent-client-protocol#1261, still open). Advertised via
  * top-level `_meta.steering.supported` in the `initialize` response; params
- * carry `{ sessionId, prompt: ContentBlock[] }` plus
- * `_meta.steering.idleBehavior: "promptRequired"` (leave idle prompts
- * unconsumed so the host submits them itself) and the omp extension
- * `_meta.steering.queue: "followUp"` (native follow-up queue instead of the
- * steering queue).
+ * carry `{ sessionId, prompt: ContentBlock[] }`. The omp extension
+ * `_meta.steering.queue: "followUp"` routes to the native follow-up queue
+ * instead of the steering queue. Idle sessions are never consumed or started:
+ * the response is always `promptRequired`, so the host submits the prompt
+ * itself and keeps owning the turn.
  */
 const SESSION_STEERING_METHOD = "_session/steering";
 /**
@@ -183,27 +183,101 @@ function isPromptTurnInFlight(turn: PromptTurnState | undefined): turn is Prompt
 }
 
 /**
- * `_session/steering` prompt param: the ACP spec shape is the same
- * `ContentBlock[]` as `session/prompt`; a bare string is accepted defensively
- * so a slightly off-spec client fails later checks with a clear error instead
- * of silently steering empty content.
+ * `_session/steering` prompt param: the same `ContentBlock[]` shape as
+ * `session/prompt`. Blocks are validated here rather than trusted, because
+ * `#convertPromptBlocks` dereferences their fields (`block.text`, image
+ * `data`/`mimeType`, `block.resource`) — a null block would surface as a
+ * TypeError (generic internal error) and an image without `data` would queue
+ * an image with undefined fields. A bare string is accepted defensively for
+ * slightly off-spec clients.
  */
 function toSteeringPromptBlocks(prompt: unknown): PromptRequest["prompt"] {
 	if (typeof prompt === "string") {
 		return [{ type: "text", text: prompt }];
 	}
-	if (Array.isArray(prompt)) {
-		return prompt as PromptRequest["prompt"];
+	if (!Array.isArray(prompt)) {
+		throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, "prompt must be content blocks");
 	}
-	throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, "prompt must be content blocks");
+	for (const block of prompt) {
+		if (typeof block !== "object" || block === null) {
+			throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, "prompt blocks must be objects");
+		}
+		const record = block as Record<string, unknown>;
+		if (typeof record.type !== "string") {
+			throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, "prompt block requires a string type");
+		}
+		const required = STEERING_BLOCK_STRING_FIELDS[record.type];
+		if (required === undefined) {
+			throw RequestError.invalidParams(
+				{ method: SESSION_STEERING_METHOD },
+				`unsupported prompt block type: ${record.type}`,
+			);
+		}
+		for (const field of required) {
+			if (typeof record[field] !== "string") {
+				throw RequestError.invalidParams(
+					{ method: SESSION_STEERING_METHOD },
+					`prompt block ${record.type} requires string ${field}`,
+				);
+			}
+		}
+		if (record.type === "resource") {
+			const resource = record.resource;
+			if (
+				typeof resource !== "object" ||
+				resource === null ||
+				typeof (resource as Record<string, unknown>).uri !== "string"
+			) {
+				throw RequestError.invalidParams(
+					{ method: SESSION_STEERING_METHOD },
+					"resource block requires a resource object with a string uri",
+				);
+			}
+			const resourceFields = resource as Record<string, unknown>;
+			if (typeof resourceFields.text !== "string" && typeof resourceFields.blob !== "string") {
+				throw RequestError.invalidParams(
+					{ method: SESSION_STEERING_METHOD },
+					"resource block requires string text or string blob",
+				);
+			}
+		}
+		if (record.type === "resource_link") {
+			for (const field of ["title", "name"] as const) {
+				if (record[field] !== undefined && typeof record[field] !== "string") {
+					throw RequestError.invalidParams(
+						{ method: SESSION_STEERING_METHOD },
+						`resource_link ${field} must be a string when present`,
+					);
+				}
+			}
+		}
+	}
+	return prompt as PromptRequest["prompt"];
 }
 
-/** `_meta.steering` fields of a `_session/steering` request, defensively read. */
-function extractSteeringMeta(meta: unknown): { idleBehavior?: unknown; queue?: unknown } {
-	if (typeof meta !== "object" || meta === null) return {};
-	const steering = (meta as Record<string, unknown>).steering;
-	if (typeof steering !== "object" || steering === null) return {};
-	return steering as { idleBehavior?: unknown; queue?: unknown };
+/** Required top-level string fields per accepted prompt block type. */
+const STEERING_BLOCK_STRING_FIELDS: Record<string, string[]> = {
+	text: ["text"],
+	image: ["data", "mimeType"],
+	audio: ["data", "mimeType"],
+	resource_link: ["uri"],
+	resource: [],
+};
+
+/**
+ * `_meta.steering.queue` of a `_session/steering` request — the omp-specific
+ * opt-in routing the message to the native follow-up queue instead of the
+ * steering queue. Everything else (including `idleBehavior`) is unused: idle
+ * sessions always answer `promptRequired`, so the host keeps owning the turn.
+ */
+function steeringQueueFromMeta(meta: unknown): "steering" | "followUp" {
+	if (typeof meta === "object" && meta !== null) {
+		const steering = (meta as Record<string, unknown>).steering;
+		if (typeof steering === "object" && steering !== null) {
+			return (steering as Record<string, unknown>).queue === "followUp" ? "followUp" : "steering";
+		}
+	}
+	return "steering";
 }
 
 type ManagedSessionRecord = {
@@ -1264,16 +1338,19 @@ export class AcpAgent implements Agent {
 	/**
 	 * `_session/steering` — the steering extension method implemented by
 	 * claude-agent-acp and codex-acp (spec proposal: ACP `session/inject`,
-	 * agentclientprotocol/agent-client-protocol#1261). While the session is
-	 * streaming, the prompt is queued on the session's native steering queue
-	 * (or its follow-up queue with `_meta.steering.queue: "followUp"`) and
-	 * reported `injected`. When idle, a
-	 * `_meta.steering.idleBehavior: "promptRequired"` opt-in leaves the content
-	 * unconsumed and reports `promptRequired` so the host submits it through
-	 * `session/prompt` and keeps owning the turn; otherwise a turn is started
-	 * through the bridge's own prompt path — not `AgentSession.steer()`'s idle
-	 * auto-continue — so the turn is owned by an ACP promptTurn and stays
-	 * cancellable, avoiding the detached turn claude-agent-acp#903 describes.
+	 * agentclientprotocol/agent-client-protocol#1261). While a turn is in
+	 * flight the prompt is queued on the session's native steering queue (or
+	 * its follow-up queue with `_meta.steering.queue: "followUp"`) and reported
+	 * `injected`; "in flight" covers both a streaming session and a
+	 * `session/prompt` turn that is reserved but still dispatching, so a steer
+	 * always joins the client's own pending turn instead of queueing a second
+	 * prompt behind it. An idle session is never started or consumed here: the
+	 * response is always `promptRequired`, so the host submits the content
+	 * through `session/prompt` and keeps owning the turn. omp deliberately
+	 * never returns `startedNewTurn` (claude-agent-acp's behavior without the
+	 * `idleBehavior` opt-in) because a detached turn has no `session/prompt`
+	 * response to carry a failure, so a rejected start would be invisible to
+	 * the client (claude-agent-acp#903).
 	 */
 	async #handleSessionSteering(params: { [key: string]: unknown }): Promise<{ [key: string]: unknown }> {
 		const sessionId = params.sessionId;
@@ -1288,11 +1365,9 @@ export class AcpAgent implements Agent {
 		if (converted.text.length === 0 && converted.images.length === 0) {
 			throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, "prompt is empty");
 		}
+		const queue = steeringQueueFromMeta(params._meta);
 
-		const steeringMeta = extractSteeringMeta(params._meta);
-		const queue = steeringMeta.queue === "followUp" ? ("followUp" as const) : ("steering" as const);
-
-		if (record.session.isStreaming) {
+		if (isPromptTurnInFlight(record.promptTurn) || record.session.isStreaming) {
 			try {
 				if (queue === "followUp") {
 					await record.session.followUp(converted.text, converted.images);
@@ -1308,16 +1383,7 @@ export class AcpAgent implements Agent {
 			return { outcome: "injected", queue };
 		}
 
-		if (steeringMeta.idleBehavior === "promptRequired") {
-			return { outcome: "promptRequired", queue };
-		}
-
-		// Fire-and-forget like claude-agent-acp's `startedNewTurn`: the steering
-		// request resolves immediately while the turn streams via `session/update`.
-		this.prompt({ sessionId, prompt: promptBlocks }).catch((error: unknown) => {
-			logger.warn("ACP steering turn failed to start", { sessionId, error });
-		});
-		return { outcome: "startedNewTurn", queue };
+		return { outcome: "promptRequired", queue };
 	}
 
 	async extNotification(_method: string, _params: { [key: string]: unknown }): Promise<void> {}

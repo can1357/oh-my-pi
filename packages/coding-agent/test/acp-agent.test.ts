@@ -1315,12 +1315,16 @@ describe("ACP agent", () => {
 			prompt: [
 				{ type: "text", text: "use the existing parser" },
 				{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+				{ type: "resource_link", uri: "file:///plan.md", name: "plan" },
 			],
 		});
 
 		expect(result).toEqual({ outcome: "injected", queue: "steering" });
 		expect(session.steerCalls).toEqual([
-			{ text: "use the existing parser", images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }] },
+			{
+				text: "use the existing parser\n\nplan",
+				images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
+			},
 		]);
 		expect(session.followUpCalls).toEqual([]);
 
@@ -1334,9 +1338,10 @@ describe("ACP agent", () => {
 		const session = harness.findSession(created.sessionId)!;
 		session.isStreaming = true;
 
+		// A bare string prompt is accepted defensively for off-spec clients.
 		const result = await harness.agent.extMethod("_session/steering", {
 			sessionId: created.sessionId,
-			prompt: [{ type: "text", text: "then run the tests" }],
+			prompt: "then run the tests",
 			_meta: { steering: { queue: "followUp" } },
 		});
 
@@ -1348,47 +1353,67 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("leaves an idle prompt unconsumed when idleBehavior is promptRequired", async () => {
+	it("steers a turn whose prompt is still dispatching instead of queueing a second prompt", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
+		// Hold the turn inside AgentSession.prompt: the ACP promptTurn is already
+		// reserved (the dispatch passed skill/builtin routing) but isStreaming
+		// is still false — the exact window between prompt() admission and the
+		// session starting to stream.
+		const dispatchHeld = Promise.withResolvers<void>();
+		session.prompt = async (text: string) => {
+			session.promptCalls.push(text);
+			await dispatchHeld.promise;
+			session.isStreaming = true;
+			return true;
+		};
+
+		const clientPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "original task" }],
+		});
+		void clientPrompt.catch(() => undefined);
+		await Bun.sleep(1);
 
 		const result = await harness.agent.extMethod("_session/steering", {
 			sessionId: created.sessionId,
-			prompt: [{ type: "text", text: "fresh task" }],
-			_meta: { steering: { idleBehavior: "promptRequired" } },
+			prompt: [{ type: "text", text: "use the existing parser" }],
 		});
 
-		expect(result).toEqual({ outcome: "promptRequired", queue: "steering" });
-		expect(session.steerCalls).toEqual([]);
-		expect(session.followUpCalls).toEqual([]);
-		expect(session.promptCalls).toEqual([]);
+		expect(result).toEqual({ outcome: "injected", queue: "steering" });
+		expect(session.steerCalls).toEqual([{ text: "use the existing parser", images: [] }]);
+		// Only the client's own prompt was ever started — the steer joins that
+		// turn rather than queueing a second prompt behind it.
+		expect(session.promptCalls).toEqual(["original task"]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
 
-	it("starts a bridge-owned turn when idle without the promptRequired opt-in", async () => {
+	it("leaves an idle prompt unconsumed whether or not idleBehavior is set", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		const turnStarted = Promise.withResolvers<void>();
-		const originalPrompt = session.prompt.bind(session);
-		session.prompt = async (text: string) => {
-			turnStarted.resolve();
-			return await originalPrompt(text);
-		};
 
-		const result = await harness.agent.extMethod("_session/steering", {
+		// agent-shell sends idleBehavior: "promptRequired"; a client that omits
+		// it must not get a detached startedNewTurn turn it cannot observe or
+		// cancel — idle steering is always the host's to submit.
+		const withMeta = await harness.agent.extMethod("_session/steering", {
 			sessionId: created.sessionId,
-			prompt: [{ type: "text", text: "start now" }],
+			prompt: [{ type: "text", text: "fresh task" }],
+			_meta: { steering: { idleBehavior: "promptRequired" } },
+		});
+		const withoutMeta = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "another task" }],
 		});
 
-		expect(result).toEqual({ outcome: "startedNewTurn", queue: "steering" });
-		// The turn runs through the session/prompt path (a tracked promptTurn),
-		// not a detached autonomous turn.
-		await turnStarted.promise;
-		expect(session.promptCalls).toEqual(["start now"]);
+		expect(withMeta).toEqual({ outcome: "promptRequired", queue: "steering" });
+		expect(withoutMeta).toEqual({ outcome: "promptRequired", queue: "steering" });
+		expect(session.steerCalls).toEqual([]);
+		expect(session.followUpCalls).toEqual([]);
+		expect(session.promptCalls).toEqual([]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -1433,6 +1458,29 @@ describe("ACP agent", () => {
 		await expect(
 			harness.agent.extMethod("_session/steering", { prompt: [{ type: "text", text: "hi" }] }),
 		).rejects.toThrow("Invalid params");
+
+		// Block-level malformations must surface as typed invalid-params errors
+		// on the wire (code -32602), not TypeErrors or silently queued
+		// undefined fields.
+		for (const prompt of [
+			[null],
+			[{ type: "image" }],
+			[{ type: "text" }],
+			[{ type: "resource" }],
+			[{ type: "resource", resource: { uri: "file:///x" } }],
+			[{ type: "resource", resource: { uri: "file:///x", mimeType: "text/plain" } }],
+			[{ type: "nope", text: "hi" }],
+			[{ type: "resource_link", uri: "file:///x", title: 5 }],
+		] as unknown[]) {
+			const error = await harness.agent
+				.extMethod("_session/steering", { sessionId: created.sessionId, prompt })
+				.then(
+					() => undefined,
+					(rejection: unknown) => rejection,
+				);
+			expect(error).toBeInstanceOf(RequestError);
+			expect((error as RequestError).code).toBe(-32602);
+		}
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
