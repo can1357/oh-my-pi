@@ -120,6 +120,7 @@ export class GoalRuntime {
 	#turnSnapshot: GoalTurnSnapshot | undefined;
 	#wallClock: GoalWallClockSnapshot;
 	#budgetReportedFor: string | undefined;
+	#deferredBudgetSteerFor: string | undefined;
 	#accountingTail: Promise<void> = Promise.resolve();
 
 	constructor(host: GoalRuntimeHost) {
@@ -181,6 +182,7 @@ export class GoalRuntime {
 
 	#markActiveAccounting(goal: Goal, resetWallClock = false): void {
 		if (resetWallClock || this.#wallClock.activeGoalId !== goal.id) {
+			this.#deferredBudgetSteerFor = undefined;
 			this.#wallClock = { lastAccountedAt: this.#now(), activeGoalId: goal.id };
 		}
 		if (this.#turnSnapshot) {
@@ -190,6 +192,7 @@ export class GoalRuntime {
 	}
 
 	#clearActiveAccounting(): void {
+		this.#deferredBudgetSteerFor = undefined;
 		this.#wallClock = { lastAccountedAt: this.#now() };
 		if (this.#turnSnapshot) {
 			this.#turnSnapshot.activeGoalId = undefined;
@@ -216,7 +219,9 @@ export class GoalRuntime {
 	async onToolCompleted(toolName: string): Promise<void> {
 		if (toolName === "goal") return;
 		if (!this.#hasAccountingState()) return;
-		await this.flushUsage("allowed");
+		await this.#withAccounting(() =>
+			this.#flushUsageLocked(toolName !== "eval" && this.#deferredBudgetSteerFor ? "deferred" : "allowed"),
+		);
 	}
 
 	async onGoalToolCompleted(): Promise<void> {
@@ -294,6 +299,7 @@ export class GoalRuntime {
 		validateTokenBudget(newBudget);
 		return await this.#withAccounting(async () => {
 			this.#budgetReportedFor = undefined;
+			this.#deferredBudgetSteerFor = undefined;
 			await this.#flushUsageLocked("suppressed");
 			const state = this.#getStateClone();
 			if (!state?.goal) return undefined;
@@ -338,7 +344,13 @@ export class GoalRuntime {
 			this.#wallClock.activeGoalId === state.goal.id
 				? Math.max(0, Math.floor((this.#now() - this.#wallClock.lastAccountedAt) / 1000))
 				: 0;
-		if (tokenDelta <= 0 && wallSeconds <= 0) return;
+		if (tokenDelta <= 0 && wallSeconds <= 0) {
+			if (steering === "allowed" && this.#deferredBudgetSteerFor === state.goal.id) {
+				this.#deferredBudgetSteerFor = undefined;
+				if (state.goal.status === "budget-limited") await this.#sendBudgetLimitSteer(state.goal);
+			}
+			return;
+		}
 
 		state.goal.tokensUsed += tokenDelta;
 		state.goal.timeUsedSeconds += wallSeconds;
@@ -366,7 +378,15 @@ export class GoalRuntime {
 		if (state.goal.status !== "budget-limited") {
 			this.#budgetReportedFor = undefined;
 		}
-		if (steering === "allowed" && flippedToBudgetLimited && this.#budgetReportedFor !== state.goal.id) {
+		if (steering === "deferred" && flippedToBudgetLimited) {
+			this.#deferredBudgetSteerFor = state.goal.id;
+		}
+		if (
+			steering === "allowed" &&
+			state.goal.status === "budget-limited" &&
+			(flippedToBudgetLimited || this.#deferredBudgetSteerFor === state.goal.id)
+		) {
+			this.#deferredBudgetSteerFor = undefined;
 			await this.#sendBudgetLimitSteer(state.goal);
 		}
 	}
