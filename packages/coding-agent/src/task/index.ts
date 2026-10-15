@@ -24,7 +24,7 @@ import type {
 	ToolSpeculationPolicy,
 } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
+import { $env, applyCatalogDescriptionBudget, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
@@ -72,6 +72,7 @@ import { type TaskLauncher, TaskLaunchSession } from "./speculative-launch";
 import { cfgAsyncEnabled } from "../tools/settings";
 import {
 	cfgTaskBatch,
+	cfgTaskAgentCatalogDescriptionBudgetChars,
 	cfgTaskDisabledAgents,
 	cfgTaskEnableEffort,
 	cfgTaskEnableLsp,
@@ -151,6 +152,7 @@ interface TaskDescriptionOptions {
 	isolationEnabled: boolean;
 	applyIsolatedChanges: boolean;
 	disabledAgents: string[];
+	agentCatalogDescriptionBudgetChars: number;
 	batchEnabled: boolean;
 	effortEnabled: boolean;
 	evalToolsEnabled: boolean;
@@ -183,8 +185,9 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		structured: !options.structured && agent.structured === true,
 	}));
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
+	const budgetedAgents = applyCatalogDescriptionBudget(renderedAgents, options.agentCatalogDescriptionBudgetChars);
 	return prompt.render(taskDescriptionTemplate, {
-		agents: renderedAgents,
+		agents: budgetedAgents,
 		scoutAvailable,
 		spawningDisabled,
 		defaultAgent: spawnPolicy.defaultAgent,
@@ -195,8 +198,8 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		evalToolsEnabled: options.evalToolsEnabled,
 		structured: options.structured,
 		asyncEnabled: options.asyncEnabled,
-		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
-		hasStructuredAgents: renderedAgents.some(agent => agent.structured),
+		hasBlockingAgents: budgetedAgents.some(agent => agent.blocking),
+		hasStructuredAgents: budgetedAgents.some(agent => agent.structured),
 		hasModelMentions: options.sessionAgents.length > 0,
 		ircEnabled: options.ircEnabled,
 		asyncGuidance: options.asyncGuidance,
@@ -718,6 +721,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
 			disabledAgents,
+			agentCatalogDescriptionBudgetChars: cfgTaskAgentCatalogDescriptionBudgetChars.get(this.session.settings),
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
