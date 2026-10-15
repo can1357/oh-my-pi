@@ -183,8 +183,18 @@ export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promis
 	}
 	try {
 		const lookup = await gh.getOrFetchPrDiff({ cwd, repo: ref.repo, number: ref.number });
+		const pinned =
+			lookup.status !== "disabled" &&
+			gh.retainPrDiffGeneration({
+				repo: ref.repo,
+				number: ref.number,
+				rendered: lookup.rendered,
+				files: lookup.payload.files,
+				fetchedAt: lookup.fetchedAt,
+			});
 		return createResolvedReviewTarget("pr", label, lookup.payload.unified, `${label} has no diff content available`, {
 			prDiffUrl: `pr://${ref.repo}/${ref.number}/diff`,
+			prDiffQuery: pinned ? `?at=${lookup.fetchedAt}` : "",
 		});
 	} catch (error) {
 		throw new Error(

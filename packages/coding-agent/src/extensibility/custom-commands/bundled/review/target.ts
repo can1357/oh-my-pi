@@ -16,6 +16,8 @@ export interface ResolvedReviewTarget {
 	contextInstruction?: string;
 	/** Base URL for per-file slices of the original, unfiltered PR/MR diff. */
 	prDiffUrl?: string;
+	/** Leading `?at=<generation>` when `prDiffUrl` is pinned, otherwise empty. */
+	prDiffQuery?: string;
 }
 
 export interface ReviewTargetUI {
@@ -38,7 +40,10 @@ export function createResolvedReviewTarget(
 	mode: string,
 	rawDiff: string,
 	emptyMessage: string,
-	options: Pick<ResolvedReviewTarget, "filteredMessage" | "diffInstruction" | "contextInstruction" | "prDiffUrl"> = {},
+	options: Pick<
+		ResolvedReviewTarget,
+		"filteredMessage" | "diffInstruction" | "contextInstruction" | "prDiffUrl" | "prDiffQuery"
+	> = {},
 ): ResolvedReviewTarget {
 	return {
 		kind,

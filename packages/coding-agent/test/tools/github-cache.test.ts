@@ -14,6 +14,7 @@ import { getOrFetchIssue, getOrFetchPr } from "@oh-my-pi/pi-coding-agent/tools/g
 import { Database } from "bun:sqlite";
 import {
 	getCached,
+	getCachedGeneration,
 	getOrFetchView,
 	openDb,
 	putCached,
@@ -477,6 +478,49 @@ describe("getOrFetchView (TTL semantics)", () => {
 		const updated = getCached<{ refreshed: boolean }>(TEST_REPO, "pr-diff", 52, false);
 		expect(updated?.rendered).toBe("refreshed-diff");
 		expect(updated?.payload.refreshed).toBe(true);
+		const pinned = getCachedGeneration<{ refreshed: boolean }>(TEST_REPO, "pr-diff", 52, false, result.fetchedAt);
+		expect(pinned?.rendered).toBe("old-diff");
+		expect(pinned?.payload.refreshed).toBe(false);
+	});
+
+	it("pins a pr-diff row that predates the generation table when it is served stale", async () => {
+		const settings = Settings.isolated({
+			"github.cache.softTtlSec": 60,
+			"github.cache.hardTtlSec": 86400,
+		});
+		const fetchedAt = Date.now() - 5 * 60_000;
+		const db = openDb();
+		expect(db).not.toBeNull();
+		db?.query(
+			"INSERT INTO github_view_cache (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		).run(
+			"default",
+			TEST_REPO,
+			"pr-diff",
+			88,
+			0,
+			fetchedAt,
+			JSON.stringify({ files: [], legacy: true }),
+			"legacy-diff",
+			null,
+		);
+
+		const result = await getOrFetchView({
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 88,
+			includeComments: false,
+			fetchFresh: async () => ({
+				rendered: "refreshed-legacy",
+				sourceUrl: undefined,
+				payload: { files: [], legacy: false },
+			}),
+			settings,
+		});
+
+		expect(result.status).toBe("stale");
+		expect(result.rendered).toBe("legacy-diff");
+		expect(getCachedGeneration(TEST_REPO, "pr-diff", 88, false, fetchedAt)?.rendered).toBe("legacy-diff");
 	});
 
 	it("treats past-hard-TTL rows as cache misses (fetcher runs)", async () => {

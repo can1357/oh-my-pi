@@ -13,6 +13,8 @@
  *     synchronously, falling back to the cached row if the live fetch fails.
  *   Expensive PR diff rows past soft TTL but within hard TTL → return cached
  *     row AND schedule a background refresh (errors logged, never thrown).
+ *     Every pr-diff generation is also stored by `fetched_at`, so a review
+ *     URL can keep reading the snapshot it froze after that refresh lands.
  *   Past hard TTL → treat as miss and fetch fresh.
  */
 
@@ -123,7 +125,20 @@ export function openDb(): Database | null {
 				source_url       TEXT,
 				PRIMARY KEY (auth_key, repo, kind, number, include_comments)
 			);
+			CREATE TABLE IF NOT EXISTS github_view_cache_generation (
+				auth_key        TEXT    NOT NULL,
+				repo             TEXT    NOT NULL,
+				kind             TEXT    NOT NULL CHECK (kind IN ('issue','pr','pr-diff')),
+				number           INTEGER NOT NULL,
+				include_comments INTEGER NOT NULL,
+				fetched_at       INTEGER NOT NULL,
+				payload          TEXT    NOT NULL,
+				rendered         TEXT    NOT NULL,
+				source_url       TEXT,
+				PRIMARY KEY (auth_key, repo, kind, number, include_comments, fetched_at)
+			);
 			CREATE INDEX IF NOT EXISTS idx_github_view_cache_fetched ON github_view_cache(fetched_at);
+			CREATE INDEX IF NOT EXISTS idx_github_view_cache_generation_fetched ON github_view_cache_generation(fetched_at);
 			PRAGMA user_version = 4;
 		`);
 		protectDbFiles(dbPath);
@@ -144,6 +159,7 @@ function evictExpired(db: Database, hardTtlMs: number): void {
 	try {
 		const cutoff = Date.now() - hardTtlMs;
 		db.query("DELETE FROM github_view_cache WHERE fetched_at < ?").run(cutoff);
+		db.query("DELETE FROM github_view_cache_generation WHERE fetched_at < ?").run(cutoff);
 	} catch (err) {
 		logger.debug("github cache: eviction failed", { err: String(err) });
 	}
@@ -358,6 +374,79 @@ export interface PutCachedInput<T = unknown> {
 	fetchedAt?: number;
 }
 
+/**
+ * Keep one immutable pr-diff generation. The live row is still one-per-PR and
+ * a background refresh replaces it; review URLs address this copy by `fetchedAt`
+ * so that refresh cannot retarget a file index. Does not write the live row.
+ */
+export function retainCachedGeneration<T = unknown>(input: PutCachedInput<T>): boolean {
+	const db = openDb();
+	if (!db) return false;
+	try {
+		const fetchedAt = input.fetchedAt ?? Date.now();
+		db.query(
+			"INSERT OR REPLACE INTO github_view_cache_generation (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		).run(
+			input.authKey ?? DEFAULT_CACHE_AUTH_KEY,
+			normalizeRepo(input.repo),
+			input.kind,
+			input.number,
+			input.includeComments ? 1 : 0,
+			fetchedAt,
+			JSON.stringify(input.payload),
+			input.rendered,
+			input.sourceUrl ?? null,
+		);
+		protectDbFiles(getGithubCacheDbPath());
+		return true;
+	} catch (err) {
+		logger.debug("github cache: generation write failed", { err: String(err) });
+		return false;
+	}
+}
+
+/** Read a pr-diff generation stored by {@link retainCachedGeneration}. */
+export function getCachedGeneration<T = unknown>(
+	repo: string,
+	kind: CacheKind,
+	number: number,
+	includeComments: boolean,
+	fetchedAt: number,
+	authKey: string = DEFAULT_CACHE_AUTH_KEY,
+): CachedView<T> | null {
+	const db = openDb();
+	if (!db) return null;
+	try {
+		const row = db
+			.query(
+				"SELECT auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url FROM github_view_cache_generation WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ? AND fetched_at = ?",
+			)
+			.get(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0, fetchedAt) as Row | undefined;
+		if (!row) return null;
+		let payload: T;
+		try {
+			payload = JSON.parse(row.payload) as T;
+		} catch (err) {
+			logger.debug("github cache: corrupt generation row, ignoring", { err: String(err), repo, kind, number });
+			return null;
+		}
+		return {
+			authKey: row.auth_key,
+			repo: row.repo,
+			kind: row.kind,
+			number: row.number,
+			includeComments: row.include_comments === 1,
+			fetchedAt: row.fetched_at,
+			payload,
+			rendered: row.rendered,
+			sourceUrl: row.source_url ?? undefined,
+		};
+	} catch (err) {
+		logger.debug("github cache: generation read failed", { err: String(err) });
+		return null;
+	}
+}
+
 export function putCached<T = unknown>(input: PutCachedInput<T>): void {
 	const db = openDb();
 	if (!db) return;
@@ -377,6 +466,9 @@ export function putCached<T = unknown>(input: PutCachedInput<T>): void {
 			input.rendered,
 			input.sourceUrl ?? null,
 		);
+		if (input.kind === "pr-diff") {
+			retainCachedGeneration({ ...input, fetchedAt });
+		}
 		protectDbFiles(getGithubCacheDbPath());
 	} catch (err) {
 		logger.debug("github cache: write failed", { err: String(err) });
@@ -442,6 +534,7 @@ export function clearAll(): void {
 	if (!db) return;
 	try {
 		db.query("DELETE FROM github_view_cache").run();
+		db.query("DELETE FROM github_view_cache_generation").run();
 	} catch (err) {
 		logger.debug("github cache: clear failed", { err: String(err) });
 	}
@@ -600,6 +693,22 @@ function scheduleBackgroundRefresh<T>(
 	});
 }
 
+/** Copy a live pr-diff row into the generation table before a refresh can replace it. */
+function pinPrDiffGeneration<T>(kind: CacheKind, cached: CachedView<T>): void {
+	if (kind !== "pr-diff") return;
+	retainCachedGeneration({
+		authKey: cached.authKey,
+		repo: cached.repo,
+		kind: cached.kind,
+		number: cached.number,
+		includeComments: cached.includeComments,
+		payload: cached.payload,
+		rendered: cached.rendered,
+		sourceUrl: cached.sourceUrl,
+		fetchedAt: cached.fetchedAt,
+	});
+}
+
 export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise<CacheLookupResult<T>> {
 	const ttl = resolveCacheTtl(options.settings);
 	const now = options.now ?? Date.now();
@@ -631,6 +740,7 @@ export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise
 			// auth lapse, etc.) and we never get to overwrite it.
 			invalidate(options.repo, options.kind, options.number, options.includeComments, authKey);
 		} else if (age <= ttl.softMs) {
+			pinPrDiffGeneration(options.kind, cached);
 			return {
 				rendered: cached.rendered,
 				sourceUrl: cached.sourceUrl,
@@ -639,6 +749,7 @@ export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise
 				fetchedAt: cached.fetchedAt,
 			};
 		} else if (options.kind === "pr-diff" || options.kind === "mr-diff") {
+			pinPrDiffGeneration(options.kind, cached);
 			scheduleBackgroundRefresh(
 				authKey,
 				options.repo,

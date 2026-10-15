@@ -11,6 +11,7 @@ import type { PrDiffPayload, ViewLookupResult } from "@oh-my-pi/pi-coding-agent/
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { parsePrUnifiedDiff } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-diff";
 import * as glab from "@oh-my-pi/pi-coding-agent/tools/glab-mr";
+import { resetForTests as resetCacheForTests } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { gitlab } from "@oh-my-pi/pi-coding-agent/utils/gitlab";
 import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
@@ -85,9 +86,16 @@ interface EditorCall {
 
 describe("ReviewCommand", () => {
 	let tmpDir: string;
+	let originalCacheDb: string | undefined;
+	let originalGhToken: string | undefined;
 
 	beforeAll(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-command-"));
+		originalCacheDb = process.env.OMP_GITHUB_CACHE_DB;
+		originalGhToken = process.env.GH_TOKEN;
+		process.env.OMP_GITHUB_CACHE_DB = path.join(tmpDir, "github-cache.db");
+		process.env.GH_TOKEN = "review-test-token";
+		resetCacheForTests();
 	});
 
 	afterEach(() => {
@@ -95,6 +103,12 @@ describe("ReviewCommand", () => {
 	});
 
 	afterAll(async () => {
+		resetCacheForTests();
+		if (originalCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
+		else process.env.OMP_GITHUB_CACHE_DB = originalCacheDb;
+		if (originalGhToken === undefined) delete process.env.GH_TOKEN;
+		else process.env.GH_TOKEN = originalGhToken;
+		resetCacheForTests();
 		await removeWithRetries(tmpDir);
 	});
 
@@ -338,11 +352,16 @@ describe("ReviewCommand", () => {
 					return { index: Number(cells[1]), path: cells[2], url: cells[5]!.replaceAll("`", "") };
 				});
 			expect(rows.map(row => row.path)).toEqual(paths.filter(file => file.startsWith("src/")));
-			expect(rows[0]).toEqual({ index: 2, path: "src/first.ts", url: "pr://owner/repo/123/diff/2" });
+			const snapshotQuery = `?at=${lookup.fetchedAt}`;
+			expect(rows[0]).toEqual({
+				index: 2,
+				path: "src/first.ts",
+				url: `pr://owner/repo/123/diff/2${snapshotQuery}`,
+			});
 			expect(rows.at(-1)).toEqual({
 				index: lastIndex,
 				path: "src/last.ts",
-				url: `pr://owner/repo/123/diff/${lastIndex}`,
+				url: `pr://owner/repo/123/diff/${lastIndex}${snapshotQuery}`,
 			});
 			try {
 				const router = InternalUrlRouter.instance();

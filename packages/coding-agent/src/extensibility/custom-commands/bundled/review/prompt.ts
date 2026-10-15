@@ -46,11 +46,12 @@ function renderReviewPromptFile(
 	file: ReviewDiffSnapshot["files"][number],
 	previewLines: number,
 	prDiffUrl?: string,
+	prDiffQuery = "",
 ): ReviewPromptFile {
 	return {
 		path: file.path,
 		diffIndex: file.diffIndex,
-		diffUrl: prDiffUrl ? `${prDiffUrl}/${file.diffIndex}` : undefined,
+		diffUrl: prDiffUrl ? `${prDiffUrl}/${file.diffIndex}${prDiffQuery}` : undefined,
 		linesAdded: file.linesAdded,
 		linesRemoved: file.linesRemoved,
 		ext: file.path.match(/\.([^.]+)$/)?.[1] ?? "",
@@ -118,7 +119,10 @@ export function buildReviewPrompt(target: ResolvedReviewTarget, additionalInstru
 	assertReviewablePatchSize(target);
 	const skipDiff = exceedsInlineDiffLimit(target);
 	const linesPerFile = skipDiff ? Math.max(5, Math.floor(100 / target.snapshot.files.length)) : 0;
-	const files = target.snapshot.files.map(file => renderReviewPromptFile(file, linesPerFile, target.prDiffUrl));
+	const prDiffQuery = target.prDiffQuery ?? "";
+	const files = target.snapshot.files.map(file =>
+		renderReviewPromptFile(file, linesPerFile, target.prDiffUrl, prDiffQuery),
+	);
 	const agentCount = getRecommendedReviewAgentCount(target.snapshot);
 	return prompt.render(reviewRequestTemplate, {
 		mode: target.mode,
@@ -135,6 +139,7 @@ export function buildReviewPrompt(target: ResolvedReviewTarget, additionalInstru
 		contextInstruction: target.contextInstruction,
 		suppliedPatch: target.kind === "patch",
 		prDiffUrl: target.prDiffUrl,
+		prDiffQuery,
 		additionalInstructions: additionalInstructions?.trim(),
 	});
 }

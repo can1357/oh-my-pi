@@ -11,7 +11,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { resetForTests as resetCacheForTests } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
+import { parsePrUnifiedDiff } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-diff";
+import {
+	getCached,
+	putCached,
+	resetForTests as resetCacheForTests,
+	resolveGithubCacheAuthKey,
+} from "@oh-my-pi/pi-coding-agent/tools/github-cache";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -467,6 +473,51 @@ describe("pr://.../diff family", () => {
 		const second = await router.resolve("pr://owner/example/77/diff/2");
 		expect(second.content.startsWith("diff --git a/src/two.ts b/src/two.ts")).toBe(true);
 		expect(second.content).not.toContain("src/one.ts");
+	});
+
+	it("serves ?at= from the pinned generation after the live row changes", async () => {
+		const oldDiff = makePrDiff([{ name: "src/old.ts", adds: 1, dels: 0 }]);
+		const newDiff = makePrDiff([{ name: "src/new.ts", adds: 4, dels: 0 }]);
+		const textSpy = vi.spyOn(github, "text").mockResolvedValue(oldDiff);
+		const router = InternalUrlRouter.instance();
+
+		const first = await router.resolve("pr://owner/example/77/diff/1");
+		expect(first.content).toContain("src/old.ts");
+		expect(textSpy).toHaveBeenCalledTimes(1);
+
+		const authKey = resolveGithubCacheAuthKey();
+		expect(authKey).toBeDefined();
+		const stored = getCached("owner/example", "pr-diff", 77, false, authKey);
+		expect(stored).not.toBeNull();
+		const fetchedAt = stored!.fetchedAt;
+		const fresh = parsePrUnifiedDiff(newDiff);
+		putCached({
+			authKey,
+			repo: "owner/example",
+			kind: "pr-diff",
+			number: 77,
+			includeComments: false,
+			payload: { unified: "", files: fresh.files },
+			rendered: newDiff,
+			fetchedAt: fetchedAt + 10_000,
+		});
+
+		const pinned = await router.resolve(`pr://owner/example/77/diff/1?at=${fetchedAt}`);
+		expect(pinned.content).toContain("src/old.ts");
+		expect(pinned.content).not.toContain("src/new.ts");
+		expect(pinned.notes).toContain("Pinned snapshot");
+		expect(textSpy).toHaveBeenCalledTimes(1);
+
+		const live = await router.resolve("pr://owner/example/77/diff/1");
+		expect(live.content).toContain("src/new.ts");
+		expect(live.content).not.toContain("src/old.ts");
+		expect(textSpy).toHaveBeenCalledTimes(1);
+
+		await expect(router.resolve("pr://owner/example/77/diff/1?at=1")).rejects.toThrow(/not available/);
+		await expect(router.resolve("pr://owner/example/77/diff/1?at=nope")).rejects.toThrow(
+			/Invalid pr:\/\/ diff snapshot/,
+		);
+		expect(textSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("rejects out-of-range and non-decimal diff indices with friendly errors", async () => {
