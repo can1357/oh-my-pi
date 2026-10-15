@@ -11,6 +11,8 @@ import * as path from "node:path";
 import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { postmortem } from "@oh-my-pi/pi-utils";
 
+import { splitCardTitle } from "./title-card";
+
 const TMUX_NAME_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 const TMUX_NAME_WHITESPACE = /\s+/g;
 const TMUX_NAME_MAX_LENGTH = 64;
@@ -178,7 +180,9 @@ export class TmuxWindowNamer {
 		// name stays identical, and renaming may be off entirely.
 		this.#syncAccent(pane, accentHex);
 		if (!this.#enabled) return;
-		const next = sanitizeTmuxWindowName(sessionName) ?? getFallbackTmuxWindowName(cwd);
+		// The title card (`<icon> <CODE>: `) is for Tern's parked panes; tmux windows show the plain title.
+		const title = sessionName && (splitCardTitle(sessionName)?.title ?? sessionName);
+		const next = sanitizeTmuxWindowName(title) ?? getFallbackTmuxWindowName(cwd);
 		if (!next || next === this.#lastName) return;
 		this.#lastName = next;
 		this.#captureOriginal(pane);
