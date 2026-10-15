@@ -11,7 +11,9 @@ import * as path from "node:path";
 const PROBE = `
 import { appendFileSync } from "node:fs";
 import { TmuxWindowNamer } from "@oh-my-pi/pi-coding-agent/utils/tmux-session";
+import { postmortem } from "@oh-my-pi/pi-utils";
 
+postmortem.installProcessHandlers();
 const log = process.env.TMUX_PROBE_LOG;
 const record = args => appendFileSync(log, \`\${JSON.stringify(args)}\\n\`);
 const namer = new TmuxWindowNamer({
