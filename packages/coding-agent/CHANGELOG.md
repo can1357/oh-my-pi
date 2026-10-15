@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added accessible collapse controls to the HTML export’s session tree for folding branches with visible descendants ([#7761](https://github.com/can1357/oh-my-pi/pull/7761) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
 ### Changed
 
 - Reduced status-line refresh overhead while subagents have long conversations ([#15874](https://github.com/can1357/oh-my-pi/pull/15874) by [@iliaal](https://github.com/iliaal)).
