@@ -1,5 +1,5 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { transaction } from "../../db";
 import { toUtcIso } from "../../util/datetime";
 import { generateId } from "../../util/ids";
@@ -52,6 +52,8 @@ type MemoryRow = {
 	metadata_json: string | null;
 	veracity: string | null;
 	created_at: string | null;
+	valid_until: string | null;
+	superseded_by: string | null;
 };
 
 /** `facts` row read by {@link getFact}; `scope` only exists on banks that added the column. */
@@ -353,9 +355,11 @@ function proactiveLinkIfEnabled(
 async function runFactExtraction(beam: BeamMemoryState, memoryId: string, content: string): Promise<void> {
 	try {
 		const extracted = await extractFactCategoriesSafe(content);
-		if (countExtractedFactCategories(extracted) === 0) return;
-		storeExtractedFactCategories(beam, extracted, 0, memoryId);
-		invalidateCaches(beam);
+		withLoopPhase("mnemopi.extract", () => {
+			if (countExtractedFactCategories(extracted) === 0) return;
+			storeExtractedFactCategories(beam, extracted, 0, memoryId);
+			invalidateCaches(beam);
+		});
 	} catch {
 		// Background fact extraction is best-effort and never surfaces to the caller.
 	}
@@ -789,7 +793,7 @@ export function updateWorking(
 export function get(beam: BeamMemoryState, memoryId: string): Row | null {
 	using workingStmt = beam.db.prepare<MemoryRow, [string]>(
 		`SELECT id, content, source, timestamp, session_id,
-			   importance, metadata_json, veracity, created_at
+			   importance, metadata_json, veracity, created_at, valid_until, superseded_by
 			FROM working_memory
 			WHERE id = ?`,
 	);
@@ -798,7 +802,7 @@ export function get(beam: BeamMemoryState, memoryId: string): Row | null {
 
 	using episodicStmt = beam.db.prepare<MemoryRow, [string, string]>(
 		`SELECT id, content, source, timestamp, session_id,
-			   importance, metadata_json, veracity, created_at
+			   importance, metadata_json, veracity, created_at, valid_until, superseded_by
 			FROM episodic_memory
 			WHERE id = ? AND (session_id = ? OR scope = 'global')`,
 	);
