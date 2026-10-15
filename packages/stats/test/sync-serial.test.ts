@@ -317,6 +317,7 @@ describe("stats sync serial mode", () => {
 			`import * as os from "node:os";`,
 			`import * as path from "node:path";`,
 			`import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";`,
+			`import { closeDb } from "@oh-my-pi/omp-stats/db";`,
 			`import { getOverallStats } from "@oh-my-pi/omp-stats/rollup";`,
 			`import { getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";`,
 			"",
@@ -342,6 +343,12 @@ describe("stats sync serial mode", () => {
 			`await fs.appendFile(sessionFile, JSON.stringify({ ...assistant, id: "a2" }) + "\\n");`,
 			`await syncAllSessions({ workers: 2, files: [sessionFile] });`,
 			`console.log("totalRequests=" + getOverallStats().totalRequests);`,
+			`// The sync opened config/stats.db through the module-global handle. Windows`,
+			`// cannot delete a still-open sqlite file (or its WAL sidecars), so close the`,
+			`// database before the recursive removal — without it the child exits nonzero`,
+			`// on Windows even when pooling is correct.`,
+			`closeDb();`,
+			`console.log("dbClosed=1");`,
 			`// No process.exit: the child must drain on its own. A pooled worker left`,
 			`// referenced would hold the event loop open and hang this script.`,
 			`await fs.rm(tempDir, { recursive: true, force: true });`,
@@ -364,6 +371,10 @@ describe("stats sync serial mode", () => {
 				expect(exitCode).toBe(0);
 				expect(stderr).toBe("");
 				expect(stdout).toContain("totalRequests=2");
+				// The child closed the sync database before its recursive removal; on
+				// Windows an open sqlite handle (or WAL sidecar) fails that removal
+				// outright, which is the only outcome this ordering guards.
+				expect(stdout).toContain("dbClosed=1");
 			} catch (error) {
 				throw new Error("pooled worker held the process open: child did not exit within 4s", { cause: error });
 			}
