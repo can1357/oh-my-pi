@@ -1,3 +1,4 @@
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import {
@@ -750,6 +751,20 @@ export interface PasteOptions {
 	submitAfterPaste?: boolean;
 }
 
+/** Extra behavior for a submit beyond the normal commit path. */
+export interface SubmitOptions {
+	/**
+	 * Set by the approve-and-steer chord. A non-command note runs the input hooks, then
+	 * `steer` queues the hook-rewritten text and images. A command dispatches as usual.
+	 * `beforeSkillDispatch` raises the steering baseline before an inline skill dispatch,
+	 * and the returned callback undoes the raise when the dispatch fails.
+	 */
+	approveSteer?: {
+		steer: (text: string, images?: ImageContent[]) => Promise<boolean>;
+		beforeSkillDispatch?: () => (() => void) | undefined;
+	};
+}
+
 export class Editor implements Component, Focusable {
 	#state: EditorState = {
 		lines: [""],
@@ -932,7 +947,11 @@ export class Editor implements Component, Focusable {
 	 */
 	#pinnedUndo: UndoMark | null = null;
 
-	onSubmit?: (text: string) => void | Promise<void>;
+	/**
+	 * Returns true when the submission was consumed locally, by a dispatched command, an input
+	 * handler, or a queued message. The approve-and-steer chord passes {@link SubmitOptions.approveSteer}.
+	 */
+	onSubmit?: (text: string, options?: SubmitOptions) => void | Promise<void | boolean>;
 	onAltEnter?: (text: string) => void;
 	onChange?: (text: string) => void;
 	#textRevision = 0;
@@ -5306,6 +5325,10 @@ export class Editor implements Component, Focusable {
 	 */
 	isShowingAutocomplete(): boolean {
 		return this.#visibleAutocompleteList() !== undefined;
+	}
+
+	cancelAutocomplete(): void {
+		this.#cancelAutocomplete();
 	}
 
 	/** The open autocomplete list, unless it has no candidate to show. */

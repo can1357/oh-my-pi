@@ -357,7 +357,9 @@ describe("wrapSteeringForModel", () => {
 		expect(wrapped[0]).not.toBe(message);
 		expect(message.content).toEqual([{ type: "text", text: rawText }]);
 		const wrappedText = getUserText(wrapped[0]);
-		expect(wrappedText).toContain("<system-notice>");
+		expect(wrappedText).toBe(
+			"<system-notice>\nUser interjection during work: priority; supersedes conflicting prior instructions. Re-read; ensure current work reflects user intent.\n</system-notice>\nUse <tag> & keep it literal",
+		);
 		expect(wrappedText).not.toContain("<message>");
 		expect(wrappedText).toContain("Use <tag> & keep it literal");
 		expect(wrappedText).not.toContain("&lt;tag&gt;");
@@ -451,6 +453,41 @@ describe("wrapSteeringForModel", () => {
 		}
 		expect(wrappedMessage.content[0]?.type).toBe("text");
 		expect(wrappedMessage.content[1]).toBe(image);
+	});
+
+	it("wraps the approval line with the note inside the interjection envelope", () => {
+		const message: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text: "watch the build" }],
+			steering: true,
+			approvalLine: "The user approved the `bash` call and sent this message while you were still working:",
+			timestamp: 1,
+		};
+		const converted = convertToLlm(wrapSteeringForModel([message]));
+		const text = getUserText(converted[0]);
+		const closing = text.indexOf("</system-notice>");
+		const approval = text.indexOf("The user approved the `bash` call");
+		expect(closing).toBeGreaterThanOrEqual(0);
+		expect(approval).toBeGreaterThan(closing);
+		expect(approval).toBeLessThan(text.indexOf("watch the build"));
+	});
+
+	it("gives an image-only steer its approval line in the envelope", () => {
+		const image: ImageContent = { type: "image", data: "abc123", mimeType: "image/png" };
+		const message: AgentMessage = {
+			role: "user",
+			content: [image],
+			steering: true,
+			approvalLine: "The user approved the `bash` call and sent this message while you were still working:",
+			timestamp: 1,
+		};
+		const wrapped = wrapSteeringForModel([message])[0];
+		if (wrapped?.role !== "user" || typeof wrapped.content === "string") {
+			throw new Error("Expected user array content");
+		}
+		expect(wrapped.content[0]?.type).toBe("text");
+		expect((wrapped.content[0] as TextContent).text).toContain("The user approved the `bash` call");
+		expect(wrapped.content[1]).toBe(image);
 	});
 
 	it("wraps every message in the trailing steering run", () => {

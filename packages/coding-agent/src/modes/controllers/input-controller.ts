@@ -14,6 +14,7 @@ import {
 	parseSgrMouse,
 	type PasteOptions,
 	type SlashCommand,
+	type SubmitOptions,
 } from "@oh-my-pi/pi-tui";
 import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -1089,7 +1090,7 @@ export class InputController {
 	}
 
 	setupEditorSubmitHandler(): void {
-		const submit = async (text: string) => {
+		const submit = async (text: string, options?: SubmitOptions) => {
 			const submittedText = text;
 			// The Editor resets before calling onSubmit, so this is normally empty;
 			// different editor text after an await below is a newer draft.
@@ -1130,7 +1131,8 @@ export class InputController {
 			// message, interrupting a running turn (see AgentSession.resume). During a
 			// /guided-goal interview "c" is a plausible answer (e.g. option C), so it is
 			// sent as a normal reply there.
-			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
+			// An approve-and-steer note is a message, not a continue.
+			if (!options?.approveSteer && (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive()))) {
 				if (this.ctx.onInputCallback) {
 					this.ctx.editor.clearDraft();
 					this.ctx.onInputCallback({ text, cancelled: false, started: true, resume: true });
@@ -1153,8 +1155,9 @@ export class InputController {
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedImages = inputImages;
 
-			// Input hooks pass in submission order with the follow-up key's (see `#submissionHookOrder`):
-			// `/queue` placement behind a queued `/compact` must follow the order the user sent them.
+			// Input hooks pass in submission order with the follow-up key's (see
+			// `#submissionHookOrder`). `/queue` placement behind a queued `/compact`
+			// must follow the order the user sent them.
 			const earlier = this.#submissionHookOrder;
 			const hooksDone = Promise.withResolvers<void>();
 			this.#submissionHookOrder = hooksDone.promise;
@@ -1166,11 +1169,11 @@ export class InputController {
 					const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
 					if (!input) {
 						// The handler consumed the submission. The editor text was reset
-						// before this callback ran, so anything in it now is a newer draft;
-						// only the submitted attachments are dropped, and only while they
+						// before this callback ran. Anything in it now is a newer draft.
+						// Only the submitted attachments are dropped, and only while they
 						// are still the live prefix.
 						this.#dropSubmittedPending(inputImages);
-						return;
+						return true;
 					}
 					({ text, images: inputImages, imageLinks: inputImageLinks } = input);
 					hasInputImages = (inputImages?.length ?? 0) > 0;
@@ -1191,7 +1194,7 @@ export class InputController {
 					images: inputImages,
 					imageLinks: inputImageLinks,
 				});
-				return;
+				return true;
 			}
 
 			const bareSlashCommand = this.#resolveBareSlashCommand(text, submittedText, hasInputImages, armedBareCommand);
@@ -1201,7 +1204,7 @@ export class InputController {
 				this.ctx.showStatus(
 					`Press Enter again to run ${bareSlashCommand.command}; add a leading space to send "${text}" as a message`,
 				);
-				return;
+				return true;
 			}
 			if (bareSlashCommand) text = bareSlashCommand.command;
 
@@ -1223,11 +1226,11 @@ export class InputController {
 					if (!draftDetached) throw error;
 					restoreDetachedDraft(this.ctx.editor, text, inputImages, inputImageLinks);
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
-					return;
+					return true;
 				}
 				if (slashResult === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
-					return;
+					return true;
 				}
 				if (typeof slashResult === "string") {
 					// Command handled but returned remaining text to use as prompt.
@@ -1245,24 +1248,24 @@ export class InputController {
 				if (text.startsWith("/")) {
 					this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
 					this.ctx.editor.setText("");
-					return;
+					return true;
 				}
 				if (text.startsWith("!") || parsePythonCommandInput(text)) {
 					this.ctx.showStatus("Local execution is host-only during a collab session");
 					this.ctx.editor.setText("");
-					return;
+					return true;
 				}
 				if (this.ctx.collabGuest.readOnly) {
 					// Keep the typed text: the prompt was not consumed.
 					this.ctx.showStatus("This collab link is read-only — prompting is disabled");
-					return;
+					return true;
 				}
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 				this.ctx.editor.clearDraft(text);
 				// No local render: the prompt comes back from the host as a
 				// collab-prompt event/entry and renders with the author badge.
 				this.ctx.collabGuest.sendPrompt(text, images);
-				return;
+				return true;
 			}
 
 			// `side: true` file commands answer as a /btw side question: off the
@@ -1290,17 +1293,26 @@ export class InputController {
 				if (this.ctx.session.isCompacting) {
 					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 					this.ctx.queueCompactionMessage(text, "steer", images);
-					return;
+					return true;
 				}
-				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks)) {
+				// Raise the steering baseline before dispatch so the deny-watch does not count
+				// the dispatched message as steering above the approval.
+				const undoBaseline = options?.approveSteer?.beforeSkillDispatch?.();
+				const outcome = await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks);
+				if (outcome === "dispatched") {
 					// The dispatch above ran the turn inline without resolving the input
 					// callback, so nothing re-enters `getUserInput` to arm the next
 					// iteration. Arm it here, now that the turn has settled.
 					if (this.ctx.loopModeEnabled) {
 						this.ctx.armLoopAutoSubmit();
 					}
-					return;
+					return true;
 				}
+				undoBaseline?.();
+				// A throw stops every submit path. A decline keeps the chord pending, and
+				// ordinary submits send the restored text as a message.
+				if (outcome === "failed") return true;
+				if (outcome === "not-dispatched" && options?.approveSteer) return true;
 			}
 
 			// Handle bash command (! for normal, !! for excluded from context)
@@ -1313,13 +1325,13 @@ export class InputController {
 							`A bash command is already running. Press ${appKey(this.ctx.keybindings, "app.interrupt")} to cancel it first.`,
 						);
 						this.ctx.editor.setText(text);
-						return;
+						return true;
 					}
 					this.ctx.editor.addToHistory(text);
 					await this.ctx.handleBashCommand(command, isExcluded);
 					this.ctx.isBashMode = false;
 					this.ctx.updateEditorBorderColor();
-					return;
+					return true;
 				}
 			}
 
@@ -1334,13 +1346,13 @@ export class InputController {
 							`A Python execution is already running. Press ${appKey(this.ctx.keybindings, "app.interrupt")} to cancel it first.`,
 						);
 						this.ctx.editor.setText(text);
-						return;
+						return true;
 					}
 					this.ctx.editor.addToHistory(text);
 					await this.ctx.handlePythonCommand(code, isExcluded);
 					this.ctx.isPythonMode = false;
 					this.ctx.updateEditorBorderColor();
-					return;
+					return true;
 				}
 			}
 
@@ -1354,7 +1366,7 @@ export class InputController {
 				// as loopPrompt while the drain executes it locally — and idle
 				// submissions never arm commands.
 				if (submittedMode === "loop" && !this.#isLocalExtensionCommand(text)) this.ctx.setLoopPrompt(text);
-				return;
+				return true;
 			}
 
 			// Extension commands are local actions. Execute them before the normal
@@ -1377,7 +1389,13 @@ export class InputController {
 					this.ctx.editor.setCollapsedText(text);
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
 				}
-				return;
+				return true;
+			}
+
+			if (options?.approveSteer) {
+				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
+				await options.approveSteer.steer(text, images);
+				return false;
 			}
 
 			// If streaming, use prompt() with steer behavior
@@ -1507,7 +1525,7 @@ export class InputController {
 		};
 		// A queued `/compact` waits for Enter input taken before it to reach the session (skill
 		// expansion, `/queue`, mode commands), the same as for the follow-up key.
-		this.ctx.editor.onSubmit = text => this.#trackSubmission(() => submit(text));
+		this.ctx.editor.onSubmit = (text, options) => this.#trackSubmission(() => submit(text, options));
 	}
 
 	/**
@@ -1886,10 +1904,12 @@ export class InputController {
 
 	/**
 	 * Dispatch a `/skill:<name> [args]` invocation through `promptCustomMessage`
-	 * using the supplied `streamingBehavior`. Returns false when the text is not
-	 * a registered skill command and leaves the editor state untouched. Registered
-	 * skills consume the full composer draft (text plus pending images) before
-	 * dispatch; if dispatch rejects, the draft is restored so the user can retry.
+	 * using the supplied `streamingBehavior`. Returns `"not-skill"` when the text
+	 * is not a registered skill command and leaves the editor state untouched.
+	 * Registered skills consume the full composer draft (text plus pending images)
+	 * before dispatch; if dispatch rejects or declines, the draft is restored so
+	 * the user can retry — `"failed"` for a rejection, `"not-dispatched"` for a
+	 * decline.
 	 */
 	async #invokeSkillCommand(
 		text: string,
@@ -1897,8 +1917,8 @@ export class InputController {
 		images?: ImageContent[],
 		imageLinks?: (string | undefined)[],
 		preserveDraft = false,
-	): Promise<boolean> {
-		if (!isKnownSkillCommand(this.ctx, text)) return false;
+	): Promise<"dispatched" | "not-dispatched" | "failed" | "not-skill"> {
+		if (!isKnownSkillCommand(this.ctx, text)) return "not-skill";
 		const draftImages = images && images.length > 0 ? [...images] : undefined;
 		const draftImageLinks = draftImages && imageLinks && imageLinks.length > 0 ? [...imageLinks] : undefined;
 		const restoreDraft = () => {
@@ -1927,12 +1947,15 @@ export class InputController {
 				optimistic: true,
 				propagateErrors: true,
 			});
-			if (!dispatched) restoreDraft();
-			return dispatched;
+			if (!dispatched) {
+				restoreDraft();
+				return "not-dispatched";
+			}
+			return "dispatched";
 		} catch (error) {
 			restoreDraft();
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
-			return true;
+			return "failed";
 		} finally {
 			if (this.ctx.session.isStreaming) {
 				this.ctx.updatePendingMessagesDisplay();
@@ -2222,8 +2245,9 @@ export class InputController {
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;
 		// Ctrl+Enter (this handler) routes them as `followUp`.
-		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks, true))) {
-			return;
+		if (text) {
+			const skillOutcome = await this.#invokeSkillCommand(text, "followUp", images, imageLinks, true);
+			if (skillOutcome === "dispatched" || skillOutcome === "failed") return;
 		}
 
 		// Hand the message back on dispatch failure (model/API-key validation,
@@ -2342,11 +2366,11 @@ export class InputController {
 	}
 
 	/** Track an Enter submission from the moment it is taken until its dispatch ends. */
-	async #trackSubmission(dispatch: () => Promise<void>): Promise<void> {
+	async #trackSubmission(dispatch: () => Promise<void | boolean>): Promise<void | boolean> {
 		const done = Promise.withResolvers<void>();
 		this.#submissionDispatches.add(done.promise);
 		try {
-			await dispatch();
+			return await dispatch();
 		} finally {
 			this.#submissionDispatches.delete(done.promise);
 			done.resolve();

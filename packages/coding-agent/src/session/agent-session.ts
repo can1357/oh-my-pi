@@ -9834,6 +9834,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			attribution: options?.attribution,
 			rawText: text,
 			onPromptQueued: options?.onPromptQueued,
+			approvalLine: options?.approvalLine,
 		});
 	}
 
@@ -10058,6 +10059,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			 * message is not queued, matching prompt()'s idle drop.
 			 */
 			promptGeneration?: number;
+			approvalLine?: string;
 		},
 	): Promise<boolean> {
 		const attribution = options?.attribution ?? "user";
@@ -10156,6 +10158,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				steering: true,
 				attribution,
 				timestamp: timestamp ?? Date.now(),
+				...(options?.approvalLine ? { approvalLine: options.approvalLine } : {}),
 			};
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			this.agent.steer(userMessage);

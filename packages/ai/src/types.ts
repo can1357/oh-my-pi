@@ -1237,6 +1237,8 @@ export interface UserMessage {
 	steering?: boolean;
 	/** True when the provider delivered this steer into the response it was streaming (`response.steer`). Display-only; never sent. */
 	liveSteered?: boolean;
+	/** Approval context shown to the model only. Never rendered to the user. */
+	approvalLine?: string;
 	/** Timestamp of a client-side history rewrite represented by this message. */
 	historyRewriteAt?: number;
 	/** Who initiated this message for billing/attribution semantics. */

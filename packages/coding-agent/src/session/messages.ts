@@ -730,8 +730,8 @@ function userMessageWithoutSteering(message: UserMessage): UserMessage {
 	return rest;
 }
 
-function renderSteeringEnvelope(message: string): string {
-	return prompt.render(userInterjectionTemplate, { message });
+function renderSteeringEnvelope(message: string, approvalLine?: string): string {
+	return prompt.render(userInterjectionTemplate, { message, approvalLine });
 }
 
 function getArrayContentText(content: (TextContent | ImageContent)[]): string {
@@ -772,14 +772,28 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 					timestamp: message.timestamp,
 				};
 	copyPerCallContextMessage(userMessage, message);
+	const approvalLine = message.role === "user" ? message.approvalLine : undefined;
 	if (typeof message.content === "string") {
 		if (message.content.length === 0) return message.role === "user" ? message : userMessage;
-		return { ...userMessage, content: renderSteeringEnvelope(message.content) };
+		return { ...userMessage, content: renderSteeringEnvelope(message.content, approvalLine) };
 	}
 
 	const text = getArrayContentText(message.content);
-	if (text.length === 0) return message.role === "user" ? message : userMessage;
-	const content: (TextContent | ImageContent)[] = [{ type: "text", text: renderSteeringEnvelope(text) }];
+	if (text.length === 0) {
+		// An image-only steer wraps the approval line alone.
+		if (approvalLine) {
+			return {
+				...userMessage,
+				content: [
+					{ type: "text", text: renderSteeringEnvelope("", approvalLine) },
+					...getArrayContentImages(message.content),
+				],
+			};
+		}
+
+		return message.role === "user" ? message : userMessage;
+	}
+	const content: (TextContent | ImageContent)[] = [{ type: "text", text: renderSteeringEnvelope(text, approvalLine) }];
 	content.push(...getArrayContentImages(message.content));
 	return { ...userMessage, content };
 }

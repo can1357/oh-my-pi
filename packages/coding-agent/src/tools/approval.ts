@@ -869,6 +869,7 @@ export async function requestApproval(
 		const answer = await ui.approve({
 			full,
 			compact,
+			toolName: tool.name,
 			...(session ? { session } : {}),
 			...(grants.length > 0 ? { grants } : {}),
 		});
