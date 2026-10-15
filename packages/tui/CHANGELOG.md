@@ -97,6 +97,10 @@
 - Fixed Tern MCP tool cards showing only a clipped one-line summary of the arguments; the call and result cards now include a folded `Args` section with the full arguments ([#16765](https://github.com/can1357/oh-my-pi/issues/16765))
 - Fixed pasting an API key or redirect URL into the setup wizard's provider sign-in prompt silently doing nothing ([#16898](https://github.com/can1357/oh-my-pi/pull/16898) by [@camiloeferrera](https://github.com/camiloeferrera))
 - Fixed the usage dashboard averaging distinct quota buckets that share a label and window (Google Antigravity's Gemini and Gemini 4 Argon weeklies) into one row, which masked a drained bucket as "50% left"; buckets now group by quota identity, and shared Claude/GPT copies still merge ([#16790](https://github.com/can1357/oh-my-pi/issues/16790))
+- Command and eval output panes no longer re-style and re-join their whole output on every frame, so a long command's output stops costing frame time while it sits in the transcript ([#16779](https://github.com/can1357/oh-my-pi/pull/16779) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+### Fixed
+
+- Fixed a replayed bash block (resumed session, `/rewind`, an agent transcript) keeping only the last 100 lines of the recorded output, so Ctrl+O could never expand back to the rest and the collapsed footer under-counted the hidden rows; the recorded output is now seeded whole, expansion recovers every line, and rows the live streaming cap dropped while the command ran, including rows the output throttle discarded when a run fails without a final snapshot, are reported as dropped instead of being counted as recoverable. A transcript-wide expand toggle now reaches those blocks, so the rewind, copy and agent-transcript views expand them too. TSP/native surfaces name the dropped rows in the same words the terminal footer uses, so users of those terminals learn earlier rows are unrecoverable ([#15326](https://github.com/can1357/oh-my-pi/pull/15326) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -312,8 +316,6 @@
 - Fixed streamed assistant text or thinking containing a tab stopping all later rows of the reply from retiring into native scrollback until the turn ended ([#15693](https://github.com/can1357/oh-my-pi/issues/15693))
 - Fixed wrapped lines in Write, Read, Edit, Todo, Ask and LSP tool cards losing their alignment under line numbers, tree connectors, and option or code rails ([#15677](https://github.com/can1357/oh-my-pi/issues/15677))
 - Fixed SIXEL images leaving their previous raster on screen, drawn again over itself, when the transcript moves them within the viewport ([#15657](https://github.com/can1357/oh-my-pi/issues/15657))
-
-- Fixed a replayed bash block (resumed session, `/rewind`, an agent transcript) keeping only the last 100 lines of the recorded output, so Ctrl+O could never expand back to the rest and the collapsed footer under-counted the hidden rows; the recorded output is now seeded whole, expansion recovers every line, and rows the live streaming cap dropped while the command ran, including rows the output throttle discarded when a run fails without a final snapshot, are reported as dropped instead of being counted as recoverable. A transcript-wide expand toggle now reaches those blocks, so the rewind, copy and agent-transcript views expand them too. TSP/native surfaces name the dropped rows in the same words the terminal footer uses, so users of those terminals learn earlier rows are unrecoverable ([#15326](https://github.com/can1357/oh-my-pi/pull/15326) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.10.4] - 2026-10-13
 

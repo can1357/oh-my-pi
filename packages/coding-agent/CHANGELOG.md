@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed a replayed bash block (resumed session, `/rewind`, an agent transcript) keeping only the last 100 lines of the recorded output, so Ctrl+O could never expand back to the rest and the collapsed footer under-counted the hidden rows; the recorded output is now seeded whole, expansion recovers every line, and rows the live streaming cap dropped while the command ran are reported as dropped instead of being counted as recoverable. TSP/native surfaces name the dropped rows in the same words the terminal footer uses, so users of those terminals learn earlier rows are unrecoverable ([#15326](https://github.com/can1357/oh-my-pi/pull/15326) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
 
@@ -949,10 +952,6 @@
 - Fixed hashline edits silently dropping the tail of a line that `read` or `grep` had cut at the column limit; such an edit is now refused until a `:raw` read shows the full line ([#15649](https://github.com/can1357/oh-my-pi/issues/15649))
 - Fixed isolated tasks failing on linked worktrees with initialized recursive submodules and leaving updated submodule pins unreachable after cleanup ([#15457](https://github.com/can1357/oh-my-pi/issues/15457))
 - Fixed `/tan` missing the parent's prompt cache by advertising `xd://` tools top-level and omitting `ask` ([#15578](https://github.com/can1357/oh-my-pi/issues/15578)).
-
-### Fixed
-
-- Fixed a replayed bash block (resumed session, `/rewind`, an agent transcript) keeping only the last 100 lines of the recorded output, so Ctrl+O could never expand back to the rest and the collapsed footer under-counted the hidden rows; the recorded output is now seeded whole, expansion recovers every line, and rows the live streaming cap dropped while the command ran are reported as dropped instead of being counted as recoverable. TSP/native surfaces name the dropped rows in the same words the terminal footer uses, so users of those terminals learn earlier rows are unrecoverable ([#15326](https://github.com/can1357/oh-my-pi/pull/15326) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.10.4] - 2026-10-13
 
