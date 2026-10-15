@@ -1524,6 +1524,13 @@ const NOUNS = [
 	"zebra",
 ];
 
+/** A collision suffix; unlike task names, it does not reserve a process-global name. */
+export function generateNameSuffix(): string {
+	const adjective = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+	const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
+	return `${adjective}-${noun}`.toLowerCase();
+}
+
 function capitalize(s: string): string {
 	return s.charAt(0).toUpperCase() + s.slice(1);
 }

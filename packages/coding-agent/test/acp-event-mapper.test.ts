@@ -108,6 +108,29 @@ class ReplayTestSession {
 }
 
 describe("ACP event mapper", () => {
+	it("maps messaging notices to one agent chunk without exposing other notice sources", () => {
+		const notice = {
+			type: "notice",
+			level: "info",
+			source: "messaging",
+			message: "Messaging status",
+		} as const;
+		const updates = mapAgentSessionEventToAcpSessionUpdates(notice, "session-1");
+
+		expect(updates).toEqual([
+			{
+				sessionId: "session-1",
+				update: {
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text", text: notice.message },
+				},
+			},
+		]);
+		expectAcpNotifications(updates);
+		expect(mapAgentSessionEventToAcpSessionUpdates({ ...notice, source: "other" }, "session-1")).toEqual([]);
+		expect(mapAgentSessionEventToAcpSessionUpdates({ ...notice, source: undefined }, "session-1")).toEqual([]);
+	});
+
 	it("attaches a stable messageId to live assistant chunks", () => {
 		const assistantMessage = makeAssistantMessage("chunk");
 		const getMessageId = (message: unknown): string | undefined =>

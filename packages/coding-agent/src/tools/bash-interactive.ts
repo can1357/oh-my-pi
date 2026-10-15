@@ -24,6 +24,7 @@ export async function runInteractiveBashPty(
 		timeoutMs?: number;
 		signal?: AbortSignal;
 		env?: Record<string, string>;
+		stripEnv?: readonly string[];
 		artifactPath?: string;
 		artifactId?: string;
 	},
@@ -39,6 +40,9 @@ export async function runInteractiveBashPty(
 	// `buildSpawnEnv`, and a guard added there belongs here too) and NO_COLOR, a
 	// monochrome marker. A key left out keeps the inherited launch value.
 	const { GIT_EDITOR: _gitEditor, GPG_TTY: _gpgTty, CI: _ci, NO_COLOR: _noColor, ...interactiveShellEnv } = shellEnv;
+	const env: Record<string, string> = { ...interactiveShellEnv, TERM: "xterm-256color", ...options.env };
+	// The native PTY overlays the C environment, so deletion cannot mask inherited values.
+	for (const key of options.stripEnv ?? []) env[key] = "";
 	const graphics = new TerminalGraphicsDecoder();
 	const sink = new OutputSink({
 		artifactPath: options.artifactPath,
@@ -111,7 +115,7 @@ export async function runInteractiveBashPty(
 							timeoutMs: options.timeoutMs,
 							// A real TERM so editors, pagers, and TUIs behave like a normal
 							// terminal; direnv's values win over everything.
-							env: { ...interactiveShellEnv, TERM: "xterm-256color", ...options.env },
+							env,
 							signal: options.signal,
 							cols,
 							rows,

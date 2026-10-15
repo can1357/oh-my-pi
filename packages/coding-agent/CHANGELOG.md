@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added cross-session messaging, modeled on Claude Code's, for top-level omp sessions on the same machine (`messaging.enabled`, default off, or `--cross-session`). Sessions are addressed by name (`/rename`, new `--name`, default `<dir>-<xx>`; names can't start with `@`) or short id; `write agent://<name>` sends and `?notify=idle` asks for one idle/exit notice; `/list-agents` (alias `/peers`) and `history://` list other sessions. Messages to a stopped session wait in an offline inbox (50 messages, 7 days) and arrive when it is resumed. Inbound messages follow `messaging.crossSessionInbound` (`accept`/`hold`/`refuse`, with an approval-mode default and an approval dialog with `messaging.dialogExpiry`), and loops are stopped by per-sender rate limits, repeat drops, relay-chain cuts and a 50-message queue. Each session gets a per-session socket/named pipe, exported to its own shells and hooks as `OMP_MESSAGING_SOCKET`/`OMP_MESSAGING_TOKEN`; `/status` shows a Peer address row. Subagents never send, list or receive cross-session ([#14263](https://github.com/can1357/oh-my-pi/pull/14263) by [@jaredlyon](https://github.com/jaredlyon)).
+
+### Changed
+
+- User renames through `AgentSession.setSessionName(name, "user")`, the extension `setSessionName` API and RPC `set_session_name` now reject `all` and names starting with `@`, which are reserved for cross-session messaging addresses, even when messaging is off ([#14263](https://github.com/can1357/oh-my-pi/pull/14263) by [@jaredlyon](https://github.com/jaredlyon))
+
 ## [18.11.0] - 2026-10-14
 
 ### Added

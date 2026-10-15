@@ -23,9 +23,11 @@ export function createExtensionDashboardRuntime(options: {
 	eventBus?: EventBus;
 	onMcpToolsChanged?: (tools: CustomTool[]) => Promise<void> | void;
 	browserMcpFilterEnabled?: () => boolean;
+	peerAddress?: () => string;
 }): ExtensionDashboardRuntime {
 	const { cwd, settings, mcpManager, eventBus, onMcpToolsChanged, browserMcpFilterEnabled } = options;
 	return {
+		peerAddress: options.peerAddress,
 		getDisabledExtensions: () => cfgDisabledExtensions.get(settings),
 		setDisabledExtensions: ids => cfgDisabledExtensions.set(settings, ids),
 		getProviders: () =>

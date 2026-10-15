@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	RpcExtensionUserMessageTracker,
 	RpcPromptResults,
@@ -8,6 +8,7 @@ import {
 import type { ExtensionActions } from "../src/extensibility/extensions/types";
 import { initializeExtensions } from "../src/modes/runtime-init";
 import type { AgentSession, AgentSessionEvent } from "../src/session/agent-session";
+import { isDisplayableQueuedMessage } from "../src/session/queued-messages";
 
 /** Prompt results for a fake session whose streaming state the test drives. */
 function createHarness() {
@@ -72,6 +73,68 @@ describe("RpcPromptResults", () => {
 		expect(frames).toEqual([
 			{ type: "prompt_result", id: "req_1", agentInvoked: true, status: "completed", sessionSettled: true },
 		]);
+	});
+
+	test("reports an aborted joined RPC prompt with only a hidden follow-up still queued", async () => {
+		const agent = new Agent();
+		const frames: object[] = [];
+		const session = {
+			isStreaming: true,
+			hasAdmittedSubmission: false,
+			agent,
+			get queuedMessageCount() {
+				return (
+					agent.peekSteeringQueue().filter(isDisplayableQueuedMessage).length +
+					agent.peekFollowUpQueue().filter(isDisplayableQueuedMessage).length
+				);
+			},
+			hasPendingAsyncWork: () => false,
+		};
+		const results = new RpcPromptResults(session, frame => frames.push(frame));
+		results.observe(agentStart);
+		const ticket = results.begin("joined");
+		// The joined user message was consumed before the interrupt; only hidden extension work remains.
+		agent.followUp({
+			role: "custom",
+			customType: "extension-hidden",
+			content: "later",
+			display: false,
+			timestamp: 0,
+			attribution: "agent",
+		});
+		results.settle(ticket);
+		session.isStreaming = false;
+		results.observe({
+			type: "agent_end",
+			messages: [assistant({ stopReason: "aborted" })],
+			isTerminal: true,
+			yielded: true,
+		});
+		await flushFrames();
+
+		expect(agent.hasQueuedMessages()).toBe(true);
+		expect(frames).toEqual([
+			{ type: "prompt_result", id: "joined", agentInvoked: true, status: "aborted", sessionSettled: true },
+		]);
+	});
+
+	test("print's queue override keeps attribution pending until the raw queue drains", () => {
+		const { session } = createHarness();
+		session.isStreaming = true;
+		let rawQueueDrained = false;
+		const attributed: (AgentMessage | undefined)[] = [];
+		const results = new RpcPromptResults(session, undefined, undefined, () => rawQueueDrained);
+		const ticket = results.begin(undefined, message => attributed.push(message));
+		results.settle(ticket);
+		results.observe(agentEnd([assistant({ stopReason: "stop" })]));
+		expect(attributed).toEqual([]);
+
+		rawQueueDrained = true;
+		session.isStreaming = false;
+		const finalAnswer = assistant({ content: [{ type: "text", text: "CLI answer after hidden follow-up" }] });
+		results.observe(agentEnd([finalAnswer]));
+		results.observe(agentEnd([assistant({ content: [{ type: "text", text: "unrelated message answer" }] })]));
+		expect(attributed).toEqual([finalAnswer]);
 	});
 
 	test("reports the prompt's own run when a stale terminal agent_end arrives after acceptance", async () => {
@@ -234,7 +297,12 @@ describe("RpcPromptResults", () => {
 	test("writes prompt_result after output queued synchronously with the settle", async () => {
 		const frames: object[] = [];
 		const results = new RpcPromptResults(
-			{ isStreaming: false, hasAdmittedSubmission: false, queuedMessageCount: 0, hasPendingAsyncWork: () => false },
+			{
+				isStreaming: false,
+				hasAdmittedSubmission: false,
+				queuedMessageCount: 0,
+				hasPendingAsyncWork: () => false,
+			},
 			frame => frames.push(frame),
 		);
 		results.completeLocal(results.begin("req_6"));

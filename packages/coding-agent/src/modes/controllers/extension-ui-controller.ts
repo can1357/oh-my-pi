@@ -2,6 +2,9 @@ import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import type { CollabHost } from "../../collab/host";
+import type { HeldMessageView } from "../../messaging/service";
+import { peerDisplayText } from "../../messaging/names";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatKeyHint, formatKeyHints, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type {
 	CompactOptions,
@@ -40,7 +43,7 @@ import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
-import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
+import { disambiguateDisplayLabels, previewLine, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { launchTerminal } from "../../subprocess/terminal-launch";
@@ -1079,6 +1082,27 @@ export class ExtensionUiController {
 		return typeof result.value === "string" ? { kind: "answered", value: result.value } : { kind: "cancelled" };
 	}
 
+	async askCrossSessionApproval(
+		view: HeldMessageView,
+		signal: AbortSignal,
+		onPresented: () => void,
+	): Promise<"approve" | "deny" | undefined> {
+		if (signal.aborted) return undefined;
+		const preview = sanitizeText(sanitizeCarriageReturns(view.body))
+			.split("\n")
+			.slice(0, 12)
+			.map(line => previewLine(line, 512))
+			.join("\n");
+		const result = await this.showHookSelector(
+			`Message from another session: @${peerDisplayText(view.from.address)}\n------------\n${preview}\n------------`,
+			[{ label: "Approve" }, { label: "Deny" }],
+			{ signal },
+			{ onPresented },
+		);
+		if (signal.aborted) return undefined;
+		return result === "Approve" ? "approve" : result === "Deny" ? "deny" : undefined;
+	}
+
 	/**
 	 * Show a selector for hooks.
 	 */
@@ -1086,7 +1110,7 @@ export class ExtensionUiController {
 		title: string,
 		options: ExtensionUISelectItem[],
 		dialogOptions?: InteractiveSelectorDialogOptions,
-		extra?: { slider?: HookSelectorSlider },
+		extra?: { slider?: HookSelectorSlider; onPresented?: () => void },
 	): Promise<string | undefined> {
 		return this.#presentDialog(dialogOptions?.signal, settle => {
 			const maxVisible = Math.max(4, Math.min(15, this.ctx.ui.terminal.rows - 12));
@@ -1130,6 +1154,7 @@ export class ExtensionUiController {
 			this.ctx.editorContainer.addChild(this.ctx.hookSelector);
 			this.ctx.ui.setFocus(this.ctx.hookSelector);
 			this.ctx.ui.requestRender();
+			extra?.onPresented?.();
 			return () => this.hideHookSelector();
 		});
 	}
@@ -1382,7 +1407,7 @@ export class ExtensionUiController {
 	}
 
 	async #updateSessionName(name: string): Promise<void> {
-		await this.ctx.sessionManager.setSessionName(name, "user");
+		await this.ctx.session.setSessionName(name, "user");
 	}
 
 	/**

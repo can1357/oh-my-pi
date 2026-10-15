@@ -2,9 +2,17 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { CliUsageError } from "@oh-my-pi/pi-coding-agent/cli/usage-error";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionActions, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
+import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
+import type { MessagingService } from "@oh-my-pi/pi-coding-agent/messaging/service";
+import { RESERVED_SESSION_NAME_ERROR, sessionAddress } from "@oh-my-pi/pi-coding-agent/messaging/names";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -103,6 +111,69 @@ afterEach(async () => {
 	}
 });
 
+it("rejects normalized reserved explicit names without mutating the session", async () => {
+	const { session, sessionManager } = createRuntime("headless");
+	await sessionManager.setSessionName("previous", "user");
+	const header = structuredClone(sessionManager.getHeader());
+	const entries = sessionManager.getEntries();
+	const revision = sessionManager.titleRevision;
+	const renamed = vi.fn();
+	sessionManager.onSessionNameChanged(renamed);
+	for (const name of [" all ", "\u0000all\u0007", " @extension "]) {
+		await expect(session.setSessionName(name, "user")).rejects.toThrow(RESERVED_SESSION_NAME_ERROR);
+		expect(session.sessionName).toBe("previous");
+		expect(sessionManager.titleRevision).toBe(revision);
+		expect(sessionManager.getHeader()).toEqual(header);
+		expect(sessionManager.getEntries()).toEqual(entries);
+	}
+	expect(renamed).not.toHaveBeenCalled();
+});
+
+it("rejects reserved renames through headless and interactive extension actions", async () => {
+	const { session, sessionManager, ctx } = createRuntime("headless");
+	await sessionManager.setSessionName("previous", "user");
+	let actions: ExtensionActions | undefined;
+	Object.defineProperty(session, "extensionRunner", {
+		configurable: true,
+		value: {
+			initialize: (bound: ExtensionActions) => {
+				actions = bound;
+			},
+			onError: () => {},
+			emit: async () => {},
+			getComposerShapes: () => [],
+		},
+	});
+	await initializeExtensions(session, { reportSendError: () => {}, reportRuntimeError: () => {} });
+	if (!actions) throw new Error("expected initialized extension actions");
+	await expect(actions.setSessionName("all")).rejects.toThrow(RESERVED_SESSION_NAME_ERROR);
+	ctx.syncComposerShape = () => {};
+	new ExtensionUiController(ctx).initializeHookRunner({} as ExtensionUIContext, true);
+	await expect(actions.setSessionName("all")).rejects.toThrow(RESERVED_SESSION_NAME_ERROR);
+	expect(sessionManager.getSessionName()).toBe("previous");
+});
+
+it("preserves a legacy reserved user title when branching before the root message with messaging off", async () => {
+	const manager = SessionManager.inMemory();
+	const rootId = manager.appendMessage({ role: "user", content: "Edit this root prompt", timestamp: 1 });
+	const legacy = manager.captureState();
+	manager.restoreState({
+		...legacy,
+		sessionName: "all",
+		titleSource: "user",
+		header: { ...legacy.header, title: "all", titleSource: "user" },
+	});
+	const { session } = createRuntime("headless", null, manager);
+	const previousId = session.sessionId;
+	expect(session.messaging).toBeUndefined();
+	const result = await session.branch(rootId);
+	expect(result).toMatchObject({ cancelled: false, selectedText: "Edit this root prompt" });
+	expect(session.sessionId).not.toBe(previousId);
+	expect(session.sessionName).toBe("all");
+	expect(manager.titleSource).toBe("user");
+	expect(session.messages).toEqual([]);
+});
+
 it("cancels title inference without applying or announcing a late rename", async () => {
 	const { session, sessionManager, runtime, execute } = createRuntime("headless");
 	await sessionManager.setSessionName("Keep this title", "user");
@@ -127,6 +198,62 @@ it("cancels title inference without applying or announcing a late rename", async
 
 for (const mode of ["TUI", "headless"] as const) {
 	describe(`/rename (${mode})`, () => {
+		it.each(["@x", "all", " all "])("refuses reserved name %s without changing the stored name", async name => {
+			const { session, sessionManager, runtime, ctx, execute } = createRuntime(mode);
+			await sessionManager.setSessionName("Keep this name", "user");
+			const entries = sessionManager.getEntries();
+			const output = mode === "TUI" ? vi.spyOn(ctx, "showError") : vi.spyOn(runtime, "output");
+
+			if (mode === "TUI" && name === " all ") await ctx.handleRenameCommand(name);
+			else await execute(`/rename ${name}`);
+
+			expect(output.mock.calls).toEqual([[RESERVED_SESSION_NAME_ERROR]]);
+			expect(session.sessionName).toBe("Keep this name");
+			expect(sessionManager.getEntries()).toEqual(entries);
+		});
+
+		it("claims a free collision variant and reports the stored address rather than the requested name", async () => {
+			const { session, sessionManager, runtime, ctx, execute } = createRuntime(mode);
+			const messaging = {
+				listSessions: async () => [{ name: "release notes" }],
+			} as unknown as MessagingService;
+			Object.defineProperty(session, "messaging", { value: messaging, configurable: true });
+			vi.spyOn(Math, "random").mockReturnValue(0);
+			const output = mode === "TUI" ? vi.spyOn(ctx, "showStatus") : vi.spyOn(runtime, "output");
+			await execute("/rename release notes");
+			const stored = sessionManager.getSessionName()!;
+			expect(stored).toMatch(/^release notes-[a-z]+-[a-z]+$/);
+			expect(output.mock.calls[0]?.[0]).toContain(stored);
+			expect(output.mock.calls[0]?.[0]).toContain(' ("release notes" is used by another session)');
+		});
+
+		it("addresses a carded title without its card and checks collisions and reserved names on it", async () => {
+			const { session, sessionManager, runtime, ctx, execute } = createRuntime(mode);
+			cfgTitleIcons.override(runtime.settings, "emoji");
+			const messaging = { listSessions: async () => [{ name: "beta" }] } as unknown as MessagingService;
+			Object.defineProperty(session, "messaging", { value: messaging, configurable: true });
+			vi.spyOn(tinyTitleClient, "generate").mockResolvedValue("🧪 BETA");
+			vi.spyOn(Math, "random").mockReturnValue(0);
+			const address = () =>
+				sessionAddress({
+					cwd: sessionManager.getCwd(),
+					sessionId: sessionManager.getSessionId(),
+					sessionName: sessionManager.getSessionName(),
+					titleSource: sessionManager.titleSource,
+					directPrint: false,
+				});
+
+			await execute("/rename beta");
+			const stored = sessionManager.getSessionName()!;
+			expect(stored).toMatch(/^🧪 BETA: beta-[a-z]+-[a-z]+$/);
+			expect(address()).toBe(stored.slice("🧪 BETA: ".length));
+
+			const error = mode === "TUI" ? vi.spyOn(ctx, "showError") : vi.spyOn(runtime, "output");
+			await execute("/rename @x");
+			expect(error.mock.calls).toEqual([[RESERVED_SESSION_NAME_ERROR]]);
+			expect(sessionManager.getSessionName()).toBe(stored);
+		});
+
 		it("replaces a manual title from conversation context and protects the result from automatic titles", async () => {
 			const { session, sessionManager, execute } = createRuntime(mode);
 			await sessionManager.setSessionName("Old manually chosen title", "user");
@@ -526,3 +653,10 @@ it.each(["TUI", "headless"] as const)(
 		}
 	},
 );
+
+it.each(["@x", " @x ", "all", " all "])("rejects --name %s as a CLI usage error", async name => {
+	const args = ["--name", name];
+	const result = runRootCommand(parseArgs(args), args);
+	await expect(result).rejects.toBeInstanceOf(CliUsageError);
+	await expect(result).rejects.toThrow(RESERVED_SESSION_NAME_ERROR);
+});
