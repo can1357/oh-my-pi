@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	type AgentMetrics,
+	aggregateCost,
 	aggregateMetrics,
 	hubFallbackStatsSession,
 	hubRowMetrics,
@@ -176,5 +177,88 @@ describe("aggregateMetrics fallback reads", () => {
 
 		expect(metrics.cost).toBeCloseTo(0.8);
 		expect(metrics.reportedAgents).toBe(2);
+	});
+});
+
+describe("aggregateCost", () => {
+	it("refreshes SDK fallback usage and retains the last successful charge through teardown", () => {
+		const messages = [assistant(100, 0.6), assistant(200, 0.3)];
+		const session = {
+			agent: { state: { messages } },
+			getSessionStats: () => ({ contextUsage: undefined }),
+		};
+		const ref = { id: "worker", session } as unknown as AgentRecordLike;
+		const args = { rows: [ref], observedById: new Map(), sessionCosts: new WeakMap() };
+		expect(aggregateCost(args)).toBeCloseTo(0.9);
+		messages[1].usage.cost.total = 0.5;
+		expect(aggregateCost(args)).toBeCloseTo(1.1);
+		messages.push(assistant(300, 0));
+		session.getSessionStats = () => {
+			throw new Error("session is stopping");
+		};
+		const observed = liveObserver(0.2);
+		args.observedById.set(ref.id, observed);
+		expect(aggregateCost(args)).toBeCloseTo(1.1);
+		args.observedById.clear();
+		expect(aggregateCost(args)).toBe(0);
+		ref.session = null;
+		expect(aggregateCost(args)).toBeCloseTo(1.1);
+		ref.history = { directCost: 1.2 };
+		expect(aggregateCost(args)).toBeCloseTo(1.2);
+	});
+
+	it("does not invent a parked row from direct-cost history without a retained snapshot", () => {
+		const ref = { id: "worker", session: null, history: { directCost: 2 } } as unknown as AgentRecordLike;
+		const args = { rows: [ref], observedById: new Map(), sessionCosts: new WeakMap() };
+		expect(aggregateCost(args)).toBe(0);
+		ref.history!.metrics = { tokens: 1, requests: 1, tools: 0, durationMs: 0, cost: 0.4 };
+		expect(aggregateCost(args)).toBe(2);
+	});
+
+	it("preserves observer validity and history precedence without counting shared sessions twice", () => {
+		const session = {
+			sessionManager: { getUsageStatistics: () => ({ cost: 99.9, subagentCost: 99 }) },
+			getSessionStats: () => {
+				throw new Error("Cost projection must not read the transcript");
+			},
+		};
+		const observed = liveObserver(0.2);
+		const ref = {
+			id: "worker",
+			session: null,
+			history: { metrics: { tokens: 1, requests: 1, tools: 0, durationMs: 0, cost: 0.1 } },
+		} as unknown as AgentRecordLike;
+		const args = {
+			rows: [ref],
+			observedById: new Map([[ref.id, observed]]),
+			sessionCosts: new WeakMap(),
+		};
+		expect(aggregateCost(args)).toBeCloseTo(0.2);
+		ref.history!.directCost = 0.4;
+		expect(aggregateCost(args)).toBeCloseTo(0.4);
+		ref.session = session as unknown as AgentRecordLike["session"];
+		args.rows.push({ ...ref, id: "alias" });
+		expect(aggregateCost(args)).toBeCloseTo(0.9);
+		args.rows.pop();
+		observed.progress!.tokens = Number.NaN;
+		expect(aggregateCost(args)).toBe(0);
+	});
+
+	it("falls back to direct assistant usage when the indexed bill is invalid", () => {
+		const indexed = { cost: Number.NaN, subagentCost: 0 };
+		const session = {
+			sessionManager: { getUsageStatistics: () => indexed },
+			agent: { state: { messages: [assistant(100, 0.6)] } },
+			getSessionStats: () => ({ cost: 99.6, contextUsage: undefined }),
+		};
+		const args = {
+			rows: [{ id: "worker", session }] as unknown as AgentRecordLike[],
+			observedById: new Map(),
+			sessionCosts: new WeakMap(),
+		};
+		expect(aggregateCost(args)).toBeCloseTo(0.6);
+		indexed.cost = 0.1;
+		indexed.subagentCost = 1;
+		expect(aggregateCost(args)).toBeCloseTo(0.6);
 	});
 });

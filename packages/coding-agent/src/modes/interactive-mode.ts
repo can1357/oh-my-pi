@@ -124,7 +124,7 @@ import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compa
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
-import type { AgentMetrics } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
+import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import { sumSubagentTreeCost } from "./agent-hub-runtime";
 import {
 	type AgentSession,
@@ -1736,7 +1736,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#runningSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
-	#subagentSessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
+	#subagentSessionCosts = new WeakMap<object, AgentCostSnapshot>();
 	#subagentCostHydratedRoot?: string;
 	#mcpStatusOrder: string[] = [];
 	#mcpPendingServers = new Set<string>();
@@ -3801,7 +3801,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					refs: AgentRegistry.global().list(),
 					observers: this.#observerRegistry,
 					rootSessionFile,
-					sessionMetrics: this.#subagentSessionMetrics,
+					sessionCosts: this.#subagentSessionCosts,
 				}),
 			);
 		}
