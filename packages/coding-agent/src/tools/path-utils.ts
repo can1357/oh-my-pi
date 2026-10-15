@@ -694,7 +694,7 @@ async function tryDelimitedPathSplit(
  * explicit `./`, `../` (either separator), `~` prefix makes it its own target.
  * A delimiter following a query or fragment remains part of that URL.
  */
-function hasAmbiguousInternalUrlTail(parts: readonly string[]): boolean {
+function hasAmbiguousInternalUrlTail(parts: readonly string[], isUrl: (part: string) => boolean): boolean {
 	let urlHasPath = false;
 	for (const [index, part] of parts.entries()) {
 		if (isInternalUrlPath(part)) {
@@ -705,9 +705,11 @@ function hasAmbiguousInternalUrlTail(parts: readonly string[]): boolean {
 			continue;
 		}
 		const localPart = normalizePosixPath(part);
-		if (isReadableUrlPath(part)) continue;
+		if (isUrl(part) || isReadableUrlPath(part)) continue;
 		const anchored =
 			isFilesystemSourcePath(expandPath(part)) ||
+			localPart === "." ||
+			localPart === ".." ||
 			localPart.startsWith("./") ||
 			localPart.startsWith("../") ||
 			localPart.startsWith("~");
@@ -745,7 +747,7 @@ export async function splitDelimitedPathEntry(
 		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
 		const routed = options.routedUrlPredicate;
 		return parts && parts.length >= 2 && parts.every(part => routed(part) || (options.exclusionParts === true && isExclusionPart(part))) &&
-			!hasAmbiguousInternalUrlTail(parts.filter(part => !(options.exclusionParts && isExclusionPart(part))))
+			!hasAmbiguousInternalUrlTail(parts.filter(part => !(options.exclusionParts && isExclusionPart(part))), options.routedUrlPredicate)
 			? parts
 			: null;
 	}
@@ -795,14 +797,15 @@ async function internalUrlLocatesExisting(entry: string, cwd: string, context?: 
 	}
 }
 
-async function internalUrlIsExactMcpResource(entry: string): Promise<boolean> {
+async function internalUrlIsExactMcpResource(entry: string, signal?: AbortSignal): Promise<boolean> {
 	if (!MCPManager.available()) return false;
 	try {
 		const manager = await MCPManager.load();
 		return manager
-			? hasExactMcpResource(manager, parseInternalUrl(InternalUrlRouter.instance().normalize(entry)))
+			? await hasExactMcpResource(manager, parseInternalUrl(InternalUrlRouter.instance().normalize(entry)), signal)
 			: false;
-	} catch {
+	} catch (error) {
+		if (signal?.aborted) throw error;
 		return false;
 	}
 }
@@ -829,7 +832,7 @@ export async function splitMixedUrlPathList(
 		if (await internalUrlLocatesExisting(normalizedEntry, cwd, context)) return null;
 		// An exact MCP URI may be non-locatable locally; its advertised identity
 		// still takes precedence over interpreting its semicolon as a list.
-		if (await internalUrlIsExactMcpResource(normalizedEntry)) return null;
+		if (await internalUrlIsExactMcpResource(normalizedEntry, context?.signal)) return null;
 	} else {
 		if ((await probeLiteralPathExists(normalizedEntry, cwd)) !== "missing") return null;
 		const selectorSplit = splitPathAndSel(normalizedEntry);
@@ -844,7 +847,7 @@ export async function splitMixedUrlPathList(
 		const partPath = splitPathAndSel(part).path;
 		if (hasGlobPathChars(partPath) || (await probeLiteralPathExists(partPath, cwd)) !== "exists") return null;
 	}
-	return hasAmbiguousInternalUrlTail(parts) ? null : parts;
+	return hasAmbiguousInternalUrlTail(parts, isUrl) ? null : parts;
 }
 
 /** Expand delimited entries in-place while preserving unsplit entries. */

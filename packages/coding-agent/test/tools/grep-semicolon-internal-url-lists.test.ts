@@ -138,6 +138,93 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 		]);
 	});
 
+	it("waits for deferred MCP catalogs before preserving an exact semicolon resource", async () => {
+		const uri = `skill://figma/deferred;${absFile}`;
+		let connected = false;
+		let catalogReady = false;
+		MCPManager.setInstance({
+			getConnectedServers: () => (connected ? ["figma"] : []),
+			getServerResources: () =>
+				catalogReady ? { resources: [{ uri, name: "deferred" }], templates: [] } : undefined,
+			waitForPendingConnections: async () => {
+				connected = true;
+			},
+			ensureServerResources: async () => {
+				catalogReady = true;
+			},
+			readServerResource: async () => ({ contents: [{ uri, text: "deferred exact needle" }] }),
+		} as unknown as MCPManager);
+		const result = await new GrepTool(createSession()).execute("deferred-exact-search", {
+			pattern: "needle",
+			path: uri,
+		});
+		expect(getResultText(result)).toContain("deferred exact needle");
+		expect(getResultText(result)).not.toContain("abs path needle");
+	});
+
+	it("cancels delimiter recovery waiting for an MCP catalog without splitting the URI", async () => {
+		const started = Promise.withResolvers<void>();
+		const pending = Promise.withResolvers<void>();
+		MCPManager.setInstance({
+			getConnectedServers: () => [],
+			getServerResources: () => undefined,
+			waitForPendingConnections: () => {
+				started.resolve();
+				return pending.promise;
+			},
+			ensureServerResources: async () => {},
+		} as unknown as MCPManager);
+		const controller = new AbortController();
+		const checking = expandDelimitedPathEntries([`skill://figma/deferred;${absFile}`], tmpDir, {
+			context: { cwd: tmpDir, signal: controller.signal },
+		});
+		expect(
+			await Promise.race([
+				started.promise.then(() => true),
+				checking.then(
+					() => false,
+					() => false,
+				),
+			]),
+		).toBe(true);
+		controller.abort();
+		try {
+			await expect(checking).rejects.toMatchObject({ name: "AbortError" });
+		} finally {
+			pending.resolve();
+		}
+	});
+
+	it("reads an opaque MCP URI after a path-bearing internal URL", async () => {
+		MCPManager.setInstance({
+			getConnectedServers: () => ["custom"],
+			getServerResources: () => ({ resources: [{ uri: "custom:item", name: "item" }], templates: [] }),
+			waitForPendingConnections: async () => {},
+			ensureServerResources: async () => {},
+			readServerResource: async () => ({ contents: [{ uri: "custom:item", text: "opaque resource marker" }] }),
+		} as unknown as MCPManager);
+		const result = await new ReadTool(createSession()).execute("opaque-list-read", {
+			path: "skill://demo/SKILL.md;custom:item",
+		});
+		expect(getResultText(result)).toContain(skillBodyNeedle);
+		expect(getResultText(result)).toContain("opaque resource marker");
+	});
+
+	it("searches bare cwd and parent directory targets after an internal URL path", async () => {
+		const child = path.join(tmpDir, "cwd");
+		await fs.mkdir(child);
+		await Bun.write(path.join(child, "child.md"), "cwd target needle\n");
+		const session = { ...createSession(), cwd: child } as ToolSession;
+		for (const tail of [".", ".."]) {
+			const result = await new GrepTool(session).execute("dot-tail-search", {
+				pattern: "needle",
+				path: `skill://demo/SKILL.md;${tail}`,
+			});
+			expect(getResultText(result)).toContain(skillBodyNeedle);
+			expect(getResultText(result)).toContain("cwd target needle");
+		}
+	});
+
 	it("keeps a local:// artifact whose name contains `;` whole even when the suffix names a cwd file", async () => {
 		const artifactsDir = path.join(tmpDir, "artifacts");
 		const localRoot = path.join(artifactsDir, "local");
