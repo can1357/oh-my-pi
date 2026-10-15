@@ -37,12 +37,16 @@ export function defaultRelayExtensionDir(): string {
  * Write the extension files of `ompVersion` into `dir`. Each changed file is
  * written beside its target and renamed over it, so Chrome never reads a
  * partly written file: a reload that meets a broken manifest unloads the
- * extension until the user reloads it by hand.
+ * extension until the user reloads it by hand. `background.js` goes last: its
+ * stamp is the version the extension reports, so a write that fails midway
+ * leaves it reporting the old one and the update is tried again.
  */
 export async function writeRelayExtension(dir: string, ompVersion: string): Promise<void> {
 	await fs.mkdir(dir, { recursive: true });
 	const files = relayExtensionFiles(ompVersion);
-	for (const name in files) {
+	const names = Object.keys(files).filter(name => name !== "background.js");
+	names.push("background.js");
+	for (const name of names) {
 		const target = path.join(dir, name);
 		const content = files[name]!;
 		const current = await Bun.file(target)

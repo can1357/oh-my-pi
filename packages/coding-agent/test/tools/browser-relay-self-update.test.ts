@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
+import * as fs from "node:fs/promises";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
@@ -357,5 +358,17 @@ describe("relay extension self-update on a real relay", () => {
 		await settled;
 		expect(events).toContain("extension update stopped");
 		expect(await installedRelayExtensionVersion(dir)).toBe("999.0.0");
+	});
+
+	it("writes background.js last, so an update that fails midway leaves the old version reported", async () => {
+		const dir = home.join("extension");
+		await writeRelayExtension(dir, OLD);
+		// A non-empty directory where a file belongs: renaming the new file over it fails.
+		await fs.rm(home.join("extension/options.js"));
+		await fs.mkdir(home.join("extension/options.js/blocker"), { recursive: true });
+		await expect(writeRelayExtension(dir, VERSION)).rejects.toThrow();
+		expect(await Bun.file(home.join("extension/background.js")).text()).toBe(
+			relayExtensionFiles(OLD)["background.js"]!,
+		);
 	});
 });
