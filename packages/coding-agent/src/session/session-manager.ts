@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as util from "node:util";
 import * as path from "node:path";
 import type {
 	ImageContent,
@@ -1042,11 +1043,15 @@ function hasSerializerHook(
 	// invokes it — so a stateful hook's first output cannot be stamped as a
 	// leaf. Leave the graph uncached exactly when such a hook exists (see
 	// `hasBigIntToJSONHook`); other primitives never consult one.
-	if (typeof value === "bigint") return hasBigIntToJSONHook();
+	if (typeof value === "bigint") return true;
 	if (value === null || typeof value !== "object") return false;
 	// `JSON.stringify` consults the hook before the value shape, so the probe
 	// does too — through the property descriptor, never by reading the key: a
 	// stateful getter would otherwise run here and again in #lineFor.
+	// A Proxy's own descriptors can hide a stateful `toJSON`; its stateful hook
+	// is invisible to descriptor probing below, so conservatively leave any
+	// proxy-backed opaque node uncached.
+	if (util.types.isProxy(value)) return true;
 	if (hasToJSONHook(value)) return true;
 	// No hook on this node: a boxed primitive serializes as its unboxed value
 	// and a rawJSON node as its payload, neither of which can harbor a hook.
