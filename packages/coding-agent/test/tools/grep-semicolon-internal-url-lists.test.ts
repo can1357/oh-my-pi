@@ -101,6 +101,20 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 		const found = await new GlobTool(createSession()).execute("file-url-tail-find", { path: target });
 		expect(found.details?.files).toContain("skill://demo/SKILL.md");
 		expect(found.details?.files?.some(file => file.endsWith("abs-target.md"))).toBe(true);
+
+		const read = await new ReadTool(createSession()).execute("file-url-tail-read", { path: target });
+		expect(getResultText(read)).toContain(skillBodyNeedle);
+		expect(getResultText(read)).toContain("abs path needle");
+		const missingTarget = `skill://demo/SKILL.md;file://${path.join(tmpDir, "missing.md")}`;
+		expect(await expandDelimitedPathEntries([missingTarget], tmpDir)).toEqual([missingTarget]);
+		await expect(
+			new GrepTool(createSession()).execute("missing-file-url-tail", {
+				pattern: "needle",
+				path: missingTarget,
+			}),
+		).rejects.toMatchObject({
+			message: `Cannot search ${missingTarget}: File not found: ${path.join(tmpDir, "skills", "demo", `SKILL.md;file://${path.join(tmpDir, "missing.md")}`)}`,
+		});
 	});
 
 	it("keeps exact MCP resources whole and fans out readable HTTPS URL tails", async () => {
