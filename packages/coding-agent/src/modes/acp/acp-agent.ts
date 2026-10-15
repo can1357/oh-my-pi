@@ -109,6 +109,18 @@ const THINKING_OFF = "off";
 const SESSION_PAGE_SIZE = 50;
 const SPEECH_MODELS_LIST_METHOD = "speech.models.list";
 /**
+ * `_session/steering` — the steering extension method from claude-agent-acp /
+ * codex-acp (spec proposal: ACP `session/inject`,
+ * agentclientprotocol/agent-client-protocol#1261, still open). Advertised via
+ * top-level `_meta.steering.supported` in the `initialize` response; params
+ * carry `{ sessionId, prompt: ContentBlock[] }` plus
+ * `_meta.steering.idleBehavior: "promptRequired"` (leave idle prompts
+ * unconsumed so the host submits them itself) and the omp extension
+ * `_meta.steering.queue: "followUp"` (native follow-up queue instead of the
+ * steering queue).
+ */
+const SESSION_STEERING_METHOD = "_session/steering";
+/**
  * Delay between `session/new` (or `session/load` / `session/resume` /
  * `unstable_session/fork`) returning and the agent firing the first
  * notifications against the new session id. Mitigates Zed's
@@ -168,6 +180,30 @@ type PromptTurnState = {
  */
 function isPromptTurnInFlight(turn: PromptTurnState | undefined): turn is PromptTurnState {
 	return turn !== undefined && (!turn.settled || turn.cleanup !== undefined);
+}
+
+/**
+ * `_session/steering` prompt param: the ACP spec shape is the same
+ * `ContentBlock[]` as `session/prompt`; a bare string is accepted defensively
+ * so a slightly off-spec client fails later checks with a clear error instead
+ * of silently steering empty content.
+ */
+function toSteeringPromptBlocks(prompt: unknown): PromptRequest["prompt"] {
+	if (typeof prompt === "string") {
+		return [{ type: "text", text: prompt }];
+	}
+	if (Array.isArray(prompt)) {
+		return prompt as PromptRequest["prompt"];
+	}
+	throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, "prompt must be content blocks");
+}
+
+/** `_meta.steering` fields of a `_session/steering` request, defensively read. */
+function extractSteeringMeta(meta: unknown): { idleBehavior?: unknown; queue?: unknown } {
+	if (typeof meta !== "object" || meta === null) return {};
+	const steering = (meta as Record<string, unknown>).steering;
+	if (typeof steering !== "object" || steering === null) return {};
+	return steering as { idleBehavior?: unknown; queue?: unknown };
 }
 
 type ManagedSessionRecord = {
@@ -674,6 +710,12 @@ export class AcpAgent implements Agent {
 					resume: {},
 					close: {},
 				},
+			},
+			// Top-level `_meta` (sibling of `agentCapabilities`) is where
+			// claude-agent-acp and codex-acp advertise steering; clients such as
+			// agent-shell gate `_session/steering` on it.
+			_meta: {
+				steering: { supported: true },
 			},
 		};
 	}
@@ -1212,9 +1254,70 @@ export class AcpAgent implements Agent {
 				enableProvider(providerId);
 				return { enabled: true };
 			}
+			case SESSION_STEERING_METHOD:
+				return await this.#handleSessionSteering(params);
 			default:
 				throw new Error(`Unknown ACP ext method: ${method}`);
 		}
+	}
+
+	/**
+	 * `_session/steering` — the steering extension method implemented by
+	 * claude-agent-acp and codex-acp (spec proposal: ACP `session/inject`,
+	 * agentclientprotocol/agent-client-protocol#1261). While the session is
+	 * streaming, the prompt is queued on the session's native steering queue
+	 * (or its follow-up queue with `_meta.steering.queue: "followUp"`) and
+	 * reported `injected`. When idle, a
+	 * `_meta.steering.idleBehavior: "promptRequired"` opt-in leaves the content
+	 * unconsumed and reports `promptRequired` so the host submits it through
+	 * `session/prompt` and keeps owning the turn; otherwise a turn is started
+	 * through the bridge's own prompt path — not `AgentSession.steer()`'s idle
+	 * auto-continue — so the turn is owned by an ACP promptTurn and stays
+	 * cancellable, avoiding the detached turn claude-agent-acp#903 describes.
+	 */
+	async #handleSessionSteering(params: { [key: string]: unknown }): Promise<{ [key: string]: unknown }> {
+		const sessionId = params.sessionId;
+		if (typeof sessionId !== "string" || sessionId.length === 0) {
+			throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, "sessionId required");
+		}
+		const record = this.#getSessionRecord(sessionId);
+		this.#throwIfRecordClosed(record);
+
+		const promptBlocks = toSteeringPromptBlocks(params.prompt);
+		const converted = this.#convertPromptBlocks(promptBlocks);
+		if (converted.text.length === 0 && converted.images.length === 0) {
+			throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, "prompt is empty");
+		}
+
+		const steeringMeta = extractSteeringMeta(params._meta);
+		const queue = steeringMeta.queue === "followUp" ? ("followUp" as const) : ("steering" as const);
+
+		if (record.session.isStreaming) {
+			try {
+				if (queue === "followUp") {
+					await record.session.followUp(converted.text, converted.images);
+				} else {
+					await record.session.steer(converted.text, converted.images);
+				}
+			} catch (error: unknown) {
+				return {
+					outcome: "failed",
+					reason: error instanceof Error ? error.message : String(error),
+				};
+			}
+			return { outcome: "injected", queue };
+		}
+
+		if (steeringMeta.idleBehavior === "promptRequired") {
+			return { outcome: "promptRequired", queue };
+		}
+
+		// Fire-and-forget like claude-agent-acp's `startedNewTurn`: the steering
+		// request resolves immediately while the turn streams via `session/update`.
+		this.prompt({ sessionId, prompt: promptBlocks }).catch((error: unknown) => {
+			logger.warn("ACP steering turn failed to start", { sessionId, error });
+		});
+		return { outcome: "startedNewTurn", queue };
 	}
 
 	async extNotification(_method: string, _params: { [key: string]: unknown }): Promise<void> {}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `_session/steering` ACP extension method (advertised as `_meta.steering.supported`) so clients like agent-shell steer running turns through omp's native steer/follow-up queues; `_meta.steering.idleBehavior: "promptRequired"` leaves idle prompts to the host, and `_meta.steering.queue: "followUp"` targets the follow-up queue.
+
 ## [18.11.1] - 2026-10-15
 
 ### Added

@@ -136,6 +136,14 @@ class FakeAgentSession {
 		return Settings.instance;
 	}
 	promptCalls: string[] = [];
+	steerCalls: Array<{ text: string; images: unknown[] }> = [];
+	followUpCalls: Array<{ text: string; images: unknown[] }> = [];
+	async steer(text: string, images?: unknown[]): Promise<void> {
+		this.steerCalls.push({ text, images: images ?? [] });
+	}
+	async followUp(text: string, images?: unknown[]): Promise<void> {
+		this.followUpCalls.push({ text, images: images ?? [] });
+	}
 	customMessages: Array<{ customType: string; content: string; details?: unknown }> = [];
 	customMessageOptions: Array<{ streamingBehavior?: "steer" | "followUp"; queueChipText?: string } | undefined> = [];
 	skillsSettings = { enableSkillCommands: true };
@@ -1291,6 +1299,140 @@ describe("ACP agent", () => {
 		await expect(harness.agent.extMethod("omp/sessions/listAll", { limit: 2 })).rejects.toThrow(
 			"Unknown ACP ext method",
 		);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("steers a running turn through _session/steering", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.isStreaming = true;
+
+		const result = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [
+				{ type: "text", text: "use the existing parser" },
+				{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+			],
+		});
+
+		expect(result).toEqual({ outcome: "injected", queue: "steering" });
+		expect(session.steerCalls).toEqual([
+			{ text: "use the existing parser", images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }] },
+		]);
+		expect(session.followUpCalls).toEqual([]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("targets the follow-up queue when _meta.steering.queue is followUp", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.isStreaming = true;
+
+		const result = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "then run the tests" }],
+			_meta: { steering: { queue: "followUp" } },
+		});
+
+		expect(result).toEqual({ outcome: "injected", queue: "followUp" });
+		expect(session.followUpCalls).toEqual([{ text: "then run the tests", images: [] }]);
+		expect(session.steerCalls).toEqual([]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("leaves an idle prompt unconsumed when idleBehavior is promptRequired", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		const result = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "fresh task" }],
+			_meta: { steering: { idleBehavior: "promptRequired" } },
+		});
+
+		expect(result).toEqual({ outcome: "promptRequired", queue: "steering" });
+		expect(session.steerCalls).toEqual([]);
+		expect(session.followUpCalls).toEqual([]);
+		expect(session.promptCalls).toEqual([]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("starts a bridge-owned turn when idle without the promptRequired opt-in", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const turnStarted = Promise.withResolvers<void>();
+		const originalPrompt = session.prompt.bind(session);
+		session.prompt = async (text: string) => {
+			turnStarted.resolve();
+			return await originalPrompt(text);
+		};
+
+		const result = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "start now" }],
+		});
+
+		expect(result).toEqual({ outcome: "startedNewTurn", queue: "steering" });
+		// The turn runs through the session/prompt path (a tracked promptTurn),
+		// not a detached autonomous turn.
+		await turnStarted.promise;
+		expect(session.promptCalls).toEqual(["start now"]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("reports a failed outcome when the session refuses the steer", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.isStreaming = true;
+		session.steer = async () => {
+			throw new Error("cannot steer");
+		};
+
+		const result = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "please" }],
+		});
+
+		expect(result).toEqual({ outcome: "failed", reason: "cannot steer" });
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("rejects _session/steering for unknown sessions and empty or malformed prompts", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+
+		await expect(
+			harness.agent.extMethod("_session/steering", {
+				sessionId: "missing-session",
+				prompt: [{ type: "text", text: "hi" }],
+			}),
+		).rejects.toThrow("Unsupported ACP session");
+		await expect(
+			harness.agent.extMethod("_session/steering", { sessionId: created.sessionId, prompt: 42 }),
+		).rejects.toThrow("Invalid params");
+		await expect(
+			harness.agent.extMethod("_session/steering", { sessionId: created.sessionId, prompt: [] }),
+		).rejects.toThrow("Invalid params");
+		await expect(
+			harness.agent.extMethod("_session/steering", { prompt: [{ type: "text", text: "hi" }] }),
+		).rejects.toThrow("Invalid params");
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
