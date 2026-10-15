@@ -116,6 +116,34 @@ describe("McpProtocolHandler", () => {
 		expect(resource.notes).toEqual(["MCP server: my-server"]);
 	});
 
+	it("checks connected catalogs before unrelated pending connections for exact URI detection", async () => {
+		const { hasExactMcpResource } = await import("@oh-my-pi/pi-coding-agent/internal-urls/mcp-protocol");
+		const uri = "skill://demo/a;literal";
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		const manager = createMockManager({
+			servers: ["ready"],
+			resources,
+			ensureResources: async name => {
+				resources.set(name, { resources: [{ uri, name: "literal" }], templates: [] });
+			},
+			waitForPendingConnections: () => Promise.withResolvers<void>().promise,
+			readResult: { contents: [{ uri, text: "connected resource" }] },
+		});
+		expect(await withTimeout(hasExactMcpResource(manager, parseInternalUrl(uri)), 500, "exact lookup blocked")).toBe(
+			true,
+		);
+		expect((await readMcpResource(manager, parseInternalUrl(uri)))?.content).toBe("connected resource");
+	});
+
+	it("preserves the speculative read wait budget for a connection that never settles", async () => {
+		const manager = createMockManager({
+			servers: [],
+			waitForPendingConnections: () => Promise.withResolvers<void>().promise,
+		});
+		const reading = readMcpResource(manager, parseInternalUrl("skill://missing"), { exact: true, waitMs: 20 });
+		expect(await withTimeout(reading, 500, "read wait budget ignored")).toBeUndefined();
+	});
+
 	it("cancels a resource read the server never answers", async () => {
 		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
 		resources.set("slow", { resources: [{ uri: "test://slow", name: "slow" }], templates: [] });
