@@ -966,15 +966,26 @@ function projectorGenerationResult(value: object): string | undefined {
 /**
  * Message-level keys `prepareEntryForPersistence` reaches by key rather than by
  * enumerating the message: `providerPayload` and `content`
- * (`stripReplayedReasoningSignatures` reads both, and iterates them), and
- * `details` (`stripSpilledMcpStructuredContent`). The entry-line stamp walks
+ * (`stripReplayedReasoningSignatures` reads both — `content` through its own
+ * `some`/`map` methods), and `details`
+ * (`stripSpilledMcpStructuredContent`). The entry-line stamp walks
  * own enumerable keys and indexed slots, so a key the projector reads any other
- * way — or an array it iterates rather than indexes — feeds persisted bytes no
- * stamp can describe.
+ * way — or an array it reads through a method or an iterator rather than its
+ * indexed slots — feeds persisted bytes no stamp can describe.
  */
 const PROJECTOR_MESSAGE_KEYS = ["providerPayload", "content", "details"] as const;
 /** The keys an OpenAI Responses `providerPayload` is itself read by. */
 const RESPONSES_PAYLOAD_KEYS = ["type", "items"] as const;
+/**
+ * The `content` array methods `stripReplayedReasoningSignatures` calls.
+ * `Array.prototype.some`/`map` read the blocks through the method — the
+ * iterator protocol never enters into it, so an override is invisible to
+ * {@link nonDefaultArrayIterator} — while `JSON.stringify` and the stamp ignore
+ * non-index array properties entirely. A flipped method changes whether — and
+ * how — the projector strips a `thinkingSignature` without moving a single
+ * stamped leaf.
+ */
+const PROJECTOR_CONTENT_METHODS = ["some", "map"] as const;
 
 /**
  * Whether the projector can reach a message-level projection input the stamp
@@ -982,10 +993,10 @@ const RESPONSES_PAYLOAD_KEYS = ["type", "items"] as const;
  * stamp of bytes the next projection will not reproduce.
  *
  * Every field here is read by key, which follows the prototype chain and runs
- * an accessor, where the stamp enumerates own enumerable keys; `content` and a
- * Responses payload's `items` are additionally iterated with `for..of`/`.some`,
- * which follow `Symbol.iterator`, where the stamp reads indexed slots. Both
- * differences change the projected line — a stripped or restored
+ * an accessor, where the stamp enumerates own enumerable keys; `content` is
+ * additionally read through its own `some`/`map` methods and a Responses
+ * payload's `items` with `for..of`, where the stamp reads indexed slots. Either
+ * difference changes the projected line — a stripped or restored
  * `thinkingSignature`, a stripped or kept `structuredContent` — without moving
  * a single key or leaf the stamp records.
  */
@@ -996,6 +1007,11 @@ function messageProjectionInputsUnstampable(message: object): boolean {
 	}
 	const content = fields.content;
 	if (Array.isArray(content) && nonDefaultArrayIterator(content)) return true;
+	if (Array.isArray(content)) {
+		for (const method of PROJECTOR_CONTENT_METHODS) {
+			if (nonDefaultArrayMethod(content, method)) return true;
+		}
+	}
 	const payload = fields.providerPayload;
 	if (payload === null || typeof payload !== "object") return false;
 	for (const field of RESPONSES_PAYLOAD_KEYS) {
@@ -1019,7 +1035,10 @@ function messageProjectionInputsUnstampable(message: object): boolean {
  * conservative direction is to leave the line uncached. The alternative — an
  * escape from the probe — fails a rewrite the projector itself completes, since
  * `JSON.stringify` and `truncateForPersistence` consult descriptors only for
- * keys `ownKeys` reported (see {@link projectorImageField}).
+ * keys `ownKeys` reported (see {@link projectorImageField}). The prototype step
+ * is guarded the same way and answers hidden on a throw for the same reason:
+ * a proxy field the message carries can throw where `JSON.stringify` — which
+ * never follows the chain — stays quiet.
  */
 function projectorKeyHiddenFromStamp(node: object, key: string): boolean {
 	let current: object | null = node;
@@ -1034,7 +1053,13 @@ function projectorKeyHiddenFromStamp(node: object, key: string): boolean {
 			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
 			return !descriptor.enumerable;
 		}
-		current = Object.getPrototypeOf(current);
+		let next: object | null;
+		try {
+			next = Object.getPrototypeOf(current);
+		} catch {
+			return true;
+		}
+		current = next;
 	}
 	return false;
 }
@@ -1042,11 +1067,12 @@ function projectorKeyHiddenFromStamp(node: object, key: string): boolean {
 /**
  * Whether `array` is read by anything other than its indexed slots — an
  * overridden or accessor `Symbol.iterator`. `JSON.stringify` and the stamp both
- * read slots up to a snapshotted length; the projector's `for..of` and `.some`
- * follow the iterator, so a non-default one yields a graph the stamp never
- * records. Answered through the descriptor, never by reading the slot, and a
- * throwing trap reports non-default for the same reason
- * {@link projectorKeyHiddenFromStamp} reports a field hidden.
+ * read slots up to a snapshotted length; the projector's `for..of` follows the
+ * iterator, so a non-default one yields a graph the stamp never records.
+ * Answered through the descriptor, never by reading the slot, and a throwing
+ * trap — on either the descriptor call or the prototype step — reports
+ * non-default for the same reason {@link projectorKeyHiddenFromStamp} reports a
+ * field hidden.
  */
 function nonDefaultArrayIterator(array: unknown[]): boolean {
 	let current: object | null = array;
@@ -1061,7 +1087,45 @@ function nonDefaultArrayIterator(array: unknown[]): boolean {
 			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
 			return descriptor.value !== Array.prototype[Symbol.iterator];
 		}
-		current = Object.getPrototypeOf(current);
+		let next: object | null;
+		try {
+			next = Object.getPrototypeOf(current);
+		} catch {
+			return true;
+		}
+		current = next;
+	}
+	return false;
+}
+
+/**
+ * Whether `array`'s projector-called `method` — one of
+ * {@link PROJECTOR_CONTENT_METHODS} — resolves to anything but the array
+ * default, or to an accessor. Answered through the descriptor, never by reading
+ * the slot, and a throwing trap on either the descriptor call or the prototype
+ * step reports non-default for the same reason
+ * {@link projectorKeyHiddenFromStamp} reports a field hidden.
+ */
+function nonDefaultArrayMethod(array: unknown[], method: (typeof PROJECTOR_CONTENT_METHODS)[number]): boolean {
+	let current: object | null = array;
+	while (current !== null) {
+		let descriptor: PropertyDescriptor | undefined;
+		try {
+			descriptor = Object.getOwnPropertyDescriptor(current, method);
+		} catch {
+			return true;
+		}
+		if (descriptor !== undefined) {
+			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
+			return descriptor.value !== Array.prototype[method];
+		}
+		let next: object | null;
+		try {
+			next = Object.getPrototypeOf(current);
+		} catch {
+			return true;
+		}
+		current = next;
 	}
 	return false;
 }
@@ -1608,15 +1672,28 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 			// Presence alone fails the match; the hook is never invoked.
 			if (hasToJSONHook(live)) return false;
 			// Hookless wrappers were stamped as their unboxed value — one leaf,
-			// not the empty container `unboxedPrimitive` explains.
+			// not the empty container `unboxedPrimitive` explains. A match is
+			// one leaf matched, never the whole graph: the frames queued behind
+			// this one still owe their own visit, so an in-place change to a
+			// sibling re-projects the line instead of restoring this leaf-era
+			// verdict for the entire message.
 			const unboxed = unboxedPrimitive(live);
-			if (unboxed !== undefined) return unboxed === expected;
+			if (unboxed !== undefined) {
+				if (unboxed !== expected) return false;
+				continue;
+			}
 			// A rawJSON node was stamped as its brand plus payload — see
 			// {@link messageValueStamp} — so a plain object with the same
-			// `{ rawJSON }` keys falls out at the brand marker.
+			// `{ rawJSON }` keys falls out at the brand marker. The same leaf
+			// rule as the wrapper above: brand, payload, and closing marker all
+			// matching is one leaf matched, and the walk continues to the
+			// siblings behind it.
 			const rawPayload = rawJsonPayload(live);
 			if (rawPayload !== undefined) {
-				return expected === STAMP_RAW_JSON && stamp[index++] === rawPayload && stamp[index++] === STAMP_END;
+				if (expected !== STAMP_RAW_JSON) return false;
+				if (stamp[index++] !== rawPayload) return false;
+				if (stamp[index++] !== STAMP_END) return false;
+				continue;
 			}
 			if (expected === STAMP_RAW_JSON) return false;
 		}
