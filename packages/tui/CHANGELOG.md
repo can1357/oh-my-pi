@@ -304,6 +304,7 @@
 
 - Improved nested tool status line rendering: moved preview content into a dedicated collapsible code block when expanded and limited field widths on the one-line summary
 - Suppressed typo highlighting for the word currently being typed to avoid distracting inline markers while composing
+- Cheaper frames while edit previews stream: each diff line is parsed once instead of up to four times per render, and a streamed assistant table no longer copies the tokens that follow it ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
@@ -348,9 +349,6 @@
 - Fixed streamed Markdown tables jumping around as each row arrives: the terminal UI fills the row being written in under the existing column widths, and native (TSP) terminals receive each row once its line is complete ([#15856](https://github.com/can1357/oh-my-pi/pull/15856) by [@H4vC](https://github.com/H4vC)).
 - Fixed streamed links and inline math showing raw `[text](url` or LaTeX and then rewrapping the paragraph when they close, in the terminal UI and native (TSP) terminals: they now render in their closed form while they stream ([#15864](https://github.com/can1357/oh-my-pi/pull/15864) by [@H4vC](https://github.com/H4vC)).
 - Paint-only overlays no longer swallow typing intended for the focused input beneath them ([#15793](https://github.com/can1357/oh-my-pi/issues/15793)).
-### Changed
-
-- Cheaper frames while edit previews stream: each diff line is parsed once instead of up to four times per render, and a streamed assistant table no longer copies the tokens that follow it ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.0] - 2026-10-14
 
