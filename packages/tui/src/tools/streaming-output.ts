@@ -936,6 +936,8 @@ export class OutputSink {
 	#columnLastCutLine = 0;
 	/** Set once a cut line's number may not match the artifact; the range is then withheld. */
 	#columnCutLinesUnmapped = false;
+	/** Set once carriage-return normalization added a line break the raw stream (and so the artifact) does not have. */
+	#lineBreaksRedrawn = false;
 	// Holds a frame until its terminator arrives, so a DCS split over chunk
 	// boundaries is only retained — and only exempted — once complete.
 	#sixelParser = new SixelSpanParser();
@@ -1015,6 +1017,11 @@ export class OutputSink {
 	 * Converts carriage-return progress updates into line boundaries while
 	 * collapsing CRLF to one newline. A trailing CR is held until the next
 	 * chunk so split CRLF sequences do not create blank lines.
+	 *
+	 * A CR that stands for a line break adds one the raw stream does not have,
+	 * so it sets {@link #lineBreaksRedrawn}: the artifact mirrors the raw stream
+	 * and numbers its lines by LF only, which leaves every later line number
+	 * off by the number of redrawn breaks.
 	 */
 	#normalizeCarriageReturns(text: string): string {
 		if (text.length === 0 || (!this.#pendingCarriageReturn && !text.includes(CR))) return text;
@@ -1022,7 +1029,9 @@ export class OutputSink {
 		let cursor = 0;
 		let normalized = "";
 		if (this.#pendingCarriageReturn) {
+			// The held CR became a line break of its own.
 			this.#pendingCarriageReturn = false;
+			this.#lineBreaksRedrawn = true;
 			normalized = NL;
 			if (text.startsWith(NL)) cursor = 1;
 		}
@@ -1036,9 +1045,13 @@ export class OutputSink {
 			normalized += text.substring(cursor, carriageReturn);
 			if (carriageReturn === text.length - 1) {
 				this.#pendingCarriageReturn = true;
+				this.#lineBreaksRedrawn = true;
 				break;
 			}
 			normalized += NL;
+			// A CRLF pair already ends a line in the raw stream: the collapse
+			// shortens it without moving any line boundary.
+			if (!text.startsWith(NL, carriageReturn + 1)) this.#lineBreaksRedrawn = true;
 			cursor = text.startsWith(NL, carriageReturn + 1) ? carriageReturn + 2 : carriageReturn + 1;
 		}
 		return normalized;
@@ -1070,7 +1083,11 @@ export class OutputSink {
 		// cap applies to it; the complete chunk still mirrors to the artifact.
 		const bufferSpans: RawSixelSegment[] = substituted ? [{ kind: "text", text: inlineChunk }] : spans;
 
-		this.#store(chunk, bufferSpans, joinSixelSegments(bufferSpans), substituted);
+		// Totals come from the complete normalized chunk while retention and the
+		// column cap run on the substitute: the elided byte and line counts are
+		// derived from those totals, so counting the substitute as the whole
+		// stream reports nothing was elided from a display the artifact kept.
+		this.#store(chunk, bufferSpans, content, substituted);
 
 		// Throttled onChunk: coalesce chunks arriving inside the throttle window.
 		// A timer flushes quiet tails at the throttle boundary; dump() catches a
@@ -1112,6 +1129,8 @@ export class OutputSink {
 			if (span.kind === "sixel") {
 				if (this.#pendingCarriageReturn) {
 					this.#pendingCarriageReturn = false;
+					// The held CR becomes a line break the raw stream does not have.
+					this.#lineBreaksRedrawn = true;
 					sanitized.push({ kind: "text", text: NL });
 				}
 				sanitized.push(span);
@@ -1124,10 +1143,11 @@ export class OutputSink {
 
 	/**
 	 * Count, cap, mirror, and retain one sanitized chunk split into spans. The
-	 * raw chunk is mirrored to the artifact before any cap is applied; the
-	 * totals count the normalized content, so elision compares the bytes the
-	 * inline view actually holds. `mirrorToArtifact: false` skips that mirror
-	 * for bytes that already streamed to the artifact with earlier chunks.
+	 * raw chunk is mirrored to the artifact before any cap is applied; the totals
+	 * count the normalized `content` of the whole chunk while `spans` carry what
+	 * the in-memory view retains, so an inline substitute reports the bytes it
+	 * elided. `mirrorToArtifact: false` skips that mirror for bytes that already
+	 * streamed to the artifact with earlier chunks.
 	 */
 	#store(
 		chunk: string,
@@ -1138,9 +1158,11 @@ export class OutputSink {
 	): void {
 		const normalizedBytes = Buffer.byteLength(content, "utf-8");
 		this.#totalBytes += normalizedBytes;
-		// Line the chunk starts on, as numbered in the artifact; 0 when the capped
-		// inline text is a substitute whose lines do not map onto the artifact.
-		let line = substituted ? 0 : this.#totalLines + 1;
+		// Line the chunk starts on, as numbered in the artifact. 0 — unmapped —
+		// when the capped inline text cannot be lined up against the artifact:
+		// an inline substitute rewrites the view, and carriage-return
+		// normalization adds line breaks the raw stream mirrors without.
+		let line = substituted || this.#lineBreaksRedrawn ? 0 : this.#totalLines + 1;
 
 		if (content.length > 0) {
 			this.#sawData = true;
@@ -1697,6 +1719,7 @@ export class OutputSink {
 		this.#columnCutLinesUnmapped = true;
 		this.#pendingChunk = "";
 		this.#pendingCarriageReturn = false;
+		this.#lineBreaksRedrawn = false;
 	}
 
 	#clearPendingChunkTimer(): void {
@@ -1838,6 +1861,8 @@ export class OutputSink {
 		this.#flushHeldSixelSpans();
 		if (this.#pendingCarriageReturn) {
 			this.#pendingCarriageReturn = false;
+			// The held CR became a line break the raw stream does not have.
+			this.#lineBreaksRedrawn = true;
 			this.push(NL);
 		}
 		const noticeLine = notice ? `[${notice}]\n` : "";

@@ -381,6 +381,32 @@ describe("OutputSink", () => {
 		expect(artifactText).toBe("headabcdefgh");
 	});
 
+	test("an inline substitute keeps the full stream as the total", async () => {
+		// The eval tool pushes a full JSON display with a bounded preview as
+		// `inline`. Only the preview is retained, but the totals still have to
+		// describe the complete stream: readers derive the elided byte and line
+		// counts from `totalBytes - outputBytes`, and counting the preview as
+		// the total makes that difference zero — a capped display reports that
+		// nothing was elided while the artifact holds everything the preview hid.
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "output.log");
+		const sink = new OutputSink({ artifactPath, artifactId: "display-1", spillThreshold: 100_000 });
+		const fullText = `display[1]:\n${"x".repeat(400)}\n${"y".repeat(400)}\n`;
+		const previewText = "display[1]:\nxxx…\n";
+
+		sink.push(fullText, { inline: previewText, emitInline: false });
+		const dumped = await sink.dump();
+
+		expect(await Bun.file(artifactPath).text()).toBe(fullText);
+		expect(dumped.truncated).toBe(true);
+		expect(dumped.output).toBe(previewText);
+		expect(dumped.totalBytes).toBe(byteLength(fullText));
+		expect(dumped.totalLines).toBe(fullText.split("\n").length);
+		expect(dumped.outputBytes).toBe(byteLength(previewText));
+		expect(dumped.totalBytes - dumped.outputBytes).toBe(byteLength(fullText) - byteLength(previewText));
+		expect(dumped.totalLines - dumped.outputLines).toBe(fullText.split("\n").length - previewText.split("\n").length);
+	});
+
 	test("throttled onChunk coalesces held-back chunks instead of dropping them", async () => {
 		const chunks: string[] = [];
 		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 60_000 });
@@ -1070,6 +1096,35 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		const notice = formatOutputNotice(meta);
 		expect(notice).not.toContain(":raw:");
 		expect(notice).toContain("Read artifact://77 for a head/tail sample");
+	});
+
+	test("column-cap cut-line numbers stay unmapped when carriage returns redraw a row", async () => {
+		// A bare `\r` is rewritten into a newline for the inline view, so the
+		// cap numbers the redrawn row as line 2. The artifact mirrors the raw
+		// stream, where lines only end on LF, so that row is not line 2 there:
+		// `artifact://77:raw:2-2` reads whatever follows instead of the cut row.
+		// The range is withheld rather than pointing at another row.
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "output.log");
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "77",
+			maxColumns: 8,
+			spillThreshold: 100_000,
+		});
+		const wide = "x".repeat(50);
+		await sink.push(`progress\r${wide}\n`);
+		const dumped = await sink.dump();
+
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.columnTruncatedRange).toBeUndefined();
+		const notice = formatOutputNotice(outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get());
+		expect(notice).toContain("Some lines truncated to 8 bytes");
+		expect(notice).not.toContain(":raw:");
+		// The raw file grew no second line; only the inline view has one.
+		const artifactLines = (await Bun.file(artifactPath).text()).split("\n");
+		expect(artifactLines).toHaveLength(2);
+		expect(artifactLines[1]).toBe("");
 	});
 
 	test("replace() withholds the cut-line range because the artifact keeps the original stream", async () => {
