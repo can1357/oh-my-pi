@@ -49,7 +49,7 @@ Set `MEMORY_EVAL_DEBUG_SCORES=<file.jsonl>` for both runs to append the score, t
 
 ```sh
 R="bun packages/coding-agent/bench/memory-eval/run.ts"; O=~/.cache/omp-memory-eval/results
-$R run --dataset <beam-100k|beam-500k|lme-s|lme-s-dev> --engine <mnemopi|mnemosyne|oracle|random> --protocol <standard|fts-only|with-sleep|upstream-compat> [--embedder js|python] [--cases N] [--out file]
+$R run --dataset <beam-100k|beam-500k|lme-s|lme-s-dev> --engine <mnemopi|mnemosyne|oracle|random> --protocol <standard|fts-only|with-sleep|upstream-compat> [--embedder js|python] [--mnemopi-recall recall|enhanced] [--polyphonic] [--cases N] [--out file]
 $R diff a.json b.json
 $R calibration-check calib-a.json calib-b.json
 ```
@@ -64,9 +64,16 @@ Memory: Mnemosyne's baseline and peak resident set size come from the engine pro
 
 `--embedder js` (default) uses Mnemopi's own local fastembed, as omp does in production. On the reference machine it embeds about 20-40x slower than Python fastembed with the same ONNX model file, so a full LongMemEval run takes days. `--embedder python` serves the same model from `py/embed_server.py` (in `venv-engine`) through Mnemopi's embedding-provider option. Mnemopi's retrieval code is unchanged, and an embedding-server failure aborts the run. The server's memory is recorded in the result's engine info (`embed_server_peak_rss_bytes`), not in `resources`. Compare a Python-embedder run against a JS-embedder run with `diff` before relying on it for a new model.
 
+### Recall options
+
+- `--mnemopi-recall recall` (default) ranks with `BeamMemory.recall`. `--mnemopi-recall enhanced` calls `recallEnhanced(question, k, { includeFacts: true })`, the call omp's auto-recall makes. Fact rows take a ranking slot (tier `fact`) and map to messages only through the content fallback.
+- `--polyphonic` turns on polyphonic recall: `BeamConfig.polyphonicRecall: true` for Mnemopi and `MNEMOSYNE_POLYPHONIC_RECALL=1` in Mnemosyne's environment. Mnemopi runs it only inside `recallEnhanced`, so with `--engine mnemopi` it needs `--mnemopi-recall enhanced`.
+
+Both are recorded in the result's `config` (`mnemopiRecall`, `polyphonic`) for every engine.
+
 ### Comparing two runs
 
-`diff a.json b.json` prints both configs (engine, protocol, k, git commit) and a paired bootstrap of the primary metric, where every difference is **b − a**. It exits 1 unless both files have the same dataset, dataset revision, protocol, `k` and question ids (no duplicates), a finite primary metric on every question, and are not `upstream-compat` results.
+`diff a.json b.json` prints both configs (engine, protocol, k, `mnemopiRecall`, `polyphonic`, git commit) and a paired bootstrap of the primary metric, where every difference is **b − a**. It exits 1 unless both files have the same dataset, dataset revision, protocol, `k` and question ids (no duplicates), a finite primary metric on every question, and are not `upstream-compat` results. Two runs of the same engine must also have the same `mnemopiRecall` and `polyphonic`; runs of different engines may differ there.
 
 The 95% interval is a percentile interval from a cluster bootstrap over cases (`caseId`): each of the 10,000 resamples draws whole cases with replacement and averages over all their questions. A BEAM case is a conversation whose questions all query one memory store (BEAM 100K: 355 questions over 20 cases), so resampling questions independently would understate the uncertainty. A LongMemEval case has one question, so there it is the per-question bootstrap. `wins`, `ties` and `losses` count questions; each line shows `n` (questions) and `cases`, overall and per category.
 

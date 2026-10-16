@@ -15,6 +15,8 @@ const REPO_ROOT = path.resolve(import.meta.dir, "../../../../..");
 export interface MnemosyneEngineOptions {
 	python?: string;
 	script?: string;
+	/** Polyphonic recall (`MNEMOSYNE_POLYPHONIC_RECALL=1`). */
+	polyphonic?: boolean;
 }
 
 /** Task 7's upstream-compat protocol drives the engine through these beyond `EngineAdapter`. */
@@ -70,6 +72,7 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 			MNEMOSYNE_EMBEDDING_MODEL: EMBEDDING_MODEL,
 			MNEMOSYNE_LLM_ENABLED: "false",
 			...(protocol === "fts-only" ? { MNEMOSYNE_NO_EMBEDDINGS: "1" } : {}),
+			...(options.polyphonic ? { MNEMOSYNE_POLYPHONIC_RECALL: "1" } : {}),
 		});
 		served = protocol;
 		return proc;
