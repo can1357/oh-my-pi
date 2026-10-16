@@ -151,6 +151,8 @@
 - Fixed browser `uploadFile` in Chrome reporting success with no file attached when the element opens no file chooser and nothing on the page reads the dropped files; it now fails and says what to target ([#15919](https://github.com/can1357/oh-my-pi/pull/15919) by [@will-bogusz](https://github.com/will-bogusz))
 - Relay mode: when Chrome detaches omp from a tab it drives (a password manager's inline menu loading in the page), the call fails at once saying why and omp reattaches to the same tab, instead of every later call timing out and reopening failing with `No page targets available` ([#15920](https://github.com/can1357/oh-my-pi/pull/15920) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the macOS `computer` tool letting the display sleep and lock in a turn that went 5 minutes without a desktop action; it now keeps the display awake until the turn ends or asks for your answer, then lets it sleep ([#15762](https://github.com/can1357/oh-my-pi/pull/15762) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a repeated date/cwd reminder line reaching a provider a second time when a custom provider appended its own message to the sent context ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed repeated date/cwd reminder lines reaching a provider a second time when a queue-only edit or session reset invalidated the replay memo without changing the live transcript ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.1] - 2026-10-15
 
@@ -354,10 +356,6 @@
 ### Fixed
 
 - Fixed `grep` on a single file showing in Tern as separate boxed snippets with no file row or syntax colors; it now looks the same as a `grep` over a directory
-### Fixed
-
-- Fixed a repeated date/cwd reminder line reaching a provider a second time when a custom provider appended its own message to the sent context ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed repeated date/cwd reminder lines reaching a provider a second time when a queue-only edit or session reset invalidated the replay memo without changing the live transcript ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.10.0] - 2026-10-12
 

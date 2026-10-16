@@ -17,6 +17,7 @@
 ### Added
 
 - `agent_start` carries `resumedToolCallIds` when a continued run first executes the calls of an unpaired assistant tail
+- Added `AgentOptions.onHistoryReplaced`, notified after the live transcript or the steering/follow-up queues are replaced wholesale, so per-request caches can drop snapshots pinned to the discarded history ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
@@ -28,7 +29,6 @@
 
 - `Tokenizer.countLatestTurn`: counts a message as the transcript's latest assistant turn, which an Anthropic Messages replay keeps byte-for-byte ([#15791](https://github.com/can1357/oh-my-pi/pull/15791) by [@will-bogusz](https://github.com/will-bogusz))
 - `Agent.prioritizeSteering`: moves given pending steering messages ahead of older ones so one-at-a-time delivery takes them first ([#15642](https://github.com/can1357/oh-my-pi/pull/15642))
-- Added `AgentOptions.onHistoryReplaced`, notified after the live transcript or the steering/follow-up queues are replaced wholesale, so per-request caches can drop snapshots pinned to the discarded history ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
