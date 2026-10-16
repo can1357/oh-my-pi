@@ -1029,11 +1029,13 @@ export class OutputSink {
 		let cursor = 0;
 		let normalized = "";
 		if (this.#pendingCarriageReturn) {
-			// The held CR became a line break of its own.
 			this.#pendingCarriageReturn = false;
-			this.#lineBreaksRedrawn = true;
 			normalized = NL;
+			// The held CR only redrew a row when nothing that already ends the
+			// line followed it: a CRLF pair has its line ending in the raw
+			// stream the artifact mirrors, so the collapse moves no boundary.
 			if (text.startsWith(NL)) cursor = 1;
+			else this.#lineBreaksRedrawn = true;
 		}
 
 		while (cursor < text.length) {
@@ -1044,8 +1046,10 @@ export class OutputSink {
 			}
 			normalized += text.substring(cursor, carriageReturn);
 			if (carriageReturn === text.length - 1) {
+				// Held until the next chunk decides whether it redrew a row: the
+				// following text may open the CRLF pair, which collapses to the
+				// one line ending the raw stream already had.
 				this.#pendingCarriageReturn = true;
-				this.#lineBreaksRedrawn = true;
 				break;
 			}
 			normalized += NL;
