@@ -221,6 +221,10 @@ async function diffCommand(argv: string[]): Promise<void> {
 		for (const key of ["mnemopiRecall", "polyphonic"] as const) {
 			if (a.config[key] !== b.config[key]) throw new Error(`${key} differs: ${a.config[key]} vs ${b.config[key]}`);
 		}
+	} else if (a.config.protocol === "with-sleep") {
+		console.warn(
+			"warning: with-sleep credits a summary hit with every message it covers, so recall@k depends on how many messages each engine's summaries cover; it is not comparable across engines",
+		);
 	}
 	const idsA = uniqueQuestionIds("a", a);
 	const idsB = uniqueQuestionIds("b", b);

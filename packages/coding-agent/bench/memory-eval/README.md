@@ -85,6 +85,8 @@ The 95% interval is a percentile interval from a cluster bootstrap over cases (`
 
 The verdict is `helps` when the overall interval lies above 0 and no category's interval lies wholly below 0, `hurts` for the mirror image, and `neutral` otherwise. With fewer than 2 cases (overall or in a category) every resample draws the same data, so `diff` prints `CI n/a (fewer than 2 cases)`. Without an overall interval the verdict is `insufficient data`; a category without one cannot veto.
 
+`with-sleep` results are not comparable across engines. After sleep, a ranked summary maps through `summary_of` to every message it covers, and recall@k credits all of them for its one slot. Each engine summarises differently (how many working rows go into one episodic row differs), so recall@k under `with-sleep` reflects summary size as much as ranking. `diff` prints a warning when it compares `with-sleep` runs of two different engines; comparing two runs of the same engine is unaffected.
+
 ### Environment guard
 
 Mnemopi runs in the harness process and reads its configuration from the environment, so `run --engine mnemopi` and `embed-parity.ts` refuse to start while any `MNEMOPI_*` or `OPENROUTER_BASE_URL` (which can route its embeddings to an API) is set. Mnemosyne's child process never inherits the parent's `MNEMOSYNE_*`.
