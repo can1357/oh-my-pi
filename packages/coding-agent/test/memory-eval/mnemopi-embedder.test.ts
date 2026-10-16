@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -45,6 +46,54 @@ describe("mnemopi python embedder", () => {
 			await expect(runCases(engine, [twoMessageCase], "standard", 10, tmp)).rejects.toThrow("embed boom");
 		} finally {
 			await engine.dispose();
+		}
+	});
+});
+
+// Any call fails: under fts-only Mnemopi must never ask the embedder.
+const DEAD_EMBED_SERVER = `import sys\nsys.exit("fts-only asked for an embedding")\n`;
+
+describe("mnemopi engine under fts-only", () => {
+	it("maps Mnemopi rows back to message ids by row id and never embeds", async () => {
+		const embedScript = path.join(tmp, "dead_embed_server.py");
+		await Bun.write(embedScript, DEAD_EMBED_SERVER);
+		const engine = mnemopiEngine({ embedder: "python", embedPython: "python3", embedScript });
+		try {
+			const { questions } = await runCases(engine, [twoMessageCase], "fts-only", 10, tmp);
+			expect(questions[0].ranked[0]).toMatchObject({ messageIds: ["m2"], viaFallback: false });
+			expect(questions[0].ranked.filter(hit => hit.viaFallback)).toEqual([]);
+			expect(questions[0].metrics["recall@10"]).toBe(1);
+		} finally {
+			await engine.dispose();
+		}
+	});
+
+	it("keeps every working-memory row past Mnemopi's 1000-row production default", async () => {
+		// SQLite syncs every insert: 1200 rows take ~0.3 s on tmpfs and ~15 s on a disk.
+		const base = process.platform === "linux" ? "/dev/shm" : tmp;
+		const storeDir = await fs.mkdtemp(path.join(base, "memory-eval-wm-"));
+		const rows = 1200;
+		const engine = mnemopiEngine();
+		try {
+			await engine.warmup("fts-only");
+			await engine.open({ ...twoMessageCase, messages: [] }, { storeDir, protocol: "fts-only" });
+			const items = Array.from({ length: rows }, (_, i) => ({
+				messageId: `m${i}`,
+				content: `message number ${i} about topic ${i % 7}`,
+				source: "user",
+				importance: 0.5,
+			}));
+			expect(new Set(await engine.remember(items)).size).toBe(rows);
+			await engine.close();
+			const db = new Database(path.join(storeDir, "mnemopi.db"), { readonly: true });
+			try {
+				expect(db.query("SELECT COUNT(*) AS n FROM working_memory").get()).toEqual({ n: rows });
+			} finally {
+				db.close();
+			}
+		} finally {
+			await engine.dispose();
+			await fs.rm(storeDir, { recursive: true, force: true });
 		}
 	});
 });
