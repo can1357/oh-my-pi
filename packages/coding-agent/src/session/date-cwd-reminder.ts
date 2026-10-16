@@ -58,11 +58,21 @@ export class DateCwdReminderInjector {
 	 * memo below can't validate against state it has already outlived.
 	 */
 	#stateVersion = 0;
+	/**
+	 * O(1) signature of the wire the last build was handed (see `#memo`): its
+	 * length plus the identity of its boundary messages. The boundary refs are
+	 * weak because the wire is not the transcript — a provider transform can
+	 * hand the injector a normalized clone of the turn that was sent — and an
+	 * ordinary turn commits with nothing else holding that clone (the prepared
+	 * context is dropped, the transcript grows). A strong ref would pin the
+	 * clone and everything it owns until the next request or disposal, for a
+	 * signature that can no longer match.
+	 */
 	#pending:
 		| {
 				length: number;
-				first: Message | undefined;
-				last: Message | undefined;
+				first: WeakRef<Message>;
+				last: WeakRef<Message>;
 				root: UserMessage;
 				reminder: string;
 				version: number;
@@ -212,8 +222,12 @@ export class DateCwdReminderInjector {
 			pending.reminder === currentReminder &&
 			pending.version === this.#stateVersion &&
 			pending.length === messages.length &&
-			pending.first === messages[0] &&
-			pending.last === messages[messages.length - 1]
+			// Weak on purpose: a boundary message nothing else holds any more (a
+			// provider-normalized clone whose turn has committed) derefs to
+			// undefined, so the signature can never match a message it is not —
+			// see the retention contract on `#pending` above.
+			pending.first.deref() === messages[0] &&
+			pending.last.deref() === messages[messages.length - 1]
 		) {
 			// Second identical build: admit the memo. `out` becomes the array a
 			// replay copies, so this injector is the only holder: every caller
@@ -237,8 +251,8 @@ export class DateCwdReminderInjector {
 				? undefined
 				: {
 						length: messages.length,
-						first: messages[0],
-						last: messages[messages.length - 1],
+						first: new WeakRef(messages[0]!),
+						last: new WeakRef(messages[messages.length - 1]!),
 						root,
 						reminder: currentReminder,
 						version: this.#stateVersion,
