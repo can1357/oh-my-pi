@@ -8401,17 +8401,21 @@ export class AgentSession implements SettingsScope {
 		images?: ImageContent[],
 		options?: { queue?: "steering" | "followUp" },
 	): Promise<boolean> {
-		if (text.startsWith("/")) {
-			this.#throwIfExtensionCommand(text);
-		}
-		// `#abortInProgress` is set synchronously at abort() entry, before its
-		// first await, so this read is race-free against a concurrent cancel.
-		// A steer admitted during the abort window would land in the
-		// post-abort stranded-message drain, whose continuation has no
-		// owner on the client side (the ACP promptTurn has already settled
-		// and unsubscribed) — refuse instead so the caller keeps its content.
+		// Liveness first: an idle session hands the content back
+		// (`promptRequired` at the ACP bridge) without validating it — the
+		// host resubmits through session/prompt, the only path that can
+		// execute an extension slash command anyway. `#abortInProgress` is
+		// set synchronously at abort() entry, before its first await, so this
+		// read is race-free against a concurrent cancel; a steer admitted
+		// during the abort window would land in the post-abort
+		// stranded-message drain, whose continuation has no owner on the
+		// client side (the ACP promptTurn has already settled and
+		// unsubscribed) — refuse instead so the caller keeps its content.
 		if (!this.isStreaming || this.#abortInProgress) {
 			return false;
+		}
+		if (text.startsWith("/")) {
+			this.#throwIfExtensionCommand(text);
 		}
 		const mode = options?.queue === "followUp" ? "followUp" : "steer";
 		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
@@ -8669,6 +8673,21 @@ export class AgentSession implements SettingsScope {
 	#canAutoContinueForFollowUp(): boolean {
 		if (this.isStreaming) return false;
 		if (this.isRetrying) return false;
+		// An ACP client that defers agent-initiated turns owns turn
+		// lifecycle: once its prompt settles (no in-flight prompt), a queued
+		// steer must not auto-continue as an autonomous run the client can
+		// neither see nor cancel. Leave it queued — it stays visible via
+		// queue_update and the next client-owned prompt delivers it. While a
+		// prompt is still in flight the end-of-turn continuation keeps
+		// running in-loop (client-observable), and explicit agent-initiated
+		// deliveries re-enable the drain via #allowAcpAgentInitiatedTurns.
+		if (
+			this.#promptInFlightCount === 0 &&
+			this.#clientBridge?.deferAgentInitiatedTurns === true &&
+			!this.#allowAcpAgentInitiatedTurns
+		) {
+			return false;
+		}
 		// A queued steer resumes from ANY tail: Agent.continue() runs #runLoop(undefined),
 		// whose initial steering poll injects the steer before the first provider call, so the
 		// request tail becomes the steer (valid) regardless of any injected custom / bashExecution

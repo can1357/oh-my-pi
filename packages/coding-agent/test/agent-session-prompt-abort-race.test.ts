@@ -37,7 +37,11 @@ describe("AgentSession prompt admission racing abort", () => {
 		authStorage?.close();
 	});
 
-	async function createSession(responses: Array<() => MockResponse | Promise<MockResponse>>, textOnly = false) {
+	async function createSession(
+		responses: Array<() => MockResponse | Promise<MockResponse>>,
+		textOnly = false,
+		options: { modelRegistry?: unknown; clientBridge?: unknown; extensionRunner?: unknown } = {},
+	) {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -53,8 +57,12 @@ describe("AgentSession prompt admission racing abort", () => {
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry: (options.modelRegistry ?? new ModelRegistry(authStorage)) as never,
+			...(options.extensionRunner ? { extensionRunner: options.extensionRunner as never } : {}),
 		});
+		if (options.clientBridge) {
+			session.setClientBridge(options.clientBridge as never);
+		}
 		const dropped: string[] = [];
 		session.setPromptDropped(prompt => dropped.push(prompt.text));
 		return { session, dropped };
@@ -287,6 +295,144 @@ describe("AgentSession prompt admission racing abort", () => {
 		await withTimeout(turnStarted.promise, 2_000, "Held turn never started");
 		releaseTurn.resolve();
 		await dispatching;
+		await session.waitForIdle();
+		expect(calls).toBe(1);
+	});
+
+	it("keeps a steer queued when the prompt that admitted it fails in setup, under an ACP client", async () => {
+		let calls = 0;
+		let apiKeyCalls = 0;
+		const apiKeyGate = Promise.withResolvers<void>();
+		const secondKeyRequested = Promise.withResolvers<void>();
+		// First call validates turn one; the second gates turn two's fallible
+		// setup and then fails it — the exact window a steer can be admitted
+		// into (#promptInFlightCount > 0 with no agent loop owning it yet).
+		const modelRegistry = {
+			getApiKey: async () => {
+				apiKeyCalls++;
+				if (apiKeyCalls === 1) return "test-key";
+				secondKeyRequested.resolve();
+				await apiKeyGate.promise;
+				return undefined;
+			},
+		};
+		const { session } = await createSession(
+			[
+				() => {
+					calls++;
+					return { content: ["first turn"] };
+				},
+				() => {
+					calls++;
+					return { content: ["should not stream"] };
+				},
+			],
+			false,
+			// deferAgentInitiatedTurns marks the session as ACP-owned: no
+			// continuation may run without a client-owned prompt.
+			{ modelRegistry, clientBridge: { capabilities: {}, deferAgentInitiatedTurns: true } },
+		);
+
+		await session.prompt("turn one");
+		expect(calls).toBe(1);
+
+		const failing = session.prompt("turn two");
+		void failing.catch(() => undefined);
+		await withTimeout(secondKeyRequested.promise, 2_000, "Second prompt never reached key validation");
+		// Admitted: the prompt turn is in flight, so the steer joins it.
+		expect(await session.joinActiveTurn("steer the failing turn")).toBe(true);
+
+		apiKeyGate.resolve();
+		await expect(failing).rejects.toThrow("No API key found");
+		await session.waitForIdle();
+
+		// The settled prompt's drain is blocked under the ACP client: the
+		// steer stays queued (visible via queue_update) instead of running
+		// as an autonomous continuation no client owns.
+		expect(calls).toBe(1);
+		const queued = session.getQueuedMessages();
+		expect(queued.steering.length).toBe(1);
+		expect(queued.steering[0]).toContain("steer the failing turn");
+	});
+
+	it("still drains the same stranded steer without an ACP client", async () => {
+		let calls = 0;
+		let apiKeyCalls = 0;
+		const apiKeyGate = Promise.withResolvers<void>();
+		const secondKeyRequested = Promise.withResolvers<void>();
+		const modelRegistry = {
+			getApiKey: async () => {
+				apiKeyCalls++;
+				if (apiKeyCalls === 1) return "test-key";
+				secondKeyRequested.resolve();
+				await apiKeyGate.promise;
+				return undefined;
+			},
+		};
+		const { session } = await createSession(
+			[
+				() => {
+					calls++;
+					return { content: ["first turn"] };
+				},
+				() => {
+					calls++;
+					return { content: ["drained steer turn"] };
+				},
+			],
+			false,
+			{ modelRegistry },
+		);
+
+		await session.prompt("turn one");
+		const failing = session.prompt("turn two");
+		void failing.catch(() => undefined);
+		await withTimeout(secondKeyRequested.promise, 2_000, "Second prompt never reached key validation");
+		expect(await session.joinActiveTurn("steer the failing turn")).toBe(true);
+
+		apiKeyGate.resolve();
+		await expect(failing).rejects.toThrow("No API key found");
+		await session.waitForIdle();
+
+		// No ACP bridge: the documented TUI drain resumes from the queued
+		// steer — the continuation runs and answers it.
+		expect(calls).toBe(2);
+		expect(session.getQueuedMessages().steering).toEqual([]);
+	});
+
+	it("joinActiveTurn hands idle slash commands back instead of failing, and still refuses them mid-run", async () => {
+		let calls = 0;
+		const turnStarted = Promise.withResolvers<void>();
+		const releaseTurn = Promise.withResolvers<void>();
+		const { session } = await createSession(
+			[
+				async () => {
+					calls++;
+					turnStarted.resolve();
+					await releaseTurn.promise;
+					return { content: ["first turn"] };
+				},
+			],
+			false,
+			{
+				extensionRunner: {
+					getCommand: (name: string) => (name === "queued-cmd" ? { name: "queued-cmd" } : undefined),
+					emitBeforeAgentStart: async () => undefined,
+				},
+			},
+		);
+
+		// Idle: the command must come back unconsumed (`promptRequired` at
+		// the bridge) so the host can resubmit through session/prompt — the
+		// only path that can execute it — instead of a `failed` outcome.
+		expect(await session.joinActiveTurn("/queued-cmd now")).toBe(false);
+
+		// Mid-run the same command genuinely cannot be queued: refuse it.
+		const running = session.prompt("start");
+		await withTimeout(turnStarted.promise, 2_000, "First turn never started");
+		await expect(session.joinActiveTurn("/queued-cmd now")).rejects.toThrow("cannot be queued");
+		releaseTurn.resolve();
+		await running;
 		await session.waitForIdle();
 		expect(calls).toBe(1);
 	});

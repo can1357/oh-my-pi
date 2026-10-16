@@ -186,6 +186,56 @@ describe("ACP JSON-RPC transport", () => {
 			{ code: -32003, message: "Agent is already processing.", data: { reason: "session_busy" } },
 		]);
 	});
+
+	it("requestCancellable rejects the pending entry, notifies $/cancel_request, and ignores late responses", async () => {
+		const inbound = new TransformStream<AnyMessage, AnyMessage>();
+		const outbound = new TransformStream<AnyMessage, AnyMessage>();
+		const connection = new RpcConnection({ writable: outbound.writable, readable: inbound.readable }, async () => {
+			throw RequestError.methodNotFound("unused");
+		});
+		const reader = outbound.readable.getReader();
+		const writer = inbound.writable.getWriter();
+
+		const { promise, cancel } = connection.requestCancellable<{ outcome: unknown }>("session/request_permission", {
+			sessionId: "session-1",
+		});
+
+		// The request frame goes out with a fresh id.
+		const requestFrame = await reader.read();
+		expect(requestFrame.value).toMatchObject({ jsonrpc: "2.0", method: "session/request_permission" });
+		const requestId = (requestFrame.value as { id: number }).id;
+
+		cancel();
+
+		// The promise rejects as request-cancelled …
+		const error = await promise.then(
+			() => undefined,
+			(rejection: unknown) => rejection,
+		);
+		expect(error).toBeInstanceOf(RequestError);
+		expect((error as RequestError).code).toBe(-32800);
+
+		// … the peer is told via $/cancel_request …
+		const cancelFrame = await reader.read();
+		expect(cancelFrame.value).toEqual({ jsonrpc: "2.0", method: "$/cancel_request", params: { id: requestId } });
+
+		// … and a late response for the dropped entry is ignored rather than
+		// rejecting anything or throwing on an unknown id.
+		await writer.write({
+			jsonrpc: "2.0",
+			id: requestId,
+			result: { outcome: { outcome: "selected", optionId: "x" } },
+		});
+		await Bun.sleep(0);
+		expect(connection.signal.aborted).toBe(false);
+
+		// A second cancel is a no-op — the entry is already gone.
+		cancel();
+		await Bun.sleep(0);
+		await connection.close();
+		reader.releaseLock();
+		writer.releaseLock();
+	});
 });
 
 describe("ACP runtime schemas", () => {

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { createAcpClientBridge } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-client-bridge";
-import type { AgentSideConnection, RequestPermissionRequest, RequestPermissionResponse } from "@oh-my-pi/pi-utils/acp";
+import {
+	RequestError,
+	type AgentSideConnection,
+	type RequestPermissionRequest,
+	type RequestPermissionResponse,
+} from "@oh-my-pi/pi-utils/acp";
 
 const ALLOW_SELECTED: RequestPermissionResponse = { outcome: { outcome: "selected", optionId: "allow_once" } };
 
@@ -44,14 +49,18 @@ describe("ACP client bridge permission requests", () => {
 		let request: RequestPermissionRequest | undefined;
 		let cancelled = 0;
 		const answer: { promise: Promise<RequestPermissionResponse> | undefined } = { promise: undefined };
+		const held = Promise.withResolvers<RequestPermissionResponse>();
 		const connection = {
 			requestPermissionWithCancel(params: RequestPermissionRequest) {
 				request = params;
 				return {
 					// Undefined means "leave the elicit pending" (dialog open).
-					promise: answer.promise ?? Promise.withResolvers<RequestPermissionResponse>().promise,
+					promise: answer.promise ?? held.promise,
 					cancel() {
 						cancelled++;
+						// Mirrors RpcConnection.requestCancellable: cancel
+						// rejects the pending wire promise.
+						held.reject(RequestError.requestCancelled());
 					},
 				};
 			},

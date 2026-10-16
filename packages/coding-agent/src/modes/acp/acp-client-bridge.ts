@@ -4,6 +4,7 @@
  * `AgentSession`) can route through the client when it advertises the
  * relevant capabilities at `initialize` time.
  */
+import { RequestError } from "@oh-my-pi/pi-utils/acp";
 import type {
 	PermissionOption as AcpPermissionOption,
 	TerminalHandle as AcpTerminalHandle,
@@ -152,6 +153,10 @@ async function requestPermission(
 	}
 	if (steeringSignal.aborted) {
 		cancel();
+		// `cancel()` rejects the wire promise (RequestError.requestCancelled)
+		// that nothing else will observe on this early-exit path; keep it
+		// handled so the rejection cannot take down the process.
+		void promise.catch(() => undefined);
 		return { outcome: "cancelled" };
 	}
 	const steered = Promise.withResolvers<void>();
@@ -164,7 +169,13 @@ async function requestPermission(
 		const winner = await Promise.race([
 			promise.then(
 				response => ({ kind: "response" as const, response }),
-				error => ({ kind: "error" as const, error }),
+				error =>
+					// `cancel()` rejects the wire promise with
+					// request-cancelled; that rejection is the steer
+					// superseding the dialog, not a transport failure.
+					error instanceof RequestError && error.code === -32800
+						? { kind: "steered" as const }
+						: { kind: "error" as const, error },
 			),
 			steered.promise.then(() => ({ kind: "steered" as const })),
 		]);
