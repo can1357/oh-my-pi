@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added ahead/behind upstream commit counts to `VcsStatusSummary` (`statusSummary`), resolved through the remote's fetch refspecs and cached per HEAD/upstream pair; absent for jj workspaces and branches without an upstream ([#11049](https://github.com/can1357/oh-my-pi/pull/11049) by [@anzhen-tech](https://github.com/anzhen-tech)).
 - Added `parseCodeStatus` to check code syntax and its resolved language without generating a summary ([#15904](https://github.com/can1357/oh-my-pi/pull/15904) by [@iliaal](https://github.com/iliaal)).
 
 ### Changed

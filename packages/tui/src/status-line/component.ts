@@ -7,7 +7,7 @@ import {
 } from "@oh-my-pi/pi-ai/usage/google-antigravity";
 import { getNextTimeBasedPricingTransition } from "@oh-my-pi/pi-catalog/models";
 import type { Model, ModelCost } from "@oh-my-pi/pi-catalog/types";
-import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
+import type { VcsGitRepo, VcsRepo, VcsStatusSummary } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
@@ -747,7 +747,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#activeRepoCache: ActiveRepoCache | undefined;
 
 	// Git status caching (1s TTL)
-	#cachedGitStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+	#cachedGitStatus: VcsStatusSummary | null = null;
 	#cachedGitStatusCwd: string | undefined = undefined;
 	#gitStatusLastFetch = 0;
 	#gitStatusGeneration = 0;
@@ -756,7 +756,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#jjBranchLastFetch = 0;
 	#jjResolveSeq = 0;
 	#jjBranchActive: JjResolveRequest | undefined = undefined;
-	#cachedJjStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+	#cachedJjStatus: VcsStatusSummary | null = null;
 	#jjStatusLastFetch = 0;
 	#jjStatusActive: JjResolveRequest | undefined = undefined;
 	// Bumped on every jj-cache reset — a cwd switch (#applyCwdChange) or a HEAD /
@@ -1690,11 +1690,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		return branch === this.#defaultBranch;
 	}
 
-	#getStatus(activeRepoCache: ActiveRepoCache = this.#resolveActiveRepoCache()): {
-		staged: number;
-		unstaged: number;
-		untracked: number;
-	} | null {
+	#getStatus(activeRepoCache: ActiveRepoCache = this.#resolveActiveRepoCache()): VcsStatusSummary | null {
 		if (!this.#gitEnabled()) return null;
 
 		const gitCwd = activeRepoCache.effectiveGitCwd;
@@ -1713,7 +1709,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#jjStatusActive = request;
 			const generation = this.#jjCacheGeneration;
 			(async () => {
-				let next: { staged: number; unstaged: number; untracked: number } | null = null;
+				let next: VcsStatusSummary | null = null;
 				try {
 					next = await repository.statusSummary(
 						AbortSignal.any([request.controller.signal, AbortSignal.timeout(JJ_COMMAND_TIMEOUT_MS)]),
@@ -1748,7 +1744,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const generation = this.#gitStatusGeneration;
 
 		(async () => {
-			let nextStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+			let nextStatus: VcsStatusSummary | null = null;
 			try {
 				nextStatus = (await repository.statusSummary()) ?? null;
 			} catch {

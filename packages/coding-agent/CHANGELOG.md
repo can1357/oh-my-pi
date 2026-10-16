@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added git upstream divergence counts (⇡ ahead / ⇣ behind) to the status line git segment, toggleable via `statusLine.segmentOptions.git.showAheadBehind` ([#11049](https://github.com/can1357/oh-my-pi/pull/11049) by [@anzhen-tech](https://github.com/anzhen-tech)).
 - Added `omp auth-gateway serve --clients=<file>`: per-client bearer tokens, each limited to listed models and broker OAuth accounts with no fallback to other accounts or API keys, re-read while serving ([#5098](https://github.com/can1357/oh-my-pi/issues/5098), [#15900](https://github.com/can1357/oh-my-pi/pull/15900) by [@alphastorm](https://github.com/alphastorm))
 
 ### Changed

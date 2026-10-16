@@ -9,7 +9,7 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 		segmentOptions: {
 			model: { showThinkingLevel: true },
 			path: { abbreviate: true, maxLength: 40, stripWorkPrefix: true },
-			git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: true },
+			git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: true, showAheadBehind: true },
 		},
 	},
 
@@ -19,7 +19,13 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 		separator: "slash",
 		segmentOptions: {
 			path: { abbreviate: true, maxLength: 30 },
-			git: { showBranch: true, showStaged: false, showUnstaged: false, showUntracked: false },
+			git: {
+				showBranch: true,
+				showStaged: false,
+				showUnstaged: false,
+				showUntracked: false,
+				showAheadBehind: false,
+			},
 		},
 	},
 
@@ -29,7 +35,7 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 		separator: "powerline-thin",
 		segmentOptions: {
 			model: { showThinkingLevel: false },
-			git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: false },
+			git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: false, showAheadBehind: true },
 		},
 	},
 
@@ -51,7 +57,7 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 		segmentOptions: {
 			model: { showThinkingLevel: true },
 			path: { abbreviate: true, maxLength: 50 },
-			git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: true },
+			git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: true, showAheadBehind: true },
 			time: { format: "24h", showSeconds: false },
 		},
 	},
@@ -76,7 +82,7 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 		segmentOptions: {
 			model: { showThinkingLevel: true },
 			path: { abbreviate: true, maxLength: 60 },
-			git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: true },
+			git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: true, showAheadBehind: true },
 			time: { format: "24h", showSeconds: true },
 		},
 	},
@@ -89,7 +95,7 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 		segmentOptions: {
 			model: { showThinkingLevel: true },
 			path: { abbreviate: true, maxLength: 40 },
-			git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: true },
+			git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: true, showAheadBehind: true },
 		},
 	},
 
