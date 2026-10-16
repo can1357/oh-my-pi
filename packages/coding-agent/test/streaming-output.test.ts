@@ -1127,6 +1127,37 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		expect(artifactLines[1]).toBe("");
 	});
 
+	test("column-cap cut-line numbers stay mapped when a CRLF pair spans a chunk boundary", async () => {
+		// The held CR is not yet a redraw: the next chunk can open its LF, and
+		// that CRLF pair is a line ending the raw stream already has. Flagging
+		// it as a redrew row withheld the cut-line range for the rest of the
+		// sink, so a `:raw:` pointer that would have read the correct row was
+		// dropped. Chunk boundaries land wherever the OS splits the stream, so
+		// a CRLF arriving split is the common case, not an exotic one.
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "output.log");
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "77",
+			maxColumns: 8,
+			spillThreshold: 100_000,
+		});
+		const wide = "x".repeat(50);
+		await sink.push("progress\r");
+		await sink.push("\n");
+		await sink.push(`${wide}\n`);
+		const dumped = await sink.dump();
+
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.columnTruncatedRange).toEqual({ first: 2, last: 2 });
+		const notice = formatOutputNotice(outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get());
+		expect(notice).toContain(":raw:2-2");
+		// The artifact's line 2 is the capped row, so the range reads right.
+		const artifactLines = (await Bun.file(artifactPath).text()).split("\n");
+		expect(artifactLines).toHaveLength(3);
+		expect(artifactLines[1]).toBe(wide);
+	});
+
 	test("replace() withholds the cut-line range because the artifact keeps the original stream", async () => {
 		const dir = await createTempDir();
 		const sink = new OutputSink({
