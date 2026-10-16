@@ -530,7 +530,6 @@ class DaemonBroker {
 				});
 			},
 			() => {
-				this.#observerOwners.delete(socket);
 				this.#sockets.delete(socket);
 				if (!authenticated) return;
 				this.#clients.delete(socket);
@@ -544,6 +543,7 @@ class DaemonBroker {
 					this.#inFlight.delete(requestId);
 					inFlight.controller.abort();
 				}
+				this.#observerOwners.delete(socket);
 			},
 		);
 	}
