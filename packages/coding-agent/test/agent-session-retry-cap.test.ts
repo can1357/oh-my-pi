@@ -115,6 +115,7 @@ describe("AgentSession retry delay cap", () => {
 			session = undefined;
 		}
 		unregisterCustomApis(RETRY_CAP_MOCK_API_SOURCE);
+		authStorage.usage.removeProvider("opencode-go");
 		vi.restoreAllMocks();
 	});
 
@@ -1756,6 +1757,7 @@ describe("AgentSession retry delay cap", () => {
 		});
 	});
 	it("waits for a short OpenCode Go sibling credential before model fallback", async () => {
+		authStorage.usage.setProvider("opencode-go", { id: "opencode-go", fetchUsage: async () => null });
 		const exhaustedModel = getBundledModel("opencode-go", "deepseek-v4-flash");
 		const fallbackModel = getBundledModel("openai", "gpt-5.5");
 		if (!exhaustedModel || !fallbackModel) {

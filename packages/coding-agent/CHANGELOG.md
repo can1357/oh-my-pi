@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Empty-stop recovery preserves provider credit charges and only promotes an entirely unbilled retry cycle ([#9487](https://github.com/can1357/oh-my-pi/pull/9487) by [@jroth1111](https://github.com/jroth1111)).
+- Entirely unbilled empty stops can use configured model fallbacks after the retry cap; effort-only changes do not count as switching models ([#9480](https://github.com/can1357/oh-my-pi/issues/9480), [#9487](https://github.com/can1357/oh-my-pi/pull/9487) by [@jroth1111](https://github.com/jroth1111)).
 
 ### Added
 
