@@ -9,7 +9,7 @@ import {
 	withMnemopiRuntimeOptions,
 } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import type { EngineAdapter, ProtocolName, RecallHit } from "../engine";
+import type { EngineAdapter, MnemopiRecall, ProtocolName, RecallHit } from "../engine";
 import { PythonProcess } from "./python-process";
 
 const EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5";
@@ -27,6 +27,9 @@ export type MnemopiEmbedder = "js" | "python";
 
 export interface MnemopiEngineOptions {
 	embedder?: MnemopiEmbedder;
+	recall?: MnemopiRecall;
+	/** Polyphonic recall (omp's `mnemopi.polyphonicRecall`); only `recallEnhanced` runs it. */
+	polyphonic?: boolean;
 	/** Overrides for the embedding server process (tests use a stub). */
 	embedPython?: string;
 	embedScript?: string;
@@ -45,12 +48,16 @@ export function assertMnemopiEnvClean(): void {
 
 function tierOf(label: string | undefined, summaryOf: string | undefined): RecallHit["tier"] {
 	const tier = label ?? (summaryOf ? "episodic" : "working");
-	if (tier !== "working" && tier !== "episodic") throw new Error(`unexpected mnemopi recall tier "${tier}"`);
+	if (tier !== "working" && tier !== "episodic" && tier !== "fact") {
+		throw new Error(`unexpected mnemopi recall tier "${tier}"`);
+	}
 	return tier;
 }
 
 export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter {
 	const embedder = options.embedder ?? "js";
+	const recallMode = options.recall ?? "recall";
+	const polyphonic = options.polyphonic ?? false;
 	let beam: BeamMemory | undefined;
 	let embedProc: PythonProcess | undefined;
 	let baselineRssBytes = process.memoryUsage().rss;
@@ -123,10 +130,11 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 		open: async (_evalCase, { storeDir, protocol }) => {
 			opts = runtimeOptions(protocol);
 			beam = await scoped(async () => {
-				const config =
-					protocol === "with-sleep"
-						? { workingMemoryLimit: 0, workingMemoryTtlHours: 0 }
-						: { workingMemoryLimit: 0 };
+				const config = {
+					workingMemoryLimit: 0,
+					polyphonicRecall: polyphonic,
+					...(protocol === "with-sleep" ? { workingMemoryTtlHours: 0 } : {}),
+				};
 				return new BeamMemory({ dbPath: path.join(storeDir, "mnemopi.db"), sessionId: "eval", config });
 			});
 		},
@@ -156,7 +164,11 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 			scoped(async () => {
 				const b = open();
 				await b.flushExtractions();
-				const rows = await b.recall(question.text, k);
+				// `enhanced` is the call omp's auto-recall makes (packages/coding-agent/src/mnemopi/state.ts).
+				const rows =
+					recallMode === "enhanced"
+						? await b.recallEnhanced(question.text, k, { includeFacts: true })
+						: await b.recall(question.text, k);
 				return rows.map(row => ({
 					engineId: row.id,
 					tier: tierOf(row.tier_label, row.summary_of),

@@ -2,13 +2,13 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isRememberable } from "./datasets";
-import type { EngineAdapter, EngineName, ProtocolName, RememberItem } from "./engine";
+import type { EngineAdapter, EngineName, MnemopiRecall, ProtocolName, RecallHit, RememberItem } from "./engine";
 import { cp, lmeMetrics, messageLevelMetrics } from "./score";
 import type { DatasetName, EvalCase, EvalMessage, ExcludedQuestion } from "./types";
 
 export interface RankedHit {
 	messageIds: string[];
-	tier: "working" | "episodic";
+	tier: RecallHit["tier"];
 	viaFallback: boolean;
 	contentPrefix: string;
 }
@@ -42,6 +42,10 @@ export interface RunConfig {
 	engineInfo: Record<string, string>;
 	protocol: ProtocolName;
 	k: number;
+	/** How the mnemopi engine recalls (`--mnemopi-recall`); recorded for every engine, used by mnemopi only. */
+	mnemopiRecall: MnemopiRecall;
+	/** Polyphonic recall (`--polyphonic`), mnemopi and mnemosyne only. */
+	polyphonic: boolean;
 	gitCommit: string;
 	startedAt: string;
 }
