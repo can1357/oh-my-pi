@@ -5099,7 +5099,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		{
 			const originalDispose = session.dispose.bind(session);
 			let tinyClientReleased = false;
-			session.dispose = async () => {
+			let disposeCall: Promise<void> | undefined;
+			const disposeOnce: AgentSession["dispose"] = async disposeOptions => {
 				try {
 					// Reject new session work (eval starts) the moment disposal
 					// begins — the lifecycle await below opens an async gap before
@@ -5123,7 +5124,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
 						await AgentLifecycleManager.global().dispose();
 					}
-					await originalDispose();
+					await originalDispose(disposeOptions);
 				} finally {
 					// The tiny-model client is a process singleton shared by every session.
 					// Only the session that owns process state drops its connections, once:
@@ -5151,6 +5152,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					unregisterMcpPostmortem = undefined;
 				}
 			};
+			session.dispose = disposeOptions => (disposeCall ??= disposeOnce(disposeOptions));
 		}
 
 		const prewarmModel = session.model;
