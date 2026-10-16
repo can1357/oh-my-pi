@@ -68,7 +68,7 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 
 ## Writing Extensions
 
-See [docs/extensions.md](../../docs/extensions.md) for full documentation.
+See [docs/extensions.md](../../../../docs/extensions.md) for full documentation.
 
 ```typescript
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
