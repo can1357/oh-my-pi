@@ -161,6 +161,11 @@ for line in sys.stdin:
 		}
 	});
 
+	it("fts-only turns Mnemosyne's embeddings off and standard leaves them on", async () => {
+		expect((await childEnv({}, "fts-only")).MNEMOSYNE_NO_EMBEDDINGS).toBe("1");
+		expect((await childEnv({}, "standard")).MNEMOSYNE_NO_EMBEDDINGS).toBeUndefined();
+	});
+
 	it("passes dropped derived rows through and hides the per-run data dir", async () => {
 		const script = await stub(
 			"dropped.py",
