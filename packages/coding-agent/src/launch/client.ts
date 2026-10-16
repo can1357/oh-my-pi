@@ -545,9 +545,12 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			this.#rejectPending(parseError);
 			return;
 		}
+		if ("event" in message && message.event === "daemon-observed") {
+			this.#deliverObservation(message.notification);
+			return;
+		}
 		if ("event" in message) {
-			if (message.event === "daemon-observed") this.#deliverObservation(message.notification);
-			else void this.#deliverCompletion(message);
+			void this.#deliverCompletion(message);
 			return;
 		}
 		const response = message;
