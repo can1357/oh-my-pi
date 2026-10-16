@@ -19,6 +19,7 @@ import { BUILTIN_MODE_SLASH_COMMANDS } from "./builtin-modes";
 import { BUILTIN_SESSION_SLASH_COMMANDS } from "./builtin-session";
 import { BUILTIN_SKILLS_SLASH_COMMANDS } from "./builtin-skills";
 import { parseSlashCommand } from "./helpers/parse";
+import { isSessionUpdateManagedByTern } from "./helpers/self-update";
 import type {
 	BuiltinSlashCommand,
 	ParsedSlashCommand,
@@ -60,22 +61,22 @@ for (const command of BUILTIN_SLASH_COMMAND_REGISTRY) {
 export const BUILTIN_SLASH_COMMAND_RESERVED_NAMES: ReadonlySet<string> = new Set(BUILTIN_SLASH_COMMAND_LOOKUP.keys());
 
 /** Builtin command metadata used for slash-command autocomplete and help text. */
-export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BUILTIN_SLASH_COMMAND_REGISTRY.map(
-	command => ({
-		name: command.name,
-		aliases: command.aliases,
-		allowArgs: command.allowArgs === true,
-		// Getter: some descriptions name keys, formatted at read time (theme/preset may change).
-		get description() {
-			return command.description;
-		},
-		icon: command.icon,
-		subcommands: command.subcommands,
-		subcommandOptional: command.subcommandOptional,
-		inlineHint: command.inlineHint,
-		getTuiAutocompleteDescription: command.getTuiAutocompleteDescription,
-	}),
-);
+export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BUILTIN_SLASH_COMMAND_REGISTRY.filter(
+	command => command.name !== "update" || !isSessionUpdateManagedByTern(),
+).map(command => ({
+	name: command.name,
+	aliases: command.aliases,
+	allowArgs: command.allowArgs === true,
+	// Getter: some descriptions name keys, formatted at read time (theme/preset may change).
+	get description() {
+		return command.description;
+	},
+	icon: command.icon,
+	subcommands: command.subcommands,
+	subcommandOptional: command.subcommandOptional,
+	inlineHint: command.inlineHint,
+	getTuiAutocompleteDescription: command.getTuiAutocompleteDescription,
+}));
 
 function materializeTuiBuiltinSlashCommand(
 	cmd: BuiltinSlashCommand,
