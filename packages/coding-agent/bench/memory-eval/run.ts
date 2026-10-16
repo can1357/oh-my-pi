@@ -1,6 +1,9 @@
 // Run: bun packages/coding-agent/bench/memory-eval/run.ts <subcommand>
-//   run  --dataset <name> --engine <name> --protocol <name> [--embedder js|python] [--cases N] [--out file]
+//   run  --dataset <name> --engine <name> --protocol <name> [--embedder js|python] [--mnemopi-recall recall|enhanced]
+//        [--polyphonic] [--cases N] [--out file]
 //        --embedder applies to mnemopi only: `python` swaps its slow JS fastembed for the same model in Python fastembed.
+//        --mnemopi-recall applies to mnemopi only: `enhanced` recalls through `recallEnhanced` with facts, as omp does.
+//        --polyphonic turns on polyphonic recall (mnemopi needs `--mnemopi-recall enhanced`, mnemosyne).
 //   diff <a.json> <b.json>
 //   calibration-check <a.json> <b.json>   (a: py/upstream_run_a.py dump, b: run --protocol upstream-compat result)
 import * as fs from "node:fs/promises";
@@ -10,7 +13,7 @@ import { parseArgs } from "node:util";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type CalibrationDump, compareCalibration, runUpstreamCompat } from "./compat";
 import { loadBeamUpstreamCompat, loadDataset } from "./datasets";
-import type { EngineAdapter, ProtocolName } from "./engine";
+import type { EngineAdapter, MnemopiRecall, ProtocolName } from "./engine";
 import { assertMnemopiEnvClean, type MnemopiEmbedder, mnemopiEngine } from "./engines/mnemopi";
 import { mnemosyneEngine, type UpstreamCompatOps } from "./engines/mnemosyne";
 import { oracleEngine, randomEngine } from "./engines/sanity";
@@ -28,13 +31,29 @@ const REVISIONS = {
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../..");
 const UPSTREAM_COMPAT_CONVERSATIONS = 3;
 
-function createEngine(name: string, embedder: MnemopiEmbedder): EngineAdapter {
+interface EngineOptions {
+	embedder: MnemopiEmbedder;
+	mnemopiRecall: MnemopiRecall;
+	polyphonic: boolean;
+}
+
+function createEngine(name: string, { embedder, mnemopiRecall, polyphonic }: EngineOptions): EngineAdapter {
 	if (embedder !== "js" && name !== "mnemopi") throw new Error("--embedder applies to the mnemopi engine only");
-	if (name === "mnemopi") {
-		assertMnemopiEnvClean();
-		return mnemopiEngine({ embedder });
+	if (mnemopiRecall !== "recall" && name !== "mnemopi") {
+		throw new Error("--mnemopi-recall applies to the mnemopi engine only");
 	}
-	if (name === "mnemosyne") return mnemosyneEngine();
+	if (polyphonic && name !== "mnemopi" && name !== "mnemosyne") {
+		throw new Error("--polyphonic applies to the mnemopi and mnemosyne engines only");
+	}
+	if (name === "mnemopi") {
+		// Only `recallEnhanced` routes through polyphonic recall; the flag would label an unchanged ranking.
+		if (polyphonic && mnemopiRecall !== "enhanced") {
+			throw new Error("--polyphonic with --engine mnemopi needs --mnemopi-recall enhanced");
+		}
+		assertMnemopiEnvClean();
+		return mnemopiEngine({ embedder, recall: mnemopiRecall, polyphonic });
+	}
+	if (name === "mnemosyne") return mnemosyneEngine({ polyphonic });
 	if (name === "oracle") return oracleEngine();
 	if (name === "random") return randomEngine();
 	throw new Error(`engine "${name}" is not available in this build (known: mnemopi, mnemosyne, oracle, random)`);
@@ -65,12 +84,19 @@ async function runCommand(argv: string[]): Promise<void> {
 			cases: { type: "string" },
 			out: { type: "string" },
 			embedder: { type: "string", default: "js" },
+			"mnemopi-recall": { type: "string", default: "recall" },
+			polyphonic: { type: "boolean", default: false },
 		},
 	});
 	const dataset = pick(values.dataset, DATASETS, "dataset");
 	const protocol = pick(values.protocol, PROTOCOLS, "protocol");
 	const cases = caseLimit(values.cases);
-	const engine = createEngine(values.engine ?? "", pick(values.embedder, ["js", "python"] as const, "embedder"));
+	const engineOptions: EngineOptions = {
+		embedder: pick(values.embedder, ["js", "python"] as const, "embedder"),
+		mnemopiRecall: pick(values["mnemopi-recall"], ["recall", "enhanced"] as const, "mnemopi-recall"),
+		polyphonic: values.polyphonic,
+	};
+	const engine = createEngine(values.engine ?? "", engineOptions);
 	const k = dataset.startsWith("beam") ? 10 : 50;
 
 	const startedAt = new Date().toISOString();
@@ -106,6 +132,8 @@ async function runCommand(argv: string[]): Promise<void> {
 				engineInfo: await engine.describe(),
 				protocol,
 				k,
+				mnemopiRecall: engineOptions.mnemopiRecall,
+				polyphonic: engineOptions.polyphonic,
 				gitCommit: (await vcs.requireGit(REPO_ROOT).headSha()) ?? "unknown",
 				startedAt,
 			},
@@ -133,7 +161,7 @@ const fmt = (b: BootstrapResult): string =>
 	`meanDiff ${b.meanDiff.toFixed(4)} CI [${b.ciLow.toFixed(4)}, ${b.ciHigh.toFixed(4)}] wins ${b.wins} ties ${b.ties} losses ${b.losses}`;
 
 const describeConfig = (label: string, c: RunConfig): string =>
-	`${label}: engine ${c.engine} protocol ${c.protocol} k ${c.k} gitCommit ${c.gitCommit}`;
+	`${label}: engine ${c.engine} protocol ${c.protocol} k ${c.k} mnemopiRecall ${c.mnemopiRecall} polyphonic ${c.polyphonic} gitCommit ${c.gitCommit}`;
 
 function uniqueQuestionIds(label: string, file: ResultFile): Set<string> {
 	const ids = new Set<string>();
@@ -170,6 +198,12 @@ async function diffCommand(argv: string[]): Promise<void> {
 		throw new Error(`protocol differs: ${a.config.protocol} vs ${b.config.protocol}`);
 	}
 	if (a.config.k !== b.config.k) throw new Error(`k differs: ${a.config.k} vs ${b.config.k}`);
+	// One engine under two options is a different system on each side; across engines the options are the comparison.
+	if (a.config.engine === b.config.engine) {
+		for (const key of ["mnemopiRecall", "polyphonic"] as const) {
+			if (a.config[key] !== b.config[key]) throw new Error(`${key} differs: ${a.config[key]} vs ${b.config[key]}`);
+		}
+	}
 	const idsA = uniqueQuestionIds("a", a);
 	const idsB = uniqueQuestionIds("b", b);
 	if (idsA.size !== idsB.size || [...idsA].some(id => !idsB.has(id))) {

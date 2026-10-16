@@ -3,6 +3,8 @@ import type { EvalCase, EvalQuestion } from "./types";
 
 export type EngineName = "mnemopi" | "mnemosyne" | "oracle" | "random";
 export type ProtocolName = "standard" | "fts-only" | "with-sleep" | "upstream-compat";
+/** `recall`: `BeamMemory.recall`. `enhanced`: `recallEnhanced` with facts, the call omp's auto-recall makes. */
+export type MnemopiRecall = "recall" | "enhanced";
 
 export interface RememberItem {
 	messageId: string;
@@ -13,7 +15,8 @@ export interface RememberItem {
 
 export interface RecallHit {
 	engineId: string;
-	tier: "working" | "episodic";
+	/** `fact`: a Mnemopi fact row (`--mnemopi-recall enhanced`); it maps to messages only by content. */
+	tier: "working" | "episodic" | "fact";
 	content: string;
 	summaryOf: string[];
 }

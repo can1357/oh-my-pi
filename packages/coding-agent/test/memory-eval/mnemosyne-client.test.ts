@@ -116,8 +116,11 @@ describe("mnemosyne client", () => {
 		await engine.dispose();
 	});
 
-	it("does not pass the parent's MNEMOSYNE_* variables to the engine process", async () => {
-		// Answers every request with the MNEMOSYNE_* variables of its own environment.
+	/** The MNEMOSYNE_* environment the engine process gets, read back through a stub that answers with its own. */
+	async function childEnv(
+		options: { polyphonic?: boolean },
+		protocol: "standard" | "fts-only",
+	): Promise<Record<string, string>> {
 		const script = await stub(
 			"env.py",
 			`import json, os, sys
@@ -127,19 +130,34 @@ for line in sys.stdin:
     print(json.dumps({"id": req["id"], "result": env}), flush=True)
 `,
 		);
-		const saved = process.env.MNEMOSYNE_VEC_WEIGHT;
-		process.env.MNEMOSYNE_VEC_WEIGHT = "0.9";
-		const engine = mnemosyneEngine({ python: "python3", script });
+		const engine = mnemosyneEngine({ python: "python3", script, ...options });
 		try {
-			await engine.warmup("standard");
-			const info = await engine.describe();
+			await engine.warmup(protocol);
+			return await engine.describe();
+		} finally {
+			await engine.dispose();
+		}
+	}
+
+	it("sets the engine process's MNEMOSYNE_* variables itself, never from the parent", async () => {
+		const saved = { vec: process.env.MNEMOSYNE_VEC_WEIGHT, poly: process.env.MNEMOSYNE_POLYPHONIC_RECALL };
+		process.env.MNEMOSYNE_VEC_WEIGHT = "0.9";
+		process.env.MNEMOSYNE_POLYPHONIC_RECALL = "1";
+		try {
+			const info = await childEnv({}, "standard");
 			expect(info.MNEMOSYNE_VEC_WEIGHT).toBeUndefined();
+			expect(info.MNEMOSYNE_POLYPHONIC_RECALL).toBeUndefined();
 			expect(info.MNEMOSYNE_LLM_ENABLED).toBe("false");
 			expect(info.MNEMOSYNE_EMBEDDING_MODEL).toBe("BAAI/bge-small-en-v1.5");
+			expect((await childEnv({ polyphonic: true }, "standard")).MNEMOSYNE_POLYPHONIC_RECALL).toBe("1");
 		} finally {
-			if (saved === undefined) delete process.env.MNEMOSYNE_VEC_WEIGHT;
-			else process.env.MNEMOSYNE_VEC_WEIGHT = saved;
-			await engine.dispose();
+			for (const [key, value] of [
+				["MNEMOSYNE_VEC_WEIGHT", saved.vec],
+				["MNEMOSYNE_POLYPHONIC_RECALL", saved.poly],
+			] as const) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
 		}
 	});
 
