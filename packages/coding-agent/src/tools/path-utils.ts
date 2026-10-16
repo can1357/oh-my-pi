@@ -833,6 +833,16 @@ export async function splitMixedUrlPathList(
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
 	if (!normalizedEntry.includes(";") || !isUrl(normalizedEntry)) return null;
+	// Structural and literal-part checks run before any locate or MCP discovery wait,
+	// so a non-list input such as `omp://?q=a;b` never blocks on an unrelated pending server.
+	const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, parseSearchPath, "semicolon", "none");
+	if (!parts || parts.length < 2) return null;
+	for (const part of parts) {
+		if (isUrl(part) || isReadableUrlPath(part)) continue;
+		const partPath = splitPathAndSel(part).path;
+		if (hasGlobPathChars(partPath) || (await probeLiteralPathExists(partPath, cwd)) !== "exists") return null;
+	}
+	if (hasAmbiguousInternalUrlTail(parts, isUrl)) return null;
 	if (isInternalUrlPath(normalizedEntry)) {
 		// Existing file-backed resources keep literal precedence over list recovery.
 		if (await internalUrlLocatesExisting(normalizedEntry, cwd, context)) return null;
@@ -846,14 +856,7 @@ export async function splitMixedUrlPathList(
 			return null;
 		}
 	}
-	const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, parseSearchPath, "semicolon", "none");
-	if (!parts || parts.length < 2) return null;
-	for (const part of parts) {
-		if (isUrl(part) || isReadableUrlPath(part)) continue;
-		const partPath = splitPathAndSel(part).path;
-		if (hasGlobPathChars(partPath) || (await probeLiteralPathExists(partPath, cwd)) !== "exists") return null;
-	}
-	return hasAmbiguousInternalUrlTail(parts, isUrl) ? null : parts;
+	return parts;
 }
 
 /** Expand delimited entries in-place while preserving unsplit entries. */
