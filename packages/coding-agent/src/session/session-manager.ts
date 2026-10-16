@@ -1014,11 +1014,23 @@ function messageProjectionInputsUnstampable(message: object): boolean {
  * {@link hasSerializerHook}). False when no descriptor exists anywhere on the
  * chain: the projector's read then yields `undefined`, which every gate it
  * feeds rejects before the value can reach a persisted line.
+ *
+ * A trap inside a proxy controls the descriptor call, so a throw reports the
+ * field hidden: the answer is only ever read to decide cacheability, so the
+ * conservative direction is to leave the line uncached. The alternative — an
+ * escape from the probe — fails a rewrite the projector itself completes, since
+ * `JSON.stringify` and `truncateForPersistence` consult descriptors only for
+ * keys `ownKeys` reported (see {@link projectorImageField}).
  */
 function projectorKeyHiddenFromStamp(node: object, key: string): boolean {
 	let current: object | null = node;
 	while (current !== null) {
-		const descriptor = Object.getOwnPropertyDescriptor(current, key);
+		let descriptor: PropertyDescriptor | undefined;
+		try {
+			descriptor = Object.getOwnPropertyDescriptor(current, key);
+		} catch {
+			return true;
+		}
 		if (descriptor !== undefined) {
 			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
 			return !descriptor.enumerable;
@@ -1033,12 +1045,19 @@ function projectorKeyHiddenFromStamp(node: object, key: string): boolean {
  * overridden or accessor `Symbol.iterator`. `JSON.stringify` and the stamp both
  * read slots up to a snapshotted length; the projector's `for..of` and `.some`
  * follow the iterator, so a non-default one yields a graph the stamp never
- * records. Answered through the descriptor, never by reading the slot.
+ * records. Answered through the descriptor, never by reading the slot, and a
+ * throwing trap reports non-default for the same reason
+ * {@link projectorKeyHiddenFromStamp} reports a field hidden.
  */
 function nonDefaultArrayIterator(array: unknown[]): boolean {
 	let current: object | null = array;
 	while (current !== null) {
-		const descriptor = Object.getOwnPropertyDescriptor(current, Symbol.iterator);
+		let descriptor: PropertyDescriptor | undefined;
+		try {
+			descriptor = Object.getOwnPropertyDescriptor(current, Symbol.iterator);
+		} catch {
+			return true;
+		}
 		if (descriptor !== undefined) {
 			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
 			return descriptor.value !== Array.prototype[Symbol.iterator];
@@ -1144,14 +1163,6 @@ function hasSerializerHook(
 	const pending: SerializerHookProbeNode[] = [{ value, key, isTopLevelToolResultDetails, atomic }];
 	for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
 		const { value, key, isTopLevelToolResultDetails, atomic } = node;
-		// `prepareEntryForPersistence` reads a handful of message-level fields
-		// by key and iterates two of them, none of which the own-key stamp below
-		// (or `JSON.stringify`) is guaranteed to describe: see
-		// {@link messageProjectionInputsUnstampable}. The walk root is the
-		// message the projector projects, and the only node without a key.
-		if (key === undefined && typeof value === "object" && value !== null && messageProjectionInputsUnstampable(value)) {
-			return true;
-		}
 		// A bigint is the one primitive `JSON.stringify` routes through a hook:
 		// when an extension installs `BigInt.prototype.toJSON`, serialization
 		// invokes it — so a stateful hook's first output cannot be stamped as a
@@ -1166,6 +1177,15 @@ function hasSerializerHook(
 		// is invisible to descriptor probing below, so conservatively leave any
 		// proxy-backed opaque node uncached.
 		if (util.types.isProxy(value)) return true;
+		// `prepareEntryForPersistence` reads a handful of message-level fields by
+		// key and iterates two of them, none of which the own-key stamp below
+		// (or `JSON.stringify`) is guaranteed to describe: see
+		// {@link messageProjectionInputsUnstampable}. The walk root is the
+		// message the projector projects and the only node without a key, so the
+		// check sits here — past the proxy short-circuit above, which already
+		// leaves any proxy-backed message uncached, and before a walk that would
+		// otherwise answer through descriptor calls a proxy trap controls.
+		if (key === undefined && messageProjectionInputsUnstampable(value)) return true;
 		if (hasToJSONHook(value)) return true;
 		// No hook on this node: a boxed primitive serializes as its unboxed value
 		// and a rawJSON node as its payload, neither of which can harbor a hook.
