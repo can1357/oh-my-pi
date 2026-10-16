@@ -131,6 +131,7 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 			opts = runtimeOptions(protocol);
 			beam = await scoped(async () => {
 				const config = {
+					// No eviction (production keeps the newest 1000 rows): both engines must hold the whole conversation.
 					workingMemoryLimit: 0,
 					polyphonicRecall: polyphonic,
 					...(protocol === "with-sleep" ? { workingMemoryTtlHours: 0 } : {}),
