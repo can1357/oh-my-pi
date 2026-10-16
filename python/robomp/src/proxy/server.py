@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from robomp.config import Settings
 from robomp.git_ops import (
@@ -350,7 +351,7 @@ def _remote_auth_for_url(url: str, expected_repo: str, token: str) -> _RemoteAut
     if scheme in ("http", "https"):
         normalized = _normalized_github_https_url(raw, expected_repo)
         return _RemoteAuth(url=normalized, token=token, auth_url=normalized)
-    return _RemoteAuth(url=raw, token=None, auth_url=None)
+    raise HTTPException(400, "remote url must be https://github.com/...")
 
 
 def _clone_remote_auth(clone_url: str, expected_repo: str, token: str) -> _RemoteAuth:
@@ -393,6 +394,12 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         yield
 
     app = FastAPI(title="robomp-gh-proxy", version="0.1.0", lifespan=lifespan)
+    if settings.trusted_hosts:
+        allowed_hosts = [h.strip() for h in settings.trusted_hosts.split(",") if h.strip()]
+        if allowed_hosts:
+            # DNS-rebinding defense-in-depth; unset by default so existing
+            # tests and token-less setups see zero behavior change.
+            app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
     def _request_target(request: Request) -> str:
         """Canonical signing target: `path` plus raw query string if any.

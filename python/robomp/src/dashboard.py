@@ -17,7 +17,8 @@ from typing import Any
 _TAIL_MAX_BYTES = 2 * 1024 * 1024
 
 # Sentinel literally embedded in the built `index.html`; replaced per-request
-# with a JSON config blob so the SPA can pick up the replay token.
+# with a JSON config blob carrying the auth posture (never the token itself —
+# `GET /` is unauthenticated, so the credential would be public).
 _CONFIG_SENTINEL = "__ROBOMP_CONFIG__"
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -112,23 +113,22 @@ def reset_index_cache() -> None:
     _load_index_template.cache_clear()
 
 
-def render_index(replay_token: str | None) -> str:
-    """Render the dashboard HTML with the server's replay token baked in.
+def render_index(replay_enabled: bool) -> str:
+    """Render the dashboard HTML with the auth posture, never the token.
 
-    The token lands inside a `<script type="application/json">` block that the
-    page parses at startup and attaches to every privileged fetch. The user
-    never sees or types it; the only credential to manage is the env var on
-    the server itself.
+    The blob only tells the SPA whether replay auth is on; the page is served
+    unauthenticated, so baking the credential here would disclose it to
+    anyone who can load the dashboard. The SPA obtains the token via
+    `GET /api/config`, which is gated by the same constant-time check.
     """
     config = {
-        "replayEnabled": bool(replay_token),
-        "replayToken": replay_token or "",
+        "replayEnabled": replay_enabled,
+        "replayToken": "",
     }
     # `</` would otherwise let an attacker-controlled token break out of the
     # script element; escape it the standard way.
     payload = json.dumps(config, separators=(",", ":")).replace("</", "<\\/")
     return _load_index_template().replace(_CONFIG_SENTINEL, payload)
-
 
 __all__ = [
     "DashboardBundleMissing",
