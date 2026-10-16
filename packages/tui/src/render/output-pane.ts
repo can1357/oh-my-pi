@@ -37,6 +37,14 @@ export interface OutputPaneFormatResult {
 	lines: readonly string[];
 	hiddenCount: number;
 	hasSixel: boolean;
+	/**
+	 * Aligned with `lines`: the rows that carry a SIXEL payload. Absent when no
+	 * row does, so payload-free streams never pay for the lookup, and left
+	 * absent by the visual caps, whose wrapped rows no longer map back to a
+	 * source row. A payload row must be emitted byte-for-byte by the caller:
+	 * the wrap stage would split its DCS string.
+	 */
+	sixelRows?: boolean[];
 }
 
 /**
@@ -76,23 +84,34 @@ export function formatOutputPaneLines(options: OutputPaneFormatOptions, theme: T
 	const limit = hasSixel && options.uncapSixel ? undefined : configuredLimit;
 	let visibleLines: readonly string[] = styledLines;
 	let hiddenCount = 0;
+	let sixelRows: boolean[] | undefined = hasSixel ? styledLines.map((_, i) => sixelMask?.[i] === true) : undefined;
 
 	if (limit !== undefined && Number.isFinite(limit)) {
 		const boundedLimit = Math.max(0, Math.floor(limit));
 		if (boundedLimit === 0) {
 			visibleLines = [];
+			sixelRows = undefined;
 			hiddenCount = styledLines.length;
 		} else if (options.visual && edge === "tail") {
+			// The wrapped output is capped below, so the payload survives whole in
+			// the visual window but its position among the surviving rows is no
+			// longer derivable here. The mask is only reported for the paths that
+			// preserve the row-for-row correspondence this caller needs.
 			const visual = truncateToVisualLines(styledLines.join("\n"), boundedLimit, Math.max(1, options.width ?? 1));
 			visibleLines = visual.visualLines;
+			sixelRows = undefined;
 			hiddenCount = visual.skippedCount;
 		} else if (options.visual) {
 			const rendered = new Text(styledLines.join("\n"), 0, 0).render(Math.max(1, options.width ?? 1));
 			visibleLines = rendered.slice(0, boundedLimit);
+			sixelRows = undefined;
 			hiddenCount = Math.max(0, rendered.length - visibleLines.length);
 		} else if (styledLines.length > boundedLimit) {
 			hiddenCount = styledLines.length - boundedLimit;
 			visibleLines = edge === "tail" ? styledLines.slice(-boundedLimit) : styledLines.slice(0, boundedLimit);
+			if (sixelRows) {
+				sixelRows = edge === "tail" ? sixelRows.slice(-boundedLimit) : sixelRows.slice(0, boundedLimit);
+			}
 		}
 	}
 
@@ -113,7 +132,7 @@ export function formatOutputPaneLines(options: OutputPaneFormatOptions, theme: T
 		if (hint) lines.push(hint);
 	}
 
-	return { lines, hiddenCount, hasSixel };
+	return { lines, hiddenCount, hasSixel, sixelRows };
 }
 
 /** Display policy for {@link describeOutputLines}. */
@@ -302,13 +321,40 @@ export class OutputPane implements Component {
 			},
 			this.#theme,
 		);
-		const content = `${this.#options.leadingBlank && formatted.lines.length > 0 ? "\n" : ""}${formatted.lines.join("\n")}`;
-		const key = `${width}:${content.length}:${Bun.hash(content).toString(36)}`;
-		if (key !== this.#renderKey) {
-			this.#renderKey = key;
-			this.#text.setText(content);
+		const sixelRows = formatted.sixelRows;
+		if (sixelRows === undefined || !sixelRows.some(Boolean)) {
+			const content = `${this.#options.leadingBlank && formatted.lines.length > 0 ? "\n" : ""}${formatted.lines.join("\n")}`;
+			const key = `${width}:${content.length}:${Bun.hash(content).toString(36)}`;
+			if (key !== this.#renderKey) {
+				this.#renderKey = key;
+				this.#text.setText(content);
+			}
+			return this.#text.render(width);
 		}
-		return this.#text.render(width);
+		// A payload row may not go through `Text`: `wrapTextWithAnsi` treats the
+		// DCS payload as printable text, so a frame wider than the pane is split
+		// across rows and padded with spaces — the terminal then receives sixel
+		// data containing newlines and blanks and the image is garbled or
+		// dropped. Emit it byte-for-byte and wrap only the rows around it.
+		const rows: string[] = [];
+		let run: string[] = this.#options.leadingBlank === true && formatted.lines.length > 0 ? [""] : [];
+		const flush = (): void => {
+			if (run.length === 0) return;
+			this.#text.setText(run.join("\n"));
+			rows.push(...this.#text.render(width));
+			run = [];
+		};
+		for (let index = 0; index < formatted.lines.length; index++) {
+			const line = formatted.lines[index]!;
+			if (sixelRows[index] === true) {
+				flush();
+				rows.push(line);
+				continue;
+			}
+			run.push(line);
+		}
+		flush();
+		return rows;
 	}
 
 	invalidate(): void {
