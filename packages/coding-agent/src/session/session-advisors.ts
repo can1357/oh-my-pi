@@ -1557,6 +1557,15 @@ export class SessionAdvisors {
 					const messages = advisorAgent.state.messages;
 					if (count < messages.length) {
 						messages.length = count;
+						// Truncating the array in place never reaches
+						// `Agent#emitHistoryReplaced`, so the session-scoped
+						// provider transform would keep the discarded batch's
+						// last entry pinned until the next request re-derives it
+						// — and on the non-retriable drop path, where the batch
+						// is abandoned outright, until the next primary update
+						// schedules a review. `appendOnlyContext` below drops
+						// its own log the same way, so release here too.
+						this.#onHistoryReplaced?.();
 					}
 					appendOnlyContext.resetSyncCursor();
 					advisorAgent.state.error = undefined;
