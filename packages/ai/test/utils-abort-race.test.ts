@@ -4,10 +4,14 @@
  *
  * Callers pass an abort `message` to get a fresh `AbortError`; the empty string
  * is a legitimate value. A truthiness check reads `""` as "no message" and leaks
- * the signal's own reason instead — losing the caller's abort text, and, since
- * `AbortController.abort()` with no argument sets a `DOMException` reason that
- * carries no `Flag.Abort`, silently downgrading the abort classification retry
- * logic depends on.
+ * the signal's own reason instead — losing the caller's abort text and, since
+ * `AbortController.abort()` installs a `DOMException` reason carrying no
+ * `Flag.Abort`, silently downgrading the abort classification that
+ * `oneshot-retry.ts` and the judgment retry paths route on.
+ *
+ * The regression hid from name-based checks: a `DOMException` from
+ * `AbortController.abort()` is also named `AbortError`, so only the class and the
+ * `Flag.Abort` classification catch it.
  */
 import { describe, expect, test } from "bun:test";
 import { raceSignal } from "@oh-my-pi/pi-ai/auth/abort";
@@ -19,8 +23,8 @@ const never = () => new Promise<never>(() => {});
 /** Whether an error carries the `Flag.Abort` classification. */
 const isAbortClassified = (error: unknown) => AIError.is(AIError.classify(error), AIError.Flag.Abort);
 
-describe("raceWithSignal abort message", () => {
-	test("carries a non-empty caller message on a fresh AbortError", async () => {
+describe("raceWithSignal caller abort message", () => {
+	test("carries a non-empty message on a fresh AbortError", async () => {
 		const controller = new AbortController();
 		const raced = raceWithSignal(never(), controller.signal, "usage fetch aborted");
 		controller.abort();
@@ -28,11 +32,10 @@ describe("raceWithSignal abort message", () => {
 		const error = await raced.catch((err: unknown) => err);
 		expect(error).toBeInstanceOf(AIError.AbortError);
 		expect((error as Error).message).toBe("usage fetch aborted");
-		expect((error as Error).name).toBe("AbortError");
 		expect(isAbortClassified(error)).toBe(true);
 	});
 
-	test("an empty-string message is a real message when the signal is already aborted", async () => {
+	test("an empty string is a message, not an absent one, when the signal is already aborted", async () => {
 		const controller = new AbortController();
 		controller.abort();
 		const raced = raceWithSignal(never(), controller.signal, "");
@@ -40,11 +43,10 @@ describe("raceWithSignal abort message", () => {
 		const error = await raced.catch((err: unknown) => err);
 		expect(error).toBeInstanceOf(AIError.AbortError);
 		expect((error as Error).message).toBe("");
-		expect((error as Error).name).toBe("AbortError");
 		expect(isAbortClassified(error)).toBe(true);
 	});
 
-	test("an empty-string message is a real message when the signal aborts later", async () => {
+	test("an empty string is a message, not an absent one, when the signal aborts later", async () => {
 		const controller = new AbortController();
 		const raced = raceWithSignal(never(), controller.signal, "");
 		controller.abort();
@@ -54,8 +56,10 @@ describe("raceWithSignal abort message", () => {
 		expect((error as Error).message).toBe("");
 		expect(isAbortClassified(error)).toBe(true);
 	});
+});
 
-	test("surfaces an explicit signal reason when no message is supplied", async () => {
+describe("raceWithSignal without a caller message", () => {
+	test("surfaces the signal's own reason verbatim when one is supplied", async () => {
 		const controller = new AbortController();
 		const reason = new AIError.AbortError("provider watchdog fired");
 		const raced = raceWithSignal(never(), controller.signal);
@@ -64,14 +68,13 @@ describe("raceWithSignal abort message", () => {
 		expect(await raced.catch((err: unknown) => err)).toBe(reason);
 	});
 
-	test("passes the signal's default reason through when no message is supplied", async () => {
+	test("passes a bare abort()'s DOMException reason through unchanged", async () => {
 		const controller = new AbortController();
 		controller.abort();
 		const raced = raceWithSignal(never(), controller.signal);
 
-		// `AbortController.abort()` with no argument sets a DOMException reason, and the
-		// message-less branch has always surfaced it verbatim — the legacy contract the
-		// empty-string fix must not disturb.
+		// A message-less race has always surfaced the signal's reason verbatim; the
+		// empty-string fix must not disturb that precedence.
 		expect(await raced.catch((err: unknown) => err)).toBe(controller.signal.reason);
 	});
 });
