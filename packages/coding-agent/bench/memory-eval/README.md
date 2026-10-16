@@ -60,6 +60,8 @@ Mnemosyne also returns derived rows (`memoria`, `memoria_source`, `associative`,
 
 Both engines run without working-memory eviction: Mnemopi with `workingMemoryLimit: 0` and Mnemosyne with `MNEMOSYNE_WM_MAX_ITEMS=100000`, more rows than any conversation has. This differs from Mnemopi's production default, which keeps the newest 1000 working rows (omp sets no override); BEAM 500K conversations have up to about 1,400 messages, so a default store would delete the oldest ones on ingest, and those hold the long-range gold this benchmark measures. Without eviction both engines rank over the same, complete input, so the numbers compare retrieval and not retention. Mnemosyne's own default, 10,000, would not evict on these datasets either; setting it keeps that from depending on the installed version.
 
+LongMemEval runs ask each engine for a ranking as deep as the case's corpus (`k` = 50 is only the deepest turn cutoff). The official `evaluate_retrieval_turn2session` reads past the session cutoff (5 or 10) until the ranking covers that many distinct sessions, and the official retrieval runner ranks the whole corpus, so a ranking cut at 50 turns would score some questions below their official value. A hit that maps to no message keeps its rank as a non-gold document in a session of its own; the question's `lme.corpusIds` lists these as `<unmapped N>_0`.
+
 Memory: Mnemosyne's baseline and peak resident set size come from the engine process's own `/proc/self/status` (`VmRSS` after imports, `VmHWM`; Linux only). Mnemopi and the sanity engines run in the harness process and report its RSS (`rssScope: "harness-process"`).
 
 ### Mnemopi embedder
