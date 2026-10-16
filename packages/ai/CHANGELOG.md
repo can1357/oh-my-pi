@@ -324,6 +324,7 @@
 - Fixed malformed image-generation inputs being forwarded to providers or reported as credential/upstream errors ([#15765](https://github.com/can1357/oh-my-pi/pull/15765) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - Fixed broker-backed auth-gateway processes retaining a cache entry for every distinct client session indefinitely under sustained traffic ([#15841](https://github.com/can1357/oh-my-pi/issues/15841)).
 - Fixed turns ending on a pinned error when a provider reports "temporarily unavailable" or finishes with an `unknown`, `other` or `unspecified` finish reason: these now retry automatically ([#15424](https://github.com/can1357/oh-my-pi/pull/15424) by [@lockwo](https://github.com/lockwo))
+- Fixed the Gemini over-planning guard missing a run of reasoning-summary titles when a title line is longer than the streamed-chunk buffer, so long Gemini header runs are detected and the tool-call reminder fires regardless of how the response is chunked ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.0] - 2026-10-14
 
@@ -347,10 +348,6 @@
 ### Changed
 
 - Stream hot paths do less work per chunk: the thinking-loop guard re-slices its rolling tail only when a scan runs instead of on every delta, and GitLab Duo workflow checkpoints skip re-hashing content that replayed unchanged.
-
-### Fixed
-
-- Fixed the Gemini over-planning guard missing a run of reasoning-summary titles when a title line is longer than the streamed-chunk buffer, so long Gemini header runs are detected and the tool-call reminder fires regardless of how the response is chunked ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.10.4] - 2026-10-13
 
