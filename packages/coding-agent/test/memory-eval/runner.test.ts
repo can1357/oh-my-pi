@@ -32,7 +32,7 @@ const caseOf = (messages: EvalMessage[], goldMessageIds: string[]): EvalCase => 
 	questions: [{ questionId: "q1", text: "q", category: "cat", goldMessageIds, goldSessionIds: [] }],
 });
 
-const twoMessageCase = caseOf([msg("m1", "alpha beta"), msg("m2", "Gamma   DELTA")], ["m2"]);
+const twoMessageCase = caseOf([msg("m1", "alpha beta"), msg("m2", "Gamma   DELTA, the second message")], ["m2"]);
 
 interface FakeOptions {
 	rowIds: (items: readonly RememberItem[]) => (string | null)[];
@@ -130,7 +130,7 @@ describe("runner", () => {
 			rowIds: items => items.map((_, i) => `r${i + 1}`),
 			hits: [
 				{ engineId: "e1", tier: "episodic", content: "summary", summaryOf: ["r1", "r2"] },
-				hit("unknown", "prefix: gamma delta, more text"),
+				hit("unknown", "prefix: gamma delta, the second message, and more text"),
 			],
 		});
 		const { questions } = await runCases(engine, [twoMessageCase], "standard", 10, tmp);
@@ -159,6 +159,17 @@ describe("runner", () => {
 	it("a hit that maps to nothing stays in the ranking", async () => {
 		const engine = fakeEngine({ rowIds: items => items.map((_, i) => `r${i}`), hits: [hit("zzz", "nothing alike")] });
 		const { questions } = await runCases(engine, [twoMessageCase], "standard", 10, tmp);
+		expect(questions[0].ranked[0].messageIds).toEqual([]);
+		expect(questions[0].metrics["recall@10"]).toBe(0);
+	});
+	it("the content fallback ignores messages shorter than 20 characters", async () => {
+		// "ok" is a whole message: any hit that says "ok" would otherwise count as recalling it.
+		const shortGold = caseOf([msg("m1", "ok"), msg("m2", "a message long enough to match on its prefix")], ["m1"]);
+		const engine = fakeEngine({
+			rowIds: items => items.map((_, i) => `r${i}`),
+			hits: [hit("zzz", "I think it is ok to proceed")],
+		});
+		const { questions } = await runCases(engine, [shortGold], "standard", 10, tmp);
 		expect(questions[0].ranked[0].messageIds).toEqual([]);
 		expect(questions[0].metrics["recall@10"]).toBe(0);
 	});
