@@ -846,6 +846,7 @@
 ### Fixed
 
 - Fixed an `EPIPE: broken pipe` unhandled rejection crashing the session when a debug adapter, eval kernel, IDA worker, or RPC server exits mid-write (seen on Windows) ([#14196](https://github.com/can1357/oh-my-pi/pull/14196) by [@andrebrait](https://github.com/andrebrait))
+- Added `model.toolCallLoopGuard.compactAfter` (off by default): once the tool-call loop guard's redirect is ignored, the session compacts and then stops the turn if the model still repeats the same tool call ([#13955](https://github.com/can1357/oh-my-pi/pull/13955) by [@STRML](https://github.com/STRML))
 
 ## [18.5.1] - 2026-10-03
 
