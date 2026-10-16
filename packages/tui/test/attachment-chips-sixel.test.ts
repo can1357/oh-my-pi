@@ -22,6 +22,7 @@ const TINY_PNG =
 const FAKE_SIXEL = "\x1bPq#0;2;0;0;0#0~\x1b\\";
 
 const ORIGINAL_PROTOCOL = TERMINAL.imageProtocol;
+const ORIGINAL_KONSOLE = Bun.env.KONSOLE_VERSION;
 let originalCell: CellDimensions;
 
 beforeAll(async () => {
@@ -32,10 +33,13 @@ beforeEach(() => {
 	originalCell = getCellDimensions();
 	setCellDimensions({ widthPx: 10, heightPx: 20 });
 	terminal.imageProtocol = ImageProtocol.Sixel;
+	Bun.env.KONSOLE_VERSION = "26.04.0";
 });
 
 afterEach(() => {
 	terminal.imageProtocol = ORIGINAL_PROTOCOL;
+	if (ORIGINAL_KONSOLE === undefined) delete Bun.env.KONSOLE_VERSION;
+	else Bun.env.KONSOLE_VERSION = ORIGINAL_KONSOLE;
 	setCellDimensions(originalCell);
 });
 
@@ -224,6 +228,147 @@ describe("AttachmentChipsBand SIXEL thumbnail", () => {
 			const moved = band.render(80);
 			expect(moved[5]).toContain(FAKE_SIXEL);
 			expect(moved[5]).toContain("a=d,d=c");
+		} finally {
+			encode.mockRestore();
+		}
+	});
+
+	it("withholds the SIXEL thumbnail where no Konsole identity confirms the SIXEL delete", () => {
+		delete Bun.env.KONSOLE_VERSION;
+		const encode = spyOn(natives, "encodeSixelAsync").mockImplementation(() => Promise.resolve(FAKE_SIXEL));
+		try {
+			const { editor, band } = makeBand();
+			stageImage(editor);
+			const rows = band.render(80);
+			expect(rows.join("\n")).not.toContain("\x1bPq");
+			expect(encode).not.toHaveBeenCalled();
+		} finally {
+			encode.mockRestore();
+		}
+	});
+
+	it("keeps the thumbnail when the rendered editor height is unchanged", async () => {
+		let encoding: Promise<string> | undefined;
+		const encode = spyOn(natives, "encodeSixelAsync").mockImplementation(() => {
+			encoding = Promise.resolve(FAKE_SIXEL);
+			return encoding;
+		});
+		try {
+			const { editor, band } = makeBand();
+			stageImage(editor);
+			band.render(80);
+			await encoding;
+			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
+			editor.setText(editor.getText().padEnd(76, " "));
+			const frame = band.render(80)[5];
+			expect(frame).toContain(FAKE_SIXEL);
+			expect(frame).not.toContain("a=d,d=c");
+		} finally {
+			encode.mockRestore();
+		}
+	});
+
+	it("retires the thumbnail when max-height clamp changes the rendered editor height", async () => {
+		let encoding: Promise<string> | undefined;
+		const encode = spyOn(natives, "encodeSixelAsync").mockImplementation(() => {
+			encoding = Promise.resolve(FAKE_SIXEL);
+			return encoding;
+		});
+		try {
+			const { editor, band } = makeBand();
+			// Default editor chrome is 2 rows (top border + content). maxHeight 4 leaves room for
+			// a second content row before the clamp; past that, Editor.render stays flat.
+			editor.setMaxHeight(4);
+			stageImage(editor);
+			band.render(80);
+			await encoding;
+			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
+			const before = editor.render(80).length;
+			editor.setText(`${editor.getText()}\nline2`);
+			expect(editor.render(80).length).toBeGreaterThan(before);
+			const moved = band.render(80);
+			expect(moved[5]).toContain(FAKE_SIXEL);
+			expect(moved[5]).toContain("a=d,d=c");
+			// Past the clamp, rendered height is stable: no further aimed delete.
+			const clamped = editor.render(80).length;
+			editor.setText(`${editor.getText()}\nline3\nline4\nline5`);
+			expect(editor.render(80).length).toBe(clamped);
+			const steady = band.render(80)[5];
+			expect(steady).toContain(FAKE_SIXEL);
+			expect(steady).not.toContain("a=d,d=c");
+		} finally {
+			encode.mockRestore();
+		}
+	});
+
+	it("retires the thumbnail when autocomplete rows grow the rendered editor", async () => {
+		let encoding: Promise<string> | undefined;
+		const encode = spyOn(natives, "encodeSixelAsync").mockImplementation(() => {
+			encoding = Promise.resolve(FAKE_SIXEL);
+			return encoding;
+		});
+		try {
+			const { editor, band } = makeBand();
+			const { promise: autocompleteUpdated, resolve: resolveAutocompleteUpdated } = Promise.withResolvers<void>();
+			editor.setAutocompleteProvider({
+				async getSuggestions() {
+					return {
+						items: [
+							{ label: "/help", value: "/help" },
+							{ label: "/model", value: "/model" },
+							{ label: "/theme", value: "/theme" },
+						],
+						prefix: "/",
+					};
+				},
+				applyCompletion(lines, cursorLine, cursorCol) {
+					return { lines, cursorLine, cursorCol };
+				},
+			});
+			editor.onAutocompleteUpdate = resolveAutocompleteUpdated;
+			stageImage(editor);
+			band.render(80);
+			await encoding;
+			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
+			const before = editor.render(80).length;
+			editor.handleInput("/");
+			await autocompleteUpdated;
+			expect(editor.isShowingAutocomplete()).toBe(true);
+			expect(editor.render(80).length).toBeGreaterThan(before);
+			const moved = band.render(80);
+			expect(moved[5]).toContain(FAKE_SIXEL);
+			expect(moved[5]).toContain("a=d,d=c");
+		} finally {
+			encode.mockRestore();
+		}
+	});
+
+	it("encodes through renderImage's shared SIXEL fit dimensions", async () => {
+		let encoding: Promise<string> | undefined;
+		const encode = spyOn(natives, "encodeSixelAsync").mockImplementation(() => {
+			encoding = Promise.resolve(FAKE_SIXEL);
+			return encoding;
+		});
+		try {
+			// Wide header-only PNG: probe yields 560x100. Shared fit is 108x36;
+			// the removed local sixelThumbFit produced 101x18 for the same source.
+			const wide = Buffer.alloc(33);
+			wide.write("\x89PNG\r\n\x1a\n", 0, "binary");
+			wide.writeUInt32BE(13, 8);
+			wide.write("IHDR", 12);
+			wide.writeUInt32BE(560, 16);
+			wide.writeUInt32BE(100, 20);
+			const { editor, band } = makeBand();
+			editor.pendingImages.push({
+				type: "image",
+				data: wide.toString("base64"),
+				mimeType: "image/png",
+			});
+			editor.insertAtom(chipLabel("image", 1), "[Image #1, 560x100]");
+			band.render(80);
+			await encoding;
+			expect(encode).toHaveBeenCalledWith(expect.any(Uint8Array), 108, 36);
+			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
 		} finally {
 			encode.mockRestore();
 		}

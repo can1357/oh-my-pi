@@ -55,22 +55,6 @@ const kSixelThumbs = new WeakMap<ImageContent, SixelThumb>();
 /** Blank 12x4 interior, the canvas a SIXEL thumbnail is drawn over. */
 const BLANK_INTERIOR: string[] = Array.from({ length: INNER_ROWS }, () => " ".repeat(INNER_COLS));
 
-/** Aspect-preserving SIXEL size for `dims` inside the 12x4 interior. The height rounds down to a
- *  whole 6-px band (as renderImage does) so no band pads past the reserved cell rows. */
-function sixelThumbFit(
-	dims: { width: number; height: number },
-	cell: { widthPx: number; heightPx: number },
-): { widthPx: number; heightPx: number; cols: number; rows: number } {
-	const maxWidthPx = INNER_COLS * cell.widthPx;
-	const maxHeightPx = INNER_ROWS * cell.heightPx;
-	const scale = Math.min(maxWidthPx / dims.width, maxHeightPx / dims.height);
-	const fittedWidthPx = dims.width * scale;
-	const fittedHeightPx = dims.height * scale;
-	const heightPx = Math.max(6, Math.floor(fittedHeightPx / 6) * 6);
-	const widthPx = Math.min(maxWidthPx, Math.max(1, Math.round((fittedWidthPx * heightPx) / fittedHeightPx)));
-	return { widthPx, heightPx, cols: Math.ceil(widthPx / cell.widthPx), rows: Math.ceil(heightPx / cell.heightPx) };
-}
-
 /**
  * The composer attachment band: one rounded card per staged attachment, rendered directly above
  * the prompt box. Image and video cards show a live thumbnail (Kitty Unicode placeholders, or a
@@ -259,34 +243,54 @@ export class AttachmentChipsBand implements Component {
 		return text;
 	}
 
-	/** SIXEL thumbnail of an image chip, encoded off the render pass once per fitted size. Returns
-	 *  `undefined` while the encode is pending or failed, when the budget suppresses the image, or
-	 *  under any other protocol: the caller keeps the icon. */
+	/** SIXEL thumbnail of an image chip. `renderImage` owns the fit (6-px band rounding, aspect scale) and
+	 *  calls back with the pixel size to encode, so chip thumbnails match every other SIXEL image. Encoded
+	 *  off-thread once per fitted size, never on a repaint. Returns `undefined` while the encode is pending
+	 *  or failed, when the budget suppresses the image, when no Konsole identity confirms the SIXEL delete
+	 *  that retires the raster (`a=d,d=c`), or under any other protocol: the caller keeps the icon. */
 	#sixelThumbnail(
 		image: ImageContent,
 		dims: { width: number; height: number },
 	): (SixelThumb & { sequence: string }) | undefined {
-		if (TERMINAL.imageProtocol !== ImageProtocol.Sixel) return undefined;
+		if (TERMINAL.imageProtocol !== ImageProtocol.Sixel || !Bun.env.KONSOLE_VERSION) return undefined;
 		const imageId = this.budget.acquireId(`chip:${image.mimeType}:${image.data.length}:${image.data.slice(0, 32)}`);
 		if (this.budget.observe(imageId)) return undefined;
-		const fit = sixelThumbFit(dims, getCellDimensions());
-		const key = `${fit.widthPx}x${fit.heightPx}`;
+		const slot: { thumb?: SixelThumb } = {};
+		renderImage(
+			image.data,
+			{ widthPx: dims.width, heightPx: dims.height },
+			{
+				maxWidthCells: INNER_COLS,
+				maxHeightCells: INNER_ROWS,
+				sixel: (widthPx, heightPx) => {
+					slot.thumb = this.#sixelEntry(image, widthPx, heightPx);
+					return slot.thumb.sequence;
+				},
+			},
+		);
+		const thumb = slot.thumb;
+		return typeof thumb?.sequence === "string" ? (thumb as SixelThumb & { sequence: string }) : undefined;
+	}
+
+	/** The cache entry for `image` at a fitted pixel size. A size change replaces the entry and starts its
+	 *  encode; `sequence` stays `undefined` until that encode settles. */
+	#sixelEntry(image: ImageContent, widthPx: number, heightPx: number): SixelThumb {
+		const key = `${widthPx}x${heightPx}`;
 		const entry = kSixelThumbs.get(image);
-		if (entry === undefined || entry.key !== key) {
-			const pending: SixelThumb = {
-				key,
-				sequence: undefined,
-				cols: fit.cols,
-				rows: fit.rows,
-			};
-			kSixelThumbs.set(image, pending);
-			encodeSixelAsync(new Uint8Array(Buffer.from(image.data, "base64")), fit.widthPx, fit.heightPx).then(
-				sequence => this.#settleSixel(image, pending, sequence),
-				() => this.#settleSixel(image, pending, null),
-			);
-			return undefined;
-		}
-		return typeof entry.sequence === "string" ? (entry as SixelThumb & { sequence: string }) : undefined;
+		if (entry !== undefined && entry.key === key) return entry;
+		const cell = getCellDimensions();
+		const pending: SixelThumb = {
+			key,
+			sequence: undefined,
+			cols: Math.ceil(widthPx / cell.widthPx),
+			rows: Math.ceil(heightPx / cell.heightPx),
+		};
+		kSixelThumbs.set(image, pending);
+		encodeSixelAsync(new Uint8Array(Buffer.from(image.data, "base64")), widthPx, heightPx).then(
+			sequence => this.#settleSixel(image, pending, sequence),
+			() => this.#settleSixel(image, pending, null),
+		);
+		return pending;
 	}
 
 	/** Store an off-thread encode result if it is still the image's current size, then repaint. */
