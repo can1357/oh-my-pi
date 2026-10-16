@@ -18,17 +18,21 @@ afterAll(async () => {
 interface FakeResult {
 	protocol?: string;
 	k?: number;
+	revision?: string;
 	/** Per question: id and the recall@10 value (null is what JSON makes of NaN). */
 	questions?: [string, number | null][];
 }
 
 /** Writes the part of a result file that `diff` reads. */
-async function writeResult(name: string, { protocol = "standard", k = 10, questions = [["q1", 1]] }: FakeResult) {
+async function writeResult(
+	name: string,
+	{ protocol = "standard", k = 10, revision = "rev", questions = [["q1", 1]] }: FakeResult,
+) {
 	const file = path.join(tmp, `${name}.json`);
 	await Bun.write(
 		file,
 		JSON.stringify({
-			config: { dataset: "beam-100k", engine: "oracle", protocol, k, gitCommit: "abc" },
+			config: { dataset: "beam-100k", datasetRevision: revision, engine: "oracle", protocol, k, gitCommit: "abc" },
 			questions: questions.map(([questionId, recall]) => ({
 				questionId,
 				category: "cat",
@@ -85,6 +89,14 @@ it("diff rejects results run with different k", async () => {
 	const { stderr, code } = await diff(a, b);
 	expect(code).toBe(1);
 	expect(stderr).toContain("k differs: 10 vs 50");
+});
+
+it("diff rejects results from different dataset revisions", async () => {
+	const a = await writeResult("rev-a", { revision: "r1" });
+	const b = await writeResult("rev-b", { revision: "r2" });
+	const { stderr, code } = await diff(a, b);
+	expect(code).toBe(1);
+	expect(stderr).toContain("datasetRevision differs: r1 vs r2");
 });
 
 it("diff rejects upstream-compat results", async () => {

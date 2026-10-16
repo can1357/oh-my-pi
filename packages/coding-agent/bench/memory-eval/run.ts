@@ -170,6 +170,9 @@ async function diffCommand(argv: string[]): Promise<void> {
 	if (a.config.dataset !== b.config.dataset) {
 		throw new Error(`dataset differs: ${a.config.dataset} vs ${b.config.dataset}`);
 	}
+	if (a.config.datasetRevision !== b.config.datasetRevision) {
+		throw new Error(`datasetRevision differs: ${a.config.datasetRevision} vs ${b.config.datasetRevision}`);
+	}
 	if (a.config.protocol !== b.config.protocol) {
 		throw new Error(`protocol differs: ${a.config.protocol} vs ${b.config.protocol}`);
 	}
