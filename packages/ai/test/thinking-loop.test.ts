@@ -1111,6 +1111,52 @@ describe("GeminiHeaderRunDetector", () => {
 		expect(detector.count).toBe(1);
 	});
 
+	test("counts a padded bold title once per line whether whole or split before its newline", () => {
+		// A bold title followed by a whitespace run longer than the partial-line
+		// cap: the `**` closer that makes the run a title is cut out of the
+		// retained tail along with the head, so the tail can no longer witness it.
+		// Failure mode: the title counts when the delta that completes the line
+		// also carries its newline, and is dropped as soon as the boundary falls
+		// before the newline — a model looping on padded bold titles is never
+		// interrupted and the user waits on a stream that never issues a tool call.
+		const title = (i: number) => `**Refining Stage ${i}**${" ".repeat(GEMINI_HEADER_PARTIAL_LINE_CAP + 8)}`;
+		// Each line completing inside one delta is judged whole (the pre-cap verdict).
+		const whole = new GeminiHeaderRunDetector();
+		for (let i = 0; i < GEMINI_HEADER_RUNAWAY_THRESHOLD; i++) whole.push(`${title(i)}\n`);
+		expect(whole.count).toBe(GEMINI_HEADER_RUNAWAY_THRESHOLD);
+		// The same titles with the boundary before the newline must agree.
+		const split = new GeminiHeaderRunDetector();
+		let tripped = false;
+		for (let i = 0; i < GEMINI_HEADER_RUNAWAY_THRESHOLD; i++) {
+			split.push(title(i));
+			tripped = split.push("\n") || tripped;
+		}
+		expect(split.count).toBe(GEMINI_HEADER_RUNAWAY_THRESHOLD);
+		expect(tripped).toBe(true);
+	});
+
+	test("never counts a marker-only bold run past the partial-line cap as a title", () => {
+		// `****` with nothing but whitespace around it is not a summary title: the
+		// whole-line verdict needs `.+` between the opener and the closer. Failure
+		// mode: the retained tail still ends on the marker, so the line is counted
+		// as a title only when the delta boundary falls before the newline — a
+		// phantom header that can drive a legitimate reasoning block over the
+		// runaway threshold and interrupt the stream with a spurious reminder.
+		const stray = (i: number) => `${" ".repeat(GEMINI_HEADER_PARTIAL_LINE_CAP + 8 + i)}****`;
+		// Each line completing inside one delta is judged whole: no title.
+		const whole = new GeminiHeaderRunDetector();
+		for (let i = 0; i < GEMINI_HEADER_RUNAWAY_THRESHOLD; i++) whole.push(`${stray(i)}\n`);
+		expect(whole.count).toBe(0);
+		// The same lines with the boundary before the newline must agree.
+		const split = new GeminiHeaderRunDetector();
+		let tripped = false;
+		for (let i = 0; i < GEMINI_HEADER_RUNAWAY_THRESHOLD; i++) {
+			tripped = split.push(stray(i)) || split.push("\n") || tripped;
+		}
+		expect(split.count).toBe(0);
+		expect(tripped).toBe(false);
+	});
+
 	test("trips on a runaway padded past the partial-line cap whatever the chunking", () => {
 		// 36 distinct titles each padded past the cap with whitespace: the retained
 		// tail is whitespace-only, so chunked feeds must still count every title

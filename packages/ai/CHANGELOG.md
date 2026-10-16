@@ -263,6 +263,7 @@
 - Fixed an OpenAI-compatible server's `finish_reason: "repetition"` or `stop_reason: "repetition_detected"` not being treated as a thinking loop, so the degenerate partial reasoning was kept and replayed into the next turn ([#12525](https://github.com/can1357/oh-my-pi/issues/12525), [#14535](https://github.com/can1357/oh-my-pi/pull/14535) by [@F0Rextasy](https://github.com/F0Rextasy))
 - Fixed the Gemini over-planning guard missing a run of reasoning-summary titles when a title line is longer than the streamed-chunk buffer, so long Gemini header runs are detected and the tool-call reminder fires regardless of how the response is chunked ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Reduced the work done while a response streamed, so long streaming replies no longer stutter as chunks arrive ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed the Gemini over-planning guard judging the same reasoning-summary title differently depending on where a streamed chunk boundary fell, so a bold title padded past its buffer is still detected and a bare bold marker no longer counts as a header ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.1] - 2026-10-15
 
