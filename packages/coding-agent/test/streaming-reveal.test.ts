@@ -370,6 +370,52 @@ describe("streaming reveal", () => {
 		expect(thinkingAt(latestMessage(component), 0)).toBe(full);
 	});
 
+	it("shows the committed whole reasoning after switching off smooth streaming", async () => {
+		// Smooth reveal part-way through a thinking block, then hide it (arming a
+		// partial "hidden block spend"), then switch streaming to non-smooth. The
+		// non-smooth setTarget finalizes the leading segment whole, so it must
+		// retire that saved spend with it. Leaving it armed makes the next show
+		// pass replay the STALE partial prefix (Math.min(spent, units)) over the
+		// committed whole block: the finalized reasoning regresses to the old
+		// partial and retypes, permanently omitting the remaining reasoning the
+		// user should have seen finish (#15336).
+		const thinking = "reasoning through the problem ".repeat(12);
+		const full = formatThinkingForDisplay(thinking, true);
+		let hideThinking = false;
+		let smooth = true;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => smooth,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+		const partial = thinkingAt(latestMessage(component), 0);
+		expect(partial.length).toBeGreaterThan(0);
+		expect(partial.length).toBeLessThan(full.length);
+
+		// Hide the block mid-reveal: a partial latent is armed for a later show.
+		hideThinking = true;
+		controller.resyncVisibility();
+
+		// Switch to non-smooth streaming: the next setTarget commits the leading
+		// segment whole and must spend the saved partial with it.
+		smooth = false;
+		controller.setTarget(makeMessage([{ type: "thinking", thinking }]), false);
+
+		// Show it again: the committed whole reasoning, never the stale partial.
+		hideThinking = false;
+		controller.resyncVisibility();
+		expect(thinkingAt(latestMessage(component), 0)).toBe(full);
+		// The reveal is done in non-smooth mode, so no timer may re-arm and retype.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+		expect(thinkingAt(latestMessage(component), 0)).toBe(full);
+	});
+
 	it("keeps a fully revealed thinking block whole when prose-only expands its fence", async () => {
 		// Prose-only mode elides a fenced-code prefix down to a trailing ellipsis.
 		// Turning it off expands that prefix back to the full fence, so a block
