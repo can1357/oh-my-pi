@@ -161,6 +161,22 @@ describe("SessionInfoOverlay", () => {
 		expect(onClose).toHaveBeenCalledTimes(2);
 	});
 
+	it("copies the session ID on c and confirms it in the footer", () => {
+		const onCopyId = vi.fn();
+		const overlay = new SessionInfoOverlay({ terminal: { rows: 12 } }, "ID: 01a13bf7", () => {}, undefined, onCopyId);
+		const footer = (): string =>
+			overlay
+				.render(60)
+				.map(line => line.replace(/\x1b\[[0-9;]*m/g, ""))
+				.join("\n");
+
+		expect(footer()).toContain("copy ID");
+		overlay.handleInput("c");
+		expect(onCopyId).toHaveBeenCalledTimes(1);
+		overlay.markCopied();
+		expect(footer()).toContain("✓ copied ID");
+	});
+
 	it("owns Escape through TUI focus and restores the editor without forwarding it", () => {
 		const terminal = new MinimalTerminal();
 		const tui = new TUI(terminal);

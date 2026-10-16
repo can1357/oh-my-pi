@@ -355,6 +355,25 @@ describe("SessionInfoOverlay.describe", () => {
 		overlay.handleNativeEvent({ type: "action", key: "actions/close", act: "close", mods: [] });
 		expect(closed).toBe(1);
 	});
+
+	it("copies the ID from the Copy ID button and confirms it in the action bar", () => {
+		let copies = 0;
+		const overlay = new SessionInfoOverlay(
+			{ terminal: { rows: 20 } },
+			fullReport(),
+			() => {},
+			undefined,
+			() => copies++,
+		);
+		const buttons = (): unknown[] =>
+			findAll(overlay.describe(cx), n => n.p?.actions?.click === "copy-id").map(n => n.p?.title);
+		expect(buttons()).toHaveLength(1);
+		overlay.handleNativeEvent({ type: "action", key: "actions/copy-id", act: "copy-id", mods: [] });
+		expect(copies).toBe(1);
+		overlay.markCopied();
+		expect(JSON.stringify(buttons())).toContain("Copy ID again");
+		expect(findAll(overlay.describe(cx), n => n.p?.role === "omp.info.copied")).toHaveLength(1);
+	});
 });
 
 describe("createUsageRowBlock describe", () => {

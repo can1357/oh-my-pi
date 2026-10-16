@@ -2,7 +2,7 @@ import { type Component, Ellipsis, matchesKey, ScrollView, Text, truncateToWidth
 import { theme } from "../theme/theme";
 import { matchesSelectCancel } from "../keybinding-matchers";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
-import { formatKeyHints } from "../app-keybindings";
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { editorKey } from "../chrome/keybinding-hints";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatNumber } from "@oh-my-pi/pi-utils";
@@ -124,6 +124,8 @@ export class SessionInfoOverlay implements Component {
 	} as const;
 	readonly #host: SessionInfoOverlayHost;
 	readonly #onClose: () => void;
+	readonly #onCopyId: (() => void) | undefined;
+	#copied = false;
 	readonly #context: ContextUsage | undefined;
 	readonly #panel: OverlayPanel;
 	readonly #info: Text;
@@ -135,10 +137,20 @@ export class SessionInfoOverlay implements Component {
 	#lastInfoLines: readonly string[] | undefined;
 	#lastHeight: number | undefined;
 
-	/** `context` adds a context-window meter to the native sheet. */
-	constructor(host: SessionInfoOverlayHost, info: string, onClose: () => void, context?: ContextUsage) {
+	/**
+	 * `context` adds a context-window meter to the native sheet. `onCopyId`
+	 * enables `c` (and a Copy ID button) to copy the session ID.
+	 */
+	constructor(
+		host: SessionInfoOverlayHost,
+		info: string,
+		onClose: () => void,
+		context?: ContextUsage,
+		onCopyId?: () => void,
+	) {
 		this.#host = host;
 		this.#onClose = onClose;
+		this.#onCopyId = onCopyId;
 		this.#context = context;
 		this.#infoSource = info;
 		this.#info = new Text(info, 0, 0);
@@ -164,7 +176,17 @@ export class SessionInfoOverlay implements Component {
 			this.#onClose();
 			return;
 		}
+		if (this.#onCopyId && matchesKey(data, "c")) {
+			this.#onCopyId();
+			return;
+		}
 		this.#scrollView.handleScrollKey(data);
+	}
+
+	/** Confirms a successful copy in the footer and the native action bar. */
+	markCopied(): void {
+		this.#copied = true;
+		this.#nativeNode = undefined;
 	}
 
 	invalidate(): void {
@@ -272,7 +294,12 @@ export class SessionInfoOverlay implements Component {
 			);
 		}
 		flushStats();
-		body.push(actionBar([null, actionButton("Close", "close", { keys: "escape" })]));
+		const copy: NativeNode[] = [];
+		if (this.#onCopyId) {
+			copy.push(actionButton(this.#copied ? "Copy ID again" : "Copy ID", "copy-id", { keys: "c" }));
+			if (this.#copied) copy.push(text([span("✓ Copied", "success")], { role: "omp.info.copied" }));
+		}
+		body.push(actionBar([...copy, null, actionButton("Close", "close", { keys: "escape" })]));
 		const described = col(body, { gap: "md" });
 		this.#nativeNode = { meter, node: described };
 		return described;
@@ -371,14 +398,21 @@ export class SessionInfoOverlay implements Component {
 		);
 	}
 
-	/** The Close button runs Esc's path. */
+	/** The Close button runs Esc's path; Copy ID runs `c`'s. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action" && event.act === "close") this.#onClose();
+		if (event.type !== "action") return;
+		if (event.act === "close") this.#onClose();
+		else if (event.act === "copy-id") this.#onCopyId?.();
 	}
 
 	render(width: number): readonly string[] {
 		const innerWidth = Math.max(1, width - 4);
-		const footerHint = `${formatKeyHints(["up", "down"])} scroll · ${editorKey("tui.select.cancel")} close`;
+		const copyHint = !this.#onCopyId
+			? ""
+			: this.#copied
+				? ` · ${theme.fg("success", "✓ copied ID")}`
+				: ` · ${formatKeyHint("c")} copy ID`;
+		const footerHint = `${formatKeyHints(["up", "down"])} scroll · ${editorKey("tui.select.cancel")} close${copyHint}`;
 		this.#footer.setLines([theme.fg("dim", truncateToWidth(footerHint, innerWidth))]);
 
 		const maxBodyHeight = Math.max(1, this.#host.terminal.rows - PANEL_CHROME_ROWS);

@@ -31,7 +31,7 @@ function createRuntimeHarness(messages: AgentMessage[], viewMessages: AgentMessa
 		showCopySelector,
 		runtime: {
 			ctx: {
-				session: { messages },
+				session: { messages, sessionId: "01a13bf7-03e2-759d-aab2-291330c2185c" },
 				viewSession: { messages: viewMessages },
 				editor: { setText },
 				showStatus,
@@ -124,6 +124,18 @@ describe("/copy slash command", () => {
 
 		expect(copySpy).toHaveBeenCalledWith(localRoot);
 		expect(fs.statSync(localRoot).isDirectory()).toBe(true);
+		expect(harness.showCopySelector).not.toHaveBeenCalled();
+		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+
+	it("copies the session ID with /copy id", async () => {
+		const copySpy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const harness = createRuntimeHarness([assistantText("answer")]);
+
+		expect(await executeBuiltinSlashCommand("/copy id", harness.runtime)).toBe(true);
+
+		expect(copySpy).toHaveBeenCalledWith("01a13bf7-03e2-759d-aab2-291330c2185c");
+		expect(harness.showStatus).toHaveBeenCalledWith("Copied session ID to clipboard");
 		expect(harness.showCopySelector).not.toHaveBeenCalled();
 		expect(harness.setText).toHaveBeenCalledWith("");
 	});

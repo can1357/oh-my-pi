@@ -6,6 +6,8 @@
 
 - Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
 
+- `SessionInfoOverlay` takes an optional copy handler: `c` and the native sheet's Copy ID button run it, and `markCopied()` confirms the copy in the footer and the action bar ([#19777](https://github.com/can1357/oh-my-pi/pull/19777) by [@farnoy](https://github.com/farnoy))
+
 ### Fixed
 
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))

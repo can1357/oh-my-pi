@@ -576,6 +576,14 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		name: "copy",
 		icon: "copy",
 		description: "Pick text or code from the conversation to copy",
+		subcommands: [
+			{ name: "code", description: "Copy the last code block" },
+			{ name: "cmd", description: "Copy the last bash command or eval code" },
+			{ name: "link", description: "Copy the last link" },
+			{ name: "local", description: "Copy the session's local:// directory" },
+			{ name: "id", description: "Copy the session ID" },
+		],
+		subcommandOptional: true,
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const arg = command.args.trim().toLowerCase();
@@ -629,7 +637,13 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				clearSubmittedText(runtime);
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /copy [code|cmd|link|local]");
+			if (arg === "id") {
+				await copyToClipboard(runtime.ctx.session.sessionId);
+				runtime.ctx.showStatus("Copied session ID to clipboard");
+				clearSubmittedText(runtime);
+				return;
+			}
+			runtime.ctx.showStatus("Usage: /copy [code|cmd|link|local|id]");
 			clearSubmittedText(runtime);
 		},
 	},
