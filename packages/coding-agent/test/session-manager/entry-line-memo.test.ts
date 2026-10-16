@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, type Mock } from "bun:test";
 import * as path from "node:path";
 import * as vm from "node:vm";
+import type { AssistantMessage, OpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai";
 import { TempDir, __resetDirsFromEnvForTests, getBlobsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { parseBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -1313,6 +1314,7 @@ describe("SessionManager entry-line memo", () => {
 		const backing: Record<string, unknown> = { type: "image", mimeType: "image/png" };
 		const block = Object.create(backing);
 		block.data = LARGE_BASE64;
+		block.detail = "auto";
 		const session = SessionManager.create(process.cwd(), sessionDir, storage);
 		session.appendMessage({
 			role: "user" as const,
@@ -1330,6 +1332,7 @@ describe("SessionManager entry-line memo", () => {
 		const originalRef = refsAfterFirst[0];
 		if (!originalRef) throw new Error("Expected blob reference");
 		expect(await blobBytesBase64(originalRef)).toBe(LARGE_BASE64);
+		expect(bodyAfterFirst).toContain('"detail":"auto"');
 		expect(bodyAfterFirst).not.toContain(LARGE_BASE64);
 
 		// Flip both inherited classifiers: no own key moves, so an own-key stamp
@@ -1506,5 +1509,66 @@ describe("SessionManager entry-line memo", () => {
 		expect(body).toContain('"details":{}');
 		expect(body).toContain('"toolName":"bash"');
 		expect(body).toContain('"role":"toolResult"');
+	});
+
+	it("persists a session whose providerPayload is a proxy with a throwing descriptor trap without latching a persistence failure", async () => {
+		// The message-level projection-input check reaches `providerPayload`
+		// and answers through `Object.getOwnPropertyDescriptor`, which the same
+		// proxy trap controls. The projector itself never touches a descriptor
+		// of that payload (`ownKeys` reports nothing, so both `for..in` and
+		// `JSON.stringify` skip it), so a probe that lets the trap throw fails a
+		// rewrite the projection completes — the read has to answer "unstampable"
+		// and leave the line uncached instead.
+		const payload = new Proxy({} as OpenAIResponsesHistoryPayload, {
+			ownKeys: () => [],
+			getOwnPropertyDescriptor(): PropertyDescriptor | undefined {
+				throw new Error("boom-fix15222-payload-trap");
+			},
+		});
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content: [{ type: "thinking" as const, thinking: "reason" }],
+			providerPayload: payload,
+		});
+
+		// The rewrite succeeds: the payload contributes `{}` and the turn is
+		// persisted in full, with no latched failure.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"providerPayload":{}');
+		expect(body).toContain('"role":"assistant"');
+		expect(body).toContain('"thinking":"reason"');
+	});
+
+	it("persists a session whose content is a proxy with a throwing descriptor trap without latching a persistence failure", async () => {
+		// The same message-level check iterates `content` to compare its
+		// iterator against the array default, so the throwing trap reaches it
+		// through that array instead of a payload field. `Array.isArray` holds
+		// for a proxy of an array and `JSON.stringify` skips the hidden keys, so
+		// the projection completes — the iterator comparison has to report
+		// "non-default" and leave the line uncached rather than throw.
+		const content = new Proxy([] as AssistantMessage["content"], {
+			ownKeys: () => [],
+			getOwnPropertyDescriptor(): PropertyDescriptor | undefined {
+				throw new Error("boom-fix15222-content-trap");
+			},
+		});
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content,
+		});
+
+		// The rewrite succeeds: the hidden blocks contribute `[]` and the turn
+		// is persisted in full, with no latched failure.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"content":[]');
+		expect(body).toContain('"role":"assistant"');
 	});
 });
