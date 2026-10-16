@@ -1,7 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { type IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
+import { IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
 import { setProcessName, TempDir } from "@oh-my-pi/pi-utils";
 import { type DaemonBrokerStartOptions, startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import { createDaemonBrokerClient, type DaemonBrokerClient } from "../../src/launch/client";
@@ -79,7 +79,6 @@ interface ProtocolServerFixture {
 	client: DaemonBrokerClient;
 	requests: DaemonWireRequest[];
 	currentSocket(): IpcConnection;
-	currentSocketClosed(): Promise<void>;
 	rejectNextRequest(reason: string): void;
 }
 
@@ -93,13 +92,10 @@ async function withProtocolServer(body: (fixture: ProtocolServerFixture) => Prom
 	const sockets = new Set<IpcConnection>();
 	const requests: DaemonWireRequest[] = [];
 	let currentSocket: IpcConnection | undefined;
-	let currentSocketClosed: Promise<void> | undefined;
 	let nextError: string | undefined;
 	const server = await IpcServer.listen(daemonBrokerEndpoint(runtimeDir), { framing: "lines" }, socket => {
 		currentSocket = socket;
 		sockets.add(socket);
-		const closed = Promise.withResolvers<void>();
-		currentSocketClosed = closed.promise;
 		socket.start(
 			line => {
 				const request = parseDaemonWireRequest(JSON.parse(line));
@@ -116,7 +112,6 @@ async function withProtocolServer(body: (fixture: ProtocolServerFixture) => Prom
 			},
 			() => {
 				sockets.delete(socket);
-				closed.resolve();
 			},
 		);
 	});
@@ -127,10 +122,6 @@ async function withProtocolServer(body: (fixture: ProtocolServerFixture) => Prom
 			currentSocket: () => {
 				if (!currentSocket) throw new Error("Diagnostic protocol client has not connected");
 				return currentSocket;
-			},
-			currentSocketClosed: () => {
-				if (!currentSocketClosed) throw new Error("Diagnostic protocol client has not connected");
-				return currentSocketClosed;
 			},
 			rejectNextRequest: reason => {
 				nextError = reason;
@@ -296,23 +287,44 @@ describe("diagnostic observation coverage gaps", () => {
 
 	it("does not report coverage gaps after unsubscribe or intentional client closure", async () => {
 		for (const unsubscribeFirst of [false, true]) {
-			await withProtocolServer(async ({ client, currentSocketClosed }) => {
-				const gaps: string[] = [];
-				const unsubscribe = client.observeOwners(
-					["child-owner"],
-					() => undefined,
-					reason => gaps.push(reason),
-				);
-				await client.request({ op: "ping" });
-				if (unsubscribeFirst) {
-					unsubscribe();
-					await client.request({ op: "ping" });
-				}
-				const closed = currentSocketClosed();
-				client.close();
-				await closed;
-				expect(gaps).toEqual([]);
+			const clientClosed = Promise.withResolvers<void>();
+			const realConnect = IpcConnection.connect;
+			const restoreStarts: Array<() => void> = [];
+			const connect = spyOn(IpcConnection, "connect").mockImplementation(async (endpoint, options) => {
+				const socket = await realConnect(endpoint, options);
+				const realStart = socket.start;
+				const start = spyOn(socket, "start").mockImplementation((onLine, onClose) => {
+					realStart.call(socket, onLine, reason => {
+						// Native client/server close callbacks are unordered. Signal only
+						// after the actual client's close handler has finished.
+						onClose(reason);
+						clientClosed.resolve();
+					});
+				});
+				restoreStarts.push(() => start.mockRestore());
+				return socket;
 			});
+			try {
+				await withProtocolServer(async ({ client }) => {
+					const gaps: string[] = [];
+					const unsubscribe = client.observeOwners(
+						["child-owner"],
+						() => undefined,
+						reason => gaps.push(reason),
+					);
+					await client.request({ op: "ping" });
+					if (unsubscribeFirst) {
+						unsubscribe();
+						await client.request({ op: "ping" });
+					}
+					client.close();
+					await clientClosed.promise;
+					expect(gaps).toEqual([]);
+				});
+			} finally {
+				connect.mockRestore();
+				for (const restore of restoreStarts) restore();
+			}
 		}
 	}, 10_000);
 });
