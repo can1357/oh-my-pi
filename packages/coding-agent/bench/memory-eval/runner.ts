@@ -163,7 +163,8 @@ export async function runCases(
 	const questions: QuestionResult[] = [];
 	let storeBytesTotal = 0;
 	for (const [caseIndex, evalCase] of cases.entries()) {
-		const storeDir = path.join(storeRoot, evalCase.caseId.replace(/[^A-Za-z0-9._-]/g, "_"));
+		// The index, never the dataset's case id: an id such as `..` would put the store, and its deletion, outside storeRoot.
+		const storeDir = path.join(storeRoot, String(caseIndex));
 		await fs.mkdir(storeDir, { recursive: true });
 		await engine.open(evalCase, { storeDir, protocol });
 
