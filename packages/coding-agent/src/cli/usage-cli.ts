@@ -33,6 +33,15 @@ import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+import { reportMatchesStatus } from "../session/claude-auto-reset";
+import { resetAccountLockKey } from "../session/codex-auto-reset";
+import {
+	classifyResetExpiry,
+	type ResetExpiryWarning,
+	type ResetSpendVerdict,
+	resetSpendVerdict,
+} from "../session/reset-expiry";
+import { checkCodexBalance, type ResetMarker, resetLockPath, withResetFence } from "../session/reset-fence";
 import {
 	collapseSharedUsageReports,
 	formatLimitTitle,
@@ -41,7 +50,18 @@ import {
 	usageResetExpiry,
 	usageWindowSuffix,
 } from "@oh-my-pi/pi-tui/overlays/usage-display";
-import { formatCodexUsageReportLabel } from "../slash-commands/helpers/active-oauth-account";
+import { formatCodexUsageReportLabel, usageReportIdentity } from "../slash-commands/helpers/active-oauth-account";
+import { errorMessage } from "../slash-commands/helpers/parse";
+import {
+	describeRedeemOutcome,
+	formatResetProviderName,
+	formatResetUsageAccountLine,
+	normalizeResetProvider,
+	oneLine,
+	parseResetUsageTarget,
+	resolveResetUsageTarget,
+	toResetUsageAccount,
+} from "../slash-commands/helpers/reset-usage";
 import {
 	accountIdentityLabel,
 	collectStoredAccounts,
@@ -364,13 +384,22 @@ function formatAccountHeader(
 		if (resets.redeemableCount !== resets.bankedCount) {
 			header += chalk.dim(` · ${resets.redeemableCount} usable now`);
 		}
-		const expiry = usageResetExpiry(resets, nowMs);
-		if (expiry) {
-			header += chalk.dim(
-				expiry.remainingMs > 0
-					? ` · soonest expires in ${formatDuration(expiry.remainingMs)} (${expiry.date})`
-					: ` · expired (${expiry.date})`,
-			);
+		const expiring = classifyResetExpiry(report, nowMs);
+		if (expiring) {
+			const text = ` · ▲ ${formatExpiringResets(expiring, nowMs)}`;
+			header +=
+				expiring.tier === "imminent"
+					? chalk.red(text)
+					: chalk.yellow(`${text} (${new Date(expiring.expiresAtMs).toISOString().slice(0, 10)})`);
+		} else {
+			const expiry = usageResetExpiry(resets, nowMs);
+			if (expiry) {
+				header += chalk.dim(
+					expiry.remainingMs > 0
+						? ` · soonest expires in ${formatDuration(expiry.remainingMs)} (${expiry.date})`
+						: ` · expired (${expiry.date})`,
+				);
+			}
 		}
 		if (resets.redeemableCount === 0 && resets.unavailableReason) {
 			const reason = sanitizeText(resets.unavailableReason.replace(/[\r\n\t]+/g, " "));
