@@ -2,90 +2,90 @@
  * Contract tests for `raceWithSignal` (published as `raceSignal` from
  * `@oh-my-pi/pi-ai/auth/abort`).
  *
- * Callers pass an abort `message` to get a fresh `AbortError`; the empty string
- * is a legitimate value. A truthiness check reads `""` as "no message" and leaks
- * the signal's own reason instead — losing the caller's abort text and, since
- * `AbortController.abort()` installs a `DOMException` reason carrying no
- * `Flag.Abort`, silently downgrading the abort classification that
- * `oneshot-retry.ts` and the judgment retry paths route on.
+ * A caller-supplied `message` — including `""` — becomes the text of a fresh
+ * `AbortError`; only an omitted message surfaces the signal's own reason. Reading
+ * the message with a truthiness check instead of `!== undefined` leaks the
+ * signal's reason whenever the caller passes `""`, which loses the caller's abort
+ * text and, because `AbortController.abort()` with no argument sets a
+ * `DOMException` reason carrying no `Flag.Abort`, silently downgrades the
+ * classification that retry routing (`classify` + `Flag.Abort`) depends on — a
+ * cancelled stream then looks transient and gets retried.
  *
- * The regression hid from name-based checks: a `DOMException` from
- * `AbortController.abort()` is also named `AbortError`, so only the class and the
- * `Flag.Abort` classification catch it.
+ * `raceWithSignal` builds its rejection at two independent sites (the
+ * `signal.aborted` early reject and the `onAbort` listener), so each message case
+ * runs through both.
  */
 import { describe, expect, test } from "bun:test";
-import { raceSignal } from "@oh-my-pi/pi-ai/auth/abort";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { raceSignal } from "@oh-my-pi/pi-ai/auth/abort";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
 
-const never = () => new Promise<never>(() => {});
+/** Each row races a promise that never settles, aborted through one rejection site. */
+const sites: Array<[string, (message?: string, reason?: unknown) => Promise<unknown>]> = [
+	[
+		"signal already aborted",
+		(message, reason) => {
+			const controller = new AbortController();
+			controller.abort(reason);
+			return raceWithSignal(new Promise<never>(() => {}), controller.signal, message).catch((err: unknown) => err);
+		},
+	],
+	[
+		"signal aborts mid-race",
+		(message, reason) => {
+			const controller = new AbortController();
+			const raced = raceWithSignal(new Promise<never>(() => {}), controller.signal, message);
+			controller.abort(reason);
+			return raced.catch((err: unknown) => err);
+		},
+	],
+];
 
-/** Whether an error carries the `Flag.Abort` classification. */
-const isAbortClassified = (error: unknown) => AIError.is(AIError.classify(error), AIError.Flag.Abort);
-
-describe("raceWithSignal caller abort message", () => {
-	test("carries a non-empty message on a fresh AbortError", async () => {
-		const controller = new AbortController();
-		const raced = raceWithSignal(never(), controller.signal, "usage fetch aborted");
-		controller.abort();
-
-		const error = await raced.catch((err: unknown) => err);
+describe.each(sites)("raceWithSignal abort classification (%s)", (_site, rejectFrom) => {
+	test("carries a non-empty caller message on a fresh AbortError", async () => {
+		const error = await rejectFrom("usage fetch aborted");
 		expect(error).toBeInstanceOf(AIError.AbortError);
 		expect((error as Error).message).toBe("usage fetch aborted");
-		expect(isAbortClassified(error)).toBe(true);
+		expect(AIError.is(AIError.classify(error), AIError.Flag.Abort)).toBe(true);
 	});
 
-	test("an empty string is a message, not an absent one, when the signal is already aborted", async () => {
-		const controller = new AbortController();
-		controller.abort();
-		const raced = raceWithSignal(never(), controller.signal, "");
-
-		const error = await raced.catch((err: unknown) => err);
+	test("treats an empty-string message as a caller-supplied message, not an absent one", async () => {
+		// `""` means "cancelled, no text". Falling through to the signal's reason
+		// returns a `DOMException`, which carries no `Flag.Abort`, so retry routing
+		// re-submits a request the caller already cancelled.
+		const error = await rejectFrom("");
 		expect(error).toBeInstanceOf(AIError.AbortError);
 		expect((error as Error).message).toBe("");
-		expect(isAbortClassified(error)).toBe(true);
+		expect(AIError.is(AIError.classify(error), AIError.Flag.Abort)).toBe(true);
 	});
 
-	test("an empty string is a message, not an absent one, when the signal aborts later", async () => {
-		const controller = new AbortController();
-		const raced = raceWithSignal(never(), controller.signal, "");
-		controller.abort();
-
-		const error = await raced.catch((err: unknown) => err);
-		expect(error).toBeInstanceOf(AIError.AbortError);
-		expect((error as Error).message).toBe("");
-		expect(isAbortClassified(error)).toBe(true);
-	});
-});
-
-describe("raceWithSignal without a caller message", () => {
-	test("surfaces the signal's own reason verbatim when one is supplied", async () => {
-		const controller = new AbortController();
+	test("surfaces the signal's own reason when no message is supplied", async () => {
+		// A watchdog that aborts with its own error must keep that identity: callers
+		// distinguish a timeout from a user cancel by the surfaced reason.
 		const reason = new AIError.AbortError("provider watchdog fired");
-		const raced = raceWithSignal(never(), controller.signal);
-		controller.abort(reason);
-
-		expect(await raced.catch((err: unknown) => err)).toBe(reason);
+		expect(await rejectFrom(undefined, reason)).toBe(reason);
 	});
 
-	test("passes a bare abort()'s DOMException reason through unchanged", async () => {
-		const controller = new AbortController();
-		controller.abort();
-		const raced = raceWithSignal(never(), controller.signal);
-
-		// A message-less race has always surfaced the signal's reason verbatim; the
-		// empty-string fix must not disturb that precedence.
-		expect(await raced.catch((err: unknown) => err)).toBe(controller.signal.reason);
+	test("falls back to a default AbortError when no message and no reason exist", async () => {
+		// `abort(null)` leaves `signal.reason` null; without the fallback the caller is
+		// handed `null` and crashes dereferencing the error instead of seeing a cancel.
+		// The default text is the migration-stable `"Request was aborted"` string that
+		// remaining text-based matchers still read.
+		const error = await rejectFrom(undefined, null);
+		expect(error).toBeInstanceOf(AIError.AbortError);
+		expect((error as Error).message).toBe("Request was aborted");
+		expect(AIError.is(AIError.classify(error), AIError.Flag.Abort)).toBe(true);
 	});
 });
 
 describe("raceWithSignal without a signal", () => {
 	test("returns the underlying promise untouched", async () => {
 		expect(await raceWithSignal(Promise.resolve("done"), undefined, "ignored")).toBe("done");
-		expect(await raceWithSignal(Promise.resolve("done"), undefined)).toBe("done");
 	});
+});
 
-	test("keeps the shared promise running for other awaiters after one caller aborts", async () => {
+describe("raceWithSignal shared promise", () => {
+	test("keeps the racing promise running for other awaiters after one caller aborts", async () => {
 		let settle: (value: string) => void = () => {};
 		const shared = new Promise<string>(resolve => {
 			settle = resolve;
@@ -102,16 +102,9 @@ describe("raceWithSignal without a signal", () => {
 
 describe("raceSignal published alias", () => {
 	test("is the same implementation as raceWithSignal", () => {
+		// `@oh-my-pi/pi-ai/auth/abort` is a published import path. A second copy here
+		// would drift from the fix in `utils/abort.ts` and reintroduce the regression
+		// for external consumers without any internal caller noticing.
 		expect(raceSignal).toBe(raceWithSignal);
-	});
-
-	test("classifies an empty-string message as an abort", async () => {
-		const controller = new AbortController();
-		const raced = raceSignal(never(), controller.signal, "");
-		controller.abort();
-
-		const error = await raced.catch((err: unknown) => err);
-		expect(error).toBeInstanceOf(AIError.AbortError);
-		expect(isAbortClassified(error)).toBe(true);
 	});
 });
