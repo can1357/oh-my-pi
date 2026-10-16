@@ -1,5 +1,6 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+import { DENSE_CANDIDATE_LIMIT } from "../../config";
 
 /**
  * Decoded `memory_embeddings` vectors, kept per SQLite connection so recall does not parse every
@@ -34,8 +35,11 @@ interface ConnectionCache {
 
 const caches = new WeakMap<Database, ConnectionCache>();
 const FETCH_CHUNK = 500;
-/** Bounds a connection whose scored rows keep moving (new memories push old ones out of the recall window). */
-export const MAX_CACHED_VECTORS = 20_000;
+/**
+ * Two recall windows: recall scores up to {@link DENSE_CANDIDATE_LIMIT} rows in each of the working and
+ * episodic tiers. Rows that slide out of the window would otherwise stay cached for the connection's lifetime.
+ */
+export const MAX_CACHED_VECTORS = 2 * DENSE_CANDIDATE_LIMIT;
 /** Bounds memory for high-dimensional models, where 20,000 vectors would take hundreds of megabytes. */
 export const MAX_CACHED_BYTES = 96 * 1024 * 1024;
 /** A cached "no embedding" marker or empty vector still holds a key; count it at a nominal size. */

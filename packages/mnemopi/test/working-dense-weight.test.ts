@@ -42,7 +42,7 @@ describe("working-tier dense weight", () => {
 		}
 	});
 
-	it("blends an embedded row whose similarity is zero instead of treating it as unembedded", async () => {
+	it("blends and explains an embedded row whose similarity is zero", async () => {
 		const memory = new Mnemopi({
 			db: new Database(":memory:"),
 			embeddings: { provider: provider.embed.bind(provider) },
@@ -54,10 +54,34 @@ describe("working-tier dense weight", () => {
 			const related = memory.remember("deploy window adjacent", { source: "test", timestamp });
 			await memory.flushExtractions();
 
-			const ids = (await memory.recall("zorblat deploy window", 5)).map(result => result.id);
+			const results = await memory.recall("zorblat deploy window", 5);
+			const ids = results.map(result => result.id);
 			expect(ids).toContain(related);
 			expect(ids).toContain(unrelated);
 			expect(ids.indexOf(related)).toBeLessThan(ids.indexOf(unrelated));
+			expect(results[ids.indexOf(unrelated)]?.explanation).toContain("dense=0");
+		} finally {
+			memory.close();
+		}
+	});
+
+	it("does not rank a row without a stored vector above an embedded row with the same query words", async () => {
+		const memory = new Mnemopi({
+			db: new Database(":memory:"),
+			embeddings: { provider: provider.embed.bind(provider) },
+		});
+		try {
+			const timestamp = new Date(Date.now() - 60_000).toISOString();
+			const embedded = memory.remember("deploy window adjacent", { source: "test", timestamp });
+			const unembedded = memory.remember("deploy window pending", { source: "test", timestamp });
+			await memory.flushExtractions();
+			// As if its embedding had not landed yet; no recall has run, so nothing is cached.
+			memory.conn.run("DELETE FROM memory_embeddings WHERE memory_id = ?", [unembedded]);
+
+			const ids = (await memory.recall("zorblat deploy window", 5)).map(result => result.id);
+			expect(ids).toContain(embedded);
+			expect(ids).toContain(unembedded);
+			expect(ids.indexOf(embedded)).toBeLessThan(ids.indexOf(unembedded));
 		} finally {
 			memory.close();
 		}
