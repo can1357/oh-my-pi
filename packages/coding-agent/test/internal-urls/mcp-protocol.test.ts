@@ -149,6 +149,19 @@ describe("McpProtocolHandler", () => {
 		).rejects.toThrow("cannot safely split");
 	});
 
+	it("treats a rejected catalog load as unknown rather than URI absence", async () => {
+		const manager = createMockManager({
+			servers: ["broken"],
+			ensureResources: async () => {
+				throw new Error("resources/list failed");
+			},
+			waitForPendingConnections: async () => {},
+		});
+		await expect(hasExactMcpResource(manager, parseInternalUrl("skill://figma/foo;/tmp/x"))).rejects.toThrow(
+			"cannot safely split",
+		);
+	});
+
 	it("preserves the speculative read wait budget for a connection that never settles", async () => {
 		const manager = createMockManager({
 			servers: [],

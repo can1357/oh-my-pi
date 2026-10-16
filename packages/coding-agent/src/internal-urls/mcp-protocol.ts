@@ -118,7 +118,7 @@ export async function hasExactMcpResource(
 	signal?.throwIfAborted();
 	const uri = extractResourceUri(url);
 	if (resolveTargetServer(mcpManager, uri, true)) return true;
-	await withTimeout(settleCatalogs(mcpManager, uri, true), waitMs, MCP_RESOURCE_DISCOVERY_TIMEOUT, signal);
+	await withTimeout(settleExactCatalogs(mcpManager, uri), waitMs, MCP_RESOURCE_DISCOVERY_TIMEOUT, signal);
 	return resolveTargetServer(mcpManager, uri, true) !== undefined;
 }
 
@@ -134,6 +134,24 @@ function formatAvailableResources(mcpManager: MCPManagerApi): string {
 		})
 		.join("\n");
 	return available || "  (none)";
+}
+
+/** Load connected catalogs; a rejected catalog load is unknown, not URI absence. */
+async function settleExactCatalogs(mcpManager: MCPManager, uri: string): Promise<void> {
+	const first = await Promise.allSettled(
+		mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)),
+	);
+	if (resolveTargetServer(mcpManager, uri, true)) return;
+	await mcpManager.waitForPendingConnections();
+	const second = await Promise.allSettled(
+		mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)),
+	);
+	if (resolveTargetServer(mcpManager, uri, true)) return;
+	// Failed resources/list leaves no match and no proof the URI is absent — same
+	// as a spent wait budget: refuse to authorize semicolon fan-out.
+	if ([...first, ...second].some(result => result.status === "rejected")) {
+		throw new Error(MCP_RESOURCE_DISCOVERY_TIMEOUT);
+	}
 }
 
 /** Load connected catalogs before waiting on unrelated servers; check again after pending connects settle. */

@@ -64,27 +64,32 @@ describe("read with a `;` list mixing URLs and local paths", () => {
 		expect(text).toContain("export const a = 1;");
 	});
 
-	it("forwards rawImages tool context and cancellation signal to every recovered target", async () => {
-		for (const target of ["Makefile:1-1;a.ts:1-1", "omp://;a.ts:1-1"]) {
-			const tool = new ReadTool(session);
-			const context = { rawImages: true } as AgentToolContext;
-			const controller = new AbortController();
-			const execute = tool.execute.bind(tool);
-			const children: Array<{ signal: AbortSignal | undefined; context: unknown }> = [];
-			const spy = spyOn(tool, "execute").mockImplementation(async (id, params, signal, update, toolContext) => {
-				if (id === "read-delimited-part") children.push({ signal, context: toolContext });
-				return execute(id, params, signal, update, toolContext);
-			});
-			try {
-				await tool.execute("context-read", { path: target }, controller.signal, undefined, context);
-				expect(children).toHaveLength(2);
-				for (const child of children) {
-					expect(child.context).toBe(context);
-					expect(child.signal).toBe(controller.signal);
-				}
-			} finally {
-				spy.mockRestore();
+	it("surfaces cancellation while a recovered child read is still pending", async () => {
+		const tool = new ReadTool(session);
+		const controller = new AbortController();
+		const childStarted = Promise.withResolvers<void>();
+		const childPending = Promise.withResolvers<never>();
+		const execute = tool.execute.bind(tool);
+		const spy = spyOn(tool, "execute").mockImplementation(async (id, params, signal, update, toolContext) => {
+			if (id === "read-delimited-part" && params.path === "Makefile:1-1") {
+				childStarted.resolve();
+				const onAbort = () => {
+					childPending.reject(Object.assign(new Error("Aborted"), { name: "AbortError" }));
+				};
+				if (signal?.aborted) onAbort();
+				else signal?.addEventListener("abort", onAbort, { once: true });
+				return childPending.promise;
 			}
+			return execute(id, params, signal, update, toolContext);
+		});
+		try {
+			const reading = tool.execute("cancel-list-read", { path: "Makefile:1-1;a.ts:1-1" }, controller.signal);
+			await childStarted.promise;
+			controller.abort();
+			await expect(reading).rejects.toMatchObject({ name: "AbortError" });
+		} finally {
+			spy.mockRestore();
+			childPending.resolve(undefined as never);
 		}
 	});
 

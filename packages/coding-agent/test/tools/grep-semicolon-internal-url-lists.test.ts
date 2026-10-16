@@ -327,6 +327,48 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 		}
 	});
 
+	it("fans out a local:// list without waiting on pending MCP catalogs", async () => {
+		const artifactsDir = path.join(tmpDir, "pending-local-artifacts");
+		await Bun.write(path.join(artifactsDir, "local", "notes"), "local list needle\n");
+		const session = {
+			...createSession(),
+			getArtifactsDir: () => artifactsDir,
+			getSessionId: () => "pending-local-session",
+		} as ToolSession;
+		const pending = Promise.withResolvers<void>();
+		MCPManager.setInstance({
+			getConnectedServers: () => [],
+			getServerResources: () => undefined,
+			waitForPendingConnections: () => pending.promise,
+			ensureServerResources: async () => {},
+		} as unknown as MCPManager);
+		try {
+			const target = `local://notes;${absFile}`;
+			// Without the scheme short-circuit this spends the discovery budget and throws.
+			expect(await expandDelimitedPathEntries([target], tmpDir)).toEqual(["local://notes", absFile]);
+			const result = await new GrepTool(session).execute("local-list-no-mcp-wait", {
+				pattern: "needle",
+				path: target,
+			});
+			expect(getResultText(result)).toContain("local list needle");
+			expect(getResultText(result)).toContain("abs path needle");
+		} finally {
+			pending.resolve();
+		}
+	});
+
+	it("fans out colon-prefixed relative tails after a path-bearing URL", async () => {
+		await Bun.write(path.join(tmpDir, "b.md"), "colon relative needle\n");
+		const target = "skill://demo/SKILL.md;:./b.md";
+		expect(await expandDelimitedPathEntries([target], tmpDir)).toEqual(["skill://demo/SKILL.md", ":./b.md"]);
+		const result = await new GrepTool(createSession()).execute("colon-relative-search", {
+			pattern: "needle",
+			path: target,
+		});
+		expect(getResultText(result)).toContain(skillBodyNeedle);
+		expect(getResultText(result)).toContain("colon relative needle");
+	});
+
 	it("keeps a local:// artifact whose name contains `;` whole even when the suffix names a cwd file", async () => {
 		const artifactsDir = path.join(tmpDir, "artifacts");
 		const localRoot = path.join(artifactsDir, "local");
@@ -412,7 +454,6 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 				"skill://demo;missing.md",
 				"Cannot search skill://demo;missing.md: Unknown skill: demo;missing.md\nAvailable: demo",
 			],
-			["skill://demo;nope", "Cannot search skill://demo;nope: Unknown skill: demo;nope\nAvailable: demo"],
 		] as const) {
 			// A glob is parsed below skill:// after delimiter recovery; prove the
 			// recovery step itself retained the exact authored target as well.

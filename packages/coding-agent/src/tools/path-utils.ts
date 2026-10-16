@@ -709,10 +709,12 @@ function hasAmbiguousInternalUrlTail(parts: readonly string[], isUrl: (part: str
 			urlHasPath = urlHasPath || (url.pathname !== "" && url.pathname !== "/");
 			continue;
 		}
-		const localPart = normalizePosixPath(part);
+		// Expand first so tolerated colon-prefixed relatives (`:./b.md`, `:..\b`)
+		// use the same spelling the existence probe already accepted.
+		const localPart = normalizePosixPath(expandPath(part));
 		if (isUrl(part) || isReadableUrlPath(part)) continue;
 		const anchored =
-			isFilesystemSourcePath(expandPath(part)) ||
+			isFilesystemSourcePath(localPart) ||
 			localPart === "." ||
 			localPart === ".." ||
 			localPart.startsWith("./") ||
@@ -803,6 +805,13 @@ async function internalUrlLocatesExisting(entry: string, cwd: string, context?: 
 }
 
 async function internalUrlIsExactMcpResource(entry: string, signal?: AbortSignal): Promise<boolean> {
+	// Only skill:// (exact MCP fallback in SkillProtocolHandler) and mcp:// can
+	// resolve through MCP catalogs among registered schemes. local://, history://,
+	// and the rest never do — skip the discovery wait so a pending MCP server cannot
+	// block or fail an ordinary list such as `local://notes;/tmp/x`.
+	const { path: barePath } = InternalUrlRouter.instance().split(entry);
+	const scheme = extractUriScheme(barePath)?.toLowerCase();
+	if (scheme !== "skill" && scheme !== "mcp") return false;
 	if (!MCPManager.available()) return false;
 	const deadline = Date.now() + MCP_RESOURCE_DISCOVERY_WAIT_MS;
 	const manager = await withTimeout(
@@ -812,8 +821,7 @@ async function internalUrlIsExactMcpResource(entry: string, signal?: AbortSignal
 		signal,
 	);
 	if (!manager) return false;
-	const { path } = InternalUrlRouter.instance().split(entry);
-	return hasExactMcpResource(manager, parseInternalUrl(path), signal, Math.max(0, deadline - Date.now()));
+	return hasExactMcpResource(manager, parseInternalUrl(barePath), signal, Math.max(0, deadline - Date.now()));
 }
 
 /**
