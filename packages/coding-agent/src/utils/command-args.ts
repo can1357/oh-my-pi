@@ -1,5 +1,17 @@
+/** Options for {@link parseCommandArgs}. */
+export interface ParseCommandArgsOptions {
+	/** Enforce complete quotes and shell-style escapes, including empty arguments. */
+	strict?: boolean;
+	/** Reject incomplete quotes while preserving literal path backslashes. */
+	rejectUnterminatedQuotes?: boolean;
+	/** Unescape active quotes, preserving other backslashes. Ignored in strict mode. */
+	escapeQuotes?: boolean;
+	/** Treat all unquoted whitespace as separators instead of only spaces and tabs. */
+	splitAllWhitespace?: boolean;
+}
+
 /** Split command arguments, optionally enforcing complete quotes and shell-style escapes. */
-export function parseCommandArgs(argsString: string, options?: { strict?: boolean }): string[] {
+export function parseCommandArgs(argsString: string, options?: ParseCommandArgsOptions): string[] {
 	const args: string[] = [];
 	let current = "";
 	let inQuote: string | null = null;
@@ -17,6 +29,15 @@ export function parseCommandArgs(argsString: string, options?: { strict?: boolea
 				continue;
 			}
 		}
+		if (!options?.strict && options?.escapeQuotes && char === "\\") {
+			const next = argsString[i + 1];
+			if ((inQuote !== null && next === inQuote) || (inQuote === null && (next === '"' || next === "'"))) {
+				current += next;
+				started = true;
+				i++;
+				continue;
+			}
+		}
 		if (inQuote) {
 			if (char === inQuote) {
 				inQuote = null;
@@ -26,7 +47,7 @@ export function parseCommandArgs(argsString: string, options?: { strict?: boolea
 		} else if (char === '"' || char === "'") {
 			inQuote = char;
 			started = true;
-		} else if (char === " " || char === "\t") {
+		} else if (char === " " || char === "\t" || (options?.splitAllWhitespace && /\s/.test(char))) {
 			if (current || (options?.strict && started)) {
 				args.push(current);
 				current = "";
@@ -38,7 +59,9 @@ export function parseCommandArgs(argsString: string, options?: { strict?: boolea
 		}
 	}
 
-	if (options?.strict && inQuote) throw new Error("Unterminated command quote.");
+	if ((options?.strict || options?.rejectUnterminatedQuotes) && inQuote) {
+		throw new Error("Unterminated command quote.");
+	}
 	if (current || (options?.strict && started)) {
 		args.push(current);
 	}
