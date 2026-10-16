@@ -1009,14 +1009,6 @@ function isTopLevelMessageChild(value: object, key: string | undefined, childKey
 	return Object.getOwnPropertyDescriptor(value, "role")?.value === "toolResult";
 }
 
-/** One node pending in {@link hasSerializerHook}'s worklist: the value plus the projection context its carve-outs answer from. */
-interface SerializerHookProbeNode {
-	value: unknown;
-	key: string | undefined;
-	isTopLevelToolResultDetails: boolean | undefined;
-	atomic: boolean;
-}
-
 /**
  * Whether `value`'s JSON graph passes through a `toJSON` serializer hook — or
  * through any accessor whose read the probe must not perform.
@@ -1048,14 +1040,23 @@ interface SerializerHookProbeNode {
  * through property descriptors and invokes nothing, so the order the worklist
  * visits nodes in changes nothing a caller can observe.
  */
+interface SerializerHookProbeNode {
+	value: unknown;
+	key: string | undefined;
+	isTopLevelToolResultDetails: boolean | undefined;
+	atomic: boolean;
+}
+
 function hasSerializerHook(
 	value: unknown,
 	key?: string,
 	isTopLevelToolResultDetails?: boolean,
 	atomic = false,
 ): boolean {
-	// Worklist, not recursion — one JS stack frame per level overflowed on a
-	// graph `details` can hold (see above).
+	// Iterative, not recursive: `details` is the tool result's opaque slot and
+	// can hold a graph nested arbitrarily deep, and one JS frame per level
+	// overflowed the stack on such input — a persistence failure on a graph
+	// serialization handles fine.
 	const pending: SerializerHookProbeNode[] = [{ value, key, isTopLevelToolResultDetails, atomic }];
 	for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
 		const { value, key, isTopLevelToolResultDetails, atomic } = node;
@@ -1241,41 +1242,87 @@ function rawJsonPayload(value: object): string | undefined {
  * where persistence keeps the whole subgraph verbatim. Arrays are walked by
  * indexed slots with a snapshotted length, the way `JSON.stringify` reads
  * them, never through the iterator protocol.
+ *
+ * The walk is an explicit worklist, not recursion: `details` is the tool
+ * result's opaque slot and can hold a graph nested arbitrarily deep, and one
+ * JS frame per level overflowed the stack on such input (~13k levels) — a
+ * persistence failure on a graph serialization handles fine. Every step
+ * invokes no user code, so the order the worklist visits nodes in changes
+ * nothing a caller can observe.
  */
-function messageValueStamp(
-	value: unknown,
-	out: unknown[] = [],
-	key?: string,
-	isTopLevelToolResultDetails?: boolean,
-	atomic = false,
-): unknown[] {
-	if (value === null || typeof value !== "object") {
-		out.push(value);
-		return out;
-	}
-	// A `toJSON` hook makes the graph unstampable — see {@link hasSerializerHook}.
-	// The memo never reaches this walk with a hooked graph; the box below is the
-	// hookless path `JSON.stringify` takes when no hook is present.
-	const unboxed = unboxedPrimitive(value);
-	if (unboxed !== undefined) {
-		out.push(unboxed);
-		return out;
-	}
-	// A rawJSON node serializes as its payload verbatim, not as its one-key
-	// container shape — stamp the brand and payload, never the keys.
-	const rawPayload = rawJsonPayload(value);
-	if (rawPayload !== undefined) {
-		out.push(STAMP_RAW_JSON, rawPayload, STAMP_END);
-		return out;
-	}
-	if (Array.isArray(value)) {
-		out.push(STAMP_ARRAY);
-		// `JSON.stringify` reads indexed slots up to a snapshotted length, not
-		// the iterator protocol — an overridden `Symbol.iterator` changes the
-		// latter while the former (and the persisted bytes) stays fixed.
-		const length = value.length;
-		for (let index = 0; index < length; index++) messageValueStamp(value[index], out, undefined, undefined, atomic);
-	} else {
+/** One node pending in {@link messageValueStamp}'s worklist. */
+type StampPending =
+	| {
+			readonly kind: "value";
+			readonly value: unknown;
+			/** Own key the value sits under; emitted before the value, the way the emitting caller did. */
+			readonly key: string | undefined;
+			readonly isTopLevelToolResultDetails: boolean | undefined;
+			readonly atomic: boolean;
+	  }
+	/** A stripped transient key: emits the key's presence without walking its value. */
+	| { readonly kind: "transient"; readonly key: string }
+	/** Emits the closing marker of the container that scheduled it. */
+	| { readonly kind: "end" };
+
+function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
+	// Iterative, not recursive — one JS stack frame per level overflowed on a
+	// graph `details` can hold (see above). Children are queued below their
+	// container's own closing marker and popped in queue order, so the
+	// worklist emits exactly the order the recursive walk did.
+	const pending: StampPending[] = [
+		{ kind: "value", value, key: undefined, isTopLevelToolResultDetails: undefined, atomic: false },
+	];
+	for (let frame = pending.pop(); frame !== undefined; frame = pending.pop()) {
+		if (frame.kind === "end") {
+			out.push(STAMP_END);
+			continue;
+		}
+		if (frame.kind === "transient") {
+			out.push(frame.key, STAMP_TRANSIENT);
+			continue;
+		}
+		const { value, key, isTopLevelToolResultDetails, atomic } = frame;
+		if (key !== undefined) out.push(key);
+		if (value === null || typeof value !== "object") {
+			out.push(value);
+			continue;
+		}
+		// A `toJSON` hook makes the graph unstampable — see {@link hasSerializerHook}.
+		// The memo never reaches this walk with a hooked graph; the box below is the
+		// hookless path `JSON.stringify` takes when no hook is present.
+		const unboxed = unboxedPrimitive(value);
+		if (unboxed !== undefined) {
+			out.push(unboxed);
+			continue;
+		}
+		// A rawJSON node serializes as its payload verbatim, not as its one-key
+		// container shape — stamp the brand and payload, never the keys.
+		const rawPayload = rawJsonPayload(value);
+		if (rawPayload !== undefined) {
+			out.push(STAMP_RAW_JSON, rawPayload, STAMP_END);
+			continue;
+		}
+		if (Array.isArray(value)) {
+			out.push(STAMP_ARRAY);
+			// `JSON.stringify` reads indexed slots up to a snapshotted length, not
+			// the iterator protocol — an overridden `Symbol.iterator` changes the
+			// latter while the former (and the persisted bytes) stays fixed.
+			const length = value.length;
+			// The closing marker sits below every child, and the children are
+			// queued last-first, so the worklist pops them first-first.
+			pending.push({ kind: "end" });
+			for (let index = length - 1; index >= 0; index--) {
+				pending.push({
+					kind: "value",
+					value: value[index],
+					key: undefined,
+					isTopLevelToolResultDetails: undefined,
+					atomic,
+				});
+			}
+			continue;
+		}
 		const fields = value as Record<string, unknown>;
 		// Atomic nodes persist verbatim: `truncateForPersistence` returns before
 		// its key-stripping loop, so transient keys inside one reach the line and
@@ -1290,6 +1337,7 @@ function messageValueStamp(
 		// projected line and is stamped whole.
 		const skipStructuredContent = isMcpSpillStrippedDetails(value, key, isTopLevelToolResultDetails);
 		out.push(STAMP_OBJECT);
+		const children: StampPending[] = [];
 		for (const childKey of Object.keys(fields)) {
 			if (skipStructuredContent && childKey === "structuredContent") continue;
 			// Stripped from the persisted line by `truncateForPersistence` before
@@ -1300,14 +1348,20 @@ function messageValueStamp(
 			// may be cyclic (a streaming event can reference the array holding
 			// it), which this walk could never escape.
 			if (!atomicNode && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) {
-				out.push(childKey, STAMP_TRANSIENT);
+				children.push({ kind: "transient", key: childKey });
 				continue;
 			}
-			out.push(childKey);
-			messageValueStamp(fields[childKey], out, childKey, isTopLevelMessageChild(value, key, childKey), atomicNode);
+			children.push({
+				kind: "value",
+				value: fields[childKey],
+				key: childKey,
+				isTopLevelToolResultDetails: isTopLevelMessageChild(value, key, childKey),
+				atomic: atomicNode,
+			});
 		}
+		pending.push({ kind: "end" });
+		for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]);
 	}
-	out.push(STAMP_END);
 	return out;
 }
 
@@ -1318,10 +1372,41 @@ function messageValueStamp(
  * stops the walk. Object identity is never trusted: two structurally equal
  * graphs compare equal (their projected lines are byte-identical), and a leaf
  * swapped for a different-typed value falls out of the marker comparison.
+ *
+ * The walk is an explicit worklist, not recursion: `details` is the tool
+ * result's opaque slot and can hold a graph nested arbitrarily deep, and one
+ * JS frame per level overflowed the stack on such input — the same failure
+ * {@link messageValueStamp} hit, one rewrite later. Every step invokes no user
+ * code, so the order the worklist visits nodes in changes nothing a caller
+ * can observe.
  */
+/** One node pending in {@link stampMatches}'s worklist. */
+type StampMatchPending =
+	| {
+			readonly kind: "value";
+			readonly live: unknown;
+			readonly key: string | undefined;
+			readonly isTopLevelToolResultDetails: boolean | undefined;
+			readonly atomic: boolean;
+	  }
+	/** Checks the closing marker of the container that scheduled it. */
+	| { readonly kind: "end" };
+
 function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 	let index = 0;
-	const match = (live: unknown, key?: string, isTopLevelToolResultDetails?: boolean, atomic = false): boolean => {
+	// Iterative, not recursive — one JS stack frame per level overflowed on a
+	// graph `details` can hold (see above). Children are queued below their
+	// container's own closing-marker check and popped in queue order, so the
+	// worklist consumes the stamp in exactly the order the recursive walk did.
+	const pending: StampMatchPending[] = [
+		{ kind: "value", live: value, key: undefined, isTopLevelToolResultDetails: undefined, atomic: false },
+	];
+	for (let frame = pending.pop(); frame !== undefined; frame = pending.pop()) {
+		if (frame.kind === "end") {
+			if (stamp[index++] !== STAMP_END) return false;
+			continue;
+		}
+		const { live, key, isTopLevelToolResultDetails, atomic } = frame;
 		const expected = stamp[index++];
 		// The stamp never invokes a `toJSON` hook: a hooked graph is left
 		// uncached (see {@link hasSerializerHook}), so reaching one here means
@@ -1352,45 +1437,62 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 				// `JSON.stringify` and {@link messageValueStamp} — never the
 				// iterator protocol.
 				const length = live.length;
-				for (let position = 0; position < length; position++)
-					if (!match(live[position], undefined, undefined, atomic)) return false;
-			} else {
-				const fields = live as Record<string, unknown>;
-				// Mirror the stamp side: transient keys were recorded whole
-				// inside atomic nodes (persistence keeps them) and as
-				// presence-only markers elsewhere.
-				const nodeAtomic = atomic || isAtomicPersistenceNode(live, key);
-				// The stamp skipped the top-level toolResult's MCP-stripped
-				// field outright (see {@link messageValueStamp}), so the
-				// matcher skips it too — the value was never recorded and may
-				// be cyclic. Any other marker-shaped `details` was stamped
-				// whole and is matched whole.
-				const skipStructuredContent = isMcpSpillStrippedDetails(live, key, isTopLevelToolResultDetails);
-				for (const childKey of Object.keys(fields)) {
-					if (skipStructuredContent && childKey === "structuredContent") continue;
-					// Stripped before serialization by `truncateForPersistence`,
-					// so only the key's presence was recorded — its value was
-					// never walked (and may be cyclic) — see
-					// {@link messageValueStamp}.
-					if (!nodeAtomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) {
-						if (stamp[index++] !== childKey || stamp[index++] !== STAMP_TRANSIENT) return false;
-						continue;
-					}
-					if (stamp[index++] !== childKey) return false;
-					if (!match(fields[childKey], childKey, isTopLevelMessageChild(live, key, childKey), nodeAtomic))
-						return false;
+				pending.push({ kind: "end" });
+				for (let position = length - 1; position >= 0; position--) {
+					pending.push({
+						kind: "value",
+						live: live[position],
+						key: undefined,
+						isTopLevelToolResultDetails: undefined,
+						atomic,
+					});
 				}
+				continue;
 			}
-			return stamp[index++] === STAMP_END;
+			const fields = live as Record<string, unknown>;
+			// Mirror the stamp side: transient keys were recorded whole
+			// inside atomic nodes (persistence keeps them) and as
+			// presence-only markers elsewhere.
+			const nodeAtomic = atomic || isAtomicPersistenceNode(live, key);
+			// The stamp skipped the top-level toolResult's MCP-stripped
+			// field outright (see {@link messageValueStamp}), so the
+			// matcher skips it too — the value was never recorded and may
+			// be cyclic. Any other marker-shaped `details` was stamped
+			// whole and is matched whole.
+			const skipStructuredContent = isMcpSpillStrippedDetails(live, key, isTopLevelToolResultDetails);
+			const children: StampMatchPending[] = [];
+			for (const childKey of Object.keys(fields)) {
+				if (skipStructuredContent && childKey === "structuredContent") continue;
+				// Stripped before serialization by `truncateForPersistence`,
+				// so only the key's presence was recorded — its value was
+				// never walked (and may be cyclic) — see
+				// {@link messageValueStamp}.
+				if (!nodeAtomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) {
+					if (stamp[index++] !== childKey || stamp[index++] !== STAMP_TRANSIENT) return false;
+					continue;
+				}
+				if (stamp[index++] !== childKey) return false;
+				children.push({
+					kind: "value",
+					live: fields[childKey],
+					key: childKey,
+					isTopLevelToolResultDetails: isTopLevelMessageChild(live, key, childKey),
+					atomic: nodeAtomic,
+				});
+			}
+			pending.push({ kind: "end" });
+			for (let position = children.length - 1; position >= 0; position--) pending.push(children[position]);
+			continue;
 		}
 		// NaN never equals itself, but JSON renders it `null` for every path,
 		// so a NaN leaf describes the same line either way.
-		return (
-			expected === live ||
-			(typeof expected === "number" && Number.isNaN(expected) && typeof live === "number" && Number.isNaN(live))
-		);
-	};
-	return match(value) && index === stamp.length;
+		if (expected === live) continue;
+		if (typeof expected === "number" && Number.isNaN(expected) && typeof live === "number" && Number.isNaN(live)) {
+			continue;
+		}
+		return false;
+	}
+	return index === stamp.length;
 }
 
 /** Own enumerable field values of `obj`, for shallow change detection. */

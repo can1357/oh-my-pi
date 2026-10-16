@@ -1240,4 +1240,63 @@ describe("SessionManager entry-line memo", () => {
 		const bodyAfterSecond = storage.readTextSync(sessionFile);
 		expect(bodyAfterSecond).toBe(bodyAfterFirst);
 	}, 60_000);
+
+	it("persists a hook-free details payload nested deeper than the recursive stamp could walk", async () => {
+		// `details` is the tool result's opaque slot, so it can hold a plain,
+		// hook-free JSON graph nested far deeper than JS recursion reaches —
+		// an opaque extension payload wrapped once per nesting level, with a
+		// leaf at the bottom. Persistence kept a payload like this verbatim
+		// before the entry-line memo landed (only native `JSON.stringify`
+		// bounded the walk, ~40k levels); the memo then walked it one JS stack
+		// frame per level and overflowed — `messageValueStamp` at ~13k levels,
+		// the projector's pre-scan at ~20k — so every full rewrite latched a
+		// persistence failure on a graph that used to persist. The stamp, its
+		// matcher, and the pre-scan must reach the leaf however deep it sits,
+		// and a mutation at the bottom must still invalidate the stamped line.
+		const depth = 22_000;
+		let nested: unknown = { leaf: "fix15222-deep-bottom" };
+		for (let level = 0; level < depth; level++) nested = { child: nested };
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-deep-clean",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			// Unsigned, not a signed block: an atomic node stops the projector's
+			// pre-scan at the `details` object, so this payload instead walks
+			// the whole graph through the pre-scan and both memo walks.
+			details: nested,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: every level reaches the line, leaf included.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst.match(/"child":/g)).toHaveLength(depth);
+		expect(bodyAfterFirst).toContain('"leaf":"fix15222-deep-bottom"');
+
+		// Second rewrite: byte-identical body — the stamped line still describes
+		// the unchanged deep graph, so the rewrite reuses it instead of
+		// churning, and the matcher's own deep walk does not overflow.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toBe(bodyAfterFirst);
+
+		// Third rewrite after an in-place mutation at the very bottom of the
+		// graph: every object identity above the leaf is unchanged, so only a
+		// deep value stamp can see it — the line must be re-projected with the
+		// new value instead of restoring the stale one.
+		let cursor: Record<string, unknown> = nested as Record<string, unknown>;
+		while (typeof cursor.child === "object" && cursor.child !== null) {
+			cursor = cursor.child as Record<string, unknown>;
+		}
+		cursor.leaf = "fix15222-deep-mutated";
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterThird = storage.readTextSync(sessionFile);
+		expect(bodyAfterThird).toContain('"leaf":"fix15222-deep-mutated"');
+		expect(bodyAfterThird).not.toBe(bodyAfterSecond);
+	}, 90_000);
 });

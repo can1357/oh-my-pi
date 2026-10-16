@@ -355,62 +355,67 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
  * objects) any child that can. Mirrors the change conditions of the rebuild
  * pass exactly — a false negative silently keeps oversized content, so when
  * in doubt this must return true.
+ *
+ * The walk is an explicit worklist, not recursion: `details` is the tool
+ * result's opaque slot and can hold a graph nested arbitrarily deep, and one
+ * JS frame per level overflowed the stack on such input (~20k levels) — a
+ * persistence failure on a graph serialization handles fine. Every step reads
+ * only own data, so the order the worklist visits nodes in changes nothing a
+ * caller can observe.
  */
 function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
-	if (obj === null || obj === undefined) return false;
-	if (typeof obj === "string") {
-		if (
-			obj.length > MAX_PERSIST_CHARS &&
-			key !== "thinkingSignature" &&
-			key !== "thoughtSignature" &&
-			key !== "textSignature"
-		)
-			return true;
-		if (key === "image_url" && isImageDataUrl(obj)) return true;
-		return false;
-	}
-	if (Array.isArray(obj)) {
-		// Indexed slots with a snapshotted length, the way `JSON.stringify` and
-		// the rebuild above read them — never the iterator protocol, which an
-		// overridden `Symbol.iterator` can hide slots from.
-		const length = obj.length;
-		for (let index = 0; index < length; index++) {
-			if (persistenceNodeNeedsRewrite(obj[index], key)) return true;
-		}
-		return false;
-	}
-	if (typeof obj === "object") {
-		// Transient keys are always stripped by the rebuild pass, so their
-		// presence alone forces the walk that drops them.
-		for (const transientKey of TRANSIENT_PERSISTENCE_KEYS) {
-			if (transientKey in obj) return true;
-		}
-		// Externalize shapes rewrite (not verbatim): check before the
-		// atomic/verbatim classification below.
-		if (typeof obj === "object" && "type" in obj) {
-			const typed = obj as Record<string, unknown>;
+	// Iterative, not recursive — one JS stack frame per level overflowed on a
+	// graph `details` can hold (see above).
+	const pending: Array<{ value: unknown; key: string | undefined }> = [{ value: obj, key }];
+	for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
+		const { value, key } = node;
+		if (value === null || value === undefined) continue;
+		if (typeof value === "string") {
 			if (
-				typed.type === "image_generation_call" &&
-				"result" in typed &&
-				typeof typed.result === "string" &&
-				!isBlobRef(typed.result) &&
-				typed.result.length >= BLOB_EXTERNALIZE_THRESHOLD
-			) {
+				value.length > MAX_PERSIST_CHARS &&
+				key !== "thinkingSignature" &&
+				key !== "thoughtSignature" &&
+				key !== "textSignature"
+			)
 				return true;
+			if (key === "image_url" && isImageDataUrl(value)) return true;
+			continue;
+		}
+		if (Array.isArray(value)) {
+			// Indexed slots with a snapshotted length, the way `JSON.stringify` and
+			// the rebuild above read them — never the iterator protocol, which an
+			// overridden `Symbol.iterator` can hide slots from.
+			const length = value.length;
+			for (let index = 0; index < length; index++) pending.push({ value: value[index], key });
+			continue;
+		}
+		if (typeof value === "object") {
+			// Transient keys are always stripped by the rebuild pass, so their
+			// presence alone forces the walk that drops them.
+			for (const transientKey of TRANSIENT_PERSISTENCE_KEYS) {
+				if (transientKey in value) return true;
+			}
+			// Externalize shapes rewrite (not verbatim): check before the
+			// atomic/verbatim classification below.
+			if ("type" in value) {
+				const typed = value as Record<string, unknown>;
+				if (
+					typed.type === "image_generation_call" &&
+					"result" in typed &&
+					typeof typed.result === "string" &&
+					!isBlobRef(typed.result) &&
+					typed.result.length >= BLOB_EXTERNALIZE_THRESHOLD
+				) {
+					return true;
+				}
+			}
+			if (shouldExternalizeImagePayload(value, key)) return true;
+			if (isAtomicPersistenceNode(value, key)) continue;
+			for (const childKey in value) {
+				if (!Object.hasOwn(value, childKey)) continue;
+				pending.push({ value: (value as Record<string, unknown>)[childKey], key: childKey });
 			}
 		}
-		if (shouldExternalizeImagePayload(obj, key)) return true;
-		if (isAtomicPersistenceNode(obj, key)) return false;
-		for (const childKey in obj) {
-			if (!Object.hasOwn(obj, childKey)) continue;
-			const value = (obj as Record<string, unknown>)[childKey];
-			if (isSnapcompactArchiveSlot(key, childKey, value)) {
-				if (snapcompactArchiveNeedsRewrite(value)) return true;
-				continue;
-			}
-			if (persistenceNodeNeedsRewrite(value, childKey)) return true;
-		}
-		return false;
 	}
 	return false;
 }
