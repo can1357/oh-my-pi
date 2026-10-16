@@ -3,6 +3,8 @@ import { readLines } from "@oh-my-pi/pi-utils";
 
 const STDERR_TAIL_CHARS = 4000;
 const EXIT_GRACE_MS = 5000;
+/** After stdout EOF, how long the exit code and the rest of stderr may take to arrive for the error message. */
+const EOF_GRACE_MS = 1000;
 
 interface WireResponse {
 	id: number;
@@ -56,7 +58,9 @@ export class PythonProcess {
 			// The process already exited.
 		}
 		try {
+			// The pump stops waiting at stdout EOF, so wait for the exit itself.
 			await this.#done;
+			await this.#proc.exited;
 		} finally {
 			clearTimeout(killer);
 		}
@@ -98,9 +102,13 @@ export class PythonProcess {
 				}
 				this.#settle(response);
 			}
-			await stderrDone;
-			const code = await this.#proc.exited;
-			this.#fail(new Error(`${this.#label} exited with code ${code}: ${this.#stderrTail.trim()}`));
+			// No response can come after stdout EOF: fail now, waiting only briefly for the exit code and stderr.
+			const exit = await Promise.race([
+				Promise.all([stderrDone, this.#proc.exited]).then(([, code]) => `exited with code ${code}`),
+				// Unref'd: a normal exit must not hold the harness open for the rest of the grace period.
+				new Promise<string>(resolve => setTimeout(resolve, EOF_GRACE_MS, "closed stdout").unref()),
+			]);
+			this.#fail(new Error(`${this.#label} ${exit}: ${this.#stderrTail.trim()}`));
 		} catch (err) {
 			this.#fail(err instanceof Error ? err : new Error(String(err)));
 		}
