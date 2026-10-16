@@ -3,6 +3,7 @@ import {
 	classifySixelRow,
 	containsSixelSequence,
 	createRawSixelExtractor,
+	getSixelLineMask,
 	matchSixelIntroducer,
 	sanitizeWithOptionalSixelPassthrough,
 	SixelSpanParser,
@@ -154,8 +155,6 @@ describe("SixelSpanParser handles the 8-bit form end to end", () => {
 		enableSixelPassthrough();
 		const sanitized = sanitizeWithOptionalSixelPassthrough(EIGHT_BIT, sanitizeText);
 		expect(sanitized).toBe(EIGHT_BIT);
-		expect(sanitized).toContain("\x90q");
-		expect(sanitized).toContain("\x9c");
 	});
 
 	it("classifies a row closed by the 8-bit ST", () => {
@@ -167,8 +166,37 @@ describe("SixelSpanParser handles the 8-bit form end to end", () => {
 	});
 });
 
+describe("SIXEL row classification", () => {
+	it("keeps a second frame on the same row open when its terminator is still to come", () => {
+		// Renderers clamp every row this classifier calls plain text. A classifier
+		// that closes the row on the FIRST frame's terminator hands the second
+		// frame's continuation rows to that clamp, which cuts them mid-DCS and
+		// leaves the host terminal swallowing the rest of the stream as payload.
+		const twoFrames = `${SEVEN_BIT}between${EIGHT_BIT}`;
+		expect(classifySixelRow(twoFrames, false)).toEqual({ isSixel: true, inSequenceAtExit: false });
+
+		// The second frame is only half written: its introducer is on this row,
+		// its payload and terminator on the next.
+		const halfWritten = `${SEVEN_BIT}between\x1bPq#0;2;100`;
+		expect(classifySixelRow(halfWritten, false)).toEqual({ isSixel: true, inSequenceAtExit: true });
+		// Over a row stream the follow-up rows stay payload, so the renderers keep
+		// clamping them and cut the frame the host terminal is still inside.
+		expect(getSixelLineMask([halfWritten, ";0;0#0~~\x1b\\tail", "plain"])).toEqual([true, true, false]);
+	});
+
+	it("treats a terminator that precedes an introducer as belonging to the earlier frame", () => {
+		// The row enters inside a sequence, closes it, then opens a new one. A
+		// terminator search that ignores order finds the stale one and reports the
+		// new frame closed, so its payload rows get clamped instead of passed
+		// through and the host stays inside an unterminated DCS.
+		expect(classifySixelRow(`#0~~\x1b\\\x1bPq#0;2;100`, true)).toEqual({
+			isSixel: true,
+			inSequenceAtExit: true,
+		});
+	});
+});
+
 describe("SixelSpanParser incremental matching", () => {
-	const streamSizes = [64 * 1024, 128 * 1024, 256 * 1024] as const;
 	const chunkSize = 1024;
 
 	function buildStream(total: number): string {
@@ -199,26 +227,11 @@ describe("SixelSpanParser incremental matching", () => {
 		]);
 	});
 
-	for (const total of streamSizes) {
-		it(`examines a ${total / 1024} KiB frame in ${chunkSize / 1024} KiB chunks at most a constant number of times`, () => {
-			const stream = buildStream(total);
-			// Linear work re-scans the stream a handful of times at most. The
-			// pre-round-2 extractor re-ran its scan over the whole held
-			// accumulator on every chunk, which is super-linear in the frame
-			// size and dominated a multi-megabyte PTY frame.
-			const scanned = measureRegexScanVolume(() => {
-				const extract = createRawSixelExtractor();
-				for (let i = 0; i < stream.length; i += chunkSize) {
-					extract(stream.slice(i, i + chunkSize));
-				}
-			});
-			expect(scanned).toBeLessThanOrEqual(stream.length * 8);
-		});
-	}
-
 	it("does not let the scan volume grow with the frame size", () => {
-		// Same assertion at two sizes: a quadratic rescan multiplies by the size
-		// ratio (256 KiB / 64 KiB = 4x) rather than staying flat.
+		// One size pair carries both halves of the linearity contract: the small
+		// frame's absolute bound, and the large/small ratio that a super-linear
+		// rescan would break. Rows at the sizes in between assert the same path
+		// again, so they were duplicates rather than extra coverage.
 		const volume = (total: number): number =>
 			measureRegexScanVolume(() => {
 				const stream = buildStream(total);
@@ -229,6 +242,7 @@ describe("SixelSpanParser incremental matching", () => {
 			});
 		const small = volume(64 * 1024);
 		const large = volume(256 * 1024);
+		expect(small).toBeLessThanOrEqual(64 * 1024 * 8);
 		expect(large).toBeLessThanOrEqual(small * 8 + 1024);
 	});
 
