@@ -1,11 +1,15 @@
-import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, setSystemTime } from "bun:test";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createCompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Api, AssistantMessage, Context, Message, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { DateCwdReminderInjector, renderDateCwdReminder } from "@oh-my-pi/pi-coding-agent/session/date-cwd-reminder";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -13,7 +17,7 @@ import { formatLocalCalendarDate } from "@oh-my-pi/pi-tui/chrome/local-date";
 import { normalizePromptPath } from "@oh-my-pi/pi-coding-agent/utils/prompt-path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { becomesCollectible } from "../../tui/test/gc";
-import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 describe("date-cwd-reminder", () => {
 	afterEach(() => {
@@ -614,5 +618,186 @@ describe("date-cwd reminder on the provider wire", () => {
 			setSystemTime();
 			authStorage.close();
 		}
+	});
+});
+
+/**
+ * Advisor half of the session-scoped reminder contract.
+ *
+ * The primary `Agent` is built with `onHistoryReplaced` so a committed
+ * `/compact` releases the injector's replay memo (sdk.ts). Every advisor is
+ * driven through that same session-scoped `transformProviderContext`, so an
+ * advisor-history discard — the runtime's `reset()`, or advisor compaction's
+ * `agent.replaceMessages([summary, ...retained])` — must release it too. Both
+ * sites discard history through `Agent#emitHistoryReplaced`, so the wired
+ * callback covers them; without it the admitted memo keeps the discarded
+ * advisor transcript (and every provider-normalized clone it holds) reachable
+ * for the rest of the session.
+ */
+describe("date/cwd reminder memo on advisor history discard", () => {
+	const REMINDER_DATE = "2026-08-14";
+	const REMINDER_CWD = "/work/omp";
+	const sessions: AgentSession[] = [];
+	let authStorage: AuthStorage;
+
+	beforeAll(() => {
+		authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
+	});
+
+	afterAll(() => {
+		authStorage.close();
+	});
+
+	afterEach(async () => {
+		for (const session of sessions.splice(0)) await session.dispose();
+	});
+
+	/** Flatten a turn's text so reminder bytes can be matched regardless of part shape. */
+	function reminderText(message: Message): string {
+		if (typeof message.content === "string") return message.content;
+		return message.content.flatMap(part => (part.type === "text" ? part.text : [])).join("\n");
+	}
+
+	function createAdvisorHarness(tempDir: TempDir): {
+		advisor: Agent;
+		advisorMock: MockModel;
+		injector: DateCwdReminderInjector;
+	} {
+		const injector = new DateCwdReminderInjector();
+		const advisorMock = createMockModel({
+			provider: "anthropic",
+			responses: [{ content: ["first advisor review"] }, { content: ["second advisor review"] }],
+		});
+		const primaryMock = createMockModel({ provider: "anthropic", responses: [{ content: ["primary done"] }] });
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const settings = Settings.isolated({
+			"advisor.syncBacklog": "1",
+			"compaction.enabled": false,
+			modelRoles: { advisor: "anthropic/claude-sonnet-4-5" },
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: primaryMock, systemPrompt: ["primary"], tools: [] },
+			streamFn: primaryMock.stream,
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: advisorMock.stream,
+			// The session-scoped provider transform, exactly as the SDK installs
+			// it: the advisor's requests ride the same injector the primary uses,
+			// and a history swap releases the memo that injector admitted.
+			transformProviderContext: context => injector.transform(context, REMINDER_DATE, REMINDER_CWD),
+			onHistoryReplaced: () => injector.release(),
+		});
+		sessions.push(session);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected an advisor agent to be live");
+		advisor.setModel(advisorMock);
+		return { advisor, advisorMock, injector };
+	}
+
+	/**
+	 * Admit the replay memo over a fixture advisor transcript and hand back a
+	 * weak reference to a turn that only the memo can still reach: assistant
+	 * turns are never injected, so nothing in the injector's injection/control
+	 * state owns them.
+	 */
+	function pinAdvisorTranscript(advisor: Agent, injector: DateCwdReminderInjector): WeakRef<Message> {
+		const firstUpdate: Message = { role: "user", content: "first update", timestamp: 1 };
+		const advisorTurn = createAssistantMessage("advisor finding");
+		const secondUpdate: Message = { role: "user", content: "second update", timestamp: 2 };
+		// The loop leaves the transcript on the advisor agent; the discard below
+		// drops that hold, as it does in production.
+		advisor.state.messages.push(firstUpdate, advisorTurn, secondUpdate);
+		const context: Context = {
+			systemPrompt: ["advisor system prompt"],
+			messages: [firstUpdate, advisorTurn, secondUpdate],
+		};
+		// Two-hit admission: the first build only records the O(1) boundary
+		// signature, the identical second one admits the memo that snapshots the
+		// whole transcript.
+		injector.transform(context, REMINDER_DATE, REMINDER_CWD);
+		injector.transform({ ...context, messages: [...context.messages] }, REMINDER_DATE, REMINDER_CWD);
+		return new WeakRef(advisorTurn);
+	}
+
+	/**
+	 * Keep the injector alive across the probe and prove it still serves
+	 * requests: a target that merely freed with its owner would pass the
+	 * collectibility assertion above without exercising the release.
+	 */
+	function assertInjectorStillServes(injector: DateCwdReminderInjector): void {
+		const fresh: Message = { role: "user", content: "fresh update", timestamp: 4 };
+		const post = injector.transform(
+			{ systemPrompt: ["advisor system prompt"], messages: [fresh] },
+			REMINDER_DATE,
+			REMINDER_CWD,
+		);
+		expect(post.messages[0]?.content).toBe(
+			`${renderDateCwdReminder(REMINDER_DATE, REMINDER_CWD)}\n\nfresh update`,
+		);
+	}
+
+	it("attaches the reminder to the advisor's first user turn and rebuilds it after a discard", async () => {
+		using tempDir = TempDir.createSync("@pi-date-cwd-reminder-advisor-");
+		const { advisor, advisorMock } = createAdvisorHarness(tempDir);
+
+		await advisor.prompt("review the current update");
+		expect(advisorMock.calls).toHaveLength(1);
+		const firstUpdate = advisorMock.calls[0]!.context.messages.find(message => message.role === "user");
+		if (!firstUpdate) throw new Error("Expected a user turn on the advisor wire");
+		// The reminder rides the first user turn, not the system prompt, so the
+		// advisor's tool schemas keep their provider prefix cache (#7404).
+		expect(advisorMock.calls[0]!.context.systemPrompt?.join("\n") ?? "").not.toContain(
+			renderDateCwdReminder(REMINDER_DATE, REMINDER_CWD),
+		);
+		expect(reminderText(firstUpdate)).toContain(renderDateCwdReminder(REMINDER_DATE, REMINDER_CWD));
+
+		advisor.reset();
+		await advisor.prompt("review the next update");
+		expect(advisorMock.calls).toHaveLength(2);
+		const rebuilt = advisorMock.calls[1]!.context.messages.find(message => message.role === "user");
+		if (!rebuilt) throw new Error("Expected a user turn on the rebuilt advisor wire");
+		// The discarded transcript is gone from the request: the new first user
+		// turn carries the reminder and no discarded turn rides along.
+		expect(advisorMock.calls[1]!.context.messages).toHaveLength(1);
+		expect(reminderText(rebuilt)).toContain(renderDateCwdReminder(REMINDER_DATE, REMINDER_CWD));
+	});
+
+	it("releases the memo when the advisor runtime resets its history", async () => {
+		using tempDir = TempDir.createSync("@pi-date-cwd-reminder-advisor-");
+		const { advisor, injector } = createAdvisorHarness(tempDir);
+		const ref = pinAdvisorTranscript(advisor, injector);
+
+		// `AdvisorRuntime.reset` discards the advisor's history; the memo must
+		// not outlive it. Collection runs through the shared probe, which
+		// forces GC from a fresh timer callback (JSC scans stale async frames
+		// conservatively) well inside Bun's 5s per-test default.
+		advisor.reset();
+
+		expect(await becomesCollectible(ref, 2_000)).toBe(true);
+		assertInjectorStillServes(injector);
+	});
+
+	it("releases the memo when advisor compaction replaces the history", async () => {
+		using tempDir = TempDir.createSync("@pi-date-cwd-reminder-advisor-");
+		const { advisor, injector } = createAdvisorHarness(tempDir);
+		const ref = pinAdvisorTranscript(advisor, injector);
+
+		// The advisor compaction path commits
+		// `agent.replaceMessages([summaryMessage, ...recentMessages])`; the memo
+		// must not outlive the transcript it snapshots.
+		advisor.replaceMessages([
+			createCompactionSummaryMessage("bounded advisor summary", 42, new Date().toISOString()),
+		]);
+
+		expect(await becomesCollectible(ref, 2_000)).toBe(true);
+		assertInjectorStillServes(injector);
 	});
 });

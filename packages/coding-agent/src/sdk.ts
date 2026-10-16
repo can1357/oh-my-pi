@@ -4753,6 +4753,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			mcpManagerToolNames: initialMcpManagerToolNames,
 			transformContext,
 			transformProviderContext,
+			// Advisors run the same session-scoped provider transform, so their
+			// history discards must release its replay memo too.
+			onHistoryReplaced: releaseDateCwdReminderOnHistoryReplace,
 			onPayload,
 			onResponse,
 			sideStreamFn: settingsAwareStreamFn,

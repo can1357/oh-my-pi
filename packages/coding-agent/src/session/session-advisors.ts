@@ -449,6 +449,15 @@ export interface SessionAdvisorsOptions {
 	configWarnings?: string[];
 	streamFn?: StreamFn;
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	/**
+	 * Called when this advisor's history is replaced wholesale. Advisors are
+	 * driven through the session's `transformProviderContext`, whose date/cwd
+	 * reminder injector is session-scoped: without this forward the replay memo
+	 * it admits over an advisor transcript outlives the discard (`reset()`, and
+	 * advisor compaction's `replaceMessages`) and keeps that transcript
+	 * reachable until the next primary request or session disposal.
+	 */
+	onHistoryReplaced?: () => void;
 }
 
 /** Options accepted when an advisor injects a primary-session message. */
@@ -547,6 +556,8 @@ export class SessionAdvisors {
 	#advisorMemoryPrompt: string | undefined;
 	#advisorStreamFn: StreamFn | undefined;
 	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
+	/** Released session-scoped provider-transform state on an advisor history swap. */
+	#onHistoryReplaced: (() => void) | undefined;
 	#advisors: ActiveAdvisor[] = [];
 	#advisorConfigs: AdvisorConfig[] | undefined;
 	#advisorConfigWarnings: string[];
@@ -622,6 +633,7 @@ export class SessionAdvisors {
 		this.#advisorConfigWarnings = options.configWarnings ?? [];
 		this.#advisorStreamFn = options.streamFn;
 		this.#transformProviderContext = options.transformProviderContext;
+		this.#onHistoryReplaced = options.onHistoryReplaced;
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
 	}
 
@@ -1444,6 +1456,10 @@ export class SessionAdvisors {
 				onResponse: this.#host.onResponse,
 				onSseEvent: this.#host.onSseEvent,
 				transformProviderContext: this.#transformProviderContext,
+				// Advisors share the session-scoped provider transform, so their
+				// history swaps (`reset`, advisor compaction) must reach its
+				// release seam exactly like the primary agent's do.
+				onHistoryReplaced: this.#onHistoryReplaced,
 				intentTracing: false,
 				transformAssistantMessage: message => {
 					quarantinedAdvisorOutput = quarantineAdvisorUnsafeOutput(
