@@ -1525,6 +1525,16 @@ describe("ACP agent", () => {
 				prompt: [{ type: "text", text: "hi" }],
 			}),
 		).rejects.toThrow("unknown session");
+		// Null/non-object params map to the method's -32602 contract, not the
+		// -32603 a TypeError dereference would surface as.
+		for (const badParams of [null, "steer", 42] as never[]) {
+			const error = await harness.agent.extMethod("_session/steering", badParams).then(
+				() => undefined,
+				(rejection: unknown) => rejection,
+			);
+			expect(error).toBeInstanceOf(RequestError);
+			expect((error as RequestError).code).toBe(-32602);
+		}
 		await expect(
 			harness.agent.extMethod("_session/steering", { sessionId: created.sessionId, prompt: 42 }),
 		).rejects.toThrow("Invalid params");

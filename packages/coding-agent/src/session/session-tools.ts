@@ -988,6 +988,9 @@ export class SessionTools {
 							},
 							PERMISSION_OPTIONS,
 							signal,
+							// The bridge cancels its pending wire dialog when the steer wins;
+							// the gate's own race above classifies the outcome either way.
+							steeringArrival,
 						).then(outcome => ({ kind: "permission" as const, outcome }));
 						raced = await Promise.race([permissionPromise, abortPromise, steerPromise]);
 					} finally {

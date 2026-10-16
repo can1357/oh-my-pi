@@ -221,4 +221,73 @@ describe("AgentSession prompt admission racing abort", () => {
 		expect(queued.followUp).toEqual([]);
 		expect(calls).toBe(1);
 	});
+
+	it("joinActiveTurn refuses an image steer whose normalization outlives the start of abort", async () => {
+		const turnStarted = Promise.withResolvers<void>();
+		const releaseTurn = Promise.withResolvers<void>();
+		let calls = 0;
+		const { session } = await createSession([
+			async () => {
+				calls++;
+				turnStarted.resolve();
+				await releaseTurn.promise;
+				return { content: ["first turn"] };
+			},
+		]);
+
+		const running = session.prompt("start");
+		await withTimeout(turnStarted.promise, 2_000, "First turn never started");
+
+		// The steer is admitted (turn live) but its image normalization is
+		// held; abort() starts while it is still being preprocessed. The
+		// post-await admission recheck must refuse via `#abortInProgress` —
+		// `isStreaming` alone would still read true until cleanup drains —
+		// so the message never reaches the queue the abort will drain.
+		const normalization = holdImageNormalization();
+		const admitting = session.joinActiveTurn("steer with an image", [IMAGE]);
+		await withTimeout(normalization.started, 2_000, "Normalization never started");
+		const aborting = session.abort({ reason: USER_INTERRUPT_LABEL });
+		normalization.release();
+		expect(await admitting).toBe(false);
+
+		releaseTurn.resolve();
+		await aborting;
+		await running;
+		await session.waitForIdle();
+		const queued = session.getQueuedMessages();
+		expect(queued.steering).toEqual([]);
+		expect(queued.followUp).toEqual([]);
+		expect(calls).toBe(1);
+	});
+
+	it("joinActiveTurn answers not-admitted during a prompt's pre-dispatch window instead of queueing behind it", async () => {
+		const normalization = holdImageNormalization();
+		const turnStarted = Promise.withResolvers<void>();
+		const releaseTurn = Promise.withResolvers<void>();
+		let calls = 0;
+		const { session } = await createSession([
+			async () => {
+				calls++;
+				turnStarted.resolve();
+				await releaseTurn.promise;
+				return { content: ["first turn"] };
+			},
+		]);
+
+		// A prompt is admitted but still dispatching (normalization held,
+		// `#beginInFlight` not yet reached): the session is not streaming and
+		// there is no pending action to ask about yet. The steer classifies
+		// as not-admitted so the host queues its own prompt behind the
+		// dispatching one — never an invisible mid-dispatch injection.
+		const dispatching = session.prompt("start", { images: [IMAGE] });
+		await withTimeout(normalization.started, 2_000, "Normalization never started");
+		expect(await session.joinActiveTurn("steer during dispatch")).toBe(false);
+
+		normalization.release();
+		await withTimeout(turnStarted.promise, 2_000, "Held turn never started");
+		releaseTurn.resolve();
+		await dispatching;
+		await session.waitForIdle();
+		expect(calls).toBe(1);
+	});
 });

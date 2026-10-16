@@ -1365,6 +1365,13 @@ export class AcpAgent implements Agent {
 	 * `_meta.steering.queue: "followUp"` routing.
 	 */
 	async #handleSessionSteering(params: { [key: string]: unknown }): Promise<{ [key: string]: unknown }> {
+		// A malformed request can carry null/non-object params (the transport hands
+		// extension requests through unvalidated): reading `sessionId` below would
+		// throw a TypeError surfaced as -32603. Map to the method's invalid-params
+		// contract instead.
+		if (typeof params !== "object" || params === null) {
+			throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, "params must be an object");
+		}
 		const sessionId = params.sessionId;
 		if (typeof sessionId !== "string" || sessionId.length === 0) {
 			throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, "sessionId required");

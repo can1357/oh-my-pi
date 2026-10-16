@@ -90,6 +90,17 @@ export class AgentSideConnection {
 	requestPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
 		return this.#connection.request("session/request_permission", params);
 	}
+	/**
+	 * Requests permission from the client, returning a handle that cancels the
+	 * pending wire request (`$/cancel_request`) — used when user steering
+	 * supersedes an open permission dialog instead of waiting behind it.
+	 */
+	requestPermissionWithCancel(params: RequestPermissionRequest): {
+		promise: Promise<RequestPermissionResponse>;
+		cancel(): void;
+	} {
+		return this.#connection.requestCancellable<RequestPermissionResponse>("session/request_permission", params);
+	}
 	/** Reads a client-side text file. */
 	readTextFile(params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
 		return this.#connection.request("fs/read_text_file", params);

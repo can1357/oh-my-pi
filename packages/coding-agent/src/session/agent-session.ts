@@ -8538,11 +8538,13 @@ export class AgentSession implements SettingsScope {
 			return false;
 		}
 		// `joinActiveTurn` admission: after every await above, the run that was
-		// live at call time may have settled. Classify as not-admitted so the
-		// caller (the ACP bridge) keeps its content for the host; the enqueue
-		// below is synchronous, so nothing interleaves between this check and
-		// the message landing on the queue.
-		if (options?.requireActiveRun && !this.isStreaming) {
+		// live at call time may have settled — or `abort()` may have started
+		// (its `#abortInProgress` flag is raised synchronously at entry, while
+		// `isStreaming` can stay true until cleanup drains). Classify either as
+		// not-admitted so the caller (the ACP bridge) keeps its content for the
+		// host; the enqueue below is synchronous, so nothing interleaves
+		// between this check and the message landing on the queue.
+		if (options?.requireActiveRun && (this.#abortInProgress || !this.isStreaming)) {
 			return false;
 		}
 		if (mode === "aside") {

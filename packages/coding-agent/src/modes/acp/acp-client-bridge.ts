@@ -10,6 +10,7 @@ import type {
 	AgentSideConnection,
 	ClientCapabilities,
 	RequestPermissionRequest,
+	RequestPermissionResponse,
 	ToolCallUpdate,
 } from "@oh-my-pi/pi-utils/acp";
 import type {
@@ -65,8 +66,8 @@ export function createAcpClientBridge(
 			createTerminalHandle(connection, sessionId, params);
 	}
 
-	bridge.requestPermission = (toolCall, options, signal) =>
-		requestPermission(connection, sessionId, toolCall, options, signal);
+	bridge.requestPermission = (toolCall, options, signal, steeringSignal) =>
+		requestPermission(connection, sessionId, toolCall, options, signal, steeringSignal);
 
 	return bridge;
 }
@@ -117,6 +118,7 @@ async function requestPermission(
 	toolCall: ClientBridgePermissionToolCall,
 	options: ClientBridgePermissionOption[],
 	signal: AbortSignal | undefined,
+	steeringSignal: AbortSignal | undefined,
 ): Promise<ClientBridgePermissionOutcome> {
 	const update: ToolCallUpdate = {
 		toolCallId: toolCall.toolCallId,
@@ -140,7 +142,48 @@ async function requestPermission(
 	if (signal?.aborted) {
 		return { outcome: "cancelled" };
 	}
-	const response = await connection.requestPermission(request);
+	// A steer queued while the dialog is open supersedes it: cancel the pending
+	// wire request (`$/cancel_request`) so the client is not left with a live
+	// dialog for a tool call the loop has already reported as cancelled.
+	const { promise, cancel } = connection.requestPermissionWithCancel(request);
+	if (!steeringSignal) {
+		const response = await promise;
+		return permissionOutcomeFromResponse(response, options);
+	}
+	if (steeringSignal.aborted) {
+		cancel();
+		return { outcome: "cancelled" };
+	}
+	const steered = Promise.withResolvers<void>();
+	const onSteer = () => {
+		cancel();
+		steered.resolve();
+	};
+	steeringSignal.addEventListener("abort", onSteer, { once: true });
+	try {
+		const winner = await Promise.race([
+			promise.then(
+				response => ({ kind: "response" as const, response }),
+				error => ({ kind: "error" as const, error }),
+			),
+			steered.promise.then(() => ({ kind: "steered" as const })),
+		]);
+		if (winner.kind === "steered") {
+			return { outcome: "cancelled" };
+		}
+		if (winner.kind === "error") {
+			throw winner.error;
+		}
+		return permissionOutcomeFromResponse(winner.response, options);
+	} finally {
+		steeringSignal.removeEventListener("abort", onSteer);
+	}
+}
+
+function permissionOutcomeFromResponse(
+	response: RequestPermissionResponse,
+	options: ClientBridgePermissionOption[],
+): ClientBridgePermissionOutcome {
 	const outcome = response.outcome;
 	if (outcome.outcome === "cancelled") {
 		return { outcome: "cancelled" };
