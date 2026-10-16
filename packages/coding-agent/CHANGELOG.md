@@ -215,6 +215,7 @@
 - Agents can now read saved context notes without accidentally clearing them ([#15748](https://github.com/can1357/oh-my-pi/pull/15748) by [@Komzpa](https://github.com/Komzpa))
 - Fixed startup without an explicit model picking an unrelated authenticated provider instead of the first available model in the configured default fallback chain ([#15781](https://github.com/can1357/oh-my-pi/pull/15781) by [@mvid](https://github.com/mvid))
 - Fixed a settings reload that flipped the thinking-block preference while thinking blocks were already hidden clearing and replaying the whole terminal, stalling a long transcript for a change nothing renders ([#15336](https://github.com/can1357/oh-my-pi/pull/15336) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed the same terminal clear-and-replay stall on a settings batch that carried prose-only thinking without changing it, which also ran the replay without the stable-emission ledger it must be paired with ([#15336](https://github.com/can1357/oh-my-pi/pull/15336) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.0] - 2026-10-14
 

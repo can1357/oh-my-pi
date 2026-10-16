@@ -3627,6 +3627,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (this.streamingComponent && this.streamingMessage) {
 				this.#eventController.resyncStreamingRevealVisibility();
 			}
+			// Gated on the value above, not on the key being present: a bulk reload
+			// that carries proseOnlyThinking with an unchanged value reached this
+			// line alone, so ui.resetDisplay() cleared and replayed the whole
+			// terminal for a change nothing observes while the ledger it depends on
+			// was never reset — the same stall the hideThinkingBlock guard fixes.
+			resetDisplay = true;
 		}
 		const hideThinkingBlock = cfgHideThinkingBlock.get(this.settings);
 		if (any("hideThinkingBlock") && hideThinkingBlock !== this.hideThinkingBlock) {
@@ -3650,11 +3656,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#inputController.applyThinkingBlockVisibility(hideThinkingBlock, { deferDisplayReset: true });
 				resetDisplay = true;
 			}
-		}
-		if (any("proseOnlyThinking")) {
-			// The component setter ran above; this batch's only display reset
-			// (below) replays retired rows under the new prose mode.
-			resetDisplay = true;
 		}
 		const expandThinkingBlocks = cfgExpandThinkingBlocks.get(this.settings);
 		if (any("expandThinkingBlocks") && expandThinkingBlocks !== this.expandThinkingBlocks) {

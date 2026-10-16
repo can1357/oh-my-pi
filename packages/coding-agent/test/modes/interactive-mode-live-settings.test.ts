@@ -241,6 +241,42 @@ describe("InteractiveMode live settings", () => {
 		expect(mode.chatContainer.emittedStableRows()).toEqual([0]);
 	});
 
+	it("does not replay the terminal when a prose-only preference update carries no change", async () => {
+		// The ledger reset for proseOnlyThinking is value-guarded against the mode's
+		// cached field, but the display reset below it was gated only on the snapshot
+		// diff. The two disagree whenever the mode's field already holds the value the
+		// snapshot is landing on: the constructor resolves the setting when the mode is
+		// built while the coalesced listener only subscribes later in init(), so a
+		// settings layer resolving in between leaves the mode's field ahead of the
+		// listener's snapshot. Such a batch then skipped the ledger reset and still ran
+		// ui.resetDisplay(), clearing and replaying the whole terminal for a change
+		// nothing observes — a stall/flicker on a long transcript at every settings
+		// reload — and it did so without the stable-emission ledger the replay has to
+		// be paired with.
+		expect(mode.proseOnlyThinking).toBe(true);
+		const resetStableEmission = vi.spyOn(mode.chatContainer, "resetStableEmission");
+		const resetDisplay = vi.spyOn(mode.ui, "resetDisplay");
+
+		// A real flip establishes the one propagation the toggle owes.
+		cfgProseOnlyThinking.set(session.settings, false);
+		await Promise.resolve();
+		expect(mode.proseOnlyThinking).toBe(false);
+		expect(resetStableEmission).toHaveBeenCalledTimes(1);
+		expect(resetDisplay).toHaveBeenCalledTimes(1);
+
+		// The mode's field runs ahead of the listener's snapshot, so the batch below
+		// diffs on the snapshot while the mode already renders the value it lands on.
+		mode.proseOnlyThinking = true;
+		cfgProseOnlyThinking.set(session.settings, true);
+		await Promise.resolve();
+		expect(mode.proseOnlyThinking).toBe(true);
+		expect(cfgProseOnlyThinking.get(session.settings)).toBe(true);
+		// Nothing observes a difference, so the batch owes nothing — in particular not
+		// a replay the ledger reset cannot back up.
+		expect(resetStableEmission).toHaveBeenCalledTimes(1);
+		expect(resetDisplay).toHaveBeenCalledTimes(1);
+	});
+
 	it("resets the stable ledger when prose-only thinking changes mid-stream", async () => {
 		// When proseOnlyThinking changes while an assistant block has emitted stable
 		// thinking rows but has not yet retired, the destructive replay must reset
