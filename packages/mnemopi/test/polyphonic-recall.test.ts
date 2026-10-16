@@ -63,6 +63,11 @@ function seedPolyphonicFixture(beam: BeamMemoryState): PolyphonicRecallEngine {
 		"m2",
 		JSON.stringify([1, 0]),
 	]);
+	// The temporal voice only re-ranks memories another voice surfaced, so m3 needs a (weak) vector hit.
+	beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+		"m3",
+		JSON.stringify([0.7, 0.71]),
+	]);
 	beam.db.run(
 		`INSERT INTO gists (id, text, timestamp, participants_json, memory_id)
 			VALUES ('gist_m2', 'Alice graph gist', ?, ?, 'm2')`,
@@ -93,7 +98,7 @@ describe("PolyphonicRecallEngine", () => {
 			expect(results.map(result => result.id)).toEqual(["m2", "m1", "m3"]);
 			expect(results[0]?.voice_scores).toEqual({ vector: 1 / 61, graph: 1 / 61 });
 			expect(results[1]?.voice_scores).toEqual({ vector: 1 / 62, fact: 1 / 61 });
-			expect(results[2]?.voice_scores).toEqual({ temporal: 1 / 61 });
+			expect(results[2]?.voice_scores).toEqual({ vector: 1 / 63, temporal: 1 / 61 });
 			expect(results[0]?.score).toBeGreaterThan(results[1]?.score ?? 0);
 			expect(results[0]?.content).toContain("graph traversal");
 		} finally {
@@ -201,12 +206,29 @@ describe("PolyphonicRecallEngine", () => {
 
 			expect(vectorResults.map(result => result.id)).toEqual(["wm-global-b"]);
 
-			process.env.MNEMOPI_VOICE_VECTOR = "0";
 			delete process.env.MNEMOPI_VOICE_TEMPORAL;
+			const engine = new PolyphonicRecallEngine({ db: beam.db, sessionId: beam.sessionId });
+			const temporalResults = engine.temporalVoice("recent vector marker", new Set(["wm-private-b", "wm-global-b"]));
 
-			const temporalResults = polyphonicRecall(beam, "recent vector marker", 5);
+			expect(temporalResults.map(result => result.memoryId)).toEqual(["wm-global-b"]);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
 
-			expect(temporalResults.map(result => result.id)).toEqual(["wm-global-b"]);
+	it("treats only whole time words as a temporal query", () => {
+		const beam = makeBeam();
+		try {
+			const engine = new PolyphonicRecallEngine({ db: beam.db, sessionId: beam.sessionId });
+			insertWorking(beam, "m-fresh", "Fresh note about the deploy");
+			const surfaced = new Set(["m-fresh"]);
+
+			for (const query of ["fix the blast radius", "the Chicago office"]) {
+				expect(engine.temporalVoice(query, surfaced)).toEqual([]);
+			}
+			expect(engine.temporalVoice("what changed last week", surfaced).map(result => result.memoryId)).toEqual([
+				"m-fresh",
+			]);
 		} finally {
 			closeQuietly(beam.db);
 		}
