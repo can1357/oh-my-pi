@@ -33,7 +33,11 @@ import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
 import { formatNumber, TempDir } from "@oh-my-pi/pi-utils";
 
-import { cfgPlanAutosave, cfgPlanAutosaveDir } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
+import {
+	cfgPlanAutosave,
+	cfgPlanAutosaveDir,
+	cfgPlanExecuteAfterCompactionFailure,
+} from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 
 /**
  * Matches the plan-approved synthetic-prompt dispatch. `#approvePlan` calls
@@ -2146,19 +2150,20 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(session.model?.id).toBe(prePlanModel.id);
 	});
 
-	it("failed compaction stays on the plan model and still dispatches", async () => {
+	it("failed compaction opt-out stays on the plan model and does not dispatch", async () => {
 		const planModel = session.modelRegistry.find("anthropic", "claude-opus-4-5");
 		if (!planModel) throw new Error("Expected opus to exist in registry");
 
 		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
 		session.settings.setModelRole("plan", "anthropic/claude-opus-4-5");
+		cfgPlanExecuteAfterCompactionFailure.set(session.settings, false);
 
 		const planFilePath = "local://PLAN.md";
 		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nCompact failure still dispatches.");
+		await Bun.write(resolvedPlanPath, "# Plan\n\nDo not execute after compaction failure.");
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(planModel.id);
@@ -2166,6 +2171,7 @@ describe("InteractiveMode plan review rendering", () => {
 		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
 		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and compact context");
 		const promptSpy = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const showWarningSpy = vi.spyOn(mode, "showWarning");
 
 		let compactModelId: string | undefined;
 		vi.spyOn(mode, "handleCompactCommand").mockImplementation(async () => {
@@ -2181,7 +2187,8 @@ describe("InteractiveMode plan review rendering", () => {
 
 		expect(compactModelId).toBe(planModel.id);
 		expect(session.model?.id).toBe(planModel.id);
-		expect(promptSpy.mock.calls.some(isPlanApprovedCall)).toBe(true);
+		expect(promptSpy.mock.calls.some(isPlanApprovedCall)).toBe(false);
+		expect(showWarningSpy).toHaveBeenCalledWith(expect.stringContaining("execution not dispatched"));
 	});
 
 	it("slider tier on the compact path applies after successful compaction", async () => {
@@ -2548,9 +2555,8 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(promptSpy.mock.calls.some(isPlanApprovedCall)).toBe(false);
 	});
 
-	it("Approve and compact context: failed outcome still dispatches plan-approved (best-effort)", async () => {
-		// Mock `handleCompactCommand` to surface the "failed" outcome directly.
-		// Failure → approval intent stands → synthetic dispatch fires.
+	it("Approve and compact context: failed outcome dispatches by default", async () => {
+		// Preserve the legacy best-effort behavior unless the operator explicitly opts out.
 		const planFilePath = "local://PLAN.md";
 		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
@@ -2571,9 +2577,8 @@ describe("InteractiveMode plan review rendering", () => {
 			title: "PLAN",
 		});
 
-		// Plan-approved synthetic prompt WAS dispatched despite the failure.
+		// The intact context stays on the plan model and receives the synthetic execution turn.
 		expect(promptSpy.mock.calls.some(isPlanApprovedCall)).toBe(true);
-		// markPlanReferenceSent fires on this dispatch path.
 		expect(markSentSpy).toHaveBeenCalledTimes(1);
 	});
 	it("Approve and compact context: setPlanReferencePath is pinned BEFORE compaction flushes the queue", async () => {
