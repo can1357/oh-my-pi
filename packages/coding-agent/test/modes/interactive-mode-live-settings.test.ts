@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
@@ -99,6 +99,13 @@ describe("InteractiveMode live settings", () => {
 		// block rendered zero rows (the answer vanished) and retirement wrote nothing
 		// to scrollback (permanent loss). It must run the exact same propagation as
 		// the Ctrl+T keybinding (#10177).
+		// Thinking on, so the raw preference flip below also flips the effective
+		// visibility every component renders by — that is the #10177 path this
+		// guards (a raw flip that leaves the effective value alone must skip the
+		// replay; see the test below).
+		session.setThinkingLevel(ThinkingLevel.High);
+		await Promise.resolve();
+		expect(mode.effectiveHideThinkingBlock).toBe(false);
 		const resetStableEmission = vi.spyOn(mode.chatContainer, "resetStableEmission");
 		const resetDisplay = vi.spyOn(mode.ui, "resetDisplay");
 
@@ -109,6 +116,38 @@ describe("InteractiveMode live settings", () => {
 		// The ledger+history rebuild the branch used to skip.
 		expect(resetStableEmission).toHaveBeenCalledTimes(1);
 		expect(resetDisplay).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not replay the terminal when a hide-thinking preference flip leaves visibility hidden", async () => {
+		// Regression: an on-disk reload or programmatic update flipped the raw
+		// hideThinkingBlock preference while thinking was off and the session had
+		// produced no displayable reasoning, so effectiveHideThinkingBlock stayed
+		// hidden on both sides of the update. The batch compared the raw
+		// preference and ran the full propagation anyway: resetStableEmission
+		// forgot the stable rows every rendered block had published to scrollback
+		// and ui.resetDisplay() cleared and replayed the whole terminal — an
+		// avoidable stall/flicker on a long transcript for a change nothing
+		// observes. The preference must still persist; only the destructive
+		// replay must go away.
+		session.setThinkingLevel(ThinkingLevel.Off);
+		await Promise.resolve();
+		expect(mode.effectiveHideThinkingBlock).toBe(true);
+		const resetStableEmission = vi.spyOn(mode.chatContainer, "resetStableEmission");
+		const resetDisplay = vi.spyOn(mode.ui, "resetDisplay");
+
+		cfgHideThinkingBlock.set(session.settings, true);
+		await Promise.resolve();
+		expect(mode.hideThinkingBlock).toBe(true);
+
+		// Same no-op in the other direction: the persisted preference flips back
+		// while thinking is still hidden.
+		cfgHideThinkingBlock.set(session.settings, false);
+		await Promise.resolve();
+
+		expect(mode.hideThinkingBlock).toBe(false);
+		expect(cfgHideThinkingBlock.get(session.settings)).toBe(false);
+		expect(resetStableEmission).not.toHaveBeenCalled();
+		expect(resetDisplay).not.toHaveBeenCalled();
 	});
 
 	it("keeps the assistant answer in the transcript when /settings hides thinking mid-stream", async () => {
