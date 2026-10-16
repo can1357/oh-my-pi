@@ -8,7 +8,9 @@ import {
 	directoryIsMissing,
 	getLogPath,
 	getProjectDir,
+	isStrictlyWithinNormalizedRoot,
 	localDay,
+	relativePathWithinNormalizedRoot,
 	relativePathWithinRoot,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils/dirs";
@@ -83,6 +85,33 @@ describe("project directory state", () => {
 		expect(() => setProjectDir("/blocked/project")).toThrow("operation not permitted");
 		expect(getProjectDir()).toBe(originalProjectDir);
 		chdir.mockRestore();
+	});
+});
+
+describe("lexical containment", () => {
+	const root = path.join(path.sep, "repo");
+
+	it("keeps a child whose name starts with two dots inside the root", () => {
+		// `..draft` is an ordinary entry name; only `..` or a `../` prefix leaves the root.
+		const child = path.join(root, "..draft", "AGENTS.md");
+		expect(relativePathWithinNormalizedRoot(root, child)).toBe(path.join("..draft", "AGENTS.md"));
+		expect(isStrictlyWithinNormalizedRoot(root, child)).toBe(true);
+	});
+
+	it("rejects the parent and siblings reached through it", () => {
+		expect(relativePathWithinNormalizedRoot(root, path.sep)).toBeNull();
+		expect(relativePathWithinNormalizedRoot(root, path.join(path.sep, "repo-other", "a.ts"))).toBeNull();
+		expect(isStrictlyWithinNormalizedRoot(root, path.join(path.sep, "repo-other"))).toBe(false);
+	});
+
+	it("treats the root itself as within but not strictly below", () => {
+		expect(relativePathWithinNormalizedRoot(root, root)).toBe("");
+		expect(isStrictlyWithinNormalizedRoot(root, root)).toBe(false);
+	});
+
+	it.skipIf(process.platform !== "win32")("rejects a candidate on another drive", () => {
+		expect(relativePathWithinNormalizedRoot("C:\\repo", "D:\\repo\\a.ts")).toBeNull();
+		expect(isStrictlyWithinNormalizedRoot("C:\\repo", "D:\\repo")).toBe(false);
 	});
 });
 

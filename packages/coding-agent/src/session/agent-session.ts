@@ -43,6 +43,7 @@ import {
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	type ThinkingLevel,
 	type ToolChoiceDirective,
+	joinAdditionalContext,
 } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionPreparation,
@@ -219,7 +220,7 @@ import {
 	toReasoningEffort,
 } from "@oh-my-pi/pi-tui/thinking";
 import { isAttachmentOnlyTitleInput, isLowSignalTitleInput } from "../tiny/text";
-import type { ImageAttachmentEntry, ToolSession } from "../tools";
+import type { ContextFileEntry, ImageAttachmentEntry, ToolSession } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { type AskToolInput, recoverAskQuestions } from "../tools/ask";
@@ -488,6 +489,7 @@ function jobSnapshotItem(job: AsyncJob): AsyncJobSnapshotItem {
 
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
 import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
+import { NestedContextInjector } from "./nested-context";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
@@ -1073,6 +1075,7 @@ export class AgentSession implements SettingsScope {
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 
 	readonly #ttsr: TtsrCoordinator;
+	readonly #nestedContext: NestedContextInjector;
 	readonly #stats: SessionStatsTracker;
 
 	/** One-shot flag for expected internal plan-mode aborts. Approval actions may
@@ -2095,6 +2098,8 @@ export class AgentSession implements SettingsScope {
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.
 			thunks.push(() => this.#todo.takeMidRunNudge());
+			// Nested context files a batch with a skipped call could not hand over.
+			thunks.push(() => this.#nestedContext.takeStranded());
 			const contextNotesReminder = this.#experimentalContextNotesReminder;
 			if (contextNotesReminder) {
 				this.#experimentalContextNotesReminder = undefined;
@@ -2156,6 +2161,7 @@ export class AgentSession implements SettingsScope {
 			xdev: config.xdev,
 			setActiveToolNames: config.setActiveToolNames,
 			baseSystemPrompt: this.agent.state.systemPrompt,
+			baseContextFilePaths: config.promptContextFiles,
 			skills: config.skills,
 			skillWarnings: config.skillWarnings,
 			skillsSettings: config.skillsSettings,
@@ -2175,10 +2181,28 @@ export class AgentSession implements SettingsScope {
 			sessionGeneration: () => this.#sessionGeneration,
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
+		this.#nestedContext = new NestedContextInjector({
+			settings: this.settings,
+			cwd: () => this.sessionManager.getCwd(),
+			additionalDirectories: () => this.sessionManager.getAdditionalDirectories(),
+			promptContextFiles: () => this.#tools.basePromptContextFiles,
+			window: () => this.agent.state.messages,
+			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
+		});
 		this.#extensionRunner?.setToolCallPreflight?.({
-			before: (toolCallId, tool, args) => this.#ttsr.beforeBridgedToolCall(toolCallId, tool, args),
-			after: (toolCallId, result, context) => this.#ttsr.afterBridgedToolCall(toolCallId, result, context),
-			cancel: toolCallId => this.#ttsr.cancelBridgedToolCall(toolCallId),
+			before: async (toolCallId, tool, args) => {
+				const verdict = await this.#ttsr.beforeBridgedToolCall(toolCallId, tool, args);
+				if (!verdict?.block) this.#nestedContext.beforeBridgedToolCall(toolCallId, tool.name, args);
+				return verdict;
+			},
+			after: async (toolCallId, result, context, isError) => {
+				await this.#nestedContext.afterBridgedToolCall(toolCallId, result, isError === true, context);
+				return this.#ttsr.afterBridgedToolCall(toolCallId, result, context);
+			},
+			cancel: toolCallId => {
+				this.#ttsr.cancelBridgedToolCall(toolCallId);
+				this.#nestedContext.cancelBridgedToolCall(toolCallId);
+			},
 		});
 		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
 		this.agent.setOnModelCallSystemPrompt(prompt => {
@@ -5041,7 +5065,9 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
-	#afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
+	#afterToolCall(
+		ctx: AfterToolCallContext,
+	): Promise<AfterToolCallResult | undefined> | AfterToolCallResult | undefined {
 		if (
 			this.#isTerminalYieldToolResult({
 				toolName: ctx.toolCall.name,
@@ -5054,7 +5080,13 @@ export class AgentSession implements SettingsScope {
 			this.#synchronouslyTerminatedYieldToolCallIds.add(ctx.toolCall.id);
 			this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
 		}
-		return this.#ttsr.afterToolCall(ctx);
+		const ttsr = this.#ttsr.afterToolCall(ctx);
+		const nested = this.#nestedContext.afterToolCall(ctx);
+		if (!nested) return ttsr;
+		return nested.then(text => {
+			const additionalContext = joinAdditionalContext([ttsr?.additionalContext, text]);
+			return additionalContext ? { ...ttsr, additionalContext } : ttsr;
+		});
 	}
 	/**
 	 * Emits the extension `tool_call` event for a loop-dispatched call at
@@ -5067,6 +5099,7 @@ export class AgentSession implements SettingsScope {
 	 * execution still emit there).
 	 */
 	async #beforeToolCall(ctx: BeforeToolCallContext, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
+		this.#nestedContext.beforeToolCall(ctx.assistantMessage, ctx.toolCall.id, ctx.tool.name);
 		const runner = this.#extensionRunner;
 		runner?.markLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
 		const ttsrResult = await this.#ttsr.beforeToolCall(ctx);
@@ -9376,6 +9409,11 @@ export class AgentSession implements SettingsScope {
 	/** Session-local general-purpose agents pinned to user-tagged models. */
 	getSessionAgents(): AgentDefinition[] {
 		return this.#modelMentions.sessionAgents();
+	}
+
+	/** Nested context files loaded on touch or fully read and still in context, for subagents to inherit. */
+	getNestedContextFiles(): Promise<ContextFileEntry[]> {
+		return this.#nestedContext.carried(this.agent.state.messages);
 	}
 
 	/** Registered model pseudonyms on the active branch. */

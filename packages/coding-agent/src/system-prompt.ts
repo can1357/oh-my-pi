@@ -605,6 +605,11 @@ export interface BuildSystemPromptResult {
 	 * a catalog the prompt already carries (issue #7139).
 	 */
 	xdevCatalogNames?: readonly string[];
+	/**
+	 * Paths of the context files this prompt renders, every workspace root's
+	 * included. Undefined when the prompt renders none of its own (`NULL_PROMPT`).
+	 */
+	contextFilePaths?: readonly string[];
 }
 
 /** Static wrapper; compiled (not rendered) so user-authored Markdown passes through byte-for-byte. */
@@ -1042,5 +1047,5 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		!resolvedCustomPrompt && xdevTools.length > 0 && rendered.includes("xd://")
 			? xdevTools.map(mounted => mounted.name)
 			: undefined;
-	return { systemPrompt, xdevCatalogNames };
+	return { systemPrompt, xdevCatalogNames, contextFilePaths: contextFiles.map(file => file.path) };
 }

@@ -453,7 +453,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			};
 		}
 		if (!loopDispatchedToolCall) {
-			const postflight = await this.runner.runToolCallPreflightAfter?.(toolCallId, result, context);
+			const postflight = await this.runner.runToolCallPreflightAfter?.(
+				toolCallId,
+				result,
+				context,
+				executionError !== undefined || result.isError === true,
+			);
 			if (postflight) result = postflight as AgentToolResult<TDetails, TParameters>;
 		}
 

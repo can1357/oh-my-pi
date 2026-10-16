@@ -34,7 +34,7 @@ import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
-import { type ExecutorOptions, runSubprocess } from "./executor";
+import { type ExecutorOptions, inheritedContextFiles, runSubprocess } from "./executor";
 import {
 	applyEligibleNestedPatches,
 	type IsolationContext,
@@ -541,12 +541,12 @@ function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
 	return { skills, autoloadSkills };
 }
 
-function buildExecutorOptions(
+async function buildExecutorOptions(
 	request: StructuredSubagentRequest,
 	policy: EffectiveSubagentPolicy,
 	lease: ArtifactLease,
 	id: string,
-): ExecutorOptions {
+): Promise<ExecutorOptions> {
 	const { session } = request;
 	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
 	const localProtocolOptions = sessionLocalProtocolOptions(session);
@@ -612,7 +612,7 @@ function buildExecutorOptions(
 		enableMCP,
 		customTools: request.customTools,
 		workPoolYieldItems: request.workPoolYieldItems,
-		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
+		contextFiles: await inheritedContextFiles(session),
 		skills,
 		autoloadSkills,
 		workspaceTree: session.workspaceTree,
@@ -799,7 +799,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
 		await refreshSkillsForAutoload(request.session, policy.agent);
-		const baseOptions = buildExecutorOptions(request, policy, lease, id);
+		const baseOptions = await buildExecutorOptions(request, policy, lease, id);
 		baseOptions.onCleanupDeferred = completion => {
 			deferredCleanup = completion;
 		};

@@ -185,8 +185,19 @@ export function normalizePathForComparison(inputPath: string): string {
  */
 export function relativePathWithinNormalizedRoot(normalizedRoot: string, normalizedCandidate: string): string | null {
 	const relative = path.relative(normalizedRoot, normalizedCandidate);
-	if (relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative))) return null;
+	// Only `..` itself or a `../` prefix leaves the root; a child may be named `..draft`.
+	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
 	return relative;
+}
+
+/**
+ * Whether `normalizedCandidate` lies strictly below `normalizedRoot`: inside
+ * it and not the root itself. Lexical, like
+ * {@link relativePathWithinNormalizedRoot}, so both operands must already be
+ * normalized (or resolved) the same way.
+ */
+export function isStrictlyWithinNormalizedRoot(normalizedRoot: string, normalizedCandidate: string): boolean {
+	return Boolean(relativePathWithinNormalizedRoot(normalizedRoot, normalizedCandidate));
 }
 
 export function pathIsWithin(root: string, candidate: string): boolean {

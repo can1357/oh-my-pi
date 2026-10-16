@@ -4,6 +4,7 @@
 
 ### Added
 
+- `contextFiles.onTouch` (off by default) loads a subdirectory's `AGENTS.md` / `CLAUDE.md` the first time `read`, `write`, `edit` (or `apply_patch`) or `ast_edit` touches a file below it, directly or from an `eval` script, as a developer message after the tool batch. Each file loads once per context window, is capped at 16,384 characters, and loads again after compaction drops it. Subagents inherit the non-`AGENTS.md` files their parent has loaded or read in full. See [Loading nested files on touch](../../docs/context-files.md#loading-nested-files-on-touch) ([#15393](https://github.com/can1357/oh-my-pi/pull/15393) by [@ryan-bert](https://github.com/ryan-bert))
 - Added `lsp.requestTimeout` setting to configure wait durations for language server diagnostics and requests
 - Added `omp auth-gateway serve --clients=<file>`: per-client bearer tokens, each limited to listed models and broker OAuth accounts with no fallback to other accounts or API keys, re-read while serving ([#5098](https://github.com/can1357/oh-my-pi/issues/5098), [#15900](https://github.com/can1357/oh-my-pi/pull/15900) by [@alphastorm](https://github.com/alphastorm))
 

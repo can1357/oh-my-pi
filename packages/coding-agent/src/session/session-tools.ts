@@ -121,11 +121,17 @@ interface SessionToolsOptions {
 	rebuildSystemPrompt?: (
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
-	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	) => Promise<{
+		systemPrompt: string[];
+		xdevCatalogNames?: readonly string[];
+		contextFilePaths?: readonly string[];
+	}>;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	baseSystemPrompt: string[];
+	/** Paths of the context files `baseSystemPrompt` renders. */
+	baseContextFilePaths?: readonly string[];
 	skills?: Skill[];
 	skillWarnings?: SkillWarning[];
 	skillsSettings?: SkillsSettings;
@@ -367,6 +373,11 @@ export class SessionTools {
 	 * prompt carries no catalog (no mounts, or a custom prompt that omits the section).
 	 */
 	#basePromptXdevNames: ReadonlySet<string> = new Set();
+	/**
+	 * Paths of the context files the current base system prompt renders (the
+	 * last rebuild's {@link BuildSystemPromptResult.contextFilePaths}).
+	 */
+	#basePromptContextFiles: readonly string[];
 	#toolRegistryMutationScope = new AsyncLocalStorage<boolean>();
 	/**
 	 * Render-scoped candidate prompt surface. Rebuild frames run inside
@@ -460,6 +471,7 @@ export class SessionTools {
 		if (this.#xdev) this.#xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
 		this.#setActiveToolNames = options.setActiveToolNames;
 		this.#baseSystemPrompt = options.baseSystemPrompt;
+		this.#basePromptContextFiles = options.baseContextFilePaths ?? [];
 		const restoredReply = this.#latestReply();
 		const restoredPromptDigest = restoredReply && this.recordedPromptDigest();
 		this.#restoredTranscript =
@@ -490,6 +502,11 @@ export class SessionTools {
 	/** Current stable base system prompt. */
 	get baseSystemPrompt(): string[] {
 		return this.#baseSystemPrompt;
+	}
+
+	/** Paths of the context files the current base system prompt renders. */
+	get basePromptContextFiles(): readonly string[] {
+		return this.#basePromptContextFiles;
 	}
 
 	/** Replaces the controller-owned base prompt without applying it to the agent. */
@@ -1127,6 +1144,7 @@ export class SessionTools {
 		// Trigger of an implicit (non-forced) rebuild, rechecked at commit.
 		let implicitRebuildSignature: string | undefined;
 		let rebuiltXdevCatalogNames: readonly string[] | undefined;
+		let rebuiltContextFilePaths: readonly string[] | undefined;
 		let candidateSurface: PromptSurface | undefined;
 		try {
 			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(true);
@@ -1175,6 +1193,7 @@ export class SessionTools {
 					if (!forcePromptRefresh) implicitRebuildSignature = triggerSignature;
 					rebuiltSignature = signature;
 					rebuiltXdevCatalogNames = built.xdevCatalogNames;
+					rebuiltContextFilePaths = built.contextFilePaths;
 					candidateSurface = candidate;
 				}
 			}
@@ -1230,6 +1249,7 @@ export class SessionTools {
 				this.#lastAppliedToolSignature = rebuiltSignature;
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#setBasePromptXdevNames(rebuiltXdevCatalogNames);
+				this.#basePromptContextFiles = rebuiltContextFilePaths ?? [];
 				// The rebuilt prompt is a fresh roster snapshot. Keep the complete
 				// pending delta for a turn override that hides it, while separately
 				// tracking any later frozen changes that must follow a delivered base.
@@ -2017,6 +2037,7 @@ export class SessionTools {
 				this.#baseSystemPrompt = built.systemPrompt;
 				this.#promptSurface = candidate;
 				this.#setBasePromptXdevNames(built.xdevCatalogNames);
+				this.#basePromptContextFiles = built.contextFilePaths ?? [];
 				this.#host.clearMemoryPromotionSnapshot();
 				if (
 					previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||

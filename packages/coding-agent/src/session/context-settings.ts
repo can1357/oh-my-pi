@@ -68,6 +68,20 @@ export const cfgContextFilesExtra = register({
 	},
 });
 
+/** Load a subdirectory's AGENTS.md (or sibling context file) the first time a tool touches that directory. */
+export const cfgContextFilesOnTouch = register({
+	id: "contextFiles.onTouch",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "context",
+		group: "General",
+		label: "Load Nested Context Files",
+		description:
+			"Inject a subdirectory's AGENTS.md / CLAUDE.md the first time read, write, edit or ast_edit touches a file below it. Loaded once per context window; re-armed after compaction.",
+	},
+});
+
 // ────────────────────────────────────────────────────────────────────────
 // Context
 // ────────────────────────────────────────────────────────────────────────

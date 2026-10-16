@@ -183,6 +183,27 @@ Loading is automatic — there is no need to instruct the agent to search for `A
 
 When workspace-tree scanning is enabled (`includeWorkspaceTree`), deeper-directory `AGENTS.md` files that were _not_ auto-loaded (for example, ones below the current directory) are surfaced separately in a `<dir-context>` block that lists their paths and tells the agent to read them before editing those directories. Those files are pointers, not full injected content.
 
+### Loading nested files on touch
+
+Set `contextFiles.onTouch: true` (or `/settings` → **Context** → **Load Nested Context Files**) to deliver those deeper files automatically instead. The first time a successful `read`, `write`, `edit` (including `apply_patch`, its name in `edit.mode: apply_patch`), or `ast_edit` touches a file below the current directory or an additional workspace root (including calls an `eval` script makes through its tool bridge), every context file between that root and the file that is not already in context is injected as a developer message after the tool batch, shallowest first so deeper rules come last:
+
+```xml
+<nested-context path="/home/me/repo/packages/api/AGENTS.md">
+Project context for `packages/api/`, loaded automatically because a tool touched a file there. ...
+...file content...
+</nested-context>
+```
+
+- Discovery is the same as at startup: provider priority, one file per directory, `contextFiles.extra`, and `@` imports all apply.
+- Each file loads once per context window, keyed by its absolute path so a change of working directory does not load it twice. A single-path `read` that showed the whole context file counts as loaded (a read inside an `eval` script does not, since its result stays in the script; a Cursor exec read does, since its result reaches the model as a tool result), unless the file has `@` imports the read did not expand; a range, tail, or truncated page does not. When compaction drops the block, the next touch loads the file again.
+- Each file is capped at 16,384 characters; a longer file is truncated with a note telling the agent to read the rest.
+- Hidden directories (`.git/`, `.venv/`, …), `node_modules/`, and everything below them are never searched for context files; a provider's own config folder, such as `.github/`, still counts for the directory that holds it. Files already in the system prompt never load either: it holds those at or above the current directory and each additional workspace root. A directory above a workspace root nested inside the current directory can still hold files only its own discovery finds, such as `.github/copilot-instructions.md`; those load on a touch below that directory.
+- A context file whose real path, after symlinks, is outside every workspace root never loads, so a symlinked directory or file cannot pull in a third-party `AGENTS.md`. The hidden-directory and `node_modules/` exclusion also applies to the real path, so a link such as `vendor -> node_modules/pkg` does not load the package's `AGENTS.md`.
+- Search and shell tools (`grep`, `glob`, `bash`) do not trigger loading.
+- Subagents start with the nested files their parent has loaded or read in full and still holds, plus any nested files the parent itself inherited, in their system prompt, ranked after the context files at or above the workspace root each sits under, as in the parent. They load further files on their own touches. An isolated subagent sees those files at their paths in its copy of the repository. As with the startup files, `AGENTS.md` files are not passed on; a subagent loads the ones it needs when it touches their directories.
+
+The setting is off by default.
+
 ## `@` imports
 
 Inside any context file, an `@path` token expands inline to the referenced file's content before injection:
