@@ -656,6 +656,8 @@ export interface InteractiveModeOptions {
 	initialImages?: ImageContent[];
 	/** Additional initial messages to queue */
 	initialMessages?: string[];
+	/** Explicit session storage override from --session-dir or PI_CODING_AGENT_SESSION_DIR. */
+	sessionDirOverride?: string;
 }
 
 export const TODO_COMPACT_TERMINAL_ROWS_THRESHOLD = 18;
@@ -1282,6 +1284,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	session: AgentSession;
 	sessionManager: SessionManager;
 	refreshScopedModelsAfterLogin?: () => Promise<void>;
+	/** Explicit session storage override from --session-dir or PI_CODING_AGENT_SESSION_DIR. */
+	readonly sessionDirOverride?: string;
 	settings: Settings;
 	keybindings: KeybindingsManager;
 	agent: Agent;
@@ -1877,10 +1881,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		composer?: Composer,
 		subagentEventBus?: EventBus,
 		refreshScopedModelsAfterLogin?: () => Promise<void>,
+		options: InteractiveModeOptions = {},
 	) {
 		this.refreshScopedModelsAfterLogin = refreshScopedModelsAfterLogin;
 		this.session = session;
 		this.sessionManager = session.sessionManager;
+		this.sessionDirOverride = options.sessionDirOverride;
 		this.settings = session.settings;
 		this.#initialComposerModel = session.model;
 		const preferences = {

@@ -70,25 +70,90 @@ function buildArgs(resume: string, sessionDir?: string): Args {
 	};
 }
 
-function buildGlobalMatch(cwd: string): { session: SessionInfo; scope: "global" } {
+type RepositoryMetadata = {
+	sessionWorktreeRoot: string;
+	primaryWorktreeRoot: string;
+};
+
+type RecoverySessionInfo = SessionInfo & {
+	repository?: RepositoryMetadata;
+};
+
+function buildGlobalMatch(
+	cwd: string,
+	options: { path?: string; repository?: RepositoryMetadata } = {},
+): { session: RecoverySessionInfo; scope: "global" } {
 	return {
 		scope: "global",
 		session: {
-			path: path.join(cwd, "019e84ed-b4cc-7000-9c87-5afe6df992c1.jsonl"),
+			path: options.path ?? path.join(cwd, "019e84ed-b4cc-7000-9c87-5afe6df992c1.jsonl"),
 			id: "019e84ed-b4cc-7000-9c87-5afe6df992c1",
 			cwd,
 			title: "in-other-project",
 			created: new Date(0),
 			modified: new Date(0),
-			messageCount: 0,
+			messageCount: 1,
 			size: 0,
-			firstMessage: "",
-			allMessagesText: "",
+			firstMessage: "prior work",
+			allMessagesText: "prior work",
+			repository: options.repository,
 		},
 	};
 }
 
 const stubSettings = { get: () => undefined } as unknown as Settings;
+
+async function writeRecoverySession(session: RecoverySessionInfo): Promise<void> {
+	await fsp.mkdir(path.dirname(session.path), { recursive: true });
+	await Bun.write(
+		session.path,
+		[
+			JSON.stringify({
+				type: "session",
+				id: session.id,
+				cwd: session.cwd,
+				timestamp: new Date(0).toISOString(),
+				repository: session.repository,
+			}),
+			JSON.stringify({
+				type: "message",
+				id: "e1",
+				parentId: null,
+				timestamp: new Date(0).toISOString(),
+				message: { role: "assistant", content: "prior work" },
+			}),
+			"",
+		].join("\n"),
+	);
+}
+
+async function createStartupRecoveryFixture(
+	root: string,
+	options: { primary?: boolean } = {},
+): Promise<{
+	launchProject: string;
+	savedPrimary: string;
+	missingCwd: string;
+	sessionDir: string;
+	match: { session: RecoverySessionInfo; scope: "global" };
+}> {
+	const launchProject = path.join(root, "launch");
+	const savedPrimary = path.join(root, "primary");
+	const missingCwd = path.join(root, "deleted-worktree");
+	const sessionDir = path.join(root, "sessions");
+	await fsp.mkdir(launchProject, { recursive: true });
+	if (options.primary !== false) await fsp.mkdir(savedPrimary, { recursive: true });
+	await fsp.mkdir(sessionDir, { recursive: true });
+	const match = buildGlobalMatch(missingCwd, {
+		path: path.join(sessionDir, "019e84ed-b4cc-7000-9c87-5afe6df992c1.jsonl"),
+		repository: {
+			sessionWorktreeRoot: missingCwd,
+			primaryWorktreeRoot: savedPrimary,
+		},
+	});
+	await writeRecoverySession(match.session);
+	return { launchProject, savedPrimary, missingCwd, sessionDir, match };
+}
 
 describe("createSessionManager — cross-project --resume", () => {
 	let existingProject: string;
@@ -115,9 +180,8 @@ describe("createSessionManager — cross-project --resume", () => {
 	it("opens the existing journal in its recorded cwd without a relocation prompt", async () => {
 		const match = buildGlobalMatch(existingProject);
 		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(match);
-		const movePrompt = vi.fn(async () => "declined" as const);
 
-		const result = await createSessionManager(buildArgs("019e84ed"), "/current/project", stubSettings, movePrompt);
+		const result = await createSessionManager(buildArgs("019e84ed"), "/current/project", stubSettings);
 
 		if (!result) throw new Error("Expected resumed session manager");
 		try {
@@ -126,7 +190,6 @@ describe("createSessionManager — cross-project --resume", () => {
 		} finally {
 			await result.close();
 		}
-		expect(movePrompt).not.toHaveBeenCalled();
 	});
 });
 
@@ -245,20 +308,13 @@ describe("runRootCommand — cross-project --resume", () => {
 		await fsp.rm(root, { recursive: true, force: true });
 	});
 
-	it("uses the destination cwd after access returns during resume", async () => {
+	it("surfaces a recorded-cwd access error instead of falling back to launch", async () => {
 		const match = buildGlobalMatch(resumedProject);
 		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(match);
 		const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
-		const reloadForCwd = vi.spyOn(settings, "reloadForCwd");
-		const preloadedCwds: (string | undefined)[] = [];
-		vi.spyOn(pluginHelpers, "preloadPluginRoots").mockImplementation(async (_home, cwd) => {
-			preloadedCwds.push(cwd);
-		});
 		const realAccess = fs.promises.access.bind(fs.promises);
-		let deniedProbes = 2;
 		const access = vi.spyOn(fs.promises, "access").mockImplementation(async (target, mode) => {
-			if (deniedProbes > 0 && path.basename(String(target)) === "resumed") {
-				deniedProbes -= 1;
+			if (path.basename(String(target)) === "resumed") {
 				throw Object.assign(new Error("permission denied"), { code: "EACCES" });
 			}
 			return realAccess(target, mode);
@@ -271,46 +327,35 @@ describe("runRootCommand — cross-project --resume", () => {
 		parsed.noRules = true;
 		parsed.noTools = true;
 		parsed.noLsp = true;
-		let resumedManager: SessionManager | undefined;
-
-		let preloadedDestinationAtCreation = false;
-		let sessionOptionsCwd: string | undefined;
-
+		const exitCodes: number[] = [];
+		const stderr: string[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exitCodes.push(code ?? 0);
+			throw new StartupProcessExitSignal(code ?? 0);
+		}) as typeof process.exit);
+		const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: string | Uint8Array) => {
+			stderr.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+			return true;
+		}) as typeof process.stderr.write);
 		try {
-			await runRootCommand(parsed, rawArgs, {
-				discoverAuthStorage: async () => authStorage,
-				settings,
-				createAgentSession: async options => {
-					if (!options) throw new Error("Expected session options");
-					resumedManager = options.sessionManager;
-					sessionOptionsCwd = options.cwd;
-					// Awaited during the switch, so by session creation the destination
-					// preload has already been requested for the resumed project.
-					preloadedDestinationAtCreation = preloadedCwds.includes(resumedProject);
-					throw new Error("stop after session options");
-				},
-			});
-		} catch (error) {
-			if (!(error instanceof Error) || error.message !== "stop after session options") throw error;
+			await expect(
+				runRootCommand(parsed, rawArgs, {
+					discoverAuthStorage: async () => authStorage,
+					settings,
+				}),
+			).rejects.toBeInstanceOf(StartupProcessExitSignal);
 		} finally {
 			access.mockRestore();
+			exit.mockRestore();
+			stderrWrite.mockRestore();
 			authStorage.close();
-			await resumedManager?.close();
 		}
-		expect(deniedProbes).toBe(0);
+		expect(exitCodes).toEqual([1]);
+		expect(stderr.join("")).toContain("Could not inspect session");
+		expect(getProjectDir()).toBe(launchProject);
+	});
 
-		expect(getProjectDir()).toBe(resumedProject);
-		// process.cwd() reports the physical path (/private/var/... on macOS) while
-		// the fixture path keeps the /var symlink form — compare canonicalized.
-		expect(normalizePathForComparison(process.cwd())).toBe(normalizePathForComparison(resumedProject));
-		expect(reloadForCwd).toHaveBeenCalledWith(resumedProject);
-		expect(resumedManager?.getCwd()).toBe(resumedProject);
-		expect(parsed.cwd).toBe(resumedProject);
-		expect(sessionOptionsCwd).toBe(resumedProject);
-		expect(preloadedDestinationAtCreation).toBe(true);
-	}, 15_000);
-
-	it("re-scopes Settings back to the launch project when destination rescope fails", async () => {
+	it("reports destination rescope failure and rolls back project state", async () => {
 		const match = buildGlobalMatch(resumedProject);
 		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(match);
 		const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
@@ -327,35 +372,29 @@ describe("runRootCommand — cross-project --resume", () => {
 		parsed.noRules = true;
 		parsed.noTools = true;
 		parsed.noLsp = true;
-		let resumedManager: SessionManager | undefined;
-
+		const exitCodes: number[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exitCodes.push(code ?? 0);
+			throw new StartupProcessExitSignal(code ?? 0);
+		}) as typeof process.exit);
 		try {
-			await runRootCommand(parsed, ["--resume", "019e84ed", "--print"], {
-				discoverAuthStorage: async () => authStorage,
-				settings,
-				createAgentSession: async options => {
-					if (!options) throw new Error("Expected session options");
-					resumedManager = options.sessionManager;
-					throw new Error("stop after session options");
-				},
-			});
-		} catch (error) {
-			if (!(error instanceof Error) || error.message !== "stop after session options") throw error;
+			await expect(
+				runRootCommand(parsed, ["--resume", "019e84ed", "--print"], {
+					discoverAuthStorage: async () => authStorage,
+					settings,
+				}),
+			).rejects.toBeInstanceOf(StartupProcessExitSignal);
 		} finally {
 			reloadForCwd.mockRestore();
+			exit.mockRestore();
 			authStorage.close();
-			await resumedManager?.close();
 		}
-
-		// The destination read rejected, so the fallback must re-scope Settings
-		// back to the launch project; otherwise path-derived values and saves
-		// would still target the failed resume target.
+		expect(exitCodes).toEqual([1]);
 		expect(getProjectDir()).toBe(launchProject);
-		expect(resumedManager?.getCwd()).toBe(launchProject);
 		expect(settings.getCwd()).toBe(launchProject);
 	});
 
-	it("rolls back the session manager when the resumed cwd is denied", async () => {
+	it("reports resumed-cwd switch failure without silent fallback", async () => {
 		const match = buildGlobalMatch(resumedProject);
 		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(match);
 		const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
@@ -373,28 +412,26 @@ describe("runRootCommand — cross-project --resume", () => {
 		parsed.noRules = true;
 		parsed.noTools = true;
 		parsed.noLsp = true;
-		let resumedManager: SessionManager | undefined;
-
+		const exitCodes: number[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exitCodes.push(code ?? 0);
+			throw new StartupProcessExitSignal(code ?? 0);
+		}) as typeof process.exit);
 		try {
-			await runRootCommand(parsed, ["--resume", "019e84ed", "--print"], {
-				discoverAuthStorage: async () => authStorage,
-				settings,
-				createAgentSession: async options => {
-					if (!options) throw new Error("Expected session options");
-					resumedManager = options.sessionManager;
-					throw new Error("stop after session options");
-				},
-			});
-		} catch (error) {
-			if (!(error instanceof Error) || error.message !== "stop after session options") throw error;
+			await expect(
+				runRootCommand(parsed, ["--resume", "019e84ed", "--print"], {
+					discoverAuthStorage: async () => authStorage,
+					settings,
+				}),
+			).rejects.toBeInstanceOf(StartupProcessExitSignal);
 		} finally {
 			chdir.mockRestore();
+			exit.mockRestore();
 			authStorage.close();
-			await resumedManager?.close();
 		}
-
+		expect(exitCodes).toEqual([1]);
 		expect(getProjectDir()).toBe(launchProject);
-		expect(resumedManager?.getCwd()).toBe(launchProject);
+		expect(settings.getCwd()).toBe(launchProject);
 	});
 
 	it("re-resolves the model scope from the resumed project's enabledModels after the switch", async () => {
@@ -457,28 +494,26 @@ describe("createSessionManager — cross-project --resume relocation (moved work
 		await fsp.rm(missingRoot, { recursive: true, force: true });
 	});
 
-	it("offers move (not fork) and returns undefined when the user declines", async () => {
+	it("returns undefined when fallback directory selection is cancelled", async () => {
 		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(buildGlobalMatch(missingProject));
 		expect(fs.existsSync(missingProject)).toBe(false);
-
-		const result = await createSessionManager(
-			buildArgs("019e84ed"),
-			"/current/project",
-			stubSettings,
-			async () => "declined" as const,
-		);
-
+		const selectDirectory = vi.fn(async () => undefined);
+		const result = await createSessionManager(buildArgs("019e84ed"), "/current/project", stubSettings, {
+			interactive: true,
+			selectDirectory,
+		});
 		expect(result).toBeUndefined();
+		expect(selectDirectory).toHaveBeenCalledTimes(1);
 	});
 
-	it("throws the move-specific error when unavailable in non-interactive mode", async () => {
+	it("throws an actionable error when unavailable in non-interactive mode", async () => {
 		const originalIsTTY = process.stdin.isTTY;
 		Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
 		try {
 			vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(buildGlobalMatch(missingProject));
 
 			await expect(createSessionManager(buildArgs("019e84ed"), "/current/project", stubSettings)).rejects.toThrow(
-				`Session "019e84ed" belongs to a directory that no longer exists (${missingProject}); run interactively to move it into the current project.`,
+				`Session "019e84ed" belongs to a directory that no longer exists (${missingProject}); select an existing directory interactively to resume it.`,
 			);
 		} finally {
 			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
@@ -493,6 +528,7 @@ describe("createSessionManager — cross-project --resume relocation (moved work
 		const moved = SessionManager.create(missingProject, explicitSessionDir);
 		moved.appendMessage({ role: "user", content: "before local move", timestamp: 1 });
 		await moved.flush();
+		await moved.ensureOnDisk();
 		const oldFile = moved.getSessionFile();
 		if (!oldFile) throw new Error("Expected persisted session file");
 		const resumePrefix = moved.getSessionId().slice(0, 8);
@@ -515,16 +551,16 @@ describe("createSessionManager — cross-project --resume relocation (moved work
 			session: sessionInfo,
 		});
 
-		const movePrompt = vi.fn(async () => "accepted" as const);
-		const result = await createSessionManager(
-			buildArgs(resumePrefix, explicitSessionDir),
-			currentProject,
-			stubSettings,
-			movePrompt,
-		);
-
-		if (!result) throw new Error("Expected moved session manager");
+		const selectDirectory = vi.fn(async () => currentProject);
+		let result: SessionManager | undefined;
 		try {
+			result = await createSessionManager(
+				buildArgs(resumePrefix, explicitSessionDir),
+				currentProject,
+				stubSettings,
+				{ interactive: true, selectDirectory },
+			);
+			if (!result) throw new Error("Expected moved session manager");
 			expect(result.getSessionFile()).toBe(oldFile);
 			expect(result.getCwd()).toBe(path.resolve(currentProject));
 			const entries = await loadEntriesFromFile(oldFile);
@@ -537,8 +573,306 @@ describe("createSessionManager — cross-project --resume relocation (moved work
 			);
 			expect(header?.cwd).toBe(path.resolve(currentProject));
 		} finally {
-			await result.close();
+			await result?.close();
 		}
-		expect(movePrompt).toHaveBeenCalledTimes(1);
+		expect(selectDirectory).toHaveBeenCalledTimes(1);
+	});
+});
+type StartupRecoveryDependencies = NonNullable<Parameters<typeof runRootCommand>[2]> & {
+	selectDirectory?: (cwd: string) => Promise<string | undefined>;
+};
+class StartupProcessExitSignal extends Error {
+	constructor(readonly code: number) {
+		super(`process.exit(${code})`);
+		this.name = "StartupProcessExitSignal";
+	}
+}
+
+class StartupSessionOptionsStop extends Error {
+	constructor() {
+		super("stop after session options");
+	}
+}
+
+describe("startup resume recovery parity", () => {
+	let recoveryRoot: string;
+	let originalProject: string;
+
+	beforeEach(async () => {
+		recoveryRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-startup-recovery-"));
+		originalProject = getProjectDir();
+	});
+
+	afterEach(async () => {
+		setProjectDir(originalProject);
+		vi.restoreAllMocks();
+		await fsp.rm(recoveryRoot, { recursive: true, force: true });
+	});
+
+	it("uses the saved primary worktree when resuming by explicit ID", async () => {
+		const fixture = await createStartupRecoveryFixture(recoveryRoot);
+		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(fixture.match);
+
+		const manager = await createSessionManager(
+			buildArgs("019e84ed", fixture.sessionDir),
+			fixture.launchProject,
+			stubSettings,
+		);
+		if (!manager) throw new Error("Expected resumed session manager");
+		try {
+			expect(manager.getCwd()).toBe(fixture.savedPrimary);
+		} finally {
+			await manager.close();
+		}
+	});
+
+	it("uses the saved primary worktree when resuming by absolute JSONL path", async () => {
+		const fixture = await createStartupRecoveryFixture(recoveryRoot);
+
+		const manager = await createSessionManager(
+			buildArgs(fixture.match.session.path, fixture.sessionDir),
+			fixture.launchProject,
+			stubSettings,
+		);
+		try {
+			expect(manager?.getCwd()).toBe(fixture.savedPrimary);
+		} finally {
+			await manager?.close();
+		}
+	});
+
+	it("uses the saved primary worktree when resuming from the startup picker", async () => {
+		const fixture = await createStartupRecoveryFixture(recoveryRoot);
+		setProjectDir(fixture.launchProject);
+		const authStorage = await AuthStorage.create(path.join(recoveryRoot, "auth.db"));
+		const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+		const parsed = parseArgs(["--resume", "--print"]);
+		parsed.noExtensions = true;
+		parsed.noSkills = true;
+		parsed.noRules = true;
+		parsed.noTools = true;
+		parsed.noLsp = true;
+		parsed.sessionDir = fixture.sessionDir;
+		let resumedManager: SessionManager | undefined;
+
+		try {
+			await runRootCommand(parsed, ["--resume", "--print"], {
+				discoverAuthStorage: async () => authStorage,
+				settings,
+				selectSession: async () => fixture.match.session,
+				createAgentSession: async options => {
+					if (!options) throw new Error("Expected session options");
+					resumedManager = options.sessionManager;
+					throw new StartupSessionOptionsStop();
+				},
+			});
+		} catch (error) {
+			if (!(error instanceof StartupSessionOptionsStop)) throw error;
+		} finally {
+			authStorage.close();
+			await resumedManager?.close();
+		}
+
+		expect(resumedManager?.getCwd()).toBe(fixture.savedPrimary);
+	});
+
+	it("uses an existing directory selected by the interactive recovery adapter", async () => {
+		const fixture = await createStartupRecoveryFixture(recoveryRoot, { primary: false });
+		const selectedDirectory = path.join(recoveryRoot, "selected");
+		await fsp.mkdir(selectedDirectory);
+		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(fixture.match);
+		setProjectDir(fixture.launchProject);
+		const authStorage = await AuthStorage.create(path.join(recoveryRoot, "auth.db"));
+		const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+		const parsed = parseArgs(["--resume", "019e84ed"]);
+		parsed.noExtensions = true;
+		parsed.noSkills = true;
+		parsed.noRules = true;
+		parsed.noTools = true;
+		parsed.noLsp = true;
+		parsed.sessionDir = fixture.sessionDir;
+		const originalIsTTY = process.stdin.isTTY;
+		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+		const selectDirectory = vi.fn(async (_cwd: string) => selectedDirectory);
+		let resumedManager: SessionManager | undefined;
+
+		try {
+			await runRootCommand(parsed, ["--resume", "019e84ed"], {
+				discoverAuthStorage: async () => authStorage,
+				settings,
+				createAgentSession: async options => {
+					if (!options) throw new Error("Expected session options");
+					resumedManager = options.sessionManager;
+					throw new StartupSessionOptionsStop();
+				},
+				selectDirectory,
+			} as StartupRecoveryDependencies);
+		} catch (error) {
+			if (!(error instanceof StartupSessionOptionsStop)) throw error;
+		} finally {
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+			authStorage.close();
+			await resumedManager?.close();
+		}
+
+		expect(selectDirectory).toHaveBeenCalledTimes(1);
+		expect(resumedManager?.getCwd()).toBe(selectedDirectory);
+	});
+
+	it("fails non-interactively with an actionable recovery error", async () => {
+		const fixture = await createStartupRecoveryFixture(recoveryRoot, { primary: false });
+		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(fixture.match);
+		setProjectDir(fixture.launchProject);
+		const authStorage = await AuthStorage.create(path.join(recoveryRoot, "auth.db"));
+		const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+		const parsed = parseArgs(["--resume", "019e84ed", "--print"]);
+		parsed.noExtensions = true;
+		parsed.noSkills = true;
+		parsed.noRules = true;
+		parsed.noTools = true;
+		parsed.noLsp = true;
+		parsed.sessionDir = fixture.sessionDir;
+		const stderr: string[] = [];
+		const exitCodes: number[] = [];
+		const originalIsTTY = process.stdin.isTTY;
+		Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
+		// Under a TTY the real stdin is a pty that never reaches EOF; with isTTY
+		// stubbed false, readPipedInput would drain it forever and keep the test
+		// process alive after the suite.
+		vi.spyOn(Bun, "stdin").mockReturnValue({ text: async () => "" } as never);
+		vi.spyOn(process.stderr, "write").mockImplementation(((chunk: string | Uint8Array): boolean => {
+			stderr.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+			return true;
+		}) as typeof process.stderr.write);
+		vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exitCodes.push(code ?? 0);
+			throw new StartupProcessExitSignal(code ?? 0);
+		}) as typeof process.exit);
+		const selectDirectory = vi.fn(async () => path.join(recoveryRoot, "not-used"));
+
+		try {
+			await expect(
+				runRootCommand(parsed, ["--resume", "019e84ed", "--print"], {
+					discoverAuthStorage: async () => authStorage,
+					settings,
+					selectDirectory,
+				} as StartupRecoveryDependencies),
+			).rejects.toBeInstanceOf(StartupProcessExitSignal);
+		} finally {
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+			authStorage.close();
+		}
+
+		expect(exitCodes).toEqual([1]);
+		expect(stderr.join("")).toContain("interactively");
+		expect(stderr.join("")).toContain(fixture.missingCwd);
+		expect(selectDirectory).not.toHaveBeenCalled();
+		await expect(fsp.stat(fixture.match.session.path)).resolves.toBeTruthy();
+	});
+	it.each([
+		["--print", ["--resume", "019e84ed", "--print"] as string[]],
+		["rpc", ["--resume", "019e84ed", "--mode", "rpc"] as string[]],
+	])("rejects missing recovery directory without prompting in terminal-backed %s mode", async (mode, rawArgs) => {
+		const fixture = await createStartupRecoveryFixture(recoveryRoot, { primary: false });
+		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(fixture.match);
+		setProjectDir(fixture.launchProject);
+		const authStorage = await AuthStorage.create(path.join(recoveryRoot, "auth.db"));
+		const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+		const parsed = parseArgs(rawArgs);
+		parsed.noExtensions = true;
+		parsed.noSkills = true;
+		parsed.noRules = true;
+		parsed.noTools = true;
+		parsed.noLsp = true;
+		parsed.sessionDir = fixture.sessionDir;
+		const stdout: string[] = [];
+		const stderr: string[] = [];
+		const exitCodes: number[] = [];
+		const originalIsTTY = process.stdin.isTTY;
+		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+		vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array): boolean => {
+			stdout.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+			return true;
+		}) as typeof process.stdout.write);
+		vi.spyOn(process.stderr, "write").mockImplementation(((chunk: string | Uint8Array): boolean => {
+			stderr.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+			return true;
+		}) as typeof process.stderr.write);
+		vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exitCodes.push(code ?? 0);
+			throw new StartupProcessExitSignal(code ?? 0);
+		}) as typeof process.exit);
+		const selectDirectory = vi.fn(async () => path.join(recoveryRoot, "not-used"));
+
+		try {
+			await expect(
+				runRootCommand(parsed, rawArgs, {
+					discoverAuthStorage: async () => authStorage,
+					settings,
+					selectDirectory,
+				} as StartupRecoveryDependencies),
+			).rejects.toBeInstanceOf(StartupProcessExitSignal);
+		} finally {
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+			authStorage.close();
+		}
+
+		expect(exitCodes).toEqual([1]);
+		expect(stderr.join("")).toContain("interactively");
+		expect(stderr.join("")).toContain(fixture.missingCwd);
+		expect(selectDirectory).not.toHaveBeenCalled();
+		if (mode === "rpc") expect(stdout.join("")).not.toContain("Enter an existing directory");
+	});
+
+	it("reports the relocation when the resumed project cannot be adopted", async () => {
+		const fixture = await createStartupRecoveryFixture(recoveryRoot);
+		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(fixture.match);
+		setProjectDir(fixture.launchProject);
+		const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+		vi.spyOn(settings, "reloadForCwd").mockImplementation(async cwd => {
+			if (normalizePathForComparison(cwd) === normalizePathForComparison(fixture.savedPrimary)) {
+				throw new Error("destination config unreadable");
+			}
+		});
+		const authStorage = await AuthStorage.create(path.join(recoveryRoot, "auth.db"));
+		const parsed = parseArgs(["--resume", "019e84ed", "--print"]);
+		parsed.noExtensions = true;
+		parsed.noSkills = true;
+		parsed.noRules = true;
+		parsed.noTools = true;
+		parsed.noLsp = true;
+		parsed.sessionDir = fixture.sessionDir;
+		const exitCodes: number[] = [];
+		const stderr: string[] = [];
+		vi.spyOn(process.stderr, "write").mockImplementation(((chunk: string | Uint8Array): boolean => {
+			stderr.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+			return true;
+		}) as typeof process.stderr.write);
+		vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exitCodes.push(code ?? 0);
+			throw new StartupProcessExitSignal(code ?? 0);
+		}) as typeof process.exit);
+
+		try {
+			await expect(
+				runRootCommand(parsed, ["--resume", "019e84ed", "--print"], {
+					discoverAuthStorage: async () => authStorage,
+					settings,
+				}),
+			).rejects.toBeInstanceOf(StartupProcessExitSignal);
+		} finally {
+			authStorage.close();
+		}
+
+		expect(exitCodes).toEqual([1]);
+		const output = stderr.join("");
+		expect(output).toContain("Could not switch to resumed project");
+		expect(output).toContain(`The session was relocated from ${fixture.missingCwd} to ${fixture.savedPrimary}.`);
+		const entries = await loadEntriesFromFile(fixture.match.session.path);
+		const header = entries.find(
+			(entry): entry is SessionHeader =>
+				typeof entry === "object" && entry !== null && "type" in entry && entry.type === "session",
+		);
+		expect(header?.cwd).toBe(fixture.savedPrimary);
 	});
 });
