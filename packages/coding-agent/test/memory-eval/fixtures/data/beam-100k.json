@@ -20,7 +20,8 @@
 			],
 			"abstention": [{ "question": "q null", "source_chat_ids": null }],
 			"summarization": [{ "question": "q empty", "source_chat_ids": [] }],
-			"event_ordering": [{ "question": "q joined", "source_chat_ids": { "order": " 3, 5 " } }]
+			"event_ordering": [{ "question": "q joined", "source_chat_ids": { "order": " 3, 5 " } }],
+			"multi_session_reasoning": [{ "question": "q partly blank", "source_chat_ids": [1, 2] }]
 		}
 	}
 ]
