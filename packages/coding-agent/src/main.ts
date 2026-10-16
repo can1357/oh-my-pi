@@ -29,6 +29,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
 import {
 	type Args,
+	type Mode,
 	reportInvalidFlagValues,
 	reportUnrecognizedFlags,
 	validateGoalLaunch,
@@ -83,6 +84,7 @@ import {
 } from "./extensibility/plugins/marketplace-auto-update";
 import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
+import { resolveExistingDirectory } from "./modes/move-directory-source";
 import { formatSessionContinuationNotice } from "./modes/persistence-failure";
 import type { PrintModeOptions } from "./modes/print-mode";
 import type { RpcModeOptions } from "./modes/rpc/rpc-mode";
@@ -130,6 +132,7 @@ import {
 	type SessionContinuation,
 	type SessionInfo,
 } from "./session/session-listing";
+import { resolveSessionRecovery, type SessionRecoveryDecision } from "./session/session-recovery";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
@@ -668,6 +671,7 @@ async function runInteractiveMode(
 	startupLease?: ComposerLease,
 	startupGoal?: string,
 	startupRestore?: () => Promise<RestoreOutcome>,
+	sessionDirOverride?: string,
 ): Promise<void> {
 	const InteractiveModeConstructor = await loadInteractiveModeConstructor();
 	let mode: InteractiveMode;
@@ -681,6 +685,7 @@ async function runInteractiveMode(
 			eventBus,
 			startupLease?.composer,
 			subagentEventBus,
+			{ sessionDirOverride },
 		);
 		startupLease?.adopt();
 	} catch (error) {
@@ -878,34 +883,32 @@ async function runInteractiveMode(
 	}
 }
 
-/**
- * `"keep"`: open the session where it is stored, with the launch directory as
- * its working directory, as `--resume <path>` does.
- */
-type SessionPromptResult = "accepted" | "declined" | "unavailable" | "keep";
+type SessionDirectoryPicker = (cwd: string) => Promise<string | undefined>;
 
-type SessionPrompt = (session: SessionInfo) => Promise<SessionPromptResult>;
+function isProtocolMode(mode: Mode | undefined): boolean {
+	return mode === "rpc" || mode === "rpc-ui" || mode === "acp";
+}
 
-async function promptMoveSession(session: SessionInfo): Promise<SessionPromptResult> {
-	if (!process.stdin.isTTY) {
-		return "unavailable";
-	}
-	const message = `Session's directory no longer exists (${session.cwd}). Move (re-root) it into the current directory? [Y/n] `;
+async function promptSelectDirectory(
+	cwd: string,
+	interactive = process.stdin.isTTY === true,
+): Promise<string | undefined> {
+	if (!interactive) return undefined;
 	pauseStartupWatchdog();
 	const createInterface = await loadReadlineInterface();
 	const rl = createInterface({ input: process.stdin, output: process.stdout });
 	try {
-		const answer = (await rl.question(message)).trim().toLowerCase();
-		return answer === "" || answer === "y" || answer === "yes" ? "accepted" : "declined";
+		while (true) {
+			const input = (await rl.question("Enter an existing directory for this session (blank to cancel): ")).trim();
+			if (!input) return undefined;
+			const directory = resolveExistingDirectory(input, cwd);
+			if (directory) return directory;
+			process.stderr.write(`${chalk.red(`Not an existing directory: ${input}`)}\n`);
+		}
 	} finally {
 		rl.close();
 		resumeStartupWatchdog();
 	}
-}
-
-/** Protocol modes (`rpc`, `rpc-ui`, `acp`) own stdin and stdout, so they never ask. */
-async function keepSessionInPlace(): Promise<SessionPromptResult> {
-	return "keep";
 }
 
 /**
@@ -953,40 +956,79 @@ function isForeignSessionImport(parsed: Pick<Args, "fromClaude" | "fromCodex">):
 	return parsed.fromClaude === true || parsed.fromCodex === true;
 }
 
-type MissingCwdMoveResult =
-	| { status: "not-needed" }
-	| { status: "declined" }
-	| { status: "kept" }
-	| { status: "moved"; manager: SessionManager };
+const relocatedSessionNotices = new WeakMap<SessionManager, { from: string; to: string }>();
 
-async function moveMissingCwdSessionIfNeeded(
+async function chooseSessionRecoveryDirectory(
 	sessionArg: string,
 	session: SessionInfo,
 	cwd: string,
-	sessionDir: string | undefined,
-	askToMoveSession: SessionPrompt,
-): Promise<MissingCwdMoveResult> {
-	const sourceCwd = session.cwd;
-	if (!sourceCwd || fsSync.existsSync(sourceCwd)) {
-		return { status: "not-needed" };
+	interactive: boolean,
+	selectDirectory: SessionDirectoryPicker,
+): Promise<string | undefined> {
+	if (!interactive) {
+		throw new SessionResolutionError(
+			`Session "${sessionArg}" belongs to a directory that no longer exists (${session.cwd}); select an existing directory interactively to resume it.`,
+		);
 	}
+	const selected = await selectDirectory(cwd);
+	if (selected === undefined) return undefined;
+	const directory = resolveExistingDirectory(selected, cwd);
+	if (!directory) {
+		throw new SessionResolutionError(`Recovery directory is not an existing directory: ${selected}`);
+	}
+	return directory;
+}
 
-	// Filed under this folder (or a removed worktree of it): the session belongs here, no question to ask.
-	if (!(await SessionManager.isStrandedIn(session, cwd, sessionDir))) {
-		const movePromptResult = await askToMoveSession(session);
-		if (movePromptResult === "keep") {
-			return { status: "kept" };
-		}
-		if (movePromptResult === "unavailable") {
-			throw new SessionResolutionError(
-				`Session "${sessionArg}" belongs to a directory that no longer exists (${sourceCwd}); run interactively to move it into the current project.`,
-			);
-		}
-		if (movePromptResult === "declined") {
-			return { status: "declined" };
+interface SessionRecoveryOptions {
+	sessionDir?: string;
+	interactive: boolean;
+	selectDirectory: SessionDirectoryPicker;
+	/** Opens the session where it is stored, with the launch directory as its working directory. */
+	openUnchanged: () => Promise<SessionManager>;
+	settings?: Settings;
+	/** Protocol modes own stdin and stdout, so a session that would need a chosen directory opens in place. */
+	openInPlace?: boolean;
+}
+
+async function openSessionWithRecovery(
+	sessionArg: string,
+	session: SessionInfo,
+	cwd: string,
+	options: SessionRecoveryOptions,
+): Promise<SessionManager | undefined> {
+	const { sessionDir, interactive, selectDirectory, openUnchanged, settings, openInPlace } = options;
+	let decision: SessionRecoveryDecision;
+	try {
+		decision = await resolveSessionRecovery(session, cwd, sessionDir, settings);
+	} catch (error) {
+		if (error instanceof SessionResolutionError) throw error;
+		throw new SessionResolutionError(
+			`Could not inspect session "${sessionArg}" working directory ${session.cwd}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	if (decision.kind === "unchanged" || (decision.kind === "choose-directory" && openInPlace)) {
+		try {
+			return await forkIfMovedAway(await openUnchanged(), sessionDir);
+		} catch (error) {
+			if (isEnoent(error) || isEnotdir(error)) {
+				throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
+			}
+			throw error;
 		}
 	}
-	return { status: "moved", manager: await openRelocatedSession(session, cwd, sessionDir) };
+	const target =
+		decision.kind === "relocate"
+			? decision.directory
+			: await chooseSessionRecoveryDirectory(sessionArg, session, cwd, interactive, selectDirectory);
+	if (!target) return undefined;
+	try {
+		return await forkIfMovedAway(await openRelocatedSession(session, target, sessionDir), sessionDir);
+	} catch (error) {
+		if (isEnoent(error) || isEnotdir(error)) {
+			throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
+		}
+		throw error;
+	}
 }
 
 /** {@link SessionManager.openRelocated} into `cwd`, reporting a live-writer refusal as a CLI error. */
@@ -996,7 +1038,9 @@ async function openRelocatedSession(
 	sessionDir: string | undefined,
 ): Promise<SessionManager> {
 	try {
-		return await SessionManager.openRelocated(session.path, session.cwd, cwd, sessionDir);
+		const manager = await SessionManager.openRelocated(session.path, session.cwd, cwd, sessionDir);
+		relocatedSessionNotices.set(manager, { from: session.cwd, to: cwd });
+		return manager;
 	} catch (err) {
 		if (!(err instanceof SessionMoveRefusedError)) throw err;
 		// Its directory is gone, so it cannot be resumed in place either.
@@ -1067,6 +1111,17 @@ async function switchToResumedProject(
 		return { cwd: launchCwd, chdirFailed: resumedCwd };
 	}
 	return { cwd };
+}
+function notifySuccessfulSessionRelocation(
+	sessionManager: SessionManager,
+	notifs: (InteractiveModeNotify | null)[] | undefined,
+): void {
+	const relocation = relocatedSessionNotices.get(sessionManager);
+	if (!relocation) return;
+	const notice = `Recovered session directory from ${relocation.from} to ${relocation.to}.`;
+	if (notifs) notifs.push({ kind: "info", message: notice });
+	else process.stderr.write(`${chalk.dim(`${notice}\n`)}`);
+	relocatedSessionNotices.delete(sessionManager);
 }
 
 /** `notifs` is the interactive UI's startup notices: an interactive launch writes nothing before its UI. */
@@ -1286,10 +1341,11 @@ export async function createSessionManager(
 	parsed: Args,
 	cwd: string,
 	activeSettings: Settings = settings,
-	askToMoveSession: SessionPrompt = promptMoveSession,
 	options: {
 		nativeFlagOwnership?: "preliminary" | "resolved";
 		onSessionContinuation?: (continuation: SessionContinuation) => void;
+		interactive?: boolean;
+		selectDirectory?: SessionDirectoryPicker;
 	} = {},
 ): Promise<SessionManager | undefined> {
 	if (parsed.fork) {
@@ -1334,30 +1390,39 @@ export async function createSessionManager(
 	}
 	normalizeContinueSessionArgs(parsed);
 
+	const interactive =
+		options.interactive ?? (process.stdin.isTTY === true && !parsed.print && parsed.mode === undefined);
+	const selectDirectory =
+		options.selectDirectory ?? ((directoryCwd: string) => promptSelectDirectory(directoryCwd, interactive));
+	const recoveryOptions = { interactive, selectDirectory, settings: activeSettings };
 	if (typeof parsed.resume === "string") {
 		const sessionArg = parsed.resume;
 		if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
 			// The conversation may have gone on in a sibling file while another process held this one.
 			const continuation = await findSessionContinuation(sessionArg);
 			if (continuation) options.onSessionContinuation?.(continuation);
-			let manager: SessionManager;
+			const targetPath = continuation?.session.path ?? sessionArg;
 			try {
-				manager = await SessionManager.open(
-					continuation?.session.path ?? sessionArg,
-					parsed.sessionDir,
-					undefined,
-					{
-						throwIfMissing: true,
-					},
-				);
+				const session = await readSessionInfo(targetPath);
+				if (!session) {
+					return await forkIfMovedAway(
+						await SessionManager.open(targetPath, parsed.sessionDir, undefined, { throwIfMissing: true }),
+						parsed.sessionDir,
+					);
+				}
+				return await openSessionWithRecovery(sessionArg, session, cwd, {
+					...recoveryOptions,
+					sessionDir: parsed.sessionDir,
+					openUnchanged: () =>
+						SessionManager.open(targetPath, parsed.sessionDir, undefined, { throwIfMissing: true }),
+					openInPlace: isProtocolMode(parsed.mode),
+				});
 			} catch (err) {
 				if (isEnoent(err) || isEnotdir(err)) {
 					throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
 				}
 				throw err;
 			}
-			// A copy whose conversation moved to another machine continues as a fork.
-			return await forkIfMovedAway(manager, parsed.sessionDir);
 		}
 		const target = await resolveResumeTarget(sessionArg, cwd, parsed.sessionDir);
 		if (!target) {
@@ -1365,20 +1430,12 @@ export async function createSessionManager(
 		}
 		const { session, continuation } = target;
 		if (continuation) options.onSessionContinuation?.(continuation);
-		const moveResult = await moveMissingCwdSessionIfNeeded(
-			sessionArg,
-			session,
-			cwd,
-			parsed.sessionDir,
-			askToMoveSession,
-		);
-		if (moveResult.status === "moved") {
-			return await forkIfMovedAway(moveResult.manager, parsed.sessionDir);
-		}
-		if (moveResult.status === "declined") {
-			return undefined;
-		}
-		return await forkIfMovedAway(await SessionManager.open(session.path, parsed.sessionDir), parsed.sessionDir);
+		return await openSessionWithRecovery(sessionArg, session, cwd, {
+			...recoveryOptions,
+			sessionDir: parsed.sessionDir,
+			openUnchanged: () => SessionManager.open(session.path, parsed.sessionDir, undefined, { throwIfMissing: true }),
+			openInPlace: isProtocolMode(parsed.mode),
+		});
 	}
 	if (parsed.continue) {
 		return await forkIfMovedAway(
@@ -1832,6 +1889,7 @@ interface RunRootCommandDependencies {
 	createAgentSession?: typeof createAgentSession;
 	discoverAuthStorage?: typeof discoverAuthStorage;
 	selectSession?: SessionPicker;
+	selectDirectory?: SessionDirectoryPicker;
 	runAcpMode?: RunAcpMode;
 	createForeignSessionStore?: (source: ForeignSessionSource) => ForeignSessionStore;
 	settings?: Settings;
@@ -1940,9 +1998,9 @@ export async function runRootCommand(
 		// Classify the host before opening auth or settings storage so every
 		// session-critical database connection picks the right busy timeout.
 		// See getDbBusyTimeoutMs().
-		const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp";
+		const protocolMode = isProtocolMode(mode);
 		// Protocol modes own stdin; treating it as prompt text would consume JSON-RPC frames before their transports start.
-		const pipedInput = isProtocolMode ? undefined : await logger.time("readPipedInput", readPipedInput);
+		const pipedInput = protocolMode ? undefined : await logger.time("readPipedInput", readPipedInput);
 		// Without a terminal on stdin the TUI cannot run, so such a launch is always
 		// headless: a piped or argv prompt runs like `-p`, and one with no prompt
 		// fails with a usage error instead of booting the interactive stack and
@@ -2072,7 +2130,7 @@ export async function runRootCommand(
 		// thinking before the session is built — otherwise a passive omitThinking
 		// setting makes the provider omit summaries and the flag prints nothing. An
 		// explicit --hide-thinking block display option still wins for output display.
-		if (parsedArgs.printThoughts && !isProtocolMode && !isInteractive) {
+		if (parsedArgs.printThoughts && !protocolMode && !isInteractive) {
 			cfgOmitThinking.override(settingsInstance, false);
 		}
 		// Print, RPC and ACP hosts serve a caller (script, harness, editor) that outlives the
@@ -2168,7 +2226,7 @@ export async function runRootCommand(
 		try {
 			foreignSource = resolveForeignSessionSource(parsedArgs);
 			if (foreignSource) {
-				if (isProtocolMode) {
+				if (protocolMode) {
 					throw new SessionResolutionError(`--from-${foreignSource} is not supported in ${mode} mode`);
 				}
 				const sourceName = foreignSessionSourceName(foreignSource);
@@ -2231,10 +2289,11 @@ export async function runRootCommand(
 					parsedArgs,
 					cwd,
 					settingsInstance,
-					isProtocolMode ? keepSessionInPlace : promptMoveSession,
 					{
 						nativeFlagOwnership: "preliminary",
 						onSessionContinuation: continuation => resumedContinuations.push(continuation),
+						interactive: isInteractive,
+						selectDirectory: deps.selectDirectory,
 					},
 				);
 			}
@@ -2257,6 +2316,7 @@ export async function runRootCommand(
 				sessionManager,
 			);
 			cwd = resumedProject.cwd;
+			notifySuccessfulSessionRelocation(sessionManager, isInteractive ? notifs : undefined);
 			notifyResumeCwdFallback(parsedArgs, resumedProject, cwd, isInteractive ? notifs : undefined);
 			if (cwd !== previousCwd) {
 				// applyStartupCwd persists an explicit --cwd in parsedArgs; once resume
@@ -2269,10 +2329,8 @@ export async function runRootCommand(
 			}
 		}
 
-		// User declined the missing-directory move prompt — exit cleanly instead of
-		// letting the cancellation fall through to a new session.
 		if (typeof parsedArgs.resume === "string" && !sessionManager) {
-			writeStartupNotice(parsedArgs, `${chalk.dim("Resume cancelled: session was not moved.")}\n`);
+			writeStartupNotice(parsedArgs, `${chalk.dim("Resume cancelled: no directory selected.")}\n`);
 			stopStartupWatchdog();
 			process.exit(0);
 		}
@@ -2335,19 +2393,27 @@ export async function runRootCommand(
 			if (continuation) resumedContinuations.push(continuation);
 			const chosen = continuation?.session ?? selected;
 			try {
-				sessionManager = await forkIfMovedAway(
-					(await SessionManager.isStrandedIn(chosen, cwd, parsedArgs.sessionDir))
-						? await openRelocatedSession(chosen, cwd, parsedArgs.sessionDir)
-						: await SessionManager.open(chosen.path),
-					parsedArgs.sessionDir,
-				);
+				sessionManager = await openSessionWithRecovery(selected.id, chosen, cwd, {
+					sessionDir: parsedArgs.sessionDir,
+					interactive: isInteractive,
+					selectDirectory:
+						deps.selectDirectory ?? (directoryCwd => promptSelectDirectory(directoryCwd, isInteractive)),
+					openUnchanged: () =>
+						SessionManager.open(chosen.path, parsedArgs.sessionDir, undefined, { throwIfMissing: true }),
+					settings: settingsInstance,
+					openInPlace: protocolMode,
+				});
+				if (!sessionManager) {
+					writeStartupNotice(parsedArgs, `${chalk.dim("Resume cancelled: no directory selected.")}\n`);
+					stopStartupWatchdog();
+					process.exit(0);
+				}
 			} catch (error: unknown) {
 				if (error instanceof SessionResolutionError) exitForSessionResolutionError(error);
 				throw error;
 			}
 			const previousCwd = cwd;
-			// A relocated session's `chosen.cwd` is its gone directory: missing, so the launch cwd stays.
-			const recordedCwd = chosen.cwd || sessionManager.getRecordedCwd() || sessionManager.getCwd();
+			const recordedCwd = sessionManager.getRecordedCwd() ?? sessionManager.getCwd();
 			const resumedProject = await switchToResumedProject(
 				recordedCwd,
 				settingsInstance,
@@ -2355,6 +2421,7 @@ export async function runRootCommand(
 				sessionManager,
 			);
 			cwd = resumedProject.cwd;
+			notifySuccessfulSessionRelocation(sessionManager, isInteractive ? notifs : undefined);
 			notifyResumeCwdFallback(parsedArgs, resumedProject, cwd, isInteractive ? notifs : undefined);
 			if (cwd !== previousCwd) {
 				parsedArgs.cwd = cwd;
@@ -2918,6 +2985,7 @@ export async function runRootCommand(
 						startupLease,
 						initialArgs.goal,
 						parsedArgs.restore ? () => restoreSession(session, { eventBus, subagentEventBus }) : undefined,
+						parsedArgs.sessionDir,
 					);
 				} finally {
 					startupLease?.dispose();

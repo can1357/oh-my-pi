@@ -735,6 +735,7 @@ export interface InteractiveModeOptions {
 	initialImages?: ImageContent[];
 	/** Additional initial messages to queue */
 	initialMessages?: string[];
+	sessionDirOverride?: string;
 }
 
 export const TODO_COMPACT_TERMINAL_ROWS_THRESHOLD = 18;
@@ -1408,6 +1409,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
 	session: AgentSession;
 	sessionManager: SessionManager;
+	readonly sessionDirOverride?: string;
 	settings: Settings;
 	keybindings: KeybindingsManager;
 	agent: Agent;
@@ -2302,9 +2304,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		eventBus?: EventBus,
 		composer?: Composer,
 		subagentEventBus?: EventBus,
+		options: InteractiveModeOptions = {},
 	) {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
+		this.sessionDirOverride = options.sessionDirOverride;
 		this.settings = session.settings;
 		const preferences = {
 			quiet: cfgStartupQuiet.get(settings),

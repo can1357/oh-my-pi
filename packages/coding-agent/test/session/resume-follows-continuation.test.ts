@@ -329,7 +329,8 @@ describe("--resume of a session that continued in a sibling file", () => {
 						: resumeArgs(original);
 
 			const followed: SessionContinuation[] = [];
-			const manager = await createSessionManager(args, tempDir.path(), stubSettings, async () => "unavailable", {
+			const manager = await createSessionManager(args, tempDir.path(), stubSettings, {
+				interactive: false,
 				onSessionContinuation: c => followed.push(c),
 			});
 			if (!manager) throw new Error("Expected a resumed session");
@@ -361,15 +362,9 @@ describe("--resume of a session that continued in a sibling file", () => {
 		await fs.rm(getTerminalSessionsDir(), { recursive: true, force: true });
 
 		const followed: SessionContinuation[] = [];
-		const manager = await createSessionManager(
-			continueArgs(tempDir.path()),
-			tempDir.path(),
-			stubSettings,
-			undefined,
-			{
-				onSessionContinuation: c => followed.push(c),
-			},
-		);
+		const manager = await createSessionManager(continueArgs(tempDir.path()), tempDir.path(), stubSettings, {
+			onSessionContinuation: c => followed.push(c),
+		});
 		try {
 			expect(manager?.getSessionFile()).toBe(original);
 			// The notice must not say the picked continuation went on in the older copy it continues.
@@ -441,12 +436,9 @@ describe("--resume of a session that continued in a sibling file", () => {
 		const holder = await Holder.resume(tempDir, continuation);
 		try {
 			await holder.append("holder on the continuation");
-			const manager = await createSessionManager(
-				resumeArgs(original),
-				tempDir.path(),
-				stubSettings,
-				async () => "unavailable",
-			);
+			const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings, {
+				interactive: false,
+			});
 			if (!manager) throw new Error("Expected a resumed session");
 			const notices: SessionPersistenceNotice[] = [];
 			manager.onPersistenceNotice(notice => notices.push(notice));
@@ -594,7 +586,7 @@ describe("--resume of a session that continued in a sibling file", () => {
 		expect(writer.getSessionFile()).toBe(last);
 
 		const followed: SessionContinuation[] = [];
-		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings, undefined, {
+		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings, {
 			onSessionContinuation: c => followed.push(c),
 		});
 		try {
@@ -675,7 +667,7 @@ describe("--resume of a session that continued in a sibling file", () => {
 
 			const followed: SessionContinuation[] = [];
 			const args = by === "id" ? resumeArgs(sessionId, tempDir.path()) : resumeArgs(original);
-			const manager = await createSessionManager(args, tempDir.path(), stubSettings, undefined, {
+			const manager = await createSessionManager(args, tempDir.path(), stubSettings, {
 				onSessionContinuation: c => followed.push(c),
 			});
 			try {

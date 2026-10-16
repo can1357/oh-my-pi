@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getTerminalId } from "@oh-my-pi/pi-tui/ttyid";
 import {
 	getCustomSessionFilesDir,
@@ -15,6 +16,7 @@ import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { Settings } from "../config/settings";
 import { worktreeFamily } from "../worktree/worktrees";
+import type { SessionRepository } from "./session-entries";
 import type { SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();
@@ -222,6 +224,40 @@ export function resolveManagedSessionRoot(sessionDir: string, cwd: string): stri
  */
 export function sessionDirForCwd(cwd: string, sessionsRoot: string = getSessionsDir()): string {
 	return path.join(sessionsRoot, getDefaultSessionDirName(cwd).encodedDirName);
+}
+
+export function getSessionRepository(cwd: string): SessionRepository | undefined {
+	try {
+		const repository = vcs.git(cwd);
+		if (!repository) return undefined;
+
+		const linked = repository.linkedWorktree();
+		if (linked) {
+			if (
+				typeof linked.root !== "string" ||
+				!linked.root ||
+				!path.isAbsolute(linked.root) ||
+				typeof linked.primaryRoot !== "string" ||
+				!linked.primaryRoot ||
+				!path.isAbsolute(linked.primaryRoot)
+			) {
+				return undefined;
+			}
+			return {
+				sessionWorktreeRoot: linked.root,
+				primaryWorktreeRoot: linked.primaryRoot,
+			};
+		}
+
+		const primaryRoot = repository.primaryRoot();
+		if (typeof primaryRoot !== "string" || !primaryRoot || !path.isAbsolute(primaryRoot)) return undefined;
+		return {
+			sessionWorktreeRoot: primaryRoot,
+			primaryWorktreeRoot: primaryRoot,
+		};
+	} catch {
+		return undefined;
+	}
 }
 
 /** Session buckets for both backends, including removed worktrees whose sessions can be resumed. */

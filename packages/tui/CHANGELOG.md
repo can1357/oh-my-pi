@@ -5,6 +5,7 @@
 ### Added
 
 - Added handling of `features` terminal events to update UI without waiting for a new hello
+- Added `SessionSelectorComponent.showError()` so a host can show a retryable resume error inside the picker ([#16781](https://github.com/can1357/oh-my-pi/pull/16781) by [@ton-anywhere](https://github.com/ton-anywhere))
 
 ### Fixed
 
