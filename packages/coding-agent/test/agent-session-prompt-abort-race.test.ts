@@ -58,9 +58,8 @@ describe("AgentSession prompt admission racing abort", () => {
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
-			modelRegistry: (options.modelRegistry ?? new ModelRegistry(authStorage)) as never,
+			modelRegistry: (options.modelRegistry as ModelRegistry | undefined) ?? modelRegistry,
 			...(options.extensionRunner ? { extensionRunner: options.extensionRunner as never } : {}),
-			modelRegistry,
 		});
 		if (options.clientBridge) {
 			session.setClientBridge(options.clientBridge as never);
