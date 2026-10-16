@@ -107,6 +107,16 @@ it("diff resamples cases, not questions: correlated questions do not make a win 
 	expect(stdout).toContain("verdict: neutral");
 });
 
+it("diff over a single case prints no interval and insufficient data", async () => {
+	const ids = ["c1:q1", "c1:q2", "c1:q3"];
+	const a = await writeResult("single-a", { questions: ids.map(id => [id, 0]) });
+	const b = await writeResult("single-b", { questions: ids.map(id => [id, 1]) });
+	const { stdout, code } = await diff(a, b);
+	expect(code).toBe(0);
+	expect(stdout).toContain("recall@10 overall (b - a, n=3, cases=1): meanDiff 1.0000 CI n/a (fewer than 2 cases)");
+	expect(stdout).toContain("verdict: insufficient data");
+});
+
 it("diff rejects results run under different protocols", async () => {
 	const a = await writeResult("proto-a", { protocol: "standard" });
 	const b = await writeResult("proto-b", { protocol: "fts-only" });
