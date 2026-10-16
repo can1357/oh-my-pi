@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -110,5 +111,39 @@ describe("read tool ACP fs routing", () => {
 		expect(text).toContain("bridge two");
 		expect(text).not.toContain("Line 2 is beyond end");
 		expect(text).not.toContain("disk two");
+	});
+
+	it("reports the bridge-buffer oversized-line preview as partial with matching stats", async () => {
+		// Regression #10774: the ACP/editor-backed route renders the
+		// in-memory byte-capped preview, so its stats must describe the
+		// delivered snippet instead of outputLines=0/outputBytes=0 and
+		// lastLinePartial=false.
+		const filePath = path.join(tmpDir, "oversized-bridge.txt");
+		const bigLine = "x".repeat(70_000);
+		const bridgeContent = `first\n${bigLine}\nlast`;
+		await fs.writeFile(filePath, "first\ndisk oversized line\nlast\n");
+		const bridge: ClientBridge = {
+			capabilities: { readTextFile: true },
+			readTextFile: async () => bridgeContent,
+		};
+		const bridgeSpy = spyOn(bridge, "readTextFile");
+
+		const session = createSession(tmpDir, bridge);
+		const tool = new ReadTool(session);
+
+		const result = await tool.execute("call-oversized-bridge", { path: `${filePath}:raw:2-2` });
+		const body = textOutput(result);
+
+		expect(bridgeSpy).toHaveBeenCalled();
+		expect(body).toBe(bigLine.slice(0, DEFAULT_MAX_BYTES));
+		expect(result.details?.displayContent?.text).toBe(bigLine.slice(0, DEFAULT_MAX_BYTES));
+		const truncation = result.details?.truncation;
+		expect(truncation).toBeDefined();
+		if (!truncation) throw new Error("expected truncation details");
+		expect(truncation.firstLineExceedsLimit).toBe(true);
+		expect(truncation.lastLinePartial).toBe(true);
+		expect(truncation.outputLines).toBe(1);
+		expect(truncation.outputBytes).toBe(DEFAULT_MAX_BYTES);
+		expect(truncation.totalBytes).toBe(70_000);
 	});
 });

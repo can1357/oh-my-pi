@@ -69,7 +69,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    - `resolvedPath`
    - `suffixResolution`
    - URL fields: `url`, `finalUrl`, `contentType`, `method`, `notes`
-   - `truncation` (`ReadTruncationStats`: counters and flags only; no duplicate `content` field)
+   - `truncation` (`ReadTruncationStats`: counters and flags only; no duplicate `content` field). `lastLinePartial` is `true` only when the delivered payload's final line is a partial byte window of the source line (an oversized first line delivered as a byte-capped preview); diagnostic-only oversized-line notices with no source bytes stay `false`, and `outputLines`/`outputBytes` always describe the delivered preview.
    - `displayContent` (unprefixed text + starting line for TUI rendering)
    - `summary` (`lines`, `elidedSpans`, `elidedLines`) for structural summaries
    - `conflictCount` for `<path>:conflicts`
