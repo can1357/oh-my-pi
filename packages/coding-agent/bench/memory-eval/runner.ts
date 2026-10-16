@@ -138,6 +138,13 @@ function scoreQuestion(
 	const rankings: number[] = [];
 	const seen = new Set<number>();
 	for (const hit of ranked) {
+		// An unmapped hit still took a rank: score it as a non-gold document in a session of its own, appended to the
+		// corpus (the official scorer reads rankings as corpus indices).
+		if (hit.messageIds.length === 0) {
+			rankings.push(corpusIds.length);
+			corpusIds.push(`<unmapped ${corpusIds.length}>_0`);
+			continue;
+		}
 		for (const id of hit.messageIds) {
 			const index = indexOf.get(id);
 			if (index === undefined || seen.has(index)) continue;
@@ -194,9 +201,12 @@ export async function runCases(
 		const prefixes = messages
 			.map(m => ({ messageId: m.messageId, prefix: normalize(cp(m.content, FALLBACK_PREFIX_CHARS)) }))
 			.filter(p => p.prefix !== "");
+		// LongMemEval's session metrics widen past the turn cutoff until they see enough distinct sessions, and the
+		// official retrieval runner ranks the whole corpus, so LongMemEval asks for that; BEAM scores the top k.
+		const depth = isBeam(evalCase.dataset) ? k : Math.max(k, evalCase.messages.length);
 		for (const question of evalCase.questions) {
 			const start = performance.now();
-			const hits = await engine.recall(question, k);
+			const hits = await engine.recall(question, depth);
 			const latencyMs = performance.now() - start;
 			const ranked: RankedHit[] = hits.map(hit => ({
 				...mapHit(hit, idMap, prefixes),
