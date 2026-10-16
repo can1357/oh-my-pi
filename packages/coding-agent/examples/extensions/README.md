@@ -12,6 +12,12 @@ pi --extension examples/extensions/permission-gate.ts
 cp permission-gate.ts ~/.omp/agent/extensions/
 ```
 
+## Standalone Plugins
+
+| Plugin | Install | Description |
+| --- | --- | --- |
+| [OMP Jev Gate](https://github.com/cyriusweng/omp-jev-gate) | `omp plugin install github:cyriusweng/omp-jev-gate` | Adds a global TypeSafe Jev policy with four preflight modes, typed checkpoints and audit receipts; it composes with [OMP Code Model](https://github.com/cyriusweng/omp-code-model) by carrying turn dispositions across executor hand-offs and gating `edit`, `write` and `bash`. |
+
 ## Examples
 
 ### Lifecycle & Safety
