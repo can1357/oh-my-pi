@@ -6,9 +6,6 @@ const SIXEL_START_REGEX = /(?:\x1bP|\x90)(?:[0-9;]*)q/u;
 const SIXEL_SEQUENCE_REGEX = /(?:\x1bP|\x90)(?:[0-9;]*)q[\s\S]*?(?:\x1b\\|\x07|\x9c)/gu;
 const SIXEL_PLACEHOLDER_PREFIX = "__OMP_SIXEL_SEQUENCE_";
 
-const SIXEL_END_SEQUENCE = "\x1b\\";
-const SIXEL_END_BELL = "\x07";
-const SIXEL_END_8BIT_ST = "\x9c";
 const BACKSLASH = 0x5c;
 const BEL = 0x07;
 const C1_DCS = 0x90;
@@ -31,21 +28,66 @@ export function containsSixelSequence(text: string): boolean {
 }
 
 /**
+ * Finds the first sixel terminator at or after `start`, with its byte length.
+ * `ESC \` is two bytes, BEL and the 8-bit ST are one; a backslash not preceded
+ * by ESC is payload, so the two-byte form has to be recognised as a pair.
+ */
+function findSixelTerminator(row: string, start: number): { index: number; length: number } | undefined {
+	for (let index = start; index < row.length; index++) {
+		const code = row.charCodeAt(index);
+		if (code === BEL || code === C1_ST) return { index, length: 1 };
+		if (code === 0x1b && row.charCodeAt(index + 1) === BACKSLASH) return { index, length: 2 };
+	}
+	return undefined;
+}
+
+/**
  * Classifies one terminal row against the DCS state that entered it: a row is
  * payload when a start marker opens a sequence on it or an earlier row left one
  * open, and it stays payload until its terminator arrives. The exit state is
  * derived from the same snapshot, so classifying a row repeatedly — a streamed
  * row is re-read every time a chunk grows it — is idempotent.
+ *
+ * The row is walked in order rather than tested for "contains a start" and
+ * "contains a terminator" separately: a row can carry several frames, and a
+ * terminator that precedes an introducer belongs to a different, earlier frame.
+ * Testing for either out of order reports the row as closed while the host
+ * terminal is still inside the last sequence it opened, so a later row gets
+ * clamped instead of passed through and the live DCS is cut mid-frame.
  */
 export function classifySixelRow(
 	row: string,
 	inSequenceAtEntry: boolean,
 ): { isSixel: boolean; inSequenceAtExit: boolean } {
 	let open = inSequenceAtEntry;
-	if (containsSixelSequence(row)) open = true;
-	const terminated =
-		open && (row.includes(SIXEL_END_SEQUENCE) || row.includes(SIXEL_END_BELL) || row.includes(SIXEL_END_8BIT_ST));
-	return { isSixel: open, inSequenceAtExit: terminated ? false : open };
+	let sawSequence = inSequenceAtEntry;
+	let index = 0;
+	while (index < row.length) {
+		if (open) {
+			const terminator = findSixelTerminator(row, index);
+			if (terminator === undefined) return { isSixel: true, inSequenceAtExit: true };
+			index = terminator.index + terminator.length;
+			open = false;
+			continue;
+		}
+		const escaped = row.indexOf("\x1b", index);
+		const c1 = row.indexOf("\x90", index);
+		const next = escaped === -1 ? c1 : c1 === -1 ? escaped : Math.min(escaped, c1);
+		if (next === -1) break;
+		index = next;
+		const introducer = matchSixelIntroducer(row, index);
+		// A bare trailing ESC/C1 is not an introducer on this row; it is payload
+		// or a different escape, and treating it as an open DCS would exempt the
+		// following rows from clamping forever.
+		if (introducer === undefined || introducer === "partial") {
+			index++;
+			continue;
+		}
+		index += introducer;
+		open = true;
+		sawSequence = true;
+	}
+	return { isSixel: sawSequence, inSequenceAtExit: open };
 }
 
 /**
