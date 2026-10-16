@@ -247,6 +247,8 @@ export class Screen {
 	/** Sink for terminal→child bytes (query replies); wired to the session PTY. */
 	onReply: ((bytes: Uint8Array) => void) | null = null;
 	#term: KittyTerminal;
+	/** Set before the native terminal is freed; late PTY bytes must not reach it. */
+	#disposed = false;
 	/** Completed image transmissions by image id (insertion order backs eviction). */
 	#images = new Map<number, StoredImage>();
 	/** In-flight chunked transmission; continuation commands carry no id. */
@@ -327,23 +329,33 @@ export class Screen {
 	}
 
 	feed(chunk: Uint8Array) {
+		// A stopped session can still deliver buffered PTY output after the native
+		// terminal was freed; feeding that disposed engine throws inside wasm
+		// ("KittyTerminal used after dispose()") and escapes as a process-level
+		// uncaught exception. Late bytes are dropped instead.
+		if (this.#disposed) return;
 		this.#term.write(chunk);
 	}
 
 	/** Resize with kitty's real semantics: content rewraps and refills from scrollback. */
 	resize(cols: number, rows: number) {
+		if (this.#disposed) return;
 		this.#term.resize(cols, rows);
 	}
 
-	/** Frees the native terminal. */
+	/** Frees the native terminal. Idempotent; every later call is a no-op. */
 	dispose() {
+		if (this.#disposed) return;
+		this.#disposed = true;
 		this.#term.dispose();
 	}
 
 	/** Resolves a decoded color against the palette; null = terminal default. */
 	#rgb(color: Color, fallback: number): number {
 		if (!color) return fallback;
-		return "rgb" in color ? color.rgb : this.#term.paletteColor(color.index);
+		if ("rgb" in color) return color.rgb;
+		if (this.#disposed) return fallback;
+		return this.#term.paletteColor(color.index);
 	}
 
 	/** Decodes a stored transmission to a drawable: PNG via Skia, raw RGB(A) via ImageData. */
@@ -378,6 +390,7 @@ export class Screen {
 
 	/** Plain-text screen: header, optional scrollback tail, then the viewport. */
 	snapshot(history = 0): string {
+		if (this.#disposed) throw new Error("Session stopped");
 		const term = this.#term;
 		const cursor = term.cursor;
 		const out = [
@@ -401,7 +414,11 @@ export class Screen {
 
 	/** Rasterizes the viewport to a PNG via Skia with real system fonts. */
 	async png(): Promise<Buffer> {
+		if (this.#disposed) throw new Error("Session stopped");
 		const { create, load, stack } = await loadCanvas();
+		// The canvas module load above awaits: a concurrent stop can free the engine
+		// while this read is in flight, so re-check before touching it.
+		if (this.#disposed) throw new Error("Session stopped");
 		const term = this.#term;
 		const cols = term.columns;
 		const rows = term.rows;
