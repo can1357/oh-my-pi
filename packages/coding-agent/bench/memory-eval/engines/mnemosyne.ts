@@ -71,6 +71,9 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 			MNEMOSYNE_FASTEMBED_CACHE_DIR: path.join(CACHE_ROOT, "fastembed"),
 			MNEMOSYNE_EMBEDDING_MODEL: EMBEDDING_MODEL,
 			MNEMOSYNE_LLM_ENABLED: "false",
+			// Larger than any conversation (BEAM 500K peaks near 1,500 messages), so working memory never evicts, like
+			// Mnemopi's `workingMemoryLimit: 0`. Mnemosyne's own default is 10,000.
+			MNEMOSYNE_WM_MAX_ITEMS: "100000",
 			...(protocol === "fts-only" ? { MNEMOSYNE_NO_EMBEDDINGS: "1" } : {}),
 			...(options.polyphonic ? { MNEMOSYNE_POLYPHONIC_RECALL: "1" } : {}),
 		});
