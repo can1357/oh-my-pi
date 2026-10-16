@@ -33,6 +33,7 @@ type SkillPromptOptions = {
 interface InvokeSkillCommandOptions {
 	propagateErrors?: boolean;
 	queueOnly?: boolean;
+	onAccepted?: () => void;
 	images?: ImageContent[];
 	imageLinks?: (string | undefined)[];
 	/**
@@ -95,7 +96,11 @@ export async function invokeSkillCommandFromText(
 	try {
 		const built = await buildSkillCommandPrompt(ctx, text, streamingBehavior, options?.images);
 		if (!built) return false;
-		const promptOptions = options?.queueOnly ? { ...built.options, queueOnly: true } : built.options;
+		const promptOptions = {
+			...built.options,
+			...(options?.queueOnly ? { queueOnly: true } : {}),
+			...(options?.onAccepted ? { onAccepted: options.onAccepted } : {}),
+		};
 		optimistic = options?.optimistic === true && !options?.queueOnly && !ctx.session.isStreaming;
 		if (optimistic) {
 			ctx.renderOptimisticSkillMessage(
