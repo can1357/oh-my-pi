@@ -1,4 +1,5 @@
 import { prompt } from "@oh-my-pi/pi-utils";
+import { displayExitReason } from "../launch/exit-reason";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import launchCompletionTemplate from "../prompts/session/launch-completion.md" with { type: "text" };
 import type { CustomMessage } from "./messages";
@@ -26,6 +27,7 @@ export function buildLaunchCompletionBatchMessage(entries: LaunchCompletionEntry
 					state: daemon.state,
 					exitCode: daemon.exitCode,
 					hasExitCode: daemon.exitCode !== undefined,
+					exitReason: displayExitReason(daemon.exitReason),
 				}),
 			)
 			.join("\n"),
