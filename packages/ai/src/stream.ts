@@ -38,6 +38,7 @@ import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { streamKimi } from "./providers/kimi";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
+import { openAISamplingExtensionEnabled, samplingCompatFlag } from "./providers/openai-shared";
 import { streamPiNative } from "./providers/pi-native-client";
 import { streamSynthetic } from "./providers/synthetic";
 import {
@@ -1184,11 +1185,12 @@ type SamplingOptions = Pick<
 >;
 
 /**
- * Drop explicit sampling parameters before any provider builds its payload
- * when the model's resolved `compat.supportsSamplingParams` is `false`. The
- * catalog's class rules assign that per model lineage on every compat record,
- * and an explicit compat override still wins, so this one check covers every
- * provider.
+ * Drop sampling parameters the model rejects before any provider builds its
+ * payload. `supportsSamplingParams: false` drops temperature and top_p.
+ * `top_k`, `min_p`, and penalties stay when the authored spec set that flag
+ * true, so a roster that omitted temperature but listed the extension still
+ * sends it. Class rules that only turn the core group off do not count as
+ * that advertisement.
  */
 function withSupportedSamplingParams<T extends SamplingOptions>(model: Model<Api>, options: T): T {
 	if (
@@ -1207,11 +1209,36 @@ function withSupportedSamplingParams<T extends SamplingOptions>(model: Model<Api
 	const supported = { ...options };
 	delete supported.temperature;
 	delete supported.topP;
-	delete supported.topK;
-	delete supported.minP;
-	delete supported.presencePenalty;
-	delete supported.repetitionPenalty;
-	delete supported.frequencyPenalty;
+	const authored = model.compatConfig;
+	if (
+		!openAISamplingExtensionEnabled(
+			false,
+			samplingCompatFlag(compat, "supportsTopK"),
+			samplingCompatFlag(authored, "supportsTopK"),
+		)
+	) {
+		delete supported.topK;
+	}
+	if (
+		!openAISamplingExtensionEnabled(
+			false,
+			samplingCompatFlag(compat, "supportsMinP"),
+			samplingCompatFlag(authored, "supportsMinP"),
+		)
+	) {
+		delete supported.minP;
+	}
+	if (
+		!openAISamplingExtensionEnabled(
+			false,
+			samplingCompatFlag(compat, "supportsPenaltyAndStopParams"),
+			samplingCompatFlag(authored, "supportsPenaltyAndStopParams"),
+		)
+	) {
+		delete supported.presencePenalty;
+		delete supported.repetitionPenalty;
+		delete supported.frequencyPenalty;
+	}
 	return supported;
 }
 
@@ -1813,6 +1840,7 @@ function mapOptionsForApi<TApi extends Api>(
 		topK: options?.topK,
 		minP: options?.minP,
 		presencePenalty: options?.presencePenalty,
+		frequencyPenalty: options?.frequencyPenalty,
 		repetitionPenalty: options?.repetitionPenalty,
 		maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 		signal: options?.signal,

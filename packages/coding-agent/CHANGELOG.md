@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `--provider openzoo` against a public tunnel that rejects the bearer exiting with an unknown-provider error instead of telling you to run /login.
+- Fixed OpenZoo public-tunnel discovery reporting a rejected bearer as a missing model instead of an authentication failure.
+- Fixed resuming a session saved on `openzoo/auto` when the OpenZoo model cache is empty.
+- Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
+
 ## [18.11.2] - 2026-10-16
 
 ### Added

@@ -538,10 +538,27 @@ export interface OpenAICompat {
 	 */
 	supportsSamplingParams?: boolean;
 	/**
+	 * Whether chat-completions and Responses requests may send `top_k`.
+	 * Unset sends it with the rest of the sampling group. `false` suppresses
+	 * only that extension. An explicit `true` still sends when
+	 * `supportsSamplingParams` is false, so a roster that listed `top_k`
+	 * but not `temperature` does not drop it. Default: true.
+	 */
+	supportsTopK?: boolean;
+	/**
+	 * Whether chat-completions and Responses requests may send `min_p`.
+	 * Unset sends it with the rest of the sampling group. `false` suppresses
+	 * only that extension. An explicit `true` still sends when
+	 * `supportsSamplingParams` is false. Default: true.
+	 */
+	supportsMinP?: boolean;
+	/**
 	 * Whether presence/frequency penalties and stop sequences may be sent.
 	 * First-party xAI `/v1/responses` rejects penalty fields for every model.
 	 * xAI reasoning models also reject them (and `stop`) on chat completions.
-	 * When unset, auto-detected. Default: true.
+	 * Unset sends penalties with the sampling group. An explicit `true` still
+	 * sends them when `supportsSamplingParams` is false. When unset,
+	 * auto-detected. Default: true.
 	 */
 	supportsPenaltyAndStopParams?: boolean;
 	/** Always send a max-token field when the caller did not provide one. Default: auto-detected (Kimi-family models derive TPM limits from max_tokens). */
@@ -927,6 +944,10 @@ export interface ResolvedOpenAISharedCompat {
 	reasoningEffortMap: Partial<Record<Effort, string>>;
 	supportsReasoningParams: boolean;
 	supportsSamplingParams: boolean;
+	/** See {@link OpenAICompat.supportsTopK}. Present so a spec override sticks; default true. */
+	supportsTopK?: boolean;
+	/** See {@link OpenAICompat.supportsMinP}. Present so a spec override sticks; default true. */
+	supportsMinP?: boolean;
 	supportsPenaltyAndStopParams: boolean;
 	thinkingFormat: OpenAIReasoningFormat;
 	/** Kimi Code transport selected by live per-model protocol metadata. */
@@ -1014,6 +1035,8 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsReasoningSummary"
 			| "statefulResponses"
 			| "supportsSamplingParams"
+			| "supportsTopK"
+			| "supportsMinP"
 			| "supportsPenaltyAndStopParams"
 			| "thinkingFormat"
 			| "kimiApiFormat"
@@ -1573,6 +1596,13 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	tokenizer?: ModelTokenizer;
 	input: ("text" | "image")[];
+	/**
+	 * The discovery row reported input modalities. When true, a catalog
+	 * `input-modalities` correction does not replace `input`: the correction
+	 * only fills rows that omitted modality metadata, so an explicit text-only
+	 * report stays text-only.
+	 */
+	inputModalitiesReported?: boolean;
 	/**
 	 * Decoder family used for image inputs when it has narrower format support
 	 * than OMP's general image pipeline. `stb` local backends reject WebP.

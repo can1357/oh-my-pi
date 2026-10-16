@@ -1,5 +1,6 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import {
 	applyOpenRouterRoutingVariant,
 	convertMessages,
@@ -118,6 +119,9 @@ async function captureOpenAICompletionsPayload(
 		apiKey?: string;
 		reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 		temperature?: number;
+		topP?: number;
+		topK?: number;
+		minP?: number;
 		sessionId?: string;
 		cacheRetention?: "none" | "short" | "long";
 	},
@@ -172,6 +176,104 @@ describe("openai-completions compatibility", () => {
 
 		const payload = await captureOpenAICompletionsPayload(model, undefined, { temperature: 0 });
 		expect(toObject(payload)?.temperature).toBeUndefined();
+	});
+
+	it("sends advertised top_k, min_p, and penalties when temperature and top_p are off", async () => {
+		// The core sampling flag is false, so temperature and top_p stay off.
+		// Extensions the spec turned on must still reach the wire, including
+		// through the stream entry point that strips sampling options first.
+		const model = buildModel({
+			...gpt4oMiniSpec,
+			id: "example-lab/extensions-only",
+			provider: "openzoo",
+			baseUrl: "http://localhost:8402/v1",
+			api: "openai-completions",
+			compat: {
+				supportsSamplingParams: false,
+				supportsTopK: true,
+				supportsMinP: true,
+				supportsPenaltyAndStopParams: true,
+			},
+		} as ModelSpec<"openai-completions">);
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamSimple(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: createMockFetch(["[DONE]"]),
+			temperature: 0.2,
+			topP: 0.9,
+			topK: 40,
+			minP: 0.05,
+			presencePenalty: 0.1,
+			frequencyPenalty: 0.2,
+			repetitionPenalty: 1.1,
+			onPayload: payload => resolve(payload),
+		});
+		const body = toObject(await promise);
+		expect(body?.temperature).toBeUndefined();
+		expect(body?.top_p).toBeUndefined();
+		expect(body?.top_k).toBe(40);
+		expect(body?.min_p).toBe(0.05);
+		expect(body?.presence_penalty).toBe(0.1);
+		expect(body?.frequency_penalty).toBe(0.2);
+		expect(body?.repetition_penalty).toBe(1.1);
+	});
+
+	it("still omits top_k and penalties for a reasoning model that did not advertise them", async () => {
+		// supportsTopK defaults true. That must not send top_k once the model
+		// line rejects the sampling group and the spec never listed the extension.
+		const model = buildModel({
+			...gpt4oMiniSpec,
+			id: "gpt-5.6-luna",
+			provider: "github-copilot",
+			api: "openai-completions",
+		} as ModelSpec<"openai-completions">);
+		expect(model.compat.supportsSamplingParams).toBe(false);
+		expect(model.compatConfig?.supportsTopK).toBeUndefined();
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamSimple(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: createMockFetch(["[DONE]"]),
+			temperature: 0.2,
+			topK: 40,
+			minP: 0.05,
+			presencePenalty: 0.1,
+			frequencyPenalty: 0.2,
+			onPayload: payload => resolve(payload),
+		});
+		const body = toObject(await promise);
+		expect(body?.temperature).toBeUndefined();
+		expect(body?.top_k).toBeUndefined();
+		expect(body?.min_p).toBeUndefined();
+		expect(body?.presence_penalty).toBeUndefined();
+		expect(body?.frequency_penalty).toBeUndefined();
+	});
+
+	it("omits top_k while still sending min_p when only top_k is turned off", async () => {
+		// A route that advertised temperature and top_p but not top_k rejects
+		// top_k with a 400. min_p stays on the wire when its own flag is on.
+		const model = buildModel({
+			...gpt4oMiniSpec,
+			id: "example-lab/partial-sampling",
+			provider: "openzoo",
+			baseUrl: "http://localhost:8402/v1",
+			api: "openai-completions",
+			compat: {
+				supportsSamplingParams: true,
+				supportsTopK: false,
+				supportsMinP: true,
+			},
+		} as ModelSpec<"openai-completions">);
+		const payload = await captureOpenAICompletionsPayload(model, undefined, {
+			temperature: 0.2,
+			topP: 0.9,
+			topK: 40,
+			minP: 0.05,
+		});
+		const body = toObject(payload);
+		expect(body?.temperature).toBe(0.2);
+		expect(body?.top_p).toBe(0.9);
+		expect(body?.top_k).toBeUndefined();
+		expect(body?.min_p).toBe(0.05);
 	});
 
 	it("serializes assistant text content as a plain string", () => {

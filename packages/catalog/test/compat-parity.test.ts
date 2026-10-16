@@ -35,6 +35,11 @@ const NEW_COMPAT_FIELDS = new Set([
 	"claudeThinkingBetaHeader",
 	"antigravityClaudeToolMode",
 	"antigravityUsageLabel",
+	// Resolved sampling-extension defaults. Baked rows leave them unset, which
+	// still sends; the engine materializes `true` so a live roster can turn
+	// one extension off without dropping temperature and top_p.
+	"supportsTopK",
+	"supportsMinP",
 ]);
 
 /** APIs whose compat record is new with the engine (no baked baseline). */

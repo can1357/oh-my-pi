@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added OpenZoo live model discovery from its keyless local proxy, including pricing and a single `auto` router entry.
+
+### Fixed
+
+- Fixed OpenZoo treating an OpenRouter `text->image` modality as image input; only the side before `->` counts, and a legacy `text+image` value still does.
+- Fixed OpenZoo sending temperature, top_p, penalties, or stop to a model whose live roster lists parameters and omits those controls.
+- Fixed OpenZoo sending `top_k` or `min_p` when the live roster lists temperature and top_p but omits that extension.
+- Fixed OpenZoo dropping `top_k`, `min_p`, or penalties when the live roster lists that control but omits temperature or top_p.
+- Fixed OpenZoo model-cache lookups missing rows when the proxy URL has more than one trailing slash.
+- Fixed OpenZoo marking a model image-capable when its live roster explicitly reports text-only input.
+- Fixed OpenZoo marking a model image-capable when its live roster sets vision support to false and reports no image input.
+- Fixed OpenZoo enabling reasoning on a thinking-named model whose live roster explicitly reports that it does not reason.
+- Fixed OpenZoo public-tunnel discovery treating an HTTP 401/403 from `/models` as an unavailable provider instead of an authentication failure.
+- Fixed the OpenZoo `auto` router hiding reasoning and image input when the live roster advertises them.
+- Fixed OpenZoo sessions sending native tool calls to models whose live roster lists parameters and omits tools.
+- Fixed OpenZoo models staying tool-disabled after a refresh when the live roster starts advertising tools.
+
 ## [18.11.2] - 2026-10-16
 
 ### Added

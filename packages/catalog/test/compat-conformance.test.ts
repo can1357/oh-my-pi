@@ -17,6 +17,7 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	"lm-studio",
 	"litellm",
 	"vllm",
+	"openzoo", // local x402 proxy; live /v1/models is the catalog (`openzooModelManagerOptions`)
 	"openai-codex-device",
 	// Public gateway discovery via charmHyperModelManagerOptions: every row,
 	// including its tariff and effort ladder, comes from the live /v1/models
