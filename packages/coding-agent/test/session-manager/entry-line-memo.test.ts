@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn, type Mock } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, type Mock } from "bun:test";
 import * as path from "node:path";
 import * as vm from "node:vm";
 import { TempDir, __resetDirsFromEnvForTests, getBlobsDir, setAgentDir } from "@oh-my-pi/pi-utils";
@@ -1093,6 +1093,7 @@ describe("SessionManager entry-line memo", () => {
 		// graph uncached; a stamp taken from one call cannot describe the
 		// bytes another call produces.
 		let revision = 0;
+		const previousBigIntToJSON = Object.getOwnPropertyDescriptor(BigInt.prototype, "toJSON");
 		Object.defineProperty(BigInt.prototype, "toJSON", {
 			enumerable: false,
 			configurable: true,
@@ -1132,10 +1133,111 @@ describe("SessionManager entry-line memo", () => {
 			expect(bodyAfterSecond).toContain('"count":"bigint-rev-3"');
 			expect(bodyAfterSecond).not.toContain('"count":"bigint-rev-2"');
 		} finally {
-			// The hook was installed by this test via defineProperty above;
-			// removing the own property restores the pristine prototype for
-			// later files. `Reflect.deleteProperty` keeps the untyped shape.
-			Reflect.deleteProperty(BigInt.prototype, "toJSON");
+			// A runtime, an extension shim, or another test file in this worker can
+			// have a `BigInt.prototype.toJSON` of its own installed before this test
+			// runs. Put back exactly what this test found — reinstalling a saved
+			// descriptor, or deleting the own property when there was none — so a
+			// hook owned elsewhere survives this file.
+			if (previousBigIntToJSON === undefined) {
+				Reflect.deleteProperty(BigInt.prototype, "toJSON");
+			} else {
+				Object.defineProperty(BigInt.prototype, "toJSON", previousBigIntToJSON);
+			}
 		}
 	});
+
+	// Another owner can install a `BigInt.prototype.toJSON` hook before any
+	// test in this describe runs — a sibling file's describe-scope setup, an
+	// extension shim, a runtime the worker booted with. It stands in for every
+	// such owner: the bigint test above replaces whatever it finds with its
+	// own stateful hook, so its cleanup has to put back what it found instead
+	// of deleting the key.
+	const SENTINEL_BIGINT_TO_JSON = "fix15222-sentinel-bigint-tojson";
+	const originalBigIntToJSON = Object.getOwnPropertyDescriptor(BigInt.prototype, "toJSON");
+	const sentinelBigIntToJSON = function sentinelBigIntToJSON(): string {
+		return SENTINEL_BIGINT_TO_JSON;
+	};
+	let sentinelInstalled = false;
+	beforeAll(() => {
+		Object.defineProperty(BigInt.prototype, "toJSON", {
+			enumerable: false,
+			configurable: true,
+			value: sentinelBigIntToJSON,
+		});
+		sentinelInstalled = true;
+	});
+	afterAll(() => {
+		// Same save/restore discipline this describe holds the bigint test to:
+		// the sentinel must not outlive the describe either.
+		if (originalBigIntToJSON === undefined) {
+			Reflect.deleteProperty(BigInt.prototype, "toJSON");
+			return;
+		}
+		Object.defineProperty(BigInt.prototype, "toJSON", originalBigIntToJSON);
+	});
+
+	it("restores a BigInt.prototype serializer another owner installed before it", async () => {
+		// The unconditional `Reflect.deleteProperty` in the bigint test above
+		// destroyed any pre-installed `BigInt.prototype.toJSON` for the rest of
+		// the worker: a later file that serializes a bigint through the hook
+		// it installed saw `undefined` output or a TypeError instead, with
+		// nothing in this file failing to point at it. What survives here is
+		// exactly the sentinel `beforeAll` installed — same function, still
+		// callable.
+		expect(sentinelInstalled).toBe(true);
+		// The very hook `beforeAll` installed — not a stand-in left behind by
+		// the test above.
+		expect(Object.getOwnPropertyDescriptor(BigInt.prototype, "toJSON")?.value).toBe(sentinelBigIntToJSON);
+		// And the serializer still consults it: an owner that installed the
+		// hook before this file ran keeps the projection it relied on.
+		expect(JSON.stringify({ count: 42n })).toBe('{"count":"fix15222-sentinel-bigint-tojson"}');
+	});
+
+	it("persists a details payload nested deeper than the recursive hook probe could walk", async () => {
+		// `details` is the tool result's opaque slot, and it can hold a graph
+		// nested far deeper than JS recursion reaches — an opaque extension
+		// payload wrapped once per nesting level, with a serializer hook at the
+		// bottom. Persistence keeps a signed details object verbatim, so a
+		// payload like this serialized fine before the memo landed; the memo's
+		// hook probe then walked it one stack frame per level and overflowed
+		// (~14k levels) before ever reaching the leaf, so every full rewrite
+		// latched a persistence failure on it. The probe must reach the hook
+		// however deep it sits and leave the graph uncached, and the publish
+		// must still carry all of the payload.
+		const depth = 25_000;
+		let nested: unknown = { toJSON: () => "fix15222-deep-hook" };
+		for (let level = 0; level < depth; level++) nested = { child: nested };
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-deep-hook",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			// Signed: `truncateForPersistence` returns the whole object before its
+			// key-stripping loop, so the nested payload reaches the line.
+			details: {
+				type: "thinking",
+				thinking: "opaque extension payload",
+				thinkingSignature: "sig-fix15222-deep",
+				nested,
+			},
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: every level reaches the line, hook leaf included.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst.match(/"child":/g)).toHaveLength(depth);
+		expect(bodyAfterFirst).toContain('"child":"fix15222-deep-hook"');
+
+		// Second rewrite: byte-identical body — the hook-backed line is
+		// re-projected from the same serialization on every publish rather than
+		// reused from a stamp of the first one.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toBe(bodyAfterFirst);
+	}, 60_000);
 });
