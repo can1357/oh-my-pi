@@ -51,7 +51,7 @@ function fakeEngine(options: FakeOptions): EngineAdapter {
 		remember: async items => options.rowIds(items),
 		vectorCount: async () => options.vectors ?? 1,
 		sleep: async () => options.onSleep?.(),
-		recall: async () => options.hits,
+		recall: async (_question, k) => options.hits.slice(0, k),
 		lastDropped: () => options.dropped ?? [],
 		close: async () => {},
 		dispose: async () => {},
@@ -283,5 +283,41 @@ describe("runner", () => {
 		await runCases(engine, cases, "standard", 10, storeRoot);
 		expect(await Bun.file(sentinel).exists()).toBe(true);
 		expect(opened).toEqual(["0", "1"]);
+	});
+
+	/** A LongMemEval case whose messages are `ids` (`<session>_<turn>`), with gold `gold`; the fake ranks `hits`. */
+	const lmeCase = (ids: string[], gold: string[]): EvalCase => ({
+		...caseOf(
+			ids.map(id => msg(id, `turn ${id}`)),
+			gold,
+		),
+		dataset: "lme-s",
+	});
+
+	it("LongMemEval asks for a ranking deep enough for session-level widening", async () => {
+		// 50 turns of one session, then the gold turn of another: session@5 widens past turn 50 to find a 2nd session.
+		const ids = [...Array.from({ length: 50 }, (_, i) => `sA_${i + 1}`), "answer_sB_1"];
+		const engine = fakeEngine({
+			rowIds: items => items.map(item => item.messageId),
+			hits: ids.map(id => hit(id, "")),
+		});
+		const { questions } = await runCases(engine, [lmeCase(ids, ["answer_sB_1"])], "standard", 50, tmp);
+		expect(questions[0].metrics["turn.recall_all@50"]).toBe(0);
+		expect(questions[0].metrics["session.recall_all@5"]).toBe(1);
+	});
+
+	it("LongMemEval keeps an unmapped hit's rank as a non-gold position", async () => {
+		const ids = ["s1_1", "s2_1", "answer_s3_1"];
+		const engine = fakeEngine({
+			rowIds: items => items.map(item => item.messageId),
+			hits: [...["u1", "u2", "u3", "u4", "u5"].map(id => hit(id, "nothing alike")), hit("answer_s3_1", "")],
+		});
+		const { questions } = await runCases(engine, [lmeCase(ids, ["answer_s3_1"])], "standard", 50, tmp);
+		expect(questions[0].ranked.map(h => h.messageIds)).toEqual([[], [], [], [], [], ["answer_s3_1"]]);
+		// The gold turn is 6th: outside the top 5 turns, and behind 5 other documents at session level.
+		expect(questions[0].metrics["turn.recall_all@5"]).toBe(0);
+		expect(questions[0].metrics["session.recall_all@5"]).toBe(0);
+		expect(questions[0].metrics["turn.recall_all@10"]).toBe(1);
+		expect(questions[0].metrics["session.recall_all@10"]).toBe(1);
 	});
 });
