@@ -4,6 +4,14 @@
 
 ### Added
 
+- Added opt-in `retry.refusalFallbackRevertPolicy: after-success` to return to the previous model after one successful refusal/content-block fallback response, including Codex cybersecurity blocks, without changing outage or rate-limit fallback behavior or overriding explicit model selections during restoration ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+
+### Fixed
+
+- Added OpenAI's Decisions API as a native judge: with an OpenAI key, set the `judge` role to `openai/gpt-6-luna-decisions`
+- Added Cloudflare Workers AI's Clef decision models as native judges (`cloudflare-workers-ai/@cf/cloudflare/clef` and `…/clef-flash`): log in with `/login cloudflare-workers-ai` (API token and account ID) or set `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`, then pick one for the `judge` role
+- `models.yml` accepts `openai-decisions` and `workers-ai-systemone` as judge APIs for custom providers
+- `computer` elements gain `doubleClick()`, and using an element method or field on the array `win.find(…)` returns, in JavaScript, Python or `computer.run`, says to pick one element first instead of failing with "is not a function" or reading `undefined` ([#15312](https://github.com/can1357/oh-my-pi/pull/15312) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `lsp.requestTimeout` setting to configure wait durations for language server diagnostics and requests
 - Added `omp auth-gateway serve --clients=<file>`: per-client bearer tokens, each limited to listed models and broker OAuth accounts with no fallback to other accounts or API keys, re-read while serving ([#5098](https://github.com/can1357/oh-my-pi/issues/5098), [#15900](https://github.com/can1357/oh-my-pi/pull/15900) by [@alphastorm](https://github.com/alphastorm))
 
@@ -385,6 +393,8 @@
 - Fixed `grep` hiding matches that appeared beyond the first 512 bytes of a long line.
 - Fixed snapcompaction leaving too little context room after compaction.
 - Fixed usage-limited account pools redeeming saved resets for accounts outside the configured pool.
+- Fixed whole-session forks reporting retained availability fallback replies as primary after interrupted refusal swaps ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed whole-session forks continuing with fallback prompt policy after restoring the primary ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
 
 ## [18.8.9] - 2026-10-10
 

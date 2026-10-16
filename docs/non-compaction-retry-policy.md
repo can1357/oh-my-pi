@@ -197,9 +197,111 @@ Defined in `packages/coding-agent/src/session/settings.ts`:
 - `retry.fallbackOn` (default `"any"`; `"usage-limit"` or `"except-usage-limit"` restrict which errors walk the chains)
 - `retry.fallbackChains`
 - `retry.fallbackRevertPolicy` (`"cooldown-expiry"` by default; `"never"` disables automatic restoration)
+- `retry.refusalFallbackRevertPolicy` (`"default"` preserves existing error-specific behavior; `"after-success"` restores after a successful refusal/content-block fallback response)
 - `retry.usageAwareFallback` (default `false`; runs a preflight for supported coding-plan usage reports)
 - `retry.usageReservePct` (default `10`; remaining-quota reserve threshold)
 - `retry.usageReservePolicy` (default `"confirm"`; `"auto"` and `"fail-closed"` are also supported)
+
+Main and task sessions pin classifier-refusal fallbacks by default, independently of
+`retry.fallbackRevertPolicy`. To retry a refused invocation on a fallback and then
+return to the previous model, opt in:
+
+```yaml
+retry:
+  refusalFallbackRevertPolicy: after-success
+  fallbackRevertPolicy: cooldown-expiry
+```
+
+This uses the existing `retry.fallbackChains`, structured `refusal` / `sensitive`
+stop metadata, and the normalized `AIError.Flag.ContentBlocked` classification
+(including Codex `cyber_policy` errors). It does not match ordinary assistant
+refusal prose. Account-policy errors still try sibling credentials before selecting
+a fallback model. The first request-scoped model hop remains available even when
+`retry.maxRetries` is `0` or credential rotation has exhausted the retry budget.
+Further non-classifier content-block detours remain budget-bounded.
+Classifier-refusal walks visit each model at most once per retry saga, even after
+the same-model retry budget is spent.
+Restoration happens after the first successful fallback response
+and its tool execution, before the next model invocation—even within the same user
+turn. Failed, aborted, and empty responses do not restore the model. Same-model
+retries remain budget-bounded. A request-scoped content block does not
+create an availability cooldown for the model it restores.
+
+With unexpected-stop detection enabled, signed-thinking-only stops and Smart-mode
+incomplete text remain on the fallback through recovery. Restoration waits for an
+accepted complete response; canceling a pending verdict does not trigger it.
+
+Eligible Anthropic fallback credit is redeemed with either refusal restoration
+policy. Redemption is single-use and replays the frozen refused request only when
+the model swap leaves the system prompt, tools, and edit mode unchanged.
+
+Restoration waits for that assistant response's transcript persistence and
+success bookkeeping, not unrelated message, tool, or turn-end extension handlers.
+The emitted message snapshot and the original turn-end response are matched by
+their stable persistence key, so a tool-result continuation cannot bypass that wait.
+Sessions without a request-scoped refusal fallback do not acquire this wait.
+
+The previous model must still be available and outside any existing cooldown.
+If the session was already on an availability fallback, that fallback and its
+original restoration policy resume rather than jumping to an unavailable primary.
+Explicit model changes take precedence, including re-selecting the incoming model
+while an automatic swap is pending. Response attribution stays with the model
+that produced it. The restored model receives the continued conversation, so a
+later invocation can trigger another refusal and fallback.
+
+Automatic fallback installs and primary restorations accept session-scoped
+context-window refits without losing ownership, model/thinking persistence, or
+model-dependent prompt synchronization. Their provider/model and request target
+(API, endpoint, wire model, and selected upstream route) must still match.
+
+If the successful fallback response also starts prewalk, restoration settles
+before prewalk captures its planning source. The configured prewalk target still
+handles continuation; `/new` restores the planning model and its saved thinking
+configuration instead of adopting the request-scoped fallback.
+
+An abort or session transition during fallback application rolls back an
+uncommitted candidate. Once primary restoration installs its model, its transcript
+and thinking selection commit before asynchronous model-dependent reconciliation.
+An ordinary abort finishes that restoration; an explicit model selection still wins.
+
+Whole-session forks preserve the running conversation. Rolling back an unfinished
+refusal swap keeps an outer availability fallback routed to the fork. A primary
+restoration committed before the fork finishes its prompt synchronization before
+the next model invocation. `/new` and session switches invalidate that pending
+synchronization when they replace the conversation.
+
+`/new` saves the selected-model baseline for resume beneath every unpinned fallback
+layer, including an availability fallback beneath an unfinished refusal detour.
+A fallback answer must not become the new transcript's selected model just because
+it answered last.
+
+When a pinned fallback becomes the `/new` baseline, its old fallback ownership is
+dropped. An unfinished detour above it retains its captured route and restoration
+policy, then restores the adopted baseline as a primary. Later failures on that
+baseline use its own configured fallback chain.
+
+The baseline includes the primary's configured thinking level (`auto` included)
+instead of the fallback's temporary effort. A fallback model's automatic effort-floor
+clamp is not a manual override. A manual thinking-level override made on the fallback
+remains authoritative. `/new` reanchors only unfinished fallback
+routing and records the active fallback as an ephemeral model change; it does not
+carry produced-work attribution from the previous conversation.
+
+Switching to a different session, supplying an explicit model while switching, or
+restoring a saved model during a same-file reload discards the outgoing fallback
+ownership only after the switch commits;
+a rejected switch preserves its pending restoration. A same-file reload that keeps
+the live model (`keepModel: true`, or unavailable saved models) retains the pending
+fallback instead.
+
+The refusal policy is recorded when the fallback is entered. Switching to `default`
+does not cancel a pending `after-success` restoration. Enabling `after-success` does
+not retroactively unpin a fallback entered under `default`; reselect the desired
+model with `/switch` to take ownership immediately.
+
+To distinguish routing from attribution, inspect the Provider section of
+`/session`. Agent Hub and task progress can still credit the fallback's successful
+answer after the active model has already restored.
 
 Programmatic toggles in session:
 
@@ -275,5 +377,5 @@ A new retry chain can still start later on a future retryable error after counte
 - Classification uses normalized `AIError` flags/status plus provider-aware text fallback; it is not limited to structured errors or to regex matching alone.
 - Retry strips the failing assistant error from **runtime context** before re-continue, but session history still keeps that error entry. When the retry chain eventually succeeds, each persisted error entry from the chain is marked with a `retryRecovery` marker (`status: "recovered"`, plus kind/attempt/note and the superseding message; entries whose error was rendered moot carry `status: "superseded"` instead). Marked entries render as a dim, non-error one-line note instead of a red failure (live UI included, via the success event's `retryErrors`), and they are excluded when the LLM context is rebuilt — the display transcript still keeps them visible.
 - `RpcSessionState` currently exposes `autoCompactionEnabled` but not an `autoRetryEnabled` field; RPC callers must track their own toggle state or query settings through other APIs.
-- Model fallback changes append temporary `model_change` entries and may later restore the primary model when its cooldown expires, depending on `retry.fallbackRevertPolicy`.
+- Model fallback changes append temporary `model_change` entries. Availability fallbacks may restore the primary after its cooldown expires according to `retry.fallbackRevertPolicy`; request-scoped refusal fallbacks restore according to `retry.refusalFallbackRevertPolicy`.
 - Usage-aware preflight runs before a provider request when `retry.usageAwareFallback` is enabled. It prefers healthy same-provider coding-plan accounts before configured model fallback; ordinary configured API keys are excluded. Unknown/unmapped usage fails open. `retry.modelFallback` gates model switching, not the preflight's account selection or `"fail-closed"` policy. At the reserve threshold, `"confirm"` asks interactive sessions and keeps the current model when declined; sessions without a confirmation UI automatically apply an eligible fallback. `"auto"` applies an eligible fallback without asking. `"fail-closed"` rejects reserve or depleted usage instead of spending it or selecting a fallback. Depleted usage under the other policies applies an eligible fallback without a reserve confirmation.

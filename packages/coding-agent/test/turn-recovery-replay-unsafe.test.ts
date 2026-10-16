@@ -6,6 +6,7 @@ import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -95,6 +96,7 @@ function createHost(
 		streamingEditAbortTriggered: () => false,
 		promptGeneration: () => 0,
 		promptSequence: () => 0,
+		sessionGeneration: () => 0,
 		sessionId: () => "test-session",
 		emitSessionEvent: async () => {},
 		scheduleAgentContinue: () => {},
@@ -184,57 +186,75 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(emittedEvents).toEqual([]);
 	});
 
-	it("does not commit a fallback superseded during model reconciliation", async () => {
-		const fallback = getBundledModel("openai", "gpt-4o-mini");
-		if (!fallback) throw new Error("Expected bundled fallback race model");
-		const selectedModel = { ...fallback, baseUrl: "https://user-selected-route.example" };
-		let activeModel = model;
-		const fallbackApplied = Promise.withResolvers<void>();
-		const releaseReconciliation = Promise.withResolvers<void>();
-		const modelChanges: string[] = [];
-		const emittedEvents: string[] = [];
-		const thinkingChanges: unknown[] = [];
-		const host = createHost(model, modelRegistry);
-		host.model = () => activeModel;
-		host.sessionManager = {
-			appendModelChange: (selector: string) => modelChanges.push(selector),
-			getSessionId: () => "replay-unsafe-session",
-		} as never;
-		host.setThinkingLevel = level => thinkingChanges.push(level);
-		host.setModelWithProviderSessionReset = async nextModel => {
-			activeModel = nextModel;
-			if (nextModel.provider === fallback.provider && nextModel.id === fallback.id) {
-				fallbackApplied.resolve();
-				await releaseReconciliation.promise;
-			}
-		};
-		host.emitSessionEvent = async event => {
-			emittedEvents.push(event.type);
-		};
-		const recovery = new TurnRecovery(host);
-		const applying = recovery.applyRetryFallbackCandidate(
-			"default",
-			{
-				raw: `${fallback.provider}/${fallback.id}`,
-				provider: fallback.provider,
-				id: fallback.id,
-				thinkingLevel: undefined,
-			},
-			`${model.provider}/${model.id}`,
-			{ pinFallback: true, apiKey: "test-key" },
-		);
+	it.each(["endpoint", "API", "wire model", "upstream"] as const)(
+		"does not commit a fallback whose %s changes during model reconciliation",
+		async targetPart => {
+			const fallback =
+				targetPart === "upstream"
+					? modelRegistry.find("openrouter", "z-ai/glm-4.7")
+					: modelRegistry.find("openai", "gpt-4o-mini");
+			if (!fallback) throw new Error("Expected bundled fallback race model");
+			const selectedModel: Model | undefined =
+				targetPart === "endpoint"
+					? { ...fallback, baseUrl: "https://user-selected-route.example" }
+					: targetPart === "API"
+						? {
+								...fallback,
+								api: fallback.api === "openai-responses" ? "openai-completions" : "openai-responses",
+							}
+						: targetPart === "wire model"
+							? { ...fallback, requestModelId: "user-selected-model" }
+							: parseModelPattern(`${fallback.provider}/${fallback.id}@user-selected-upstream`, [fallback])
+									.model;
+			if (!selectedModel) throw new Error("Expected selected fallback race model");
+			let activeModel = model;
+			const fallbackApplied = Promise.withResolvers<void>();
+			const releaseReconciliation = Promise.withResolvers<void>();
+			const modelChanges: string[] = [];
+			const emittedEvents: string[] = [];
+			const thinkingChanges: unknown[] = [];
+			const host = createHost(model, modelRegistry);
+			host.model = () => activeModel;
+			host.sessionManager = {
+				appendModelChange: (selector: string) => modelChanges.push(selector),
+				getSessionId: () => "replay-unsafe-session",
+			} as never;
+			host.setThinkingLevel = level => thinkingChanges.push(level);
+			host.setModelWithProviderSessionReset = async nextModel => {
+				activeModel = nextModel;
+				if (nextModel.provider === fallback.provider && nextModel.id === fallback.id) {
+					fallbackApplied.resolve();
+					await releaseReconciliation.promise;
+				}
+			};
+			host.emitSessionEvent = async event => {
+				emittedEvents.push(event.type);
+			};
+			const recovery = new TurnRecovery(host);
+			const applying = recovery.applyRetryFallbackCandidate(
+				"default",
+				{
+					raw: `${fallback.provider}/${fallback.id}`,
+					provider: fallback.provider,
+					id: fallback.id,
+					thinkingLevel: undefined,
+				},
+				`${model.provider}/${model.id}`,
+				{ pinFallback: true, apiKey: "test-key" },
+			);
 
-		await fallbackApplied.promise;
-		activeModel = selectedModel;
-		releaseReconciliation.resolve();
-		const committed = await applying;
+			await fallbackApplied.promise;
+			activeModel = selectedModel;
+			releaseReconciliation.resolve();
+			const committed = await applying;
 
-		expect(committed).toBe(false);
-		expect(activeModel).toBe(selectedModel);
-		expect(modelChanges).toEqual([]);
-		expect(thinkingChanges).toEqual([]);
-		expect(emittedEvents).toEqual([]);
-	});
+			expect(committed).toBe(false);
+			expect(activeModel).toBe(selectedModel);
+			expect(modelChanges).toEqual([]);
+			expect(thinkingChanges).toEqual([]);
+			expect(emittedEvents).toEqual([]);
+		},
+	);
 	it("keeps a committed fallback when cancellation arrives during applied-event delivery", async () => {
 		const fallback = getBundledModel("openai", "gpt-4o-mini");
 		if (!fallback) throw new Error("Expected bundled fallback model");

@@ -20,6 +20,7 @@ import {
 	cfgRetryBaseDelayMs,
 	cfgRetryFallbackChains,
 	cfgRetryFallbackRevertPolicy,
+	cfgRetryRefusalFallbackRevertPolicy,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
@@ -210,6 +211,47 @@ describe("AgentSession prewalk", () => {
 			created.target.id,
 		]);
 		expect(created.nudges[boundary]).not.toContain("prewalk-checklist");
+	});
+	it("/new restores and rearms from the primary when a request-scoped fallback starts prewalk", async () => {
+		const fallback = modelOrThrow("claude-opus-4-6");
+		const created = createLifecycleSession([
+			{ stopReason: "error", stopDetails: { type: "refusal" }, errorMessage: "Classifier declined" },
+			{
+				content: [
+					{ type: "toolCall", id: "fallback-todo", name: "todo", arguments: {} },
+					{ type: "toolCall", id: "fallback-write", name: "write", arguments: {} },
+				],
+				stopReason: "toolUse",
+			},
+			{ content: ["continuation complete"] },
+		]);
+		cfgRetryFallbackChains.override(created.settings, {
+			[`${created.primary.provider}/${created.primary.id}`]: [`${fallback.provider}/${fallback.id}:high`],
+		});
+		cfgRetryRefusalFallbackRevertPolicy.override(created.settings, "after-success");
+		const fallbackSuccessModels: string[] = [];
+		const fallbackAttribution: string[] = [];
+		created.session.subscribe(event => {
+			if (event.type !== "retry_fallback_succeeded") return;
+			fallbackSuccessModels.push(event.model);
+			const modelIdentity = created.session.servingModel?.modelIdentity;
+			if (modelIdentity !== undefined) fallbackAttribution.push(modelIdentity);
+		});
+
+		await created.session.prompt("complete the requested work");
+		await created.session.waitForIdle();
+
+		expect(created.requested).toEqual([created.primary.id, fallback.id, created.target.id]);
+		expect(fallbackSuccessModels).toEqual([`${fallback.provider}/${fallback.id}:high`]);
+		expect(fallbackAttribution).toEqual([`${fallback.provider}/${fallback.id}`]);
+		expect(created.session.model?.id).toBe(created.target.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.Low);
+
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.model?.id).toBe(created.primary.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+		expect(created.session.getPrewalkState()?.target.id).toBe(created.target.id);
+		expect(created.session.getPrewalkState()?.thinkingLevel).toBe(Effort.Low);
 	});
 
 	it("/new restores the prewalk source and effort after automatic fallback and primary restoration", async () => {
