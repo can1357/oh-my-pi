@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, type Mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, type Mock } from "bun:test";
 import * as path from "node:path";
 import * as vm from "node:vm";
 import type { AssistantMessage, OpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai";
@@ -15,6 +15,21 @@ function restoreEnv(key: string, value: string | undefined): void {
 		process.env[key] = value;
 	}
 }
+
+/**
+ * The `BigInt.prototype.toJSON` the worker was running when this file loaded.
+ * A test that swaps a hook on must leave exactly this descriptor behind:
+ * another file in the same worker — or the runtime itself — can own it.
+ */
+const bigIntToJSONAtFileStart = Object.getOwnPropertyDescriptor(BigInt.prototype, "toJSON");
+
+const SENTINEL_BIGINT_TO_JSON = "fix15222-sentinel-bigint-tojson";
+// Identity is the contract, not the body: the tests assert the live
+// `toJSON` descriptor's value is this very function, so it needs a stable
+// named binding.
+const sentinelBigIntToJSON = function sentinelBigIntToJSON(): string {
+	return SENTINEL_BIGINT_TO_JSON;
+};
 
 // Exceeds BLOB_EXTERNALIZE_THRESHOLD (1024) so image blocks are externalized to blob refs.
 const LARGE_BASE64 = "A".repeat(2048);
@@ -1085,7 +1100,7 @@ describe("SessionManager entry-line memo", () => {
 		expect(body).toContain('"payload":"fix15222-tag"');
 		expect(body).toContain('"toolName":"bash"');
 	});
-	it("never reuses a line for a bigint detail whose BigInt.prototype serializer is stateful", async () => {
+	it("never reuses a line for a bigint detail whose BigInt.prototype serializer is stateful, and restores the hook it displaced", async () => {
 		// `details` is the tool result's opaque slot, so an extension can hand
 		// it a bigint — and a runtime can install `BigInt.prototype.toJSON`,
 		// which `JSON.stringify` invokes even though the value is primitive.
@@ -1094,105 +1109,103 @@ describe("SessionManager entry-line memo", () => {
 		// written. The probe must detect the prototype hook and leave the
 		// graph uncached; a stamp taken from one call cannot describe the
 		// bytes another call produces.
+		//
+		// Another owner can have installed a `BigInt.prototype.toJSON` of its
+		// own before this test runs — a sibling file's describe-scope setup, an
+		// extension shim, a runtime the worker booted with. The sentinel stands
+		// in for that owner: it is installed for this test alone and put back
+		// in the outer `finally` below. A describe-scope install instead left
+		// the hook live for every test in between — every intervening bigint
+		// serialization in the worker observed non-native output — and its
+		// `afterAll` restore could clobber a hook another test installed later.
 		let revision = 0;
-		const previousBigIntToJSON = Object.getOwnPropertyDescriptor(BigInt.prototype, "toJSON");
-		Object.defineProperty(BigInt.prototype, "toJSON", {
+		const originalBigIntToJSON = Object.getOwnPropertyDescriptor(BigInt.prototype, "toJSON");
+		const sentinelDescriptor: PropertyDescriptor = {
 			enumerable: false,
 			configurable: true,
-			value(this: bigint): string {
-				revision++;
-				return `bigint-rev-${revision}`;
-			},
-		});
+			value: sentinelBigIntToJSON,
+		};
+		Object.defineProperty(BigInt.prototype, "toJSON", sentinelDescriptor);
 		try {
-			const session = SessionManager.create(process.cwd(), sessionDir, storage);
-			session.appendMessage({
-				role: "toolResult" as const,
-				toolCallId: "call-fix15222-bigint-hook",
-				toolName: "bash",
-				content: [{ type: "text" as const, text: "ok" }],
-				details: { count: 42n },
-				isError: false,
-				timestamp: Date.now(),
+			// The stateful hook this test swaps in has to put back what it
+			// found — the sentinel — rather than deleting the key.
+			Object.defineProperty(BigInt.prototype, "toJSON", {
+				enumerable: false,
+				configurable: true,
+				value(this: bigint): string {
+					revision++;
+					return `bigint-rev-${revision}`;
+				},
 			});
+			try {
+				const session = SessionManager.create(process.cwd(), sessionDir, storage);
+				session.appendMessage({
+					role: "toolResult" as const,
+					toolCallId: "call-fix15222-bigint-hook",
+					toolName: "bash",
+					content: [{ type: "text" as const, text: "ok" }],
+					details: { count: 42n },
+					isError: false,
+					timestamp: Date.now(),
+				});
 
-			// Every rewrite re-projects through the serializer: each published
-			// body carries the output of the serialization that produced it —
-			// here the second serialization's revision, since one atomic
-			// publish serializes the body twice (materialize, then commit).
-			await session.appendEntriesAtomically(() => {});
-			const sessionFile = session.getSessionFile();
-			if (!sessionFile) throw new Error("Expected session file");
-			const bodyAfterFirst = storage.readTextSync(sessionFile);
-			expect(bodyAfterFirst).toContain('"count":"bigint-rev-2"');
+				// Every rewrite re-projects through the serializer: each published
+				// body carries the output of the serialization that produced it —
+				// here the second serialization's revision, since one atomic
+				// publish serializes the body twice (materialize, then commit).
+				await session.appendEntriesAtomically(() => {});
+				const sessionFile = session.getSessionFile();
+				if (!sessionFile) throw new Error("Expected session file");
+				const bodyAfterFirst = storage.readTextSync(sessionFile);
+				expect(bodyAfterFirst).toContain('"count":"bigint-rev-2"');
 
-			// Second rewrite: a fresh revision again — the first call's output
-			// restored from a reused line would pin `bigint-rev-2` forever.
-			// (The no-op second publish serializes the untouched body once
-			// more rather than twice, so the counter advances by one.)
-			await session.appendEntriesAtomically(() => {});
-			const bodyAfterSecond = storage.readTextSync(sessionFile);
-			expect(bodyAfterSecond).toContain('"count":"bigint-rev-3"');
-			expect(bodyAfterSecond).not.toContain('"count":"bigint-rev-2"');
+				// Second rewrite: a fresh revision again — the first call's output
+				// restored from a reused line would pin `bigint-rev-2` forever.
+				// (The no-op second publish serializes the untouched body once
+				// more rather than twice, so the counter advances by one.)
+				await session.appendEntriesAtomically(() => {});
+				const bodyAfterSecond = storage.readTextSync(sessionFile);
+				expect(bodyAfterSecond).toContain('"count":"bigint-rev-3"');
+				expect(bodyAfterSecond).not.toContain('"count":"bigint-rev-2"');
+			} finally {
+				// Put back exactly what this test displaced: the sentinel stands
+				// in for the owner whose hook was here first, and the
+				// unconditional `Reflect.deleteProperty` an earlier revision used
+				// destroyed that hook for the rest of the worker.
+				Object.defineProperty(BigInt.prototype, "toJSON", sentinelDescriptor);
+			}
+
+			// What survived the stateful hook's own restore is exactly the
+			// sentinel — same function, still callable — not a deleted key.
+			expect(Object.getOwnPropertyDescriptor(BigInt.prototype, "toJSON")?.value).toBe(sentinelBigIntToJSON);
+			// And the serializer still consults it: an owner that installed the
+			// hook before this file ran keeps the projection it relied on.
+			expect(JSON.stringify({ count: 42n })).toBe('{"count":"fix15222-sentinel-bigint-tojson"}');
 		} finally {
-			// A runtime, an extension shim, or another test file in this worker can
-			// have a `BigInt.prototype.toJSON` of its own installed before this test
-			// runs. Put back exactly what this test found — reinstalling a saved
-			// descriptor, or deleting the own property when there was none — so a
-			// hook owned elsewhere survives this file.
-			if (previousBigIntToJSON === undefined) {
+			// The sentinel does not outlive this test either: put back the hook
+			// this file found, or delete the own property when there was none.
+			if (originalBigIntToJSON === undefined) {
 				Reflect.deleteProperty(BigInt.prototype, "toJSON");
 			} else {
-				Object.defineProperty(BigInt.prototype, "toJSON", previousBigIntToJSON);
+				Object.defineProperty(BigInt.prototype, "toJSON", originalBigIntToJSON);
 			}
 		}
 	});
 
-	// Another owner can install a `BigInt.prototype.toJSON` hook before any
-	// test in this describe runs — a sibling file's describe-scope setup, an
-	// extension shim, a runtime the worker booted with. It stands in for every
-	// such owner: the bigint test above replaces whatever it finds with its
-	// own stateful hook, so its cleanup has to put back what it found instead
-	// of deleting the key.
-	const SENTINEL_BIGINT_TO_JSON = "fix15222-sentinel-bigint-tojson";
-	const originalBigIntToJSON = Object.getOwnPropertyDescriptor(BigInt.prototype, "toJSON");
-	const sentinelBigIntToJSON = function sentinelBigIntToJSON(): string {
-		return SENTINEL_BIGINT_TO_JSON;
-	};
-	let sentinelInstalled = false;
-	beforeAll(() => {
-		Object.defineProperty(BigInt.prototype, "toJSON", {
-			enumerable: false,
-			configurable: true,
-			value: sentinelBigIntToJSON,
-		});
-		sentinelInstalled = true;
-	});
-	afterAll(() => {
-		// Same save/restore discipline this describe holds the bigint test to:
-		// the sentinel must not outlive the describe either.
-		if (originalBigIntToJSON === undefined) {
-			Reflect.deleteProperty(BigInt.prototype, "toJSON");
-			return;
+	it("leaves the worker's BigInt serialization exactly as this file found it", () => {
+		// The sentinel is installed and restored inside its own test, so
+		// nothing this file swaps onto `BigInt.prototype` outlives it: the
+		// tests that follow — and the sibling files in this worker — still
+		// observe the serialization the runtime shipped. A describe-scope
+		// install instead left the sentinel live for every test in between,
+		// and its afterAll restore could clobber a hook a later test installed.
+		expect(Object.getOwnPropertyDescriptor(BigInt.prototype, "toJSON")).toEqual(bigIntToJSONAtFileStart);
+		// When the runtime started native — no hook of its own — serialization
+		// still rejects a bigint exactly as the runtime ships it. A leaked
+		// sentinel would have answered the call instead of throwing.
+		if (bigIntToJSONAtFileStart === undefined) {
+			expect(() => JSON.stringify({ count: 42n })).toThrow(TypeError);
 		}
-		Object.defineProperty(BigInt.prototype, "toJSON", originalBigIntToJSON);
-	});
-
-	it("restores a BigInt.prototype serializer another owner installed before it", async () => {
-		// The unconditional `Reflect.deleteProperty` in the bigint test above
-		// destroyed any pre-installed `BigInt.prototype.toJSON` for the rest of
-		// the worker: a later file that serializes a bigint through the hook
-		// it installed saw `undefined` output or a TypeError instead, with
-		// nothing in this file failing to point at it. What survives here is
-		// exactly the sentinel `beforeAll` installed — same function, still
-		// callable.
-		expect(sentinelInstalled).toBe(true);
-		// The very hook `beforeAll` installed — not a stand-in left behind by
-		// the test above.
-		expect(Object.getOwnPropertyDescriptor(BigInt.prototype, "toJSON")?.value).toBe(sentinelBigIntToJSON);
-		// And the serializer still consults it: an owner that installed the
-		// hook before this file ran keeps the projection it relied on.
-		expect(JSON.stringify({ count: 42n })).toBe('{"count":"fix15222-sentinel-bigint-tojson"}');
 	});
 
 	it("persists a details payload nested deeper than the recursive hook probe could walk", async () => {
@@ -1554,6 +1567,281 @@ describe("SessionManager entry-line memo", () => {
 			ownKeys: () => [],
 			getOwnPropertyDescriptor(): PropertyDescriptor | undefined {
 				throw new Error("boom-fix15222-content-trap");
+			},
+		});
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content,
+		});
+
+		// The rewrite succeeds: the hidden blocks contribute `[]` and the turn
+		// is persisted in full, with no latched failure.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"content":[]');
+		expect(body).toContain('"role":"assistant"');
+	});
+
+	it("persists a sibling mutation after an unchanged boxed-primitive leaf in the same details object", async () => {
+		// `details` is the tool result's opaque slot, so a wrapper leaf can sit
+		// beside a mutable sibling. The stamp records the wrapper as its
+		// unboxed value, and the matcher answered for the whole graph the
+		// moment that one leaf compared equal: the sibling queued behind it
+		// was never visited, so a full rewrite restored the old line and a
+		// reload showed the stale sibling.
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		const messageId = session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-boxed-sibling",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: { boxed: new Number(1), status: "fix15222-boxed-before" },
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the line carries the original sibling value.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain('"status":"fix15222-boxed-before"');
+
+		// Move the sibling in place: the wrapper leaf never changes and no key
+		// moves, so only the walk past the leaf sees the difference.
+		const entry = session.getEntries().find(e => e.id === messageId);
+		if (!entry || entry.type !== "message" || entry.message.role !== "toolResult") {
+			throw new Error("Expected toolResult message entry");
+		}
+		const details = entry.message.details;
+		if (details === null || typeof details !== "object") throw new Error("Expected object details");
+		(details as Record<string, unknown>).status = "fix15222-boxed-after";
+
+		// Second rewrite: the line carries the moved sibling, not the stale one.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"status":"fix15222-boxed-after"');
+		expect(bodyAfterSecond).not.toContain('"status":"fix15222-boxed-before"');
+	});
+
+	it("persists a sibling mutation after an unchanged JSON.rawJSON leaf in the same details object", async () => {
+		if (!("rawJSON" in JSON) || typeof JSON.rawJSON !== "function") {
+			throw new Error("Expected JSON.rawJSON support");
+		}
+		// A rawJSON node is stamped as its brand, its payload, and its closing
+		// marker, and the matcher returned the whole-graph verdict as soon as
+		// those three compared equal — the sibling queued behind the node was
+		// never visited, so its in-place change restored a stale line.
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		const messageId = session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-rawjson-sibling",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: { payload: JSON.rawJSON("1"), status: "fix15222-raw-before" },
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the branded node serializes as its payload verbatim and
+		// the line carries the original sibling value.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain('"payload":1');
+		expect(bodyAfterFirst).toContain('"status":"fix15222-raw-before"');
+
+		// Move the sibling in place: the rawJSON node never changes and no key
+		// moves, so only the walk past the node sees the difference.
+		const entry = session.getEntries().find(e => e.id === messageId);
+		if (!entry || entry.type !== "message" || entry.message.role !== "toolResult") {
+			throw new Error("Expected toolResult message entry");
+		}
+		const details = entry.message.details;
+		if (details === null || typeof details !== "object") throw new Error("Expected object details");
+		(details as Record<string, unknown>).status = "fix15222-raw-after";
+
+		// Second rewrite: the line carries the moved sibling, not the stale one.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"status":"fix15222-raw-after"');
+		expect(bodyAfterSecond).not.toContain('"status":"fix15222-raw-before"');
+	});
+
+	it("persists the current signature strip of an assistant turn whose content overrides its own some", async () => {
+		// `stripReplayedReasoningSignatures` gates the strip on
+		// `message.content.some(...)`, which reads the blocks through the
+		// method, not through the iterator the cacheability guard watches —
+		// and `JSON.stringify` and the stamp both ignore non-index array
+		// properties, so the override moves the projected strip without moving
+		// a single stamped leaf. A matcher that cannot see the method reuses
+		// the line an earlier strip decision produced, and the signature a
+		// later projection would keep is lost on reload.
+		const reasoningItem = { type: "reasoning", id: "resp-fix15222-some", encrypted_content: "enc-fix15222-some" };
+		const content: AssistantMessage["content"] = [
+			{ type: "thinking" as const, thinking: "reason", thinkingSignature: JSON.stringify(reasoningItem) },
+		];
+		const payload = { type: "openaiResponsesHistory" as const, items: [reasoningItem] };
+		const thinkingSignature = JSON.stringify(reasoningItem);
+		// The persisted line is JSON, so the signature's own quotes arrive
+		// escaped: the bytes to look for are the escaped form of the text.
+		const persistedSignature = JSON.stringify(thinkingSignature).slice(1, -1);
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content,
+			providerPayload: payload,
+		});
+
+		// First rewrite: the gate sees the signed block and the payload covers
+		// it, so the projected line drops the duplicate signature.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).not.toContain(persistedSignature);
+
+		// Give the array its own `some` in place: no indexed slot moves and no
+		// key changes, so the stamp still describes the array — but the strip
+		// gate now sees nothing and the projector keeps the signature.
+		Object.defineProperty(content, "some", {
+			enumerable: false,
+			configurable: true,
+			writable: true,
+			value: (): boolean => false,
+		});
+
+		// Second rewrite: the persisted line carries the signature.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain(persistedSignature);
+	});
+
+	it("persists the current signature strip of an assistant turn whose content overrides its own map", async () => {
+		// The strip itself is computed with `message.content.map(...)`, which
+		// reads the blocks through that method — again invisible to the
+		// iterator guard, to `JSON.stringify`, and to the stamp. An array whose
+		// `map` rebuilds the blocks unchanged changes the projected line
+		// without moving a stamped leaf, so a reused line restores the earlier
+		// strip decision.
+		const reasoningItem = { type: "reasoning", id: "resp-fix15222-map", encrypted_content: "enc-fix15222-map" };
+		const content: AssistantMessage["content"] = [
+			{ type: "thinking" as const, thinking: "reason", thinkingSignature: JSON.stringify(reasoningItem) },
+		];
+		const payload = { type: "openaiResponsesHistory" as const, items: [reasoningItem] };
+		const thinkingSignature = JSON.stringify(reasoningItem);
+		// The persisted line is JSON, so the signature's own quotes arrive
+		// escaped: the bytes to look for are the escaped form of the text.
+		const persistedSignature = JSON.stringify(thinkingSignature).slice(1, -1);
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content,
+			providerPayload: payload,
+		});
+
+		// First rewrite: the default `map` runs the strip and the line drops
+		// the duplicate signature.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).not.toContain(persistedSignature);
+
+		// Give the array its own `map` in place: the slots it reads are the
+		// ones the stamp recorded, but the strip never runs.
+		Object.defineProperty(content, "map", {
+			enumerable: false,
+			configurable: true,
+			writable: true,
+			value: (): AssistantMessage["content"] => content.slice(),
+		});
+
+		// Second rewrite: the persisted line carries the signature.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain(persistedSignature);
+	});
+
+	it("persists a session whose details is a proxy with a throwing getPrototypeOf trap without latching a persistence failure", async () => {
+		// The image-classifier lookup answers through a prototype-chain walk,
+		// and `Object.getPrototypeOf` is the one step a proxy trap controls: a
+		// proxy whose descriptor answers stay quiet — `JSON.stringify`
+		// serializes it as `{}` — can still throw on the prototype step. That
+		// throw escaped `prepareEntryForPersistence` and latched a persistence
+		// failure on a write the projection completes.
+		const details = new Proxy({} as Record<string, unknown>, {
+			getPrototypeOf(): object | null {
+				throw new Error("boom-fix15222-proto-trap");
+			},
+		});
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-proto-trap",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// The rewrite succeeds: the proxy contributes `{}` to the line and the
+		// rest of the message is persisted in full.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"details":{}');
+		expect(body).toContain('"toolName":"bash"');
+		expect(body).toContain('"role":"toolResult"');
+	});
+
+	it("persists a session whose providerPayload is a proxy with a throwing getPrototypeOf trap without latching a persistence failure", async () => {
+		// The message-level projection-input check walks `providerPayload`'s
+		// prototype chain looking for the Responses fields by key, so the
+		// throwing prototype trap reaches it through that payload. The
+		// projector never touches a descriptor or the prototype of the payload
+		// (`ownKeys` reports nothing, so both `for..in` and `JSON.stringify`
+		// skip it) and the write completes — the walk has to report the field
+		// hidden and leave the line uncached rather than throw.
+		const payload = new Proxy({} as OpenAIResponsesHistoryPayload, {
+			getPrototypeOf(): object | null {
+				throw new Error("boom-fix15222-payload-proto-trap");
+			},
+		});
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content: [{ type: "thinking" as const, thinking: "reason" }],
+			providerPayload: payload,
+		});
+
+		// The rewrite succeeds: the payload contributes `{}` and the turn is
+		// persisted in full, with no latched failure.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"providerPayload":{}');
+		expect(body).toContain('"role":"assistant"');
+		expect(body).toContain('"thinking":"reason"');
+	});
+
+	it("persists a session whose content is a proxy with a throwing getPrototypeOf trap without latching a persistence failure", async () => {
+		// The same message-level check compares `content`'s iterator against
+		// the array default by walking the prototype chain, so the throwing
+		// trap reaches it through that array. `Array.isArray` holds for a proxy
+		// of an array and `JSON.stringify` writes it as `[]`, so the
+		// comparison has to report "non-default" — leaving the line uncached —
+		// rather than throw.
+		const content = new Proxy([] as AssistantMessage["content"], {
+			getPrototypeOf(): object | null {
+				throw new Error("boom-fix15222-content-proto-trap");
 			},
 		});
 		const session = SessionManager.create(process.cwd(), sessionDir, storage);
