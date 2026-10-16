@@ -157,8 +157,10 @@ async function runCommand(argv: string[]): Promise<void> {
 	console.log(`wrote ${out}`);
 }
 
-const fmt = (b: BootstrapResult): string =>
-	`meanDiff ${b.meanDiff.toFixed(4)} CI [${b.ciLow.toFixed(4)}, ${b.ciHigh.toFixed(4)}] wins ${b.wins} ties ${b.ties} losses ${b.losses}`;
+const fmt = (b: BootstrapResult): string => {
+	const ci = Number.isNaN(b.ciLow) ? "n/a (fewer than 2 cases)" : `[${b.ciLow.toFixed(4)}, ${b.ciHigh.toFixed(4)}]`;
+	return `meanDiff ${b.meanDiff.toFixed(4)} CI ${ci} wins ${b.wins} ties ${b.ties} losses ${b.losses}`;
+};
 
 const describeConfig = (label: string, c: RunConfig): string =>
 	`${label}: engine ${c.engine} protocol ${c.protocol} k ${c.k} mnemopiRecall ${c.mnemopiRecall} polyphonic ${c.polyphonic} gitCommit ${c.gitCommit}`;
