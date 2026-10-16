@@ -81,10 +81,15 @@ describe("memory-eval stats", () => {
 	});
 
 	it("pins the percentile CI for a fixed input and seed", () => {
-		const r = pairedBootstrap([0.2, 0.5, 0.1, 0.9, 0.4, 0.7, 0.3, 0.6], [0.5, 0.4, 0.3, 1, 0.2, 0.9, 0.3, 0.8], each(8), {
-			seed: 3,
-			resamples: 2000,
-		});
+		const r = pairedBootstrap(
+			[0.2, 0.5, 0.1, 0.9, 0.4, 0.7, 0.3, 0.6],
+			[0.5, 0.4, 0.3, 1, 0.2, 0.9, 0.3, 0.8],
+			each(8),
+			{
+				seed: 3,
+				resamples: 2000,
+			},
+		);
 		expect(r.meanDiff).toBeCloseTo(0.0875, 12);
 		expect(r.ciLow).toBeCloseTo(-0.0375, 12);
 		expect(r.ciHigh).toBeCloseTo(0.1875, 12);

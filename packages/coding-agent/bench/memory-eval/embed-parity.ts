@@ -47,7 +47,9 @@ async function main(file: string | undefined): Promise<void> {
 	if (!vectors || vectors.length !== py.texts.length) throw new Error("mnemopi returned no usable embeddings");
 	const cosines = vectors.map((vector, i) => cosine(vector, py.vectors[i]));
 	const mean = cosines.reduce((sum, c) => sum + c, 0) / cosines.length;
-	console.log(`${cosines.length} texts: min cosine ${Math.min(...cosines).toFixed(6)}, mean cosine ${mean.toFixed(6)}`);
+	console.log(
+		`${cosines.length} texts: min cosine ${Math.min(...cosines).toFixed(6)}, mean cosine ${mean.toFixed(6)}`,
+	);
 	assertParity(cosines);
 }
 

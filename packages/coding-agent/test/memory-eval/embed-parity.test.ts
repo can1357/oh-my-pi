@@ -23,6 +23,8 @@ it("embed-parity refuses to run while the environment could route Mnemopi embedd
 		});
 		const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
 		expect(code).toBe(1);
-		expect(stderr).toContain(`refusing to run mnemopi with MNEMOPI_* or OPENROUTER_BASE_URL set: ${Object.keys(extra)[0]}`);
+		expect(stderr).toContain(
+			`refusing to run mnemopi with MNEMOPI_* or OPENROUTER_BASE_URL set: ${Object.keys(extra)[0]}`,
+		);
 	}
 });
