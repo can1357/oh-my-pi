@@ -1,5 +1,6 @@
 import { popLoopPhase, pushLoopPhase, withLoopPhase } from "@oh-my-pi/pi-utils";
 import {
+	DENSE_CANDIDATE_LIMIT,
 	importedWeight,
 	inferredWeight,
 	normalizedRecallWeights,
@@ -53,8 +54,6 @@ type CandidateSignals = {
 	fts: number;
 	ftsMatched: boolean;
 	dense: number;
-	/** The query was embedded and this row has a stored vector; `dense` is then its similarity, possibly 0. */
-	embedded: boolean;
 	keyword: number;
 	candidateSource: "fts" | "vec" | "fallback";
 };
@@ -135,11 +134,6 @@ export function clipRecallContent(
 }
 
 const DEFAULT_LIMIT = 500;
-/**
- * Newest visible rows per tier that recall scores by embedding similarity. Older rows are reachable only
- * through keyword search, so a small cap hides semantically relevant memories once a bank outgrows it.
- */
-const DENSE_CANDIDATE_LIMIT = 10_000;
 const STOP_WORDS = new Set([
 	"a",
 	"an",
@@ -648,7 +642,6 @@ function fetchCandidates(
 				fts,
 				ftsMatched,
 				dense,
-				embedded: vecScores.has(id),
 				keyword: 0,
 				candidateSource: ftsMatched ? "fts" : dense > 0 ? "vec" : "fallback",
 			},
@@ -672,7 +665,7 @@ function fallbackCandidates(
 	return rows.map(row => ({
 		row,
 		tierLabel,
-		signals: { fts: 0, ftsMatched: false, dense: 0, embedded: false, keyword: 0, candidateSource: "fallback" },
+		signals: { fts: 0, ftsMatched: false, dense: 0, keyword: 0, candidateSource: "fallback" },
 	}));
 }
 
@@ -696,6 +689,8 @@ function scoreCandidate(
 			? recencyDecay(candidate.row.timestamp, 72)
 			: temporalBoost(candidate.row.timestamp, parseQueryTime(options.queryTime), 72);
 	const keyword = Math.max(lexical, candidate.signals.fts * 0.6);
+	// Similarities were scored (see `vectorSimilarities`), so `dense` is meaningful even when it is 0.
+	const queryEmbedded = (options.queryEmbedding?.length ?? 0) > 0;
 	let baseScore: number;
 	if (candidate.tierLabel === "episodic") {
 		baseScore = Math.max(
@@ -706,8 +701,9 @@ function scoreCandidate(
 		const kwShare = (1 - importanceWeight) * 0.6;
 		baseScore = keyword * kwShare + importance * importanceWeight + keyword * keyword * 0.08;
 		// An equal share: at 0.2, rows that only repeat the query's words outranked rows that answer it by meaning.
-		// Every row with a stored vector is blended, zero similarity included; rows not yet embedded keep their score.
-		if (candidate.signals.embedded) baseScore = baseScore * 0.5 + candidate.signals.dense * 0.5;
+		// Once the query is embedded every row is blended: a row without a stored vector counts as similarity 0, or
+		// it would keep twice the keyword weight of an embedded one.
+		if (queryEmbedded) baseScore = baseScore * 0.5 + candidate.signals.dense * 0.5;
 	}
 	let score = baseScore * (0.7 + 0.3 * decay);
 	const temporalWeight = options.temporalWeight ?? 0;
@@ -755,7 +751,7 @@ function scoreCandidate(
 		temporal_score: round4(temporalScore),
 		recall_count: asNumber(candidate.row.recall_count, 0),
 		last_recalled: asNullableString(candidate.row.last_recalled),
-		explanation: explain(candidate.tierLabel, candidate.signals, lexical, temporalScore),
+		explanation: explain(candidate.tierLabel, candidate.signals, lexical, temporalScore, queryEmbedded),
 		voice_scores: {
 			vec: round4(candidate.signals.dense),
 			fts: round4(candidate.signals.fts),
@@ -770,10 +766,16 @@ function scoreCandidate(
 	return result;
 }
 
-function explain(tierLabel: TierLabel, signals: CandidateSignals, lexical: number, temporalScore: number): string {
+function explain(
+	tierLabel: TierLabel,
+	signals: CandidateSignals,
+	lexical: number,
+	temporalScore: number,
+	queryEmbedded: boolean,
+): string {
 	const parts: string[] = [tierLabel, signals.candidateSource];
 	if (lexical > 0) parts.push(`keyword=${round4(lexical)}`);
-	if (signals.dense > 0) parts.push(`dense=${round4(signals.dense)}`);
+	if (queryEmbedded) parts.push(`dense=${round4(signals.dense)}`);
 	if (temporalScore > 0) parts.push(`temporal=${round4(temporalScore)}`);
 	return parts.join(" ");
 }
@@ -892,6 +894,8 @@ function collectMemoryCandidates(
 					.map(([id]) => id),
 			]),
 		];
+		// Keyword hits older than the scored window are candidates too: score their vectors so they blend like the rest.
+		for (const [id, similarity] of vectorSimilarities(beam, wmIds, queryEmbedding)) wmVec.set(id, similarity);
 		const emIds = [...emVec.entries()]
 			.sort((a, b) => b[1] - a[1])
 			.slice(0, limit)
