@@ -68,6 +68,8 @@ Memory: Mnemosyne's baseline and peak resident set size come from the engine pro
 
 `diff a.json b.json` prints both configs (engine, protocol, k, git commit) and a paired bootstrap of the primary metric, where every difference is **b − a**. It exits 1 unless both files have the same dataset, dataset revision, protocol, `k` and question ids (no duplicates), a finite primary metric on every question, and are not `upstream-compat` results.
 
+The 95% interval is a percentile interval from a cluster bootstrap over cases (`caseId`): each of the 10,000 resamples draws whole cases with replacement and averages over all their questions. A BEAM case is a conversation whose questions all query one memory store (BEAM 100K: 355 questions over 20 cases), so resampling questions independently would understate the uncertainty. A LongMemEval case has one question, so there it is the per-question bootstrap. `wins`, `ties` and `losses` count questions; each line shows `n` (questions) and `cases`, overall and per category.
+
 ### Environment guard
 
 Mnemopi runs in the harness process and reads its configuration from the environment, so `run --engine mnemopi` refuses to start while any `MNEMOPI_*` or `OPENROUTER_BASE_URL` (which can route its embeddings to an API) is set. Mnemosyne's child process never inherits the parent's `MNEMOSYNE_*`.
