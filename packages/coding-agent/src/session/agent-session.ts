@@ -1231,6 +1231,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#inheritedProviderPromptCacheKey: string | undefined;
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
+	#autolearnCapturePendingAnnounced = false;
+	#autolearnCapturePendingAborted = false;
+	#autolearnCaptureSkipNextPending = false;
 	#isDisposed = false;
 	#modelDiscoveryAbortController = new AbortController();
 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
@@ -6411,16 +6414,58 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
+	/**
+	 * Announce a coalesced pending auto-learn capture synchronously inside the
+	 * qualifying turn's `agent_end` dispatch while an earlier capture is still in
+	 * flight, so later subscribers see `autolearn_capture_start` before that
+	 * turn's `agent_end` frame. If a pending capture was already announced and a
+	 * newer qualifying turn coalesces into the same pending slot, the superseded
+	 * announcement closes with `autolearn_capture_end(aborted)` first so
+	 * `autolearn_capture_start` and `autolearn_capture_end` stay paired 1:1.
+	 */
+	notifyAutolearnCapturePending(): void {
+		if (this.#isDisposed || !this.#autolearnCaptureTask) return;
+		if (this.#autolearnCapturePendingAnnounced) {
+			this.#emit({ type: "autolearn_capture_end", outcome: "aborted" });
+		}
+		this.#autolearnCapturePendingAnnounced = true;
+		this.#autolearnCapturePendingAborted = false;
+		this.#autolearnCaptureSkipNextPending = false;
+		this.#emit({ type: "autolearn_capture_start" });
+	}
+
 	/** Run one abortable auto-learn capture outside the primary agent loop. */
 	async runAutolearnCapture(capture: (signal: AbortSignal) => Promise<void>): Promise<void> {
-		if (this.#autolearnCaptureTask || this.#isDisposed) return;
+		if (this.#autolearnCaptureSkipNextPending) {
+			this.#autolearnCaptureSkipNextPending = false;
+			return;
+		}
+		if (this.#isDisposed) {
+			if (this.#autolearnCapturePendingAnnounced) {
+				this.#autolearnCapturePendingAnnounced = false;
+				this.#autolearnCapturePendingAborted = false;
+				this.#emit({ type: "autolearn_capture_end", outcome: "aborted" });
+			}
+			return;
+		}
+		if (this.#autolearnCaptureTask) return;
+		const preAnnounced = this.#autolearnCapturePendingAnnounced;
+		this.#autolearnCapturePendingAnnounced = false;
+		this.#autolearnCapturePendingAborted = false;
 		const controller = new AbortController();
 		this.#autolearnCaptureAbortController = controller;
+		let outcome: "completed" | "aborted" | "error" = "completed";
 		const task = (async () => {
 			try {
 				await capture(controller.signal);
+				if (controller.signal.aborted) outcome = "aborted";
 			} catch (error) {
-				if (!controller.signal.aborted) throw error;
+				if (controller.signal.aborted) {
+					outcome = "aborted";
+				} else {
+					outcome = "error";
+					throw error;
+				}
 			} finally {
 				if (this.#autolearnCaptureAbortController === controller) {
 					this.#autolearnCaptureAbortController = undefined;
@@ -6428,15 +6473,40 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		})();
 		this.#autolearnCaptureTask = task;
+		// Emitted synchronously before the first await (unless already announced
+		// when queued behind a prior capture): the AutoLearnController subscriber
+		// is still inside the `agent_end` dispatch, so every later subscriber (RPC
+		// mode's forwarder) sees `autolearn_capture_start` before the `agent_end`
+		// that triggered it.
+		if (!preAnnounced) {
+			this.#emit({ type: "autolearn_capture_start" });
+		}
 		try {
 			await task;
 		} finally {
 			if (this.#autolearnCaptureTask === task) this.#autolearnCaptureTask = undefined;
+			this.#emit({ type: "autolearn_capture_end", outcome });
+			if (this.#autolearnCapturePendingAnnounced && this.#autolearnCapturePendingAborted) {
+				this.#autolearnCapturePendingAnnounced = false;
+				this.#autolearnCapturePendingAborted = false;
+				this.#autolearnCaptureSkipNextPending = true;
+				this.#emit({ type: "autolearn_capture_end", outcome: "aborted" });
+			}
 		}
 	}
 
 	#abortAutolearnCapture(): void {
 		this.#autolearnCaptureAbortController?.abort();
+		if (this.#autolearnCapturePendingAnnounced) {
+			if (this.#autolearnCaptureTask) {
+				this.#autolearnCapturePendingAborted = true;
+			} else {
+				this.#autolearnCapturePendingAnnounced = false;
+				this.#autolearnCapturePendingAborted = false;
+				this.#autolearnCaptureSkipNextPending = true;
+				this.#emit({ type: "autolearn_capture_end", outcome: "aborted" });
+			}
+		}
 	}
 
 	async #drainAutolearnCapture(): Promise<void> {

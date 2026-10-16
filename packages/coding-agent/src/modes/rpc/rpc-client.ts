@@ -182,6 +182,8 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"model_changed",
 	"goal_updated",
 	"queue_update",
+	"autolearn_capture_start",
+	"autolearn_capture_end",
 ]);
 
 function isRpcResponse(value: unknown): value is RpcResponse {
