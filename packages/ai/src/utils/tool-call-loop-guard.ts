@@ -85,8 +85,6 @@ export class ToolCallLoopGuard {
 			return null;
 		}
 		if (toolCalls.every(tc => this.#exemptTools.has(tc.name))) {
-			this.#lastHash = undefined;
-			this.#count = 0;
 			return null;
 		}
 
