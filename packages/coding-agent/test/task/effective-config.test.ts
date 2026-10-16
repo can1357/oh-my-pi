@@ -396,6 +396,44 @@ describe("omp agents show against the session a spawn starts", () => {
 		}
 	});
 
+	it("reports the default role's retry fallback entry a new session starts on", async () => {
+		await setup();
+		const settings = Settings.isolated({
+			modelRoles: { default: "missing-provider/missing-model" },
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { default: ["anthropic/claude-haiku-4-5"] },
+		});
+		const agent: AgentDefinition = { name: "plain", description: "test", systemPrompt: "test", source: "project" };
+		const view = await resolveEffectiveAgentConfig(agent, settings, registry, tempDir);
+		const { session: parent } = await sdkModule.createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry: registry,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			rules: [],
+			preloadedCustomToolPaths: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			hasUI: false,
+			settings,
+			toolNames: ["read"],
+		});
+		try {
+			expect(parent.model).toMatchObject({ provider: "anthropic", id: "claude-haiku-4-5" });
+			expect(view.model.value).toBe(formatModelStringWithRouting(parent.model!));
+			expect(view.model.source).toEqual({ layer: "setting", key: "retry.fallbackChains", scope: "runtime" });
+		} finally {
+			await parent.dispose();
+		}
+	});
+
 	it("clamps the thinking level to what the model supports", async () => {
 		await setup();
 		const settings = Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } });

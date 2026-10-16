@@ -1,7 +1,7 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../config/model-registry";
-import { cfgModelRoles } from "../config/model-settings";
+import { cfgDisabledProviders, cfgEnabledModels, cfgModelRoles } from "../config/model-settings";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -11,10 +11,21 @@ import {
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
-import { resolveConfiguredModelPatterns, resolveModelRoleValue } from "../config/model-resolver";
+import {
+	type ModelMatchPreferences,
+	parseModelPattern,
+	resolveConfiguredModelPatterns,
+	resolveModelRoleValue,
+} from "../config/model-resolver";
 import { getRoleInfo, isKindRole } from "../config/model-roles";
 
-import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy, type RetrySettings } from "./settings";
+import type { InitialRetryFallbackState } from "./agent-session-types";
+import {
+	cfgRetryFallbackChains,
+	cfgRetryFallbackRevertPolicy,
+	cfgRetryModelFallback,
+	type RetrySettings,
+} from "./settings";
 
 /** Configured fallback chains keyed by role or model selector. */
 export type RetryFallbackChains = Record<string, string[]>;
@@ -666,4 +677,81 @@ export function findRetryFallbackCandidates(
 		return options?.wrapAround ? [...candidatesAfter, ...chain.slice(0, baseIndex)] : candidatesAfter;
 	}
 	return chain;
+}
+
+/** The chain entry a new session starts on when its configured `default` role resolves nothing. */
+export interface DefaultRoleRetryFallback {
+	model: Model;
+	retryFallback: InitialRetryFallbackState;
+	/** The entry's explicit thinking selector, else the configured primary's; undefined when neither sets one. */
+	thinkingLevel: ConfiguredThinkingLevel | undefined;
+}
+
+/**
+ * Startup's retry-fallback step for an unresolved `default` role: the first
+ * entry of its configured chain that resolves and can authenticate.
+ * `candidates` is the default-availability pool ({@link resolveAllowedModels}).
+ */
+export function resolveDefaultRoleRetryFallback(
+	settings: Settings,
+	modelRegistry: ModelRegistry,
+	candidates: Model[],
+	preferences: ModelMatchPreferences | undefined,
+): DefaultRoleRetryFallback | undefined {
+	const originalSelector = settings.getModelRole("default");
+	if (!originalSelector || !cfgRetryModelFallback.get(settings)) return undefined;
+	const chains = expandDefaultRetryFallbackChains(cfgRetryFallbackChains.get(settings), [
+		...Object.keys(settings.getModelRoles()),
+		"default",
+	]);
+	// Candidates come only from configured chain entries. Without one,
+	// bail before any catalog lookup so the first-paint path never
+	// composes the full catalog.
+	if (!Object.values(chains).some(chain => Array.isArray(chain) && chain.length > 0)) return undefined;
+	const fallbackContext: RetryFallbackResolutionContext = {
+		chains,
+		getModelRole: role => settings.getModelRole(role),
+		modelLookup: modelRegistry,
+	};
+	const parsedOriginal = parseModelString(originalSelector, {
+		allowMaxSuffix: true,
+		allowAutoAlias: true,
+		isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+	});
+	// A provider-qualified selector resolves within its provider's
+	// catalog; only bare/alias selectors need the full catalog.
+	const originalModel = parsedOriginal
+		? (modelRegistry.find(parsedOriginal.provider, parsedOriginal.id) ??
+			parseModelPattern(originalSelector, modelRegistry.getProviderModels(parsedOriginal.provider), preferences)
+				.model)
+		: parseModelPattern(originalSelector, modelRegistry.getAll(), preferences).model;
+	const chainKey = resolveRetryFallbackChainKey(fallbackContext, originalSelector, originalModel, "default");
+	if (!chainKey) return undefined;
+	const retryFallback: InitialRetryFallbackState = {
+		role: chainKey,
+		originalSelector,
+		originalThinkingLevel: parsedOriginal?.thinkingLevel,
+	};
+	// `candidates` is the default-availability pool, which ignores
+	// cross-provider env aliases (`xai-oauth` borrowing `XAI_API_KEY`).
+	// An explicit chain entry is bound only by the `enabledModels` scope,
+	// so outside one it resolves from its provider's catalog and
+	// configured auth decides whether requests can authenticate.
+	const scopedByEnabledModels = (cfgEnabledModels.get(settings)?.length ?? 0) > 0;
+	const disabledProviders = cfgDisabledProviders.get(settings);
+	for (const candidate of findRetryFallbackCandidates(fallbackContext, chainKey, originalSelector, originalModel, {
+		allowMissingPrimary: true,
+	})) {
+		let resolved = parseModelPattern(candidate.raw, candidates, preferences);
+		if (!resolved.model && !scopedByEnabledModels && !disabledProviders?.includes(candidate.provider)) {
+			resolved = parseModelPattern(candidate.raw, modelRegistry.getProviderModels(candidate.provider), preferences);
+		}
+		if (!resolved.model || !modelRegistry.hasConfiguredAuth(resolved.model)) continue;
+		return {
+			model: resolved.model,
+			retryFallback,
+			thinkingLevel: resolved.explicitThinkingLevel ? resolved.thinkingLevel : retryFallback.originalThinkingLevel,
+		};
+	}
+	return undefined;
 }
