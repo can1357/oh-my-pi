@@ -660,3 +660,61 @@ export function findRetryFallbackCandidates(
 	}
 	return chain;
 }
+
+/** Outcome of {@link resolveUnavailableModelReplacement} for a model that owns a chain. */
+export type UnavailableModelReplacement =
+	| {
+			kind: "replaced";
+			/** Configured model key that owned the requested model; `undefined` for the inherited chain. */
+			chainKey: string | undefined;
+			model: Model;
+			/** The candidate's own thinking level, else the requested selector's (bare entries inherit it). */
+			thinkingLevel: ThinkingLevel | undefined;
+	  }
+	| {
+			kind: "refused";
+			/** Configured model key that owned the requested model; `undefined` for the inherited chain. */
+			chainKey: string | undefined;
+			/** Every candidate the chain named, none usable; empty for an empty chain. */
+			tried: string[];
+	  };
+
+/**
+ * Replace a requested model that cannot serve at startup — absent from the
+ * catalog, or without working credentials — the way a runtime failure of that
+ * model would be replaced: an exact `provider/id` or `provider/*` key owns it
+ * outright; failing that, `inheritedChain` (the role or default chain a
+ * single-model subagent inherits) does. The first candidate `isUsable` accepts
+ * replaces it; an owning chain that is empty or has no usable candidate refuses
+ * it. `undefined` when no chain owns the model, so the caller keeps its own
+ * default.
+ */
+export async function resolveUnavailableModelReplacement(
+	context: RetryFallbackResolutionContext,
+	requested: { selector: string; model: Model | undefined },
+	inheritedChain: readonly string[] | undefined,
+	isUsable: (candidate: Model, selector: RetryFallbackSelector) => Promise<boolean>,
+): Promise<UnavailableModelReplacement | undefined> {
+	const ownerKey = resolveRetryFallbackChainKey(context, requested.selector, requested.model);
+	let chainKey: string | undefined;
+	let candidates: RetryFallbackSelector[];
+	if (ownerKey !== undefined && isRetryFallbackModelKey(ownerKey)) {
+		chainKey = ownerKey;
+		candidates = findRetryFallbackCandidates(context, ownerKey, requested.selector, requested.model, {
+			allowMissingPrimary: true,
+		});
+	} else if (inheritedChain && inheritedChain.length > 0) {
+		candidates = inheritedChain.flatMap(entry => parseRetryFallbackSelector(entry, context.modelLookup) ?? []);
+	} else {
+		return undefined;
+	}
+	const requestedThinkingLevel = parseRetryFallbackSelector(requested.selector, context.modelLookup)?.thinkingLevel;
+	for (const candidate of candidates) {
+		const model = context.modelLookup.find(candidate.provider, candidate.id);
+		if (!model) continue;
+		if (requested.model && model.provider === requested.model.provider && model.id === requested.model.id) continue;
+		if (!(await isUsable(model, candidate))) continue;
+		return { kind: "replaced", chainKey, model, thinkingLevel: candidate.thinkingLevel ?? requestedThinkingLevel };
+	}
+	return { kind: "refused", chainKey, tried: candidates.map(candidate => candidate.raw) };
+}

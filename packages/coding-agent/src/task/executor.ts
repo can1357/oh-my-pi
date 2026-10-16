@@ -315,10 +315,9 @@ function installSubagentRetryFallbackChain(args: {
 	candidates: SubagentRetryFallbackCandidate[];
 	inheritedFallbackChain: string[] | undefined;
 	model: Model<Api> | undefined;
-	authFallbackUsed: boolean;
 }): string | undefined {
-	const { settings, id, candidates, inheritedFallbackChain, model, authFallbackUsed } = args;
-	if (!model || authFallbackUsed || candidates.length === 0) return undefined;
+	const { settings, id, candidates, inheritedFallbackChain, model } = args;
+	if (!model || candidates.length === 0) return undefined;
 
 	const selectedIndex = candidates.findIndex(
 		candidate => candidate.model.provider === model.provider && candidate.model.id === model.id,
@@ -1287,6 +1286,8 @@ interface SubagentRunMonitor {
 	takeActiveSession(): AgentSession | null;
 	/** Subscribe the monitor to a session's events. Returns the unsubscribe function. */
 	attach(session: AgentSession): () => void;
+	/** Record why session creation started the run on a fallback instead of the requested model. */
+	noteStartupModelFallback(reason: string | undefined): void;
 	/** Best-effort capture of the last assistant text for cancelled-run salvage. */
 	captureSalvage(session: AgentSession): void;
 	lastAssistantSalvageText(): string | undefined;
@@ -1380,6 +1381,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let yieldAcceptedAt: number | undefined;
 	let yieldTurnStopRequested = false;
 	let yieldTurnStopPromise: Promise<void> | null = null;
+	/** Why session creation started on a fallback (`modelFallbackMessage`); reported while the start model serves. */
+	let startupFallbackReason: string | undefined;
+	/** Why the latest runtime retry fallback was applied; reported once its target serves. */
+	let runtimeFallbackReason: string | undefined;
 
 	// Accumulate usage incrementally from message_end events (no memory for streaming events)
 	const accumulatedUsage: Usage = {
@@ -2148,11 +2153,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			// window keep the last known one rather than blanking the gauge.
 			const contextWindow =
 				serving.contextWindow && serving.contextWindow > 0 ? serving.contextWindow : progress.contextWindow;
+			// The newest reason wins: a runtime fallback replaces the model a
+			// startup fallback chose. No reason survives a restored primary.
+			const fallbackReason = isFallback ? (runtimeFallbackReason ?? startupFallbackReason) : undefined;
 			if (
 				serving.selector === progress.resolvedModel &&
 				serving.modelIdentity === progress.resolvedModelIdentity &&
 				serving.thinkingLevel === progress.resolvedThinkingLevel &&
 				(progress.resolvedModelIsFallback ?? false) === isFallback &&
+				fallbackReason === progress.resolvedModelFallbackReason &&
 				contextWindow === progress.contextWindow
 			) {
 				return;
@@ -2161,10 +2170,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			progress.resolvedModelIdentity = serving.modelIdentity;
 			progress.resolvedThinkingLevel = serving.thinkingLevel;
 			progress.resolvedModelIsFallback = isFallback;
+			progress.resolvedModelFallbackReason = fallbackReason;
 			progress.contextWindow = contextWindow;
 			scheduleProgress(true);
 		};
 		return session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") {
+				runtimeFallbackReason = `Fallback: ${event.from} -> ${event.to}${event.reason ? `\n${event.reason}` : ""}`;
+			}
 			emitSubagentEvent(event);
 			publishAdvisorState(session);
 			publishServingModel();
@@ -2308,6 +2321,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			return session;
 		},
 		attach,
+		noteStartupModelFallback: reason => {
+			startupFallbackReason = reason;
+		},
 		captureSalvage,
 		lastAssistantSalvageText: () => lastAssistantSalvageText,
 		lastReportTurnText: () => lastReportTurnText,
@@ -2947,6 +2963,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		resolvedModelIdentity: progress.resolvedModelIdentity,
 		resolvedThinkingLevel: progress.resolvedThinkingLevel,
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
+		resolvedModelFallbackReason: progress.resolvedModelFallbackReason,
 		resolvedModelRoute: progress.resolvedModelRoute,
 		advisor: progress.advisor,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
@@ -4249,13 +4266,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 							modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings),
 						)
 					: undefined;
-			const {
-				model,
-				thinkingLevel: resolvedThinkingLevel,
-				explicitThinkingLevel,
-				authFallbackUsed,
-				warning: modelResolutionWarning,
-			} = await awaitAbortable(
+			let resolution = await awaitAbortable(
 				resolveModelOverrideWithAuthFallback(
 					modelPatterns,
 					options.parentActiveModelPattern,
@@ -4264,18 +4275,40 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					id,
 				),
 			);
+			// The parent's registry was loaded when the parent started. A provider,
+			// or a provider key, added to models.yml since then is missing from it,
+			// so catch the catalog up before deciding the requested model is absent.
+			if (
+				registryFromParent &&
+				modelPatterns.length > 0 &&
+				(!resolution.model || resolution.authFallbackUsed) &&
+				(await awaitAbortable(modelRegistry.refreshIfStale()))
+			) {
+				resolution = await awaitAbortable(
+					resolveModelOverrideWithAuthFallback(
+						modelPatterns,
+						options.parentActiveModelPattern,
+						modelRegistry,
+						settings,
+						id,
+					),
+				);
+			}
+			// A requested model without working credentials is left to
+			// createAgentSession's deferred resolution, the one place that applies
+			// the model's retry.fallbackChains entry (an empty chain refuses the
+			// spawn) and marks whatever replaces it as a fallback.
+			const { authFallbackUsed, warning: modelResolutionWarning } = resolution;
+			const model = authFallbackUsed ? undefined : resolution.model;
+			const resolvedThinkingLevel = authFallbackUsed ? undefined : resolution.thinkingLevel;
+			const explicitThinkingLevel = !authFallbackUsed && resolution.explicitThinkingLevel;
+			// Session creation resolves what dispatch could not: an explicit request
+			// it found no model for, or any requested model without credentials.
+			const deferModelPatterns = !model && (modelOverride !== undefined || authFallbackUsed);
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,
 					requested: modelPatterns,
-				});
-			}
-			if (authFallbackUsed && model) {
-				logger.warn("Subagent model has no working credentials; falling back to parent session model", {
-					requested: modelPatterns,
-					parentModel: options.parentActiveModelPattern,
-					resolvedProvider: model.provider,
-					resolvedModel: model.id,
 				});
 			}
 			// The exact-name `task.agentServiceTierOverrides` entry dispatch resolved
@@ -4299,7 +4332,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings),
 				inheritedFallbackChain: inheritedRetryFallbackChain,
 				model,
-				authFallbackUsed,
 			});
 			if (retryFallbackRole) {
 				logger.debug("Configured subagent runtime model fallback chain", {
@@ -4438,13 +4470,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					oauthAccountPools: options.oauthAccountPools,
 					inheritedSessionAgents: options.inheritedSessionAgents,
 					model,
-					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
-					modelPatternAuthFallback:
-						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
-					modelPatternFallbackRole:
-						model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
-					modelPatternDefaultFallbackChain:
-						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
+					modelPattern: deferModelPatterns ? modelPatterns : undefined,
+					modelPatternAuthFallback: deferModelPatterns ? options.parentActiveModelPattern : undefined,
+					modelPatternFallbackRole: deferModelPatterns ? subagentRetryFallbackRole(id) : undefined,
+					modelPatternDefaultFallbackChain: deferModelPatterns ? inheritedRetryFallbackChain : undefined,
 					thinkingLevel: effectiveThinkingLevel,
 					thinkingLevelCeiling: spawnEffortCeiling,
 					// Subagents are short-lived; never schedule background warm requests.
@@ -4532,7 +4561,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						},
 					}),
 				);
-				({ session } = await awaitAbortable(sessionPromise));
+				let modelFallbackMessage: string | undefined;
+				({ session, modelFallbackMessage } = await awaitAbortable(sessionPromise));
+				monitor.noteStartupModelFallback(modelFallbackMessage);
 			} catch (err) {
 				mcpFollower?.dispose();
 				// Abort raced session startup. The session may still resolve later

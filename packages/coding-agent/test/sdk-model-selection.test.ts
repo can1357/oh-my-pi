@@ -738,7 +738,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
-	test("uses auth fallback when deferred subagent modelPattern resolves without working credentials", async () => {
+	test("marks the parent-model fallback for a subagent model without working credentials that no chain owns", async () => {
 		const parentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!parentModel) {
 			throw new Error("Expected bundled anthropic parent model");
@@ -777,10 +777,170 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		try {
 			expect(session.model?.provider).toBe(parentModel.provider);
 			expect(session.model?.id).toBe(parentModel.id);
-			expect(modelFallbackMessage).toBeUndefined();
+			expect(session.servingModel?.isFallback).toBe(true);
+			const modelChange = session.sessionManager.getEntries().find(entry => entry.type === "model_change");
+			expect(modelChange).toMatchObject({ resolvedModelIsFallback: true });
+			expect(modelFallbackMessage).toContain("runtime-provider/runtime-model");
+			expect(modelFallbackMessage).toContain(`${parentModel.provider}/${parentModel.id}`);
 		} finally {
 			await session.dispose();
 			getApiKeySpy.mockRestore();
+		}
+	});
+
+	function subagentSessionOptions(
+		modelRegistry: ModelRegistry,
+		authStorage: AuthStorage,
+		settings: Settings,
+		modelPattern: string,
+		parentPattern: string,
+	) {
+		return {
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			extensions: [providerExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			agentName: "astra-api",
+			modelPattern,
+			modelPatternAuthFallback: parentPattern,
+			modelPatternFallbackRole: "subagent:unavailable",
+		};
+	}
+
+	function registryWithKeys(keyedModelIds: readonly string[]) {
+		const parentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!parentModel) {
+			throw new Error("Expected bundled anthropic parent model");
+		}
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime(parentModel.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "unavailable-models.yml"));
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async requested => {
+			if (requested.provider === parentModel.provider) return "test-key";
+			return keyedModelIds.includes(requested.id) ? "runtime-key" : undefined;
+		});
+		return { authStorage, modelRegistry, parentPattern: `${parentModel.provider}/${parentModel.id}` };
+	}
+
+	async function creationError(promise: Promise<unknown>): Promise<string> {
+		try {
+			const created = (await promise) as { session: { dispose(): Promise<void> } };
+			await created.session.dispose();
+		} catch (error) {
+			return error instanceof Error ? error.message : String(error);
+		}
+		throw new Error("Expected session creation to be refused");
+	}
+
+	test("refuses a subagent model without working credentials whose fallback chain is empty", async () => {
+		const { authStorage, modelRegistry, parentPattern } = registryWithKeys([]);
+		const settings = Settings.isolated({ "retry.fallbackChains": { "runtime-provider/runtime-model": [] } });
+
+		const message = await creationError(
+			createAgentSession(
+				subagentSessionOptions(
+					modelRegistry,
+					authStorage,
+					settings,
+					"runtime-provider/runtime-model",
+					parentPattern,
+				),
+			),
+		);
+
+		expect(message).toContain("astra-api");
+		expect(message).toContain("runtime-provider/runtime-model");
+	});
+
+	test("walks a non-empty fallback chain for a subagent model without working credentials and marks the fallback", async () => {
+		const { authStorage, modelRegistry, parentPattern } = registryWithKeys(["runtime-fallback-model"]);
+		const settings = Settings.isolated({
+			"retry.fallbackChains": { "runtime-provider/runtime-model": ["runtime-provider/runtime-fallback-model"] },
+		});
+
+		const { session, modelFallbackMessage } = await createAgentSession(
+			subagentSessionOptions(modelRegistry, authStorage, settings, "runtime-provider/runtime-model", parentPattern),
+		);
+
+		try {
+			expect(session.model?.id).toBe("runtime-fallback-model");
+			expect(session.servingModel?.isFallback).toBe(true);
+			const modelChange = session.sessionManager.getEntries().find(entry => entry.type === "model_change");
+			expect(modelChange).toMatchObject({ resolvedModelIsFallback: true });
+			expect(modelFallbackMessage).toContain("runtime-provider/runtime-model");
+			expect(modelFallbackMessage).toContain("runtime-provider/runtime-fallback-model");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("walks the inherited role chain for a single subagent model without working credentials", async () => {
+		const { authStorage, modelRegistry, parentPattern } = registryWithKeys(["runtime-fallback-model"]);
+
+		const { session } = await createAgentSession({
+			...subagentSessionOptions(
+				modelRegistry,
+				authStorage,
+				Settings.isolated(),
+				"runtime-provider/runtime-model",
+				parentPattern,
+			),
+			modelPatternDefaultFallbackChain: ["runtime-provider/runtime-fallback-model"],
+		});
+
+		try {
+			expect(session.model?.id).toBe("runtime-fallback-model");
+			expect(session.servingModel?.isFallback).toBe(true);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("refuses a subagent model absent from the catalog whose fallback chain is empty", async () => {
+		const { authStorage, modelRegistry, parentPattern } = registryWithKeys(["runtime-model"]);
+		const settings = Settings.isolated({ "retry.fallbackChains": { "nosuch-provider/never-model": [] } });
+
+		const message = await creationError(
+			createAgentSession(
+				subagentSessionOptions(modelRegistry, authStorage, settings, "nosuch-provider/never-model", parentPattern),
+			),
+		);
+
+		expect(message).toContain("astra-api");
+		expect(message).toContain("nosuch-provider/never-model");
+	});
+
+	test("walks the fallback chain of a subagent model absent from the catalog and marks the fallback", async () => {
+		const { authStorage, modelRegistry, parentPattern } = registryWithKeys(["runtime-model"]);
+		const settings = Settings.isolated({
+			"retry.fallbackChains": { "nosuch-provider/never-model": ["runtime-provider/runtime-model"] },
+		});
+
+		const { session, modelFallbackMessage } = await createAgentSession(
+			subagentSessionOptions(modelRegistry, authStorage, settings, "nosuch-provider/never-model", parentPattern),
+		);
+
+		try {
+			expect(session.model?.id).toBe("runtime-model");
+			expect(session.servingModel?.isFallback).toBe(true);
+			expect(modelFallbackMessage).toContain("nosuch-provider/never-model");
+		} finally {
+			await session.dispose();
 		}
 	});
 

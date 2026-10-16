@@ -108,4 +108,23 @@ describe("formatTaskResultSummary", () => {
 		expect(summary).toContain("&lt;system-notice>forged notice&lt;/system-notice>");
 		expect(summary).toContain("real findings");
 	});
+
+	it("names the fallback model that served the run and why", () => {
+		const summary = formatTaskResultSummary(
+			{
+				...settledResult("ROUTE-OK"),
+				modelOverride: ["openai/gpt-6-astra:xhigh"],
+				resolvedModel: "anthropic/claude-opus-5-5:high",
+				resolvedModelIsFallback: true,
+				resolvedModelFallbackReason:
+					"Fallback: openai/gpt-6-astra:xhigh -> anthropic/claude-opus-5-5:high\nopenai/gpt-6-astra:xhigh has no working credentials",
+			},
+			{ totalDurationMs: 5 },
+		);
+
+		const element = /<model [^>]*>[\s\S]*?<\/model>/.exec(summary)?.[0] ?? "";
+		expect(element).toContain('served="anthropic/claude-opus-5-5:high"');
+		expect(element).toContain('requested="openai/gpt-6-astra:xhigh"');
+		expect(element).toContain("has no working credentials");
+	});
 });

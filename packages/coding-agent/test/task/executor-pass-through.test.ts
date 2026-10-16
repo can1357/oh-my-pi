@@ -117,6 +117,7 @@ function createModelRegistry(
 	return {
 		authStorage: {},
 		refresh: async () => {},
+		refreshIfStale: async () => false,
 		getAvailable: () => available,
 		getApiKey,
 	} as unknown as ModelRegistry;
@@ -719,7 +720,7 @@ describe("runSubprocess per-agent service-tier overrides", () => {
 		expect(childTiers(spy.mock.calls[0]?.[0])).toEqual({});
 	});
 
-	it("resolves the override against the auth-fallback model rather than the requested one", async () => {
+	it("resolves the override against the auth-fallback model the session settles on, not the requested one", async () => {
 		const requested = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const parentModel = getBundledModel("openai-codex", "gpt-5.6-sol");
 		if (!requested || !parentModel) throw new Error("Expected bundled service-tier models to exist");
@@ -741,9 +742,14 @@ describe("runSubprocess per-agent service-tier overrides", () => {
 		});
 
 		expect(result.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.model?.provider).toBe(parentModel.provider);
+		// Missing credentials defer the choice to session creation, which applies the
+		// requested model's fallback chain or, with none, the parent's model.
+		const sessionOptions = spy.mock.calls[0]?.[0];
+		expect(sessionOptions?.model).toBeUndefined();
+		expect(sessionOptions?.modelPatternAuthFallback).toBe(`${parentModel.provider}/${parentModel.id}`);
 		// `scale` is an OpenAI-only tier: it lands on the fallback family and never on Anthropic.
-		expect(childTiers(spy.mock.calls[0]?.[0])).toEqual({ openai: "scale" });
+		expect(childTiers(sessionOptions, parentModel)).toEqual({ openai: "scale" });
+		expect(childTiers(sessionOptions, requested)).toEqual({});
 	});
 
 	it("scopes a concrete override to the model the session resolves instead of broadcasting it", async () => {
