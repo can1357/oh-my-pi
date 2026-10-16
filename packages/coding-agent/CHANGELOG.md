@@ -6,6 +6,8 @@
 
 - Added `lsp.requestTimeout` setting to configure wait durations for language server diagnostics and requests
 - Added `omp auth-gateway serve --clients=<file>`: per-client bearer tokens, each limited to listed models and broker OAuth accounts with no fallback to other accounts or API keys, re-read while serving ([#5098](https://github.com/can1357/oh-my-pi/issues/5098), [#15900](https://github.com/can1357/oh-my-pi/pull/15900) by [@alphastorm](https://github.com/alphastorm))
+- Added bounded, rate-limited progress delivery for background jobs: batched previews with stable overflow artifacts, ambient and wake queues under one session-wide wake-turn budget, and completion notices that lead with the full-output artifact and carry exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
+- Daemon broker clients can subscribe to live, rate-limited output previews for supervised processes while the broker mirrors the complete raw stream into a session artifact. Replay after a reconnect is bounded by time, batch count, and bytes; evicted batches are reported as an explicit gap, each batch carries the artifact size it is backed by, and a republished subscription continues its capture only past the size it acknowledged. A subscription replaced on the same artifact path waits for the previous sink to close before its capture opens, and a fresh capture truncates the file instead of overwriting it in place.
 
 ### Changed
 
@@ -57,6 +59,8 @@
 - Fixed cancelling a bash job hard-killing it before its TERM cleanup handlers could run; it now gets up to one second to clean up before termination is forced ([#15709](https://github.com/can1357/oh-my-pi/pull/15709) by [@mg-mg-mg](https://github.com/mg-mg-mg))
 - Fixed the transcript collapsing to one line per entry after switching between a subagent and the main session mid-turn when an earlier turn left a tool call without a result ([#12247](https://github.com/can1357/oh-my-pi/issues/12247), [#15466](https://github.com/can1357/oh-my-pi/pull/15466) by [@shgew](https://github.com/shgew))
 - Fixed a retried tool losing its transcript card when the view was rebuilt (subagent focus switch, overlay close) while the tool was still running
+- Fixed daemon broker idle shutdown closing newly accepted clients before their authentication request could be processed under load; a socket that never authenticates is now closed after the client authentication timeout so it cannot keep the broker alive.
+- Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check, and gave each tunnel child a private temporary log directory so concurrent tunnels cannot share a log path.
 
 ## [18.11.1] - 2026-10-15
 
