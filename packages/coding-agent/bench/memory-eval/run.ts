@@ -31,6 +31,21 @@ const REVISIONS = {
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../..");
 const UPSTREAM_COMPAT_CONVERSATIONS = 3;
 
+/** The revision `py/prepare_datasets.py` recorded next to the cached file; anything but the pinned one is refused. */
+async function cachedRevision(dataset: DatasetName, dataDir: string): Promise<string> {
+	const beam = dataset.startsWith("beam");
+	const marker = path.join(dataDir, `${beam ? dataset : "lme-s"}.json.revision`);
+	const pinned = beam ? REVISIONS.beam : REVISIONS.lme;
+	const file = Bun.file(marker);
+	const revision = (await file.exists()) ? (await file.text()).trim() : undefined;
+	if (revision !== pinned) {
+		throw new Error(
+			`${marker}: ${revision === undefined ? "missing" : `revision ${revision}`}, expected ${pinned}; re-run py/prepare_datasets.py`,
+		);
+	}
+	return revision;
+}
+
 interface EngineOptions {
 	embedder: MnemopiEmbedder;
 	mnemopiRecall: MnemopiRecall;
@@ -106,6 +121,7 @@ async function runCommand(argv: string[]): Promise<void> {
 	try {
 		let run: RunOutput;
 		let excluded: ExcludedQuestion[] = [];
+		const datasetRevision = await cachedRevision(dataset, dataDir);
 		if (protocol === "upstream-compat") {
 			if (dataset !== "beam-100k" || !hasCompatOps(engine)) {
 				throw new Error("upstream-compat runs only with --engine mnemosyne --dataset beam-100k");
@@ -127,7 +143,7 @@ async function runCommand(argv: string[]): Promise<void> {
 		result = buildResultFile(
 			{
 				dataset,
-				datasetRevision: dataset.startsWith("beam") ? REVISIONS.beam : REVISIONS.lme,
+				datasetRevision,
 				engine: engine.name,
 				engineInfo: await engine.describe(),
 				protocol,
