@@ -22,13 +22,15 @@ function sanityEngine(
 		},
 		vectorCount: async () => 1,
 		sleep: async () => {},
-		recall: async (question): Promise<RecallHit[]> =>
-			order(items, question).map(item => ({
-				engineId: item.messageId,
-				tier: "working",
-				content: item.content,
-				summaryOf: [],
-			})),
+		recall: async (question, k): Promise<RecallHit[]> =>
+			order(items, question)
+				.slice(0, k)
+				.map(item => ({
+					engineId: item.messageId,
+					tier: "working",
+					content: item.content,
+					summaryOf: [],
+				})),
 		close: async () => {},
 		dispose: async () => {},
 		warmup: async () => {
@@ -46,7 +48,7 @@ export function oracleEngine(): EngineAdapter {
 	return sanityEngine("oracle", (items, question) => {
 		const gold = new Set(question.goldMessageIds);
 		const byId = new Map(items.map(item => [item.messageId, item]));
-		const first = question.goldMessageIds.flatMap(id => byId.get(id) ?? []);
+		const first = [...gold].flatMap(id => byId.get(id) ?? []);
 		return [...first, ...items.filter(item => !gold.has(item.messageId))];
 	});
 }

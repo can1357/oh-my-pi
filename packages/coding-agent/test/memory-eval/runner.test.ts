@@ -93,6 +93,20 @@ describe("runner", () => {
 		const b = await runCases(randomEngine(), cases, "standard", 10, tmp);
 		expect(a.questions.map(q => q.ranked)).toEqual(b.questions.map(q => q.ranked));
 	});
+	it("sanity engines return only the top k hits", async () => {
+		const { cases } = await loadDataset("beam-100k", fixtureDir);
+		for (const engine of [oracleEngine(), randomEngine()]) {
+			const { questions } = await runCases(engine, cases, "standard", 2, tmp);
+			expect(questions.map(q => q.ranked.length)).toEqual(questions.map(() => 2));
+		}
+	});
+	it("oracle ranks each gold message once", async () => {
+		// Ten copies of m1 ahead of m2 must not push m2 out of the top 10.
+		const repeated = caseOf([msg("m1", "alpha"), msg("m2", "beta")], [...Array(10).fill("m1"), "m2"]);
+		const { questions } = await runCases(oracleEngine(), [repeated], "standard", 10, tmp);
+		expect(questions[0].ranked.map(h => h.messageIds)).toEqual([["m1"], ["m2"]]);
+		expect(questions[0].metrics["recall@10"]).toBe(1);
+	});
 	it("duplicate content maps one row to every message", async () => {
 		const dupCase = caseOf([msg("m1", "same text"), msg("m2", "same text")], ["m2"]);
 		const engine = fakeEngine({ rowIds: items => items.map(() => "row-1"), hits: [hit("row-1", "same text")] });
