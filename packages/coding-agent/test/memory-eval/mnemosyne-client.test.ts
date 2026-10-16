@@ -103,6 +103,22 @@ describe("mnemosyne client", () => {
 		await engine.dispose();
 	});
 
+	it("a process that closes stdout but stays alive fails the pending call promptly, with its stderr", async () => {
+		// Reads one request, closes stdout, then lives on until stdin closes.
+		const script = await stub(
+			"eof.py",
+			`import os, sys\nsys.stdin.readline()\nos.close(1)\nprint("bye", file=sys.stderr, flush=True)\nsys.stdin.read()\n`,
+		);
+		const engine = mnemosyneEngine({ python: "python3", script });
+		try {
+			const started = performance.now();
+			await expect(engine.warmup("standard")).rejects.toThrow(/closed stdout.*bye/s);
+			expect(performance.now() - started).toBeLessThan(3000);
+		} finally {
+			await engine.dispose();
+		}
+	});
+
 	it("a Mnemosyne version other than 4.0.0b4 aborts the run", async () => {
 		const engine = mnemosyneEngine({ python: "python3", script: REAL_SCRIPT });
 		await expect(runCases(engine, [twoMessageCase], "standard", 10, tmp)).rejects.toThrow("4.0.0b4");
