@@ -166,6 +166,22 @@ it("diff rejects one engine run with different options, but compares engines run
 	expect(across.stdout).toContain("b: engine mnemosyne protocol standard k 10 mnemopiRecall recall polyphonic true");
 });
 
+it("diff warns that with-sleep recall is not comparable across engines", async () => {
+	const mnemopi = await writeResult("sleep-mnemopi", { engine: "mnemopi", protocol: "with-sleep" });
+	const mnemosyne = await writeResult("sleep-mnemosyne", { engine: "mnemosyne", protocol: "with-sleep" });
+	const across = await diff(mnemopi, mnemosyne);
+	expect(across.code).toBe(0);
+	expect(across.stderr).toContain("warning: with-sleep credits a summary hit with every message it covers");
+	const same = await diff(mnemopi, mnemopi);
+	expect(same.code).toBe(0);
+	expect(same.stderr).toBe("");
+	const standard = await diff(
+		await writeResult("standard-mnemopi", { engine: "mnemopi" }),
+		await writeResult("standard-mnemosyne", { engine: "mnemosyne" }),
+	);
+	expect(standard.stderr).toBe("");
+});
+
 it("diff rejects upstream-compat results", async () => {
 	const a = await writeResult("compat-a", { protocol: "upstream-compat" });
 	const b = await writeResult("compat-b", { protocol: "upstream-compat" });
