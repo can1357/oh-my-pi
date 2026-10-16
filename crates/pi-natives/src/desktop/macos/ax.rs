@@ -16,12 +16,14 @@ use objc2_application_services::{
 };
 use objc2_core_foundation::{
 	CFArray, CFBoolean, CFDate, CFIndex, CFNull, CFNumber, CFRange, CFRetained, CFString,
-	CFTimeZone, CFType, CGPoint, CGSize, Type,
+	CFTimeZone, CFType, CFURL, CGPoint, CGSize, Type,
 };
 
 use super::{
 	super::{
-		ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_macos},
+		ax::{
+			AxBounds, AxHandle, AxIdentity, AxProps, UNKNOWN_FIELD, WalkBounds, normalize_role_macos,
+		},
 		backend::AxBackend,
 		control,
 		error::{CoreResult, DesktopError},
@@ -49,7 +51,7 @@ const MAX_ATTACHED_SEARCH_DEPTH: usize = 24;
 /// that skips bounds drops the last two, and `props` drops `AXChildren`,
 /// whose count `AXUIElementGetAttributeValueCount` reads without copying the
 /// array.
-const NODE_ATTRIBUTES: [&str; 9] = [
+const NODE_ATTRIBUTES: [&str; 15] = [
 	"AXChildren",
 	"AXRole",
 	"AXTitle",
@@ -57,6 +59,12 @@ const NODE_ATTRIBUTES: [&str; 9] = [
 	"AXDescription",
 	"AXEnabled",
 	"AXFocused",
+	"AXSubrole",
+	"AXRoleDescription",
+	"AXValueDescription",
+	"AXHelp",
+	"AXIdentifier",
+	"AXURL",
 	"AXPosition",
 	"AXSize",
 ];
@@ -67,8 +75,21 @@ const VALUE: usize = 3;
 const DESCRIPTION: usize = 4;
 const ENABLED: usize = 5;
 const FOCUSED: usize = 6;
-const POSITION: usize = 7;
-const SIZE: usize = 8;
+const SUBROLE: usize = 7;
+const ROLE_DESCRIPTION: usize = 8;
+const VALUE_DESCRIPTION: usize = 9;
+const HELP: usize = 10;
+const IDENTIFIER: usize = 11;
+const URL: usize = 12;
+const POSITION: usize = 13;
+const SIZE: usize = 14;
+
+/// The [`NODE_ATTRIBUTES`] read only to tell an element apart in its window
+/// ([`read_identity`]). A batch that fails as a whole skips them, so a hung
+/// app costs no more lone reads, each with its own timeout, than the
+/// element's role, labels, state and children; the element then has no
+/// identity.
+const IDENTITY_ONLY: Range<usize> = SUBROLE..POSITION;
 
 /// Which slice of [`NODE_ATTRIBUTES`] one element read requests.
 #[derive(Clone, Copy)]
@@ -150,20 +171,30 @@ impl NodeValues {
 		})
 	}
 
-	/// The batch's values, or `lone` reads of each attribute when the batch
-	/// failed as a whole for a live element: a messaging timeout gives the
-	/// batch one deadline for every attribute, and one slow attribute must
-	/// not lose the element's role and children.
+	/// The batch's values, or `lone` reads of each attribute outside
+	/// [`IDENTITY_ONLY`] when the batch failed as a whole for a live element:
+	/// a messaging timeout gives the batch one deadline for every attribute,
+	/// and one slow attribute must not lose the element's role and children.
 	fn from_batch(
 		batch: Result<CFRetained<CFArray<CFType>>, AXError>,
 		attributes: Range<usize>,
-		lone: impl FnMut(usize) -> Result<Option<CFRetained<CFType>>, AXError>,
+		mut lone: impl FnMut(usize) -> Result<Option<CFRetained<CFType>>, AXError>,
 	) -> Self {
 		let first = attributes.start;
 		let values = match batch {
 			Ok(values) => NodeBatch::Read(values),
 			Err(error) if error == AXError::InvalidUIElement => NodeBatch::Gone(error),
-			Err(_) => NodeBatch::Lone(attributes.map(lone).collect()),
+			Err(_) => NodeBatch::Lone(
+				attributes
+					.map(|index| {
+						if IDENTITY_ONLY.contains(&index) {
+							Err(AXError::CannotComplete)
+						} else {
+							lone(index)
+						}
+					})
+					.collect(),
+			),
 		};
 		Self { values, first }
 	}
@@ -637,13 +668,15 @@ impl AxBackend for MacAx {
 			WalkBounds::Skip => NodeRead::Walk,
 		};
 		let values = NodeValues::read(element, read);
-		let children = values
-			.get(CHILDREN)
+		let children = values.get(CHILDREN);
+		let children_read = answered(&children);
+		let children = children
 			.ok()
 			.flatten()
 			.and_then(element_array)
 			.unwrap_or_default();
-		let props = element_props(element, &values, children.len(), read_bounds)?;
+		let mut props = element_props(element, &values, children.len(), read_bounds)?;
+		props.partial |= !children_read;
 		Ok((props, children.into_iter().map(AxHandle::Mac).collect()))
 	}
 
@@ -787,6 +820,14 @@ impl AxBackend for MacAx {
 		}
 		Ok(result)
 	}
+
+	/// The app answers `InvalidUIElement` only for an element it no longer
+	/// has; a busy or slow app answers otherwise.
+	fn destroyed(&mut self, h: &AxHandle) -> bool {
+		mac_handle(h).is_ok_and(|element| {
+			copy_attribute_result(element, "AXRole").err() == Some(AXError::InvalidUIElement)
+		})
+	}
 }
 
 fn element_props(
@@ -808,12 +849,16 @@ fn element_props(
 			.and_then(|value| value.downcast::<CFBoolean>().ok())
 			.map(|value| value.as_bool())
 	};
+	let title = nonempty(string(TITLE));
+	let value = nonempty(read(VALUE).map(|value| stringify_value(&value)));
+	let description = nonempty(string(DESCRIPTION));
+	let identity = read_identity(values, &native_role);
 	Ok(AxProps {
 		role: normalize_role_macos(&native_role),
 		native_role,
-		title: nonempty(string(TITLE)),
-		value: nonempty(read(VALUE).map(|value| stringify_value(&value))),
-		description: nonempty(string(DESCRIPTION)),
+		title,
+		value,
+		description,
 		enabled: boolean(ENABLED).unwrap_or(true),
 		focused: boolean(FOCUSED).unwrap_or(false),
 		bounds: match read_bounds {
@@ -824,7 +869,53 @@ fn element_props(
 		},
 		actions,
 		child_count: u32::try_from(child_count).unwrap_or(u32::MAX),
+		partial: identity.is_none(),
+		identity,
 	})
+}
+
+/// The [`NODE_ATTRIBUTES`] that, after `AXRole`, make up an element's
+/// [`AxIdentity`], in its order.
+const IDENTIFYING: [usize; 9] =
+	[SUBROLE, ROLE_DESCRIPTION, TITLE, DESCRIPTION, VALUE, VALUE_DESCRIPTION, HELP, IDENTIFIER, URL];
+
+/// The element's [`AxIdentity`], or `None` when the app did not get to answer
+/// one of the [`IDENTIFYING`] attributes, as when it was too busy to reply:
+/// the walk that met it then can't vouch for any identity. A read that fails
+/// outright is [`UNKNOWN_FIELD`]: the element itself is never re-found, and
+/// it counts as a twin of any element agreeing with its other fields, since
+/// `AppKit` fails some attributes on every read, a checkbox's `AXSubrole`
+/// among them, and a window holding one must stay readable.
+fn read_identity(values: &NodeValues, native_role: &str) -> Option<AxIdentity> {
+	let mut identity = Vec::with_capacity(IDENTIFYING.len() + 1);
+	identity.push(Some(native_role.to_owned()));
+	for index in IDENTIFYING {
+		let value = match values.get(index) {
+			Err(error) if error == AXError::Failure => {
+				identity.push(Some(UNKNOWN_FIELD.to_owned()));
+				continue;
+			},
+			value if answered(&value) => value.ok().flatten(),
+			_ => return None,
+		};
+		let text = match index {
+			VALUE | URL => value.map(|value| stringify_value(&value)),
+			_ => value
+				.and_then(|value| value.downcast::<CFString>().ok())
+				.map(|value| value.to_string()),
+		};
+		identity.push(nonempty(text));
+	}
+	Some(identity.into_boxed_slice())
+}
+
+/// Whether an attribute read got the element's answer: a value, or the
+/// element saying it has none. Any other error leaves the value unknown.
+fn answered<T>(read: &Result<Option<T>, AXError>) -> bool {
+	read
+		.as_ref()
+		.err()
+		.is_none_or(|error| *error == AXError::NoValue || *error == AXError::AttributeUnsupported)
 }
 
 fn element_pid(element: &AXUIElement) -> CoreResult<libc::pid_t> {
@@ -1606,6 +1697,11 @@ fn stringify_value(value: &CFType) -> String {
 			.or_else(|| nonempty(copy_string(element, "AXDescription")))
 			.unwrap_or_default();
 	}
+	// A URL's description carries its object's address, so two reads of one
+	// link would never compare equal.
+	if let Some(url) = value.downcast_ref::<CFURL>() {
+		return url.string().to_string();
+	}
 	format!("{value:?}")
 }
 
@@ -1665,7 +1761,7 @@ mod tests {
 	};
 
 	use objc2_application_services::{AXError, AXValue, AXValueType};
-	use objc2_core_foundation::{CFArray, CFNumber, CFString, CFType, Type, kCFNull};
+	use objc2_core_foundation::{CFArray, CFNumber, CFString, CFType, CFURL, Type, kCFNull};
 
 	use super::{
 		AttachedCandidate, CHILDREN, DESCRIPTION, ENABLED, NodeRead, NodeValues, ROLE, TITLE,
@@ -1728,10 +1824,92 @@ mod tests {
 				}
 			},
 		);
-		assert_eq!(asked, NodeRead::Walk.attributes().collect::<Vec<_>>());
+		let mut expected: Vec<_> = NodeRead::Walk.attributes().collect();
+		expected.retain(|index| !super::IDENTITY_ONLY.contains(index));
+		assert_eq!(asked, expected);
+		assert_eq!(asked.len(), 7);
 		assert_eq!(required_string(values.get(ROLE), "AXRole").unwrap(), "AXTextArea");
 		assert_eq!(values.get(VALUE).unwrap_err(), AXError::CannotComplete);
 		assert!(values.get(TITLE).unwrap().is_none());
+	}
+
+	#[test]
+	fn only_an_element_whose_app_answered_every_identifying_attribute_has_an_identity() {
+		use super::{HELP, answered, read_identity};
+
+		let error = |mut code: AXError| {
+			// SAFETY: An AXError-typed AXValue copies the one AXError it points
+			// at.
+			unsafe { AXValue::new(AXValueType::AXError, NonNull::from(&mut code).cast()) }.unwrap()
+		};
+		let role = CFString::from_static_str("AXButton");
+		let title = CFString::from_static_str("Go");
+		let no_value = error(AXError::NoValue);
+		let unsupported = error(AXError::AttributeUnsupported);
+		let busy = error(AXError::CannotComplete);
+		let failed = error(AXError::Failure);
+		// SAFETY: kCFNull is a process-lifetime constant.
+		let null = unsafe { kCFNull }.unwrap();
+		// One walk read, in `NODE_ATTRIBUTES` order, with `help` as its `AXHelp`.
+		let walk = |help: &CFType| {
+			let entries: [&CFType; 13] = [
+				null,
+				&role,
+				&title,
+				&no_value,
+				null,
+				null,
+				null,
+				&unsupported,
+				null,
+				null,
+				help,
+				null,
+				null,
+			];
+			NodeValues::from_batch(
+				Ok(CFArray::from_objects(&entries)),
+				NodeRead::Walk.attributes(),
+				|_| unreachable!("an answered batch needs no lone reads"),
+			)
+		};
+		// Missing and unsupported attributes are answers.
+		let identity = read_identity(&walk(&no_value), "AXButton").unwrap();
+		assert_eq!(identity.len(), 10);
+		assert_eq!(identity[0].as_deref(), Some("AXButton"));
+		assert_eq!(identity[3].as_deref(), Some("Go"));
+		assert_eq!(
+			identity
+				.iter()
+				.skip(1)
+				.filter(|field| field.is_some())
+				.count(),
+			1
+		);
+		assert!(answered(&walk(&no_value).get(CHILDREN)));
+		// A read that failed outright leaves the identity, with that field
+		// unknown.
+		let failing = read_identity(&walk(&failed), "AXButton").unwrap();
+		assert_ne!(failing, identity);
+		assert_eq!(read_identity(&walk(&failed), "AXButton").unwrap(), failing);
+		// One the app was too busy to answer is unknown.
+		assert!(read_identity(&walk(&busy), "AXButton").is_none());
+
+		// A batch that fails as a whole falls back to lone reads without the
+		// identity-only attributes, so the element has no identity.
+		let role: &CFType = &role;
+		let lone = NodeValues::from_batch(
+			Err(AXError::CannotComplete),
+			NodeRead::Walk.attributes(),
+			|index| match index {
+				ROLE => Ok(Some(role.retain())),
+				HELP => unreachable!("the fallback skips identity-only attributes"),
+				CHILDREN => Err(AXError::Failure),
+				_ => Err(AXError::NoValue),
+			},
+		);
+		assert!(read_identity(&lone, "AXButton").is_none());
+		assert!(!answered(&lone.get(CHILDREN)));
 	}
 
 	#[test]
@@ -1764,6 +1942,15 @@ mod tests {
 		assert_eq!(stringify_value(&CFNumber::new_i64(-3)), "-3");
 		assert_eq!(stringify_value(&CFNumber::new_f64(0.185)), "0.185");
 		assert_eq!(stringify_value(&CFNumber::new_f32(0.185)), "0.185");
+	}
+
+	#[test]
+	fn a_url_value_reads_as_its_text_on_every_read() {
+		let url =
+			|| CFURL::from_string(None, &CFString::from_str("https://example.com/a"), None).unwrap();
+		let (first, second) = (url(), url());
+		assert_eq!(stringify_value(&first), "https://example.com/a");
+		assert_eq!(stringify_value(&first), stringify_value(&second));
 	}
 
 	#[test]

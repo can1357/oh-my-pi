@@ -17,6 +17,7 @@
 - Fixed `listWorkspace({ reportDirectoryErrors: true, maxDepth: 0 })` returning an empty result for an unreadable root instead of failing the scan ([#15789](https://github.com/can1357/oh-my-pi/pull/15789))
 - Minimized cargo output now keeps one "Blocking waiting for file lock on …" line, so a build stuck behind another cargo process says why ([#14631](https://github.com/can1357/oh-my-pi/pull/14631) by [@jorgoose](https://github.com/jorgoose))
 - Fixed `grep` ignoring `maxCountPerFile` when the path is a single file, and single-file count mode stopping at the `maxCount` content cap ([#14162](https://github.com/can1357/oh-my-pi/issues/14162), [#14327](https://github.com/can1357/oh-my-pi/pull/14327) by [@F0Rextasy](https://github.com/F0Rextasy))
+- Fixed a macOS element-ref `StaleRef` giving no lead when the app destroyed the element and put an identical one in its place: the error now names the one element of the window with the fields the ref was read with, registered as a new ref, and sends nothing to it ([#15574](https://github.com/can1357/oh-my-pi/pull/15574) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.11.1] - 2026-10-15
 

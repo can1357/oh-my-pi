@@ -560,26 +560,28 @@ impl Drop for KernelLease {
 	}
 }
 
+/// Real ownership without OS event monitoring: lifecycle regressions must
+/// not depend on an interactive desktop or Accessibility permissions.
+#[cfg(test)]
+pub(crate) fn grant_for_test(source: &CancellationSource) {
+	let owner = ControlLease {
+		_escape: None,
+		_kernel: KernelOwner::acquire().expect("test kernel owner"),
+		running: AtomicBool::new(false),
+	};
+	*source.0.state.lock() = Some(Arc::new(owner));
+}
+
+/// Removes this process's private kernel lock (see `KernelLease::path`).
+#[cfg(test)]
+pub(crate) fn remove_test_lock() {
+	#[cfg(unix)]
+	let _ = std::fs::remove_file(KernelLease::path());
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	/// Real ownership without OS event monitoring: lifecycle regressions must
-	/// not depend on an interactive desktop or Accessibility permissions.
-	fn grant_for_test(source: &CancellationSource) {
-		let owner = ControlLease {
-			_escape: None,
-			_kernel: KernelOwner::acquire().expect("test kernel owner"),
-			running: AtomicBool::new(false),
-		};
-		*source.0.state.lock() = Some(Arc::new(owner));
-	}
-
-	/// Removes this process's private kernel lock (see `KernelLease::path`).
-	fn remove_test_lock() {
-		#[cfg(unix)]
-		let _ = std::fs::remove_file(KernelLease::path());
-	}
 
 	#[test]
 	fn task_lease_survives_retirement_but_abort_and_release_revoke_it() {

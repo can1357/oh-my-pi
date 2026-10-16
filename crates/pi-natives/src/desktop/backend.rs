@@ -225,4 +225,10 @@ pub trait AxBackend {
 	fn alive(&mut self, _h: &AxHandle) -> bool {
 		true
 	}
+	/// Whether the app has provably destroyed the element `h` was read from,
+	/// rather than a request on it failing on another element. Only then does
+	/// a `StaleRef` name the one element left with its fields.
+	fn destroyed(&mut self, _h: &AxHandle) -> bool {
+		false
+	}
 }
