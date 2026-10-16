@@ -41,6 +41,46 @@ for n, line in enumerate(sys.stdin, 1):
     print(json.dumps(reply), flush=True)
 `;
 
+// A fake Mnemosyne 4.0.0b4 for the real engine script: recall ranks one derived row above every remembered row and,
+// like Mnemosyne, returns at most top_k rows.
+const FAKE_BEAM = `import sqlite3
+
+class BeamMemory:
+    def __init__(self, session_id, db_path):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.execute("CREATE TABLE memory_embeddings (id TEXT)")
+        self.conn.execute("INSERT INTO memory_embeddings VALUES ('v')")
+        self.rows = []
+
+    def remember(self, content, source, importance):
+        self.rows.append({"id": "r%d" % (len(self.rows) + 1), "tier": "working", "content": content})
+        return self.rows[-1]["id"]
+
+    def recall(self, query, top_k):
+        derived = {"id": "memoria_facts", "tier": "memoria", "content": "[MEMORIA facts]", "source_memory_id": None}
+        return ([derived] + self.rows)[:top_k]
+`;
+
+/** The real engine script, run against FAKE_BEAM instead of an installed Mnemosyne. */
+async function realScriptOnFakeMnemosyne(): Promise<string> {
+	const fake = path.join(tmp, "fake-mnemosyne");
+	await Bun.write(
+		path.join(fake, "mnemosyne_memory-4.0.0b4.dist-info", "METADATA"),
+		"Metadata-Version: 2.1\nName: mnemosyne-memory\nVersion: 4.0.0b4\n",
+	);
+	await Bun.write(path.join(fake, "mnemosyne", "__init__.py"), "");
+	await Bun.write(path.join(fake, "mnemosyne", "core", "__init__.py"), "");
+	await Bun.write(
+		path.join(fake, "mnemosyne", "core", "embeddings.py"),
+		`_DEFAULT_MODEL = "fake"\ndef available():\n    return True\ndef embed(texts):\n    return [[1.0] for _ in texts]\n`,
+	);
+	await Bun.write(path.join(fake, "mnemosyne", "core", "beam.py"), FAKE_BEAM);
+	return stub(
+		"fake-mnemosyne-run.py",
+		`import runpy, sys\nsys.path.insert(0, ${JSON.stringify(fake)})\nrunpy.run_path(${JSON.stringify(REAL_SCRIPT)}, run_name="__main__")\n`,
+	);
+}
+
 describe("mnemosyne client", () => {
 	it("adapter error aborts the run", async () => {
 		const engine = mnemosyneEngine({ python: "python3", script: await stub("erroring.py", ERRORING_STUB) });
@@ -129,6 +169,23 @@ for line in sys.stdin:
 			expect(questions[0].ranked.map(h => h.messageIds)).toEqual([["m1"]]);
 			expect(questions[0].dropped).toEqual([{ tier: "memoria_source", messageIds: ["m2"], rank: 1, gold: true }]);
 			expect((await engine.describe()).MNEMOSYNE_DATA_DIR).toBe("<temp>");
+		} finally {
+			await engine.dispose();
+		}
+	});
+
+	it("fetches past derived rows until k working or episodic rows are ranked", async () => {
+		const threeMessageCase: EvalCase = {
+			...twoMessageCase,
+			messages: [...twoMessageCase.messages, { messageId: "m3", sessionId: "s", role: "user", content: "eta theta" }],
+		};
+		const engine = mnemosyneEngine({ python: "python3", script: await realScriptOnFakeMnemosyne() });
+		try {
+			const { questions } = await runCases(engine, [threeMessageCase], "standard", 2, tmp);
+			// At top_k=2 the derived row would leave one ranked row and miss gold m2; m3 is past the top 2.
+			expect(questions[0].ranked.map(h => h.messageIds)).toEqual([["m1"], ["m2"]]);
+			expect(questions[0].metrics["recall@10"]).toBe(1);
+			expect(questions[0].dropped).toEqual([{ tier: "memoria", messageIds: [], rank: 0, gold: false }]);
 		} finally {
 			await engine.dispose();
 		}

@@ -56,7 +56,7 @@ $R calibration-check calib-a.json calib-b.json
 
 `run` writes `~/.cache/omp-memory-eval/results/<dataset>.<engine>.<protocol>.<time>.json` unless `--out` is given, and prints the aggregate, per-category means, `fallbackRate`, `droppedRows` and `droppedGoldRows`. `oracle` (recall must be 1) and `random` are sanity engines. `upstream-compat` runs only with `--engine mnemosyne --dataset beam-100k` (see the calibration section).
 
-Mnemosyne also returns derived rows (`memoria`, `memoria_source`, `associative`, `fact`). They are not ranked (the spec ranks working and episodic rows), but every one is recorded per question under `dropped` with its tier, rank in Mnemosyne's raw list and the message ids behind its `source_memory_id`. `droppedGoldRows` counts those that map to a gold message.
+Mnemosyne also returns derived rows (`memoria`, `memoria_source`, `associative`, `fact`). They are not ranked (the spec ranks working and episodic rows), so the engine doubles `top_k` until Mnemosyne returns `k` working or episodic rows (or runs out of rows) and ranks the first `k`. Every derived row ahead of the last ranked row is recorded per question under `dropped` with its tier, rank in Mnemosyne's raw list and the message ids behind its `source_memory_id`. `droppedGoldRows` counts those that map to a gold message.
 
 Memory: Mnemosyne's baseline and peak resident set size come from the engine process's own `/proc/self/status` (`VmRSS` after imports, `VmHWM`; Linux only). Mnemopi and the sanity engines run in the harness process and report its RSS (`rssScope: "harness-process"`).
 
