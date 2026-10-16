@@ -231,17 +231,27 @@ async function awaitPrimaryStateRebuild(session: AgentSession): Promise<void> {
 export async function rebindMemoryBackendForCwd(session: AgentSession): Promise<void> {
 	if (!session.memoryEnabled) return;
 	await session.settleMemoryBackend();
-	// Other backends have no Hindsight rebuild path. Reapply them on an
-	// explicit cwd move, but let an in-flight Hindsight transition finish (or
-	// fail) rather than retrying a partially torn-down backend outside its task.
-	if (!session.getHindsightSessionState() && !primaryRebuildTasks.has(session)) {
-		// The manager already has the new cwd, and this may also be rollback
-		// from a destination that never committed. Drain existing writes without
-		// capturing the transcript under either transient scope.
-		await session.applyMemoryBackend({ retainMnemopi: false });
-	}
 
+	// Consume (or fail on) any rebuild a reload's scope hook queued BEFORE the
+	// paired leg runs: a failed transition must reject the move, and retiring the
+	// task on failure is only safe while no later step can mistake the failure
+	// for a finished pass.
 	await awaitPrimaryStateRebuild(session);
+
+	if (session.getHindsightSessionState() || primaryRebuildTasks.has(session)) {
+		// A Hindsight transition owns the backend, so let it finish (or fail) rather
+		// than retrying a partially torn-down store outside its own task. A backend
+		// paired alongside the store still has to follow the move though, and the
+		// rebuild below reinstalls Hindsight's state alone. Rebinding that leg on its
+		// own leaves the in-flight transition untouched.
+		await session.applyPairedMemoryBackend("rebind");
+	} else {
+		// Other backends have no Hindsight scope subscription, so reapply them on an
+		// explicit cwd move. The manager already has the new cwd, and this may also be
+		// rollback from a destination that never committed. Drain existing writes
+		// without capturing the transcript under either transient scope.
+		await session.applyMemoryBackend({ retainMnemopi: false, reason: "rebind" });
+	}
 
 	// Startup is best-effort, but a move must not commit an unusable memory backend.
 	if (cfgMemoryBackend.get(session.settings) === "mnemopi" && !session.getMnemopiSessionState()) {
@@ -334,6 +344,20 @@ async function installPrimaryState(
  * Resolves true only when the runtime actually moved — the backend owner
  * re-applied the selection, or a fresh primary state was installed — so the
  * scheduler can tell a completed transition from a no-op.
+ *
+ * The re-apply below is a full `applyMemoryBackend`, and it always asks for
+ * `"rebind"`. Catch-up exists for one thing, the startup race where the first
+ * turn is submitted while `resolveMemoryBackend` is still importing the backend,
+ * and a rebuild is never that: by the time one runs, the outgoing backend's
+ * subscription has already seen any live prompt. What a rebuild can be is the
+ * tail of a `/move`, where the trailing transcript entry is the prompt the
+ * session typed in the project it left, and catching up files it as a decision
+ * about the destination.
+ *
+ * Asking unconditionally is also what makes that safe. A reload fires the scope
+ * hook while the move is still in `reloadForCwd`, so the task is queued before
+ * the move calls `rebindMemoryBackendForCwd`, and a reason handed down from the
+ * caller would arrive after this had already run with the wrong one.
  */
 async function reconcilePrimaryState(session: AgentSession): Promise<boolean> {
 	const current = session.getHindsightSessionState();
@@ -348,7 +372,7 @@ async function reconcilePrimaryState(session: AgentSession): Promise<boolean> {
 	// install or retire a backend's runtime state, memory tools, and prompt,
 	// and it flushes the outgoing state's queued retains on the way out.
 	if (selected !== (current !== undefined)) {
-		await session.applyMemoryBackend();
+		await session.applyMemoryBackend({ reason: "rebind" });
 		return true;
 	}
 	if (!current) return false;
