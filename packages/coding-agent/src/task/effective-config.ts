@@ -41,8 +41,10 @@ import {
 	cfgCompactionThresholdTokens,
 } from "../session/context-settings";
 import { describeModelCompactionPoint } from "../session/model-compaction-threshold";
+import { resolveDefaultRoleRetryFallback } from "../session/retry-fallback-chains";
 import {
 	cfgDefaultThinkingLevel,
+	cfgRetryFallbackChains,
 	cfgTierAnthropic,
 	cfgTierGoogle,
 	cfgTierOpenai,
@@ -139,9 +141,10 @@ function settingSource(setting: AnySetting, settings: Settings): AgentConfigSour
 
 /**
  * Model a new top-level session starts on: the `default` role when it resolves
- * among the allowed models, else the startup fallback pick. Like session start,
- * a configured role that misses (or no pick at all) awaits one discovery pass
- * first, so a cold models.yml cache cannot hand the role's slot to a fallback.
+ * among the allowed models, else its retry fallback chain's first usable entry,
+ * else the startup fallback pick. Like session start, a configured role that
+ * misses (or no pick at all) awaits one discovery pass first, so a cold
+ * models.yml cache cannot hand the role's slot to a fallback.
  */
 async function resolveParentModel(
 	settings: Settings,
@@ -164,6 +167,14 @@ async function resolveParentModel(
 			await modelRegistry.refresh("online-if-uncached");
 			refreshed = true;
 			continue;
+		}
+		const chainFallback = resolveDefaultRoleRetryFallback(settings, modelRegistry, allowed, preferences);
+		if (chainFallback) {
+			return {
+				pattern: formatModelString(chainFallback.model),
+				source: settingSource(cfgRetryFallbackChains, settings),
+				note: `modelRoles.default ${defaultRole} unavailable`,
+			};
 		}
 		const enabled = cfgEnabledModels.get(settings);
 		return {
