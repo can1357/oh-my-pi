@@ -166,6 +166,44 @@ describe("date-cwd-reminder", () => {
 			expect(post.messages[0]).not.toBe(freshUser);
 		});
 
+		it("does not pin a provider-normalized boundary message after the turn commits", async () => {
+			// Contract: the O(1) admission signature records the boundary messages
+			// of the wire it was handed, and that wire is not the transcript — a
+			// provider transform clones a normalized image/tool turn. Once the
+			// one-shot turn commits, the session transcript holds the
+			// pre-normalization turn and the prepared context is dropped, so that
+			// boundary is reachable only through the injector, where it can never
+			// match again (the transcript has grown). A strong signature keeps the
+			// clone — and every message it transitively owns — alive until the next
+			// request or the session is disposed; for a one-shot session that never
+			// sends again, that is the rest of the process.
+			function prepareCommittedTurn(): { ref: WeakRef<Message>; injector: DateCwdReminderInjector } {
+				const injector = new DateCwdReminderInjector();
+				const root: Message = { role: "user", content: "root", timestamp: 1 };
+				// The wire's last turn is the provider's normalized copy of the sent
+				// one, so the session transcript never holds this object.
+				const normalized: Message = { role: "user", content: "normalized-image", timestamp: 2 };
+				const context: Context = { systemPrompt: ["system"], messages: [root, normalized] };
+				// One preparation for the turn: only the O(1) boundary signature is
+				// recorded, no memo is admitted, so nothing else holds the
+				// normalized turn back.
+				injector.transform(context, "2026-08-14", "/work/omp");
+				return { ref: new WeakRef(normalized), injector };
+			}
+			const { ref, injector } = prepareCommittedTurn();
+			expect(await becomesCollectible(ref, 2_000)).toBe(true);
+			// Liveness anchor: the injector must survive the probe above, or the
+			// boundary frees vacuously with its owner. It must also keep injecting
+			// on the next turn.
+			const freshUser: Message = { role: "user", content: "fresh", timestamp: 3 };
+			const post = injector.transform(
+				{ systemPrompt: ["system"], messages: [freshUser] },
+				"2026-08-14",
+				"/work/omp",
+			);
+			expect(post.messages[0]).not.toBe(freshUser);
+		});
+
 		it("rebuilds the wire when the caller edits the input array in place", () => {
 			const injector = new DateCwdReminderInjector();
 			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
