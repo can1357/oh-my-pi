@@ -260,4 +260,28 @@ describe("runner", () => {
 		await runCases(engine, cases, "standard", 10, tmp);
 		expect(sleeps).toBe(2);
 	});
+
+	it("names store directories by case index, so a case id of .. stays inside the store root", async () => {
+		const parent = await fs.mkdtemp(path.join(tmp, "escape-"));
+		const storeRoot = path.join(parent, "stores");
+		await fs.mkdir(storeRoot);
+		const sentinel = path.join(parent, "sentinel");
+		await Bun.write(sentinel, "keep");
+		const oracle = oracleEngine();
+		const opened: string[] = [];
+		const engine: EngineAdapter = {
+			...oracle,
+			open: async (evalCase, options) => {
+				opened.push(path.relative(storeRoot, options.storeDir));
+				await oracle.open(evalCase, options);
+			},
+		};
+		const cases = [
+			{ ...twoMessageCase, caseId: ".." },
+			{ ...twoMessageCase, caseId: "../x" },
+		];
+		await runCases(engine, cases, "standard", 10, storeRoot);
+		expect(await Bun.file(sentinel).exists()).toBe(true);
+		expect(opened).toEqual(["0", "1"]);
+	});
 });
