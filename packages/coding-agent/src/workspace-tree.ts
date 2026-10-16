@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { FileType, type GlobMatch, listWorkspace } from "@oh-my-pi/pi-natives";
+import { sanitizeDisplayWarning, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { formatAge, formatBytes } from "@oh-my-pi/pi-utils";
 
 /** Defaults for the workspace tree shown in the system prompt. */
@@ -71,7 +72,14 @@ export async function buildDirectoryTree(cwd: string, options: BuildDirectoryTre
 		rootLimit,
 		lineCap: options.lineCap === undefined ? null : options.lineCap,
 		nativeTruncated: result.truncated,
-		unreadable: new Map(result.unreadableDirectories.map(dir => [dir.path, dir.message])),
+		// Platform error text is untrusted display content: strip control
+		// characters and newlines, then bound it so one entry stays one line.
+		unreadable: new Map(
+			result.unreadableDirectories.map(dir => [
+				dir.path,
+				truncateToWidth(sanitizeDisplayWarning(dir.message), TRUNCATE_LENGTHS.CONTENT),
+			]),
+		),
 		// Tool output (read tool directory listing), not a cached prefix —
 		// the human-friendly relative "ago" is appropriate here.
 		ageMode: "relative",

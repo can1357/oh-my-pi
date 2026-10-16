@@ -108,7 +108,6 @@ describe("auth gateway images", () => {
 					model: "gpt-image-test",
 					prompt: "paint a lighthouse",
 					n: 2,
-					response_format: "b64_json",
 					size: "1536x1024",
 				},
 			});

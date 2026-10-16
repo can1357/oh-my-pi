@@ -70,6 +70,21 @@ describe("readImageMetadata", () => {
 		const loading = loadImageInput({ path: imagePath, cwd: testDir, autoResize: false });
 		await expect(loading).rejects.toBeInstanceOf(InvalidImageDataError);
 	});
+
+	it("labels the file as PNG when its display image is re-encoded as WebP", async () => {
+		const imagePath = path.join(testDir, "known.png");
+		await Bun.write(
+			imagePath,
+			Buffer.from(
+				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2Z0AAAAASUVORK5CYII=",
+				"base64",
+			),
+		);
+
+		const result = await loadImageInput({ path: imagePath, cwd: testDir, autoResize: true, excludeWebP: false });
+		expect(result?.mimeType).toBe("image/webp");
+		expect(result?.textNote).toContain("Read image file [image/png] (displayed as image/webp)");
+	});
 });
 
 describe("loadImageAttachmentInput", () => {

@@ -1092,6 +1092,57 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("uses a default fallback whose provider authenticates only through a cross-provider env alias", async () => {
+		const fallbackId = DEFAULT_MODEL_PER_PROVIDER["xai-oauth"];
+		const settings = Settings.isolated({
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { default: [`xai-oauth/${fallbackId}`] },
+		});
+		settings.setModelRole("default", "missing-provider/missing-model");
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "alias-fallback-models.yml"));
+		const originalXaiApiKey = Bun.env.XAI_API_KEY;
+		const originalXaiOauthToken = Bun.env.XAI_OAUTH_TOKEN;
+		// XAI_API_KEY authenticates `xai-oauth` requests through an alias, but
+		// default availability ignores that alias and offers `xai` instead.
+		Bun.env.XAI_API_KEY = "xai-env-key";
+		delete Bun.env.XAI_OAUTH_TOKEN;
+		try {
+			const { session, modelFallbackMessage } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				modelRegistry,
+				settings,
+				sessionManager: SessionManager.inMemory(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				rules: [],
+				preloadedCustomToolPaths: [],
+				toolNames: ["read"],
+			});
+			try {
+				expect(session.model?.provider).toBe("xai-oauth");
+				expect(session.model?.id).toBe(fallbackId);
+				expect(modelFallbackMessage).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			if (originalXaiApiKey === undefined) delete Bun.env.XAI_API_KEY;
+			else Bun.env.XAI_API_KEY = originalXaiApiKey;
+			if (originalXaiOauthToken === undefined) delete Bun.env.XAI_OAUTH_TOKEN;
+			else Bun.env.XAI_OAUTH_TOKEN = originalXaiOauthToken;
+		}
+	});
+
 	test("preserves deferred bare role fallback chains", async () => {
 		const settings = Settings.isolated();
 		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model");

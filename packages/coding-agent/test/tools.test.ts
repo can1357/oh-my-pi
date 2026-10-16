@@ -2809,6 +2809,32 @@ function b() {
 			expect(output).toMatch(/\*2\|match line/);
 		});
 
+		it("searches all of a named file larger than the directory-walk window", async () => {
+			const testFile = path.join(testDir, "manual.txt");
+			await Bun.write(
+				testFile,
+				`${"x".repeat(2 * 1024 * 1024)}\nEARLYNEEDLE\n${"x".repeat(5 * 1024 * 1024)}\nLATENEEDLE\n`,
+			);
+
+			const whole = getTextOutput(
+				await searchTool.execute("grep-large-whole", { pattern: "EARLYNEEDLE|LATENEEDLE", path: testFile }),
+			);
+			expect(whole).toMatch(/\*2\|EARLYNEEDLE/);
+			expect(whole).toMatch(/\*4\|LATENEEDLE/);
+
+			const ranged = getTextOutput(
+				await searchTool.execute("grep-large-range", { pattern: "LATENEEDLE", path: `${testFile}:3-` }),
+			);
+			expect(ranged).toMatch(/\*4\|LATENEEDLE/);
+
+			// Multiline matching holds the file in memory, so it reads only the leading window and says so.
+			const multiline = getTextOutput(
+				await searchTool.execute("grep-large-multiline", { pattern: "x\nLATENEEDLE", path: testFile }),
+			);
+			expect(multiline).toMatch(/^No matches in searched content \(multiline search limited large files/);
+			expect(multiline).toContain("manual.txt");
+		});
+
 		it("flags a zero-match search as contextually useless", async () => {
 			fs.writeFileSync(path.join(testDir, "plain.txt"), "nothing interesting here\n");
 

@@ -1,6 +1,7 @@
 import { $env } from "@oh-my-pi/pi-utils";
 import type { ResponseInput, ResponseInputItem } from "./providers/openai-responses-wire";
 import { isMalformedToolCallName, redactSensitiveCredentials } from "./providers/transform-messages";
+export { normalizeToolCallId } from "./providers/transform-messages";
 import type { CacheRetention, OpenAIResponsesHistoryPayload, ProviderPayload } from "./types";
 import { invalidToolCallArguments } from "./utils/tool-call-arguments";
 
@@ -32,11 +33,6 @@ export function normalizeSystemPrompts(systemPrompt: readonly string[] | string 
 	return prompts
 		.map(prompt => redactSensitiveCredentials(prompt.toWellFormed()))
 		.filter(prompt => prompt.trim().length > 0);
-}
-
-export function normalizeToolCallId(id: string): string {
-	const sanitized = id.replace(/[^a-zA-Z0-9_-]/g, "_");
-	return sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
 }
 
 type ResponsesToolItemIdPrefix = "fc" | "ctc";

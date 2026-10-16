@@ -147,7 +147,7 @@ describe("read local:// images", () => {
 		expect(image && "mimeType" in image ? image.mimeType : undefined).toBe("image/png");
 		const png = image?.type === "image" ? Buffer.from(image.data, "base64") : Buffer.alloc(0);
 		expect(png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-		expect(joinText(result.content)).toContain("Read SVG file [image/png]");
+		expect(joinText(result.content)).toContain("Read SVG file [image/svg+xml] (displayed as image/png)");
 	});
 	it("returns SVG metadata plus a question hint for text-only models", async () => {
 		await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);

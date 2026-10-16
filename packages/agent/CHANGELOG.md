@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [18.11.2] - 2026-10-16
+
+### Added
+
+- `agent_start` carries `resumedToolCallIds` when a continued run first executes the calls of an unpaired assistant tail
+
+### Fixed
+
+- Cancelling an `ask` after a background job finishes now reports the user cancellation instead of telling the model to retry a skipped tool ([#15985](https://github.com/can1357/oh-my-pi/issues/15985))
+
 ## [18.11.1] - 2026-10-15
 
 ### Added

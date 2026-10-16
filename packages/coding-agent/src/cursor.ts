@@ -31,7 +31,7 @@ import {
 	piLsPath,
 	piReadPath,
 	piTimeout,
-	shellTimeoutSeconds,
+	shellDeadlineSeconds,
 } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
@@ -597,7 +597,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 
 	async shell(args: Parameters<NonNullable<ICursorExecHandlers["shell"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
-		const timeoutSeconds = shellTimeoutSeconds(args.timeout);
+		const timeoutSeconds = shellDeadlineSeconds(args);
 		const toolResultMessage = await executeTool(this.options, "bash", toolCallId, {
 			command: args.command,
 			cwd: args.workingDirectory || undefined,
@@ -618,7 +618,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			return createToolResultMessage(toolCallId, toolName, result, true);
 		}
 
-		const timeoutSeconds = shellTimeoutSeconds(args.timeout);
+		const timeoutSeconds = shellDeadlineSeconds(args);
 		const toolArgs = omitUndefinedArgs({
 			command: args.command,
 			cwd: args.workingDirectory || undefined,

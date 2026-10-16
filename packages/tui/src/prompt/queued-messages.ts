@@ -18,7 +18,7 @@ export interface QueuedMessageGroup {
  * Messages queued while the agent works, above the editor. ANSI: a heading
  * per group, numbered dim rows and the dequeue hint. Natively (§8.1): a
  * stack of pills, each `corner-down-right` · the text · `⌥↑ Edit`, the total
- * count in the first pill when more than one waits; the edit control sends
+ * (`N queued`, not a position) in the first pill when more than one waits; the edit control sends
  * `queue.edit`, answered like the dequeue key.
  */
 export class QueuedMessagesBand extends Container {
@@ -63,7 +63,14 @@ export class QueuedMessagesBand extends Container {
 					),
 				];
 				if (pills.length === 0 && count > 1) {
-					children.push(node("badge", { text: `${count}`, role: "omp.queue.count" }, undefined, "count"));
+					children.push(
+						node(
+							"badge",
+							{ text: `${count} queued`, title: `${count} messages queued`, role: "omp.queue.count" },
+							undefined,
+							"count",
+						),
+					);
 				}
 				children.push(
 					node(

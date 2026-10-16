@@ -126,6 +126,7 @@ import {
 } from "../storage-state";
 import { assertTabPressArgs } from "../tab-arguments";
 import type { Observation, ReadyInfo, SessionSnapshot } from "../tab-protocol";
+import { readFilePayloads } from "../upload-files";
 import {
 	installWebMcpPageHook,
 	uninstallWebMcpPageHook,
@@ -1538,16 +1539,7 @@ export class TernTab implements InProcessRunTab {
 			// No chooser asked for the preset: disarm it before dropping the files instead.
 			await this.#op("files", { paths: null });
 		}
-		const files = [];
-		for (const file of absolute) {
-			const handle = Bun.file(file);
-			files.push({
-				name: path.basename(file),
-				type: handle.type || "application/octet-stream",
-				data: Buffer.from(await fs.promises.readFile(file)).toString("base64"),
-			});
-		}
-		await this.#kit("setFiles", [spec, files]);
+		await this.#kit("setFiles", [spec, await readFilePayloads(absolute)]);
 	}
 
 	// ─── Queries ──────────────────────────────────────────────────────────

@@ -69,7 +69,12 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
 
-import { cfgLspDiagnosticsDeduplicate, cfgLspDiagnosticsOnWrite, cfgLspFormatOnWrite } from "../lsp/settings";
+import {
+	cfgLspDiagnosticsDeduplicate,
+	cfgLspDiagnosticsOnWrite,
+	cfgLspFormatOnWrite,
+	cfgLspRequestTimeout,
+} from "../lsp/settings";
 
 const EXECUTABLE_NOTICE = "[Notice: Made executable via chmod +x]";
 const URI_LIKE_WRITE_PATH_RE = /^([a-z][a-z0-9+.-]*):\/{1,2}(.*)$/i;
@@ -510,6 +515,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			transformDiagnostics: dedup
 				? (path, result) => getDiagnosticsLedger(this.session).reduce(path, result)
 				: undefined,
+			requestTimeoutSec: cfgLspRequestTimeout.get(settings),
 		});
 		return { writethrough, deferred: enableDiagnostics ? this.#deferredDiagnostics : undefined };
 	}
@@ -799,8 +805,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			!coordination &&
 			!(await targetsLocalSandbox(this.session, path, signal))
 		) {
+			// A device-only session that still has `yield` is the read-only subagent
+			// shape: `write` is present only as the xd:// transport, yet the parent's
+			// briefing names a file path. Without naming the channel that does work,
+			// the rejection reads as a dead end (#14308). Keyed on `yield` being
+			// active rather than on an `isReadOnlyAgent` flag, which never reaches
+			// this session: a caller without `yield` keeps today's message verbatim.
+			const yieldFallback =
+				this.session.isToolActive?.("yield") === true
+					? " To deliver results to the caller, return the content in `yield` instead."
+					: "";
 			throw new ToolError(
-				"This `write` tool is limited to the xd:// device transport and local:// session scratch: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices), or write a `local://<name>` file. Filesystem writes are not available elsewhere.",
+				"This `write` tool is limited to the xd:// device transport and local:// session scratch: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices), or write a `local://<name>` file. Filesystem writes are not available elsewhere." +
+					yieldFallback,
 			);
 		}
 		return untilAborted(signal, async () => {

@@ -25,7 +25,7 @@ import type {
 	Usage,
 } from "../types";
 import { shouldSendServiceTier } from "../types";
-import { normalizeSystemPrompts } from "../utils";
+import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
@@ -162,11 +162,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 	const contents: Content[] = [];
 	const emittedToolCallNames = new Map<string, string>();
 
-	const normalizeToolCallId = (id: string): string => {
-		return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
-	};
-
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
+	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id));
 
 	// Gemini < 3 image tool results go in a separate user turn, but parallel tool results must
 	// stay a single contiguous functionResponse turn ("number of function response parts is not

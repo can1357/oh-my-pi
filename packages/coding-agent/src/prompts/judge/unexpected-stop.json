@@ -1,9 +1,9 @@
 {
 	"stopped": {
-		"instructions": "Classify whether this assistant message is an unexpected stop: it says it will act, continue working, or call a tool, then ends without doing so.",
+		"instructions": "The state holds an assistant's final `message` for this turn and, when known, the user's `request` it replies to. Classify whether the message is an unexpected stop: it announces work it is about to do now (call a tool, edit, check, continue), then ends without doing it. A message that answers or reports on the request, offers options or optional next steps for the user to pick, or asks the user to decide something the request left open ends the turn normally, even when it says what it would do next. Asking permission for work the request already asked for is an unexpected stop.",
 		"criteria": {
-			"true": "Unexpected stops:\n- \"I should do the same for the JS eval worker. Doing that now.\"\n- \"Let me run the tests next.\"\n- \"I'll fix that now.\"\n- \"Should I do that for you?\"",
-			"false": "Not an unexpected stop:\n- \"I've completed the task.\"\n- \"Is there anything else I can help with?\"\n- \"The fix is done and tests pass.\""
+			"true": "Unexpected stops:\n- \"I should do the same for the JS eval worker. Doing that now.\"\n- \"Let me run the tests next.\"\n- \"I'll fix that now.\"\n- request \"fix the failing test\", message \"Found the bug. Should I fix it?\"",
+			"false": "Not an unexpected stop:\n- \"I've completed the task.\"\n- \"Is there anything else I can help with?\"\n- \"The fix is done and tests pass.\"\n- \"Option 1 is simpler. If you want it, I'll start by finding where the flag is set.\"\n- request \"explain the crash, don't change anything\", message \"The cache is stale. Should I fix it?\""
 		}
 	}
 }

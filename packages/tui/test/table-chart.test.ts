@@ -579,7 +579,7 @@ describe("renderChartSvg", () => {
 
 	it("writes a repeated row name once per group", () => {
 		const analysis = analyze(NESTED);
-		const { svg } = renderChartSvg(buildChart(analysis, { ...planChart(analysis)!, shading: "shared" })!);
+		const svg = renderChartSvg(buildChart(analysis, { ...planChart(analysis)!, shading: "shared" })!);
 		expect(svg.match(/>Sonnet 5\.5</g)).toHaveLength(1);
 		expect(svg.match(/>bash</g)).toHaveLength(2);
 	});
@@ -625,7 +625,7 @@ describe("renderChartSvg", () => {
 		plans.push(["scatter", { kind: "scatter", label: undefined, series: [0, 1], transpose: false }]);
 		for (const [markdown, plan] of plans) {
 			const analysis = markdown === "scatter" ? scatter : analyze(markdown);
-			const { svg } = renderChartSvg(buildChart(analysis, plan!)!);
+			const svg = renderChartSvg(buildChart(analysis, plan!)!);
 			// Gradients count as themed: their stops are tokens too.
 			expect(svg).not.toMatch(/(?:fill|stroke|stop-color)="(?!var\(--|none"|url\(#)/);
 			for (const [, name] of svg.matchAll(/var\(--([\w-]+)\)/g)) expect(palette[name!]).toBeDefined();
@@ -751,11 +751,11 @@ describe("table charts in assistant Markdown", () => {
 	it("asks the smart planner only for multi-series tables, once per table", async () => {
 		const planner = vi.fn<TableChartPlanner>(async request => ({ ...request.guess, kind: "heatmap" }));
 		setTableCharts("smart", planner);
-		expect(lookupTableChart(table(TIMINGS))).toMatchObject({ alt: expect.stringContaining("bar chart") });
+		expect(lookupTableChart(table(TIMINGS))).toContain("bar chart of");
 		const pick = lookupTableChart(table(BEFORE_AFTER));
 		expect(pick).toBeInstanceOf(Promise);
 		await pick;
-		expect(lookupTableChart(table(BEFORE_AFTER))).toMatchObject({ alt: expect.stringContaining("heatmap chart") });
+		expect(lookupTableChart(table(BEFORE_AFTER))).toContain("heatmap chart of");
 		expect(planner).toHaveBeenCalledTimes(1);
 	});
 
@@ -769,6 +769,6 @@ describe("table charts in assistant Markdown", () => {
 			throw new Error("no judge");
 		});
 		await lookupTableChart(table(BEFORE_AFTER));
-		expect(lookupTableChart(table(BEFORE_AFTER))).toMatchObject({ alt: expect.stringContaining("paired chart") });
+		expect(lookupTableChart(table(BEFORE_AFTER))).toContain("paired chart of");
 	});
 });

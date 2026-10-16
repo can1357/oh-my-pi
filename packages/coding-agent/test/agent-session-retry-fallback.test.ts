@@ -37,6 +37,7 @@ import {
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -838,6 +839,70 @@ describe("AgentSession retry fallback", () => {
 		);
 		expect(requestedModels).toEqual([`${fallbackModel.provider}/${fallbackModel.id}`]);
 		expect(session.messages.some(message => message.role === "user")).toBe(true);
+	});
+
+	it("lets the computer display sleep while the reserve fallback waits for the user", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled reserve fallback models");
+		const mock = createMockModel({ responses: [{ content: ["continued"] }] });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePct": 10,
+			"retry.usageReservePolicy": "confirm",
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
+			provider === primaryModel.provider
+				? {
+						state: "reserve",
+						accounts: [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								selected: true,
+								state: "reserve",
+								remainingFraction: 0.02,
+							},
+						],
+					}
+				: { state: "healthy", accounts: [] },
+		);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const owner = session.getEvalKernelOwnerId();
+		const releases: number[] = [];
+		const unregister = registerComputerController(owner, {
+			async run() {
+				throw new Error("not used");
+			},
+			async capabilities() {
+				return undefined;
+			},
+			releaseDisplay(turn) {
+				releases.push(turn);
+			},
+			async close() {},
+		});
+		let asked: { turn: number | undefined; releases: number[] } | undefined;
+		session.setUsageFallbackConfirmer(async () => {
+			asked = { turn: computerTurnInFlight(owner), releases: [...releases] };
+			return true;
+		});
+		try {
+			await session.prompt("Keep working");
+			await session.waitForIdle();
+		} finally {
+			unregister();
+		}
+		expect(asked).toEqual({ turn: undefined, releases: [1] });
+		expect(releases).toEqual([1, 2]);
 	});
 
 	it("keeps a declined reserve fallback until the selected account recovers", async () => {

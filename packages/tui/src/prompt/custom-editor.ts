@@ -39,6 +39,7 @@ import {
 	skillToken,
 } from "./composer-attachments";
 import { type MacOSSpellingFeatures, MacOSSpellingProvider } from "./macos-spelling";
+import { TypingWordTracker } from "./typing-word";
 import { hasMagicKeyword, highlightMagicKeywords, magicKeywordRanges } from "./magic-keywords";
 import type { TspEditorDecoration, TspText } from "@oh-my-pi/pi-wire";
 import { isNativeRendering } from "../native/state";
@@ -461,6 +462,8 @@ export type ComposerChipDescriptor =
  */
 export class CustomEditor extends Editor {
 	#spelling = new MacOSSpellingProvider();
+	/** The word being typed: its typo mark waits until the caret leaves it. */
+	#typing = new TypingWordTracker();
 	#wordCompletion = new WordCompletionProvider();
 	imageLinks?: readonly (string | undefined)[];
 
@@ -865,6 +868,9 @@ export class CustomEditor extends Editor {
 		}
 		// One string instance per revision: whole-buffer memos downstream hit on identity.
 		const editorText = this.#decorationText;
+		const caret = this.getCursor();
+		this.#typing.update(this.textRevision, this.#decorationLines, caret.line, caret.col, this.focused);
+		const typing = this.#typing.word;
 		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
 		if (animated) this.#scheduleShimmerFrame();
@@ -887,6 +893,7 @@ export class CustomEditor extends Editor {
 							lines: this.#decorationLines,
 							line: context.line,
 							startCol: context.startCol + sourceOffset,
+							typing,
 						},
 						span => highlightMagicKeywords(span, undefined, phase),
 					);
@@ -934,6 +941,15 @@ export class CustomEditor extends Editor {
 		);
 	};
 
+	/** Catch the typed word up with the caret first: its leaving the word (or a blur) re-describes the typo marks. */
+	override describe(cx: DescribeContext): NativeNode {
+		const caret = this.getCursor();
+		if (this.#typing.update(this.textRevision, this.getLines(), caret.line, caret.col, this.focused)) {
+			this.invalidate();
+		}
+		return super.describe(cx);
+	}
+
 	/**
 	 * TSP decorations: magic keywords shimmer (terminal-clocked) in the accent
 	 * color, chips and markers take their token colors, misspellings are marked,
@@ -974,6 +990,7 @@ export class CustomEditor extends Editor {
 
 		const queueBody = parseQueueShorthand(text);
 		const queueList = queueBody !== undefined && isQueuedMessageList(queueBody);
+		const typing = this.#typing.word;
 		let lineStart = 0;
 		for (let line = 0; line < lines.length; line++) {
 			const value = lines[line] ?? "";
@@ -987,7 +1004,8 @@ export class CustomEditor extends Editor {
 					decor.push({ from: lineStart + indent, to: lineStart + marker[0].length, s: "accent" });
 				}
 			}
-			for (const typo of this.#spelling.typoRanges(value, { editorText: text, lines, line, startCol: 0 })) {
+			const context = { editorText: text, lines, line, startCol: 0, typing };
+			for (const typo of this.#spelling.typoRanges(value, context)) {
 				decor.push({ from: lineStart + typo.start, to: lineStart + typo.start + typo.length, s: "typo" });
 			}
 			lineStart += value.length + 1;

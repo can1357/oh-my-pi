@@ -492,29 +492,31 @@ fn format_file_text(file: &StagedFile, header: &str) -> String {
 	if let Some(text) = &file.text_override {
 		return text.clone();
 	}
-	if file.op == FileOp::Delete {
-		return format!("Deleted {}", file.display);
-	}
-	let preview_source = file.preview_diff.as_deref().unwrap_or(&file.diff);
-	let preview = build_compact_diff_preview(preview_source, &CompactDiffOptions::default()).preview;
-	let mut lines: Vec<&str> = vec![header];
-	lines.extend(file.before_preview.iter().map(String::as_str));
-	let moved = file
-		.move_to
-		.as_ref()
-		.map(|m| format!("Moved to {}", m.display));
-	if let Some(moved) = &moved {
-		lines.push(moved);
-	}
-	if !preview.is_empty() {
-		lines.push(&preview);
-	}
-	lines.extend(file.after_preview.iter().map(String::as_str));
-	let body = lines
-		.into_iter()
-		.filter(|line| !line.is_empty())
-		.collect::<Vec<_>>()
-		.join("\n");
+	let body = if file.op == FileOp::Delete {
+		format!("Deleted {}", file.display)
+	} else {
+		let preview_source = file.preview_diff.as_deref().unwrap_or(&file.diff);
+		let preview =
+			build_compact_diff_preview(preview_source, &CompactDiffOptions::default()).preview;
+		let mut lines: Vec<&str> = vec![header];
+		lines.extend(file.before_preview.iter().map(String::as_str));
+		let moved = file
+			.move_to
+			.as_ref()
+			.map(|m| format!("Moved to {}", m.display));
+		if let Some(moved) = &moved {
+			lines.push(moved);
+		}
+		if !preview.is_empty() {
+			lines.push(&preview);
+		}
+		lines.extend(file.after_preview.iter().map(String::as_str));
+		lines
+			.into_iter()
+			.filter(|line| !line.is_empty())
+			.collect::<Vec<_>>()
+			.join("\n")
+	};
 	let warnings: Vec<&str> = file
 		.warnings
 		.iter()
@@ -545,16 +547,8 @@ fn prune_snapshots(
 /// errors. Unknown languages never "parse", so they never regress.
 pub fn source_parses(code: &str, path: &str) -> bool {
 	let code = if code.is_empty() { "\n" } else { code };
-	pi_ast::summary::summarize_code(pi_ast::summary::SummaryOptions {
-		code:               code.to_owned(),
-		lang:               None,
-		path:               Some(path.to_owned()),
-		min_body_lines:     None,
-		min_comment_lines:  None,
-		unfold_until_lines: None,
-		unfold_limit_lines: None,
-	})
-	.is_ok_and(|summary| summary.parsed)
+	pi_ast::summary::parse_code_status(code, None, Some(path))
+		.is_ok_and(|language| language.is_some())
 }
 
 /// The persisted bytes differ from what was sent (an editor reformatted on

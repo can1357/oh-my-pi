@@ -11,7 +11,11 @@ const BUSY_MAX_ATTEMPTS = 4;
 const BUSY_BASE_DELAY_MS = 100;
 const SQLITE_STORE_SUFFIXES = ["-wal", "-shm", "-journal", ""];
 
-type SqliteFileIdentity = string | null | undefined;
+/**
+ * A store's identity as `dev:ino:birthtimeMs`, `null` when the path holds no
+ * file, or `undefined` when the stat itself failed and no conclusion is safe.
+ */
+export type SqliteFileIdentity = string | null | undefined;
 
 /**
  * Corrupt handles held open by in-process openers awaiting recovery, keyed by
@@ -77,7 +81,13 @@ class SqliteAttemptFailure extends Error {
 	}
 }
 
-function sqliteFileIdentity(dbPath: string): SqliteFileIdentity {
+/**
+ * Identity of the file currently at `dbPath`. Quarantine moves a corrupt store
+ * aside and recreates one at the same path, so a connection cached on the path
+ * alone keeps writing to the unlinked inode: callers that hold a long-lived
+ * handle compare this before reusing it.
+ */
+export function sqliteFileIdentity(dbPath: string): SqliteFileIdentity {
 	try {
 		const stat = fs.statSync(dbPath);
 		return `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;

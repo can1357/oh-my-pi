@@ -61,7 +61,12 @@ import {
 	ConnectFrameDecoder,
 	frameConnectMessage,
 } from "./connect-frame";
-import { isResponsesFamilyApi, responsesCallComponent, transformMessages } from "./transform-messages";
+import {
+	isResponsesFamilyApi,
+	normalizeToolCallId,
+	responsesCallComponent,
+	transformMessages,
+} from "./transform-messages";
 
 /** Base host for Codeium/Windsurf's Cascade chat API (Connect protocol over HTTP/1.1). */
 export const DEVIN_API_URL = DEVIN_DEFAULT_BASE_URL;
@@ -244,9 +249,10 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 					context.messages,
 					model,
 					(id, _target, source) =>
-						(isResponsesFamilyApi(source.api) ? responsesCallComponent(id) : id)
-							.replace(/[^a-zA-Z0-9_-]/g, "_")
-							.slice(0, DEVIN_TOOL_CALL_ID_MAX_LENGTH),
+						normalizeToolCallId(
+							isResponsesFamilyApi(source.api) ? responsesCallComponent(id) : id,
+							DEVIN_TOOL_CALL_ID_MAX_LENGTH,
+						),
 					DEVIN_TOOL_CALL_ID_MAX_LENGTH,
 				),
 			};

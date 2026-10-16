@@ -10,7 +10,12 @@ import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
 import { type ComputerScreenshot, type ComputerSessionSnapshot, screenStateNotice } from "./computer/protocol";
-import { type ComputerController, ComputerSupervisor, registerComputerController } from "./computer/supervisor";
+import {
+	type ComputerController,
+	ComputerSupervisor,
+	computerTurnInFlight,
+	registerComputerController,
+} from "./computer/supervisor";
 import type { ToolSession } from "./index";
 import { renderCallChain, renderFunctionRun } from "./run-code";
 import { throwIfAborted } from "./tool-errors";
@@ -253,6 +258,7 @@ function buildComputerSnapshot(session: ToolSession, readOnly: boolean): Compute
 			: configuredMaxHeight,
 		display: cfgComputerDisplay.get(session.settings),
 		readOnly,
+		displayTurn: computerTurnInFlight(session.getEvalKernelOwnerId?.() ?? undefined),
 	};
 }
 

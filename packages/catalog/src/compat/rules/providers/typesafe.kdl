@@ -14,6 +14,9 @@ provider "typesafe" {
 			supports-tools #false
 		}
 	}
+	models "jev-latest" "jev-preview" "jev-1.13.0" "jev-1.14.0" {
+		input-modalities "text" "image"
+	}
 
 	models "*" {
 		kind "judge"

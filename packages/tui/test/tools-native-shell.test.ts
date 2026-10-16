@@ -535,6 +535,57 @@ describe("eval native run boxes", () => {
 		expect(foot(last)).toMatchObject({ state: "Failed", time: { stopped: 800 } });
 	});
 
+	it("keeps a nested tool read's preview off its status line and bounds it in a code well when expanded", () => {
+		const source = Array.from({ length: 15 }, (_, i) => (i === 0 ? "import {" : `\tname${i},`)).join("\n");
+		const statusEntries = (expanded: boolean) => {
+			const [box] = nodes(
+				evalToolRenderer.describeResult(
+					{
+						content: [{ type: "text", text: "" }],
+						details: {
+							cells: [
+								cell({
+									language: "js",
+									code: "await tool.read({ path: 'src/rollup.ts:1:raw' })",
+									statusEvents: [
+										{ op: "read", path: "src/rollup.ts:1:raw", chars: 2082, preview: source },
+										{ op: "log", message: "first\nsecond" },
+									],
+								}),
+							],
+						},
+					},
+					{ expanded, isPartial: false },
+				).body,
+			);
+			return nodes(nodes(box?.c).find(child => role(child) === "omp.run.status")?.c);
+		};
+
+		const folded = statusEntries(false);
+		expect(folded.map(entry => entry.k)).toEqual(["text", "text"]);
+		expect(spansText(folded[0])).toBe("read path=src/rollup.ts:1:raw chars=2082");
+		expect(spansText(folded[1])).toBe("log message=first second");
+		expect(collect(folded, "code")).toHaveLength(0);
+
+		const [read, log] = statusEntries(true);
+		expect(read?.k).toBe("col");
+		expect(role(read)).toBe("omp.tool.eval.status.event");
+		const [line, preview] = nodes(read?.c);
+		expect(spansText(line)).toBe("read path=src/rollup.ts:1:raw chars=2082");
+		expect(preview?.k).toBe("code");
+		expect(props(preview)).toMatchObject({
+			role: "omp.tool.eval.status.preview",
+			lang: "typescript",
+			wrap: false,
+			preview: { lines: 3 },
+		});
+		const shown = String(props(preview).text).split("\n");
+		expect(shown).toHaveLength(10);
+		expect(shown[0]).toBe("import {");
+		expect(shown[1]).not.toContain("\t");
+		expect(spansText(log)).toBe("log message=first second");
+	});
+
 	it("renders console.table values without losing surrounding output", () => {
 		const table = [
 			"┌─────────┬────┬─────┐",

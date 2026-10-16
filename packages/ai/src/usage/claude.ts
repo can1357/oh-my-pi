@@ -1,5 +1,6 @@
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { isAnthropicOAuthToken, toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { slugify } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import {
 	type CredentialRankingContext,
@@ -545,14 +546,6 @@ function buildUsageLimit(args: {
 	};
 }
 
-function slugifyClaudeLimitDisplayName(displayName: string): string {
-	return displayName
-		.trim()
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
-}
-
 /**
  * Scoped weekly rows are per-model-family counters, not account-wide windows.
  * They deliberately leave `scope.shared` unset so credential-wide exhaustion
@@ -564,7 +557,7 @@ function buildScopedWeeklyUsageLimits(entries: readonly ParsedApiLimitEntry[]): 
 	const limits: UsageLimit[] = [];
 	for (const entry of entries) {
 		if (entry.kind !== "weekly_scoped" || !entry.displayName) continue;
-		const slug = slugifyClaudeLimitDisplayName(entry.displayName);
+		const slug = slugify(entry.displayName);
 		if (!slug || seenSlugs.has(slug)) continue;
 		seenSlugs.add(slug);
 		const limit = buildUsageLimit({

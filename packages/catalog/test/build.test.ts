@@ -356,6 +356,30 @@ describe("buildModel", () => {
 	});
 });
 
+describe("TypeSafe Jev image input", () => {
+	const typesafeModel = (id: string, provider = "typesafe") =>
+		buildModel({
+			id,
+			name: id,
+			api: "typesafe",
+			provider,
+			baseUrl: "https://api.typesafe.ai",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		} satisfies ModelSpec<"typesafe">);
+
+	it("exposes images only for the four confirmed direct TypeSafe ids", () => {
+		expect(typesafeModel("jev-latest").input).toEqual(["text", "image"]);
+		expect(typesafeModel("jev-1.14.0").input).toEqual(["text", "image"]);
+		expect(typesafeModel("jev-fast").input).toEqual(["text"]);
+		expect(typesafeModel("jev-1.13").input).toEqual(["text"]);
+		expect(typesafeModel("jev-latest", "unrelated-provider").input).toEqual(["text"]);
+	});
+});
+
 describe("Responses native-resolution image compatibility", () => {
 	it.each([
 		["custom loopback", "custom", "openai-responses", "http://127.0.0.1:8080/v1", false],

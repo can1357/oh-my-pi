@@ -29,7 +29,21 @@ const JEV_PREVIEW = {
 	maxTokens: 4096,
 } as Model<Api>;
 
-const JEV_IMAGE_DECLARED = { ...JEV_PREVIEW, id: "jev-image-declared", input: ["text", "image"] } as Model<Api>;
+const OPENROUTER_DECISIONS_URL = "https://decisions.example.test/decisions";
+const OPENROUTER_JEV = {
+	...JEV_PREVIEW,
+	id: "~typesafe/jev-latest",
+	api: "openrouter-decisions",
+	provider: "openrouter",
+	baseUrl: "https://decisions.example.test",
+	input: ["text", "image"],
+} as Model<Api>;
+const OPENROUTER_TEXT_ONLY = {
+	...OPENROUTER_JEV,
+	id: "text-only-openrouter",
+	name: "Text-only native",
+	input: ["text"],
+} as Model<Api>;
 
 const LOCAL = getBundledModel("local", "qwen2.5-1.5b");
 const ONLINE = getBundledModel("anthropic", "claude-sonnet-4-6");
@@ -73,20 +87,12 @@ const IMAGE_TWO: ImageContent = {
 	data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
 	mimeType: "image/png",
 };
-
-const DECISIONS = {
-	...JEV_PREVIEW,
-	id: "~typesafe/jev-latest",
-	api: "openrouter-decisions",
-	provider: "openrouter",
-	baseUrl: "https://decisions.example.test",
-} as Model<Api>;
-const TEXT_ONLY_NATIVE = {
-	...DECISIONS,
-	id: "text-only-openrouter",
-	name: "Text-only native",
-	input: ["text"],
-} as Model<Api>;
+/** 320x320 grayscale PNG: inside Jev's 280–1568 px per-side bounds, unlike the 1x1 fixtures above. */
+const JEV_IMAGE: ImageContent = {
+	type: "image",
+	data: "iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAAAAADo+/p2AAAAeklEQVR42u3BgQAAAADDoPlTH+ECVQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMA3kU8AAamZiz8AAAAASUVORK5CYII=",
+	mimeType: "image/png",
+};
 
 const BUCKET_QUESTION: ChoiceQuestion<"trivial" | "moderate" | "hard"> = {
 	type: "choice",
@@ -104,6 +110,7 @@ function makeRegistry(models: Model<Api>[], keys: Record<string, string> = {}): 
 	const authStorage = createInMemoryAuthStorage();
 	for (const provider in keys) authStorage.keys.setRuntime(provider, keys[provider]!);
 	const registry = new ModelRegistry(authStorage, "/nonexistent/judgment-chain-models.yml");
+	// Return the supplied fixtures directly; getAvailable's normal auth filtering is intentionally bypassed.
 	vi.spyOn(registry, "getAvailable").mockReturnValue(models);
 	return registry;
 }
@@ -255,14 +262,10 @@ describe("ChainJudge", () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
 			"retry.fallbackChains": {
-				judge: [
-					`${LOCAL.provider}/${LOCAL.id}`,
-					`${DECISIONS.provider}/${DECISIONS.id}`,
-					`${ONLINE.provider}/${ONLINE.id}`,
-				],
+				judge: [`${LOCAL.provider}/${LOCAL.id}`, `${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}`],
 			},
 		});
-		const registry = makeRegistry([JEV_PREVIEW, LOCAL, DECISIONS, ONLINE], {
+		const registry = makeRegistry([JEV_PREVIEW, LOCAL, OPENROUTER_JEV, ONLINE], {
 			typesafe: "ts-key",
 			openrouter: "or-key",
 			[ONLINE.provider]: "online-key",
@@ -288,7 +291,7 @@ describe("ChainJudge", () => {
 		});
 
 		expect(result.answers.level.choice).toBe("high");
-		expect(urls).toEqual(["https://judge.example.test/v1/systemone", "https://decisions.example.test/decisions"]);
+		expect(urls).toEqual(["https://judge.example.test/v1/systemone", OPENROUTER_DECISIONS_URL]);
 		expect(local).not.toHaveBeenCalled();
 		expect(online).not.toHaveBeenCalled();
 	});
@@ -365,6 +368,70 @@ describe("ChainJudge", () => {
 		expect(serializedInput).toContain('"detail":"original"');
 	});
 
+	it("selects OpenRouter Jev after filtering the text-only native candidate", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: `${OPENROUTER_TEXT_ONLY.provider}/${OPENROUTER_TEXT_ONLY.id}` },
+			"retry.fallbackChains": {
+				judge: [`${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}`, `${VISION_CHAT.provider}/${VISION_CHAT.id}`],
+			},
+		});
+		const registry = makeRegistry([OPENROUTER_TEXT_ONLY, OPENROUTER_JEV, VISION_CHAT], {
+			openrouter: "or-key",
+			[VISION_CHAT.provider]: "vision-key",
+		});
+		let nativeUrl: string | undefined;
+		const native = vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				nativeUrl = String(url);
+				return Response.json({
+					model: OPENROUTER_JEV.id,
+					answers: { visible: { type: "noul", noul: 0.75 } },
+					usage: { input_tokens: 8, output_tokens: 0 },
+				});
+			}),
+		);
+		const chat = vi.spyOn(ai, "completeSimple");
+
+		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
+			state: "look at this",
+			questions: { visible: { type: "noul", instructions: "Is an object visible?" } },
+			images: [JEV_IMAGE],
+		});
+
+		expect(result.answers.visible.noul).toBe(0.75);
+		expect(native).toHaveBeenCalledTimes(1);
+		expect(nativeUrl).toBe(OPENROUTER_DECISIONS_URL);
+		expect(chat).not.toHaveBeenCalled();
+	});
+
+	it("uses vision chat when the image falls outside the native judge's size bounds", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: `${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}` },
+			"retry.fallbackChains": { judge: [`${VISION_CHAT.provider}/${VISION_CHAT.id}`] },
+		});
+		const registry = makeRegistry([OPENROUTER_JEV, VISION_CHAT], {
+			openrouter: "or-key",
+			[VISION_CHAT.provider]: "vision-key",
+		});
+		const native = vi.spyOn(globalThis, "fetch").mockImplementation(asGlobalFetch(async () => Response.json({})));
+		const chat = vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _context, options) => {
+			const response = reply(model, "visible: yes");
+			options?.onAttempt?.(response);
+			return response;
+		});
+
+		// IMAGE_ONE is 1x1, below Jev's 280 px minimum side, which Jev rejects rather than resizes.
+		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
+			state: "look at this",
+			questions: { visible: { type: "noul", instructions: "Is an object visible?" } },
+			images: [IMAGE_ONE],
+		});
+
+		expect(result.answers.visible.noul).toBe(1);
+		expect(native).not.toHaveBeenCalled();
+		expect(chat).toHaveBeenCalledTimes(1);
+	});
+
 	it("reports an explicit error when no candidate supports image judgments", async () => {
 		const settings = Settings.isolated({ modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` } });
 		const registry = makeRegistry([LOCAL]);
@@ -381,19 +448,15 @@ describe("ChainJudge", () => {
 		expect(local).not.toHaveBeenCalled();
 	});
 
-	it("uses vision chat after filtering image-incompatible native candidates", async () => {
+	it("uses vision chat after filtering the text-only native candidate", async () => {
 		const settings = Settings.isolated({
-			modelRoles: { judge: `${TEXT_ONLY_NATIVE.provider}/${TEXT_ONLY_NATIVE.id}` },
+			modelRoles: { judge: `${OPENROUTER_TEXT_ONLY.provider}/${OPENROUTER_TEXT_ONLY.id}` },
 			"retry.fallbackChains": {
-				judge: [
-					`${JEV_IMAGE_DECLARED.provider}/${JEV_IMAGE_DECLARED.id}`,
-					`${VISION_CHAT.provider}/${VISION_CHAT.id}`,
-				],
+				judge: [`${VISION_CHAT.provider}/${VISION_CHAT.id}`],
 			},
 		});
-		const registry = makeRegistry([TEXT_ONLY_NATIVE, JEV_IMAGE_DECLARED, VISION_CHAT], {
+		const registry = makeRegistry([OPENROUTER_TEXT_ONLY, VISION_CHAT], {
 			openrouter: "or-key",
-			typesafe: "ts-key",
 			[VISION_CHAT.provider]: "vision-key",
 		});
 		const native = vi.spyOn(globalThis, "fetch").mockImplementation(asGlobalFetch(async () => Response.json({})));
@@ -583,11 +646,11 @@ describe("ChainJudge", () => {
 	it("uses a capable session model when image filtering removes every native candidate", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
-			"retry.fallbackChains": { judge: [`${TEXT_ONLY_NATIVE.provider}/${TEXT_ONLY_NATIVE.id}`] },
+			"retry.fallbackChains": {
+				judge: [`${OPENROUTER_TEXT_ONLY.provider}/${OPENROUTER_TEXT_ONLY.id}`],
+			},
 		});
-		const registry = makeRegistry([JEV_PREVIEW, TEXT_ONLY_NATIVE], {
-			typesafe: "ts-key",
-			openrouter: "or-key",
+		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_TEXT_ONLY], {
 			[VISION_CHAT.provider]: "vision-key",
 		});
 		const native = vi.spyOn(globalThis, "fetch").mockImplementation(asGlobalFetch(async () => Response.json({})));
@@ -616,11 +679,11 @@ describe("ChainJudge", () => {
 	it("rejects an image-incapable session model after filtering text-only natives", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
-			"retry.fallbackChains": { judge: [`${TEXT_ONLY_NATIVE.provider}/${TEXT_ONLY_NATIVE.id}`] },
+			"retry.fallbackChains": {
+				judge: [`${OPENROUTER_TEXT_ONLY.provider}/${OPENROUTER_TEXT_ONLY.id}`],
+			},
 		});
-		const registry = makeRegistry([JEV_PREVIEW, TEXT_ONLY_NATIVE], {
-			typesafe: "ts-key",
-			openrouter: "or-key",
+		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_TEXT_ONLY], {
 			[TEXT_ONLY.provider]: "text-key",
 		});
 		const native = vi.spyOn(globalThis, "fetch").mockImplementation(asGlobalFetch(async () => Response.json({})));

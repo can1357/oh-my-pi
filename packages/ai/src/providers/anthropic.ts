@@ -5777,9 +5777,9 @@ export function convertAnthropicMessages(
 		compactionRequest?: AnthropicCompactionRequest;
 	},
 ): AnthropicMessageParam[] {
-	// Indices of params emitted from `developer` messages. After the main pass,
-	// the ones whose placement satisfies Anthropic's mid-conversation rules are
-	// upgraded from the `user` role to the authoritative `system` role.
+	// Indices of params emitted from agent-owned `developer` messages. After the
+	// main pass, the ones whose placement satisfies Anthropic's mid-conversation
+	// rules are upgraded from the `user` role to the authoritative `system` role.
 	const developerParams: Array<{ index: number; payload?: AnthropicMessagePayload }> = [];
 	const params: AnthropicMessageParam[] = [];
 	// Controls rendered from request-control markers. The assistant repairs
@@ -5818,7 +5818,7 @@ export function convertAnthropicMessages(
 	const transformedMessages = transformMessages(
 		messages,
 		model,
-		normalizeToolCallId,
+		id => normalizeToolCallId(id),
 		undefined,
 		undefined,
 		undefined,
@@ -5906,7 +5906,13 @@ export function convertAnthropicMessages(
 				blocks.push(...anthropicToolChangeBlocks(payload.toolChanges, isOAuthToken, model));
 				content = blocks;
 			}
-			if (msg.role === "developer") developerParams.push({ index: params.length, payload });
+			// User-attributed developer turns (text `@file` mentions, hidden extension
+			// messages) only borrow the slot: their content is the user's, so it stays
+			// on `user` instead of gaining system authority or ending the request in
+			// place of the user's turn. Provider controls only exist on `system`.
+			if (msg.role === "developer" && (msg.attribution !== "user" || hasProviderControls)) {
+				developerParams.push({ index: params.length, payload });
+			}
 			const param: AnthropicMessageParam & ConversationalUserCarrier = { role: "user", content };
 			// Record that this wire `user` came from a real conversational turn, so
 			// prompt-cache decimation can tell it apart from everything else that

@@ -15,7 +15,7 @@ const cloudModel: Model<"ollama-chat"> = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 128_000,
 	maxTokens: 8_192,
-	compat: undefined,
+	compat: { stripThinkingHistory: true },
 };
 
 function createNdjsonResponse(lines: unknown[]): Response {
@@ -175,7 +175,7 @@ test("ollama-chat clamps num_predict at the Ollama Cloud 65536 output-token cap 
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 524288,
 		maxTokens: 1_048_576,
-		compat: undefined,
+		compat: { stripThinkingHistory: true },
 	};
 
 	let requestBody: Record<string, unknown> | undefined;
@@ -213,7 +213,7 @@ test("ollama-chat does not clamp num_predict for self-hosted ollama (#3392)", as
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 131_072,
 		maxTokens: 131_072,
-		compat: undefined,
+		compat: { stripThinkingHistory: false },
 	};
 
 	let requestBody: Record<string, unknown> | undefined;

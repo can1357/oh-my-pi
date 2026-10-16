@@ -64,6 +64,7 @@ export function openaiCodexModelManagerOptions(
 		providerId: "openai-codex",
 		cacheProviderId: resolveModelCacheProviderId("openai-codex", { baseUrl }),
 		dynamicModelsAuthoritative: providerEntry("openai-codex")?.dynamicModelsAuthoritative === true,
+		keepStaticNames: providerEntry("openai-codex")?.keepBundledNames === true,
 		...(resolveAccounts
 			? {
 					fetchDynamicModels: async () => {

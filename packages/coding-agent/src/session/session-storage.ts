@@ -1007,7 +1007,9 @@ export class FileSessionStorage implements SessionStorage {
 
 	listFilesSync(dir: string, pattern: string): string[] {
 		try {
-			return Array.from(new Bun.Glob(pattern).scanSync(dir)).map(name => path.join(dir, name));
+			return Array.from(new Bun.Glob(pattern).scanSync({ cwd: dir, followSymlinks: true })).map(name =>
+				path.join(dir, name),
+			);
 		} catch {
 			return [];
 		}

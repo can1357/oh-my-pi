@@ -34,7 +34,14 @@ import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
+import {
+	isMountableUnderXdev,
+	listXdevTools,
+	planXdevPromptDocs,
+	type XdevState,
+	xdevDocsFor,
+	xdevEntries,
+} from "../tools/xdev";
 import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { resolveEditMode } from "../utils/edit-mode";
 import {
@@ -88,6 +95,8 @@ export interface SessionToolsHost {
 	evalPreludes(): readonly EvalPreludeDefinition[];
 	/** Live user-tagged model agents; candidates for the next base rebuild's advertised snapshot. */
 	sessionAgents(): readonly AgentDefinition[];
+	/** Runs a wait for the user's answer, such as an ACP client's permission request. */
+	waitForUser<T>(dialog: () => Promise<T>): Promise<T>;
 }
 
 /** Registry delta applied by the SDK's settings-gated tool reconcile. */
@@ -971,28 +980,30 @@ export class SessionTools {
 					}
 					let raced: PermissionRaceResult;
 					try {
-						const permissionPromise = bridge.requestPermission!(
-							{
-								toolCallId,
-								toolName: target.name,
-								title: permissionIntent.title,
-								...(target.name === "bash" ? { kind: "execute" } : {}),
-								status: "pending",
-								rawInput: args,
-								...(commandContent ? { content: commandContent } : {}),
-								locations: extractPermissionLocations(
-									args,
-									this.#host.sessionManager.getCwd(),
-									permissionIntent.paths,
-								),
-							},
-							PERMISSION_OPTIONS,
-							signal,
-							// The bridge cancels its pending wire dialog when the steer wins;
-							// the gate's own race above classifies the outcome either way.
-							steeringArrival,
-						).then(outcome => ({ kind: "permission" as const, outcome }));
-						raced = await Promise.race([permissionPromise, abortPromise, steerPromise]);
+						raced = await this.#host.waitForUser(() => {
+							const permissionPromise = bridge.requestPermission!(
+								{
+									toolCallId,
+									toolName: target.name,
+									title: permissionIntent.title,
+									...(target.name === "bash" ? { kind: "execute" } : {}),
+									status: "pending",
+									rawInput: args,
+									...(commandContent ? { content: commandContent } : {}),
+									locations: extractPermissionLocations(
+										args,
+										this.#host.sessionManager.getCwd(),
+										permissionIntent.paths,
+									),
+								},
+								PERMISSION_OPTIONS,
+								signal,
+								// The bridge cancels its pending wire dialog when the steer wins;
+								// the gate's own race above classifies the outcome either way.
+								steeringArrival,
+							).then(outcome => ({ kind: "permission" as const, outcome }));
+							return Promise.race([permissionPromise, abortPromise, steerPromise]);
+						});
 					} finally {
 						signal?.removeEventListener("abort", onAbort);
 						steeringArrival.removeEventListener("abort", onSteer);
@@ -1733,8 +1744,32 @@ export class SessionTools {
 		// {@link #notifyXdevMountDelta} cancel a mount followed by an unmount before
 		// any request is sent (issue #7139 reviews).
 		if (baseCatalogDelivered) {
+			// Route guidance ships in the same request's append prompt: a pending
+			// add whose route line already carries its catalog summary needs no
+			// notice line — the route renders the same name and summary. Deferred
+			// MCP discovery is the common path — the post-connect mount lands
+			// before the next user turn while the base catalog (which the check
+			// above consults) never lists routed tools — so without this check
+			// the notice would duplicate every route line verbatim. Two devices
+			// keep their notice lines: ones the bounded route projection omits
+			// (no shipped route line to lean on), and ones whose docs the prompt
+			// inlines (their route line has no summary; the notice is what
+			// delivers their docs).
+			let routedSummaryNames: Set<string> | undefined;
+			if (this.#xdev) {
+				const docsPlan = planXdevPromptDocs(
+					this.#xdev,
+					cfgToolsXdevDocs.get(this.#host.settings),
+					cfgToolsXdevInlineDevices.get(this.#host.settings),
+				);
+				routedSummaryNames = new Set(
+					projectMountedMCPXdevGuidance(collectMountedMCPToolRoutes(listXdevTools(this.#xdev)))
+						.mappings.filter(mapping => docsPlan.catalog.has(mapping.name))
+						.map(mapping => mapping.name),
+				);
+			}
 			for (const name of pending.added) {
-				if (this.#basePromptXdevNames.has(name)) announcedMounts.add(name);
+				if (this.#basePromptXdevNames.has(name) || routedSummaryNames?.has(name)) announcedMounts.add(name);
 			}
 		}
 		// Only announce a net change relative to what the model already knows (from

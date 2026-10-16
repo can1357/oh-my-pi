@@ -15,9 +15,11 @@ import {
 	SCREEN_LOCKED_CAPTURE_NOTE,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/protocol";
 import {
+	beginComputerTurnForOwner,
 	type ComputerController,
 	ComputerSupervisor,
 	type ComputerWorkerHandle,
+	endComputerTurnForOwner,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { ComputerWorkerCore, type NativeDesktopSession } from "@oh-my-pi/pi-coding-agent/tools/computer/worker";
 import type {
@@ -157,6 +159,14 @@ class FakeNativeSession implements NativeDesktopSession {
 	}
 	retire(): void {
 		this.retireCount += 1;
+	}
+	/** Display-hold calls in order: `turn` for holdDisplayUntilReleased, `release` for releaseDisplayAwake. */
+	readonly displayHolds: string[] = [];
+	holdDisplayUntilReleased(): void {
+		this.displayHolds.push("turn");
+	}
+	releaseDisplayAwake(): void {
+		this.displayHolds.push("release");
 	}
 	async listApplications() {
 		return [{ id: "test.editor", name: "Editor", path: "/Applications/Editor.app", running: true, pid: 123 }];
@@ -320,13 +330,14 @@ class MemoryTransport implements ComputerWorkerTransport {
 	}
 }
 
-const snapshot = (readOnly = false): ComputerSessionSnapshot => ({
+const snapshot = (readOnly = false, displayTurn?: number): ComputerSessionSnapshot => ({
 	cwd: import.meta.dir,
 	sessionId: crypto.randomUUID(),
 	captureMaxWidth: 1280,
 	captureMaxHeight: 896,
 	display: "active",
 	readOnly,
+	displayTurn,
 });
 
 async function runWorker(
@@ -2636,6 +2647,198 @@ describe("computer supervisor recovery", () => {
 		// cache, so a fresh session yielded undefined until a run happened.
 		const direct = await supervisor.capabilities(snapshot(true));
 		expect(direct).toEqual(capabilities);
+		await supervisor.close();
+	});
+});
+
+describe("display hold follows the agent turn", () => {
+	async function runTurn(transport: MemoryTransport, id: string, code: string, displayTurn?: number) {
+		transport.inbound({ type: "run", id, code, timeoutMs: 2_000, session: snapshot(false, displayTurn) });
+		const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+		if (message.type !== "result" || !message.ok) throw new Error(`run ${id} failed`);
+		return message.payload.returnValue;
+	}
+
+	it("holds the display for a run inside a turn, and the turn's end releases only the hold", async () => {
+		const native = new FakeNativeSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+
+		expect(
+			await runTurn(transport, "turn-1", "globalThis.kept = (await desktop.windows())[0].id; return kept;", 1),
+		).toBe("42");
+		expect(native.displayHolds).toEqual(["turn"]);
+		await native.acquireControl();
+		const before = { cancel: native.cancelCount, retire: native.retireCount, close: native.closeCount };
+
+		transport.inbound({ type: "release-display", turn: 1 });
+		expect(native.displayHolds).toEqual(["turn", "release"]);
+		expect({ cancel: native.cancelCount, retire: native.retireCount, close: native.closeCount }).toEqual(before);
+		expect(native.controlState()).toEqual({ active: true });
+
+		// A run of the ended turn that arrives after its end (work outliving the turn) is left to the grace period.
+		await runTurn(transport, "turn-1-late", "return kept;", 1);
+		expect(native.displayHolds).toEqual(["turn", "release"]);
+
+		// The next turn's first run holds it again, in the same native session and runtime.
+		expect(await runTurn(transport, "turn-2", "return kept;", 2)).toBe("42");
+		expect(native.displayHolds).toEqual(["turn", "release", "turn"]);
+	});
+
+	it("leaves a run outside any turn to the native grace period", async () => {
+		const native = new FakeNativeSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		await runTurn(transport, "no-turn", "return (await desktop.windows()).length;");
+		expect(native.displayHolds).toEqual([]);
+	});
+
+	it("holds the display again for a run whose turn goes on after a dialog", async () => {
+		const native = new FakeNativeSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		transport.inbound({
+			type: "run",
+			id: "confirming",
+			code: 'await desktop.control.acquire({ reason: "Edit" }); return 1;',
+			timeoutMs: 2_000,
+			session: snapshot(false, 1),
+		});
+		const confirm = await transport.waitFor(
+			message => message.type === "control-request" && message.runId === "confirming",
+		);
+		if (confirm.type !== "control-request") throw new Error("Expected the run's control confirmation");
+		expect(native.displayHolds).toEqual(["turn"]);
+		// The confirmation dialog ends turn 1; the answer resumes it as turn 2.
+		transport.inbound({ type: "release-display", turn: 1 });
+		transport.inbound({ type: "resume-display", from: 5, turn: 6 });
+		expect(native.displayHolds).toEqual(["turn", "release"]);
+		transport.inbound({ type: "resume-display", from: 1, turn: 2 });
+		expect(native.displayHolds).toEqual(["turn", "release", "turn"]);
+		transport.inbound({ type: "tool-reply", id: confirm.id, reply: { ok: true, value: true } });
+		await transport.waitFor(message => message.type === "result" && message.id === "confirming");
+
+		// With no run of that turn active, a resume holds nothing.
+		transport.inbound({ type: "resume-display", from: 2, turn: 3 });
+		expect(native.displayHolds).toEqual(["turn", "release", "turn"]);
+	});
+
+	it("carries a turn resumed while a cold run starts into that run's hold", async () => {
+		const native = new FakeNativeSession();
+		const transport = new MemoryTransport();
+		const created = Promise.withResolvers<void>();
+		new ComputerWorkerCore(transport, async () => {
+			await created.promise;
+			return native;
+		});
+		transport.inbound({ type: "run", id: "cold", code: "return 1;", timeoutMs: 2_000, session: snapshot(false, 1) });
+		// A dialog opens and is answered while the native session is still being created.
+		transport.inbound({ type: "release-display", turn: 1 });
+		transport.inbound({ type: "resume-display", from: 1, turn: 2 });
+		created.resolve();
+		await transport.waitFor(message => message.type === "result" && message.id === "cold");
+		expect(native.displayHolds).toEqual(["turn"]);
+	});
+
+	it("numbers runs by the owner's turn and releases the owner's sessions once when it ends", async () => {
+		const owner = `computer-turn-${crypto.randomUUID()}`;
+		const snapshots: ComputerSessionSnapshot[] = [];
+		const releases: number[] = [];
+		const session: ToolSession = { ...toolSession(), getEvalKernelOwnerId: () => owner };
+		const prelude = createComputerPrelude(session, () => ({
+			async run(_code, _timeoutMs, runSnapshot) {
+				snapshots.push(runSnapshot);
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return capabilities;
+			},
+			releaseDisplay(turn) {
+				releases.push(turn);
+			},
+			async close() {},
+		}));
+		const context = { session, toolCallId: "computer-turn", signal: new AbortController().signal };
+		const run = () => prelude.invoke({ action: "run", code: "await desktop.windows()" }, context);
+
+		// No agent turn (SDK or eval use): the run keeps the grace period.
+		await run();
+		beginComputerTurnForOwner(owner);
+		await run();
+		await run();
+		expect(releases).toEqual([]);
+		endComputerTurnForOwner(owner);
+		expect(releases).toEqual([1]);
+		endComputerTurnForOwner(owner);
+		expect(releases).toEqual([1]);
+		await run();
+		beginComputerTurnForOwner(owner);
+		await run();
+		endComputerTurnForOwner(owner);
+		expect(snapshots.map(entry => entry.displayTurn)).toEqual([undefined, 1, 1, undefined, 2]);
+		expect(releases).toEqual([1, 2]);
+		await prelude.invoke({ action: "close" }, context);
+	});
+
+	it("sends the turn's end to a running worker and starts none for it", async () => {
+		const sent: ComputerWorkerInbound[] = [];
+		let workers = 0;
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => {
+				workers += 1;
+				const worker = new SupervisorWorker(true);
+				const send = worker.send.bind(worker);
+				worker.send = message => {
+					sent.push(message);
+					send(message);
+				};
+				return worker;
+			},
+			{ startMs: 200, closeMs: 200 },
+		);
+		supervisor.releaseDisplay(1);
+		expect(workers).toBe(0);
+		await supervisor.run("1", 1_000, snapshot(false, 2));
+		supervisor.releaseDisplay(2);
+		expect(sent.map(message => message.type)).toEqual(["run", "release-display"]);
+		expect(sent[1]).toEqual({ type: "release-display", turn: 2 });
+		expect(workers).toBe(1);
+		await supervisor.close();
+	});
+
+	it("holds the display for a run whose turn goes on while its worker is still starting", async () => {
+		const native = new FakeNativeSession();
+		const ready = Promise.withResolvers<void>();
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => {
+				const transport = new MemoryTransport();
+				new ComputerWorkerCore(transport, () => native);
+				return {
+					send: message => transport.inbound(message),
+					onMessage: handler => {
+						transport.listeners.add(handler);
+						void ready.promise.then(() => handler({ type: "ready" }));
+						return () => {
+							transport.listeners.delete(handler);
+						};
+					},
+					onError: () => () => {},
+					terminate: async () => {
+						transport.inbound({ type: "close" });
+					},
+				};
+			},
+			{ startMs: 1_000, closeMs: 200 },
+		);
+		const run = supervisor.run("return 1;", 2_000, snapshot(false, 1));
+		// A dialog opens and is answered before the cold worker's handshake, so before the run reaches it.
+		supervisor.releaseDisplay(1);
+		supervisor.resumeDisplay(1, 2);
+		ready.resolve();
+		await run;
+		expect(native.displayHolds).toEqual(["turn"]);
 		await supervisor.close();
 	});
 });

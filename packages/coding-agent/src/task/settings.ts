@@ -31,8 +31,8 @@ export const cfgTaskIsolationEnabled = register({
 	ui: {
 		tab: "tasks",
 		group: "Isolation",
-		label: "Isolate Subagents",
-		description: "Run subagents in an isolated copy of the checkout and integrate their changes afterwards",
+		label: "Allow Isolated Subagents",
+		description: "Allow per-task isolation with `isolated: true`; tasks without it run in the shared checkout",
 	},
 });
 

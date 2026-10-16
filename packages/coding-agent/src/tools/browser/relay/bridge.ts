@@ -64,6 +64,8 @@ interface SessionRef {
 	runtimeEpoch: number;
 	/** Sent `Target.setAutoAttach`; only such a session is told about real child targets. */
 	autoAttach: boolean;
+	/** Asked for `Page.setInterceptFileChooserDialog`; the tab keeps it on while any of its sessions does. */
+	interceptsFileChooser: boolean;
 }
 
 interface TargetInfo {
@@ -157,7 +159,7 @@ class TabState {
 	groupId: number;
 	/** Whether `chrome.debugger` is currently attached to this tab. */
 	attached = false;
-	/** Set when attach failed or the user cancelled the debugger; cleared on navigation. */
+	/** Set when attach failed or the user cancelled the debugger bar; cleared on navigation. */
 	banned = false;
 	/** Whether targets for this tab were announced to discovering connections. */
 	announced = false;
@@ -172,6 +174,8 @@ class TabState {
 	detaching: Promise<void> | null = null;
 	/** A successful attach completed after the most recently requested relay detach. */
 	reattachedAfterDetach = false;
+	/** The relay asked the extension to close this tab (`Target.closeTarget`); its coming detach is not Chrome's own. */
+	closing = false;
 	/** True after the relay put this tab in the omp group; `ompGroupId` holds that group. */
 	grouped = false;
 	/** Group RPC in flight — suppresses duplicate requests from load-time tabUpdated bursts. */
@@ -191,6 +195,8 @@ class TabState {
 	rootRuntimeEnabling: Promise<void> | null = null;
 	/** Invalidates an in-flight Runtime enable when the debugger detaches. */
 	runtimeGeneration = 0;
+	/** Settled by the next detach Chrome reports on its own (not one the relay requested). */
+	chromeDetach = Promise.withResolvers<void>();
 
 	constructor(
 		readonly instanceId: string,
@@ -225,6 +231,10 @@ const INELIGIBLE_URL = /^(chrome|devtools|edge|view-source|chrome-extension|chro
 const RPC_TIMEOUT_MS = 20_000;
 const CDP_ERROR_METHOD_NOT_FOUND = -32601;
 const CDP_ERROR_SERVER = -32000;
+/** Chrome's answer to a command in flight when it ends the debugger attachment. */
+const DETACHED_COMMAND_ERROR = /Detached while handling command/;
+/** How long such a failure waits for the extension to report the detach itself. */
+const CHROME_DETACH_REPORT_MS = 1_000;
 
 /**
  * Multiplexing CDP bridge between downstream puppeteer connections and the
@@ -259,6 +269,8 @@ export class RelayBridge {
 	#groupQueue: TabState[] = [];
 	/** True while {@link #drainGroupQueue} runs — group RPCs must never overlap. */
 	#groupDraining = false;
+	/** Each tab's last file chooser interception transition; see {@link #serializeInterception}. */
+	#interceptionTransitions = new Map<string, Promise<void>>();
 
 	constructor(
 		opts: {
@@ -525,8 +537,13 @@ export class RelayBridge {
 		if (!conn) return;
 		this.#conns.delete(connId);
 		const touched = new Set<string>();
-		for (const ref of conn.sessions.values()) touched.add(ref.tabKey);
+		const intercepting = new Set<string>();
+		for (const ref of conn.sessions.values()) {
+			touched.add(ref.tabKey);
+			if (ref.interceptsFileChooser) intercepting.add(ref.tabKey);
+		}
 		conn.sessions.clear();
+		for (const tabKey of intercepting) this.#releaseFileChooserInterception(tabKey);
 		// Tabs this client claimed leave the omp group unless another claimant
 		// remains — session holders don't count: the long-lived registry
 		// connection holds sessions on every tab without driving any of them.
@@ -614,6 +631,19 @@ export class RelayBridge {
 				if (!(await this.#forwardToTab(conn, msg, ref.tabKey, undefined, ref.autoAttach ? announce : undefined))) {
 					ref.autoAttach = previous;
 				}
+				return;
+			}
+			if (msg.method === "Page.setInterceptFileChooserDialog") {
+				// Every session of a tab shares one debugger attachment, so interception is tab-wide here: one
+				// session switching it off must not cancel another session's chooser wait.
+				await this.#serializeInterception(ref.tabKey, async () => {
+					const previous = ref.interceptsFileChooser;
+					ref.interceptsFileChooser = msg.params?.enabled === true;
+					const params = { ...msg.params, enabled: this.#interceptsFileChooser(ref.tabKey) };
+					if (!(await this.#forwardToTab(conn, { ...msg, params }, ref.tabKey, undefined))) {
+						ref.interceptsFileChooser = previous;
+					}
+				});
 				return;
 			}
 			await this.#forwardToTab(conn, msg, ref.tabKey, undefined);
@@ -782,7 +812,13 @@ export class RelayBridge {
 			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
 			return true;
 		} catch (err) {
-			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
+			const message = err instanceof Error ? err.message : String(err);
+			// Chrome fails the root session's command in flight before it reports the detach. Hold the failure
+			// until the detach is reported, so the client gets `OMP.debuggerDetached` first and knows why.
+			if (realSessionId === undefined && tab.attached && DETACHED_COMMAND_ERROR.test(message)) {
+				await Promise.race([tab.chromeDetach.promise, Bun.sleep(CHROME_DETACH_REPORT_MS)]);
+			}
+			this.#replyError(conn, msg, message);
 			return false;
 		}
 	}
@@ -965,7 +1001,14 @@ export class RelayBridge {
 					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
 					return;
 				}
-				await this.#rpc({ op: "removeTab", tabId: removedTab.tabId }, this.#instanceFor(removedTab));
+				removedTab.closing = true;
+				try {
+					await this.#rpc({ op: "removeTab", tabId: removedTab.tabId }, this.#instanceFor(removedTab));
+				} catch (err) {
+					// The tab stays open, so a later detach is Chrome's own again.
+					removedTab.closing = false;
+					throw err;
+				}
 				this.#reply(conn, msg, { success: true });
 				return;
 			}
@@ -1134,11 +1177,28 @@ export class RelayBridge {
 		tab.attached = false;
 		tab.attaching = null;
 		this.#resetRuntime(tab);
-		tab.banned = true;
-		// The user dismissed the debugger infobar (or the attach was torn
-		// down): release the tab's omp-group membership too.
+		// Only the user pressing Cancel on Chrome's debugging bar is a refusal. Chrome also detaches when
+		// another extension's frame (a password manager's inline menu) starts loading in the tab: that tab
+		// stays adoptable and is announced again at once; an attach Chrome refuses still bans it (#ensureAttached).
+		const cancelledByUser = reason === "canceled_by_user";
+		if (cancelledByUser) tab.banned = true;
+		// A user cancel releases the tab's omp-group membership; any other detach keeps it.
 		this.#syncTabGrouping(tab);
+		// Relay-private event, ahead of the sessions' detach: a client driving the tab learns that Chrome
+		// ended the attachment, not the page, and can re-adopt it instead of waiting on a dead session. A tab
+		// the relay is closing detaches on its way out (Chrome may report that before the removal): not re-adoptable.
+		if (!tab.closing) {
+			for (const conn of this.#conns.values()) {
+				for (const pageSession of conn.sessionsForTab(tabKey, "page")) {
+					this.#emit(conn, "OMP.debuggerDetached", { reason }, pageSession);
+				}
+			}
+		}
+		// Failures of commands that were in flight are released behind the event (#forwardToTab).
+		tab.chromeDetach.resolve();
+		tab.chromeDetach = Promise.withResolvers<void>();
 		this.#retractTab(tab);
+		if (!cancelledByUser && !tab.closing && this.#eligible(tab) && !tab.discarded) this.#announceTab(tab);
 	}
 
 	#onTabRemoved(tabKey: string): void {
@@ -1183,17 +1243,7 @@ export class RelayBridge {
 		const eligible = this.#eligible(tab);
 		this.#syncTabGrouping(tab);
 		if (eligible && !tab.announced && !tab.discarded) {
-			tab.announced = true;
-			for (const conn of this.#conns.values()) {
-				if (!conn.discover) continue;
-				this.#emit(conn, "Target.targetCreated", { targetInfo: this.#tabInfo(tab, tab.attached) });
-				this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
-			}
-			for (const conn of this.#conns.values()) {
-				if (!conn.autoAttach) continue;
-				this.#attachForAutoAttach(tab);
-				break;
-			}
+			this.#announceTab(tab);
 			return;
 		}
 		if ((!eligible || tab.discarded) && tab.announced) {
@@ -1211,6 +1261,17 @@ export class RelayBridge {
 		}
 	}
 
+	/** Announce an unannounced tab to discovering connections and attach it for auto-attaching ones. */
+	#announceTab(tab: TabState): void {
+		tab.announced = true;
+		for (const conn of this.#conns.values()) {
+			if (!conn.discover) continue;
+			this.#emit(conn, "Target.targetCreated", { targetInfo: this.#tabInfo(tab, tab.attached) });
+			this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
+		}
+		this.#attachForAutoAttach(tab);
+	}
+
 	#attachForAutoAttach(tab: TabState): void {
 		let hasAutoAttach = false;
 		for (const conn of this.#conns.values()) {
@@ -1221,7 +1282,12 @@ export class RelayBridge {
 		}
 		if (!hasAutoAttach) return;
 		void this.#ensureAttached(tab, { retryAfterDiscard: true }).then(ok => {
-			if (!ok) return;
+			if (!ok) {
+				// A refused attach banned the tab until its URL changes. Withdraw the announcement too, or the URL change
+				// finds the tab already announced and neither announces nor attaches it again.
+				if (tab.banned && tab.announced && this.#tabs.get(tab.tabKey) === tab) this.#retractTab(tab);
+				return;
+			}
 			if (tab.discarded || !this.#eligible(tab) || this.#tabs.get(tab.tabKey) !== tab) {
 				this.#retractTab(tab);
 				this.#detachIfUnheld(tab.tabKey);
@@ -1370,6 +1436,7 @@ export class RelayBridge {
 			runtimeEnabling: null,
 			runtimeEpoch: 0,
 			autoAttach: false,
+			interceptsFileChooser: false,
 		});
 		return sessionId;
 	}
@@ -1378,6 +1445,7 @@ export class RelayBridge {
 		const ref = conn.sessions.get(sessionId);
 		if (!ref) return;
 		conn.sessions.delete(sessionId);
+		if (ref.interceptsFileChooser) this.#releaseFileChooserInterception(ref.tabKey);
 		const targetId = ref.kind === "tab" ? tabTargetIdFromKey(ref.tabKey) : pageTargetIdFromKey(ref.tabKey);
 		this.#emit(conn, "Target.detachedFromTarget", { sessionId, targetId }, parentSessionId);
 		// An explicit release of the last session must drop the attachment too,
@@ -1438,6 +1506,50 @@ export class RelayBridge {
 			if (conn.sessionsForTab(tabKey).length > 0) out.push(conn);
 		}
 		return out;
+	}
+
+	/** Whether any live session on a tab, across connections, has file chooser interception on. */
+	#interceptsFileChooser(tabKey: string): boolean {
+		for (const conn of this.#conns.values()) {
+			for (const ref of conn.sessions.values()) {
+				if (ref.tabKey === tabKey && ref.interceptsFileChooser) return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Switch interception off once no live session of the tab asks for it: a session that went away without disabling
+	 * it (a worker killed mid-upload) would otherwise leave the shared attachment swallowing every chooser.
+	 */
+	#releaseFileChooserInterception(tabKey: string): void {
+		void this.#serializeInterception(tabKey, async () => {
+			if (this.#interceptsFileChooser(tabKey)) return;
+			const tab = this.#tabs.get(tabKey);
+			const inst = tab?.attached ? this.#instances.get(tab.instanceId) : undefined;
+			if (!tab || !inst) return;
+			const params = { enabled: false };
+			await this.#rpc(
+				{ op: "send", tabId: tab.tabId, method: "Page.setInterceptFileChooserDialog", params },
+				inst,
+			).catch(() => {});
+		});
+	}
+
+	/**
+	 * Run a tab's interception transitions one at a time, each sending the tab-wide state as it stands when it runs.
+	 * The extension starts RPCs independently, so overlapping transitions could settle out of order; a failed one's
+	 * rollback would then restore a state another transition had already changed on the tab.
+	 */
+	#serializeInterception(tabKey: string, run: () => Promise<void>): Promise<void> {
+		const pending = this.#interceptionTransitions.get(tabKey);
+		const result = pending ? pending.then(run) : run();
+		const tail = result.catch(() => {});
+		this.#interceptionTransitions.set(tabKey, tail);
+		void tail.then(() => {
+			if (this.#interceptionTransitions.get(tabKey) === tail) this.#interceptionTransitions.delete(tabKey);
+		});
+		return result;
 	}
 
 	#emitTabAttached(conn: CdpConnection, tab: TabState): void {

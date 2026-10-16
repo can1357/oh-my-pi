@@ -2143,6 +2143,66 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[0])).not.toContain(secret);
 		});
 
+		it("drops a tool call's replay signature when it rewrites the call arguments", async () => {
+			const secret = "ADVISOR_SIGNED_ARG_SECRET_123";
+			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			// The Gemini signature attests to the arguments it was computed over,
+			// so it cannot ride along once those arguments are rewritten.
+			// https://ai.google.dev/gemini-api/docs/thought-signatures
+			const assistant = {
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "call_1",
+						name: "bash",
+						arguments: { command: `deploy --token ${secret}` },
+						thoughtSignature: "c2lnbmVkLW9yaWdpbmFsLWNhbGw=",
+					},
+				],
+				api: "google-generative-ai",
+				provider: "google",
+				model: "gemini-3.5-flash",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 1,
+			} as AssistantMessage;
+			// The advisor's own conversation replays this history to its model, so
+			// it goes through the same re-obfuscation the primary transcript does.
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [assistant] as AgentMessage[] },
+			};
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => [{ role: "user", content: "deploy it", timestamp: 2 } as AgentMessage],
+				obfuscator,
+			};
+			const runtime = new AdvisorRuntime(agent, host);
+
+			runtime.onTurnEnd();
+			await Promise.resolve();
+
+			expect(promptText(promptInputs[0])).not.toContain(secret);
+			const replayed = agent.state.messages[0];
+			expect(replayed?.role).toBe("assistant");
+			const block = (replayed as AssistantMessage).content[0];
+			expect(block?.type).toBe("toolCall");
+			expect(JSON.stringify(block?.type === "toolCall" ? block.arguments : {})).not.toContain(secret);
+			expect(block?.type === "toolCall" ? block.thoughtSignature : "kept").toBeUndefined();
+		});
+
 		it("falls back to one redacted update when a regex secret spans source messages", async () => {
 			const obfuscator = new SecretObfuscator([{ type: "regex", content: "BEGIN[\\s\\S]*END" }]);
 			const promptInputs: Array<string | AgentMessage[]> = [];

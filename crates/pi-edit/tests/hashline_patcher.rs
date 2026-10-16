@@ -117,6 +117,37 @@ async fn rejection_names_the_path_a_foreign_tag_was_issued_for() {
 	assert_eq!(workspace.read("wt/crates/a/mcp.rs").as_deref(), Some("worktree\n"));
 }
 
+#[tokio::test]
+async fn recovered_rem_reports_authored_and_deleted_paths() {
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	let target = workspace.write("correct/target.ts", "const value = 1;\n");
+	let tag = workspace.snapshot("correct/target.ts", "const value = 1;\n", None);
+	let input = format!("[wrong/target.ts#{tag}]\nREM\n");
+	let outcome = workspace
+		.apply_json(&json!({ "input": input }), &common::DiskWriter::default())
+		.await
+		.expect("recovered delete");
+
+	assert!(!target.exists());
+	let deleted = pi_edit::path_policy::canonical_key(&target);
+	assert!(
+		outcome
+			.text
+			.contains(&format!("Deleted {}", deleted.display())),
+		"{}",
+		outcome.text
+	);
+	assert!(
+		outcome.text.contains(&format!(
+			"Warnings:\nPath \"wrong/target.ts\" does not exist; matched its filename and snapshot \
+			 tag #{tag} to {}",
+			deleted.display()
+		)),
+		"{}",
+		outcome.text
+	);
+}
+
 #[test]
 fn completed_preview_surfaces_stale_hash_error() {
 	let workspace = common::Workspace::new(EditMode::Hashline);

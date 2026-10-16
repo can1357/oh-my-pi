@@ -896,9 +896,12 @@ async function runStage1Job(options: {
 						metadata: options.metadata,
 						maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
 						reasoning: clampThinkingLevelForModel(model, Effort.Low),
+						// OpenAI chat-completions owns its transient retries in the HTTP
+						// transport; never restart that budget at the provider/oneshot layers.
+						maxHttpAttempts: model.api === "openai-completions" ? 3 : undefined,
 					},
 				),
-			{ provider: model.provider },
+			{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
 		);
 
 		if (response.stopReason === "error") {
@@ -1039,9 +1042,10 @@ async function runConsolidationModel(options: {
 					metadata: options.metadata,
 					maxTokens: 8192,
 					reasoning: clampThinkingLevelForModel(model, Effort.Medium),
+					maxHttpAttempts: model.api === "openai-completions" ? 3 : undefined,
 				},
 			),
-		{ provider: model.provider },
+		{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
 	);
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "phase2 model error");

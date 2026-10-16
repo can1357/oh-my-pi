@@ -988,7 +988,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(rebuildCount).toBe(2);
 	});
 
-	it("waits for the next user prompt before delivering xd:// mount notices", async () => {
+	it("suppresses routed mount notices; unmounts still wait for the next user prompt", async () => {
 		const firstCallStarted = Promise.withResolvers<void>();
 		const releaseFirstCall = Promise.withResolvers<void>();
 		let rebuildCount = 0;
@@ -1025,43 +1025,52 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(contexts).toHaveLength(1);
 		expect(mountNoticesIn(contexts[0])).toHaveLength(0);
 
-		// The next user prompt carries one coalesced notice for both mounts.
+		// The next user prompt consumes the coalesced delta, but both devices are
+		// routed with catalog summaries: the same request's route guidance already
+		// lists them, so a notice would duplicate those lines verbatim. The delta
+		// is still consumed, keeping an eventual unmount announcable.
 		await session.prompt("again");
 		expect(contexts).toHaveLength(2);
-		const mountNotices = mountNoticesIn(contexts[1]);
-		expect(mountNotices).toHaveLength(1);
-		expect(mountNotices[0]).toContain("Available tools.");
-		expect(mountNotices[0]).toContain("xd://mcp__nucleus_search");
-		expect(mountNotices[0]).toContain("xd://mcp__nucleus_fetch");
-		expect(mountNotices[0]).not.toContain("Unmounted; writes fail:");
+		expect(mountNoticesIn(contexts[1])).toHaveLength(0);
 
-		// A later unmount is likewise held for the following user prompt.
+		// A later unmount is likewise held for the following user prompt, and
+		// announces the removal even though the mount never shipped a line.
 		await session.refreshMCPTools([search]);
 		expect(rebuildCount).toBe(3);
 		expect(contexts).toHaveLength(2);
 		await session.prompt("third");
 		const allNotices = mountNoticesIn(contexts[2]);
-		expect(allNotices).toHaveLength(2);
-		expect(allNotices[1]).toContain("Unmounted; writes fail:");
-		expect(allNotices[1]).toContain("xd://mcp__nucleus_fetch");
-		expect(allNotices[1]).not.toContain("Available tools.");
+		expect(allNotices).toHaveLength(1);
+		expect(allNotices[0]).toContain("Unmounted; writes fail:");
+		expect(allNotices[0]).toContain("xd://mcp__nucleus_fetch");
+		expect(allNotices[0]).not.toContain("Available tools.");
 	});
 
-	it("caps dynamic xd:// mount-notice summaries", async () => {
+	it("keeps capped summaries for devices the route projection omits", async () => {
 		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
 			xdev: createTestXdevState(),
 			responses: [{ content: ["ok"] }],
 		});
-		const description = `Search ${"x".repeat(XDEV_EXTERNAL_DESCRIPTION_CAP * 3)} TAIL`;
-		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", description);
-
-		await session.refreshMCPTools([search]);
+		// Route guidance lists at most 64 mappings; the overflow device has no
+		// shipped route line, so its notice line — with a capped summary — is the
+		// only inventory the model receives for it.
+		const tools = Array.from({ length: 65 }, (_, index) =>
+			createMcpCustomTool(
+				`mcp__nucleus_t${index}`,
+				"nucleus",
+				`t${index}`,
+				`Search ${index} ${"x".repeat(XDEV_EXTERNAL_DESCRIPTION_CAP * 3)} TAIL`,
+			),
+		);
+		await session.refreshMCPTools(tools);
 		await session.prompt("hello");
 
 		const notices = mountNoticesIn(contexts[0]);
 		expect(notices).toHaveLength(1);
-		expect(notices[0]).toContain("xd://mcp__nucleus_search");
+		expect(notices[0]).toContain("- xd://mcp__nucleus_t64 —");
 		expect(notices[0]).not.toContain("TAIL");
+		expect(notices[0]).not.toContain("- xd://mcp__nucleus_t0 —");
+		expect(notices[0]).not.toContain("- xd://mcp__nucleus_t63 —");
 	});
 
 	it("inlines configured late xd:// device docs in mount notices", async () => {
@@ -1178,6 +1187,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		});
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
+		cfgToolsXdevDocs.set(session.settings, "builtins");
+		cfgToolsXdevInlineDevices.set(session.settings, ["mcp__nucleus_*"]);
 
 		// fetch mounts and unmounts before the model ever hears about it → the
 		// coalesced notice must not mention it in either direction.
@@ -1237,6 +1248,8 @@ These tools became available:
 			responses: [{ content: ["ok"] }, { content: ["ok"] }],
 			initialMessages: [priorNotice],
 		});
+		cfgToolsXdevDocs.set(session.settings, "builtins");
+		cfgToolsXdevInlineDevices.set(session.settings, ["mcp__nucleus_*"]);
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
 
@@ -1384,6 +1397,8 @@ These tools became available:
 			responses: [{ content: ["ok"] }, { content: ["ok"] }],
 		});
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		cfgToolsXdevDocs.set(session.settings, "builtins");
+		cfgToolsXdevInlineDevices.set(session.settings, ["mcp__nucleus_*"]);
 
 		// Announce the device in the original transcript.
 		await session.refreshMCPTools([search]);
@@ -1420,6 +1435,8 @@ These tools became available:
 		});
 		session.subscribe(() => {});
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		cfgToolsXdevDocs.set(session.settings, "builtins");
+		cfgToolsXdevInlineDevices.set(session.settings, ["mcp__nucleus_*"]);
 
 		// A user turn establishes a branch point.
 		await session.prompt("first");
@@ -1447,6 +1464,8 @@ These tools became available:
 			responses: [{ content: ["ok"] }],
 		});
 		cfgStartupQuiet.set(session.settings, true);
+		cfgToolsXdevDocs.set(session.settings, "builtins");
+		cfgToolsXdevInlineDevices.set(session.settings, ["mcp__nucleus_*"]);
 		const notices: string[] = [];
 		session.subscribe(event => {
 			if (event.type === "notice" && event.source === "xdev") notices.push(event.message);

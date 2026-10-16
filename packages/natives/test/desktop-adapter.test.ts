@@ -29,4 +29,9 @@ describe("desktop native ABI requirements", () => {
 		const DesktopSession = adaptDesktopSession(NativeSession);
 		expect(() => new DesktopSession({ display: "active" })).toThrow(/^Unsupported:/);
 	});
+
+	it("rejects an addon built before the turn-scoped display hold", () => {
+		const Stale = adaptDesktopSession(class {});
+		expect(() => new Stale({ display: "active" })).toThrow(/holdDisplayUntilReleased, releaseDisplayAwake/);
+	});
 });

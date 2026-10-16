@@ -10,6 +10,7 @@
  */
 
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { slugify } from "@oh-my-pi/pi-utils";
 import { isUsageLimitExhausted } from "../auth/usage-report";
 import {
 	buildXAICliBillingUrl,
@@ -93,14 +94,6 @@ function buildPercentAmount(usagePercent: number): UsageAmount {
 		remainingFraction: 1 - usedFraction,
 		unit: "percent",
 	};
-}
-
-function slugifyProduct(product: string): string {
-	return product
-		.trim()
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
 }
 
 function buildPeriodWindow(period: XaiBillingPeriod): UsageWindow {
@@ -262,7 +255,7 @@ function buildLimits(config: XaiBillingConfig, accountId: string | undefined): U
 
 		for (const item of config.productUsage) {
 			const amount = buildPercentAmount(item.usagePercent);
-			const slug = slugifyProduct(item.product);
+			const slug = slugify(item.product);
 			if (!slug) continue;
 			limits.push({
 				id: `${PROVIDER_ID}:product:${slug}:1w`,

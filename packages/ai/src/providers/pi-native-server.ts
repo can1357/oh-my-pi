@@ -55,6 +55,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"repetitionPenalty",
 	"stopSequences",
 	"maxTokens",
+	"maxHttpAttempts",
 	"cacheRetention",
 	"cachedContent",
 	"userProfileId",

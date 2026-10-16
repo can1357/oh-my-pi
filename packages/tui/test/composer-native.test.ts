@@ -472,12 +472,24 @@ describe("native queued messages", () => {
 		const pills = (band.describe().c ?? []).filter(isNode);
 		expect(pills).toHaveLength(3);
 		const counts = pills.map(pill => byRole(pill, "omp.queue.count")?.p);
-		expect(counts).toEqual([{ text: "3", role: "omp.queue.count" }, undefined, undefined]);
+		expect(counts).toEqual([
+			{ text: "3 queued", title: "3 messages queued", role: "omp.queue.count" },
+			undefined,
+			undefined,
+		]);
 		band.handleNativeEvent({ type: "action", key: "x/edit", act: "queue.edit", mods: [] });
 		expect(onEdit).toHaveBeenCalledTimes(1);
 
 		const single = new QueuedMessagesBand([{ label: "Steering", messages: ["only"] }], "alt+up", onEdit);
 		expect(byRole(single.describe(), "omp.queue.count")).toBeUndefined();
+
+		// Two waiting: the first pill reads as the total ("2 queued"), never as a bare "2" position.
+		const pair = new QueuedMessagesBand([{ label: "Steering", messages: ["first", "second"] }], "alt+up", onEdit);
+		const pairCounts = (pair.describe().c ?? []).filter(isNode).map(pill => byRole(pill, "omp.queue.count")?.p);
+		expect(pairCounts).toEqual([
+			{ text: "2 queued", title: "2 messages queued", role: "omp.queue.count" },
+			undefined,
+		]);
 	});
 });
 

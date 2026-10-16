@@ -2732,11 +2732,12 @@ interface FinalizeRunArgs {
 	detached?: boolean;
 	/**
 	 * This finalize is a revival/wake or explicit follow-up turn, not the initial
-	 * run. Such turns only (re)write `<id>.md` when they produce a real `yield`
-	 * result, so a conversational peer-message wake (which never yields) cannot clobber the
-	 * completed run's artifact with a missing-yield warning body (issue #9518).
+	 * run. Structured turns only republish a real `yield`; message-result turns
+	 * republish successful, non-empty reports only when the parent or the user
+	 * requested the turn.
 	 */
 	followUpTurn?: boolean;
+	publishMessageResult?: boolean;
 	sessionFile?: string;
 	startTime: number;
 }
@@ -2805,14 +2806,21 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	// Write output artifact (input and jsonl already written in real-time).
 	// Compute output metadata for agent:// URL integration.
 	//
-	// A revival/follow-up turn only (re)writes <id>.md when it produced a real
-	// yield result. A subagent revived to answer a peer message never yields, so
-	// writing here would overwrite the completed run's authoritative artifact with
-	// a missing-yield warning body (issue #9518). The initial run is unaffected
-	// (followUpTurn is unset), preserving the documented missing-yield artifact.
+	// Structured follow-ups need a real yield so conversational wakes cannot
+	// replace the accepted artifact with a missing-yield warning (issue #9518).
+	// Message-result agents publish successful reports the parent or the user
+	// asked for, not conversational replies to peers or cancelled follow-ups.
 	let outputMeta: { lineCount: number; charCount: number } | undefined;
 	let outputPath: string | undefined;
-	if (args.artifactsDir && (!args.followUpTurn || hasYield)) {
+	const hasMessageResult =
+		args.publishMessageResult &&
+		!structured &&
+		exitCode === 0 &&
+		!done.aborted &&
+		!signal?.aborted &&
+		!monitor.runtimeLimitExceeded() &&
+		rawOutput.trim().length > 0;
+	if (args.artifactsDir && (!args.followUpTurn || hasYield || hasMessageResult)) {
 		const candidatePath = path.join(args.artifactsDir, `${id}.md`);
 		try {
 			await writeArtifact(candidatePath, rawOutput);
@@ -3143,7 +3151,8 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
  * settle (see {@link AgentSession.setIrcWakeTurnObserver}).
  *
  * The turn's output reaches the parent as an async job when the parent's
- * message woke the turn or the turn yielded, and the other waking peers via
+ * message woke the turn, the turn yielded, or a user prompt completed a
+ * message result, and the other waking peers via
  * {@link relayWakeTurnOutput}; the relay is registered as a pending reply on
  * the session up front so a `send await:true` waiter holds its "stopped
  * without replying" verdict until the relay has been delivered.
@@ -3248,7 +3257,13 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 
 		turnMonitor.setActiveSession(session);
 		const unsubscribeTurn = turnMonitor.attach(session);
-		if (wakeSources(records, id).some(source => source.from === ownerId)) registerWakeJob();
+		const ownerWoken = wakeSources(records, id).some(source => source.from === ownerId);
+		if (ownerWoken) registerWakeJob();
+		// A focused-session user prompt is the operator driving this agent (#14428):
+		// like a parent follow-up, its message-result reply is the agent's new result.
+		const userPrompted = records.some(record =>
+			record.role === "user" ? record.attribution === "user" : record.role === "developer" && record.userInitiated,
+		);
 		return async turnError => {
 			unsubscribeTurn();
 			const activeSession = turnMonitor.takeActiveSession();
@@ -3315,6 +3330,9 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					parentToolCallId: options.parentToolCallId,
 					detached: true,
 					followUpTurn: true,
+					publishMessageResult: ownerWoken || userPrompted,
+					// A cancelled wake job must not replace the accepted result.
+					signal: jobCancel.signal,
 					sessionFile,
 					startTime: turnStartTime,
 				});
@@ -3325,11 +3343,25 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					error: caught instanceof Error ? caught.message : String(caught),
 				});
 			} finally {
+				// A user-driven message result is already complete: enqueue its
+				// delivery without reserving an execution slot (which may be full).
+				const messageResult = userPrompted && options.structured === false && result?.outputPath !== undefined;
+				if (messageResult && !wakeJob && ownerId && session.asyncJobManager && result) {
+					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+					try {
+						session.asyncJobManager.publishCompleted("task", id, { text }, { id, agentId: id, ownerId });
+					} catch (error) {
+						logger.warn("User-resumed subagent result delivery failed", {
+							id,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				}
 				// Once registered, the wake job carries this turn's outcome to the
 				// parent whatever it is: the yield result, the failure that
 				// superseded it, or, for a turn that never yielded, the answer a
 				// relay would have carried.
-				if (wakeJob && yielded && result) {
+				if (wakeJob && (yielded || messageResult) && result) {
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 					const structured = result.structuredOutput;
 					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
@@ -3534,9 +3566,9 @@ export interface FollowUpTurnOptions {
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
 	/**
-	 * When set, a turn that produces a `yield` result (re)writes `<artifactsDir>/<id>.md`
-	 * so `agent://<id>` tracks the latest completion. A yield-less turn (e.g. a peer-message
-	 * wake answering a message) leaves the existing artifact intact (issue #9518).
+	 * When set, a turn that yields or completes a successful, non-empty message
+	 * result (re)writes `<artifactsDir>/<id>.md` so `agent://<id>` tracks the latest
+	 * completion. Structured turns without a yield leave the existing artifact intact.
 	 */
 	artifactsDir?: string;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
@@ -3713,6 +3745,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		parentToolCallId: options.parentToolCallId,
 		detached: true,
 		followUpTurn: true,
+		publishMessageResult: true,
 		sessionFile,
 		startTime,
 	});

@@ -369,8 +369,9 @@ export class BtwHistoryPanel implements Component, Focusable {
 	}
 	handleInput(data: string): void {
 		if (this.#composer) {
-			// The input owns every key, including panel shortcuts and pasted text.
-			this.#composer.input.handleInput(data);
+			// The input owns every key it handles, including panel shortcuts and
+			// pasted text; the line keys it ignores still scroll the answer above.
+			if (!this.#composer.input.handleInput(data)) this.#scrollDetail(data);
 			this.#options.requestRender();
 			return;
 		}
@@ -417,29 +418,35 @@ export class BtwHistoryPanel implements Component, Focusable {
 			else if (matchesKey(data, "home")) this.#select(0);
 			else if (matchesKey(data, "end")) this.#select(this.#records.length - 1);
 			else return;
-		} else {
-			const by: TspScrollBy | undefined = matchesSelectUp(data)
-				? "line-up"
-				: matchesSelectDown(data)
-					? "line-down"
-					: matchesSelectPageUp(data)
-						? "page-up"
-						: matchesSelectPageDown(data)
-							? "page-down"
-							: matchesKey(data, "home")
-								? "start"
-								: matchesKey(data, "end")
-									? "end"
-									: undefined;
-			if (by === "line-up") this.#detail.scroll(-1);
-			else if (by === "line-down") this.#detail.scroll(1);
-			else if (by === "page-up") this.#detail.page(-1);
-			else if (by === "page-down") this.#detail.page(1);
-			else if (!this.#detail.handleScrollKey(data)) return;
-			if (by) this.#scroll = { by, n: (this.#scroll?.n ?? 0) + 1 };
-			this.#followLatest = matchesKey(data, "end");
+		} else if (!this.#scrollDetail(data)) {
+			return;
 		}
 		this.#options.requestRender();
+	}
+
+	/** Apply an answer-pane scroll key; a scroll stops following the newest row unless it is End. */
+	#scrollDetail(data: string): boolean {
+		const by: TspScrollBy | undefined = matchesSelectUp(data)
+			? "line-up"
+			: matchesSelectDown(data)
+				? "line-down"
+				: matchesSelectPageUp(data)
+					? "page-up"
+					: matchesSelectPageDown(data)
+						? "page-down"
+						: matchesKey(data, "home")
+							? "start"
+							: matchesKey(data, "end")
+								? "end"
+								: undefined;
+		if (by === "line-up") this.#detail.scroll(-1);
+		else if (by === "line-down") this.#detail.scroll(1);
+		else if (by === "page-up") this.#detail.page(-1);
+		else if (by === "page-down") this.#detail.page(1);
+		else if (!this.#detail.handleScrollKey(data)) return false;
+		if (by) this.#scroll = { by, n: (this.#scroll?.n ?? 0) + 1 };
+		this.#followLatest = matchesKey(data, "end");
+		return true;
 	}
 
 	/** A large glass sheet (the list beside the reader), palette-sized while there is nothing to list. */

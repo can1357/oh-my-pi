@@ -195,7 +195,7 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
 
 # 3. Decompose
 {{#has tools "todo"}}- Update todos; skip trivial requests.
-- NEVER make a todo-only turn; batch `init` with first work, `done` with next action/verification.
+- NEVER make a todo-only turn: send `todo` in the same response as the turn's real call (parallel tool calls); `init` with first work, `done` with next action/verification.
 {{/has}}
 
 # 4. Implement

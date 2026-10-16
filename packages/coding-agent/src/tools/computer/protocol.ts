@@ -14,6 +14,11 @@ export interface ComputerSessionSnapshot {
 	captureMaxHeight: number;
 	display: string;
 	readOnly: boolean;
+	/**
+	 * The agent turn the run belongs to, if any: once it acts, the display stays awake until that turn's
+	 * `release-display` rather than for the native grace period after its last request.
+	 */
+	displayTurn?: number;
 }
 
 /** Reply envelope for a session tool invoked by desktop JavaScript. */
@@ -26,6 +31,13 @@ export type ComputerWorkerInbound =
 	| { type: "capabilities"; id: string; session: ComputerSessionSnapshot }
 	| { type: "abort"; id: string }
 	| { type: "revoke-control"; id: string }
+	/** Agent turn `turn` ended: let the display sleep now, keeping every other piece of session state. */
+	| { type: "release-display"; turn: number }
+	/**
+	 * Turn `from` stopped for a dialog and went on as turn `turn`: the run of turn `from` still active holds the display
+	 * again, until turn `turn` ends.
+	 */
+	| { type: "resume-display"; from: number; turn: number }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
 

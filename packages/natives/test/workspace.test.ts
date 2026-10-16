@@ -78,3 +78,20 @@ it.skipIf(process.platform === "win32")("finds file symlink rules without traver
 		await fs.rm(root, { recursive: true, force: true });
 	}
 });
+
+it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+	"rejects an unreadable root at depth zero when reporting directory errors",
+	async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "workspace-denied-root-"));
+		try {
+			await Bun.write(path.join(root, "present.txt"), "present");
+			await fs.chmod(root, 0o000);
+			await expect(listWorkspace({ path: root, maxDepth: 0, reportDirectoryErrors: true })).rejects.toThrow(
+				/permission denied|os error 13/i,
+			);
+		} finally {
+			await fs.chmod(root, 0o755);
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	},
+);

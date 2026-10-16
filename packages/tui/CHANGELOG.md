@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a streamed Markdown list keeping every item out of native scrollback until the turn ended, so rows that scrolled off screen were unreachable mid-stream; items in front of the newest one now retire as soon as it begins ([#13676](https://github.com/can1357/oh-my-pi/issues/13676), [#15993](https://github.com/can1357/oh-my-pi/pull/15993) by [@shgew](https://github.com/shgew))
+- Fixed SIXEL charts and SVG figures being resampled before display, which softened their text, on terminals whose cell height is not a multiple of 6 such as Windows Terminal ([#16007](https://github.com/can1357/oh-my-pi/issues/16007))
+
+## [18.11.2] - 2026-10-16
+
+### Changed
+
+- Improved nested tool status line rendering: moved preview content into a dedicated collapsible code block when expanded and limited field widths on the one-line summary
+- Suppressed typo highlighting for the word currently being typed to avoid distracting inline markers while composing
+
+### Fixed
+
+- Fixed double-clicking an extension switched off in `/extensions` in Tern not switching it back on
+- Fixed the queued-messages badge in Tern showing a bare count that read as the first message's number; it now reads `N queued`
+- Fixed table charts on TSP terminals to use SVG fences and respect terminal palette
+- Fixed table charts in Tern's native view drawing in the other appearance's colors (light labels on a light page) when omp's light/dark detection disagreed with Tern; Tern now colors them in the theme it shows, like the prose around them
+- Fixed the /btw history answer being stuck at the bottom while a follow-up is being written: Up/Down and Page Up/Down now scroll the answer without leaving the draft ([#15902](https://github.com/can1357/oh-my-pi/pull/15902) by [@H4vC](https://github.com/H4vC))
+- Fixed macOS editor spelling assistance hanging silently when the spelling service stops responding; it now reports and disables itself instead ([#12084](https://github.com/can1357/oh-my-pi/issues/12084), [#14341](https://github.com/can1357/oh-my-pi/pull/14341) by [@F0Rextasy](https://github.com/F0Rextasy))
+- Fixed a chip toggled in a multi-select setting's open submenu leaving its row and its tab's changed badge showing the old selection until the submenu was closed ([#14444](https://github.com/can1357/oh-my-pi/pull/14444) by [@F0Rextasy](https://github.com/F0Rextasy))
+- Fixed `@` file autocomplete freezing when the project contains a symlink into a very large directory tree; the fuzzy walk now stops after 1.5 s and the popup falls back to the immediate-directory listing ([#12317](https://github.com/can1357/oh-my-pi/issues/12317), [#14330](https://github.com/can1357/oh-my-pi/pull/14330) by [@F0Rextasy](https://github.com/F0Rextasy))
+- Fixed omp in a Tern pane showing the classic CLI when a shell rc, dev shell or `.env` set `TERM` to a `screen*`/`tmux*` value with no multiplexer running; only a real tmux/screen/zellij/herdr/cmux/wmux session now keeps Tern's native view off
+- omp inside devenv 2.x's reloading `devenv shell` now starts on the classic renderer instead of opening Tern's native view and abandoning it: devenv's terminal layer drops Tern's protocol, so the native view needs `devenv shell --no-reload`. The debug log now records why a Tern pane stays on the classic renderer
+- Fixed large terminal paints on Windows being split mid-row, which let other output land inside a row; writes are now cut at row boundaries ([#14187](https://github.com/can1357/oh-my-pi/pull/14187) by [@mateusant13](https://github.com/mateusant13))
+- Fixed `TUI.addStartListener()` hooks added after `start()` never running until the next stop/start cycle; a hook added to a running TUI now runs at once ([#15369](https://github.com/can1357/oh-my-pi/pull/15369) by [@LoneExile](https://github.com/LoneExile))
+- Fixed the git viewer advertising stage, discard, select and commit keys while showing a clean tree's HEAD commit, where none of them do anything; the footer and sidebar now describe the commit view ([#14347](https://github.com/can1357/oh-my-pi/issues/14347), [#14480](https://github.com/can1357/oh-my-pi/pull/14480) by [@F0Rextasy](https://github.com/F0Rextasy))
+- Fixed the status line `pr` segment keeping the previous branch's PR after switching to the default branch, a detached HEAD, or a branch without a PR ([#15455](https://github.com/can1357/oh-my-pi/pull/15455) by [@ravshansbox](https://github.com/ravshansbox))
+- Fixed the status-line footer total leaving out task subagent spend; it now reads the session's cumulative usage, the same source the interactive status line uses ([#14393](https://github.com/can1357/oh-my-pi/pull/14393) by [@F0Rextasy](https://github.com/F0Rextasy))
+- Fixed transcript rows disappearing from scrollback or reappearing out of order when bottom chrome stays taller after a turn, self-clearing HUDs close, or the composer shape changes ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
+
 ## [18.11.1] - 2026-10-15
 
 ### Added
@@ -2559,113 +2590,4 @@
 
 - Fixed viewport shift handling to prevent stale content when mixed updates remap screen rows
 
-## [13.5.0] - 2026-03-01
-
-### Breaking Changes
-
-- Removed `PI_TUI_RESIZE_CLEAR_STRATEGY`; resize behavior is no longer configurable between viewport/scrollback modes. The renderer now uses fixed semantics: width changes perform a hard reset (`3J` + full content rewrite), while height changes and diff fallbacks use viewport-scoped repainting.
-
-### Added
-
-- Added a new terminal regression suite in `packages/tui/test/render-regressions.test.ts` covering no-op render stability, targeted middle-line diffs, shrink cleanup, width-resize truncation without ghost rows, shrink/grow viewport tail anchoring, scrollback deduplication across forced redraws, overlay restore behavior, and rapid mutation convergence.
-- Expanded `packages/tui/test/overlay-scroll.test.ts` with stress coverage for overflow shrink/regrow cycles, resize oscillation, overlay toggle churn, no-op render loops, and hardware-cursor-only updates while bounding scrollback growth and blank-run artifacts.
-
-### Changed
-
-- Refactored render orchestration to explicit `hardReset` and `viewportRepaint` paths, with targeted fallbacks for offscreen diff ranges and unsafe row deltas.
-- Switched startup to `requestRender(true)` so the first frame always initializes renderer state with a forced full path.
-- Replaced legacy viewport bookkeeping (`previousViewportTop`) with `viewportTopRow` tracking and consistent screen-relative cursor calculations.
-- Updated stop-sequence cursor placement to target the visible working area and clamp to terminal bounds before final newline emission.
-- Documented the intentional performance policy of not forcing full repaint on every viewport-top shift, relying on narrower safety guards instead.
-
-### Fixed
-
-- Fixed stale/duplicated terminal cursor dedup state by synchronizing `#lastCursorSequence` in all render write paths (hard reset, viewport repaint, deleted-lines clear path, append fast path, and differential path).
-- Fixed scroll overshoot on `stop()` when content fills the viewport by clamping target row movement to valid screen rows.
-
-## [13.4.0] - 2026-03-01
-
-### Added
-
-- Added `PI_TUI_RESIZE_CLEAR_STRATEGY` environment variable to control terminal behavior on resize: `viewport` (default) clears/redraws the viewport while preserving scrollback, or `scrollback` clears all history
-
-### Changed
-
-- Changed resize redraw behavior to use configurable clear semantics (`viewport` vs `scrollback`) while keeping full content rendering for scrollback navigation
-
-### Fixed
-
-- Fixed loader component rendering lines wider than terminal width, preventing text overflow and display artifacts
-
-## [13.3.11] - 2026-02-28
-
-### Fixed
-
-- Restored terminal image protocol override and fallback detection for image rendering, including `PI_FORCE_IMAGE_PROTOCOL` support and Kitty fallback for screen/tmux/ghostty-style TERM environments.
-
-## [13.3.8] - 2026-02-28
-
-### Breaking Changes
-
-- Changed mermaid hash type from string to bigint in `getMermaidImage` callback and `extractMermaidBlocks` return type
-- Removed `mime-types` and `@types/mime-types` from dependencies
-- Removed `@xterm/xterm` from dependencies
-
-### Changed
-
-- Updated mermaid hash computation to use `Bun.hash.xxHash64()` instead of `Bun.hash().toString(16)`
-
-## [12.19.0] - 2026-02-22
-
-### Added
-
-- Added `getTopBorderAvailableWidth()` method to calculate available width for top border content accounting for border characters and padding
-
-### Fixed
-
-- Fixed stale viewport rows appearing when terminal height increases by triggering full re-render on height changes
-
-## [12.18.0] - 2026-02-21
-
-### Fixed
-
-- Fixed viewport synchronization issue by clearing scrollback when terminal state becomes desynced during full re-renders
-
-## [12.12.2] - 2026-02-19
-
-### Fixed
-
-- Fixed non-forced full re-renders clearing terminal scrollback history during streaming updates by limiting scrollback clears to explicit forced re-renders.
-
-## [12.12.0] - 2026-02-19
-
-### Added
-
-- Added PageUp/PageDown navigation for editor content and autocomplete selection to jump across long wrapped inputs faster.
-
-### Fixed
-
-- Fixed history-entry navigation anchoring (Up opens at top, Down opens at bottom) and preserved editor scroll context when max-height changes to keep cursor movement visible in long prompts ([#99](https://github.com/can1357/oh-my-pi/issues/99)).
-
-## [12.11.3] - 2026-02-19
-
-### Fixed
-
-- Fixed differential deleted-line rendering when content shrinks to empty so stale first-row content is cleared reliably.
-- Fixed incremental stale-row clearing to use erase-below semantics in synchronized output, reducing leftover-line artifacts after shrink operations.
-
-## [12.9.0] - 2026-02-17
-
-### Added
-
-- Exported `getTerminalId()` function to get a stable identifier for the current terminal, with support for TTY device paths and terminal multiplexers
-- Exported `getTtyPath()` function to resolve the TTY device path for stdin via POSIX `ttyname(3)`
-
-## [12.5.0] - 2026-02-15
-
-### Added
-
-- Added `cursorOverride` and `cursorOverrideWidth` properties to customize the end-of-text cursor glyph with ANSI-styled strings
-- Added `getUseTerminalCursor()` method to query the terminal cursor mode setting
-
-Older entries are archived in [packages/tui/CHANGELOG.md@090e359aa972](https://github.com/can1357/oh-my-pi/blob/090e359aa97267de88bd365054685c8234843cd7/packages/tui/CHANGELOG.md).
+Older entries are archived in [packages/tui/CHANGELOG.md@9748d65121ba](https://github.com/can1357/oh-my-pi/blob/9748d65121bac9589d3b136a6d839d76ec52dc2e/packages/tui/CHANGELOG.md).

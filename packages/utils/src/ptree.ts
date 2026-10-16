@@ -443,7 +443,9 @@ export class ChildProcess<In extends InMask = InMask> {
 	// ── Output helpers ───────────────────────────────────────────────────
 
 	async #throwIfAborted(): Promise<void> {
-		const exitReason = this.exitReason;
+		// A kill() issued before Bun reports the root's exit only records the
+		// reason as pending; output readers that do not wait for exit must still see it.
+		const exitReason = this.#exitReason ?? this.#exitReasonPending;
 		if (!exitReason?.aborted) return;
 		if (this.#terminating) await this.#terminating;
 		throw exitReason;
@@ -589,10 +591,11 @@ export class ChildProcess<In extends InMask = InMask> {
 	// ── Signal / timeout ─────────────────────────────────────────────────
 
 	attachSignal(signal: AbortSignal): void {
+		const cleanup = this.#exited.catch(() => {});
 		const onAbort = () => this.kill(new AbortError(signal.reason, "<cancelled>"));
 		if (signal.aborted) return void onAbort();
 		signal.addEventListener("abort", onAbort, { once: true });
-		this.#exited.catch(() => {}).finally(() => signal.removeEventListener("abort", onAbort));
+		cleanup.finally(() => signal.removeEventListener("abort", onAbort));
 	}
 
 	#clearTimeout(): void {

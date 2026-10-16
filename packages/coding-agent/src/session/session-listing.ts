@@ -662,8 +662,9 @@ export async function listAllSessions(
 	sessionsRoot: string = getSessionsDir(),
 ): Promise<SessionInfo[]> {
 	try {
-		const files = await Array.fromAsync(new Bun.Glob("*/*.jsonl").scan(sessionsRoot), name =>
-			path.join(sessionsRoot, name),
+		const files = await Array.fromAsync(
+			new Bun.Glob("*/*.jsonl").scan({ cwd: sessionsRoot, followSymlinks: true }),
+			name => path.join(sessionsRoot, name),
 		);
 		return await collectSessionsFromFiles(files, storage, true);
 	} catch {
@@ -745,7 +746,9 @@ async function newestSessionFiles(
 	try {
 		files =
 			storage instanceof FileSessionStorage
-				? await Array.fromAsync(new Bun.Glob(pattern).scan(root), name => path.join(root, name))
+				? await Array.fromAsync(new Bun.Glob(pattern).scan({ cwd: root, followSymlinks: true }), name =>
+						path.join(root, name),
+					)
 				: storage.listFilesSync(root, pattern);
 	} catch {
 		return [];
@@ -865,8 +868,9 @@ export async function listRecentProjects(
 export async function findSessionFiles(idPrefix: string, sessionsRoot: string = getSessionsDir()): Promise<string[]> {
 	if (!/^[\w-]+$/.test(idPrefix)) return [];
 	try {
-		const files = await Array.fromAsync(new Bun.Glob(`*/*_${idPrefix}*.jsonl`).scan(sessionsRoot), name =>
-			path.join(sessionsRoot, name),
+		const files = await Array.fromAsync(
+			new Bun.Glob(`*/*_${idPrefix}*.jsonl`).scan({ cwd: sessionsRoot, followSymlinks: true }),
+			name => path.join(sessionsRoot, name),
 		);
 		// `*_` can also match an underscore inside an id; keep true id-prefix matches only.
 		return files.filter(file => sessionIdFromSessionPath(file)?.startsWith(idPrefix));

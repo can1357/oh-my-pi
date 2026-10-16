@@ -39,7 +39,7 @@ import { formatTurnUsage, type TurnUsageSummary } from "../overlays/usage-row";
 import { FigureMarkdown } from "./figure-markdown";
 import { svgFigureRendering } from "./svg-figure";
 import { hasSvgFence } from "./svg-source";
-import { describeTableChart, hasChartTable, lookupTableChart, splitTableCharts } from "./table-chart";
+import { chartFence, hasChartTable, lookupTableChart, splitTableCharts } from "./table-chart";
 
 /**
  * Max wrapped rows of a turn-ending provider error rendered inline in the
@@ -919,7 +919,7 @@ export class AssistantMessageComponent extends Container {
 						children.push(markdown(`t${index}`, `t${index}`, linked(source, streaming), streaming));
 						continue;
 					}
-					// A chart follows its table as an SVG image node; the prose splits around it.
+					// A chart follows its table as an ```svg figure the terminal colors; the prose splits around it.
 					const segments = splitTableCharts(source, streaming);
 					segments.forEach((segment, part) => {
 						const slot = part === 0 ? `t${index}` : `t${index}.${part}`;
@@ -930,7 +930,7 @@ export class AssistantMessageComponent extends Container {
 						}
 						const chart = lookupTableChart(segment.table);
 						if (chart instanceof Promise) this.#awaitChart(chart);
-						else if (chart) children.push(describeTableChart(chart, slot));
+						else if (chart) children.push(markdown(slot, slot, chartFence(chart), false));
 					});
 				} else if (content.type === "thinking") {
 					const display = resolveThinkingDisplay(content, this.#proseOnlyThinking);

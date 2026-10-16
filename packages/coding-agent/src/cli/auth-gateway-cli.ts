@@ -8,7 +8,7 @@
  * `OMP_AUTH_BROKER_URL` / `auth.broker.url` precedence used elsewhere).
  *
  * Sub-verbs:
- *   - `serve [--bind=…] [--trust-proxy-headers]` — boots the gateway against the configured broker.
+ *   - `serve [--bind=…] [--trust-proxy-headers] [--clients=<file>]` — boots the gateway against the configured broker.
  *   - `stdio` — serves the same routes as JSON lines on stdin/stdout with this omp's own credentials
  *     and model roles (`auth-gateway-stdio.ts`).
  *   - `token` / `token --regenerate` — manages the gateway bearer token file.
@@ -32,7 +32,12 @@ import {
 	RemoteAuthCredentialStore,
 	type SnapshotResponse,
 } from "@oh-my-pi/pi-ai/auth-broker";
-import { DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import {
+	type AuthGatewayClient,
+	DEFAULT_AUTH_GATEWAY_BIND,
+	parseAuthGatewayClients,
+	startAuthGateway,
+} from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels, getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
@@ -73,6 +78,11 @@ export interface AuthGatewayCommandArgs {
 		 * actually usable" signal. Slower and consumes a tiny amount of quota.
 		 */
 		strict?: boolean;
+		/**
+		 * `serve`: JSON file of scoped client tokens, each limited to its own
+		 * models and broker OAuth accounts. Re-read while serving.
+		 */
+		clients?: string;
 	};
 }
 
@@ -147,6 +157,53 @@ const CATALOG_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
  * advertised.
  */
 const CREDENTIAL_SYNC_INTERVAL_MS = 10 * 1000;
+
+/**
+ * How often `serve --clients` re-reads its clients file. Its own timer rather
+ * than the credential sync's: a slow or failing broker poll must never delay
+ * revoking a client.
+ */
+const CLIENTS_RELOAD_INTERVAL_MS = 10 * 1000;
+
+/**
+ * Re-read a `--clients` file and apply it when its text changed. A file that
+ * cannot be read or parsed, or that the gateway rejects, revokes every client
+ * token until it is fixed: keeping the previous table would keep serving a
+ * client the operator just removed. Polls never overlap, so a slow read cannot
+ * apply an older file over a newer one. `appliedText` is the file text the
+ * gateway started with.
+ */
+export function createAuthGatewayClientsReloader(
+	filePath: string,
+	appliedText: string,
+	setClients: (clients: readonly AuthGatewayClient[]) => void,
+): () => Promise<void> {
+	let applied: string | undefined = appliedText;
+	let inFlight: Promise<void> | undefined;
+	const reload = async (): Promise<void> => {
+		try {
+			const text = await Bun.file(filePath).text();
+			if (text === applied) return;
+			setClients(parseAuthGatewayClients(text));
+			applied = text;
+			logger.info("auth-gateway clients reloaded", { path: filePath });
+		} catch (error) {
+			if (applied === undefined) return;
+			applied = undefined;
+			setClients([]);
+			logger.error("auth-gateway clients file rejected; refusing every client token until it is fixed", {
+				path: filePath,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	};
+	return () => {
+		inFlight ??= reload().finally(() => {
+			inFlight = undefined;
+		});
+		return inFlight;
+	};
+}
 
 /**
  * Catalog kinds the gateway has a route for: chat (`/v1/chat/completions`,
@@ -266,8 +323,25 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 			"`omp auth-gateway serve` requires OMP_AUTH_BROKER_URL (or `auth.broker.url`/`auth.broker.token` in config.yml). The gateway is itself a broker client.",
 		);
 	}
+	if (flags.clients !== undefined && flags.noAuth) {
+		throw new Error("`--clients` needs bearer auth; drop `--no-auth`.");
+	}
 	const bind = flags.bind ?? DEFAULT_AUTH_GATEWAY_BIND;
 	const gatewayToken = flags.noAuth ? null : await ensureToken();
+	// Read before touching the broker, so a bad file fails the command at once.
+	const clientsPath = flags.clients === undefined ? undefined : path.resolve(flags.clients);
+	let clientsText: string | undefined;
+	let clients: AuthGatewayClient[] | undefined;
+	if (clientsPath !== undefined) {
+		try {
+			clientsText = await Bun.file(clientsPath).text();
+			clients = parseAuthGatewayClients(clientsText);
+		} catch (error) {
+			throw new Error(
+				`Cannot load --clients ${clientsPath}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
 
 	// Build a broker-backed AuthStorage — same pattern as discoverAuthStorage()
 	// in sdk.ts. The gateway never touches local SQLite.
@@ -333,12 +407,18 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		resolveModel: (id: string) => resolveGatewayModel(id, modelById, routable),
 		listModels: () => modelById.values(),
 		excludeProviders: new Set(cfgDisabledProviders.get(settings)),
+		clients,
 	});
 	process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 	if (gatewayToken) {
 		process.stdout.write(`bearer token: ${getTokenFilePath()} (chmod 0600)\n`);
 	} else {
 		process.stdout.write(`auth: disabled (--no-auth) — any client can call this gateway\n`);
+	}
+	if (clientsPath !== undefined && clients !== undefined) {
+		process.stdout.write(
+			`client tokens: ${clients.length} from ${clientsPath} (re-read every ${CLIENTS_RELOAD_INTERVAL_MS / 1000}s)\n`,
+		);
 	}
 	process.stdout.write(`upstream broker: ${brokerConfig.url}\n`);
 
@@ -375,6 +455,15 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	}, CREDENTIAL_SYNC_INTERVAL_MS);
 	credentialSync.unref();
 
+	// Re-read the clients file so adding, changing or revoking a client needs
+	// no restart. `unref()` for the same reason as above.
+	let clientsReload: NodeJS.Timeout | undefined;
+	if (clientsPath !== undefined && clientsText !== undefined) {
+		const reloadClients = createAuthGatewayClientsReloader(clientsPath, clientsText, handle.setClients);
+		clientsReload = setInterval(() => void reloadClients(), CLIENTS_RELOAD_INTERVAL_MS);
+		clientsReload.unref();
+	}
+
 	const stopped = Promise.withResolvers<void>();
 	let shutdownStarted = false;
 	const stop = async (signal: NodeJS.Signals): Promise<void> => {
@@ -383,6 +472,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		process.stdout.write(`\nReceived ${signal}, shutting down...\n`);
 		clearInterval(catalogRefresh);
 		clearInterval(credentialSync);
+		clearInterval(clientsReload);
 		let closeError: unknown;
 		try {
 			await handle.close();

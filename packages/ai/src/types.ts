@@ -497,6 +497,11 @@ export interface StreamOptions {
 	frequencyPenalty?: number;
 	maxTokens?: number;
 	signal?: AbortSignal;
+	/**
+	 * OpenAI chat-completions HTTP attempt budget. When set, transient provider
+	 * errors are not replayed above the transport, so retries share this limit.
+	 */
+	maxHttpAttempts?: number;
 	apiKey?: string;
 	/** @internal Stored credential row serving this request, when known. */
 	credentialId?: number;

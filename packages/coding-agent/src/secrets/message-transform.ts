@@ -542,7 +542,13 @@ function deobfuscateTextBlocks(
 /**
  * Re-obfuscate assistant content before it returns to a provider after session
  * restoration, removing friendly prefixes made unsafe by this batch. A changed
- * thinking block loses its byte-bound replay signature.
+ * thinking block loses its byte-bound replay signature, and so does a tool call
+ * whose arguments changed: the Gemini `thoughtSignature` is an encrypted
+ * attestation over the function call it rides on, so replaying obfuscated
+ * arguments under a signature issued for the raw ones pairs a valid signature
+ * with a payload it does not cover. `intent` and `rawBlock` are harness-side
+ * fields the signed part never carries, so they keep it.
+ * https://ai.google.dev/gemini-api/docs/thought-signatures
  */
 function obfuscateAssistantContentForReplay(
 	obfuscator: SecretObfuscator,
@@ -574,7 +580,9 @@ function obfuscateAssistantContentForReplay(
 			const rawBlock = block.rawBlock === undefined ? undefined : obfuscate(block.rawBlock);
 			if (args === block.arguments && intent === block.intent && rawBlock === block.rawBlock) return block;
 			changed = true;
-			return { ...block, arguments: args, intent, rawBlock };
+			return args === block.arguments
+				? { ...block, intent, rawBlock }
+				: { ...block, arguments: args, intent, rawBlock, thoughtSignature: undefined };
 		}
 		return block;
 	});

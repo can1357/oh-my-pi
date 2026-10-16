@@ -1087,7 +1087,7 @@ function convertMessages(
 	promptCachePolicy: BedrockPromptCachePolicy,
 ): WireMessage[] {
 	const result: WireMessage[] = [];
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
+	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id));
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const m = transformedMessages[i];

@@ -988,6 +988,23 @@ describe("BTW follow-up composer", () => {
 		expect(h.onClose).toHaveBeenCalledTimes(1);
 	});
 
+	it("scrolls a long answer while composing a follow-up without touching the draft", () => {
+		const h = composer(vi.fn(async () => true));
+		const answer = Array.from({ length: 80 }, (_, index) => `Answer row ${index + 1}`).join("\n\n");
+		h.panel.update([{ ...h.record, answer }]);
+		h.panel.handleInput("f");
+		h.panel.pasteText("draft");
+		const pinned = Bun.stripANSI(h.panel.render(100).join("\n"));
+		expect(pinned).toContain("Answer row 80");
+		for (let i = 0; i < 10; i++) h.panel.handleInput("\x1b[5~");
+		const scrolled = Bun.stripANSI(h.panel.render(100).join("\n"));
+		expect(scrolled).toMatch(/Answer row 1 /);
+		expect(scrolled).not.toContain("Answer row 80");
+		expect(scrolled).toContain("draft");
+		h.panel.handleInput("\x1b[B");
+		expect(Bun.stripANSI(h.panel.render(100).join("\n"))).not.toBe(scrolled);
+	});
+
 	it("submits once while pending and retains the rejected draft for a successful retry", async () => {
 		const pending = Promise.withResolvers<boolean>();
 		const followUp = vi.fn((_record: BtwHistoryRecord, _question: string) => pending.promise);

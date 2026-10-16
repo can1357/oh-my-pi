@@ -1252,7 +1252,14 @@ export interface AgentContext {
  */
 export type AgentEvent =
 	// Agent lifecycle
-	| { type: "agent_start" }
+	| {
+			type: "agent_start";
+			/**
+			 * Calls of the unpaired assistant tail a continued run executes before its
+			 * first model request. They run without a new assistant `message_end`.
+			 */
+			resumedToolCallIds?: string[];
+	  }
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];

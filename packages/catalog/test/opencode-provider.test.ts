@@ -725,6 +725,38 @@ describe("OpenCode provider discovery", () => {
 		}
 	});
 
+	test("keeps bundled drop-listed Zen models when refresh fails on a multi-row authoritative cache", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-gemini37-multi-cache-"));
+		const cacheDbPath = path.join(tempDir, "models.db");
+		try {
+			const options = opencodeZenModelManagerOptions({ apiKey: "zen-account-key" });
+			const cacheProviderId = options.cacheProviderId;
+			if (!cacheProviderId) throw new Error("OpenCode Zen cache provider id is missing");
+			const bundledModels = getBundledModels("opencode-zen");
+			const gemini = bundledModels.find(model => model.id === "gemini-3.7-flash");
+			const pickle = bundledModels.find(model => model.id === "big-pickle");
+			if (!gemini || !pickle) throw new Error("OpenCode Zen bundled models are missing");
+			const managerOptions = {
+				...options,
+				staticModels: bundledModels,
+				cacheDbPath,
+				modelsDev: undefined,
+				fetchDynamicModels: async (): Promise<never> => {
+					throw new Error("offline");
+				},
+			};
+
+			for (const strategy of ["online-if-uncached", "offline"] as const) {
+				writeModelCache(cacheProviderId, Date.now(), [gemini, pickle], true, "merge-v3:pre-10543", cacheDbPath);
+				const resolved = await resolveProviderModels(managerOptions, strategy);
+				expect(resolved.models.map(model => model.id)).toContain("gemini-3.7-flash");
+				expect(resolved.models.map(model => model.id)).toContain("big-pickle");
+			}
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	test("routes opencode-go deepseek-v4-flash to the responses API", () => {
 		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-go");
 		// The gateway serves Flash on /v1/responses, not /v1/chat/completions;
@@ -771,6 +803,25 @@ describe("OpenCode provider discovery", () => {
 				requiresEffort: true,
 			},
 		});
+		expect(options.dropCachedModelIdsOnStaticMismatch).toContain(id);
+	});
+
+	test("routes live Zen Argon to the native Google endpoint (#15977)", async () => {
+		const id = "gemini-4-argon";
+		const baseUrl = "https://opencode.ai/inference/google/v1beta";
+		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-zen");
+		expect(descriptor?.resolveApi?.(id, { tool_call: true, provider: { npm: "@ai-sdk/google" } })).toEqual({
+			api: "google-generative-ai",
+			baseUrl,
+		});
+
+		const options = opencodeZenModelManagerOptions({
+			apiKey: "test-key",
+			fetch: async () => modelListResponse([id]),
+		});
+		const spec = (await options.fetchDynamicModels?.())?.find(model => model.id === id);
+		if (!spec) throw new Error("Zen did not discover Argon");
+		expect(spec).toMatchObject({ api: "google-generative-ai", baseUrl });
 		expect(options.dropCachedModelIdsOnStaticMismatch).toContain(id);
 	});
 
@@ -984,6 +1035,39 @@ describe("OpenCode provider discovery", () => {
 				maxTokens: 131_072,
 				reasoning: true,
 			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test("preserves authoritative discovered Zen models across online, online-if-uncached, and offline strategies when additiveOnly is enabled", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-zen-authoritative-cache-"));
+		try {
+			const baseOptions = opencodeZenModelManagerOptions({
+				apiKey: "free-account-key",
+				fetch: async input => {
+					if (String(input).includes("catalog.stencil.so")) return Response.json({});
+					return modelListResponse(LIVE_FREE_MODEL_IDS);
+				},
+			});
+			const managerOptions = {
+				...baseOptions,
+				cacheDbPath: path.join(tempDir, "models.db"),
+				modelsDev: baseOptions.modelsDev ? { ...baseOptions.modelsDev, additiveOnly: true } : undefined,
+			};
+			const expectedIds = [...LIVE_FREE_MODEL_IDS, "jev-1.13", "jev-1.13-free"].sort();
+
+			const online = await resolveProviderModels(managerOptions, "online");
+			expect(online.stale).toBe(false);
+			expect(online.models.map(model => model.id).sort()).toEqual(expectedIds);
+
+			const uncached = await resolveProviderModels(managerOptions, "online-if-uncached");
+			expect(uncached.stale).toBe(false);
+			expect(uncached.models.map(model => model.id).sort()).toEqual(expectedIds);
+
+			const offline = await resolveProviderModels(managerOptions, "offline");
+			expect(offline.stale).toBe(false);
+			expect(offline.models.map(model => model.id).sort()).toEqual(expectedIds);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

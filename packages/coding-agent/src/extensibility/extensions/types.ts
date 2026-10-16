@@ -881,6 +881,8 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	mcpServerName?: string;
 	/** Original MCP tool name for discovery/search metadata. */
 	mcpToolName?: string;
+	/** MCP read-only annotation, independent of the approval tier. */
+	mcpReadOnlyHint?: boolean;
 	/** Previous public name when a rename changed minting. Forwarded through
 	 *  RegisteredToolAdapter so approval falls back to legacy `deny`/`prompt`. */
 	legacyName?: string;

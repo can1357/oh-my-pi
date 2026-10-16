@@ -126,6 +126,7 @@ import {
 	type ToolDefinition,
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
+import type { UserWaitTracker } from "./extensibility/extensions/user-wait";
 import {
 	createSkillDescriptionCompressor,
 	openSessionSkillDescriptionStore,
@@ -1414,6 +1415,7 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 		strict: tool.strict,
 		mcpServerName: tool.mcpServerName,
 		mcpToolName: tool.mcpToolName,
+		mcpReadOnlyHint: tool.mcpReadOnlyHint,
 		// Forwarded so MCP tools renamed by the digit-keeping mint keep honoring
 		// legacy `deny`/`prompt` policies; RegisteredToolAdapter re-exposes it.
 		legacyName: tool.legacyName,
@@ -1603,9 +1605,28 @@ export function createAutoLearnCaptureRunner(
 
 		const captureSessionId = options.createSessionId?.() ?? Bun.randomUUIDv7();
 		const captureProviderSessionState = new Map<string, ProviderSessionState>();
+		const stripInheritedReasoning =
+			captureModel.api === "openai-responses" ||
+			(captureModel.api === "openrouter" && $env.PI_OPENROUTER_RESPONSES !== "0");
 		const captureMessages = options.sourceAgent.state.messages.map((message): AgentMessage => {
 			if (message.role === "assistant") {
-				return { ...message, responseId: undefined, providerPayload: undefined };
+				let content = message.content;
+				if (
+					stripInheritedReasoning &&
+					message.provider === captureModel.provider &&
+					message.api === captureModel.api &&
+					message.model === captureModel.id &&
+					content.some(block => block.type === "thinking" && block.thinkingSignature !== undefined)
+				) {
+					// Fresh capture transport skips inherited native reasoning on its first request.
+					// Keep that history stable when the transport warms; new capture reasoning is untouched.
+					content = content.map(block =>
+						block.type === "thinking" && block.thinkingSignature !== undefined
+							? { ...block, thinkingSignature: undefined }
+							: block,
+					);
+				}
+				return { ...message, content, responseId: undefined, providerPayload: undefined };
 			}
 			if (message.role === "user" || message.role === "developer") {
 				return { ...message, providerPayload: undefined };
@@ -3195,28 +3216,48 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const tryResolveDefaultRoleFallback = (fallbackCandidates: Model[]): boolean => {
 				const originalSelector = settings.getModelRole("default");
 				if (hasExplicitModel || !originalSelector || !cfgRetryModelFallback.get(settings)) return false;
+				const chains = expandDefaultRetryFallbackChains(cfgRetryFallbackChains.get(settings), [
+					...Object.keys(settings.getModelRoles()),
+					"default",
+				]);
+				// Candidates come only from configured chain entries. Without one,
+				// bail before any catalog lookup so the first-paint path never
+				// composes the full catalog.
+				if (!Object.values(chains).some(chain => Array.isArray(chain) && chain.length > 0)) return false;
 				const fallbackContext: RetryFallbackResolutionContext = {
-					chains: expandDefaultRetryFallbackChains(cfgRetryFallbackChains.get(settings), [
-						...Object.keys(settings.getModelRoles()),
-						"default",
-					]),
+					chains,
 					getModelRole: role => settings.getModelRole(role),
 					modelLookup: modelRegistry,
 				};
-				const allModels = modelRegistry.getAll();
-				const originalModel = parseModelPattern(originalSelector, allModels, modelMatchPreferences).model;
-				const chainKey = resolveRetryFallbackChainKey(fallbackContext, originalSelector, originalModel, "default");
-				if (!chainKey) return false;
 				const parsedOriginal = parseModelString(originalSelector, {
 					allowMaxSuffix: true,
 					allowAutoAlias: true,
 					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
 				});
+				// A provider-qualified selector resolves within its provider's
+				// catalog; only bare/alias selectors need the full catalog.
+				const originalModel = parsedOriginal
+					? (modelRegistry.find(parsedOriginal.provider, parsedOriginal.id) ??
+						parseModelPattern(
+							originalSelector,
+							modelRegistry.getProviderModels(parsedOriginal.provider),
+							modelMatchPreferences,
+						).model)
+					: parseModelPattern(originalSelector, modelRegistry.getAll(), modelMatchPreferences).model;
+				const chainKey = resolveRetryFallbackChainKey(fallbackContext, originalSelector, originalModel, "default");
+				if (!chainKey) return false;
 				const retryFallback: InitialRetryFallbackState = {
 					role: chainKey,
 					originalSelector,
 					originalThinkingLevel: parsedOriginal?.thinkingLevel,
 				};
+				// `fallbackCandidates` is the default-availability pool, which ignores
+				// cross-provider env aliases (`xai-oauth` borrowing `XAI_API_KEY`).
+				// An explicit chain entry is bound only by the `enabledModels` scope,
+				// so outside one it resolves from its provider's catalog and
+				// `hasModelAuth` decides whether requests can authenticate.
+				const scopedByEnabledModels = (cfgEnabledModels.get(settings)?.length ?? 0) > 0;
+				const disabledProviders = cfgDisabledProviders.get(settings);
 				for (const candidate of findRetryFallbackCandidates(
 					fallbackContext,
 					chainKey,
@@ -3224,7 +3265,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					originalModel,
 					{ allowMissingPrimary: true },
 				)) {
-					const resolved = parseModelPattern(candidate.raw, fallbackCandidates, modelMatchPreferences);
+					let resolved = parseModelPattern(candidate.raw, fallbackCandidates, modelMatchPreferences);
+					if (!resolved.model && !scopedByEnabledModels && !disabledProviders?.includes(candidate.provider)) {
+						resolved = parseModelPattern(
+							candidate.raw,
+							modelRegistry.getProviderModels(candidate.provider),
+							modelMatchPreferences,
+						);
+					}
 					if (!resolved.model || !hasModelAuth(resolved.model)) continue;
 					model = resolved.model;
 					initialRetryFallback = retryFallback;
@@ -3375,6 +3423,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}),
 			createAnnotationsAPI,
 		);
+		// A dialog waits for the user, not the agent: the session lets the display sleep while one is open.
+		const trackUserWait: UserWaitTracker = dialog => (hasSession ? session.waitForUser(dialog) : dialog());
+		extensionRunner.setUserWaitTracker(trackUserWait);
 
 		credentialDisabledTarget = extensionRunner;
 		for (const event of startupCredentialDisabledEvents.splice(0)) {
@@ -3395,7 +3446,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			localProtocolOptions,
 			autoApprove: options.autoApprove ?? false,
 		});
-		const toolContextStore = new ToolContextStore(getSessionContext);
+		const toolContextStore = new ToolContextStore(getSessionContext, trackUserWait);
 		toolSession.getToolContext = () => toolContextStore.getContext();
 		const setSessionActiveToolNames = (names: Iterable<string>): void => {
 			const snapshot = Array.from(names);

@@ -11,6 +11,43 @@
  */
 import { isJsonObject, type JsonObject } from "./types";
 
+// Only schema-valued keywords may contain references; literal JSON is opaque.
+const SCHEMA_MAP_KEYS: Record<string, true> = {
+	properties: true,
+	patternProperties: true,
+	dependencies: true,
+	dependentSchemas: true,
+};
+const SCHEMA_ARRAY_KEYS: Record<string, true> = { anyOf: true, oneOf: true, allOf: true, prefixItems: true };
+const SCHEMA_VALUE_KEYS: Record<string, true> = {
+	items: true,
+	additionalItems: true,
+	contains: true,
+	contentSchema: true,
+	propertyNames: true,
+	if: true,
+	// oxlint-disable-next-line unicorn/no-thenable -- JSON Schema keyword
+	then: true,
+	else: true,
+	not: true,
+	additionalProperties: true,
+	unevaluatedItems: true,
+	unevaluatedProperties: true,
+};
+
+function dereferenceKeyword(key: string, value: unknown, root: JsonObject, visiting: Set<string>): unknown {
+	if (Object.hasOwn(SCHEMA_MAP_KEYS, key) && isJsonObject(value)) {
+		const result: JsonObject = {};
+		for (const name in value) result[name] = dereferenceNode(value[name], root, visiting);
+		return result;
+	}
+	if ((Object.hasOwn(SCHEMA_ARRAY_KEYS, key) || key === "items") && Array.isArray(value)) {
+		return value.map(item => dereferenceNode(item, root, visiting));
+	}
+	if (Object.hasOwn(SCHEMA_VALUE_KEYS, key)) return dereferenceNode(value, root, visiting);
+	return value;
+}
+
 /**
  * Resolve a JSON-pointer-style `$ref` against the root schema's `$defs`
  * or `definitions` block. Returns `undefined` for external or unresolvable refs.
@@ -33,7 +70,6 @@ function resolveLocalRef(ref: string, root: JsonObject): JsonObject | undefined 
  */
 function dereferenceNode(node: unknown, root: JsonObject, visiting: Set<string>): unknown {
 	if (!isJsonObject(node)) return node;
-	if (Array.isArray(node)) return node.map(item => dereferenceNode(item, root, visiting));
 
 	const ref = node.$ref;
 	if (typeof ref === "string") {
@@ -49,14 +85,17 @@ function dereferenceNode(node: unknown, root: JsonObject, visiting: Set<string>)
 		// referencing node. In draft 2020-12 these are valid alongside $ref.
 		let hasSiblings = false;
 		for (const k in node) {
-			if (k !== "$ref") {
+			if (k !== "$ref" && k !== "$defs" && k !== "definitions") {
 				hasSiblings = true;
 				break;
 			}
 		}
 		if (!hasSiblings || !isJsonObject(inlined)) return inlined;
-		const merged: JsonObject = { ...inlined, ...node };
-		delete merged.$ref;
+		const merged: JsonObject = { ...inlined };
+		for (const key in node) {
+			if (key === "$ref" || key === "$defs" || key === "definitions") continue;
+			merged[key] = dereferenceKeyword(key, node[key], root, visiting);
+		}
 		return merged;
 	}
 
@@ -66,13 +105,7 @@ function dereferenceNode(node: unknown, root: JsonObject, visiting: Set<string>)
 		// Skip $defs/definitions — they get inlined into consumers
 		if (key === "$defs" || key === "definitions") continue;
 
-		if (Array.isArray(value)) {
-			result[key] = value.map(item => dereferenceNode(item, root, visiting));
-		} else if (isJsonObject(value)) {
-			result[key] = dereferenceNode(value, root, visiting);
-		} else {
-			result[key] = value;
-		}
+		result[key] = dereferenceKeyword(key, value, root, visiting);
 	}
 	return result;
 }

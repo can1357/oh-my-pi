@@ -68,6 +68,8 @@ export interface OpenAIStreamRequestInit {
 	body: unknown;
 	signal: AbortSignal;
 	fetch?: FetchImpl;
+	/** Override the default transport attempt budget for this request. */
+	maxAttempts?: number;
 	/** Optional caller-specific gate composed with shared transport retry exclusions. */
 	shouldRetryResponse?: (response: Response, bodyText: string) => boolean | Promise<boolean>;
 	/**
@@ -102,7 +104,7 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		body: JSON.stringify(init.body),
 		signal: init.signal,
 		fetch: init.fetch,
-		maxAttempts: DEFAULT_MAX_ATTEMPTS,
+		maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
 		// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 		// surfaces immediately instead of being slept-and-retried here; session
 		// recovery owns its backoff/fallback (issue #8854).

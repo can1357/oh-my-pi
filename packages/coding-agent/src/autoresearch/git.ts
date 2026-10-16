@@ -1,5 +1,6 @@
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { slugify } from "@oh-my-pi/pi-utils";
 import type { ExtensionAPI } from "../extensibility/extensions";
 import { normalizePathSpec } from "./helpers";
 
@@ -184,7 +185,8 @@ export function normalizeStatusPath(rawPath: string): string {
 }
 
 async function allocateBranchName(repository: VcsGitRepo, goal: string | null): Promise<string> {
-	const baseName = `${AUTORESEARCH_BRANCH_PREFIX}${slugifyGoal(goal)}-${currentDateStamp()}`;
+	const goalSlug = slugify(goal ?? "", { maxLength: BRANCH_NAME_MAX_LENGTH }) || "session";
+	const baseName = `${AUTORESEARCH_BRANCH_PREFIX}${goalSlug}-${currentDateStamp()}`;
 	let candidate = baseName;
 	let suffix = 2;
 	while (await repository.refExists(`refs/heads/${candidate}`)) {
@@ -192,15 +194,6 @@ async function allocateBranchName(repository: VcsGitRepo, goal: string | null): 
 		suffix += 1;
 	}
 	return candidate;
-}
-
-function slugifyGoal(goal: string | null): string {
-	const normalized = (goal ?? "")
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
-	const trimmed = normalized.slice(0, BRANCH_NAME_MAX_LENGTH).replace(/-+$/g, "");
-	return trimmed || "session";
 }
 
 function currentDateStamp(): string {

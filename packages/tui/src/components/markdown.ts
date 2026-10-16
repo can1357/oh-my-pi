@@ -1779,6 +1779,33 @@ function loosenListItem(item: Tokens.ListItem): Tokens.ListItem {
 	};
 }
 
+const REFERENCE_LABEL_RE = /\[[^[\]]*[^\s[\]][^[\]]*\]/;
+const LABEL_FREE_TOKENS = new Set(["checkbox", "code", "codespan", "escape", "html", "image", "math"]);
+
+function labelSource(tokens: readonly Token[]): string {
+	let source = "";
+	for (const token of tokens) {
+		if (token.type === "list") {
+			for (const item of (token as Tokens.List).items) source += `${labelSource(item.tokens)}\n\n`;
+		} else if (token.type === "table") {
+			const table = token as TableToken;
+			for (const cell of [...table.header, ...table.rows.flat()]) source += `${labelSource(cell.tokens ?? [])}\n\n`;
+		} else if ("tokens" in token && token.tokens) {
+			source += labelSource(token.tokens);
+		} else {
+			source += LABEL_FREE_TOKENS.has(token.type) ? " " : token.raw;
+		}
+	}
+	return source;
+}
+
+/** Whether a reference definition arriving later could still turn part of `item` into a link. */
+function hasUnresolvedReferenceLabel(item: Tokens.ListItem): boolean {
+	return labelSource(item.tokens)
+		.split(BLANK_LINE_RE)
+		.some(block => REFERENCE_LABEL_RE.test(block));
+}
+
 function formatHyperlink(text: string, target: string): string {
 	if (!TERMINAL.hyperlinks || !target) {
 		return text;
@@ -2145,6 +2172,7 @@ interface StreamingListCache {
 	start: number;
 	tailStart: number;
 	stableCount: number;
+	referenceStop?: number;
 	list: Tokens.List;
 }
 /**
@@ -2232,6 +2260,13 @@ export class Markdown implements Component {
 	// The frozen prefix's leading run in front of the first of those openers:
 	// no append can change its tokens, so getLastRenderStableText publishes it.
 	#streamSettledText?: string;
+	// The text in front of the newest top-level item of a list that is still
+	// streaming as the last block. Once an item's marker line has ended, no
+	// append can add to the items in front of it, and #renderList draws each
+	// item from its own tokens alone, so their rows are final. Kept while later
+	// texts extend it, so the published prefix never shrinks when the list
+	// stops being the last block.
+	#streamListSettledText?: string;
 	// The prefix before a rewind that only a closer on the still-growing last
 	// line caused. Once a later text holds no closer line after it, that
 	// prefix is right again, so #lexTokens puts it back.
@@ -2411,14 +2446,18 @@ export class Markdown implements Component {
 	}
 
 	/**
-	 * Width-independent source prefix of the last render ending at a frozen
-	 * Markdown block boundary that no append can move: it stops in front of a
-	 * display-math opener whose block an append could still close. Only
+	 * Width-independent source prefix of the last render that no append can
+	 * change: up to a frozen Markdown block boundary, stopping in front of a
+	 * display-math opener whose block an append could still close, or, while a
+	 * list streams as the last block, up to its newest top-level item. Only
 	 * meaningful while streaming (transient render cache on); grows
 	 * monotonically under append-only `setText`.
 	 */
 	getLastRenderStableText(): string {
-		return this.#transientRenderCache ? (this.#streamSettledText ?? "") : "";
+		if (!this.#transientRenderCache) return "";
+		const settled = this.#streamSettledText ?? "";
+		const list = this.#streamListSettledText;
+		return list !== undefined && list.length > settled.length ? list : settled;
 	}
 
 	get transientRenderCache(): boolean {
@@ -2589,6 +2628,9 @@ export class Markdown implements Component {
 	#checkpointStreamingList(text: string, tokens: Token[]): void {
 		const previous = this.#streamingListCache;
 		this.#streamingListCache = undefined;
+		if (this.#streamListSettledText !== undefined && !text.startsWith(this.#streamListSettledText)) {
+			this.#streamListSettledText = undefined;
+		}
 		let index = tokens.length - 1;
 		while (tokens[index]?.type === "space") index--;
 		const token = tokens[index];
@@ -2603,6 +2645,7 @@ export class Markdown implements Component {
 		let cursor = canResume ? previous.tailStart : start;
 		let tailStart = start;
 		let stableCount = 0;
+		let referenceStop = canResume ? previous.referenceStop : undefined;
 		const indent = /^ */.exec(list.raw)![0].length;
 		for (let i = canResume ? previous.stableCount : 0; i < list.items.length; i++) {
 			const item = list.items[i]!;
@@ -2614,9 +2657,34 @@ export class Markdown implements Component {
 				tailStart = position;
 				stableCount = i;
 			}
+			if (referenceStop === undefined && hasUnresolvedReferenceLabel(item)) referenceStop = tailStart;
 			cursor = position + item.raw.length;
 		}
-		this.#streamingListCache = { text, before: tokens.slice(0, index), start, tailStart, stableCount, list };
+		// Items from stableCount on are scanned again next time and may still
+		// resolve their own labels, so only a finished item's label is kept.
+		if (referenceStop !== undefined && referenceStop >= tailStart) referenceStop = undefined;
+		this.#streamingListCache = {
+			text,
+			before: tokens.slice(0, index),
+			start,
+			tailStart,
+			stableCount,
+			referenceStop,
+			list,
+		};
+		// No append can add to an item once a later one has begun, but a later
+		// reference definition can still restyle a bracketed label in it. The
+		// list must also start right at the settled boundary: in front of it may
+		// sit a display-math opener whose closer, arriving after the list, would
+		// turn the whole run, list included, into one math block.
+		const settledEnd = referenceStop ?? tailStart;
+		if (
+			settledEnd > start &&
+			(this.#streamSettledText?.length ?? 0) === start &&
+			settledEnd > (this.#streamListSettledText?.length ?? 0)
+		) {
+			this.#streamListSettledText = text.slice(0, settledEnd);
+		}
 	}
 
 	/**
@@ -2629,6 +2697,7 @@ export class Markdown implements Component {
 		this.#streamPrefixTokens = undefined;
 		this.#streamPrefixOpeners = NO_OPENERS;
 		this.#streamSettledText = undefined;
+		this.#streamListSettledText = undefined;
 		this.#streamPrefixLineCache = undefined;
 		this.#tailRowCache = undefined;
 		this.#listItemRowsCache = undefined;

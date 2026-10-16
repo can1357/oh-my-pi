@@ -166,8 +166,12 @@ native TSP surfaces keep their own image transport.
 ### Native rendering (Tern Surface Protocol)
 
 `ProcessTerminal` also sends the TSP `hello` query (APC `tsp`) behind a `tsp`
-DA1 sentinel owner. `PI_TUI_NATIVE=0` disables it; multiplexers and Bun tests
-skip it by default, while `PI_TUI_NATIVE=1` forces the probe. A supported-version
+DA1 sentinel owner. `PI_TUI_NATIVE=0` disables it; multiplexers, devenv's
+reloading shell (`DEVENV_RELOAD_FILE`: its terminal layer forwards DA1 but drops
+APC) and Bun tests skip it by default, while `PI_TUI_NATIVE=1` forces the probe
+(tmux still needs `@tern-tsp`). With `TERM_PROGRAM=tern` only a multiplexer's
+session marker counts, not a `screen*`/`tmux*` `TERM` alone, and the debug log
+records once why the pane stayed on rows. A supported-version
 reply switches `TUI` to `native/backend.ts`: components
 are described (`describe()`, or `rows` fallback from `render()`), reconciled
 into document ops (`native/reconcile.ts`) and sent as frames, paced by the

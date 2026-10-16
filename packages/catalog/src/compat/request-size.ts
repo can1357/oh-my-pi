@@ -26,12 +26,14 @@ export function resolveInlineImageByteBudget(model: Model, officialEndpoint: boo
 }
 
 /**
- * Most images one request to this deployment may carry, or `undefined` when no rule names the host. The
+ * Most images one request to this deployment may carry, or `undefined` when no rule names the host. A configured
+ * `model.imageCountBudget` wins: the user knows the host behind a custom gateway. Otherwise the
  * `official-image-count-budget` axis replaces `image-count-budget` only when `officialEndpoint` says the request
  * reaches the model's official endpoint (see {@link resolveInlineImageByteBudget}); a rerouted endpoint keeps the
  * provider's generic budget.
  */
 export function resolveImageCountBudget(model: Model, officialEndpoint: boolean): number | undefined {
+	if (model.imageCountBudget !== undefined) return model.imageCountBudget;
 	const policy = resolveCatalogPolicy(model);
 	const value = (officialEndpoint && policy.officialImageCountBudget) || policy.imageCountBudget;
 	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;

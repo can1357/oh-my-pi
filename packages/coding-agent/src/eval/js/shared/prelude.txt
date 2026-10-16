@@ -57,11 +57,17 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	const read = async (path, opts, ...rest) => {
 		const options = optionsArg("read", opts, rest, ["offset", "limit"], "{ offset, limit }");
 		if (typeof path === "string" && /^artifact:\/\/\d+$/i.test(path)) {
-			const rawPath = withReadLineSelector(`${path}:raw`, options);
-			if (rawPath === null) return "";
+			if (typeof options.limit === "number" && options.limit <= 0) return "";
 			const text = callHelper("hasRoot", path) ? await callHelper("read", path, options) : undefined;
+			if (text !== undefined) return text;
 			// Another session's, or no artifacts dir was injected: the read tool searches every registered one.
-			return text ?? readToolText(rawPath);
+			// A bounded raw read locates the file without inlining it; a bare `:raw` read refuses files over 50 KB.
+			const located = await globalThis.__omp_call_tool__("read", { path: `${path}:raw:1-1` });
+			const filePath = located?.details?.resolvedPath;
+			// Once located, the file is read like this session's artifacts and plain paths: read() is no read-tool policy gate.
+			if (typeof filePath === "string") return callHelper("read", filePath, options);
+			// An extension's replacement `read` may name no file: its own text for the selected lines is the answer.
+			return readToolText(withReadLineSelector(`${path}:raw`, options));
 		}
 		if (shouldDelegateRead(path)) {
 			const toolPath = withReadLineSelector(path, options);

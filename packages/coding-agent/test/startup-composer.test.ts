@@ -62,6 +62,14 @@ class CountingTerminal extends VirtualTerminal {
 	}
 }
 
+class WriteTrackingTerminal extends CountingTerminal {
+	written = "";
+	override write(data: string): void {
+		this.written += data;
+		super.write(data);
+	}
+}
+
 class ThrowingStartTerminal extends CountingTerminal {
 	override start(): void {
 		this.starts += 1;
@@ -493,6 +501,40 @@ describe("Composer prepaint", () => {
 			expect(mode.editor.getExpandedText()).toBe("");
 		} finally {
 			releaseInit.resolve();
+			mode.stop();
+			lease.dispose();
+			await testSession.cleanup();
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("turns kitty enhanced paste on when the interactive mode adopts an already started composer", async () => {
+		// The prepaint composer starts the TUI before InteractiveMode wires the input
+		// controller, so enhanced paste (ESC[?5522h) cannot wait for a start event.
+		const terminal = new WriteTrackingTerminal();
+		const composer = new Composer({ preferences: config, terminal });
+		composer.start();
+		const lease = new ComposerLease(composer);
+		const testSession = await createTestSession({ inMemory: true });
+		const mode = new InteractiveMode(
+			testSession.session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			lease.composer,
+		);
+		lease.adopt();
+		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+
+		try {
+			expect(terminal.written).not.toContain("\x1b[?5522h");
+			await mode.init({ suppressWelcomeIntro: true });
+			expect(terminal.written.split("\x1b[?5522h")).toHaveLength(2);
+			expect(terminal.starts).toBe(1);
+		} finally {
 			mode.stop();
 			lease.dispose();
 			await testSession.cleanup();

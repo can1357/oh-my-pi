@@ -363,10 +363,7 @@ export class AsyncJobManager {
 			);
 		}
 
-		const id = this.#resolveJobId(options?.id);
-		this.#suppressedDeliveries.delete(id);
-		this.#consumedJobResults.delete(id);
-		this.#releasedForegroundJobs.delete(id);
+		const id = this.#claimJobId(options?.id);
 		if (options?.foreground) this.#suppressedDeliveries.add(id);
 		const abortController = new AbortController();
 		const startTime = Date.now();
@@ -435,6 +432,39 @@ export class AsyncJobManager {
 		})();
 
 		this.#jobs.set(id, job);
+		return id;
+	}
+
+	/**
+	 * Deliver an already-completed result through the normal owner-scoped job
+	 * queue without consuming a running-job slot.
+	 */
+	publishCompleted(
+		type: AsyncJobType,
+		label: string,
+		result: AsyncJobRunResult,
+		options: { id?: string; ownerId?: string; agentId?: string },
+	): string {
+		if (this.#disposed) throw new Error("Async job manager is disposed");
+		const id = this.#claimJobId(options.id);
+		const now = Date.now();
+		const job: AsyncJob = {
+			id,
+			type,
+			status: "completed",
+			startTime: now,
+			endTime: now,
+			label,
+			abortController: new AbortController(),
+			promise: Promise.resolve(),
+			ownerId: options.ownerId,
+			agentId: options.agentId,
+			resultText: result.text,
+			structured: result.structured,
+		};
+		this.#jobs.set(id, job);
+		this.#enqueueDelivery(id, result.text);
+		this.#scheduleEviction(id);
 		return id;
 	}
 
@@ -837,6 +867,14 @@ export class AsyncJobManager {
 		this.#releasedForegroundJobs.delete(jobId);
 		this.#evictJob(jobId);
 		if (jobId === `bg_${this.#nextAutoId - 1}`) this.#nextAutoId -= 1;
+	}
+
+	#claimJobId(preferredId?: string): string {
+		const id = this.#resolveJobId(preferredId);
+		this.#suppressedDeliveries.delete(id);
+		this.#consumedJobResults.delete(id);
+		this.#releasedForegroundJobs.delete(id);
+		return id;
 	}
 
 	#resolveJobId(preferredId?: string): string {

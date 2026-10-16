@@ -44,7 +44,8 @@ use crate::task;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_mins(3);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
-/// How long the display stays awake after the last desktop request. Releasing
+/// How long the display stays awake after the last desktop request, unless an
+/// agent turn holds it (see [`DisplayAwake::hold_until_released`]). Releasing
 /// the assertion restarts the OS display-sleep countdown, so the display can
 /// sleep this long plus the user's display-sleep setting after the agent's
 /// last action, and never sooner while the agent keeps acting.
@@ -52,9 +53,20 @@ const DISPLAY_AWAKE_GRACE: Duration = Duration::from_mins(5);
 
 /// The display-awake assertion, shared by the worker that takes it for
 /// activity and the session, which drops it when a caller gives up (timeout,
-/// close) while the worker may still be blocked inside a request.
+/// close) while the worker may still be blocked inside a request, or when the
+/// agent's turn ends.
 #[derive(Default)]
-struct DisplayAwake(Mutex<Option<DisplayAwakeHold>>);
+struct DisplayAwake(Mutex<AwakeState>);
+
+#[derive(Default)]
+struct AwakeState {
+	hold:       Option<DisplayAwakeHold>,
+	/// An agent turn is acting: activity from now on holds for the turn.
+	armed:      bool,
+	/// Activity came while `armed`: the grace period does not end the
+	/// hold; only [`DisplayAwake::release_turn`] or closing the session does.
+	turn_holds: bool,
+}
 
 impl DisplayAwake {
 	/// Takes the assertion for a request unless its caller has given up. The
@@ -65,18 +77,58 @@ impl DisplayAwake {
 		token: &OperationToken,
 		start: impl FnOnce() -> Option<DisplayAwakeHold>,
 	) -> bool {
-		let mut held = self.0.lock();
+		let mut state = self.0.lock();
 		if token.check().is_err() {
 			return false;
 		}
-		if held.is_none() {
-			*held = start();
+		if state.hold.is_none() {
+			state.hold = start();
+		}
+		if state.armed {
+			state.turn_holds = true;
 		}
 		true
 	}
 
+	/// Keeps the hold that activity takes from now on until
+	/// [`Self::release_turn`], instead of for the grace period. A hold taken
+	/// earlier keeps its grace until the turn's first request.
+	fn hold_until_released(&self) {
+		self.0.lock().armed = true;
+	}
+
+	/// Drops a turn's hold now and returns later activity to the grace period.
+	/// A hold no turn request took (activity outside a turn, or a turn that
+	/// made no request) keeps its grace.
+	fn release_turn(&self) {
+		let released = {
+			let mut state = self.0.lock();
+			state.armed = false;
+			if std::mem::take(&mut state.turn_holds) {
+				state.hold.take()
+			} else {
+				None
+			}
+		};
+		drop(released);
+	}
+
+	/// The grace period after the last activity ran out: drops the hold unless
+	/// a turn holds it.
+	fn expire(&self) {
+		let released = {
+			let mut state = self.0.lock();
+			if state.turn_holds {
+				None
+			} else {
+				state.hold.take()
+			}
+		};
+		drop(released);
+	}
+
 	fn release(&self) {
-		let released = self.0.lock().take();
+		let released = self.0.lock().hold.take();
 		drop(released);
 	}
 
@@ -85,9 +137,9 @@ impl DisplayAwake {
 	/// than reusing the one dropped here.
 	fn cancel_and_release(&self, cancellation: &CancellationSource) {
 		let released = {
-			let mut held = self.0.lock();
+			let mut state = self.0.lock();
 			cancellation.cancel();
-			held.take()
+			state.hold.take()
 		};
 		drop(released);
 	}
@@ -690,7 +742,8 @@ impl Worker {
 
 	/// Serves requests until close or disconnect. Each activity request whose
 	/// caller is still waiting holds the display awake until `grace` passes
-	/// with no further activity; the hold is released before the loop returns.
+	/// with no further activity, or until the turn holding it is released; the
+	/// hold is released before the loop returns.
 	fn serve(mut self, rx: &flume::Receiver<QueuedRequest>, grace: Duration) {
 		let mut awake_until: Option<Instant> = None;
 		loop {
@@ -701,7 +754,7 @@ impl Worker {
 			let QueuedRequest { request, token } = match next {
 				Ok(queued) => queued,
 				Err(flume::RecvTimeoutError::Timeout) => {
-					self.display_awake.release();
+					self.display_awake.expire();
 					awake_until = None;
 					continue;
 				},
@@ -1330,6 +1383,23 @@ impl DesktopSession {
 	#[napi(getter)]
 	pub fn screen_state(&self) -> ScreenState {
 		read_screen_state(&self.core.selector)
+	}
+
+	/// Keeps the display awake from the next activity request until
+	/// `releaseDisplayAwake()`, however long the session sits idle in between,
+	/// instead of for the grace period after the last request. An agent calls
+	/// this when it acts inside a turn.
+	#[napi]
+	pub fn hold_display_until_released(&self) {
+		self.core.display_awake.hold_until_released();
+	}
+
+	/// Lets the display sleep now if a turn holds it, without waiting behind
+	/// queued requests, and returns later activity to the grace period. Activity
+	/// outside a turn keeps its grace. An agent calls this when its turn ends.
+	#[napi]
+	pub fn release_display_awake(&self) {
+		self.core.display_awake.release_turn();
 	}
 
 	#[napi]
@@ -2336,6 +2406,103 @@ mod capture_tests {
 		drop(tx);
 		serving.join().unwrap();
 		assert_eq!(*awake.lock(), [true, false]);
+	}
+
+	/// A worker serving with `grace`, sharing the returned hold as a session's
+	/// does, so the test can hold and release it for a turn.
+	fn serving_with_turns(
+		backend: FakeWaylandBackend,
+		grace: Duration,
+	) -> (Arc<DisplayAwake>, flume::Sender<QueuedRequest>, thread::JoinHandle<()>) {
+		let display_awake = Arc::new(DisplayAwake::default());
+		let (tx, rx) = flume::unbounded();
+		let serving = thread::spawn({
+			let display_awake = Arc::clone(&display_awake);
+			move || Worker { display_awake, ..unlocked_worker(backend) }.serve(&rx, grace)
+		});
+		(display_awake, tx, serving)
+	}
+
+	#[test]
+	fn a_turn_keeps_the_display_awake_past_the_grace_until_it_ends() {
+		let backend = FakeWaylandBackend::new();
+		let awake = Arc::clone(&backend.awake);
+		let grace = Duration::from_millis(100);
+		let (turn, tx, serving) = serving_with_turns(backend, grace);
+
+		turn.hold_until_released();
+		send_and_wait(&tx, |reply| Request::ListWindows { reply });
+		// The turn goes on without desktop work for many grace periods.
+		thread::sleep(grace * 10);
+		assert_eq!(*awake.lock(), [true], "the grace ended the turn's hold");
+
+		turn.release_turn();
+		assert_eq!(*awake.lock(), [true, false], "the turn's end released nothing");
+
+		send_and_wait(&tx, |reply| Request::Close { reply });
+		serving.join().unwrap();
+		assert_eq!(*awake.lock(), [true, false]);
+	}
+
+	#[test]
+	fn the_next_turn_holds_the_display_again_from_its_first_request() {
+		let backend = FakeWaylandBackend::new();
+		let awake = Arc::clone(&backend.awake);
+		let grace = Duration::from_millis(100);
+		let (turn, tx, serving) = serving_with_turns(backend, grace);
+
+		turn.hold_until_released();
+		send_and_wait(&tx, |reply| Request::ListWindows { reply });
+		turn.release_turn();
+		assert_eq!(*awake.lock(), [true, false]);
+
+		// A turn that has not acted yet holds nothing.
+		turn.hold_until_released();
+		thread::sleep(grace * 3);
+		assert_eq!(*awake.lock(), [true, false]);
+		send_and_wait(&tx, |reply| Request::ListWindows { reply });
+		thread::sleep(grace * 10);
+		assert_eq!(*awake.lock(), [true, false, true], "the next turn's hold ended before the turn");
+		turn.release_turn();
+		assert_eq!(*awake.lock(), [true, false, true, false]);
+
+		send_and_wait(&tx, |reply| Request::Close { reply });
+		serving.join().unwrap();
+	}
+
+	#[test]
+	fn activity_after_a_turn_ends_is_held_only_for_the_grace() {
+		let backend = FakeWaylandBackend::new();
+		let awake = Arc::clone(&backend.awake);
+		let (turn, tx, serving) = serving_with_turns(backend, Duration::from_millis(100));
+
+		turn.hold_until_released();
+		send_and_wait(&tx, |reply| Request::ListWindows { reply });
+		turn.release_turn();
+		// Work that outlives its turn, such as a background job.
+		send_and_wait(&tx, |reply| Request::ListWindows { reply });
+		wait_for_awake(&awake, &[true, false, true, false]);
+
+		send_and_wait(&tx, |reply| Request::Close { reply });
+		serving.join().unwrap();
+	}
+
+	#[test]
+	fn a_turn_end_leaves_the_grace_of_activity_outside_a_turn() {
+		let backend = FakeWaylandBackend::new();
+		let awake = Arc::clone(&backend.awake);
+		let (turn, tx, serving) = serving_with_turns(backend, Duration::from_millis(300));
+
+		// A background job acts between turns; a later turn's run makes no
+		// request, and the turn ends.
+		send_and_wait(&tx, |reply| Request::ListWindows { reply });
+		turn.hold_until_released();
+		turn.release_turn();
+		assert_eq!(*awake.lock(), [true], "the turn's end cut the grace short");
+		wait_for_awake(&awake, &[true, false]);
+
+		send_and_wait(&tx, |reply| Request::Close { reply });
+		serving.join().unwrap();
 	}
 
 	/// Logs the release of the fake display-awake assertion.

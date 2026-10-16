@@ -119,6 +119,9 @@ provider "openrouter" {
 	models "~typesafe/*" "typesafe/*" {
 		kind "judge"
 	}
+	models "~typesafe/jev-latest" "typesafe/jev-1.13" "typesafe/jev-1.14" {
+		input-modalities "text" "image"
+	}
 	models "cohere/rerank-v3.5" {
 		kind "rerank"
 	}
@@ -150,6 +153,13 @@ provider "openrouter" {
 			filter-reasoning-history #true
 			allows-synthetic-reasoning-content-for-tool-calls #false
 		}
+	}
+	// OpenRouter forwards these hosted Muse SKUs to Meta's backend, which
+	// accepts only tool_choice "auto" and 400s on "none" (see providers/meta.kdl).
+	// Other Muse models, including muse-spark-open, retain discovered tool_choice.
+	models "meta/muse-spark-1.1" "meta/muse-spark-1.2" "meta/muse-spark-1.2-contributor" \
+		"meta/muse-spark-1.3" "meta/muse-spark-1.3-contributor" "meta/muse-wonder" {
+		supports-tool-choice #false
 	}
 	class "minimax" {
 		family "m3" {

@@ -150,7 +150,7 @@ The CLI broker refresh hook also handles managed `mcp_oauth:*` credentials using
 ### CLI
 
 ```
-omp auth-gateway serve   [--bind=host:port] [--no-auth] [--trust-proxy-headers]
+omp auth-gateway serve   [--bind=host:port] [--no-auth] [--trust-proxy-headers] [--clients=<file>]
 omp auth-gateway stdio
 omp auth-gateway token   [--regenerate] [--json]
 omp auth-gateway status  [--json]
@@ -158,9 +158,34 @@ omp auth-gateway check   [--strict] [--json]
 ```
 
 - `serve` requires `OMP_AUTH_BROKER_URL` (or `auth.broker.url` in `config.yml`) — the gateway is itself a broker client. It fetches a live snapshot, wraps it in `RemoteAuthCredentialStore`, and constructs `AuthStorage` with the configured account pool and account policies. Unlike normal client discovery, gateway startup does not use the encrypted snapshot cache. Default bind is `127.0.0.1:4000`. The gateway token is stored at `<config-dir>/auth-gateway.token` (`0600`); `--no-auth` disables the bearer check entirely. Use that flag only on trusted loopback listeners; it does not enforce a loopback bind.
-- Logs attribute requests to the socket peer address. Behind a trusted reverse proxy, pass `--trust-proxy-headers` to use `X-Forwarded-For` / `X-Real-IP` for authenticated requests; unauthorized requests are always logged with the socket peer. An authenticated request that also carries the gateway token in its URL or in a forwarded, logged, or identity header is rejected with `400` before any credential lookup.
+- Logs attribute requests to the socket peer address. Behind a trusted reverse proxy, pass `--trust-proxy-headers` to use `X-Forwarded-For` / `X-Real-IP` for authenticated requests; unauthorized requests are always logged with the socket peer. An authenticated request that also carries the gateway token, or its own client token, in its URL or in a forwarded, logged, or identity header is rejected with `400` before any credential lookup. Each `auth-gateway request` log line carries the broker `credentialId` the request started on, and `client` for a [client token](#client-tokens).
 - `token` manages the token file; `--regenerate` requires a running gateway to restart before accepting the replacement. `status` checks the local token file and an authenticated broker snapshot; it does not probe the gateway listener.
 - `check` constructs its own broker-backed store and probes the credentials the gateway would use, without calling a running gateway. Without `--strict` it uses provider usage probes. `--strict` additionally tries suitable bundled chat models and can consume quota; providers with no suitable candidate (including pi-native forwarding, Bedrock, Vertex, and Cursor transports) cannot be completion-probed.
+
+### Client tokens
+
+`serve --clients=<file>` admits bearers besides the gateway token, each limited by the gateway itself. The file maps each client name to its token digest and limits:
+
+```json
+{
+  "ci": {
+    "tokenSha256": "<hex SHA-256 of the client's token>",
+    "models": ["anthropic/claude-sonnet-4-5", "openai-codex/*"],
+    "accounts": {
+      "anthropic": ["email:ci@example.com|org:org-team"],
+      "openai-codex": ["email:ci@example.com|org:ws-team"]
+    }
+  }
+}
+```
+
+- `tokenSha256` is the hex SHA-256 of the token the client sends as `Authorization: Bearer <token>` (`printf %s "$TOKEN" | shasum -a 256`); the file never holds a raw token. A digest shared by two clients, or equal to the gateway token's, is rejected.
+- `models` lists exact `provider/id` grants or `provider/*`. Absent allows every served model; `[]` allows none. A model outside the list answers `404 Unknown model` before any credential lookup, and `GET /v1/models` lists only granted models. A bare id resolves to the first served model of that id the client may call; a provider-qualified id is never reread as another provider's bare id.
+- `accounts` maps a provider to the OAuth identity keys (the `identityKey` values of [account pools](#client-account-pools-routing-not-authorization), which `omp usage accounts` lists) its requests to that provider may use. Selection, refresh, usage-limit blocking and auth-recovery rotation stay inside the list, stored, runtime and environment API keys are never used, and a request fails rather than borrow another account. An empty list allows no account. When `accounts` is present it is also a provider allow-list: a provider it omits is refused like a model outside `models`, so a binding cannot be sidestepped through another provider. A `models` grant for a provider `accounts` omits rejects the file, as does a provider id with surrounding whitespace. Without `accounts`, every provider resolves credentials as for the gateway token.
+- A client's conversations share one account pin per listed provider: with several accounts listed, the client's traffic stays on one of them until usage-limit blocking or auth recovery moves it, rather than spreading conversations across them. They never share retained provider state (learned fallbacks, Codex transport sessions) with another client's or with gateway-token traffic.
+- `/v1/usage` and `/v1/credentials/check` cover every account the gateway holds, so client tokens get `403` there.
+- The gateway token stays valid and unscoped. `--clients` cannot be combined with `--no-auth`.
+- An unknown field or malformed entry rejects the whole file; `serve` fails to start on it. While serving, the file is re-read every 10 s: a removed or changed token is refused from its next request, while a request already in flight finishes, retries included, on the model and accounts it was admitted with. A changed entry starts a new account pin. A file that cannot be read or parsed refuses every client token until it is fixed, and every client starts a new account pin once it is; replace the file atomically (write a temporary file, then rename it over the original) so a reload never reads it half-written.
 
 ### stdio
 
@@ -201,7 +226,7 @@ omp auth-gateway check   [--strict] [--json]
 | `GET`  | `/v1/videos/:id`        | bearer | Poll a video job. `:id` is gateway-issued and stateless: it encodes provider, model, and upstream job id |
 | `GET`  | `/v1/videos/:id/content` | bearer | Stream the finished video bytes with the upstream content type |
 
-For `POST /v1/systemone`, `images` is optional and accepts inline data only, for example `images: [{type:'image',data:'<base64>',mimeType:'image/png',detail:'high'}]`; file paths are not supported. Image data must be non-empty standard base64 with valid padding and canonical trailing bits; padding may be omitted. Optional `detail` must be `auto`, `low`, `high`, or `original`. Invalid image fields, or images sent to a judge model without image input, return `422` before provider credential lookup or any upstream request; images are never silently dropped.
+For `POST /v1/systemone`, TypeSafe models accept TypeSafe's inline `assets` form (`data_base64` only; multipart `part` assets are rejected), and every asset must be referenced in `state`, `instructions`, or `criteria`; other native APIs reject that form with `422`. The existing `images` field remains available for compatible backends and accepts inline data only, for example `images: [{type:'image',data:'<base64>',mimeType:'image/png',detail:'high'}]`; file paths are not supported. Image data must be non-empty standard base64 with valid padding and canonical trailing bits; padding may be omitted. Optional `detail` must be `auto`, `low`, `high`, or `original`. Invalid image fields, or images sent to a judge model without image input, return `422` before provider credential lookup or any upstream request; images are never silently dropped.
 
 Image inputs to `POST /v1/images/generations` (and its `/v1/images` alias) and `POST /v1/images/edits` must contain non-empty canonical base64 data (padding may be omitted) and a syntactically valid image MIME type. Data-URL inputs reject MIME types containing `#`, which data URLs cannot carry; multipart file types may contain it, but providers that receive images as data URLs reject such inputs. After gateway bearer authentication, malformed input returns `400 invalid_request_error` before provider credential lookup or refresh. Supported image formats remain provider-specific.
 

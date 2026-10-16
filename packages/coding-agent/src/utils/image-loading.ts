@@ -177,6 +177,8 @@ interface LoadInMemoryImageInputOptions {
 	bytes?: Uint8Array;
 	resolvedPath: string;
 	textNotePrefix: string;
+	/** Original file type when the display image was rasterized before loading. */
+	sourceMimeType?: string;
 	autoResize: boolean;
 	maxBytes: number;
 	excludeWebP: boolean | undefined;
@@ -219,7 +221,11 @@ async function loadInMemoryImageInput(options: LoadInMemoryImageInputOptions): P
 		}
 	}
 
-	let textNote = `${options.textNotePrefix} [${outputMimeType}]`;
+	const sourceMimeType = options.sourceMimeType ?? options.image.mimeType;
+	let textNote = `${options.textNotePrefix} [${sourceMimeType}]`;
+	if (outputMimeType !== sourceMimeType) {
+		textNote += ` (displayed as ${outputMimeType})`;
+	}
 	if (dimensionNote) {
 		textNote += `\n${dimensionNote}`;
 	}
@@ -386,6 +392,7 @@ export async function loadSvgImageInput(options: LoadImageInputOptions): Promise
 		bytes: png,
 		resolvedPath,
 		textNotePrefix: "Read SVG file",
+		sourceMimeType: "image/svg+xml",
 		autoResize: options.autoResize,
 		maxBytes,
 		excludeWebP: options.excludeWebP,

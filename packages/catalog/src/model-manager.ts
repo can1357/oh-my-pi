@@ -74,6 +74,12 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	 */
 	dynamicCostAuthoritative?: boolean;
 	/**
+	 * When true, a static row's display name wins over the cached or live row
+	 * for the same id, so a model keeps one name before and after discovery.
+	 * Set from the provider's `keep-bundled-names` catalog entry.
+	 */
+	keepStaticNames?: boolean;
+	/**
 	 * When true, a fresh cache never satisfies an online-eligible refresh: the
 	 * dynamic fetch always runs (an explicit `"offline"` strategy is still
 	 * honored), and the cache serves only as the fetch-failure fallback. For
@@ -254,11 +260,14 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const staticModels = options.staticModels
 		? materializeStaticModels<TApi>(options.staticModels)
 		: (getBundledModels(options.providerId as GeneratedProvider) as Model<TApi>[]);
-	const additiveStaticModelIds =
+	const modelsDevAdditiveStaticModelIds =
 		options.modelsDev?.additiveOnly && staticModels.length > 0
 			? new Set(staticModels.map(model => model.id))
 			: undefined;
 	const cache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
+	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
+	const isAuthoritativeDynamicCache = dynamicModelsAuthoritative && (cache?.authoritative ?? false);
+	const cacheAdditiveStaticModelIds = isAuthoritativeDynamicCache ? undefined : modelsDevAdditiveStaticModelIds;
 	const restoredCache = restoreCachedModelHeaders(
 		cache?.models ?? [],
 		staticModels,
@@ -270,11 +279,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	);
 	const usableCachedModels = restoredCache.models.filter(model => !restoredCache.unresolvedModelIds.has(model.id));
 	const cacheHasUnresolvedHeaders = restoredCache.unresolvedModelIds.size > 0;
-	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
 	const mergeAuthority: DynamicMergeAuthority = {
 		input: options.dynamicInputAuthoritative ?? false,
 		reasoning: options.dynamicReasoningAuthoritative ?? false,
 		cost: options.dynamicCostAuthoritative ?? false,
+		staticNames: options.keepStaticNames ? new Map(staticModels.map(model => [model.id, model.name])) : undefined,
 	};
 	const cacheDropIds = options.dropCachedModelIdsOnStaticMismatch;
 	const staticCatalogFingerprint = fingerprintStaticModels(staticModels, dynamicModelsAuthoritative);
@@ -315,10 +324,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		cacheFingerprintMatches &&
 		!cacheHasUnresolvedHeaders
 	) {
-		const cacheContribution = additiveStaticModelIds
-			? restoredCache.models.filter(model => !additiveStaticModelIds.has(model.id))
+		const cacheContribution = cacheAdditiveStaticModelIds
+			? restoredCache.models.filter(model => !cacheAdditiveStaticModelIds.has(model.id))
 			: restoredCache.models;
-		const cachedModels = additiveStaticModelIds
+		const cachedModels = cacheAdditiveStaticModelIds
 			? mergeCatalogMetrics(
 					mergeDynamicModels(staticModels, cacheContribution, mergeAuthority),
 					restoredCache.models,
@@ -338,8 +347,8 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		: [null, null];
 	const modelsDevFetchSucceeded = fetchedModelsDevModels !== null;
 	const normalizedModelsDevModels = fetchedModelsDevModels?.models ?? [];
-	const modelsDevModels = additiveStaticModelIds
-		? normalizedModelsDevModels.filter(model => !additiveStaticModelIds.has(model.id))
+	const modelsDevModels = modelsDevAdditiveStaticModelIds
+		? normalizedModelsDevModels.filter(model => !modelsDevAdditiveStaticModelIds.has(model.id))
 		: normalizedModelsDevModels;
 	const shouldUseFreshCacheAsAuthoritative =
 		strategy === "online-if-uncached" && hasUsableFreshCache && hasAuthoritativeCache;
@@ -359,10 +368,8 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				cacheFingerprintMatches,
 				options.dropCachedModelIdsOnStaticMismatch,
 			);
-	// Additive shared-catalog rows may only introduce IDs. Apply that boundary
-	// to cache fallback too, including snapshots written by an older binary.
-	const cacheModels = additiveStaticModelIds
-		? preparedCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
+	const cacheModels = cacheAdditiveStaticModelIds
+		? preparedCacheModels.filter(model => !cacheAdditiveStaticModelIds.has(model.id))
 		: preparedCacheModels;
 	const dynamicModels = fetchedDynamicModels?.models ?? [];
 	// A successful empty endpoint result stays authoritative for THIS cycle (so an
@@ -383,7 +390,9 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		fetchedModelsDevModels?.explicitKindModels,
 	);
 	const catalogMetricsSource = modelsDevFetchSucceeded ? normalizedModelsDevModels : preparedCacheModels;
-	const mergedWithCatalogMetrics = additiveStaticModelIds
+	const mergedWithCatalogMetrics = (
+		modelsDevFetchSucceeded ? modelsDevAdditiveStaticModelIds : cacheAdditiveStaticModelIds
+	)
 		? mergeCatalogMetrics(mergedWithModelsDev, catalogMetricsSource)
 		: mergedWithModelsDev;
 	const mergedModels = mergeDynamicModels(
@@ -393,7 +402,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		fetchedDynamicModels?.explicitKindModels,
 	);
 	const models = collapseBuiltVariants(
-		authoritativeDynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
+		authoritativeDynamicFetchSucceeded
+			? retainModelIds(mergedModels, dynamicModels)
+			: !dynamicFetchSucceeded && isAuthoritativeDynamicCache && usableCachedModels.length > 0
+				? retainModelIds(mergedModels, usableCachedModels)
+				: mergedModels,
 	);
 	const resolutionAuthoritative = !hasRemoteFetcher || remoteResolutionComplete || shouldUseFreshCacheAsAuthoritative;
 	const remoteUpdatedAt = anyRemoteFetchSucceeded ? now() : undefined;
@@ -438,15 +451,18 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				cacheFingerprintMatches,
 				options.dropCachedModelIdsOnStaticMismatch,
 			);
-			const latestCacheModels = additiveStaticModelIds
-				? preparedLatestCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
+			const latestCacheModels = cacheAdditiveStaticModelIds
+				? preparedLatestCacheModels.filter(model => !cacheAdditiveStaticModelIds.has(model.id))
 				: preparedLatestCacheModels;
+			const mergedFallbackModels = mergeDynamicModels(
+				mergeDynamicModels(staticModels, latestCacheModels, mergeAuthority),
+				modelsDevModels,
+				mergeAuthority,
+			);
 			const fallbackSnapshotModels = collapseBuiltVariants(
-				mergeDynamicModels(
-					mergeDynamicModels(staticModels, latestCacheModels, mergeAuthority),
-					modelsDevModels,
-					mergeAuthority,
-				),
+				isAuthoritativeDynamicCache && latestUsableCacheModels.length > 0
+					? retainModelIds(mergedFallbackModels, latestUsableCacheModels)
+					: mergedFallbackModels,
 			);
 			if (fallbackSnapshotModels.length > 0 || latestCache !== null || cache !== null) {
 				writeModelCache(
@@ -582,6 +598,8 @@ interface DynamicMergeAuthority {
 	readonly input: boolean;
 	readonly reasoning: boolean;
 	readonly cost: boolean;
+	/** Static display names by id that override dynamic rows (`keepStaticNames`). */
+	readonly staticNames: ReadonlyMap<string, string> | undefined;
 }
 
 function mergeDynamicModels<TApi extends Api>(
@@ -694,7 +712,9 @@ function mergeDynamicModel<TApi extends Api>(
 	return buildModel({
 		...existingModel,
 		...dynamicModel,
-		name: preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
+		name:
+			authority.staticNames?.get(dynamicModel.id) ??
+			preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
 		...(trustsOwnThinking ? { thinking: dynamicModel.thinking } : {}),
 		input: supportsImage ? ["text", "image"] : ["text"],

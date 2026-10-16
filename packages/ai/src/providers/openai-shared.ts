@@ -77,6 +77,7 @@ import {
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 	sanitizeOpenAIResponsesHistoryItemsForReplay,
 	stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay,
+	truncateResponseItemId,
 } from "../utils";
 import {
 	clearStreamingPartialJson,
@@ -124,7 +125,7 @@ import type {
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
 import { applyInferenceHeaders, applySessionHeader, setHeaderIfAbsent } from "./inference-headers";
-import { transformMessages } from "./transform-messages";
+import { isValidToolCallId, transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
 export interface OpenAIModelIdentity {
@@ -1379,6 +1380,36 @@ interface StrictToolsRetryContext {
 	tools: Tool[] | undefined;
 }
 
+/**
+ * Read OpenRouter's `error.metadata.raw` from a captured non-2xx body.
+ *
+ * OpenRouter routes to a different upstream per request, so its top-level
+ * `error.message` is a generic policy sentence ("Access denied by security
+ * policy") and the only place the routed provider's own words appear is
+ * `error.metadata.raw`. Providers that proxy through OpenRouter also hang the
+ * upstream provider name there.
+ *
+ * The detail lives in the decoded body captured on the thrown
+ * {@link AIError.OpenAIHttpError}, not on the error object itself: no error
+ * class in this package carries an `error` property, so reading
+ * `error.error.metadata.raw` unconditionally yielded `undefined` and the
+ * upstream detail was dropped from every surfaced message.
+ */
+export function readOpenRouterRawMetadata(
+	capturedErrorResponse: CapturedHttpErrorResponse | undefined,
+): string | undefined {
+	const body = capturedErrorResponse?.bodyJson;
+	if (!body || typeof body !== "object" || !("error" in body)) return undefined;
+	const errorBody = body.error;
+	if (!errorBody || typeof errorBody !== "object" || !("metadata" in errorBody)) return undefined;
+	const metadata = errorBody.metadata;
+	if (!metadata || typeof metadata !== "object" || !("raw" in metadata)) return undefined;
+	const raw = metadata.raw;
+	if (typeof raw !== "string") return undefined;
+	const trimmed = raw.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
 /** Decide whether an OpenAI-family request should retry once with non-strict tools. */
 export function shouldRetryWithoutStrictTools(
 	error: unknown,
@@ -1487,7 +1518,7 @@ export function normalizeResponsesToolCallIdForTransform(
 	source?: AssistantMessage,
 ): string {
 	const sep = id.search(/[\n|]/);
-	if (sep < 0 && id.length <= 64 && /^[a-zA-Z0-9_-]+$/.test(id)) return id;
+	if (isValidToolCallId(id)) return id;
 	const isForeignToolCall =
 		source != null && model != null && (source.provider !== model.provider || source.api !== model.api);
 	if (isForeignToolCall || sep >= 0 || id.length > 64) {
@@ -2516,8 +2547,8 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 				// legacy plain-string signatures that would otherwise fall into
 				// the >64-char hash branch and fabricate a bogus msg_ id.
 				msgId = undefined;
-			} else if (msgId.length > 64) {
-				msgId = `msg_${Bun.hash(msgId).toString(36)}`;
+			} else {
+				msgId = truncateResponseItemId(msgId, "msg");
 			}
 			const messageItem: ResponsesReplayAssistantMessage = {
 				type: "message",

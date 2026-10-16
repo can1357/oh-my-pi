@@ -4,6 +4,11 @@ provider "openai-codex" {
 	default-model "gpt-5.5"
 	env "OPENAI_CODEX_OAUTH_TOKEN"
 	dynamic-models-authoritative #true
+	// Codex `/models` `display_name` is a title-cased slug (`GPT-6.1-Sol`,
+	// `GPT-5.6-Luna`) while the generator names bundled rows from the shared
+	// reference (`GPT-6.1 Sol`); without this the composer chip flips spelling
+	// once live discovery lands.
+	keep-bundled-names #true
 	kind-apis {
 		image "openai-codex-responses"
 	}

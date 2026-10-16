@@ -190,14 +190,18 @@ fn test_stand_in(language: &str) -> Option<Language> {
 /// Parses `source` as `language`, on this thread's wasm-capable parser when
 /// `language` is a wasm grammar.
 ///
+/// `old_tree`, when given, must already carry a [`Tree::edit`] describing the
+/// change from its source to `source`; tree-sitter then reuses its unchanged
+/// subtrees.
+///
 /// # Errors
 /// When the parser rejects `language` (incompatible ABI) or the thread's wasm
 /// store cannot be created.
-pub fn parse(language: &Language, source: &str) -> Result<Option<Tree>> {
+pub fn parse(language: &Language, source: &str, old_tree: Option<&Tree>) -> Result<Option<Tree>> {
 	if !language.is_wasm() {
 		let mut parser = Parser::new();
 		parser.set_language(language)?;
-		return Ok(parser.parse(source, None));
+		return Ok(parser.parse(source, old_tree));
 	}
 	WASM_PARSER.with_borrow_mut(|slot| {
 		let mut parser = if let Some(parser) = slot.take() {
@@ -209,7 +213,7 @@ pub fn parse(language: &Language, source: &str) -> Result<Option<Tree>> {
 		};
 		let tree = parser
 			.set_language(language)
-			.map(|()| parser.parse(source, None));
+			.map(|()| parser.parse(source, old_tree));
 		*slot = Some(parser);
 		Ok(tree?)
 	})

@@ -34,7 +34,7 @@ import type {
 	ToolChoice,
 	ToolResultMessage,
 } from "../types";
-import { normalizeSystemPrompts, resolveCacheRetention } from "../utils";
+import { normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
 import { hasVisibleAssistantContent, withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
@@ -111,6 +111,7 @@ import {
 	type OpenAIRequestSetup,
 	type OpenAIStrictToolsState,
 	parseAzureDeploymentNameMap,
+	readOpenRouterRawMetadata,
 	resolveOpenAICompatPolicy,
 	resolveOpenAICompletionsOutputClamp,
 	resolveOpenAIOutputTokenParam,
@@ -127,6 +128,8 @@ import {
 
 export { applyOpenRouterRoutingVariant } from "./openai-shared";
 
+const OPENAI_TOOL_CALL_ID_MAX_LENGTH = 40;
+
 type OpenAICompletionsReasoningField = NonNullable<ResolvedOpenAICompat["reasoningContentField"]>;
 
 type ProviderAttributedChatCompletionChunk = ChatCompletionChunk & {
@@ -135,6 +138,10 @@ type ProviderAttributedChatCompletionChunk = ChatCompletionChunk & {
 
 type OpenAICompletionsChoiceUsage = ChatCompletionChunk.Choice & {
 	usage?: unknown;
+};
+
+type OpenAICompletionsRepetitionChoice = ChatCompletionChunk.Choice & {
+	stop_reason?: unknown;
 };
 
 type OpenAICompletionsDeltaWithReasoningDetails = ChatCompletionChunk.Choice["delta"] & {
@@ -929,6 +936,7 @@ const streamOpenAICompletionsOnce = (
 						headers: headersWithTimeout,
 						body: params,
 						signal: requestSignal,
+						maxAttempts: options?.maxHttpAttempts,
 						fetch: wrapFetchForCopilotFallback(
 							options?.fetch,
 							model.provider === "github-copilot",
@@ -1318,6 +1326,8 @@ const streamOpenAICompletionsOnce = (
 			let streamFinishedAt: number | undefined;
 			let sawUsagePayload = false;
 			let awaitTrailingUsageDetails = false;
+			/** Server-declared repetition stop; classified after the finalization sweep. */
+			let repetitionStop: string | undefined;
 			const applyUsagePayload = (rawUsage: object): void => {
 				output.usage = parseChunkUsage(
 					rawUsage,
@@ -1404,6 +1414,15 @@ const streamOpenAICompletionsOnce = (
 						applyUsagePayload(choiceUsage);
 					}
 				}
+
+				// A server-declared repetition stop completes the response, so it takes
+				// the same terminal bookkeeping a `finish_reason` chunk would. The
+				// classification itself is deferred to just before the error checks
+				// below: `output.content` is not final until the block sweep has run.
+				// Latched: a trailing frame without the signal must not clear the one
+				// an earlier chunk carried.
+				repetitionStop ??= detectRepetitionStop(choice);
+				if (repetitionStop) streamFinishedAt ??= Date.now();
 
 				if (choice.finish_reason) {
 					const finishReasonResult = mapStopReason(choice.finish_reason);
@@ -1760,6 +1779,27 @@ const streamOpenAICompletionsOnce = (
 			if (output.stopReason === "aborted") {
 				throw new AIError.AbortError();
 			}
+
+			// Checked before the generic `stopReason === "error"` throw so the flagged
+			// error is the one that reaches `AIError.finalize` — that call rebuilds
+			// `errorId` from the thrown error, so assigning the flag to `output` here
+			// would be overwritten. The partial output is dropped rather than
+			// committed or replayed into the retry; the guard's own loop error does
+			// the same, because degenerate reasoning is replay garbage (#12525).
+			if (repetitionStop) {
+				output.content = [];
+				// The sweep above already closed every block. Clear the handle so the
+				// catch's `finishOpenBlocksOnError` does not re-emit a `thinking_end`
+				// against an index that no longer exists in the emptied content array.
+				currentBlock = undefined;
+				throw AIError.attach(
+					new AIError.ProviderResponseError(`Provider reported a repetition stop: ${repetitionStop}`, {
+						provider: model.provider,
+						kind: "runtime",
+					}),
+					AIError.create(AIError.Flag.ThinkingLoop),
+				);
+			}
 			if (output.stopReason === "error") {
 				throw new AIError.ProviderResponseError(output.errorMessage || "Provider returned an error stop reason", {
 					provider: model.provider,
@@ -1792,7 +1832,7 @@ const streamOpenAICompletionsOnce = (
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			// Some providers via OpenRouter include extra details here.
-			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
+			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
@@ -1827,7 +1867,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (mo
 	const resolvedModel = resolveOpenAICompletionsCompat(model);
 	return withReplaySafeStreamRetry(resolvedModel, context, options, streamOpenAICompletionsOnce, {
 		retryEmptyCompletion: true,
-		retryProviderErrors: true,
+		retryProviderErrors: options?.maxHttpAttempts === undefined,
 		maxProviderErrorRetries: 1,
 	});
 };
@@ -2305,10 +2345,10 @@ export function convertMessages(
 	const maxNormalizedToolCallIdLength = compat.requiresMistralToolIds
 		? 9
 		: compat.usesOpenAIToolCallIdLimit
-			? 40
+			? OPENAI_TOOL_CALL_ID_MAX_LENGTH
 			: undefined;
 	const duplicateToolCallIdSuffixPrefix = compat.requiresMistralToolIds ? "dup" : undefined;
-	const normalizeToolCallId = (id: string, source?: AssistantMessage): string => {
+	const normalizeCompletionsToolCallId = (id: string, source?: AssistantMessage): string => {
 		if (compat.requiresMistralToolIds) return normalizeMistralToolId(id, true);
 
 		const isSameModelSource =
@@ -2321,16 +2361,17 @@ export function convertMessages(
 		// Chat Completions IDs are provider-issued opaque correlation tokens.
 		if (!isSameModelSource && id.includes("|")) {
 			const [callId] = id.split("|");
-			return callId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40);
+			return normalizeToolCallId(callId, OPENAI_TOOL_CALL_ID_MAX_LENGTH);
 		}
 
-		if (compat.usesOpenAIToolCallIdLimit) return id.length > 40 ? id.slice(0, 40) : id;
+		if (compat.usesOpenAIToolCallIdLimit)
+			return id.length > OPENAI_TOOL_CALL_ID_MAX_LENGTH ? id.slice(0, OPENAI_TOOL_CALL_ID_MAX_LENGTH) : id;
 		return id;
 	};
 	const transformedMessages = transformMessages(
 		context.messages,
 		model,
-		(id, _target, source) => normalizeToolCallId(id, source),
+		(id, _target, source) => normalizeCompletionsToolCallId(id, source),
 		maxNormalizedToolCallIdLength,
 		duplicateToolCallIdSuffixPrefix,
 		compat,
@@ -2363,7 +2404,7 @@ export function convertMessages(
 	};
 
 	const ensureToolCallId = (rawId: string, seed: string, source?: AssistantMessage): string => {
-		const normalized = normalizeToolCallId(rawId, source);
+		const normalized = normalizeCompletionsToolCallId(rawId, source);
 		if (normalized.trim().length > 0) return normalized;
 		return generateFallbackToolCallId(seed);
 	};
@@ -2892,6 +2933,36 @@ function convertTools(
 
 const EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE =
 	"Model returned no content: prompt filled the context window; raise Ollama num_ctx or shorten the prompt.";
+
+/**
+ * Detect a server-declared repetition stop on a streamed choice.
+ *
+ * vLLM and other OpenAI-compatible servers report a generation that degenerated
+ * into repetition as a terminal signal rather than a content pattern OMP can
+ * see: `finish_reason: "repetition"`, and/or `stop_reason: "repetition_detected"`.
+ * The `stop_reason` form arrives alongside an ordinary `finish_reason: "stop"`,
+ * or with no `finish_reason` at all, so it has to be read independently of it —
+ * otherwise the signal is either masked by the clean finish or never seen.
+ *
+ * Returns the raw values for the diagnostic message, or `undefined` when the
+ * choice carries no repetition signal.
+ */
+function detectRepetitionStop(choice: ChatCompletionChunk.Choice): string | undefined {
+	const finishReason: string | null | undefined = choice.finish_reason;
+	const stopReason = (choice as OpenAICompletionsRepetitionChoice).stop_reason;
+	const namesRepetition = (value: string): boolean => {
+		const lower = value.toLowerCase();
+		return lower === "repetition" || lower === "repetition_detected";
+	};
+	const flagged =
+		(typeof finishReason === "string" && namesRepetition(finishReason)) ||
+		(typeof stopReason === "string" && namesRepetition(stopReason));
+	if (!flagged) return undefined;
+	const parts: string[] = [];
+	if (typeof finishReason === "string" && finishReason.length > 0) parts.push(`finish_reason=${finishReason}`);
+	if (typeof stopReason === "string" && stopReason.length > 0) parts.push(`stop_reason=${stopReason}`);
+	return parts.join(" ") || "repetition";
+}
 
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {
 	stopReason: StopReason;

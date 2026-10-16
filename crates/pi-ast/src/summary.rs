@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, path::Path};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tree_sitter::Node;
+use tree_sitter::{Node, Tree};
 
 use crate::{language::SupportLang, parse_cache::parse_cached};
 
@@ -160,24 +160,45 @@ fn select_folded_spans(
 	folded.into_iter().map(|i| nodes[i].span).collect()
 }
 
+fn parse_clean_source(
+	source: &str,
+	lang: Option<&str>,
+	path: Option<&str>,
+) -> Result<Option<(SupportLang, Tree)>> {
+	if source.is_empty() {
+		return Ok(None);
+	}
+	let Some(language) = resolve_language(lang, path) else {
+		return Ok(None);
+	};
+	let Some(tree) = parse_cached(source, language, path)? else {
+		return Ok(None);
+	};
+	if tree.root_node().has_error() {
+		return Ok(None);
+	}
+	Ok(Some((language, tree)))
+}
+
+/// Return the language only when non-empty source parses without syntax errors.
+/// Uses the same cached parse and language precedence as [`summarize_code`].
+pub fn parse_code_status(
+	source: &str,
+	lang: Option<&str>,
+	path: Option<&str>,
+) -> Result<Option<SupportLang>> {
+	Ok(parse_clean_source(source, lang, path)?.map(|(language, _)| language))
+}
+
 pub fn summarize_code(options: SummaryOptions) -> Result<SummaryResult> {
 	let source = options.code;
 	let total_lines = count_lines(&source);
-	if source.is_empty() {
-		return Ok(unparsed_result(source, total_lines));
-	}
-
-	let Some(language) = resolve_language(options.lang.as_deref(), options.path.as_deref()) else {
-		return Ok(unparsed_result(source, total_lines));
-	};
-
-	let Some(tree) = parse_cached(&source, language)? else {
+	let Some((language, tree)) =
+		parse_clean_source(&source, options.lang.as_deref(), options.path.as_deref())?
+	else {
 		return Ok(unparsed_result(source, total_lines));
 	};
 	let root = tree.root_node();
-	if root.has_error() {
-		return Ok(unparsed_result(source, total_lines));
-	}
 
 	let min_body_lines = options
 		.min_body_lines

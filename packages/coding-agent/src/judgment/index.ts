@@ -22,7 +22,9 @@ import {
 	type AssistantMessage,
 	chatTextBackend,
 	createNativeJudge,
+	type ImageContent,
 	isJudgmentApi,
+	nativeJudgmentAcceptsImages,
 	nativeJudgmentSupportsImages,
 	type Judge,
 	type JudgeOptions,
@@ -156,33 +158,38 @@ interface RegistryWithRejections extends ModelRegistry {
 	[kRoleChain]?: {
 		settings: Settings;
 		revision: number;
+		roleChain: RoleChainCandidate[];
 		list: RoleChainCandidate[];
-		imageList: RoleChainCandidate[];
 		expiresAt: number;
 	};
 }
 
 /**
- * {@link judgeRoleChain}, reused for {@link CANDIDATE_TTL_MS} across judges over the same settings and registry.
- * A settings change (e.g. a new judge role) resolves afresh; registry or credential changes still wait out the TTL,
- * so {@link hasNativeJudge} (uncached) can briefly see a different chain after a login or discovery change.
+ * The resolved `judge` role chain and its text {@link judgeRoleChain}, reused for {@link CANDIDATE_TTL_MS}
+ * across judges over the same settings and registry. A settings change (e.g. a new judge role) resolves
+ * afresh; registry or credential changes still wait out the TTL, so {@link hasNativeJudge} (uncached) can
+ * briefly see a different chain after a login or discovery change.
  */
 function cachedJudgeRoleChain(
 	settings: Settings,
 	registry: RegistryWithRejections,
-	requiresImages = false,
-): RoleChainCandidate[] {
+): { roleChain: RoleChainCandidate[]; list: RoleChainCandidate[] } {
 	const now = Date.now();
 	const revision = settings.revision;
 	const cached = registry[kRoleChain];
 	if (cached && cached.settings === settings && cached.revision === revision && now < cached.expiresAt) {
-		return requiresImages ? cached.imageList : cached.list;
+		return cached;
 	}
 	const roleChain = resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
-	const list = textJudgeRoleChain(roleChain);
-	const imageList = imageJudgeRoleChain(roleChain);
-	registry[kRoleChain] = { settings, revision, list, imageList, expiresAt: now + CANDIDATE_TTL_MS };
-	return requiresImages ? imageList : list;
+	const entry = {
+		settings,
+		revision,
+		roleChain,
+		list: textJudgeRoleChain(roleChain),
+		expiresAt: now + CANDIDATE_TTL_MS,
+	};
+	registry[kRoleChain] = entry;
+	return entry;
 }
 
 /** Append a compatible session model when no candidate is native and the chain does not already route to it. */
@@ -242,9 +249,19 @@ function textJudgeRoleChain(chain: RoleChainCandidate[]): RoleChainCandidate[] {
 	return chain.filter((candidate, index) => index < firstNative || kindOf(candidate) === "native");
 }
 
-/** Filter image-incompatible candidates before applying the native-only tail policy. */
-function imageJudgeRoleChain(chain: RoleChainCandidate[]): RoleChainCandidate[] {
-	return textJudgeRoleChain(chain.filter(candidate => supportsImageJudgment(candidate.model)));
+/**
+ * Filter candidates that cannot take `images` before applying the native-only tail policy. A native
+ * judge is checked against its dialect's documented bounds, which it never resizes to fit; prompted
+ * chat models normalize images per model, so their image support alone decides.
+ */
+function imageJudgeRoleChain(chain: RoleChainCandidate[], images: readonly ImageContent[]): RoleChainCandidate[] {
+	return textJudgeRoleChain(
+		chain.filter(candidate =>
+			kindOf(candidate) === "native"
+				? nativeJudgmentAcceptsImages(candidate.model, images)
+				: supportsImageJudgment(candidate.model),
+		),
+	);
 }
 
 function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainCandidate[] {
@@ -276,7 +293,8 @@ export class ChainJudge implements Judge {
 	readonly label = "judge role chain";
 	readonly #deps: JudgeDeps;
 	readonly #telemetry: AgentTelemetry | undefined;
-	#candidates: { chain: RoleChainCandidate[]; list: RoleChainCandidate[]; requiresImages: boolean } | undefined;
+	/** Text-judgment candidates memoized per resolved chain; image candidates depend on each request's images. */
+	#candidates: { chain: RoleChainCandidate[]; list: RoleChainCandidate[] } | undefined;
 
 	constructor(deps: JudgeDeps) {
 		this.#deps = deps;
@@ -308,7 +326,7 @@ export class ChainJudge implements Judge {
 				return candidateJudge.judge({ ...request, images }, options);
 			},
 			options,
-			requestImages.length > 0,
+			requestImages,
 		);
 	}
 
@@ -322,20 +340,21 @@ export class ChainJudge implements Judge {
 	}
 
 	async withCandidate<T>(run: (judge: Judge, kind: JudgeKind) => Promise<T>, options: JudgeOptions = {}): Promise<T> {
-		return this.#withCandidate((judge, kind) => run(judge, kind), options, false);
+		return this.#withCandidate((judge, kind) => run(judge, kind), options, []);
 	}
 
 	async #withCandidate<T>(
 		run: (judge: Judge, kind: JudgeKind, model: Model) => Promise<T>,
 		options: JudgeOptions,
-		requiresImages: boolean,
+		images: readonly ImageContent[],
 	): Promise<T> {
+		const requiresImages = images.length > 0;
 		const signal = options.signal;
 		let lastFailure: string | undefined;
 		let lastUnavailable: string | undefined;
 		let compatibleCandidate = false;
 		let unsupportedCandidate = false;
-		const candidates = this.#resolveCandidates(requiresImages);
+		const candidates = this.#resolveCandidates(images);
 		const rejections = this.#rejections();
 		for (const candidate of candidates) {
 			if (signal?.aborted) {
@@ -413,14 +432,13 @@ export class ChainJudge implements Judge {
 		return (registry[kRejections] ??= new Map());
 	}
 
-	#resolveCandidates(requiresImages = false): RoleChainCandidate[] {
+	#resolveCandidates(images: readonly ImageContent[] = []): RoleChainCandidate[] {
 		const { settings, registry, sessionModel } = this.#deps;
-		const candidates = cachedJudgeRoleChain(settings, registry, requiresImages);
-		if (candidates === this.#candidates?.chain && requiresImages === this.#candidates.requiresImages) {
-			return this.#candidates.list;
-		}
-		const list = withSessionFallback(candidates, sessionModel, requiresImages);
-		this.#candidates = { chain: candidates, list, requiresImages };
+		const { roleChain, list: chain } = cachedJudgeRoleChain(settings, registry);
+		if (images.length > 0) return withSessionFallback(imageJudgeRoleChain(roleChain, images), sessionModel, true);
+		if (chain === this.#candidates?.chain) return this.#candidates.list;
+		const list = withSessionFallback(chain, sessionModel);
+		this.#candidates = { chain, list };
 		return list;
 	}
 

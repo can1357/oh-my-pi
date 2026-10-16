@@ -570,26 +570,20 @@ describe("OpenAI-family first-event timeouts", () => {
 	it("times out Azure responses streams that only emit no-progress status events", async () => {
 		const fetchMock: FetchImpl = (input: string | URL | Request, init?: RequestInit) =>
 			Promise.resolve(createNoProgressOpenAIResponsesStream(getRequestSignal(input, init)));
-		const controller = new AbortController();
-		const abortTimer = setTimeout(() => controller.abort(new Error("fallback abort")), 200);
-		abortTimer.unref();
 
-		try {
-			const result = await streamAzureOpenAIResponses(azureOpenAIResponsesModel, baseContext(), {
-				apiKey: "test-key",
-				azureBaseUrl: azureOpenAIResponsesModel.baseUrl,
-				azureApiVersion: "v1",
-				signal: controller.signal,
-				streamFirstEventTimeoutMs: 1_000,
-				streamIdleTimeoutMs: 20,
-				fetch: fetchMock,
-			}).result();
+		// The stall is retryable, so the retry stalls too; skip the real backoff between attempts.
+		const result = await streamAzureOpenAIResponses(azureOpenAIResponsesModel, baseContext(), {
+			apiKey: "test-key",
+			azureBaseUrl: azureOpenAIResponsesModel.baseUrl,
+			azureApiVersion: "v1",
+			streamFirstEventTimeoutMs: 1_000,
+			streamIdleTimeoutMs: 20,
+			fetch: fetchMock,
+			providerRetryWait: async () => {},
+		}).result();
 
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toBe("Azure OpenAI responses stream stalled while waiting for the next event");
-		} finally {
-			clearTimeout(abortTimer);
-		}
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Azure OpenAI responses stream stalled while waiting for the next event");
 	});
 
 	it("keeps caller aborts as aborted for OpenAI responses", async () => {

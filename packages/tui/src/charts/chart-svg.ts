@@ -2,9 +2,11 @@
  * Draws a {@link ChartSpec} as a standalone SVG document colored only with
  * figure tokens — `var(--fg)`, `var(--muted)`, `var(--border)`,
  * `var(--accent)`, `var(--surface)`, `var(--c1)`…`var(--c6)` — on a
- * transparent background — the token vocabulary of assistant ```svg figures —
- * so the host resolves them against the live theme (`prepareSvg`) for both
- * the rasterized terminal image and the native TSP blob.
+ * transparent background — the token vocabulary of assistant ```svg figures:
+ * the host resolves them against the live theme (`prepareSvg`) for the
+ * rasterized terminal image, and a TSP terminal draws the chart as an ```svg
+ * figure in the palette it shows. The root carries {@link chartAlt} as its
+ * `aria-label`.
  *
  * Styled after Apple's charts and Tern's UI: a UI sans (Geist where Tern
  * provides it), muted labels, hairline gridlines that recede behind the
@@ -236,15 +238,8 @@ interface Tier {
 	readonly high: number;
 }
 
-/** A drawn chart: the SVG document and its size in user units. */
-export interface ChartSvg {
-	readonly svg: string;
-	readonly width: number;
-	readonly height: number;
-}
-
-/** The SVG document for `spec`. */
-export function renderChartSvg(spec: ChartSpec): ChartSvg {
+/** The SVG document for `spec`, labeled for screen readers with {@link chartAlt}. */
+export function renderChartSvg(spec: ChartSpec): string {
 	const layer = drawChart(spec);
 	const header = drawHeader(spec, layer);
 	const head = matrixHead(spec);
@@ -268,8 +263,8 @@ export function renderChartSvg(spec: ChartSpec): ChartSvg {
 		height += 20;
 	}
 	height = Math.ceil(height + PAD);
-	const svg = [
-		`<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${height}" viewBox="0 0 ${WIDTH} ${height}" font-family="${FONT}" font-size="${LABEL_SIZE}">`,
+	return [
+		`<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${height}" viewBox="0 0 ${WIDTH} ${height}" role="img" aria-label="${escapeXml(chartAlt(spec))}" font-family="${FONT}" font-size="${LABEL_SIZE}">`,
 		layer.body.includes(`url(#${INK_MASK})`) ? INK_DEFS : "",
 		`<g transform="translate(0 ${PAD})">${header.body}</g>`,
 		head.body && `<g transform="translate(0 ${num(PAD + header.height)})">${head.body}</g>`,
@@ -278,11 +273,10 @@ export function renderChartSvg(spec: ChartSpec): ChartSvg {
 		caption,
 		"</svg>",
 	].join("");
-	return { svg, width: WIDTH, height };
 }
 
-/** One-line description of the chart, for screen readers and terminals that show the alt text. */
-export function chartAlt(spec: ChartSpec): string {
+/** One-line description of the chart, for screen readers. */
+function chartAlt(spec: ChartSpec): string {
 	const joint =
 		spec.kind === "stacked" ? " + " : spec.kind === "slope" ? " → " : spec.kind === "butterfly" ? " vs " : ", ";
 	const names = spec.series.map(entry => entry.name).join(joint);
@@ -4432,6 +4426,13 @@ function token(name: string): string {
 	return `var(--${name})`;
 }
 
+/** `raw` safe as XML text or a double-quoted attribute value. */
+function escapeXml(raw: string): string {
+	return raw.replace(/[&<>"]/g, char =>
+		char === "&" ? "&amp;" : char === "<" ? "&lt;" : char === ">" ? "&gt;" : "&quot;",
+	);
+}
+
 function num(value: number): string {
 	return Number(value.toFixed(1)).toString();
 }
@@ -4469,10 +4470,6 @@ function text(x: number, y: number, content: string | readonly TextRun[], style:
 		style.weight ? `font-weight="${style.weight}"` : "",
 		style.italic ? `font-style="italic"` : "",
 	].filter(Boolean);
-	const escape = (raw: string) =>
-		raw.replace(/[&<>"]/g, char =>
-			char === "&" ? "&amp;" : char === "<" ? "&lt;" : char === ">" ? "&gt;" : "&quot;",
-		);
 	const body = runs
 		.filter(run => run.content)
 		.map(run => {
@@ -4480,7 +4477,7 @@ function text(x: number, y: number, content: string | readonly TextRun[], style:
 				run.fill ? ` fill="${token(run.fill)}"` : "",
 				run.weight ? ` font-weight="${run.weight}"` : "",
 			].join("");
-			return own ? `<tspan${own}>${escape(run.content)}</tspan>` : escape(run.content);
+			return own ? `<tspan${own}>${escapeXml(run.content)}</tspan>` : escapeXml(run.content);
 		})
 		.join("");
 	return `<text ${attrs.join(" ")}>${body}</text>`;

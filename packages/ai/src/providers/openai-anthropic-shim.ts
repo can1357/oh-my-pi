@@ -133,6 +133,7 @@ export function streamOpenAIAnthropicShim(
 					presencePenalty: options?.presencePenalty,
 					repetitionPenalty: options?.repetitionPenalty,
 					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
+					maxHttpAttempts: options?.maxHttpAttempts,
 					signal: options?.signal,
 					headers: mergedHeaders,
 					cacheRetention: config.forwardCacheOptions ? options?.cacheRetention : undefined,

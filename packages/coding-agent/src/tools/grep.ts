@@ -373,9 +373,9 @@ async function recordSnapshotTags(store: EditStore, snapshotPaths: readonly stri
  * line in line order, so a bounded range's hits all sit within the first
  * `endLine` entries, and an open-ended range starting at S is preceded by at
  * most S-1 out-of-range entries — S-1+perFileKeep entries cover the kept
- * window or exhaust the file. Clamped to the native file-size ceiling (a
- * ≤4 MiB file cannot have more matched lines than bytes), which also keeps
- * the scaled global budget inside the native layer's u32 bounds.
+ * window or exhaust the file. Clamped to the native file-size ceiling, which
+ * keeps the scaled global budget inside the native layer's u32 bounds; a
+ * range past that many matched lines is not fetched.
  */
 function lineRangeFetchCap(pathSpecs: readonly GrepPathSpec[], perFileKeep: number): number {
 	let cap = 0;
@@ -842,11 +842,14 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					: "";
 				const { record: recordFile, list: fileList } = createFileRecorder();
 				const fileMatchCounts = new Map<string, number>();
-				// Detect explicit file targets that exceed the native grep size cap.
-				// Native searches only their first NATIVE_GREP_MAX_FILE_BYTES; without
-				// this note the caller might miss that matches beyond the window
-				// (or "no matches") reflect partial coverage, not the whole file.
+				const limitMb = Math.floor(NATIVE_GREP_MAX_FILE_BYTES / (1024 * 1024));
+				// Native streams an explicitly named file whole, except in multiline
+				// mode, which holds the file in memory and so reads only its first
+				// NATIVE_GREP_MAX_FILE_BYTES; without this note the caller might miss
+				// that matches beyond the window (or "no matches") reflect partial
+				// coverage, not the whole file.
 				const oversizedNote = await (async (): Promise<string | undefined> => {
+					if (!effectiveMultiline) return undefined;
 					const explicitFileTargets: string[] = [];
 					if (exactFilePaths) {
 						explicitFileTargets.push(...exactFilePaths);
@@ -868,8 +871,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						}),
 					);
 					if (oversized.length === 0) return undefined;
-					const limitMb = Math.floor(NATIVE_GREP_MAX_FILE_BYTES / (1024 * 1024));
-					return `Searched only the first ${limitMb}MB of large files (matches past the ${limitMb}MB window are not shown; use \`read\` for the rest): ${oversized.join(", ")}`;
+					return `Multiline search read only the first ${limitMb}MB of large files (matches past the ${limitMb}MB window are not shown; search without a newline in the pattern, or use \`read\`, for the rest): ${oversized.join(", ")}`;
 				})();
 				// Directory/multi-target scopes: native counts files it could not map
 				// even a prefix of (rare mmap failures), but cannot name them.
@@ -905,7 +907,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					const skipPastEnd = canPaginate && normalizedSkip > 0 && totalFiles > 0 && skipFiles >= totalFiles;
 					const noMatchText = skipPastEnd
 						? `No more results (${totalFilesLabel} files total; skip=${normalizedSkip} is past the end)`
-						: "No matches found";
+						: oversizedNote
+							? `No matches in searched content (multiline search limited large files to their first ${limitMb}MB)`
+							: "No matches found";
 					const text = warningNote ? `${noMatchText}\n${warningNote}` : noMatchText;
 					// Zero matches is useless regardless of warnings: by the time
 					// compaction runs, the follow-up call has already corrected course.

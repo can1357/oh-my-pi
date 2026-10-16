@@ -1,6 +1,7 @@
 import type { AgentToolContext, ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { CustomToolContext } from "../extensibility/custom-tools/types";
 import type { ExtensionUIContext } from "../extensibility/extensions/types";
+import { trackUserWaits, type UserWaitTracker } from "../extensibility/extensions/user-wait";
 
 declare module "@oh-my-pi/pi-agent-core" {
 	interface AgentToolContext extends CustomToolContext {
@@ -33,7 +34,11 @@ export class ToolContextStore {
 	#hasUI = false;
 	#toolNames: string[] = [];
 
-	constructor(private readonly getBaseContext: () => CustomToolContext) {}
+	constructor(
+		private readonly getBaseContext: () => CustomToolContext,
+		/** Runs each dialog a tool opens (`ask`, eval prelude approvals, computer control) as a wait for the user. */
+		private readonly trackUserWait?: UserWaitTracker,
+	) {}
 
 	getContext(toolCall?: ToolCallContext): AgentToolContext {
 		return {
@@ -49,7 +54,7 @@ export class ToolContextStore {
 	}
 
 	setUIContext(uiContext: ExtensionUIContext, hasUI: boolean): void {
-		this.#uiContext = uiContext;
+		this.#uiContext = this.trackUserWait ? trackUserWaits(uiContext, this.trackUserWait) : uiContext;
 		this.#hasUI = hasUI;
 	}
 

@@ -4,14 +4,15 @@
  * can point `TYPESAFE_BASE_URL` at the gateway and never hold the real key.
  *
  * Requests are validated only as far as routing needs — the `model` id, the
- * shape of the `questions` map, and optional embedded base64 images — and
- * otherwise forwarded to the selected native judgment wire. Validation
- * failures answer `422` like TypeSafe.
+ * shape of the `questions` map, top-level embedded images, and inline asset
+ * maps — and otherwise forwarded to the selected native judgment wire.
+ * Validation failures answer `422` like TypeSafe.
  */
 import { type } from "@oh-my-pi/omptype";
 import * as AIError from "../error";
 import { isEmbeddedImageContent } from "../images/shared";
 import type { JudgmentRequest, JudgmentResult } from "../judgment/types";
+import type { JudgmentImageAssets } from "../judgment/wire";
 import type { ImageContent } from "../types";
 
 /** Image shape only; the shared embedded-image guard validates data, MIME type, and detail. */
@@ -21,6 +22,18 @@ const systemOneImageSchema = type({
 	mimeType: "string > 0",
 	"detail?": "unknown",
 });
+
+/** Inline JSON assets only: multipart `part` assets need a multipart body this ingress does not parse. */
+const systemOneAssetSchema = type({
+	"type?": "'image'",
+	format: "'png' | 'jpg' | 'jpeg'",
+	data_base64: "string > 0",
+	"part?": "never",
+});
+
+const systemOneAssetsSchema = type({ "[string]": systemOneAssetSchema }).narrow(
+	(assets, context) => !Array.isArray(assets) || context.mustBe("an object map"),
+);
 
 /**
  * TypeSafe accepts `instructions` and `criteria` as strings or structured
@@ -32,11 +45,13 @@ const systemOneRequestSchema = type({
 	state: "string | object",
 	questions: type({ "[string]": { type: "'noul' | 'choice' | 'score'", instructions: "string | object" } }),
 	"images?": systemOneImageSchema.array(),
+	"assets?": systemOneAssetsSchema,
 });
 
 export interface SystemOneParsedRequest {
 	modelId: string;
 	request: JudgmentRequest;
+	imageAssets?: JudgmentImageAssets;
 }
 
 /** `POST /v1/systemone` response body; `cost` (USD) appears only when the route billed one. */
@@ -48,17 +63,16 @@ export interface SystemOneResponseBody {
 
 /**
  * Validate the routing-relevant parts of a System One request body, including
- * optional embedded base64 images.
+ * top-level embedded images and inline TypeSafe image assets.
  *
  * @throws {AIError.ValidationError} when required routing fields are missing
- * or malformed, or a supplied image is malformed.
+ * or malformed, supplied image data is invalid, or an asset uses multipart
+ * `part`, which this JSON ingress cannot read.
  */
 export function parseRequest(body: unknown): SystemOneParsedRequest {
 	const parsed = systemOneRequestSchema(body);
 	if (parsed instanceof type.errors) throw new AIError.ValidationError(`systemone: ${parsed.summary}`);
-	// `req.json()` output is JSON by construction, and the typed `Questions`
-	// contract models string instructions only; native judgment wires transform
-	// question fields as needed, while image bytes stay separate from `state`.
+
 	const images: ImageContent[] | undefined = parsed.images?.map((image, index) => {
 		if (!isEmbeddedImageContent(image)) {
 			throw new AIError.ValidationError(
@@ -67,12 +81,34 @@ export function parseRequest(body: unknown): SystemOneParsedRequest {
 		}
 		return image;
 	});
+	const imageAssets: JudgmentImageAssets | undefined =
+		parsed.assets === undefined
+			? undefined
+			: Object.fromEntries(
+					Object.entries(parsed.assets).map(([reference, asset]) => {
+						const image = {
+							type: "image",
+							data: asset.data_base64,
+							mimeType: asset.format === "png" ? "image/png" : "image/jpeg",
+						};
+						if (!isEmbeddedImageContent(image)) {
+							throw new AIError.ValidationError(
+								`systemone: assets[${JSON.stringify(reference)}] must contain non-empty base64 data`,
+							);
+						}
+						return [reference, image];
+					}),
+				);
 	const request = {
 		state: parsed.state,
 		questions: parsed.questions,
 		...(images === undefined ? {} : { images }),
 	} as JudgmentRequest;
-	return { modelId: parsed.model, request };
+	return {
+		modelId: parsed.model,
+		request,
+		...(imageAssets === undefined ? {} : { imageAssets }),
+	};
 }
 
 /** Re-encode a judgment result in TypeSafe's response shape. */

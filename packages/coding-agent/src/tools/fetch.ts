@@ -9,6 +9,7 @@ import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } fro
 import { htmlToMarkdown, notebookToEditableText } from "@oh-my-pi/pi-natives";
 import { $which, ptree } from "@oh-my-pi/pi-utils";
 import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "@oh-my-pi/pi-utils/ar";
+import type { Element } from "@oh-my-pi/pi-utils/dom";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ToolSession } from "../sdk";
@@ -18,6 +19,7 @@ import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import { ensureTool } from "../utils/tools-manager";
+import { decodeBody } from "../web/response-body";
 import { findFirecrawlApiKey, scrapeWithFirecrawl } from "../web/firecrawl";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
 import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
@@ -380,14 +382,12 @@ function extractHeadHtml(html: string): string {
 	return html.slice(headStart, headTagEnd + 1 + relativeEnd + 7);
 }
 
-/**
- * Parse alternate links from HTML head
- */
-function parseAlternateLinks(html: string, pageUrl: string): string[] {
-	const links: string[] = [];
+/** Alternate representations must describe the requested page, not a site-wide index. */
+function parseAlternateLinks(html: string, pageUrl: string): Array<{ href: string; kind: "markdown" | "feed" }> {
+	const links: Array<{ href: string; kind: "markdown" | "feed" }> = [];
 
 	try {
-		const pagePath = new URL(pageUrl).pathname;
+		const pagePath = new URL(pageUrl).pathname.replace(/\/$/, "");
 		const headHtml = extractHeadHtml(html);
 		const linkTags = headHtml.match(/<link\b[^>]*>/gi) ?? [];
 
@@ -410,13 +410,16 @@ function parseAlternateLinks(html: string, pageUrl: string): string[] {
 				continue;
 			}
 
+			const altPath = new URL(href, pageUrl).pathname;
+			const pageSpecific =
+				altPath === pagePath ||
+				(pagePath !== "" && (altPath.startsWith(`${pagePath}/`) || altPath.startsWith(`${pagePath}.`)));
+			if (!pageSpecific) continue;
+
 			if (type.includes("markdown")) {
-				links.push(href);
-			} else if (
-				(type.includes("rss") || type.includes("atom") || type.includes("feed")) &&
-				(href.includes(pagePath) || href.includes("comments"))
-			) {
-				links.push(href);
+				links.push({ href, kind: "markdown" });
+			} else if (pagePath !== "" && (type.includes("rss") || type.includes("atom") || type.includes("feed"))) {
+				links.push({ href, kind: "feed" });
 			}
 		}
 	} catch {}
@@ -466,6 +469,11 @@ function cleanFeedText(text: string): string {
 		.trim();
 }
 
+/** Cleaned text of the first `selector` match under `parent`; empty when absent. */
+function feedField(parent: Element, selector: string): string {
+	return cleanFeedText(parent.querySelector(selector)?.textContent ?? "");
+}
+
 /**
  * Parse RSS/Atom feed to markdown
  */
@@ -477,15 +485,15 @@ async function parseFeedToMarkdown(content: string, maxItems = 10): Promise<stri
 		// Try RSS
 		const channel = doc.querySelector("channel");
 		if (channel) {
-			const title = cleanFeedText(channel.querySelector("title")?.text || "RSS Feed");
+			const title = feedField(channel, "title") || "RSS Feed";
 			const items = channel.querySelectorAll("item").slice(0, maxItems);
 
 			let md = `# ${title}\n\n`;
 			for (const item of items) {
-				const itemTitle = cleanFeedText(item.querySelector("title")?.text || "Untitled");
-				const link = cleanFeedText(item.querySelector("link")?.text || "");
-				const pubDate = cleanFeedText(item.querySelector("pubDate")?.text || "");
-				const desc = cleanFeedText(item.querySelector("description")?.text || "");
+				const itemTitle = feedField(item, "title") || "Untitled";
+				const link = feedField(item, "link");
+				const pubDate = feedField(item, "pubDate");
+				const desc = feedField(item, "description");
 
 				md += `## ${itemTitle}\n`;
 				if (pubDate) md += `*${pubDate}*\n\n`;
@@ -499,17 +507,15 @@ async function parseFeedToMarkdown(content: string, maxItems = 10): Promise<stri
 		// Try Atom
 		const feed = doc.querySelector("feed");
 		if (feed) {
-			const title = cleanFeedText(feed.querySelector("title")?.text || "Atom Feed");
+			const title = feedField(feed, "title") || "Atom Feed";
 			const entries = feed.querySelectorAll("entry").slice(0, maxItems);
 
 			let md = `# ${title}\n\n`;
 			for (const entry of entries) {
-				const entryTitle = cleanFeedText(entry.querySelector("title")?.text || "Untitled");
+				const entryTitle = feedField(entry, "title") || "Untitled";
 				const link = entry.querySelector("link")?.getAttribute("href") || "";
-				const updated = cleanFeedText(entry.querySelector("updated")?.text || "");
-				const summary = cleanFeedText(
-					entry.querySelector("summary")?.text || entry.querySelector("content")?.text || "",
-				);
+				const updated = feedField(entry, "updated");
+				const summary = feedField(entry, "summary") || feedField(entry, "content");
 
 				md += `## ${entryTitle}\n`;
 				if (updated) md += `*${updated}*\n\n`;
@@ -618,13 +624,14 @@ export async function renderHtmlToText(
 		// even after remote/subprocess attempts are aborted by the budget.
 		native: () => htmlToMarkdown(html, { cleanContent: true }),
 		trafilatura: async () => {
+			if (overallSignal?.aborted) return null;
 			const trafilatura = await ensureTool("trafilatura", { signal: overallSignal, silent: true });
-			if (!trafilatura) return null;
+			if (!trafilatura || overallSignal?.aborted) return null;
 			const result = await ptree.exec([trafilatura, "-u", url, "--output-format", "markdown"], execOptions);
 			return result.ok ? result.stdout : null;
 		},
 		lynx: async () => {
-			if (!hasCommand("lynx")) return null;
+			if (!hasCommand("lynx") || overallSignal?.aborted) return null;
 			const result = await ptree.exec(["lynx", "-dump", "-nolist", "-width", "250", url], execOptions);
 			return result.ok ? result.stdout : null;
 		},
@@ -904,7 +911,7 @@ async function tryRenderBinaryPayload(
 	notes: readonly string[],
 	/** The convertible-document download already made for this URL; reused instead of downloading again. */
 	prefetched?: BinaryFetchResult,
-): Promise<FetchRenderResult | null> {
+): Promise<FetchRenderResult | string | null> {
 	const hasNotebookHint = isNotebookHint(mime, extHint);
 	const hasSqliteHint = isSqliteHint(mime, extHint);
 	const hasArchiveHint = isArchiveHint(mime, extHint);
@@ -1005,6 +1012,15 @@ async function tryRenderBinaryPayload(
 				fetchedAt,
 				resultNotes,
 			);
+		}
+	}
+
+	if (rawLooksBinary && !bodySkipped && !hasNotebookHint && !hasSqliteHint && !hasArchiveHint) {
+		const bytes = Buffer.from(binary.buffer.buffer, binary.buffer.byteOffset, binary.buffer.byteLength);
+		const contentType = binary.contentType ?? mime;
+		if (!sampleLooksBinary(decodeBody(bytes.subarray(0, BINARY_SAMPLE_CHARS), contentType))) {
+			// The refetch may have negotiated a different encoding; render its text, not the first response's bytes.
+			return decodeBody(bytes, contentType);
 		}
 	}
 
@@ -1156,7 +1172,8 @@ async function renderUrl(
 		};
 	}
 
-	const { finalUrl, content: rawContent } = response;
+	const { finalUrl } = response;
+	let rawContent = response.content;
 	if (response.truncated) {
 		notes.push(`Response body exceeded ${formatBytes(MAX_BYTES)} and was cut mid-stream; content is incomplete`);
 	}
@@ -1313,7 +1330,11 @@ async function renderUrl(
 		notes,
 		convertibleBinary,
 	);
-	if (binaryPayloadResult) return binaryPayloadResult;
+	if (typeof binaryPayloadResult === "string") {
+		rawContent = binaryPayloadResult;
+	} else if (binaryPayloadResult) {
+		return binaryPayloadResult;
+	}
 
 	// Step 4: Handle non-HTML text content
 	const isHtml = mime.includes("html") || mime.includes("xhtml");
@@ -1385,9 +1406,9 @@ async function renderUrl(
 	if (isHtml && !raw) {
 		// 5A: Check for page-specific markdown alternate
 		const alternates = parseAlternateLinks(rawContent, finalUrl);
-		const markdownAlt = alternates.find(alt => alt.endsWith(".md") || alt.includes("markdown"));
+		const markdownAlt = alternates.find(alt => alt.kind === "markdown");
 		if (markdownAlt) {
-			const resolved = markdownAlt.startsWith("http") ? markdownAlt : new URL(markdownAlt, finalUrl).href;
+			const resolved = new URL(markdownAlt.href, finalUrl).href;
 			const altResult = await loadPage(resolved, { timeout, signal });
 			if (altResult.ok && altResult.content.trim().length > 100 && !looksLikeHtml(altResult.content)) {
 				notes.push(`Used markdown alternate: ${resolved}`);
@@ -1440,9 +1461,9 @@ async function renderUrl(
 		}
 
 		// 5D: Check for feed alternates
-		const feedAlternates = alternates.filter(alt => !alt.endsWith(".md") && !alt.includes("markdown"));
-		for (const altUrl of feedAlternates.slice(0, 2)) {
-			const resolved = altUrl.startsWith("http") ? altUrl : new URL(altUrl, finalUrl).href;
+		const feedAlternates = alternates.filter(alt => alt.kind === "feed");
+		for (const alt of feedAlternates.slice(0, 2)) {
+			const resolved = new URL(alt.href, finalUrl).href;
 			const altResult = await loadPage(resolved, { timeout, signal });
 			if (altResult.ok && altResult.content.trim().length > 200) {
 				notes.push(`Used feed alternate: ${resolved}`);

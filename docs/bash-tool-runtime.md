@@ -182,6 +182,7 @@ Cancellation:
 - aborted signal triggers `shellSession.abort(...)`,
 - timeout from native result is mapped to `cancelled: true` + annotation text,
 - explicit cancellation similarly returns `cancelled: true` + annotation.
+- on POSIX, cancelling a non-PTY run sends TERM to its owned process groups and descendants, allows up to one second for cleanup, then escalates to KILL; Windows terminates processes without a catchable TERM signal.
 
 No exception is thrown inside executor for timeout/cancel; it returns structured `BashResult` and lets caller map error semantics.
 

@@ -403,6 +403,7 @@ provider "sakana" {
     dynamic-models-authoritative #true            // discovery replaces bundled rows
     allow-unauthenticated #true                   // runtime manager without a key
     skip-cross-provider-reference-fills #true     // generator never backfills from same-id rows elsewhere
+    keep-bundled-names #true                      // discovery never renames a bundled row
     discovery label="Sakana AI" oauth-provider="sakana" allow-unauthenticated=#true {
         env "SAKANA_GEN_KEY"                      // generation-time keys; defaults to the provider env
     }

@@ -3338,12 +3338,18 @@ export interface OpenCodeModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+const OPENCODE_ZEN_BASE_PATH = "https://opencode.ai/zen";
+const OPENCODE_ZEN_GOOGLE_BASE_URL = "https://opencode.ai/inference/google/v1beta";
+
 function normalizeOpenCodeBasePath(baseUrl: string | undefined, fallbackBasePath: string): string {
 	const value = normalizeAnthropicBaseUrl(baseUrl, fallbackBasePath);
 	return value.endsWith("/v1") ? value.slice(0, -3) : value;
 }
 
 function openCodeBaseUrlForApi(api: Api, basePath: string): string {
+	if (api === "google-generative-ai" && basePath === OPENCODE_ZEN_BASE_PATH) {
+		return OPENCODE_ZEN_GOOGLE_BASE_URL;
+	}
 	return api === "anthropic-messages" ? basePath : `${basePath}/v1`;
 }
 
@@ -7138,10 +7144,7 @@ function createOpenCodeApiResolution(
 	rules: ApiResolutionRule[];
 } {
 	const completionsBaseUrl = `${basePath}/v1`;
-	// Per-API base URLs on the OpenCode-style endpoint:
-	// - openai-completions / openai-responses / google-generative-ai → /v1
-	// - anthropic-messages → bare basePath (the Anthropic client appends /v1/messages)
-	const baseUrlForApi = (api: Api): string => (api === "anthropic-messages" ? basePath : completionsBaseUrl);
+	const baseUrlForApi = (api: Api): string => openCodeBaseUrlForApi(api, basePath);
 	// Per-id route pins live in the `api-routes` behavior rules.
 	const overrideRules: ApiResolutionRule[] = (
 		["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"] as const
@@ -7173,7 +7176,7 @@ function createOpenCodeApiResolution(
 
 // Resolver rules for the models.dev descriptor path; the per-id pins live in
 // the `api-routes` behavior rules, which also drive the live-discovery mapper.
-const OPENCODE_ZEN_API_RESOLUTION = createOpenCodeApiResolution("https://opencode.ai/zen", "opencode-zen");
+const OPENCODE_ZEN_API_RESOLUTION = createOpenCodeApiResolution(OPENCODE_ZEN_BASE_PATH, "opencode-zen");
 const OPENCODE_GO_BASE_PATH = "https://opencode.ai/inference/go";
 const OPENCODE_GO_API_RESOLUTION = createOpenCodeApiResolution(OPENCODE_GO_BASE_PATH, "opencode-go");
 

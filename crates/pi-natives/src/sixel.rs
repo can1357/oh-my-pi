@@ -174,8 +174,10 @@ fn decimal(bytes: &[u8], mut index: usize) -> (usize, usize) {
 /// the calling thread.
 ///
 /// The input image is decoded and resized to the requested pixel dimensions
-/// before encoding. Prefer [`encode_sixel_async`] unless the caller cannot
-/// wait: the decode, resize and dither block the JS thread.
+/// (not resampled when it already has them), then encoded in whole 6-pixel
+/// bands: a partial last band is dropped, see [`band_rows`]. Prefer
+/// [`encode_sixel_async`] unless the caller cannot wait: the decode, resize
+/// and dither block the JS thread.
 ///
 /// # Errors
 /// Returns an error if decoding, resizing, or SIXEL encoding fails.
@@ -218,9 +220,26 @@ fn encode_image(bytes: &[u8], target_width_px: u32, target_height_px: u32) -> Re
 	};
 	// Reuses the pixel buffer when the image is already RGBA8.
 	let rgba = resized.into_rgba8();
+	let width = target_width_px as usize;
+	let rows = band_rows(target_height_px) as usize;
 	let options = EncodeOptions::default();
-	sixel_encode(rgba.as_raw(), target_width_px as usize, target_height_px as usize, &options)
+	sixel_encode(&rgba.as_raw()[..width * rows * 4], width, rows, &options)
 		.map_err(|err| Error::from_reason(format!("Failed to encode SIXEL: {err}")))
+}
+
+/// Pixel rows of a `height_px` image that SIXEL can show without growing it.
+///
+/// SIXEL draws in 6-pixel bands and terminals size a partial last band as a
+/// whole one, so an image whose height is not a multiple of 6 reaches up to
+/// 5 pixels further down: past the bottom of its cell box, which then takes an
+/// extra text row. Cropping that band instead of scaling the image keeps the
+/// rest pixel-exact. An image shorter than one band keeps its rows.
+const fn band_rows(height_px: u32) -> u32 {
+	if height_px < 6 {
+		height_px
+	} else {
+		height_px - height_px % 6
+	}
 }
 
 fn decode_image_from_bytes(bytes: &[u8]) -> Result<DynamicImage> {
@@ -231,4 +250,47 @@ fn decode_image_from_bytes(bytes: &[u8]) -> Result<DynamicImage> {
 	reader
 		.decode()
 		.map_err(|e| Error::from_reason(format!("Failed to decode image: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// PNG of 1px black/white columns, which any resample turns gray.
+	fn stripes_png(width: u32, height: u32) -> (RgbaImage, Vec<u8>) {
+		let image = RgbaImage::from_fn(width, height, |x, _| {
+			let v = if x % 2 == 0 { 255 } else { 0 };
+			image::Rgba([v, v, v, 255])
+		});
+		let mut png = Vec::new();
+		DynamicImage::ImageRgba8(image.clone())
+			.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+			.expect("PNG should encode");
+		(image, png)
+	}
+
+	fn round_trip(png: &[u8], width: u32, height: u32) -> RgbaImage {
+		let sixel = encode_image(png, width, height).expect("SIXEL should encode");
+		let decoded = decode_sixel(sixel.as_bytes()).expect("SIXEL should decode");
+		image::load_from_memory(&decoded)
+			.expect("decoded SIXEL should be PNG")
+			.to_rgba8()
+	}
+
+	#[test]
+	fn crops_partial_band_without_resampling() {
+		// A raster padded to 9x11 cells of 10x20: 220 rows end in a partial band.
+		let (source, png) = stripes_png(90, 220);
+		let shown = round_trip(&png, 90, 220);
+		assert_eq!(shown.dimensions(), (90, 216));
+		for (x, y, pixel) in shown.enumerate_pixels() {
+			assert_eq!(pixel, source.get_pixel(x, y), "pixel ({x}, {y}) was resampled");
+		}
+	}
+
+	#[test]
+	fn keeps_an_image_shorter_than_one_band() {
+		let (_, png) = stripes_png(8, 4);
+		assert_eq!(round_trip(&png, 8, 4).height(), 6);
+	}
 }

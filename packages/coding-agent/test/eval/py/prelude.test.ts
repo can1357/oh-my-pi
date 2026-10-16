@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { PYTHON_PRELUDE } from "../../../src/eval/py/prelude";
+import { artifactReadBridge } from "../../helpers/artifact-read-bridge";
 const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
 
 async function runPrelude(
@@ -76,7 +77,7 @@ describe("python prelude", () => {
 		expect(lines[1]).toBe("True []");
 	});
 
-	it("appends line selectors to delegated URI paths, reading a bare artifact raw", async () => {
+	it("appends line selectors to delegated URI paths", async () => {
 		const requests: unknown[] = [];
 		const server = Bun.serve({
 			hostname: "127.0.0.1",
@@ -91,27 +92,18 @@ describe("python prelude", () => {
 		});
 
 		try {
-			const result = await runPrelude(
-				[`print(read("artifact://21", 3, 2))`, `print(read("mcp://server/resource", 10, 5))`].join("\n"),
-				{
-					PI_TOOL_BRIDGE_URL: server.url.toString(),
-					PI_TOOL_BRIDGE_TOKEN: "test-token",
-					PI_TOOL_BRIDGE_SESSION: "test-session",
-				},
-			);
+			const result = await runPrelude(`print(read("mcp://server/resource", 10, 5))`, {
+				PI_TOOL_BRIDGE_URL: server.url.toString(),
+				PI_TOOL_BRIDGE_TOKEN: "test-token",
+				PI_TOOL_BRIDGE_SESSION: "test-session",
+			});
 
 			expect(result).toEqual({
-				stdout: "resource contents\nresource contents\n",
+				stdout: "resource contents\n",
 				stderr: "",
 				exitCode: 0,
 			});
 			expect(requests).toEqual([
-				{
-					session: "test-session",
-					run: null,
-					name: "read",
-					args: { path: "artifact://21:raw:3-4" },
-				},
 				{
 					session: "test-session",
 					run: null,
@@ -124,43 +116,114 @@ describe("python prelude", () => {
 		}
 	});
 
-	it("reads an artifact from this session's dir, else raw through the read tool; empty for limit <= 0", async () => {
+	async function runWithReadBridge(
+		code: string,
+		env: Record<string, string>,
+		readTool: (args: { path: string }) => Promise<unknown>,
+	): Promise<{ stdout: string; stderr: string; requests: unknown[] }> {
 		const requests: unknown[] = [];
 		const server = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,
 			fetch: async request => {
-				requests.push(await request.json());
-				return Response.json({ ok: true, value: { text: "from the read tool" } });
+				const body = (await request.json()) as { args: { path: string } };
+				requests.push(body);
+				return Response.json({ ok: true, value: await readTool(body.args) });
 			},
 		});
-		using artifacts = TempDir.createSync("@omp-py-prelude-artifacts-");
-		await Bun.write(artifacts.join("12.eval.log"), "first\nsecond\nthird\n");
-
 		try {
-			const result = await runPrelude(
-				[
-					`print(repr(read("artifact://12", offset=2, limit=1)))`,
-					`print([read("artifact://12", limit=0), read("artifact://12", limit=-1), read("artifact://7", limit=0)])`,
-					`print(read("artifact://7"), "|", read("artifact://7", offset=2, limit=2))`,
-				].join("\n"),
-				{
-					PI_EVAL_LOCAL_ROOTS: JSON.stringify({ artifact: artifacts.path() }),
-					PI_TOOL_BRIDGE_URL: server.url.toString(),
-					PI_TOOL_BRIDGE_TOKEN: "test-token",
-					PI_TOOL_BRIDGE_SESSION: "test-session",
-				},
-			);
-
-			expect(result.stderr).toBe("");
-			expect(result.stdout).toBe("'second\\n'\n['', '', '']\nfrom the read tool | from the read tool\n");
-			expect(requests).toMatchObject([
-				{ name: "read", args: { path: "artifact://7:raw" } },
-				{ name: "read", args: { path: "artifact://7:raw:2-3" } },
-			]);
+			// No inherited artifacts root (an Eval cell running these tests has one); tests that want one pass it.
+			const result = await runPrelude(code, {
+				PI_EVAL_LOCAL_ROOTS: "{}",
+				...env,
+				PI_TOOL_BRIDGE_URL: server.url.toString(),
+				PI_TOOL_BRIDGE_TOKEN: "test-token",
+				PI_TOOL_BRIDGE_SESSION: "test-session",
+			});
+			return { stdout: result.stdout, stderr: result.stderr, requests };
 		} finally {
 			server.stop(true);
 		}
+	}
+
+	// Over the 50 KB a bare `:raw` read inlines, with a line wider than any column cap and a trailing newline.
+	const largeArtifact = ["head", "w".repeat(60_000), ...Array.from({ length: 3000 }, (_, i) => `row ${i}`), ""].join(
+		"\n",
+	);
+
+	it("reads an artifact from this session's dir; empty for limit <= 0", async () => {
+		using artifacts = TempDir.createSync("@omp-py-prelude-artifacts-");
+		await Bun.write(artifacts.join("12.eval.log"), "first\nsecond\nthird\n");
+		const { stdout, stderr, requests } = await runWithReadBridge(
+			[
+				`print(repr(read("artifact://12", offset=2, limit=1)))`,
+				`print([read("artifact://12", limit=0), read("artifact://12", limit=-1), read("artifact://7", limit=0)])`,
+			].join("\n"),
+			{ PI_EVAL_LOCAL_ROOTS: JSON.stringify({ artifact: artifacts.path() }) },
+			async () => ({ text: "from the read tool" }),
+		);
+
+		expect(stderr).toBe("");
+		expect(stdout).toBe("'second\\n'\n['', '', '']\n");
+		expect(requests).toEqual([]);
+	});
+
+	it("reads an artifact another session holds in full, however large, through the read tool", async () => {
+		using tmp = TempDir.createSync("@omp-py-prelude-artifact-fallback-");
+		await Bun.write(tmp.join("owner", "7.bash.log"), largeArtifact);
+		await Bun.write(tmp.join("own", "12.eval.log"), "this session's");
+		const out = tmp.join("out.txt");
+		const { stdout, stderr, requests } = await runWithReadBridge(
+			[
+				`open(${JSON.stringify(out)}, "w", newline="").write(read("artifact://7"))`,
+				`print(repr(read("artifact://7", offset=3, limit=2)))`,
+				`print(read("artifact://7", offset=3) == "".join(f"row {i}\\n" for i in range(3000)))`,
+			].join("\n"),
+			{ PI_EVAL_LOCAL_ROOTS: JSON.stringify({ artifact: tmp.join("own") }) },
+			artifactReadBridge(tmp.path(), tmp.join("owner")),
+		);
+
+		expect(stderr).toBe("");
+		expect(await Bun.file(out).text()).toBe(largeArtifact);
+		expect(stdout).toBe("'row 0\\nrow 1\\n'\nTrue\n");
+		expect(requests).toMatchObject([
+			{ name: "read", args: { path: "artifact://7:raw:1-1" } },
+			{ name: "read", args: { path: "artifact://7:raw:1-1" } },
+			{ name: "read", args: { path: "artifact://7:raw:1-1" } },
+		]);
+	});
+
+	it("reads an artifact in full through the read tool when no artifacts dir was injected", async () => {
+		using tmp = TempDir.createSync("@omp-py-prelude-artifact-no-root-");
+		await Bun.write(tmp.join("12.eval.log"), largeArtifact);
+		const out = tmp.join("out.txt");
+		const { stderr, requests } = await runWithReadBridge(
+			`open(${JSON.stringify(out)}, "w", newline="").write(read("artifact://12"))`,
+			{},
+			artifactReadBridge(tmp.path(), tmp.path()),
+		);
+
+		expect(stderr).toBe("");
+		expect(await Bun.file(out).text()).toBe(largeArtifact);
+		expect(requests).toMatchObject([{ name: "read", args: { path: "artifact://12:raw:1-1" } }]);
+	});
+
+	it("returns a replacement read tool's text when it names no artifact file", async () => {
+		// An extension's same-name `read` replacement returns its own content without the built-in's `details`.
+		const { stdout, stderr, requests } = await runWithReadBridge(
+			[`print(read("artifact://12"))`, `print(read("artifact://12", offset=2, limit=2))`].join("\n"),
+			{},
+			async args => ({ text: `replaced ${args.path}` }),
+		);
+
+		expect(stderr).toBe("");
+		expect(stdout).toBe("replaced artifact://12:raw\nreplaced artifact://12:raw:2-3\n");
+		expect(requests).toMatchObject([
+			{ name: "read", args: { path: "artifact://12:raw:1-1" } },
+			{ name: "read", args: { path: "artifact://12:raw" } },
+			{ name: "read", args: { path: "artifact://12:raw:1-1" } },
+			{ name: "read", args: { path: "artifact://12:raw:2-3" } },
+		]);
 	});
 
 	it("bypasses discovered proxies for loopback bridge calls", async () => {

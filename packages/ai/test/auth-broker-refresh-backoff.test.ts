@@ -196,7 +196,7 @@ describe("auth broker OAuth refresh backoff", () => {
 		if (!brokerStorage) throw new Error("test setup failed");
 		const model = { provider: PROVIDER, id: "gateway-model", api: "openai-responses", baseUrl: "http://gateway" };
 		const resolve = buildGatewayApiKeyResolver(
-			brokerStorage,
+			{ storage: brokerStorage },
 			model as Model<Api>,
 			"gateway",
 			{ apiKey: "access-0" },

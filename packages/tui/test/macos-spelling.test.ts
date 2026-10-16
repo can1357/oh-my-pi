@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, mock, vi } from "bun:test";
 import { MacOSSpellingProvider, type SpellingBackend } from "@oh-my-pi/pi-tui/prompt/macos-spelling";
 import type { SpellingDecorationContext } from "@oh-my-pi/pi-tui/prompt/prose-gate";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
@@ -97,6 +97,28 @@ describe("macOS spelling feature gates", () => {
 		await updated.promise;
 		const rendered = provider.decorateTypos(text, decorationContext(text));
 		expect(rendered.replace(/\x1b\[[0-9;:]*m/g, "")).toBe(text);
+	});
+
+	it("holds off the typo mark of the word being typed, keeping the others", async () => {
+		const text = "wrld helo";
+		const checkSpelling = mock(async () => [
+			{ start: 0, length: 4 },
+			{ start: 5, length: 4 },
+		]);
+		const provider = new MacOSSpellingProvider(backend({ checkSpelling }));
+		provider.setFeatures({ typoDetection: true, autocorrect: false });
+		const updated = Promise.withResolvers<void>();
+		provider.onUpdate = updated.resolve;
+		provider.typoRanges(text, decorationContext(text));
+		await updated.promise;
+
+		const typing = { line: 0, start: 5, end: 9 };
+		expect(provider.typoRanges(text, { ...decorationContext(text), typing })).toEqual([{ start: 0, length: 4 }]);
+		// Segments are offset into the line: "helo" alone, starting at column 5.
+		expect(provider.typoRanges("helo", { ...decorationContext(text, 0, 5), typing })).toEqual([]);
+		// The word on another line, or no word being typed, holds nothing back.
+		expect(provider.typoRanges(text, { ...decorationContext(text), typing: { ...typing, line: 1 } })).toHaveLength(2);
+		expect(provider.typoRanges(text, decorationContext(text))).toHaveLength(2);
 	});
 
 	it("enables typo detection without enabling autocorrect", async () => {
@@ -285,6 +307,39 @@ describe("macOS spelling feature gates", () => {
 		expect(await provider.tryAutocorrect(["recieved "], 0, 9)).toBeNull();
 		expect(await provider.getWordReplacements(["recieved"], 0, 4)).toBeNull();
 		expect(checkSpelling).toHaveBeenCalledTimes(1);
+	});
+
+	it("disables spelling when the backend never settles", async () => {
+		// The Rust side awaits a flume reply with no timeout, so a spell-checker
+		// call that never returns leaves the promise pending forever. A pending
+		// promise never reaches a catch: the provider stayed available, nothing was
+		// logged, and the typo queue stayed frozen for the rest of the session.
+		// Fake timers because the fix must use setTimeout — Bun.sleep is not
+		// intercepted by vi.useFakeTimers().
+		vi.useFakeTimers();
+		try {
+			// Never resolved, on purpose: this is the reported hang.
+			const pending = Promise.withResolvers<readonly { start: number; length: number }[]>();
+			const checkSpelling = mock(() => pending.promise);
+			const provider = new MacOSSpellingProvider(backend({ checkSpelling }));
+			provider.setFeatures({ typoDetection: true, autocorrect: true });
+
+			expect(provider.decorateTypos("recieved", decorationContext("recieved"))).toBe("recieved");
+			expect(checkSpelling).toHaveBeenCalledTimes(1);
+
+			vi.advanceTimersByTime(5_000);
+			// bun:test's vi has no advanceTimersByTimeAsync, so drain the rejection
+			// by hand: the expiry rejects, #fetchTypoRanges catches, #disable runs.
+			for (let tick = 0; tick < 10; tick++) await Promise.resolve();
+
+			// Disabled: further work is refused and no second native call is made.
+			expect(provider.decorateTypos("definately", decorationContext("definately"))).toBe("definately");
+			expect(await provider.tryAutocorrect(["recieved "], 0, 9)).toBeNull();
+			expect(await provider.getWordReplacements(["recieved"], 0, 4)).toBeNull();
+			expect(checkSpelling).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 

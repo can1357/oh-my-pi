@@ -17,7 +17,7 @@ export const lspSchema = type({
 	"timeout?": type.number
 		.atLeast(TOOL_TIMEOUTS.lsp.min)
 		.atMost(TOOL_TIMEOUTS.lsp.max)
-		.describe("Timeout in seconds (default 20; range 5–300)."),
+		.describe("Timeout in seconds; raises or lowers the default (range 5–300)."),
 	payload: "string?",
 });
 

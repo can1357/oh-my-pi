@@ -162,7 +162,15 @@ if "__omp_prelude_loaded__" not in globals():
             p = _artifact_file(path)
             if p is None:
                 # Another session's, or no artifacts dir was injected: the read tool searches every registered one.
-                return _read_through_tool(f"{path}:raw", offset, limit)
+                # A bounded raw read locates the file without inlining it; a bare `:raw` read refuses files over 50 KB.
+                located = _bridge_call("read", {"path": f"{path}:raw:1-1"})
+                details = located.get("details") if isinstance(located, dict) else None
+                file_path = details.get("resolvedPath") if isinstance(details, dict) else None
+                if not isinstance(file_path, str):
+                    # An extension's replacement `read` may name no file: its own text for the selected lines is the answer.
+                    return _read_through_tool(f"{path}:raw", offset, limit)
+                # Once located, the file is read like this session's artifacts and plain paths: read() is no read-tool policy gate.
+                p = Path(file_path)
         elif _should_delegate_read(path):
             return _read_through_tool(path, offset, limit)
         else:

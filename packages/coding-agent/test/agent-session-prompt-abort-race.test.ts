@@ -53,19 +53,21 @@ describe("AgentSession prompt admission racing abort", () => {
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
 			streamFn: mock.stream,
 		});
+		const modelRegistry = new ModelRegistry(authStorage);
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
 			modelRegistry: (options.modelRegistry ?? new ModelRegistry(authStorage)) as never,
 			...(options.extensionRunner ? { extensionRunner: options.extensionRunner as never } : {}),
+			modelRegistry,
 		});
 		if (options.clientBridge) {
 			session.setClientBridge(options.clientBridge as never);
 		}
 		const dropped: string[] = [];
 		session.setPromptDropped(prompt => dropped.push(prompt.text));
-		return { session, dropped };
+		return { session, dropped, modelRegistry };
 	}
 
 	/** Holds image normalization for image-bearing calls until released. */
@@ -152,6 +154,39 @@ describe("AgentSession prompt admission racing abort", () => {
 		expect(dropped).toEqual(["queue while normalizing"]);
 		expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: [], liveSteered: 0 });
 		expect(calls).toBe(1);
+	});
+
+	it("keeps the next prompt busy when an interrupted setup unwinds late", async () => {
+		const { session, modelRegistry } = await createSession([() => ({ content: ["done"] })]);
+		const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const release = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const getApiKey = modelRegistry.getApiKey.bind(modelRegistry);
+		let calls = 0;
+		const spy = spyOn(modelRegistry, "getApiKey").mockImplementation(async (model, sessionId, options) => {
+			const index = calls++;
+			if (index < 2) {
+				entered[index].resolve();
+				await release[index].promise;
+			}
+			return getApiKey(model, sessionId, options);
+		});
+		restores.push(() => spy.mockRestore());
+
+		const first = session.prompt("first");
+		await withTimeout(entered[0].promise, 2_000, "First prompt did not reach setup");
+		await session.abort();
+
+		const second = session.prompt("second");
+		await withTimeout(entered[1].promise, 2_000, "Second prompt did not reach setup");
+		expect(session.isStreaming).toBe(true);
+
+		release[0].resolve();
+		await first;
+		expect(session.isStreaming).toBe(true);
+
+		release[1].resolve();
+		await second;
+		expect(session.isStreaming).toBe(false);
 	});
 
 	it("cancels an in-flight vision description on abort and drops the prompt", async () => {

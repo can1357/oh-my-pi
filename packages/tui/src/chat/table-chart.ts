@@ -5,24 +5,19 @@
  * and draws that chart — locally under `always`, through the host's
  * model-backed {@link TableChartPlanner} under `smart` for the tables
  * {@link shouldJudge} picks — and caches it per table source. {@link TableChartFigure} shows it
- * as a rasterized terminal image; {@link describeTableChart} hands a TSP
- * terminal the SVG itself. Both resolve the figure tokens against the live
- * theme, so a chart follows theme switches like the prose around it.
+ * as a terminal image rasterized in omp's theme; {@link chartFence} hands a
+ * TSP terminal the SVG as an ```svg fence, which it draws in the palette it
+ * shows. Either way a chart follows theme switches like the prose around it.
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Token, Tokens } from "@oh-my-pi/pi-utils/marked";
 import { type ChartPlan, buildChart, planChart, shouldJudge, worthCharting } from "../charts/chart-plan";
-import { chartAlt, renderChartSvg } from "../charts/chart-svg";
+import { renderChartSvg } from "../charts/chart-svg";
 import { analyzeTable, type TableAnalysis } from "../charts/table-data";
 import type { ImageBudget } from "../components/image";
 import { lexDocument } from "../components/markdown";
-import { keyed } from "../native/describe";
-import { nativeImageNode } from "../native/blobs";
-import type { NativeNode } from "../native/node";
-import { getThemeEpoch } from "../theme";
 import type { Component } from "../tui";
-import { SvgFigure, svgFigurePalette } from "./svg-figure";
-import { prepareSvg } from "./svg-source";
+import { SvgFigure } from "./svg-figure";
 
 /**
  * `smart`: a model refines the local guess where meaning decides (kind,
@@ -47,18 +42,11 @@ export interface TableChartRequest {
  */
 export type TableChartPlanner = (request: TableChartRequest) => Promise<ChartPlan | null>;
 
-/** A drawn chart, ready to resolve against the theme. */
-export interface TableChart {
-	/** SVG colored with figure tokens (`var(--accent)`, …). */
-	readonly svg: string;
-	readonly alt: string;
-	/** Size in SVG user units. */
-	readonly width: number;
-	readonly height: number;
-}
-
-/** The chart under a table: drawn, none, or a smart pick on its way (the promise settles once the cache holds it). */
-export type ChartLookup = TableChart | null | Promise<void>;
+/**
+ * The chart under a table: its SVG, colored with figure tokens (`var(--accent)`, …)
+ * still to resolve; none; or a smart pick on its way (the promise settles once the cache holds it).
+ */
+export type ChartLookup = string | null | Promise<void>;
 
 /** One run of a Markdown block: prose (ending at a charted table), or the chart drawn after that table. */
 export type ChartSegment =
@@ -67,8 +55,6 @@ export type ChartSegment =
 
 /** Tables cached per source; a long session keeps its recent charts without growing without bound. */
 const CACHE_LIMIT = 256;
-/** SVG user units per terminal column (16 per row on 1:2 cells), sizing native images. */
-const UNITS_PER_COLUMN = 8;
 /** A GFM delimiter row (`|---|:--:|`), the cheap test before lexing a block. */
 const DELIMITER_ROW = /^ {0,3}\|?[ \t]*:?-+:?[ \t]*\|/m;
 
@@ -78,20 +64,14 @@ interface ChartEntry {
 	readonly guess: ChartPlan | undefined;
 	/** The host's planner picks this table's chart. */
 	readonly smart: boolean;
-	/** `undefined` until drawn (or judged chartless). */
-	chart?: TableChart | null;
+	/** The chart's SVG; `undefined` until drawn (or judged chartless). */
+	chart?: string | null;
 	pending?: Promise<void>;
 }
 
 let chartMode: TableChartMode = "off";
 let chartPlanner: TableChartPlanner | undefined;
 const charts = new Map<string, ChartEntry>();
-/** The theme-resolved image node owning a chart's native bytes. */
-const kNativeImage = Symbol("tableChart.nativeImage");
-
-interface NativeTagged extends TableChart {
-	[kNativeImage]?: { epoch: number; image: NativeNode };
-}
 
 /** Set how tables become charts (the host's `tui.autoGraph`) and its `smart` planner; the host rebuilds the transcript after. */
 export function setTableCharts(mode: TableChartMode, planner?: TableChartPlanner): void {
@@ -188,34 +168,21 @@ function chartEntry(table: Tokens.Table): ChartEntry {
  * Draw `plan`. A guess must also pass {@link worthCharting}; a model's pick
  * already judged the chart worth drawing.
  */
-function drawChart(analysis: TableAnalysis, plan: ChartPlan, guessed = false): TableChart | null {
+function drawChart(analysis: TableAnalysis, plan: ChartPlan, guessed = false): string | null {
 	const spec = buildChart(analysis, plan);
 	if (!spec || (guessed && !worthCharting(spec))) return null;
-	return { ...renderChartSvg(spec), alt: chartAlt(spec) };
+	return renderChartSvg(spec);
 }
 
 /**
- * A native `image` node drawing `chart` from its SVG — no raster — resolved
- * against the active theme; rebuilt when the theme changes.
+ * Chart `svg` as a Markdown ```svg fence, for a TSP terminal's `md` node. Its
+ * figure tokens stay unresolved: the terminal draws the fence as a figure in
+ * the palette it shows the prose in, so the chart cannot fall out of step with
+ * the page when omp's own idea of the appearance does, and a theme switch
+ * recolors it without a resend.
  */
-export function describeTableChart(chart: TableChart, key: string): NativeNode {
-	const epoch = getThemeEpoch();
-	const tagged: NativeTagged = chart;
-	let entry = tagged[kNativeImage];
-	if (entry?.epoch !== epoch) {
-		const svg = prepareSvg(chart.svg, svgFigurePalette());
-		entry = {
-			epoch,
-			image: nativeImageNode(new TextEncoder().encode(svg), "image/svg+xml", {
-				alt: chart.alt,
-				w: chart.width,
-				h: chart.height,
-				max: { w: `${Math.round(chart.width / UNITS_PER_COLUMN)}ch` },
-			}),
-		};
-		tagged[kNativeImage] = entry;
-	}
-	return keyed(entry.image, key);
+export function chartFence(svg: string): string {
+	return `\`\`\`svg\n${svg}\n\`\`\``;
 }
 
 export interface TableChartFigureOptions {
@@ -235,8 +202,8 @@ export class TableChartFigure implements Component {
 	readonly #options: TableChartFigureOptions;
 	readonly #figure: SvgFigure;
 	#table: Tokens.Table | undefined;
-	/** `undefined` while not looked up or waiting for a pick. */
-	#chart: TableChart | null | undefined;
+	/** The chart's SVG; `undefined` while not looked up or waiting for a pick. */
+	#chart: string | null | undefined;
 	#waiting = false;
 	#disposed = false;
 
@@ -289,6 +256,6 @@ export class TableChartFigure implements Component {
 			return;
 		}
 		this.#chart = found;
-		if (found) this.#figure.update(found.svg, true);
+		if (found) this.#figure.update(found, true);
 	}
 }

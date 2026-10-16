@@ -291,8 +291,14 @@ pub fn list_workspace(options: ListWorkspaceOptions<'_>) -> task::Promise<ListWo
 	task::blocking("listWorkspace", ct, move |ct| {
 		let max_depth = max_depth as usize;
 		let collect_agents_md = collect_agents_md.unwrap_or(false);
+		let report_directory_errors = report_directory_errors.unwrap_or(false);
 		let walk_max_depth = if collect_agents_md {
 			max_depth.max(AGENTS_MD_MAX_DEPTH)
+		} else if report_directory_errors {
+			// A depth-0 walk never opens the root, so an unreadable root would
+			// resolve empty. Walk one level so its listing error surfaces; the
+			// returned entries stay bounded by `max_depth`.
+			max_depth.max(1)
 		} else {
 			max_depth
 		};
@@ -304,7 +310,7 @@ pub fn list_workspace(options: ListWorkspaceOptions<'_>) -> task::Promise<ListWo
 				include_hidden: hidden.unwrap_or(false),
 				use_gitignore: gitignore.unwrap_or(true),
 				collect_agents_md,
-				report_directory_errors: report_directory_errors.unwrap_or(false),
+				report_directory_errors,
 			},
 			ct,
 		)

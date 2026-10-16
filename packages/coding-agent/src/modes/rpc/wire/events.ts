@@ -15,7 +15,13 @@ export const eventDefs = {
 	CacheWarmingOutcome: "'hit' | 'miss' | 'error' | 'aborted'",
 	NotifyType: "'info' | 'warning' | 'error'",
 
-	AgentStartEvent: { type: "'agent_start'" },
+	AgentStartEvent: {
+		type: "'agent_start'",
+		"resumedToolCallIds?": doc(
+			"string[]",
+			"Calls of an unpaired assistant tail a continued run executes before its first model request.",
+		),
+	},
 	AgentEndEvent: {
 		type: "'agent_end'",
 		messages: doc(

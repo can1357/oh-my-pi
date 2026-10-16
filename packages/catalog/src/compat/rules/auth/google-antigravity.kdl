@@ -1,5 +1,5 @@
 auth "google-antigravity" {
-	name "Antigravity (Gemini 3, Claude, GPT-OSS)"
+	name "Google Antigravity (Gemini, Claude, GPT-OSS)"
 	login "oauth-code" {
 		// Antigravity uses different Google OAuth credentials for its additional models.
 		client-id "MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlcC5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==" encoding="base64"

@@ -104,6 +104,7 @@ authorization-code flow, and `github-copilot.kdl` for a custom flow.
 | `allow-unauthenticated #true` | Allows runtime discovery-manager creation without credentials. Does not by itself make hosted inference keyless. |
 | `dynamic-models-authoritative #true` | Successful discovery replaces bundled provider models rather than retaining fallback-only IDs. |
 | `skip-cross-provider-reference-fills #true` | Prevents generation from borrowing reasoning, modalities, and limits from same-ID rows on other providers. |
+| `keep-bundled-names #true` | Runtime discovery and its cache keep a bundled row's display name instead of the live one, so a model's name does not change once discovery lands. For hosts whose live names are slug-like (`openai-codex`). |
 | `discovery label="…"` | Enables catalog generation for an entry with a discovery factory. Optional `oauth-provider`, `allow-unauthenticated`, and child `env` select generation credentials/policy. |
 | `seed api="…" base-url="…"` | Defines reviewed model rows; individual rows may override API and base URL. Each row needs `name`, `reasoning`, `input`, `cost`, and `limits`. |
 | Seed `bundle` / `precedence` | `bundle="always"` is the default; `"fallback"` omits seeds after authoritative discovery, and `"empty"` emits them only if the provider has no rows. Default `precedence="upstream"` lets upstream rows win; `"seed"` pins the seed row. |

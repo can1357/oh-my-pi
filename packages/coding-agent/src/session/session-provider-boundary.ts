@@ -18,7 +18,7 @@ import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } 
 import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { type CustomMessage, convertToLlm } from "./messages";
 import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
-import type { BuildSessionContextOptions, SessionContext } from "./session-context";
+import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
 import type { SessionManager } from "./session-manager";
 
 import {
@@ -48,6 +48,8 @@ export interface SessionProviderBoundaryHost {
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	/** Current secret obfuscator; swapped when `secrets.enabled` turns on mid-session. */
 	obfuscator(): SecretObfuscator | undefined;
+	/** Tool calls emitted by assistant turns of the current agent run. */
+	runToolCallIds(): ReadonlySet<string>;
 }
 
 /** Owns the transformations at the session/provider boundary. */
@@ -142,15 +144,20 @@ export class SessionProviderBoundary {
 		return undefined;
 	}
 
-	/** Builds the full display-only transcript context. */
-	buildTranscriptSessionContext(
-		options?: Pick<BuildSessionContextOptions, "collapseCompactedHistory" | "keepDanglingToolCalls">,
-	): SessionContext {
+	/**
+	 * Builds the full display-only transcript context. `keepInFlightToolCalls`
+	 * keeps unpaired calls only when the current agent run emitted them; calls
+	 * left unpaired by earlier runs (interrupted, host restarted) are stripped so
+	 * a mid-turn rebuild never revives them as active tool cards. This holds even
+	 * before the run's prompt (user, custom or developer message) is persisted.
+	 */
+	buildTranscriptSessionContext(options?: TranscriptSessionContextOptions): SessionContext {
+		const keepLive = options?.keepInFlightToolCalls === true && this.#host.agent.state.isStreaming;
 		return deobfuscateSessionContext(
 			this.#host.sessionManager.buildSessionContext({
 				transcript: true,
 				collapseCompactedHistory: options?.collapseCompactedHistory,
-				keepDanglingToolCalls: options?.keepDanglingToolCalls,
+				inFlightToolCallIds: keepLive ? this.#host.runToolCallIds() : undefined,
 			}),
 			this.#host.obfuscator(),
 		);

@@ -25,6 +25,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { dispatchXdevTool, resolveMountedXdevExecutable, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -606,6 +607,46 @@ it("apply_patch custom-wire delete requests ACP permission through agent dispatc
 			locations: [{ path: "/tmp/gone.ts" }],
 		},
 	]);
+});
+
+it("lets the computer display sleep while the ACP client asks the user for permission", async () => {
+	const bashTool = makeFakeTool("bash");
+	const releases: number[] = [];
+	let owner = "";
+	let asked: { turn: number | undefined; releases: number[] } | undefined;
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission() {
+			asked = { turn: computerTurnInFlight(owner), releases: [...releases] };
+			return { outcome: "selected", optionId: "allow_once", kind: "allow_once" };
+		},
+	};
+	session = await createSessionWithMockModel([bashTool], bridge, [
+		{ content: [{ type: "toolCall", id: "call-bash", name: "bash", arguments: { command: "echo hi" } }] },
+		{ content: ["done"] },
+	]);
+	owner = session.getEvalKernelOwnerId();
+	const unregister = registerComputerController(owner, {
+		async run() {
+			throw new Error("not used");
+		},
+		async capabilities() {
+			return undefined;
+		},
+		releaseDisplay(turn) {
+			releases.push(turn);
+		},
+		async close() {},
+	});
+	try {
+		await session.prompt("run it");
+	} finally {
+		unregister();
+	}
+
+	expect(asked).toEqual({ turn: undefined, releases: [1] });
+	expect(bashTool.executeCalls).toBe(1);
+	expect(releases).toEqual([1, 2]);
 });
 
 it("patch-mode delete operations take precedence over earlier moves", async () => {

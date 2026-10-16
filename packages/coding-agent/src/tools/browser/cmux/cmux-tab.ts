@@ -49,6 +49,7 @@ import type {
 } from "../network";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "../readable";
 import { assertTabPressArgs } from "../tab-arguments";
+import { readFilePayloads } from "../upload-files";
 import type { VitalsOptions, VitalsResult } from "../react/vitals";
 import type { RecordingOptions, RecordingStartResult, RecordingStatus, RecordingStopResult } from "../recording";
 import type {
@@ -140,12 +141,6 @@ interface BoundingBox {
 	y: number;
 	width: number;
 	height: number;
-}
-
-interface FilePayload {
-	name: string;
-	type: string;
-	data: string;
 }
 
 type CmuxCaptureEntry = BrowserConsoleEntry | BrowserErrorEntry;
@@ -1614,13 +1609,8 @@ export class CmuxTab implements InProcessRunTab {
 
 	async uploadFile(selector: string, ...filePaths: string[]): Promise<void> {
 		if (!filePaths.length) throw new ToolError("tab.uploadFile() requires at least one file path");
-		const files: FilePayload[] = [];
-		for (const filePath of filePaths) {
-			const absolute = resolveToCwd(filePath, this.#requireRunContext("tab.uploadFile()").session.cwd);
-			const file = Bun.file(absolute);
-			const data = Buffer.from(await file.arrayBuffer()).toString("base64");
-			files.push({ name: path.basename(absolute), type: file.type || "application/octet-stream", data });
-		}
+		const cwd = this.#requireRunContext("tab.uploadFile()").session.cwd;
+		const files = await readFilePayloads(filePaths.map(filePath => resolveToCwd(filePath, cwd)));
 		await this.#selectorAction(selector, "uploadFile", { files });
 	}
 

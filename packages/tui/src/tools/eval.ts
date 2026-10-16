@@ -9,7 +9,7 @@ import type {
 	ToolRenderer,
 } from "./renderer";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { compact, keyed, md, node, span, text } from "../native/describe";
+import { code, compact, keyed, md, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { plainText } from "../native/spans";
 import { resultText, runBox, runFoot, type RunFootInput, runInput, runOutput, type RunState } from "./native-view";
@@ -35,12 +35,17 @@ import {
 	renderJsonTreeLines,
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
+import { splitPathAndSel } from "./read";
+import { getLanguageFromPath } from "../lang-from-path";
 import {
 	DEFAULT_TERMINAL_PREVIEW_LINES,
+	PREVIEW_LIMITS,
 	cappedHeadLines,
 	formatTitle,
+	previewLine,
 	previewWindowRows,
 	replaceTabs,
+	sanitizeDisplayLines,
 	shortenPath,
 	truncateToWidth,
 	wrapBrackets,
@@ -635,17 +640,43 @@ function formatCellOutputLines(
 	return { lines: formatted.lines, hiddenCount: formatted.hiddenCount };
 }
 
-/** Plain one-line summary of a status event: op plus its scalar fields. */
-function describeStatusEvent(event: EvalStatusEvent): NativeNode {
+/** Display cells a status field value keeps on its one-line summary. */
+const STATUS_VALUE_WIDTH = 200;
+
+/**
+ * Plain one-line summary of a status event: op plus its scalar fields, each
+ * collapsed to one line. A `preview` (file or command text a helper returned)
+ * never joins the line: an expanded cell shows it under the line as a code
+ * block holding its first {@link PREVIEW_LIMITS.OUTPUT_EXPANDED} lines, folded
+ * to {@link PREVIEW_LIMITS.COLLAPSED_LINES}.
+ */
+function describeStatusEvent(event: EvalStatusEvent, expanded: boolean): NativeNode {
 	const spans: TspSpan[] = [span(event.op, "accent")];
 	for (const key in event) {
-		if (key === "op" || key === "resolvedThinkingLevel") continue;
+		if (key === "op" || key === "preview" || key === "resolvedThinkingLevel") continue;
 		const value = event[key];
 		if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-			spans.push(span(` ${key}=`, "muted"), span(sanitizeText(String(value))));
+			spans.push(span(` ${key}=`, "muted"), span(previewLine(sanitizeText(String(value)), STATUS_VALUE_WIDTH)));
 		}
 	}
-	return text(spans, { truncate: "end", role: "omp.tool.eval.status" });
+	const line = text(spans, { truncate: "end", role: "omp.tool.eval.status" });
+	const preview = expanded ? eventString(event.preview)?.trimEnd() : undefined;
+	if (!preview) return line;
+	const head = cappedHeadLines(sanitizeDisplayLines(preview), PREVIEW_LIMITS.OUTPUT_EXPANDED).lines;
+	const path = eventString(event.path);
+	const lang = path ? getLanguageFromPath(splitPathAndSel(path).path) : undefined;
+	return node("col", { role: "omp.tool.eval.status.event", gap: "none" }, [
+		keyed(line, "line"),
+		keyed(
+			code(head.join("\n"), {
+				role: "omp.tool.eval.status.preview",
+				lang,
+				wrap: false,
+				preview: { lines: PREVIEW_LIMITS.COLLAPSED_LINES },
+			}),
+			"preview",
+		),
+	]);
 }
 
 /**
@@ -777,7 +808,9 @@ function evalStatusSection(log: StatusEventLog, expanded: boolean): NativeNode |
 	if (events.length === 0 && elided === 0) return undefined;
 	const shownFrom = expanded ? 0 : Math.max(0, events.length - RUN_STATUS_TAIL);
 	const hidden = shownFrom + elided;
-	const lines = events.slice(shownFrom).map((event, i) => keyed(describeStatusEvent(event), `s${hidden + i}`));
+	const lines = events
+		.slice(shownFrom)
+		.map((event, i) => keyed(describeStatusEvent(event, expanded), `s${hidden + i}`));
 	return node(
 		"col",
 		{ role: "omp.run.status", gap: "none" },

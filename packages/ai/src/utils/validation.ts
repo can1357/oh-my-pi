@@ -1418,10 +1418,16 @@ function singleRequiredStringKey(schema: unknown): string | undefined {
  * property — a required string — some providers deliver the payload under a
  * different key (e.g. the `edit` tool's patch arriving as `input`/`_input`, or
  * any single-string tool whose argument the model mislabels). When the declared
- * key is absent but another field holds a string, adopt the first such string
+ * key is absent but exactly one other field holds a string, adopt that string
  * as the declared key so the call validates instead of failing with "<key> was
  * missing". A present-but-wrong-type value is left alone so its real type error
  * still surfaces.
+ *
+ * Two or more string candidates are ambiguous: nothing distinguishes the real
+ * argument from the model's other fields, so picking one would resolve by
+ * `for...in` insertion order and the same call could act on a different
+ * argument depending only on JSON key order. Such a payload is returned
+ * unchanged so validation fails and the model sees its own arguments back.
  */
 function normalizeSingleStringField(schema: unknown, value: unknown): { value: unknown; changed: boolean } {
 	const key = singleRequiredStringKey(schema);
@@ -1429,15 +1435,21 @@ function normalizeSingleStringField(schema: unknown, value: unknown): { value: u
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return { value, changed: false };
 	const record = value as Record<string, unknown>;
 	if (record[key] !== undefined) return { value, changed: false };
+	let adopted: string | undefined;
+	let ambiguous = false;
 	for (const candidate in record) {
 		if (candidate === key || !Object.hasOwn(record, candidate)) continue;
-		const candidateValue = record[candidate];
-		if (typeof candidateValue !== "string") continue;
-		const next = { ...record, [key]: candidateValue };
-		delete next[candidate];
-		return { value: next, changed: true };
+		if (typeof record[candidate] !== "string") continue;
+		if (adopted !== undefined) {
+			ambiguous = true;
+			break;
+		}
+		adopted = candidate;
 	}
-	return { value, changed: false };
+	if (ambiguous || adopted === undefined) return { value, changed: false };
+	const next = { ...record, [key]: record[adopted] };
+	delete next[adopted];
+	return { value: next, changed: true };
 }
 
 // ============================================================================
@@ -2075,7 +2087,9 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 	}
 
 	// Single-argument tools (e.g. `edit`): if the model put the lone required
-	// string under a different key, adopt the first string field as that key.
+	// string under a different key, adopt the sole string field as that key. Two
+	// or more candidates are ambiguous, so they are left alone and validation
+	// fails, and the model sees its own arguments back.
 	const singleStringNorm = normalizeSingleStringField(json, normalizedArgs);
 	if (singleStringNorm.changed) {
 		normalizedArgs = singleStringNorm.value;

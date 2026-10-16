@@ -1310,25 +1310,15 @@ export function renderImage(
 	}
 
 	if (TERMINAL.imageProtocol === ImageProtocol.Sixel) {
-		// SIXEL encodes in 6-pixel vertical bands. A height that is not a
-		// multiple of 6 is padded with transparent rows, but the terminal
-		// still allocates cell rows for the padded height. When the padded
-		// height crosses a cell boundary the terminal uses one more row
-		// than fit.rows, so the next line of content overwrites the bottom
-		// of the image — a visible slice stripped from the image. Round the
-		// encode height DOWN to the largest multiple of 6 that fits within
-		// the requested row budget, so the band boundary aligns without
-		// padding and the reserved row count never exceeds fit.rows. Scale
-		// the width by the same ratio so resize_exact preserves the aspect
-		// ratio instead of squashing the image vertically.
-		const rawHeightPx = Math.max(1, fit.rows * cellDims.heightPx);
-		const targetHeightPx = Math.max(6, Math.floor(rawHeightPx / 6) * 6);
-		const heightScale = targetHeightPx / rawHeightPx;
-		const targetWidthPx = Math.max(1, Math.round(fit.columns * cellDims.widthPx * heightScale));
-		const rows = Math.max(1, Math.ceil(targetHeightPx / cellDims.heightPx));
-		const sequence = options.sixel
-			? options.sixel(targetWidthPx, targetHeightPx)
-			: encodeSixelNow(base64Data, targetWidthPx, targetHeightPx);
+		// Encode the cell box itself, so a raster drawn at the cell size
+		// (SvgFigure) is placed 1:1 instead of resampled. The encoder drops a
+		// partial last 6px band rather than letting the terminal pad it into
+		// the next row; only a box under one band (sub-6px cells) still takes
+		// the rows of a whole one.
+		const heightPx = fit.rows * cellDims.heightPx;
+		const widthPx = fit.columns * cellDims.widthPx;
+		const rows = heightPx < 6 ? Math.ceil(6 / cellDims.heightPx) : fit.rows;
+		const sequence = options.sixel ? options.sixel(widthPx, heightPx) : encodeSixelNow(base64Data, widthPx, heightPx);
 		if (sequence === null) return null;
 		// Undefined while the provider's encode is pending: the rows stay reserved.
 		return { sequence, rows };

@@ -700,7 +700,17 @@ export function agentLoopContinue(
 			const newMessages: AgentMessage[] = [];
 			const currentContext: AgentContext = { ...context, messages: [...context.messages] };
 
-			stream.push({ type: "agent_start" });
+			const resumeTail = unpairedToolCallTail(currentContext.messages);
+			stream.push(
+				resumeTail
+					? {
+							type: "agent_start",
+							resumedToolCallIds: resumeTail.content.flatMap(block =>
+								block.type === "toolCall" ? [block.id] : [],
+							),
+						}
+					: { type: "agent_start" },
+			);
 
 			await runLoop(currentContext, newMessages, config, signal, stream, streamFn);
 		} catch (err) {
@@ -3642,20 +3652,17 @@ async function executeToolCalls(
 		const interrupted = interruptState.triggered;
 		const perToolAborted = record.signal.aborted;
 		const abortedDuringExecution = perToolAborted && isError && !completedToolExecution;
-		if (interrupted && abortedDuringExecution) {
-			// This tool's own signal fired AND it failed to produce a result. The
-			// execution may already have performed partial work before throwing on
-			// abort, so preserve that distinction in the placeholder metadata.
+		if (record.interruptible && interrupted && abortedDuringExecution) {
+			// Queued steering/asides abort only interruptible tools. An external
+			// user abort can also fail a non-interruptible tool (e.g. cancelled
+			// ask); keep its actual error instead of attributing it to the queue.
 			record.skipped = true;
 			emitToolResult(record, createSkippedToolResult(interruptState.source, executionStarted), true);
 		} else {
-			// No interrupt on this signal, or the tool finished before the interrupt landed
-			// (`completedToolExecution`) — even if the signal aborted around completion. Keep
-			// its real result: a completed tool already ran its side effects, so the model must
-			// see what actually happened (a genuine non-zero exit / error result) rather than a
-			// false "skipped" that discards work the tool performed (#4752). A peer-IRC interrupt
-			// on the batch leaves non-interruptible tools' signals untouched — their genuine
-			// errors survive here too.
+			// A tool that finished before the interrupt landed (`completedToolExecution`)
+			// keeps its real result even if its signal aborted around completion:
+			// the model must see the work it actually performed (#4752).
+			// Non-interruptible tools also retain errors from external user aborts.
 			emitToolResult(record, result, isError);
 		}
 

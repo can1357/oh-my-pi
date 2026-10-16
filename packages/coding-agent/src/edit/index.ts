@@ -75,7 +75,12 @@ import {
 	cfgEditFuzzyMatch,
 	cfgEditFuzzyThreshold,
 } from "./settings";
-import { cfgLspDiagnosticsDeduplicate, cfgLspDiagnosticsOnEdit, cfgLspFormatOnWrite } from "../lsp/settings";
+import {
+	cfgLspDiagnosticsDeduplicate,
+	cfgLspDiagnosticsOnEdit,
+	cfgLspFormatOnWrite,
+	cfgLspRequestTimeout,
+} from "../lsp/settings";
 
 export type {
 	EditRenderContext,
@@ -179,6 +184,7 @@ function createEditWritethrough(session: ToolSession): WritethroughCallback {
 				transformDiagnostics: deduplicate
 					? (filePath, result) => getDiagnosticsLedger(session).reduce(filePath, result)
 					: undefined,
+				requestTimeoutSec: cfgLspRequestTimeout.get(session.settings),
 			})
 		: writethroughNoop;
 }

@@ -1,5 +1,5 @@
 /**
- * Antigravity OAuth flow (Gemini 3, Claude, GPT-OSS via Google Cloud)
+ * Google Antigravity OAuth flow (Gemini, Claude, GPT-OSS via Google Cloud)
  * Uses different OAuth credentials than google-gemini-cli for access to additional models.
  */
 import { type } from "@oh-my-pi/omptype";
