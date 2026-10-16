@@ -45,6 +45,8 @@ export interface EngineAdapter {
 	recall(question: EvalQuestion, k: number): Promise<RecallHit[]>;
 	/** Rows the last `recall` returned but did not rank; engines that never drop rows omit this. */
 	lastDropped?(): DroppedRow[];
+	/** The largest `top_k` the last `recall` asked the engine for (diagnostic); engines that never widen omit this. */
+	lastFetchK?(): number;
 	close(): Promise<void>;
 	dispose(): Promise<void>;
 	/** Starts the engine and embeds the one string "warmup" (a no-op for fts-only), so the runner can time process start, import and model load. */
