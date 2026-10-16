@@ -3630,15 +3630,26 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const hideThinkingBlock = cfgHideThinkingBlock.get(this.settings);
 		if (any("hideThinkingBlock") && hideThinkingBlock !== this.hideThinkingBlock) {
-			// Same propagation as the Ctrl+T keybinding: children + live streaming
-			// component + reveal resync, then forget the stable-emission ledger and
-			// rebuild retired history. Skipping the ledger reset here slices the
-			// shorter render by the stale emitted-row count — the assistant's
-			// answer vanishes from the live block AND is never written to scrollback
-			// on retirement (#10177). The batch owns the one display reset below, so
-			// a bulk reload that also rebuilds the transcript does not replay twice.
-			this.#inputController.applyThinkingBlockVisibility(hideThinkingBlock, { deferDisplayReset: true });
-			resetDisplay = true;
+			// The raw preference can flip without changing what any block renders:
+			// while thinking is off and the session has produced no displayable
+			// reasoning, the effective value stays hidden either way. Persist the
+			// preference, then compare the effective values around it — propagating a
+			// flip that leaves visibility alone would forget the stable-emission
+			// ledger and clear/replay the whole terminal for a change nothing
+			// observes, stalling a long transcript on every settings reload.
+			const effectiveHideThinkingBlock = this.effectiveHideThinkingBlock;
+			this.hideThinkingBlock = hideThinkingBlock;
+			if (this.effectiveHideThinkingBlock !== effectiveHideThinkingBlock) {
+				// Same propagation as the Ctrl+T keybinding: children + live streaming
+				// component + reveal resync, then forget the stable-emission ledger and
+				// rebuild retired history. Skipping the ledger reset here slices the
+				// shorter render by the stale emitted-row count — the assistant's
+				// answer vanishes from the live block AND is never written to scrollback
+				// on retirement (#10177). The batch owns the one display reset below, so
+				// a bulk reload that also rebuilds the transcript does not replay twice.
+				this.#inputController.applyThinkingBlockVisibility(hideThinkingBlock, { deferDisplayReset: true });
+				resetDisplay = true;
+			}
 		}
 		if (any("proseOnlyThinking")) {
 			// The component setter ran above; this batch's only display reset
