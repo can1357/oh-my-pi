@@ -1097,11 +1097,25 @@ export class OutputSink {
 		this.#store(joinSixelSegments(held), sanitized, joinSixelSegments(sanitized), false);
 	}
 
-	/** Sanitize the text spans of a split, leaving payload spans byte-for-byte. */
+	/**
+	 * Sanitize the text spans of a split, leaving payload spans byte-for-byte.
+	 * A trailing CR is held for the next text span; a payload is not text, so the
+	 * held newline is emitted here to keep the frame on the row after the text.
+	 */
 	#sanitizeSpans(spans: readonly RawSixelSegment[]): RawSixelSegment[] {
-		return spans.map(span =>
-			span.kind === "sixel" ? span : { kind: "text", text: sanitizeText(this.#normalizeCarriageReturns(span.text)) },
-		);
+		const sanitized: RawSixelSegment[] = [];
+		for (const span of spans) {
+			if (span.kind === "sixel") {
+				if (this.#pendingCarriageReturn) {
+					this.#pendingCarriageReturn = false;
+					sanitized.push({ kind: "text", text: NL });
+				}
+				sanitized.push(span);
+				continue;
+			}
+			sanitized.push({ kind: "text", text: sanitizeText(this.#normalizeCarriageReturns(span.text)) });
+		}
+		return sanitized;
 	}
 
 	/**
