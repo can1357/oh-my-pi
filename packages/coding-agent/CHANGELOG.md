@@ -5,6 +5,9 @@
 ### Changed
 
 - With a first-party Anthropic model on the official API selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup; third-party gateways and custom endpoints are never probed ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
+### Added
+
+- Added a Serply web-search provider (`web/serply`), authenticated with `SERPLY_API_KEY` or `/login serply`, that forwards Google search operators (`site:`, `filetype:`, `intitle:`, quoted phrases, `OR`, `-exclusions`, `after:`/`before:`) verbatim instead of translating them onto vendor-specific filters ([#12021](https://github.com/can1357/oh-my-pi/pull/12021) by [@googio](https://github.com/googio))
 
 ### Fixed
 
