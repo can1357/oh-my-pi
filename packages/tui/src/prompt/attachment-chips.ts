@@ -90,8 +90,8 @@ export class AttachmentChipsBand implements Component {
 	#native:
 		| { chips: readonly ComposerChipDescriptor[]; node: NativeNode; images: ReadonlyMap<ImageContent, NativeNode> }
 		| undefined;
-	#lastSixelPlacements: Array<{ x: number; cols: number; rows: number; below: number }> = [];
-	#renderSixelPlacements: Array<{ x: number; cols: number; rows: number; below: number }> = [];
+	#lastSixelPlacements: Array<{ x: number; cols: number; rows: number; below: number; thumb: SixelThumb }> = [];
+	#renderSixelPlacements: Array<{ x: number; cols: number; rows: number; below: number; thumb: SixelThumb }> = [];
 
 	/**
 	 * A wrapping `row` of chip `card`s (`omp.composer.chip`) titled with the
@@ -149,17 +149,25 @@ export class AttachmentChipsBand implements Component {
 	}
 
 	render(width: number): readonly string[] {
-		const below = this.#editorBelow(width);
 		const chips = this.editor.composerChips();
+		// Editor geometry only feeds SIXEL placement bookkeeping. Measuring it walks every draft
+		// line, so it is skipped unless a SIXEL thumbnail can be placed or retired this frame.
+		const sixel = TERMINAL.imageProtocol === ImageProtocol.Sixel;
 		if (chips.length === 0) {
 			if (this.#lastSixelPlacements.length === 0) return [];
+			// Editor rows plus one chrome row: the band's viewport row up to a constant. Editor.render applies the max-height clamp and wrapping.
+			const below = this.editor.render(width).length + 1;
 			const clearRows = Array.from({ length: 6 }, () => "");
 			clearRows[5] = this.#lastSixelPlacements
 				.map(placement => this.#clearSixelAt(placement, below - placement.below))
 				.join("");
 			this.#lastSixelPlacements = [];
+			// The emptied band collapses to [] only on the next render, and nothing else schedules it.
+			this.requestRender();
 			return clearRows;
 		}
+		// Same editor geometry as the clear path above; only measured when a SIXEL thumbnail can be placed or retired.
+		const below = sixel || this.#lastSixelPlacements.length > 0 ? this.editor.render(width).length + 1 : 0;
 		this.#renderSixelPlacements = [];
 		const rows = ["", "", "", "", "", ""];
 		const gap = " ".repeat(CARD_GAP);
@@ -173,7 +181,9 @@ export class AttachmentChipsBand implements Component {
 		}
 		// Stale deletes lead the bottom row: a delete cell inside a replacement
 		// thumbnail's rect would otherwise erase the new image (Konsole removes
-		// every placement covering the cell, SIXEL included).
+		// every placement covering the cell, SIXEL included). The thumbnail object
+		// is part of the key: it changes with the image or its fitted size, so two
+		// thumbnails with equal cell geometry are still retired and redrawn.
 		let stale = "";
 		for (const placement of this.#lastSixelPlacements) {
 			if (
@@ -182,7 +192,8 @@ export class AttachmentChipsBand implements Component {
 						current.x === placement.x &&
 						current.cols === placement.cols &&
 						current.rows === placement.rows &&
-						current.below === placement.below,
+						current.below === placement.below &&
+						current.thumb === placement.thumb,
 				)
 			) {
 				stale += this.#clearSixelAt(placement, below - placement.below);
@@ -238,7 +249,7 @@ export class AttachmentChipsBand implements Component {
 	 *  direct-placement lift pattern, which would erase the rows above. Cached on the thumbnail
 	 *  while the placement and border text are unchanged. */
 	#sixelBottomRow(thumb: SixelThumb & { sequence: string }, x: number, border: string, below: number): string {
-		this.#renderSixelPlacements.push({ x, cols: thumb.cols, rows: thumb.rows, below });
+		this.#renderSixelPlacements.push({ x, cols: thumb.cols, rows: thumb.rows, below, thumb });
 		const rowKey = `${x}\0${border}`;
 		if (thumb.row?.key === rowKey) return thumb.row.text;
 		const leftPad = Math.floor((INNER_COLS - thumb.cols) / 2);
@@ -283,21 +294,6 @@ export class AttachmentChipsBand implements Component {
 		if (kSixelThumbs.get(image) !== entry) return;
 		entry.sequence = sequence;
 		this.requestRender();
-	}
-
-	/** Editor rows below the band: the wrapped text height plus one chrome row. The band sits
-	 *  directly above the editor, so this is the band's viewport row up to a constant: when it
-	 *  changes between renders the band moved and every kept placement needs an aimed delete.
-	 *  Calibrated against Editor.render (content width is the terminal width minus 6 cells of
-	 *  gutter/chrome at widths 80 and 100). Blind to the autocomplete dropdown and the viewport
-	 *  max-height clamp, which also move the band; those keep today's behavior (a missed delete). */
-	#editorBelow(width: number): number {
-		const contentWidth = Math.max(1, width - 6);
-		let textRows = 0;
-		for (const line of this.editor.getLines()) {
-			textRows += Math.max(1, Math.ceil(visibleWidth(replaceTabs(line)) / contentWidth));
-		}
-		return textRows + 1;
 	}
 
 	/** Horizontal border with an optional centered, bold caption padded by one space per side. */
