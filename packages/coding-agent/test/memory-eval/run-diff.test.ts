@@ -16,9 +16,12 @@ afterAll(async () => {
 });
 
 interface FakeResult {
+	engine?: string;
 	protocol?: string;
 	k?: number;
 	revision?: string;
+	/** Engine options as `run` records them in the config. */
+	options?: { mnemopiRecall?: string; polyphonic?: boolean };
 	/** Per question: id (`<caseId>:...` names its case) and the recall@10 value (null is what JSON makes of NaN). */
 	questions?: [string, number | null][];
 }
@@ -26,13 +29,20 @@ interface FakeResult {
 /** Writes the part of a result file that `diff` reads. */
 async function writeResult(
 	name: string,
-	{ protocol = "standard", k = 10, revision = "rev", questions = [["q1", 1]] }: FakeResult,
+	{
+		engine = "oracle",
+		protocol = "standard",
+		k = 10,
+		revision = "rev",
+		options = { mnemopiRecall: "recall", polyphonic: false },
+		questions = [["q1", 1]],
+	}: FakeResult,
 ) {
 	const file = path.join(tmp, `${name}.json`);
 	await Bun.write(
 		file,
 		JSON.stringify({
-			config: { dataset: "beam-100k", datasetRevision: revision, engine: "oracle", protocol, k, gitCommit: "abc" },
+			config: { dataset: "beam-100k", datasetRevision: revision, engine, protocol, k, gitCommit: "abc", ...options },
 			questions: questions.map(([questionId, recall]) => ({
 				caseId: questionId.split(":")[0],
 				questionId,
@@ -72,8 +82,12 @@ it("diff prints both configs and compares matching results", async () => {
 	});
 	const { stdout, code } = await diff(a, b);
 	expect(code).toBe(0);
-	expect(stdout).toContain("a: engine oracle protocol standard k 10 gitCommit abc");
-	expect(stdout).toContain("b: engine oracle protocol standard k 10 gitCommit abc");
+	expect(stdout).toContain(
+		"a: engine oracle protocol standard k 10 mnemopiRecall recall polyphonic false gitCommit abc",
+	);
+	expect(stdout).toContain(
+		"b: engine oracle protocol standard k 10 mnemopiRecall recall polyphonic false gitCommit abc",
+	);
 	// The bootstrap resamples cases: the output names how many questions and cases it covered.
 	expect(stdout).toContain("recall@10 overall (b - a, n=3, cases=2): meanDiff 0.3333");
 	expect(stdout).toContain("  cat (n=3, cases=2): ");
@@ -102,6 +116,30 @@ it("diff rejects results from different dataset revisions", async () => {
 	const { stderr, code } = await diff(a, b);
 	expect(code).toBe(1);
 	expect(stderr).toContain("datasetRevision differs: r1 vs r2");
+});
+
+it("diff rejects one engine run with different options, but compares engines run with different options", async () => {
+	const plain = await writeResult("opt-plain", { engine: "mnemopi" });
+	const poly = await writeResult("opt-poly", {
+		engine: "mnemopi",
+		options: { mnemopiRecall: "recall", polyphonic: true },
+	});
+	const enhanced = await writeResult("opt-enh", {
+		engine: "mnemopi",
+		options: { mnemopiRecall: "enhanced", polyphonic: false },
+	});
+	const mnemosynePoly = await writeResult("opt-msy", {
+		engine: "mnemosyne",
+		options: { mnemopiRecall: "recall", polyphonic: true },
+	});
+	const polyphonic = await diff(plain, poly);
+	expect(polyphonic.code).toBe(1);
+	expect(polyphonic.stderr).toContain("polyphonic differs: false vs true");
+	expect((await diff(plain, enhanced)).stderr).toContain("mnemopiRecall differs: recall vs enhanced");
+	const across = await diff(enhanced, mnemosynePoly);
+	expect(across.code).toBe(0);
+	expect(across.stdout).toContain("a: engine mnemopi protocol standard k 10 mnemopiRecall enhanced polyphonic false");
+	expect(across.stdout).toContain("b: engine mnemosyne protocol standard k 10 mnemopiRecall recall polyphonic true");
 });
 
 it("diff rejects upstream-compat results", async () => {
