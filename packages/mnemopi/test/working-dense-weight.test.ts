@@ -34,6 +34,7 @@ describe("working-tier dense weight", () => {
 			await memory.flushExtractions();
 
 			const ids = (await memory.recall("zorblat deploy window", 5)).map(result => result.id);
+			expect(ids).toContain(answer);
 			expect(ids).toContain(echo);
 			expect(ids.indexOf(answer)).toBeLessThan(ids.indexOf(echo));
 		} finally {
@@ -54,6 +55,7 @@ describe("working-tier dense weight", () => {
 			await memory.flushExtractions();
 
 			const ids = (await memory.recall("zorblat deploy window", 5)).map(result => result.id);
+			expect(ids).toContain(related);
 			expect(ids).toContain(unrelated);
 			expect(ids.indexOf(related)).toBeLessThan(ids.indexOf(unrelated));
 		} finally {
