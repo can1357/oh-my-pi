@@ -574,6 +574,7 @@ export function createAcpExtensionUiContext(
 			logger.debug("ACP extension notification", { message, type });
 		},
 		onTerminalInput: () => () => {},
+		rerenderMessage: () => {},
 		setStatus: () => {},
 		setWorkingMessage: () => {},
 		setWidget: () => {},

@@ -14,10 +14,10 @@ import {
 } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
-import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import type { AssistantThinkingRenderer } from "./extension-types";
+import type { AssistantTextRenderer, AssistantTextRendering, AssistantThinkingRenderer } from "./extension-types";
 import { ensureThemeSync, getMarkdownTheme, getMarkdownThemeWithLinkTargets, getThemeEpoch, theme } from "../theme";
 import { card, col, elapsed, node, span, text } from "../native/describe";
 import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
@@ -51,6 +51,8 @@ import { chartFence, hasChartTable, lookupTableChart, splitTableCharts } from ".
  */
 const MAX_TRANSCRIPT_ERROR_ROWS = 8;
 const EMPTY_STABLE_RENDER: readonly string[] = [];
+/** Text renderers that threw once; each failure is logged once per renderer, not per frame. */
+const failedTextRenderers = new WeakSet<AssistantTextRenderer>();
 
 /** The native head of a finished thinking block: "Thought for 12s", or "Thought" when it was never seen streaming. */
 function thoughtLabel(clock: { start: number; end?: number } | undefined): string {
@@ -390,8 +392,10 @@ export class AssistantMessageComponent extends Container {
 	#reactionTarget: ReactionTarget | undefined;
 	/** Reaction lifted from the reply's opening emoji, once resolved. */
 	#reaction: string | undefined;
-	/** Display form of {@link #lastMessage} (reaction handled) the native description is built from. */
+	/** Display form of {@link #lastMessage} (reaction handled, extension text renderers applied) the native description is built from. */
 	#displayedMessage: AssistantMessage | undefined;
+	/** {@link #displayedMessage} before extension text renderers: the reply as written, which the native Copy copies. */
+	#answerMessage: AssistantMessage | undefined;
 	/** Thinking-extension components per content index, recorded when the slow path mounts them. */
 	#thinkingExtensions = new Map<number, Component[]>();
 	/** Collapse state of thinking sections toggled in the terminal, by content index; cleared by {@link setHideThinkingBlock}. */
@@ -523,9 +527,40 @@ export class AssistantMessageComponent extends Container {
 		content[index] = { ...block, text };
 		return { ...message, content };
 	}
+
+	/**
+	 * Display form with the extension text renderers applied, in registration order: each gets the
+	 * previous one's output. A renderer that throws or returns a non-string leaves its input drawn;
+	 * a throw is logged once per renderer.
+	 */
+	#renderText(message: AssistantMessage, streaming: boolean): AssistantMessage {
+		const rendering = this.#textRendering;
+		if (!rendering) return message;
+		let content: AssistantMessage["content"] | undefined;
+		for (let index = 0; index < message.content.length; index++) {
+			const block = message.content[index]!;
+			if (block.type !== "text" || block.text.length === 0) continue;
+			let text = block.text;
+			for (const renderer of rendering.renderers) {
+				try {
+					const rendered = renderer({ message, contentIndex: rendering.contentOffset + index, text, streaming });
+					if (typeof rendered === "string") text = rendered;
+				} catch (error) {
+					if (failedTextRenderers.has(renderer)) continue;
+					failedTextRenderers.add(renderer);
+					logger.warn("Assistant text renderer failed; drawing its input", { error: String(error) });
+				}
+			}
+			if (text === block.text) continue;
+			content ??= message.content.slice();
+			content[index] = { ...block, text };
+		}
+		return content ? { ...message, content } : message;
+	}
 	#hideThinkingBlock: boolean;
 	readonly #onImageUpdate?: () => void;
 	readonly #thinkingRenderers: readonly AssistantThinkingRenderer[];
+	#textRendering: AssistantTextRendering | undefined;
 	readonly #imageBudget?: ImageBudget;
 	#proseOnlyThinking: boolean;
 	#expandThinkingBlocks: boolean;
@@ -539,11 +574,13 @@ export class AssistantMessageComponent extends Container {
 		proseOnlyThinking = true,
 		linkTargets?: ReadonlyMap<string, string>,
 		expandThinkingBlocks = false,
+		textRendering?: AssistantTextRendering,
 	) {
 		super();
 		this.#hideThinkingBlock = hideThinkingBlock;
 		this.#onImageUpdate = onImageUpdate;
 		this.#thinkingRenderers = thinkingRenderers;
+		this.#textRendering = textRendering?.renderers.length ? textRendering : undefined;
 		this.#imageBudget = imageBudget;
 		this.#proseOnlyThinking = proseOnlyThinking;
 		this.#expandThinkingBlocks = expandThinkingBlocks;
@@ -1152,7 +1189,7 @@ export class AssistantMessageComponent extends Container {
 	/** The answer as the transcript shows it: its text blocks' markdown, a blank line apart, without thinking or tool calls. */
 	#answerText(): string {
 		const blocks: string[] = [];
-		for (const content of this.#displayedMessage?.content ?? []) {
+		for (const content of this.#answerMessage?.content ?? []) {
 			if (content.type === "text" && canonicalizeMessage(content.text)) blocks.push(content.text.trim());
 		}
 		return blocks.join("\n\n");
@@ -1214,7 +1251,8 @@ export class AssistantMessageComponent extends Container {
 	 * every guard skips publication and nothing ever retracts it.
 	 */
 	#publishStableSnapshot(rendered: readonly string[], width: number): void {
-		if (!this.#midStreamPublication) return;
+		// Extension text renderers may rewrite text they already drew, and published rows never retract.
+		if (!this.#midStreamPublication || this.#textRendering) return;
 		const parts = this.#currentStableSnapshot();
 		if (!parts) return;
 		const last = parts.at(-1);
@@ -1491,17 +1529,39 @@ export class AssistantMessageComponent extends Container {
 		this.#stopThinkingAnimation();
 		// If the live pulse was on screen when the block sealed, drop the fast path
 		// and rebuild so the placeholder is removed — finalized blocks never animate.
+		// A sealed block's text is also complete and can retire to scrollback before the
+		// reply's final update reaches it: give the text renderers their final call now
+		// (sealed renders pass `streaming: false`).
+		const sealRenderers = this.#textRendering !== undefined && this.#lastUpdateTransient;
 		if (this.#thinkingDots) {
 			this.#fastPathKey = undefined;
 			this.#fastPathItems = undefined;
-			if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		}
+		if ((this.#thinkingDots || sealRenderers) && this.#lastMessage) {
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		}
+	}
+
+	/** Swap the extension text renderers (the setting enabling them changed) and redraw with them. */
+	setTextRendering(rendering: AssistantTextRendering | undefined): void {
+		this.#textRendering = rendering?.renderers.length ? rendering : undefined;
+		if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 	}
 
 	applyRetryRecovery(retryRecovery: AssistantMessage["retryRecovery"]): void {
 		if (!this.#lastMessage || !retryRecovery) return;
 		this.setErrorPinned(false);
 		this.updateContent({ ...this.#lastMessage, retryRecovery });
+	}
+
+	/**
+	 * Draw the current message again when it is the reply sent at `timestamp`, re-running the
+	 * extension text renderers; returns whether it was. The caller schedules the frame.
+	 */
+	rerenderMessage(timestamp: number): boolean {
+		if (this.#lastMessage?.timestamp !== timestamp) return false;
+		this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		return true;
 	}
 
 	messagePersistenceKey(): string | undefined {
@@ -1806,6 +1866,9 @@ export class AssistantMessageComponent extends Container {
 		// verbatim message so re-renders re-derive the reaction deterministically.
 		// Narration the provider returned as thinking renders as answer text.
 		message = this.#displayMessage(presentNarrationAsAnswer(message), this.#lastUpdateTransient);
+		this.#answerMessage = message;
+		// A sealed block (closed at a tool call) keeps receiving transient updates; its text is final.
+		message = this.#renderText(message, this.#lastUpdateTransient && !this.#transcriptBlockFinalized);
 		this.#displayedMessage = message;
 
 		// Streaming-speed gauge: only a live, in-flight render of the single
