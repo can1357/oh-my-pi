@@ -19,6 +19,7 @@ import { node, row, span } from "../native/describe";
 import { plainText } from "../native/spans";
 import type { DescribeContext, NativeNode } from "../native/node";
 import { convertImageToPng } from "../png-conversion";
+import { wrapTmuxPassthroughIfNeeded } from "../tmux";
 import { attachmentSgr } from "./composer-attachments";
 import { cachedImageDimensions, setCachedImageDimensions } from "./image-references";
 import { theme } from "../theme/theme";
@@ -47,8 +48,6 @@ interface SixelThumb {
 	sequence: string | null | undefined;
 	cols: number;
 	rows: number;
-	/** Composed bottom border row, reused while its placement and border text are unchanged. */
-	row?: { key: string; text: string };
 }
 /** Thumbnails by image: encoded once per fitted size, never on a repaint. */
 const kSixelThumbs = new WeakMap<ImageContent, SixelThumb>();
@@ -69,13 +68,29 @@ export class AttachmentChipsBand implements Component {
 		private readonly editor: CustomEditor,
 		private readonly budget: ImageBudget,
 		private readonly requestRender: () => void,
-	) {}
+	) {
+		// Promote speculative placements to last-painted once per emitted frame only.
+		// `limitResidentImages` runs once per emission (never per discarded retry),
+		// so a discovery pass the budget discards never becomes the delete baseline.
+		this.budget.onFrameCommitted(() => {
+			this.#lastSixelPlacements = this.#renderSixelPlacements;
+		});
+	}
 
 	#native:
 		| { chips: readonly ComposerChipDescriptor[]; node: NativeNode; images: ReadonlyMap<ImageContent, NativeNode> }
 		| undefined;
 	#lastSixelPlacements: Array<{ x: number; cols: number; rows: number; below: number; thumb: SixelThumb }> = [];
 	#renderSixelPlacements: Array<{ x: number; cols: number; rows: number; below: number; thumb: SixelThumb }> = [];
+	#renderSixelPrefixes: string[] = [];
+	/**
+	 * Promote the last rendered placements to last-painted. Called automatically
+	 * once per emitted frame via the budget hook; tests call it explicitly to
+	 * simulate emission between renders (a retry pass must not commit).
+	 */
+	commitSixelPlacements(): void {
+		this.#lastSixelPlacements = this.#renderSixelPlacements;
+	}
 
 	/**
 	 * A wrapping `row` of chip `card`s (`omp.composer.chip`) titled with the
@@ -145,7 +160,9 @@ export class AttachmentChipsBand implements Component {
 			clearRows[5] = this.#lastSixelPlacements
 				.map(placement => this.#clearSixelAt(placement, below - placement.below))
 				.join("");
-			this.#lastSixelPlacements = [];
+			this.#renderSixelPlacements = [];
+			this.#renderSixelPrefixes = [];
+			// Do not commit here: the budget hook promotes to last-painted on emission.
 			// The emptied band collapses to [] only on the next render, and nothing else schedules it.
 			this.requestRender();
 			return clearRows;
@@ -153,6 +170,7 @@ export class AttachmentChipsBand implements Component {
 		// Same editor geometry as the clear path above; only measured when a SIXEL thumbnail can be placed or retired.
 		const below = sixel || this.#lastSixelPlacements.length > 0 ? this.editor.render(width).length + 1 : 0;
 		this.#renderSixelPlacements = [];
+		this.#renderSixelPrefixes = [];
 		const rows = ["", "", "", "", "", ""];
 		const gap = " ".repeat(CARD_GAP);
 		let x = 0;
@@ -183,8 +201,13 @@ export class AttachmentChipsBand implements Component {
 				stale += this.#clearSixelAt(placement, below - placement.below);
 			}
 		}
-		rows[5] = stale + rows[5];
-		this.#lastSixelPlacements = this.#renderSixelPlacements;
+		// SIXEL DCS sequences ride immediately after stale deletes, before border text:
+		// with budget-suppressed chips ahead of a live thumbnail, border text alone can
+		// push the first DCS beyond SIXEL_MARKER_SCAN_LIMIT (128), and line-fit then
+		// treats the payload as visible text and truncates. Hoisted prefixes keep the
+		// first marker at renderer-recognized row start (stale deletes + one prefix).
+		rows[5] = stale + this.#renderSixelPrefixes.join("") + rows[5];
+		// Commit happens via the budget's once-per-emission hook (or explicitly in tests).
 		return rows;
 	}
 
@@ -219,28 +242,29 @@ export class AttachmentChipsBand implements Component {
 	/** Delete the SIXEL placement at `placement`. `rowShift` is how many rows the band moved
 	 *  down since that placement was drawn (negative when editor growth pushed the band up):
 	 *  the delete aims from the current bottom-border cursor at the old origin cell. Zero keeps
-	 *  the legacy straight-up lift, byte for byte. */
+	 *  the legacy straight-up lift, byte for byte. The Kitty `a=d,d=c` APC rides the shared
+	 *  tmux passthrough so a Konsole outer terminal behind tmux still receives it. */
 	#clearSixelAt(placement: { x: number; cols: number; rows: number }, rowShift = 0): string {
 		const leftPad = Math.floor((INNER_COLS - placement.cols) / 2);
 		const topPad = Math.floor((INNER_ROWS - placement.rows) / 2);
 		const net = rowShift - (INNER_ROWS - topPad);
 		const vertical = net < 0 ? `\x1b[${-net}A` : net > 0 ? `\x1b[${net}B` : "";
-		return `\x1b[0m\x1b7${vertical}\x1b[${placement.x + 2 + leftPad}G\x1b_Ga=d,d=c,q=2\x1b\\\x1b8`;
+		const del = wrapTmuxPassthroughIfNeeded("\x1b_Ga=d,d=c,q=2\x1b\\");
+		return `\x1b[0m\x1b7${vertical}\x1b[${placement.x + 2 + leftPad}G${del}\x1b8`;
 	}
-	/** Bottom border row carrying a SIXEL thumbnail. The image is emitted from the centered origin
-	 *  inside the interior: save the cursor, move up to that row, print the sequence, restore the
-	 *  cursor, then the border text. The leading SGR reset keeps the line from matching the
-	 *  direct-placement lift pattern, which would erase the rows above. Cached on the thumbnail
-	 *  while the placement and border text are unchanged. */
+	/** Bottom border for a SIXEL thumbnail card. The DCS cursor-addressed prefix is hoisted
+	 *  to the bottom row start (see `render`): the image emits from the centered origin inside
+	 *  the interior via save/move/print/restore, then the border text follows. The leading SGR
+	 *  reset keeps the line from matching the direct-placement lift pattern, which would erase
+	 *  the rows above. Prefixes rebuild per frame (cheap concat; the encode stays cached). */
 	#sixelBottomRow(thumb: SixelThumb & { sequence: string }, x: number, border: string, below: number): string {
 		this.#renderSixelPlacements.push({ x, cols: thumb.cols, rows: thumb.rows, below, thumb });
-		const rowKey = `${x}\0${border}`;
-		if (thumb.row?.key === rowKey) return thumb.row.text;
 		const leftPad = Math.floor((INNER_COLS - thumb.cols) / 2);
 		const topPad = Math.floor((INNER_ROWS - thumb.rows) / 2);
-		const text = `\x1b[0m\x1b7\x1b[${INNER_ROWS - topPad}A\x1b[${x + 2 + leftPad}G${thumb.sequence}\x1b8${border}`;
-		thumb.row = { key: rowKey, text };
-		return text;
+		this.#renderSixelPrefixes.push(
+			`\x1b[0m\x1b7\x1b[${INNER_ROWS - topPad}A\x1b[${x + 2 + leftPad}G${thumb.sequence}\x1b8`,
+		);
+		return border;
 	}
 
 	/** SIXEL thumbnail of an image chip. `renderImage` owns the fit (6-px band rounding, aspect scale) and

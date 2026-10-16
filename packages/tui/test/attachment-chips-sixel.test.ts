@@ -125,10 +125,12 @@ describe("AttachmentChipsBand SIXEL thumbnail", () => {
 			band.render(80);
 			await encoding;
 			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
+			band.commitSixelPlacements();
 			editor.clearDraft();
 			const cleared = band.render(80);
 			expect(cleared).toHaveLength(6);
 			expect(cleared[5]).toContain("a=d,d=c");
+			band.commitSixelPlacements();
 			expect(band.render(80)).toEqual([]);
 		} finally {
 			encode.mockRestore();
@@ -198,6 +200,7 @@ describe("AttachmentChipsBand SIXEL thumbnail", () => {
 			await pending[0];
 			await pending[1];
 			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
+			band.commitSixelPlacements();
 			// Drop the narrow chip: the wide thumbnail slides into its origin
 			// while the narrow placement is still live.
 			editor.setText(`${chipLabel("image", 2)} `);
@@ -222,6 +225,7 @@ describe("AttachmentChipsBand SIXEL thumbnail", () => {
 			band.render(80);
 			await encoding;
 			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
+			band.commitSixelPlacements();
 			// Multiline input pushes the band up; x/cols/rows are unchanged,
 			// so only the tracked band row distinguishes the stale placement.
 			editor.setText(`${editor.getText()}\nhello\nworld`);
@@ -283,13 +287,14 @@ describe("AttachmentChipsBand SIXEL thumbnail", () => {
 			band.render(80);
 			await encoding;
 			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
+			band.commitSixelPlacements();
 			const before = editor.render(80).length;
 			editor.setText(`${editor.getText()}\nline2`);
 			expect(editor.render(80).length).toBeGreaterThan(before);
 			const moved = band.render(80);
 			expect(moved[5]).toContain(FAKE_SIXEL);
 			expect(moved[5]).toContain("a=d,d=c");
-			// Past the clamp, rendered height is stable: no further aimed delete.
+			band.commitSixelPlacements();
 			const clamped = editor.render(80).length;
 			editor.setText(`${editor.getText()}\nline3\nline4\nline5`);
 			expect(editor.render(80).length).toBe(clamped);
@@ -330,6 +335,7 @@ describe("AttachmentChipsBand SIXEL thumbnail", () => {
 			band.render(80);
 			await encoding;
 			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
+			band.commitSixelPlacements();
 			const before = editor.render(80).length;
 			editor.handleInput("/");
 			await autocompleteUpdated;
@@ -370,6 +376,115 @@ describe("AttachmentChipsBand SIXEL thumbnail", () => {
 			expect(encode).toHaveBeenCalledWith(expect.any(Uint8Array), 108, 36);
 			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
 		} finally {
+			encode.mockRestore();
+		}
+	});
+	it("preserves last-painted placements across a discarded budget retry pass", async () => {
+		let encoding: Promise<string> | undefined;
+		const encode = spyOn(natives, "encodeSixelAsync").mockImplementation(() => {
+			encoding = Promise.resolve(FAKE_SIXEL);
+			return encoding;
+		});
+		try {
+			const { editor, band } = makeBand();
+			stageImage(editor);
+			band.render(80);
+			await encoding;
+			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
+			band.commitSixelPlacements();
+			// Discarded discovery pass: editor growth moves the band, but the frame
+			// is thrown away (budget retry), so it must not become the delete baseline.
+			editor.setText(`${editor.getText()}\nhello\nworld`);
+			const discarded = band.render(80);
+			expect(discarded[5]).toContain(FAKE_SIXEL);
+			expect(discarded[5]).toContain("a=d,d=c");
+			// Retry pass at the same geometry still diffs against the emitted frame,
+			// so it still carries the aimed delete. A speculative commit would have
+			// silenced it.
+			const retry = band.render(80);
+			expect(retry[5]).toContain(FAKE_SIXEL);
+			expect(retry[5]).toContain("a=d,d=c");
+			band.commitSixelPlacements();
+			// Steady state after emission: no further delete.
+			const steady = band.render(80);
+			expect(steady[5]).toContain(FAKE_SIXEL);
+			expect(steady[5]).not.toContain("a=d,d=c");
+		} finally {
+			encode.mockRestore();
+		}
+	});
+
+	it("keeps the first SIXEL marker within the renderer scan window under a suppressed budget", async () => {
+		const pending: Promise<string>[] = [];
+		const encode = spyOn(natives, "encodeSixelAsync").mockImplementation(() => {
+			const next = Promise.resolve(FAKE_SIXEL);
+			pending.push(next);
+			return next;
+		});
+		try {
+			const editor = new CustomEditor(getEditorTheme());
+			const budget = new ImageBudget(1);
+			const band = new AttachmentChipsBand(editor, budget, () => {});
+			// Four distinct staged images: same 2x2 header so the fit is stable,
+			// distinct trailing lengths so the budget hands out distinct ids.
+			const base = Buffer.from(TINY_PNG, "base64");
+			for (let n = 1; n <= 4; n++) {
+				const bytes = Buffer.concat([base, Buffer.alloc(n, n)]);
+				editor.pendingImages.push({ type: "image", data: bytes.toString("base64"), mimeType: "image/png" });
+				editor.insertAtom(chipLabel("image", n), `[Image #${n}, 2x2]`);
+			}
+			// Prime the off-thread encodes, then drive the TUI discovery/retry loop
+			// so the cap-1 budget converges: oldest three fall back to text, newest keeps its thumbnail.
+			budget.beginPass();
+			band.render(80);
+			budget.endPass();
+			await Promise.all(pending);
+			pending.length = 0;
+			let viewport: readonly string[] = [];
+			for (let pass = 0; pass < 3; pass++) {
+				budget.beginPass();
+				viewport = band.render(80);
+				if (!budget.endPass()) break;
+			}
+			budget.limitResidentImages();
+			const bottom = viewport[5] ?? "";
+			expect(bottom).toContain(FAKE_SIXEL);
+			// Hoisted prefixes keep the first DCS at row start (after any deletes),
+			// well inside SIXEL_MARKER_SCAN_LIMIT 128, before any suppressed border text.
+			// Interleaved borders would place it after three suppressed cards.
+			expect(bottom.indexOf("\x1bP")).toBeGreaterThanOrEqual(0);
+			expect(bottom.indexOf("\x1bP")).toBeLessThan(128);
+			expect(bottom.indexOf(FAKE_SIXEL)).toBeLessThan(bottom.indexOf("╰"));
+			expect(TERMINAL.isImageLine(bottom)).toBe(true);
+		} finally {
+			encode.mockRestore();
+		}
+	});
+
+	it("wraps the Konsole cursor-cell delete APC through tmux passthrough", async () => {
+		let encoding: Promise<string> | undefined;
+		const encode = spyOn(natives, "encodeSixelAsync").mockImplementation(() => {
+			encoding = Promise.resolve(FAKE_SIXEL);
+			return encoding;
+		});
+		const originalTmux = Bun.env.TMUX;
+		try {
+			const { editor, band } = makeBand();
+			stageImage(editor);
+			band.render(80);
+			await encoding;
+			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
+			band.commitSixelPlacements();
+			Bun.env.TMUX = "/tmp/tmux-test,123,0";
+			editor.setText(`${editor.getText()}\nhello\nworld`);
+			const moved = band.render(80)[5];
+			expect(moved).toContain(FAKE_SIXEL);
+			expect(moved).toContain("a=d,d=c");
+			// Shared encoder path: the delete APC rides tmux DCS passthrough.
+			expect(moved).toContain("\x1bPtmux;");
+		} finally {
+			if (originalTmux === undefined) delete Bun.env.TMUX;
+			else Bun.env.TMUX = originalTmux;
 			encode.mockRestore();
 		}
 	});
