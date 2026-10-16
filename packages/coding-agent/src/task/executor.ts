@@ -4402,8 +4402,8 @@ function buildSubagentSessionOptions(
 		onFirstChatDispatch: launch?.onFirstChatDispatch,
 		// A launch prompts its assignment only after setup; a revive's turns are its IRC wakes.
 		awaitingAssignment: launch !== undefined,
-		systemPrompt: defaultPrompt => {
-			const promptPrefix = inputs.systemPreset === "minimal-task" ? [] : defaultPrompt;
+		systemPrompt: (defaultPrompt, runtimeInstructions) => {
+			const promptPrefix = inputs.systemPreset === "minimal-task" ? (runtimeInstructions ?? []) : defaultPrompt;
 			// A revive shows the roster the parked session's prompt held, and a rebuild that leaves the
 			// rest of the prompt unchanged keeps the roster the prompt it replaces showed: peer rows carry
 			// each peer's live activity, so a re-collected roster changed the prompt's bytes on every such
@@ -4437,6 +4437,7 @@ function buildSubagentSessionOptions(
 					ircOmittedCount: ircRoster?.omittedCount ?? 0,
 					ircSelfId: inputs.ircEnabled ? inputs.id : "",
 				},
+				runtimeInstructions,
 			);
 			if (ircRoster) recordIrcRender(inputs, subagentPrompt.at(-1)!, ircRoster);
 			// Per-spawn text (context, worktree, IRC roster) goes after the trailing

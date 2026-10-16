@@ -27,7 +27,10 @@ function identityConverter(messages: AgentMessage[]): Message[] {
 	) as Message[];
 }
 
-async function captureProviderContext(dialect?: AgentLoopConfig["dialect"]): Promise<Context> {
+async function captureProviderContext(
+	dialect?: AgentLoopConfig["dialect"],
+	systemPrompt: string[] = buildSubagentSystemPrompt([], "minimal-task", data),
+): Promise<Context> {
 	const schema = type({ path: type("string").describe("path argument sentinel") });
 	const readTool: AgentTool<typeof schema, { path: string }> = {
 		name: "read_probe",
@@ -48,7 +51,7 @@ async function captureProviderContext(dialect?: AgentLoopConfig["dialect"]): Pro
 		],
 	});
 	const context: AgentContext = {
-		systemPrompt: buildSubagentSystemPrompt([], "minimal-task", data),
+		systemPrompt,
 		messages: [],
 		tools: [readTool],
 	};

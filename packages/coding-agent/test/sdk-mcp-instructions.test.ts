@@ -11,6 +11,7 @@ import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { buildSubagentSystemPrompt } from "@oh-my-pi/pi-coding-agent/task/system-prompt";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import {
@@ -112,6 +113,101 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		}
 		mock.restore();
 	});
+
+	it("keeps callable MCP server protocols in a minimal prompt without inherited user instructions", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.startupTimeoutMs": 0, "tools.xdev": false, inlineToolDescriptors: "off" }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: true,
+			appendSystemPrompt: USER_APPEND_MARKER,
+			systemPrompt: (defaultPrompt, runtimeInstructions) =>
+				buildSubagentSystemPrompt(
+					defaultPrompt,
+					"minimal-task",
+					{
+						agent: "Inspect the connected test server.",
+						context: "",
+						planReference: "",
+						planReferencePath: "",
+						worktree: "",
+						outputSchema: undefined,
+						outputSchemaOverridesAgent: false,
+					},
+					runtimeInstructions,
+				),
+		});
+		try {
+			const rendered = session.systemPrompt.join("\n");
+			expect(rendered).toContain(SERVER_INSTRUCTIONS);
+			expect(rendered).toContain("server-controlled and may not be verified");
+			expect(rendered).not.toContain(USER_APPEND_MARKER);
+			const result = await session.getToolByName(MCP_TOOL_NAME)?.execute("minimal-server-protocol-call", {});
+			expect(result?.content.find(part => part.type === "text")?.text).toBe(TOOL_RESULT);
+		} finally {
+			await session.dispose();
+		}
+	}, 20_000);
+
+	for (const enabled of [true, false]) {
+		it(`keeps the opaque-token contract only with active secret obfuscation (${enabled})`, async () => {
+			const { session } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				modelRegistry,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "secrets.enabled": enabled }),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableLsp: false,
+				skipPythonPreflight: true,
+				enableMCP: false,
+				appendSystemPrompt: USER_APPEND_MARKER,
+				systemPrompt: (defaultPrompt, runtimeInstructions) =>
+					buildSubagentSystemPrompt(
+						defaultPrompt,
+						"minimal-task",
+						{
+							agent: "Inspect the fixture.",
+							context: "",
+							planReference: "",
+							planReferencePath: "",
+							worktree: "",
+							outputSchema: undefined,
+							outputSchemaOverridesAgent: false,
+						},
+						runtimeInstructions,
+					),
+			});
+			try {
+				const rendered = session.systemPrompt.join("\n");
+				if (enabled) {
+					expect(rendered).toContain(
+						"`$$HASH$$`, `$$HASH:CASE$$`, `$$NAME_HASH:CASE$$` output tokens: opaque strings.",
+					);
+				} else {
+					expect(rendered).not.toContain("$$HASH$$");
+				}
+				expect(rendered).not.toContain(USER_APPEND_MARKER);
+			} finally {
+				await session.dispose();
+			}
+		}, 20_000);
+	}
 
 	it("omits an opted-out server's instructions and the empty heading, and keeps its tools", async () => {
 		await Bun.write(

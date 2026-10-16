@@ -2019,7 +2019,13 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		});
 		const result = await executorModule.runSubprocess({
 			cwd,
-			agent: { name: "task", description: "test", systemPrompt: "charter", source: "bundled" },
+			agent: {
+				name: "task",
+				description: "test",
+				systemPrompt: "charter",
+				source: "bundled",
+				...(sdkProtocolContext ? { systemPreset: "minimal-task" as const } : {}),
+			},
 			task: "do work",
 			index: 0,
 			id: "prompt-blocks",
@@ -2032,6 +2038,32 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		if (!spawned) throw new Error("Expected the spawn to create a session");
 		return spawned;
 	}
+
+	it("keeps live SDK protocols in the provider prompt during a minimal cold revival", async () => {
+		const cwd = makeTempDir("@pi-minimal-protocol-revive-");
+		const protocols = [
+			"## MCP Server Instructions\n\n### fixture\nInitialize the fixture before calling its tools.",
+			"- `$$HASH$$`, `$$HASH:CASE$$`, `$$NAME_HASH:CASE$$` output tokens: opaque strings.",
+		];
+		// Produce the persisted prompt through the real executor callback first.
+		// Cold revival must replay that prompt, rather than rebuild a seeded transcript.
+		const spawned = await spawn(cwd, () => [], spawnResponses(), undefined, {
+			defaultPrompt: ["INHERITED_PROJECT_PROTOCOL_SENTINEL"],
+			runtimeInstructions: protocols,
+		});
+		const recordedPrompt = spawned.requests.at(-1);
+		if (!recordedPrompt) throw new Error("Expected a recorded provider request");
+		await spawned.session.dispose();
+
+		const replayed = await reviveAndFollowUp(cwd);
+		expect(replayed.system).toEqual(recordedPrompt);
+		const providerPrompt = replayed.system.join("\n");
+		expect(providerPrompt).toContain("Initialize the fixture before calling its tools.");
+		expect(providerPrompt).toContain(
+			"`$$HASH$$`, `$$HASH:CASE$$`, `$$NAME_HASH:CASE$$` output tokens: opaque strings.",
+		);
+		expect(providerPrompt).not.toContain("INHERITED_PROJECT_PROTOCOL_SENTINEL");
+	});
 
 	/** Cold-revives the parked transcript the way the Agent Hub does and returns the follow-up's request. */
 	async function reviveAndFollowUp(cwd: string, hooks?: ExtensionHooks): Promise<{ system: string[]; tools: string }> {
