@@ -2,7 +2,6 @@
  * The relay extension's files as omp installs them, and the checks that let a
  * relay rewrite an installed copy in place (extension self-update).
  */
-import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getBrowserRelayDir } from "@oh-my-pi/pi-utils";
@@ -85,7 +84,7 @@ export function extensionIdForPath(absolutePath: string, platform: NodeJS.Platfo
 					"utf16le",
 				)
 			: Buffer.from(absolutePath, "utf8");
-	const hex = createHash("sha256").update(bytes).digest("hex").slice(0, 32);
+	const hex = new Bun.CryptoHasher("sha256").update(bytes).digest("hex").slice(0, 32);
 	return Array.from(hex, digit => String.fromCharCode(97 + Number.parseInt(digit, 16))).join("");
 }
 

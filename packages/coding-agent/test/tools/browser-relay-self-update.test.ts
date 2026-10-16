@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
@@ -130,7 +129,7 @@ describe("relay extension self-update decisions", () => {
 		expect(bridge.ready).toBe(true);
 		const sent = reloading.messages.length;
 		const conn = bridge.cdpConnected(FAKE_CDP);
-		const code = createHash("sha256").update("chrome").digest("base64url").slice(0, 8);
+		const code = new Bun.CryptoHasher("sha256").update("chrome").digest("base64url").slice(0, 8);
 		bridge.cdpMessage(
 			conn,
 			JSON.stringify({
