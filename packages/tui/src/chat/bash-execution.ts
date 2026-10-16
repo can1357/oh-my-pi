@@ -19,6 +19,7 @@ import {
 	activeStyleAtRowEnd,
 	loadXtermTerminal,
 	readTerminalRows,
+	SGR,
 	splitTerminalRowAt,
 	styleTerminalRow,
 } from "../tools/terminal-output";
@@ -439,9 +440,22 @@ export class BashExecutionComponent extends Container {
 			// color, and the segment's own runs still override it.
 			let carry = "";
 			for (const span of spans) {
-				const [head, tail] = splitTerminalRowAt(remaining, span.offset - consumed);
-				emitted += `${styleTerminalRow(carry + head, base)}${span.payload}`;
-				carry = activeStyleAtRowEnd(head);
+				const offset = span.offset - consumed;
+				const [head, tail] = splitTerminalRowAt(remaining, offset);
+				// A row renders up to its last non-blank cell, but the anchor
+				// counts every column the cursor advanced — trailing spaces leave
+				// no glyph — so a frame can sit past the end of its rendered row.
+				// Reconstruct the blanks the trim dropped or the frame splices
+				// onto the last visible glyph and the image shifts left.
+				let visible = head.length;
+				for (const match of head.matchAll(SGR)) visible -= match[0].length;
+				const blanks = visible >= offset ? "" : " ".repeat(offset - visible);
+				// The carry is part of what this segment renders, so the style it
+				// leaves active is the one the next segment inherits. Deriving it
+				// from `head` alone drops a run that opened before an earlier
+				// frame and was never reset.
+				carry = activeStyleAtRowEnd(carry + head);
+				emitted += `${styleTerminalRow(carry + head + blanks, base)}${span.payload}`;
 				consumed = span.offset;
 				remaining = tail;
 			}

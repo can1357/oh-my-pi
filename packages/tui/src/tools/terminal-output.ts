@@ -14,7 +14,8 @@ export async function loadXtermTerminal(): Promise<typeof XtermModule.Terminal> 
 }
 
 const RESET = "\x1b[0m";
-const SGR = /\x1b\[([0-9;]*)m/g;
+/** SGR run in a rendered replay row; shared with callers that measure one. */
+export const SGR = /\x1b\[([0-9;]*)m/g;
 
 interface TerminalCell {
 	getChars(): string;

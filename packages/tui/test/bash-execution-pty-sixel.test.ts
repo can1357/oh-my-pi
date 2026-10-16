@@ -148,6 +148,59 @@ describe("BashExecutionComponent PTY SIXEL", () => {
 		expect(plain).toBe(`a${SIXEL}b${second}c`);
 	});
 
+	it("carries the row's style across two frames on one row", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		// Second iteration of the splice loop: the style run opened before the
+		// first frame must survive it for the text between and after the second
+		// frame. A frame does not reset SGR, so re-deriving the carry from the
+		// bare segment between two frames drops the run and the tail renders in
+		// the base color even though nothing reset it.
+		const second = "\x1bPq#1;2;0;100;0#1~~\x1b\\";
+		const component = new BashExecutionComponent("img", ui, false);
+		component.appendPtyChunk(`\x1b[31mred${SIXEL}b${second}c\r\n`);
+		component.setComplete(0, false);
+
+		await renderUntil(component, () => component.isTranscriptBlockFinalized());
+
+		const output = component.getOutput();
+		const row = output.split("\n").find(line => line.includes(SIXEL));
+		expect(row).toBeDefined();
+		expect(row).toMatch(/\x1b\[38;5;1m/);
+		const plain = row!.replace(/\x1b\[[0-9;]*m/gu, "");
+		expect(plain).toBe(`red${SIXEL}b${second}c`);
+		// Both payloads split the red run, so the red SGR has to live ahead of
+		// each payload and ahead of `c`.
+		const runs = [...row!.matchAll(/\x1b\[38;5;1m/gu)].map(match => match.index ?? 0);
+		expect(runs.length).toBeGreaterThanOrEqual(3);
+		const tailIndex = row!.indexOf("c", row!.indexOf(second) + second.length);
+		expect(Math.max(...runs)).toBeLessThan(tailIndex);
+	});
+
+	it("keeps a frame's column when blank cells precede it", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		// Cursor-advancing spaces leave no glyph, so the replay row is trimmed
+		// at its last visible cell while the anchored column counts them. The
+		// frame has to be spliced at its own column: dropping the blank cells
+		// shifts the image left onto the text that precedes it.
+		const component = new BashExecutionComponent("img", ui, false);
+		component.appendPtyChunk(`a   ${SIXEL}`);
+		component.setComplete(0, false);
+
+		await renderUntil(component, () => component.isTranscriptBlockFinalized());
+
+		const output = component.getOutput();
+		const row = output.split("\n").find(line => line.includes(SIXEL));
+		expect(row).toBeDefined();
+		const plain = row!.replace(/\x1b\[[0-9;]*m/gu, "");
+		expect(plain).toBe(`a   ${SIXEL}`);
+	});
+
 	it("keeps the stream order of a payload emitted after a wide character row", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
 		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
