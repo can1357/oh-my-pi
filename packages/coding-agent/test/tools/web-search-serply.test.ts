@@ -133,6 +133,21 @@ describe("Serply web search provider", () => {
 		expect(seen.url?.searchParams.get("tbs")).toBe("qdr:w");
 	});
 
+	it("demotes path-qualified site: filters to plain terms", async () => {
+		const { seen, fetchImpl } = mockFetch({ results: [] });
+
+		await searchSerply({
+			...makeParams("websearch provider site:github.com/can1357/oh-my-pi after:2026-08-01"),
+			fetch: fetchImpl,
+		});
+
+		const query = seen.url?.searchParams.get("q") ?? "";
+		// Google zero-matches `site:` with a path; the pipeline post-filter enforces it instead.
+		expect(query).not.toContain("site:");
+		expect(query).toContain("github.com/can1357/oh-my-pi");
+		expect(query).toContain("after:2026-08-01");
+	});
+
 	it("keeps explicit date bounds in the query and drops the relative window", async () => {
 		const { seen, fetchImpl } = mockFetch({ results: [] });
 

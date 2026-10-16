@@ -9,11 +9,18 @@ import { asRecord, USER_AGENT } from "@oh-my-pi/pi-utils";
 import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import type { StructuredQuery } from "../query";
-import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery } from "../query";
+import { formatScraperQuery, parseSearchQuery } from "../query";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, normalizeSearchText, readLimitedText, withHardTimeout } from "./utils";
+import {
+	classifyProviderHttpError,
+	getErrorMessage,
+	normalizeSearchText,
+	normalizeUrl,
+	readLimitedText,
+	withHardTimeout,
+} from "./utils";
 
 const SERPLY_SEARCH_URL = "https://api.serply.io/v1/search/";
 const DEFAULT_NUM_RESULTS = 10;
@@ -43,41 +50,16 @@ interface SerplySearchResponse {
 	results?: unknown;
 }
 
-/** Serply reports failures as a `detail` string, occasionally as a nested object. */
-function getErrorMessage(value: unknown): string | null {
-	if (typeof value === "string") return value.trim() || null;
-
-	const record = asRecord(value);
-	if (!record) return null;
-
-	for (const key of ["detail", "error", "message"]) {
-		const message = getErrorMessage(record[key]);
-		if (message) return message;
-	}
-
-	return null;
-}
-
-function normalizeUrl(value: unknown): string | undefined {
-	if (typeof value !== "string" || value.length > 2048) return undefined;
-	try {
-		const url = new URL(value);
-		if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-		return url.toString();
-	} catch {
-		return undefined;
-	}
-}
-
 /** Exported for testing. Builds the Serply request URL from unified params. */
 export function buildRequestUrl(params: SerplySearchParams): URL {
 	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
-	// Serply proxies Google itself, so the classic operator set (quoted
-	// phrases, OR groups, -exclusions, site:, inurl:, intitle:, intext:,
-	// filetype:, and after:/before: bounds) is re-emitted into `q` rather than
-	// translated onto side-channel request parameters.
+	// Serply proxies Google itself, so the operator set (quoted phrases, OR
+	// groups, -exclusions, bare-domain site:, intitle:, intext:, filetype:,
+	// and after:/before: bounds) is re-emitted into `q`. Path-carrying site:
+	// and inurl: zero-match on Google, so the shared scraper formatter demotes
+	// them to plain terms and the pipeline post-filter enforces them.
 	const url = new URL(SERPLY_SEARCH_URL);
-	url.searchParams.set("q", parsed.hasDirectives ? formatQuery(parsed, GOOGLE_QUERY_SYNTAX) : params.query);
+	url.searchParams.set("q", formatScraperQuery(params.query, parsed));
 	url.searchParams.set("num", String(clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS)));
 	// `tbs` is a pure time filter. Explicit after:/before: bounds already ride
 	// along in `q`; stacking the relative window on top would intersect two
