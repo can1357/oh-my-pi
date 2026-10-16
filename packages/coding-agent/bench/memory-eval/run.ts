@@ -11,7 +11,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type CalibrationDump, compareCalibration, runUpstreamCompat } from "./compat";
 import { loadBeamUpstreamCompat, loadDataset } from "./datasets";
 import type { EngineAdapter, ProtocolName } from "./engine";
-import { type MnemopiEmbedder, mnemopiEngine } from "./engines/mnemopi";
+import { assertMnemopiEnvClean, type MnemopiEmbedder, mnemopiEngine } from "./engines/mnemopi";
 import { mnemosyneEngine, type UpstreamCompatOps } from "./engines/mnemosyne";
 import { oracleEngine, randomEngine } from "./engines/sanity";
 import { buildResultFile, primaryMetric, type ResultFile, type RunConfig, type RunOutput, runCases } from "./runner";
@@ -31,14 +31,7 @@ const UPSTREAM_COMPAT_CONVERSATIONS = 3;
 function createEngine(name: string, embedder: MnemopiEmbedder): EngineAdapter {
 	if (embedder !== "js" && name !== "mnemopi") throw new Error("--embedder applies to the mnemopi engine only");
 	if (name === "mnemopi") {
-		// Mnemopi runs in this process and reads these itself, so they cannot be scrubbed: refuse instead.
-		// OPENROUTER_BASE_URL is the one non-MNEMOPI_ variable that can route its embeddings to an API.
-		const set = Object.keys(Bun.env).filter(
-			key => (key.startsWith("MNEMOPI_") || key === "OPENROUTER_BASE_URL") && Bun.env[key],
-		);
-		if (set.length > 0) {
-			throw new Error(`refusing to run mnemopi with MNEMOPI_* or OPENROUTER_BASE_URL set: ${set.join(", ")}`);
-		}
+		assertMnemopiEnvClean();
 		return mnemopiEngine({ embedder });
 	}
 	if (name === "mnemosyne") return mnemosyneEngine();

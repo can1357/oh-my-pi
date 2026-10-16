@@ -1,7 +1,9 @@
 // Run: bun packages/coding-agent/bench/memory-eval/embed-parity.ts <parity-py.json>
-// Compares Mnemopi's embeddings of the texts py/embed_parity.py embedded with fastembed; exits 1 if any cosine < 0.99.
+// Compares Mnemopi's embeddings of the texts py/embed_parity.py embedded with fastembed; exits 1 if any cosine is
+// non-finite or < 0.99.
 import { embed } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import { withMnemopiRuntimeOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
+import { assertMnemopiEnvClean } from "./engines/mnemopi";
 
 const MODEL = "BAAI/bge-small-en-v1.5";
 const MIN_COSINE = 0.99;
@@ -25,8 +27,18 @@ function cosine(a: ArrayLike<number>, b: ArrayLike<number>): number {
 	return dot / Math.sqrt(normA * normB);
 }
 
+/** Throws unless every cosine is finite and at least MIN_COSINE. */
+export function assertParity(cosines: readonly number[]): void {
+	const bad = cosines.findIndex(c => !Number.isFinite(c));
+	if (bad !== -1) throw new Error(`parity failed: text ${bad} has a non-finite cosine (${cosines[bad]})`);
+	const min = Math.min(...cosines);
+	if (min < MIN_COSINE) throw new Error(`parity failed: min cosine ${min} < ${MIN_COSINE}`);
+}
+
 async function main(file: string | undefined): Promise<void> {
 	if (!file) throw new Error("usage: embed-parity.ts <parity-py.json>");
+	// Otherwise embed() could reach an API instead of the local fastembed this probe validates.
+	assertMnemopiEnvClean();
 	const py: ParityFile = await Bun.file(file).json();
 	if (py.model !== MODEL) throw new Error(`${file} was embedded with ${py.model}, expected ${MODEL}`);
 	const vectors = await withMnemopiRuntimeOptions({ embeddings: { model: MODEL, disabled: false } }, () =>
@@ -34,10 +46,9 @@ async function main(file: string | undefined): Promise<void> {
 	);
 	if (!vectors || vectors.length !== py.texts.length) throw new Error("mnemopi returned no usable embeddings");
 	const cosines = vectors.map((vector, i) => cosine(vector, py.vectors[i]));
-	const min = Math.min(...cosines);
 	const mean = cosines.reduce((sum, c) => sum + c, 0) / cosines.length;
-	console.log(`${cosines.length} texts: min cosine ${min.toFixed(6)}, mean cosine ${mean.toFixed(6)}`);
-	if (min < MIN_COSINE) throw new Error(`parity failed: min cosine ${min} < ${MIN_COSINE}`);
+	console.log(`${cosines.length} texts: min cosine ${Math.min(...cosines).toFixed(6)}, mean cosine ${mean.toFixed(6)}`);
+	assertParity(cosines);
 }
 
 if (import.meta.main) {

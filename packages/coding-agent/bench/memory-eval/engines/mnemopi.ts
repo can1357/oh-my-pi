@@ -32,6 +32,17 @@ export interface MnemopiEngineOptions {
 	embedScript?: string;
 }
 
+/** Mnemopi runs in this process and reads these itself, so they cannot be scrubbed: refuse instead. */
+export function assertMnemopiEnvClean(): void {
+	// OPENROUTER_BASE_URL is the one non-MNEMOPI_ variable that can route its embeddings to an API.
+	const set = Object.keys(Bun.env).filter(
+		key => (key.startsWith("MNEMOPI_") || key === "OPENROUTER_BASE_URL") && Bun.env[key],
+	);
+	if (set.length > 0) {
+		throw new Error(`refusing to run mnemopi with MNEMOPI_* or OPENROUTER_BASE_URL set: ${set.join(", ")}`);
+	}
+}
+
 function tierOf(label: string | undefined, summaryOf: string | undefined): RecallHit["tier"] {
 	const tier = label ?? (summaryOf ? "episodic" : "working");
 	if (tier !== "working" && tier !== "episodic") throw new Error(`unexpected mnemopi recall tier "${tier}"`);

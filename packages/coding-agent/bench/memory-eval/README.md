@@ -72,7 +72,7 @@ The 95% interval is a percentile interval from a cluster bootstrap over cases (`
 
 ### Environment guard
 
-Mnemopi runs in the harness process and reads its configuration from the environment, so `run --engine mnemopi` refuses to start while any `MNEMOPI_*` or `OPENROUTER_BASE_URL` (which can route its embeddings to an API) is set. Mnemosyne's child process never inherits the parent's `MNEMOSYNE_*`.
+Mnemopi runs in the harness process and reads its configuration from the environment, so `run --engine mnemopi` and `embed-parity.ts` refuse to start while any `MNEMOPI_*` or `OPENROUTER_BASE_URL` (which can route its embeddings to an API) is set. Mnemosyne's child process never inherits the parent's `MNEMOSYNE_*`.
 
 Never run real engines under `bun test`: with `NODE_ENV=test` Mnemopi's local embeddings are disabled. The tests use fakes and stub engine scripts.
 
@@ -91,7 +91,7 @@ $V $P/lme_official_check.py $O/lme-oracle.json --oracle-from-cases  # official o
 
 ## Embedding parity (Layer 0)
 
-Mnemopi and Mnemosyne must embed alike. Embed 50 BEAM messages with fastembed, then embed the same texts through Mnemopi and compare; the second step exits 1 if any cosine is below 0.99.
+Mnemopi and Mnemosyne must embed alike. Embed 50 BEAM messages with fastembed, then embed the same texts through Mnemopi's local fastembed and compare; the second step exits 1 if any cosine is non-finite or below 0.99.
 
 ```sh
 ~/.cache/omp-memory-eval/venv-engine/bin/python packages/coding-agent/bench/memory-eval/py/embed_parity.py
