@@ -965,6 +965,90 @@ function projectorGenerationResult(value: object): string | undefined {
 	return undefined;
 }
 /**
+ * Message-level keys `prepareEntryForPersistence` reaches by key rather than by
+ * enumerating the message: `providerPayload` and `content`
+ * (`stripReplayedReasoningSignatures` reads both, and iterates them), and
+ * `details` (`stripSpilledMcpStructuredContent`). The entry-line stamp walks
+ * own enumerable keys and indexed slots, so a key the projector reads any other
+ * way — or an array it iterates rather than indexes — feeds persisted bytes no
+ * stamp can describe.
+ */
+const PROJECTOR_MESSAGE_KEYS = ["providerPayload", "content", "details"] as const;
+/** The keys an OpenAI Responses `providerPayload` is itself read by. */
+const RESPONSES_PAYLOAD_KEYS = ["type", "items"] as const;
+
+/**
+ * Whether the projector can reach a message-level projection input the stamp
+ * cannot see, so the line must be left uncacheable rather than reused from a
+ * stamp of bytes the next projection will not reproduce.
+ *
+ * Every field here is read by key, which follows the prototype chain and runs
+ * an accessor, where the stamp enumerates own enumerable keys; `content` and a
+ * Responses payload's `items` are additionally iterated with `for..of`/`.some`,
+ * which follow `Symbol.iterator`, where the stamp reads indexed slots. Both
+ * differences change the projected line — a stripped or restored
+ * `thinkingSignature`, a stripped or kept `structuredContent` — without moving
+ * a single key or leaf the stamp records.
+ */
+function messageProjectionInputsUnstampable(message: object): boolean {
+	const fields = message as Record<string, unknown>;
+	for (const field of PROJECTOR_MESSAGE_KEYS) {
+		if (projectorKeyHiddenFromStamp(message, field)) return true;
+	}
+	const content = fields.content;
+	if (Array.isArray(content) && nonDefaultArrayIterator(content)) return true;
+	const payload = fields.providerPayload;
+	if (payload === null || typeof payload !== "object") return false;
+	for (const field of RESPONSES_PAYLOAD_KEYS) {
+		if (projectorKeyHiddenFromStamp(payload, field)) return true;
+	}
+	if ((payload as Record<string, unknown>).type !== "openaiResponsesHistory") return false;
+	const items = (payload as Record<string, unknown>).items;
+	return Array.isArray(items) && nonDefaultArrayIterator(items);
+}
+
+/**
+ * Whether `key` reaches `node` only through a descriptor the own-key stamp does
+ * not walk — an inherited link, an own non-enumerable descriptor, or an
+ * accessor. Answered through descriptors, never by reading the key (see
+ * {@link hasSerializerHook}). False when no descriptor exists anywhere on the
+ * chain: the projector's read then yields `undefined`, which every gate it
+ * feeds rejects before the value can reach a persisted line.
+ */
+function projectorKeyHiddenFromStamp(node: object, key: string): boolean {
+	let current: object | null = node;
+	while (current !== null) {
+		const descriptor = Object.getOwnPropertyDescriptor(current, key);
+		if (descriptor !== undefined) {
+			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
+			return !descriptor.enumerable;
+		}
+		current = Object.getPrototypeOf(current);
+	}
+	return false;
+}
+
+/**
+ * Whether `array` is read by anything other than its indexed slots — an
+ * overridden or accessor `Symbol.iterator`. `JSON.stringify` and the stamp both
+ * read slots up to a snapshotted length; the projector's `for..of` and `.some`
+ * follow the iterator, so a non-default one yields a graph the stamp never
+ * records. Answered through the descriptor, never by reading the slot.
+ */
+function nonDefaultArrayIterator(array: unknown[]): boolean {
+	let current: object | null = array;
+	while (current !== null) {
+		const descriptor = Object.getOwnPropertyDescriptor(current, Symbol.iterator);
+		if (descriptor !== undefined) {
+			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
+			return descriptor.value !== Array.prototype[Symbol.iterator];
+		}
+		current = Object.getPrototypeOf(current);
+	}
+	return false;
+}
+
+/**
  * Whether `value` is the top-level `details` of a `toolResult` message whose
  * `structuredContent` the persistence projection removes before serialization
  * — the mirror of `stripSpilledMcpStructuredContent` in
@@ -1060,6 +1144,14 @@ function hasSerializerHook(
 	const pending: SerializerHookProbeNode[] = [{ value, key, isTopLevelToolResultDetails, atomic }];
 	for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
 		const { value, key, isTopLevelToolResultDetails, atomic } = node;
+		// `prepareEntryForPersistence` reads a handful of message-level fields
+		// by key and iterates two of them, none of which the own-key stamp below
+		// (or `JSON.stringify`) is guaranteed to describe: see
+		// {@link messageProjectionInputsUnstampable}. The walk root is the
+		// message the projector projects, and the only node without a key.
+		if (key === undefined && typeof value === "object" && value !== null && messageProjectionInputsUnstampable(value)) {
+			return true;
+		}
 		// A bigint is the one primitive `JSON.stringify` routes through a hook:
 		// when an extension installs `BigInt.prototype.toJSON`, serialization
 		// invokes it — so a stateful hook's first output cannot be stamped as a
@@ -1084,8 +1176,14 @@ function hasSerializerHook(
 			// loop below pushes any slot.
 			if (hasIndexedAccessorSlot(value)) return true;
 			const length = value.length;
+			// The array's own key rides along to every slot, mirroring
+			// `truncateForPersistence`'s array branch (which hands the caller's
+			// key to each element) and {@link messageValueStamp}: the atomic
+			// classification below reads it, so a carrier that persists verbatim
+			// under `anthropicCompaction` must be probed as atomic, not have its
+			// transient keys skipped.
 			for (let index = 0; index < length; index++) {
-				pending.push({ value: value[index], key: undefined, isTopLevelToolResultDetails: undefined, atomic });
+				pending.push({ value: value[index], key, isTopLevelToolResultDetails: undefined, atomic });
 			}
 			continue;
 		}
@@ -1102,12 +1200,23 @@ function hasSerializerHook(
 		// cannot affect the persisted bytes — and the live value may be cyclic
 		// where the projection is not.
 		const nodeAtomic = atomic || isAtomicPersistenceNode(value, key);
-		// An image-shaped value whose `data` rides an inherited data descriptor is
-		// projector-accepted (`isImageDataPayload` reads through the chain) but
-		// invisible to the own-key stamp below: the backing bytes can change with
-		// no own key moving. Leave the graph uncached so the line is always
-		// re-projected from the live bytes.
-		if (projectorImageField(value, "data") !== undefined && !Object.hasOwn(value, "data")) return true;
+		// An image-shaped value whose projector classifiers ride somewhere the
+		// own-key stamp below cannot see — an inherited link, or an own
+		// non-enumerable descriptor — is projector-accepted
+		// (`isImageBlock`/`isImageDataPayload` read `type`, `mimeType`, and
+		// `data` through the prototype chain) while `JSON.stringify`, and so the
+		// stamp, read own enumerable keys only. `data` outside the stamp lets
+		// the backing bytes change; `type` and `mimeType` are the classifiers
+		// that decide whether they are externalized at all, so flipping
+		// `image/png` to `text/plain` swaps a blob ref for the raw base64 with
+		// no stamped leaf moving. Leave the graph uncached so the line is always
+		// re-projected from the live input.
+		if (
+			imageClassifierHiddenFromStamp(value, "data") ||
+			imageClassifierHiddenFromStamp(value, "type") ||
+			imageClassifierHiddenFromStamp(value, "mimeType")
+		)
+			return true;
 		// Same for an `image_generation_call` whose `result` rides an inherited or
 		// non-enumerable data descriptor: `truncateForPersistence` reads it via
 		// `"result" in obj` and rewrites it into an own blob ref, but the own-key
@@ -1255,8 +1364,19 @@ type StampPending =
 	| {
 			readonly kind: "value";
 			readonly value: unknown;
-			/** Own key the value sits under; emitted before the value, the way the emitting caller did. */
+			/**
+			 * Key the value sits under, as the projection reads it — the walk
+			 * root carries none and so does every array slot, whose key the
+			 * caller's key provides (see the array branch below).
+			 */
 			readonly key: string | undefined;
+			/**
+			 * True when the stamp records {@link key} ahead of the value — object
+			 * children only. Arrays emit no keys: `JSON.stringify` delimits slots
+			 * by the array marker alone, so a key written for one would shift
+			 * every element the matcher reads after it.
+			 */
+			readonly keyed: boolean;
 			readonly isTopLevelToolResultDetails: boolean | undefined;
 			readonly atomic: boolean;
 	  }
@@ -1271,7 +1391,7 @@ function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
 	// container's own closing marker and popped in queue order, so the
 	// worklist emits exactly the order the recursive walk did.
 	const pending: StampPending[] = [
-		{ kind: "value", value, key: undefined, isTopLevelToolResultDetails: undefined, atomic: false },
+		{ kind: "value", value, key: undefined, keyed: false, isTopLevelToolResultDetails: undefined, atomic: false },
 	];
 	for (let frame = pending.pop(); frame !== undefined; frame = pending.pop()) {
 		if (frame.kind === "end") {
@@ -1282,8 +1402,8 @@ function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
 			out.push(frame.key, STAMP_TRANSIENT);
 			continue;
 		}
-		const { value, key, isTopLevelToolResultDetails, atomic } = frame;
-		if (key !== undefined) out.push(key);
+		const { value, key, keyed, isTopLevelToolResultDetails, atomic } = frame;
+		if (keyed && key !== undefined) out.push(key);
 		if (value === null || typeof value !== "object") {
 			out.push(value);
 			continue;
@@ -1310,13 +1430,20 @@ function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
 			// latter while the former (and the persisted bytes) stays fixed.
 			const length = value.length;
 			// The closing marker sits below every child, and the children are
-			// queued last-first, so the worklist pops them first-first.
+			// queued last-first, so the worklist pops them first-first. The
+			// array's own key rides along to every slot, exactly as
+			// `truncateForPersistence`'s array branch hands the caller's key to
+			// each element: the atomic classification and the transient-key strip
+			// both read it, so dropping it here would stamp a verbatim carrier as
+			// a stripped one. It is not a stamp key — the array marker already
+			// delimits the slots, and the stamp records no key for them.
 			pending.push({ kind: "end" });
 			for (let index = length - 1; index >= 0; index--) {
 				pending.push({
 					kind: "value",
 					value: value[index],
-					key: undefined,
+					key,
+					keyed: false,
 					isTopLevelToolResultDetails: undefined,
 					atomic,
 				});
@@ -1355,6 +1482,7 @@ function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
 				kind: "value",
 				value: fields[childKey],
 				key: childKey,
+				keyed: true,
 				isTopLevelToolResultDetails: isTopLevelMessageChild(value, key, childKey),
 				atomic: atomicNode,
 			});
@@ -1363,6 +1491,25 @@ function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
 		for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]);
 	}
 	return out;
+}
+
+/**
+ * Whether one of the persistence projector's image classifiers — `type` for a
+ * content block, `mimeType` for an `images[]`/`frames[]` entry, `data` for both
+ * — sits where the own-key stamp cannot see it: on an inherited link, or on an
+ * own non-enumerable descriptor. Both readers look at the same field
+ * ({@link projectorImageField} through the chain, the stamp through
+ * `Object.keys`), so a hidden field moves the projected bytes — the
+ * externalization decision and the externalized bytes alike — without moving
+ * anything the stamp records. Answered through descriptors, never by reading
+ * the key (see {@link hasSerializerHook}); an accessor anywhere on the chain
+ * yields no classifier at all, so `undefined` there means "not an image
+ * payload", not "hidden".
+ */
+function imageClassifierHiddenFromStamp(value: object, key: "data" | "mimeType" | "type"): boolean {
+	if (projectorImageField(value, key) === undefined) return false;
+	const descriptor = Object.getOwnPropertyDescriptor(value, key);
+	return descriptor === undefined || !descriptor.enumerable;
 }
 
 /**
@@ -1386,9 +1533,18 @@ type StampMatchPending =
 			readonly kind: "value";
 			readonly live: unknown;
 			readonly key: string | undefined;
+			/**
+			 * True when the stamp records `key` ahead of the value — object
+			 * children only. The walk root and every array slot sit in the stamp
+			 * without one: the root has no key, and {@link messageValueStamp}
+			 * emits the array marker straight into its indexed slots.
+			 */
+			readonly keyed: boolean;
 			readonly isTopLevelToolResultDetails: boolean | undefined;
 			readonly atomic: boolean;
 	  }
+	/** Checks a stripped transient key's presence-only record. */
+	| { readonly kind: "transient"; readonly key: string }
 	/** Checks the closing marker of the container that scheduled it. */
 	| { readonly kind: "end" };
 
@@ -1399,14 +1555,30 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 	// container's own closing-marker check and popped in queue order, so the
 	// worklist consumes the stamp in exactly the order the recursive walk did.
 	const pending: StampMatchPending[] = [
-		{ kind: "value", live: value, key: undefined, isTopLevelToolResultDetails: undefined, atomic: false },
+		{ kind: "value", live: value, key: undefined, keyed: false, isTopLevelToolResultDetails: undefined, atomic: false },
 	];
 	for (let frame = pending.pop(); frame !== undefined; frame = pending.pop()) {
 		if (frame.kind === "end") {
 			if (stamp[index++] !== STAMP_END) return false;
 			continue;
 		}
-		const { live, key, isTopLevelToolResultDetails, atomic } = frame;
+		if (frame.kind === "transient") {
+			// The key and its marker sit together in the stamp (see
+			// {@link messageValueStamp}), so both are read here, in this frame's
+			// own turn — never in the container's loop, which runs before any
+			// sibling value is consumed.
+			if (stamp[index++] !== frame.key || stamp[index++] !== STAMP_TRANSIENT) return false;
+			continue;
+		}
+		const { live, key, keyed, isTopLevelToolResultDetails, atomic } = frame;
+		// An object child's key sits ahead of its value in the stamp (see
+		// {@link messageValueStamp}), so each child consumes its own key here —
+		// per child, never in the container's loop. Hoisting the check into the
+		// loop reads the keys back to back against a stamp that interleaves each
+		// key with its value, so every container with two or more children fails
+		// to match: the memo can never reuse a line, and a full rewrite
+		// re-serializes the whole session on every publish.
+		if (keyed && stamp[index++] !== key) return false;
 		const expected = stamp[index++];
 		// The stamp never invokes a `toJSON` hook: a hooked graph is left
 		// uncached (see {@link hasSerializerHook}), so reaching one here means
@@ -1435,14 +1607,19 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 			if (Array.isArray(live)) {
 				// Indexed slots with a snapshotted length, mirroring both
 				// `JSON.stringify` and {@link messageValueStamp} — never the
-				// iterator protocol.
+				// iterator protocol. The array's own key rides along to every
+				// slot: the stamp's atomic classification reads it exactly as
+				// `truncateForPersistence` does, whose array branch hands the
+				// caller's key to each element. It is not a stamp key — array
+				// slots record none (`keyed` below).
 				const length = live.length;
 				pending.push({ kind: "end" });
 				for (let position = length - 1; position >= 0; position--) {
 					pending.push({
 						kind: "value",
 						live: live[position],
-						key: undefined,
+						key,
+						keyed: false,
 						isTopLevelToolResultDetails: undefined,
 						atomic,
 					});
@@ -1468,14 +1645,14 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 				// never walked (and may be cyclic) — see
 				// {@link messageValueStamp}.
 				if (!nodeAtomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) {
-					if (stamp[index++] !== childKey || stamp[index++] !== STAMP_TRANSIENT) return false;
+					children.push({ kind: "transient", key: childKey });
 					continue;
 				}
-				if (stamp[index++] !== childKey) return false;
 				children.push({
 					kind: "value",
 					live: fields[childKey],
 					key: childKey,
+					keyed: true,
 					isTopLevelToolResultDetails: isTopLevelMessageChild(live, key, childKey),
 					atomic: nodeAtomic,
 				});
