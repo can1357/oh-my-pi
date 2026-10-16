@@ -93,6 +93,20 @@ it("diff prints both configs and compares matching results", async () => {
 	expect(stdout).toContain("  cat (n=3, cases=2): ");
 });
 
+it("diff resamples cases, not questions: correlated questions do not make a win significant", async () => {
+	// 10 cases of 10 questions; every question of a case moves the same way: b wins 7 cases and loses 3.
+	// Resampling the 100 questions would put the interval above 0 and print "helps".
+	const ids = Array.from({ length: 100 }, (_, i) => `c${Math.floor(i / 10)}:q${i}`);
+	const wins = (id: string): boolean => Number(id.slice(1, id.indexOf(":"))) < 7;
+	const a = await writeResult("cluster-a", { questions: ids.map(id => [id, wins(id) ? 0 : 1]) });
+	const b = await writeResult("cluster-b", { questions: ids.map(id => [id, wins(id) ? 1 : 0]) });
+	const { stdout, code } = await diff(a, b);
+	expect(code).toBe(0);
+	expect(stdout).toContain("recall@10 overall (b - a, n=100, cases=10): meanDiff 0.4000 CI [-0.2000, 1.0000]");
+	expect(stdout).toContain("  cat (n=100, cases=10): meanDiff 0.4000 CI [-0.2000, 1.0000]");
+	expect(stdout).toContain("verdict: neutral");
+});
+
 it("diff rejects results run under different protocols", async () => {
 	const a = await writeResult("proto-a", { protocol: "standard" });
 	const b = await writeResult("proto-b", { protocol: "fts-only" });
