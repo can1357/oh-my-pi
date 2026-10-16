@@ -84,36 +84,44 @@ class Engine:
 		self.beam.sleep(force=True)
 
 	def op_recall(self, params):
-		k = params["k"]
-		# Derived rows take top_k slots but are not ranked, so widen top_k until k working/episodic rows come back or
-		# Mnemosyne runs out of rows. Upstream's recall_with_evidence_pack likewise widens recall, then filters tiers.
-		fetch = k
-		while True:
-			rows = self.beam.recall(params["query"], top_k=fetch)
-			if sum(row["tier"] in RANKED_TIERS for row in rows) >= k or len(rows) < fetch:
-				break
-			fetch *= 2
-		hits = []
+		query, k = params["query"], params["k"]
+		rows = self.beam.recall(query, top_k=k)
+		ranked = []
 		dropped = []
 		for rank, row in enumerate(rows):
-			if len(hits) == k:
+			if len(ranked) == k:
 				break
-			tier = row["tier"]
-			if tier not in RANKED_TIERS:
-				# The spec ranks working and episodic rows only; derived rows ahead of the k-th one are dropped but recorded.
-				self.dropped_tier_rows += 1
-				dropped.append(
-					{"tier": tier, "engine_id": row["id"], "source_memory_id": row.get("source_memory_id"), "rank": rank}
-				)
+			if row["tier"] in RANKED_TIERS:
+				ranked.append(row)
 				continue
-			summary_of = []
-			if tier == "episodic":
-				found = self.beam.conn.execute(
-					"SELECT summary_of FROM episodic_memory WHERE id=?", (row["id"],)
-				).fetchone()
-				summary_of = [part for part in ((found and found["summary_of"]) or "").split(",") if part]
-			hits.append({"engine_id": row["id"], "tier": tier, "content": row["content"], "summary_of": summary_of})
-		return {"hits": hits, "dropped": dropped}
+			# The spec ranks working and episodic rows only; derived rows in the native top k are dropped but recorded.
+			self.dropped_tier_rows += 1
+			dropped.append(
+				{"tier": row["tier"], "engine_id": row["id"], "source_memory_id": row.get("source_memory_id"), "rank": rank}
+			)
+		# Derived rows took native slots: double top_k until k working/episodic rows are ranked or Mnemosyne runs out of
+		# rows (upstream's recall_with_evidence_pack likewise widens, then filters tiers). A wider call scores larger
+		# candidate pools and can reorder rows, so it only appends rows the native top k did not rank.
+		seen = {(row["tier"], row["id"]) for row in ranked}
+		fetch = k
+		while len(ranked) < k and len(rows) >= fetch:
+			fetch *= 2
+			rows = self.beam.recall(query, top_k=fetch)
+			for row in rows:
+				if len(ranked) == k:
+					break
+				key = (row["tier"], row["id"])
+				if row["tier"] in RANKED_TIERS and key not in seen:
+					seen.add(key)
+					ranked.append(row)
+		return {"hits": [self.hit(row) for row in ranked], "dropped": dropped, "fetch_k": fetch}
+
+	def hit(self, row):
+		summary_of = []
+		if row["tier"] == "episodic":
+			found = self.beam.conn.execute("SELECT summary_of FROM episodic_memory WHERE id=?", (row["id"],)).fetchone()
+			summary_of = [part for part in ((found and found["summary_of"]) or "").split(",") if part]
+		return {"engine_id": row["id"], "tier": row["tier"], "content": row["content"], "summary_of": summary_of}
 
 	def op_close(self, _params):
 		if self.beam is not None:

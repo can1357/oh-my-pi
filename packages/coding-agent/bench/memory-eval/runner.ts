@@ -29,6 +29,8 @@ export interface QuestionResult {
 	dropped: DroppedHit[];
 	metrics: Record<string, number>;
 	latencyMs: number;
+	/** The largest `top_k` the engine was asked for, when it widens past `k` (Mnemosyne; diagnostic). */
+	fetchK?: number;
 	lme?: { corpusIds: string[]; correctDocs: string[]; rankings: number[] };
 	compat?: { question: string; rankedContents: string[]; goldContents: string[] };
 }
@@ -208,6 +210,7 @@ export async function runCases(
 				ranked,
 				dropped,
 				latencyMs,
+				fetchK: engine.lastFetchK?.(),
 				...scoreQuestion(evalCase, question.goldMessageIds, ranked),
 			});
 		}

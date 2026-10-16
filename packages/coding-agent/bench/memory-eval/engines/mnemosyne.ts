@@ -52,6 +52,7 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 	let dataDir: string | undefined;
 	let isOpen = false;
 	let lastDropped: DroppedRow[] = [];
+	let lastFetchK = 0;
 
 	// Embedding settings are read when Python imports Mnemosyne, so the first protocol fixes the process.
 	const start = async (protocol: ProtocolName): Promise<PythonProcess> => {
@@ -100,10 +101,12 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 			await live().call("sleep");
 		},
 		recall: async (question, k) => {
-			const { hits, dropped } = (await live().call("recall", { query: question.text, k })) as {
+			const { hits, dropped, fetch_k } = (await live().call("recall", { query: question.text, k })) as {
 				hits: WireHit[];
 				dropped: WireDropped[];
+				fetch_k: number;
 			};
+			lastFetchK = fetch_k;
 			lastDropped = dropped.map(row => ({
 				tier: row.tier,
 				engineId: row.engine_id,
@@ -118,6 +121,7 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 			}));
 		},
 		lastDropped: () => lastDropped,
+		lastFetchK: () => lastFetchK,
 		close: async () => {
 			if (!isOpen) return;
 			await live().call("close");
