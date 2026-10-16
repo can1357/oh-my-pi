@@ -1,6 +1,8 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { encodeSixelAsync } from "@oh-my-pi/pi-natives";
 import {
 	type Component,
+	getCellDimensions,
 	getImageDimensions,
 	getKittyGraphics,
 	type ImageBudget,
@@ -38,10 +40,41 @@ interface ImageContentWithPng extends ImageContent {
 	[kImagePng]?: ImageContent | null;
 }
 
+/** A SIXEL thumbnail for one image at one fitted size. `sequence` is `undefined` while the
+ *  off-thread encode is pending and `null` when it failed (the chip keeps its icon). */
+interface SixelThumb {
+	key: string;
+	sequence: string | null | undefined;
+	cols: number;
+	rows: number;
+	/** Composed bottom border row, reused while its placement and border text are unchanged. */
+	row?: { key: string; text: string };
+}
+/** Thumbnails by image: encoded once per fitted size, never on a repaint. */
+const kSixelThumbs = new WeakMap<ImageContent, SixelThumb>();
+/** Blank 12x4 interior, the canvas a SIXEL thumbnail is drawn over. */
+const BLANK_INTERIOR: string[] = Array.from({ length: INNER_ROWS }, () => " ".repeat(INNER_COLS));
+
+/** Aspect-preserving SIXEL size for `dims` inside the 12x4 interior. The height rounds down to a
+ *  whole 6-px band (as renderImage does) so no band pads past the reserved cell rows. */
+function sixelThumbFit(
+	dims: { width: number; height: number },
+	cell: { widthPx: number; heightPx: number },
+): { widthPx: number; heightPx: number; cols: number; rows: number } {
+	const maxWidthPx = INNER_COLS * cell.widthPx;
+	const maxHeightPx = INNER_ROWS * cell.heightPx;
+	const scale = Math.min(maxWidthPx / dims.width, maxHeightPx / dims.height);
+	const fittedWidthPx = dims.width * scale;
+	const fittedHeightPx = dims.height * scale;
+	const heightPx = Math.max(6, Math.floor(fittedHeightPx / 6) * 6);
+	const widthPx = Math.min(maxWidthPx, Math.max(1, Math.round((fittedWidthPx * heightPx) / fittedHeightPx)));
+	return { widthPx, heightPx, cols: Math.ceil(widthPx / cell.widthPx), rows: Math.ceil(heightPx / cell.heightPx) };
+}
+
 /**
  * The composer attachment band: one rounded card per staged attachment, rendered directly above
- * the prompt box. Image and video cards show a live thumbnail (Kitty Unicode placeholders — the only
- * protocol whose output is plain text cells and therefore composable inside a border row) with
+ * the prompt box. Image and video cards show a live thumbnail (Kitty Unicode placeholders, or a
+ * SIXEL placed inside the interior from the bottom border row) with
  * the pixel dimensions as the bottom caption; text-paste cards show the leading snippet with a
  * `+N lines` / `N chars` caption. The top caption is the same `<icon> #N` token that sits in
  * the editor buffer, in the same identity color. Cards that no longer fit the terminal width
@@ -121,24 +154,27 @@ export class AttachmentChipsBand implements Component {
 		let x = 0;
 		for (const chip of chips) {
 			if (x + CARD_COLS > width) break;
-			const card = this.#card(chip);
+			const cardX = x + (x > 0 ? CARD_GAP : 0);
+			const card = this.#card(chip, cardX);
 			for (let r = 0; r < rows.length; r++) rows[r] += (x > 0 ? gap : "") + card[r];
 			x += (x > 0 ? CARD_GAP : 0) + CARD_COLS;
 		}
 		return rows;
 	}
 
-	#card(chip: ComposerChipDescriptor): string[] {
+	#card(chip: ComposerChipDescriptor, x: number): string[] {
 		const sgr = attachmentSgr(chip.kind, chip.n);
 		const icon = theme.symbol(
 			chip.kind === "paste" ? "chip.paste" : chip.kind === "video" ? "chip.video" : "chip.image",
 		);
 		let bottomCaption: string;
 		let interior: string[];
+		let thumb: (SixelThumb & { sequence: string }) | undefined = undefined;
 		if (chip.kind !== "paste") {
 			const dims = this.#imageDims(chip.image);
 			bottomCaption = dims ? `${dims.width}x${dims.height}` : "";
-			interior = this.#imageInterior(chip.image, dims, chip.kind);
+			thumb = dims ? this.#sixelThumbnail(chip.image, dims) : undefined;
+			interior = thumb ? BLANK_INTERIOR : this.#imageInterior(chip.image, dims, chip.kind);
 		} else {
 			bottomCaption = chip.text.lineCount > 1 ? `+${chip.text.lineCount} lines` : `${chip.text.charCount} chars`;
 			interior = this.#textInterior(chip.text);
@@ -146,11 +182,59 @@ export class AttachmentChipsBand implements Component {
 		const vertical = `${sgr}${theme.symbol("boxRound.vertical")}${RESET_FG}`;
 		const title =
 			chip.kind === "paste" || !chip.link ? `${icon} #${chip.n}` : fileHyperlink(chip.link, `${icon} #${chip.n}`);
+		const border = this.#borderRow(sgr, bottomCaption, "bottom");
 		return [
 			this.#borderRow(sgr, title, "top"),
 			...interior.map(row => vertical + row + vertical),
-			this.#borderRow(sgr, bottomCaption, "bottom"),
+			thumb ? this.#sixelBottomRow(thumb, x, border) : border,
 		];
+	}
+
+	/** Bottom border row carrying a SIXEL thumbnail. The image is emitted from the centered origin
+	 *  inside the interior: save the cursor, move up to that row, print the sequence, restore the
+	 *  cursor, then the border text. The leading SGR reset keeps the line from matching the
+	 *  direct-placement lift pattern, which would erase the rows above. Cached on the thumbnail
+	 *  while the placement and border text are unchanged. */
+	#sixelBottomRow(thumb: SixelThumb & { sequence: string }, x: number, border: string): string {
+		const rowKey = `${x}\0${border}`;
+		if (thumb.row?.key === rowKey) return thumb.row.text;
+		const leftPad = Math.floor((INNER_COLS - thumb.cols) / 2);
+		const topPad = Math.floor((INNER_ROWS - thumb.rows) / 2);
+		const text = `\x1b[0m\x1b7\x1b[${INNER_ROWS - topPad}A\x1b[${x + 2 + leftPad}G${thumb.sequence}\x1b8${border}`;
+		thumb.row = { key: rowKey, text };
+		return text;
+	}
+
+	/** SIXEL thumbnail of an image chip, encoded off the render pass once per fitted size. Returns
+	 *  `undefined` while the encode is pending or failed, when the budget suppresses the image, or
+	 *  under any other protocol: the caller keeps the icon. */
+	#sixelThumbnail(
+		image: ImageContent,
+		dims: { width: number; height: number },
+	): (SixelThumb & { sequence: string }) | undefined {
+		if (TERMINAL.imageProtocol !== ImageProtocol.Sixel) return undefined;
+		const imageId = this.budget.acquireId(`chip:${image.mimeType}:${image.data.length}:${image.data.slice(0, 32)}`);
+		if (this.budget.observe(imageId)) return undefined;
+		const fit = sixelThumbFit(dims, getCellDimensions());
+		const key = `${fit.widthPx}x${fit.heightPx}`;
+		const entry = kSixelThumbs.get(image);
+		if (entry === undefined || entry.key !== key) {
+			const pending: SixelThumb = { key, sequence: undefined, cols: fit.cols, rows: fit.rows };
+			kSixelThumbs.set(image, pending);
+			encodeSixelAsync(new Uint8Array(Buffer.from(image.data, "base64")), fit.widthPx, fit.heightPx).then(
+				sequence => this.#settleSixel(image, pending, sequence),
+				() => this.#settleSixel(image, pending, null),
+			);
+			return undefined;
+		}
+		return typeof entry.sequence === "string" ? (entry as SixelThumb & { sequence: string }) : undefined;
+	}
+
+	/** Store an off-thread encode result if it is still the image's current size, then repaint. */
+	#settleSixel(image: ImageContent, entry: SixelThumb, sequence: string | null): void {
+		if (kSixelThumbs.get(image) !== entry) return;
+		entry.sequence = sequence;
+		this.requestRender();
 	}
 
 	/** Horizontal border with an optional centered, bold caption padded by one space per side. */
@@ -178,9 +262,10 @@ export class AttachmentChipsBand implements Component {
 		return dims;
 	}
 
-	/** 12x4 thumbnail as Kitty Unicode-placeholder cell rows, centered; any other protocol (or a
-	 *  budget-suppressed image) falls back to a centered icon — direct placements, SIXEL, and
-	 *  iTerm2 output cursor-addressed sequences that cannot be composed into a border row. */
+	/** 12x4 thumbnail as Kitty Unicode-placeholder cell rows, centered. SIXEL is placed by #card
+	 *  instead; any other protocol, a budget-suppressed image, or a pending encode falls back to a
+	 *  centered icon, as do direct placements and iTerm2 output (cursor-addressed sequences that
+	 *  cannot be composed into a border row). */
 	#imageInterior(
 		image: ImageContent,
 		dims: { width: number; height: number } | null,
