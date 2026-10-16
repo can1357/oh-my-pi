@@ -398,7 +398,7 @@ describe("memories runtime", () => {
 		expect(raw.indexOf("## thread-b")).toBeLessThan(raw.indexOf("## thread-a"));
 	});
 
-	test("phase2 empty-input cleanup removes consolidated files and skills dir", async () => {
+	test("phase2 empty-input preserves consolidated files and skills dir (issue #12596)", async () => {
 		const fx = await createFixture();
 		const memoryRoot = getMemoryRoot(fx.agentDir, fx.session.sessionManager.getCwd());
 		await fs.mkdir(path.join(memoryRoot, "skills", "legacy"), { recursive: true });
@@ -420,10 +420,13 @@ describe("memories runtime", () => {
 			taskDepth: 0,
 		});
 
-		await settle(fx.whenSettled, "phase2 empty-input cleanup");
-		expect(await Bun.file(path.join(memoryRoot, "MEMORY.md")).exists()).toBe(false);
-		expect(await Bun.file(path.join(memoryRoot, "memory_summary.md")).exists()).toBe(false);
-		expect(await Bun.file(path.join(memoryRoot, "skills")).exists()).toBe(false);
+		await settle(fx.whenSettled, "phase2 empty-input preservation");
+		// An empty Phase 2 must not wipe live consolidations: outputs may land
+		// later (or under a sibling scope key), and the artifacts on disk are
+		// still valid. Previously this path deleted them.
+		expect(await Bun.file(path.join(memoryRoot, "MEMORY.md")).exists()).toBe(true);
+		expect(await Bun.file(path.join(memoryRoot, "memory_summary.md")).exists()).toBe(true);
+		expect(await Bun.file(path.join(memoryRoot, "skills", "legacy", "SKILL.md")).exists()).toBe(true);
 		expect((await fs.readFile(path.join(memoryRoot, "raw_memories.md"), "utf8")).trim()).toBe(
 			"# Raw Memories\n\nNo raw memories yet.",
 		);
