@@ -168,6 +168,20 @@ describe("polyphonic recall wiring", () => {
 		// No token budget applies: 120 rows overflow the engine's default 4000-token context.
 		expect(await mem.recallEnhanced("Alice deploy runbook", 120)).toHaveLength(120);
 	});
+
+	it("does not pad a query that mentions time with unrelated recent memories", async () => {
+		const mem = memory(":memory:", { polyphonicRecall: true });
+		const relevant = "The terraform deploy pipeline runs plan, then apply after review";
+		mem.remember(relevant);
+		for (let i = 0; i < 40; i++) mem.remember(`Standup ${i} covered lunch-${i}, desk-${i} and parking-${i}`);
+
+		for (const query of [
+			"how does the terraform deploy pipeline work, run it before commit",
+			"how does the terraform deploy pipeline work, fix the blast radius",
+		]) {
+			expect(contents(await mem.recallEnhanced(query, 8, { includeFacts: true }))).toEqual([relevant]);
+		}
+	});
 });
 
 describe("polyphonic graph voice bounds", () => {
