@@ -70,14 +70,7 @@ const hit = (engineId: string, content: string, summaryOf: string[] = []): Recal
 describe("runner", () => {
 	it("oracle scores perfect primary metrics", async () => {
 		const { cases } = await loadDataset("beam-100k", fixtureDir);
-		// The fixture's first question has an empty gold message, which is never remembered.
-		const rememberable = cases.map(c => ({
-			...c,
-			questions: c.questions.filter(q =>
-				q.goldMessageIds.every(id => c.messages.find(m => m.messageId === id)?.content),
-			),
-		}));
-		const { questions } = await runCases(oracleEngine(), rememberable, "standard", 10, tmp);
+		const { questions } = await runCases(oracleEngine(), cases, "standard", 10, tmp);
 		expect(questions.length).toBeGreaterThan(0);
 		expect(questions.every(r => r.metrics["recall@10"] === 1 && r.metrics.mrr === 1)).toBe(true);
 	});

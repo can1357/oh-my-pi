@@ -1,6 +1,7 @@
 /** Protocol runner: ingests each case into an engine, recalls every question, maps hits back to message ids and scores them. */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { isRememberable } from "./datasets";
 import type { EngineAdapter, EngineName, ProtocolName, RememberItem } from "./engine";
 import { cp, lmeMetrics, messageLevelMetrics } from "./score";
 import type { DatasetName, EvalCase, EvalMessage, ExcludedQuestion } from "./types";
@@ -160,7 +161,7 @@ export async function runCases(
 		await fs.mkdir(storeDir, { recursive: true });
 		await engine.open(evalCase, { storeDir, protocol });
 
-		const messages: EvalMessage[] = evalCase.messages.filter(m => m.content.trim() !== "");
+		const messages: EvalMessage[] = evalCase.messages.filter(isRememberable);
 		const idMap = new Map<string, string[]>();
 		for (let i = 0; i < messages.length; i += REMEMBER_BATCH) {
 			const batch = messages.slice(i, i + REMEMBER_BATCH);

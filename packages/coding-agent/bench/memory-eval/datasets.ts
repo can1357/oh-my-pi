@@ -52,6 +52,9 @@ function beamGold(sourceChatIds: unknown): string[] {
 	return values.filter(v => v !== null && v !== undefined).map(String);
 }
 
+/** The runner remembers only these messages, so a blank one can never be recalled. */
+export const isRememberable = (message: EvalMessage): boolean => message.content.trim() !== "";
+
 async function readBeam(dataDir: string, name: "beam-100k" | "beam-500k"): Promise<BeamConversation[]> {
 	return (await Bun.file(path.join(dataDir, `${name}.json`)).json()) as BeamConversation[];
 }
@@ -62,12 +65,15 @@ function loadBeam(name: "beam-100k" | "beam-500k", conversations: BeamConversati
 	for (const conv of conversations) {
 		const messages: EvalMessage[] = [];
 		const sessionOf = new Map<string, string>();
+		const blank = new Set<string>();
 		conv.chat.forEach((block, blockIndex) => {
 			const sessionId = `beam-${conv.conversationId}-${blockIndex}`;
 			for (const m of block) {
 				const messageId = String(m.id);
 				sessionOf.set(messageId, sessionId);
-				messages.push({ messageId, sessionId, role: asRole(m.role), content: m.content });
+				const message: EvalMessage = { messageId, sessionId, role: asRole(m.role), content: m.content };
+				if (!isRememberable(message)) blank.add(messageId);
+				messages.push(message);
 			}
 		});
 		const questions: EvalQuestion[] = [];
@@ -75,19 +81,24 @@ function loadBeam(name: "beam-100k" | "beam-500k", conversations: BeamConversati
 			list.forEach((q, i) => {
 				const questionId = `${conv.conversationId}:${ability}:${i}`;
 				// Some entries are comma-joined strings such as "136,138".
-				const goldMessageIds = beamGold(q.source_chat_ids)
+				const listedGold = beamGold(q.source_chat_ids)
 					.flatMap(s => s.split(","))
 					.map(s => s.trim())
 					.filter(s => s !== "");
-				if (goldMessageIds.length === 0) {
+				if (listedGold.length === 0) {
 					excluded.push({ questionId, reason: "no-gold" });
 					return;
 				}
-				const dangling = goldMessageIds.find(id => !sessionOf.has(id));
+				const dangling = listedGold.find(id => !sessionOf.has(id));
 				if (dangling !== undefined) {
 					throw new Error(
 						`${name} case ${conv.conversationId} question ${questionId}: gold id "${dangling}" is not in the conversation`,
 					);
+				}
+				const goldMessageIds = listedGold.filter(id => !blank.has(id));
+				if (goldMessageIds.length === 0) {
+					excluded.push({ questionId, reason: "blank-gold" });
+					return;
 				}
 				const goldSessionIds = new Set<string>();
 				for (const id of goldMessageIds) {
