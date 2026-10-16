@@ -58,7 +58,9 @@ export function isImageBlock(value: unknown): value is { type: "image"; data: st
  * `prepareEntryForPersistence` that fails the whole write for a value
  * serialization accepts. A throw anywhere on the walk therefore answers "no
  * classifier here": the payload stays inline instead of externalized, which is
- * a size regression on an exotic shape, not a lost session.
+ * a size regression on an exotic shape, not a lost session. The prototype step
+ * is guarded for the same reason: `Object.getPrototypeOf` is a trap too, and a
+ * proxy can keep its descriptor answers quiet while throwing there.
  */
 export function projectorImageField(value: object, key: "data" | "mimeType" | "type"): string | undefined {
 	let current: object | null = value;
@@ -73,7 +75,13 @@ export function projectorImageField(value: object, key: "data" | "mimeType" | "t
 			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return undefined;
 			return typeof descriptor.value === "string" ? descriptor.value : undefined;
 		}
-		current = Object.getPrototypeOf(current);
+		let next: object | null;
+		try {
+			next = Object.getPrototypeOf(current);
+		} catch {
+			return undefined;
+		}
+		current = next;
 	}
 	return undefined;
 }
@@ -325,8 +333,13 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 		if (!persistenceNodeNeedsRewrite(obj)) return obj;
 		let changed = false;
 		const entries: Array<readonly [string, unknown]> = [];
-		for (const childKey in obj) {
-			if (!Object.hasOwn(obj, childKey)) continue;
+		// Own enumerable keys, enumerated directly instead of through
+		// `for..in`: the inherited keys `for..in` yields were dropped by the
+		// own-key filter this replaces, while the prototype walk itself is a
+		// step a proxy's `getPrototypeOf` trap can fail on — and
+		// `JSON.stringify`, which reads own keys only, stays quiet on the
+		// same value. A write the serializer completes must not fail here.
+		for (const childKey of Object.keys(obj)) {
 			const value = (obj as Record<string, unknown>)[childKey];
 			// Strip transient/redundant properties that shouldn't be persisted.
 			// - jsonlEvents: raw subprocess streaming events (already saved to artifact files)
@@ -425,8 +438,10 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 			}
 			if (shouldExternalizeImagePayload(value, key)) return true;
 			if (isAtomicPersistenceNode(value, key)) continue;
-			for (const childKey in value) {
-				if (!Object.hasOwn(value, childKey)) continue;
+			// Own enumerable keys, enumerated directly — see the rebuild loop
+			// in `truncateForPersistence` for why `for..in`'s prototype walk
+			// is a step a thrown `getPrototypeOf` trap fails.
+			for (const childKey of Object.keys(value)) {
 				pending.push({ value: (value as Record<string, unknown>)[childKey], key: childKey });
 			}
 		}
