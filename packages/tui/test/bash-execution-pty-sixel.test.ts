@@ -81,6 +81,105 @@ describe("BashExecutionComponent PTY SIXEL", () => {
 		expect(output).toContain("after");
 		expect(output).toContain(SIXEL);
 		expect(output).not.toContain("__OMP_SIXEL_SEQUENCE_");
+		// The frame has to sit between the two text runs of its own row, in stream
+		// order: `before<sixel>after`, never `beforeafter<sixel>`. A frame appended
+		// after the completed row text renders detached from the bytes that
+		// preceded it, so the terminal draws the image after the row instead of
+		// inside it. `renderUntil` polls the final render, so the assertion covers
+		// the finalized replay and not just a refresh in flight.
+		const row = output.split("\n").find(line => line.includes(SIXEL));
+		expect(row).toBeDefined();
+		const plain = row!.replace(/\x1b\[[0-9;]*m/gu, "");
+		expect(plain).toBe(`before${SIXEL}after`);
+	});
+
+	it("keeps the stream order of a payload emitted inside styled text", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		// A colored prefix proves the splice happens on the styled row, not on a
+		// plain-text copy: the SGR run must survive, and the frame must still land
+		// inside the row.
+		const component = new BashExecutionComponent("img", ui, false);
+		component.appendPtyChunk(`\x1b[31mred${SIXEL}plain\r\n`);
+		component.setComplete(0, false);
+
+		await renderUntil(component, () => component.isTranscriptBlockFinalized());
+
+		const output = component.getOutput();
+		const row = output.split("\n").find(line => line.includes(SIXEL));
+		expect(row).toBeDefined();
+		// The vterm normalizes SGR 31 to the equivalent palette form; the point is
+		// that a style run survives the splice, so the split is applied to the
+		// styled row rather than to a plain-text copy of it.
+		expect(row).toMatch(/\x1b\[38;5;1m/);
+		const plain = row!.replace(/\x1b\[[0-9;]*m/gu, "");
+		expect(plain).toBe(`red${SIXEL}plain`);
+	});
+
+	it("keeps two frames on one row in their stream order", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		// Each frame is anchored where it landed, so both keep their own position
+		// instead of collapsing into one trailing run.
+		const second = "\x1bPq#1;2;0;100;0#1~~\x1b\\";
+		const component = new BashExecutionComponent("img", ui, false);
+		component.appendPtyChunk(`a${SIXEL}b${second}c\r\n`);
+		component.setComplete(0, false);
+
+		await renderUntil(component, () => component.isTranscriptBlockFinalized());
+
+		const output = component.getOutput();
+		const row = output.split("\n").find(line => line.includes(SIXEL));
+		expect(row).toBeDefined();
+		const plain = row!.replace(/\x1b\[[0-9;]*m/gu, "");
+		expect(plain).toBe(`a${SIXEL}b${second}c`);
+	});
+
+	it("keeps the stream order of a payload emitted after a wide character row", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		// A CJK cell occupies two grid columns but one rendered character, so the
+		// retained column has to resolve against the rendered row, not against
+		// grid columns. Off-by-one here shifts the frame into the wrong text run.
+		const component = new BashExecutionComponent("img", ui, false);
+		component.appendPtyChunk(`世界${SIXEL}tail\r\n`);
+		component.setComplete(0, false);
+
+		await renderUntil(component, () => component.isTranscriptBlockFinalized());
+
+		const output = component.getOutput();
+		const row = output.split("\n").find(line => line.includes(SIXEL));
+		expect(row).toBeDefined();
+		const plain = row!.replace(/\x1b\[[0-9;]*m/gu, "");
+		expect(plain).toBe(`世界${SIXEL}tail`);
+	});
+
+	it("replays a payload emitted between chunks that arrive after it", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		// Chunk boundaries split the stream, so the trailing text is a later
+		// queue unit: the retained offset has to survive the interleaving and
+		// land inside the row once the row has grown past it.
+		const component = new BashExecutionComponent("img", ui, false);
+		component.appendPtyChunk(`before${SIXEL}`);
+		component.appendPtyChunk("after\r\n");
+		component.setComplete(0, false);
+
+		await renderUntil(component, () => component.isTranscriptBlockFinalized());
+
+		const output = component.getOutput();
+		const row = output.split("\n").find(line => line.includes(SIXEL));
+		expect(row).toBeDefined();
+		const plain = row!.replace(/\x1b\[[0-9;]*m/gu, "");
+		expect(plain).toBe(`before${SIXEL}after`);
 	});
 
 	it("keeps a payload split across chunks without swallowing the rows after it", async () => {
