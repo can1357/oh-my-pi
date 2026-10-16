@@ -42,7 +42,8 @@ for n, line in enumerate(sys.stdin, 1):
 `;
 
 // A fake Mnemosyne 4.0.0b4 for the real engine script: recall ranks one derived row above every remembered row and,
-// like Mnemosyne, returns at most top_k rows.
+// like Mnemosyne, returns at most top_k rows. A wider call reorders the remembered rows (Mnemosyne sizes its candidate
+// pools from top_k), and a call past top_k 64 fails, so widening that never stops cannot hang the test.
 const FAKE_BEAM = `import sqlite3
 
 class BeamMemory:
@@ -57,8 +58,11 @@ class BeamMemory:
         return self.rows[-1]["id"]
 
     def recall(self, query, top_k):
+        if top_k > 64:
+            raise RuntimeError("widened past top_k 64")
         derived = {"id": "memoria_facts", "tier": "memoria", "content": "[MEMORIA facts]", "source_memory_id": None}
-        return ([derived] + self.rows)[:top_k]
+        rows = self.rows if top_k <= 2 else list(reversed(self.rows))
+        return ([derived] + rows)[:top_k]
 `;
 
 /** The real engine script, run against FAKE_BEAM instead of an installed Mnemosyne. */
@@ -174,21 +178,31 @@ for line in sys.stdin:
 		}
 	});
 
-	it("fetches past derived rows until k working or episodic rows are ranked", async () => {
-		const threeMessageCase: EvalCase = {
-			...twoMessageCase,
-			messages: [
-				...twoMessageCase.messages,
-				{ messageId: "m3", sessionId: "s", role: "user", content: "eta theta" },
-			],
-		};
+	const threeMessageCase: EvalCase = {
+		...twoMessageCase,
+		messages: [...twoMessageCase.messages, { messageId: "m3", sessionId: "s", role: "user", content: "eta theta" }],
+	};
+
+	it("widening keeps the native top-k's ranked rows and appends unseen rows from wider calls", async () => {
 		const engine = mnemosyneEngine({ python: "python3", script: await realScriptOnFakeMnemosyne() });
 		try {
 			const { questions } = await runCases(engine, [threeMessageCase], "standard", 2, tmp);
-			// At top_k=2 the derived row would leave one ranked row and miss gold m2; m3 is past the top 2.
-			expect(questions[0].ranked.map(h => h.messageIds)).toEqual([["m1"], ["m2"]]);
-			expect(questions[0].metrics["recall@10"]).toBe(1);
+			// top_k=2 gives [derived, r1]; top_k=4 reorders to [derived, r3, r2, r1]: r1 keeps its place, r3 is appended.
+			expect(questions[0].ranked.map(h => h.messageIds)).toEqual([["m1"], ["m3"]]);
 			expect(questions[0].dropped).toEqual([{ tier: "memoria", messageIds: [], rank: 0, gold: false }]);
+			expect(questions[0].fetchK).toBe(4);
+		} finally {
+			await engine.dispose();
+		}
+	});
+
+	it("widening stops when Mnemosyne returns fewer rows than requested", async () => {
+		const engine = mnemosyneEngine({ python: "python3", script: await realScriptOnFakeMnemosyne() });
+		try {
+			// Four rows exist, so the first top_k=10 call is short and must be the last.
+			const { questions } = await runCases(engine, [threeMessageCase], "standard", 10, tmp);
+			expect(questions[0].ranked.map(h => h.messageIds)).toEqual([["m3"], ["m2"], ["m1"]]);
+			expect(questions[0].fetchK).toBe(10);
 		} finally {
 			await engine.dispose();
 		}
