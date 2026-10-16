@@ -1226,6 +1226,10 @@ export interface GmiCloudModelManagerConfig {
  * reference index. Pricing is deliberately never borrowed across providers:
  * GMI's per-model tariff is unknown for these ids, so cost stays zeroed rather
  * than inheriting another provider's rate.
+ *
+ * GMI's contract keeps `canonical.thinking`: its KDL authors ladders only for
+ * the seeded DeepSeek-V4-Flash, so resold rows need the reference's ladder to
+ * expose their exact tiers.
  */
 function mapGmiCloudModel(
 	entry: OpenAICompatibleModelRecord,
