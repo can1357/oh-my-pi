@@ -26,6 +26,11 @@ export const DEFAULT_EMBEDDING_API_URL = "https://openrouter.ai/api/v1";
 export const DEFAULT_LLM_MODEL_REPO = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF";
 export const DEFAULT_LLM_MODEL_FILE = "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf";
 export const HOST_LLM_TIMEOUT_SECONDS = 15.0;
+/**
+ * Newest visible rows per tier that recall scores by embedding similarity. Older rows are reachable only
+ * through keyword search, so a small cap hides semantically relevant memories once a bank outgrows it.
+ */
+export const DENSE_CANDIDATE_LIMIT = 10_000;
 
 export type VecType = "float32" | "int8" | "bit";
 
