@@ -164,4 +164,68 @@ describe("AttachmentChipsBand SIXEL thumbnail", () => {
 			encode.mockRestore();
 		}
 	});
+
+	it("emits the stale delete before the replacement thumbnail", async () => {
+		const pending: Promise<string>[] = [];
+		const encode = spyOn(natives, "encodeSixelAsync").mockImplementation(() => {
+			const next = Promise.resolve(FAKE_SIXEL);
+			pending.push(next);
+			return next;
+		});
+		try {
+			// Wide header-only PNG: the probe yields 560x100, fitting 11x1 cells —
+			// a different geometry than the narrow 2x2 (8x4) thumbnail.
+			const wide = Buffer.alloc(33);
+			wide.write("\x89PNG\r\n\x1a\n", 0, "binary");
+			wide.writeUInt32BE(13, 8);
+			wide.write("IHDR", 12);
+			wide.writeUInt32BE(560, 16);
+			wide.writeUInt32BE(100, 20);
+			const { editor, band } = makeBand();
+			editor.pendingImages.push({ type: "image", data: TINY_PNG, mimeType: "image/png" });
+			editor.insertAtom(chipLabel("image", 1), "[Image #1, 2x2]");
+			editor.pendingImages.push({
+				type: "image",
+				data: wide.toString("base64"),
+				mimeType: "image/png",
+			});
+			editor.insertAtom(chipLabel("image", 2), "[Image #2, 560x100]");
+			band.render(80);
+			await pending[0];
+			await pending[1];
+			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
+			// Drop the narrow chip: the wide thumbnail slides into its origin
+			// while the narrow placement is still live.
+			editor.setText(`${chipLabel("image", 2)} `);
+			const bottom = band.render(80)[5];
+			expect(bottom).toContain(FAKE_SIXEL);
+			expect(bottom).toContain("a=d,d=c");
+			expect(bottom.indexOf("a=d,d=c")).toBeLessThan(bottom.indexOf(FAKE_SIXEL));
+		} finally {
+			encode.mockRestore();
+		}
+	});
+
+	it("clears the old cell when editor growth moves the band", async () => {
+		let encoding: Promise<string> | undefined;
+		const encode = spyOn(natives, "encodeSixelAsync").mockImplementation(() => {
+			encoding = Promise.resolve(FAKE_SIXEL);
+			return encoding;
+		});
+		try {
+			const { editor, band } = makeBand();
+			stageImage(editor);
+			band.render(80);
+			await encoding;
+			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
+			// Multiline input pushes the band up; x/cols/rows are unchanged,
+			// so only the tracked band row distinguishes the stale placement.
+			editor.setText(`${editor.getText()}\nhello\nworld`);
+			const moved = band.render(80);
+			expect(moved[5]).toContain(FAKE_SIXEL);
+			expect(moved[5]).toContain("a=d,d=c");
+		} finally {
+			encode.mockRestore();
+		}
+	});
 });

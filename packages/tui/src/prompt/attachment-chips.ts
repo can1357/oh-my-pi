@@ -90,8 +90,8 @@ export class AttachmentChipsBand implements Component {
 	#native:
 		| { chips: readonly ComposerChipDescriptor[]; node: NativeNode; images: ReadonlyMap<ImageContent, NativeNode> }
 		| undefined;
-	#lastSixelPlacements: Array<{ x: number; cols: number; rows: number }> = [];
-	#renderSixelPlacements: Array<{ x: number; cols: number; rows: number }> = [];
+	#lastSixelPlacements: Array<{ x: number; cols: number; rows: number; below: number }> = [];
+	#renderSixelPlacements: Array<{ x: number; cols: number; rows: number; below: number }> = [];
 
 	/**
 	 * A wrapping `row` of chip `card`s (`omp.composer.chip`) titled with the
@@ -149,11 +149,14 @@ export class AttachmentChipsBand implements Component {
 	}
 
 	render(width: number): readonly string[] {
+		const below = this.#editorBelow(width);
 		const chips = this.editor.composerChips();
 		if (chips.length === 0) {
 			if (this.#lastSixelPlacements.length === 0) return [];
 			const clearRows = Array.from({ length: 6 }, () => "");
-			clearRows[5] = this.#lastSixelPlacements.map(placement => this.#clearSixelAt(placement)).join("");
+			clearRows[5] = this.#lastSixelPlacements
+				.map(placement => this.#clearSixelAt(placement, below - placement.below))
+				.join("");
 			this.#lastSixelPlacements = [];
 			return clearRows;
 		}
@@ -164,25 +167,33 @@ export class AttachmentChipsBand implements Component {
 		for (const chip of chips) {
 			if (x + CARD_COLS > width) break;
 			const cardX = x + (x > 0 ? CARD_GAP : 0);
-			const card = this.#card(chip, cardX);
+			const card = this.#card(chip, cardX, below);
 			for (let r = 0; r < rows.length; r++) rows[r] += (x > 0 ? gap : "") + card[r];
 			x += (x > 0 ? CARD_GAP : 0) + CARD_COLS;
 		}
+		// Stale deletes lead the bottom row: a delete cell inside a replacement
+		// thumbnail's rect would otherwise erase the new image (Konsole removes
+		// every placement covering the cell, SIXEL included).
+		let stale = "";
 		for (const placement of this.#lastSixelPlacements) {
 			if (
 				!this.#renderSixelPlacements.some(
 					current =>
-						current.x === placement.x && current.cols === placement.cols && current.rows === placement.rows,
+						current.x === placement.x &&
+						current.cols === placement.cols &&
+						current.rows === placement.rows &&
+						current.below === placement.below,
 				)
 			) {
-				rows[5] += this.#clearSixelAt(placement);
+				stale += this.#clearSixelAt(placement, below - placement.below);
 			}
 		}
+		rows[5] = stale + rows[5];
 		this.#lastSixelPlacements = this.#renderSixelPlacements;
 		return rows;
 	}
 
-	#card(chip: ComposerChipDescriptor, x: number): string[] {
+	#card(chip: ComposerChipDescriptor, x: number, below: number): string[] {
 		const sgr = attachmentSgr(chip.kind, chip.n);
 		const icon = theme.symbol(
 			chip.kind === "paste" ? "chip.paste" : chip.kind === "video" ? "chip.video" : "chip.image",
@@ -206,22 +217,28 @@ export class AttachmentChipsBand implements Component {
 		return [
 			this.#borderRow(sgr, title, "top"),
 			...interior.map(row => vertical + row + vertical),
-			thumb ? this.#sixelBottomRow(thumb, x, border) : border,
+			thumb ? this.#sixelBottomRow(thumb, x, border, below) : border,
 		];
 	}
 
+	/** Delete the SIXEL placement at `placement`. `rowShift` is how many rows the band moved
+	 *  down since that placement was drawn (negative when editor growth pushed the band up):
+	 *  the delete aims from the current bottom-border cursor at the old origin cell. Zero keeps
+	 *  the legacy straight-up lift, byte for byte. */
+	#clearSixelAt(placement: { x: number; cols: number; rows: number }, rowShift = 0): string {
+		const leftPad = Math.floor((INNER_COLS - placement.cols) / 2);
+		const topPad = Math.floor((INNER_ROWS - placement.rows) / 2);
+		const net = rowShift - (INNER_ROWS - topPad);
+		const vertical = net < 0 ? `\x1b[${-net}A` : net > 0 ? `\x1b[${net}B` : "";
+		return `\x1b[0m\x1b7${vertical}\x1b[${placement.x + 2 + leftPad}G\x1b_Ga=d,d=c,q=2\x1b\\\x1b8`;
+	}
 	/** Bottom border row carrying a SIXEL thumbnail. The image is emitted from the centered origin
 	 *  inside the interior: save the cursor, move up to that row, print the sequence, restore the
 	 *  cursor, then the border text. The leading SGR reset keeps the line from matching the
 	 *  direct-placement lift pattern, which would erase the rows above. Cached on the thumbnail
 	 *  while the placement and border text are unchanged. */
-	#clearSixelAt(placement: { x: number; cols: number; rows: number }): string {
-		const leftPad = Math.floor((INNER_COLS - placement.cols) / 2);
-		const topPad = Math.floor((INNER_ROWS - placement.rows) / 2);
-		return `\x1b[0m\x1b7\x1b[${INNER_ROWS - topPad}A\x1b[${placement.x + 2 + leftPad}G\x1b_Ga=d,d=c,q=2\x1b\\\x1b8`;
-	}
-	#sixelBottomRow(thumb: SixelThumb & { sequence: string }, x: number, border: string): string {
-		this.#renderSixelPlacements.push({ x, cols: thumb.cols, rows: thumb.rows });
+	#sixelBottomRow(thumb: SixelThumb & { sequence: string }, x: number, border: string, below: number): string {
+		this.#renderSixelPlacements.push({ x, cols: thumb.cols, rows: thumb.rows, below });
 		const rowKey = `${x}\0${border}`;
 		if (thumb.row?.key === rowKey) return thumb.row.text;
 		const leftPad = Math.floor((INNER_COLS - thumb.cols) / 2);
@@ -266,6 +283,21 @@ export class AttachmentChipsBand implements Component {
 		if (kSixelThumbs.get(image) !== entry) return;
 		entry.sequence = sequence;
 		this.requestRender();
+	}
+
+	/** Editor rows below the band: the wrapped text height plus one chrome row. The band sits
+	 *  directly above the editor, so this is the band's viewport row up to a constant: when it
+	 *  changes between renders the band moved and every kept placement needs an aimed delete.
+	 *  Calibrated against Editor.render (content width is the terminal width minus 6 cells of
+	 *  gutter/chrome at widths 80 and 100). Blind to the autocomplete dropdown and the viewport
+	 *  max-height clamp, which also move the band; those keep today's behavior (a missed delete). */
+	#editorBelow(width: number): number {
+		const contentWidth = Math.max(1, width - 6);
+		let textRows = 0;
+		for (const line of this.editor.getLines()) {
+			textRows += Math.max(1, Math.ceil(visibleWidth(replaceTabs(line)) / contentWidth));
+		}
+		return textRows + 1;
 	}
 
 	/** Horizontal border with an optional centered, bold caption padded by one space per side. */
