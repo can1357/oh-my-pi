@@ -79,6 +79,8 @@ Both are recorded in the result's `config` (`mnemopiRecall`, `polyphonic`) for e
 
 The 95% interval is a percentile interval from a cluster bootstrap over cases (`caseId`): each of the 10,000 resamples draws whole cases with replacement and averages over all their questions. A BEAM case is a conversation whose questions all query one memory store (BEAM 100K: 355 questions over 20 cases), so resampling questions independently would understate the uncertainty. A LongMemEval case has one question, so there it is the per-question bootstrap. `wins`, `ties` and `losses` count questions; each line shows `n` (questions) and `cases`, overall and per category.
 
+The verdict is `helps` when the overall interval lies above 0 and no category's interval lies wholly below 0, `hurts` for the mirror image, and `neutral` otherwise. With fewer than 2 cases (overall or in a category) every resample draws the same data, so `diff` prints `CI n/a (fewer than 2 cases)`. Without an overall interval the verdict is `insufficient data`; a category without one cannot veto.
+
 ### Environment guard
 
 Mnemopi runs in the harness process and reads its configuration from the environment, so `run --engine mnemopi` and `embed-parity.ts` refuse to start while any `MNEMOPI_*` or `OPENROUTER_BASE_URL` (which can route its embeddings to an API) is set. Mnemosyne's child process never inherits the parent's `MNEMOSYNE_*`.

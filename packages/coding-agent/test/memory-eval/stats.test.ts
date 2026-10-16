@@ -56,6 +56,20 @@ describe("memory-eval stats", () => {
 		expect(r.ciHigh).toBeCloseTo(1 / 3, 12);
 	});
 
+	it("reports no interval and insufficient data with fewer than two cases", () => {
+		// Every resample would draw the one case, giving a zero-width interval that excludes 0.
+		const one = pairedBootstrap([0, 0, 0], [1, 1, 1], ["c", "c", "c"]);
+		expect(one).toMatchObject({ meanDiff: 1, wins: 3, ties: 0, losses: 0 });
+		expect(one.ciLow).toBeNaN();
+		expect(one.ciHigh).toBeNaN();
+		expect(verdict(one, { cat: one })).toBe("insufficient data");
+		const lossInOneCase = pairedBootstrap([1, 1], [0, 0], ["c", "c"]);
+		expect(verdict(lossInOneCase, { cat: lossInOneCase })).toBe("insufficient data");
+		// A category asked in one case has no interval, so it cannot veto an overall win.
+		const win = { meanDiff: 0.1, ciLow: 0.05, ciHigh: 0.15, wins: 9, ties: 0, losses: 1 };
+		expect(verdict(win, { a: win, b: lossInOneCase })).toBe("helps");
+	});
+
 	it("verdict rejects a win with a category regression", () => {
 		const win = { meanDiff: 0.1, ciLow: 0.05, ciHigh: 0.15, wins: 9, ties: 0, losses: 1 };
 		const loss = { meanDiff: -0.2, ciLow: -0.3, ciHigh: -0.1, wins: 0, ties: 0, losses: 5 };
