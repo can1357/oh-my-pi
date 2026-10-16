@@ -1,4 +1,7 @@
-/** Sanity engines: `oracle` ranks gold first (recall must be 1), `random` shuffles (recall must match chance). */
+/**
+ * Sanity engines: `oracle` ranks gold first, so recall@k must reach its ceiling `min(1, k / |unique gold|)` (k slots
+ * hold at most k gold messages); `random` shuffles (recall must match chance).
+ */
 import type { EngineAdapter, EngineName, RecallHit, RememberItem } from "../engine";
 import { mulberry32 } from "../stats";
 import type { EvalQuestion } from "../types";
