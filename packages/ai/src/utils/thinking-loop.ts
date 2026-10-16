@@ -341,12 +341,20 @@ export const GEMINI_HEADER_RUNAWAY_THRESHOLD = 36;
  *  judged whole — see {@link foldPartialLineHead}. */
 export const GEMINI_HEADER_PARTIAL_LINE_CAP = 512;
 
-/** Closing `\*{2,3}` of a whole-line bold run — the end of the line, which is the
- *  one part the tail cap always keeps. */
-const BOLD_RUN_CLOSER_RE = /\*{2,3}$/;
+/** Stars in a whole-line bold run's closing `\*{2,3}`. */
+const BOLD_RUN_CLOSER_STARS = 2;
 
 /** `\s`: what trims a line, and what `\S` excludes. */
 const WHITESPACE_RE = /\s/;
+
+/** Line terminators: what `.` refuses to match, so a whole-line bold run's `.+`
+ *  body can never cross one. */
+const LINE_TERMINATOR_RE = /[\n\r\u2028\u2029]/;
+
+/** Padding folded since a bold run's closer witness last grew: a space or tab, or
+ *  a line terminator. */
+const BOLD_PAD_SPACE = 1;
+const BOLD_PAD_BREAK = 2;
 
 /**
  * True when a single trimmed line is a Gemini reasoning-summary title: a markdown
@@ -380,6 +388,40 @@ interface PartialLineHead {
 	 *  (a title followed by a longer whitespace run), so whether the line has body
 	 *  text at all is decided from what was folded, never from the capped tail. */
 	text: boolean;
+	/** `*` run that currently ends a bold run's trimmed text, saturated at
+	 *  {@link BOLD_RUN_CLOSER_STARS}: the closing `\*{2,3}`. Folded as the line
+	 *  arrives because the retained tail cannot witness it — a whitespace run past
+	 *  the cap cuts the closer out of the tail, and a marker-only run leaves a tail
+	 *  that ends on stars without being a title. */
+	closer: number;
+	/** {@link BOLD_PAD_SPACE} / {@link BOLD_PAD_BREAK} whitespace folded since
+	 *  {@link closer} last grew. Padding inside the run is body text, so a `*`
+	 *  after it opens a new run instead of extending the closer (`****  *` ends on
+	 *  one star and is not a title). */
+	pad: number;
+}
+
+/**
+ * Fold one character into a bold run's closing witness: the `*` run that ends the
+ * line's trimmed text. Padding inside the run is body text a later `*` cannot
+ * join, padding after the closer is trimmed away at EOF, and a line terminator is
+ * fatal as soon as text follows it, because the whole-line `.+` cannot cross one.
+ * Returns true when the character settles the run as prose for the rest of the
+ * line.
+ */
+function foldBoldCloser(head: PartialLineHead, ch: string): boolean {
+	if (LINE_TERMINATOR_RE.test(ch)) {
+		head.pad |= BOLD_PAD_BREAK;
+		return false;
+	}
+	if (WHITESPACE_RE.test(ch)) {
+		head.pad |= BOLD_PAD_SPACE;
+		return false;
+	}
+	if (head.pad & BOLD_PAD_BREAK) return true;
+	head.closer = ch === "*" ? (head.pad ? 1 : Math.min(head.closer + 1, BOLD_RUN_CLOSER_STARS)) : 0;
+	head.pad = 0;
+	return false;
 }
 
 /**
@@ -389,8 +431,13 @@ interface PartialLineHead {
  * {@link GEMINI_HEADER_PARTIAL_LINE_CAP} keeps only the tail of a long
  * unterminated line, which drops exactly the `# `/`**` that makes it a title.
  * Deciding as the line arrives is what keeps a title's verdict independent of
- * where the chunk boundaries fall — against a tail-only buffer the same line is a
- * title when it arrives whole and stops being one once it is split.
+ * where the chunk boundaries fall — against a tail-only buffer the same line is
+ * a title when it arrives whole and stops being one once it is split.
+ *
+ * A bold run is judged at both ends, so once its opener has settled the fold
+ * keeps running to witness the closing `\*{2,3}` for the same reason: the tail
+ * the cap retains is the only other witness, and a whitespace run past the cap
+ * removes the closer from it while a marker-only run leaves one behind.
  */
 function foldPartialLineHead(head: PartialLineHead, ch: string): void {
 	// Record real text before the verdict can settle: the tail cap can leave the
@@ -399,8 +446,14 @@ function foldPartialLineHead(head: PartialLineHead, ch: string): void {
 	if (!WHITESPACE_RE.test(ch)) head.text = true;
 	switch (head.phase) {
 		case "atx":
-		case "bold":
 		case "plain":
+			// Marker alone settles these verdicts; nothing later in the line can
+			// change them, so the fold stops here.
+			return;
+		case "bold":
+			// The opener is settled but the run's verdict also needs its closer, which
+			// the retained tail cannot witness — see {@link foldBoldCloser}.
+			if (foldBoldCloser(head, ch)) head.phase = "plain";
 			return;
 		case "start":
 			// Leading whitespace is trimmed away before the line is judged.
@@ -440,10 +493,19 @@ function foldPartialLineHead(head: PartialLineHead, ch: string): void {
 			// missing.
 			if (ch === "*") {
 				if (head.run < 3) head.run++;
-				else head.phase = "bold";
+				else {
+					head.phase = "bold";
+					// The whole-line opener only consumes three of the four stars, so
+					// the fourth opens the closer's witness: one more star settles
+					// `\*{2,3}`, which is what separates `****` (a marker with no body,
+					// not a title) from `*****` (a title).
+					head.closer = 1;
+				}
 				return;
 			}
-			head.phase = head.run >= 2 ? "bold" : "plain";
+			// A body that starts on a line break can never be the `.+` the whole-line
+			// verdict needs, and a body of padding alone is too short for it either.
+			head.phase = head.run >= 2 && !LINE_TERMINATOR_RE.test(ch) ? "bold" : "plain";
 			return;
 	}
 }
@@ -453,13 +515,16 @@ function foldPartialLineHead(head: PartialLineHead, ch: string): void {
  *
  * With its head intact the line is judged whole, exactly as it was before the
  * tail cap existed. Once {@link GEMINI_HEADER_PARTIAL_LINE_CAP} has cut the head
- * off, the verdict comes from the folded opening marker plus the retained tail:
- * an ATX heading is settled by the marker alone, and a whole-line bold run also
- * needs the line to end on `\*{2,3}` — the tail, which the cap never cuts.
+ * off, the verdict comes from the folded markers: an ATX heading is settled by
+ * its opening marker alone, and a whole-line bold run also needs its closing
+ * `\*{2,3}`, which the fold witnesses rather than the retained tail — a
+ * whitespace run past the cap cuts the closer out of the tail that is all the
+ * cap keeps, while a marker-only run leaves a tail that ends on `\*{2,3}`
+ * without being a title.
  */
 function isSummaryTitleLine(line: string, head: PartialLineHead, headCut: boolean): boolean {
 	if (!headCut) return isReasoningSummaryHeader(line);
-	return head.phase === "atx" || (head.phase === "bold" && BOLD_RUN_CLOSER_RE.test(line));
+	return head.phase === "atx" || (head.phase === "bold" && head.closer >= BOLD_RUN_CLOSER_STARS);
 }
 
 /**
@@ -475,7 +540,7 @@ export class GeminiHeaderRunDetector {
 	/** Thinking text not yet split into completed lines. */
 	#pending = "";
 	/** Opening marker of the unterminated partial line, folded as it streams. */
-	#head: PartialLineHead = { phase: "start", run: 0, gap: false, text: false };
+	#head: PartialLineHead = { phase: "start", run: 0, gap: false, text: false, closer: 0, pad: 0 };
 	/** The held partial line has been cut back to
 	 *  {@link GEMINI_HEADER_PARTIAL_LINE_CAP}, so its head survives only in
 	 *  `#head`. */
@@ -534,11 +599,13 @@ export class GeminiHeaderRunDetector {
 	}
 
 	/** Fold the characters of `#pending` in `[from, to)` the opening-marker fold
-	 *  has not seen yet. Stops at the character that settles the verdict, so a
-	 *  line that is not a title costs one character look per delta. */
+	 *  has not seen yet. Stops at the verdict a marker alone settles (`plain`,
+	 *  `atx`), so a line that is not a title costs one character look per delta; a
+	 *  bold run keeps folding past its opener to witness the closer the retained
+	 *  tail cannot. */
 	#foldHead(from: number, to: number): void {
 		const head = this.#head;
-		while (from < to && head.phase !== "atx" && head.phase !== "bold" && head.phase !== "plain") {
+		while (from < to && head.phase !== "atx" && head.phase !== "plain") {
 			foldPartialLineHead(head, this.#pending[from++]);
 		}
 	}
@@ -549,6 +616,8 @@ export class GeminiHeaderRunDetector {
 		this.#head.run = 0;
 		this.#head.gap = false;
 		this.#head.text = false;
+		this.#head.closer = 0;
+		this.#head.pad = 0;
 	}
 
 	/** Number of summary titles counted in the current run (for the reminder/log). */
