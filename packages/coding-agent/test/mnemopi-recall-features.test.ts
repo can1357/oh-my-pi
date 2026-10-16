@@ -82,11 +82,12 @@ afterEach(async () => {
 });
 
 describe("mnemopi.polyphonicRecall", () => {
-	it("surfaces a graph-linked memory that the default recall misses", async () => {
+	it("surfaces a graph-linked memory by default that linear recall misses", async () => {
 		const texts: Record<string, string> = {};
 		for (const polyphonicRecall of [false, true]) {
 			const { tools } = startSession({
-				"mnemopi.polyphonicRecall": polyphonicRecall,
+				// The polyphonic leg leaves the setting unset, so it runs the default.
+				...(polyphonicRecall ? {} : { "mnemopi.polyphonicRecall": false }),
 				"mnemopi.proactiveLinking": true,
 			});
 			await retain(
