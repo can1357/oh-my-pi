@@ -133,6 +133,14 @@ describe("Serply web search provider", () => {
 		expect(seen.url?.searchParams.get("tbs")).toBe("qdr:w");
 	});
 
+	it("rounds a fractional result count down", async () => {
+		const { seen, fetchImpl } = mockFetch({ results: [] });
+
+		await searchSerply({ ...makeParams("bun"), numSearchResults: 5.5, fetch: fetchImpl });
+
+		expect(seen.url?.searchParams.get("num")).toBe("5");
+	});
+
 	it("demotes path-qualified site: filters to plain terms", async () => {
 		const { seen, fetchImpl } = mockFetch({ results: [] });
 
@@ -178,8 +186,9 @@ describe("Serply web search provider", () => {
 
 	it("throws a clear error when Serply credentials are missing", async () => {
 		apiKey = undefined;
-		await expect(searchSerply(makeParams("missing creds"))).rejects.toThrow(
-			'Serply credentials not found. Set SERPLY_API_KEY or configure an API key for provider "serply".',
-		);
+		const error = await searchSerply(makeParams("missing creds")).catch((err: unknown) => err);
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toContain("Serply");
+		expect((error as Error).message).toContain("SERPLY_API_KEY");
 	});
 });

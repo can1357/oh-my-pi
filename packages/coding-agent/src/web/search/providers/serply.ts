@@ -60,7 +60,10 @@ export function buildRequestUrl(params: SerplySearchParams): URL {
 	// them to plain terms and the pipeline post-filter enforces them.
 	const url = new URL(SERPLY_SEARCH_URL);
 	url.searchParams.set("q", formatScraperQuery(params.query, parsed));
-	url.searchParams.set("num", String(clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS)));
+	url.searchParams.set(
+		"num",
+		String(Math.floor(clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS))),
+	);
 	// `tbs` is a pure time filter. Explicit after:/before: bounds already ride
 	// along in `q`; stacking the relative window on top would intersect two
 	// date filters and over-restrict the page.
@@ -151,7 +154,10 @@ export async function searchSerply(params: SearchParams): Promise<SearchResponse
 		missingKeyMessage:
 			'Serply credentials not found. Set SERPLY_API_KEY or configure an API key for provider "serply".',
 	});
-	return toSearchResponse(response, clampNumResults(serplyParams.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS));
+	return toSearchResponse(
+		response,
+		Math.floor(clampNumResults(serplyParams.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS)),
+	);
 }
 
 /** Search provider for Serply web search. */
