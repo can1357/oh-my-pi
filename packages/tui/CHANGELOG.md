@@ -10,7 +10,7 @@
 - Suppressed typo highlighting for the word currently being typed to avoid distracting inline markers while composing
 
 ### Fixed
-
+- Fixed partially clipped SIXEL charts painting over committed history, demoted images leaving raster pixels in the viewport, and SVG figures retiring before their replacement raster is ready ([#16005](https://github.com/can1357/oh-my-pi/issues/16005))
 - Fixed double-clicking an extension switched off in `/extensions` in Tern not switching it back on
 - Fixed the queued-messages badge in Tern showing a bare count that read as the first message's number; it now reads `N queued`
 - Fixed table charts on TSP terminals to use SVG fences and respect terminal palette

@@ -7,8 +7,11 @@ import {
 	type TranscriptStableRow,
 	trimBlankEdges,
 } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { COMPOSER_DEFAULTS, Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { Component } from "@oh-my-pi/pi-tui";
+import { VirtualRenderScheduler } from "./virtual-render-scheduler";
+import { VirtualTerminal } from "./virtual-terminal";
 
 class Block implements Component {
 	#rows: string[];
@@ -35,6 +38,15 @@ class Block implements Component {
 
 	render(): readonly string[] {
 		return this.#rows;
+	}
+}
+
+/** Finalized text that temporarily changes while its replacement raster is pending. */
+class ReplacingBlock extends Block {
+	pending = false;
+
+	isTranscriptBlockPending(): boolean {
+		return this.pending;
 	}
 }
 
@@ -315,6 +327,93 @@ describe("TranscriptContainer", () => {
 		expect(transcript.peekFlushBatch(80)).toBeUndefined();
 		transcript.beginReplay();
 		expect(transcript.peekReplayBatch(80)?.rows).toEqual(["archived", "", "first done", "", "replacement done", ""]);
+	});
+
+	it("reopens a settled block and retracts its offered raster without dropping queued replay", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["committed prefix"], true));
+		const first = transcript.peekFlushBatch(80)!;
+		transcript.acknowledgeFinalizedBatch(first.id);
+
+		const figure = new ReplacingBlock(["old raster"], true);
+		transcript.addChild(figure);
+		const offered = transcript.peekFlushBatch(80)!;
+		expect(offered.rows).toEqual(["old raster", ""]);
+		expect(transcript.blockStates()).toEqual(["committed", "settled"]);
+		transcript.beginReplay();
+		figure.pending = true;
+		figure.finalize(["replacement drawing"]);
+		expect(transcript.hasActiveBlock()).toBe(true);
+		expect(transcript.blockStates()).toEqual(["committed", "active"]);
+		const replay = transcript.peekReplayBatch(80)!;
+		expect(replay.rows).toEqual(["committed prefix", ""]);
+		expect(replay.id).not.toBe(offered.id);
+		transcript.acknowledgeFinalizedBatch(offered.id);
+		expect(transcript.blockStates()).toEqual(["committed", "active"]);
+		transcript.acknowledgeFinalizedBatch(replay.id);
+		expect(transcript.renderViewport(80, 2, frame)).toEqual(["replacement drawing"]);
+		expect(transcript.peekFlushBatch(80)).toBeUndefined();
+
+		figure.pending = false;
+		const replacement = transcript.peekFlushBatch(80)!;
+		expect(replacement.rows).toEqual(["replacement drawing", ""]);
+		transcript.acknowledgeFinalizedBatch(replacement.id);
+		expect(transcript.blockStates()).toEqual(["committed", "committed"]);
+	});
+
+	it("refuses immutable retirement when a width change starts a replacement during render", () => {
+		class WidthSensitiveFigure extends ReplacingBlock {
+			override render(width?: number): readonly string[] {
+				if (width !== undefined && width < 80) this.pending = true;
+				return super.render();
+			}
+		}
+		const transcript = new TranscriptContainer();
+		const figure = new WidthSensitiveFigure(["old raster"], true);
+		transcript.addChild(figure);
+		expect(transcript.peekFlushBatch(40)).toBeUndefined();
+		expect(transcript.blockStates()).toEqual(["active"]);
+
+		figure.pending = false;
+		const old = transcript.peekFlushBatch(80)!;
+		expect(old.rows).toEqual(["old raster", ""]);
+		expect(transcript.rerenderOfferedBatch(40)).toBeUndefined();
+		expect(transcript.peekFlushBatch(40)).toBeUndefined();
+		transcript.acknowledgeFinalizedBatch(old.id);
+		expect(transcript.blockStates()).toEqual(["active"]);
+	});
+
+	it("withdraws the composer history batch when a figure replacement becomes pending", () => {
+		const terminal = new VirtualTerminal(80, 20);
+		const composer = new Composer({
+			terminal,
+			tuiOptions: { renderScheduler: new VirtualRenderScheduler() },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		const transcript = new TranscriptContainer();
+		const figure = new ReplacingBlock(["old figure"], true);
+		transcript.addChild(figure);
+		composer.setRuntimeChildren([transcript]);
+		composer.start({ playWelcomeIntro: false });
+		try {
+			composer.beginHistoryFlush();
+			const offered = composer.renderFrame({ columns: 80, rows: 20 }).history;
+			expect(offered?.rows).toEqual(["old figure", ""]);
+			figure.pending = true;
+			figure.finalize(["replacement figure"]);
+			const frame = composer.renderFrame({ columns: 80, rows: 20 });
+			expect(frame.history).toBeUndefined();
+			expect(frame.viewport.join("\n")).toContain("replacement figure");
+			expect(transcript.blockStates()).toEqual(["active"]);
+			composer.acknowledgeHistory(offered!.id);
+			expect(transcript.blockStates()).toEqual(["active"]);
+			figure.pending = false;
+			const replacement = composer.renderFrame({ columns: 80, rows: 20 }).history;
+			expect(replacement?.rows).toEqual(["replacement figure", ""]);
+			expect(replacement?.id).not.toBe(offered?.id);
+		} finally {
+			composer.stop();
+		}
 	});
 
 	it("captures mutable by default and append-only declarations permanently", () => {

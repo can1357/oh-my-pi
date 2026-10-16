@@ -59,8 +59,8 @@ interface FinalizableBlock {
 	isTranscriptBlockFinalized?(): boolean;
 	/**
 	 * A finalized block whose rows still wait on async work (an SVG figure's
-	 * raster). Retirement holds until it lands: committed rows can never be
-	 * repainted, so retiring early would freeze a placeholder into scrollback.
+	 * raster), including a replacement for an earlier result. Retirement holds
+	 * until it lands: committed rows can never be repainted.
 	 */
 	isTranscriptBlockPending?(): boolean;
 	/** Render the row that must remain represented under emergency viewport pressure. */
@@ -126,7 +126,7 @@ type RetirementPolicy = "pressure" | "flush";
 type Offered =
 	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number }
 	/** Whole blocks `[frontier, end)`, then optionally the head rows of block `end`. */
-	| { batch: HistoryBatch; kind: "commit"; end: number; split?: RowSplit }
+	| { batch: HistoryBatch; kind: "commit"; end: number; width: number; split?: RowSplit }
 	| { batch: HistoryBatch; kind: "replay" };
 
 /** Rows a progressive-append retirement offers, and the stable count they bring the head to. */
@@ -697,7 +697,7 @@ export class TranscriptContainer extends Container {
 	/** Recompose the unacknowledged batch so a discarded TUI frame can be rendered again. */
 	rerenderOfferedBatch(width: number): HistoryBatch | undefined {
 		const offered = this.#offered;
-		if (offered === undefined) return undefined;
+		if (offered === undefined || this.#discardPendingOffer()) return undefined;
 		let rows: readonly string[];
 		if (offered.kind === "append") {
 			const entry = this.#entries[offered.entry];
@@ -706,7 +706,12 @@ export class TranscriptContainer extends Container {
 			const after = this.#renderStablePrefix(entry, offered.emittedEnd, width);
 			rows = after.slice(before.length);
 		} else if (offered.kind === "commit") {
-			rows = this.#renderRange(this.#frontier, offered.end, width, true).rows;
+			const retirement = this.#renderRange(this.#frontier, offered.end, width, true, undefined, true);
+			if (retirement.end !== offered.end) {
+				this.#withdrawOffer();
+				return undefined;
+			}
+			rows = retirement.rows;
 			const head = offered.split ? this.#entries[offered.end] : undefined;
 			if (head !== undefined && offered.split !== undefined) {
 				// The offer's fingerprint covers bytes of a discarded frame history
@@ -718,9 +723,14 @@ export class TranscriptContainer extends Container {
 				const cut =
 					width === offered.split.width ? offered.split.rows : this.#splitRowCount(head, offered.split, width);
 				const end = Math.min(cut, scrollback.length);
+				if (head.state !== "settled") {
+					this.#withdrawOffer();
+					return undefined;
+				}
 				offered.split = rowSplit(scrollback, end, width);
 				rows = [...rows, ...scrollback.slice(start, end)];
 			}
+			offered.width = width;
 		} else {
 			rows = this.#renderReplay(width);
 		}
@@ -731,7 +741,11 @@ export class TranscriptContainer extends Container {
 	#peekBatch(width: number, capacity: number, policy: RetirementPolicy): HistoryBatch | undefined {
 		this.#syncEntries();
 		this.#settleFinalized();
-		if (this.#offered !== undefined) return this.#offered.batch;
+		if (this.#offered !== undefined) {
+			return this.#offered.kind === "commit" && this.#offered.width !== width
+				? this.rerenderOfferedBatch(width)
+				: this.#offered.batch;
+		}
 		const replay = this.#peekReplayBatch(width);
 		if (replay !== undefined) return replay;
 
@@ -850,17 +864,19 @@ export class TranscriptContainer extends Container {
 				width,
 				true,
 				policy === "flush" ? undefined : RETIREMENT_BUDGET_MS,
+				true,
 			);
 		} finally {
 			popLoopPhase();
 		}
 		if (split !== undefined && retirement.end !== split.index) split = undefined;
+		if (retirement.end === this.#frontier && split === undefined) return undefined;
 		const batch: HistoryBatch = {
 			id: this.#nextBatchId++,
 			rows: split === undefined ? retirement.rows : [...retirement.rows, ...split.rows],
 			kind: "append",
 		};
-		this.#offered = { batch, end: retirement.end, kind: "commit", split: split?.split };
+		this.#offered = { batch, end: retirement.end, width, kind: "commit", split: split?.split };
 		return batch;
 	}
 
@@ -875,16 +891,18 @@ export class TranscriptContainer extends Container {
 		visible: number,
 	): { rows: readonly string[]; split: RowSplit } | undefined {
 		const measured = this.#measuredRows(entry, width);
+		if (entry.state !== "settled") return undefined;
 		const start = this.#emittedRowCount(entry, width);
 		const total = measured.length - visible;
 		if (total <= start) return undefined;
 		const scrollback = renderForScrollback(() => this.#renderEntry(entry, width));
-		if (scrollback.length !== measured.length) return undefined;
+		if (entry.state !== "settled" || scrollback.length !== measured.length) return undefined;
 		return { rows: scrollback.slice(start, total), split: rowSplit(scrollback, total, width) };
 	}
 
 	/** Acknowledges exactly the most recently offered append, commit, or replay transaction. */
 	acknowledgeFinalizedBatch(id: number): void {
+		if (this.#discardPendingOffer()) return;
 		const offered = this.#offered;
 		if (offered === undefined || offered.batch.id !== id) return;
 		if (offered.kind === "append") {
@@ -986,6 +1004,7 @@ export class TranscriptContainer extends Container {
 
 	#renderEntry(entry: TranscriptEntry, width: number): readonly string[] {
 		const rendered = trimBlankEdges(entry.component.render(width));
+		this.#settleEntry(entry);
 		if (entry.state === "committed" || entry.mode === "mutable" || entry.stableFrozen) return rendered;
 		const appendOnly = entry.component as Component & AppendOnlyTranscriptBlock;
 		const stable = appendOnly.getTranscriptStableRows();
@@ -1204,7 +1223,8 @@ export class TranscriptContainer extends Container {
 	 * at least one block — and reports the index actually reached, so a single
 	 * frame never renders more of a resumed ledger than it can afford (#12933).
 	 * Callers that must emit a whole prefix (replay, shutdown flush, recompose
-	 * of an already offered batch) omit it.
+	 * of an already offered batch) omit it. `finalizedOnly` checks readiness
+	 * after rendering: a new width may start async work on a settled block.
 	 */
 	#renderRange(
 		start: number,
@@ -1212,6 +1232,7 @@ export class TranscriptContainer extends Container {
 		width: number,
 		trailingBlank: boolean,
 		budgetMs?: number,
+		finalizedOnly = false,
 	): { rows: readonly string[]; end: number } {
 		const rows: string[] = [];
 		const startedAt = budgetMs === undefined ? 0 : performance.now();
@@ -1227,6 +1248,8 @@ export class TranscriptContainer extends Container {
 			const rendered = renderForScrollback(() =>
 				index === start ? this.#renderEntry(entry, width) : trimBlankEdges(entry.component.render(width)),
 			);
+			if (index !== start) this.#settleEntry(entry);
+			if (finalizedOnly && entry.state !== "settled") break;
 			const emittedRows = index === start ? this.#emittedRowCount(entry, width) : 0;
 			const block = rendered.slice(emittedRows);
 			reached = index + 1;
@@ -1267,6 +1290,7 @@ export class TranscriptContainer extends Container {
 				if (entry.emitted !== entry.stableRows.length) return;
 				if (this.#renderStablePrefix(entry, entry.emitted, width).length !== rendered.length) return;
 			}
+			if (entry.state !== "settled") return;
 			this.#retireEntry(entry);
 			this.#frontier++;
 		}
@@ -1430,8 +1454,34 @@ export class TranscriptContainer extends Container {
 	#settleFinalized(): void {
 		for (let index = this.#frontier; index < this.#entries.length; index++) {
 			const entry = this.#entries[index]!;
-			if (entry.state === "active" && isFinalized(entry.component)) entry.state = "settled";
+			this.#settleEntry(entry);
 		}
+		this.#discardPendingOffer();
+	}
+
+	#settleEntry(entry: TranscriptEntry): void {
+		if (entry.state !== "committed") entry.state = isFinalized(entry.component) ? "settled" : "active";
+	}
+
+	/** A cached retirement offer cannot outlive a replacement raster becoming pending. */
+	#discardPendingOffer(): boolean {
+		const offered = this.#offered;
+		if (offered?.kind !== "commit") return false;
+		const end = offered.end + (offered.split === undefined ? 0 : 1);
+		for (let index = this.#frontier; index < end; index++) {
+			const entry = this.#entries[index]!;
+			this.#settleEntry(entry);
+			if (entry.state !== "settled") {
+				this.#withdrawOffer();
+				return true;
+			}
+		}
+		return false;
+	}
+
+	#withdrawOffer(): void {
+		this.#offered = undefined;
+		if (this.#replayRequested) this.#startReplay();
 	}
 
 	#liveEntries(): Array<{ entry: TranscriptEntry; index: number }> {

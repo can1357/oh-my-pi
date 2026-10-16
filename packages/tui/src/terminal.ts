@@ -25,6 +25,7 @@ import {
 	NotifyProtocol,
 	setCellDimensions,
 	setOsc99Supported,
+	setTerminalBackgroundColor,
 	setTerminalGlyphProtocol,
 	TERMINAL,
 } from "./terminal-capabilities";
@@ -1107,6 +1108,7 @@ export class ProcessTerminal implements Terminal {
 		onDisconnect?: () => void,
 		options?: TerminalStartOptions,
 	): void {
+		setTerminalBackgroundColor(null);
 		this.#inputHandler = onInput;
 		this.#resizeHandler = onResize;
 		this.#disconnectHandler = onDisconnect;
@@ -2041,7 +2043,15 @@ export class ProcessTerminal implements Terminal {
 			const max = 16 ** hex.length - 1;
 			return max > 0 ? value / max : 0;
 		};
-		const luminance = 0.299 * normalize(rHex) + 0.587 * normalize(gHex) + 0.114 * normalize(bHex);
+		const red = normalize(rHex);
+		const green = normalize(gHex);
+		const blue = normalize(bHex);
+		const component = (value: number): string =>
+			Math.round(value * 255)
+				.toString(16)
+				.padStart(2, "0");
+		setTerminalBackgroundColor(`#${component(red)}${component(green)}${component(blue)}`);
+		const luminance = 0.299 * red + 0.587 * green + 0.114 * blue;
 		const mode: TerminalAppearance = luminance < 0.5 ? "dark" : "light";
 		const changed = mode !== this.#appearance;
 		this.#appearance = mode;

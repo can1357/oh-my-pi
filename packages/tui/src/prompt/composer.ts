@@ -787,11 +787,10 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	): { id: number; rows: readonly string[]; kind: "append" | "replay" } | undefined {
 		if (this.#offeredHistory !== undefined) {
 			this.#rerenderOfferedHistory(width);
-			return {
-				id: this.#offeredHistory.id,
-				rows: this.#offeredHistory.rows,
-				kind: this.#offeredHistory.kind,
-			};
+			const offered = this.#offeredHistory;
+			if (offered !== undefined) {
+				return { id: offered.id, rows: offered.rows, kind: offered.kind };
+			}
 		}
 		if (this.#headerReplayPending) {
 			const transcriptReplay = transcript.peekReplayBatch(width);
@@ -870,9 +869,21 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			return;
 		}
 		const transcript = offered.source.transcript.rerenderOfferedBatch(width);
-		if (offered.source.header === "none") {
-			if (transcript !== undefined) offered.rows = transcript.rows;
-			return;
+		if (transcript === undefined) {
+			// A pending replacement can withdraw transcript retirement before the
+			// terminal accepts it; the outer offer must expire with the inner one.
+			// Header-only replay has no linked transcript offer to withdraw.
+			if (offered.source.header === "none" || offered.source.transcriptId !== undefined) {
+				this.#offeredHistory = undefined;
+				if (this.#historyReplayRequested) this.#startHistoryReplay();
+				return;
+			}
+		} else {
+			offered.source.transcriptId = transcript.id;
+			if (offered.source.header === "none") {
+				offered.rows = transcript.rows;
+				return;
+			}
 		}
 		const recomposed = this.#header.render(width);
 		const headerRows = recomposed.length > 0 ? [...recomposed, ""] : this.#reflowRetiredHeader(width, 0);

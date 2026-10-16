@@ -840,6 +840,18 @@ export function setCellDimensions(dims: CellDimensions): void {
 	cellDimensions = dims;
 }
 
+let terminalBackgroundColor: string | null = null;
+
+/** Last validated OSC 11 background, canonical lowercase #rrggbb; null until reported. */
+export function getTerminalBackgroundColor(): string | null {
+	return terminalBackgroundColor;
+}
+
+/** Discard unknown colors rather than passing untrusted terminal reports to SVG renderers. */
+export function setTerminalBackgroundColor(color: string | null): void {
+	terminalBackgroundColor = color !== null && /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : null;
+}
+
 function chunkKittyApc(leadParams: string, base64Data: string): string {
 	const CHUNK_SIZE = 4096;
 	if (base64Data.length <= CHUNK_SIZE) {

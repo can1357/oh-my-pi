@@ -4,8 +4,10 @@ import { ProcessTerminal, type TerminalStartOptions } from "@oh-my-pi/pi-tui/ter
 import {
 	type CellDimensions,
 	getCellDimensions,
+	getTerminalBackgroundColor,
 	getTerminalInfo,
 	setCellDimensions,
+	setTerminalBackgroundColor,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 
@@ -64,6 +66,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		restoreEnv("WT_SESSION", originalWtSession);
 		restoreEnv("TERM_PROGRAM", originalTermProgram);
 		restoreEnv("TMUX", originalTmux);
+		setTerminalBackgroundColor(null);
 	});
 
 	// conpty defaults false so kitty-flag assertions stay hermetic under WSL,
@@ -92,6 +95,20 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 
 		return { terminal, writes, received, queryCount, sentinelCount };
 	}
+
+	it("stores only validated canonical OSC 11 RGB and resets it before a new session", () => {
+		setTerminalBackgroundColor("#112233");
+		const { terminal } = setupTerminal();
+		expect(getTerminalBackgroundColor()).toBeNull();
+		process.stdin.emit("data", "\x1b]11;rgb:1/8/fff\x07");
+		expect(getTerminalBackgroundColor()).toBe("#1188ff");
+		terminal.stop();
+
+		setTerminalBackgroundColor("url(evil)");
+		expect(getTerminalBackgroundColor()).toBeNull();
+		setTerminalBackgroundColor("#AaBbCc");
+		expect(getTerminalBackgroundColor()).toBe("#aabbcc");
+	});
 
 	it("swallows the DA1 sentinel even when the OSC 11 reply arrives first", () => {
 		const { terminal, writes, received } = setupTerminal();

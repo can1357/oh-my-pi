@@ -16,7 +16,15 @@ import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { hexToOklch, hueDistance, logger, oklchCusp, oklchToHex } from "@oh-my-pi/pi-utils";
 import { Image, type ImageBudget, imageMaxColumns } from "../components/image";
 import { fencedCode, type Markdown } from "../components/markdown";
-import { type CellDimensions, getCellDimensions, getImageDimensions } from "../terminal-capabilities";
+import {
+	type CellDimensions,
+	type ImageDimensions,
+	getCellDimensions,
+	getImageDimensions,
+	getTerminalBackgroundColor,
+	ImageProtocol,
+	TERMINAL,
+} from "../terminal-capabilities";
 import { ensureThemeSync, getThemeEpoch, type ThemeColor, theme } from "../theme";
 import type { Component } from "../tui";
 import { closePartialSvg, prepareSvg } from "./svg-source";
@@ -130,6 +138,8 @@ interface Raster {
 	cell: CellDimensions;
 	limits: Limits;
 	themeEpoch: number;
+	/** Matte baked into a SIXEL raster; null for unknown background or alpha-capable protocols. */
+	backgroundColor: string | null;
 	/** Base64 PNG. */
 	data: string;
 	widthPx: number;
@@ -144,6 +154,7 @@ interface Attempt {
 	cell: CellDimensions;
 	limits: Limits;
 	themeEpoch: number;
+	backgroundColor: string | null;
 	final: boolean;
 }
 
@@ -167,8 +178,8 @@ export class SvgFigure implements Component {
 	#revision = 0;
 	#raster: Raster | undefined;
 	#attempt: Attempt | undefined;
-	/** Final source that could not be drawn; rendered as a fenced code block. */
-	#failed: string | undefined;
+	/** Final drawing attempt that could not be rasterized. */
+	#failed: Attempt | undefined;
 	#rasterizing = false;
 	#startedAt = Number.NEGATIVE_INFINITY;
 	#timer: NodeJS.Timeout | undefined;
@@ -201,16 +212,16 @@ export class SvgFigure implements Component {
 		});
 	}
 
-	/** Whether the final source still waits for its raster (or for failing to render). */
+	/** Whether the final drawing inputs still wait for a raster (or for a failed attempt). */
 	get pending(): boolean {
-		return this.#final && this.#raster?.source !== this.#source && this.#failed !== this.#source;
+		return this.#final && !this.#currentFailure() && !this.#currentRaster();
 	}
 
 	render(width: number): readonly string[] {
-		// Width, cell size and theme are render-time inputs; a change re-rasterizes.
+		// Width, cell size, theme and SIXEL matte are render-time drawing inputs.
 		this.#width = width;
 		this.#schedule();
-		if (this.#failed === this.#source) return this.#fallbackRows(width);
+		if (this.#currentFailure()) return this.#fallbackRows(width);
 		const raster = this.#raster;
 		if (!raster) {
 			if (!this.#options.markdown) return [];
@@ -236,16 +247,53 @@ export class SvgFigure implements Component {
 	debugState(): Record<string, unknown> {
 		return {
 			final: this.#final,
-			failed: this.#failed === this.#source,
+			failed: this.#currentFailure(),
 			raster: this.#raster ? `${this.#raster.widthPx}x${this.#raster.heightPx}` : null,
-			current: this.#raster?.source === this.#source,
+			current: this.#currentRaster(),
 		};
 	}
 
-	/** Whether the current source, cell size, theme or room at `width` has not been attempted yet. */
+	#backgroundColor(): string | null {
+		return TERMINAL.imageProtocol === ImageProtocol.Sixel ? getTerminalBackgroundColor() : null;
+	}
+
+	#matchesDrawing(attempt: Attempt | Raster): boolean {
+		const width = this.#width;
+		if (width === undefined || attempt.source !== this.#source) return false;
+		const cell = getCellDimensions();
+		const limits = limitsFor(width, cell);
+		return (
+			attempt.cell.widthPx === cell.widthPx &&
+			attempt.cell.heightPx === cell.heightPx &&
+			attempt.themeEpoch === getThemeEpoch() &&
+			attempt.backgroundColor === this.#backgroundColor() &&
+			attempt.limits.columns === limits.columns &&
+			attempt.limits.rows === limits.rows
+		);
+	}
+
+	#currentFailure(): boolean {
+		return this.#failed !== undefined && this.#matchesDrawing(this.#failed);
+	}
+
+	#currentRaster(): boolean {
+		const raster = this.#raster;
+		const width = this.#width;
+		if (!raster || width === undefined || raster.source !== this.#source) return false;
+		const cell = getCellDimensions();
+		return (
+			raster.cell.widthPx === cell.widthPx &&
+			raster.cell.heightPx === cell.heightPx &&
+			raster.themeEpoch === getThemeEpoch() &&
+			raster.backgroundColor === this.#backgroundColor() &&
+			!this.#outgrown(limitsFor(width, cell))
+		);
+	}
+
+	/** Whether the current source, cell size, theme, matte or room has not been attempted yet. */
 	#stale(width: number): boolean {
 		const attempt = this.#attempt;
-		if (this.#failed === this.#source) return false;
+		if (this.#currentFailure()) return false;
 		const cell = getCellDimensions();
 		const limits = limitsFor(width, cell);
 		return (
@@ -253,10 +301,12 @@ export class SvgFigure implements Component {
 			attempt.source !== this.#source ||
 			attempt.cell.widthPx !== cell.widthPx ||
 			attempt.cell.heightPx !== cell.heightPx ||
+			attempt.backgroundColor !== this.#backgroundColor() ||
 			attempt.themeEpoch !== getThemeEpoch() ||
 			// A streaming attempt that failed is retried once as final.
-			(this.#final && !attempt.final && this.#raster?.source !== this.#source) ||
-			((attempt.limits.columns !== limits.columns || attempt.limits.rows !== limits.rows) && this.#outgrown(limits))
+			(this.#final && !attempt.final && !this.#currentRaster()) ||
+			((attempt.limits.columns !== limits.columns || attempt.limits.rows !== limits.rows) &&
+				(this.#failed === attempt || this.#outgrown(limits)))
 		);
 	}
 
@@ -304,24 +354,40 @@ export class SvgFigure implements Component {
 			cell,
 			limits: limitsFor(width, cell),
 			themeEpoch: getThemeEpoch(),
+			backgroundColor: this.#backgroundColor(),
 			final: this.#final,
 		};
 		this.#attempt = attempt;
 		const svg = closePartialSvg(attempt.source);
-		let png: Uint8Array | undefined;
+		let data: string | undefined;
+		let size: ImageDimensions | null = null;
 		if (svg !== null) {
 			this.#rasterizing = true;
 			this.#startedAt = performance.now();
 			try {
 				const prepared = prepareSvg(svg, svgFigurePalette());
-				png = await rasterizeSvg(
+				let png = await rasterizeSvg(
 					new TextEncoder().encode(prepared),
 					attempt.limits.columns * cell.widthPx,
 					attempt.limits.rows * cell.heightPx,
 					cell.heightPx / UNITS_PER_ROW,
 					cell,
 				);
+				data = png.toBase64();
+				size = getImageDimensions(data, "image/png");
+				if (attempt.backgroundColor !== null && size) {
+					// Composite the padded raster, not the SVG source: root opacity,
+					// transforms and viewBox offsets must keep their original coverage.
+					// Only SIXEL needs an opaque matte; Kitty retains its alpha channel.
+					const { widthPx, heightPx } = size;
+					const composite = `<svg xmlns="http://www.w3.org/2000/svg" width="${widthPx}" height="${heightPx}" viewBox="0 0 ${widthPx} ${heightPx}"><rect width="${widthPx}" height="${heightPx}" fill="${attempt.backgroundColor}"/><image width="${widthPx}" height="${heightPx}" href="data:image/png;base64,${data}"/></svg>`;
+					png = await rasterizeSvg(new TextEncoder().encode(composite), widthPx, heightPx, 1);
+					data = png.toBase64();
+					size = getImageDimensions(data, "image/png");
+				}
 			} catch (error) {
+				data = undefined;
+				size = null;
 				// A streaming prefix that does not parse yet keeps the previous raster.
 				if (attempt.final) logger.debug("SVG figure did not render", { error: String(error) });
 			} finally {
@@ -329,25 +395,25 @@ export class SvgFigure implements Component {
 			}
 		}
 		if (this.#disposed) return;
-		const data = png?.toBase64();
-		const size = data ? getImageDimensions(data, "image/png") : null;
 		if (data && size) {
 			this.#show(attempt, data, size.widthPx, size.heightPx);
 		} else if (attempt.final) {
-			this.#failed = attempt.source;
+			this.#failed = attempt;
 			this.#options.onChange();
 		}
-		// The source, cell size, theme or room moved on while this raster ran.
+		// Drawing inputs may have moved on while this raster ran.
 		this.#schedule();
 	}
 
 	#show(attempt: Attempt, data: string, widthPx: number, heightPx: number): void {
 		const previous = this.#raster;
+		this.#failed = undefined;
 		this.#raster = {
 			source: attempt.source,
 			cell: attempt.cell,
 			limits: attempt.limits,
 			themeEpoch: attempt.themeEpoch,
+			backgroundColor: attempt.backgroundColor,
 			data,
 			widthPx,
 			heightPx,
@@ -355,7 +421,7 @@ export class SvgFigure implements Component {
 		};
 		// A streaming revision is gone for good: free its terminal image now
 		// rather than letting it crowd older images out of the store. A
-		// re-raster of the same source (cell size, theme or room change) may still be
+		// re-raster of the same source (cell, theme, matte or room) may still be
 		// standing in scrollback, so the residency sweep keeps deciding for it.
 		if (previous && previous.source !== attempt.source) this.#options.budget?.release(previous.key);
 		this.#options.onChange();

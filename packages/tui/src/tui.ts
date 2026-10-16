@@ -36,6 +36,7 @@ import {
 	encodeKittyDeleteImage,
 	encodeKittyDeletePlacement,
 	encodeKittyPlacementLine,
+	getCellDimensions,
 	ImageProtocol,
 	isImageProtocolForced,
 	isInsideTerminalMultiplexer,
@@ -47,6 +48,7 @@ import {
 	TERMINAL,
 } from "./terminal-capabilities";
 import { compositeLineAt } from "./render/composite";
+import { clipSixel } from "./render/sixel";
 import { tmuxMultiplexer } from "./multiplexers/tmux";
 import {
 	Ellipsis,
@@ -1007,6 +1009,8 @@ export class TUI extends Container {
 	#forceViewportRepaintOnNextRender = false;
 	#hasEverRendered = false;
 	#stopped = false;
+	// null marks a legacy subscription without an unsubscribe function.
+	#appearanceReportUnsubscribe: (() => void) | null | undefined;
 	#cancelPostmortemRestore?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
 	#inputDeferred = false;
@@ -1478,6 +1482,13 @@ export class TUI extends Container {
 
 	start(options?: TUIStartOptions): void {
 		this.#stopped = false;
+		if (this.#appearanceReportUnsubscribe !== null) {
+			this.#appearanceReportUnsubscribe?.();
+			this.#appearanceReportUnsubscribe =
+				this.terminal.onAppearanceReport?.(() => {
+					if (!this.#stopped) this.requestRender();
+				}) || null;
+		}
 		this.#debugPaint = undefined;
 		this.#debugServer?.stop();
 		this.#debugServer = undefined;
@@ -2580,6 +2591,10 @@ export class TUI extends Container {
 	}
 
 	stop(): void {
+		if (this.#appearanceReportUnsubscribe) {
+			this.#appearanceReportUnsubscribe();
+			this.#appearanceReportUnsubscribe = undefined;
+		}
 		this.#cancelPostmortemRestore?.();
 		this.#cancelPostmortemRestore = undefined;
 		this.#debugServer?.stop();
@@ -3238,21 +3253,66 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Clip a Kitty direct placement and record its live owner; history
-	 * placements have no mutable owner. Other direct placements (SIXEL,
-	 * iTerm2) have no delete command and composite over whatever pixels they
-	 * land on, so the rows they paint above `screenRow` are erased first.
+	 * Clip direct placements to their visible owner, not merely to the top of
+	 * the physical screen. A mutable image must not repaint committed history.
+	 * Raster protocols lack a delete command, so erase their covered rows first.
 	 */
 	#imageLineSequence(
 		line: string,
 		screenRow: number,
 		placements: Map<number, LiveImagePlacement> | undefined,
 		placementRow: number,
+		ownerRow: number,
 	): string {
 		if (screenRow < 0) return line;
 		const parsed = parseKittyDirectPlacementLine(line);
 		if (!parsed) {
-			const lift = Math.min(directPlacementLift(line), screenRow);
+			const requestedLift = directPlacementLift(line);
+			const lift = Math.min(requestedLift, screenRow, ownerRow);
+			if (TERMINAL.imageProtocol === ImageProtocol.Sixel) {
+				const prefix = requestedLift > 0 ? /^\x1b7\x1b\[\d+A/.exec(line) : null;
+				if (requestedLift > 0 && (!prefix || !line.endsWith("\x1b8"))) return "";
+				const cellHeight = getCellDimensions().heightPx;
+				if (!Number.isSafeInteger(cellHeight) || cellHeight <= 0) return "";
+				const hiddenPixels = (requestedLift - lift) * cellHeight;
+				const raster = /"\d+;\d+;\d+;(\d+)/.exec(line);
+				if (!raster) return "";
+				const visibleHeight = Number(raster[1]) - hiddenPixels;
+				if (!Number.isSafeInteger(visibleHeight) || visibleHeight <= 0 || visibleHeight > (lift + 1) * cellHeight)
+					return "";
+				const originRow = screenRow - lift;
+				let extraLift = 0;
+				const maxExtraLift = Math.min(5, originRow);
+				// SIXEL allocates whole six-pixel bands, sometimes at least two.
+				// A transparent leading row can shift the DCS origin upward
+				// without moving any image pixels onto committed history.
+				for (; extraLift <= maxExtraLift; extraLift++) {
+					const allocated = Math.max(12, Math.ceil((extraLift * cellHeight + visibleHeight) / 6) * 6);
+					if (allocated <= (this.terminal.rows - originRow + extraLift) * cellHeight) break;
+				}
+				const displayMode = extraLift > maxExtraLift;
+				if (displayMode) {
+					// WT's DECSDM clips an otherwise impossible page-bottom band
+					// instead of scrolling; it anchors at page zero. Never assume
+					// those outer-page semantics inside a multiplexer.
+					if (process.platform !== "win32" || !Bun.env.WT_SESSION || isInsideTerminalMultiplexer()) return "";
+					extraLift = originRow;
+				}
+				if (hiddenPixels > 0 || extraLift > 0 || displayMode) {
+					const sequence = clipSixel(
+						prefix ? line.slice(prefix[0].length, -2) : line,
+						hiddenPixels,
+						extraLift * cellHeight,
+					);
+					if (sequence === null) return "";
+					line = displayMode
+						? `\x1b7\x1b[?80h${sequence}\x1b[?80l\x1b8`
+						: `\x1b7${lift + extraLift > 0 ? `\x1b[${lift + extraLift}A` : ""}${sequence}\x1b8`;
+				}
+			} else if (lift < requestedLift && TERMINAL.imageProtocol !== ImageProtocol.Kitty) {
+				// An unknown non-Kitty raster cannot be re-anchored safely.
+				return "";
+			}
 			return lift > 0 ? `\x1b[${lift}A${`${ERASE_LINE}\x1b[B`.repeat(lift)}${line}` : line;
 		}
 		const previous = placements?.get(placementRow);
@@ -3266,7 +3326,7 @@ export class TUI extends Container {
 				placementId,
 				columns: parsed.columns,
 				rows: parsed.rows,
-				screenRow,
+				screenRow: Math.min(screenRow, ownerRow),
 				imageHeightPx: this.#imageBudget.getPlacementGeometry(parsed.imageId)?.heightPx ?? 0,
 			})
 		);
@@ -3546,10 +3606,10 @@ export class TUI extends Container {
 			for (const id of this.#imageBudget.takeResetPurgeIds()) buffer += encodeKittyDeleteImage(id);
 			this.#screenImagePlacements.clear();
 		}
+		const purgeIds = this.#imageBudget.takePurgeIds();
+		const repaintPurgedImages = TERMINAL.imageProtocol !== ImageProtocol.Kitty && purgeIds.length > 0;
 		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
-			for (const id of this.#imageBudget.takePurgeIds()) buffer += encodeKittyDeleteImage(id);
-		} else {
-			this.#imageBudget.takePurgeIds();
+			for (const id of purgeIds) buffer += encodeKittyDeleteImage(id);
 		}
 		// ED2 MUST precede ED3: tmux implements ED2 by scrolling the live screen
 		// into pane history (so cleared content stays reachable), so erasing
@@ -3572,13 +3632,18 @@ export class TUI extends Container {
 			historyRows.length === 0 &&
 			startTop === newTop &&
 			!this.#forceViewportRepaintOnNextRender &&
+			!repaintPurgedImages &&
 			!destructiveReset &&
 			this.#providerWindow.length > 0;
 		buffer += this.#retireImagePlacements(this.#screenImagePlacements, prepared.lines, newTop, !diffable);
 		for (const sequence of this.#imageBudget.takeTransmits()) append(sequence);
+		const retiredImageRows = diffable
+			? this.#retiredImageRows(this.#providerPreparedRows, prepared.lines)
+			: undefined;
 		if (diffable) {
 			for (let index = 0; index < rows; index++) {
 				if (
+					!retiredImageRows?.has(index) &&
 					!this.#rowNeedsRewrite(
 						this.#providerWindow,
 						this.#providerPreparedRows,
@@ -3595,7 +3660,7 @@ export class TUI extends Container {
 					width,
 					newTop + index,
 					this.#osc66SpacerGlyphWidth(prepared.lines, index),
-					{ imagePlacements: this.#screenImagePlacements },
+					{ imagePlacements: this.#screenImagePlacements, imageOwnerRow: index },
 				)}`;
 			}
 			if (this.#providerWindow.length > rows && newTop + rows < height) {
@@ -3638,6 +3703,7 @@ export class TUI extends Container {
 							blankRow: compactReplay,
 							imagePlacements: index < replayViewportRows ? undefined : this.#screenImagePlacements,
 							imageRow: newTop + index,
+							imageOwnerRow: index < replayViewportRows ? undefined : index - replayViewportRows,
 						},
 					),
 				);
@@ -4232,6 +4298,21 @@ export class TUI extends Container {
 		return visibleWidth(above);
 	}
 
+	/** Obsolete raster pixels survive byte-identical reserved rows unless those rows are erased. */
+	#retiredImageRows(previous: readonly PreparedLine[], lines: readonly string[]): Set<number> | undefined {
+		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) return undefined;
+		let retired: Set<number> | undefined;
+		for (let index = 0; index < previous.length; index++) {
+			const row = previous[index]!;
+			if (!row.isImage || row.line === lines[index]) continue;
+			retired ??= new Set();
+			for (let first = Math.max(0, index - directPlacementLift(row.line)); first <= index; first++) {
+				retired.add(first);
+			}
+		}
+		return retired;
+	}
+
 	/**
 	 * Whether screen row `index` must be rewritten to turn the previously painted
 	 * frame into this one: its line, or the preparation it was painted with,
@@ -4260,7 +4341,13 @@ export class TUI extends Container {
 		width: number,
 		screenRow = -1,
 		spacerGlyphWidth = -1,
-		options?: { blankRow?: boolean; imagePlacements?: Map<number, LiveImagePlacement>; imageRow?: number },
+		options?: {
+			blankRow?: boolean;
+			imagePlacements?: Map<number, LiveImagePlacement>;
+			imageRow?: number;
+			/** Row within this image's owner, not the physical screen. */
+			imageOwnerRow?: number;
+		},
 	): string {
 		// End every rewrite at column zero. ConPTY can materialize a pending
 		// wrap before a following cursor-addressing sequence even while DECAWM is
@@ -4279,7 +4366,13 @@ export class TUI extends Container {
 		} else if (line.isImage) {
 			rewrite =
 				ERASE_LINE +
-				this.#imageLineSequence(line.line, screenRow, options?.imagePlacements, options?.imageRow ?? screenRow);
+				this.#imageLineSequence(
+					line.line,
+					screenRow,
+					options?.imagePlacements,
+					options?.imageRow ?? screenRow,
+					options?.imageOwnerRow ?? screenRow,
+				);
 		} else {
 			const terminalLine = this.#terminalLine(line);
 			if (options?.blankRow) {
@@ -4422,17 +4515,20 @@ export class TUI extends Container {
 		this.#forceViewportRepaintOnNextRender = false;
 		const full =
 			force ||
+			(TERMINAL.imageProtocol !== ImageProtocol.Kitty && purgeIds.length > 0) ||
 			this.#altPreviousLines.length !== height ||
 			((this.#altPreviousLines.some(isOsc66Line) || prepared.lines.some(isOsc66Line)) &&
 				prepared.rows.some((_row, r) =>
 					this.#rowNeedsRewrite(this.#altPreviousLines, this.#altPreparedRows, prepared.lines, prepared.rows, r),
 				));
 		prelude += this.#retireImagePlacements(this.#altImagePlacements, prepared.lines, 0, full);
+		const retiredImageRows = full ? undefined : this.#retiredImageRows(this.#altPreparedRows, prepared.lines);
 		let rowsBuffer = "";
 		for (let r = 0; r < height; r++) {
 			if (full) {
 				if (r > 0) rowsBuffer += "\n";
 			} else if (
+				retiredImageRows?.has(r) ||
 				this.#rowNeedsRewrite(this.#altPreviousLines, this.#altPreparedRows, prepared.lines, prepared.rows, r)
 			) {
 				rowsBuffer += `\x1b[${r + 1};1H`;
@@ -4444,7 +4540,7 @@ export class TUI extends Container {
 				width,
 				r,
 				this.#osc66SpacerGlyphWidth(prepared.lines, r),
-				{ imagePlacements: this.#altImagePlacements },
+				{ imagePlacements: this.#altImagePlacements, imageOwnerRow: r },
 			);
 		}
 		this.#altPreviousLines = prepared.lines;

@@ -1,4 +1,5 @@
 import { $env, $flag } from "@oh-my-pi/pi-utils";
+import { wrapTmuxPassthrough } from "../tmux";
 
 const SIXEL_START_REGEX = /\x1bP(?:[0-9;]*)q/u;
 const SIXEL_END_SEQUENCE = "\x1b\\";
@@ -66,4 +67,108 @@ export function sanitizeWithOptionalSixelPassthrough(text: string, sanitize: (te
 		const index = Number.parseInt(indexText, 10);
 		return preservedSequences[index] ?? "";
 	});
+}
+
+/**
+ * Crop a SIXEL's top pixels without rescaling it. Output bands combine bits
+ * from neighboring source bands; optional transparent leading pixels let the
+ * DCS origin move upward to avoid a terminal's six-pixel band scrolling past
+ * the bottom edge. Unknown payloads cannot safely be moved and are rejected.
+ */
+export function clipSixel(sequence: string, hiddenPixels: number, leadingPixels = 0): string | null {
+	if (hiddenPixels === 0 && leadingPixels === 0) return sequence;
+	const wrapped = sequence.startsWith("\x1bPtmux;") && sequence.endsWith("\x1b\\");
+	const raw = wrapped ? sequence.slice(7, -2).replaceAll("\x1b\x1b", "\x1b") : sequence;
+	const header = /^(\x1bP[0-9;]*q)"(\d+);(\d+);(\d+);(\d+)/.exec(raw);
+	if (!header || !raw.endsWith("\x1b\\")) return null;
+	const width = Number(header[4]);
+	const height = Number(header[5]);
+	if (
+		!Number.isSafeInteger(hiddenPixels) ||
+		hiddenPixels < 0 ||
+		!Number.isSafeInteger(leadingPixels) ||
+		leadingPixels < 0 ||
+		!Number.isSafeInteger(width) ||
+		!Number.isSafeInteger(height) ||
+		width <= 0 ||
+		height <= hiddenPixels
+	)
+		return null;
+	// Transparent prefix is only safe with a transparent DCS background.
+	if (leadingPixels > 0 && (header[1]!.slice(2, -1).split(";")[1] !== "1" || header[2] !== "1" || header[3] !== "1"))
+		return null;
+	const body = raw.slice(header[0].length, -2);
+	const token = /#(\d+)(?:;([12]);\d+;\d+;\d+)?|!(\d+)([?-~])|[?-~$-]/gy;
+	const palette: string[] = [];
+	const definitions = new Map<string, string>();
+	const bands: string[] = [];
+	let band = "#0";
+	let color = "0";
+	let x = 0;
+	let offset = 0;
+	while (offset < body.length) {
+		token.lastIndex = offset;
+		const match = token.exec(body);
+		if (!match) return null;
+		offset = token.lastIndex;
+		const command = match[0];
+		if (match[1] !== undefined) {
+			color = match[1];
+			if (match[2] !== undefined) {
+				const previous = definitions.get(color);
+				if (previous !== undefined && previous !== command) return null;
+				if (previous === undefined) {
+					definitions.set(color, command);
+					palette.push(command);
+				}
+			}
+			band += `#${color}`;
+		} else if (command === "-") {
+			bands.push(band);
+			if (bands.length > Math.ceil(height / 6)) return null;
+			band = `#${color}`;
+			x = 0;
+		} else {
+			if (command === "$") x = 0;
+			else x += match[3] === undefined ? 1 : Number(match[3]);
+			if (!Number.isSafeInteger(x) || x > width) return null;
+			band += command;
+		}
+	}
+	bands.push(band);
+	if (bands.length > Math.ceil(height / 6) + 1) return null;
+	const outputHeight = leadingPixels + height - hiddenPixels;
+	if (!Number.isSafeInteger(outputHeight)) return null;
+	const output: string[] = [`${header[1]}"${header[2]};${header[3]};${width};${outputHeight}${palette.join("")}`];
+	const visibleBands = Math.min(
+		Math.ceil(outputHeight / 6),
+		Math.ceil((leadingPixels + Math.max(0, bands.length * 6 - hiddenPixels)) / 6),
+	);
+	for (let row = 0; row < visibleBands; row++) {
+		if (row > 0) output.push("-");
+		const sourceY = hiddenPixels + row * 6 - leadingPixels;
+		const firstBand = Math.floor(sourceY / 6);
+		const shift = ((sourceY % 6) + 6) % 6;
+		const firstBit = Math.max(0, Math.min(6, leadingPixels - row * 6));
+		const lastBit = Math.min(6, outputHeight - row * 6);
+		const mask = ((1 << lastBit) - 1) & ~((1 << firstBit) - 1);
+		const lower = bands[firstBand] ?? "";
+		output.push(
+			lower.replace(/[?-~]/g, sixel => String.fromCharCode(63 + (((sixel.charCodeAt(0) - 63) >> shift) & mask))),
+		);
+		if (shift > 0) {
+			const upper = bands[firstBand + 1];
+			if (upper) {
+				output.push(
+					"$",
+					upper.replace(/[?-~]/g, sixel =>
+						String.fromCharCode(63 + (((sixel.charCodeAt(0) - 63) << (6 - shift)) & mask)),
+					),
+				);
+			}
+		}
+	}
+	output.push("\x1b\\");
+	const clipped = output.join("");
+	return wrapped ? wrapTmuxPassthrough(clipped) : clipped;
 }
