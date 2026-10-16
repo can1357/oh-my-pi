@@ -701,18 +701,40 @@ async function tryDelimitedPathSplit(
  */
 function hasAmbiguousInternalUrlTail(parts: readonly string[], isUrl: (part: string) => boolean): boolean {
 	let urlHasPath = false;
+	// Path state from readable HTTPS/www URLs only matters once an internal or
+	// routed URL already opened the list: pure `https://host/x;local` lists must
+	// still fan out, while `skill://demo;https://host/a;b.md` must keep the
+	// HTTPS path's semicolon attached.
+	let seenInternalOrRoutedUrl = false;
 	for (const [index, part] of parts.entries()) {
 		if (isInternalUrlPath(part)) {
+			seenInternalOrRoutedUrl = true;
 			const url = parseInternalUrl(InternalUrlRouter.instance().normalize(expandPath(part)));
 			// Any following delimiter is inside this URL’s query or fragment.
 			if (index < parts.length - 1 && (url.search || url.hash)) return true;
 			urlHasPath = urlHasPath || (url.pathname !== "" && url.pathname !== "/");
 			continue;
 		}
+		if (isReadableUrlPath(part)) {
+			if (seenInternalOrRoutedUrl) {
+				try {
+					const href = /^www\./i.test(part) ? `https://${part}` : part;
+					const url = new URL(href);
+					if (index < parts.length - 1 && (url.search || url.hash)) return true;
+					urlHasPath = urlHasPath || (url.pathname !== "" && url.pathname !== "/");
+				} catch {
+					// Malformed readable-URL spelling: treat as a non-path URL component.
+				}
+			}
+			continue;
+		}
+		if (isUrl(part)) {
+			seenInternalOrRoutedUrl = true;
+			continue;
+		}
 		// Expand first so tolerated colon-prefixed relatives (`:./b.md`, `:..\b`)
 		// use the same spelling the existence probe already accepted.
 		const localPart = normalizePosixPath(expandPath(part));
-		if (isUrl(part) || isReadableUrlPath(part)) continue;
 		const anchored =
 			isFilesystemSourcePath(localPart) ||
 			localPart === "." ||
@@ -751,6 +773,12 @@ export async function splitDelimitedPathEntry(
 	if (!hasTopLevelPathDelimiter(normalizedEntry)) return null;
 	const splitter = options.splitter ?? parseSearchPath;
 	if (options.routedUrlPredicate?.(normalizedEntry)) {
+		// Internal URLs must use the full mixed-list classifier so exact MCP /
+		// file-backed literal precedence cannot be bypassed by a weaker retry
+		// (e.g. ReadTool after splitMixedUrlPathList already declined the split).
+		if (isInternalUrlPath(normalizedEntry)) {
+			return splitMixedUrlPathList(normalizedEntry, cwd, options.routedUrlPredicate, options.context);
+		}
 		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
 		const routed = options.routedUrlPredicate;
 		return parts && parts.length >= 2 && parts.every(part => routed(part) || (options.exclusionParts === true && isExclusionPart(part))) &&

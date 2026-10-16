@@ -162,6 +162,19 @@ describe("McpProtocolHandler", () => {
 		);
 	});
 
+	it("treats a failed MCP handshake as unknown discovery rather than URI absence", async () => {
+		const manager = createMockManager({
+			servers: [],
+			waitForPendingConnections: async () => {},
+		});
+		// A known server whose handshake rejected leaves no connected catalog; that is
+		// unknown, not proof the exact semicolon URI is absent.
+		manager.getAllServerNames = () => ["figma"];
+		await expect(hasExactMcpResource(manager, parseInternalUrl("skill://figma/foo;/tmp/x"))).rejects.toThrow(
+			"cannot safely split",
+		);
+	});
+
 	it("preserves the speculative read wait budget for a connection that never settles", async () => {
 		const manager = createMockManager({
 			servers: [],

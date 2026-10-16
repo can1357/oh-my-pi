@@ -117,7 +117,7 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 		});
 	});
 
-	it("keeps exact MCP resources whole and fans out readable HTTPS URL tails", async () => {
+	it("keeps exact MCP resources whole, including URL-shaped suffixes, and fans out readable HTTPS URL tails", async () => {
 		const exactUri = `skill://figma/resource;${absFile}`;
 		MCPManager.setInstance({
 			getConnectedServers: () => ["figma"],
@@ -136,6 +136,26 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 			"skill://demo/SKILL.md",
 			"https://example.test/doc",
 		]);
+
+		// Exact MCP URI whose suffix is itself URL-shaped must stay whole through
+		// ReadTool's routed-only fallback (splitMixed declines, then tryReadDelimitedPaths).
+		const exactOpaque = "skill://figma/foo;custom:item";
+		MCPManager.setInstance({
+			getConnectedServers: () => ["figma"],
+			getServerResources: () => ({ resources: [{ uri: exactOpaque, name: "exact-opaque" }], templates: [] }),
+			readServerResource: async () => ({ contents: [{ uri: exactOpaque, text: "exact opaque MCP needle" }] }),
+			waitForPendingConnections: async () => {},
+			ensureServerResources: async () => {},
+		} as unknown as MCPManager);
+		const opaqueRead = await new ReadTool(createSession()).execute("exact-opaque-mcp", { path: exactOpaque });
+		expect(getResultText(opaqueRead)).toContain("exact opaque MCP needle");
+		expect(getResultText(opaqueRead)).not.toContain("interpreted as");
+
+		// A readable URL component with its own path must keep a following relative
+		// tail attached (`https://host/a;b.md` stays whole when b.md exists).
+		await Bun.write(path.join(tmpDir, "b.md"), "relative after https needle\n");
+		const httpsWithPath = "skill://demo;https://example.test/a;b.md";
+		expect(await expandDelimitedPathEntries([httpsWithPath], tmpDir)).toEqual([httpsWithPath]);
 	});
 
 	it("waits for deferred MCP catalogs before preserving an exact semicolon resource", async () => {

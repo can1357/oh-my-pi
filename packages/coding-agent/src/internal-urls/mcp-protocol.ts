@@ -136,20 +136,28 @@ function formatAvailableResources(mcpManager: MCPManagerApi): string {
 	return available || "  (none)";
 }
 
-/** Load connected catalogs; a rejected catalog load is unknown, not URI absence. */
+/** Load connected catalogs; a rejected catalog load or failed handshake is unknown, not URI absence. */
 async function settleExactCatalogs(mcpManager: MCPManager, uri: string): Promise<void> {
 	const first = await Promise.allSettled(
 		mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)),
 	);
 	if (resolveTargetServer(mcpManager, uri, true)) return;
+	// Known servers that never appear connected after pending work settles had a
+	// failed handshake — that is unknown discovery, not proof the URI is absent.
+	const knownBeforeWait =
+		typeof mcpManager.getAllServerNames === "function"
+			? mcpManager.getAllServerNames()
+			: mcpManager.getConnectedServers();
 	await mcpManager.waitForPendingConnections();
 	const second = await Promise.allSettled(
 		mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)),
 	);
 	if (resolveTargetServer(mcpManager, uri, true)) return;
+	const connected = new Set(mcpManager.getConnectedServers());
+	const failedHandshake = knownBeforeWait.some(name => !connected.has(name));
 	// Failed resources/list leaves no match and no proof the URI is absent — same
 	// as a spent wait budget: refuse to authorize semicolon fan-out.
-	if ([...first, ...second].some(result => result.status === "rejected")) {
+	if (failedHandshake || [...first, ...second].some(result => result.status === "rejected")) {
 		throw new Error(MCP_RESOURCE_DISCOVERY_TIMEOUT);
 	}
 }
