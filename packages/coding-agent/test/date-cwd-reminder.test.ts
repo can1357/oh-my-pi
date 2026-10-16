@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, setSystemTime } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import { createCompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Api, AssistantMessage, Context, Message, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai";
@@ -237,6 +237,12 @@ describe("date-cwd-reminder", () => {
 			const messageSet = () => [firstUser, anchor, anchor];
 
 			injector.transform({ systemPrompt: ["system"], messages: messageSet() }, "2026-08-14", "/old");
+			// Warm the replay memo over the unchanged input: the first `/new`
+			// build only records the O(1) boundary signature, so an identical
+			// repeat is what actually admits the memo the reorder below must
+			// survive. Without it `live` is a first build that owns its array
+			// outright and the splice mutates nothing the injector holds.
+			injector.transform({ systemPrompt: ["system"], messages: messageSet() }, "2026-08-15", "/new");
 			const live = injector.transform({ systemPrompt: ["system"], messages: messageSet() }, "2026-08-15", "/new");
 			const control = live.messages.at(-1)!;
 			expect(control.role).toBe("developer");
@@ -247,6 +253,10 @@ describe("date-cwd-reminder", () => {
 			expect([memo[1], memo[2], memo[3], memo[4]]).toEqual([anchor, control, anchor, control]);
 			memo.splice(3, 2, control, anchor);
 
+			// A third identical build serves the admitted memo, so it hands out
+			// a copy of the memo's own array. Admitting by returning that array
+			// instead of a copy would let the splice above rewrite what every
+			// later request is sent.
 			const replay = injector.transform({ systemPrompt: ["system"], messages: messageSet() }, "2026-08-15", "/new");
 
 			// The reordered array is not replayed: the reminder control stays where it
@@ -659,7 +669,11 @@ describe("date/cwd reminder memo on advisor history discard", () => {
 		return message.content.flatMap(part => (part.type === "text" ? part.text : [])).join("\n");
 	}
 
-	function createAdvisorHarness(tempDir: TempDir): {
+	function createAdvisorHarness(
+		tempDir: TempDir,
+		advisorStreamFn?: StreamFn,
+	): {
+		session: AgentSession;
 		advisor: Agent;
 		advisorMock: MockModel;
 		injector: DateCwdReminderInjector;
@@ -687,7 +701,7 @@ describe("date/cwd reminder memo on advisor history discard", () => {
 			settings,
 			modelRegistry,
 			advisorTools: [],
-			advisorStreamFn: advisorMock.stream,
+			advisorStreamFn: advisorStreamFn ?? advisorMock.stream,
 			// The session-scoped provider transform, exactly as the SDK installs
 			// it: the advisor's requests ride the same injector the primary uses,
 			// and a history swap releases the memo that injector admitted.
@@ -699,7 +713,7 @@ describe("date/cwd reminder memo on advisor history discard", () => {
 		const advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected an advisor agent to be live");
 		advisor.setModel(advisorMock);
-		return { advisor, advisorMock, injector };
+		return { session, advisor, advisorMock, injector };
 	}
 
 	/**
@@ -739,9 +753,7 @@ describe("date/cwd reminder memo on advisor history discard", () => {
 			REMINDER_DATE,
 			REMINDER_CWD,
 		);
-		expect(post.messages[0]?.content).toBe(
-			`${renderDateCwdReminder(REMINDER_DATE, REMINDER_CWD)}\n\nfresh update`,
-		);
+		expect(post.messages[0]?.content).toBe(`${renderDateCwdReminder(REMINDER_DATE, REMINDER_CWD)}\n\nfresh update`);
 	}
 
 	it("attaches the reminder to the advisor's first user turn and rebuilds it after a discard", async () => {
@@ -798,6 +810,52 @@ describe("date/cwd reminder memo on advisor history discard", () => {
 		]);
 
 		expect(await becomesCollectible(ref, 2_000)).toBe(true);
+		assertInjectorStillServes(injector);
+	});
+
+	it("releases the injector's layout when a failed advisor turn is rolled back", async () => {
+		// Contract: `AdvisorRuntime` discards a failed advisor turn through this
+		// session's own `rollbackTo` facade, which truncates the advisor's
+		// `state.messages` in place rather than calling `Agent.reset()` — so it
+		// never reaches `Agent#emitHistoryReplaced`. The injector's pending
+		// layout records the last entry of the build it just ran, so without a
+		// release there the rolled-back batch's tail stays pinned. The terminal
+		// non-retriable failure below is the sharpest case: the batch is
+		// abandoned outright, so the next build is the next primary update's
+		// review rather than this turn's retry.
+		using tempDir = TempDir.createSync("@pi-date-cwd-reminder-advisor-");
+		const terminalError = "Codex error event: Request blocked. (code=invalid_prompt)";
+		let tailRef: WeakRef<Message> | undefined;
+		const advisorMock = createMockModel({
+			provider: "anthropic",
+			responses: [{ stopReason: "error", errorMessage: terminalError }],
+		});
+		const {
+			session: live,
+			advisor,
+			injector,
+		} = createAdvisorHarness(tempDir, (model, context, options) => {
+			// The wire context of the failing build is the last place the batch
+			// tail is observable; taking the reference here (and dropping the
+			// driver's own record below) leaves the injector as the only holder.
+			tailRef ??= new WeakRef(context.messages.at(-1)!);
+			return advisorMock.stream(model, context, options);
+		});
+
+		await live.prompt("first primary update");
+		expect(await live.waitForAdvisorCatchup(5_000)).toBe(true);
+		// One attempt, one rollback: the failure is terminal, so the runtime
+		// drops the batch instead of retrying it (the rollback itself clears
+		// `state.error`, which is why the transcript is empty rather than
+		// carrying the synthetic error turn).
+		expect(advisorMock.calls).toHaveLength(1);
+		expect(advisor.state.messages).toHaveLength(0);
+		// The mock records the context it was handed per call, so it still holds
+		// the batch tail through its own log; drop it to leave the injector the
+		// only possible holder.
+		advisorMock.reset();
+
+		expect(await becomesCollectible(tailRef!, 2_000)).toBe(true);
 		assertInjectorStillServes(injector);
 	});
 });
