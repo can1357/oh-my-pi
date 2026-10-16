@@ -187,3 +187,52 @@ async def test_sync_repo_backfills_pages_and_sets_watermark(db: Database, tmp_pa
     backend.pages = {1: []}
     await sync.sync_repo("octo/widget")
     assert backend.calls and backend.calls[0][0] is not None
+
+
+async def test_sync_repo_routes_to_forgejo_backend_when_configured(db: Database, tmp_path: Path) -> None:
+    """sync_repo routes forgejo repos to the forgejo backend."""
+
+    class _FakeForgejoBackend:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def list_issue_index_entries(
+            self, repo: str, *, since: str | None = None, page: int = 1, per_page: int = 100
+        ) -> list[IssueIndexEntry]:
+            self.calls.append(repo)
+            return []
+
+    class _FakeSettings:
+        issue_index_sync_seconds = 900.0
+        repo_allowlist = frozenset({"forgejo-org/fj-repo", "github-org/gh-repo"})
+        forgejo_repos = frozenset({"forgejo-org/fj-repo"})
+
+    gh_backend = _FakeBackend({1: []})
+    fj_backend = _FakeForgejoBackend()
+    sync = IssueIndexSync(settings=_FakeSettings(), db=db, github=gh_backend, forgejo_github=fj_backend)  # type: ignore[arg-type]
+
+    # Forgejo repo → forgejo backend
+    await sync.sync_repo("forgejo-org/fj-repo")
+    assert fj_backend.calls == ["forgejo-org/fj-repo"]
+    assert not gh_backend.calls
+
+    # GitHub repo → default backend
+    fj_backend.calls.clear()
+    await sync.sync_repo("github-org/gh-repo")
+    assert gh_backend.calls, "default backend should have been called"
+    assert not fj_backend.calls
+
+
+async def test_sync_repo_falls_back_to_github_when_no_forgejo_backend(db: Database, tmp_path: Path) -> None:
+    """sync_repo uses default backend when forgejo_github is None, even for forgejo repos."""
+
+    class _FakeSettings:
+        issue_index_sync_seconds = 900.0
+        repo_allowlist = frozenset({"forgejo-org/fj-repo"})
+        forgejo_repos = frozenset({"forgejo-org/fj-repo"})
+
+    backend = _FakeBackend({1: []})
+    sync = IssueIndexSync(settings=_FakeSettings(), db=db, github=backend, forgejo_github=None)  # type: ignore[arg-type]
+
+    await sync.sync_repo("forgejo-org/fj-repo")
+    assert backend.calls, "default backend should have been called"
