@@ -50,13 +50,26 @@ if (process.argv.includes(unrelatedUncaughtChildFlag)) {
 	for (let i = 0; i < 64; i++) process.stdout.write(`${"x".repeat(64 * 1024)}\n`);
 	await Promise.withResolvers<void>().promise;
 } else if (process.argv.includes(attributionChildFlag)) {
+	const marker = process.argv[process.argv.indexOf(attributionChildFlag) + 1];
+	if (!marker) throw new Error("Missing survival marker path");
 	postmortem.registerStdioDisconnectHandling();
-	// A write EPIPE that did NOT come from stdout (a closed subprocess stdin or
-	// socket) must stay fatal even while stdout-disconnect handling is active, so
-	// an unrelated failure is never masked as a clean exit.
+	// A write EPIPE that did NOT come from stdout (a closed subprocess stdin,
+	// a shared-socket peer, a mystery fs stream) is contained: the peer is
+	// gone, its owner recovers itself, and one failed pipe write must not kill
+	// a healthy session (ten field crashes rode in on exactly this path).
 	setImmediate(() => {
 		throw Object.assign(new Error("EPIPE: broken pipe, write"), { code: "EPIPE", syscall: "write", errno: -32 });
 	});
+	// The marker rides a later macrotask on purpose: if containment ever
+	// regressed, the async fatal path (`exitAfterFatal` awaits `runCleanup`)
+	// gets a window to exit 1 first, so the marker can never win a scheduling
+	// race and false-pass the survival contract. A real timer is required —
+	// the competing event is a real process exit, which fake timers cannot
+	// simulate (ts-no-test-timers exception).
+	setTimeout(async () => {
+		await Bun.write(marker, "survived non-stdout write EPIPE");
+		process.exit(0);
+	}, 250);
 	await Promise.withResolvers<void>().promise;
 } else if (process.argv.includes(deferNonEpipeChildFlag)) {
 	const marker = process.argv[process.argv.indexOf(deferNonEpipeChildFlag) + 1];
@@ -133,20 +146,34 @@ if (!CHILD_FLAGS.some(flag => process.argv.includes(flag))) {
 			expect(stderr).toContain("[Uncaught Exception] Error: unrelated fatal exception");
 		});
 
-		// The graceful path is attributed to stdout by process.stdout's own `error`
-		// event, so a write EPIPE that never touched stdout must stay fatal. This is
-		// the guard against masking an unrelated failure (closed subprocess stdin,
-		// socket) as a clean exit while stdout-disconnect handling is registered.
-		it("keeps a non-stdout write EPIPE fatal while stdio-disconnect handling is registered", async () => {
-			const child = Bun.spawn([process.execPath, "run", import.meta.path, attributionChildFlag], {
+		// A write EPIPE that never touched stdout is contained rather than fatal:
+		// the peer is gone, its owner recovers itself, and one failed pipe write
+		// must not kill a healthy session. The stdout-disconnect graceful path
+		// (exit 0) is separate and stays driven by process.stdout's own `error`
+		// event; this guard keeps the fatal path from firing for peer disconnects
+		// while leaving every non-EPIPE failure fatal (see the unrelated test).
+		it("contains a non-stdout write EPIPE while stdio-disconnect handling is registered", async () => {
+			const marker = path.join(os.tmpdir(), `omp-postmortem-attribution-${process.pid}-${Date.now()}`);
+			const child = Bun.spawn([process.execPath, "run", import.meta.path, attributionChildFlag, marker], {
 				stdin: "ignore",
 				stdout: "pipe",
 				stderr: "pipe",
 			});
-			const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
-			expect(exitCode).toBe(1);
-			expect(stderr).toContain("[Uncaught Exception]");
-			expect(stderr).toContain("EPIPE");
+			try {
+				const [exitCode, stdout, stderr] = await Promise.all([
+					child.exited,
+					new Response(child.stdout).text(),
+					new Response(child.stderr).text(),
+				]);
+				expect(exitCode, stderr).toBe(0);
+				expect(stdout).toBe("");
+				expect(stderr).not.toContain("Uncaught Exception");
+				expect(await Bun.file(marker).text()).toBe("survived non-stdout write EPIPE");
+			} finally {
+				child.kill();
+				await child.exited;
+				await fs.rm(marker, { force: true });
+			}
 		});
 
 		// A non-EPIPE stdout error (revoked PTY reporting EIO) must be deferred, not
