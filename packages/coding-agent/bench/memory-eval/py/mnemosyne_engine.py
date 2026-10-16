@@ -45,6 +45,7 @@ def proc_status_bytes(field: str) -> int:
 
 
 BASELINE_RSS_BYTES = proc_status_bytes("VmRSS")
+RANKED_TIERS = ("working", "episodic")
 
 
 class Engine:
@@ -83,12 +84,23 @@ class Engine:
 		self.beam.sleep(force=True)
 
 	def op_recall(self, params):
+		k = params["k"]
+		# Derived rows take top_k slots but are not ranked, so widen top_k until k working/episodic rows come back or
+		# Mnemosyne runs out of rows. Upstream's recall_with_evidence_pack likewise widens recall, then filters tiers.
+		fetch = k
+		while True:
+			rows = self.beam.recall(params["query"], top_k=fetch)
+			if sum(row["tier"] in RANKED_TIERS for row in rows) >= k or len(rows) < fetch:
+				break
+			fetch *= 2
 		hits = []
 		dropped = []
-		for rank, row in enumerate(self.beam.recall(params["query"], top_k=params["k"])):
+		for rank, row in enumerate(rows):
+			if len(hits) == k:
+				break
 			tier = row["tier"]
-			if tier not in ("working", "episodic"):
-				# The spec ranks working and episodic rows only; derived rows are dropped but recorded.
+			if tier not in RANKED_TIERS:
+				# The spec ranks working and episodic rows only; derived rows ahead of the k-th one are dropped but recorded.
 				self.dropped_tier_rows += 1
 				dropped.append(
 					{"tier": tier, "engine_id": row["id"], "source_memory_id": row.get("source_memory_id"), "rank": rank}
