@@ -2,8 +2,11 @@
  * Shared UI primitives for tool renderers. Every renderer composes these
  * instead of inventing new CSS — see tool-render.css for the `tv-` classes.
  */
+import { formatBytes } from "@oh-my-pi/pi-utils/format";
+import type { CollabElided } from "@oh-my-pi/pi-wire";
 import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
+import { isPathPrefix } from "../lib/elided";
 import type { ToolRenderHost, ToolResultImage, ToolResultLike } from "./types";
 import { getHljs, replaceTabs, resultImagesOf, resultTextOf, shortenPath, stripAnsi } from "./util";
 
@@ -209,6 +212,126 @@ export function ResultImages({ result }: { result: ToolResultLike | undefined })
 				</button>
 			))}
 		</div>
+	);
+}
+
+interface LoadState {
+	loading: boolean;
+	error: string | null;
+}
+
+const LOAD_IDLE: LoadState = { loading: false, error: null };
+
+/**
+ * Load `records` of entry `entryId` through the host, one at a time and
+ * shallowest path first: a whole-entry or array load already restores what
+ * the records nested inside it trimmed, which the host then drops.
+ */
+function useLoadFull(
+	host: ToolRenderHost | undefined,
+	entryId: string | undefined,
+	records: readonly CollabElided[],
+): { state: LoadState; load: (() => void) | undefined } {
+	const [state, setState] = useState<LoadState>(LOAD_IDLE);
+	const loadFull = host?.loadFull;
+	if (loadFull === undefined || entryId === undefined || records.length === 0) return { state, load: undefined };
+	const load = (): void => {
+		setState({ loading: true, error: null });
+		void (async () => {
+			const ordered = [...records].sort((a, b) => a.path.length - b.path.length);
+			for (const record of ordered) {
+				const error = await loadFull(entryId, record);
+				if (error !== null) {
+					setState({ loading: false, error });
+					return;
+				}
+			}
+			setState(LOAD_IDLE);
+		})();
+	};
+	return { state, load };
+}
+
+/** Bytes a load of `records` transfers: nested records are covered by their ancestors. */
+function loadBytes(records: readonly CollabElided[]): number {
+	let total = 0;
+	for (const record of records) {
+		const nested = records.some(
+			other => other !== record && other.path.length < record.path.length && isPathPrefix(other.path, record.path),
+		);
+		if (!nested) total += record.bytes;
+	}
+	return total;
+}
+
+/**
+ * "load full" control for values the collab host trimmed from one entry.
+ * Renders nothing when the host cannot load (HTML exports) or nothing is
+ * trimmed; the placeholders themselves stay as sent.
+ */
+export function LoadFull({
+	host,
+	entryId,
+	records,
+	label,
+}: {
+	host: ToolRenderHost | undefined;
+	entryId: string | undefined;
+	records: readonly CollabElided[];
+	/** e.g. "load full output"; the size is appended. */
+	label: string;
+}): ReactNode {
+	const { state, load } = useLoadFull(host, entryId, records);
+	if (load === undefined) return null;
+	return (
+		<span className="tv-load">
+			<button type="button" className="tv-expand tv-load-btn" disabled={state.loading} onClick={load}>
+				{state.loading && <span className="tv-spin" aria-hidden="true" />}
+				{state.loading ? "loading…" : `⤓ ${label} (${formatBytes(loadBytes(records))})`}
+			</button>
+			{state.error !== null && (
+				<span className="tv-load-err" role="alert">
+					{state.error}
+				</span>
+			)}
+		</span>
+	);
+}
+
+/**
+ * Tile standing in for an image the collab host did not send; the loaded
+ * entry renders the image itself. Renders nothing when the host cannot load.
+ */
+export function ElidedImage({
+	host,
+	entryId,
+	elided,
+	placeholder,
+}: {
+	host: ToolRenderHost | undefined;
+	entryId: string | undefined;
+	elided: CollabElided;
+	/** The host's text placeholder, shown as sent; omitted where it is already on screen. */
+	placeholder?: string;
+}): ReactNode {
+	const records = useMemo(() => [elided], [elided]);
+	const { state, load } = useLoadFull(host, entryId, records);
+	if (load === undefined) return null;
+	return (
+		<button
+			type="button"
+			className="tv-img-tile"
+			disabled={state.loading}
+			onClick={load}
+			aria-label={`Load image (${elided.mimeType ?? "unknown type"}, ${formatBytes(elided.bytes)})`}
+		>
+			{placeholder !== undefined && <span className="tv-img-tile-text">{placeholder}</span>}
+			<span className="tv-img-tile-action">
+				{state.loading && <span className="tv-spin" aria-hidden="true" />}
+				{state.loading ? "loading image…" : "tap to load image"}
+			</span>
+			{state.error !== null && <span className="tv-load-err">{state.error}</span>}
+		</button>
 	);
 }
 
