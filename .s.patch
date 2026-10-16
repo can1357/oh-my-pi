@@ -1,0 +1,57 @@
+diff --git a/packages/coding-agent/src/modes/utils/ui-helpers.ts b/packages/coding-agent/src/modes/utils/ui-helpers.ts
+index 9d07db85209..a98160080c2 100644
+--- a/packages/coding-agent/src/modes/utils/ui-helpers.ts
++++ b/packages/coding-agent/src/modes/utils/ui-helpers.ts
+@@ -196,8 +196,23 @@ export class UiHelpers {
+ 			case "custom": {
+ 				if (message.display) {
+ 					if (message.customType === "async-result") {
+-						const component = buildAsyncResultBlock(message);
+-						this.ctx.chatContainer.addChild(component);
++						const renderer = this.ctx.viewSession.extensionRunner?.getMessageRenderer(message.customType);
++						// A registered renderer owns this card. The built-in block stays the
++						// fallback both when no renderer exists and when one declines
++						// (returns undefined), so an extension can override the completion
++						// row instead of being bypassed by it (#14131).
++						if (!renderer) {
++							const component = buildAsyncResultBlock(message);
++							this.ctx.chatContainer.addChild(component);
++							break;
++						}
++						const rendered = new CustomMessageComponent(
++							message as CustomMessage<unknown>,
++							(delegate, options, rendererTheme) =>
++								renderer(delegate, options, rendererTheme) ?? buildAsyncResultBlock(message),
++						);
++						rendered.setExpanded(this.ctx.toolOutputExpanded);
++						this.ctx.chatContainer.addChild(rendered);
+ 						break;
+ 					}
+ 					if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {
+diff --git a/packages/tui/src/chat/chat-transcript-builder.ts b/packages/tui/src/chat/chat-transcript-builder.ts
+index f284fc82b9b..5c476e4a6d1 100644
+--- a/packages/tui/src/chat/chat-transcript-builder.ts
++++ b/packages/tui/src/chat/chat-transcript-builder.ts
+@@ -563,7 +563,21 @@ export class ChatTranscriptBuilder {
+ 	#appendCustomMessage(message: Extract<AgentMessage, { role: "custom" | "hookMessage" }>): void {
+ 		if (!message.display) return;
+ 		if (message.customType === "async-result") {
+-			const component = buildAsyncResultBlock(message);
++			const renderer = this.#deps.getMessageRenderer?.(message.customType);
++			// A registered renderer owns this card. The built-in block stays the
++			// fallback both when no renderer exists and when one declines (returns
++			// undefined), so an extension can override the completion row instead of
++			// being bypassed by it (#14131).
++			if (!renderer) {
++				this.container.addChild(buildAsyncResultBlock(message));
++				return;
++			}
++			const component = new CustomMessageComponent(
++				message as CustomMessage<unknown>,
++				(delegate, options, rendererTheme) =>
++					renderer(delegate, options, rendererTheme) ?? buildAsyncResultBlock(message),
++			);
++			this.#trackExpandable(component);
+ 			this.container.addChild(component);
+ 			return;
+ 		}
