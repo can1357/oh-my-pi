@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `autolearn_capture_start` and `autolearn_capture_end` (`completed` | `aborted` | `error`) RPC session events so RPC hosts know when a background auto-learn capture turn is running ([#15966](https://github.com/can1357/oh-my-pi/pull/15966) by [@Vignesh-285](https://github.com/Vignesh-285))
+
 ### Fixed
 
 - Claude auto-redeem now spends a full saved reset on an account blocked by its weekly limit when the reset also clears the Fable cap; such resets were treated as Fable-only and skipped while Fable usage had room ([#18801](https://github.com/can1357/oh-my-pi/pull/18801))
