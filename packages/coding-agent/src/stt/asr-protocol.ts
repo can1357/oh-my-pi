@@ -1,4 +1,5 @@
 import type { SttModelKey } from "./models";
+import type { SttSegment } from "./transcript";
 
 export type SttProgressStatus = "initiate" | "download" | "progress" | "progress_total" | "done" | "ready" | "error";
 
@@ -22,6 +23,7 @@ export interface SttProgressEvent {
 
 export type SttWorkerInbound =
 	| { type: "ping"; id: string }
+	// One window of 16 kHz mono audio, answered with timed segments relative to its first sample.
 	| { type: "transcribe"; id: string; modelKey: SttModelKey; audio: Float32Array; language?: string }
 	| { type: "download"; id: string; modelKey: SttModelKey }
 	// ── Live streaming session ──
@@ -36,7 +38,7 @@ export type SttWorkerInbound =
 
 export type SttWorkerOutbound =
 	| { type: "pong"; id: string }
-	| { type: "transcription"; id: string; text: string }
+	| { type: "transcription"; id: string; segments: SttSegment[] }
 	| { type: "downloaded"; id: string }
 	| { type: "error"; id: string; error: string }
 	| { type: "progress"; id: string; event: SttProgressEvent }

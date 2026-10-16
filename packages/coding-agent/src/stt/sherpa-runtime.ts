@@ -6,6 +6,9 @@ const SHERPA_PACKAGE = "sherpa-onnx-node";
 
 interface SherpaOfflineResult {
 	text?: string;
+	tokens?: string[];
+	timestamps?: number[];
+	durations?: number[];
 }
 
 interface SherpaOfflineStream {
@@ -40,7 +43,7 @@ export interface SherpaOnlineRecognizer {
 	createStream(): SherpaOnlineStream;
 	isReady(stream: SherpaOnlineStream): boolean;
 	decode(stream: SherpaOnlineStream): void;
-	getResult(stream: SherpaOnlineStream): { text: string };
+	getResult(stream: SherpaOnlineStream): { text: string; tokens?: string[]; timestamps?: number[] };
 	isEndpoint(stream: SherpaOnlineStream): boolean;
 	reset(stream: SherpaOnlineStream): void;
 }

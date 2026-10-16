@@ -7,6 +7,7 @@ import type { SpeculativeOperationContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import { CodingAgentSpeculativeExecutionHost } from "@oh-my-pi/pi-coding-agent/speculation/host";
+import { encodePcm16Wav } from "@oh-my-pi/pi-coding-agent/stt/wav";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { getConflictHistory } from "@oh-my-pi/pi-coding-agent/tools/conflict-detect";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
@@ -519,6 +520,31 @@ describe("read speculation assessment", () => {
 				tool,
 				toolCall: { type: "toolCall", id: "video-link", name: "read", arguments: { path: "clip.mp4" } },
 				args: { path: "clip.mp4" },
+				effect: assessment.effect,
+			}),
+		).resolves.toEqual({ allowed: false, reason: "local read target is unsafe" });
+	});
+
+	it("denies audio files at authorization so speech recognition never runs speculatively", async () => {
+		fs.writeFileSync(path.join(testDir, "memo.wav"), encodePcm16Wav([new Float32Array(1600)]));
+		const session = {
+			...createSession(testDir),
+			settings: Settings.isolated({ "tools.approvalMode": "yolo", "tools.speculativeExecution.enabled": true }),
+		} as ToolSession;
+		const tool = new ReadTool(session);
+		const policy = tool.speculation.finalized;
+		if (!policy) throw new Error("read tool has no finalized speculation policy");
+		const host = new CodingAgentSpeculativeExecutionHost(session.settings, session, { hasHandlers: () => false });
+		const assessment = await policy.assess({ args: { path: "memo.wav" } });
+		if (!assessment.eligible) throw new Error("expected provisional admission for memo.wav");
+		await expect(
+			host.authorize({
+				candidateId: "audio",
+				source: "direct",
+				dependencies: [],
+				tool,
+				toolCall: { type: "toolCall", id: "audio", name: "read", arguments: { path: "memo.wav" } },
+				args: { path: "memo.wav" },
 				effect: assessment.effect,
 			}),
 		).resolves.toEqual({ allowed: false, reason: "local read target is unsafe" });

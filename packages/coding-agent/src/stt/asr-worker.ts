@@ -42,6 +42,7 @@ import {
 	type SherpaOnlineStream,
 	type SherpaRuntime,
 } from "./sherpa-runtime";
+import { type SttSegment, segmentTimedTokens, segmentWhisperChunks } from "./transcript";
 
 const ASR_TASK = "automatic-speech-recognition";
 const SHERPA_PACKAGE = "sherpa-onnx-node";
@@ -413,30 +414,11 @@ async function loadModel(modelKey: SttModelKey, transport: SttTransport, request
 	return loaded;
 }
 
-async function decodeSegment(
-	model: LoadedModel,
-	spec: SttModel,
-	audio: Float32Array,
-	language: string | undefined,
-): Promise<string> {
-	if (model.engine === "sherpa") {
-		if (model.mode === "online") {
-			const stream = model.recognizer.createStream();
-			stream.acceptWaveform({ samples: audio, sampleRate: ASR_SAMPLE_RATE });
-			stream.acceptWaveform({ samples: ONLINE_TERMINAL_PADDING, sampleRate: ASR_SAMPLE_RATE });
-			stream.inputFinished();
-			while (model.recognizer.isReady(stream)) model.recognizer.decode(stream);
-			return model.recognizer.getResult(stream).text.trim();
-		}
-		const stream = model.recognizer.createStream();
-		stream.acceptWaveform({ samples: audio, sampleRate: ASR_SAMPLE_RATE });
-		const result = await model.recognizer.decodeAsync(stream);
-		return (result.text ?? "").trim();
-	}
+function whisperCallOptions(spec: SttModel, language: string | undefined, returnTimestamps: boolean): AsrCallOptions {
 	const options: AsrCallOptions = {
 		chunk_length_s: CHUNK_LENGTH_S,
 		stride_length_s: STRIDE_LENGTH_S,
-		return_timestamps: false,
+		return_timestamps: returnTimestamps,
 	};
 	// English-only Whisper checkpoints reject `language`/`task`; multilingual ones
 	// take the configured source language (auto-detected when omitted).
@@ -444,8 +426,61 @@ async function decodeSegment(
 		options.task = "transcribe";
 		if (language) options.language = language;
 	}
-	const output = (await model.pipeline(audio, options)) as AutomaticSpeechRecognitionOutput;
+	return options;
+}
+
+/** Decode one whole buffer; an online recognizer gets terminal padding so its last words flush. */
+async function decodeSherpa(
+	model: Extract<LoadedModel, { engine: "sherpa" }>,
+	audio: Float32Array,
+): Promise<{ text?: string; tokens?: string[]; timestamps?: number[]; durations?: number[] }> {
+	if (model.mode === "online") {
+		const stream = model.recognizer.createStream();
+		stream.acceptWaveform({ samples: audio, sampleRate: ASR_SAMPLE_RATE });
+		stream.acceptWaveform({ samples: ONLINE_TERMINAL_PADDING, sampleRate: ASR_SAMPLE_RATE });
+		stream.inputFinished();
+		while (model.recognizer.isReady(stream)) model.recognizer.decode(stream);
+		return model.recognizer.getResult(stream);
+	}
+	const stream = model.recognizer.createStream();
+	stream.acceptWaveform({ samples: audio, sampleRate: ASR_SAMPLE_RATE });
+	return model.recognizer.decodeAsync(stream);
+}
+
+async function decodeSegment(
+	model: LoadedModel,
+	spec: SttModel,
+	audio: Float32Array,
+	language: string | undefined,
+): Promise<string> {
+	if (model.engine === "sherpa") return ((await decodeSherpa(model, audio)).text ?? "").trim();
+	const output = (await model.pipeline(
+		audio,
+		whisperCallOptions(spec, language, false),
+	)) as AutomaticSpeechRecognitionOutput;
 	return (output.text ?? "").trim();
+}
+
+/** Decode one window with timings; segment times are seconds from the start of `audio`. */
+async function decodeTimedSegments(
+	model: LoadedModel,
+	spec: SttModel,
+	audio: Float32Array,
+	language: string | undefined,
+): Promise<SttSegment[]> {
+	const durationS = audio.length / ASR_SAMPLE_RATE;
+	if (model.engine === "sherpa") {
+		const result = await decodeSherpa(model, audio);
+		return segmentTimedTokens(
+			{ tokens: result.tokens ?? [], timestamps: result.timestamps ?? [], durations: result.durations },
+			durationS,
+		);
+	}
+	const output = (await model.pipeline(
+		audio,
+		whisperCallOptions(spec, language, true),
+	)) as AutomaticSpeechRecognitionOutput;
+	return segmentWhisperChunks(output.chunks ?? [], durationS);
 }
 
 async function transcribeAudio(
@@ -454,11 +489,11 @@ async function transcribeAudio(
 	modelKey: SttModelKey,
 	audio: Float32Array,
 	language: string | undefined,
-): Promise<string> {
+): Promise<SttSegment[]> {
 	const spec = getSttModelSpec(modelKey);
 	if (!spec) throw new Error(`Unknown stt model: ${modelKey}`);
 	const model = await loadModel(modelKey, transport, requestId);
-	return runOnModel(() => decodeSegment(model, spec, audio, language));
+	return runOnModel(() => decodeTimedSegments(model, spec, audio, language));
 }
 
 async function handleBatchRequest(
@@ -471,8 +506,8 @@ async function handleBatchRequest(
 			transport.send({ type: "downloaded", id: request.id });
 			return;
 		}
-		const text = await transcribeAudio(transport, request.id, request.modelKey, request.audio, request.language);
-		transport.send({ type: "transcription", id: request.id, text });
+		const segments = await transcribeAudio(transport, request.id, request.modelKey, request.audio, request.language);
+		transport.send({ type: "transcription", id: request.id, segments });
 	} catch (error) {
 		transport.send({ type: "error", id: request.id, error: errorText(error) });
 	}

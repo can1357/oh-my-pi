@@ -12,6 +12,9 @@ import * as runtime from "../src/stt/sherpa-runtime";
 class OnlineStream implements runtime.SherpaOnlineStream {
 	pending: number[] = [];
 	words: string[] = [];
+	// Start time (s) of each word, from its position in the decoded audio.
+	times: number[] = [];
+	decoded = 0;
 	endpoint = false;
 	finished = false;
 	finishCalls = 0;
@@ -50,12 +53,16 @@ class OnlineRecognizer implements runtime.SherpaOnlineRecognizer {
 	decode(stream: OnlineStream): void {
 		if (!this.isReady(stream)) throw new Error("decode before ready");
 		const token = stream.pending.shift()!;
+		const at = stream.decoded++ / 16_000;
 		if (token === -1) stream.endpoint = true;
-		else if (token > 0) stream.words.push(vocabulary[token]!);
+		else if (token > 0) {
+			stream.words.push(vocabulary[token]!);
+			stream.times.push(at);
+		}
 	}
 
-	getResult(stream: OnlineStream): { text: string } {
-		return { text: stream.words.join(" ") };
+	getResult(stream: OnlineStream): { text: string; tokens: string[]; timestamps: number[] } {
+		return { text: stream.words.join(" "), tokens: stream.words.map(word => ` ${word}`), timestamps: stream.times };
 	}
 
 	isEndpoint(stream: OnlineStream): boolean {
@@ -65,6 +72,7 @@ class OnlineRecognizer implements runtime.SherpaOnlineRecognizer {
 	reset(stream: OnlineStream): void {
 		this.resetCalls++;
 		stream.words.length = 0;
+		stream.times.length = 0;
 		stream.endpoint = false;
 	}
 }
@@ -78,9 +86,14 @@ class OfflineStream {
 
 const offlineRecognizer = {
 	createStream: () => new OfflineStream(),
-	decodeAsync: async (stream: OfflineStream) => ({
-		text: Array.from(stream.samples, sample => vocabulary[sample] ?? "").join(" "),
-	}),
+	decodeAsync: async (stream: OfflineStream) => {
+		const words = Array.from(stream.samples, sample => vocabulary[sample] ?? "");
+		return {
+			text: words.join(" "),
+			tokens: words.map(word => ` ${word}`),
+			timestamps: words.map((_, index) => index / 16_000),
+		};
+	},
 };
 const nativeRuntime: runtime.SherpaRuntime = {
 	OnlineRecognizer,
@@ -301,7 +314,7 @@ describe("native online STT worker", () => {
 		expect(await h.waitFor("transcription", "batch-online")).toEqual({
 			type: "transcription",
 			id: "batch-online",
-			text: "hello world tail",
+			segments: [{ start: 0, end: 2 / 16_000, text: "hello world tail" }],
 		});
 		expect(OnlineRecognizer.instances[0]!.streams[0]!.finishCalls).toBe(1);
 		expect(offlineDecode).not.toHaveBeenCalled();
@@ -309,7 +322,7 @@ describe("native online STT worker", () => {
 		expect(await h.waitFor("transcription", "batch-offline")).toEqual({
 			type: "transcription",
 			id: "batch-offline",
-			text: "hello world",
+			segments: [{ start: 0, end: 1 / 16_000, text: "hello world" }],
 		});
 		expect(offlineDecode).toHaveBeenCalledTimes(1);
 	});
