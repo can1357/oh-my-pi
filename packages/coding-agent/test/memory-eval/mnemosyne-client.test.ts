@@ -149,6 +149,8 @@ for line in sys.stdin:
 			expect(info.MNEMOSYNE_POLYPHONIC_RECALL).toBeUndefined();
 			expect(info.MNEMOSYNE_LLM_ENABLED).toBe("false");
 			expect(info.MNEMOSYNE_EMBEDDING_MODEL).toBe("BAAI/bge-small-en-v1.5");
+			// Larger than any conversation, so working memory never evicts (Mnemopi runs with workingMemoryLimit 0).
+			expect(info.MNEMOSYNE_WM_MAX_ITEMS).toBe("100000");
 			expect((await childEnv({ polyphonic: true }, "standard")).MNEMOSYNE_POLYPHONIC_RECALL).toBe("1");
 		} finally {
 			for (const [key, value] of [
