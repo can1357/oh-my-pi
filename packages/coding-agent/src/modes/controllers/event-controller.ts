@@ -438,6 +438,10 @@ export class EventController {
 			// this event exists for RPC/ACP clients that have no equivalent local
 			// call site to hook, so there is nothing additional to do here.
 			queue_update: async () => {},
+			// The private capture turn renders nothing in the TUI; RPC hosts are
+			// the consumers that wait on this lifecycle.
+			autolearn_capture_start: async () => {},
+			autolearn_capture_end: async () => {},
 		} satisfies AgentSessionEventHandlers;
 	}
 

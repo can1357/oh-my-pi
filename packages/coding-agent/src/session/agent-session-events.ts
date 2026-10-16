@@ -88,7 +88,16 @@ export type AgentSessionEvent =
 	// `AgentSession.getQueuedMessages()`; `liveSteered` counts the leading
 	// `steering` entries already sent into the streaming response, which
 	// `remove_queued_message` cannot reach.
-	| { type: "queue_update"; steering: string[]; followUp: string[]; liveSteered: number };
+	| { type: "queue_update"; steering: string[]; followUp: string[]; liveSteered: number }
+	// Auto-learn capture lifecycle: `autolearn_capture_start` is emitted
+	// synchronously when a private capture turn begins (before the `agent_end`
+	// that triggered it reaches later subscribers, so RPC hosts can hold their
+	// result until the matching `autolearn_capture_end`).
+	| { type: "autolearn_capture_start" }
+	| {
+			type: "autolearn_capture_end";
+			outcome: "completed" | "aborted" | "error";
+	  };
 
 /** Listener function for agent session events. */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;

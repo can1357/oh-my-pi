@@ -1200,6 +1200,19 @@ class QueueUpdateEvent:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class AutoLearnCaptureStartEvent:
+    """A private auto-learn capture turn began; the `agent_end` that triggered it follows this frame."""
+    type: Literal["autolearn_capture_start"] = "autolearn_capture_start"
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class AutoLearnCaptureEndEvent:
+    """The capture turn announced by `autolearn_capture_start` settled with this outcome."""
+    type: Literal["autolearn_capture_end"] = "autolearn_capture_end"
+    outcome: Literal["completed", "aborted", "error"]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class ReadyEvent:
     """First frame after startup; transport fields are absent on servers without protocol v2."""
     type: Literal["ready"] = "ready"
@@ -1603,7 +1616,7 @@ UsageLimitState: TypeAlias = UsageLimitLowPriority | UsageLimitWrapUp
 """Provider-neutral state of an account past its usage limit, discriminated by `stage`."""
 
 
-RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
+RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent | AutoLearnCaptureStartEvent | AutoLearnCaptureEndEvent
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
@@ -2558,6 +2571,21 @@ def parse_queue_update_event(value: object, path: str = "QueueUpdateEvent") -> Q
     )
 
 
+def parse_auto_learn_capture_start_event(value: object, path: str = "AutoLearnCaptureStartEvent") -> AutoLearnCaptureStartEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["autolearn_capture_start"]]', literal(frozenset({"autolearn_capture_start"}))), path)
+    return AutoLearnCaptureStartEvent(
+    )
+
+
+def parse_auto_learn_capture_end_event(value: object, path: str = "AutoLearnCaptureEndEvent") -> AutoLearnCaptureEndEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["autolearn_capture_end"]]', literal(frozenset({"autolearn_capture_end"}))), path)
+    return AutoLearnCaptureEndEvent(
+        outcome=required(payload, "outcome", cast('Decoder[Literal["completed", "aborted", "error"]]', literal(frozenset({"completed", "aborted", "error"}))), path),
+    )
+
+
 def parse_ready_event(value: object, path: str = "ReadyEvent") -> ReadyEvent:
     payload = expect_object(value, path)
     required(payload, "type", cast('Decoder[Literal["ready"]]', literal(frozenset({"ready"}))), path)
@@ -3054,6 +3082,8 @@ _RPC_AGENT_EVENT_CASES: Final[dict[str, Decoder[RpcAgentEvent]]] = {
         "thinking_level_changed": parse_thinking_level_changed_event,
         "goal_updated": parse_goal_updated_event,
         "queue_update": parse_queue_update_event,
+        "autolearn_capture_start": parse_auto_learn_capture_start_event,
+        "autolearn_capture_end": parse_auto_learn_capture_end_event,
 }
 
 
@@ -3108,6 +3138,8 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "thinking_level_changed": parse_rpc_agent_event,
         "goal_updated": parse_rpc_agent_event,
         "queue_update": parse_rpc_agent_event,
+        "autolearn_capture_start": parse_rpc_agent_event,
+        "autolearn_capture_end": parse_rpc_agent_event,
 }
 
 
@@ -3712,6 +3744,14 @@ class WireClient:
         """Subscribe to `queue_update`: Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes."""
         return self._listen("queue_update", listener)
 
+    def on_autolearn_capture_start(self, listener: Callable[[AutoLearnCaptureStartEvent], None]) -> Callable[[], None]:
+        """Subscribe to `autolearn_capture_start`: A private auto-learn capture turn began; the `agent_end` that triggered it follows this frame."""
+        return self._listen("autolearn_capture_start", listener)
+
+    def on_autolearn_capture_end(self, listener: Callable[[AutoLearnCaptureEndEvent], None]) -> Callable[[], None]:
+        """Subscribe to `autolearn_capture_end`: The capture turn announced by `autolearn_capture_start` settled with this outcome."""
+        return self._listen("autolearn_capture_end", listener)
+
 
 __all__ = [
     "AbortAndRestoreQueueResult",
@@ -3747,6 +3787,8 @@ __all__ = [
     "AutoCompactionEndEvent",
     "AutoCompactionReason",
     "AutoCompactionStartEvent",
+    "AutoLearnCaptureEndEvent",
+    "AutoLearnCaptureStartEvent",
     "AutoRetryEndEvent",
     "AutoRetryStartEvent",
     "AvailableCommandsUpdateEvent",
@@ -3935,6 +3977,8 @@ __all__ = [
     "parse_assistant_tool_call_start_event",
     "parse_auto_compaction_end_event",
     "parse_auto_compaction_start_event",
+    "parse_auto_learn_capture_end_event",
+    "parse_auto_learn_capture_start_event",
     "parse_auto_retry_end_event",
     "parse_auto_retry_start_event",
     "parse_available_commands_update_event",

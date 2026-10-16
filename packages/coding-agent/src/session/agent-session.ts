@@ -5516,11 +5516,18 @@ export class AgentSession implements SettingsScope {
 		if (this.#autolearnCaptureTask || this.#isDisposed) return;
 		const controller = new AbortController();
 		this.#autolearnCaptureAbortController = controller;
+		let outcome: "completed" | "aborted" | "error" = "completed";
 		const task = (async () => {
 			try {
 				await capture(controller.signal);
+				if (controller.signal.aborted) outcome = "aborted";
 			} catch (error) {
-				if (!controller.signal.aborted) throw error;
+				if (controller.signal.aborted) {
+					outcome = "aborted";
+				} else {
+					outcome = "error";
+					throw error;
+				}
 			} finally {
 				if (this.#autolearnCaptureAbortController === controller) {
 					this.#autolearnCaptureAbortController = undefined;
@@ -5528,10 +5535,18 @@ export class AgentSession implements SettingsScope {
 			}
 		})();
 		this.#autolearnCaptureTask = task;
+		// Emitted synchronously before the first await: the AutoLearnController
+		// subscriber that started this capture is still inside the `agent_end`
+		// dispatch, so every later subscriber (RPC mode's forwarder) sees
+		// `autolearn_capture_start` before the `agent_end` that triggered it. A
+		// turn that starts no capture emits nothing, letting hosts exit at
+		// `agent_end` with no wait at all.
+		this.#emit({ type: "autolearn_capture_start" });
 		try {
 			await task;
 		} finally {
 			if (this.#autolearnCaptureTask === task) this.#autolearnCaptureTask = undefined;
+			this.#emit({ type: "autolearn_capture_end", outcome });
 		}
 	}
 
