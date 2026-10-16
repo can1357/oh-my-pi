@@ -32,16 +32,51 @@ export const boxComposerStyle: ComposerStyle = {
 			return topLeft + borderColor(box.horizontal.repeat(topFillWidth)) + topRight;
 		}
 		const { content, width: statusWidth } = topBorder;
-		if (statusWidth <= topFillWidth) {
-			// Status fits - add fill after it
-			const fillWidth = topFillWidth - statusWidth;
-			return topLeft + content + borderColor(box.horizontal.repeat(fillWidth)) + topRight;
+		const lines = content.split("\n");
+		// Two-line status (line 2 = overflow/substrate segments) frames as one
+		// box: line 1 keeps the historical cornered row exactly, following rows
+		// render with vertical sides (`│` + padding) so the corner columns line
+		// up and the frame reads as one box. Single-line content is byte-identical
+		// to the old fit/truncate math.
+		if (lines.length <= 1) {
+			if (statusWidth <= topFillWidth) {
+				// Status fits - add fill after it
+				const fillWidth = topFillWidth - statusWidth;
+				return topLeft + content + borderColor(box.horizontal.repeat(fillWidth)) + topRight;
+			}
+			// Status too long - truncate it
+			const truncated = truncateToWidth(content, Math.max(0, topFillWidth - 1));
+			const truncatedWidth = visibleWidth(truncated);
+			const fillWidth = Math.max(0, topFillWidth - truncatedWidth);
+			return topLeft + truncated + borderColor(box.horizontal.repeat(fillWidth)) + topRight;
 		}
-		// Status too long - truncate it
-		const truncated = truncateToWidth(content, Math.max(0, topFillWidth - 1));
-		const truncatedWidth = visibleWidth(truncated);
-		const fillWidth = Math.max(0, topFillWidth - truncatedWidth);
-		return topLeft + truncated + borderColor(box.horizontal.repeat(fillWidth)) + topRight;
+		const rows: string[] = [];
+		const sideLeft = borderColor(`${box.vertical}${padding(paddingX)}`);
+		const sideRight = borderColor(`${padding(paddingX)}${box.vertical}`);
+		for (let i = 0; i < lines.length; i++) {
+			const lineText = lines[i]!;
+			const lineWidth = visibleWidth(lineText);
+			if (i === 0) {
+				if (lineWidth <= topFillWidth) {
+					const fillWidth = topFillWidth - lineWidth;
+					rows.push(topLeft + lineText + borderColor(box.horizontal.repeat(fillWidth)) + topRight);
+				} else {
+					const truncated = truncateToWidth(lineText, Math.max(0, topFillWidth - 1));
+					const truncatedWidth = visibleWidth(truncated);
+					const fillWidth = Math.max(0, topFillWidth - truncatedWidth);
+					rows.push(topLeft + truncated + borderColor(box.horizontal.repeat(fillWidth)) + topRight);
+				}
+			} else if (lineWidth <= topFillWidth) {
+				const fillWidth = topFillWidth - lineWidth;
+				rows.push(sideLeft + lineText + padding(fillWidth) + sideRight);
+			} else {
+				const truncated = truncateToWidth(lineText, Math.max(0, topFillWidth));
+				const truncatedWidth = visibleWidth(truncated);
+				const fillWidth = Math.max(0, topFillWidth - truncatedWidth);
+				rows.push(sideLeft + truncated + padding(fillWidth) + sideRight);
+			}
+		}
+		return rows.join("\n");
 	},
 
 	renderRow(ctx: ComposerRowContext): string[] {

@@ -87,6 +87,7 @@ export function createStartupStatusLine(data: StatusLineStartupData): StatusLine
 		getSessionSettingsRevision: () => 0,
 		goalStatusInFooter: () => false,
 		activeAccount: () => undefined,
+		getAdvisorUsageAccounts: () => [],
 		canFetchUsageReports: () => false,
 		fetchUsageReports: async () => null,
 		resolveActiveRepo: () => null,

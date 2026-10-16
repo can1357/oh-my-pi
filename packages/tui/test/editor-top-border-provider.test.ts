@@ -17,7 +17,9 @@
  * 4. Clearing the provider falls back to the eager slot.
  */
 import { describe, expect, it } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
 import { Editor, type EditorTopBorder } from "@oh-my-pi/pi-tui/components/editor";
+import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { defaultEditorTheme } from "./test-themes";
 
 function stubTopBorder(label: string): EditorTopBorder {
@@ -89,5 +91,51 @@ describe("Editor lazy top-border provider (#4145)", () => {
 		expect(widths).toHaveLength(2);
 		expect(widths[0]).toBe(editor.getTopBorderAvailableWidth(80));
 		expect(widths[1]).toBe(editor.getTopBorderAvailableWidth(120));
+	});
+
+	it("renders content with one newline as two framed, width-filled border rows", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const primary = "primary-status";
+		const overlay = "overflow-segments";
+		editor.setTopBorderProvider(() => ({
+			content: `${primary}\n${overlay}`,
+			// Contract: for multi-line content `width` is the MAX visibleWidth.
+			width: Math.max(primary.length, overlay.length),
+		}));
+
+		const frame = editor.render(40).map(line => stripVTControlCharacters(line));
+		expect(frame[0]).toContain(primary);
+		expect(frame[1]).toContain(overlay);
+		// Both rows are full-width rows of the content area; the first keeps the
+		// cornered top row and the second uses vertical sides, so the corner
+		// columns line up as one box.
+		expect(visibleWidth(frame[0])).toBe(40);
+		expect(visibleWidth(frame[1])).toBe(40);
+		expect(frame[0]).toMatch(/^\+.*\+$/);
+		expect(frame[1]).toMatch(/^\|.*\|$/);
+		// The second row's sides occupy the same columns as the top row's corners.
+		expect(frame[1][0]).toBe("|");
+		expect(frame[1][frame[1].length - 1]).toBe("|");
+		expect(frame[0][0]).toBe("+");
+		expect(frame[0][frame[0].length - 1]).toBe("+");
+		// The frame grows exactly one row taller than the single-line frame.
+		const single = new Editor(defaultEditorTheme);
+		single.setTopBorderProvider(() => ({ content: primary, width: primary.length }));
+		const singleFrame = single.render(40).map(line => stripVTControlCharacters(line));
+		expect(frame.length).toBe(singleFrame.length + 1);
+	});
+
+	it("truncates an overflowing second row to the fill width", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const long = "x".repeat(100);
+		editor.setTopBorderProvider(() => ({ content: `short\n${long}`, width: long.length }));
+
+		const frame = editor.render(40).map(line => stripVTControlCharacters(line));
+		expect(frame[0]).toContain("short");
+		expect(visibleWidth(frame[0])).toBe(40);
+		// The oversized second row is truncated (with fill) to the full width.
+		expect(frame[1]).toMatch(/^\|.*\|$/);
+		expect(visibleWidth(frame[1])).toBe(40);
+		expect(frame[1]).not.toContain(long);
 	});
 });
