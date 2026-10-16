@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
-import * as net from "node:net";
 import * as path from "node:path";
+import { type IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
 import { setProcessName, TempDir } from "@oh-my-pi/pi-utils";
 import { type DaemonBrokerStartOptions, startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import { createDaemonBrokerClient, type DaemonBrokerClient } from "../../src/launch/client";
@@ -78,7 +78,8 @@ async function withBroker(
 interface ProtocolServerFixture {
 	client: DaemonBrokerClient;
 	requests: DaemonWireRequest[];
-	currentSocket(): net.Socket;
+	currentSocket(): IpcConnection;
+	currentSocketClosed(): Promise<void>;
 	rejectNextRequest(reason: string): void;
 }
 
@@ -89,47 +90,47 @@ async function withProtocolServer(body: (fixture: ProtocolServerFixture) => Prom
 	const runtimeDir = path.join(tempDir.path(), "runtime");
 	await fs.mkdir(projectDir);
 	const client = await createDaemonBrokerClient(projectDir, { runtimeDir });
-	const sockets = new Set<net.Socket>();
+	const sockets = new Set<IpcConnection>();
 	const requests: DaemonWireRequest[] = [];
-	let currentSocket: net.Socket | undefined;
+	let currentSocket: IpcConnection | undefined;
+	let currentSocketClosed: Promise<void> | undefined;
 	let nextError: string | undefined;
-	const server = net.createServer(socket => {
+	const server = await IpcServer.listen(daemonBrokerEndpoint(runtimeDir), { framing: "lines" }, socket => {
 		currentSocket = socket;
 		sockets.add(socket);
-		socket.on("close", () => sockets.delete(socket));
-		socket.setEncoding("utf8");
-		let buffer = "";
-		socket.on("data", chunk => {
-			buffer += chunk;
-			for (;;) {
-				const newline = buffer.indexOf("\n");
-				if (newline < 0) break;
-				const request = parseDaemonWireRequest(JSON.parse(buffer.slice(0, newline)));
-				buffer = buffer.slice(newline + 1);
+		const closed = Promise.withResolvers<void>();
+		currentSocketClosed = closed.promise;
+		socket.start(
+			line => {
+				const request = parseDaemonWireRequest(JSON.parse(line));
 				requests.push(request);
 				const error = nextError;
 				nextError = undefined;
-				socket.write(
-					`${JSON.stringify(
+				socket.send(
+					JSON.stringify(
 						error === undefined
 							? { id: request.id, ok: true, result: { op: "ping", projectDir: client.projectDir } }
 							: { id: request.id, ok: false, error },
-					)}\n`,
+					),
 				);
-			}
-		});
+			},
+			() => {
+				sockets.delete(socket);
+				closed.resolve();
+			},
+		);
 	});
 	try {
-		await new Promise<void>((resolve, reject) => {
-			server.once("error", reject);
-			server.listen(daemonBrokerEndpoint(client.projectDir, runtimeDir), resolve);
-		});
 		await body({
 			client,
 			requests,
 			currentSocket: () => {
 				if (!currentSocket) throw new Error("Diagnostic protocol client has not connected");
 				return currentSocket;
+			},
+			currentSocketClosed: () => {
+				if (!currentSocketClosed) throw new Error("Diagnostic protocol client has not connected");
+				return currentSocketClosed;
 			},
 			rejectNextRequest: reason => {
 				nextError = reason;
@@ -138,7 +139,7 @@ async function withProtocolServer(body: (fixture: ProtocolServerFixture) => Prom
 	} finally {
 		client.close();
 		for (const socket of sockets) socket.destroy();
-		await new Promise<void>(resolve => server.close(() => resolve()));
+		await server.close();
 	}
 }
 
@@ -286,7 +287,7 @@ describe("diagnostic observation coverage gaps", () => {
 			expect(await registrationFailed.promise).toContain("observer registration rejected");
 			expect(gaps).toHaveLength(2);
 			await client.request({ op: "ping" });
-			currentSocket().write(`${JSON.stringify({ event: "daemon-observed", notification: completion })}\n`);
+			currentSocket().send(JSON.stringify({ event: "daemon-observed", notification: completion }));
 			expect(await observed.promise).toEqual(completion);
 			await client.request({ op: "ping" });
 			expect(requests.every(request => (request.completionAcks?.length ?? 0) === 0)).toBe(true);
@@ -295,7 +296,7 @@ describe("diagnostic observation coverage gaps", () => {
 
 	it("does not report coverage gaps after unsubscribe or intentional client closure", async () => {
 		for (const unsubscribeFirst of [false, true]) {
-			await withProtocolServer(async ({ client, currentSocket }) => {
+			await withProtocolServer(async ({ client, currentSocketClosed }) => {
 				const gaps: string[] = [];
 				const unsubscribe = client.observeOwners(
 					["child-owner"],
@@ -307,10 +308,9 @@ describe("diagnostic observation coverage gaps", () => {
 					unsubscribe();
 					await client.request({ op: "ping" });
 				}
-				const closed = Promise.withResolvers<void>();
-				currentSocket().once("close", () => closed.resolve());
+				const closed = currentSocketClosed();
 				client.close();
-				await closed.promise;
+				await closed;
 				expect(gaps).toEqual([]);
 			});
 		}
