@@ -406,6 +406,12 @@ export class StreamingRevealController {
 		this.#alignBlocks(message);
 		if (!this.#component) return;
 		if (!this.#smoothStreaming) {
+			// Switching to non-smooth streaming finalizes the leading segment whole
+			// here, so the spend a hidden block saved during smooth reveal is spent
+			// with it — keeping it armed would replay a stale partial prefix on the
+			// next show pass over the committed whole block and strand the
+			// remaining reasoning (#15336).
+			this.#hiddenBlockSpend.clear();
 			this.#revealWhole(message);
 			this.#targetDirty = false;
 			this.#stopTimer();
