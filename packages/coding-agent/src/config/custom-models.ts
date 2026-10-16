@@ -1,6 +1,7 @@
 import type { Api, Model, ModelSpec, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getVariantAliasSources, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import {
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
@@ -179,6 +180,47 @@ export function normalizeSuppressedSelector(
 	// so persisted suppressions keyed by raw member ids still bind.
 	const aliasId = resolveVariantSelector(parsed.provider, parsed.id);
 	return `${parsed.provider}/${aliasId ?? parsed.id}`;
+}
+
+/**
+ * Stable one-way digest of the local header configuration that composes a
+ * provider's cached request headers. Persisted with caches so offline reads
+ * can tell whether the configured sources still reconstruct the omitted set.
+ * The digest never encodes the raw maps: header values may carry literal
+ * credentials that must not reach `models.db`.
+ */
+export function computeHeaderConfigFingerprint(
+	providerOverride: { headers?: Record<string, string>; authHeader?: boolean; apiKey?: unknown } | undefined,
+	modelOverrides: ReadonlyMap<string, { headers?: Record<string, string> }> | undefined,
+): string {
+	// Only effective header-resolution inputs: a headerless override (e.g. a
+	// context-window tweak for an unrelated model) or one whose declarations
+	// are all blank changes no cached row's header composition — the restore
+	// hook discards such maps too. Each key's active/nonblank state is pinned
+	// (the request path drops blank declarations), never its secret value:
+	// rotating a credential rebuilds the same layer.
+	const activeKeys = (headers: Record<string, string> | undefined): string[] | undefined =>
+		headers === undefined
+			? undefined
+			: Object.entries(headers)
+					.filter(([, declaration]) => declaration.trim().length > 0)
+					.map(([key]) => key)
+					.sort();
+	const models = [...(modelOverrides?.entries() ?? [])]
+		.map(([id, override]) => [id, activeKeys(override.headers)] as const)
+		.filter(([, keys]) => keys !== undefined && keys.length > 0)
+		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+	const providerActiveKeys = activeKeys(providerOverride?.headers);
+	const canonical = stableStringifyJson([
+		providerActiveKeys !== undefined && providerActiveKeys.length > 0 ? providerActiveKeys : null,
+		providerOverride?.authHeader === true,
+		// The resolver only folds the configured key into request headers when
+		// authHeader is enabled; moving it to AuthStorage otherwise rebuilds the
+		// same layer and must not invalidate restored rows.
+		providerOverride?.authHeader === true && providerOverride?.apiKey !== undefined,
+		models,
+	]);
+	return new Bun.CryptoHasher("sha256").update(canonical).digest("hex");
 }
 
 /**

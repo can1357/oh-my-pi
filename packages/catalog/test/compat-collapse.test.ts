@@ -9,6 +9,7 @@ import {
 	deriveThinkingPairFamilies,
 	getVariantAliasSources,
 	isCollapsedVariantSpec,
+	registerCollapsedVariantAliases,
 	resolveBareVariantSelector,
 	resolveVariantSelector,
 	reviewedCollapseTable,
@@ -1874,5 +1875,53 @@ describe("Devin GLM-5.2 collapse", () => {
 			high: "glm-5-2-1m",
 			xhigh: "glm-5-2-max-1m",
 		});
+	});
+});
+
+describe("alias replay replacement", () => {
+	const memberModel = (id: string, rawId: string) =>
+		buildModel({
+			id,
+			name: id,
+			api: "openai-completions",
+			provider: "p",
+			baseUrl: "https://example.test",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.High],
+				defaultLevel: Effort.High,
+				effortRouting: { high: rawId },
+			},
+		});
+
+	it("lets a later online cohort move a member id instead of losing first-write-wins", () => {
+		collapseBuiltVariants([memberModel("mover-row-a", "mover-raw")]);
+		expect(resolveBareVariantSelector("mover-raw")?.id).toBe("mover-row-a");
+
+		// A fresh cohort owns the member id now; replay with replacement so the
+		// selector follows it immediately instead of resolving to the old row.
+		collapseBuiltVariants([memberModel("mover-row-b", "mover-raw")], { replaceAliases: true });
+		expect(resolveBareVariantSelector("mover-raw")?.id).toBe("mover-row-b");
+	});
+
+	it("keeps first-write-wins within one replay batch", () => {
+		collapseBuiltVariants([memberModel("batch-first", "batch-raw"), memberModel("batch-second", "batch-raw")], {
+			replaceAliases: true,
+		});
+		expect(resolveBareVariantSelector("batch-raw")?.id).toBe("batch-first");
+	});
+
+	it("retires prior claims for an explicit empty replacement batch", () => {
+		collapseBuiltVariants([memberModel("empty-row", "empty-raw")], { replaceAliases: true, retireStale: true });
+		expect(resolveBareVariantSelector("empty-raw")?.id).toBe("empty-row");
+		// A successful cohort that drops every row retires the old claims too:
+		// the manager invokes this for providers absent from the fresh batch.
+		registerCollapsedVariantAliases("p", [], { replace: true, retireStale: true });
+		expect(resolveBareVariantSelector("empty-raw")).toBeUndefined();
 	});
 });

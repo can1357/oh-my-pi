@@ -19,7 +19,11 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
-import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
+import {
+	collapseBuiltVariants,
+	getReviewedVariantAliasSources,
+	registerCollapsedVariantAliases,
+} from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
 	clampCodexContextWindow,
 	clampsContextOverride,
@@ -57,6 +61,7 @@ import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResol
 import type { ConfigError, ConfigFile } from "./config-file";
 import {
 	buildCustomModelOverlay,
+	computeHeaderConfigFingerprint,
 	type CustomModelDefinitionLike,
 	type CustomModelOverlay,
 	finalizeCustomModel,
@@ -1505,9 +1510,215 @@ export class ModelRegistry {
 		return models;
 	}
 
-	#canRestoreConfiguredDiscoveryHeaders(providerId: string): boolean {
-		const override = this.#providerOverrides.get(providerId);
-		return override?.authHeader === true && override.apiKey !== undefined;
+	/**
+	 * Rebuild request headers for cache-omitted models from the same local
+	 * configuration that attached them at discovery time (see
+	 * `mergeDiscoveredModel`): per-model `modelOverrides` headers first, then
+	 * provider-level `headers`, with the provider's bearer key minted at the
+	 * request boundary when `authHeader` is set. Cached rows never persist
+	 * header values (#5780), so without this hook a model whose headers are
+	 * authored in models.yml would be dropped from every cache-only read even
+	 * though its headers remain in local configuration. Returns undefined when
+	 * none of those sources exist, keeping the drop-unsafe-rows behavior.
+	 */
+	#configuredDiscoveryHeaderRestore(
+		providerId: string,
+	):
+		| ((
+				model: Readonly<Model<Api>>,
+				cohort: readonly Readonly<Model<Api>>[],
+				headerConfigFingerprint?: string,
+		  ) => Pick<Model<Api>, "headers" | "resolveHeaders"> | undefined)
+		| undefined {
+		const providerOverride = this.#providerOverrides.get(providerId);
+		const modelOverrides = this.#modelOverrides.get(providerId);
+		let hasModelOverrideHeaders = false;
+		if (modelOverrides) {
+			for (const modelOverride of modelOverrides.values()) {
+				if (modelOverride.headers !== undefined) {
+					hasModelOverrideHeaders = true;
+					break;
+				}
+			}
+		}
+		const hasProviderHeaders = providerOverride?.headers !== undefined;
+		const hasBearerAuth = providerOverride?.authHeader === true && providerOverride.apiKey !== undefined;
+		if (!hasModelOverrideHeaders && !hasProviderHeaders && !hasBearerAuth) return undefined;
+		const liveRows = [
+			...this.#customModelOverlays,
+			...this.#runtimeModelOverlays,
+			...(getBundledModels(providerId as Parameters<typeof getBundledModels>[0]) as Model<Api>[]),
+		].filter(model => model.provider === providerId);
+		const liveModelIds = new Set(liveRows.map(model => model.id.toLowerCase()));
+		// A live row owns not only its id but also its collapsed-variant aliases
+		// (e.g. bundled cursor/claude-4-sonnet's raw claude-4-sonnet-thinking): a
+		// cached row recording the same member id must not claim its headers —
+		// unless that row is itself an owner (same-owner rebinds). Owners are
+		// sets: two current rows may intentionally share a member id.
+		const liveAliasOwners = new Map<string, Set<string>>();
+		for (const liveModel of liveRows) {
+			for (const source of [
+				...Object.values(liveModel.thinking?.effortRouting ?? {}),
+				...("requestModelId" in liveModel && liveModel.requestModelId ? [liveModel.requestModelId] : []),
+				...getReviewedVariantAliasSources(liveModel.provider, liveModel.id),
+			]) {
+				if (!source) continue;
+				// Selector ownership lowercases aliases; the owner maps must match
+				// or a differently-spelled cohort source slips past the owner.
+				const key = source.toLowerCase();
+				const owners = liveAliasOwners.get(key);
+				if (owners) owners.add(liveModel.id.toLowerCase());
+				else liveAliasOwners.set(key, new Set([liveModel.id.toLowerCase()]));
+			}
+		}
+		const bundledById = new Map(
+			((getBundledModels(providerId as Parameters<typeof getBundledModels>[0]) as Model<Api>[]) ?? []).map(model => [
+				model.id,
+				model,
+			]),
+		);
+		let restoredCohort: readonly Readonly<Model<Api>>[] | undefined;
+		let liveIds = liveModelIds;
+		let cohortAliasOwners = new Map<string, Set<string>>();
+		const currentConfigFingerprint = this.#headerConfigFingerprint(providerId);
+		return (model, cohort, cacheConfigFingerprint) => {
+			// A written fingerprint proves which local header sources composed the
+			// omitted rows. When it no longer matches, the current sources cannot
+			// be shown to rebuild the complete header set (e.g. a removed
+			// model-specific account header), so the row must refetch or drop
+			// rather than publish a request with headers silently missing. Rows
+			// written before fingerprints existed keep the legacy behavior.
+			if (cacheConfigFingerprint !== undefined && cacheConfigFingerprint !== currentConfigFingerprint) {
+				return undefined;
+			}
+			// Per-pass state keys off the cohort the manager hands us: it is the
+			// cache batch being restored (the fallback re-read after concurrent
+			// writes restores a different one). Replaying its persisted effort
+			// routing/requestModelId registers the retired-id aliases the override
+			// lookup below needs, without touching storage from this hook.
+			if (cohort !== restoredCohort) {
+				restoredCohort = cohort;
+				liveIds = new Set([...cohort.map(row => row.id.toLowerCase()), ...liveModelIds]);
+				// The global alias index cannot replace stale entries (an older
+				// omitted-header cache may already map a source to a row that no
+				// longer records it), so alias ownership comes from the cohort
+				// being restored and takes precedence over the index.
+				cohortAliasOwners = new Map();
+				for (const row of cohort) {
+					for (const source of [
+						...Object.values(row.thinking?.effortRouting ?? {}),
+						...(row.requestModelId ? [row.requestModelId] : []),
+						...getReviewedVariantAliasSources(row.provider, row.id),
+					]) {
+						if (!source) continue;
+						const key = source.toLowerCase();
+						const owners = cohortAliasOwners.get(key);
+						if (owners) owners.add(row.id.toLowerCase());
+						else cohortAliasOwners.set(key, new Set([row.id.toLowerCase()]));
+					}
+				}
+			}
+			const ownedElsewhere = (source: string): boolean => {
+				const normalized = source.toLowerCase();
+				const self = model.id.toLowerCase();
+				const liveOwners = liveAliasOwners.get(normalized);
+				if (liveOwners !== undefined) return !liveOwners.has(self);
+				const cohortOwners = cohortAliasOwners.get(normalized);
+				// No current owner at all: a stale alias with nobody recording it is
+				// a collision too, so an old alias-keyed override cannot rebind.
+				return cohortOwners === undefined || !cohortOwners.has(self);
+			};
+			let modelOverride = modelOverrides
+				? resolveModelOverrideWithAliases(
+						modelOverrides,
+						model,
+						(_provider, id) => liveIds.has(id.toLowerCase()) || ownedElsewhere(id),
+					)
+				: undefined;
+			// The alias index is first-write-wins, so an earlier cohort or catalog
+			// composition can own a remapped member id. The persisted routing and
+			// requestModelId of the row being restored are authoritative for its own
+			// member ids, so resolve those directly before giving up.
+			if (!modelOverride && modelOverrides) {
+				for (const source of [
+					...Object.values(model.thinking?.effortRouting ?? {}),
+					...(model.requestModelId ? [model.requestModelId] : []),
+				]) {
+					if (!source || source === model.id || liveIds.has(source.toLowerCase()) || ownedElsewhere(source))
+						continue;
+					const candidate = modelOverrides.get(source);
+					if (candidate?.headers !== undefined) {
+						modelOverride = candidate;
+						break;
+					}
+				}
+			}
+			// The bundled row's transport headers are a trusted static source (the
+			// manager's restore uses them the same way), so a cached row for a
+			// bundled model keeps both its bundled and its local headers. Bundled
+			// constants alone are not proof the omitted headers are reconstructable
+			// though: the configured manager writes with staticModels: [], so a
+			// removed per-model header would stay missing and the kept row would
+			// displace the bundled fallback. They only add onto a row a config
+			// source has already restored. An empty header map resolves to no
+			// request headers at all, so it is not a restoration source either.
+			const configSources = [modelOverride?.headers, providerOverride?.headers].filter(
+				(source): source is NonNullable<typeof source> =>
+					typeof source === "function"
+						? true
+						: source !== undefined && Object.values(source).some(declaration => declaration.trim().length > 0),
+			);
+			if (configSources.length === 0 && !hasBearerAuth) return undefined;
+			const requestModelIsReserved = model.requestModelId
+				? liveIds.has(model.requestModelId.toLowerCase()) || ownedElsewhere(model.requestModelId)
+				: false;
+			const bundledModel =
+				bundledById.get(model.id) ??
+				(model.requestModelId && !requestModelIsReserved ? bundledById.get(model.requestModelId) : undefined);
+			const headerSources = [bundledModel?.resolveHeaders ?? bundledModel?.headers, ...configSources].filter(
+				(source): source is NonNullable<typeof source> =>
+					typeof source === "function"
+						? true
+						: source !== undefined && Object.values(source).some(declaration => declaration.trim().length > 0),
+			);
+			const resolveHeaders = createConfigHeaderResolver(headerSources, {
+				authHeader: providerOverride?.authHeader,
+				apiKeyConfig: providerOverride?.apiKey,
+			});
+			return { resolveHeaders };
+		};
+	}
+
+	/**
+	 * Rebuilds the omitted request headers of a cached cohort from the local
+	 * configuration, honoring the persisted header-config fingerprint: rows
+	 * whose complete source set cannot be proven are excluded rather than
+	 * published with headers silently missing.
+	 */
+	#restoreCachedHeaderModels(
+		providerId: string,
+		cache: {
+			models: readonly Model<Api>[];
+			headerOmittedModelIds: readonly string[];
+			headerConfigFingerprint?: string;
+		},
+	): { models: Model<Api>[]; hasUnrestoredHeaders: boolean } {
+		const omittedHeaderIds = new Set(cache.headerOmittedModelIds);
+		const restoreConfiguredHeaders = this.#configuredDiscoveryHeaderRestore(providerId);
+		let hasUnrestoredHeaders = false;
+		const models = cache.models.flatMap(model => {
+			if (!omittedHeaderIds.has(model.id)) return [model];
+			const restored = restoreConfiguredHeaders?.(model, cache.models, cache.headerConfigFingerprint);
+			const restorable = restored?.headers !== undefined || restored?.resolveHeaders !== undefined;
+			if (!restorable) {
+				hasUnrestoredHeaders = true;
+				return [];
+			}
+			// Attach the rebuilt headers like the manager's restore does: later
+			// override passes may not re-find an alias-keyed source on their own.
+			return [{ ...model, ...restored }];
+		});
+		return { models, hasUnrestoredHeaders };
 	}
 
 	#loadCachedDiscoverableModels(): Model<Api>[] {
@@ -1526,16 +1737,45 @@ export class ModelRegistry {
 				continue;
 			}
 			const configStale = this.#isDiscoveryCacheOlderThanModelsConfig(cache.updatedAt);
-			// Cached rows never persist headers (#5780). A configured authHeader
-			// is re-derived asynchronously at the request boundary, so its rows are
+			// Cached rows never persist headers (#5780): rebuild each omitted row's
+			// headers from the same local configuration that attached them and keep
+			// only the rows that get them back. A configured authHeader is
+			// re-derived asynchronously at the request boundary, so its rows are
 			// safe to retain without baking a credential snapshot into the cache.
-			const canRestoreHeaders = this.#canRestoreConfiguredDiscoveryHeaders(providerConfig.provider);
-			const omittedHeaderIds = new Set(cache.headerOmittedModelIds);
-			const hasUnrestoredHeaders = omittedHeaderIds.size > 0 && !canRestoreHeaders;
-			const usableCacheModels =
-				omittedHeaderIds.size === 0 || canRestoreHeaders
-					? cache.models
-					: cache.models.filter(model => !omittedHeaderIds.has(model.id));
+			// Live rows own their collapsed-variant aliases (e.g. bundled
+			// cursor/claude-4-sonnet's raw claude-4-sonnet-thinking): claim them for
+			// their owner before the cache cohort registers, so the first-write-wins
+			// alias index cannot steal an alias from its intended owner. Collapse
+			// first: an automatic X/X-thinking pair only owns its raw member id once
+			// folded into the logical model.
+			const liveRowsForAlias = [
+				...this.#customModelOverlays
+					.filter(model => model.provider === providerConfig.provider)
+					.map(model => finalizeCustomModel(model, { useDefaults: true })),
+				...this.#runtimeModelOverlays
+					.filter(model => model.provider === providerConfig.provider)
+					.map(model => finalizeCustomModel(model, { useDefaults: true })),
+				...((getBundledModels(providerConfig.provider as Parameters<typeof getBundledModels>[0]) as Model<Api>[]) ??
+					[]),
+			].filter(model => model.provider === providerConfig.provider);
+			collapseBuiltVariants(liveRowsForAlias);
+			const { models: usableCacheModels, hasUnrestoredHeaders } = this.#restoreCachedHeaderModels(
+				providerConfig.provider,
+				cache,
+			);
+			// Register variant aliases only for retained rows: a rejected stale row
+			// must not claim its raw member id in the global selector index and make
+			// `provider/<alias>` select a model that is no longer published. Current
+			// rows supersede earlier cohort claims so a member id can move between
+			// rows across cache generations, but never across live owners: replay the
+			// collapsed live rows last so a cached row recording a live alias cannot
+			// steal it. The retained cohort is authoritative for its provider's
+			// claims: sources it no longer records are retired.
+			registerCollapsedVariantAliases(providerConfig.provider, usableCacheModels, {
+				replace: true,
+				retireStale: true,
+			});
+			collapseBuiltVariants(liveRowsForAlias, { replaceAliases: true });
 			const providerOverride = this.#providerOverrides.get(providerConfig.provider);
 			const restoredCacheModels = providerOverride
 				? usableCacheModels.map(model => this.#applyProviderTransportOverrideToModel(model, providerOverride))
@@ -2042,7 +2282,12 @@ export class ModelRegistry {
 				});
 				this.#lastDiscoveryWarnings.delete(providerConfig.provider);
 				return {
-					models: cached ? this.#normalizeDiscoverableModels(providerConfig, cached.models) : [],
+					models: cached
+						? this.#normalizeDiscoverableModels(
+								providerConfig,
+								this.#restoreCachedHeaderModels(providerConfig.provider, cached).models,
+							)
+						: [],
 					replaceRuntimeModels: false,
 				};
 			}
@@ -2072,20 +2317,14 @@ export class ModelRegistry {
 			}
 		};
 
-		const providerOverride = this.#providerOverrides.get(providerId);
-		const cachedHeaderResolver = this.#canRestoreConfiguredDiscoveryHeaders(providerId)
-			? createConfigHeaderResolver([providerOverride?.headers], {
-					authHeader: providerOverride?.authHeader,
-					apiKeyConfig: providerOverride?.apiKey,
-				})
-			: undefined;
 		const manager = createModelManager<Api>({
 			providerId,
 			staticModels: [],
-			restoreCachedHeaders: cachedHeaderResolver ? () => ({ resolveHeaders: cachedHeaderResolver }) : undefined,
+			restoreCachedHeaders: this.#configuredDiscoveryHeaderRestore(providerId),
 			cacheDbPath: this.#cacheDbPath,
 			cacheProviderId,
 			cacheTtlMs: 24 * 60 * 60 * 1000,
+			headerConfigFingerprint: this.#headerConfigFingerprint(providerId),
 			fetchDynamicModels,
 		});
 		const result = await manager.refresh(effectiveStrategy);
@@ -2473,7 +2712,11 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 	): Promise<BuiltInDiscoveryResult> {
 		try {
-			const manager = createModelManager({ ...options, cacheDbPath: this.#cacheDbPath });
+			const manager = createModelManager({
+				...options,
+				cacheDbPath: this.#cacheDbPath,
+				headerConfigFingerprint: this.#headerConfigFingerprint(options.providerId),
+			});
 			const result = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
 				manager.refresh(strategy),
 			);
@@ -2537,12 +2780,25 @@ export class ModelRegistry {
 		const overrides = this.#modelOverrides.get(provider);
 		if (!overrides || overrides.size === 0) return models;
 		let liveIds: Set<string> | null = null;
-		const hasLiveModel = (_provider: string, id: string) => {
-			liveIds ??= new Set(models.map(m => m.id));
-			return liveIds.has(id);
+		let aliasOwners: Map<string, Set<string>> | null = null;
+		const indexCatalog = () => {
+			if (liveIds) return;
+			liveIds = new Set(models.map(indexed => indexed.id.toLowerCase()));
+			// The global alias index keeps stale reverse entries, so alias
+			// ownership comes from the rows actually being projected: a raw id
+			// recorded by a different row may not rebind that row's override.
+			aliasOwners = this.#modelAliasOwners(models);
 		};
 		return models.map(model => {
-			const override = resolveModelOverrideWithAliases(overrides, model, hasLiveModel);
+			const override = resolveModelOverrideWithAliases(overrides, model, (modelProvider, id) => {
+				indexCatalog();
+				const normalized = id.toLowerCase();
+				if (liveIds?.has(normalized)) return true;
+				const owners = aliasOwners?.get(`${modelProvider.toLowerCase()}\u0000${normalized}`);
+				// An alias with no current owner is stale; rebinding it would revive
+				// an override the routing no longer authorizes.
+				return owners === undefined || !owners.has(model.id.toLowerCase());
+			});
 			if (!override) return model;
 			return this.#applyModelOverrideWithClamp(model, override);
 		});
@@ -2669,6 +2925,43 @@ export class ModelRegistry {
 		);
 	}
 
+	/**
+	 * Stable fingerprint of the local header configuration that composes a
+	 * provider's cached request headers. Persisted with caches so offline reads
+	 * can tell whether the configured sources still reconstruct the omitted set.
+	 */
+	#headerConfigFingerprint(provider: string): string {
+		return computeHeaderConfigFingerprint(this.#providerOverrides.get(provider), this.#modelOverrides.get(provider));
+	}
+
+	/**
+	 * Maps `provider source` of each collapsed-variant/request member id (and
+	 * reviewed extra alias) to the rows that record it. Keyed by provider: two
+	 * providers may reuse the same raw member id for different logical models.
+	 * A source keeps every current owner, so a row that records it may rebind
+	 * even when another row shares the member id.
+	 */
+	#modelAliasOwners(models: readonly Model<Api>[]): Map<string, Set<string>> {
+		const owners = new Map<string, Set<string>>();
+		for (const model of models) {
+			for (const source of [
+				...Object.values(model.thinking?.effortRouting ?? {}),
+				...(model.requestModelId ? [model.requestModelId] : []),
+				...getReviewedVariantAliasSources(model.provider, model.id),
+			]) {
+				if (!source) continue;
+				// Selector ownership lowercases aliases; normalize the composite key
+				// and owner ids the same way or casing variants cross owners.
+				const key = `${model.provider.toLowerCase()}\u0000${source.toLowerCase()}`;
+				const owner = model.id.toLowerCase();
+				const existing = owners.get(key);
+				if (existing) existing.add(owner);
+				else owners.set(key, new Set([owner]));
+			}
+		}
+		return owners;
+	}
+
 	#applyModelOverrides(models: Model<Api>[], overrides: Map<string, Map<string, ModelOverride>>): Model<Api>[] {
 		const customWindows = new Map<string, number>();
 		for (const overlays of [this.#customModelOverlays, this.#runtimeModelOverlays]) {
@@ -2685,14 +2978,21 @@ export class ModelRegistry {
 		const extendedContext = isExtendedContextEnabledFromSettings(this.#settings);
 		const compactionPoints = getModelCompactionPointsFromSettings(this.#settings);
 		let liveKeys: Set<string> | null = null;
-		const hasLiveModel = (provider: string, id: string) => {
-			liveKeys ??= new Set(models.map(m => `${m.provider}\u0000${m.id}`));
-			return liveKeys.has(`${provider}\u0000${id}`);
-		};
+		let aliasOwners: Map<string, Set<string>> | null = null;
 		return models.map(model => {
 			const providerOverrides = overrides.get(model.provider);
 			const override = providerOverrides
-				? resolveModelOverrideWithAliases(providerOverrides, model, hasLiveModel)
+				? resolveModelOverrideWithAliases(providerOverrides, model, (provider, id) => {
+						// The global alias index keeps stale reverse entries, so alias
+						// ownership comes from the rows actually being projected: a raw
+						// id recorded by no current row may not rebind this row's override.
+						const normalized = `${provider.toLowerCase()}\u0000${id.toLowerCase()}`;
+						liveKeys ??= new Set(models.map(m => `${m.provider.toLowerCase()}\u0000${m.id.toLowerCase()}`));
+						if (liveKeys.has(normalized)) return true;
+						aliasOwners ??= this.#modelAliasOwners(models);
+						const owners = aliasOwners.get(normalized);
+						return owners === undefined || !owners.has(model.id.toLowerCase());
+					})
 				: undefined;
 			const overridden = override ? this.#applyModelOverrideWithClamp(model, override) : model;
 			// Resolve configuration before selecting a window. A context-only

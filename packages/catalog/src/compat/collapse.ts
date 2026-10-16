@@ -1088,7 +1088,7 @@ function resolveCollapsedModelReference(
  */
 export function collapseVariants<TSpec extends VariantSpecLike>(
 	specs: readonly TSpec[],
-	opts?: { table?: VariantCollapseTable },
+	opts?: { table?: VariantCollapseTable; replaceAliases?: boolean; retireStale?: boolean },
 ): TSpec[] {
 	if (opts?.table !== undefined) return collapseWithTable(specs, opts.table);
 	const byProvider = new Map<string, TSpec[]>();
@@ -1114,7 +1114,10 @@ export function collapseVariants<TSpec extends VariantSpecLike>(
 		if (derived.length > 0) {
 			result = collapseWithTable(result, { families: derived });
 		}
-		registerCollapsedVariantAliases(provider, result);
+		registerCollapsedVariantAliases(provider, result, {
+			replace: opts?.replaceAliases === true,
+			retireStale: opts?.retireStale === true,
+		});
 		out.push(...result);
 	}
 	retargetCollapsedModelReferences(out);
@@ -1128,8 +1131,11 @@ export function collapseVariants<TSpec extends VariantSpecLike>(
  * logical specs so thinking wire defaults stay resolved. Untouched entries
  * pass through by reference.
  */
-export function collapseBuiltVariants<TApi extends Api>(models: readonly Model<TApi>[]): Model<TApi>[] {
-	const collapsed = collapseVariants(models);
+export function collapseBuiltVariants<TApi extends Api>(
+	models: readonly Model<TApi>[],
+	opts?: { replaceAliases?: boolean; retireStale?: boolean },
+): Model<TApi>[] {
+	const collapsed = collapseVariants(models, opts);
 	const inputRefs = new Set<Model<TApi>>(models);
 	return collapsed.map(model => (inputRefs.has(model) ? model : buildModel(projectModelSpec(model))));
 }
@@ -1169,17 +1175,52 @@ class VariantAliasIndex {
 		this.#templates = templates;
 	}
 
-	/** Register `from` → `to`; false when `from` is already claimed. */
-	add(from: string, to: string): boolean {
-		if (from === to || this.#forward.has(from.toLowerCase())) return false;
-		this.#forward.set(from.toLowerCase(), to);
+	/**
+	 * Register `from` → `to`; false when `from` is already claimed. With
+	 * `replace`, a later mapping supersedes an earlier one (its reverse entry is
+	 * dropped): cache cohorts replay current routing on every read and must be
+	 * able to move a member id between rows.
+	 */
+	add(from: string, to: string, replace = false): boolean {
+		if (from === to) return false;
+		const key = from.toLowerCase();
+		const existing = this.#forward.get(key);
+		if (existing !== undefined) {
+			if (!replace || existing === to) return false;
+			const previousSources = this.#reverse.get(existing);
+			if (previousSources) {
+				const keyOf = (source: string) => source.toLowerCase();
+				const at = previousSources.findIndex(source => keyOf(source) === key);
+				if (at >= 0) previousSources.splice(at, 1);
+				if (previousSources.length === 0) this.#reverse.delete(existing);
+			}
+		}
+		this.#forward.set(key, to);
 		const sources = this.#reverse.get(to);
 		if (sources) {
-			sources.push(from);
+			if (!sources.includes(from)) sources.push(from);
 		} else {
 			this.#reverse.set(to, [from]);
 		}
 		return true;
+	}
+
+	/**
+	 * Retire every dynamic claim whose source an authoritative replacement
+	 * batch does not record: a row that no longer routes a member id must stop
+	 * resolving `provider/<alias>` to it.
+	 */
+	retireUnclaimed(claimedSources: ReadonlySet<string>): void {
+		for (const [key, owner] of [...this.#forward]) {
+			if (claimedSources.has(key)) continue;
+			this.#forward.delete(key);
+			const sources = this.#reverse.get(owner);
+			if (sources) {
+				const at = sources.findIndex(source => source.toLowerCase() === key);
+				if (at >= 0) sources.splice(at, 1);
+				if (sources.length === 0) this.#reverse.delete(owner);
+			}
+		}
 	}
 
 	/** Register a family: its logical id plus every member and extra alias. */
@@ -1228,8 +1269,33 @@ const kAliasIndex = Symbol("compat-collapse.aliasIndex");
  * Persist aliases embedded in collapsed routing so generated catalog rows and
  * newly discovered families expose the same selector migrations as reviewed tables.
  */
-function registerCollapsedVariantAliases(provider: Provider, specs: readonly VariantSpecLike[]): void {
+export function registerCollapsedVariantAliases(
+	provider: Provider,
+	specs: readonly VariantSpecLike[],
+	options?: { replace?: boolean; retireStale?: boolean },
+): void {
 	const providerId = provider.toLowerCase();
+	const replace = options?.replace === true;
+	if (options?.retireStale === true) {
+		const claimedSources = new Set<string>();
+		for (const spec of specs) {
+			const routing = spec.thinking?.effortRouting;
+			if (routing) {
+				for (const effort of VARIANT_ROUTING_KEYS) {
+					const source = routing[effort];
+					if (source && source !== spec.id) claimedSources.add(source.toLowerCase());
+				}
+			}
+			if (spec.requestModelId && spec.requestModelId !== spec.id) {
+				claimedSources.add(spec.requestModelId.toLowerCase());
+			}
+		}
+		dynamicAliasIndexes.get(providerId)?.retireUnclaimed(claimedSources);
+	}
+	// Replace supersedes claims from earlier cohorts only: within one replay
+	// batch the ordinary collapse semantics stay first-write-wins, so a shared
+	// member id keeps pointing at the first row that records it.
+	const claimedThisBatch = new Set<string>();
 	let index = dynamicAliasIndexes.get(providerId);
 	for (const spec of specs) {
 		const routing = spec.thinking?.effortRouting;
@@ -1238,12 +1304,18 @@ function registerCollapsedVariantAliases(provider: Provider, specs: readonly Var
 		for (const effort of VARIANT_ROUTING_KEYS) {
 			const source = routing[effort];
 			if (!source || source === spec.id) continue;
+			if (claimedThisBatch.has(source.toLowerCase())) continue;
+			claimedThisBatch.add(source.toLowerCase());
 			index ??= new VariantAliasIndex();
-			registered = index.add(source, spec.id) || registered;
+			registered = index.add(source, spec.id, replace) || registered;
 		}
 		if (spec.requestModelId && spec.requestModelId !== spec.id) {
-			index ??= new VariantAliasIndex();
-			registered = index.add(spec.requestModelId, spec.id) || registered;
+			const source = spec.requestModelId;
+			if (!claimedThisBatch.has(source.toLowerCase())) {
+				claimedThisBatch.add(source.toLowerCase());
+				index ??= new VariantAliasIndex();
+				registered = index.add(source, spec.id, replace) || registered;
+			}
 		}
 		if (registered) index?.markFamily(spec.id);
 	}
@@ -1332,6 +1404,18 @@ export function getVariantAliasSources(provider: Provider, modelId: string): rea
 	if (!staticSources) return dynamicSources ?? [];
 	if (!dynamicSources) return staticSources;
 	return [...new Set([...staticSources, ...dynamicSources])];
+}
+
+/**
+ * Reviewed-table alias sources only (members and `extraAliases`), excluding
+ * runtime registrations that may carry stale cohort mappings. Ownership
+ * derivation uses these so a stale dynamic entry cannot re-attribute an alias
+ * a reviewed family still owns.
+ */
+export function getReviewedVariantAliasSources(provider: Provider, modelId: string): readonly string[] {
+	const providerId = provider.toLowerCase();
+	const table = reviewedCollapseTable(provider) ?? reviewedCollapseTable(providerId);
+	return table ? (getAliasIndex(table).sourcesOf(modelId) ?? []) : [];
 }
 
 function maxOrNull(values: ReadonlyArray<number | null>): number | null {

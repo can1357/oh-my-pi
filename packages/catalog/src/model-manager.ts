@@ -1,6 +1,6 @@
 import { logger, VERSION } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
-import { collapseBuiltVariants } from "./compat/collapse";
+import { collapseBuiltVariants, registerCollapsedVariantAliases } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
@@ -102,10 +102,22 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	/**
 	 * Reconstruct omitted request headers from authoritative local configuration
 	 * when no trusted static source remains. Return undefined to keep the row
-	 * unavailable. This hook must not perform I/O; attach `resolveHeaders` for
+	 * unavailable. `cohort` is the cache batch whose rows are being restored, so
+	 * implementations can key per-pass state (alias hydration, live-id guards) off
+	 * its identity. This hook must not perform I/O; attach `resolveHeaders` for
 	 * command-backed credentials that must wait until an actual request.
 	 */
-	restoreCachedHeaders?: (model: Readonly<Model>) => Pick<Model, "headers" | "resolveHeaders"> | undefined;
+	restoreCachedHeaders?: (
+		model: Readonly<Model>,
+		cohort: readonly Readonly<Model>[],
+		headerConfigFingerprint?: string,
+	) => Pick<Model, "headers" | "resolveHeaders"> | undefined;
+	/**
+	 * Fingerprint of the local header configuration; persisted with caches so a
+	 * later offline read can tell whether configured header sources still
+	 * compose the omitted rows the same way.
+	 */
+	headerConfigFingerprint?: string;
 	/** Optional dynamic endpoint fetcher. */
 	fetchDynamicModels?: () => Promise<readonly ModelSpec<TApi>[] | null>;
 	/** Optional stencil.so fallback hook. */
@@ -200,6 +212,7 @@ function restoreCachedModelHeaders<TApi extends Api>(
 	unrestorableHeaderModelIds: readonly string[],
 	legacyHeaderRestoreMarkers: boolean,
 	restorableHeaderFallback: Record<string, string> | undefined,
+	headerConfigFingerprint: string | undefined,
 	restoreCachedHeaders: ModelManagerOptions<TApi>["restoreCachedHeaders"],
 ): CachedHeaderRestoreResult<TApi> {
 	if (headerOmittedModelIds.length === 0) {
@@ -228,7 +241,7 @@ function restoreCachedModelHeaders<TApi extends Api>(
 			if (!unrestorable && restorableHeaderFallback) {
 				return { ...model, headers: { ...restorableHeaderFallback } };
 			}
-			const configured = restoreCachedHeaders?.(model);
+			const configured = restoreCachedHeaders?.(model, cachedModels, headerConfigFingerprint);
 			if (configured?.headers || configured?.resolveHeaders) return { ...model, ...configured };
 			unresolvedModelIds.add(model.id);
 			return model;
@@ -272,6 +285,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		cache?.unrestorableHeaderModelIds ?? [],
 		cache?.legacyHeaderRestoreMarkers ?? false,
 		restorableHeaderFallback,
+		cache?.headerConfigFingerprint,
 		options.restoreCachedHeaders,
 	);
 	const usableCachedModels = restoredCache.models.filter(model => !restoredCache.unresolvedModelIds.has(model.id));
@@ -401,7 +415,17 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	);
 	const models = collapseBuiltVariants(
 		authoritativeDynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
+		// A successful online cohort is authoritative for member-id placement:
+		// replay with replacement so a moved raw id stops resolving to the row
+		// that owned it before this refresh, and retire claims this cohort no
+		// longer records.
+		{ replaceAliases: anyRemoteFetchSucceeded, retireStale: anyRemoteFetchSucceeded },
 	);
+	if (anyRemoteFetchSucceeded && !models.some(model => model.provider === options.providerId)) {
+		// A successful cohort with zero rows for this provider still retires its
+		// prior dynamic claims: the endpoint no longer advertises those aliases.
+		registerCollapsedVariantAliases(options.providerId, [], { replace: true, retireStale: true });
+	}
 	const resolutionAuthoritative = !hasRemoteFetcher || remoteResolutionComplete || shouldUseFreshCacheAsAuthoritative;
 	const remoteUpdatedAt = anyRemoteFetchSucceeded ? now() : undefined;
 	if (shouldFetchFromNetwork) {
@@ -415,6 +439,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				dbPath,
 				staticModels,
 				restorableHeaderFallback,
+				options.headerConfigFingerprint,
 			);
 		} else {
 			// Remote fetch failed. Re-persist any prior catalog as a
@@ -427,13 +452,15 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			// model until it ages out. Writing nothing lets the next launch retry
 			// immediately (#10964).
 			const latestCache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
+			const preservedCache = latestCache ?? cache;
 			const latestRestoredCache = restoreCachedModelHeaders(
-				latestCache?.models ?? cache?.models ?? [],
+				preservedCache?.models ?? [],
 				staticModels,
-				latestCache?.headerOmittedModelIds ?? cache?.headerOmittedModelIds ?? [],
-				latestCache?.unrestorableHeaderModelIds ?? cache?.unrestorableHeaderModelIds ?? [],
-				latestCache?.legacyHeaderRestoreMarkers ?? cache?.legacyHeaderRestoreMarkers ?? false,
+				preservedCache?.headerOmittedModelIds ?? [],
+				preservedCache?.unrestorableHeaderModelIds ?? [],
+				preservedCache?.legacyHeaderRestoreMarkers ?? false,
 				restorableHeaderFallback,
+				preservedCache?.headerConfigFingerprint,
 				options.restoreCachedHeaders,
 			);
 			const latestUsableCacheModels = latestRestoredCache.models.filter(
@@ -465,6 +492,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 					dbPath,
 					staticModels,
 					restorableHeaderFallback,
+					options.headerConfigFingerprint,
 				);
 			}
 		}
