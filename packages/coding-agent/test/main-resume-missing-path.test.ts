@@ -16,6 +16,7 @@ import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { createSessionManager, runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -25,8 +26,11 @@ class ProcessExitSignal extends Error {
 		this.name = "ProcessExitSignal";
 	}
 }
+type StartupRecoveryDependencies = NonNullable<Parameters<typeof runRootCommand>[2]> & {
+	selectDirectory?: (cwd: string) => Promise<string | undefined>;
+};
 
-async function makeSessionFile(cwd: string, id: string): Promise<string> {
+async function makeSessionFile(cwd: string, id: string, recordedCwd = cwd): Promise<string> {
 	const file = path.join(cwd, `${id}.jsonl`);
 	await Bun.write(
 		file,
@@ -34,7 +38,7 @@ async function makeSessionFile(cwd: string, id: string): Promise<string> {
 			JSON.stringify({
 				type: "session",
 				id,
-				cwd,
+				cwd: recordedCwd,
 				timestamp: new Date().toISOString(),
 			}),
 			JSON.stringify({
@@ -82,13 +86,18 @@ describe("--resume <path> — missing path (#13928)", () => {
 			exitCodes.push(code ?? 0);
 			throw new ProcessExitSignal(code ?? 0);
 		}) as typeof process.exit);
-
+		let recoveryDirectoryPrompted = false;
 		let thrown: unknown;
+
 		try {
 			await runRootCommand(parsed, rawArgs, {
 				discoverAuthStorage: async () => authStorage,
 				settings: Settings.isolated({ "marketplace.autoUpdate": "off" }),
-			});
+				selectDirectory: async () => {
+					recoveryDirectoryPrompted = true;
+					return path.dirname(missingPath);
+				},
+			} as StartupRecoveryDependencies);
 		} catch (err) {
 			thrown = err;
 		} finally {
@@ -103,6 +112,7 @@ describe("--resume <path> — missing path (#13928)", () => {
 		// The defect's real damage: a session file materializing at a path the
 		// user believed was being read.
 		await expect(fsp.stat(missingPath)).rejects.toThrow();
+		expect(recoveryDirectoryPrompted).toBe(false);
 	}, 20_000);
 });
 
@@ -134,5 +144,53 @@ describe("--resume <path> — existing path (#13928)", () => {
 		} finally {
 			await manager.close();
 		}
+	});
+});
+
+describe("--resume <path> — transcript deletion during recovery", () => {
+	it("fails closed when the transcript disappears after directory selection", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-deleted-during-recovery-");
+		const sessionDir = tempDir.path();
+		const missingCwd = path.join(sessionDir, "deleted-worktree");
+		const selectedCwd = path.join(sessionDir, "selected");
+		await fsp.mkdir(selectedCwd);
+		const sessionId = "019ea530-0000-7000-0000-000000000001";
+		const sessionPath = await makeSessionFile(sessionDir, sessionId, missingCwd);
+		const originalIsTTY = process.stdin.isTTY;
+		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+		let selected = false;
+		try {
+			await expect(
+				createSessionManager(
+					{
+						resume: sessionPath,
+						sessionDir,
+						messages: [],
+						fileArgs: [],
+						unknownFlags: new Map(),
+						unrecognizedFlags: [],
+						invalidFlagValues: [],
+					},
+					sessionDir,
+					Settings.isolated({ "marketplace.autoUpdate": "off" }),
+					{
+						selectDirectory: async () => {
+							selected = true;
+							await fsp.unlink(sessionPath);
+							return selectedCwd;
+						},
+					},
+				),
+			).rejects.toMatchObject({
+				name: "SessionResolutionError",
+				message: `Session "${sessionPath}" not found.`,
+			});
+		} finally {
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+		}
+
+		expect(selected).toBe(true);
+		await expect(fsp.stat(sessionPath)).rejects.toThrow();
+		expect(await SessionManager.list(selectedCwd, sessionDir)).toHaveLength(0);
 	});
 });
