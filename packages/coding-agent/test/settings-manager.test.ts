@@ -33,7 +33,7 @@ import {
 	cfgStatusLineLeftSegments,
 	cfgSpellingAutocomplete,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
-import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
+import { cfgDisabledExtensions, cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import {
 	cfgProvidersMaxInFlightRequests,
 	cfgPowerSleepPrevention,
@@ -1373,6 +1373,28 @@ describe("Settings", () => {
 
 			expect(cfgEnabledModels.get(settings)).toEqual(["always-model", "other-model"]);
 			expect(cfgDisabledProviders.get(settings)).toEqual(["always-provider", "other-provider"]);
+		});
+
+		it("scopes disabledExtensions by directory and keeps scoped entries when one id is toggled", async () => {
+			const nestedDir = path.join(projectDir, "packages", "app");
+			const otherDir = path.join(tempDir.toString(), "other-project");
+			fs.mkdirSync(nestedDir, { recursive: true });
+			fs.mkdirSync(otherDir, { recursive: true });
+			const scopedEntry = { paths: [projectDir], extensions: ["mcp:work-server"] };
+			await writeSettings({ disabledExtensions: ["skill:always-off", scopedEntry] });
+
+			const settings = await Settings.init({ cwd: nestedDir, agentDir });
+			expect(cfgDisabledExtensions.get(settings)).toEqual(["skill:always-off", "mcp:work-server"]);
+
+			cfgDisabledExtensions.setMember(settings, "rule:noisy", { member: true });
+			cfgDisabledExtensions.setMember(settings, "skill:always-off", { member: false });
+			await settings.flush();
+
+			expect((await readSettings()).disabledExtensions).toEqual([scopedEntry, "rule:noisy"]);
+			expect(cfgDisabledExtensions.get(settings)).toEqual(["mcp:work-server", "rule:noisy"]);
+
+			await settings.reloadForCwd(otherDir);
+			expect(cfgDisabledExtensions.get(settings)).toEqual(["rule:noisy"]);
 		});
 
 		it("migrates legacy snapcompact system prompt booleans to scoped modes", async () => {

@@ -37,8 +37,10 @@ function fixture(): Fixture {
 	const extensions = [extension("skill", "alpha", "native"), extension("slash-command", "gamma", "claude")];
 	const runtime: ExtensionDashboardRuntime = {
 		getDisabledExtensions: () => disabled,
-		setDisabledExtensions: ids => {
-			disabled.splice(0, disabled.length, ...ids);
+		setExtensionDisabled: (id, isDisabled) => {
+			const index = disabled.indexOf(id);
+			if (isDisabled && index === -1) disabled.push(id);
+			if (!isDisabled && index !== -1) disabled.splice(index, 1);
 		},
 		getProviders: () => providers,
 		loadExtensions: async ids =>

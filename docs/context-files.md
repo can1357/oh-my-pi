@@ -281,7 +281,7 @@ Context-file ids have the form `context-file:<level>:<basename>`, where `<level>
 | `context-file:project:AGENTS.md`    | **Every** project-level `AGENTS.md`, at each directory depth the walk reaches — the id carries no depth. |
 | `context-file:user:AGENTS.md`       | Every user-level file named `AGENTS.md`, whichever provider supplied it.       |
 
-The match is on level and file name only, so one entry covers every provider that contributes a file of that name at that level, and a project entry cannot be narrowed to a single depth. When you need per-directory control, use a project `.omp/config.yml` in the subtree that should differ, or the path-scoped `disabledProviders` form above.
+The match is on level and file name only, so one entry covers every provider that contributes a file of that name at that level, and a project entry cannot be narrowed to a single depth. When you need per-directory control, use a path-scoped `disabledExtensions` entry (below), a project `.omp/config.yml` in the subtree that should differ, or the path-scoped `disabledProviders` form above.
 
 Disabling is not the same as shadowing, and the difference is visible: a disabled file is dropped before deduplication, so it does not claim its scope. **The file it used to shadow is loaded in its place.** In a project holding both `.claude/CLAUDE.md` and `AGENTS.md`, `CLAUDE.md` normally wins the depth-0 scope; disable `context-file:project:CLAUDE.md` and `AGENTS.md` becomes the project context rather than the scope falling empty. To leave the scope with no file at all, disable each candidate name.
 
@@ -290,7 +290,16 @@ Two everyday uses:
 - **Non-interactive runs.** A user-level context file written for your own interactive sessions is usually wrong for `-p` runs driven by another program, which arrive with their own instructions. Disabling it in a `--config` overlay keeps your interactive setup untouched.
 - **Delegated work.** When one agent drives another, the caller's own operating instructions travel into the callee's prompt as user-level context and can contradict the task it was actually given.
 
-`disabledExtensions` is not path-scoped: only `enabledModels` and `disabledProviders` accept the `path:` form. Like every array setting it is replaced, not merged, by a higher-precedence layer.
+`disabledExtensions` accepts the same path-scoped entries as `disabledProviders`, with the ids under `extensions`, so a file can be dropped only under one directory tree:
+
+```yaml
+disabledExtensions:
+  - path: ~/work
+    extensions:
+      - context-file:user:CLAUDE.md
+```
+
+Like every array setting it is replaced, not merged, by a higher-precedence layer. See [Path-scoped arrays](./settings.md#path-scoped-arrays).
 
 Browse the ids interactively with `/extensions`, which lists every discovered context file with its level, source, and current state, and toggles the same setting.
 

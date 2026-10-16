@@ -66,8 +66,13 @@ import {
 
 /** Runtime operations remain owned by the embedding application. */
 export interface ExtensionDashboardRuntime {
+	/** Disabled extension ids in effect for the current directory. */
 	getDisabledExtensions(): string[];
-	setDisabledExtensions(ids: string[]): void;
+	/**
+	 * Adds or removes one id in the persisted disabled list, leaving every other entry
+	 * (including path-scoped ones) untouched.
+	 */
+	setExtensionDisabled(id: string, disabled: boolean): void;
 	getProviders(): readonly ExtensionProvider[];
 	loadExtensions(disabledIds: string[]): Promise<Extension[]>;
 	toggleProvider(providerId: string): boolean;
@@ -451,21 +456,12 @@ export class ExtensionDashboard implements Component {
 			return;
 		}
 
-		const disabled = this.#runtime.getDisabledExtensions().slice();
-		if (enabled) {
-			const index = disabled.indexOf(extensionId);
-			if (index !== -1) {
-				disabled.splice(index, 1);
-				this.#runtime.setDisabledExtensions(disabled);
-			}
-		} else {
-			if (!disabled.includes(extensionId)) {
-				disabled.push(extensionId);
-				this.#runtime.setDisabledExtensions(disabled);
-			}
+		const disabled = this.#runtime.getDisabledExtensions();
+		if (disabled.includes(extensionId) !== !enabled) {
+			this.#runtime.setExtensionDisabled(extensionId, !enabled);
 		}
 
-		this.#applyDisabledExtensions(disabled);
+		this.#applyDisabledExtensions(this.#runtime.getDisabledExtensions());
 		void this.#refreshFromState();
 	}
 
@@ -489,12 +485,9 @@ export class ExtensionDashboard implements Component {
 		// state so a legacy `mcp:<name>` flag from before this routing change
 		// doesn't keep the server marked disabled after the user re-enables it
 		// via the UI.
-		const stored = this.#runtime.getDisabledExtensions().slice();
-		const had = stored.indexOf(extensionId);
-		if (enabled && had !== -1) {
-			stored.splice(had, 1);
-			this.#runtime.setDisabledExtensions(stored);
-			this.#applyDisabledExtensions(stored);
+		if (enabled && this.#runtime.getDisabledExtensions().includes(extensionId)) {
+			this.#runtime.setExtensionDisabled(extensionId, false);
+			this.#applyDisabledExtensions(this.#runtime.getDisabledExtensions());
 		}
 
 		await this.#refreshFromState();

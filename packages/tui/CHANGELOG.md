@@ -59,6 +59,10 @@
 - `ApprovalDialogComponent` takes a `draft` option that routes typing to the composer beneath it, so a message can be written while a tool call waits ([#15642](https://github.com/can1357/oh-my-pi/pull/15642) by [@H4vC](https://github.com/H4vC))
 - `ApprovalDialogComponent` takes a `fullPrompt` option that the expand key (`app.tools.expand`) or a Details button swaps in for the summarized prompt; it replaces `wrapDetails` ([#15642](https://github.com/can1357/oh-my-pi/pull/15642) by [@H4vC](https://github.com/H4vC))
 
+### Changed
+
+- `ExtensionDashboardRuntime` replaces `setDisabledExtensions(ids)` with `setExtensionDisabled(id, disabled)`, so toggling an item in the extensions dashboard changes only that id and keeps path-scoped `disabledExtensions` entries ([#15716](https://github.com/can1357/oh-my-pi/pull/15716) by [@chrisalexandrepena](https://github.com/chrisalexandrepena))
+
 ### Fixed
 
 - SVG fences in CRLF or CR-only assistant Markdown now render as figures instead of source code ([#15663](https://github.com/can1357/oh-my-pi/issues/15663)).

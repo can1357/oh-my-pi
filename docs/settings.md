@@ -309,7 +309,7 @@ Overlay paths are resolved relative to the process working directory (and `~` is
 
 ## Path-scoped arrays
 
-Three array settings — `enabledModels`, `enabledProviders`, and `disabledProviders` — accept path-scoped entries in addition to bare strings, so a single global config can behave differently per directory:
+Four array settings — `enabledModels`, `enabledProviders`, `disabledProviders`, and `disabledExtensions` — accept path-scoped entries in addition to bare strings, so a single global config can behave differently per directory:
 
 ```yaml
 enabledModels:
@@ -326,6 +326,12 @@ disabledProviders:
     providers:
       - anthropic
       - openai
+
+disabledExtensions:
+  - skill:legacy-helper # applies everywhere
+  - path: ~/work
+    extensions:
+      - mcp:personal-mail
 ```
 
 Bare string entries apply everywhere. A scoped entry applies when the current working directory **is** the configured path or is **under** it. `~` expands to your home directory and relative paths are resolved before matching.
@@ -334,10 +340,12 @@ Accepted **path** keys (any of them, combined): `path`, `paths`, `pathPrefix`, `
 
 Accepted **value** keys:
 
-- `models` (for `enabledModels`) or `providers` (for `enabledProviders` and `disabledProviders`)
+- `models` (for `enabledModels`), `providers` (for `enabledProviders` and `disabledProviders`), or `extensions` (for `disabledExtensions`)
 - `values` or `items` (for any setting)
 
 Only string values are kept; malformed scoped entries are ignored. Path scoping is resolved **after** the layer merge, so it reads the final effective array.
+
+Toggling an item in `/extensions` adds or removes only that bare string id, so scoped entries survive; an item disabled by a scoped entry stays disabled until you edit that entry.
 
 ## Provider and source disabling
 

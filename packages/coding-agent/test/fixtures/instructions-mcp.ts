@@ -12,9 +12,11 @@
  * Speaks newline-delimited JSON-RPC 2.0 (the wire format of `StdioTransport`):
  * one JSON object per line on stdin, one JSON response per line on stdout.
  * Only requests (objects with an `id`) get a response; notifications are
- * dropped. Server-to-client requests are never sent — the client side only
- * needs `initialize` + `tools/list` answered to register the tool and capture
- * any optional instructions.
+ * dropped. By default no server-to-client request is sent — the client side
+ * only needs `initialize` + `tools/list` answered to register the tool and
+ * capture any optional instructions. `ROOTS_ECHO_MODE` makes `tools/call` ask
+ * the client `roots/list` and answer with the first root's URI, so a test can
+ * observe which workspace root the client reports.
  *
  * Exported `SERVER_INSTRUCTIONS` is imported by the test for the assertion;
  * the server only starts when run as the entry module (`import.meta.main`), so
@@ -36,6 +38,8 @@ const CONTEXT_MODE_TOOL_NAME = "ctx_execute";
 export const BOUNDED_GUIDANCE_TOOL_COUNT = 65;
 /** Gives the default tool a schema whose rendered docs exceed the per-device prompt cap. */
 export const OVERSIZED_SCHEMA_MODE = "--oversized-schema";
+/** `tools/call` answers with the URI of the client's first `roots/list` root. */
+export const ROOTS_ECHO_MODE = "--roots-echo";
 
 function defaultInputSchema(): Record<string, unknown> {
 	if (!process.argv.includes(OVERSIZED_SCHEMA_MODE)) {
@@ -99,21 +103,41 @@ function buildResult(method: string): Record<string, unknown> {
 	}
 }
 
+/** The client's reply to a server-to-client request. */
+type JsonRpcResponse = { jsonrpc: "2.0"; id: string | number; result?: { roots?: Array<{ uri: string }> } };
+
 function startServer(): void {
 	const rl = readline.createInterface({ input: process.stdin });
+	const write = (message: object) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+	/** `tools/call` ids awaiting the client's `roots/list` reply, keyed by that request's id. */
+	const pendingRootCalls = new Map<string, string | number>();
+	let nextRootsRequest = 0;
 	rl.on("line", line => {
 		const trimmed = line.trim();
 		if (trimmed.length === 0) return;
-		let msg: JsonRpcRequest;
+		let msg: JsonRpcRequest | JsonRpcResponse;
 		try {
-			msg = JSON.parse(trimmed) as JsonRpcRequest;
+			msg = JSON.parse(trimmed) as JsonRpcRequest | JsonRpcResponse;
 		} catch {
+			return;
+		}
+		if (!("method" in msg)) {
+			const callId = pendingRootCalls.get(String(msg.id));
+			if (callId === undefined) return;
+			pendingRootCalls.delete(String(msg.id));
+			const uri = msg.result?.roots?.[0]?.uri ?? "";
+			write({ id: callId, result: { content: [{ type: "text", text: uri }], isError: false } });
 			return;
 		}
 		// Notifications (no `id`) get no response.
 		if (msg.id === undefined || msg.id === null) return;
-		const response = { jsonrpc: "2.0" as const, id: msg.id, result: buildResult(msg.method) };
-		process.stdout.write(`${JSON.stringify(response)}\n`);
+		if (msg.method === "tools/call" && process.argv.includes(ROOTS_ECHO_MODE)) {
+			const rootsId = `roots-${nextRootsRequest++}`;
+			pendingRootCalls.set(rootsId, msg.id);
+			write({ id: rootsId, method: "roots/list" });
+			return;
+		}
+		write({ id: msg.id, result: buildResult(msg.method) });
 	});
 	rl.on("close", () => process.exit(0));
 }
