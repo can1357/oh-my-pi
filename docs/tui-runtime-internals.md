@@ -124,6 +124,8 @@ Fullscreen overlays use the alternate buffer and never append history. Normal ov
 
 Inline image data and purge commands are emitted before row placements. Active images may remain graphical in the viewport; finalized history uses textual fallback unless the protocol can account for stable physical rows.
 
+SIXEL attachment-chip thumbnails are emitted at their interior cell origin and cached across editor repaints. When a thumbnail leaves the band, the chip component positions the cursor at that origin and sends Kitty graphics `a=d,d=c`; Konsole 26.04 removes the overlapping SIXEL placement without erasing text or non-overlapping images.
+
 ## Native surfaces
 
 A supported Tern Surface Protocol handshake bypasses the row/history renderer.

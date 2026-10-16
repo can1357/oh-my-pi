@@ -83,7 +83,7 @@ describe("AttachmentChipsBand SIXEL thumbnail", () => {
 		}
 	});
 
-	it("reuses the cached thumbnail on repaint instead of re-encoding", async () => {
+	it("reuses the cached thumbnail across typing repaints without re-encoding", async () => {
 		let encoding: Promise<string> | undefined;
 		const encode = spyOn(natives, "encodeSixelAsync").mockImplementation(() => {
 			encoding = Promise.resolve(FAKE_SIXEL);
@@ -98,7 +98,34 @@ describe("AttachmentChipsBand SIXEL thumbnail", () => {
 			const first = band.render(80)[5];
 			const second = band.render(80)[5];
 			expect(second).toBe(first);
+			for (let i = 0; i < 10; i++) {
+				editor.setText(`${editor.getText()}x`);
+				const frame = band.render(80);
+				expect(frame[5]).toContain(FAKE_SIXEL);
+				expect(encode).toHaveBeenCalledTimes(1);
+			}
 			expect(encode).toHaveBeenCalledTimes(1);
+		} finally {
+			encode.mockRestore();
+		}
+	});
+	it("repaints the former chip rows once when the last attachment is cleared", async () => {
+		let encoding: Promise<string> | undefined;
+		const encode = spyOn(natives, "encodeSixelAsync").mockImplementation(() => {
+			encoding = Promise.resolve(FAKE_SIXEL);
+			return encoding;
+		});
+		try {
+			const { editor, band } = makeBand();
+			stageImage(editor);
+			band.render(80);
+			await encoding;
+			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
+			editor.clearDraft();
+			const cleared = band.render(80);
+			expect(cleared).toHaveLength(6);
+			expect(cleared[5]).toContain("a=d,d=c");
+			expect(band.render(80)).toEqual([]);
 		} finally {
 			encode.mockRestore();
 		}

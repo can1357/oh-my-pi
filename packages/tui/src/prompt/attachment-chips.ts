@@ -90,6 +90,8 @@ export class AttachmentChipsBand implements Component {
 	#native:
 		| { chips: readonly ComposerChipDescriptor[]; node: NativeNode; images: ReadonlyMap<ImageContent, NativeNode> }
 		| undefined;
+	#lastSixelPlacements: Array<{ x: number; cols: number; rows: number }> = [];
+	#renderSixelPlacements: Array<{ x: number; cols: number; rows: number }> = [];
 
 	/**
 	 * A wrapping `row` of chip `card`s (`omp.composer.chip`) titled with the
@@ -148,7 +150,14 @@ export class AttachmentChipsBand implements Component {
 
 	render(width: number): readonly string[] {
 		const chips = this.editor.composerChips();
-		if (chips.length === 0) return [];
+		if (chips.length === 0) {
+			if (this.#lastSixelPlacements.length === 0) return [];
+			const clearRows = Array.from({ length: 6 }, () => "");
+			clearRows[5] = this.#lastSixelPlacements.map(placement => this.#clearSixelAt(placement)).join("");
+			this.#lastSixelPlacements = [];
+			return clearRows;
+		}
+		this.#renderSixelPlacements = [];
 		const rows = ["", "", "", "", "", ""];
 		const gap = " ".repeat(CARD_GAP);
 		let x = 0;
@@ -159,6 +168,17 @@ export class AttachmentChipsBand implements Component {
 			for (let r = 0; r < rows.length; r++) rows[r] += (x > 0 ? gap : "") + card[r];
 			x += (x > 0 ? CARD_GAP : 0) + CARD_COLS;
 		}
+		for (const placement of this.#lastSixelPlacements) {
+			if (
+				!this.#renderSixelPlacements.some(
+					current =>
+						current.x === placement.x && current.cols === placement.cols && current.rows === placement.rows,
+				)
+			) {
+				rows[5] += this.#clearSixelAt(placement);
+			}
+		}
+		this.#lastSixelPlacements = this.#renderSixelPlacements;
 		return rows;
 	}
 
@@ -195,7 +215,13 @@ export class AttachmentChipsBand implements Component {
 	 *  cursor, then the border text. The leading SGR reset keeps the line from matching the
 	 *  direct-placement lift pattern, which would erase the rows above. Cached on the thumbnail
 	 *  while the placement and border text are unchanged. */
+	#clearSixelAt(placement: { x: number; cols: number; rows: number }): string {
+		const leftPad = Math.floor((INNER_COLS - placement.cols) / 2);
+		const topPad = Math.floor((INNER_ROWS - placement.rows) / 2);
+		return `\x1b[0m\x1b7\x1b[${INNER_ROWS - topPad}A\x1b[${placement.x + 2 + leftPad}G\x1b_Ga=d,d=c,q=2\x1b\\\x1b8`;
+	}
 	#sixelBottomRow(thumb: SixelThumb & { sequence: string }, x: number, border: string): string {
+		this.#renderSixelPlacements.push({ x, cols: thumb.cols, rows: thumb.rows });
 		const rowKey = `${x}\0${border}`;
 		if (thumb.row?.key === rowKey) return thumb.row.text;
 		const leftPad = Math.floor((INNER_COLS - thumb.cols) / 2);
@@ -219,7 +245,12 @@ export class AttachmentChipsBand implements Component {
 		const key = `${fit.widthPx}x${fit.heightPx}`;
 		const entry = kSixelThumbs.get(image);
 		if (entry === undefined || entry.key !== key) {
-			const pending: SixelThumb = { key, sequence: undefined, cols: fit.cols, rows: fit.rows };
+			const pending: SixelThumb = {
+				key,
+				sequence: undefined,
+				cols: fit.cols,
+				rows: fit.rows,
+			};
 			kSixelThumbs.set(image, pending);
 			encodeSixelAsync(new Uint8Array(Buffer.from(image.data, "base64")), fit.widthPx, fit.heightPx).then(
 				sequence => this.#settleSixel(image, pending, sequence),
