@@ -116,6 +116,15 @@ describe("BashExecutionComponent PTY SIXEL", () => {
 		expect(row).toMatch(/\x1b\[38;5;1m/);
 		const plain = row!.replace(/\x1b\[[0-9;]*m/gu, "");
 		expect(plain).toBe(`red${SIXEL}plain`);
+		// The tail inherits the row's active style across the splice: `plain` was
+		// emitted with the red SGR still open, so it must stay red. Styling the
+		// tail from the base color alone dropped the run that was active where
+		// the payload split the row.
+		const payloadIndex = row!.indexOf(SIXEL);
+		expect(payloadIndex).toBeGreaterThan(-1);
+		const afterPayload = row!.slice(payloadIndex + SIXEL.length);
+		expect(afterPayload).toMatch(/\x1b\[38;5;1m/);
+		expect(afterPayload.indexOf("\x1b[38;5;1m")).toBeLessThan(afterPayload.indexOf("plain"));
 	});
 
 	it("keeps two frames on one row in their stream order", async () => {
