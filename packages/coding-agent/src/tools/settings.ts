@@ -909,6 +909,25 @@ export const cfgAsyncMaxJobs = register({
 	default: 100,
 });
 
+export const cfgWaitMaxMs = register({
+	id: "wait.maxMs",
+	type: "number",
+	default: 30 * 60_000,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Wait Safety Cap",
+		description:
+			"Longest a `wait` call blocks on still-running background work before it returns a snapshot, in milliseconds. Set to 0 to wait until a result, a message, or a steering interrupt.",
+		options: [
+			{ value: "0", label: "No cap" },
+			{ value: "1800000", label: "30 minutes" },
+			{ value: "3600000", label: "1 hour" },
+			{ value: "7200000", label: "2 hours" },
+		],
+	},
+});
+
 export const cfgToolsXdev = register({
 	id: "tools.xdev",
 	type: "boolean",
