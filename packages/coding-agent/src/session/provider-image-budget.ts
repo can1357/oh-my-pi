@@ -10,12 +10,15 @@ import type {
 	ToolResultProviderMetadata,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { reachesOfficialEndpoint } from "@oh-my-pi/pi-ai";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
-import { resolveInlineImageByteBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { capFrameDataBytes, frameDataBytesBudget, providerImageBudget } from "@oh-my-pi/snapcompact";
+import {
+	capFrameDataBytes,
+	frameDataBytesBudget,
+	providerImageBudget,
+	providerImageByteBudget,
+} from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { imageDecodeFailureReason } from "@oh-my-pi/pi-tui/chat/image-loading";
 
@@ -140,12 +143,12 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
 }
 
 /**
- * Drops oldest inline image blocks so their base64 fits the deployment's request-body budget.
+ * Drops oldest inline image blocks so their base64 fits the provider's request-body budget.
  * Runs after URL/provider-file decoration: blocks the provider receives as references carry no inline bytes.
  */
 export function clampProviderContextImageBytes(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
-	const byteBudget = resolveInlineImageByteBudget(model, reachesOfficialEndpoint(model));
+	const byteBudget = providerImageByteBudget(model);
 	if (byteBudget === undefined) return context;
 	let inlineBytes = 0;
 	for (const message of context.messages) {

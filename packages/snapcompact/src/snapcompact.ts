@@ -534,13 +534,34 @@ export const FRAME_DATA_BYTES_ESTIMATE = 170_000;
  *  ~11 MB JSON payload on every turn. */
 export const DEFAULT_FRAME_DATA_BYTES_BUDGET = 3_000_000;
 
+let configuredImageBudgets: Readonly<Record<string, number>> = {};
+let configuredImageByteBudgets: Readonly<Record<string, number>> = {};
+
+/** Installs user-configured per-request image-count caps by provider id; they replace the catalog budget. */
+export function configureProviderImageBudgets(budgets: Readonly<Record<string, number>>): void {
+	configuredImageBudgets = budgets;
+}
+
+/** Installs user-configured per-request inline-image byte caps by provider id; they replace the catalog budget. */
+export function configureProviderImageByteBudgets(budgets: Readonly<Record<string, number>>): void {
+	configuredImageByteBudgets = budgets;
+}
+
+/** Base64 inline-image bytes one request to `model` may carry: the configured cap for its provider, else the
+ *  catalog `inline-image-byte-budget` while the request reaches the official endpoint. `undefined` is unbounded. */
+export function providerImageByteBudget(model: Model | undefined): number | undefined {
+	if (!model) return undefined;
+	if (Object.hasOwn(configuredImageByteBudgets, model.provider)) return configuredImageByteBudgets[model.provider];
+	return resolveInlineImageByteBudget(model, reachesOfficialEndpoint(model));
+}
+
 /** Base64 image bytes the archive frames riding every request to `model` may
- *  carry: half the deployment's inline-image byte budget, else
+ *  carry: half of {@link providerImageByteBudget}, else
  *  {@link DEFAULT_FRAME_DATA_BYTES_BUDGET}. Frames are the oldest images in the
  *  request, so the send-time byte clamp evicts them first; the other half stays
  *  free for live screenshots. */
 export function frameDataBytesBudget(model: Model | undefined): number {
-	const inlineBudget = model ? resolveInlineImageByteBudget(model, reachesOfficialEndpoint(model)) : undefined;
+	const inlineBudget = providerImageByteBudget(model);
 	return inlineBudget === undefined ? DEFAULT_FRAME_DATA_BYTES_BUDGET : Math.floor(inlineBudget / 2);
 }
 
@@ -579,12 +600,12 @@ export function frameDataBytes(frames: readonly Pick<Frame, "data">[]): number {
 export const DEFAULT_PROVIDER_IMAGE_BUDGET = 5;
 
 /** Most images one request to `model`'s deployment may carry, archive,
- *  system-prompt and tool-result imaging combined. */
+ *  system-prompt and tool-result imaging combined: the configured cap for its
+ *  provider, else the catalog budget, else the floor. */
 export function providerImageBudget(model: Model | undefined): number {
-	return (
-		(model ? resolveImageCountBudget(model, reachesOfficialEndpoint(model)) : undefined) ??
-		DEFAULT_PROVIDER_IMAGE_BUDGET
-	);
+	if (!model) return DEFAULT_PROVIDER_IMAGE_BUDGET;
+	if (Object.hasOwn(configuredImageBudgets, model.provider)) return configuredImageBudgets[model.provider]!;
+	return resolveImageCountBudget(model, reachesOfficialEndpoint(model)) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
 }
 
 /** Archive frame cap for `model`: its image budget, never above {@link MAX_FRAMES_DEFAULT}. */

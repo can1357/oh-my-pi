@@ -9,6 +9,7 @@ import {
 	clampProviderContextImageBytes,
 	clampProviderContextImages,
 } from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
+import { configureProviderImageBudgets, configureProviderImageByteBudgets } from "@oh-my-pi/snapcompact";
 
 const UMANS_MODEL = buildModel({
 	id: "umans-glm-5.2",
@@ -497,6 +498,34 @@ describe("provider context image budgets", () => {
 		expect(clampProviderContextImageBytes(context, ANTHROPIC_PROXY_MODEL)).toBe(context);
 		expect(clampProviderContextImageBytes(context, { ...ANTHROPIC_MODEL, api: "openai-responses" })).toBe(context);
 		expect(clampProviderContextImageBytes(context, { ...ANTHROPIC_MODEL, input: ["text"] })).toBe(context);
+	});
+
+	it("enforces configured count and byte caps for a gateway the catalog does not know", () => {
+		const gateway = buildModel({ ...ANTHROPIC_SPEC, provider: "my-gateway", baseUrl: "https://gateway.example" });
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: Array.from({ length: 8 }, (_, index) => ({
+				role: "user" as const,
+				content: [text(`turn-${index}`), image(String(index).repeat(10))],
+				timestamp: index,
+			})),
+		};
+		expect(imageData(clampProviderContextImages(context, gateway))).toHaveLength(5);
+		expect(clampProviderContextImageBytes(context, gateway)).toBe(context);
+		try {
+			configureProviderImageBudgets({ "my-gateway": 90 });
+			configureProviderImageByteBudgets({ "my-gateway": 35 });
+			expect(clampProviderContextImages(context, gateway)).toBe(context);
+			const clamped = clampProviderContextImageBytes(context, gateway);
+			expect(imageData(clamped)).toEqual(["5".repeat(10), "6".repeat(10), "7".repeat(10)]);
+			expect(textData(clamped)).toHaveLength(8);
+			// Other providers keep their catalog budgets.
+			expect(clampProviderContextImageBytes(context, ANTHROPIC_MODEL)).toBe(context);
+		} finally {
+			configureProviderImageBudgets({});
+			configureProviderImageByteBudgets({});
+		}
 	});
 
 	it.each([

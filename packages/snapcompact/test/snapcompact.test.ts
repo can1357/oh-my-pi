@@ -1639,6 +1639,30 @@ describe("archive helpers", () => {
 			snapcompact.providerImageBudget(getBundledModel("anthropic", "claude-haiku-4-5")),
 		);
 	});
+
+	it("lets a configured cap replace the catalog budgets for its provider id only", () => {
+		const opus = getBundledModel("anthropic", "claude-opus-5-5");
+		const ramp = buildModel({ ...toModelSpec(opus), provider: "ramp" });
+		const prototypeKey = buildModel({ ...toModelSpec(opus), provider: "constructor" });
+		try {
+			snapcompact.configureProviderImageBudgets({ ramp: 90, anthropic: 50 });
+			snapcompact.configureProviderImageByteBudgets({ ramp: 7_000_000, anthropic: 4_000_000 });
+			expect(snapcompact.providerImageBudget(ramp)).toBe(90);
+			expect(snapcompact.providerFrameBudget(ramp)).toBe(snapcompact.MAX_FRAMES_DEFAULT);
+			expect(snapcompact.providerImageBudget(opus)).toBe(50);
+			expect(snapcompact.providerImageByteBudget(ramp)).toBe(7_000_000);
+			expect(snapcompact.frameDataBytesBudget(ramp)).toBe(3_500_000);
+			expect(snapcompact.frameDataBytesBudget(opus)).toBe(2_000_000);
+			expect(snapcompact.providerImageBudget(prototypeKey)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+			expect(snapcompact.providerImageByteBudget(prototypeKey)).toBeUndefined();
+		} finally {
+			snapcompact.configureProviderImageBudgets({});
+			snapcompact.configureProviderImageByteBudgets({});
+		}
+		expect(snapcompact.providerImageBudget(ramp)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+		expect(snapcompact.providerImageByteBudget(ramp)).toBeUndefined();
+		expect(snapcompact.providerImageBudget(opus)).toBe(600);
+	});
 });
 
 describe("dimStopwords", () => {

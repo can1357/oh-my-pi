@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `configureProviderImageBudgets` and `configureProviderImageByteBudgets` for per-provider overrides of the catalog image budgets, and `providerImageByteBudget(model)`; `providerImageBudget` and `frameDataBytesBudget` honor the overrides ([#7549](https://github.com/can1357/oh-my-pi/pull/7549) by [@shgew](https://github.com/shgew))
+
 ## [18.10.4] - 2026-10-13
 
 ### Added

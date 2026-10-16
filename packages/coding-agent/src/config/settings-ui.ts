@@ -9,7 +9,7 @@ import { cfgPlanAutosave, cfgPlanEnabled } from "../plan-mode/settings";
 import {
 	cfgRetryUsageAwareFallback,
 	cfgDefaultThinkingLevel,
-	normalizeProviderMaxInFlightRequests,
+	normalizeProviderLimits,
 	validateProviderMaxInFlightRequests,
 } from "../session/settings";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
@@ -81,7 +81,7 @@ export function createSettingsHost(): SettingsHost {
 		get: path => lookup(path)?.layered(settings),
 		set: (path, value) => resolve(path).set(settings, value),
 		unset: path => resolve(path).unset(settings),
-		normalizeProviderLimits: normalizeProviderMaxInFlightRequests,
+		normalizeProviderLimits,
 		validateProviderLimits: validateProviderMaxInFlightRequests,
 	};
 }

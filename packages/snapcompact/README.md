@@ -64,7 +64,7 @@ const result = await compact(preparation, { model });
 - **Rendering**: `render`, `renderMany`, `frames`, `geometry`
 - **Shapes**: `SHAPES`, `SHAPE_VARIANTS`, `resolveShape`, `resolveShapeForText`, `idealShapeVariant`, `isShape`, `isShapeVariantName`
 - **Text**: `serializeConversation`, `normalize`, `scanRenderability`, `renderabilityProbeText`, `dimStopwords`, `wrap`
-- **Budgets**: `providerImageBudget`, `frameDataBytesBudget`, `MAX_FRAMES_DEFAULT`, `FRAME_TOKEN_ESTIMATE`, `frameBilling`, `frameTokens`, `frameBillingKey`, `plannedFrameTokens`, `HQ_EDGE_FRAMES`
+- **Budgets**: `providerImageBudget`, `providerImageByteBudget`, `configureProviderImageBudgets`, `configureProviderImageByteBudgets`, `frameDataBytesBudget`, `MAX_FRAMES_DEFAULT`, `FRAME_TOKEN_ESTIMATE`, `frameBilling`, `frameTokens`, `frameBillingKey`, `plannedFrameTokens`, `HQ_EDGE_FRAMES`
 - **File ops**: `createFileOps`, `computeFileLists`, `upsertFileOperations`
 
 ## References

@@ -23,6 +23,7 @@ import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } fr
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
+import { configureProviderImageBudgets, configureProviderImageByteBudgets } from "@oh-my-pi/snapcompact";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
@@ -130,8 +131,8 @@ function isPositiveLimit(limit: unknown): limit is number {
 	return typeof limit === "number" && Number.isFinite(limit) && limit > 0;
 }
 
-/** Per-provider request limits floored to whole numbers ≥ 1; non-positive or non-numeric entries are dropped. */
-export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
+/** Per-provider limits floored to whole numbers ≥ 1; non-positive or non-numeric entries are dropped. */
+export function normalizeProviderLimits(value: unknown): Record<string, number> {
 	const normalized: Record<string, number> = {};
 	if (!isLimitRecord(value)) return normalized;
 	for (const provider in value) {
@@ -141,20 +142,27 @@ export function normalizeProviderMaxInFlightRequests(value: unknown): Record<str
 	return normalized;
 }
 
+/** Published under `./session/*` before image limits shared it; kept for SDK consumers. */
+export const normalizeProviderMaxInFlightRequests = normalizeProviderLimits;
+
 /**
- * Per-provider request limits floored to whole numbers ≥ 1.
+ * Per-provider limits floored to whole numbers ≥ 1.
  *
  * @throws Error naming every provider whose limit is not a positive number.
  */
-export function validateProviderMaxInFlightRequests(value: unknown): Record<string, number> {
+function validatePositiveLimits(value: unknown, label: string): Record<string, number> {
 	if (isLimitRecord(value)) {
 		const invalidProviders: string[] = [];
 		for (const provider in value) if (!isPositiveLimit(value[provider])) invalidProviders.push(provider);
 		if (invalidProviders.length > 0) {
-			throw new Error(`Provider request limits must be positive numbers: ${invalidProviders.join(", ")}`);
+			throw new Error(`${label} must be positive numbers: ${invalidProviders.join(", ")}`);
 		}
 	}
-	return normalizeProviderMaxInFlightRequests(value);
+	return normalizeProviderLimits(value);
+}
+
+export function validateProviderMaxInFlightRequests(value: unknown): Record<string, number> {
+	return validatePositiveLimits(value, "Provider request limits");
 }
 
 export const cfgProvidersMaxInFlightRequests = register({
@@ -172,7 +180,49 @@ export const cfgProvidersMaxInFlightRequests = register({
 	},
 });
 effect(cfgProvidersMaxInFlightRequests, limits =>
-	configureProviderMaxInFlightRequests(normalizeProviderMaxInFlightRequests(limits)),
+	configureProviderMaxInFlightRequests(normalizeProviderLimits(limits)),
+);
+
+function validateProviderMaxImagesPerRequest(value: unknown): Record<string, number> {
+	return validatePositiveLimits(value, "Provider image limits");
+}
+
+export const cfgProvidersMaxImagesPerRequest = register({
+	id: "providers.maxImagesPerRequest",
+	type: "record",
+	default: EMPTY_NUMBER_RECORD,
+	validate: validateProviderMaxImagesPerRequest,
+	normalize: validateProviderMaxImagesPerRequest,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Max Images Per Request",
+		description:
+			"Maximum images one request may carry per provider id (for example a custom gateway id), replacing the catalog budget for that provider. Omitted providers use the catalog budget, or 5 when the catalog has none.",
+	},
+});
+effect(cfgProvidersMaxImagesPerRequest, budgets => configureProviderImageBudgets(normalizeProviderLimits(budgets)));
+
+function validateProviderMaxImageBytesPerRequest(value: unknown): Record<string, number> {
+	return validatePositiveLimits(value, "Provider image byte limits");
+}
+
+export const cfgProvidersMaxImageBytesPerRequest = register({
+	id: "providers.maxImageBytesPerRequest",
+	type: "record",
+	default: EMPTY_NUMBER_RECORD,
+	validate: validateProviderMaxImageBytesPerRequest,
+	normalize: validateProviderMaxImageBytesPerRequest,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Max Image Bytes Per Request",
+		description:
+			"Maximum total base64 image bytes one request may carry per provider id, for gateways that reject large request bodies; the oldest images are dropped first and snapcompact archives get half. Replaces the catalog budget for that provider. Omitted providers use the catalog budget on official endpoints and are unbounded elsewhere.",
+	},
+});
+effect(cfgProvidersMaxImageBytesPerRequest, budgets =>
+	configureProviderImageByteBudgets(normalizeProviderLimits(budgets)),
 );
 
 export const cfgImagesDescribeForTextModels = register({

@@ -21,6 +21,7 @@ import MODEL_PRIO from "../src/priority.json" with { type: "json" };
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getAgentDbPath, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
+import { frameDataBytesBudget, providerImageBudget, providerImageByteBudget } from "@oh-my-pi/snapcompact";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 import {
@@ -35,6 +36,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import {
+	cfgProvidersMaxImageBytesPerRequest,
+	cfgProvidersMaxImagesPerRequest,
 	cfgProvidersMaxInFlightRequests,
 	cfgPowerSleepPrevention,
 	cfgFeaturesUnexpectedStopDetection,
@@ -2778,6 +2781,38 @@ describe("Settings", () => {
 				await expect(
 					Settings.init({ cwd: projectDir, agentDir, inMemory: true, configFiles: [overlayPath] }),
 				).rejects.toThrow("Provider request limits must be positive numbers: umans");
+			});
+		});
+
+		describe("provider image budgets", () => {
+			it("installs budgets loaded from config.yml and follows later writes", async () => {
+				const gateway = createMockModel({ provider: "my-gateway" }).model;
+				await writeSettings({
+					providers: {
+						maxImagesPerRequest: { "my-gateway": 90.7 },
+						maxImageBytesPerRequest: { "my-gateway": 7_000_000 },
+					},
+				});
+				const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+				expect(providerImageBudget(gateway)).toBe(90);
+				expect(providerImageByteBudget(gateway)).toBe(7_000_000);
+				expect(frameDataBytesBudget(gateway)).toBe(3_500_000);
+
+				cfgProvidersMaxImagesPerRequest.set(settings, { "my-gateway": 20 });
+				cfgProvidersMaxImageBytesPerRequest.set(settings, {});
+				expect(providerImageBudget(gateway)).toBe(20);
+				expect(providerImageByteBudget(gateway)).toBeUndefined();
+			});
+
+			it("rejects non-positive or non-numeric budgets", async () => {
+				expect(() => Settings.isolated({ "providers.maxImagesPerRequest": { gw: 0 } })).toThrow(
+					"Provider image limits must be positive numbers: gw",
+				);
+				await writeSettings({ providers: { maxImageBytesPerRequest: { gw: "7MB" } } });
+				await expect(Settings.init({ cwd: projectDir, agentDir })).rejects.toThrow(
+					"Provider image byte limits must be positive numbers: gw",
+				);
 			});
 		});
 	});
