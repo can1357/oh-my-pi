@@ -1226,6 +1226,10 @@ export interface GmiCloudModelManagerConfig {
  * reference index. Pricing is deliberately never borrowed across providers:
  * GMI's per-model tariff is unknown for these ids, so cost stays zeroed rather
  * than inheriting another provider's rate.
+ *
+ * Unlike Munito, GMI keeps the reference's thinking ladder: only the seeded
+ * DeepSeek-V4-Flash is authored in KDL, so resold rows need the reference's
+ * exact tiers.
  */
 function mapGmiCloudModel(
 	entry: OpenAICompatibleModelRecord,
@@ -5450,10 +5454,7 @@ export interface MunitoModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
-/**
- * Chat models only: OCR SKUs are excluded via `runtime/behavior.kdl`
- * (`exclude-models provider="munito"`).
- */
+/** OCR SKUs serve only the document API; `runtime/behavior.kdl` excludes them by provider. */
 export function isMunitoChatModelId(id: string): boolean {
 	const normalized = id.trim().toLowerCase();
 	if (!normalized) {
@@ -5463,16 +5464,18 @@ export function isMunitoChatModelId(id: string): boolean {
 }
 
 /**
- * Munito reference recovery: Munito's `/models` rows carry only
- * `id`/`owned_by`. An id bundled on Munito hydrates through
- * {@link mapWithBundledReference}; anything else recovers intrinsic
- * capabilities (context window, output limit, reasoning, modalities) from the
- * bundled canonical reference index (`recover-canonical-params "munito"`).
- * Thinking stays unset: ladders are host policy, and an inherited reference
- * ladder would win `resolveThinkingPolicy` and defeat Munito's authored
- * thinking rules, so the provider KDL owns the effort ladder and wire
- * dialect. Identity, pricing, and compat are never borrowed: Munito
- * publishes no per-model tariff, so pricing stays zeroed.
+ * Munito reference recovery: `/models` rows carry only `id`/`owned_by`. An id
+ * bundled on Munito hydrates through {@link mapWithBundledReference}; anything
+ * else recovers intrinsic capabilities (context window, output limit,
+ * reasoning, input modalities) from the bundled canonical index. The
+ * `recover-canonical-params "munito"` membership in `taxonomy/_discovery.kdl`
+ * records that posture; this function is the mapping.
+ *
+ * Thinking stays unset: an inherited reference ladder would win
+ * `resolveThinkingPolicy` and defeat Munito's authored effort rules, so the
+ * provider KDL owns the ladder and wire dialect. Identity, pricing, and compat
+ * are never borrowed: Munito publishes no per-model tariff, so pricing stays
+ * zeroed.
  */
 export function mapMunitoReferenceModel<TApi extends Api>(
 	entry: OpenAICompatibleModelRecord,
