@@ -8,6 +8,7 @@ import { loadSkillsFromDir } from "@oh-my-pi/pi-coding-agent/extensibility/skill
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { readMcpResource } from "@oh-my-pi/pi-coding-agent/internal-urls/mcp-protocol";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -53,6 +54,7 @@ describe("McpProtocolHandler", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		MCPManager.resetForTests();
 		InternalUrlRouter.resetForTests();
 	});
@@ -135,6 +137,30 @@ describe("McpProtocolHandler", () => {
 		expect((await readMcpResource(manager, parseInternalUrl(uri)))?.content).toBe("connected resource");
 	});
 
+	it("finds an exact URI before an unrelated connected catalog settles", async () => {
+		const uri = "skill://demo/a;literal";
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		const ready = Promise.withResolvers<void>();
+		const stalled = Promise.withResolvers<void>();
+		const manager = createMockManager({
+			servers: ["ready", "stalled"],
+			resources,
+			ensureResources: async name => {
+				if (name === "stalled") return stalled.promise;
+				await ready.promise;
+				resources.set(name, { resources: [{ uri, name: "literal" }], templates: [] });
+			},
+		});
+		const discovering = hasExactMcpResource(manager, parseInternalUrl(uri), undefined, 100);
+		ready.resolve();
+		try {
+			expect(await withTimeout(discovering, 500, "exact lookup blocked by another catalog")).toBe(true);
+		} finally {
+			stalled.resolve();
+			await discovering.catch(() => {});
+		}
+	});
+
 	it("bounds exact catalog discovery without reporting an uncertain URI absent", async () => {
 		const manager = createMockManager({
 			servers: [],
@@ -162,6 +188,28 @@ describe("McpProtocolHandler", () => {
 		);
 	});
 
+	it("reports URI absence after a transient catalog failure recovers on retry", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		let attempts = 0;
+		let connectionsSettled = false;
+		const manager = createMockManager({
+			servers: ["recovering"],
+			resources,
+			ensureResources: async name => {
+				attempts += 1;
+				if (attempts === 1) throw new Error("temporary resources/list failure");
+				expect(connectionsSettled).toBe(true);
+				resources.set(name, { resources: [{ uri: "skill://other", name: "other" }], templates: [] });
+			},
+			waitForPendingConnections: async () => {
+				connectionsSettled = true;
+			},
+		});
+
+		expect(await hasExactMcpResource(manager, parseInternalUrl("skill://demo;/tmp/x"))).toBe(false);
+		expect(attempts).toBe(2);
+	});
+
 	it("treats a failed MCP handshake as unknown discovery rather than URI absence", async () => {
 		const manager = createMockManager({
 			servers: [],
@@ -173,6 +221,20 @@ describe("McpProtocolHandler", () => {
 		await expect(hasExactMcpResource(manager, parseInternalUrl("skill://figma/foo;/tmp/x"))).rejects.toThrow(
 			"cannot safely split",
 		);
+	});
+
+	it("keeps a source-less failed handshake unknown during exact URI discovery", async () => {
+		const manager = new MCPManager(process.cwd());
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(new Error("handshake refused"));
+		try {
+			const result = await manager.connectServers({ runtime: { type: "stdio", command: "fake-mcp-server" } }, {});
+			expect(result.errors.get("runtime")).toBe("handshake refused");
+			await expect(hasExactMcpResource(manager, parseInternalUrl("skill://demo;/tmp/x"))).rejects.toThrow(
+				"cannot safely split",
+			);
+		} finally {
+			await manager.disconnectAll();
+		}
 	});
 
 	it("preserves the speculative read wait budget for a connection that never settles", async () => {

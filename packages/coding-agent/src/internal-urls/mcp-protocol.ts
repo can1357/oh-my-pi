@@ -136,12 +136,38 @@ function formatAvailableResources(mcpManager: MCPManagerApi): string {
 	return available || "  (none)";
 }
 
+/** Observe catalogs individually so a known exact URI never waits on an unrelated catalog. */
+async function loadConnectedCatalogs(mcpManager: MCPManager, uri: string, failures: Set<string>): Promise<boolean> {
+	const names = mcpManager.getConnectedServers();
+	if (names.length === 0) return false;
+
+	const { promise, resolve } = Promise.withResolvers<boolean>();
+	let remaining = names.length;
+	const finishOne = () => {
+		remaining -= 1;
+		if (remaining === 0) resolve(false);
+	};
+	for (const name of names) {
+		void mcpManager.ensureServerResources(name).then(
+			() => {
+				// A successful retry supersedes this server's earlier catalog failure.
+				failures.delete(name);
+				if (resolveTargetServer(mcpManager, uri, true)) resolve(true);
+				finishOne();
+			},
+			() => {
+				failures.add(name);
+				finishOne();
+			},
+		);
+	}
+	return promise;
+}
+
 /** Load connected catalogs; a rejected catalog load or failed handshake is unknown, not URI absence. */
 async function settleExactCatalogs(mcpManager: MCPManager, uri: string): Promise<void> {
-	const first = await Promise.allSettled(
-		mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)),
-	);
-	if (resolveTargetServer(mcpManager, uri, true)) return;
+	const failures = new Set<string>();
+	if (await loadConnectedCatalogs(mcpManager, uri, failures)) return;
 	// Known servers that never appear connected after pending work settles had a
 	// failed handshake — that is unknown discovery, not proof the URI is absent.
 	const knownBeforeWait =
@@ -149,15 +175,12 @@ async function settleExactCatalogs(mcpManager: MCPManager, uri: string): Promise
 			? mcpManager.getAllServerNames()
 			: mcpManager.getConnectedServers();
 	await mcpManager.waitForPendingConnections();
-	const second = await Promise.allSettled(
-		mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)),
-	);
-	if (resolveTargetServer(mcpManager, uri, true)) return;
+	if (await loadConnectedCatalogs(mcpManager, uri, failures)) return;
 	const connected = new Set(mcpManager.getConnectedServers());
 	const failedHandshake = knownBeforeWait.some(name => !connected.has(name));
 	// Failed resources/list leaves no match and no proof the URI is absent — same
 	// as a spent wait budget: refuse to authorize semicolon fan-out.
-	if (failedHandshake || [...first, ...second].some(result => result.status === "rejected")) {
+	if (failedHandshake || failures.size > 0) {
 		throw new Error(MCP_RESOURCE_DISCOVERY_TIMEOUT);
 	}
 }
