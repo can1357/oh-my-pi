@@ -1008,6 +1008,14 @@ function isTopLevelMessageChild(value: object, key: string | undefined, childKey
 	return Object.getOwnPropertyDescriptor(value, "role")?.value === "toolResult";
 }
 
+/** One node pending in {@link hasSerializerHook}'s worklist: the value plus the projection context its carve-outs answer from. */
+interface SerializerHookProbeNode {
+	value: unknown;
+	key: string | undefined;
+	isTopLevelToolResultDetails: boolean | undefined;
+	atomic: boolean;
+}
+
 /**
  * Whether `value`'s JSON graph passes through a `toJSON` serializer hook — or
  * through any accessor whose read the probe must not perform.
@@ -1031,6 +1039,13 @@ function isTopLevelMessageChild(value: object, key: string | undefined, childKey
  * cyclic — a streaming event can reference the array holding it — which this
  * walk could never escape; the projected line never contains it, so no hook
  * beneath one can reach the persisted bytes.
+ *
+ * The walk is an explicit worklist, not recursion: `details` is the tool
+ * result's opaque slot and can hold a graph nested arbitrarily deep, and one
+ * JS frame per level overflowed the stack on such input — a persistence
+ * failure on a graph serialization handles fine. Every step below answers
+ * through property descriptors and invokes nothing, so the order the worklist
+ * visits nodes in changes nothing a caller can observe.
  */
 function hasSerializerHook(
 	value: unknown,
@@ -1038,77 +1053,87 @@ function hasSerializerHook(
 	isTopLevelToolResultDetails?: boolean,
 	atomic = false,
 ): boolean {
-	// A bigint is the one primitive `JSON.stringify` routes through a hook:
-	// when an extension installs `BigInt.prototype.toJSON`, serialization
-	// invokes it — so a stateful hook's first output cannot be stamped as a
-	// leaf. Leave the graph uncached exactly when such a hook exists (see
-	// `hasBigIntToJSONHook`); other primitives never consult one.
-	if (typeof value === "bigint") return true;
-	if (value === null || typeof value !== "object") return false;
-	// `JSON.stringify` consults the hook before the value shape, so the probe
-	// does too — through the property descriptor, never by reading the key: a
-	// stateful getter would otherwise run here and again in #lineFor.
-	// A Proxy's own descriptors can hide a stateful `toJSON`; its stateful hook
-	// is invisible to descriptor probing below, so conservatively leave any
-	// proxy-backed opaque node uncached.
-	if (util.types.isProxy(value)) return true;
-	if (hasToJSONHook(value)) return true;
-	// No hook on this node: a boxed primitive serializes as its unboxed value
-	// and a rawJSON node as its payload, neither of which can harbor a hook.
-	if (unboxedPrimitive(value) !== undefined || rawJsonPayload(value) !== undefined) return false;
-	if (Array.isArray(value)) {
-		// Indexed slots first pass through the accessor scan: a stateful or
-		// one-shot indexed getter must leave the graph uncached before the
-		// recursion below reads any slot.
-		if (hasIndexedAccessorSlot(value)) return true;
-		const length = value.length;
-		for (let index = 0; index < length; index++) {
-			if (hasSerializerHook(value[index], undefined, undefined, atomic)) return true;
+	// Worklist, not recursion — one JS stack frame per level overflowed on a
+	// graph `details` can hold (see above).
+	const pending: SerializerHookProbeNode[] = [{ value, key, isTopLevelToolResultDetails, atomic }];
+	for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
+		const { value, key, isTopLevelToolResultDetails, atomic } = node;
+		// A bigint is the one primitive `JSON.stringify` routes through a hook:
+		// when an extension installs `BigInt.prototype.toJSON`, serialization
+		// invokes it — so a stateful hook's first output cannot be stamped as a
+		// leaf. Leave the graph uncached exactly when such a hook exists (see
+		// `hasBigIntToJSONHook`); other primitives never consult one.
+		if (typeof value === "bigint") return true;
+		if (value === null || typeof value !== "object") continue;
+		// `JSON.stringify` consults the hook before the value shape, so the probe
+		// does too — through the property descriptor, never by reading the key: a
+		// stateful getter would otherwise run here and again in #lineFor.
+		// A Proxy's own descriptors can hide a stateful `toJSON`; its stateful hook
+		// is invisible to descriptor probing below, so conservatively leave any
+		// proxy-backed opaque node uncached.
+		if (util.types.isProxy(value)) return true;
+		if (hasToJSONHook(value)) return true;
+		// No hook on this node: a boxed primitive serializes as its unboxed value
+		// and a rawJSON node as its payload, neither of which can harbor a hook.
+		if (unboxedPrimitive(value) !== undefined || rawJsonPayload(value) !== undefined) continue;
+		if (Array.isArray(value)) {
+			// Indexed slots first pass through the accessor scan: a stateful or
+			// one-shot indexed getter must leave the graph uncached before the
+			// loop below pushes any slot.
+			if (hasIndexedAccessorSlot(value)) return true;
+			const length = value.length;
+			for (let index = 0; index < length; index++) {
+				pending.push({ value: value[index], key: undefined, isTopLevelToolResultDetails: undefined, atomic });
+			}
+			continue;
 		}
-		return false;
-	}
-	// Mirror the persistence projection's MCP spill strip
-	// (`stripSpilledMcpStructuredContent`): only the top-level `details` of a
-	// `toolResult` message loses `structuredContent` before serialization, so
-	// only there can a hook beneath it not reach the persisted bytes — and
-	// only there may the live graph be cyclic where the projection is not. A
-	// stateful `meta` getter would shift serialization if read, so the object
-	// loop below answers it through the descriptor and leaves the graph
-	// uncached.
-	const skipStructuredContent = isMcpSpillStrippedDetails(value, key, isTopLevelToolResultDetails);
-	// Mirror the projection's stripping boundary: a hook beneath a stripped key
-	// cannot affect the persisted bytes — and the live value may be cyclic
-	// where the projection is not.
-	const nodeAtomic = atomic || isAtomicPersistenceNode(value, key);
-	// An image-shaped value whose `data` rides an inherited data descriptor is
-	// projector-accepted (`isImageDataPayload` reads through the chain) but
-	// invisible to the own-key stamp below: the backing bytes can change with
-	// no own key moving. Leave the graph uncached so the line is always
-	// re-projected from the live bytes.
-	if (projectorImageField(value, "data") !== undefined && !Object.hasOwn(value, "data")) return true;
-	// Same for an `image_generation_call` whose `result` rides an inherited or
-	// non-enumerable data descriptor: `truncateForPersistence` reads it via
-	// `"result" in obj` and rewrites it into an own blob ref, but the own-key
-	// stamp cannot see the backing field — and a longer inherited `result`
-	// chain could itself harbor an accessor the stamp would invoke. Leave the
-	// graph uncached so the line is always re-projected from the live input.
-	if (
-		Object.getOwnPropertyDescriptor(value, "type")?.value === "image_generation_call" &&
-		projectorGenerationResult(value) !== undefined &&
-		Object.getOwnPropertyDescriptor(value, "result") === undefined
-	)
-		return true;
-	for (const childKey of Object.keys(value)) {
-		if (skipStructuredContent && childKey === "structuredContent") continue;
-		if (!nodeAtomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
-		// Never read through an accessor: the child lookup below would invoke
-		// the getter, and a stateful one then yields a different value when
-		// `#lineFor` serializes the node — so leave the graph uncached instead.
-		const descriptor = Object.getOwnPropertyDescriptor(value, childKey);
-		if (descriptor === undefined) continue;
-		if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
-		if (hasSerializerHook(descriptor.value, childKey, isTopLevelMessageChild(value, key, childKey), nodeAtomic))
+		// Mirror the persistence projection's MCP spill strip
+		// (`stripSpilledMcpStructuredContent`): only the top-level `details` of a
+		// `toolResult` message loses `structuredContent` before serialization, so
+		// only there can a hook beneath it not reach the persisted bytes — and
+		// only there may the live graph be cyclic where the projection is not. A
+		// stateful `meta` getter would shift serialization if read, so the object
+		// loop below answers it through the descriptor and leaves the graph
+		// uncached.
+		const skipStructuredContent = isMcpSpillStrippedDetails(value, key, isTopLevelToolResultDetails);
+		// Mirror the projection's stripping boundary: a hook beneath a stripped key
+		// cannot affect the persisted bytes — and the live value may be cyclic
+		// where the projection is not.
+		const nodeAtomic = atomic || isAtomicPersistenceNode(value, key);
+		// An image-shaped value whose `data` rides an inherited data descriptor is
+		// projector-accepted (`isImageDataPayload` reads through the chain) but
+		// invisible to the own-key stamp below: the backing bytes can change with
+		// no own key moving. Leave the graph uncached so the line is always
+		// re-projected from the live bytes.
+		if (projectorImageField(value, "data") !== undefined && !Object.hasOwn(value, "data")) return true;
+		// Same for an `image_generation_call` whose `result` rides an inherited or
+		// non-enumerable data descriptor: `truncateForPersistence` reads it via
+		// `"result" in obj` and rewrites it into an own blob ref, but the own-key
+		// stamp cannot see the backing field — and a longer inherited `result`
+		// chain could itself harbor an accessor the stamp would invoke. Leave the
+		// graph uncached so the line is always re-projected from the live input.
+		if (
+			Object.getOwnPropertyDescriptor(value, "type")?.value === "image_generation_call" &&
+			projectorGenerationResult(value) !== undefined &&
+			Object.getOwnPropertyDescriptor(value, "result") === undefined
+		)
 			return true;
+		for (const childKey of Object.keys(value)) {
+			if (skipStructuredContent && childKey === "structuredContent") continue;
+			if (!nodeAtomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
+			// Never read through an accessor: the child lookup below would invoke
+			// the getter, and a stateful one then yields a different value when
+			// `#lineFor` serializes the node — so leave the graph uncached instead.
+			const descriptor = Object.getOwnPropertyDescriptor(value, childKey);
+			if (descriptor === undefined) continue;
+			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
+			pending.push({
+				value: descriptor.value,
+				key: childKey,
+				isTopLevelToolResultDetails: isTopLevelMessageChild(value, key, childKey),
+				atomic: nodeAtomic,
+			});
+		}
 	}
 	return false;
 }
