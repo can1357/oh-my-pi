@@ -971,8 +971,22 @@ export class SessionTools {
 					// boundary; the tool call then surfaces as a cancelled
 					// permission (a normal tool error), so the loop continues.
 					const steeringArrival = this.#host.steeringArrivalSignal();
+					// The message that supersedes this dialog delivers at the
+					// next batch boundary ahead of older queued steers, so the
+					// agent reads the question that stopped the call first —
+					// the same "denying steer first" semantics as the TUI
+					// approval dialog (agent.prioritizeSteering, #15642).
+					// Identity-based promotion: text matching could hit an
+					// older equal-looking steer instead.
+					const steeringBaseline = new Set(this.#host.agent.peekSteeringQueue());
 					const { promise: steerPromise, resolve: resolveSteer } = Promise.withResolvers<PermissionRaceResult>();
-					const onSteer = () => resolveSteer({ kind: "steered" });
+					const onSteer = () => {
+						const added = this.#host.agent.peekSteeringQueue().filter(message => !steeringBaseline.has(message));
+						if (added.length > 0) {
+							this.#host.agent.prioritizeSteering(added);
+						}
+						resolveSteer({ kind: "steered" });
+					};
 					if (steeringArrival.aborted) {
 						onSteer();
 					} else {

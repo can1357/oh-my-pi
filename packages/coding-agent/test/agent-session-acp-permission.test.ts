@@ -27,7 +27,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { dispatchXdevTool, resolveMountedXdevExecutable, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 // ---------------------------------------------------------------------------
 // Shared setup
@@ -1048,5 +1048,61 @@ it("a steer sent while a permission dialog is open supersedes it instead of wait
 	).toBe(true);
 
 	// Resolve the abandoned elicit so nothing dangles into the next test.
+	permissionPending.resolve({ outcome: "cancelled" });
+});
+
+it("delivers the steer that supersedes a permission dialog ahead of older queued steers", async () => {
+	const deleteTool = makeFakeTool("delete");
+	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();
+	const permissionOpened = Promise.withResolvers<void>();
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(_toolCall, _options, _signal) {
+			permissionOpened.resolve();
+			return await permissionPending.promise;
+		},
+	};
+	// Hold the first response open so an older steer can queue before the
+	// delete call dispatches; the later steer supersedes the elicit and must
+	// deliver first (agent.prioritizeSteering — same semantics as the TUI
+	// approval dialog's denying steer).
+	const turnStreamStarted = Promise.withResolvers<void>();
+	const releaseTurnStream = Promise.withResolvers<void>();
+	session = await createSessionWithMockModel([deleteTool as AgentTool], bridge, [
+		async () => {
+			turnStreamStarted.resolve();
+			await releaseTurnStream.promise;
+			return {
+				content: [{ type: "toolCall", id: "call-delete-1", name: "delete", arguments: { path: "/tmp/gone.ts" } }],
+			};
+		},
+		{ content: ["answered superseding steer"] },
+		{ content: ["answered older steer"] },
+	]);
+
+	const promptDone = session.prompt("delete something");
+	await withTimeout(turnStreamStarted.promise, 5_000, "Held turn stream never started");
+	// An older steer queues while the turn streams, before any dialog exists.
+	expect(await session.joinActiveTurn("older question about the batch")).toBe(true);
+	releaseTurnStream.resolve();
+	await permissionOpened.promise;
+
+	// This steer supersedes the open dialog.
+	expect(await session.joinActiveTurn("why this deletion?")).toBe(true);
+
+	await promptDone;
+	await session.waitForIdle();
+	expect(deleteTool.executeCalls).toBe(0);
+
+	// Order proof: the superseding steer was delivered to the model before
+	// the older queued one.
+	const messages = session.agent.state.messages;
+	const contentIndexOf = (needle: string) =>
+		messages.findIndex(message => message.role === "user" && JSON.stringify(message.content).includes(needle));
+	const supersedeIndex = contentIndexOf("why this deletion?");
+	const olderIndex = contentIndexOf("older question about the batch");
+	expect(supersedeIndex).toBeGreaterThanOrEqual(0);
+	expect(olderIndex).toBeGreaterThan(supersedeIndex);
+
 	permissionPending.resolve({ outcome: "cancelled" });
 });
