@@ -50,11 +50,25 @@ export function isImageBlock(value: unknown): value is { type: "image"; data: st
  * Answered without invoking anything: an accessor anywhere on the chain yields
  * `undefined` rather than running user code, so a stateful getter keeps the
  * value out of the blob store instead of shifting what serialization observes.
+ *
+ * The descriptor walk itself is guarded: `Object.getOwnPropertyDescriptor` on a
+ * proxy runs its trap, which can throw. `JSON.stringify` consults descriptors
+ * only for keys `ownKeys` reported, so a proxy whose `ownKeys` stays quiet
+ * serializes as `{}` while this direct lookup throws — an escape from
+ * `prepareEntryForPersistence` that fails the whole write for a value
+ * serialization accepts. A throw anywhere on the walk therefore answers "no
+ * classifier here": the payload stays inline instead of externalized, which is
+ * a size regression on an exotic shape, not a lost session.
  */
 export function projectorImageField(value: object, key: "data" | "mimeType" | "type"): string | undefined {
 	let current: object | null = value;
 	while (current !== null) {
-		const descriptor = Object.getOwnPropertyDescriptor(current, key);
+		let descriptor: PropertyDescriptor | undefined;
+		try {
+			descriptor = Object.getOwnPropertyDescriptor(current, key);
+		} catch {
+			return undefined;
+		}
 		if (descriptor !== undefined) {
 			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return undefined;
 			return typeof descriptor.value === "string" ? descriptor.value : undefined;
