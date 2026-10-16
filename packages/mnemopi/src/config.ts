@@ -292,7 +292,7 @@ let proactiveLinkingDefault = false;
  * `polyphonicRecall` / `enhancedRecall` / `proactiveLinking` options instead
  * (`Mnemopi` / `BeamMemory` constructors), which take precedence over these
  * defaults. The `MNEMOPI_POLYPHONIC_RECALL` / `MNEMOPI_ENHANCED_RECALL` /
- * `MNEMOPI_PROACTIVE_LINKING` environment variables still win whenever they are set.
+ * `MNEMOPI_PROACTIVE_LINKING` environment variables still win whenever they hold a boolean word.
  */
 export function configureRecallFeatures(flags: RecallFeatureFlags): void {
 	if (flags.polyphonicRecall !== undefined) polyphonicRecallDefault = flags.polyphonicRecall;
@@ -301,12 +301,11 @@ export function configureRecallFeatures(flags: RecallFeatureFlags): void {
 }
 
 /**
- * Resolves the polyphonic recall gate: the env var wins when set, then the
- * per-instance `configured` value, then the process-wide default.
+ * Resolves the polyphonic recall gate: the env var wins when it is a boolean word
+ * (`1/true/yes/on`, `0/false/no/off`), then the per-instance `configured` value, then the process-wide default.
  */
 export function polyphonicRecallEnabled(env: Env = process.env, configured?: boolean): boolean {
-	const value = envOptionalString("MNEMOPI_POLYPHONIC_RECALL", env);
-	return value === undefined ? (configured ?? polyphonicRecallDefault) : value === "1";
+	return envBool("MNEMOPI_POLYPHONIC_RECALL", configured ?? polyphonicRecallDefault, env);
 }
 
 export function temporalHalflifeHours(env: Env = process.env): number {
@@ -315,16 +314,14 @@ export function temporalHalflifeHours(env: Env = process.env): number {
 
 /**
  * Resolves the enhanced recall (query result cache) gate: the env var wins when
- * set, then the per-instance `configured` value, then the process-wide default.
+ * it is a boolean word, then the per-instance `configured` value, then the process-wide default.
  */
 export function enhancedRecallEnabled(env: Env = process.env, configured?: boolean): boolean {
-	const value = envOptionalString("MNEMOPI_ENHANCED_RECALL", env);
-	return value === undefined ? (configured ?? enhancedRecallDefault) : value === "1";
+	return envBool("MNEMOPI_ENHANCED_RECALL", configured ?? enhancedRecallDefault, env);
 }
 
-export function proactiveLinkingEnabled(env: Env = process.env): boolean {
-	const value = envOptionalString("MNEMOPI_PROACTIVE_LINKING", env);
-	return value === undefined ? proactiveLinkingDefault : value === "1";
+export function proactiveLinkingEnabled(env: Env = process.env, configured?: boolean): boolean {
+	return envBool("MNEMOPI_PROACTIVE_LINKING", configured ?? proactiveLinkingDefault, env);
 }
 
 export function llmEnabled(env: Env = process.env): boolean {

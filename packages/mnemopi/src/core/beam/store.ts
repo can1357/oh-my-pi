@@ -1,5 +1,6 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
+import { proactiveLinkingEnabled } from "../../config";
 import { transaction } from "../../db";
 import { toUtcIso } from "../../util/datetime";
 import { generateId } from "../../util/ids";
@@ -273,18 +274,13 @@ function addTemporalAnnotations(beam: BeamMemoryState, memoryId: string, timesta
 	}
 }
 
-function proactiveLinkingAllowed(beam: BeamMemoryState): boolean {
-	const override = process.env.MNEMOPI_PROACTIVE_LINKING;
-	return override === undefined ? beam.config.proactiveLinking === true : override === "1";
-}
-
 function proactiveLinkIfEnabled(
 	beam: BeamMemoryState,
 	memoryId: string,
 	content: string,
 	extractEntities: boolean,
 ): void {
-	if (!proactiveLinkingAllowed(beam)) return;
+	if (!proactiveLinkingEnabled(process.env, beam.config.proactiveLinking === true)) return;
 	try {
 		const graph =
 			beam.episodicGraph instanceof EpisodicGraph
