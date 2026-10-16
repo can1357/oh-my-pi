@@ -66,7 +66,7 @@ Memory: Mnemosyne's baseline and peak resident set size come from the engine pro
 
 ### Comparing two runs
 
-`diff a.json b.json` prints both configs (engine, protocol, k, git commit) and a paired bootstrap of the primary metric, where every difference is **b − a**. It exits 1 unless both files have the same dataset, protocol, `k` and question ids (no duplicates), a finite primary metric on every question, and are not `upstream-compat` results.
+`diff a.json b.json` prints both configs (engine, protocol, k, git commit) and a paired bootstrap of the primary metric, where every difference is **b − a**. It exits 1 unless both files have the same dataset, dataset revision, protocol, `k` and question ids (no duplicates), a finite primary metric on every question, and are not `upstream-compat` results.
 
 ### Environment guard
 
