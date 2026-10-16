@@ -24,7 +24,7 @@ export interface EvalCase {
 
 export interface ExcludedQuestion {
 	questionId: string;
-	reason: "abstention" | "no-gold";
+	reason: "abstention" | "no-gold" | "blank-gold";
 }
 
 export interface LoadResult {
