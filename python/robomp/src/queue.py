@@ -79,6 +79,10 @@ class WorkerPool:
         """Signal that new work is available."""
         self._wakeup.set()
 
+    def is_ready(self) -> bool:
+        """Report whether the dispatcher can still drain queued events."""
+        return bool(self._workers) and not self._stop.is_set() and not self._workers[0].done()
+
     async def inflight_snapshot(self) -> list[str]:
         """Return a stable, sorted snapshot of currently in-flight issue keys."""
         async with self._inflight_lock:
@@ -194,24 +198,27 @@ class WorkerPool:
 
     async def _dispatch_loop(self) -> None:
         log.info("dispatch loop online")
-        try:
-            while not self._stop.is_set():
+        while not self._stop.is_set():
+            try:
                 row = await self._claim_next_unique()
-                if row is None:
-                    self._wakeup.clear()
-                    try:
-                        await asyncio.wait_for(self._wakeup.wait(), timeout=10.0)
-                    except TimeoutError:
-                        pass
-                    continue
-                # Schedule the task; the slot pool caps concurrent execution.
-                task = asyncio.create_task(self._run_event(row), name=f"robomp-event-{row.delivery_id[:8]}")
-                self._inflight_tasks[task] = row.delivery_id
-                task.add_done_callback(lambda t: self._inflight_tasks.pop(t, None))
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("dispatch loop crashed")
+            except Exception:
+                log.exception("dispatch claim failed")
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=1.0)
+                except TimeoutError:
+                    pass
+                continue
+            if row is None:
+                self._wakeup.clear()
+                try:
+                    await asyncio.wait_for(self._wakeup.wait(), timeout=10.0)
+                except TimeoutError:
+                    pass
+                continue
+            # Schedule the task; the slot pool caps concurrent execution.
+            task = asyncio.create_task(self._run_event(row), name=f"robomp-event-{row.delivery_id[:8]}")
+            self._inflight_tasks[task] = row.delivery_id
+            task.add_done_callback(lambda t: self._inflight_tasks.pop(t, None))
 
     async def _claim_next_unique(self) -> EventRow | None:
         """Claim the next event whose issue isn't already inflight."""
