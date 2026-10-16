@@ -16,10 +16,25 @@ afterAll(async () => {
 	await fs.rm(home, { recursive: true, force: true });
 });
 
-async function runWithCases(value: string, engine: string, protocol: string): Promise<{ stderr: string; code: number }> {
+async function runWithCases(
+	value: string,
+	engine: string,
+	protocol: string,
+): Promise<{ stderr: string; code: number }> {
 	const proc = Bun.spawn(
 		// `--cases=value`: parseArgs itself rejects a separate argument that starts with a dash.
-		[process.execPath, RUN, "run", "--dataset", "beam-100k", "--engine", engine, "--protocol", protocol, `--cases=${value}`],
+		[
+			process.execPath,
+			RUN,
+			"run",
+			"--dataset",
+			"beam-100k",
+			"--engine",
+			engine,
+			"--protocol",
+			protocol,
+			`--cases=${value}`,
+		],
 		{ env: { ...Bun.env, HOME: home }, stdout: "pipe", stderr: "pipe" },
 	);
 	const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);

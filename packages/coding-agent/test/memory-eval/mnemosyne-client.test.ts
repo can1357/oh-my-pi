@@ -177,7 +177,10 @@ for line in sys.stdin:
 	it("fetches past derived rows until k working or episodic rows are ranked", async () => {
 		const threeMessageCase: EvalCase = {
 			...twoMessageCase,
-			messages: [...twoMessageCase.messages, { messageId: "m3", sessionId: "s", role: "user", content: "eta theta" }],
+			messages: [
+				...twoMessageCase.messages,
+				{ messageId: "m3", sessionId: "s", role: "user", content: "eta theta" },
+			],
 		};
 		const engine = mnemosyneEngine({ python: "python3", script: await realScriptOnFakeMnemosyne() });
 		try {
