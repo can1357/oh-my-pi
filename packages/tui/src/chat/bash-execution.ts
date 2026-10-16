@@ -15,7 +15,13 @@ import type { OutputArtifactError } from "../tools/streaming-output";
 import type { TruncationMeta } from "../tools/output-meta";
 import { resolveImageOptions } from "../render/render-utils";
 import { OutputPane } from "../render/output-pane";
-import { loadXtermTerminal, readTerminalRows, splitTerminalRowAt, styleTerminalRow } from "../tools/terminal-output";
+import {
+	activeStyleAtRowEnd,
+	loadXtermTerminal,
+	readTerminalRows,
+	splitTerminalRowAt,
+	styleTerminalRow,
+} from "../tools/terminal-output";
 import {
 	createRawSixelExtractor,
 	getSixelLineMask,
@@ -427,13 +433,19 @@ export class BashExecutionComponent extends Container {
 			let emitted = "";
 			let remaining = row;
 			let consumed = 0;
+			// The style active where a payload split the row carries into what
+			// follows it: a frame does not reset SGR, so text emitted after it
+			// was still styled. The carry rides ahead of each segment's base
+			// color, and the segment's own runs still override it.
+			let carry = "";
 			for (const span of spans) {
 				const [head, tail] = splitTerminalRowAt(remaining, span.offset - consumed);
-				emitted += `${styleTerminalRow(head, base)}${span.payload}`;
+				emitted += `${styleTerminalRow(carry + head, base)}${span.payload}`;
+				carry = activeStyleAtRowEnd(head);
 				consumed = span.offset;
 				remaining = tail;
 			}
-			return `${emitted}${styleTerminalRow(remaining, base)}`;
+			return `${emitted}${styleTerminalRow(carry + remaining, base)}`;
 		});
 		this.#displayDirty = true;
 		this.#outputVersion++;

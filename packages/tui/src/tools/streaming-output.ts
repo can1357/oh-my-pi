@@ -1094,7 +1094,11 @@ export class OutputSink {
 		const held = this.#sixelParser.finish();
 		if (held.length === 0) return;
 		const sanitized = this.#sanitizeSpans(held);
-		this.#store(joinSixelSegments(held), sanitized, joinSixelSegments(sanitized), false);
+		// The held bytes arrived with the chunks that streamed them, so while the
+		// artifact is open they are already on disk: mirroring them again here
+		// would append the held prefix — up to the whole held-frame bound — a
+		// second time.
+		this.#store(joinSixelSegments(held), sanitized, joinSixelSegments(sanitized), false, false);
 	}
 
 	/**
@@ -1122,9 +1126,16 @@ export class OutputSink {
 	 * Count, cap, mirror, and retain one sanitized chunk split into spans. The
 	 * raw chunk is mirrored to the artifact before any cap is applied; the
 	 * totals count the normalized content, so elision compares the bytes the
-	 * inline view actually holds.
+	 * inline view actually holds. `mirrorToArtifact: false` skips that mirror
+	 * for bytes that already streamed to the artifact with earlier chunks.
 	 */
-	#store(chunk: string, spans: readonly RawSixelSegment[], content: string, substituted: boolean): void {
+	#store(
+		chunk: string,
+		spans: readonly RawSixelSegment[],
+		content: string,
+		substituted: boolean,
+		mirrorToArtifact = true,
+	): void {
 		const normalizedBytes = Buffer.byteLength(content, "utf-8");
 		this.#totalBytes += normalizedBytes;
 		// Line the chunk starts on, as numbered in the artifact; 0 when the capped
@@ -1181,6 +1192,7 @@ export class OutputSink {
 		// representation differs, overflows memory, hits the column cap, or a
 		// prior chunk already opened the artifact.
 		if (
+			mirrorToArtifact &&
 			this.#artifactPath &&
 			(this.#file != null || substituted || cappedThisChunk || this.#willOverflow(cappedBytes))
 		) {

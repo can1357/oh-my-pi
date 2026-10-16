@@ -83,6 +83,23 @@ function isSafeStyle(codes: readonly number[]): boolean {
 	return true;
 }
 
+/**
+ * The safe style still active where `row` ends, as its SGR run. Row runs are
+ * complete style descriptions (see {@link readTerminalRows}), so the active
+ * style is the last one the row opened; a trailing reset leaves none.
+ */
+export function activeStyleAtRowEnd(row: string): string {
+	let active = "";
+	for (const match of row.matchAll(SGR)) {
+		if (match[1] === "0") active = "";
+		else {
+			const codes = match[1].split(";").map(Number);
+			if (codes.length > 0 && codes.every(Number.isInteger) && isSafeStyle(codes)) active = match[0];
+		}
+	}
+	return active;
+}
+
 /** Applies the active tool-output color while preserving safe styles from a virtual terminal row. */
 export function styleTerminalRow(row: string, baseForeground: string): string {
 	let output = baseForeground;

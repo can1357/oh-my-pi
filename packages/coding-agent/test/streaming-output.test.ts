@@ -1279,6 +1279,43 @@ describe("OutputSink SIXEL spill window", () => {
 		expect(dumped.output).toContain("before");
 		expect(dumped.output).toContain("after");
 	});
+
+	test("a frame the stream ended inside is mirrored to the artifact once", async () => {
+		// #15327 round 3 item 1: #flushHeldSixelSpans re-stored the held raw
+		// bytes through #store, and #store mirrors every chunk to the artifact
+		// once it is open. Those bytes had already streamed to the artifact
+		// with the chunk that carried them, so a mid-frame exit appended the
+		// held prefix — up to the entire held-frame bound — a second time.
+		enableSixelPassthrough();
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "held.log");
+		// An oversized frame opens the artifact (its bytes count toward the
+		// spill mirror), exactly like the streaming production path.
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "art-held",
+			spillThreshold: 50 * 1024,
+			artifactMaxBytes: 0,
+		});
+		await sink.push(`\x1bPq${"~".repeat(70_000)}\x1b\\`);
+		// No ST: the stream ends mid-frame. The trailing marker keeps the prefix
+		// from matching inside the tildes of the frame that streamed before it,
+		// so the occurrence count is exact.
+		const held = `\x1bPq${"~".repeat(60)}HELD`;
+		await sink.push(held);
+
+		await sink.dump();
+		const artifactText = await Bun.file(artifactPath).text();
+
+		// The artifact is the verbatim raw log: the held prefix appears exactly
+		// once — streamed live, never re-mirrored by the finish flush. A second
+		// copy is what the double-mirror wrote: the finish flush re-stored the
+		// held raw bytes through the same chunk path the live stream used.
+		expect(artifactText.split(held).length - 1).toBe(1);
+		// The frame that streamed ahead of it is intact and precedes it.
+		expect(artifactText.endsWith(held)).toBe(true);
+		expect(artifactText).toContain("~".repeat(70_000));
+	});
 });
 
 describe("OutputSink SIXEL mixed-write column cap", () => {
