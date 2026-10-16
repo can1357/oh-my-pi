@@ -53,6 +53,8 @@ type CandidateSignals = {
 	fts: number;
 	ftsMatched: boolean;
 	dense: number;
+	/** The query was embedded and this row has a stored vector; `dense` is then its similarity, possibly 0. */
+	embedded: boolean;
 	keyword: number;
 	candidateSource: "fts" | "vec" | "fallback";
 };
@@ -646,6 +648,7 @@ function fetchCandidates(
 				fts,
 				ftsMatched,
 				dense,
+				embedded: vecScores.has(id),
 				keyword: 0,
 				candidateSource: ftsMatched ? "fts" : dense > 0 ? "vec" : "fallback",
 			},
@@ -669,7 +672,7 @@ function fallbackCandidates(
 	return rows.map(row => ({
 		row,
 		tierLabel,
-		signals: { fts: 0, ftsMatched: false, dense: 0, keyword: 0, candidateSource: "fallback" },
+		signals: { fts: 0, ftsMatched: false, dense: 0, embedded: false, keyword: 0, candidateSource: "fallback" },
 	}));
 }
 
@@ -703,7 +706,8 @@ function scoreCandidate(
 		const kwShare = (1 - importanceWeight) * 0.6;
 		baseScore = keyword * kwShare + importance * importanceWeight + keyword * keyword * 0.08;
 		// An equal share: at 0.2, rows that only repeat the query's words outranked rows that answer it by meaning.
-		if (candidate.signals.dense > 0) baseScore = baseScore * 0.5 + candidate.signals.dense * 0.5;
+		// Every row with a stored vector is blended, zero similarity included; rows not yet embedded keep their score.
+		if (candidate.signals.embedded) baseScore = baseScore * 0.5 + candidate.signals.dense * 0.5;
 	}
 	let score = baseScore * (0.7 + 0.3 * decay);
 	const temporalWeight = options.temporalWeight ?? 0;
