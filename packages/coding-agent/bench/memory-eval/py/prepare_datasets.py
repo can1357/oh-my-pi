@@ -1,6 +1,8 @@
 """Download the pinned BEAM and LongMemEval files into ~/.cache/omp-memory-eval/data/.
 
-Run with venv-engine's python. Idempotent: existing outputs are skipped.
+Run with venv-engine's python. Each output gets a `<file>.revision` marker holding the revision it was downloaded at;
+run.ts refuses data whose marker is missing or not its pinned revision. Idempotent: an output whose marker matches the
+pinned revision is skipped, any other is downloaded again.
 """
 
 import ast
@@ -45,12 +47,22 @@ def convert_beam(parquet_path: str) -> list[dict]:
 	return rows
 
 
+def marker(out: Path) -> Path:
+	return out.with_name(f"{out.name}.revision")
+
+
+def is_current(out: Path, revision: str) -> bool:
+	return out.exists() and marker(out).exists() and marker(out).read_text().strip() == revision
+
+
 def write_beam(name: str, split: str) -> list[dict]:
 	out = DATA / name
-	if out.exists():
+	if is_current(out, BEAM_REVISION):
 		return json.loads(out.read_text())
 	rows = convert_beam(fetch(BEAM_REPO, f"data/{split}-00000-of-00001.parquet", BEAM_REVISION))
 	out.write_text(json.dumps(rows, ensure_ascii=False))
+	# Written after the data, so an interrupted write leaves no marker and is redone.
+	marker(out).write_text(BEAM_REVISION + "\n")
 	return rows
 
 
@@ -76,8 +88,9 @@ def main() -> None:
 	print(f"beam-500k: {len(beam500)} conversations, {count500} questions")
 
 	lme = DATA / "lme-s.json"
-	if not lme.exists():
+	if not is_current(lme, LME_REVISION):
 		shutil.copyfile(fetch(LME_REPO, LME_FILE, LME_REVISION), lme)
+		marker(lme).write_text(LME_REVISION + "\n")
 	print(f"lme: {len(json.loads(lme.read_text()))} questions")
 
 

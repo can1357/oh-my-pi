@@ -5,26 +5,37 @@ import * as path from "node:path";
 
 const RUN = path.join(import.meta.dir, "../../bench/memory-eval/run.ts");
 const FIXTURE_DATA = path.join(import.meta.dir, "fixtures", "data");
+/** The BEAM revision `run.ts` pins; `py/prepare_datasets.py` records it next to the file it downloaded. */
+const BEAM_REVISION = "3205395e897e7318c7b094ef4e6047b9b82dbb03";
 // Each case spawns the CLI, which loads the harness and Mnemopi; on a loaded machine that exceeds bun's 5 s default.
 setDefaultTimeout(30_000);
 
-// A temp HOME whose cache holds only the BEAM fixture: runs never read or write the real cache.
+// Temp HOMEs whose cache holds only the BEAM fixture: runs never read or write the real cache.
+let root: string;
 let home: string;
 beforeAll(async () => {
-	home = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-cases-"));
-	const data = path.join(home, ".cache", "omp-memory-eval", "data");
-	await fs.mkdir(data, { recursive: true });
-	await fs.copyFile(path.join(FIXTURE_DATA, "beam-100k.json"), path.join(data, "beam-100k.json"));
+	root = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-cases-"));
+	home = await cacheHome("pinned", BEAM_REVISION);
 });
 afterAll(async () => {
-	await fs.rm(home, { recursive: true, force: true });
+	await fs.rm(root, { recursive: true, force: true });
 });
 
-/** `run --dataset beam-100k` plus `args`, without MNEMOPI_* in the environment. */
-async function run(...args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+/** A HOME holding the BEAM fixture and, unless `revision` is undefined, its revision marker. */
+async function cacheHome(name: string, revision: string | undefined): Promise<string> {
+	const dir = path.join(root, name);
+	const data = path.join(dir, ".cache", "omp-memory-eval", "data");
+	await fs.mkdir(data, { recursive: true });
+	await fs.copyFile(path.join(FIXTURE_DATA, "beam-100k.json"), path.join(data, "beam-100k.json"));
+	if (revision !== undefined) await Bun.write(path.join(data, "beam-100k.json.revision"), `${revision}\n`);
+	return dir;
+}
+
+/** `run --dataset beam-100k` plus `args` with HOME `homeDir`, without MNEMOPI_* in the environment. */
+async function runAt(homeDir: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
 	const env = Object.fromEntries(Object.entries(Bun.env).filter(([key]) => !key.startsWith("MNEMOPI_")));
 	const proc = Bun.spawn([process.execPath, RUN, "run", "--dataset", "beam-100k", ...args], {
-		env: { ...env, HOME: home },
+		env: { ...env, HOME: homeDir },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -35,6 +46,8 @@ async function run(...args: string[]): Promise<{ stdout: string; stderr: string;
 	]);
 	return { stdout, stderr, code };
 }
+
+const run = (...args: string[]) => runAt(home, args);
 
 it("run rejects a --cases value that is not a positive integer", async () => {
 	const runs = await Promise.all([
@@ -83,6 +96,21 @@ it("run records the engine options in the result config", async () => {
 	]);
 	expect([a.code, a.stderr]).toEqual([0, ""]);
 	expect([b.code, b.stderr]).toEqual([0, ""]);
-	expect((await Bun.file(defaults).json()).config).toMatchObject({ mnemopiRecall: "recall", polyphonic: false });
+	expect((await Bun.file(defaults).json()).config).toMatchObject({
+		mnemopiRecall: "recall",
+		polyphonic: false,
+		datasetRevision: BEAM_REVISION,
+	});
 	expect((await Bun.file(ablation).json()).config).toMatchObject({ mnemopiRecall: "enhanced", polyphonic: true });
+});
+
+it("run refuses a cached dataset whose recorded revision is missing or not the pinned one", async () => {
+	const [stale, bare] = await Promise.all([
+		cacheHome("stale", "deadbeef").then(dir => runAt(dir, ["--engine", "oracle", "--protocol", "standard"])),
+		cacheHome("bare", undefined).then(dir => runAt(dir, ["--engine", "oracle", "--protocol", "standard"])),
+	]);
+	expect(stale.code).toBe(1);
+	expect(stale.stderr).toContain(`beam-100k.json.revision: revision deadbeef, expected ${BEAM_REVISION}`);
+	expect(bare.code).toBe(1);
+	expect(bare.stderr).toContain(`beam-100k.json.revision: missing, expected ${BEAM_REVISION}`);
 });
