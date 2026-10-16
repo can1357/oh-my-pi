@@ -122,7 +122,6 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		trackIrcReply: (pending: Promise<void>) => {
 			trackedReplies.push(pending);
 		},
-		subscribeRunState: () => () => {},
 		getLastAssistantMessage: () => lastAssistant,
 		extensionRunner,
 	} as unknown as AgentSession;
