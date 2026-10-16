@@ -49,3 +49,26 @@ export interface DaemonSnapshot {
 	persist: boolean;
 	detached: boolean;
 }
+
+/** Model-facing delivery mode a client attached to one output subscription. */
+export type DaemonMonitorDelivery = "wake" | "ambient";
+
+/** One live output monitor as the broker sees it; listed with services so watchers are debuggable. */
+export interface DaemonMonitorWatcher {
+	/** Process name the monitor targets. */
+	name: string;
+	/** Client-scoped subscription id. */
+	id: string;
+	/** Session that registered the monitor. */
+	owner: string;
+	/** Delivery mode advertised by the client; absent for clients that predate the field. */
+	delivery?: DaemonMonitorDelivery;
+	/** Epoch milliseconds when the client registered the monitor; absent for older clients. */
+	since?: number;
+	/** Session artifact id receiving the raw capture; absent for older clients. */
+	artifactId?: string;
+	/** Daemon incarnation the monitor is bound to; absent while it waits for a start. */
+	daemonId?: string;
+	/** False while the registering client is disconnected inside the reconnect grace. */
+	connected: boolean;
+}
