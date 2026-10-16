@@ -20,8 +20,12 @@ export interface ExtensionDirectoryResolutionOptions {
 	sortChildren?: boolean;
 	/** Preserve callers that surface unexpected stat failures instead of skipping them. */
 	throwUnexpectedStatErrors?: boolean;
-	/** Receives malformed/unreadable manifest and directory scan diagnostics. */
+	/** Receives unreadable entries and malformed manifest diagnostics; missing probes stay quiet. */
 	onReadError?: (filePath: string, error: unknown) => void;
+}
+
+function isMissing(error: unknown): boolean {
+	return isEnoent(error) || hasFsCode(error, "ENOTDIR");
 }
 
 function isUnavailable(error: unknown): boolean {
@@ -32,7 +36,7 @@ function isUnavailable(error: unknown): boolean {
 export function findExtensionDirectoryIndex(
 	dir: string,
 	indexNames: readonly string[],
-	options: { throwUnexpectedStatErrors?: boolean } = {},
+	options: Pick<ExtensionDirectoryResolutionOptions, "throwUnexpectedStatErrors" | "onReadError"> = {},
 ): string | null {
 	for (const name of indexNames) {
 		const candidate = path.join(dir, name);
@@ -40,6 +44,7 @@ export function findExtensionDirectoryIndex(
 			if (fs.statSync(candidate).isFile()) return candidate;
 		} catch (error) {
 			if (options.throwUnexpectedStatErrors && !isUnavailable(error)) throw error;
+			if (!isMissing(error)) options.onReadError?.(candidate, error);
 		}
 	}
 	return null;
@@ -54,7 +59,7 @@ function readDeclaredManifestEntries(
 	try {
 		raw = fs.readFileSync(packageJsonPath, "utf8");
 	} catch (error) {
-		if (!isUnavailable(error)) options.onReadError?.(packageJsonPath, error);
+		if (!isMissing(error)) options.onReadError?.(packageJsonPath, error);
 		return { declared: false, files: [] };
 	}
 
@@ -81,6 +86,7 @@ function readDeclaredManifestEntries(
 			stats = fs.statSync(candidate);
 		} catch (error) {
 			if (options.throwUnexpectedStatErrors && !isUnavailable(error)) throw error;
+			if (!isMissing(error)) options.onReadError?.(candidate, error);
 			continue;
 		}
 		if (stats.isDirectory()) {
@@ -113,7 +119,7 @@ export function resolveExtensionDirectory(
 	try {
 		children = fs.readdirSync(dir);
 	} catch (error) {
-		if (!isUnavailable(error)) options.onReadError?.(dir, error);
+		if (!isMissing(error)) options.onReadError?.(dir, error);
 		return { declared: false, files: [] };
 	}
 	if (options.sortChildren) children.sort();
@@ -127,6 +133,7 @@ export function resolveExtensionDirectory(
 			stats = fs.statSync(childPath);
 		} catch (error) {
 			if (options.throwUnexpectedStatErrors && !isUnavailable(error)) throw error;
+			if (!isMissing(error)) options.onReadError?.(childPath, error);
 			continue;
 		}
 		if (stats.isDirectory()) {

@@ -303,6 +303,9 @@ const PLUGIN_EXTENSION_DIRECTORY_OPTIONS = {
 	indexNames: MANIFEST_ENTRY_INDEX_NAMES,
 	isScanFile: isModuleFile,
 	sortChildren: true,
+	onReadError: (filePath: string, error: unknown) => {
+		logger.warn("Failed to resolve plugin extension directory", { path: filePath, error: String(error) });
+	},
 };
 
 /**
