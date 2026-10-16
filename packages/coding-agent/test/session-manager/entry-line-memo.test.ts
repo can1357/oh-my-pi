@@ -5,6 +5,7 @@ import { TempDir, __resetDirsFromEnvForTests, getBlobsDir, setAgentDir } from "@
 import { parseBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { makeAssistantMessage } from "./helpers";
 
 function restoreEnv(key: string, value: string | undefined): void {
 	if (value === undefined) {
@@ -1299,4 +1300,211 @@ describe("SessionManager entry-line memo", () => {
 		expect(bodyAfterThird).toContain('"leaf":"fix15222-deep-mutated"');
 		expect(bodyAfterThird).not.toBe(bodyAfterSecond);
 	}, 90_000);
+
+	it("persists the current bytes of an image block whose classifiers ride an inherited descriptor", async () => {
+		// `isImageBlock`/`isImageDataPayload` classify through the prototype
+		// chain, so a content block whose `type` and `mimeType` ride inherited
+		// descriptors is projector-accepted and its oversized `data` externalized
+		// to a blob ref — while the own-key stamp records only `data`. Flipping
+		// the inherited classifiers from `image/png` to `text/plain` turns
+		// externalization off, so a fresh projection swaps the blob ref for the
+		// raw base64; a stamp that cannot see the classifiers compares equal and
+		// reuses the stale ref, so a reload restores the previous image.
+		const backing: Record<string, unknown> = { type: "image", mimeType: "image/png" };
+		const block = Object.create(backing);
+		block.data = LARGE_BASE64;
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "user" as const,
+			content: [block],
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the accepted payload is externalized to a blob ref.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		const refsAfterFirst = persistedBlobRefs(bodyAfterFirst);
+		expect(refsAfterFirst).toHaveLength(1);
+		const originalRef = refsAfterFirst[0];
+		if (!originalRef) throw new Error("Expected blob reference");
+		expect(await blobBytesBase64(originalRef)).toBe(LARGE_BASE64);
+		expect(bodyAfterFirst).not.toContain(LARGE_BASE64);
+
+		// Flip both inherited classifiers: no own key moves, so an own-key stamp
+		// still matches the original line while the projector stops accepting
+		// the payload and keeps its base64 inline.
+		backing.type = "text";
+		backing.mimeType = "text/plain";
+
+		// Second rewrite: the persisted line carries the live base64 and the
+		// ref is gone — reloading restores the block as it now stands.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(persistedBlobRefs(bodyAfterSecond)).toHaveLength(0);
+		expect(bodyAfterSecond).toContain(LARGE_BASE64);
+		expect(bodyAfterSecond).not.toContain(originalRef);
+	});
+
+	it("persists a jsonlEvents mutation inside a typeless anthropicCompaction carrier nested in an array", async () => {
+		// The preserveData-style compaction carrier has no `type` marker of its
+		// own, so `truncateForPersistence` classifies it atomic by the caller's
+		// key — and its array branch hands that key to every element. A carrier
+		// nested inside an array therefore persists verbatim, `jsonlEvents`
+		// included. A stamp that drops the parent key at the array boundary
+		// instead records the events presence-only, so a later mutation compares
+		// equal and the rewrite reuses the stale JSONL line.
+		const carrier: Record<string, unknown> = { content: "summary", jsonlEvents: [{ seq: 1 }] };
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-array-carrier",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: { anthropicCompaction: [carrier] },
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the verbatim carrier keeps its events on the line.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain('"seq":1');
+
+		// Mutate the event in place: same carrier, same array, only the leaf changes.
+		const events = carrier.jsonlEvents;
+		if (!Array.isArray(events)) throw new Error("Expected events array");
+		const event = events[0] as Record<string, unknown>;
+		event.seq = 2;
+
+		// Second rewrite: the persisted line carries the mutated event — a
+		// presence-only stamp reuses the old line and a reload restores seq 1.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"seq":2');
+		expect(bodyAfterSecond).not.toContain('"seq":1');
+	});
+
+	it("persists the current signature strip of an assistant turn whose payload items ride an inherited descriptor", async () => {
+		// `stripReplayedReasoningSignatures` reads `providerPayload.items` by
+		// key, so an items array on an inherited link reaches the projector while
+		// the own-key stamp never walks it. Dropping the item turns the
+		// signature-stripping decision off, so a fresh projection keeps the
+		// duplicate signature; a stamp blind to the payload compares equal and
+		// reuses the stripped line, losing the signature on reload.
+		const reasoningItem = { type: "reasoning", id: "resp-fix15222-items", encrypted_content: "enc-fix15222-items" };
+		const items: Array<Record<string, unknown>> = [reasoningItem];
+		const payload = Object.create({ type: "openaiResponsesHistory", items });
+		const thinkingSignature = JSON.stringify(reasoningItem);
+		// The persisted line is JSON, so the signature's own quotes arrive
+		// escaped: the bytes to look for are the escaped form of the text.
+		const persistedSignature = JSON.stringify(thinkingSignature).slice(1, -1);
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content: [{ type: "thinking" as const, thinking: "reason", thinkingSignature }],
+			providerPayload: payload,
+		});
+
+		// First rewrite: the payload covers the signature, so the projected line
+		// drops the duplicate.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).not.toContain(persistedSignature);
+
+		// Empty the backing items: the projector no longer covers the signature,
+		// so the line must keep it.
+		items.length = 0;
+
+		// Second rewrite: the persisted line carries the signature — a stamp that
+		// cannot see the payload reuses the stripped line instead.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain(persistedSignature);
+	});
+
+	it("persists the current signature strip of an assistant turn whose payload items hide behind an overridden iterator", async () => {
+		// The stamp reads an array's indexed slots the way `JSON.stringify`
+		// does, but `stripReplayedReasoningSignatures` iterates
+		// `providerPayload.items` with `for..of`. An items array whose iterator
+		// yields the reasoning item later than its slots do therefore changes
+		// the projected line without moving a single stamped leaf.
+		const reasoningItem = { type: "reasoning", id: "resp-fix15222-iter", encrypted_content: "enc-fix15222-iter" };
+		const items: Array<Record<string, unknown>> = [reasoningItem];
+		items[Symbol.iterator] = function* emptyIterator(): ArrayIterator<Record<string, unknown>> {
+			// Yields nothing: the reasoning item is invisible to the projector.
+		};
+		const payload = { type: "openaiResponsesHistory" as const, items };
+		const thinkingSignature = JSON.stringify(reasoningItem);
+		// The persisted line is JSON, so the signature's own quotes arrive
+		// escaped: the bytes to look for are the escaped form of the text.
+		const persistedSignature = JSON.stringify(thinkingSignature).slice(1, -1);
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content: [{ type: "thinking" as const, thinking: "reason", thinkingSignature }],
+			providerPayload: payload,
+		});
+
+		// First rewrite: the iterator hides the item, so the signature is kept.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain(persistedSignature);
+
+		// Reveal the item to the iterator: the indexed slots never moved, so only
+		// the projector's view of the array changed.
+		items[Symbol.iterator] = function* revealingIterator(): ArrayIterator<Record<string, unknown>> {
+			yield reasoningItem;
+		};
+
+		// Second rewrite: the persisted line drops the now-covered signature —
+		// a slot-only stamp reuses the line that kept it.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).not.toContain(persistedSignature);
+	});
+
+	it("persists a session whose details is a proxy with a throwing descriptor trap without latching a persistence failure", async () => {
+		// `projectorImageField` answers its acceptance question with
+		// `Object.getOwnPropertyDescriptor` on every prototype link — a call a
+		// proxy trap controls. `JSON.stringify` consults descriptors only for
+		// keys `ownKeys` reported, so a proxy whose descriptor trap throws while
+		// `ownKeys` stays quiet serializes as `{}`; the projector's direct
+		// lookup threw instead, and that throw escaped
+		// `prepareEntryForPersistence` and latched a persistence failure on
+		// every rewrite.
+		const details = new Proxy({} as Record<string, unknown>, {
+			ownKeys: () => [],
+			getOwnPropertyDescriptor(): PropertyDescriptor | undefined {
+				throw new Error("boom-fix15222-descriptor-trap");
+			},
+		});
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-descriptor-trap",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// The rewrite succeeds: the proxy contributes `{}` to the line and the
+		// rest of the message is persisted in full.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"details":{}');
+		expect(body).toContain('"toolName":"bash"');
+		expect(body).toContain('"role":"toolResult"');
+	});
 });
