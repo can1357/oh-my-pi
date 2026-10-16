@@ -53,6 +53,13 @@ function pick<T extends string>(value: string | undefined, allowed: readonly T[]
 	return found;
 }
 
+function caseLimit(value: string | undefined): number | undefined {
+	if (value === undefined) return undefined;
+	const limit = Number(value);
+	if (!Number.isInteger(limit) || limit <= 0) throw new Error(`--cases must be a positive integer, got "${value}"`);
+	return limit;
+}
+
 const hasCompatOps = (engine: EngineAdapter): engine is EngineAdapter & UpstreamCompatOps => "recallRaw" in engine;
 
 async function runCommand(argv: string[]): Promise<void> {
@@ -69,6 +76,7 @@ async function runCommand(argv: string[]): Promise<void> {
 	});
 	const dataset = pick(values.dataset, DATASETS, "dataset");
 	const protocol = pick(values.protocol, PROTOCOLS, "protocol");
+	const cases = caseLimit(values.cases);
 	const engine = createEngine(values.engine ?? "", pick(values.embedder, ["js", "python"] as const, "embedder"));
 	const k = dataset.startsWith("beam") ? 10 : 50;
 
@@ -83,7 +91,7 @@ async function runCommand(argv: string[]): Promise<void> {
 			if (dataset !== "beam-100k" || !hasCompatOps(engine)) {
 				throw new Error("upstream-compat runs only with --engine mnemosyne --dataset beam-100k");
 			}
-			const count = Number(values.cases ?? UPSTREAM_COMPAT_CONVERSATIONS);
+			const count = cases ?? UPSTREAM_COMPAT_CONVERSATIONS;
 			const questions = await runUpstreamCompat(engine, await loadBeamUpstreamCompat(dataDir, count));
 			// No warmup runs here; the store is a temp dir, not measured.
 			run = {
@@ -94,7 +102,7 @@ async function runCommand(argv: string[]): Promise<void> {
 		} else {
 			const loaded = await loadDataset(dataset, dataDir);
 			excluded = loaded.excluded;
-			const selected = values.cases ? loaded.cases.slice(0, Number(values.cases)) : loaded.cases;
+			const selected = cases === undefined ? loaded.cases : loaded.cases.slice(0, cases);
 			run = await runCases(engine, selected, protocol, k, storeRoot);
 		}
 		result = buildResultFile(
