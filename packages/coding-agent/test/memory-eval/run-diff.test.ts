@@ -19,7 +19,7 @@ interface FakeResult {
 	protocol?: string;
 	k?: number;
 	revision?: string;
-	/** Per question: id and the recall@10 value (null is what JSON makes of NaN). */
+	/** Per question: id (`<caseId>:...` names its case) and the recall@10 value (null is what JSON makes of NaN). */
 	questions?: [string, number | null][];
 }
 
@@ -34,6 +34,7 @@ async function writeResult(
 		JSON.stringify({
 			config: { dataset: "beam-100k", datasetRevision: revision, engine: "oracle", protocol, k, gitCommit: "abc" },
 			questions: questions.map(([questionId, recall]) => ({
+				caseId: questionId.split(":")[0],
 				questionId,
 				category: "cat",
 				ranked: [],
@@ -57,21 +58,25 @@ async function diff(a: string, b: string): Promise<{ stdout: string; stderr: str
 it("diff prints both configs and compares matching results", async () => {
 	const a = await writeResult("ok-a", {
 		questions: [
-			["q1", 0],
-			["q2", 1],
+			["c1:q1", 0],
+			["c1:q2", 1],
+			["c2:q3", 1],
 		],
 	});
 	const b = await writeResult("ok-b", {
 		questions: [
-			["q2", 1],
-			["q1", 1],
+			["c1:q2", 1],
+			["c2:q3", 1],
+			["c1:q1", 1],
 		],
 	});
 	const { stdout, code } = await diff(a, b);
 	expect(code).toBe(0);
 	expect(stdout).toContain("a: engine oracle protocol standard k 10 gitCommit abc");
 	expect(stdout).toContain("b: engine oracle protocol standard k 10 gitCommit abc");
-	expect(stdout).toContain("recall@10 overall (b - a)");
+	// The bootstrap resamples cases: the output names how many questions and cases it covered.
+	expect(stdout).toContain("recall@10 overall (b - a, n=3, cases=2): meanDiff 0.3333");
+	expect(stdout).toContain("  cat (n=3, cases=2): ");
 });
 
 it("diff rejects results run under different protocols", async () => {

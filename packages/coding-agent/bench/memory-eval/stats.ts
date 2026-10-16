@@ -1,4 +1,4 @@
-/** Paired bootstrap over per-question scores and the helps/hurts/neutral decision rule. */
+/** Paired cluster bootstrap over per-question scores and the helps/hurts/neutral decision rule. */
 
 export interface BootstrapResult {
 	meanDiff: number;
@@ -20,23 +20,45 @@ export function mulberry32(seed: number): () => number {
 	};
 }
 
-/** Differences are b − a. */
+/**
+ * Differences are b − a. `clusters[i]` names the case question i was asked against: its questions share one memory
+ * store, so each resample draws whole clusters with replacement and pools their questions (sum of differences over
+ * question count). With one question per cluster this is the plain per-question bootstrap.
+ */
 export function pairedBootstrap(
 	a: readonly number[],
 	b: readonly number[],
+	clusters: readonly string[],
 	options: { resamples?: number; seed?: number } = {},
 ): BootstrapResult {
-	if (a.length !== b.length) throw new Error(`pairedBootstrap: length mismatch ${a.length} vs ${b.length}`);
+	if (a.length !== b.length || clusters.length !== a.length) {
+		throw new Error(`pairedBootstrap: length mismatch ${a.length} vs ${b.length} vs ${clusters.length} clusters`);
+	}
 	const { resamples = 10000, seed = 1 } = options;
 	const diffs = a.map((x, i) => b[i] - x);
 	const n = diffs.length;
 	if (n === 0) return { meanDiff: 0, ciLow: 0, ciHigh: 0, wins: 0, ties: 0, losses: 0 };
+	const totals = new Map<string, { sum: number; count: number }>();
+	for (const [i, d] of diffs.entries()) {
+		const total = totals.get(clusters[i]);
+		if (total) {
+			total.sum += d;
+			total.count++;
+		} else totals.set(clusters[i], { sum: d, count: 1 });
+	}
+	const groups = [...totals.values()];
+	const m = groups.length;
 	const rand = mulberry32(seed);
 	const means = new Float64Array(resamples);
 	for (let r = 0; r < resamples; r++) {
 		let sum = 0;
-		for (let i = 0; i < n; i++) sum += diffs[Math.floor(rand() * n)];
-		means[r] = sum / n;
+		let count = 0;
+		for (let i = 0; i < m; i++) {
+			const group = groups[Math.floor(rand() * m)];
+			sum += group.sum;
+			count += group.count;
+		}
+		means[r] = sum / count;
 	}
 	means.sort();
 	// Percentile rule: index floor(p * resamples), clamped to the last element; p = 0.025 and 0.975.

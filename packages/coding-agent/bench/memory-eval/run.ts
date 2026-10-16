@@ -193,19 +193,23 @@ async function diffCommand(argv: string[]): Promise<void> {
 	).length;
 	console.log(`identical rankings: ${identical} / ${pairs.length}`);
 
+	// Questions of one case were asked against one memory store, so the bootstrap resamples cases, not questions.
 	const overall = pairedBootstrap(
 		pairs.map(p => p.a.metrics[metric]),
 		pairs.map(p => p.b.metrics[metric]),
+		pairs.map(p => p.a.caseId),
 	);
-	console.log(`${metric} overall (b - a): ${fmt(overall)}`);
+	const sizes = (rows: typeof pairs): string => `n=${rows.length}, cases=${new Set(rows.map(p => p.a.caseId)).size}`;
+	console.log(`${metric} overall (b - a, ${sizes(pairs)}): ${fmt(overall)}`);
 	const perCategory: Record<string, BootstrapResult> = {};
 	for (const category of new Set(pairs.map(p => p.a.category))) {
 		const rows = pairs.filter(p => p.a.category === category);
 		perCategory[category] = pairedBootstrap(
 			rows.map(p => p.a.metrics[metric]),
 			rows.map(p => p.b.metrics[metric]),
+			rows.map(p => p.a.caseId),
 		);
-		console.log(`  ${category} (n=${rows.length}): ${fmt(perCategory[category])}`);
+		console.log(`  ${category} (${sizes(rows)}): ${fmt(perCategory[category])}`);
 	}
 	console.log(`verdict: ${verdict(overall, perCategory)}`);
 }
