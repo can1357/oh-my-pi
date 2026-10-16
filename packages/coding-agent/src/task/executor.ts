@@ -136,6 +136,7 @@ import { buildSubagentSystemPrompt } from "./system-prompt";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
+	type SystemPromptPreset,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
 	TASK_SUBAGENT_EVENT_CHANNEL,
@@ -1229,6 +1230,7 @@ function inheritedSubagentServiceTiers(
  * root values, not an ancestor's override.
  */
 const kRootCompactionThresholds = Symbol("task.rootCompactionThresholds");
+const kMinimalTaskParentSettings = Symbol("task.minimalTaskParentSettings");
 
 /** Root compaction thresholds a subagent chain pins (see {@link kRootCompactionThresholds}). */
 export interface RootCompactionThresholds extends CompactionThresholdPair {
@@ -1238,7 +1240,9 @@ export interface RootCompactionThresholds extends CompactionThresholdPair {
 /** Settings from {@link createSubagentSettings}, tagged with its chain's root compaction thresholds. */
 interface SubagentChainSettings extends Settings {
 	[kRootCompactionThresholds]?: RootCompactionThresholds;
+	[kMinimalTaskParentSettings]?: Settings;
 }
+
 
 /**
  * Settings overrides applying an exact-name compaction threshold entry to one
@@ -1272,6 +1276,7 @@ export function createSubagentSettings(
 	baseSettings: SubagentChainSettings,
 	overrides?: Readonly<Record<string, unknown>>,
 	inheritedServiceTier?: ServiceTierByFamily | null,
+	systemPreset?: SystemPromptPreset,
 ): Settings {
 	// Resolve the subagent's per-family tiers from `tier.subagent` ("inherit" =
 	// match the parent's live tiers when a live session supplied them, else the
@@ -1287,6 +1292,9 @@ export function createSubagentSettings(
 		thresholdTokens: cfgCompactionThresholdTokens.get(baseSettings),
 		modelThresholdsEnabled: cfgCompactionModelThresholdsEnabled.get(baseSettings),
 	};
+	// Minimal-task prompt workarounds belong to this session, not ordinary descendants.
+	const promptParentSettings = baseSettings[kMinimalTaskParentSettings] ?? baseSettings;
+	const inheritedPromptSettings = baseSettings[kMinimalTaskParentSettings];
 	// Every other setting reads through to the parent live; writes on the overlay stay local.
 	const subagentSettings: SubagentChainSettings = baseSettings.overlay(
 		{
@@ -1323,10 +1331,13 @@ export function createSubagentSettings(
 			// worker runs sailing past the configured threshold until the provider
 			// rejected the context (#13211). A per-spawn override still wins.
 			"compaction.midTurnEnabled": true,
+			...(inheritedPromptSettings ? { inlineToolDescriptors: cfgInlineToolDescriptors.get(inheritedPromptSettings), "tools.commands": cfgToolsCommands.get(inheritedPromptSettings) } : undefined),
 			...overrides,
+			...(systemPreset === "minimal-task" ? { inlineToolDescriptors: "off", "tools.commands": false } : undefined),
 		},
 		{ derived: true },
 	);
+	if (systemPreset === "minimal-task") subagentSettings[kMinimalTaskParentSettings] = promptParentSettings;
 	subagentSettings[kRootCompactionThresholds] = rootThresholds;
 	return subagentSettings;
 }
@@ -4795,7 +4806,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		settings,
 		{
 			...compactionThresholdSettings(options.compactionThresholdOverride),
-			...(isMinimalTask ? { inlineToolDescriptors: "off", "tools.commands": false } : undefined),
 			...subagentLspWritethroughSettings(settings),
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.
@@ -4806,6 +4816,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				: undefined),
 		},
 		options.parentServiceTier,
+		agent.systemPreset,
 	);
 	const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(settings);
 	const maxRuntimeMs = Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? cfgTaskMaxRuntimeMs.get(settings)) || 0));
