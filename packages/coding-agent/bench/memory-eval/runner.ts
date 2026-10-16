@@ -79,6 +79,8 @@ export interface RunOutput {
 const REMEMBER_BATCH = 500;
 const CONTENT_PREFIX_CHARS = 80;
 const FALLBACK_PREFIX_CHARS = 50;
+/** A shorter prefix is a whole short message ("ok", "yes"), which an unrelated hit can easily contain. */
+const MIN_FALLBACK_PREFIX_CHARS = 20;
 
 const isBeam = (dataset: DatasetName): boolean => dataset.startsWith("beam");
 
@@ -200,7 +202,7 @@ export async function runCases(
 
 		const prefixes = messages
 			.map(m => ({ messageId: m.messageId, prefix: normalize(cp(m.content, FALLBACK_PREFIX_CHARS)) }))
-			.filter(p => p.prefix !== "");
+			.filter(p => Array.from(p.prefix).length >= MIN_FALLBACK_PREFIX_CHARS);
 		// LongMemEval's session metrics widen past the turn cutoff until they see enough distinct sessions, and the
 		// official retrieval runner ranks the whole corpus, so LongMemEval asks for that; BEAM scores the top k.
 		const depth = isBeam(evalCase.dataset) ? k : Math.max(k, evalCase.messages.length);
