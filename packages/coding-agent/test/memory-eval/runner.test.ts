@@ -68,11 +68,29 @@ const hit = (engineId: string, content: string, summaryOf: string[] = []): Recal
 });
 
 describe("runner", () => {
-	it("oracle scores perfect primary metrics", async () => {
+	/** The best recall@k any ranking of k memories can reach: k slots cannot hold more than k gold messages. */
+	const ceiling = (k: number, gold: readonly string[]): number => Math.min(1, k / new Set(gold).size);
+
+	it("oracle reaches the recall ceiling on every question", async () => {
 		const { cases } = await loadDataset("beam-100k", fixtureDir);
 		const { questions } = await runCases(oracleEngine(), cases, "standard", 10, tmp);
+		const gold = new Map(cases.flatMap(c => c.questions).map(q => [q.questionId, q.goldMessageIds]));
 		expect(questions.length).toBeGreaterThan(0);
-		expect(questions.every(r => r.metrics["recall@10"] === 1 && r.metrics.mrr === 1)).toBe(true);
+		for (const q of questions) {
+			expect(q.metrics["recall@10"]).toBe(ceiling(10, gold.get(q.questionId)!));
+			expect(q.metrics.mrr).toBe(1);
+		}
+	});
+	it("oracle recall@10 is 10/11 with 11 gold messages", async () => {
+		const messages = Array.from({ length: 12 }, (_, i) => msg(`m${i}`, `text ${i}`));
+		const elevenGold = caseOf(
+			messages,
+			messages.slice(0, 11).map(m => m.messageId),
+		);
+		const { questions } = await runCases(oracleEngine(), [elevenGold], "standard", 10, tmp);
+		expect(questions[0].ranked).toHaveLength(10);
+		expect(questions[0].metrics["recall@10"]).toBe(ceiling(10, elevenGold.questions[0].goldMessageIds));
+		expect(questions[0].metrics["recall@10"]).toBeCloseTo(10 / 11, 12);
 	});
 	it("oracle scores perfect LongMemEval session recall", async () => {
 		const { cases } = await loadDataset("lme-s", fixtureDir);
