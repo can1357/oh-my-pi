@@ -85,6 +85,7 @@ export interface RewindSelectorDeps {
 	proseOnlyThinking?: () => boolean;
 	expandThinkingBlocks?: () => boolean;
 	linkTargets?: ReadonlyMap<string, string>;
+	proseGithubRepo?: (at?: number) => () => string | undefined;
 	requestRender: () => void;
 	/** Sibling branch paths of `entryId`'s turn (excluding the turn itself). */
 	siblingPaths?: (entryId: string) => BranchVariantPath[];
@@ -255,6 +256,7 @@ export class RewindSelectorComponent implements Component {
 			proseOnlyThinking: this.deps.proseOnlyThinking,
 			expandThinkingBlocks: this.deps.expandThinkingBlocks,
 			linkTargets: this.deps.linkTargets,
+			proseGithubRepo: this.deps.proseGithubRepo,
 			requestRender: this.deps.requestRender,
 		});
 		builder.setExpanded(this.#expanded);

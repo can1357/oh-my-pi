@@ -385,6 +385,8 @@ export class AssistantMessageComponent extends Container {
 	#markdownTheme: MarkdownTheme | undefined;
 	/** Text-block sources with {@link #linkTargets} applied, for the native `md` nodes; reset with the targets. */
 	#nativeLinkSources = new Map<string, string>();
+	/** GitHub repo (`owner/repo`) of the session that produced this reply; bare `#N` refs link to it. */
+	readonly #githubRepo: () => string | undefined;
 	/** Block this reply reacts to; undefined when the preceding block takes no reactions. */
 	#reactionTarget: ReactionTarget | undefined;
 	/** Reaction lifted from the reply's opening emoji, once resolved. */
@@ -433,7 +435,9 @@ export class AssistantMessageComponent extends Container {
 		if (this.#markdownTheme) return this.#markdownTheme;
 		const base = getMarkdownTheme();
 		const snapshot = this.#linkTargets;
-		const markdownTheme = snapshot.size > 0 ? getMarkdownThemeWithLinkTargets(snapshot) : base;
+		const githubRepo = this.#githubRepo();
+		const markdownTheme =
+			snapshot.size > 0 || githubRepo ? getMarkdownThemeWithLinkTargets(snapshot, githubRepo) : base;
 		this.#markdownTheme = markdownTheme;
 		return markdownTheme;
 	}
@@ -538,6 +542,7 @@ export class AssistantMessageComponent extends Container {
 		proseOnlyThinking = true,
 		linkTargets?: ReadonlyMap<string, string>,
 		expandThinkingBlocks = false,
+		githubRepo: () => string | undefined = () => undefined,
 	) {
 		super();
 		this.#hideThinkingBlock = hideThinkingBlock;
@@ -550,6 +555,7 @@ export class AssistantMessageComponent extends Container {
 		ensureThemeSync();
 		this.#transcriptBlockFinalized = message !== undefined;
 		if (linkTargets?.size) this.#linkTargets = linkTargets;
+		this.#githubRepo = githubRepo;
 
 		// Container for text/thinking content.
 		this.#contentContainer = new Container();
