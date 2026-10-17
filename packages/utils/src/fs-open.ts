@@ -15,9 +15,10 @@ const O_CLOEXEC = process.platform === "linux" ? 0o2000000 : process.platform ==
  * `fs.openSync` with close-on-exec, matching Node's default.
  *
  * libuv adds `O_CLOEXEC` inside `uv__fs_open`, so on Node every `fs` descriptor
- * dies at `exec`. Bun's `fs.open*` does not, and descriptors it returns survive
- * into any child spawned through a path that does not close strays itself — the
- * bash tool's shell `fork`/`exec`s user commands and hands them the lot. Use
+ * dies at `exec`. Bun's `fs.open*` did not before 1.4.3 (still inside the
+ * `bun@>=1.4` floor), and descriptors it returns survive into any child spawned
+ * through a path that does not close strays itself — the bash tool's shell
+ * `fork`/`exec`s user commands and hands them the lot. Use
  * this for every descriptor kept open past such a spawn (session transcripts,
  * logs, spools); a child must never hold a writable handle to them (#13224).
  *

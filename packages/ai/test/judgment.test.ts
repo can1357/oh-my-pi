@@ -163,16 +163,17 @@ describe("TextJudge", () => {
 	});
 
 	it("renders scalar fields directly, nested fields as YAML, and unsafe keys through field tags", () => {
-		expect(
-			renderJudgmentState({
-				name: 'a < b & "quoted"',
-				count: 2,
-				active: true,
-				missing: null,
-				config: { retries: 3, labels: ["fast", "safe"] },
-				"bad key": { enabled: false },
-			}),
-		).toBe(
+		// Bun 1.4.3 stopped emitting the trailing space after a block-valued key
+		// (`labels: ` → `labels:`); that whitespace is not part of the contract.
+		const rendered = renderJudgmentState({
+			name: 'a < b & "quoted"',
+			count: 2,
+			active: true,
+			missing: null,
+			config: { retries: 3, labels: ["fast", "safe"] },
+			"bad key": { enabled: false },
+		});
+		expect(rendered.replace(/ +$/gm, "")).toBe(
 			'<name>a &lt; b &amp; "quoted"</name>\n' +
 				"<count>2</count>\n" +
 				"<active>true</active>\n" +
