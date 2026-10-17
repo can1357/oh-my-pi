@@ -328,4 +328,18 @@ describe("runner", () => {
 		expect(questions[0].metrics["turn.recall_all@10"]).toBe(1);
 		expect(questions[0].metrics["session.recall_all@10"]).toBe(1);
 	});
+
+	it("with-sleep refuses LongMemEval, whose corpus ranks cannot hold a summary covering several sessions", async () => {
+		let warmed = false;
+		const engine: EngineAdapter = {
+			...oracleEngine(),
+			warmup: async () => {
+				warmed = true;
+			},
+		};
+		await expect(runCases(engine, [lmeCase(["s1_1"], ["s1_1"])], "with-sleep", 50, tmp)).rejects.toThrow(
+			"with-sleep does not support LongMemEval",
+		);
+		expect(warmed).toBe(false);
+	});
 });
