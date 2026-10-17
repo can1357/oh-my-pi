@@ -39,6 +39,9 @@
 ### Fixed
 
 - Fixed Windows archive extraction overwriting existing files or following existing symlinks when copying a symlink entry without symlink privileges ([#15931](https://github.com/can1357/oh-my-pi/pull/15931) by [@jchanghong023](https://github.com/jchanghong023)).
+### Breaking Changes
+
+- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/pi-utils` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.3] - 2026-10-16
 
@@ -48,9 +51,6 @@
 - Fixed `parseHTML` treating `<link>` in RSS/Atom documents as an HTML void element, which dropped the URL text of RSS `<link>…</link>` ([#15954](https://github.com/can1357/oh-my-pi/issues/15954))
 
 ## [18.11.2] - 2026-10-16
-### Breaking Changes
-
-- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3; `MIN_BUN_VERSION` derives from this package's `engines.bun`, so consumers now reject older runtimes at startup ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 

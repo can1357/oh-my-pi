@@ -1063,14 +1063,36 @@ export interface SourceMount {
 	nodeModules: string[];
 }
 
-/** Bun version pinned by the repo's `packageManager` field. */
+/**
+ * Concrete Bun release the repo pins: the root `packageManager` field when it
+ * names one, else the floor declared by `packages/utils`. A range (`>=1.4.3`)
+ * resolves to its boundary, which is the version the `oven/bun:<ver>` deps
+ * image and the benchmark containers install.
+ */
 function repoBunVersion(): string {
-	const raw = readJson(path.join(REPO_ROOT, "package.json"));
-	if (raw && typeof raw === "object") {
-		const pm = (raw as Record<string, unknown>).packageManager;
-		if (typeof pm === "string" && pm.startsWith("bun@")) return pm.slice("bun@".length);
+	const root = readJson(path.join(REPO_ROOT, "package.json"));
+	if (root !== null && typeof root === "object" && "packageManager" in root) {
+		const pm = root.packageManager;
+		if (typeof pm === "string" && pm.startsWith("bun@")) return pm.slice("bun@".length).replace(/^[^0-9]*/, "");
 	}
 	return "1.4.0";
+}
+
+/**
+ * Runtime floor the installed `omp` enforces (`MIN_BUN_VERSION` in
+ * `packages/utils`). Benchmark containers install their own Bun, so this has to
+ * travel to the agent — the default would otherwise be an older build the CLI
+ * exits on at startup.
+ */
+function minimumBunVersion(): string {
+	const utils = readJson(path.join(REPO_ROOT, "packages", "utils", "package.json"));
+	if (utils !== null && typeof utils === "object" && "engines" in utils) {
+		const engines = utils.engines;
+		if (engines !== null && typeof engines === "object" && "bun" in engines && typeof engines.bun === "string") {
+			return engines.bun.replace(/^[^0-9]*/, "");
+		}
+	}
+	return repoBunVersion();
 }
 
 /** Native arch of the docker daemon (what non-emulated task containers run as). */
@@ -1467,6 +1489,9 @@ export function buildHarborEnv(
 	env.OMP_BENCH_INSTALL = cfg.install;
 	env.OMP_BENCH_VERSION = cfg.version ?? version;
 	if (tarball) env.OMP_BENCH_TARBALL = tarball;
+	// The benchmark containers install Bun themselves (omp_local.py) and the
+	// installed CLI exits below this floor, so publish the repo's minimum.
+	env.OMP_BENCH_BUN_VERSION = minimumBunVersion();
 	if (source) {
 		env.OMP_BENCH_SOURCE_DIR = SOURCE_SRC_MOUNT;
 		env.OMP_BENCH_SOURCE_BUN = `${SOURCE_BIN_MOUNT}/bun`;

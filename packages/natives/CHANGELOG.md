@@ -122,6 +122,12 @@
 
 ## [18.12.0] - 2026-10-17
 
+- Fixed Windows file-lock contention returning permission errors when an existing lease allows synchronization but not full mutex access ([#15930](https://github.com/can1357/oh-my-pi/pull/15930) by [@jchanghong023](https://github.com/jchanghong023)).
+### Breaking Changes
+
+- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/pi-natives` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+## [18.11.3] - 2026-10-16
 ### Breaking Changes
 
 - `encodeSixel` and `encodeSixelAsync` now require a fourth terminal-background RGB argument packed as `0xRRGGBB` ([#15891](https://github.com/can1357/oh-my-pi/pull/15891) by [@Bouska](https://github.com/Bouska)).
@@ -138,9 +144,6 @@
 - Changed `encodeSixel` and `encodeSixelAsync` to drop a partial last 6-pixel band, so an image never extends below the requested height and the caller no longer has to shrink it to a multiple of 6 ([#16007](https://github.com/can1357/oh-my-pi/issues/16007))
 
 ## [18.11.2] - 2026-10-16
-### Breaking Changes
-
-- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/pi-natives` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
