@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bu
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { pinnedCheckout } from "../../bench/memory-eval/run";
 
 const RUN = path.join(import.meta.dir, "../../bench/memory-eval/run.ts");
@@ -119,21 +120,20 @@ it("run refuses a cached dataset whose recorded revision is missing or not the p
 });
 
 describe("pinnedCheckout", () => {
-	const commit = (dir: string, message: string) =>
-		Bun.$`git -c user.name=t -c user.email=t@t commit -q --allow-empty -m ${message}`.cwd(dir).quiet();
-	const repo = async (name: string): Promise<string> => {
+	/** A repo with one commit; returns its directory and HEAD. */
+	const repo = async (name: string): Promise<{ dir: string; sha: string }> => {
 		const dir = path.join(root, name);
 		await fs.mkdir(dir, { recursive: true });
 		await Bun.write(path.join(dir, "a"), "1");
-		await Bun.$`git init -q && git add a`.cwd(dir).quiet();
-		await commit(dir, "one");
-		return dir;
+		const git = await vcs.init(dir);
+		await git.configSet("user.name", "t");
+		await git.configSet("user.email", "t@t");
+		await git.stageFiles(["a"]);
+		return { dir, sha: await git.commitCreate("one", {}) };
 	};
-	const head = async (dir: string) => (await Bun.$`git rev-parse HEAD`.cwd(dir).text()).trim();
 
 	it("records HEAD and whether the checkout is dirty before the run starts", async () => {
-		const dir = await repo("clean");
-		const sha = await head(dir);
+		const { dir, sha } = await repo("clean");
 		const dirtyDuringRun = await pinnedCheckout(dir, async state => {
 			await Bun.write(path.join(dir, "a"), "2");
 			return state;
@@ -143,7 +143,9 @@ describe("pinnedCheckout", () => {
 	});
 
 	it("refuses the result when HEAD moves during the run", async () => {
-		const dir = await repo("moved");
-		await expect(pinnedCheckout(dir, () => commit(dir, "two"))).rejects.toThrow("HEAD moved");
+		const { dir } = await repo("moved");
+		await expect(
+			pinnedCheckout(dir, () => vcs.requireGit(dir).commitCreate("two", { allowEmpty: true })),
+		).rejects.toThrow("HEAD moved");
 	});
 });
