@@ -42,6 +42,7 @@
 - Fixed resumed sessions with `eval` history (`--continue`, `--resume`) missing the prompt cache after the previous process's first request ([#15736](https://github.com/can1357/oh-my-pi/issues/15736))
 - Fixed a failed streamed edit preview ending the whole run without retry: the harness now re-drives the turn with the preview diagnostic so the model can read the file again and correct the patch, and gives up with a notice only after two recoveries
 - Fixed MCP OAuth login requesting every scope in an authorization server's catalogue when the protected resource advertises no scopes; `/mcp reauth` now falls back to configured scopes or authorization-server defaults ([#15996](https://github.com/can1357/oh-my-pi/pull/15996) by [@unclesamwk](https://github.com/unclesamwk)).
+- Fixed the JTD-to-JSON-Schema converter emitting `$ref`s that cannot resolve: ref names are now escaped per JSON Pointer (`~` and `/`), and the JTD root `definitions` map is mapped to `$defs` so `#/$defs/` refs have a target ([#14826](https://github.com/can1357/oh-my-pi/pull/14826) by [@jchanghong023](https://github.com/jchanghong023)).
 
 ## [18.11.3] - 2026-10-16
 
