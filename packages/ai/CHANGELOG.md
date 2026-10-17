@@ -26,6 +26,7 @@
 
 ### Fixed
 
+- Fixed OpenCode free-tier 403 on most conversations: the `x-opencode-session` head low 12 bits are now forced into the gateway-accepted range instead of raw digest bits the gate rejects ~98% of the time ([#12556](https://github.com/can1357/oh-my-pi/pull/12556) by [@palprateek](https://github.com/palprateek), gate range measured by [@jaskaran-ai](https://github.com/jaskaran-ai)).
 - Fixed JSON Schema dereferencing rewriting literal values in `const`, `enum`, `default`, examples, and custom annotations, or treating property names as schema keywords ([#15927](https://github.com/can1357/oh-my-pi/pull/15927) by [@jchanghong023](https://github.com/jchanghong023)).
 - Fixed Anthropic requests hanging forever on Bun 1.3 when the upstream accepted the request but never sent headers: aborting the request (including the first-event timeout) now fails it, so the turn retries instead of waiting until the user interrupts it ([#16010](https://github.com/can1357/oh-my-pi/pull/16010) by [@ca-io-systems](https://github.com/ca-io-systems))
 - Fixed the auth gateway's `POST /v1/chat/completions` streams being dropped (`terminated`) after ~255 s without upstream output, e.g. while xAI generates a large tool call's arguments, which arrive only when complete; the stream now sends an SSE `: keepalive` comment every 15 s ([#15940](https://github.com/can1357/oh-my-pi/pull/15940) by [@radkawar](https://github.com/radkawar))
@@ -77,6 +78,7 @@
 
 ### Fixed
 
+- Fixed OpenCode free-tier 403 on advisor turns: the gateway mandatorily requires the `bash` and `read` tool names, so requests missing either (including rosters that carry other tool names but no `bash`) are now padded with stubs for the missing pair — on both dispatch funnels, with the `tool_choice: none` pin kept off `openai-responses` ([#12556](https://github.com/can1357/oh-my-pi/pull/12556) by [@palprateek](https://github.com/palprateek), with funnel coverage contributed by [@NoelJacob](https://github.com/NoelJacob)).
 - Fixed parallel tool calls failing with "Tool call arguments are not valid JSON" on some OpenAI-compatible gateways, such as Gemini ([#15682](https://github.com/can1357/oh-my-pi/pull/15682) by [@Zzz141592653](https://github.com/Zzz141592653))
 - Fixed Anthropic fallback-credit redemption losing its credit on errors that only mention `400` in their text, such as an overload message ([#15702](https://github.com/can1357/oh-my-pi/pull/15702) by [@H4vC](https://github.com/H4vC))
 - Fixed Anthropic fallback-credit redemption sending an extra `fallback-credit-2026-06-01` beta when the refused request used a newer one ([#15702](https://github.com/can1357/oh-my-pi/pull/15702) by [@H4vC](https://github.com/H4vC))
@@ -563,6 +565,9 @@
 
 ### Fixed
 
+- Fixed OpenCode Zen/Go free-tier 403 `FreeTierError` on model requests: OpenCode's gate rejects clients whose `User-Agent` is not `opencode/<version>` and whose `x-opencode-session` is not the canonical `ses_<12 hex><14 alnum>` shape, which omp's identity failed on both counts. All OpenCode inference now sends the canonical client UA and a stable session token derived from the conversation id so routing and prompt caching stay pinned across turns ([#12556](https://github.com/can1357/oh-my-pi/pull/12556) by [@palprateek](https://github.com/palprateek))
+- Fixed OpenCode free-tier 403 on tool-less auxiliary calls (advisors, one-shot helpers): the gate also requires at least five OpenCode core tool names in `tools[]`, so `stream()` now pads such requests with stub entries for the missing names instead of letting the gateway refuse them ([#12556](https://github.com/can1357/oh-my-pi/pull/12556) by [@palprateek](https://github.com/palprateek)).
+- OpenCode `403 FreeTierError` denials no longer rotate sibling credentials or invalidate the stored key (the same key keeps serving paid models), and the surfaced message now explains the model-scoped restriction instead of reading like an auth failure ([#12556](https://github.com/can1357/oh-my-pi/pull/12556) by [@palprateek](https://github.com/palprateek)).
 - Fixed Claude Opus 5.5 not applying a mid-session switch to high-effort reasoning when the session started without an explicit effort setting.
 - Fixed Alibaba Token Plan monthly quotas not appearing in usage reports or the status line.
 
