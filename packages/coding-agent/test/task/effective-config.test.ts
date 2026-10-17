@@ -303,6 +303,28 @@ describe("omp agents show", () => {
 		});
 	});
 
+	it("reports a seance's model as its source session's and drops the overrides a seance spawn ignores", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5", advisor: "anthropic/claude-opus-4-5" },
+			"task.enableLsp": true,
+			"task.agentModelOverrides": { seance: "anthropic/claude-haiku-4-5" },
+			"task.agentPrewalk": { seance: "anthropic/claude-opus-4-5" },
+			"task.agentAdvisor": { seance: "anthropic/claude-sonnet-4-5" },
+		});
+		const agent = getBundledAgent("seance");
+		if (!agent) throw new Error("Expected bundled seance agent");
+		const view = await resolveEffectiveAgentConfig(agent, settings, modelRegistry, "/tmp");
+
+		expect(view.model).toEqual({
+			value: null,
+			source: { layer: "session", key: "seance source" },
+			note: "the source session's saved model, or the call's model",
+		});
+		expect(view.prewalk).toMatchObject({ value: null, note: "a seance never hands off" });
+		expect(view.advisor).toMatchObject({ value: null, note: "a seance runs unadvised" });
+		expect(view.tools.value).toEqual(["read", "grep", "glob"]);
+	});
+
 	it("aligns the source column by terminal cells when a value is wide", async () => {
 		const settings = Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } });
 		const agent: AgentDefinition = { name: "plain", description: "test", systemPrompt: "test", source: "project" };
