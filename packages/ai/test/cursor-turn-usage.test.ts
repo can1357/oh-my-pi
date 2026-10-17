@@ -308,6 +308,34 @@ describe("Cursor turn usage (issue #13082)", () => {
 		},
 	);
 
+	it.each([true, false])("rejects cache-write-only bill echoes (turnEnded first: %s)", async endedFirst => {
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const usageState: UsageState = { sawTokenDelta: false, contextWindow: 500_000 };
+		const update: InteractionUpdate = {
+			message: {
+				case: "turnEnded",
+				value: { inputTokens: 889_190n, outputTokens: 2_828n, cacheWriteTokens: 882_816n },
+			},
+		};
+		if (endedFirst) processInteractionUpdate(update, output, stream, state, usageState);
+		await checkpoint(output, stream, state, usageState, 892_018);
+		if (!endedFirst) processInteractionUpdate(update, output, stream, state, usageState);
+
+		expect(output.usage).toMatchObject({
+			input: 6_374,
+			output: 2_828,
+			cacheRead: 0,
+			cacheWrite: 882_816,
+			totalTokens: 892_018,
+			contextTokens: 0,
+		});
+		await checkpoint(output, stream, state, usageState, 264_400);
+		await checkpoint(output, stream, state, usageState, 892_018);
+		expect(output.usage.contextTokens).toBe(264_400);
+	});
+
 	it.each([
 		{ contextWindow: 500_000, input: 100n, output: 7n, cacheRead: 60n, cacheWrite: 15n, usedTokens: 107 },
 		{

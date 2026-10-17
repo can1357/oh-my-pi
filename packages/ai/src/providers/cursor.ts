@@ -5582,7 +5582,7 @@ function adoptCursorContextOccupancy(usage: Usage, usedTokens: number, usageStat
 		contextWindow > 0 &&
 		usedTokens > contextWindow &&
 		usedTokens === usage.totalTokens &&
-		usage.cacheRead > 0
+		(usage.cacheRead > 0 || usage.cacheWrite > 0)
 	) {
 		// Explicit zero disables billable fallback without creating a transcript usage anchor.
 		usage.contextTokens = usageState.trustedContextTokens ?? 0;

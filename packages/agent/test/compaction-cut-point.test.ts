@@ -2,11 +2,13 @@ import { describe, expect, test } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
+	type CompactionEntry,
 	type BranchSummaryEntry,
 	type CustomMessageEntry,
 	DEFAULT_COMPACTION_SETTINGS,
 	findCutPoint,
 	prepareCompaction,
+	type SessionEntry,
 	type SessionMessageEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core/tokenizer";
@@ -145,5 +147,100 @@ describe("findCutPoint backward scan boundaries", () => {
 			const cut = findCutPoint(entries, new Tokenizer(opus), 0, entries.length, 20_000);
 			expect(cut.firstKeptEntryIndex).toBe(4);
 		});
+	});
+});
+
+describe("prepareCompaction context accounting", () => {
+	const messageEntry = (message: SessionMessageEntry["message"]): SessionMessageEntry => ({
+		...base("message"),
+		type: "message",
+		message,
+	});
+	const trusted = () => {
+		const message = createAssistantMessage([{ type: "text", text: "prior reply" }]);
+		message.usage.contextTokens = 264_400;
+		return messageEntry(message);
+	};
+	const rejected = () => {
+		const message = createAssistantMessage([{ type: "text", text: "latest reply" }]);
+		message.usage = {
+			...message.usage,
+			input: 6_374,
+			output: 2_828,
+			cacheRead: 882_816,
+			totalTokens: 892_018,
+			contextTokens: 0,
+		};
+		return messageEntry(message);
+	};
+
+	test("keeps prior occupancy plus the unaccounted tail and bounds the retained suffix", () => {
+		const prior = trusted();
+		const tail = [messageEntry(createUserMessage("t".repeat(6_000))), rejected()];
+		const entries = [messageEntry(createUserMessage("p".repeat(40_000))), prior, ...tail];
+		const preparation = prepareCompaction(
+			entries,
+			{ ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 5_000 },
+			undefined,
+			tokenizer,
+		);
+
+		expect(preparation?.tokensBefore).toBe(264_400 + tokenizer.countMessages(tail.map(entry => entry.message)));
+		expect(preparation?.firstKeptEntryId).toBe(tail[1].id);
+		expect(preparation?.recentMessages).toEqual([tail[1].message]);
+	});
+
+	test("counts the live messages locally when every usage report is rejected", () => {
+		const entries = [messageEntry(createUserMessage("x".repeat(40_000))), rejected()];
+		const preparation = prepareCompaction(
+			entries,
+			{ ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 },
+			undefined,
+			tokenizer,
+		);
+
+		expect(preparation?.tokensBefore).toBe(tokenizer.countMessages(entries.map(entry => entry.message)));
+		expect(preparation?.recentMessages).toEqual([entries[1].message]);
+	});
+
+	test("does not reuse a cleared anchor after reset", () => {
+		const tail = [messageEntry(createUserMessage("new request")), rejected()];
+		const entries: SessionEntry[] = [trusted(), { ...base("reset_boundary"), type: "reset_boundary" }, ...tail];
+		const preparation = prepareCompaction(
+			entries,
+			{ ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 },
+			undefined,
+			tokenizer,
+		);
+
+		expect(preparation?.tokensBefore).toBe(tokenizer.countMessages(tail.map(entry => entry.message)));
+		expect([...(preparation?.messagesToSummarize ?? []), ...(preparation?.turnPrefixMessages ?? [])]).toEqual([
+			tail[0].message,
+		]);
+	});
+
+	test("does not reuse pre-compaction usage from a retained message", () => {
+		const prior = trusted();
+		const retained = messageEntry(createUserMessage("retained request"));
+		const boundary: CompactionEntry = {
+			...base("compaction"),
+			type: "compaction",
+			summary: "previous summary",
+			firstKeptEntryId: retained.id,
+			tokensBefore: 264_400,
+		};
+		const tail = [messageEntry(createUserMessage("new request")), rejected()];
+		const entries = [messageEntry(createUserMessage("summarized request")), retained, prior, boundary, ...tail];
+		const preparation = prepareCompaction(
+			entries,
+			{ ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 },
+			undefined,
+			tokenizer,
+		);
+
+		expect(preparation?.tokensBefore).toBe(
+			tokenizer.countMessages([retained.message, prior.message, ...tail.map(entry => entry.message)]),
+		);
+		expect(preparation?.previousSummary).toBe("previous summary");
 	});
 });
