@@ -354,6 +354,7 @@ import {
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
 	cfgDisplaySubagentLivePreview,
+	cfgDisplayTranscriptReplayLimit,
 	cfgGitEnabled,
 	cfgLoopConditionTimeoutMs,
 	cfgLoopMode,
@@ -451,6 +452,7 @@ const cfgLiveUiSettings = combine({
 	"display.collapseCompacted": cfgDisplayCollapseCompacted,
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
 	"display.showTurnTime": cfgDisplayShowTurnTime,
+	"display.transcriptReplayLimit": cfgDisplayTranscriptReplayLimit,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
 	"tui.renderSvg": cfgTuiRenderSvg,
 	"tui.autoGraph": cfgTuiAutoGraph,
@@ -3631,7 +3633,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		// options are baked in at build time: rebuild, then retire rows already
 		// committed to native scrollback.
 		if (
-			any("display.cacheMissMarker", "display.collapseCompacted", "display.showTokenUsage", "display.showTurnTime")
+			any(
+				"display.cacheMissMarker",
+				"display.collapseCompacted",
+				"display.showTokenUsage",
+				"display.showTurnTime",
+				"display.transcriptReplayLimit",
+			)
 		) {
 			rebuildChat = true;
 		}

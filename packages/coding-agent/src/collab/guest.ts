@@ -270,6 +270,15 @@ export class CollabGuestLink {
 		return this.#readOnly;
 	}
 
+	/**
+	 * True while the transcript shows the host's replica: from the switch to it
+	 * until leaving starts. `collabGuest` is set earlier (while joining) and
+	 * stays set until the local session is back; both of those draw the local one.
+	 */
+	get showsReplica(): boolean {
+		return this.#replicaActivated && !this.#left;
+	}
+
 	/** Shows the read-only status hint when applicable; true when the action must be dropped. */
 	#rejectReadOnly(): boolean {
 		if (!this.#readOnly) return false;

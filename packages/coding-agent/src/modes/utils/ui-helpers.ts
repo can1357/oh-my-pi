@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
@@ -18,6 +18,7 @@ import { createBackgroundTanDispatchBlock } from "@oh-my-pi/pi-tui/chat/backgrou
 import { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { detectCacheInvalidation } from "@oh-my-pi/pi-tui/chat/cache-invalidation-marker";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
+import { HiddenHistoryNotice } from "@oh-my-pi/pi-tui/chat/hidden-history-notice";
 import { CollabPromptMessageComponent } from "@oh-my-pi/pi-tui/chat/collab-prompt-message";
 import {
 	BranchSummaryMessageComponent,
@@ -103,6 +104,7 @@ import {
 	cfgDisplayCollapseCompacted,
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
+	cfgDisplayTranscriptReplayLimit,
 	cfgTerminalShowImages,
 } from "../settings";
 import { cfgReadToolResultPreview } from "../../tools/settings";
@@ -489,12 +491,27 @@ export class UiHelpers {
 		this.ctx.pendingTools.clear();
 		const activeToolExecutionUpdates = this.ctx.viewSession.activeToolExecutionUpdates?.() ?? [];
 		const runningAsyncJobs = this.ctx.viewSession.getAsyncJobSnapshot?.()?.running ?? [];
+		const messages = sessionContext.messages;
+		const start = this.#transcriptWindowStart(messages, this.#liveBackgroundJobCheck());
 		// Reseed the cache-invalidation baseline: this rebuild re-derives every
 		// turn's marker from usage, and the last turn becomes the live baseline.
 		this.ctx.lastAssistantUsage = undefined;
 		// Same for the served-model tracker: replaying history re-flags the first
 		// occurrence of each substitution and carries the memory forward live.
 		this.ctx.servedModelTracker = new ServedModelTracker();
+		// History above the redrawn window still feeds both, so the first drawn
+		// turn gets the marker a full redraw would give it. Its settled
+		// components are dropped: session entries keep messages reachable, so a
+		// retained mapping would pin layout caches the redraw no longer shows.
+		for (let i = 0; i < start; i++) {
+			const message = messages[i]!;
+			this.ctx.transcriptMessageComponents.delete(message);
+			if (message.role !== "assistant") continue;
+			const usage = message.usage;
+			if (usage.cacheRead + usage.cacheWrite + usage.input > 0) this.ctx.lastAssistantUsage = usage;
+			this.ctx.servedModelTracker.check(message);
+		}
+		if (start > 0) this.ctx.chatContainer.addChild(new HiddenHistoryNotice(start));
 
 		if (options.updateFooter) {
 			this.ctx.statusLine.invalidate();
@@ -590,9 +607,8 @@ export class UiHelpers {
 		// (not finalized) so replayed and live frames still route to the card;
 		// the ids are handed back to the controller after the loop (#10447).
 		const backgroundCallIds = new Set<string>();
-		const messages = sessionContext.messages;
 		const count = messages.length;
-		for (let i = 0; i < count; i++) {
+		for (let i = start; i < count; i++) {
 			// Yield BEFORE each message (except the first) rather than after: the
 			// per-message body has several early `continue` paths (preserved live
 			// results, image-only and grouped `read` results), and a trailing yield
@@ -600,7 +616,7 @@ export class UiHelpers {
 			// such results, so an after-body yield never trips the chunk counter and
 			// the whole batch replays in one event-loop turn. Yielding at the top of
 			// the next iteration is reached no matter how the prior message exited.
-			if (i > 0) yield;
+			if (i > start) yield;
 			const message = messages[i]!;
 			if (message.role !== "toolResult") flushPendingUsage();
 			// Assistant messages need special handling for tool calls
@@ -959,6 +975,63 @@ export class UiHelpers {
 	}
 
 	/**
+	 * Snapshot of background job calls whose card the replay parks (#10447):
+	 * the persisted result is only the "still running" state, and the job's
+	 * latest frame, if any, has not settled. A finished job keeps its last
+	 * frame cached, so a frame alone does not make the job live.
+	 */
+	#liveBackgroundJobCheck(): (message: ToolResultMessage) => boolean {
+		const activeToolExecutionUpdates = this.ctx.viewSession.activeToolExecutionUpdates?.() ?? [];
+		const runningAsyncJobs = this.ctx.viewSession.getAsyncJobSnapshot?.()?.running ?? [];
+		return message => {
+			if (!parksAsBackground(message.toolName, message.details)) return false;
+			const frame = activeToolExecutionUpdates.find(event => event.toolCallId === message.toolCallId)?.partialResult;
+			if (frame !== undefined) return !isSettledJobFrame(frame.details);
+			const jobId = (message.details as { async?: { jobId?: string } } | undefined)?.async?.jobId;
+			return runningAsyncJobs.some(job => job.id === jobId);
+		};
+	}
+
+	/**
+	 * First message a transcript redraw draws. Past `display.transcriptReplayLimit`
+	 * messages, the redraw starts at the user request opening the turn that
+	 * contains the limit, so tool calls stay with their results, and reaches
+	 * further back to any still-running background job so its card keeps
+	 * receiving progress. Clearing native scrollback means every drawn row is
+	 * re-sent to the terminal; earlier history stays browsable in /tree. Views
+	 * without /tree access to their own history (a focused subagent, a collab
+	 * guest's replica) are drawn in full; the local session a guest returns to
+	 * is windowed like any other.
+	 */
+	#transcriptWindowStart(
+		messages: readonly AgentMessage[],
+		isLiveBackgroundJob: (message: ToolResultMessage) => boolean,
+	): number {
+		if (messages.length === 0 || this.ctx.focusedAgentId || this.ctx.collabGuest?.showsReplica) return 0;
+		// Config accepts any finite number; a fractional limit would index between messages.
+		const limit = Math.trunc(cfgDisplayTranscriptReplayLimit.get(this.ctx.settings));
+		if (limit <= 0 || messages.length <= limit) return 0;
+		// Same turn anchors as the replay's turn timer: an agent-attributed
+		// `user` message (a mid-run steer) does not open a turn; a synthetic
+		// developer message (`.`/`c` continue, auto-continue, /goal) does.
+		const turnStartAtOrBefore = (index: number): number => {
+			for (let i = index; i > 0; i--) {
+				const message = messages[i]!;
+				if (message.role === "user" && message.attribution !== "agent") return i;
+				if (message.role === "developer" && message.synthetic) return i;
+				if (message.role === "custom" && isUserTurnInitiator(message as CustomMessage)) return i;
+			}
+			return 0;
+		};
+		const start = turnStartAtOrBefore(messages.length - limit);
+		for (let i = 0; i < start; i++) {
+			const message = messages[i]!;
+			if (message.role === "toolResult" && isLiveBackgroundJob(message)) return turnStartAtOrBefore(i);
+		}
+		return start;
+	}
+
+	/**
 	 * Fast-path history rewind (esc-esc branch, /tree rewind to an ancestor):
 	 * drop the rendered components at/after `message` in place instead of the
 	 * destructive clear-scrollback replay. Rows already committed to native
@@ -1000,6 +1073,17 @@ export class UiHelpers {
 		});
 		for (const remaining of context.messages) {
 			if (remaining === message) return false;
+		}
+		// A windowed transcript keeps its window only if the shorter surviving
+		// transcript would start at the same message; otherwise only a full
+		// redraw shows the history that now belongs above the cut. Without a
+		// window, a shorter transcript never gains one.
+		const notice = chat.children.find((child): child is HiddenHistoryNotice => child instanceof HiddenHistoryNotice);
+		if (
+			notice &&
+			this.#transcriptWindowStart(context.messages, this.#liveBackgroundJobCheck()) !== notice.hiddenMessages
+		) {
+			return false;
 		}
 		const dropped = chat.children.slice(index);
 		for (let i = dropped.length - 1; i >= 0; i--) {

@@ -9,6 +9,8 @@
 
 ### Changed
 
+- Rewinding from `/tree` or Esc-Esc, resuming, and changing display settings on long sessions now redraw only the most recent ~600 messages under an "N earlier messages not shown" note; set `display.transcriptReplayLimit` to `0` to redraw the full history ([#14988](https://github.com/can1357/oh-my-pi/pull/14988) by [@azain47](https://github.com/azain47)).
+- Reduced status-line refresh overhead while subagents have long conversations ([#15874](https://github.com/can1357/oh-my-pi/pull/15874) by [@iliaal](https://github.com/iliaal)).
 - With a first-party Anthropic model on the official API selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup; third-party gateways and custom endpoints are never probed ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
 - Snapcompact now shows an imaged `read` result's indentation as count brackets (`[»2]` two tabs, `[·4]` four spaces) and keeps its `[path#TAG]` header as text, so edits from imaged reads keep the right indentation and tag ([#15899](https://github.com/can1357/oh-my-pi/pull/15899) by [@apoc](https://github.com/apoc))
 
