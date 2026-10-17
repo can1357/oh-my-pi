@@ -1,7 +1,7 @@
 # memory-eval
 
 Retrieval benchmark harness: Mnemopi (`packages/mnemopi`) vs upstream Mnemosyne 4.0.0b4.
-Everything it downloads lives under `~/.cache/omp-memory-eval/` and is never committed.
+Everything it downloads lives under `~/.cache/omp-memory-eval/` and is never committed, except the embedding model Mnemopi's own fastembed loads (`--embedder js`, `embed-parity.ts`): Mnemopi has no option to move it, so it shares omp's fastembed cache (`~/.omp/cache/fastembed` by default).
 
 ## One-time setup
 
