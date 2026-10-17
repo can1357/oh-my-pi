@@ -172,7 +172,51 @@ export const cfgAdvisorJudgeGate = register({
 		group: "Advisor",
 		label: "Advisor Judge Gate (experimental)",
 		description:
-			"Before each in-progress review, ask the 'judge' model role whether the update shows risk. Low-risk updates are held for the next review instead of costing a full advisor turn. Final turns are never gated, though review cadence can still hold them; judge failures review anyway.",
+			"Before each in-progress review, ask the 'judge' model role whether the update shows risk. Low-risk updates are held for the next review instead of costing a full advisor turn, up to the hold count and age caps below. Final turns are never gated, though review cadence can still hold them; judge failures review anyway.",
+		condition: "advisorEnabled",
+	},
+});
+
+export const cfgAdvisorJudgeGateMaxHolds = register({
+	id: "advisor.judgeGateMaxHolds",
+	protocolDefault: ["rpc", "acp"],
+	type: "number",
+	default: 3,
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Judge Gate Max Holds",
+		description:
+			"After the judge gate has held this many in-progress updates in a row (minimum 1), the next one is reviewed without asking the judge, together with everything held.",
+		options: [
+			{ value: "1", label: "1 update" },
+			{ value: "2", label: "2 updates" },
+			{ value: "3", label: "3 updates", description: "Default." },
+			{ value: "5", label: "5 updates" },
+			{ value: "10", label: "10 updates" },
+		],
+		condition: "advisorEnabled",
+	},
+});
+
+export const cfgAdvisorJudgeGateMaxHoldMs = register({
+	id: "advisor.judgeGateMaxHoldMs",
+	protocolDefault: ["rpc", "acp"],
+	type: "number",
+	default: 120_000,
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Judge Gate Max Hold Time",
+		description:
+			"When the oldest update the judge gate holds has waited longer than this, the next in-progress update is reviewed without asking the judge, together with everything held. 0 disables the time cap.",
+		options: [
+			{ value: "0", label: "Off" },
+			{ value: "30000", label: "30 seconds" },
+			{ value: "60000", label: "1 minute" },
+			{ value: "120000", label: "2 minutes", description: "Default." },
+			{ value: "300000", label: "5 minutes" },
+		],
 		condition: "advisorEnabled",
 	},
 });

@@ -1841,6 +1841,7 @@ Older entries are archived in [packages/coding-agent/CHANGELOG.md@add60d3a7727](
 ### Added
 
 - Added experimental `advisor.judgeGate`: the `judge` model role (e.g. TypeSafe Jev) screens each in-progress advisor update, and low-risk updates wait for the next review instead of costing a full advisor turn ([#14279](https://github.com/can1357/oh-my-pi/pull/14279) by [@LaansDole](https://github.com/LaansDole))
+- Added `advisor.judgeGateMaxHolds` (default 3) and `advisor.judgeGateMaxHoldMs` (default 120000, `0` disables) so the judge gate force-reviews held in-progress updates mid-session instead of leaving advice until the final review ([#14279](https://github.com/can1357/oh-my-pi/pull/14279) by [@LaansDole](https://github.com/LaansDole))
 
 ### Fixed
 

@@ -112,6 +112,13 @@ export interface AdvisorRuntimeHost {
 	 */
 	// ponytail: judges only the newest update, so cross-update loops surface at the final review; pass held text if that proves too late.
 	gateReview?(update: string): Promise<boolean> | undefined;
+	/**
+	 * Bounds on consecutive `gateReview` holds, read at each in-progress boundary.
+	 * Once the gate holds `maxHolds` updates, or the oldest has waited more than
+	 * `maxHoldMs` (`0` disables the age cap), the next in-progress update is
+	 * dispatched without asking the gate, with everything held. Absent means unbounded.
+	 */
+	gateLimits?(): { maxHolds: number; maxHoldMs: number };
 }
 
 /**
@@ -260,6 +267,8 @@ interface PendingDelta {
 	overflowRecovery?: boolean;
 	/** Pending `advisor.judgeGate` verdict on this held delta; survives the copies `#held` entries go through. */
 	gate?: Promise<boolean>;
+	/** When the gate held this delta (epoch ms); unset for cadence-held deltas. */
+	gatedAt?: number;
 }
 
 /** Updates a review cadence captured but has not sent, and the primary cursor they end at. */
@@ -472,8 +481,12 @@ export class AdvisorRuntime {
 			this.#releaseFailureWaiters();
 			logger.warn("advisor delta render failed", { err: String(err) });
 		}
-		// The experimental gate may hold an in-progress update the cadence scheduled.
-		const verdict = opts?.dispatch !== false && rendered && wip ? this.host.gateReview?.(rendered.text) : undefined;
+		// The experimental gate may hold an in-progress update the cadence scheduled,
+		// unless it has already held enough of them (see `gateLimits`).
+		const verdict =
+			opts?.dispatch !== false && rendered && wip && !this.#gateHoldCapped()
+				? this.host.gateReview?.(rendered.text)
+				: undefined;
 		if (opts?.dispatch === false || verdict) {
 			if (!rendered) return;
 			// The batch renders from `rawMessages` only when a later boundary
@@ -485,6 +498,7 @@ export class AdvisorRuntime {
 				rawMessages: rendered.rawMessages.map(message => ({ ...message })),
 				turns: 1,
 				gate: verdict,
+				gatedAt: verdict ? Date.now() : undefined,
 			});
 			if (verdict) void this.#dispatchIfGatePasses(verdict);
 			return;
@@ -508,6 +522,18 @@ export class AdvisorRuntime {
 		if (!review || this.disposed || this.#quotaExhausted || this.#halted) return;
 		const index = this.#held.findIndex(delta => delta.gate === verdict);
 		if (index !== -1) this.#dispatch(undefined, index + 1);
+	}
+
+	/** Whether the gate holds already reached its count or age cap; the dispatch that follows clears them. */
+	#gateHoldCapped(): boolean {
+		const limits = this.host.gateLimits?.();
+		const holds = this.#held.filter(delta => delta.gatedAt !== undefined);
+		if (!limits || holds.length === 0) return false;
+		// Held in arrival order, so the first is the oldest.
+		const age = Date.now() - holds[0]!.gatedAt!;
+		const capped = holds.length >= limits.maxHolds || (limits.maxHoldMs > 0 && age > limits.maxHoldMs);
+		if (capped) logger.debug("advisor review gate hold cap reached; reviewing", { held: holds.length, ageMs: age });
+		return capped;
 	}
 
 	/**

@@ -1812,6 +1812,99 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[0])).toContain("risky step");
 		});
 
+		/** Runtime whose gate always holds; `step(n)` ends an in-progress turn carrying "step n". */
+		function holdingGateRuntime(limits: { maxHolds: number; maxHoldMs: number }) {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const messages: AgentMessage[] = [];
+			const judged: string[] = [];
+			const runtime = new AdvisorRuntime(makeAgent(promptInputs), {
+				snapshotMessages: () => messages,
+				gateReview: update => {
+					judged.push(update);
+					return Promise.resolve(false);
+				},
+				gateLimits: () => limits,
+			});
+			const step = (n: number): void => {
+				messages.push({ role: "user", content: `step ${n}`, timestamp: n } as AgentMessage);
+				runtime.onTurnEnd(messages, { willContinue: true });
+			};
+			return { runtime, promptInputs, judged, step };
+		}
+
+		it("reviews every held update without judging once the gate has held the maximum", async () => {
+			const { runtime, promptInputs, judged, step } = holdingGateRuntime({ maxHolds: 3, maxHoldMs: 0 });
+
+			step(1);
+			step(2);
+			step(3);
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(promptInputs).toHaveLength(0);
+
+			step(4);
+			await runtime.waitForCatchup(1_000, 1);
+
+			// The fourth update skipped the judge and carried all three held updates with it.
+			expect(judged).toHaveLength(3);
+			expect(promptInputs).toHaveLength(1);
+			const review = promptText(promptInputs[0]);
+			for (const n of [1, 2, 3, 4]) expect(review).toContain(`step ${n}`);
+		});
+
+		it("reviews held updates without judging once the oldest has waited past the age cap", async () => {
+			const { runtime, promptInputs, judged, step } = holdingGateRuntime({ maxHolds: 10, maxHoldMs: 60_000 });
+			const now = vi.spyOn(Date, "now");
+			try {
+				now.mockReturnValue(1_000_000);
+				step(1);
+				now.mockReturnValue(1_030_000);
+				step(2);
+				await Promise.resolve();
+				await Promise.resolve();
+				// 30s after the first hold: under the cap, so both were judged and held.
+				expect(judged).toHaveLength(2);
+				expect(promptInputs).toHaveLength(0);
+
+				now.mockReturnValue(1_061_000);
+				step(3);
+				await runtime.waitForCatchup(1_000, 1);
+			} finally {
+				now.mockRestore();
+			}
+
+			expect(judged).toHaveLength(2);
+			expect(promptInputs).toHaveLength(1);
+			const review = promptText(promptInputs[0]);
+			for (const n of [1, 2, 3]) expect(review).toContain(`step ${n}`);
+		});
+
+		it("starts counting gate holds afresh after a review dispatches", async () => {
+			const { runtime, promptInputs, judged, step } = holdingGateRuntime({ maxHolds: 2, maxHoldMs: 0 });
+
+			step(1);
+			step(2);
+			step(3);
+			await runtime.waitForCatchup(1_000, 1);
+			expect(promptInputs).toHaveLength(1);
+
+			// Without the reset the held count would still sit at the cap and these would skip the judge.
+			step(4);
+			step(5);
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(judged).toHaveLength(4);
+			expect(promptInputs).toHaveLength(1);
+
+			step(6);
+			await runtime.waitForCatchup(1_000, 1);
+
+			expect(promptInputs).toHaveLength(2);
+			const second = promptText(promptInputs[1]);
+			for (const n of [4, 5, 6]) expect(second).toContain(`step ${n}`);
+			expect(second).not.toContain("step 3");
+		});
+
 		it("preserves the next user turn when an accepted empty stop is pruned", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const agent = makeAgent(promptInputs);
