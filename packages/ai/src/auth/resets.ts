@@ -36,7 +36,10 @@ export interface ResetCreditsDeps {
 export class ResetCredits implements ResetsApi {
 	#deps: ResetCreditsDeps;
 	/** Manual and automatic attempts on one stored account share a mutation. */
-	#resetInFlight = new Map<string, { creditId?: string; promise: Promise<ResetCreditRedeemOutcome> }>();
+	#resetInFlight = new Map<
+		string,
+		{ creditId?: string; preflightSignal?: AbortSignal; promise: Promise<ResetCreditRedeemOutcome> }
+	>();
 	#listInFlight = new Map<string, Promise<ResetCreditAccountStatus[]>>();
 	/** Ambiguous Claude claims retain their idempotency key until reconciled. */
 	#pendingClaudeResets = new Map<
@@ -132,7 +135,15 @@ export class ResetCredits implements ResetsApi {
 			return { ...identity, ok: false, code: "unsupported_provider" };
 		}
 		const baseUrl = options.baseUrlResolver?.(provider);
-		const match = await this.#deps.oauth.accessById(provider, target.credentialId, { signal: options.signal });
+		const { preflightSignal } = options;
+		// Steps before the reset request also stop on caller cancellation.
+		const beforeSendSignal =
+			preflightSignal && options.signal
+				? AbortSignal.any([options.signal, preflightSignal])
+				: (preflightSignal ?? options.signal);
+		const match = await beforeSend(preflightSignal, () =>
+			this.#deps.oauth.accessById(provider, target.credentialId, { signal: beforeSendSignal }),
+		);
 		if (!match) return { ...identity, ok: false, code: "no_account" };
 		const resolvedIdentity = {
 			provider,
@@ -145,14 +156,26 @@ export class ResetCredits implements ResetsApi {
 		const inFlight = this.#resetInFlight.get(accountKey);
 		if (inFlight) {
 			if (inFlight.creditId !== creditId) return { ...resolvedIdentity, ok: false, code: "reset_in_progress" };
-			return inFlight.promise;
+			// The owner's cancellation before its request was sent spent nothing: this caller redeems itself.
+			const shared = inFlight.promise.catch(error => {
+				if (inFlight.preflightSignal?.aborted && error === inFlight.preflightSignal.reason)
+					return this.redeem(options);
+				throw error;
+			});
+			// This caller's cancellation stops only its own wait; the owner's attempt runs on.
+			return raceSignal(shared, preflightSignal, "Reset wait aborted").catch(error => {
+				preflightSignal?.throwIfAborted();
+				throw error;
+			});
 		}
 		const promise = this.#redeemAccountReset(provider, match, accountKey, {
 			creditId,
 			baseUrl,
 			signal: options.signal,
+			preflightSignal,
+			beforeSendSignal,
 		}).finally(() => this.#resetInFlight.delete(accountKey));
-		this.#resetInFlight.set(accountKey, { creditId, promise });
+		this.#resetInFlight.set(accountKey, { creditId, preflightSignal, promise });
 		return promise;
 	}
 
@@ -160,15 +183,23 @@ export class ResetCredits implements ResetsApi {
 		provider: string,
 		access: OAuthAccess,
 		accountKey: string,
-		options: { creditId?: string; baseUrl?: string; signal?: AbortSignal },
+		options: {
+			creditId?: string;
+			baseUrl?: string;
+			signal?: AbortSignal;
+			preflightSignal?: AbortSignal;
+			beforeSendSignal?: AbortSignal;
+		},
 	): Promise<ResetCreditRedeemOutcome> {
 		const identity = { provider, accountId: access.accountId, email: access.email, orgId: access.orgId };
+		const { preflightSignal } = options;
 		const auth = { ...access, baseUrl: options.baseUrl, fetch: this.#deps.usage.fetch, signal: options.signal };
+		const listAuth = { ...auth, signal: options.beforeSendSignal };
 		let creditId = options.creditId;
 		let result: ResetCreditRedeemOutcome;
 		let report: UsageReport | null = null;
 		if (provider === "anthropic") {
-			const list = await listClaudeResetCredits(auth);
+			const list = await beforeSend(preflightSignal, () => listClaudeResetCredits(listAuth));
 			if (!list) return { ...identity, ok: false, code: "credit_list_failed" };
 			const selected = list.credits.find(credit => credit.id === list.nextCreditId);
 			if (creditId && creditId !== list.nextCreditId) {
@@ -212,6 +243,7 @@ export class ResetCredits implements ResetsApi {
 			report = list.report ?? null;
 			const requestId = pending?.requestId ?? crypto.randomUUID();
 			options.signal?.throwIfAborted();
+			preflightSignal?.throwIfAborted();
 			this.#pendingClaudeResets.set(accountKey, {
 				creditId,
 				requestId,
@@ -224,6 +256,14 @@ export class ResetCredits implements ResetsApi {
 				orgId: list.orgId ?? access.orgId,
 				credit: selected,
 				redeemRequestId: requestId,
+				preflightSignal,
+			}).catch(error => {
+				// Cancelled before the reset request was sent: this claim was never made.
+				if (preflightSignal?.aborted && error === preflightSignal.reason) {
+					if (pending) this.#pendingClaudeResets.set(accountKey, pending);
+					else this.#pendingClaudeResets.delete(accountKey);
+				}
+				throw error;
 			});
 			if (
 				consumed.ok ||
@@ -248,12 +288,13 @@ export class ResetCredits implements ResetsApi {
 			};
 		} else {
 			if (!creditId) {
-				const list = await listCodexResetCredits(auth);
+				const list = await beforeSend(preflightSignal, () => listCodexResetCredits(listAuth));
 				if (!list) return { ...identity, ok: false, code: "credit_list_failed" };
 				const credit = pickSoonestExpiringCredit(list.credits);
 				if (!credit) return { ...identity, ok: false, code: "no_credit" };
 				creditId = credit.id;
 			}
+			preflightSignal?.throwIfAborted();
 			const consumed = await consumeCodexResetCredit({ ...auth, creditId });
 			result = { ...identity, ok: consumed.ok, code: consumed.code, creditId };
 		}
@@ -317,4 +358,23 @@ export class ResetCredits implements ResetsApi {
 		}
 		return result;
 	}
+}
+
+/**
+ * Runs a step that precedes the reset request, without waiting on it once
+ * `preflightSignal` fires. The step's outcome then (an abort error, or a listing
+ * that swallowed one) gives way to the signal's reason, so the caller knows
+ * nothing was sent.
+ */
+async function beforeSend<T>(preflightSignal: AbortSignal | undefined, step: () => Promise<T>): Promise<T> {
+	preflightSignal?.throwIfAborted();
+	let result: T;
+	try {
+		result = await raceSignal(step(), preflightSignal, "Reset aborted before sending");
+	} catch (error) {
+		preflightSignal?.throwIfAborted();
+		throw error;
+	}
+	preflightSignal?.throwIfAborted();
+	return result;
 }

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `codexResets.restoreBeforeReserve` and `claudeResets.restoreBeforeReserve` (off by default) to spend a blocked account's saved reset before the turn moves to an account inside its usage reserve, such as a `reservePct: 100` backup or a Codex account on paid credits ([#15130](https://github.com/can1357/oh-my-pi/pull/15130) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.12.0] - 2026-10-17
 
 ### Added
