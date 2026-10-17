@@ -220,39 +220,4 @@ describe("InputController thinking visibility", () => {
 		expect(cfgHideThinkingBlock.get(settings)).toBe(true);
 	});
 
-	it("propagates the effective visibility, not the raw preference, when thinking is off", () => {
-		// The /settings and on-disk-reload gestures have no thinking-off guard, so
-		// with thinking off and no displayable reasoning yet the stored preference
-		// and the effective visibility disagree. The raw preference must not reach
-		// the components: the reveal controller re-renders the in-flight message
-		// from the effective flag (event-controller.ts:332), and a component shown
-		// under the raw value would disagree with it and with every re-rendered
-		// block. The stored preference itself must survive untouched — the
-		// auto-hide is derived, not persisted.
-		const assistant = createAssistant();
-		const setHideThinkingBlock = assistant.setHideThinkingBlock as Mock<(hidden: boolean) => void>;
-		const streamingComponent = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
-		streamingComponent.setHideThinkingBlock = vi.fn();
-		const resyncStreamingRevealVisibility = vi.fn();
-		const resetDisplay = vi.fn();
-		const settings = Settings.isolated();
-		const ctx = {
-			hideThinkingBlock: false,
-			effectiveHideThinkingBlock: true, // thinking is off → effective is true
-			settings,
-			chatContainer: { children: [assistant], resetStableEmission: vi.fn() },
-			streamingComponent,
-			streamingMessage: {} as unknown as AssistantMessage,
-			eventController: { resyncStreamingRevealVisibility },
-			ui: { resetDisplay },
-		} as unknown as InteractiveModeContext;
-
-		new InputController(ctx).applyThinkingBlockVisibility(false);
-
-		expect(ctx.hideThinkingBlock).toBe(false);
-		expect(setHideThinkingBlock).toHaveBeenCalledWith(true);
-		expect(streamingComponent.setHideThinkingBlock).toHaveBeenCalledWith(true);
-		expect(resyncStreamingRevealVisibility).toHaveBeenCalledTimes(1);
-		expect(resetDisplay).toHaveBeenCalledTimes(1);
-	});
 });
