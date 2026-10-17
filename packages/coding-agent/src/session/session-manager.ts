@@ -974,7 +974,7 @@ function projectorGenerationResult(value: object): string | undefined {
  * way — or an array it reads through a method or an iterator rather than its
  * indexed slots — feeds persisted bytes no stamp can describe.
  */
-const PROJECTOR_MESSAGE_KEYS = ["providerPayload", "content", "details"] as const;
+const PROJECTOR_MESSAGE_KEYS = ["role", "providerPayload", "content", "details"] as const;
 /** The keys an OpenAI Responses `providerPayload` is itself read by. */
 const RESPONSES_PAYLOAD_KEYS = ["type", "items"] as const;
 /**
@@ -987,6 +987,15 @@ const RESPONSES_PAYLOAD_KEYS = ["type", "items"] as const;
  * stamped leaf.
  */
 const PROJECTOR_CONTENT_METHODS = ["some", "map"] as const;
+/**
+ * Keys {@link isAtomicPersistenceNode} and the projection's early returns read
+ * by key: `type` for every typed carrier, and `content` for the typeless
+ * `anthropicCompaction` slot. A `type`/`content` the own-key stamp cannot see —
+ * inherited, non-enumerable, or an accessor — flips the atomic classification
+ * while moving no stamped leaf, so the projected line can gain or lose a
+ * stripped `thinkingSignature` without the memo noticing.
+ */
+const ATOMIC_CLASSIFIER_KEYS = ["type", "content"] as const;
 
 /**
  * Whether the projector can reach a message-level projection input the stamp
@@ -1066,6 +1075,20 @@ function projectorKeyHiddenFromStamp(node: object, key: string): boolean {
 }
 
 /**
+ * The array helpers {@link nonDefaultArrayIterator} and
+ * {@link nonDefaultArrayMethod} compare against, captured at module load.
+ * Reading `Array.prototype[method]` at check time compares the descriptor
+ * against the very slot a prototype-level replacement just overwrote, so a
+ * replaced `some`/`map`/`Symbol.iterator` reads as the default and a graph the
+ * projector traverses differently is cached as if it were unchanged.
+ */
+const ARRAY_ITERATOR_INTRINSIC = Array.prototype[Symbol.iterator];
+const ARRAY_CONTENT_METHOD_INTRINSICS: Record<(typeof PROJECTOR_CONTENT_METHODS)[number], unknown> = {
+	some: Array.prototype.some,
+	map: Array.prototype.map,
+};
+
+/**
  * Whether `array` is read by anything other than its indexed slots — an
  * overridden or accessor `Symbol.iterator`. `JSON.stringify` and the stamp both
  * read slots up to a snapshotted length; the projector's `for..of` follows the
@@ -1086,7 +1109,7 @@ function nonDefaultArrayIterator(array: unknown[]): boolean {
 		}
 		if (descriptor !== undefined) {
 			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
-			return descriptor.value !== Array.prototype[Symbol.iterator];
+			return descriptor.value !== ARRAY_ITERATOR_INTRINSIC;
 		}
 		let next: object | null;
 		try {
@@ -1118,7 +1141,7 @@ function nonDefaultArrayMethod(array: unknown[], method: (typeof PROJECTOR_CONTE
 		}
 		if (descriptor !== undefined) {
 			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
-			return descriptor.value !== Array.prototype[method];
+			return descriptor.value !== ARRAY_CONTENT_METHOD_INTRINSICS[method];
 		}
 		let next: object | null;
 		try {
@@ -1206,12 +1229,32 @@ function isTopLevelMessageChild(value: object, key: string | undefined, childKey
  * failure on a graph serialization handles fine. Every step below answers
  * through property descriptors and invokes nothing, so the order the worklist
  * visits nodes in changes nothing a caller can observe.
+ *
+ * A back-reference the projection does NOT strip (the MCP spill and the
+ * transient keys are skipped below, so their cycles are never visited) makes
+ * the live graph circular, which `JSON.stringify` rejects. A node already on
+ * the walk's path is therefore skipped: its hooks were already probed when it
+ * was first visited, and re-entering it would only repeat the walk forever.
+ * The graph is left to the projector, which surfaces the serialization error.
  */
 interface SerializerHookProbeNode {
 	value: unknown;
 	key: string | undefined;
 	isTopLevelToolResultDetails: boolean | undefined;
 	atomic: boolean;
+	/** The object nodes on this node's path, innermost first, for cycle detection. */
+	parent: PathNode | undefined;
+}
+
+/** One object on a memo walk's path, linked to its own parent. */
+type PathNode = { readonly value: object; readonly parent: PathNode | undefined };
+
+/** Whether `value` already sits on `parent`'s path, closing a cycle. */
+function onWalkPath(parent: PathNode | undefined, value: object): boolean {
+	for (let node = parent; node !== undefined; node = node.parent) {
+		if (node.value === value) return true;
+	}
+	return false;
 }
 
 function hasSerializerHook(
@@ -1224,16 +1267,24 @@ function hasSerializerHook(
 	// can hold a graph nested arbitrarily deep, and one JS frame per level
 	// overflowed the stack on such input — a persistence failure on a graph
 	// serialization handles fine.
-	const pending: SerializerHookProbeNode[] = [{ value, key, isTopLevelToolResultDetails, atomic }];
+	const pending: SerializerHookProbeNode[] = [{ value, key, isTopLevelToolResultDetails, atomic, parent: undefined }];
 	for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
-		const { value, key, isTopLevelToolResultDetails, atomic } = node;
+		const { value, key, isTopLevelToolResultDetails, atomic, parent } = node;
 		// A bigint is the one primitive `JSON.stringify` routes through a hook:
 		// when an extension installs `BigInt.prototype.toJSON`, serialization
 		// invokes it — so a stateful hook's first output cannot be stamped as a
 		// leaf. Leave the graph uncached exactly when such a hook exists (see
 		// `hasBigIntToJSONHook`); other primitives never consult one.
 		if (typeof value === "bigint") return true;
-		if (value === null || typeof value !== "object") continue;
+		if (value === null) continue;
+		// `JSON.stringify` invokes a `toJSON` hook on a callable value too, so a
+		// function's hook must be probed like an object's — a `typeof` gate that
+		// drops functions before the descriptor checks would stamp only the
+		// function identity, and a stateful or in-place-changed hook would then
+		// compare equal while the serialized bytes differ. Functions carry no
+		// enumerable children `JSON.stringify` reads, so the hook probe is the
+		// only thing left to check for them.
+		if (typeof value !== "object" && typeof value !== "function") continue;
 		// `JSON.stringify` consults the hook before the value shape, so the probe
 		// does too — through the property descriptor, never by reading the key: a
 		// stateful getter would otherwise run here and again in #lineFor.
@@ -1251,9 +1302,29 @@ function hasSerializerHook(
 		// otherwise answer through descriptor calls a proxy trap controls.
 		if (key === undefined && messageProjectionInputsUnstampable(value)) return true;
 		if (hasToJSONHook(value)) return true;
+		// A callable value serializes through its hook alone (probed above) or is
+		// dropped by `JSON.stringify`; its own properties never reach the line, so
+		// the walk stops here.
+		if (typeof value === "function") continue;
 		// No hook on this node: a boxed primitive serializes as its unboxed value
 		// and a rawJSON node as its payload, neither of which can harbor a hook.
-		if (unboxedPrimitive(value) !== undefined || rawJsonPayload(value) !== undefined) continue;
+		if (unboxedPrimitive(value) !== undefined) {
+			// A box serializes through `ToPrimitive`, so an own or inherited
+			// `valueOf`/`toString`/`Symbol.toPrimitive` override — even a
+			// non-enumerable one — changes the emitted bytes while
+			// {@link unboxedPrimitive}'s intrinsic call (which bypasses the
+			// override on purpose, so it never runs user code) reports the boxed
+			// value. Such a box is left uncached, like any other hooked graph.
+			if (hasBoxCoercionOverride(value)) return true;
+			continue;
+		}
+		if (rawJsonPayload(value) !== undefined) continue;
+		// A node already on this path closes a cycle the projection does not
+		// strip: its hooks were probed when it was first visited, so re-entering
+		// it would repeat the walk forever. The projector surfaces the resulting
+		// serialization error.
+		if (onWalkPath(parent, value)) continue;
+		const path: PathNode = { value, parent };
 		if (Array.isArray(value)) {
 			// Indexed slots first pass through the accessor scan: a stateful or
 			// one-shot indexed getter must leave the graph uncached before the
@@ -1267,7 +1338,7 @@ function hasSerializerHook(
 			// under `anthropicCompaction` must be probed as atomic, not have its
 			// transient keys skipped.
 			for (let index = 0; index < length; index++) {
-				pending.push({ value: value[index], key, isTopLevelToolResultDetails: undefined, atomic });
+				pending.push({ value: value[index], key, isTopLevelToolResultDetails: undefined, atomic, parent: path });
 			}
 			continue;
 		}
@@ -1283,6 +1354,15 @@ function hasSerializerHook(
 		// Mirror the projection's stripping boundary: a hook beneath a stripped key
 		// cannot affect the persisted bytes — and the live value may be cyclic
 		// where the projection is not.
+		// `isAtomicPersistenceNode` reads `type` and the typeless carrier's
+		// `content` by key, which runs an accessor. A stateful getter would be
+		// consumed here and again inside the projection, shifting what `#lineFor`
+		// serializes, so a hidden or accessor-backed classifier key leaves the
+		// graph uncached before the classifier is consulted — the descriptor loop
+		// below would otherwise never see the key it hides.
+		for (const classifierKey of ATOMIC_CLASSIFIER_KEYS) {
+			if (projectorKeyHiddenFromStamp(value, classifierKey)) return true;
+		}
 		const nodeAtomic = atomic || isAtomicPersistenceNode(value, key);
 		// An image-shaped value whose projector classifiers ride somewhere the
 		// own-key stamp below cannot see — an inherited link, or an own
@@ -1327,6 +1407,7 @@ function hasSerializerHook(
 				key: childKey,
 				isTopLevelToolResultDetails: isTopLevelMessageChild(value, key, childKey),
 				atomic: nodeAtomic,
+				parent: path,
 			});
 		}
 	}
@@ -1393,6 +1474,63 @@ function unboxedPrimitive(value: object): number | string | boolean | undefined 
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * The coercion functions `JSON.stringify`'s `ToPrimitive` unboxing treats as
+ * built-in, captured at module load. A prototype-level replacement must not
+ * compare equal to itself, and a box built on `Number.prototype` unboxes
+ * through `Number.prototype.valueOf` while a `String` box goes through
+ * `String.prototype.toString`, so every intrinsic that can appear on a genuine
+ * wrapper's chain is listed.
+ */
+const BOX_COERCION_INTRINSICS: readonly unknown[] = [
+	Object.prototype[Symbol.toPrimitive],
+	Object.prototype.valueOf,
+	Object.prototype.toString,
+	Number.prototype.valueOf,
+	Number.prototype.toString,
+	String.prototype.valueOf,
+	String.prototype.toString,
+	Boolean.prototype.valueOf,
+	Boolean.prototype.toString,
+];
+
+/**
+ * Whether a boxed primitive reaches its emitted value through an override
+ * rather than an intrinsic. `JSON.stringify` unboxes through `ToPrimitive`,
+ * which consults `Symbol.toPrimitive`, then `valueOf`, then `toString` — own
+ * first, then the prototype chain — so any of them resolving to something else
+ * changes the bytes while the boxed value itself is unchanged. Answered
+ * through property descriptors, never by reading the key (see
+ * {@link hasSerializerHook}); an accessor anywhere counts as an override, since
+ * running it would invoke user code.
+ */
+function hasBoxCoercionOverride(value: object): boolean {
+	for (const key of [Symbol.toPrimitive, "valueOf", "toString"] as const) {
+		let current: object | null = value;
+		while (current !== null) {
+			let descriptor: PropertyDescriptor | undefined;
+			try {
+				descriptor = Object.getOwnPropertyDescriptor(current, key);
+			} catch {
+				return true;
+			}
+			if (descriptor !== undefined) {
+				if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
+				if (!BOX_COERCION_INTRINSICS.includes(descriptor.value)) return true;
+				break;
+			}
+			let next: object | null;
+			try {
+				next = Object.getPrototypeOf(current);
+			} catch {
+				return true;
+			}
+			current = next;
+		}
+	}
+	return false;
 }
 
 /**
