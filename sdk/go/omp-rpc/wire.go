@@ -4406,6 +4406,76 @@ func (v QueueUpdateEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"queue_update"`, nil)
 }
 
+// A private auto-learn capture turn began; the `agent_end` that triggered it follows this frame.
+type AutoLearnCaptureStartEvent struct{}
+
+func (v *AutoLearnCaptureStartEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "AutoLearnCaptureStartEvent", v.decodeFrom)
+}
+
+func (v *AutoLearnCaptureStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out AutoLearnCaptureStartEvent
+	d := fieldDecoder{raw: raw, owner: "AutoLearnCaptureStartEvent"}
+	d.constant("type", "autolearn_capture_start")
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v AutoLearnCaptureStartEvent) MarshalJSON() ([]byte, error) {
+	type plain AutoLearnCaptureStartEvent
+	return encodeObject(plain(v), `"type":"autolearn_capture_start"`, nil)
+}
+
+// The capture turn announced by `autolearn_capture_start` settled with this outcome.
+type AutoLearnCaptureEndEvent struct {
+	Outcome AutoLearnCaptureEndEventOutcome `json:"outcome"`
+}
+
+func (v *AutoLearnCaptureEndEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "AutoLearnCaptureEndEvent", v.decodeFrom)
+}
+
+func (v *AutoLearnCaptureEndEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out AutoLearnCaptureEndEvent
+	d := fieldDecoder{raw: raw, owner: "AutoLearnCaptureEndEvent"}
+	d.constant("type", "autolearn_capture_end")
+	d.required("outcome", &out.Outcome)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v AutoLearnCaptureEndEvent) MarshalJSON() ([]byte, error) {
+	type plain AutoLearnCaptureEndEvent
+	return encodeObject(plain(v), `"type":"autolearn_capture_end"`, nil)
+}
+
+type AutoLearnCaptureEndEventOutcome string
+
+const (
+	AutoLearnCaptureEndEventOutcomeCompleted AutoLearnCaptureEndEventOutcome = "completed"
+	AutoLearnCaptureEndEventOutcomeAborted   AutoLearnCaptureEndEventOutcome = "aborted"
+	AutoLearnCaptureEndEventOutcomeError     AutoLearnCaptureEndEventOutcome = "error"
+)
+
+func (v *AutoLearnCaptureEndEventOutcome) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "AutoLearnCaptureEndEventOutcome")
+	if err != nil {
+		return err
+	}
+	switch value := AutoLearnCaptureEndEventOutcome(s); value {
+	case AutoLearnCaptureEndEventOutcomeCompleted, AutoLearnCaptureEndEventOutcomeAborted, AutoLearnCaptureEndEventOutcomeError:
+		*v = value
+		return nil
+	}
+	return unknownValue("AutoLearnCaptureEndEventOutcome", s)
+}
+
 // A session event, discriminated by `type`; `set_event_filter` selects which are sent.
 type RpcAgentEvent struct {
 	// Value holds one variant, chosen by "type" on decode.
@@ -4449,6 +4519,8 @@ func (NoticeEvent) isRpcAgentEvent()                 {}
 func (ThinkingLevelChangedEvent) isRpcAgentEvent()   {}
 func (GoalUpdatedEvent) isRpcAgentEvent()            {}
 func (QueueUpdateEvent) isRpcAgentEvent()            {}
+func (AutoLearnCaptureStartEvent) isRpcAgentEvent()  {}
+func (AutoLearnCaptureEndEvent) isRpcAgentEvent()    {}
 func (UnknownNotification) isRpcAgentEvent()         {}
 
 func (v RpcAgentEvent) MarshalJSON() ([]byte, error) {
@@ -4532,6 +4604,10 @@ func (v *RpcAgentEvent) decodeFrom(raw map[string]json.RawMessage) error {
 		value, err = decodeVariant[GoalUpdatedEvent](raw)
 	case "queue_update":
 		value, err = decodeVariant[QueueUpdateEvent](raw)
+	case "autolearn_capture_start":
+		value, err = decodeVariant[AutoLearnCaptureStartEvent](raw)
+	case "autolearn_capture_end":
+		value, err = decodeVariant[AutoLearnCaptureEndEvent](raw)
 	default:
 		return unknownValue("RpcAgentEvent.type", tag)
 	}
@@ -6485,6 +6561,8 @@ func (NoticeEvent) isRpcNotification()                  {}
 func (ThinkingLevelChangedEvent) isRpcNotification()    {}
 func (GoalUpdatedEvent) isRpcNotification()             {}
 func (QueueUpdateEvent) isRpcNotification()             {}
+func (AutoLearnCaptureStartEvent) isRpcNotification()   {}
+func (AutoLearnCaptureEndEvent) isRpcNotification()     {}
 func (UnknownNotification) isRpcNotification()          {}
 
 func (v RpcNotification) MarshalJSON() ([]byte, error) {
@@ -6599,6 +6677,10 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[GoalUpdatedEvent](raw)
 	case "queue_update":
 		value, err = decodeVariant[QueueUpdateEvent](raw)
+	case "autolearn_capture_start":
+		value, err = decodeVariant[AutoLearnCaptureStartEvent](raw)
+	case "autolearn_capture_end":
+		value, err = decodeVariant[AutoLearnCaptureEndEvent](raw)
 	default:
 		value = newUnknownNotification(tag, data)
 	}
@@ -6675,6 +6757,8 @@ func (NoticeEvent) isRpcServerFrame()                  {}
 func (ThinkingLevelChangedEvent) isRpcServerFrame()    {}
 func (GoalUpdatedEvent) isRpcServerFrame()             {}
 func (QueueUpdateEvent) isRpcServerFrame()             {}
+func (AutoLearnCaptureStartEvent) isRpcServerFrame()   {}
+func (AutoLearnCaptureEndEvent) isRpcServerFrame()     {}
 func (UnknownNotification) isRpcServerFrame()          {}
 
 func (v RpcServerFrame) MarshalJSON() ([]byte, error) {
@@ -6799,6 +6883,10 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[GoalUpdatedEvent](raw)
 	case "queue_update":
 		value, err = decodeVariant[QueueUpdateEvent](raw)
+	case "autolearn_capture_start":
+		value, err = decodeVariant[AutoLearnCaptureStartEvent](raw)
+	case "autolearn_capture_end":
+		value, err = decodeVariant[AutoLearnCaptureEndEvent](raw)
 	default:
 		value = newUnknownNotification(tag, data)
 	}

@@ -4187,6 +4187,39 @@
 			],
 			"description": "Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes."
 		},
+		"AutoLearnCaptureStartEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "autolearn_capture_start"
+				}
+			},
+			"required": [
+				"type"
+			],
+			"description": "A private auto-learn capture turn began; the `agent_end` that triggered it follows this frame."
+		},
+		"AutoLearnCaptureEndEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "autolearn_capture_end"
+				},
+				"outcome": {
+					"enum": [
+						"completed",
+						"aborted",
+						"error"
+					],
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"outcome"
+			],
+			"description": "The capture turn announced by `autolearn_capture_start` settled with this outcome."
+		},
 		"RpcAgentEvent": {
 			"anyOf": [
 				{
@@ -4281,6 +4314,12 @@
 				},
 				{
 					"$ref": "#/$defs/QueueUpdateEvent"
+				},
+				{
+					"$ref": "#/$defs/AutoLearnCaptureStartEvent"
+				},
+				{
+					"$ref": "#/$defs/AutoLearnCaptureEndEvent"
 				}
 			],
 			"description": "A session event, discriminated by `type`; `set_event_filter` selects which are sent."

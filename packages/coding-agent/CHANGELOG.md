@@ -81,6 +81,7 @@
 
 - Added `lsp.requestTimeout` setting to configure wait durations for language server diagnostics and requests
 - Added `omp auth-gateway serve --clients=<file>`: per-client bearer tokens, each limited to listed models and broker OAuth accounts with no fallback to other accounts or API keys, re-read while serving ([#5098](https://github.com/can1357/oh-my-pi/issues/5098), [#15900](https://github.com/can1357/oh-my-pi/pull/15900) by [@alphastorm](https://github.com/alphastorm))
+- Added `autolearn_capture_start` and `autolearn_capture_end` (`completed` | `aborted` | `error`) RPC session events so RPC hosts know when a background auto-learn capture turn is running ([#15966](https://github.com/can1357/oh-my-pi/pull/15966) by [@Vignesh-285](https://github.com/Vignesh-285))
 
 ### Changed
 
