@@ -21,6 +21,7 @@ import {
 	sleepAllSessions,
 } from "./consolidate";
 import { factRecall, formatContext, recall, recallEnhanced } from "./recall";
+import { clearCachedEmbeddings } from "./embedding-cache";
 import { initBeam } from "./schema";
 import {
 	exportToDict,
@@ -204,6 +205,8 @@ export class BeamMemory implements BeamMemoryState {
 			return;
 		}
 		this.#closed = true;
+		// A closed BeamMemory may stay referenced; its decoded vectors must not outlive the connection.
+		clearCachedEmbeddings(this.db);
 		closeQuietly(this.db);
 	}
 
