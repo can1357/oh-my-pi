@@ -203,4 +203,115 @@ describe("Cursor turn usage (issue #13082)", () => {
 		expect(output.usage.contextTokens).toBe(89_000);
 		expect(output.usage.output).toBe(24_000);
 	});
+
+	it("keeps a real checkpoint occupancy beside a huge cache bill", async () => {
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const usageState = { sawTokenDelta: false };
+		const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+
+		processInteractionUpdate(
+			{
+				message: {
+					case: "turnEnded",
+					value: { inputTokens: 5_695_246n, outputTokens: 23_633n, cacheReadTokens: 5_601_408n },
+				},
+			},
+			output,
+			stream,
+			state,
+			usageState,
+		);
+		await checkpoint(output, stream, state, usageState, h2Request, 264_400);
+
+		expect(output.usage).toMatchObject({ input: 93_838, cacheRead: 5_601_408, totalTokens: 5_718_879 });
+		expect(output.usage.contextTokens).toBe(264_400);
+	});
+
+	it("does not treat a checkpoint that echoes the cache bill as context occupancy", async () => {
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const usageState = { sawTokenDelta: false };
+		const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+
+		processInteractionUpdate(
+			{
+				message: {
+					case: "turnEnded",
+					value: { inputTokens: 889_190n, outputTokens: 2_828n, cacheReadTokens: 882_816n },
+				},
+			},
+			output,
+			stream,
+			state,
+			usageState,
+		);
+		await checkpoint(output, stream, state, usageState, h2Request, 892_018);
+
+		// Fresh input is 889190 - 882816. Occupancy must not become the bill.
+		expect(output.usage).toMatchObject({
+			input: 6_374,
+			output: 2_828,
+			cacheRead: 882_816,
+			totalTokens: 892_018,
+			contextTokens: 9_202,
+		});
+	});
+
+	it("corrects a bill-echo checkpoint that arrived before turnEnded", async () => {
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const usageState = { sawTokenDelta: false };
+		const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+
+		await checkpoint(output, stream, state, usageState, h2Request, 892_018);
+		expect(output.usage.contextTokens).toBe(892_018);
+
+		processInteractionUpdate(
+			{
+				message: {
+					case: "turnEnded",
+					value: { inputTokens: 889_190n, outputTokens: 2_828n, cacheReadTokens: 882_816n },
+				},
+			},
+			output,
+			stream,
+			state,
+			usageState,
+		);
+
+		expect(output.usage.contextTokens).toBe(9_202);
+	});
 });
+
+async function checkpoint(
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	state: BlockState,
+	usageState: { sawTokenDelta: boolean },
+	h2Request: Parameters<typeof handleServerMessage>[5],
+	usedTokens: number,
+): Promise<void> {
+	await handleServerMessage(
+		create(AgentServerMessageSchema, {
+			message: {
+				case: "conversationCheckpointUpdate",
+				value: create(ConversationStateStructureSchema, {
+					tokenDetails: create(ConversationTokenDetailsSchema, { usedTokens }),
+				}),
+			},
+		}),
+		output,
+		stream,
+		state,
+		new Map(),
+		h2Request,
+		undefined,
+		undefined,
+		usageState,
+		[],
+	);
+}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor conversation checkpoints that report this turn's billed total, cache included, as `usedTokens`. Compaction treats that field as context occupancy, so a session still under the window was compacted. A checkpoint that merely echoes the bill now keeps the non-cache portion, and a reading that is not the bill is unchanged.
+
 ### Added
 
 - Added `prewarmAnthropicConnection(model)`, which opens the official Anthropic API connection for a first-party `anthropic` model ahead of a request, using the same transport and TLS settings so the request reuses it instead of paying the connection handshake ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))

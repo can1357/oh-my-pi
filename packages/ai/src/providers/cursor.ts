@@ -5562,6 +5562,36 @@ function applyTurnEndedUsage(usage: Usage, update: TurnEndedUpdate): void {
 	if (cacheWrite > 0) usage.cacheWrite = cacheWrite;
 	if (reasoning > 0) usage.reasoningTokens = reasoning;
 	usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+	// A checkpoint may have arrived before these counters. Re-check it against
+	// the bill; a usedTokens value that merely echoes the bill is not occupancy.
+	if (usage.contextTokens !== undefined) adoptCursorContextOccupancy(usage, usage.contextTokens);
+}
+
+/** This turn's billed total, including cache counters. Zero before `TurnEndedUpdate`. */
+function cursorTurnBill(usage: Usage): number {
+	return usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+}
+
+/**
+ * Record checkpoint `usedTokens` as context occupancy.
+ *
+ * A real reading is the whole conversation and stays well clear of a turn whose
+ * `cacheRead` is an SDK-internal counter (hundreds of thousands of occupancy
+ * next to millions of cache). Some checkpoints instead report this turn's bill
+ * (`input + output + cacheRead + cacheWrite`). Compaction prefers
+ * `contextTokens` over every local estimate, so accepting that bill compacts a
+ * session still under the window. Keep the non-cache portion in that case;
+ * compaction then takes the larger of it and the stored transcript estimate.
+ * A bill that includes no cache is left alone: it already matches occupancy.
+ */
+function adoptCursorContextOccupancy(usage: Usage, usedTokens: number): void {
+	if (usedTokens <= 0) return;
+	const bill = cursorTurnBill(usage);
+	if (bill > 0 && usedTokens === bill && (usage.cacheRead > 0 || usage.cacheWrite > 0)) {
+		usage.contextTokens = usage.input + usage.output;
+		return;
+	}
+	usage.contextTokens = usedTokens;
 }
 
 /**
@@ -5577,11 +5607,7 @@ function handleConversationCheckpointUpdate(
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
 ): void {
 	onConversationCheckpoint?.(checkpoint);
-	const usedTokens = checkpoint.tokenDetails?.usedTokens ?? 0;
-	if (usedTokens <= 0) {
-		return;
-	}
-	output.usage.contextTokens = usedTokens;
+	adoptCursorContextOccupancy(output.usage, checkpoint.tokenDetails?.usedTokens ?? 0);
 }
 
 function createBlobId(data: Uint8Array): Uint8Array {
