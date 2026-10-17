@@ -843,6 +843,9 @@
 ### Removed
 
 - Removed the built-in `rs-parking-lot` rule; Rust edits using `std::sync::{Mutex, RwLock}` with `.lock().unwrap()` are no longer steered to `parking_lot`
+### Fixed
+
+- A `doas` or `sudo` command now runs on an interactive terminal, so it can ask for the password instead of dying with `doas: Authentication failed` ([#16103](https://github.com/can1357/oh-my-pi/pull/16103) by [@iacore](https://github.com/iacore)).
 
 ## [18.11.2] - 2026-10-16
 
