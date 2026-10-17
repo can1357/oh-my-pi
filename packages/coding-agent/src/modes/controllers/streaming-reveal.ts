@@ -517,6 +517,19 @@ export class StreamingRevealController {
 		const proseBefore = this.#proseOnlyThinking;
 		this.#hideThinkingBlock = this.#getHideThinkingBlock();
 		this.#proseOnlyThinking = this.#getProseOnlyThinking();
+		// Smoothing can be turned off between deltas: a hide/show round trip with
+		// no provider update in between then reaches this resync, and restoring
+		// the latent partial would re-arm the reveal timer and retype reasoning
+		// the user asked to see whole. Non-smooth renders the full target, so
+		// spend every block and drop the saved partials with it.
+		if (!this.#getSmoothStreaming()) {
+			this.#smoothStreaming = false;
+			this.#hiddenBlockSpend.clear();
+			this.#revealWhole(target);
+			this.#stopTimer();
+			this.#renderCurrent();
+			return;
+		}
 		// Per-block unit counts under the old and the fresh flags, plus the
 		// reveal each block had already earned under the old layout.
 		const sizes: { before: number; after: number; spent: number }[] = [];
