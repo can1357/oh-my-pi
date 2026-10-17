@@ -3,6 +3,7 @@
 ## [Unreleased]
 ### Fixed
 - Fixed isolated task spawn freezing the host when the checkout contains gitignored linked worktrees — nested-repo discovery now skips gitignored directories and baseline capture is bounded ([#16068](https://github.com/can1357/oh-my-pi/issues/16068))
+- Fixed `worktree.clone` recursing into a destination inside the checkout and copying nested worktrees' `.git` files — destination-inside-source is now rejected and nested `.git` entries are stripped after clone ([#16076](https://github.com/can1357/oh-my-pi/issues/16076))
 
 ### Changed
 
