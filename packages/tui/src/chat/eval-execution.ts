@@ -141,6 +141,10 @@ export class EvalExecutionComponent extends Container {
 				exitCode: this.#exitCode,
 				truncation: this.#truncation,
 				artifactError: this.#artifactError,
+				// The eval pane keeps every line it is handed, so nothing is dropped.
+				droppedLineCount: 0,
+				throttledLineCount: 0,
+				throttledFragmentLost: false,
 			};
 			return dataFirst
 				? describeExecutionTool({
@@ -156,7 +160,11 @@ export class EvalExecutionComponent extends Container {
 						...common,
 						head: [span(title, `${this.#excludeFromContext ? "dim" : "pythonMode"} strong`)],
 						muted: this.#excludeFromContext,
-						lead: [code(this.#code, { lang: this.#highlightLang(), key: "code" })],
+						// The card body is not clamped, so the source carries its own
+						// preview to keep a long cell bounded while collapsed.
+						lead: [
+							code(this.#code, { lang: this.#highlightLang(), key: "code", preview: { lines: PREVIEW_LINES } }),
+						],
 					});
 		});
 	}

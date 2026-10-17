@@ -3,6 +3,8 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import type { TspKind, TspSpan } from "@oh-my-pi/pi-wire";
 import { AssistantMessageComponent } from "../src/chat/assistant-message";
 import { BashExecutionComponent } from "../src/chat/bash-execution";
+import { EvalExecutionComponent } from "../src/chat/eval-execution";
+import { PREVIEW_LINES } from "../src/chat/execution-shared";
 import { ReadToolGroupComponent } from "../src/chat/read-tool-group";
 import { ToolExecutionComponent } from "../src/chat/tool-execution";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
@@ -209,6 +211,35 @@ describe("bash native run box", () => {
 		expect(facts[0]).toEqual({ t: "Service web · running · ready", s: "muted" });
 		expect(facts.at(-1)?.s).toBe("warning");
 		expect(facts.at(-1)?.t).toContain("900");
+	});
+
+	it("renders dropped-lines and truncation notices together when a run carries both", () => {
+		const view = bashToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: "tail" }],
+				details: {
+					meta: {
+						droppedLines: 5,
+						truncation: {
+							direction: "head",
+							truncatedBy: "lines",
+							totalLines: 900,
+							totalBytes: 9000,
+							outputLines: 100,
+							outputBytes: 1000,
+							shownRange: { start: 801, end: 900 },
+						},
+					},
+				},
+			},
+			done,
+			{ command: "serve" },
+		);
+		const facts = foot(nodes(view.body)[0])?.facts ?? [];
+		const warningFacts = facts.filter(f => f.s === "warning").map(f => f.t);
+		expect(warningFacts).toHaveLength(2);
+		expect(warningFacts[0]).toContain("earlier lines dropped");
+		expect(warningFacts[1]).toContain("900");
 	});
 
 	it("attaches result images below the box", () => {
@@ -643,5 +674,176 @@ describe("user shell runs", () => {
 		expect(foot(box)?.time?.stopped).toBeNumber();
 		expect(image?.k).toBe("text");
 		expect(run.describe(cx(["card", "ansi"])).k).toBe("card");
+	});
+
+	it("keeps the dropped-lines note outside the card's clamped body", () => {
+		const run = new BashExecutionComponent("seq 1 250", ui, false);
+		run.appendOutput(Array.from({ length: 250 }, (_, i) => `line-${i}`).join("\n"));
+		// Settled without a full snapshot (the error/abort path): the rows the
+		// live cap dropped are gone for good.
+		run.setComplete(0, false);
+		const card = run.describe(cx(["card", "ansi"]));
+		expect(card.k).toBe("card");
+		// The collapsed card must not clamp its body: a body clamp hides the
+		// trailing note behind a long output, so users would only learn the rows
+		// are unrecoverable after expanding.
+		expect(props(card).preview).toBeUndefined();
+		// The output child keeps the clamp instead, so the collapsed view is
+		// still bounded to the tail window.
+		const output = nodes(card.c).find(child => child.key === "output");
+		expect(props(output).preview).toEqual({ lines: PREVIEW_LINES });
+		// The notice itself is a body child the collapse cannot hide.
+		const notes = nodes(card.c).find(child => props(child).key === "notes");
+		expect(spansText(notes)).toContain("… 150 earlier lines dropped");
+	});
+
+	it("pins a settled replay's collapsed ANSI preview to the result tail", () => {
+		// A completed >100-line block replayed on a card/ansi-only surface
+		// describes once: follow:false would anchor the collapsed preview at
+		// the earliest rows and hide the recent result until expansion.
+		const run = new BashExecutionComponent("seq 1 250", ui, false);
+		run.setComplete(0, false, {
+			output: Array.from({ length: 250 }, (_, i) => `line-${i}`).join("\n"),
+		});
+		const card = run.describe(cx(["card", "ansi"]));
+		expect(card.k).toBe("card");
+		const output = nodes(card.c).find(child => child.key === "output");
+		expect(output?.k).toBe("ansi");
+		expect(props(output)).toMatchObject({ follow: true, preview: { lines: PREVIEW_LINES } });
+	});
+	it("bounds a long eval cell's collapsed card source to the preview window", () => {
+		// The eval card body is unclamped, so the source carries its own
+		// preview: without it a long cell fills screens while collapsed.
+		const cell = new EvalExecutionComponent(Array.from({ length: 60 }, (_, i) => `x${i} = ${i}`).join("\n"), ui);
+		cell.setComplete(0, false, { output: "done" });
+		const card = cell.describe(cx(["card", "ansi"]));
+		expect(card.k).toBe("card");
+		const code = nodes(card.c).find(child => child.k === "code");
+		expect(code).toBeDefined();
+		expect(props(code)).toMatchObject({ preview: { lines: PREVIEW_LINES } });
+	});
+
+	it("bounds a collapsed card's image collection and names the hidden rest", () => {
+		// Images carry no preview of their own and the card body is unclamped,
+		// so without a bound a 32-image run fills screens while collapsed.
+		const images = Array.from({ length: 10 }, () => ({ type: "image" as const, data: PNG, mimeType: "image/png" }));
+		const run = new BashExecutionComponent("plot", ui, false);
+		run.setComplete(0, false, { output: "done", images, showImages: false });
+		const card = run.describe(cx(["card", "ansi"]));
+		expect(card.k).toBe("card");
+		// Past PREVIEW_LIMITS.COLLAPSED_ITEMS (8): only the first 8 image
+		// fallbacks stay, and the notes name the hidden pair. (The notes node
+		// is itself a text child, keyed in props rather than the node key.)
+		const fallbacks = (children: readonly NativeChild[] | undefined): NativeNode[] =>
+			nodes(children).filter(child => child.k === "text" && props(child).key === undefined);
+		expect(fallbacks(card.c)).toHaveLength(8);
+		const notes = nodes(card.c).find(child => props(child).key === "notes");
+		expect(spansText(notes)).toContain("… 2 more images");
+		// Expansion delivers every image and retires the notice.
+		run.setExpanded(true);
+		const open = run.describe(cx(["card", "ansi"]));
+		expect(fallbacks(open.c)).toHaveLength(10);
+		expect(spansText(nodes(open.c).find(child => props(child).key === "notes"))).not.toContain("more images");
+	});
+	it("clamps one tall image's drawn height while collapsed and reveals it whole on expansion", () => {
+		// A single tall emission keeps its intrinsic pixel height with no max,
+		// so without a drawn-height clamp the collapsed card fills screens.
+		const tall = Buffer.from(PNG, "base64");
+		tall.writeUInt32BE(4000, 20);
+		const run = new BashExecutionComponent("plot", ui, false);
+		run.setComplete(0, false, {
+			output: "done",
+			images: [{ type: "image" as const, data: tall.toString("base64"), mimeType: "image/png" }],
+		});
+		const card = run.describe(cx(["card", "ansi"]));
+		expect(card.k).toBe("card");
+		const collapsed = nodes(card.c).filter(child => child.k === "image");
+		expect(collapsed).toHaveLength(1);
+		expect(props(collapsed[0]).max).toMatchObject({ h: `${PREVIEW_LINES}lines` });
+		// Expansion delivers the untouched node with no clamp.
+		run.setExpanded(true);
+		const open = run.describe(cx(["card", "ansi"]));
+		const expanded = nodes(open.c).filter(child => child.k === "image");
+		expect(expanded).toHaveLength(1);
+		expect(props(expanded[0]).max).toBeUndefined();
+	});
+
+	it("withholds the dropped-lines notice until the run settles", () => {
+		const run = new BashExecutionComponent("seq 1 250", ui, false);
+		run.appendOutput(Array.from({ length: 250 }, (_, i) => `line-${i}`).join("\n"));
+		// Still running: the completed snapshot replaces the streamed tail window
+		// and clears the count, so naming dropped rows now would be retracted by
+		// the success path's very next frame.
+		expect(JSON.stringify(run.describe(cx(["tool", "ansi", "code"])))).not.toContain("earlier lines dropped");
+		// Settling without a full snapshot: the dropped head is gone for good, so
+		// the run foot must name it.
+		run.setComplete(1, false);
+		expect(JSON.stringify(run.describe(cx(["tool", "ansi", "code"])))).toContain("… 150 earlier lines dropped");
+	});
+
+	it("names throttle-skipped rows as a gap apart from the dropped head", () => {
+		const run = new BashExecutionComponent("seq 1 250", ui, false);
+		run.appendOutput(Array.from({ length: 250 }, (_, i) => `line-${i}`).join("\n"));
+		// Second callback inside the 50 ms gate, then a throw: the run settles
+		// without a final snapshot, so the retained tail window is all there is.
+		// The rejected chunk arrived later than the retained `line-150…line-249`,
+		// so its four rows (the first merges into `line-249`, exactly as an
+		// accepted chunk would have) are a mid/tail gap — folding them into "N
+		// earlier lines dropped" would falsely present the visible block as the
+		// tail.
+		run.appendOutput(["extra-0", "extra-1", "extra-2", "extra-3", "extra-4"].join("\n"));
+		run.setComplete(undefined, false);
+		const card = run.describe(cx(["card", "ansi"]));
+		const notes = nodes(card.c).find(child => props(child).key === "notes");
+		expect(spansText(notes)).toContain("… 150 earlier lines dropped");
+		expect(spansText(notes)).toContain("… 4 lines skipped in output");
+		expect(spansText(notes)).not.toContain("154");
+		// Same truth in the native run foot facts (scoped to the facts text:
+		// the output payload itself contains rows like `line-154`).
+		const tool = run.describe(cx(["tool", "ansi", "code"]));
+		const box = nodes(tool.c)[0];
+		const factsText = (foot(box)?.facts ?? []).map(f => f.t).join(" ");
+		expect(factsText).toContain("… 150 earlier lines dropped");
+		expect(factsText).toContain("… 4 lines skipped in output");
+		expect(factsText).not.toContain("154");
+	});
+
+	it("names a throttle gap without a dropped head when the cap never fired", () => {
+		const run = new BashExecutionComponent("echo hi", ui, false);
+		run.appendOutput("kept-0");
+		// Rejected chunk with no capped head: there is no "earlier" drop to
+		// name, only the rows skipped after the retained tail.
+		run.appendOutput(["gap-0", "gap-1", "gap-2"].join("\n"));
+		run.setComplete(undefined, false);
+		const card = run.describe(cx(["card", "ansi"]));
+		const notes = nodes(card.c).find(child => props(child).key === "notes");
+		expect(spansText(notes)).toContain("… 2 lines skipped in output");
+		expect(spansText(notes)).not.toContain("earlier lines dropped");
+		// The legacy terminal footer names the same gap in the same words.
+		expect(Bun.stripANSI(run.render(120).join("\n"))).toContain("… 2 lines skipped in output");
+	});
+
+	it("names a throttle-discarded partial line even when the skipped-row count is zero", () => {
+		// Failure mode: a callback carrying only a partial-line suffix arrives
+		// inside the 50 ms gate, then the run settles via the error path. The
+		// suffix merges into the retained last row, so countNewlines + 1 - 1 is
+		// zero — but the suffix is gone, and the footer must name the corrupted
+		// tail instead of presenting the line as complete.
+		const run = new BashExecutionComponent("echo hi", ui, false);
+		run.appendOutput("kept-");
+		run.appendOutput("suffix");
+		run.setComplete(undefined, false);
+		// The retained line is the prefix alone; without a notice the user
+		// would read it as the command's whole last line.
+		expect(run.getOutput()).toBe("kept-");
+		const rendered = Bun.stripANSI(run.render(120).join("\n"));
+		expect(rendered).toContain("… partial output skipped in output");
+		expect(rendered).not.toContain("lines skipped in output");
+		const card = run.describe(cx(["card", "ansi"]));
+		const notes = nodes(card.c).find(child => props(child).key === "notes");
+		expect(spansText(notes)).toContain("… partial output skipped in output");
+		const tool = run.describe(cx(["tool", "ansi", "code"]));
+		const factsText = (foot(nodes(tool.c)[0])?.facts ?? []).map(f => f.t).join(" ");
+		expect(factsText).toContain("… partial output skipped in output");
 	});
 });
