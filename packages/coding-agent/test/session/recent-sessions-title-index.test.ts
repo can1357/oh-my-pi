@@ -1,11 +1,18 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getRecentSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
-import { getConfigRootDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import {
+	listSessionRecaps,
+	lookupSessionTitle,
+	recordSessionRecap,
+	recordSessionTitle,
+	resetSessionIndexForTests,
+} from "@oh-my-pi/pi-coding-agent/session/session-index";
+import { getConfigRootDir, getHistoryDbPath, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { makeAssistantMessage } from "../session-manager/helpers";
 
 /**
@@ -51,6 +58,14 @@ describe("recent sessions title index", () => {
 		return { sessionDir: path.dirname(sessionFile), sessionFile };
 	}
 
+	it("creates the agent directory before acquiring a filesystem-backed history lease", () => {
+		setAgentDir(path.join(testAgentDir, "fresh", "agent"));
+		recordSessionTitle("fresh", "New title");
+		recordSessionRecap("fresh", "/project", "New recap");
+		expect(lookupSessionTitle("fresh")).toBe("New title");
+		expect(listSessionRecaps({ sessionIds: ["fresh"] }).map(row => row.recap)).toEqual(["New recap"]);
+	});
+
 	it("resolves a titled session from the index without reading file contents", async () => {
 		const { sessionDir, sessionFile } = await createTitledSession("Indexed title");
 
@@ -62,6 +77,28 @@ describe("recent sessions title index", () => {
 		expect(recent).toHaveLength(1);
 		expect(recent[0].name).toBe("Indexed title");
 		expect(recent[0].path).toBe(sessionFile);
+	});
+
+	it("reopens the session index when a failed database path is replaced", () => {
+		const dbPath = getHistoryDbPath(testAgentDir);
+		fs.mkdirSync(dbPath);
+		expect(lookupSessionTitle("session-a")).toBeUndefined();
+
+		fs.rmSync(dbPath, { recursive: true });
+		const replacementPath = `${dbPath}.replacement`;
+		const replacement = new Database(replacementPath);
+		replacement.run(`
+			CREATE TABLE session_titles (
+				session_id TEXT PRIMARY KEY,
+				title TEXT NOT NULL,
+				updated_at INTEGER NOT NULL
+			)
+		`);
+		replacement.query("INSERT INTO session_titles VALUES (?, ?, ?)").run("session-a", "recovered title", 1);
+		replacement.close();
+		fs.renameSync(replacementPath, dbPath);
+
+		expect(lookupSessionTitle("session-a")).toBe("recovered title");
 	});
 
 	it("falls back to a header scan for unindexed files and backfills the index", async () => {

@@ -23,10 +23,12 @@ import {
 	readLines,
 	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
+import { withSqliteStoreLease } from "@oh-my-pi/pi-utils/sqlite";
 import { Settings } from "../config/settings";
 import type { Setting } from "../config/registry";
 
 import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-store";
+import { hasPendingHistorySalvage } from "../session/history-storage";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
 import { readSessionHeaderId } from "../session/session-loader";
@@ -1062,6 +1064,17 @@ function sqliteNumber(value: number | bigint | null | undefined): number {
 // Every statement below is scoped with `using`: an unfinalized statement keeps the SQLite
 // connection (and its db/-wal/-shm files) open after close() until GC, and Windows refuses
 // to delete or replace a file that is still open.
+function withLeasedDatabase<T>(dbPath: string, operation: (db: Database) => T): T {
+	return withSqliteStoreLease(dbPath, () => {
+		const db = new Database(dbPath);
+		try {
+			return operation(db);
+		} finally {
+			db.close();
+		}
+	});
+}
+
 function tableExists(db: Database, table: string): boolean {
 	using stmt = db.prepare("SELECT 1 AS present FROM sqlite_master WHERE type IN ('table','view') AND name = ?");
 	const row = stmt.get(table) as { present?: number } | null;
@@ -1070,8 +1083,10 @@ function tableExists(db: Database, table: string): boolean {
 
 function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { deleted: number; ftsRebuilt: boolean } {
 	if (sessionIds.length === 0) return { deleted: 0, ftsRebuilt: false };
-	const db = new Database(dbPath);
-	try {
+	return withLeasedDatabase(dbPath, db => {
+		if (hasPendingHistorySalvage(dbPath)) {
+			throw new Error("History recovery is pending; history cleanup was deferred");
+		}
 		db.run("PRAGMA busy_timeout = 5000");
 		const hasHistory = tableExists(db, "history") && tableHasColumn(db, "history", "session_id");
 		const hasRecaps = tableExists(db, "session_recaps");
@@ -1095,9 +1110,7 @@ function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { d
 		});
 		tx(sessionIds);
 		return { deleted, ftsRebuilt: deleted > 0 && hasFts };
-	} finally {
-		db.close();
-	}
+	});
 }
 
 async function collectArchivedSessionIds(archiveRoot: string): Promise<string[]> {
@@ -1317,16 +1330,13 @@ function buildStatsCleanupPlans(
 	}));
 	const nodes = [...archivedNodes, ...retainedNodes];
 
-	const db = new Database(dbPath);
-	try {
+	withLeasedDatabase(dbPath, db => {
 		db.run("PRAGMA busy_timeout = 5000");
 		for (const storedPath of collectStoredStatsSessionPaths(db)) {
 			const match = resolveLogicalSessionMatch(storedPath, nodes);
 			if (match) match.node.statsPaths.add(match.logicalRoot);
 		}
-	} finally {
-		db.close();
-	}
+	});
 
 	for (const child of nodes) {
 		if (
@@ -1528,8 +1538,7 @@ async function populateStatsTransferTargets(context: StatsCleanupContext): Promi
  */
 function reconcileStatsRowsForSessions(dbPath: string, plans: StatsCleanupPlan[]): number {
 	if (plans.length === 0) return 0;
-	const db = new Database(dbPath);
-	try {
+	return withLeasedDatabase(dbPath, db => {
 		db.run("PRAGMA busy_timeout = 5000");
 		const sessionTables = STATS_SESSION_TABLES.filter(
 			table => tableExists(db, table) && tableHasColumn(db, table, "session_file"),
@@ -1628,9 +1637,7 @@ function reconcileStatsRowsForSessions(dbPath: string, plans: StatsCleanupPlan[]
 		});
 		tx(plans);
 		return deleted;
-	} finally {
-		db.close();
-	}
+	});
 }
 
 async function collectArchivedStatsSessions(
@@ -2043,19 +2050,15 @@ async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpo
 	};
 	if (!apply || !(await pathExists(dbPath))) return result;
 
-	const db = new Database(dbPath);
-	let checkpointAttempted = false;
-	try {
+	const checkpointAttempted = withLeasedDatabase(dbPath, db => {
 		db.run("PRAGMA busy_timeout = 5000");
 		using checkpointStmt = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)");
 		const row = checkpointStmt.get() as WalCheckpointRow | null;
-		checkpointAttempted = true;
 		result.busy = sqliteNumber(row?.busy);
 		result.log = sqliteNumber(row?.log);
 		result.checkpointedFrames = sqliteNumber(row?.checkpointed);
-	} finally {
-		db.close();
-	}
+		return true;
+	});
 	try {
 		result.walBytes = (await fs.stat(walPath)).size;
 	} catch (error) {

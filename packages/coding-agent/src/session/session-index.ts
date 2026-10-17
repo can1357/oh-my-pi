@@ -22,10 +22,16 @@
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isSqliteBusyError, sqliteFileIdentity, type SqliteFileIdentity } from "@oh-my-pi/pi-utils";
-import { getHistoryDbPath } from "@oh-my-pi/pi-utils/dirs";
+import { getHistoryDbPath, resolveEquivalentPath } from "@oh-my-pi/pi-utils/dirs";
 import { getDbBusyTimeoutMs } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import {
+	isSqliteBusyError,
+	onSqliteStoreQuarantine,
+	readDamagedSqliteRows,
+	sqliteFileIdentity,
+	withSqliteStoreLease,
+} from "@oh-my-pi/pi-utils/sqlite";
 
 const SESSION_INDEX_DDL = `
 CREATE TABLE IF NOT EXISTS session_titles (
@@ -44,74 +50,94 @@ CREATE INDEX IF NOT EXISTS idx_session_recaps_session ON session_recaps(session_
 `;
 
 interface SessionIndexHandle {
-	dbPath: string;
-	/** Identity of the file this handle is attached to; the path alone does not identify it after a quarantine. */
-	identity: SqliteFileIdentity;
 	db: Database;
 	upsertTitle: Statement;
 	selectTitle: Statement;
 	insertRecap: Statement;
 }
 
-let handle: SessionIndexHandle | undefined;
-/** Db path whose open failed; skip retries (and log spam) until the path changes. */
+/** Db path whose open failed; skip retries until that path's file identity changes. */
 let failedPath: string | undefined;
+let failedIdentity: string | null | undefined;
+/** One quarantine-clearing hook per {@link failedPath}; self-unregisters once it fires. */
+let failedPathUnregister: (() => void) | undefined;
 
-function closeHandle(): void {
-	if (!handle) return;
-	try {
-		handle.upsertTitle.finalize();
-		handle.selectTitle.finalize();
-		handle.insertRecap.finalize();
-		handle.db.close();
-	} catch {}
-	handle = undefined;
-}
-
-function openSessionIndex(): SessionIndexHandle | undefined {
-	const dbPath = getHistoryDbPath();
-	// A quarantined history.db is unlinked and recreated at the same path, so
-	// the path alone still matches a handle pinned to the dead inode. Reopen
-	// unless the file behind the path is still the one this handle was opened
-	// on. An `undefined` identity means the stat itself failed: no conclusion
-	// is safe there, so treat the handle as stale.
-	if (handle?.dbPath === dbPath) {
-		const identity = sqliteFileIdentity(dbPath);
-		if (identity !== undefined && identity === handle.identity) return handle;
-	}
-
-	if (failedPath === dbPath) return undefined;
-	closeHandle();
-	try {
-		fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-		const db = new Database(dbPath);
-		// Install the busy handler BEFORE any lock-taking statement (see #2421).
-		db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
-		db.run(`PRAGMA journal_mode=WAL;\nPRAGMA synchronous=NORMAL;\n${SESSION_INDEX_DDL}`);
-		handle = {
-			dbPath,
-			identity: sqliteFileIdentity(dbPath),
-			db,
-			upsertTitle: db.prepare(`
+function withSessionIndex<T>(operation: (index: SessionIndexHandle) => T): T | undefined {
+	const dbPath = resolveEquivalentPath(getHistoryDbPath(), { allowMissing: true });
+	fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+	return withSqliteStoreLease(dbPath, () => {
+		if (failedPath === dbPath) {
+			const currentIdentity = sqliteFileIdentity(dbPath);
+			if (currentIdentity === undefined || currentIdentity === failedIdentity) return undefined;
+			failedPath = undefined;
+			failedIdentity = undefined;
+			failedPathUnregister?.();
+			failedPathUnregister = undefined;
+		}
+		let db: Database | undefined;
+		const prepared: Statement[] = [];
+		let index: SessionIndexHandle;
+		try {
+			db = new Database(dbPath);
+			// Install the busy handler BEFORE any lock-taking statement (see #2421).
+			db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
+			db.run(`PRAGMA journal_mode=WAL;\nPRAGMA synchronous=NORMAL;\n${SESSION_INDEX_DDL}`);
+			prepared.push(
+				db.prepare(`
 INSERT INTO session_titles (session_id, title, updated_at)
 VALUES (?, ?, CAST(strftime('%s','now') AS INTEGER))
 ON CONFLICT(session_id) DO UPDATE SET
 	title = excluded.title,
 	updated_at = excluded.updated_at
-			`),
-			selectTitle: db.prepare("SELECT title FROM session_titles WHERE session_id = ?"),
-			insertRecap: db.prepare("INSERT INTO session_recaps (session_id, cwd, recap) VALUES (?, ?, ?)"),
-		};
+				`),
+			);
+			prepared.push(db.prepare("SELECT title FROM session_titles WHERE session_id = ?"));
+			prepared.push(db.prepare("INSERT INTO session_recaps (session_id, cwd, recap) VALUES (?, ?, ?)"));
+			index = {
+				db,
+				upsertTitle: prepared[0],
+				selectTitle: prepared[1],
+				insertRecap: prepared[2],
+			};
+		} catch (error) {
+			for (const stmt of prepared) {
+				try {
+					stmt.finalize();
+				} catch {}
+			}
+			db?.close();
+			if (isSqliteBusyError(error)) return undefined;
+			failedPath = dbPath;
+			failedIdentity = sqliteFileIdentity(dbPath);
+			if (failedPathUnregister) failedPathUnregister();
+			const hook = onSqliteStoreQuarantine(dbPath, () => {
+				if (failedPath === dbPath) {
+					failedPath = undefined;
+					failedIdentity = undefined;
+				}
+				failedPathUnregister = undefined;
+				hook();
+			});
+			failedPathUnregister = hook;
+			logger.warn("Session index unavailable", { dbPath, error: String(error) });
+			return undefined;
+		}
+
 		failedPath = undefined;
-		return handle;
-	} catch (error) {
-		// A busy store is transient (a peer process holds the lock), so it must
-		// not latch the path as unusable for the rest of the session.
-		if (isSqliteBusyError(error)) return undefined;
-		failedPath = dbPath;
-		logger.warn("Session index unavailable", { dbPath, error: String(error) });
-		return undefined;
-	}
+		failedIdentity = undefined;
+		failedPathUnregister?.();
+		failedPathUnregister = undefined;
+		try {
+			return operation(index);
+		} finally {
+			for (const stmt of prepared) {
+				try {
+					stmt.finalize();
+				} catch {}
+			}
+			db.close();
+		}
+	});
 }
 
 /**
@@ -119,10 +145,8 @@ ON CONFLICT(session_id) DO UPDATE SET
  * failures must never break a rename, so errors are logged and swallowed.
  */
 export function recordSessionTitle(sessionId: string, title: string): void {
-	const index = openSessionIndex();
-	if (!index) return;
 	try {
-		index.upsertTitle.run(sessionId, title);
+		withSessionIndex(index => index.upsertTitle.run(sessionId, title));
 	} catch (error) {
 		logger.debug("Session title index write failed", { sessionId, error: String(error) });
 	}
@@ -130,11 +154,11 @@ export function recordSessionTitle(sessionId: string, title: string): void {
 
 /** Indexed title for a session id, or undefined when unindexed/unavailable. */
 export function lookupSessionTitle(sessionId: string): string | undefined {
-	const index = openSessionIndex();
-	if (!index) return undefined;
 	try {
-		const row = index.selectTitle.get(sessionId) as { title: string } | null;
-		return row?.title ?? undefined;
+		return withSessionIndex(index => {
+			const row = index.selectTitle.get(sessionId) as { title: string } | null;
+			return row?.title ?? undefined;
+		});
 	} catch (error) {
 		logger.debug("Session title index read failed", { sessionId, error: String(error) });
 		return undefined;
@@ -146,10 +170,8 @@ export function lookupSessionTitle(sessionId: string): string | undefined {
  * failure must never disturb the recap display, so errors are logged and swallowed.
  */
 export function recordSessionRecap(sessionId: string, cwd: string, recap: string): void {
-	const index = openSessionIndex();
-	if (!index) return;
 	try {
-		index.insertRecap.run(sessionId, cwd, recap);
+		withSessionIndex(index => index.insertRecap.run(sessionId, cwd, recap));
 	} catch (error) {
 		logger.debug("Session recap journal write failed", { sessionId, error: String(error) });
 	}
@@ -188,8 +210,6 @@ interface SessionRecapRow {
  */
 export function listSessionRecaps(query: SessionRecapQuery = {}): SessionRecap[] {
 	if (query.sessionIds?.length === 0) return [];
-	const index = openSessionIndex();
-	if (!index) return [];
 	const where: string[] = [];
 	const params: SQLQueryBindings[] = [];
 	if (query.sessionIds) {
@@ -208,23 +228,91 @@ export function listSessionRecaps(query: SessionRecapQuery = {}): SessionRecap[]
 		params.push(query.limit);
 	}
 	try {
-		// Ad-hoc SQL (the IN list varies), so prepare and finalize per call
-		// instead of growing the connection's statement cache.
-		using statement = index.db.prepare(sql);
-		return (statement.all(...params) as SessionRecapRow[]).map(row => ({
-			sessionId: row.session_id,
-			cwd: row.cwd,
-			recap: row.recap,
-			createdAt: row.created_at,
-		}));
+		return (
+			withSessionIndex(index => {
+				// Ad-hoc SQL (the IN list varies), so prepare and finalize per call.
+				using statement = index.db.prepare(sql);
+				return (statement.all(...params) as SessionRecapRow[]).map(row => ({
+					sessionId: row.session_id,
+					cwd: row.cwd,
+					recap: row.recap,
+					createdAt: row.created_at,
+				}));
+			}) ?? []
+		);
 	} catch (error) {
 		logger.debug("Session recap journal read failed", { error: String(error) });
 		return [];
 	}
 }
 
-/** @internal Close the cached connection so the next call re-resolves the db path — test-only. */
+interface SessionTitleRow {
+	session_id: string;
+	title: string;
+	updated_at: number;
+}
+
+interface SalvagedRecapRow extends SessionRecapRow {
+	/** Decimal text, like history rowids: a number would round past 2^53 and break the rowid bind. */
+	id: string;
+}
+
+export interface SalvagedSessionIndex {
+	titles: SessionTitleRow[];
+	recaps: SalvagedRecapRow[];
+	damagedRegions: number;
+}
+
+/** Read independently of the replacement, so source damage cannot be mistaken for a failed target write. */
+export function readSalvagedSessionIndex(source: Database): SalvagedSessionIndex {
+	const tables = new Set(
+		(source.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
+			row => row.name,
+		),
+	);
+	const titles = tables.has("session_titles")
+		? readDamagedSqliteRows<SessionTitleRow>(
+				source,
+				"session_titles",
+				"session_id, title, updated_at",
+				"typeof(session_id) = 'text' AND typeof(title) = 'text' AND typeof(updated_at) = 'integer'",
+			)
+		: { rows: [], damagedRegions: 0 };
+	const recaps = tables.has("session_recaps")
+		? readDamagedSqliteRows<SalvagedRecapRow>(
+				source,
+				"session_recaps",
+				"CAST(id AS TEXT) AS id, session_id, cwd, recap, created_at",
+				"typeof(session_id) = 'text' AND typeof(cwd) = 'text' AND typeof(recap) = 'text' AND typeof(created_at) = 'integer'",
+			)
+		: { rows: [], damagedRegions: 0 };
+	return { titles: titles.rows, recaps: recaps.rows, damagedRegions: titles.damagedRegions + recaps.damagedRegions };
+}
+
+/** Restore a source snapshot inside the caller's salvage transaction. Identical recaps are skipped so replaying an already-carried backup cannot duplicate them under a remapped id. */
+export function restoreSalvagedSessionIndex(snapshot: SalvagedSessionIndex, target: Database): void {
+	target.run(SESSION_INDEX_DDL);
+	const insertTitle = target.query(`
+INSERT INTO session_titles (session_id, title, updated_at) VALUES (?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at
+WHERE excluded.updated_at > session_titles.updated_at
+	`);
+	const insertRecap = target.query(`
+INSERT INTO session_recaps (id, session_id, cwd, recap, created_at)
+SELECT CASE WHEN EXISTS (SELECT 1 FROM session_recaps WHERE id = CAST(?1 AS INTEGER)) THEN NULL ELSE CAST(?1 AS INTEGER) END, ?2, ?3, ?4, ?5
+WHERE NOT EXISTS (
+	SELECT 1 FROM session_recaps
+	WHERE session_id = ?2 AND cwd = ?3 AND recap = ?4 AND created_at = ?5
+)
+	`);
+	for (const row of snapshot.titles) insertTitle.run(row.session_id, row.title, row.updated_at);
+	for (const row of snapshot.recaps) insertRecap.run(row.id, row.session_id, row.cwd, row.recap, row.created_at);
+}
+
+/** @internal Clear cached availability state — test-only. */
 export function resetSessionIndexForTests(): void {
-	closeHandle();
 	failedPath = undefined;
+	failedIdentity = undefined;
+	failedPathUnregister?.();
+	failedPathUnregister = undefined;
 }

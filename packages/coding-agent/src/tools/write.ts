@@ -12,7 +12,15 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 
-import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	getHistoryDbPath,
+	isEnoent,
+	isRecord,
+	normalizePathForComparison,
+	prompt,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
+import { withSqliteStoreLease } from "@oh-my-pi/pi-utils/sqlite";
 import {
 	type ArchiveMemberContent,
 	archiveFormatFromPath,
@@ -691,66 +699,82 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		content: string,
 		resolvedSqlitePath: ResolvedSqliteWritePath,
 	): Promise<AgentToolResult<WriteToolDetails>> {
-		let db: Database | null = null;
 		try {
 			if (!resolvedSqlitePath.exists) {
 				throw new ToolError(`SQLite database '${displayPath}' not found`);
 			}
 
-			db = new Database(resolvedSqlitePath.absolutePath, { create: false, strict: true });
-			db.run("PRAGMA busy_timeout = 3000");
-
-			const trimmedContent = content.trim();
-			let resultText: string;
-			if (trimmedContent.length === 0) {
-				if (!resolvedSqlitePath.key) {
-					throw new ToolError("SQLite deletes require a row key in the path");
-				}
-
-				const lookup = resolveTableRowLookup(db, resolvedSqlitePath.table);
-				const deleted =
-					lookup.kind === "pk"
-						? deleteRowByKey(db, resolvedSqlitePath.table, lookup, resolvedSqlitePath.key)
-						: deleteRowByRowId(db, resolvedSqlitePath.table, resolvedSqlitePath.key);
-				resultText =
-					deleted > 0
-						? `Deleted row '${resolvedSqlitePath.key}' from ${resolvedSqlitePath.table}`
-						: `No row deleted from ${resolvedSqlitePath.table} for key '${resolvedSqlitePath.key}'`;
-			} else {
-				let parsedContent: unknown;
+			const run = (): AgentToolResult<WriteToolDetails> => {
+				let db: Database | null = null;
 				try {
-					parsedContent = Bun.JSON5.parse(content);
-				} catch (error) {
-					throw new ToolError(
-						`SQLite write content must be valid JSON5: ${error instanceof Error ? error.message : String(error)}`,
-					);
-				}
+					db = new Database(resolvedSqlitePath.absolutePath, { create: false, strict: true });
+					db.run("PRAGMA busy_timeout = 3000");
 
-				if (!isRecord(parsedContent)) {
-					throw new ToolError("SQLite write content must be a JSON object");
-				}
+					const trimmedContent = content.trim();
+					let resultText: string;
+					if (trimmedContent.length === 0) {
+						if (!resolvedSqlitePath.key) {
+							throw new ToolError("SQLite deletes require a row key in the path");
+						}
 
-				if (resolvedSqlitePath.key) {
-					const lookup = resolveTableRowLookup(db, resolvedSqlitePath.table);
-					const updated =
-						lookup.kind === "pk"
-							? updateRowByKey(db, resolvedSqlitePath.table, lookup, resolvedSqlitePath.key, parsedContent)
-							: updateRowByRowId(db, resolvedSqlitePath.table, resolvedSqlitePath.key, parsedContent);
-					resultText =
-						updated > 0
-							? `Updated row '${resolvedSqlitePath.key}' in ${resolvedSqlitePath.table}`
-							: `No row updated in ${resolvedSqlitePath.table} for key '${resolvedSqlitePath.key}'`;
-				} else {
-					insertRow(db, resolvedSqlitePath.table, parsedContent);
-					resultText = `Inserted row into ${resolvedSqlitePath.table}`;
+						const lookup = resolveTableRowLookup(db, resolvedSqlitePath.table);
+						const deleted =
+							lookup.kind === "pk"
+								? deleteRowByKey(db, resolvedSqlitePath.table, lookup, resolvedSqlitePath.key)
+								: deleteRowByRowId(db, resolvedSqlitePath.table, resolvedSqlitePath.key);
+						resultText =
+							deleted > 0
+								? `Deleted row '${resolvedSqlitePath.key}' from ${resolvedSqlitePath.table}`
+								: `No row deleted from ${resolvedSqlitePath.table} for key '${resolvedSqlitePath.key}'`;
+					} else {
+						let parsedContent: unknown;
+						try {
+							parsedContent = Bun.JSON5.parse(content);
+						} catch (error) {
+							throw new ToolError(
+								`SQLite write content must be valid JSON5: ${error instanceof Error ? error.message : String(error)}`,
+							);
+						}
+
+						if (!isRecord(parsedContent)) {
+							throw new ToolError("SQLite write content must be a JSON object");
+						}
+
+						if (resolvedSqlitePath.key) {
+							const lookup = resolveTableRowLookup(db, resolvedSqlitePath.table);
+							const updated =
+								lookup.kind === "pk"
+									? updateRowByKey(db, resolvedSqlitePath.table, lookup, resolvedSqlitePath.key, parsedContent)
+									: updateRowByRowId(db, resolvedSqlitePath.table, resolvedSqlitePath.key, parsedContent);
+							resultText =
+								updated > 0
+									? `Updated row '${resolvedSqlitePath.key}' in ${resolvedSqlitePath.table}`
+									: `No row updated in ${resolvedSqlitePath.table} for key '${resolvedSqlitePath.key}'`;
+						} else {
+							insertRow(db, resolvedSqlitePath.table, parsedContent);
+							resultText = `Inserted row into ${resolvedSqlitePath.table}`;
+						}
+					}
+
+					invalidateFsScanAfterWrite(resolvedSqlitePath.absolutePath);
+					return toolResult<WriteToolDetails>({ resolvedPath: resolvedSqlitePath.absolutePath })
+						.text(resultText)
+						.sourcePath(resolvedSqlitePath.absolutePath)
+						.done();
+				} finally {
+					db?.close();
 				}
+			};
+
+			// Writes to the process-wide store must not overlap corruption recovery's
+			// quarantine/replace: run the whole open..close inside the shared lease.
+			if (
+				normalizePathForComparison(resolvedSqlitePath.absolutePath, { allowMissing: true }) ===
+				normalizePathForComparison(getHistoryDbPath(), { allowMissing: true })
+			) {
+				return withSqliteStoreLease(resolvedSqlitePath.absolutePath, run);
 			}
-
-			invalidateFsScanAfterWrite(resolvedSqlitePath.absolutePath);
-			return toolResult<WriteToolDetails>({ resolvedPath: resolvedSqlitePath.absolutePath })
-				.text(resultText)
-				.sourcePath(resolvedSqlitePath.absolutePath)
-				.done();
+			return run();
 		} catch (error) {
 			if (isEnoent(error)) {
 				throw new ToolError(`SQLite database '${displayPath}' not found`);
@@ -759,8 +783,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				throw error;
 			}
 			throw new ToolError(error instanceof Error ? error.message : String(error));
-		} finally {
-			db?.close();
 		}
 	}
 

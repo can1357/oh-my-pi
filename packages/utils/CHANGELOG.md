@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `readDamagedSqliteRows()` to salvage readable rows, including negative rowids, from damaged SQLite tables, `assertSqliteQuickCheck()` to detect damaged stores, and `onSqliteStoreQuarantine()` hooks for releasing held connections ([#15751](https://github.com/can1357/oh-my-pi/pull/15751) by [@Shadorain](https://github.com/Shadorain))
+- Added `withSqliteStoreLease()` for operation-scoped connections and `sqliteFileIdentity()` for detecting database replacement generations ([#15751](https://github.com/can1357/oh-my-pi/pull/15751) by [@Shadorain](https://github.com/Shadorain))
+
+### Changed
+
+- SQLite recovery flushes preserved evidence before replacement, and path comparison helpers can retain canonical aliases while a target is temporarily missing ([#15751](https://github.com/can1357/oh-my-pi/pull/15751) by [@Shadorain](https://github.com/Shadorain))
+
+### Fixed
+
+- Fixed SQLite salvage skipping the minimum signed rowid ([#15751](https://github.com/can1357/oh-my-pi/pull/15751) by [@Shadorain](https://github.com/Shadorain))
+
 ## [18.11.3] - 2026-10-16
 
 ### Fixed

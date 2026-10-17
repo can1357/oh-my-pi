@@ -624,5 +624,11 @@ Discovery helpers live in `session-listing.ts`; `SessionManager` exposes project
 - Resubmission updates the latest timestamp/cwd/session provenance and increments `use_count`
 - `add()` writes synchronously before returning its resolved promise; failures are logged rather than thrown
 - The same DB also contains independent `session_titles` and append-only `session_recaps` tables. Idle recaps do not enter the session JSONL or model context.
+- History, session-index, GC, and prediction reads coordinate through a cross-process recovery lease; disk handles close before it is released. Symlink and Windows case aliases use the same lease. Restart older omp processes before relying on this coordination; pre-fix binaries do not participate.
+- Integrity is checked on first open of a file generation, not before every indexed lookup. Corruption discovered during search or submission enters the same recovery path.
+- Recovery flushes preserved copies and a `.pending-salvage` queue before removing a corrupt store. Backup names are relative to the database directory. Newest snapshots are applied first, carrying earlier applied-backup identities so replay after another recovery does not duplicate usage counts or recaps.
+- Readable prompts, titles, recaps, the history allocation high-water mark, and applied-backup identities commit together with full SQLite synchronization before the queue entry is removed. Interrupted scans and transient I/O or write failures stay queued; permanently unreadable sources are retired after recording the recoverable data, with evidence retained and the failure logged.
+- Prediction checkpoints include the database file generation. A replacement re-ingests readable history once, so new low-id prompts are not skipped if damage or deferred salvage lost the old allocation sequence.
+- SQLite tool reads of this store run on a read-only in-memory snapshot after releasing the lease, so long raw queries do not block prompt persistence. `omp gc` defers history-row cleanup while salvage is pending; rerun GC after recovery completes.
 
 Use session files for conversation graph/state replay; use `HistoryStorage` for prompt history UX.

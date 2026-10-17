@@ -148,7 +148,7 @@ const NORMALIZED_SCRATCH_ROOTS: readonly string[] = (() => {
 			roots.add("/private/var/tmp");
 		}
 	}
-	return [...new Set(Array.from(roots, normalizePathForComparison))];
+	return [...new Set(Array.from(roots, root => normalizePathForComparison(root)))];
 })();
 
 interface ProjectDirDisplay {
@@ -184,8 +184,8 @@ function getProjectDirDisplay(projectDir: string): ProjectDirDisplay {
 		}
 	}
 	if (!scratch) {
-		displayRoots ??= [path.join(homeDir, "Projects"), path.join(homeDir, "repos"), "/work"].map(
-			normalizePathForComparison,
+		displayRoots ??= [path.join(homeDir, "Projects"), path.join(homeDir, "repos"), "/work"].map(root =>
+			normalizePathForComparison(root),
 		);
 		for (const root of displayRoots) {
 			const relative = relativePathWithinNormalizedRoot(root, normalizedProjectDir);

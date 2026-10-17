@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { hasFsCode, isEexist, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
 
 /**
@@ -121,4 +122,29 @@ export async function replaceFileAcrossDevices(source: string, destination: stri
 	await fs.promises.unlink(source).catch(error => {
 		logger.warn("Failed to remove moved file's source", { source, error: toError(error).message });
 	});
+}
+
+/** Publish complete, flushed contents without exposing a partially written target. */
+export function writeFileAtomicallySync(targetPath: string, content: string): void {
+	const staging = `${targetPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	try {
+		const fd = fs.openSync(staging, "wx", 0o600);
+		try {
+			fs.writeFileSync(fd, content);
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+		fs.renameSync(staging, targetPath);
+		if (process.platform !== "win32") {
+			const directory = fs.openSync(path.dirname(targetPath), "r");
+			try {
+				fs.fsyncSync(directory);
+			} finally {
+				fs.closeSync(directory);
+			}
+		}
+	} finally {
+		fs.rmSync(staging, { force: true });
+	}
 }

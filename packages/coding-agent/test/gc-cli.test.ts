@@ -1106,6 +1106,42 @@ describe("runGcCommand cold-session archive", () => {
 		expect(ftsRows.map(row => row.session_id)).toEqual(["keep-me"]);
 	});
 
+	test("defers history deletion while recovery could replay archived rows, then cleans them on a later run", async () => {
+		await writeSession(root, "project", "archive-me", "complete", { ageDays: 90 });
+		const dbPath = getHistoryDbPath(root);
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		const db = new Database(dbPath);
+		db.run("CREATE TABLE history (id INTEGER PRIMARY KEY, prompt TEXT NOT NULL, session_id TEXT)");
+		db.run("INSERT INTO history VALUES (1, 'archived prompt', 'archive-me')");
+		db.close();
+		await Bun.write(`${dbPath}.pending-salvage`, JSON.stringify([{ backupName: "history.db.corrupt-waiting" }]));
+		const options = {
+			flags: {
+				agentDir: root,
+				archive: true,
+				coldArchiveAfterDays: 30,
+				retainNewestGlobal: 0,
+				retainNewestPerCwd: 0,
+				apply: true,
+			},
+		};
+		const first = await runGcCommand(options);
+		expect(first.archive?.historyRowsDeleted).toBe(0);
+		expect(first.archive?.errors).toContain(
+			"history cleanup: History recovery is pending; history cleanup was deferred",
+		);
+		const check = new Database(dbPath, { readonly: true });
+		try {
+			expect(check.query("SELECT prompt FROM history").all()).toEqual([{ prompt: "archived prompt" }]);
+		} finally {
+			check.close();
+		}
+		await fs.unlink(`${dbPath}.pending-salvage`);
+		const second = await runGcCommand(options);
+		expect(second.archive?.historyRowsDeleted).toBe(1);
+		expect(second.archive?.errors).toEqual([]);
+	});
+
 	test("removes archived session recaps even when history.db has no prompt history", async () => {
 		await writeSession(root, "project", "archive-me", "complete", { ageDays: 90 });
 		const dbPath = getHistoryDbPath(root);

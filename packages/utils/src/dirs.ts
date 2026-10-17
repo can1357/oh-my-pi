@@ -160,17 +160,27 @@ function standardizeProjectPath(p: string): string {
 	return process.platform === "win32" ? expandWindowsLongPath(p) : standardizeMacOSPath(p);
 }
 
-export function resolveEquivalentPath(inputPath: string): string {
+/** Resolve aliases; optionally retain the canonical spelling of a temporarily missing target. */
+export function resolveEquivalentPath(inputPath: string, options?: { allowMissing?: boolean }): string {
 	const resolvedPath = path.resolve(inputPath);
 	try {
 		return fs.realpathSync(resolvedPath);
-	} catch {
-		return resolvedPath;
+	} catch (error) {
+		if (!options?.allowMissing || !isEnoent(error)) return resolvedPath;
 	}
+	const parent = path.dirname(resolvedPath);
+	if (parent === resolvedPath) return resolvedPath;
+	try {
+		const link = fs.readlinkSync(resolvedPath);
+		return resolveEquivalentPath(path.resolve(parent, link), options);
+	} catch (error) {
+		if (!isEnoent(error)) return resolvedPath;
+	}
+	return path.join(resolveEquivalentPath(parent, options), path.basename(resolvedPath));
 }
 
-export function normalizePathForComparison(inputPath: string): string {
-	const resolvedPath = resolveEquivalentPath(inputPath);
+export function normalizePathForComparison(inputPath: string, options?: { allowMissing?: boolean }): string {
+	const resolvedPath = resolveEquivalentPath(inputPath, options);
 	return process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;
 }
 

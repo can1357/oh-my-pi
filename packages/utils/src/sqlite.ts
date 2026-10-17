@@ -1,11 +1,42 @@
 /** Shared SQLite opening, error attribution, and result-code classification for persistent stores. */
-import { Database } from "bun:sqlite";
+import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { normalizePathForComparison, resolveEquivalentPath } from "./dirs";
 import { getDbBusyTimeoutMs } from "./env";
 import { withFileLockSync } from "./file-lock";
 import { isEnoent } from "./fs-error";
 import * as logger from "./logger";
+
+const sqliteStoreLeaseDepth = new Map<string, number>();
+
+/**
+ * Runs a synchronous store operation under the same cross-process lock used
+ * for corruption recovery. Reentrancy is limited to this process and thread;
+ * callbacks must not be async. The callback must close every database and
+ * finalize every statement before returning; no SQLite handle may outlive the lease.
+ */
+export function withSqliteStoreLease<T>(dbPath: string, operation: () => T): T {
+	const key = corruptHandleKey(dbPath);
+	const depth = sqliteStoreLeaseDepth.get(key) ?? 0;
+	if (depth > 0) {
+		sqliteStoreLeaseDepth.set(key, depth + 1);
+		try {
+			return operation();
+		} finally {
+			sqliteStoreLeaseDepth.set(key, depth);
+		}
+	}
+
+	return withFileLockSync(`${key}.recovery`, () => {
+		sqliteStoreLeaseDepth.set(key, 1);
+		try {
+			return operation();
+		} finally {
+			sqliteStoreLeaseDepth.delete(key);
+		}
+	});
+}
 
 const BUSY_MAX_ATTEMPTS = 4;
 const BUSY_BASE_DELAY_MS = 100;
@@ -25,8 +56,7 @@ export type SqliteFileIdentity = string | null | undefined;
 const pendingCorruptHandles = new Map<string, Set<Database>>();
 
 function corruptHandleKey(dbPath: string): string {
-	const resolved = path.resolve(dbPath);
-	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+	return normalizePathForComparison(dbPath, { allowMissing: true });
 }
 
 function registerCorruptHandle(dbPath: string, db: Database | undefined): void {
@@ -66,6 +96,46 @@ function closePeerCorruptHandles(dbPath: string, own: Database | undefined): voi
 	}
 }
 
+/** Release callbacks of long-lived connections, keyed like {@link pendingCorruptHandles}. */
+const quarantineHooks = new Map<string, Set<() => void>>();
+
+/**
+ * Registers `release` to run in-process when the store at `dbPath` is
+ * quarantined, after its evidence is copied and before its files are
+ * unlinked. Connections opened outside {@link openSqliteDatabase} use it to
+ * close their handle: Windows refuses to unlink a held file, and elsewhere the
+ * handle would keep writing to the quarantined file. Returns an unregister
+ * function.
+ */
+export function onSqliteStoreQuarantine(dbPath: string, release: () => void): () => void {
+	const key = corruptHandleKey(dbPath);
+	let hooks = quarantineHooks.get(key);
+	if (!hooks) {
+		hooks = new Set();
+		quarantineHooks.set(key, hooks);
+	}
+	hooks.add(release);
+	return () => {
+		const current = quarantineHooks.get(key);
+		if (!current) return;
+		current.delete(release);
+		if (current.size === 0) quarantineHooks.delete(key);
+	};
+}
+
+function runQuarantineHooks(dbPath: string): void {
+	const hooks = quarantineHooks.get(corruptHandleKey(dbPath));
+	if (!hooks) return;
+	// Deleting the current element mid-iteration is safe for a Set; a release typically unregisters itself.
+	for (const release of hooks) {
+		try {
+			release();
+		} catch (error) {
+			logger.warn("Failed to release a SQLite handle before quarantine", { path: dbPath, error: String(error) });
+		}
+	}
+}
+
 class SqliteAttemptFailure extends Error {
 	readonly original: unknown;
 	readonly identity: SqliteFileIdentity;
@@ -89,8 +159,8 @@ class SqliteAttemptFailure extends Error {
  */
 export function sqliteFileIdentity(dbPath: string): SqliteFileIdentity {
 	try {
-		const stat = fs.statSync(dbPath);
-		return `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+		const stat = fs.statSync(dbPath, { bigint: true });
+		return `${stat.dev}:${stat.ino}:${stat.birthtimeNs}`;
 	} catch (error) {
 		return isEnoent(error) ? null : undefined;
 	}
@@ -114,8 +184,22 @@ export interface SqliteOpenOptions {
 	 * initializer once more. Disabled by default.
 	 */
 	recoverCorruption?: boolean;
-	/** Runs after preservation and before the replacement is initialized. */
+	/** Runs after preservation and before the original store is unlinked, while holding its recovery lease. */
 	onCorruptionPreserved?: (backupPath: string, error: unknown) => void;
+}
+
+/**
+ * Throws a `SQLITE_CORRUPT`-coded error when `PRAGMA quick_check` reports
+ * damage. A probe that itself fails propagates unchanged, so callers still see
+ * corrupt-page errors with their original SQLite codes.
+ */
+export function assertSqliteQuickCheck(db: Database): void {
+	const rows = db.query<{ quick_check: string }, []>("PRAGMA quick_check(1)").all();
+	if (rows[0]?.quick_check === "ok") return;
+	throw Object.assign(new Error(`database disk image is malformed (${rows[0]?.quick_check})`), {
+		code: "SQLITE_CORRUPT",
+		errno: 11,
+	});
 }
 
 /**
@@ -127,20 +211,19 @@ export interface SqliteOpenOptions {
  */
 function revealHiddenCorruption(db: Database | undefined, error: unknown): unknown {
 	if (!db || isSqliteCorruptionError(error) || isSqliteBusyError(error)) return error;
-	let detail: string;
-	let code: unknown = "SQLITE_CORRUPT";
-	let errno: unknown = 11;
 	try {
-		const rows = db.query<{ quick_check: string }, []>("PRAGMA quick_check(1)").all();
-		if (rows[0]?.quick_check === "ok") return error;
-		detail = `database disk image is malformed (${rows[0]?.quick_check})`;
+		assertSqliteQuickCheck(db);
+		return error;
 	} catch (probeError) {
 		if (!isSqliteCorruptionError(probeError)) return error;
-		detail = probeError instanceof Error ? probeError.message : String(probeError);
-		({ code, errno } = probeError as { code: unknown; errno?: unknown });
+		const detail = probeError instanceof Error ? probeError.message : String(probeError);
+		const { code, errno } = probeError as { code: unknown; errno?: unknown };
+		const original = error instanceof Error ? error.message : String(error);
+		return Object.assign(new Error(`${detail}; initialization failed: ${original}`, { cause: error }), {
+			code,
+			errno,
+		});
 	}
-	const original = error instanceof Error ? error.message : String(error);
-	return Object.assign(new Error(`${detail}; initialization failed: ${original}`, { cause: error }), { code, errno });
 }
 
 async function openWithBusyRetries<T>(
@@ -189,7 +272,12 @@ function openOnce<T>(dbPath: string, initialize: (db: Database) => T, options: S
 	}
 }
 
-function quarantineCorruptSqliteStore(dbPath: string, db: Database | undefined): string {
+function quarantineCorruptSqliteStore(
+	dbPath: string,
+	db: Database | undefined,
+	options: SqliteOpenOptions,
+	error: unknown,
+): string {
 	const backupPath = `${dbPath}.corrupt-${Date.now()}-${crypto.randomUUID()}`;
 	const preserved: string[] = [];
 	// Closing a failed WAL connection can truncate its WAL. Copy evidence
@@ -198,17 +286,32 @@ function quarantineCorruptSqliteStore(dbPath: string, db: Database | undefined):
 		try {
 			fs.chmodSync(`${dbPath}${suffix}`, 0o600);
 			fs.copyFileSync(`${dbPath}${suffix}`, `${backupPath}${suffix}`, fs.constants.COPYFILE_EXCL);
+			const fd = fs.openSync(`${backupPath}${suffix}`, "r+");
+			try {
+				fs.fsyncSync(fd);
+			} finally {
+				fs.closeSync(fd);
+			}
 			preserved.push(suffix);
 		} catch (error) {
 			if (isEnoent(error) && suffix !== "") continue;
 			throw error;
 		}
 	}
+	if (process.platform !== "win32") {
+		const directory = fs.openSync(path.dirname(backupPath), "r");
+		try {
+			fs.fsyncSync(directory);
+		} finally {
+			fs.closeSync(directory);
+		}
+	}
 	db?.close();
-	// Only Windows refuses to unlink a file another handle still holds. Elsewhere
-	// each peer must keep its own handle until it closes it after adopting the
-	// replacement; closing it here races the peer's recovery on POSIX.
+	// History participants close under this lease; other stores may still own
+	// in-process handles registered with the quarantine hook.
 	if (process.platform === "win32") closePeerCorruptHandles(dbPath, db);
+	runQuarantineHooks(dbPath);
+	options.onCorruptionPreserved?.(backupPath, error);
 
 	const removed: string[] = [];
 	try {
@@ -256,13 +359,13 @@ function recoverCorruptDatabase(dbPath: string, error: unknown, options: SqliteO
 	let backupPath: string | null;
 	try {
 		try {
-			backupPath = withFileLockSync(`${dbPath}.recovery`, () => {
+			backupPath = withSqliteStoreLease(dbPath, () => {
 				const currentIdentity = sqliteFileIdentity(dbPath);
 				if (failure.identity === undefined || currentIdentity === undefined) {
 					throw new Error("could not verify the corrupt database file identity");
 				}
 				if (currentIdentity !== failure.identity) return null;
-				return quarantineCorruptSqliteStore(dbPath, failure.db);
+				return quarantineCorruptSqliteStore(dbPath, failure.db, options, failure.original);
 			});
 		} finally {
 			unregisterCorruptHandle(dbPath, failure.db);
@@ -278,7 +381,6 @@ function recoverCorruptDatabase(dbPath: string, error: unknown, options: SqliteO
 		backupPath,
 		warning: "Stored credentials from this database may require re-login.",
 	});
-	options.onCorruptionPreserved?.(backupPath, failure.original);
 }
 
 /**
@@ -296,6 +398,7 @@ export async function openSqliteDatabase<T>(
 	initialize: (db: Database) => T | Promise<T>,
 	options: SqliteOpenOptions = {},
 ): Promise<T> {
+	dbPath = resolveEquivalentPath(dbPath, { allowMissing: true });
 	try {
 		return await openWithBusyRetries(dbPath, initialize, options);
 	} catch (error) {
@@ -318,6 +421,7 @@ export function openSqliteDatabaseSync<T>(
 	initialize: (db: Database) => T,
 	options: SqliteOpenOptions = {},
 ): T {
+	dbPath = resolveEquivalentPath(dbPath, { allowMissing: true });
 	try {
 		return openOnce(dbPath, initialize, options);
 	} catch (error) {
@@ -341,6 +445,208 @@ export function annotateSqliteError(error: unknown, dbPath: string): Error {
 /** Checkpoints committed WAL frames without waiting for concurrent readers. */
 export function checkpointWal(db: Database): void {
 	db.run("PRAGMA wal_checkpoint(PASSIVE)");
+}
+
+type SalvageSeek = { rowid: bigint; ok: boolean; row: Record<string, unknown> } | "end" | "damaged";
+
+/** SQLite's signed 64-bit rowid domain; `number` would lose precision there. */
+const MIN_SQLITE_ROWID = -(1n << 63n);
+const MAX_SQLITE_ROWID = (1n << 63n) - 1n;
+
+/** Step values are counts, not database keys, so `bigint` stays exact and safe. */
+function probeAt(origin: bigint, delta: bigint, boundary: bigint): bigint {
+	const shifted = origin + delta;
+	return delta > 0n ? (shifted > boundary ? boundary : shifted) : shifted < boundary ? boundary : shifted;
+}
+
+/** Bind rowid boundaries as decimal text; SQLite's CAST preserves all signed int64 bits. */
+function bindRowid(origin: bigint): string {
+	return origin.toString();
+}
+
+/**
+ * Reads every readable row of a possibly damaged rowid table. Rows are
+ * visited by rowid seeks (`rowid > ?`, or `rowid < ?`/`rowid <= ?` for the
+ * negative space), so work grows with the rows actually stored, never with a
+ * (possibly corrupt or sparse) max rowid. Damage is not monotonic — a
+ * readable leaf can sit between two damaged ones — so when a seek fails, the
+ * scan probes forward with a doubling step and pushes each skipped interval
+ * onto a worklist — but only when the probe found a live row strictly inside
+ * a strict sub-interval, so a queued interval can never requeue itself and a
+ * dead tail cannot explode the worklist. Every probe also tries `rowid = ?`:
+ * a row whose predecessor lives on a damaged page is unreachable by `rowid >`
+ * and is only found by an exact seek. Negative rowids sit left of every probe
+ * the forward anchor can reach, so a damage episode that starts negative
+ * queues that span for a descending sweep from 0. Rows on a damaged page are
+ * lost, and a row ringed by damage on both sides may be missed. `predicate`
+ * filters rows (e.g. by `typeof`) before they are returned.
+ * `damagedRegions` — a bound on the damage, since probes may hit one region
+ * repeatedly; any other error propagates.
+ */
+export function readDamagedSqliteRows<T>(
+	db: Database,
+	table: string,
+	columns: string,
+	predicate = "1",
+): { rows: T[]; damagedRegions: number } {
+	const selection = `CAST(rowid AS TEXT) AS __salvage_rowid, (${predicate}) AS __salvage_ok, ${columns}`;
+	const nextStmt = db.query<Record<string, unknown>, [string]>(
+		`SELECT ${selection} FROM ${table} WHERE rowid > CAST(? AS INTEGER) ORDER BY rowid LIMIT 1`,
+	);
+	const exactStmt = db.query<Record<string, unknown>, [string]>(
+		`SELECT ${selection} FROM ${table} WHERE rowid = CAST(? AS INTEGER)`,
+	);
+	const topStmt = db.query<Record<string, unknown>, [string]>(
+		`SELECT ${selection} FROM ${table} WHERE rowid <= CAST(? AS INTEGER) ORDER BY rowid DESC LIMIT 1`,
+	);
+	const prevStmt = db.query<Record<string, unknown>, [string]>(
+		`SELECT ${selection} FROM ${table} WHERE rowid < CAST(? AS INTEGER) ORDER BY rowid DESC LIMIT 1`,
+	);
+	let damagedRegions = 0;
+	const read = (stmt: Statement<Record<string, unknown>, [string]>, origin: bigint): SalvageSeek => {
+		let hit: Record<string, unknown> | null;
+		try {
+			hit = stmt.get(bindRowid(origin));
+		} catch (error) {
+			if (!isSqliteCorruptionError(error)) throw error;
+			damagedRegions++;
+			return "damaged";
+		}
+		if (!hit) return "end";
+		const { __salvage_rowid: rowid, __salvage_ok: ok, ...row } = hit;
+		if (typeof rowid !== "string") return "damaged";
+		const parsedRowid = BigInt(rowid);
+		// A cross-linked page can surface rowids out of order; treat that as damage so the scan always advances.
+		if (
+			(stmt === nextStmt && parsedRowid <= origin) ||
+			(stmt === topStmt && parsedRowid > origin) ||
+			(stmt === prevStmt && parsedRowid >= origin)
+		)
+			return "damaged";
+		return { rowid: parsedRowid, ok: ok === 1, row };
+	};
+
+	const kept: { rowid: bigint; row: Record<string, unknown> }[] = [];
+	const seen = new Set<bigint>();
+	const keep = (seek: SalvageSeek): void => {
+		if (typeof seek !== "object" || seen.has(seek.rowid)) return;
+		seen.add(seek.rowid);
+		if (seek.ok) kept.push({ rowid: seek.rowid, row: seek.row });
+	};
+
+	// The initial half-open interval cannot visit its own lower endpoint.
+	keep(read(exactStmt, MIN_SQLITE_ROWID));
+
+	// Half-open intervals (lo, hi] of unexplored seek origins, each swept in one
+	// direction: 1 ascends from `lo` with `rowid >` seeks, -1 descends from `hi`
+	// with `rowid <=`/`rowid <` seeks. `deadBoundary` marks an interval whose
+	// entry boundary is a dead probe origin; the sweep skips its entry seek and
+	// starts probing.
+	const pending: Array<[lo: bigint, hi: bigint, deadBoundary: boolean, dir: 1 | -1]> = [
+		[MIN_SQLITE_ROWID, MAX_SQLITE_ROWID, false, 1],
+	];
+	while (pending.length > 0) {
+		const [lo, hi, deadBoundary, dir] = pending.pop()!;
+		if (dir > 0) {
+			let origin = lo;
+			let seek: SalvageSeek = deadBoundary ? "damaged" : read(nextStmt, origin);
+			for (;;) {
+				if (seek === "end") break;
+				if (seek !== "damaged") {
+					keep(seek);
+					if (seek.rowid > hi) break;
+					origin = seek.rowid;
+					seek = read(nextStmt, origin);
+					continue;
+				}
+				// The successor of `origin` is unreadable. Negative rowids sit left
+				// of every probe the forward anchor below can reach, so that span
+				// goes to a descending sweep before probing; it self-terminates when
+				// the table holds no negatives.
+				if (origin < 0n && (hi > 0n ? 0n : hi) > origin) {
+					pending.push([origin, hi > 0n ? 0n : hi, false, -1]);
+				}
+				// Probe forward; a skipped interval goes on the worklist only when
+				// the probe found a live row inside it.
+				let skipped = origin;
+				let resumed = false;
+				for (let step = 1n; ; step *= 2n) {
+					const probe = probeAt(skipped < 0n ? 0n : skipped, step, hi);
+					// A row at `probe` itself can sit on a readable leaf while every
+					// `rowid >` path to it routes through damage.
+					const exact = read(exactStmt, probe);
+					keep(exact);
+					const hit = read(nextStmt, probe);
+					const liveInRange =
+						(typeof exact === "object" && exact.rowid > skipped && exact.rowid <= hi) ||
+						(typeof hit === "object" && hit.rowid > skipped && hit.rowid <= hi);
+					// A width-1 gap holds only the dead probe's own origin, and an
+					// entry that is not a strict sub-interval would requeue itself.
+					if (probe > skipped + 1n && (skipped > lo || probe < hi) && liveInRange) {
+						pending.push([skipped, probe - 1n, true, 1]);
+					}
+					if (hit === "damaged") {
+						if (probe === hi) break;
+						skipped = probe;
+						continue;
+					}
+					if (hit === "end") break;
+					keep(hit);
+					if (hit.rowid > hi) break;
+					origin = hit.rowid;
+					seek = read(nextStmt, origin);
+					resumed = true;
+					break;
+				}
+				if (!resumed) break;
+			}
+			continue;
+		}
+		// Descending mirror of the forward sweep for negative rowids.
+		let ceiling = hi;
+		let seek: SalvageSeek = deadBoundary ? "damaged" : read(topStmt, ceiling);
+		for (;;) {
+			if (seek === "end") break;
+			if (seek !== "damaged") {
+				keep(seek);
+				if (seek.rowid <= lo) break;
+				ceiling = seek.rowid;
+				seek = read(prevStmt, ceiling);
+				continue;
+			}
+			// The predecessor of `ceiling` is unreadable. Probe downward with the
+			// same doubling, exact-seek, and strict-sub-interval rules.
+			let floor = ceiling;
+			let resumed = false;
+			for (let step = 1n; ; step *= 2n) {
+				const probe = probeAt(floor, -step, lo);
+				const exact = read(exactStmt, probe);
+				keep(exact);
+				const hit = read(prevStmt, probe);
+				const liveInRange =
+					(typeof exact === "object" && exact.rowid > lo && exact.rowid < floor) ||
+					(typeof hit === "object" && hit.rowid > lo && hit.rowid < floor);
+				if (probe < floor - 1n && (floor < hi || probe > lo) && liveInRange) {
+					pending.push([probe + 1n, floor, true, -1]);
+				}
+				if (hit === "damaged") {
+					if (probe === lo) break;
+					floor = probe;
+					continue;
+				}
+				if (hit === "end") break;
+				keep(hit);
+				if (hit.rowid <= lo) break;
+				ceiling = hit.rowid;
+				seek = read(prevStmt, ceiling);
+				resumed = true;
+				break;
+			}
+			if (!resumed) break;
+		}
+	}
+	kept.sort((a, b) => (a.rowid < b.rowid ? -1 : a.rowid > b.rowid ? 1 : 0));
+	return { rows: kept.map(entry => entry.row as T), damagedRegions };
 }
 
 /**

@@ -1,4 +1,6 @@
-import type { Database } from "bun:sqlite";
+import { getHistoryDbPath, normalizePathForComparison } from "@oh-my-pi/pi-utils/dirs";
+import { withSqliteStoreLease } from "@oh-my-pi/pi-utils/sqlite";
+import { Database } from "bun:sqlite";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ToolSession } from "../sdk";
 import { DEFAULT_MAX_LINES, truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -13,6 +15,7 @@ import {
 	type SuffixMatchCache,
 } from "./read-path-resolution";
 import {
+	configureSqliteReadConnection,
 	executeReadQuery,
 	getRowByKey,
 	getRowByRowId,
@@ -21,6 +24,7 @@ import {
 	listTables,
 	MAX_RAW_QUERY_ROWS,
 	openSqliteReadConnection,
+	openSqliteReadConnectionSync,
 	parseSqlitePathCandidates,
 	parseSqliteSelector,
 	queryRows,
@@ -108,11 +112,8 @@ export async function readSqlite(
 		suffixResolution: resolvedSqlitePath.suffixResolution,
 	};
 
-	let db: Database | null = null;
-	try {
-		db = await openSqliteReadConnection(resolvedSqlitePath.absolutePath);
+	const renderResult = (db: Database): AgentToolResult<ReadToolDetails> => {
 		throwIfAborted(signal);
-
 		switch (selector.kind) {
 			case "list": {
 				const listLimit = applyListLimit(listTables(db), { limit: 500 });
@@ -204,14 +205,54 @@ export async function readSqlite(
 					.done();
 			}
 		}
-
 		throw new ToolError("Unsupported SQLite selector");
+	};
+
+	try {
+		// Bounded selectors do not need a full-store copy. Arbitrary raw SQL
+		// runs off-lease so it cannot starve prompt persistence.
+		if (
+			normalizePathForComparison(resolvedSqlitePath.absolutePath, { allowMissing: true }) ===
+			normalizePathForComparison(getHistoryDbPath(), { allowMissing: true })
+		) {
+			if (selector.kind === "raw") {
+				const snapshot = withSqliteStoreLease(resolvedSqlitePath.absolutePath, () => {
+					const db = openSqliteReadConnectionSync(resolvedSqlitePath.absolutePath);
+					try {
+						return db.serialize();
+					} finally {
+						db.close();
+					}
+				});
+				// A deserialized database has no WAL sidecars; keep the serialized
+				// pages but switch its file-format read/write versions to rollback mode.
+				snapshot[18] = snapshot[19] = 1;
+				const db = configureSqliteReadConnection(Database.deserialize(snapshot, { readonly: true, strict: true }));
+				try {
+					return renderResult(db);
+				} finally {
+					db.close();
+				}
+			}
+			return withSqliteStoreLease(resolvedSqlitePath.absolutePath, () => {
+				const db = openSqliteReadConnectionSync(resolvedSqlitePath.absolutePath);
+				try {
+					return renderResult(db);
+				} finally {
+					db.close();
+				}
+			});
+		}
+		const db = await openSqliteReadConnection(resolvedSqlitePath.absolutePath);
+		try {
+			return renderResult(db);
+		} finally {
+			db.close();
+		}
 	} catch (error) {
 		if (error instanceof ToolError) {
 			throw error;
 		}
 		throw new ToolError(error instanceof Error ? error.message : String(error));
-	} finally {
-		db?.close();
 	}
 }

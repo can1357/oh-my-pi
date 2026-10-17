@@ -2736,6 +2736,7 @@ export function convertMessages(
 					assistantMsg.reasoning_details = reasoningDetails;
 				}
 			}
+
 			// Some OpenAI-compatible backends concatenate assistant content as a
 			// string even for tool-call replay. OpenAI accepts an empty string here;
 			// null trips strict/proxy implementations before the tool result is read.
