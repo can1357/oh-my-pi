@@ -685,6 +685,7 @@
 - A custom model's explicit `contextWindow` or `maxTokens` in `models.yml` now wins over the catalog's limit rules for that model id, which previously overwrote it ([#16094](https://github.com/can1357/oh-my-pi/pull/16094) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
+- Fixed the host-discovery and WSL probes (`wslpath`, `cmd.exe` over the WSL interop pipe, and `wslview`'s Windows-path conversion) holding startup past their 500 ms deadline when a descendant inherited the probe's stdout pipe: the whole process group is killed at the deadline and the pending pipe reads are cancelled, so a wedged interop pipe costs the budget instead of an unbounded wait ([#15337](https://github.com/can1357/oh-my-pi/pull/15337) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed Claude Opus 5.5 replies sent between tool calls (for example an answer to a question asked mid-task) being folded into the "Thought" block; they now show as normal reply text in the transcript, print mode, ACP clients, and HTML exports
 - Fixed the shell's `du --time=ctime` (also `status`) printing `???` on Windows; it now shows the last write time, as `stat` already does for the status-change time
