@@ -38,8 +38,6 @@ export interface EngineOpenOptions {
 
 export interface EngineAdapter {
 	readonly name: EngineName;
-	/** Whose memory `resources()` reports: a separate engine process, or the harness process itself. */
-	readonly rssScope: "engine-process" | "harness-process";
 	describe(): Promise<Record<string, string>>;
 	open(evalCase: EvalCase, options: EngineOpenOptions): Promise<void>;
 	remember(items: readonly RememberItem[]): Promise<(string | null)[]>;
@@ -54,6 +52,4 @@ export interface EngineAdapter {
 	dispose(): Promise<void>;
 	/** Starts the engine and embeds the one string "warmup" (a no-op for fts-only), so the runner can time process start, import and model load. */
 	warmup(protocol: ProtocolName): Promise<void>;
-	/** Engine memory: peak resident set size, plus the resident set size before warmup. Both are in bytes. */
-	resources(): Promise<{ peakRssBytes: number; baselineRssBytes: number }>;
 }

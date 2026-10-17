@@ -45,7 +45,6 @@ interface FakeOptions {
 function fakeEngine(options: FakeOptions): EngineAdapter {
 	return {
 		name: "mnemopi",
-		rssScope: "engine-process",
 		describe: async () => ({}),
 		open: async () => {},
 		remember: async items => options.rowIds(items),
@@ -56,7 +55,6 @@ function fakeEngine(options: FakeOptions): EngineAdapter {
 		close: async () => {},
 		dispose: async () => {},
 		warmup: async () => {},
-		resources: async () => ({ peakRssBytes: 2, baselineRssBytes: 1 }),
 	};
 }
 
@@ -203,7 +201,6 @@ describe("runner", () => {
 		);
 		expect(file.aggregate[primaryMetric("lme-s")]).toBe(1);
 		expect(file.aggregate["latency.p50"]).toBeGreaterThanOrEqual(0);
-		expect(file.resources.rssScope).toBe("harness-process");
 		expect(file.perCategory[run.questions[0].category]).toBeDefined();
 		expect(primaryMetric("beam-500k")).toBe("recall@10");
 	});

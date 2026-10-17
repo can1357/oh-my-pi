@@ -1,6 +1,6 @@
 """Embedding server for the Mnemopi engine: Python fastembed over JSON lines on stdio.
 
-Request:  {"id": number, "op": "embed" | "resources", "params": {...}}
+Request:  {"id": number, "op": "embed", "params": {"texts": [...]}}
 Response: {"id": number, "result": ...} or {"id": number, "error": string}  (one per stdout line)
 
 Mnemopi's JS fastembed stack embeds about 20-40x slower than Python fastembed with the same ONNX model file, which
@@ -27,16 +27,6 @@ MODEL = os.environ["MEMORY_EVAL_EMBED_MODEL"]
 CACHE_DIR = os.environ["MEMORY_EVAL_EMBED_CACHE_DIR"]
 
 
-def proc_status_bytes(field: str) -> int:
-	# Linux only. getrusage's ru_maxrss survives spawn/exec, so a child would report its parent's peak; /proc is per-process.
-	with open("/proc/self/status", encoding="ascii") as status:
-		for line in status:
-			if line.startswith(f"{field}:"):
-				return int(line.split()[1]) * 1024  # the value is in kB
-	raise RuntimeError(f"{field} not found in /proc/self/status")
-
-
-BASELINE_RSS_BYTES = proc_status_bytes("VmRSS")
 EMBEDDER = TextEmbedding(MODEL, cache_dir=CACHE_DIR)
 
 
@@ -44,11 +34,7 @@ def op_embed(params):
 	return [vector.tolist() for vector in EMBEDDER.embed(params["texts"])]
 
 
-def op_resources(_params):
-	return {"peak_rss_bytes": proc_status_bytes("VmHWM"), "baseline_rss_bytes": BASELINE_RSS_BYTES}
-
-
-OPS = {"embed": op_embed, "resources": op_resources}
+OPS = {"embed": op_embed}
 
 
 def main():

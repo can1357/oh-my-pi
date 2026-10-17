@@ -64,11 +64,11 @@ Both engines run without working-memory eviction: Mnemopi with `workingMemoryLim
 
 LongMemEval runs ask each engine for a ranking as deep as the case's corpus (`k` = 50 is only the deepest turn cutoff). The official `evaluate_retrieval_turn2session` reads past the session cutoff (5 or 10) until the ranking covers that many distinct sessions, and the official retrieval runner ranks the whole corpus, so a ranking cut at 50 turns would score some questions below their official value. A hit that maps to no message keeps its rank as a non-gold document in a session of its own; the question's `lme.corpusIds` lists these as `<unmapped N>_0`.
 
-Memory: Mnemosyne's baseline and peak resident set size come from the engine process's own `/proc/self/status` (`VmRSS` after imports, `VmHWM`; Linux only). Mnemopi and the sanity engines run in the harness process and report its RSS (`rssScope: "harness-process"`).
+Latency (`latency.p50`, `latency.p95`, per question `latencyMs`) is the wall time of one `recall` as the harness sees it, so it includes engine-specific overheads: JSON-lines IPC to Mnemosyne's process and its widening calls, Mnemopi's `flushExtractions()`, and for LongMemEval a ranking as deep as the corpus. It is not comparable across engines as a speed benchmark. `warmupMs` is the engine's start, imports and model load.
 
 ### Mnemopi embedder
 
-`--embedder js` (default) uses Mnemopi's own local fastembed, as omp does in production. On the reference machine it embeds about 20-40x slower than Python fastembed with the same ONNX model file, so a full LongMemEval run takes days. `--embedder python` serves the same model from `py/embed_server.py` (in `venv-engine`) through Mnemopi's embedding-provider option. Mnemopi's retrieval code is unchanged, and an embedding-server failure aborts the run. The server's memory is recorded in the result's engine info (`embed_server_peak_rss_bytes`), not in `resources`. Compare a Python-embedder run against a JS-embedder run with `diff` before relying on it for a new model.
+`--embedder js` (default) uses Mnemopi's own local fastembed, as omp does in production. On the reference machine it embeds about 20-40x slower than Python fastembed with the same ONNX model file, so a full LongMemEval run takes days. `--embedder python` serves the same model from `py/embed_server.py` (in `venv-engine`) through Mnemopi's embedding-provider option. Mnemopi's retrieval code is unchanged, and an embedding-server failure aborts the run. Compare a Python-embedder run against a JS-embedder run with `diff` before relying on it for a new model.
 
 ### Recall options
 

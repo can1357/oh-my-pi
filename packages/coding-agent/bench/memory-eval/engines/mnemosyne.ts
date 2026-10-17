@@ -87,7 +87,6 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 
 	return {
 		name: "mnemosyne",
-		rssScope: "engine-process",
 		describe: async () => ({
 			...((await live().call("describe")) as Record<string, string>),
 			// A fresh temp dir per run: its path would make otherwise identical configs differ.
@@ -149,10 +148,6 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 		// The spawn is part of warmup: its time covers interpreter start, imports and model load.
 		warmup: async protocol => {
 			await (await start(protocol)).call("warmup");
-		},
-		resources: async () => {
-			const rss = (await live().call("resources")) as { peak_rss_bytes: number; baseline_rss_bytes: number };
-			return { peakRssBytes: rss.peak_rss_bytes, baselineRssBytes: rss.baseline_rss_bytes };
 		},
 		oldestWorking: async limit => {
 			const rows = (await live().call("oldest_working", { limit })) as { engine_id: string; content: string }[];

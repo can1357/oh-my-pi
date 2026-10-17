@@ -11,10 +11,8 @@ function sanityEngine(
 	order: (items: readonly RememberItem[], question: EvalQuestion) => readonly RememberItem[],
 ): EngineAdapter {
 	let items: RememberItem[] = [];
-	let baselineRssBytes = process.memoryUsage().rss;
 	return {
 		name,
-		rssScope: "harness-process",
 		describe: async () => ({ engine: name, kind: "sanity" }),
 		open: async () => {
 			items = [];
@@ -36,14 +34,7 @@ function sanityEngine(
 				})),
 		close: async () => {},
 		dispose: async () => {},
-		warmup: async () => {
-			baselineRssBytes = process.memoryUsage().rss;
-		},
-		resources: async () => ({
-			// `maxRSS` is in kilobytes on Linux.
-			peakRssBytes: process.resourceUsage().maxRSS * 1024,
-			baselineRssBytes,
-		}),
+		warmup: async () => {},
 	};
 }
 
