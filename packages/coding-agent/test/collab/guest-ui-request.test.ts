@@ -216,6 +216,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
 		loadingAnimation: undefined,
+		composer: { setRunActive: () => {} },
 		statusLine: {
 			setCollabStatus: () => {},
 			invalidate: () => {},

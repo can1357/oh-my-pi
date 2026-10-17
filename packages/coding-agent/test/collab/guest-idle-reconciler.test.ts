@@ -142,6 +142,7 @@ describe("reconcileGuestSnapshotHostState", () => {
 		expect(statusLine.getActiveMs()).toBe(5_000);
 
 		const ensureLoadingAnimation = mock(() => {});
+		const setRunActive = mock((_active: boolean) => {});
 		const ctx: GuestSnapshotActivityReconcilerCtx = {
 			statusLine,
 			statusContainer: { disposeChildren: () => {} },
@@ -149,12 +150,15 @@ describe("reconcileGuestSnapshotHostState", () => {
 			ensureLoadingAnimation,
 			autoCompactionLoader: undefined,
 			retryLoader: undefined,
+			composer: { setRunActive },
 		};
 		reconcileGuestSnapshotHostState(ctx, false);
 		const stoppedAt = statusLine.getActiveMs();
 		now += 60_000;
 		expect(statusLine.getActiveMs()).toBe(stoppedAt);
 		expect(ensureLoadingAnimation).not.toHaveBeenCalled();
+		// A dropped agent_end must not leave the composer busy through the host's idle state.
+		expect(setRunActive).toHaveBeenCalledWith(false);
 	});
 
 	it("starts the working loader for a streaming snapshot when no maintenance loader is active", () => {
@@ -165,6 +169,7 @@ describe("reconcileGuestSnapshotHostState", () => {
 		const statusLine = statusLines.track(new StatusLineComponent(makeSession(), statusLineHost));
 		const markActivityStart = vi.spyOn(statusLine, "markActivityStart");
 		const ensureLoadingAnimation = mock(() => {});
+		const setRunActive = mock((_active: boolean) => {});
 		const ctx: GuestSnapshotActivityReconcilerCtx = {
 			statusLine,
 			statusContainer: { disposeChildren: () => {} },
@@ -172,10 +177,51 @@ describe("reconcileGuestSnapshotHostState", () => {
 			ensureLoadingAnimation,
 			autoCompactionLoader: undefined,
 			retryLoader: undefined,
+			composer: { setRunActive },
 		};
 		reconcileGuestSnapshotHostState(ctx, true);
 		expect(markActivityStart).toHaveBeenCalledTimes(1);
 		expect(ensureLoadingAnimation).toHaveBeenCalledTimes(1);
+		// A missed agent_start must not let chrome settle during a tool gap.
+		expect(setRunActive).toHaveBeenCalledWith(true);
+	});
+
+	it("keeps the composer busy across a stream-idle pause while the host's logical run is open", () => {
+		const statusLine = statusLines.track(new StatusLineComponent(makeSession(), statusLineHost));
+		const ensureLoadingAnimation = mock(() => {});
+		const setRunActive = mock((_active: boolean) => {});
+		const ctx: GuestSnapshotActivityReconcilerCtx = {
+			statusLine,
+			statusContainer: { disposeChildren: () => {} },
+			loadingAnimation: undefined,
+			ensureLoadingAnimation,
+			autoCompactionLoader: undefined,
+			retryLoader: undefined,
+			composer: { setRunActive },
+		};
+		// Host stream is idle (post-prompt work / async wake pending) but the run is open.
+		reconcileGuestSnapshotHostState(ctx, false, true);
+
+		expect(setRunActive).toHaveBeenLastCalledWith(true);
+		// Raw streaming is still false, so no working loader is conjured for a pause.
+		expect(ensureLoadingAnimation).not.toHaveBeenCalled();
+	});
+
+	it("falls back to the streaming flag when an older host omits the logical run bit", () => {
+		const setRunActive = mock((_active: boolean) => {});
+		const ctx: GuestSnapshotActivityReconcilerCtx = {
+			statusLine: statusLines.track(new StatusLineComponent(makeSession(), statusLineHost)),
+			statusContainer: { disposeChildren: () => {} },
+			loadingAnimation: undefined,
+			ensureLoadingAnimation: () => {},
+			autoCompactionLoader: undefined,
+			retryLoader: undefined,
+			composer: { setRunActive },
+		};
+		reconcileGuestSnapshotHostState(ctx, true);
+		expect(setRunActive).toHaveBeenLastCalledWith(true);
+		reconcileGuestSnapshotHostState(ctx, false);
+		expect(setRunActive).toHaveBeenLastCalledWith(false);
 	});
 
 	it("restores an owned working loader when a streaming resync clears a maintenance loader", () => {
@@ -199,6 +245,7 @@ describe("reconcileGuestSnapshotHostState", () => {
 			autoCompactionLoader:
 				staleMaintenanceLoader as unknown as GuestSnapshotActivityReconcilerCtx["autoCompactionLoader"],
 			retryLoader: undefined,
+			composer: { setRunActive: () => {} },
 		};
 
 		clearGuestTransientStatus(ctx);
@@ -213,6 +260,7 @@ describe("reconcileGuestSnapshotHostState", () => {
 
 	it("does not start the working loader while a retry loader owns the status area", () => {
 		const ensureLoadingAnimation = mock(() => {});
+		const setRunActive = mock((_active: boolean) => {});
 		const ctx: GuestSnapshotActivityReconcilerCtx = {
 			statusLine: statusLines.track(new StatusLineComponent(makeSession(), statusLineHost)),
 			statusContainer: { disposeChildren: () => {} },
@@ -220,9 +268,12 @@ describe("reconcileGuestSnapshotHostState", () => {
 			ensureLoadingAnimation,
 			autoCompactionLoader: undefined,
 			retryLoader: {} as GuestSnapshotActivityReconcilerCtx["retryLoader"],
+			composer: { setRunActive },
 		};
 		reconcileGuestSnapshotHostState(ctx, true);
 		expect(ensureLoadingAnimation).not.toHaveBeenCalled();
+		// Loader ownership is separate from run state: the host is still streaming.
+		expect(setRunActive).toHaveBeenCalledWith(true);
 	});
 
 	it("does not start the working loader while an auto-compaction loader owns the status area", () => {
@@ -234,6 +285,7 @@ describe("reconcileGuestSnapshotHostState", () => {
 			ensureLoadingAnimation,
 			autoCompactionLoader: {} as GuestSnapshotActivityReconcilerCtx["autoCompactionLoader"],
 			retryLoader: undefined,
+			composer: { setRunActive: () => {} },
 		};
 		reconcileGuestSnapshotHostState(ctx, true);
 		expect(ensureLoadingAnimation).not.toHaveBeenCalled();

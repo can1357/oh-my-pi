@@ -39,6 +39,9 @@ function createContext(options: { terminalProgress?: boolean } = {}) {
 			get hasPostPromptWork() {
 				return streamState.continuation !== undefined;
 			},
+			get hasLogicalRunActivity() {
+				return streamState.isStreaming || streamState.continuation !== undefined;
+			},
 			waitForIdle: async () => {
 				await streamState.continuation?.promise;
 			},

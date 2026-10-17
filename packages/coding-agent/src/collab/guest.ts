@@ -134,6 +134,8 @@ export interface GuestSnapshotActivityReconcilerCtx extends GuestIdleReconcilerC
 	ensureLoadingAnimation: InteractiveModeContext["ensureLoadingAnimation"];
 	autoCompactionLoader: InteractiveModeContext["autoCompactionLoader"];
 	retryLoader: InteractiveModeContext["retryLoader"];
+	/** Composer run flag, repaired alongside the loader when the wire start/end events were missed. */
+	composer: InteractiveModeContext["composer"];
 }
 
 /** Status-area state which cannot outlive removal of its child components. */
@@ -156,7 +158,12 @@ export function clearGuestTransientStatus(ctx: GuestTransientStatusCtx): void {
 	ctx.statusContainer.clear();
 }
 
-export function reconcileGuestSnapshotHostState(ctx: GuestSnapshotActivityReconcilerCtx, isStreaming: boolean): void {
+export function reconcileGuestSnapshotHostState(
+	ctx: GuestSnapshotActivityReconcilerCtx,
+	isStreaming: boolean,
+	runActive: boolean = isStreaming,
+): void {
+	ctx.composer.setRunActive(runActive);
 	if (isStreaming) {
 		ctx.statusLine.markActivityStart();
 		if (!ctx.autoCompactionLoader && !ctx.retryLoader) ctx.ensureLoadingAnimation();
@@ -513,7 +520,7 @@ export class CollabGuestLink {
 		this.#clearTransientUi();
 		this.#clearAgentMirror();
 		this.state = pending.state;
-		reconcileGuestSnapshotHostState(this.#ctx, pending.state.isStreaming);
+		reconcileGuestSnapshotHostState(this.#ctx, pending.state.isStreaming, pending.state.runActive);
 		this.#reconcileLifecycle(pending.state.isStreaming);
 		this.#applyHostState(pending.state);
 		this.#ctx.resetObserverRegistry();
@@ -621,7 +628,7 @@ export class CollabGuestLink {
 				this.#applyHostState(frame.state);
 				setSessionTerminalTitle(frame.state.sessionName, frame.state.cwd);
 				this.#updateStatusSegment();
-				reconcileGuestSnapshotHostState(this.#ctx, frame.state.isStreaming);
+				reconcileGuestSnapshotHostState(this.#ctx, frame.state.isStreaming, frame.state.runActive);
 				this.#reconcileLifecycle(frame.state.isStreaming);
 				this.#ctx.statusLine.invalidate();
 				this.#ctx.ui.requestRender();

@@ -409,6 +409,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				initialChatRendered: true,
 				hideToolActivity: false,
 				loadingAnimation: undefined,
+				composer: { setRunActive: () => {} },
 				statusLine: {
 					setCollabStatus: () => {},
 					invalidate: () => {},
@@ -605,6 +606,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				initialChatRendered: true,
 				hideToolActivity: false,
 				loadingAnimation: undefined,
+				composer: { setRunActive: () => {} },
 				statusLine: {
 					setCollabStatus: () => {},
 					invalidate: () => {},
@@ -792,6 +794,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				initialChatRendered: true,
 				hideToolActivity: false,
 				loadingAnimation: undefined,
+				composer: { setRunActive: () => {} },
 				statusLine: {
 					setCollabStatus: () => {},
 					invalidate: () => {},

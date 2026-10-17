@@ -221,4 +221,59 @@ describe("EventController message_update coalescing", () => {
 		await flushMicrotasks();
 		expect(initCalls).toBe(3);
 	});
+	it("does not let an old queued timer flush a reattached view's snapshot early", async () => {
+		const { controller, ctx } = createStreamingFixture();
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const handle = controller.handleEvent.bind(controller);
+		vi.spyOn(controller, "handleEvent").mockImplementation(async event => {
+			if (event.type === "turn_start") {
+				entered.resolve();
+				await release.promise;
+			} else {
+				await handle(event);
+			}
+		});
+		const blocked = controller.dispatchSessionEvent({ type: "turn_start" });
+		await entered.promise;
+		await controller.dispatchSessionEvent(messageUpdate("old attachment"));
+		vi.advanceTimersByTime(33);
+		controller.resetTranscriptAnchors();
+		ctx.streamingMessage = undefined;
+		await controller.dispatchSessionEvent(messageUpdate("new attachment"));
+		release.resolve();
+		await blocked;
+		await flushMicrotasks();
+
+		expect(ctx.streamingMessage).toBeUndefined();
+		vi.advanceTimersByTime(33);
+		await flushMicrotasks();
+		expect<AssistantMessage | undefined>(ctx.streamingMessage).toEqual(assistantMessage("new attachment"));
+	});
+
+	it("rechecks attachment ownership after an awaited snapshot flush before ending the run", async () => {
+		const { controller, ctx } = createStreamingFixture();
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const handle = controller.handleEvent.bind(controller);
+		vi.spyOn(controller, "handleEvent").mockImplementation(async event => {
+			await handle(event);
+			if (event.type === "message_update") {
+				entered.resolve();
+				await release.promise;
+			}
+		});
+		await controller.handleEvent({ type: "agent_start" });
+		await controller.dispatchSessionEvent(messageUpdate("old attachment"));
+		const staleEnd = controller.dispatchSessionEvent({ type: "agent_end", messages: [] });
+		await entered.promise;
+		Object.defineProperty(ctx.session, "isStreaming", { value: false });
+		controller.resetTranscriptAnchors();
+		ctx.streamingMessage = assistantMessage("reattached transcript");
+		release.resolve();
+		await staleEnd;
+
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+		expect(ctx.streamingMessage).toEqual(assistantMessage("reattached transcript"));
+	});
 });

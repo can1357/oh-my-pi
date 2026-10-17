@@ -73,6 +73,7 @@ function makeGuestContext(): InteractiveModeContext {
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
 		loadingAnimation: undefined,
+		composer: { setRunActive: () => {} },
 		statusLine: {
 			setRunningSubagents: (agentIds: readonly string[]) => {
 				statusLineCount = agentIds.length;

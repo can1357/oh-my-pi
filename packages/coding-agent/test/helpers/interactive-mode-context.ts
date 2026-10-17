@@ -103,6 +103,7 @@ export function createSessionStub(
 		isAborting: false,
 		isRetrying: false,
 		hasPostPromptWork: false,
+		hasLogicalRunActivity: false,
 		queuedMessageCount: 0,
 		isTtsrAbortPending: false,
 		retryAttempt: 0,

@@ -341,6 +341,9 @@ function makeAsyncWaitContext() {
 		session: {
 			// The real settle is emitted while its prompt is still admitted.
 			hasAdmittedSubmission: true,
+			get hasLogicalRunActivity() {
+				return pending;
+			},
 			hasPendingAsyncWork: () => pending,
 			settleAsyncWork: () => settled.promise,
 		},
@@ -369,6 +372,9 @@ describe("EventController — terminal title across a non-terminal agent_end", (
 			sessionManager: { getSessionName: () => "test-session" },
 			session: {
 				get hasPostPromptWork() {
+					return continuationPending;
+				},
+				get hasLogicalRunActivity() {
 					return continuationPending;
 				},
 				waitForIdle: () => continuation.promise,
@@ -404,7 +410,7 @@ describe("EventController — terminal title across a non-terminal agent_end", (
 		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
 		const ctx = createInteractiveModeContext({
 			sessionManager: { getSessionName: () => "test-session" },
-			session: { queuedMessageCount: 1 },
+			session: { queuedMessageCount: 1, hasLogicalRunActivity: true },
 		});
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const controller = new EventController(ctx);

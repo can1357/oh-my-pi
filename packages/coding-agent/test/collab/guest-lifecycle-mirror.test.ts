@@ -128,6 +128,7 @@ async function makeHarness(
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
 		loadingAnimation: undefined,
+		composer: { setRunActive: () => {} },
 		ensureLoadingAnimation: () => {},
 		autoCompactionLoader: undefined,
 		retryLoader: undefined,

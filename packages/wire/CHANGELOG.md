@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `SessionState.runActive` so collab guests preserve the host's busy state while a turn is paused on background work ([#15894](https://github.com/can1357/oh-my-pi/pull/15894) by [@emmahyde](https://github.com/emmahyde))
+
 ## [18.10.2] - 2026-10-12
 
 ### Added

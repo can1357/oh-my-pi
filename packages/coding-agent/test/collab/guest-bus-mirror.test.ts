@@ -53,6 +53,7 @@ function makeGuestContext(eventBus: EventBus): InteractiveModeContext {
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
 		loadingAnimation: undefined,
+		composer: { setRunActive: () => {} },
 		statusLine: {
 			setSubagentCount: () => {},
 			get subagentCount() {

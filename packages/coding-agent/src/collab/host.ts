@@ -1084,6 +1084,7 @@ export class CollabHost {
 
 	#buildState(): CollabSessionState {
 		const session = this.#ctx.session;
+		this.#syncRunStateInterval();
 		// Context numbers come from the status line's memoized breakdown so guests
 		// render exactly the same anchored, provider-real count the host's own
 		// status line shows.
@@ -1091,6 +1092,7 @@ export class CollabHost {
 		const tokens = breakdown.usedTokens ?? 0;
 		return {
 			isStreaming: session.isStreaming,
+			runActive: session.hasLogicalRunActivity,
 			isAborting: session.isAborting,
 			queuedMessageCount: session.queuedMessageCount,
 			sessionName: session.sessionName,
@@ -1109,10 +1111,20 @@ export class CollabHost {
 	#onEventForState(event: AgentSessionEvent): void {
 		if (!STATE_TRIGGER_EVENTS[event.type]) return;
 		this.#scheduleStateBroadcast();
-		if (event.type === "agent_start" && !this.#streamingInterval) {
-			this.#streamingInterval = setInterval(() => this.#scheduleStateBroadcast(), STREAMING_STATE_INTERVAL_MS);
-		} else if (event.type === "agent_end" && this.#streamingInterval) {
-			clearInterval(this.#streamingInterval);
+		this.#syncRunStateInterval();
+	}
+
+	#syncRunStateInterval(): void {
+		if (this.#ctx.session.hasLogicalRunActivity && !this.#streamingInterval) {
+			this.#streamingInterval = setInterval(() => {
+				this.#scheduleStateBroadcast();
+				if (!this.#ctx.session.hasLogicalRunActivity) {
+					clearInterval(this.#streamingInterval ?? undefined);
+					this.#streamingInterval = null;
+				}
+			}, STREAMING_STATE_INTERVAL_MS);
+		} else if (!this.#ctx.session.hasLogicalRunActivity) {
+			clearInterval(this.#streamingInterval ?? undefined);
 			this.#streamingInterval = null;
 		}
 	}

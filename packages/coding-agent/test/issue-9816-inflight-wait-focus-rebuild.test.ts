@@ -210,6 +210,7 @@ function makeSession(
 ): SessionStub {
 	let messages = initialMessages;
 	let streaming = initialStreaming;
+	let runStartedAt: number | undefined = initialStreaming || runningJobIds.length > 0 ? 1 : undefined;
 	let listener: ((event: AgentSessionEvent) => Promise<void> | void) | undefined;
 	let persistence = Promise.resolve();
 	const activeToolUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
@@ -220,7 +221,17 @@ function makeSession(
 		get isStreaming() {
 			return streaming;
 		},
+		get runStartedAt() {
+			return runStartedAt;
+		},
 		retryAttempt: 0,
+		hasPostPromptWork: false,
+		queuedMessageCount: 0,
+		hasPendingAsyncWork: () => runningJobIds.length > 0,
+		waitForIdle: async () => {
+			await persistence;
+		},
+		settleAsyncWork: () => Promise.withResolvers<void>().promise,
 		agent: {
 			get state() {
 				return { streamMessage: liveMessage };
@@ -270,6 +281,7 @@ function makeSession(
 			persistence = pending.promise;
 			return () => {
 				messages = [danglingWait, completedWait];
+				runStartedAt = undefined;
 				pending.resolve();
 			};
 		},

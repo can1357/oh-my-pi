@@ -112,6 +112,7 @@ function makeFailingGuestContext(failure: Error): InteractiveModeContext {
 			resetTranscriptAnchors: () => {},
 		},
 		loadingAnimation: undefined,
+		composer: { setRunActive: () => {} },
 		statusLine: {
 			setCollabStatus: () => {},
 			invalidate: () => {},
@@ -165,6 +166,7 @@ function makeCancelledSwitchGuestContext(
 			resetTranscriptAnchors: () => {},
 		},
 		loadingAnimation: undefined,
+		composer: { setRunActive: () => {} },
 		statusLine: {
 			setCollabStatus: () => {},
 			invalidate: () => {},

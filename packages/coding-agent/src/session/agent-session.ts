@@ -6832,6 +6832,23 @@ export class AgentSession implements SettingsScope {
 		return this.#postPromptTasks.size > 0;
 	}
 
+	/**
+	 * Whether the logical run is still open: streaming, retrying, or paused on
+	 * post-prompt work, an async wake, or a queued continuation. A stream-idle
+	 * pulse clears `runStartedAt` while the run still owns a continuation, so raw
+	 * `isStreaming` alone reads idle across those pauses.
+	 */
+	get hasLogicalRunActivity(): boolean {
+		return (
+			this.#runStartedAt !== undefined ||
+			this.isStreaming ||
+			this.isRetrying ||
+			this.hasPostPromptWork ||
+			this.hasPendingAsyncWork() ||
+			this.queuedMessageCount > 0
+		);
+	}
+
 	/** Register post-prompt work in tests without driving a full agent turn. */
 	trackPostPromptTaskForTests(task: Promise<unknown>): void {
 		if (!isBunTestRuntime()) throw new Error("trackPostPromptTaskForTests is test-only");

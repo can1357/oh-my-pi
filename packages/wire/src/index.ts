@@ -233,6 +233,12 @@ export interface SessionState {
 	contextUsage?: ContextUsage;
 	participants: Participant[];
 	isAborting?: boolean;
+	/**
+	 * Whether the host's logical run is open, including pauses where the stream is
+	 * idle but a continuation (post-prompt work, async wake, queued message) will
+	 * resume it. Absent on older hosts; guests then fall back to `isStreaming`.
+	 */
+	runActive?: boolean;
 }
 
 export interface AgentSnapshot {
