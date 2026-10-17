@@ -493,9 +493,11 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			}
 			const scopedPaths = toPathList(rawPath);
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
-			const rawEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd);
-			const pathSpecs = await parsePathSpecs(rawEntries, this.session.cwd);
 			const resolveContext = sessionResolveContext(this.session, { signal });
+			const rawEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
+				context: resolveContext,
+			});
+			const pathSpecs = await parsePathSpecs(rawEntries, this.session.cwd);
 			// Internal URLs resolve inside the native search, bounded by the tier this call was approved at.
 			const urlFilesystem = new InternalUrlFilesystem({
 				context: resolveContext,
@@ -545,6 +547,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					rawPaths: resolvedPaths,
 					cwd: this.session.cwd,
 					internalUrlAction: "search",
+					context: resolveContext,
 					filesystem: urlFilesystem,
 					resolveExternalUrl: materializeExternalUrlForSearch,
 					trackImmutableSources: true,

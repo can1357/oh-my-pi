@@ -1166,7 +1166,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		toolContext: AgentToolContext | undefined,
 		routedUrlPredicate?: (entry: string) => boolean,
 	): Promise<AgentToolResult<ReadToolDetails> | null> {
-		const parts = await splitDelimitedPathEntry(readPath, this.session.cwd, { routedUrlPredicate });
+		const parts = await splitDelimitedPathEntry(readPath, this.session.cwd, {
+			routedUrlPredicate,
+			context: sessionResolveContext(this.session, { signal }),
+		});
 		return parts ? this.#readDelimitedParts(parts, signal, toolContext) : null;
 	}
 
@@ -1705,6 +1708,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			readPath,
 			this.session.cwd,
 			part => parseReadUrlTarget(part) !== null || InternalUrlRouter.instance().canResolve(part),
+			sessionResolveContext(this.session, { signal }),
 		);
 		if (mixedParts) return this.#readDelimitedParts(mixedParts, signal, toolContext);
 		const imageQuestion = splitImageQuestionTarget(readPath);

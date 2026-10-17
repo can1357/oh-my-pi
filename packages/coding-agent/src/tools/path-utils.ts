@@ -1,4 +1,4 @@
-import { extractUriScheme } from "../internal-urls/parse";
+import { extractUriScheme, parseInternalUrl } from "../internal-urls/parse";
 import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { splitPathAndSel, isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
 import * as fs from "node:fs";
@@ -8,6 +8,7 @@ import * as url from "node:url";
 import { glob } from "@oh-my-pi/pi-natives";
 import {
 	hasFsCode,
+	withTimeout,
 	isEnoent,
 	isEnotdir,
 	isWsl,
@@ -15,6 +16,13 @@ import {
 	windowsPathToWslMount,
 } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter } from "../internal-urls";
+import {
+	hasExactMcpResource,
+	MCP_RESOURCE_DISCOVERY_TIMEOUT,
+	MCP_RESOURCE_DISCOVERY_WAIT_MS,
+} from "../internal-urls/mcp-protocol";
+import { MCPManager } from "../mcp/manager";
+import type { ResolveContext } from "../internal-urls/types";
 import { type InternalUrlFilesystem, joinUrlPath, UrlFsError } from "../internal-urls/url-filesystem";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -683,6 +691,61 @@ async function tryDelimitedPathSplit(
 }
 
 /**
+ * Whether an internal-URL list has a URL with its own path segments followed by
+ * an unanchored local part. A local part is anchored when
+ * {@link isFilesystemSourcePath} (POSIX absolute, Windows drive, UNC) or an
+ * explicit `./`, `../` (either separator), `~` prefix makes it its own target.
+ * A delimiter following a query or fragment remains part of that URL.
+ */
+function hasAmbiguousInternalUrlTail(parts: readonly string[], isUrl: (part: string) => boolean): boolean {
+	let urlHasPath = false;
+	// Path state from readable HTTPS/www URLs only matters once an internal or
+	// routed URL already opened the list: pure `https://host/x;local` lists must
+	// still fan out, while `skill://demo;https://host/a;b.md` must keep the
+	// HTTPS path's semicolon attached.
+	let seenInternalOrRoutedUrl = false;
+	for (const [index, part] of parts.entries()) {
+		if (isInternalUrlPath(part)) {
+			seenInternalOrRoutedUrl = true;
+			const url = parseInternalUrl(InternalUrlRouter.instance().normalize(expandPath(part)));
+			// Any following delimiter is inside this URL’s query or fragment.
+			if (index < parts.length - 1 && (url.search || url.hash)) return true;
+			urlHasPath = urlHasPath || (url.pathname !== "" && url.pathname !== "/");
+			continue;
+		}
+		if (isReadableUrlPath(part)) {
+			if (seenInternalOrRoutedUrl) {
+				try {
+					const href = /^www\./i.test(part) ? `https://${part}` : part;
+					const url = new URL(href);
+					if (index < parts.length - 1 && (url.search || url.hash)) return true;
+					urlHasPath = urlHasPath || (url.pathname !== "" && url.pathname !== "/");
+				} catch {
+					// Malformed readable-URL spelling: treat as a non-path URL component.
+				}
+			}
+			continue;
+		}
+		if (isUrl(part)) {
+			seenInternalOrRoutedUrl = true;
+			continue;
+		}
+		// Expand first so tolerated colon-prefixed relatives (`:./b.md`, `:..\b`)
+		// use the same spelling the existence probe already accepted.
+		const localPart = normalizePosixPath(expandPath(part));
+		const anchored =
+			isFilesystemSourcePath(localPart) ||
+			localPart === "." ||
+			localPart === ".." ||
+			localPart.startsWith("./") ||
+			localPart.startsWith("../") ||
+			localPart.startsWith("~");
+		if (urlHasPath && !anchored) return true;
+	}
+	return false;
+}
+
+/**
  * Split one path-like entry whose multiple targets were flattened into one
  * string. Existing paths are kept intact, so real filenames containing spaces,
  * commas, or semicolons win over delimiter recovery.
@@ -693,16 +756,41 @@ export async function splitDelimitedPathEntry(
 	options: {
 		splitter?: PathEntrySplitter;
 		routedUrlPredicate?: (entry: string) => boolean;
+		/** Calling session context for file-backed internal URLs. */
+		context?: ResolveContext;
 	} = {},
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
 	if (!hasTopLevelPathDelimiter(normalizedEntry)) return null;
 	const splitter = options.splitter ?? parseSearchPath;
 	if (options.routedUrlPredicate?.(normalizedEntry)) {
+		// Internal URLs must use the full mixed-list classifier so exact MCP /
+		// file-backed literal precedence cannot be bypassed by a weaker retry
+		// (e.g. ReadTool after splitMixedUrlPathList already declined the split).
+		if (isInternalUrlPath(normalizedEntry)) {
+			return splitMixedUrlPathList(normalizedEntry, cwd, options.routedUrlPredicate, options.context);
+		}
 		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
-		return parts?.every(options.routedUrlPredicate) ? parts : null;
+		// One nonempty target is not a list: `skill://demo/a;` must keep its
+		// literal trailing `;`, not fan out to the truncated `skill://demo/a`.
+		return parts &&
+			parts.length >= 2 &&
+			parts.every(options.routedUrlPredicate) &&
+			!hasAmbiguousInternalUrlTail(parts, options.routedUrlPredicate)
+			? parts
+			: null;
 	}
-	if (isInternalUrlPath(normalizedEntry)) return null;
+	// An internal URL that still carries a top-level `;` is a flattened list
+	// (`history://A;history://B`, `skill://x;/abs/path`): fan it out the same way
+	// read's mixed-URL recovery does. Splitting is deliberately strict: every
+	// part must be a URL or an existing literal path without glob characters, so
+	// `catalog://items;active` and `skill://demo;*.md` stay whole. When a URL part
+	// has its own path segments, a relative tail (`skill://demo/a;b.md`) is
+	// ambiguous with a literal `;` in the resource name, so only anchored tails
+	// (absolute, `./`, `../`, `~`) fan out and the URL keeps literal precedence.
+	if (isInternalUrlPath(normalizedEntry)) {
+		return splitMixedUrlPathList(normalizedEntry, cwd, isInternalUrlPath, options.context);
+	}
 	// A real POSIX file may contain a delimiter and a selector-shaped tail
 	// (`a;b:1-2`, `a b:1-2`). Preserve the raw entry whenever the full literal
 	// resolves — or is only ambiguous — so downstream literal-preferring
@@ -726,6 +814,35 @@ export async function splitDelimitedPathEntry(
 	);
 }
 
+/** Whether the complete internal URL locates an existing local target. */
+async function internalUrlLocatesExisting(entry: string, cwd: string, context?: ResolveContext): Promise<boolean> {
+	try {
+		return (await InternalUrlRouter.instance().locate(entry, { cwd, ...context })) !== null;
+	} catch {
+		return false;
+	}
+}
+
+async function internalUrlIsExactMcpResource(entry: string, signal?: AbortSignal): Promise<boolean> {
+	// Only skill:// (exact MCP fallback in SkillProtocolHandler) and mcp:// can
+	// resolve through MCP catalogs among registered schemes. local://, history://,
+	// and the rest never do — skip the discovery wait so a pending MCP server cannot
+	// block or fail an ordinary list such as `local://notes;/tmp/x`.
+	const { path: barePath } = InternalUrlRouter.instance().split(entry);
+	const scheme = extractUriScheme(barePath)?.toLowerCase();
+	if (scheme !== "skill" && scheme !== "mcp") return false;
+	if (!MCPManager.available()) return false;
+	const deadline = Date.now() + MCP_RESOURCE_DISCOVERY_WAIT_MS;
+	const manager = await withTimeout(
+		MCPManager.load(),
+		MCP_RESOURCE_DISCOVERY_WAIT_MS,
+		MCP_RESOURCE_DISCOVERY_TIMEOUT,
+		signal,
+	);
+	if (!manager) return false;
+	return hasExactMcpResource(manager, parseInternalUrl(barePath), signal, Math.max(0, deadline - Date.now()));
+}
+
 /**
  * Split a `;` list that names URLs alongside local paths
  * (`https://x;src/a.ts:1-20`, `omp://;Makefile:1-3`). Engages only when URL
@@ -739,22 +856,32 @@ export async function splitMixedUrlPathList(
 	entry: string,
 	cwd: string,
 	isUrl: (part: string) => boolean,
+	context?: ResolveContext,
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
 	if (!normalizedEntry.includes(";") || !isUrl(normalizedEntry)) return null;
-	if (!isInternalUrlPath(normalizedEntry)) {
+	// Structural and literal-part checks run before any locate or MCP discovery wait,
+	// so a non-list input such as `omp://?q=a;b` never blocks on an unrelated pending server.
+	const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, parseSearchPath, "semicolon", "none");
+	if (!parts || parts.length < 2) return null;
+	for (const part of parts) {
+		if (isUrl(part) || isReadableUrlPath(part)) continue;
+		const partPath = splitPathAndSel(part).path;
+		if (hasGlobPathChars(partPath) || (await probeLiteralPathExists(partPath, cwd)) !== "exists") return null;
+	}
+	if (hasAmbiguousInternalUrlTail(parts, isUrl)) return null;
+	if (isInternalUrlPath(normalizedEntry)) {
+		// Existing file-backed resources keep literal precedence over list recovery.
+		if (await internalUrlLocatesExisting(normalizedEntry, cwd, context)) return null;
+		// An exact MCP URI may be non-locatable locally; its advertised identity
+		// still takes precedence over interpreting its semicolon as a list.
+		if (await internalUrlIsExactMcpResource(normalizedEntry, context?.signal)) return null;
+	} else {
 		if ((await probeLiteralPathExists(normalizedEntry, cwd)) !== "missing") return null;
 		const selectorSplit = splitPathAndSel(normalizedEntry);
 		if (selectorSplit.sel !== undefined && (await probeLiteralPathExists(selectorSplit.path, cwd)) !== "missing") {
 			return null;
 		}
-	}
-	const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, parseSearchPath, "semicolon", "none");
-	if (!parts) return null;
-	for (const part of parts) {
-		if (isUrl(part)) continue;
-		const partPath = splitPathAndSel(part).path;
-		if (hasGlobPathChars(partPath) || (await probeLiteralPathExists(partPath, cwd)) !== "exists") return null;
 	}
 	return parts;
 }
@@ -763,7 +890,7 @@ export async function splitMixedUrlPathList(
 export async function expandDelimitedPathEntries(
 	entries: readonly string[],
 	cwd: string,
-	options: { splitter?: PathEntrySplitter } = {},
+	options: { splitter?: PathEntrySplitter; context?: ResolveContext } = {},
 ): Promise<string[]> {
 	const expanded: string[] = [];
 	for (const entry of entries) {
@@ -1380,6 +1507,8 @@ export interface ToolScopeOptions {
 	fanOutFileTargets?: boolean;
 	/** Extra hint appended to "Path not found" when stat fails and the user supplied multiple paths. */
 	multipathStatHint?: string;
+	/** Calling session context for file-backed internal URLs during list recovery. */
+	context?: ResolveContext;
 	/** Materialize readable external URLs to local text files before scope derivation. */
 	resolveExternalUrl?: (rawPath: string) => Promise<ResolvedExternalSearchUrl | undefined>;
 }
@@ -1405,12 +1534,12 @@ export interface ToolScopeResolution {
  *  5. stat the resolved base path through `filesystem` so callers can branch on directory vs file scope.
  */
 export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<ToolScopeResolution> {
-	const { rawPaths: inputs, cwd, internalUrlAction } = opts;
+	const { rawPaths: inputs, cwd, internalUrlAction, context } = opts;
 	const normalizedRawPaths = inputs.map(normalizePathLikeInput);
 	if (normalizedRawPaths.some(rawPath => rawPath.length === 0)) {
 		throw new ToolError("Search scope entries must be non-empty paths or globs");
 	}
-	const rawPaths = await expandDelimitedPathEntries(normalizedRawPaths, cwd);
+	const rawPaths = await expandDelimitedPathEntries(normalizedRawPaths, cwd, { context });
 	if (rawPaths.some(rawPath => rawPath.length === 0)) {
 		throw new ToolError("Search scope entries must be non-empty paths or globs");
 	}
