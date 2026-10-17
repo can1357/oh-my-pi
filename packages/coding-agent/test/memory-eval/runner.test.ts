@@ -48,7 +48,8 @@ function fakeEngine(options: FakeOptions): EngineAdapter {
 		describe: async () => ({}),
 		open: async () => {},
 		remember: async items => options.rowIds(items),
-		vectorCount: async () => options.vectors ?? 1,
+		// Unset: every remembered row has its vector.
+		vectorCount: async () => options.vectors ?? Number.POSITIVE_INFINITY,
 		sleep: async () => options.onSleep?.(),
 		recall: async (_question, k) => options.hits.slice(0, k),
 		lastDropped: () => options.dropped ?? [],
@@ -180,6 +181,23 @@ describe("runner", () => {
 		const engine = fakeEngine({ rowIds: items => items.map((_, i) => `r${i}`), hits: [], vectors: 0 });
 		const { questions } = await runCases(engine, [twoMessageCase], "fts-only", 10, tmp);
 		expect(questions).toHaveLength(1);
+	});
+	it("aborts when any case leaves a remembered row without a vector, not only the first", async () => {
+		let opened = 0;
+		const engine: EngineAdapter = {
+			...fakeEngine({ rowIds: items => items.map((_, i) => `r${i}`), hits: [] }),
+			open: async () => {
+				opened++;
+			},
+			// Case 1 stores both rows' vectors; case 2 loses one.
+			vectorCount: async () => (opened === 1 ? 2 : 1),
+		};
+		const cases = [twoMessageCase, { ...twoMessageCase, caseId: "c/2" }];
+		await expect(runCases(engine, cases, "standard", 10, tmp)).rejects.toThrow(
+			"embeddings unavailable for mnemopi: 1 of 2 remembered rows in case c/2 have no vector",
+		);
+		opened = 0;
+		expect((await runCases(engine, cases, "fts-only", 10, tmp)).questions).toHaveLength(2);
 	});
 	it("builds aggregates, nearest-rank latency percentiles and the primary metric", async () => {
 		const { cases } = await loadDataset("lme-s", fixtureDir);
