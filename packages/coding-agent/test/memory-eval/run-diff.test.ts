@@ -23,6 +23,7 @@ interface FakeResult {
 	/** Engine options as `run` records them in the config. */
 	options?: { mnemopiRecall?: string; polyphonic?: boolean };
 	engineInfo?: Record<string, string>;
+	gitDirty?: boolean;
 	/**
 	 * Per question: id (`<caseId>:...` names its case), the recall@10 value (null is what JSON makes of NaN) and
 	 * overrides of its case, category (`cat`) and definition hash (absent, as in older files).
@@ -40,6 +41,7 @@ async function writeResult(
 		revision = "rev",
 		options = { mnemopiRecall: "recall", polyphonic: false },
 		engineInfo = {},
+		gitDirty = false,
 		questions = [["q1", 1]],
 	}: FakeResult,
 ) {
@@ -55,6 +57,7 @@ async function writeResult(
 				protocol,
 				k,
 				gitCommit: "abc",
+				gitDirty,
 				...options,
 			},
 			questions: questions.map(([questionId, recall, overrides]) => ({
@@ -294,7 +297,7 @@ it("diff rejects a question whose case or category differs between the files, in
 	expect((await diff(ok, recategorised)).stderr).toContain("question c1:q1 has category cat in a but other in b");
 });
 
-it("diff rejects a question whose query text or gold set changed, in either order", async () => {
+it("diff rejects a question whose corpus, query text or gold set changed, in either order", async () => {
 	const v1 = await writeResult("def-1", { questions: [["c1:q1", 1, { definitionHash: "aa" }]] });
 	const v2 = await writeResult("def-2", { questions: [["c1:q1", 1, { definitionHash: "bb" }]] });
 	for (const [a, b] of [
@@ -303,7 +306,7 @@ it("diff rejects a question whose query text or gold set changed, in either orde
 	]) {
 		const { stderr, code } = await diff(a, b);
 		expect(code).toBe(1);
-		expect(stderr).toContain("question c1:q1 has a different query text or gold set in a and b");
+		expect(stderr).toContain("question c1:q1 has a different corpus, query text or gold set in a and b");
 	}
 	const same = await diff(v1, v1);
 	expect(same.code).toBe(0);
@@ -332,4 +335,14 @@ it("diff names each side's Mnemopi embedder when the config records one", async 
 	expect(stdout).toContain("a: engine mnemopi embedder js protocol standard");
 	expect(stdout).toContain("b: engine mnemopi embedder python protocol standard");
 	expect((await diff(oracle, oracle)).stdout).toContain("a: engine oracle protocol standard");
+});
+
+it("diff marks a side produced from a dirty checkout", async () => {
+	const clean = await writeResult("git-clean", { gitDirty: false });
+	const dirty = await writeResult("git-dirty", { gitDirty: true });
+	const { stdout, code } = await diff(clean, dirty);
+	expect(code).toBe(0);
+	const [a, b] = ["a:", "b:"].map(label => stdout.split("\n").find(line => line.startsWith(label)) ?? "");
+	expect(a).not.toContain("(dirty)");
+	expect(b).toContain("(dirty)");
 });
