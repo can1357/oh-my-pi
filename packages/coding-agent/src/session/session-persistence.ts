@@ -389,11 +389,27 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
  * persistence failure on a graph serialization handles fine. Every step reads
  * only own data, so the order the worklist visits nodes in changes nothing a
  * caller can observe.
+ *
+ * A back-reference that the projection does NOT strip (`jsonlEvents` and the
+ * spilled `structuredContent` are stripped before this walk, so their cycles
+ * are never visited) makes the live graph circular. `JSON.stringify` rejects
+ * such a graph with a `TypeError`, which the caller surfaces as a persistence
+ * failure; this scan must not instead re-enqueue the same object forever, so a
+ * node already on the walk's path is skipped. Skipping is sound: the node's
+ * subtree was already scanned for the same change conditions when it was
+ * first pushed, and the scan answers only "can this change".
  */
 function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 	// Iterative, not recursive — one JS stack frame per level overflowed on a
 	// graph `details` can hold (see above).
-	const pending: Array<{ value: unknown; key: string | undefined }> = [{ value: obj, key }];
+	const pending: Array<{ value: unknown; key: string | undefined; parent: PathNode | undefined }> = [
+		{ value: obj, key, parent: undefined },
+	];
+	// The objects currently on the walk path, each linked to its own parent so a
+	// node can be tested against its ancestors without a per-node copy of the
+	// path. A cycle re-encountering one of them is skipped rather than queued
+	// again (see above).
+	type PathNode = { readonly value: object; readonly parent: PathNode | undefined };
 	for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
 		const { value, key } = node;
 		if (value === null || value === undefined) continue;
@@ -408,12 +424,26 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 			if (key === "image_url" && isImageDataUrl(value)) return true;
 			continue;
 		}
+		// A node already on this path closes a cycle. Its subtree was scanned when
+		// it was first pushed, so re-walking it would only repeat work — and a
+		// self-reference would repeat it forever.
+		let ancestor = node.parent;
+		let onPath = false;
+		while (ancestor !== undefined) {
+			if (ancestor.value === value) {
+				onPath = true;
+				break;
+			}
+			ancestor = ancestor.parent;
+		}
+		if (onPath) continue;
+		const path: PathNode = { value, parent: node.parent };
 		if (Array.isArray(value)) {
 			// Indexed slots with a snapshotted length, the way `JSON.stringify` and
 			// the rebuild above read them — never the iterator protocol, which an
 			// overridden `Symbol.iterator` can hide slots from.
 			const length = value.length;
-			for (let index = 0; index < length; index++) pending.push({ value: value[index], key });
+			for (let index = 0; index < length; index++) pending.push({ value: value[index], key, parent: path });
 			continue;
 		}
 		if (typeof value === "object") {
@@ -442,7 +472,7 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 			// in `truncateForPersistence` for why `for..in`'s prototype walk
 			// is a step a thrown `getPrototypeOf` trap fails.
 			for (const childKey of Object.keys(value)) {
-				pending.push({ value: (value as Record<string, unknown>)[childKey], key: childKey });
+				pending.push({ value: (value as Record<string, unknown>)[childKey], key: childKey, parent: path });
 			}
 		}
 	}

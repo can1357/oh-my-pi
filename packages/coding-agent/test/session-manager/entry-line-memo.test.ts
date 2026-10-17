@@ -1859,4 +1859,131 @@ describe("SessionManager entry-line memo", () => {
 		expect(body).toContain('"content":[]');
 		expect(body).toContain('"role":"assistant"');
 	});
+
+	it("surfaces a serialization error for an unstripped back-reference instead of hanging the write", async () => {
+		// `jsonlEvents` and the spilled `structuredContent` are stripped before
+		// serialization, so their cycles never reach the projector. An ordinary
+		// back-reference under `details` is NOT stripped: `JSON.stringify`
+		// rejects the graph, which the write surfaces as a persistence failure.
+		// The memo's walks must not re-enqueue the same object forever on the
+		// way there — an earlier revision spun the event loop instead.
+		const details: Record<string, unknown> = { status: "old" };
+		details.self = details;
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-unstripped-cycle",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		await expect(session.appendEntriesAtomically(() => {})).rejects.toThrow(/cyclic/i);
+	}, 8_000);
+
+	it("leaves a function-valued detail with a toJSON hook uncached", async () => {
+		// `JSON.stringify` invokes a `toJSON` on a callable value, so a function
+		// detail whose hook changes must not reuse a line stamped from an
+		// earlier call's output.
+		let revision = 0;
+		const hookable = () => "never-called";
+		(hookable as unknown as Record<string, unknown>).toJSON = () => `fn-rev-${++revision}`;
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-fn-hook",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: { hookable },
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// One atomic publish serializes the body twice (materialize, then
+		// commit), so the hook has run twice by the time the line lands.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(storage.readTextSync(sessionFile)).toContain('"hookable":"fn-rev-2"');
+
+		// A second rewrite re-serializes the hook: a reused line would still
+		// carry the first call's output.
+		await session.appendEntriesAtomically(() => {});
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"hookable":"fn-rev-3"');
+		expect(body).not.toContain('"hookable":"fn-rev-2"');
+	});
+
+	it("leaves a boxed detail with a custom coercion override uncached", async () => {
+		// A box serializes through `ToPrimitive`, so an own `valueOf` override
+		// changes the emitted number while the intrinsic brand check (which must
+		// not run user code) still reports the boxed value.
+		const boxed = new Number(1) as Number & { valueOf(): number };
+		boxed.valueOf = () => 41;
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-boxed-coercion",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: boxed,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(storage.readTextSync(sessionFile)).toContain('"details":41');
+
+		// Change the coercion in place: a reused line would still say 41.
+		boxed.valueOf = () => 42;
+		await session.appendEntriesAtomically(() => {});
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"details":42');
+		expect(body).not.toContain('"details":41');
+	});
+
+	it("leaves an assistant turn whose role rides a hidden descriptor uncached", async () => {
+		// `stripReplayedReasoningSignatures` gates on `message.role`, read by key
+		// through the prototype chain, while the stamp records own enumerable
+		// keys only. A hidden `role` can therefore flip whether the projection
+		// strips a `thinkingSignature` without moving a stamped leaf.
+		const reasoningItem = { type: "reasoning", id: "resp-fix15222-role", encrypted_content: "enc-fix15222-role" };
+		const content: AssistantMessage["content"] = [
+			{ type: "thinking" as const, thinking: "reason", thinkingSignature: JSON.stringify(reasoningItem) },
+		];
+		const payload = { type: "openaiResponsesHistory" as const, items: [reasoningItem] };
+		const persistedSignature = JSON.stringify(JSON.stringify(reasoningItem)).slice(1, -1);
+		const message = { ...makeAssistantMessage(), content, providerPayload: payload };
+		// The role sits on a non-enumerable own descriptor, so the projector's
+		// by-key read sees it while the stamp's own-enumerable walk does not.
+		Object.defineProperty(message, "role", {
+			value: "assistant",
+			enumerable: false,
+			configurable: true,
+			writable: true,
+		});
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage(message);
+
+		// First rewrite: the strip applies, so the line has no signature.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(storage.readTextSync(sessionFile)).not.toContain(persistedSignature);
+
+		// Flip the hidden role in place: the strip no longer applies, so the
+		// signature must come back. A reused line would still omit it.
+		Object.defineProperty(message, "role", {
+			value: "user",
+			enumerable: false,
+			configurable: true,
+			writable: true,
+		});
+		await session.appendEntriesAtomically(() => {});
+		expect(storage.readTextSync(sessionFile)).toContain(persistedSignature);
+	});
 });
