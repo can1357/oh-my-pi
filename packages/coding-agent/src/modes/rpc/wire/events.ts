@@ -170,8 +170,16 @@ export const eventDefs = {
 				),
 				0,
 			),
+			"attachments?": doc(
+				"QueueAttachments",
+				"Session-host socket clients only; absent means unknown, not that no chip carries one.",
+			),
 		},
 		"Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.",
+	),
+	IdleRecapEvent: doc(
+		{ type: "'idle_recap'", recap: "string" },
+		"The host produced a recap while the session sat idle: the full reply (de-duplicated and capped like any side-channel reply), journaled in the session history database. It never enters the transcript or the model context.",
 	),
 
 	RpcAgentEvent: doc(
@@ -207,6 +215,7 @@ export const eventDefs = {
 			"ThinkingLevelChangedEvent",
 			"GoalUpdatedEvent",
 			"QueueUpdateEvent",
+			"IdleRecapEvent",
 		].join(" | "),
 		"A session event, discriminated by `type`; `set_event_filter` selects which are sent.",
 	),

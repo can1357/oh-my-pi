@@ -50,6 +50,8 @@
 ### Added
 
 - Added a tree layout to the background jobs sheet: subagents' jobs nest under the task job that runs them, busiest branches first, and Cancel appears only on the viewing agent's own jobs ([#15854](https://github.com/can1357/oh-my-pi/pull/15854) by [@H4vC](https://github.com/H4vC))
+- `CollabStatus.role` accepts `"hosted"` for a terminal attached to a session host, with an optional `contextUsage` that replaces the footer's local context estimate; the status line's collab segment shows it as `⇄ hosted:N` ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait))
+- Added `clearAssistantMessageLinkTargets()` to invalidate cached assistant file-link targets after a host switch or relocation ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
 
 ### Fixed
 

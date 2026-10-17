@@ -246,6 +246,7 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 			return [
 				{ label: "host active", context: { collab: { role: "host", participantCount: 3 } } },
 				{ label: "guest active", context: { collab: { role: "guest", participantCount: 3 } } },
+				{ label: "hosted active", context: { collab: { role: "hosted", participantCount: 2 } } },
 			];
 		case "vim":
 			return [

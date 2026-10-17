@@ -11,7 +11,7 @@ It explicitly excludes context-overflow recovery via auto-compaction. Overflow i
 - [`../packages/coding-agent/src/session/settings.ts`](../packages/coding-agent/src/session/settings.ts) — `retry.*` setting definitions
 - [`../packages/coding-agent/src/modes/controllers/event-controller.ts`](../packages/coding-agent/src/modes/controllers/event-controller.ts)
 - [`../packages/coding-agent/src/modes/controllers/input-controller.ts`](../packages/coding-agent/src/modes/controllers/input-controller.ts)
-- [`../packages/coding-agent/src/modes/rpc/rpc-mode.ts`](../packages/coding-agent/src/modes/rpc/rpc-mode.ts)
+- [`../packages/coding-agent/src/modes/rpc/rpc-server.ts`](../packages/coding-agent/src/modes/rpc/rpc-server.ts)
 - [`../packages/coding-agent/src/modes/rpc/rpc-client.ts`](../packages/coding-agent/src/modes/rpc/rpc-client.ts)
 - [`../packages/coding-agent/src/modes/rpc/rpc-types.ts`](../packages/coding-agent/src/modes/rpc/rpc-types.ts)
 

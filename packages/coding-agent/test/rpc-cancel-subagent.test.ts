@@ -262,7 +262,6 @@ describe("handleRpcCancelSubagent", () => {
 			setToolUIContext: () => {},
 			eventBus: new EventBus(),
 		} as CreateAgentSessionResult);
-		registry.setSubscriptionLevel("progress");
 		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 
 		// Foreground: awaited directly, with no async job behind it.

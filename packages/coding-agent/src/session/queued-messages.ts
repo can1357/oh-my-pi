@@ -96,6 +96,26 @@ export function isHiddenUserCompanion(message: AgentMessage): boolean {
 	);
 }
 
+/** Hidden companion types that stand for something attached to the prompt they accompany (the rest only echo its text). */
+const ATTACHMENT_COMPANION_TYPES: Readonly<Record<string, true>> = {
+	[IMAGE_ATTACHMENT_DESCRIPTION_TYPE]: true,
+	[VIDEO_ATTACHMENT_TYPE]: true,
+	[IMAGE_ATTACHMENT_TYPE]: true,
+};
+
+/**
+ * Whether a queued user prompt, with the hidden companions queued just before it (`group`, prompt last), carries an
+ * attachment its chip text does not: an image part, or a companion holding an image's source path or description.
+ * Restoring such a prompt as text alone would drop the attachment.
+ */
+export function queuedGroupHasAttachments(group: readonly AgentMessage[]): boolean {
+	return group.some(
+		message =>
+			queuedImageContent(message) !== undefined ||
+			(message.role === "custom" && Object.hasOwn(ATTACHMENT_COMPANION_TYPES, message.customType)),
+	);
+}
+
 /** Human-readable text shown for a queued-message chip. */
 export function queueChipText(message: AgentMessage): string {
 	if (message.role === "custom") {
