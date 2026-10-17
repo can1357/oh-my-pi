@@ -5,6 +5,7 @@
 ### Added
 
 - Added `prewarmAnthropicConnection(model)`, which opens the official Anthropic API connection for a first-party `anthropic` model ahead of a request, using the same transport and TLS settings so the request reuses it instead of paying the connection handshake ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
+- Added `PI_CODEX_WHITESPACE_DELTA_EVENT_LIMIT` and `PI_CODEX_WHITESPACE_DELTA_CHAR_LIMIT` to raise the Codex transport's whitespace-only tool-call argument cap for gateways that stream those deltas as keep-alive ([#16022](https://github.com/can1357/oh-my-pi/pull/16022) by [@yangqi45](https://github.com/yangqi45))
 
 ### Changed
 
