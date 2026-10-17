@@ -6,13 +6,12 @@
  * permanently truncated to its tail — Ctrl+O expanded to the same 100 lines and
  * the footer under-reported the hidden count by ~9900 lines.
  */
-import { beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { BashExecutionComponent, STREAMING_LINE_CAP } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
 import { PREVIEW_LINES } from "@oh-my-pi/pi-tui/chat/execution-shared";
-import { getThemeByName, initTheme, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { TUI } from "@oh-my-pi/pi-tui";
+import { getThemeByName, initTheme, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 
 const ui = { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI;
 /** Past both the streaming cap and the 20-row collapsed preview. */
