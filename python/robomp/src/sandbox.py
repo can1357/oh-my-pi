@@ -991,6 +991,23 @@ class SandboxManager:
                             existing_branch,
                             branch,
                         )
+                # Resumed worktrees keep the base they were cut from; the slot's
+                # shell git is credential-less and the pool is blob:none, so the
+                # agent can never reconcile a moved default branch itself. A
+                # stale base re-introduces old tree contents at push time and
+                # trips GitHub's workflow-scope pre-receive check. Reconcile
+                # here, before the tree is handed to the slot.
+                self._reconcile_stale_workspace_branch(
+                    repo=repo,
+                    number=number,
+                    pool=pool,
+                    repo_dir=repo_dir,
+                    branch=branch,
+                    default_branch=default_branch,
+                    detached=current.returncode != 0,
+                    env=slot_git_env,
+                    slot_kwargs=slot_git_kwargs,
+                )
             if not workspace_prepared:
                 _share_git_metadata_with_slots(repo_dir, slot_uid)
                 _provision_runtime_dirs(ws_root)
@@ -1021,6 +1038,193 @@ class SandboxManager:
             # the agent rebuilds, so the cached file is never mutated.
             self._populate_natives_cache(workspace, slot_uid=slot_uid)
             return workspace
+
+    @staticmethod
+    def _abort_stale_rebase_state(
+        *,
+        repo: str,
+        number: int,
+        repo_dir: Path,
+        env: dict[str, str] | None,
+        slot_kwargs: dict[str, Any],
+    ) -> None:
+        """Abort leftover in-progress rebase state before reconciling.
+
+        A previous session can die mid-rebase (the slot's shell git cannot
+        fetch blobs, so its own rebase attempt dies with rebase state left
+        behind). Git refuses to start a new rebase while that state exists,
+        burning a retry, and the in-progress state can also leave the worktree
+        looking conflicted. Aborting restores the branch to the tip the rebase
+        was started from, so nothing the agent committed is lost.
+        """
+        for state in ("rebase-merge", "rebase-apply"):
+            probe = _safe_run(
+                ["git", "rev-parse", "--git-path", state],
+                cwd=repo_dir,
+                env=env,
+                **slot_kwargs,
+            )
+            if probe.returncode != 0:
+                continue
+            state_path = Path(probe.stdout.strip())
+            if not state_path.is_absolute():
+                state_path = repo_dir / state_path
+            if not state_path.exists():
+                continue
+            abort = _safe_run(
+                ["git", "rebase", "--abort"],
+                cwd=repo_dir,
+                env=env,
+                **slot_kwargs,
+            )
+            if abort.returncode != 0:
+                log.error(
+                    "stale rebase state could not be aborted; failing the task to the maintainer",
+                    extra={"repo": repo, "issue": number, "state": state},
+                )
+                raise GitCommandError(
+                    ["git", "rebase", "--abort"],
+                    abort.returncode,
+                    abort.stdout,
+                    abort.stderr,
+                )
+            log.warning(
+                "aborted stale in-progress rebase left by a previous session",
+                extra={"repo": repo, "issue": number, "state": state},
+            )
+            return
+
+    def _reconcile_stale_workspace_branch(
+        self,
+        *,
+        repo: str,
+        number: int,
+        pool: Path,
+        repo_dir: Path,
+        branch: str,
+        default_branch: str,
+        detached: bool,
+        env: dict[str, str] | None,
+        slot_kwargs: dict[str, Any],
+    ) -> None:
+        """Rebase a resumed, local-only workspace branch onto the moved default.
+
+        A workspace resumed days after it was cut still sits on its original
+        base. The slot's shell git is credential-less by design and the pool is
+        a ``--filter=blob:none`` partial clone, so the agent sees the updated
+        ``origin/<default_branch>`` ref but cannot materialize the new blobs to
+        rebase itself; pushing the stale tree then re-introduces old contents
+        and GitHub's workflow-scope pre-receive check rejects the push, leaving
+        validated work stranded with no PR.
+
+        Materialize the fresh default branch through the transport (which holds
+        the PAT, directly or via gh-proxy) and rebase the workspace branch
+        before the tree is handed to the agent. Best-effort by design: detached
+        HEAD (review checkouts), dirty worktrees, branches that already have a
+        remote counterpart (PR follow-ups — rebasing would force-push),
+        branches whose history contains merge commits (a plain rebase drops
+        merges, silently discarding conflict resolutions that live only in
+        them), and indeterminate (timed-out) or unresolvable ref probes all
+        leave the worktree untouched so existing resume semantics hold.
+        """
+        if detached:
+            return
+        self._abort_stale_rebase_state(
+            repo=repo,
+            number=number,
+            repo_dir=repo_dir,
+            env=env,
+            slot_kwargs=slot_kwargs,
+        )
+        status = _safe_run(["git", "status", "--porcelain"], cwd=repo_dir, env=env, **slot_kwargs)
+        if status.returncode != 0 or status.stdout.strip():
+            return
+        remote_branch = _safe_run(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
+            cwd=repo_dir,
+            env=env,
+            **slot_kwargs,
+        )
+        if remote_branch.returncode == 124:
+            # A timed-out probe is indeterminate, not "branch absent": treating
+            # absence here could rebase an already-published branch and make
+            # its next push non-fast-forward.
+            log.warning(
+                "workspace reconcile skipped: origin/%s probe indeterminate",
+                branch,
+                extra={"repo": repo, "issue": number, "branch": branch},
+            )
+            return
+        if remote_branch.returncode == 0:
+            return
+        base_tip = _safe_run(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{default_branch}"],
+            cwd=repo_dir,
+            env=env,
+            **slot_kwargs,
+        )
+        if base_tip.returncode != 0:
+            log.warning(
+                "workspace reconcile skipped: origin/%s could not be resolved",
+                default_branch,
+                extra={"repo": repo, "issue": number, "branch": branch},
+            )
+            return
+        merge_base = _safe_run(
+            ["git", "merge-base", "HEAD", f"refs/remotes/origin/{default_branch}"],
+            cwd=repo_dir,
+            env=env,
+            **slot_kwargs,
+        )
+        if merge_base.returncode != 0 or merge_base.stdout.strip() == base_tip.stdout.strip():
+            return
+        merge_count = _safe_run(
+            ["git", "rev-list", "--merges", "--count", f"refs/remotes/origin/{default_branch}..HEAD"],
+            cwd=repo_dir,
+            env=env,
+            **slot_kwargs,
+        )
+        if merge_count.returncode != 0:
+            log.warning(
+                "workspace reconcile skipped: merge history could not be inspected",
+                extra={"repo": repo, "issue": number, "branch": branch},
+            )
+            return
+        if merge_count.stdout.strip() not in ("", "0"):
+            # A plain rebase drops merge commits; conflict resolutions that live
+            # only in a merge would be silently rewritten away. Leave merge-
+            # bearing branches untouched rather than risk losing resolutions.
+            log.warning(
+                "workspace reconcile skipped: branch history contains merge commits",
+                extra={"repo": repo, "issue": number, "branch": branch},
+            )
+            return
+        self.transport.fetch_base_ref(repo=repo, pool_dir=pool, ref=default_branch)
+        rebase = _safe_run(
+            ["git", "rebase", f"refs/remotes/origin/{default_branch}"],
+            cwd=repo_dir,
+            env=env,
+            **slot_kwargs,
+        )
+        if rebase.returncode != 0:
+            abort = _safe_run(["git", "rebase", "--abort"], cwd=repo_dir, env=env, **slot_kwargs)
+            detail = (rebase.stderr or rebase.stdout).strip() or f"exit {rebase.returncode}"
+            if abort.returncode != 0:
+                detail += f"; rebase --abort also failed: {(abort.stderr or abort.stdout).strip()}"
+            log.error(
+                "workspace reconcile failed; failing the task to the maintainer",
+                extra={"repo": repo, "issue": number, "branch": branch, "detail": detail},
+            )
+            raise GitCommandError(
+                ["git", "rebase", f"refs/remotes/origin/{default_branch}"],
+                rebase.returncode,
+                rebase.stdout,
+                rebase.stderr,
+            )
+        log.info(
+            "workspace branch rebased onto current default branch",
+            extra={"repo": repo, "issue": number, "branch": branch},
+        )
 
     def ensure_release_workspace(
         self,
