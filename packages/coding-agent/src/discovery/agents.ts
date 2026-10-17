@@ -6,7 +6,7 @@
  * Project-level discovery walks up from cwd to repoRoot.
  */
 import * as path from "node:path";
-import { isWsl, windowsPathToWslMount } from "@oh-my-pi/pi-utils";
+import { isWsl, ptree, windowsPathToWslMount } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
 import { readFile } from "../capability/fs";
@@ -39,55 +39,58 @@ interface UserPathCandidateOptions {
 /**
  * Hard cap for best-effort host-discovery probes.
  *
- * WSL→Windows interop can wedge indefinitely (issue #8402): a synchronous
- * spawn with no timeout blocks the whole startup thread before the TUI paints
- * or any log file is created. The probe result only ever augments discovery
- * with an extra host-home candidate, so a few hundred milliseconds is a
- * generous ceiling — past it we treat the host as unavailable.
+ * WSL→Windows interop can wedge indefinitely (issue #8402). The probe result
+ * only ever augments discovery with an extra host-home candidate, so a few
+ * hundred milliseconds is a generous ceiling — past it we treat the host as
+ * unavailable.
  */
 const HOST_PROBE_TIMEOUT_MS = 500;
 
 /**
  * Run a best-effort discovery probe and return its trimmed stdout, or
  * `undefined` when the command fails, produces no output, or exceeds the
- * timeout. On timeout the child is killed with SIGKILL so a wedged interop pipe
- * cannot hang startup; the killed/non-zero exit is then reported as
- * "unavailable" and discovery falls back to the Linux `$HOME`/`~/.omp`
+ * timeout.
+ *
+ * `ptree.exec` owns the wall-clock bound: at the deadline it kills the whole
+ * process group and cancels the pending pipe readers, so neither a wedged interop
+ * pipe nor a descendant that inherited stdout can hold the read open past
+ * `timeoutMs` (issue #8402). The killed/non-zero/blank outcomes all report
+ * "unavailable", and discovery falls back to the Linux `$HOME`/`~/.omp`
  * candidates.
  */
-export function runHostProbe(cmd: string[], timeoutMs = HOST_PROBE_TIMEOUT_MS): string | undefined {
+export async function runHostProbe(cmd: string[], timeoutMs = HOST_PROBE_TIMEOUT_MS): Promise<string | undefined> {
 	try {
-		const result = Bun.spawnSync(cmd, {
-			stdout: "pipe",
-			stderr: "ignore",
+		const result = await ptree.exec(cmd, {
 			timeout: timeoutMs,
-			killSignal: "SIGKILL",
+			allowNonZero: true,
+			allowAbort: true,
+			detached: true,
 		});
-		if (result.exitCode !== 0) return undefined;
-		const resolved = result.stdout.toString().trim();
+		if (!result.ok || result.exitError?.aborted) return undefined;
+		const resolved = result.stdout.trim();
 		return resolved.length > 0 ? resolved : undefined;
 	} catch {
 		return undefined;
 	}
 }
 
-function resolveWithWslPath(windowsPath: string): string | undefined {
+async function resolveWithWslPath(windowsPath: string): Promise<string | undefined> {
 	return runHostProbe(["wslpath", "-u", windowsPath]);
 }
 
-function resolveWindowsUserProfile(): string | undefined {
-	const resolved = runHostProbe(["cmd.exe", "/d", "/c", "echo", "%USERPROFILE%"]);
+async function resolveWindowsUserProfile(): Promise<string | undefined> {
+	const resolved = await runHostProbe(["cmd.exe", "/d", "/c", "echo", "%USERPROFILE%"]);
 	return resolved && resolved !== "%USERPROFILE%" ? resolved : undefined;
 }
 
 /** Resolve the Windows host profile home exposed to WSL, if available. */
-export function getWslWindowsHomeCandidate(options: UserPathCandidateOptions = {}): string | undefined {
+export async function getWslWindowsHomeCandidate(options: UserPathCandidateOptions = {}): Promise<string | undefined> {
 	const platform = options.platform ?? process.platform;
 	const env = options.env ?? process.env;
 	if (!isWsl(platform, env)) return undefined;
-	const userProfile = env.USERPROFILE ?? (options.windowsUserProfile ?? resolveWindowsUserProfile)();
+	const userProfile = env.USERPROFILE ?? (await (options.windowsUserProfile ?? resolveWindowsUserProfile)());
 	if (!userProfile) return undefined;
-	const interopPath = (options.wslPath ?? resolveWithWslPath)(userProfile);
+	const interopPath = await (options.wslPath ?? resolveWithWslPath)(userProfile);
 	if (interopPath !== undefined) return interopPath;
 	const trimmed = userProfile.trim();
 	return path.posix.isAbsolute(trimmed) ? path.posix.normalize(trimmed) : windowsPathToWslMount(trimmed);
@@ -103,28 +106,31 @@ export function getWslWindowsHomeCandidate(options: UserPathCandidateOptions = {
  * test/SDK environment changes visible instead of pinning the first answer
  * for the process lifetime.
  */
-const wslHomeMemo = new Map<string, string | undefined>();
+const wslHomeMemo = new Map<string, Promise<string | undefined>>();
 
-function getUserHomeCandidates(ctx: LoadContext): string[] {
+async function getUserHomeCandidates(ctx: LoadContext): Promise<string[]> {
 	const homes = [ctx.home];
 	const env = process.env;
 	const key = `${process.platform}\0${env.WSL_DISTRO_NAME ?? ""}\0${env.WSL_INTEROP ?? ""}\0${env.USERPROFILE ?? ""}`;
-	let wslHome: string | undefined;
+	let wslHome: Promise<string | undefined> | undefined;
 	if (wslHomeMemo.has(key)) {
 		wslHome = wslHomeMemo.get(key);
 	} else {
 		wslHome = getWslWindowsHomeCandidate();
 		wslHomeMemo.set(key, wslHome);
+		// A rejection must not poison the memo: the old synchronous helper only
+		// cached settled answers, so drop the entry and let a later call retry.
+		wslHome.catch(() => wslHomeMemo.delete(key));
 	}
-	if (wslHome && !homes.includes(wslHome)) homes.push(wslHome);
+	const resolved = await wslHome;
+	if (resolved && !homes.includes(resolved)) homes.push(resolved);
 	return homes;
 }
 
 /** User-level paths: ~/.agent[s]/<segments>, plus the Windows host profile under WSL. */
-export function getUserPathCandidates(ctx: LoadContext, ...segments: string[]): string[] {
-	return getUserHomeCandidates(ctx).flatMap(home =>
-		AGENT_DIR_CANDIDATES.map(baseDir => path.join(home, baseDir, ...segments)),
-	);
+export async function getUserPathCandidates(ctx: LoadContext, ...segments: string[]): Promise<string[]> {
+	const homes = await getUserHomeCandidates(ctx);
+	return homes.flatMap(home => AGENT_DIR_CANDIDATES.map(baseDir => path.join(home, baseDir, ...segments)));
 }
 
 /**
@@ -159,7 +165,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	const projectScans = getProjectPathCandidates(ctx, "skills").map(dir =>
 		scanSkillsFromDir(ctx, { dir, providerId: PROVIDER_ID, level: "project" }),
 	);
-	const userScans = getUserPathCandidates(ctx, "skills").map(dir =>
+	const userScans = (await getUserPathCandidates(ctx, "skills")).map(dir =>
 		scanSkillsFromDir(ctx, { dir, providerId: PROVIDER_ID, level: "user" }),
 	);
 
@@ -190,7 +196,7 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 
 	const results = await Promise.all([
 		...getProjectPathCandidates(ctx, "rules").map(dir => load(dir, "project")),
-		...getUserPathCandidates(ctx, "rules").map(dir => load(dir, "user")),
+		...(await getUserPathCandidates(ctx, "rules")).map(dir => load(dir, "user")),
 	]);
 
 	return {
@@ -222,7 +228,7 @@ async function loadPrompts(ctx: LoadContext): Promise<LoadResult<Prompt>> {
 
 	const results = await Promise.all([
 		...getProjectPathCandidates(ctx, "prompts").map(dir => load(dir, "project")),
-		...getUserPathCandidates(ctx, "prompts").map(dir => load(dir, "user")),
+		...(await getUserPathCandidates(ctx, "prompts")).map(dir => load(dir, "user")),
 	]);
 
 	return {
@@ -255,7 +261,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 
 	const results = await Promise.all([
 		...getProjectPathCandidates(ctx, "commands").map(dir => load(dir, "project")),
-		...getUserPathCandidates(ctx, "commands").map(dir => load(dir, "user")),
+		...(await getUserPathCandidates(ctx, "commands")).map(dir => load(dir, "user")),
 	]);
 
 	return {
@@ -285,7 +291,7 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 
 	const results = await Promise.all([
 		...getProjectPathCandidates(ctx, "AGENTS.md").map(p => load(p, "project")),
-		...getUserPathCandidates(ctx, "AGENTS.md").map(p => load(p, "user")),
+		...(await getUserPathCandidates(ctx, "AGENTS.md")).map(p => load(p, "user")),
 	]);
 
 	return { items: results.filter((r): r is ContextFile => r !== null), warnings: [] };
@@ -314,8 +320,8 @@ async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemProm
 	const results = await Promise.all([
 		...getProjectPathCandidates(ctx, "SYSTEM.md").map(p => load(p, "project", "text")),
 		...getProjectPathCandidates(ctx, "SYSTEM_TEMPLATE.md").map(p => load(p, "project", "template")),
-		...getUserPathCandidates(ctx, "SYSTEM.md").map(p => load(p, "user", "text")),
-		...getUserPathCandidates(ctx, "SYSTEM_TEMPLATE.md").map(p => load(p, "user", "template")),
+		...(await getUserPathCandidates(ctx, "SYSTEM.md")).map(p => load(p, "user", "text")),
+		...(await getUserPathCandidates(ctx, "SYSTEM_TEMPLATE.md")).map(p => load(p, "user", "template")),
 	]);
 
 	return { items: results.filter((r): r is SystemPrompt => r !== null), warnings: [] };
