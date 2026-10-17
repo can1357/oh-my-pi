@@ -16,8 +16,10 @@ import {
 	lookupTableChart,
 	setTableCharts,
 	splitTableCharts,
+	TableChartFigure,
 	type TableChartPlanner,
 } from "@oh-my-pi/pi-tui/chat/table-chart";
+import { renderForScrollback } from "@oh-my-pi/pi-tui/components/image";
 import { lexDocument } from "@oh-my-pi/pi-tui/components/markdown";
 import { trimBlankEdges } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
@@ -641,6 +643,100 @@ describe("table charts in assistant Markdown", () => {
 	});
 
 	const answer = `Timings:\n\n${TIMINGS}\n\nThat is all.`;
+
+	it.each(["configuration", "render argument", "row callback", "setter"] as const)(
+		"defers hidden smart charts through a %s ceiling until there is room to draw",
+		async bound => {
+			const protocol = TERMINAL.imageProtocol;
+			setTerminalImageProtocol(ImageProtocol.Sixel);
+			const choice = Promise.withResolvers<ChartPlan | null>();
+			const planner = vi.fn<TableChartPlanner>(() => choice.promise);
+			setTableCharts("smart", planner);
+			let maxRows = 0;
+			let changed = Promise.withResolvers<void>();
+			const chart = new TableChartFigure({
+				maxRows: bound === "row callback" ? () => maxRows : bound === "configuration" ? maxRows : undefined,
+				onChange: () => changed.resolve(),
+			});
+			chart.update(table(BEFORE_AFTER));
+			const render = () => chart.render(76, bound === "render argument" ? maxRows : undefined);
+			const resize = (rows: number) => {
+				maxRows = rows;
+				if (bound === "configuration" || bound === "setter") chart.setMaxRows(rows);
+			};
+			try {
+				if (bound === "setter") chart.setMaxRows(0);
+				if (bound !== "render argument") expect(chart.pending).toBe(false);
+				expect(render()).toEqual([]);
+				expect(chart.pending).toBe(false);
+				resize(1);
+				expect(render()).toEqual([]);
+				expect(chart.pending).toBe(false);
+				expect(planner).not.toHaveBeenCalled();
+
+				resize(4);
+				render();
+				expect(planner).toHaveBeenCalledTimes(1);
+				expect(chart.pending).toBe(true);
+				resize(0);
+				expect(render()).toEqual([]);
+				expect(chart.pending).toBe(false);
+				choice.resolve(planner.mock.calls[0]![0].guess);
+				await changed.promise;
+				expect(chart.pending).toBe(false);
+				expect(render()).toEqual([]);
+
+				changed = Promise.withResolvers<void>();
+				resize(4);
+				render();
+				await changed.promise;
+				const drawn = renderForScrollback(render);
+				expect(drawn.length).toBeLessThanOrEqual(maxRows);
+				expect(drawn[0]).toBe("");
+				expect(drawn.at(-1)).toMatch(/\x1bP[\d;]*q/);
+				expect(chart.pending).toBe(false);
+				expect(planner).toHaveBeenCalledTimes(1);
+			} finally {
+				chart.dispose();
+				choice.resolve(null);
+				await choice.promise;
+				setTerminalImageProtocol(protocol);
+			}
+		},
+	);
+
+	it.each(["render argument", "row callback", "setter"] as const)(
+		"fits a chart and its separator within a %s ceiling and hides both with fewer than two rows",
+		async bound => {
+			const protocol = TERMINAL.imageProtocol;
+			setTerminalImageProtocol(ImageProtocol.Sixel);
+			setTableCharts("always");
+			let maxRows = 4;
+			const landed = Promise.withResolvers<void>();
+			const chart = new TableChartFigure({
+				maxRows: bound === "row callback" ? () => maxRows : bound === "setter" ? maxRows : undefined,
+				onChange: () => landed.resolve(),
+			});
+			chart.update(table(TIMINGS));
+			const render = () => chart.render(76, bound === "render argument" ? maxRows : undefined);
+			try {
+				render();
+				await landed.promise;
+				const drawn = renderForScrollback(render);
+				expect(drawn.length).toBeLessThanOrEqual(maxRows);
+				expect(drawn[0]).toBe("");
+				expect(drawn.at(-1)).toMatch(/\x1bP[\d;]*q/);
+				for (const ceiling of [1, 0]) {
+					maxRows = ceiling;
+					if (bound === "setter") chart.setMaxRows(maxRows);
+					expect(render()).toEqual([]);
+				}
+			} finally {
+				chart.dispose();
+				setTerminalImageProtocol(protocol);
+			}
+		},
+	);
 
 	it("leaves a table streaming at the tail whole and charts it once the answer moves on", () => {
 		setTableCharts("always");

@@ -99,7 +99,7 @@ All components implement:
 
 ```typescript
 interface Component {
-	render(width: number): readonly string[];
+	render(width: number, maxRows?: number, verticalAnchor?: "top" | "bottom"): readonly string[];
 	handleInput?(data: string): void;
 	invalidate?(): void;
 	releaseRenderCaches?(): void;
@@ -108,10 +108,12 @@ interface Component {
 
 | Method                   | Description                                                                                                                                                        |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `render(width)`          | Returns an array of strings, one per line. Each line **must not exceed `width`** or the TUI will error. Use `truncateToWidth()` or manual wrapping to ensure this. The result is component-owned and immutable to callers; return the same array reference when unchanged (enables renderer memoization) and a new array when content changed. |
+| `render(width, maxRows?, verticalAnchor?)` | Returns an array of strings, one per line. Each line **must not exceed `width`** or the TUI will error. Use `truncateToWidth()` or manual wrapping to ensure this. The optional `maxRows` is the available surface height; `verticalAnchor` selects the edge to retain when content exceeds it (defaults to `"top"`). The result is component-owned and immutable to callers; return the same array reference when unchanged (enables renderer memoization) and a new array when content changed. |
 | `handleInput?(data)`     | Called when the component has focus and receives keyboard input. The `data` string contains raw terminal input (may include ANSI escape sequences).                |
 | `invalidate?()`          | Called to clear any cached render state. Components should re-render from scratch on the next `render()` call.                                                     |
 | `releaseRenderCaches?()` | Drops only derived render caches. The next `render()` must return the same rows without eager rebuilds, renderer callbacks, image conversions, or child replacement. |
+
+Overlays pass their resolved height and retained edge to `render` before clipping. Figure components use this bound to keep an image's reserved rows and payload together. `FigureMarkdown` fills the surface from that edge, fitting complete figures and separating only visible parts; bottom-anchored overlays retain trailing content. Its configured `maxRows` option remains a per-figure limit when no render-time surface bound is supplied. Custom layouts should reserve their own chrome and pass the remaining height and retained edge to child figures. Components that ignore these optional arguments retain the overlay's existing clipping behavior.
 
 ## Built-in Components
 

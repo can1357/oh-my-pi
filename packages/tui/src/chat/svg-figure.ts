@@ -113,6 +113,8 @@ export interface SvgFigureOptions {
 	markdown?: (text: string) => Markdown;
 	/** Shared inline-image budget; superseded rasters are released from it. */
 	budget?: ImageBudget;
+	/** Row ceiling for the figure, including fallback text; zero hides it. Defaults to a share of the viewport. */
+	maxRows?: number | (() => number | undefined);
 	/** The figure's rows changed outside a text update: a raster landed or rendering fell back to code. */
 	onChange: () => void;
 }
@@ -149,18 +151,23 @@ interface Attempt {
 
 let nextFigureId = 0;
 
-/** Cells a figure rendered at `width` may fill: the image's width, a share of the viewport, and the raster edge cap. */
-function limitsFor(width: number, cell: CellDimensions): Limits {
-	const viewportRows = Math.floor((process.stdout.rows || 24) * MAX_VIEWPORT_SHARE);
+/** Cells a figure rendered at `width` may fill: the image's width, the caller's row ceiling (or a share of the viewport), and the raster edge cap. */
+function limitsFor(width: number, cell: CellDimensions, maxRows?: number): Limits {
+	const viewportRows =
+		maxRows != null
+			? Math.max(0, Math.floor(maxRows))
+			: Math.max(1, Math.floor((process.stdout.rows || 24) * MAX_VIEWPORT_SHARE));
 	return {
 		columns: Math.min(imageMaxColumns(width), Math.floor(MAX_EDGE_PX / cell.widthPx)),
-		rows: Math.max(1, Math.min(viewportRows, Math.floor(MAX_EDGE_PX / cell.heightPx))),
+		rows: Math.max(0, Math.min(viewportRows, Math.floor(MAX_EDGE_PX / cell.heightPx))),
 	};
 }
 
 export class SvgFigure implements Component {
 	readonly #options: SvgFigureOptions;
 	readonly #id = nextFigureId++;
+	#maxRows?: number | (() => number | undefined);
+	#renderMaxRows?: number;
 	#source = "";
 	/** No more text arrives for this fence: no throttling, and a failed raster falls back to code. */
 	#final = false;
@@ -178,12 +185,21 @@ export class SvgFigure implements Component {
 	/** Last render width; rasters wait for the first render to know their room. */
 	#width: number | undefined;
 	#image: { raster: Raster; component: Image } | undefined;
-	#fallback: { source: string; md: Markdown } | undefined;
+	/** Visible image retained while a resize replacement's SIXEL encode is pending. */
+	#previousImage: Image | undefined;
+	#fallback:
+		| {
+				source: string;
+				md: Markdown;
+				clipped?: { sourceRows: readonly string[]; maxRows: number; start: number; rows: readonly string[] };
+		  }
+		| undefined;
 	#placeholder: readonly string[] | undefined;
 
 	constructor(options: SvgFigureOptions) {
 		ensureThemeSync();
 		this.#options = options;
+		this.#maxRows = options.maxRows;
 	}
 
 	/** Feed the fence body; `final` once the fence closed or the message stopped streaming. */
@@ -203,26 +219,72 @@ export class SvgFigure implements Component {
 
 	/** Whether the final source still waits for its raster (or for failing to render). */
 	get pending(): boolean {
-		return this.#final && this.#raster?.source !== this.#source && this.#failed !== this.#source;
+		return (
+			this.#resolveMaxRows() !== 0 &&
+			this.#final &&
+			this.#raster?.source !== this.#source &&
+			this.#failed !== this.#source
+		);
 	}
 
-	render(width: number): readonly string[] {
-		// Width, cell size and theme are render-time inputs; a change re-rasterizes.
-		this.#width = width;
+	/** Replace the configured row ceiling and clear any render-time override. */
+	setMaxRows(maxRows?: number | (() => number | undefined)): void {
+		this.#maxRows = maxRows;
+		this.#renderMaxRows = undefined;
 		this.#schedule();
-		if (this.#failed === this.#source) return this.#fallbackRows(width);
+	}
+
+	#resolveMaxRows(): number | undefined {
+		const bound =
+			this.#renderMaxRows !== undefined
+				? this.#renderMaxRows
+				: typeof this.#maxRows === "function"
+					? this.#maxRows()
+					: this.#maxRows;
+		return bound != null && Number.isFinite(bound) ? Math.max(0, Math.floor(bound)) : undefined;
+	}
+
+	/** Size a layout pass without observing image order or starting a graphics encode. */
+	measureRows(width: number, maxRows?: number): number {
+		const bound = this.#prepareRender(width, maxRows);
+		const limits = limitsFor(width, getCellDimensions(), bound);
+		if (limits.rows === 0) return 0;
+		if (this.#failed === this.#source) return Math.min(this.#fallbackRows(width).length, bound ?? Infinity);
+		const raster = this.#raster;
+		if (!raster) return this.#options.markdown ? 1 : 0;
+		return Math.min(this.#imageFor(raster, limits.rows).measureRows(width, this.#previousImage), limits.rows);
+	}
+
+	/** Render with an optional row ceiling overriding the configuration for this pass. */
+	render(width: number, maxRows?: number, verticalAnchor: "top" | "bottom" = "top"): readonly string[] {
+		const bound = this.#prepareRender(width, maxRows);
+		const limits = limitsFor(width, getCellDimensions(), bound);
+		if (limits.rows === 0) return [];
+		if (this.#failed === this.#source) return this.#fallbackRows(width, bound, verticalAnchor);
 		const raster = this.#raster;
 		if (!raster) {
 			if (!this.#options.markdown) return [];
 			this.#placeholder ??= [` ${theme.fg("dim", "Drawing SVG…")}`];
 			return this.#placeholder;
 		}
-		return this.#imageFor(raster).render(width);
+		const image = this.#imageFor(raster, limits.rows);
+		const rows = image.renderWithPrevious(width, this.#previousImage);
+		if (!image.pending) this.#previousImage = undefined;
+		return rows.length <= limits.rows ? rows : rows.slice(0, limits.rows);
+	}
+
+	#prepareRender(width: number, maxRows?: number): number | undefined {
+		// Width, cell size and theme are render-time inputs; a change re-rasterizes.
+		this.#width = width;
+		this.#renderMaxRows = maxRows;
+		this.#schedule();
+		return this.#resolveMaxRows();
 	}
 
 	invalidate(): void {
 		this.#placeholder = undefined;
 		this.#image?.component.invalidate();
+		this.#previousImage?.invalidate();
 		// Rebuilt through the Markdown factory, which may carry a new theme.
 		this.#fallback = undefined;
 	}
@@ -247,7 +309,7 @@ export class SvgFigure implements Component {
 		const attempt = this.#attempt;
 		if (this.#failed === this.#source) return false;
 		const cell = getCellDimensions();
-		const limits = limitsFor(width, cell);
+		const limits = limitsFor(width, cell, this.#resolveMaxRows());
 		return (
 			attempt === undefined ||
 			attempt.source !== this.#source ||
@@ -280,6 +342,7 @@ export class SvgFigure implements Component {
 	#schedule(): void {
 		const width = this.#width;
 		if (this.#disposed || this.#rasterizing || width === undefined) return;
+		if (this.#resolveMaxRows() === 0) return;
 		if (this.#final && this.#timer) {
 			clearTimeout(this.#timer);
 			this.#timer = undefined;
@@ -302,7 +365,7 @@ export class SvgFigure implements Component {
 		const attempt: Attempt = {
 			source: this.#source,
 			cell,
-			limits: limitsFor(width, cell),
+			limits: limitsFor(width, cell, this.#resolveMaxRows()),
 			themeEpoch: getThemeEpoch(),
 			final: this.#final,
 		};
@@ -366,11 +429,16 @@ export class SvgFigure implements Component {
 	 * cell size and room it was drawn for that box is its pixels exactly; a
 	 * raster outdated by a resize is scaled by {@link Image} until its redraw lands.
 	 */
-	#imageFor(raster: Raster): Image {
+	#imageFor(raster: Raster, maxRows: number): Image {
 		const current = this.#image;
-		if (current?.raster === raster) return current.component;
 		const columns = raster.widthPx / raster.cell.widthPx;
-		const rows = raster.heightPx / raster.cell.heightPx;
+		const rows = Math.min(raster.heightPx / raster.cell.heightPx, maxRows);
+		if (current?.raster === raster) {
+			current.component.setMaxHeightCells(rows);
+			return current.component;
+		}
+		if (current?.raster.source === raster.source) this.#previousImage ??= current.component;
+		else this.#previousImage = undefined;
 		const component = new Image(
 			raster.data,
 			"image/png",
@@ -390,12 +458,20 @@ export class SvgFigure implements Component {
 	}
 
 	/** The source as the fenced code block it was written as, fenced longer than any backtick run inside. */
-	#fallbackRows(width: number): readonly string[] {
+	#fallbackRows(width: number, maxRows?: number, verticalAnchor: "top" | "bottom" = "top"): readonly string[] {
 		const source = this.#source;
 		if (!this.#options.markdown) return [];
 		if (this.#fallback?.source !== source) {
 			this.#fallback = { source, md: this.#options.markdown(fencedCode("svg", source)) };
 		}
-		return this.#fallback.md.render(width);
+		const fallback = this.#fallback;
+		const sourceRows = fallback.md.render(width);
+		if (maxRows === undefined || sourceRows.length <= maxRows) return sourceRows;
+		const start = verticalAnchor === "bottom" ? sourceRows.length - maxRows : 0;
+		const cached = fallback.clipped;
+		if (cached?.sourceRows === sourceRows && cached.maxRows === maxRows && cached.start === start) return cached.rows;
+		const rows = sourceRows.slice(start, start + maxRows);
+		fallback.clipped = { sourceRows, maxRows, start, rows };
+		return rows;
 	}
 }

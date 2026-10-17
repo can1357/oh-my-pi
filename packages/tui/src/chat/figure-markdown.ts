@@ -2,7 +2,7 @@ import type { Tokens } from "@oh-my-pi/pi-utils/marked";
 import type { ImageBudget } from "../components/image";
 import { type Markdown, streamingMarkdownSource } from "../components/markdown";
 import { Spacer } from "../components/spacer";
-import { Container } from "../tui";
+import { type Component, Container } from "../tui";
 import { SvgFigure, svgFigureRendering } from "./svg-figure";
 import { type FigureSegment, splitSvgFences } from "./svg-source";
 import { type ChartSegment, hasChartTable, splitTableCharts, TableChartFigure } from "./table-chart";
@@ -14,6 +14,8 @@ export interface FigureMarkdownOptions {
 	charts: boolean;
 	/** Shared inline-image budget for the figures. */
 	budget?: ImageBudget;
+	/** Row ceiling for child figures; defaults to a share of the terminal viewport. */
+	maxRows?: number | (() => number | undefined);
 	/** A figure's rows changed outside a text update (raster landed, fell back to code). */
 	onChange: () => void;
 }
@@ -22,6 +24,13 @@ type Part =
 	| { readonly kind: "markdown"; readonly md: Markdown; text: string }
 	| { readonly kind: "svg"; readonly figure: SvgFigure; source: string; closed: boolean }
 	| { readonly kind: "chart"; readonly figure: TableChartFigure; table: Tokens.Table };
+
+interface SurfacePart {
+	rows: readonly string[];
+	start: number;
+	length: number;
+	separator: boolean;
+}
 
 /**
  * Assistant Markdown whose top-level ```svg fences are lifted out of the prose
@@ -36,14 +45,110 @@ type Part =
  */
 export class FigureMarkdown extends Container {
 	readonly #options: FigureMarkdownOptions;
+	#maxRows?: number | (() => number | undefined);
+	#renderMaxRows?: number;
+	readonly #figureMaxRows = (): number | undefined =>
+		this.#renderMaxRows ?? (typeof this.#maxRows === "function" ? this.#maxRows() : this.#maxRows);
 	#text = "";
 	#transient = false;
 	#parts: Part[] = [];
+	#surfaceParts: SurfacePart[] = [];
+	#surfaceRows: readonly string[] | undefined;
+	#surfaceAnchor: "top" | "bottom" = "top";
 
 	constructor(text: string, options: FigureMarkdownOptions) {
 		super();
 		this.#options = options;
+		this.#maxRows = options.maxRows;
 		this.setText(text);
+	}
+
+	/** Replace the configured row ceiling and clear any render-time override. */
+	setMaxRows(maxRows?: number | (() => number | undefined)): void {
+		this.#maxRows = maxRows;
+		this.#renderMaxRows = undefined;
+		for (const part of this.#parts) {
+			if (part.kind === "svg" || part.kind === "chart") part.figure.setMaxRows(this.#figureMaxRows);
+		}
+	}
+
+	/** Fit complete figures from the surface's retained edge, separating only visible parts. */
+	override render(width: number, maxRows?: number, verticalAnchor: "top" | "bottom" = "top"): readonly string[] {
+		this.#renderMaxRows = maxRows;
+		if (maxRows === undefined || !Number.isFinite(maxRows)) return super.render(width);
+		const bottom = verticalAnchor === "bottom";
+		const count = this.#parts.length;
+		let unchanged =
+			this.#surfaceRows !== undefined &&
+			this.#surfaceParts.length === count &&
+			this.#surfaceAnchor === verticalAnchor;
+		let remainingRows = Math.max(0, Math.floor(maxRows));
+		let neighbor: Part | undefined;
+		const limits: number[] = [];
+		// Measure from the retained edge, then render in display order below.
+		// ImageBudget uses render order to keep the most recent images live.
+		for (let step = 0; step < count; step++) {
+			const index = bottom ? count - step - 1 : step;
+			const part = this.#parts[index]!;
+			// Charts include their own leading separator. In reverse traversal,
+			// the part already selected is the one following this separator.
+			const separator = neighbor !== undefined && (bottom ? neighbor.kind : part.kind) !== "chart";
+			const available = Math.max(0, remainingRows - Number(separator));
+			const measured =
+				part.kind === "markdown" ? part.md.render(width).length : part.figure.measureRows(width, available);
+			const length = Math.min(measured, available);
+			limits[index] = available;
+			if (length > 0) {
+				remainingRows -= length + Number(separator);
+				neighbor = part;
+			}
+		}
+		neighbor = undefined;
+		for (let index = 0; index < count; index++) {
+			const part = this.#parts[index]!;
+			const available = limits[index]!;
+			// Render hidden figures with zero too, so pending/planning state uses
+			// the current surface even after a resize or anchor change.
+			const child: Component = part.kind === "markdown" ? part.md : part.figure;
+			const rows = child.render(width, available, verticalAnchor);
+			const length = Math.min(rows.length, available);
+			const start = bottom ? rows.length - length : 0;
+			const separator = length > 0 && neighbor !== undefined && part.kind !== "chart";
+			const previous = this.#surfaceParts[index];
+			if (
+				previous === undefined ||
+				previous.length !== length ||
+				previous.start !== start ||
+				previous.separator !== separator ||
+				(length > 0 && previous.rows !== rows)
+			) {
+				unchanged = false;
+				this.#surfaceParts[index] = { rows, start, length, separator };
+			}
+			if (length > 0) neighbor = part;
+		}
+		this.#surfaceParts.length = count;
+		this.#surfaceAnchor = verticalAnchor;
+		if (unchanged) return this.#surfaceRows!;
+		const lines: string[] = [];
+		for (const { rows, start, length, separator } of this.#surfaceParts) {
+			if (separator) lines.push("");
+			for (let row = start; row < start + length; row++) lines.push(rows[row]!);
+		}
+		this.#surfaceRows = lines;
+		return lines;
+	}
+
+	override invalidate(): void {
+		this.#surfaceRows = undefined;
+		this.#surfaceParts = [];
+		super.invalidate();
+	}
+
+	override releaseRenderCaches(): void {
+		this.#surfaceRows = undefined;
+		this.#surfaceParts = [];
+		super.releaseRenderCaches();
 	}
 
 	/** Replace the source; returns whether it changed. */
@@ -109,7 +214,11 @@ export class FigureMarkdown extends Container {
 				}
 				reshaped = true;
 				const { budget, onChange } = this.#options;
-				return { kind: "chart", figure: new TableChartFigure({ budget, onChange }), table: segment.table };
+				return {
+					kind: "chart",
+					figure: new TableChartFigure({ budget, maxRows: this.#figureMaxRows, onChange }),
+					table: segment.table,
+				};
 			}
 			if (segment.kind === "markdown") {
 				const text = segment.text.trim();
@@ -130,7 +239,7 @@ export class FigureMarkdown extends Container {
 			const { markdown, budget, onChange } = this.#options;
 			return {
 				kind: "svg",
-				figure: new SvgFigure({ markdown, budget, onChange }),
+				figure: new SvgFigure({ markdown, budget, maxRows: this.#figureMaxRows, onChange }),
 				source: segment.source,
 				closed: segment.closed,
 			};

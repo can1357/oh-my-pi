@@ -20,6 +20,8 @@ export type FenceFigureLang = "svg" | "mermaid";
 export interface FenceFigureOptions {
 	/** Shared inline-image budget for an svg's rasters. */
 	budget?: ImageBudget;
+	/** Row ceiling for the raster; defaults to a share of the terminal viewport. */
+	maxRows?: number | (() => number | undefined);
 	/** The figure's rows changed outside a render: a raster landed. */
 	onChange: () => void;
 }
@@ -47,7 +49,17 @@ export class FenceFigure implements Component {
 
 	constructor(lang: FenceFigureLang, options: FenceFigureOptions) {
 		this.lang = lang;
-		if (lang === "svg") this.#svg = new SvgFigure({ budget: options.budget, onChange: options.onChange });
+		if (lang === "svg") {
+			this.#svg = new SvgFigure({
+				budget: options.budget,
+				maxRows: options.maxRows,
+				onChange: options.onChange,
+			});
+		}
+	}
+
+	setMaxRows(maxRows?: number | (() => number | undefined)): void {
+		this.#svg?.setMaxRows(maxRows);
 	}
 
 	/** Feed the fence as it stands; its `lang` is this figure's. */
@@ -63,8 +75,10 @@ export class FenceFigure implements Component {
 	}
 
 	/** The drawing; no rows while an svg draws, or when it does not. */
-	render(width: number): readonly string[] {
-		if (this.#svg) return this.#svg.render(width);
+	render(width: number, maxRows?: number, verticalAnchor?: "top" | "bottom"): readonly string[] {
+		if (this.#svg) {
+			return this.#svg.render(width, maxRows, verticalAnchor);
+		}
 		this.#diagram ??= new Markdown(fencedCode("mermaid", this.#source), 1, 0, getMarkdownTheme());
 		return this.#diagram.render(width);
 	}

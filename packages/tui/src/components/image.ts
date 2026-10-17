@@ -1,6 +1,8 @@
 import { encodeSixelAsync } from "@oh-my-pi/pi-natives";
 import { getKittyGraphics } from "../kitty-graphics";
 import {
+	calculateImageFit,
+	calculateSixelFit,
 	encodeSixelNow,
 	getCellDimensions,
 	getImageDimensions,
@@ -707,6 +709,25 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
+	/** Resize a mutable surface's image without discarding its settled SIXEL encode. */
+	setMaxHeightCells(maxHeightCells?: number): void {
+		if (this.#options.maxHeightCells === maxHeightCells) return;
+		this.#options.maxHeightCells = maxHeightCells;
+		this.#renderedGraphicRows = 0;
+		this.#native = undefined;
+		this.invalidate();
+	}
+
+	/** Whether the live render is waiting for its off-thread SIXEL encode. */
+	get pending(): boolean {
+		return (
+			TERMINAL.imageProtocol === ImageProtocol.Sixel &&
+			!this.#cachedSuppressed &&
+			this.#sixel !== undefined &&
+			this.#sixel.sequence === undefined
+		);
+	}
+
 	releaseRenderCaches(): void {
 		this.#cachedLines = undefined;
 		this.#cachedWidth = undefined;
@@ -716,7 +737,9 @@ export class Image implements Component {
 	 * SIXEL sequence for a target size and background. A change starts the encode off the JS
 	 * thread and answers `undefined` until it settles; the settled encode
 	 * invalidates the cached lines and requests a repaint. A render bound for
-	 * scrollback cannot wait, so it encodes synchronously.
+	 * scrollback cannot wait, so it encodes synchronously. Shrinking a settled
+	 * graphic also encodes synchronously: the old payload no longer fits, and
+	 * reserving blank rows would erase an image that is already visible.
 	 */
 	#sixelSequence(widthPx: number, heightPx: number, backgroundRgb: number): string | null | undefined {
 		const current = this.#sixel;
@@ -726,7 +749,12 @@ export class Image implements Component {
 			current.heightPx === heightPx &&
 			current.backgroundRgb === backgroundRgb;
 		if (sameInput && current.sequence !== undefined) return current.sequence;
-		if (scrollbackRenderDepth > 0) {
+		const shrinking =
+			current?.sequence != null &&
+			widthPx <= current.widthPx &&
+			heightPx <= current.heightPx &&
+			(widthPx < current.widthPx || heightPx < current.heightPx);
+		if (scrollbackRenderDepth > 0 || shrinking) {
 			// Replacing the entry makes a still-pending async encode settle as stale.
 			const sequence = encodeSixelNow(this.#base64Data, widthPx, heightPx, backgroundRgb);
 			this.#sixel = { widthPx, heightPx, backgroundRgb, sequence };
@@ -778,6 +806,31 @@ export class Image implements Component {
 	}
 
 	render(width: number): readonly string[] {
+		return this.renderWithPrevious(width);
+	}
+
+	/** Bound the next render's height without observing the budget or encoding graphics. */
+	measureRows(width: number, previous?: Image): number {
+		const fallbackRows = Math.max(1, this.#renderedGraphicRows);
+		if (TERMINAL.imageProtocol === null) return fallbackRows;
+		const cell = getCellDimensions();
+		const options = { maxWidthCells: this.#maxWidth(width), maxHeightCells: this.#options.maxHeightCells };
+		const fit = calculateImageFit(this.#dimensions, options, cell);
+		if (TERMINAL.imageProtocol !== ImageProtocol.Sixel) return Math.max(fallbackRows, fit.rows);
+		const rows = calculateSixelFit(fit, cell).rows;
+		const previousRows = previous
+			? calculateSixelFit(calculateImageFit(previous.#dimensions, options, cell), cell).rows
+			: 0;
+		return Math.max(fallbackRows, rows, previousRows);
+	}
+
+	#maxWidth(width: number): number {
+		const cap = this.#options.maxWidthCells;
+		return cap != null && cap > 0 ? Math.min(imageMaxColumns(width), cap) : imageMaxColumns(width);
+	}
+
+	/** Keep a previous raster visible while this image's SIXEL encode is pending. Both share one budget slot. */
+	renderWithPrevious(width: number, previous?: Image): readonly string[] {
 		const imageProtocol = TERMINAL.imageProtocol;
 		const hasProtocol = imageProtocol != null;
 		const cellDimensions = getCellDimensions();
@@ -815,8 +868,7 @@ export class Image implements Component {
 			return this.#cachedLines;
 		}
 
-		const cap = this.#options.maxWidthCells;
-		const maxWidth = cap != null && cap > 0 ? Math.min(imageMaxColumns(width), cap) : imageMaxColumns(width);
+		const maxWidth = this.#maxWidth(width);
 
 		let lines: string[];
 
@@ -824,13 +876,20 @@ export class Image implements Component {
 			// Transmit the data once (keyed by id); thereafter renderImage returns
 			// just the placement, so repaints never re-send the base64.
 			const needsTransmit = transmitsSeparately && (this.#budget?.shouldTransmit(imageId) ?? false);
-			const result = renderImage(this.#base64Data, this.#dimensions, {
+			let result = renderImage(this.#base64Data, this.#dimensions, {
 				maxWidthCells: maxWidth,
 				maxHeightCells: this.#options.maxHeightCells,
 				imageId: this.#imageId,
 				includeTransmit: needsTransmit,
 				sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx, sixelBackground!),
 			});
+			if (imageProtocol === ImageProtocol.Sixel && result?.sequence === undefined && previous && this.pending) {
+				result = renderImage(previous.#base64Data, previous.#dimensions, {
+					maxWidthCells: maxWidth,
+					maxHeightCells: this.#options.maxHeightCells,
+					sixel: (widthPx, heightPx) => previous.#sixelSequence(widthPx, heightPx, sixelBackground!),
+				});
+			}
 
 			if (result?.transmit && this.#imageId != null && this.#budget !== undefined) {
 				this.#budget.enqueueTransmit(this.#imageId, result.transmit);

@@ -1093,7 +1093,7 @@ export function calculateImageRows(
 	return Math.max(1, rows);
 }
 
-function calculateImageFit(
+export function calculateImageFit(
 	imageDimensions: ImageDimensions,
 	options: ImageRenderOptions,
 	cellDims: CellDimensions,
@@ -1119,6 +1119,24 @@ function calculateImageFit(
 	return {
 		columns: maxColumns !== undefined ? Math.min(columns, maxColumns) : columns,
 		rows: maxRows !== undefined ? Math.min(rows, maxRows) : rows,
+	};
+}
+
+/** SIXEL's cell box, including its minimum six-pixel band height. */
+export function calculateSixelFit(
+	fit: { columns: number; rows: number },
+	cellDims: CellDimensions,
+): ImageDimensions & { rows: number } {
+	// Encode the cell box itself, so a raster drawn at the cell size
+	// (SvgFigure) is placed 1:1 instead of resampled. The encoder drops a
+	// partial last 6px band rather than letting the terminal pad it into
+	// the next row; only a box under one band (sub-6px cells) still takes
+	// the rows of a whole one.
+	const heightPx = fit.rows * cellDims.heightPx;
+	return {
+		widthPx: fit.columns * cellDims.widthPx,
+		heightPx,
+		rows: heightPx < 6 ? Math.ceil(6 / cellDims.heightPx) : fit.rows,
 	};
 }
 
@@ -1334,14 +1352,7 @@ export function renderImage(
 	}
 
 	if (TERMINAL.imageProtocol === ImageProtocol.Sixel) {
-		// Encode the cell box itself, so a raster drawn at the cell size
-		// (SvgFigure) is placed 1:1 instead of resampled. The encoder drops a
-		// partial last 6px band rather than letting the terminal pad it into
-		// the next row; only a box under one band (sub-6px cells) still takes
-		// the rows of a whole one.
-		const heightPx = fit.rows * cellDims.heightPx;
-		const widthPx = fit.columns * cellDims.widthPx;
-		const rows = heightPx < 6 ? Math.ceil(6 / cellDims.heightPx) : fit.rows;
+		const { widthPx, heightPx, rows } = calculateSixelFit(fit, cellDims);
 		const sequence = options.sixel ? options.sixel(widthPx, heightPx) : encodeSixelNow(base64Data, widthPx, heightPx);
 		if (sequence === null) return null;
 		// Undefined while the provider's encode is pending: the rows stay reserved.
