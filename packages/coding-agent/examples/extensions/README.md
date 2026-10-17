@@ -43,6 +43,30 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 | `status-line.ts`   | Shows turn progress in footer via `ctx.ui.setStatus()` with themed colors      |
 | `thinking-note.ts` | Adds display-only supplemental UI below assistant thinking blocks              |
 | `snake.ts`         | Snake game with custom UI, keyboard handling, and session persistence          |
+| `arabic-rtl.ts`    | Opt-in Windows Arabic shaping and bidirectional display for Composer output |
+
+#### Arabic/RTL display on Windows
+
+`arabic-rtl.ts` uses Windows `icu.dll` through Bun FFI to shape Arabic letters
+and reorder mixed-direction text for terminals without native bidi rendering.
+Load it explicitly:
+
+```powershell
+omp --extension ./packages/coding-agent/examples/extensions/arabic-rtl.ts
+```
+
+Alternatively, copy the file to `~/.omp/agent/extensions/` and restart omp.
+Remove the file and restart to uninstall. Do not enable it in a terminal that
+already performs bidirectional layout: text would be reordered twice.
+It does nothing on non-Windows systems and requires Windows `icu.dll`.
+
+The extension transforms Composer transcript/history, input, and resize output,
+not stored messages or model input. Use omp's copy command for original logical
+text; terminal drag-selection copies the displayed presentation glyphs.
+Arrow keys still navigate logical text, not visual order. Existing word wrapping
+is unchanged; fullscreen overlays and native Tern surfaces are not transformed.
+It wraps internal Composer prototype methods, so compatibility must be checked
+after omp upgrades. This is an opt-in extension, not global RTL support.
 
 ### Git Integration
 

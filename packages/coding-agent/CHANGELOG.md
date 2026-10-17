@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in Windows extension example for Arabic letter joining and bidirectional display in the transcript and composer ([#16083](https://github.com/can1357/oh-my-pi/pull/16083) by [@0xOthman](https://github.com/0xOthman)).
+
 ### Changed
 
 - With a first-party Anthropic model on the official API selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup; third-party gateways and custom endpoints are never probed ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
