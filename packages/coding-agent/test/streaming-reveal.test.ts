@@ -416,6 +416,44 @@ describe("streaming reveal", () => {
 		expect(thinkingAt(latestMessage(component), 0)).toBe(full);
 	});
 
+	it("shows the whole reasoning when smoothing is turned off without a provider delta", async () => {
+		// Same round trip as above, but with NO setTarget between the hide and the
+		// show: the user disables smooth streaming and toggles thinking back on
+		// before the provider streams again. resyncVisibility is then the only
+		// path that runs, so it must read the fresh smooth flag itself — restoring
+		// the latent partial there re-arms the 30fps timer and retypes reasoning
+		// that should render whole (#15336).
+		const thinking = "reasoning through the problem ".repeat(12);
+		const full = formatThinkingForDisplay(thinking, true);
+		let hideThinking = false;
+		let smooth = true;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => smooth,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+		const partial = thinkingAt(latestMessage(component), 0);
+		expect(partial.length).toBeGreaterThan(0);
+		expect(partial.length).toBeLessThan(full.length);
+
+		hideThinking = true;
+		controller.resyncVisibility();
+		smooth = false;
+		hideThinking = false;
+		controller.resyncVisibility();
+
+		expect(thinkingAt(latestMessage(component), 0)).toBe(full);
+		// No timer may re-arm, so the rendering cannot regress on later frames.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+		expect(thinkingAt(latestMessage(component), 0)).toBe(full);
+	});
+
 	it("keeps a fully revealed thinking block whole when prose-only expands its fence", async () => {
 		// Prose-only mode elides a fenced-code prefix down to a trailing ellipsis.
 		// Turning it off expands that prefix back to the full fence, so a block
