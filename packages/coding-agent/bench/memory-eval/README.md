@@ -87,6 +87,8 @@ The verdict is `helps` when the overall interval lies above 0 and no category's 
 
 `with-sleep` results are not comparable across engines. After sleep, a ranked summary maps through `summary_of` to every message it covers, and recall@k credits all of them for its one slot. Each engine summarises differently (how many working rows go into one episodic row differs), so recall@k under `with-sleep` reflects summary size as much as ranking. `diff` prints a warning when it compares `with-sleep` runs of two different engines; comparing two runs of the same engine is unaffected.
 
+`with-sleep` runs only on BEAM. LongMemEval ranks every message a summary covers as its own corpus document, so one top summary covering six sessions would fill the session cutoff by itself; `run` refuses `--protocol with-sleep` with an `lme-*` dataset.
+
 ### Environment guard
 
 Mnemopi runs in the harness process and reads its configuration from the environment, so `run --engine mnemopi` and `embed-parity.ts` refuse to start while any `MNEMOPI_*` or `OPENROUTER_BASE_URL` (which can route its embeddings to an API) is set. Mnemosyne's child process never inherits the parent's `MNEMOSYNE_*`.

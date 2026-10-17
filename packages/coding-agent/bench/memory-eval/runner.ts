@@ -149,6 +149,11 @@ export async function runCases(
 	k: number,
 	storeRoot: string,
 ): Promise<RunOutput> {
+	// A summary hit covers several messages; LongMemEval ranks each as its own corpus document, so one summary could
+	// push its own gold session out of @5. BEAM credits the summary in one slot.
+	if (protocol === "with-sleep" && cases.some(c => !isBeam(c.dataset))) {
+		throw new Error("with-sleep does not support LongMemEval datasets; use a BEAM dataset");
+	}
 	const warmupStart = performance.now();
 	await engine.warmup(protocol);
 	const warmupMs = performance.now() - warmupStart;
