@@ -9,7 +9,15 @@ import {
 	streamOpenAIResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { stream as streamModel, streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Context, FetchImpl, Model, ProviderSessionState, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	Context,
+	FetchImpl,
+	Model,
+	ProviderSessionState,
+	SimpleStreamOptions,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
@@ -440,6 +448,71 @@ describe("OpenAI Responses explicit prompt cache policy", () => {
 			},
 			{ role: "user", content: [{ type: "input_text", text: "only prompt" }] },
 		]);
+	});
+
+	it("advances the stable cache boundary from tool output through later dialogue", () => {
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_read", name: "read", arguments: { path: "README.md" } }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5.6",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_read",
+			toolName: "read",
+			content: [{ type: "text", text: "file contents" }],
+			isError: false,
+			timestamp: 2,
+		};
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "read README.md", timestamp: 0 },
+				assistant,
+				toolResult,
+				{ role: "user", content: "summarize it", timestamp: 3 },
+			],
+		};
+		const params = buildParams(
+			openAI56ResponsesModel,
+			context,
+			{ promptCache: { mode: "explicit" } },
+			undefined,
+		).params;
+
+		const output = params.input?.find(item => item.type === "function_call_output");
+		expect(output).toMatchObject({
+			output: [{ type: "input_text", text: "file contents", prompt_cache_breakpoint: { mode: "explicit" } }],
+		});
+
+		context.messages.push(
+			{ ...assistant, content: [{ type: "text", text: "summary" }], stopReason: "stop", timestamp: 4 },
+			{ role: "user", content: "explain the installation steps", timestamp: 5 },
+		);
+		const continued = buildParams(
+			openAI56ResponsesModel,
+			context,
+			{ promptCache: { mode: "explicit" }, statefulResponses: false },
+			undefined,
+		).params;
+		expect(continued.input?.find(item => item.type === "function_call_output")).toMatchObject({
+			output: "file contents",
+		});
+		expect(continued.input?.[3]).toMatchObject({
+			role: "user",
+			content: [{ type: "input_text", text: "summarize it", prompt_cache_breakpoint: { mode: "explicit" } }],
+		});
 	});
 
 	it("routes explicit policy through streamSimple", async () => {
