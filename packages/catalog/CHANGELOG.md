@@ -35,6 +35,9 @@
 ### Fixed
 
 - Fixed OpenCode Zen Gemini 4 Argon failing with an unsupported protocol; it now uses the native Gemini endpoint ([#15977](https://github.com/can1357/oh-my-pi/issues/15977)).
+### Added
+
+- Added Munito (`munito`) as an open-model provider: OpenAI-compatible chat completions at `api.munito.ai/inference/v1` with keyless-authoritative `/models` discovery, canonical-reference hydration, and `omp login munito` ([#15546](https://github.com/can1357/oh-my-pi/pull/15546) by [@jpds](https://github.com/jpds))
 
 ## [18.11.1] - 2026-10-15
 
