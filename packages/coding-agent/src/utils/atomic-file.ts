@@ -1,5 +1,41 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { hasFsCode, isEexist, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
+
+export interface AtomicWriteOptions {
+	/** Permission bits for the published file; a new file is private (`0600`) unless given. */
+	mode?: number;
+	/** Runs once the sibling is durable and immediately before the rename; if it throws, nothing is published. */
+	beforePublish?: () => Promise<void>;
+}
+
+/** Write a file through a synced sibling before publishing it. */
+export async function writeFileAtomically(
+	filePath: string,
+	content: string,
+	options: AtomicWriteOptions = {},
+): Promise<void> {
+	await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+	const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	let removeTemp = false;
+	try {
+		const handle = await fs.promises.open(tempPath, "wx", 0o600);
+		removeTemp = true;
+		try {
+			// `open` applies the umask; chmod sets the exact bits before any content lands in the file.
+			if (options.mode !== undefined) await handle.chmod(options.mode);
+			await handle.writeFile(content, "utf8");
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+		await options.beforePublish?.();
+		await replaceFileAtomically(tempPath, filePath);
+		removeTemp = false;
+	} finally {
+		if (removeTemp) await fs.promises.rm(tempPath, { force: true });
+	}
+}
 
 /**
  * Publish a staged sibling file atomically, preserving an existing destination
