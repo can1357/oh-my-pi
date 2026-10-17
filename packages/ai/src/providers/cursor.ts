@@ -1385,6 +1385,14 @@ function streamCursorWithWireMode(
 				cursorConversations.set(conversationId!, conversationEntry);
 			};
 
+			const invalidateCheckpoint = (): void => {
+				checkpointCoversTurn = false;
+				if (!usageState || usageState.checkpointTokens === undefined) return;
+				usageState.checkpointTokens = undefined;
+				usageState.trustedContextTokens = undefined;
+				output.usage.contextTokens = 0;
+			};
+
 			// Client replies that carry a local result (exec output, exec control,
 			// interaction-query answers) advance the turn past any checkpoint the
 			// server sent before them: resuming from that checkpoint re-issues the
@@ -1395,7 +1403,7 @@ function streamCursorWithWireMode(
 			const resultWriter: CursorMessageWriter = {
 				write(frame) {
 					progressVersion++;
-					checkpointCoversTurn = false;
+					invalidateCheckpoint();
 					resultTransport.write(frame);
 				},
 			};
@@ -1466,7 +1474,7 @@ function streamCursorWithWireMode(
 							interactionCase !== "stepCompleted" &&
 							interactionCase !== "turnEnded"
 						) {
-							checkpointCoversTurn = false;
+							invalidateCheckpoint();
 						}
 						const isTurnEnded = interactionCase === "turnEnded";
 						// Dispatch is fire-and-forget so the socket keeps draining while a
@@ -1586,7 +1594,7 @@ function streamCursorWithWireMode(
 						call[kStreamingPartialJson] === undefined
 					),
 			);
-			if (flushChangesTurn) checkpointCoversTurn = false;
+			if (flushChangesTurn) invalidateCheckpoint();
 			flushOpenToolCalls(output, stream, state);
 			// Results that flush and server-owned tools reported are still settling
 			// through the host; the digest must see them as the host stored them.

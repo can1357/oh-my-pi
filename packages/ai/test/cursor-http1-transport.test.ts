@@ -8,9 +8,20 @@ import {
 	AgentServerMessageSchema,
 	BidiAppendRequestSchema,
 	BidiRequestIdSchema,
+	ConversationStateStructureSchema,
+	ConversationTokenDetailsSchema,
+	ExecServerMessageSchema,
+	type InteractionUpdate,
 	InteractionUpdateSchema,
+	McpArgsSchema,
+	McpToolCallSchema,
+	ReadArgsSchema,
+	StepCompletedUpdateSchema,
 	TextDeltaUpdateSchema,
+	ToolCallSchema,
+	ToolCallStartedUpdateSchema,
 	TurnEndedUpdateSchema,
+	type TurnEndedUpdate,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
@@ -31,28 +42,39 @@ function readConnectMessage(frame: Uint8Array): Uint8Array {
 	return frame.subarray(5);
 }
 
-function textDeltaFrame(text: string): Buffer {
-	const message = create(AgentServerMessageSchema, {
-		message: {
-			case: "interactionUpdate",
-			value: create(InteractionUpdateSchema, {
-				message: { case: "textDelta", value: create(TextDeltaUpdateSchema, { text }) },
+function interactionFrame(message: InteractionUpdate["message"]): Buffer {
+	return frameConnectMessage(
+		toBinary(
+			AgentServerMessageSchema,
+			create(AgentServerMessageSchema, {
+				message: { case: "interactionUpdate", value: create(InteractionUpdateSchema, { message }) },
 			}),
-		},
-	});
-	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+		),
+	);
 }
 
-function turnEndedFrame(): Buffer {
-	const message = create(AgentServerMessageSchema, {
-		message: {
-			case: "interactionUpdate",
-			value: create(InteractionUpdateSchema, {
-				message: { case: "turnEnded", value: create(TurnEndedUpdateSchema, {}) },
+function textDeltaFrame(text: string): Buffer {
+	return interactionFrame({ case: "textDelta", value: create(TextDeltaUpdateSchema, { text }) });
+}
+
+function turnEndedFrame(usage: Partial<TurnEndedUpdate> = {}): Buffer {
+	return interactionFrame({ case: "turnEnded", value: create(TurnEndedUpdateSchema, usage) });
+}
+
+function checkpointFrame(usedTokens: number): Buffer {
+	return frameConnectMessage(
+		toBinary(
+			AgentServerMessageSchema,
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "conversationCheckpointUpdate",
+					value: create(ConversationStateStructureSchema, {
+						tokenDetails: create(ConversationTokenDetailsSchema, { usedTokens }),
+					}),
+				},
 			}),
-		},
-	});
-	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+		),
+	);
 }
 
 function connectEndErrorFrame(code: string): Buffer {
@@ -245,3 +267,197 @@ it(
 	},
 	SETTLE_TIMEOUT_MS,
 );
+
+it.each([
+	{
+		name: "text progress then bill echo",
+		progress: true,
+		echo: true,
+		echoFirst: false,
+		refreshed: false,
+		expected: 0,
+	},
+	{
+		name: "text progress after a bill echo",
+		progress: true,
+		echo: true,
+		echoFirst: true,
+		refreshed: false,
+		expected: 0,
+	},
+	{
+		name: "text progress without another checkpoint",
+		progress: true,
+		echo: false,
+		echoFirst: false,
+		refreshed: false,
+		expected: 0,
+	},
+	{
+		name: "fresh checkpoint after text progress",
+		progress: true,
+		echo: true,
+		echoFirst: false,
+		refreshed: true,
+		expected: 427_000,
+	},
+	{
+		name: "bill echo without later progress",
+		progress: false,
+		echo: true,
+		echoFirst: false,
+		refreshed: false,
+		expected: 424_000,
+	},
+	{
+		name: "usage and keepalives after a checkpoint",
+		progress: false,
+		echo: false,
+		echoFirst: false,
+		refreshed: false,
+		expected: 424_000,
+	},
+])("does not publish stale context occupancy: $name", async scenario => {
+	const server = startRunSseServer(controller => {
+		controller.enqueue(textDeltaFrame("prefix"));
+		controller.enqueue(checkpointFrame(424_000));
+		if (scenario.echoFirst) controller.enqueue(checkpointFrame(892_018));
+		if (scenario.progress) controller.enqueue(textDeltaFrame(" tail"));
+		controller.enqueue(interactionFrame({ case: "heartbeat", value: {} }));
+		controller.enqueue(interactionFrame({ case: "tokenDelta", value: { tokens: 10 } }));
+		controller.enqueue(interactionFrame({ case: "stepCompleted", value: create(StepCompletedUpdateSchema, {}) }));
+		if (scenario.refreshed) controller.enqueue(checkpointFrame(427_000));
+		controller.enqueue(turnEndedFrame({ inputTokens: 889_190n, outputTokens: 2_828n, cacheReadTokens: 882_816n }));
+		if (scenario.echo && !scenario.echoFirst) controller.enqueue(checkpointFrame(892_018));
+		controller.close();
+	});
+	try {
+		const model = { ...makeModel(server.url.toString()), contextWindow: 500_000, maxTokens: 8_192 };
+		const response = streamCursor(model, context, {
+			apiKey: "test-token",
+			transport: "http1",
+			signal: AbortSignal.timeout(SETTLE_TIMEOUT_MS),
+		});
+		const { result, terminalEvents } = await drain(response);
+
+		expect(terminalEvents).toEqual(["done"]);
+		expect(result.content).toEqual([
+			expect.objectContaining({ type: "text", text: scenario.progress ? "prefix tail" : "prefix" }),
+		]);
+		expect(result.usage.contextTokens).toBe(scenario.expected);
+		expect(result.usage.totalTokens).toBe(892_018);
+	} finally {
+		server.stop(true);
+	}
+});
+
+it("invalidates a checkpoint when a pending exec result advances the completed turn", async () => {
+	const releaseRead = Promise.withResolvers<void>();
+	const server = startRunSseServer(controller => {
+		controller.enqueue(
+			Buffer.concat([
+				frameConnectMessage(
+					toBinary(
+						AgentServerMessageSchema,
+						create(AgentServerMessageSchema, {
+							message: {
+								case: "execServerMessage",
+								value: create(ExecServerMessageSchema, {
+									id: 1,
+									execId: "pending-read",
+									message: {
+										case: "readArgs",
+										value: create(ReadArgsSchema, { path: "/fixture", toolCallId: "read-1" }),
+									},
+								}),
+							},
+						}),
+					),
+				),
+				checkpointFrame(424_000),
+				turnEndedFrame({ inputTokens: 889_190n, outputTokens: 2_828n, cacheReadTokens: 882_816n }),
+				checkpointFrame(892_018),
+			]),
+		);
+		controller.close();
+	});
+	try {
+		const response = streamCursor(
+			{ ...makeModel(server.url.toString()), contextWindow: 500_000, maxTokens: 8_192 },
+			context,
+			{
+				apiKey: "test-token",
+				transport: "http1",
+				signal: AbortSignal.timeout(SETTLE_TIMEOUT_MS),
+				execHandlers: {
+					async read() {
+						await releaseRead.promise;
+						return {
+							role: "toolResult",
+							toolCallId: "read-1",
+							toolName: "read",
+							content: [{ type: "text", text: "file contents" }],
+							isError: false,
+							timestamp: 1,
+						};
+					},
+				},
+			},
+		);
+		const { result, terminalEvents } = await drain(response, type => {
+			if (type === "toolcall_start") releaseRead.resolve();
+		});
+
+		expect(terminalEvents).toEqual(["done"]);
+		expect(result.content).toEqual([expect.objectContaining({ type: "toolCall", id: "read-1", name: "read" })]);
+		expect(result.usage.contextTokens).toBe(0);
+		expect(result.usage.totalTokens).toBe(892_018);
+	} finally {
+		releaseRead.resolve();
+		server.stop(true);
+	}
+});
+
+it("invalidates a checkpoint when teardown settles an unfinished tool call", async () => {
+	const server = startRunSseServer(controller => {
+		controller.enqueue(
+			Buffer.concat([
+				interactionFrame({
+					case: "toolCallStarted",
+					value: create(ToolCallStartedUpdateSchema, {
+						callId: "pending-mcp",
+						toolCall: create(ToolCallSchema, {
+							tool: {
+								case: "mcpToolCall",
+								value: create(McpToolCallSchema, { args: create(McpArgsSchema, { toolCallId: "mcp-1" }) }),
+							},
+						}),
+					}),
+				}),
+				checkpointFrame(424_000),
+				turnEndedFrame({ inputTokens: 889_190n, outputTokens: 2_828n, cacheReadTokens: 882_816n }),
+				checkpointFrame(892_018),
+			]),
+		);
+		controller.close();
+	});
+	try {
+		const response = streamCursor(
+			{ ...makeModel(server.url.toString()), contextWindow: 500_000, maxTokens: 8_192 },
+			context,
+			{
+				apiKey: "test-token",
+				transport: "http1",
+				signal: AbortSignal.timeout(SETTLE_TIMEOUT_MS),
+			},
+		);
+		const { result, terminalEvents } = await drain(response);
+
+		expect(terminalEvents).toEqual(["done"]);
+		expect(result.content).toEqual([expect.objectContaining({ type: "toolCall", id: "mcp-1" })]);
+		expect(result.usage.contextTokens).toBe(0);
+		expect(result.usage.totalTokens).toBe(892_018);
+	} finally {
+		server.stop(true);
+	}
+});

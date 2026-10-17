@@ -65,6 +65,8 @@ Disabling future native compaction does not disable normal replay of an existing
 
 Compaction preparation uses the newest trustworthy assistant usage plus locally counted messages appended after it. Explicitly unusable usage, aborted/error turns, and usage made stale by pruning are not anchors. Retained messages from before a compaction still carry the old prompt's usage, so anchors cannot cross a readable compaction or reset boundary. When no valid anchor remains, preparation counts the retained/live messages locally. The same estimate supplies the pre-compaction size and the provider/local ratio used to bound the retained-history budget.
 
+Cursor checkpoint occupancy remains valid only while that checkpoint covers the current turn. Later content or tool progress, client exec replies, and teardown-generated tool results invalidate both the occupancy and its pending revalidation at turn end. An invalidated report is persisted as explicit zero occupancy so transcript accounting falls back to the preceding anchor plus the whole current turn, rather than treating a partial-turn checkpoint as a complete-turn anchor. A new valid checkpoint restores anchoring; keepalives, token deltas, and step/turn-end usage do not invalidate it.
+
 ## Compaction pipeline
 
 ### Triggers
