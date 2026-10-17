@@ -49,6 +49,7 @@ import {
 	inheritWarnings,
 	lookup as lookupSetting,
 	resetRegistryForTest,
+	type Setting,
 	settingValuesEqual,
 	type ValueCacheEntry,
 	type WarnState,
@@ -64,6 +65,31 @@ import { cfgShellPath } from "../exec/settings";
 
 /** Settings layer that supplies an effective value; see {@link Settings.getProvenance}. */
 export type SettingProvenance = "env" | "runtime" | "overlay" | "project" | "global" | "default";
+
+/** Persisted layer whose value may safely seed another process's speculative startup cache. */
+export function settingCacheScope(provenance: SettingProvenance): "global" | "project" | undefined {
+	if (provenance === "project") return "project";
+	if (provenance === "global" || provenance === "default") return "global";
+	return undefined;
+}
+
+/** Every project settings file that can become authoritative, including files not created yet. */
+function prospectiveProjectSettingsSourcePaths(cwd: string): string[] {
+	const projectCwd = path.resolve(cwd);
+	const projectConfigDir = getProjectAgentDir(projectCwd);
+	return [
+		path.join(projectConfigDir, "config.yml"),
+		path.join(projectConfigDir, "settings.json"),
+		path.join(projectCwd, ".claude", "settings.json"),
+		path.join(projectCwd, ".cursor", "settings.json"),
+		path.join(projectCwd, ".gemini", "settings.json"),
+		path.join(projectCwd, ".codex", "config.toml"),
+		path.join(projectCwd, "opencode.json"),
+		path.join(projectCwd, "opencode.jsonc"),
+		path.join(projectCwd, ".opencode", "opencode.json"),
+		path.join(projectCwd, ".opencode", "opencode.jsonc"),
+	];
+}
 
 /** Raw settings object as stored in YAML */
 export interface RawSettings {
@@ -619,6 +645,10 @@ export class Settings {
 	readonly warnState: WarnState = { invalid: new Map(), items: new Map() };
 	/** Change listeners bucketed by the `slot` of the setting they observe ({@link onEffectiveChange}). */
 	#changeListeners: (Set<SettingChangeListener> | undefined)[] = [];
+	/** Global-layer listeners fire even when a project value masks the changed setting. */
+	#globalChangeListeners: (Set<SettingChangeListener> | undefined)[] = [];
+	/** Project-layer listeners fire even when an equal global value masks the layer transition. */
+	#projectChangeListeners: (Set<SettingChangeListener> | undefined)[] = [];
 	/** Forwarders of every change into live {@link overlay} children. */
 	#childForwarders = new Set<SettingChangeListener>();
 	/** Instance this overlay reads through to ({@link overlay}); overlays never persist or write back. */
@@ -917,6 +947,7 @@ export class Settings {
 		}
 		this.#rebuildMerged();
 		if (persistGlobal) this.#queueSave();
+		if (persistGlobal) this.#notifyGlobalChange(setting);
 		this.#fireIfChanged(setting, prev);
 	}
 
@@ -933,6 +964,7 @@ export class Settings {
 		if (current !== undefined) this.#stageGlobal(setting.segments, undefined);
 		this.#rebuildMerged();
 		if (current !== undefined) this.#queueSave();
+		if (current !== undefined) this.#notifyGlobalChange(setting);
 		this.#fireIfChanged(setting, prev);
 	}
 
@@ -963,6 +995,7 @@ export class Settings {
 		}
 		this.#rebuildMerged();
 		if (staged) this.#queueSave();
+		if (staged) this.#notifyGlobalChange(setting);
 		this.#fireIfChanged(setting, prev);
 	}
 
@@ -1051,6 +1084,16 @@ export class Settings {
 		return allSettings().map(setting => setting.get(this));
 	}
 
+	/** Configured value of every setting in the global layer, before project masking. */
+	#globalSnapshot(): unknown[] {
+		return allSettings().map(setting => this.globalValue(setting));
+	}
+
+	#projectSnapshot(): unknown[] {
+		const project = projectLayerForMerge(this.#project);
+		return allSettings().map(setting => configuredValue(project, setting, this.#cwd));
+	}
+
 	/**
 	 * Notifies change listeners for every setting whose effective value differs from
 	 * `previous` (disk reload, save-time merge, project re-scope).
@@ -1060,6 +1103,25 @@ export class Settings {
 		for (let i = 0; i < previous.length; i++) {
 			const setting = settings[i];
 			if (!settingValuesEqual(setting.get(this), previous[i])) this.#notifyChange(setting);
+		}
+	}
+
+	#fireGlobalChangesSince(previous: readonly unknown[]): void {
+		const settings = allSettings();
+		for (let i = 0; i < previous.length; i++) {
+			const setting = settings[i];
+			if (!settingValuesEqual(this.globalValue(setting), previous[i])) this.#notifyGlobalChange(setting);
+		}
+	}
+
+	#fireProjectChangesSince(previous: readonly unknown[], force = false): void {
+		const settings = allSettings();
+		const project = projectLayerForMerge(this.#project);
+		for (let i = 0; i < previous.length; i++) {
+			const setting = settings[i];
+			if (force || !settingValuesEqual(configuredValue(project, setting, this.#cwd), previous[i])) {
+				this.#notifyProjectChange(setting);
+			}
 		}
 	}
 
@@ -1074,6 +1136,16 @@ export class Settings {
 		if (this.#childForwarders.size > 0) runChangeListeners(this.#childForwarders, setting);
 	}
 
+	#notifyGlobalChange(setting: AnySetting): void {
+		const listeners = this.#globalChangeListeners[setting.slot];
+		if (listeners) runChangeListeners(listeners, setting);
+	}
+
+	#notifyProjectChange(setting: AnySetting): void {
+		const listeners = this.#projectChangeListeners[setting.slot];
+		if (listeners) runChangeListeners(listeners, setting);
+	}
+
 	/**
 	 * Registry plumbing behind `Derived.listen` and `effect`: calls `listener` synchronously
 	 * whenever the effective value of one of `sources` changes in this instance. Returns the
@@ -1083,6 +1155,26 @@ export class Settings {
 		for (const source of sources) (this.#changeListeners[source.slot] ??= new Set()).add(listener);
 		return () => {
 			for (const source of sources) this.#changeListeners[source.slot]?.delete(listener);
+		};
+	}
+
+	/** Observe writes to the global layer even when a higher-precedence project value masks them. */
+	onGlobalChange(sources: readonly AnySetting[], listener: SettingChangeListener): () => void {
+		const stopParent = this.#parent?.onGlobalChange(sources, listener);
+		for (const source of sources) (this.#globalChangeListeners[source.slot] ??= new Set()).add(listener);
+		return () => {
+			stopParent?.();
+			for (const source of sources) this.#globalChangeListeners[source.slot]?.delete(listener);
+		};
+	}
+
+	/** Observe project-layer changes even when the effective value stays equal to another layer. */
+	onProjectChange(sources: readonly AnySetting[], listener: SettingChangeListener): () => void {
+		const stopParent = this.#parent?.onProjectChange(sources, listener);
+		for (const source of sources) (this.#projectChangeListeners[source.slot] ??= new Set()).add(listener);
+		return () => {
+			stopParent?.();
+			for (const source of sources) this.#projectChangeListeners[source.slot]?.delete(listener);
 		};
 	}
 
@@ -1172,11 +1264,7 @@ export class Settings {
 			}
 		};
 		for (const filename of MAIN_CONFIG_FILENAMES) addFile(path.join(this.#agentDir, filename));
-		const projectCwd = path.resolve(this.#cwd);
-		const projectConfigDir = getProjectAgentDir(projectCwd);
-		addFile(path.join(projectConfigDir, "config.yml"));
-		addFile(path.join(projectConfigDir, "settings.json"));
-		addFile(path.join(projectCwd, ".claude", "settings.json"));
+		for (const file of prospectiveProjectSettingsSourcePaths(this.#cwd)) addFile(file);
 		for (const file of this.#projectSourcePaths) addFile(file);
 		for (const file of this.#configFiles) addFile(file);
 		return targets;
@@ -1433,6 +1521,8 @@ export class Settings {
 			if (!keepLastGood) this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(layers)), this.#cwd);
 
 			const previous = this.#snapshot();
+			const previousGlobal = this.#globalSnapshot();
+			const previousProject = this.#projectSnapshot();
 			for (const refresh of adopted) refresh.commit();
 			this.#global = layers.global;
 			this.#project = layers.project;
@@ -1441,6 +1531,8 @@ export class Settings {
 			for (const setting of settled) this.#softPins.delete(setting);
 			this.#rebuildMerged();
 			this.#fireChangesSince(previous);
+			this.#fireGlobalChangesSince(previousGlobal);
+			this.#fireProjectChangesSince(previousProject);
 			return;
 		}
 	}
@@ -1506,6 +1598,7 @@ export class Settings {
 			this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(candidate)), normalized);
 
 			const previous = this.#snapshot();
+			const previousProject = this.#projectSnapshot();
 			this.#cwd = normalized;
 			this.#overrides = candidate.overrides;
 			for (const setting of settledPins) this.#softPins.delete(setting);
@@ -1516,6 +1609,7 @@ export class Settings {
 			}
 			this.#rebuildMerged();
 			this.#fireChangesSince(previous);
+			this.#fireProjectChangesSince(previousProject, true);
 			this.#syncFileWatchers();
 		} catch (error) {
 			settled.reject(error);
@@ -1540,6 +1634,16 @@ export class Settings {
 
 	getAgentDir(): string {
 		return this.#agentDir;
+	}
+
+	/** Files whose on-disk identity validates a speculative cached setting value. */
+	settingCacheSourcePaths(scope: "global" | "project"): readonly string[] {
+		if (scope === "global") {
+			const own = MAIN_CONFIG_FILENAMES.map(filename => path.join(this.#agentDir, filename));
+			return this.#parent ? [...new Set([...this.#parent.settingCacheSourcePaths(scope), ...own])] : own;
+		}
+		const own = [...prospectiveProjectSettingsSourcePaths(this.#cwd), ...this.#projectSourcePaths];
+		return this.#parent ? [...new Set([...this.#parent.settingCacheSourcePaths(scope), ...own])] : [...new Set(own)];
 	}
 
 	/** Resolved absolute paths of the config overlays supplied to this instance. */
@@ -1569,6 +1673,13 @@ export class Settings {
 	getGlobalSettings(): RawSettings {
 		const own = structuredClone(this.#global);
 		return this.#parent ? this.#deepMerge(this.#parent.getGlobalSettings(), own) : own;
+	}
+
+	/** Value supplied by the global layer alone, before project and launch-local overrides. */
+	globalValue<T>(setting: Setting<T>): T | undefined {
+		const own = getByPath(this.#global, setting.segments);
+		if (own !== undefined && own !== null) return own as T;
+		return this.#parent?.globalValue(setting);
 	}
 
 	/**
@@ -2406,9 +2517,9 @@ export class Settings {
 		const discoveryCwd = path.resolve(cwd);
 		const projectConfigDir = getProjectAgentDir(cwd);
 		const projectConfigPath = path.join(projectConfigDir, "config.yml");
-		invalidateCapabilityFsCache(projectConfigPath);
-		invalidateCapabilityFsCache(path.join(projectConfigDir, "settings.json"));
-		invalidateCapabilityFsCache(path.join(discoveryCwd, ".claude", "settings.json"));
+		for (const sourcePath of prospectiveProjectSettingsSourcePaths(discoveryCwd)) {
+			invalidateCapabilityFsCache(sourcePath);
+		}
 		for (const sourcePath of this.#projectSourcePaths) invalidateCapabilityFsCache(sourcePath);
 		let shellPathSource: string | undefined;
 		let merged: RawSettings = {};
@@ -3801,9 +3912,11 @@ export class Settings {
 		this.#applyPendingGlobalWrites(saved);
 		if (!this.#acceptsLayers({ ...this.#ownLayers(), global: saved }, source)) return;
 		const previous = this.#snapshot();
+		const previousGlobal = this.#globalSnapshot();
 		this.#global = saved;
 		this.#rebuildMerged();
 		this.#fireChangesSince(previous);
+		this.#fireGlobalChangesSince(previousGlobal);
 	}
 
 	/** Re-applies every global write still pending a save onto `target`, a global layer read from disk. */

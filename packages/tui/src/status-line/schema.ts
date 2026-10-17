@@ -4,6 +4,7 @@ export const STATUS_LINE_SEGMENT_IDS = [
 	"status",
 	"model",
 	"mode",
+	"profile",
 	"path",
 	"git",
 	"pr",

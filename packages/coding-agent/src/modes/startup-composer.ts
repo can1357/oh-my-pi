@@ -1,4 +1,6 @@
 import type { Terminal } from "@oh-my-pi/pi-tui";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
 	COMPOSER_DEFAULTS,
 	Composer,
@@ -12,7 +14,14 @@ import {
 } from "@oh-my-pi/pi-tui/prompt/composer-cache";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { initThemeSync } from "@oh-my-pi/pi-tui/theme";
+import {
+	hasPositiveMovedProjectEvidence,
+	readTerminalBreadcrumbEntrySync,
+	resolveBreadcrumbToInteractiveRoot,
+	sessionDirForCwd,
+} from "../session/session-paths";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
+import { findMostRecentNonEmptySessionSync } from "../session/recent-session-sync";
 
 /** Inputs available at the CLI prepaint boundary before command modules load. */
 export interface PrepaintComposerOptions {
@@ -24,11 +33,21 @@ export interface PrepaintComposerOptions {
 	readonly preferences?: Partial<ComposerPreferences>;
 	readonly theme?: ComposerThemePreferences;
 	readonly cache?: boolean;
+	/** Whether this launch shape can auto-resume the cached session. */
+	readonly allowSessionUsage?: boolean;
+	/** Exact session file this launch will resume; inferred from the terminal breadcrumb by default. */
+	readonly sessionFile?: string;
 }
 
 /** Final settings pushed into the live composer after Settings and the theme resolve. */
 export interface PrepaintComposerPreferences extends ComposerPreferences {
 	readonly theme: ComposerThemePreferences;
+	readonly autoResume: boolean;
+	/** Persisted settings layer that may safely seed the next launch. */
+	readonly autoResumeCacheScope?: "global" | "project";
+	readonly autoResumeSourcePaths?: readonly string[];
+	/** Potential project sources that can override inherited global intent. */
+	readonly autoResumeProjectSourcePaths?: readonly string[];
 }
 
 interface PendingComposer {
@@ -39,6 +58,71 @@ interface PendingComposer {
 }
 
 let pendingComposer: PendingComposer | undefined;
+
+export interface TerminalSessionPrepaint {
+	readonly cacheCwd: string;
+	readonly sessionFile: string;
+}
+
+export interface TerminalSessionPrepaintOptions {
+	/** Whether cached settings permit a potentially expensive current-project transcript scan. */
+	readonly canAutoResume?: (cacheCwd: string, movedToCwd?: string) => boolean;
+}
+
+/** Resolve the newest canonical project-local target `continueRecent()` will choose. */
+function resolveCurrentProjectSession(cwd: string): string | undefined {
+	return findMostRecentNonEmptySessionSync(sessionDirForCwd(cwd));
+}
+
+/** Cached usage is unsafe when process-local settings can override the persisted auto-resume intent. */
+export function canReusePrepaintSessionUsage(
+	allowSessionUsage: boolean | undefined,
+	configFiles?: string,
+	sessionDirOverride?: string,
+): boolean {
+	return (
+		allowSessionUsage === true && !(configFiles?.split(path.delimiter).some(Boolean) ?? false) && !sessionDirOverride
+	);
+}
+
+/** Resolve the session identity needed by prepaint, without loading the session graph. */
+export function resolveTerminalSessionPrepaint(
+	cwd: string,
+	options: TerminalSessionPrepaintOptions = {},
+): TerminalSessionPrepaint | undefined {
+	const breadcrumb = readTerminalBreadcrumbEntrySync();
+	const resolvedCwd = path.resolve(cwd);
+	const canAutoResume = options.canAutoResume ?? (() => true);
+	// Match continueRecent(): a lazy /new boundary that never materialized must
+	// not leak an older current-project session into prepaint, even after cwd changes.
+	if (breadcrumb?.fresh && !breadcrumb.exists) return undefined;
+	// A terminal without a breadcrumb follows continueRecent()'s project-local
+	// fallback. Resolve it from the same canonical session directory as the live
+	// selector, rather than the last cache writer's possibly custom directory. The
+	// matching cache identity lets the
+	// first frame reserve its usage widths before the session graph loads.
+	if (!breadcrumb) {
+		if (!canAutoResume(resolvedCwd)) return undefined;
+		const currentSessionFile = resolveCurrentProjectSession(resolvedCwd);
+		return currentSessionFile ? { cacheCwd: resolvedCwd, sessionFile: currentSessionFile } : undefined;
+	}
+	const breadcrumbCwd = path.resolve(breadcrumb.cwd);
+	const breadcrumbSessionFile = resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile);
+	if (breadcrumbCwd === resolvedCwd) return { cacheCwd: resolvedCwd, sessionFile: breadcrumbSessionFile };
+	const breadcrumbCwdExists = fs.existsSync(breadcrumbCwd);
+	const looksLikeMovedProject =
+		!breadcrumbCwdExists && hasPositiveMovedProjectEvidence(breadcrumb.cwdIdentity, resolvedCwd);
+	// continueRecent() always prefers a genuine target-project transcript for a
+	// cross-cwd breadcrumb, even while the old cwd still exists. A moved project's
+	// project-scoped cache remains keyed by its prior path, so either row may
+	// authorize this scan.
+	const mayScanCurrentProject =
+		canAutoResume(resolvedCwd) || (looksLikeMovedProject && canAutoResume(breadcrumbCwd, resolvedCwd));
+	const currentSessionFile = mayScanCurrentProject ? resolveCurrentProjectSession(resolvedCwd) : undefined;
+	if (currentSessionFile) return { cacheCwd: resolvedCwd, sessionFile: currentSessionFile };
+	if (breadcrumbCwdExists || !looksLikeMovedProject || !canAutoResume(breadcrumbCwd, resolvedCwd)) return undefined;
+	return { cacheCwd: breadcrumbCwd, sessionFile: breadcrumbSessionFile };
+}
 
 /** Ownership token that transfers one already-started Composer to InteractiveMode. */
 export class ComposerLease {
@@ -70,7 +154,26 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 	if (pendingComposer) throw new Error("A prepaint composer is already active");
 	const cwd = options.cwd ?? process.cwd();
 	const cache = options.cache === false ? undefined : sharedComposerCache();
-	const cached = cache ? cache.read(cwd) : { preferences: undefined, theme: undefined, status: undefined };
+	const allowSessionUsage = canReusePrepaintSessionUsage(
+		options.allowSessionUsage,
+		process.env.PI_CONFIG_FILES,
+		process.env.PI_CODING_AGENT_SESSION_DIR,
+	);
+	const terminalSession = options.sessionFile
+		? { cacheCwd: cwd, sessionFile: options.sessionFile }
+		: resolveTerminalSessionPrepaint(cwd, {
+				canAutoResume: (cacheCwd, movedToCwd) =>
+					allowSessionUsage &&
+					(movedToCwd
+						? cache?.rebaseMovedProjectAutoResume(cacheCwd, movedToCwd)
+						: cache?.cachedAutoResume(cacheCwd)) === true,
+			});
+	const cached = cache
+		? cache.read(terminalSession?.cacheCwd ?? cwd, {
+				allowSessionUsage,
+				sessionFile: terminalSession?.sessionFile,
+			})
+		: { preferences: undefined, theme: undefined, status: undefined };
 	const theme = { ...cached.theme, ...options.theme };
 	initThemeSync(theme.symbolPreset, theme.colorBlindMode, theme.darkTheme, theme.lightTheme);
 	setMagicKeywords(MAGIC_KEYWORDS);
@@ -130,4 +233,13 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 	// buffered) everything typed during the load; the editor replays it here.
 	pending.composer.enableInput();
 	pending.cache?.writeUi(pending.cwd, preferences, update.theme);
+	if (update.autoResumeCacheScope) {
+		pending.cache?.writeAutoResume(
+			pending.cwd,
+			update.autoResume,
+			update.autoResumeCacheScope === "project",
+			update.autoResumeSourcePaths,
+			update.autoResumeProjectSourcePaths,
+		);
+	}
 }

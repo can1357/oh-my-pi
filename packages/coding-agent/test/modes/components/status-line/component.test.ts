@@ -145,6 +145,23 @@ describe("StatusLineComponent", () => {
 		expect(border).not.toContain("%");
 	});
 
+	it("renders the compact context prefix", () => {
+		const statusLine = new StatusLineComponent(
+			makeSessionWithLastMessage(null) as unknown as AgentSession,
+			statusLineHost,
+		);
+		statusLine.updateSettings({
+			preset: "custom",
+			leftSegments: ["context_pct"],
+			rightSegments: [],
+			contextLine: "off",
+			segmentOptions: { context_pct: { compact: true } },
+		});
+
+		const rendered = Bun.stripANSI(statusLine.getTopBorder(80).content);
+		expect(rendered).toContain("ctx:0.0%");
+	});
+
 	it("renders primary and advisor costs separately with subscription indicator in Unicode preset", () => {
 		const statusLine = statusLines.track(
 			new StatusLineComponent(

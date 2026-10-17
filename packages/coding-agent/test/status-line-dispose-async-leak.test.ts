@@ -13,7 +13,7 @@
  * `VcsGitRepo.defaultBranch` (the same entry point `#isDefaultBranch` awaits) and
  * asserting `#onBranchChange` never fires post-dispose.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { StatusLineSettings } from "@oh-my-pi/pi-tui/status-line";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
@@ -22,23 +22,23 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import type { VcsGitRepo, VcsGitRepoInfo, VcsHeadState, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests } from "@oh-my-pi/pi-utils";
+import {
+	beginSettingsTest,
+	restoreEnvValue,
+	restoreSettingsTestState,
+	type SettingsTestState,
+} from "./helpers/settings-test-state";
 import { StatusLineTestComponents } from "./helpers/status-line";
 
-const originalProjectDir = getProjectDir();
+const originalOmpProfile = process.env.OMP_PROFILE;
+const originalPiProfile = process.env.PI_PROFILE;
+let settingsState: SettingsTestState | undefined;
 
-beforeAll(async () => {
-	resetSettingsForTest();
+beforeEach(async () => {
+	settingsState = beginSettingsTest();
 	await Settings.init({ inMemory: true });
 	await initTheme();
-});
-
-afterAll(() => {
-	resetSettingsForTest();
-	setProjectDir(originalProjectDir);
-});
-
-beforeEach(() => {
 	headState = fakeRefHead;
 	defaultBranchMock = vi.fn(async () => null);
 	vi.spyOn(vcs, "gitInfo").mockReturnValue(fakeRepoInfo);
@@ -62,7 +62,14 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	vi.restoreAllMocks();
+	restoreSettingsTestState(settingsState);
+	settingsState = undefined;
+	// Profile is process-wide; restore the raw environment after settings-state
+	// cleanup so `setAgentDir()` inside the helper does not leave subsequent
+	// files running under the default profile (P1 review: restore active profile).
+	restoreEnvValue("OMP_PROFILE", originalOmpProfile);
+	restoreEnvValue("PI_PROFILE", originalPiProfile);
+	__resetDirsFromEnvForTests();
 });
 
 function makeSession() {
