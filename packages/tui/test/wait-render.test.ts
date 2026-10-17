@@ -8,7 +8,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../../coding-agent/src/prompts/tools/task-summary.md" with { type: "text" };
-import { waitToolRenderer } from "@oh-my-pi/pi-tui/tools/wait";
+import { createIrcMessageCard, waitToolRenderer } from "@oh-my-pi/pi-tui/tools/wait";
 
 function renderLines(resultText: string): string {
 	const result = {
@@ -313,5 +313,94 @@ describe("job renderer task-result preview", () => {
 			// as live work.
 			expect(output).toContain("no turn");
 		});
+	});
+});
+
+describe("IRC body wrapping", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	it("soft-wraps a long body line to the card width when expanded", () => {
+		const longLine = "word ".repeat(40).trim();
+		const result = {
+			content: [{ type: "text" as const, text: "" }],
+			details: {
+				op: "wait" as const,
+				waited: { id: "1", from: "Peer", to: "Main", body: longLine, ts: Date.now() },
+			},
+		};
+		const component = waitToolRenderer.renderResult(
+			result,
+			{ expanded: true, isPartial: false },
+			theme,
+		);
+		const lines = component.render(120) as readonly string[];
+		const stripped = lines.map(line => Bun.stripANSI(line));
+		const bodyLines = stripped.filter(line => line.includes("word"));
+		// A 200-char line wraps to multiple lines at the card width
+		expect(bodyLines.length).toBeGreaterThanOrEqual(2);
+		// Full content preserved across the wrap
+		const words = bodyLines.join(" ").split(/\s+/).filter(w => w === "word");
+		expect(words).toHaveLength(40);
+	});
+
+	it("shows an expand hint on a collapsed card with hidden lines", () => {
+		const body = ["line one", "line two", "line three", "line four"].join("\n");
+		const result = {
+			content: [{ type: "text" as const, text: "" }],
+			details: {
+				op: "wait" as const,
+				waited: { id: "1", from: "Peer", to: "Main", body, ts: Date.now() },
+			},
+		};
+		const component = waitToolRenderer.renderResult(
+			result,
+			{ expanded: false, isPartial: false },
+			theme,
+		);
+		const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+		expect(output).toContain("+2 more lines");
+		expect(output).toContain("Expand");
+	});
+
+	it("preserves ANSI escape codes across a wrap boundary", () => {
+		const longLine = `\x1b[31m${"red ".repeat(40)}\x1b[0m`;
+		const result = {
+			content: [{ type: "text" as const, text: "" }],
+			details: {
+				op: "wait" as const,
+				waited: { id: "1", from: "Peer", to: "Main", body: longLine, ts: Date.now() },
+			},
+		};
+		const component = waitToolRenderer.renderResult(
+			result,
+			{ expanded: true, isPartial: false },
+			theme,
+		);
+		const lines = component.render(120) as readonly string[];
+		const rawJoined = lines.join("\n");
+		// ANSI codes preserved in raw output
+		expect(rawJoined).toContain("\x1b[31m");
+		expect(rawJoined).toContain("\x1b[0m");
+		// Full visible content preserved after stripping
+		const stripped = Bun.stripANSI(rawJoined);
+		const words = stripped.split(/\s+/).filter(w => w === "red");
+		expect(words).toHaveLength(40);
+	});
+
+	it("soft-wraps a long body in an expanded IRC message card", () => {
+		const longLine = "word ".repeat(40).trim();
+		const component = createIrcMessageCard(
+			{ kind: "incoming", from: "Peer", body: longLine },
+			() => true,
+			theme,
+		);
+		const lines = component.render(120) as readonly string[];
+		const stripped = lines.map(line => Bun.stripANSI(line));
+		const bodyLines = stripped.filter(line => line.includes("word"));
+		expect(bodyLines.length).toBeGreaterThanOrEqual(2);
+		const words = bodyLines.join(" ").split(/\s+/).filter(w => w === "word");
+		expect(words).toHaveLength(40);
 	});
 });

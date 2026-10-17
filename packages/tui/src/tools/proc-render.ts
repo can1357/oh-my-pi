@@ -1,14 +1,17 @@
 import type { Component } from "../tui";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../render";
+import { visibleWidth } from "../utils";
 import {
 	cappedHeadLines,
 	formatBadge,
 	formatDuration,
 	formatErrorDetail,
+	formatExpandHint,
 	formatStatusIcon,
 	PREVIEW_LIMITS,
 	TRUNCATE_LENGTHS,
 	type ToolUIColor,
+	wrapTextWithAnsi,
 } from "../render/render-utils";
 import type { Theme } from "../theme/theme";
 import type { NativeToolView, RenderResultOptions } from "./renderer";
@@ -39,19 +42,37 @@ export type ProcWriteDetails =
 /** Process operation selected by a write URL, independent of its content. */
 export type ProcWriteAction = "stdin" | "mode" | "kill";
 
-function preview(body: string, expanded: boolean, theme: Theme, tone: "dim" | "toolOutput" = "dim"): string[] {
+function preview(
+	body: string,
+	expanded: boolean,
+	theme: Theme,
+	tone: "dim" | "toolOutput" = "dim",
+	width?: number,
+): string[] {
 	if (!body.trim()) return [];
-	const limit = expanded ? PREVIEW_LIMITS.EXPANDED_LINES : PREVIEW_LIMITS.COLLAPSED_LINES;
-	const shown = cappedHeadLines(
-		body.split("\n").filter(line => line.trim()),
-		limit,
-	);
 	const quote = theme.fg("dim", theme.md.quoteBorder);
-	const lines = shown.lines.map(
-		line =>
-			`  ${quote} ${theme.fg(tone, truncateToWidth(safe(line.trim()), TRUNCATE_LENGTHS.LINE, Ellipsis.Unicode))}`,
-	);
-	if (shown.hidden) lines.push(`  ${quote} ${theme.fg("dim", `… +${shown.hidden} more lines`)}`);
+	const source = body.split("\n").filter(line => line.trim());
+	const shown = expanded ? source : cappedHeadLines(source, PREVIEW_LIMITS.COLLAPSED_LINES).lines;
+	const hidden = source.length - shown.length;
+	let cut = false;
+	const lines: string[] = [];
+	for (const line of shown) {
+		const text = safe(line.trim());
+		// IRC cards pass the card width: an expanded body soft-wraps instead of
+		// being cut. Every other preview keeps the fixed 110-column cap.
+		if (expanded && width !== undefined) {
+			for (const row of wrapTextWithAnsi(text, Math.max(1, width - 4)))
+				lines.push(`  ${quote} ${theme.fg(tone, row)}`);
+			continue;
+		}
+		cut ||= visibleWidth(text) > TRUNCATE_LENGTHS.LINE;
+		lines.push(`  ${quote} ${theme.fg(tone, truncateToWidth(text, TRUNCATE_LENGTHS.LINE, Ellipsis.Unicode))}`);
+	}
+	if (width !== undefined && (hidden > 0 || cut)) {
+		const hint = formatExpandHint(theme, expanded, true);
+		const marker = hidden > 0 ? `… +${hidden} more lines` : "…";
+		lines.push(`  ${quote} ${theme.fg("dim", `${marker}${hint ? ` ${hint}` : ""}`)}`);
+	}
 	return lines;
 }
 
@@ -91,7 +112,7 @@ export function renderAgentWrite(
 		);
 		if (result?.isError && receipts.length === 0)
 			return [header, formatErrorDetail(firstText(result) || "Message delivery failed.", theme)];
-		const lines = [header, ...preview(body, expanded, theme)];
+		const lines = [header, ...preview(body, expanded, theme, "dim", width)];
 		if (result && receipts.length === 0)
 			lines.push(theme.fg("muted", firstText(result) || "No live peers to broadcast to."));
 		if (receipts.length > 1 || failed > 0) {
