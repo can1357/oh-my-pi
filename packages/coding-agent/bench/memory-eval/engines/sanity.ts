@@ -21,7 +21,8 @@ function sanityEngine(
 			items.push(...batch);
 			return batch.map(item => item.messageId);
 		},
-		vectorCount: async () => 1,
+		// No embeddings; reported as one per row so the runner's coverage check passes.
+		vectorCount: async () => items.length,
 		sleep: async () => {},
 		recall: async (question, k): Promise<RecallHit[]> =>
 			order(items, question)
