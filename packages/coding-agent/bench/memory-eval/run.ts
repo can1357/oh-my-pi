@@ -90,6 +90,22 @@ function caseLimit(value: string | undefined): number | undefined {
 
 const hasCompatOps = (engine: EngineAdapter): engine is EngineAdapter & UpstreamCompatOps => "recallRaw" in engine;
 
+/**
+ * Runs `fn` with the checkout's HEAD and dirty state read before it starts, and refuses its result if HEAD moved
+ * meanwhile: the code that produced it is then unknown.
+ */
+export async function pinnedCheckout<T>(
+	repoRoot: string,
+	fn: (state: { commit: string; dirty: boolean }) => Promise<T>,
+): Promise<T> {
+	const git = vcs.requireGit(repoRoot);
+	const commit = (await git.headSha()) ?? "unknown";
+	const result = await fn({ commit, dirty: await git.isDirty() });
+	const after = (await git.headSha()) ?? "unknown";
+	if (after !== commit) throw new Error(`HEAD moved from ${commit} to ${after} during the run; result not written`);
+	return result;
+}
+
 async function runCommand(argv: string[]): Promise<void> {
 	const { values } = parseArgs({
 		args: argv,
@@ -117,48 +133,50 @@ async function runCommand(argv: string[]): Promise<void> {
 
 	const startedAt = new Date().toISOString();
 	const dataDir = path.join(CACHE_ROOT, "data");
-	const storeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-"));
-	let result: ResultFile;
-	try {
-		let run: RunOutput;
-		let excluded: ExcludedQuestion[] = [];
-		const datasetRevision = await cachedRevision(dataset, dataDir);
-		if (protocol === "upstream-compat") {
-			if (dataset !== "beam-100k" || !hasCompatOps(engine)) {
-				throw new Error("upstream-compat runs only with --engine mnemosyne --dataset beam-100k");
+	const result = await pinnedCheckout(REPO_ROOT, async git => {
+		const storeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-"));
+		try {
+			let run: RunOutput;
+			let excluded: ExcludedQuestion[] = [];
+			const datasetRevision = await cachedRevision(dataset, dataDir);
+			if (protocol === "upstream-compat") {
+				if (dataset !== "beam-100k" || !hasCompatOps(engine)) {
+					throw new Error("upstream-compat runs only with --engine mnemosyne --dataset beam-100k");
+				}
+				const count = cases ?? UPSTREAM_COMPAT_CONVERSATIONS;
+				const questions = await runUpstreamCompat(engine, await loadBeamUpstreamCompat(dataDir, count));
+				// No warmup runs here.
+				run = { questions, warmupMs: 0 };
+			} else {
+				const loaded = await loadDataset(dataset, dataDir);
+				excluded = loaded.excluded;
+				const selected = cases === undefined ? loaded.cases : loaded.cases.slice(0, cases);
+				run = await runCases(engine, selected, protocol, k, storeRoot);
 			}
-			const count = cases ?? UPSTREAM_COMPAT_CONVERSATIONS;
-			const questions = await runUpstreamCompat(engine, await loadBeamUpstreamCompat(dataDir, count));
-			// No warmup runs here.
-			run = { questions, warmupMs: 0 };
-		} else {
-			const loaded = await loadDataset(dataset, dataDir);
-			excluded = loaded.excluded;
-			const selected = cases === undefined ? loaded.cases : loaded.cases.slice(0, cases);
-			run = await runCases(engine, selected, protocol, k, storeRoot);
+			return buildResultFile(
+				{
+					dataset,
+					datasetRevision,
+					engine: engine.name,
+					engineInfo: await engine.describe(),
+					protocol,
+					k,
+					mnemopiRecall: engineOptions.mnemopiRecall,
+					polyphonic: engineOptions.polyphonic,
+					gitCommit: git.commit,
+					gitDirty: git.dirty,
+					startedAt,
+				},
+				run,
+				excluded,
+			);
+		} finally {
+			await engine.dispose();
+			// A just-closed SQLite file can block deletion for a while (Windows); a leftover scratch store must
+			// never cost a finished run its result file.
+			await removeWithRetries(storeRoot).catch(err => console.warn(`could not remove ${storeRoot}: ${err}`));
 		}
-		result = buildResultFile(
-			{
-				dataset,
-				datasetRevision,
-				engine: engine.name,
-				engineInfo: await engine.describe(),
-				protocol,
-				k,
-				mnemopiRecall: engineOptions.mnemopiRecall,
-				polyphonic: engineOptions.polyphonic,
-				gitCommit: (await vcs.requireGit(REPO_ROOT).headSha()) ?? "unknown",
-				startedAt,
-			},
-			run,
-			excluded,
-		);
-	} finally {
-		await engine.dispose();
-		// A just-closed SQLite file can block deletion for a while (Windows); a leftover scratch store must
-		// never cost a finished run its result file.
-		await removeWithRetries(storeRoot).catch(err => console.warn(`could not remove ${storeRoot}: ${err}`));
-	}
+	});
 
 	const out =
 		values.out ??
