@@ -306,7 +306,9 @@ neither resolves, and `inherit` tiers are the configured `tier.*`. Tools are the
 child session constructs, with `yield` only under `task.structured` (an eval `agent()` spawn always gets
 it); MCP and extension tools come from the session. A caller's `model` or `effort`, a live `/model` or
 `/fast` change, a session-only `Alt+P` pick, plan mode and `before_subagent_spawn` handlers can still
-change what a real spawn uses.
+change what a real spawn uses. The bundled `seance` agent runs on its source session's saved model (or the
+caller's `model`), so its model shows as unresolved; it never gets an advisor, a prewalk hand-off, LSP, or
+MCP and extension tools.
 
 ## Command discovery interaction
 
