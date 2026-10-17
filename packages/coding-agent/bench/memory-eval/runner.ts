@@ -1,6 +1,7 @@
 /** Protocol runner: ingests each case into an engine, recalls every question, maps hits back to message ids and scores them. */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { isRememberable } from "./datasets";
 import type { EngineAdapter, EngineName, MnemopiRecall, ProtocolName, RecallHit, RememberItem } from "./engine";
 import { cp, lmeMetrics, messageLevelMetrics } from "./score";
@@ -235,7 +236,8 @@ export async function runCases(
 		}
 
 		await engine.close();
-		await fs.rm(storeDir, { recursive: true, force: true });
+		// A store left behind costs disk space; losing the results of a multi-day run costs the run.
+		await removeWithRetries(storeDir).catch(err => console.warn(`could not remove ${storeDir}: ${err}`));
 	}
 
 	return { questions, warmupMs };
