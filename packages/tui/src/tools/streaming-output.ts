@@ -941,6 +941,10 @@ export class OutputSink {
 	// Holds a frame until its terminator arrives, so a DCS split over chunk
 	// boundaries is only retained — and only exempted — once complete.
 	#sixelParser = new SixelSpanParser();
+	// Set once a chunk carrying an unterminated frame has been mirrored to the
+	// artifact, so the held prefix is already on disk and must not be written
+	// again when the stream ends mid-frame.
+	#heldBytesMirrored = false;
 	#file?: {
 		path: string;
 		artifactId?: string;
@@ -1115,11 +1119,17 @@ export class OutputSink {
 		const held = this.#sixelParser.finish();
 		if (held.length === 0) return;
 		const sanitized = this.#sanitizeSpans(held);
-		// The held bytes arrived with the chunks that streamed them, so while the
-		// artifact is open they are already on disk: mirroring them again here
-		// would append the held prefix — up to the whole held-frame bound — a
-		// second time.
-		this.#store(joinSixelSegments(held), sanitized, joinSixelSegments(sanitized), false, false);
+		const heldText = joinSixelSegments(held);
+		// The held bytes arrived with the chunks that streamed them, so once such a
+		// chunk was mirrored the prefix is already on disk and writing it again
+		// would duplicate up to the whole held-frame bound. When no chunk was
+		// mirrored — the frame was the stream's only output, so nothing ever
+		// tripped the mirror condition — this is the one write that creates the
+		// recovery artifact, and leaving it out loses the prefix with no way back.
+		const mirrored = this.#heldBytesMirrored;
+		this.#heldBytesMirrored = false;
+		if (!mirrored && this.#artifactPath) this.#writeToFile(heldText);
+		this.#store(heldText, sanitized, joinSixelSegments(sanitized), false, false);
 	}
 
 	/**
@@ -1223,6 +1233,10 @@ export class OutputSink {
 			(this.#file != null || substituted || cappedThisChunk || this.#willOverflow(cappedBytes))
 		) {
 			this.#writeToFile(chunk);
+			// The chunk carrying an unterminated frame went to disk whole, so the
+			// held prefix is already mirrored and must not be written a second time
+			// when the stream ends mid-frame.
+			if (this.#sixelParser.holding) this.#heldBytesMirrored = true;
 		}
 		if (retained.length === 0) return;
 

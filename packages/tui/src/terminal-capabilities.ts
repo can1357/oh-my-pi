@@ -72,6 +72,8 @@ export type TerminalId =
 
 const IMAGE_MARKER_SCAN_LIMIT = 512;
 const SIXEL_MARKER_SCAN_LIMIT = 128;
+// The 8-bit C1 DCS introducer; the 7-bit spelling is `ESC P`.
+const C1_DCS = 0x90;
 const KITTY_PLACEHOLDER_HIGH_SURROGATE = KITTY_PLACEHOLDER.charCodeAt(0);
 const KITTY_PLACEHOLDER_LOW_SURROGATE = KITTY_PLACEHOLDER.charCodeAt(1);
 
@@ -114,11 +116,19 @@ export class TerminalInfo {
 		const protocol = this.imageProtocol;
 		if (!protocol) return false;
 		if (protocol === ImageProtocol.Sixel) {
+			// Both legal introducer encodings: the 7-bit `ESC P` form and the 8-bit
+			// C1 DCS. The terminal decoder and the raw-stream splitter already
+			// accept both, so recognising only `ESC P` here left an 8-bit frame's
+			// row classified as text and cut to the viewport width mid-payload.
 			const limit = Math.min(line.length, SIXEL_MARKER_SCAN_LIMIT);
-			if (start + 3 > limit || line.charCodeAt(start) !== 0x1b || line.charCodeAt(start + 1) !== 0x50) {
+			let i: number;
+			if (start + 2 <= limit && line.charCodeAt(start) === 0x1b && line.charCodeAt(start + 1) === 0x50) {
+				i = start + 2;
+			} else if (start + 1 <= limit && line.charCodeAt(start) === C1_DCS) {
+				i = start + 1;
+			} else {
 				return false;
 			}
-			let i = start + 2;
 			while (i < limit) {
 				const code = line.charCodeAt(i);
 				if ((code >= 0x30 && code <= 0x39) || code === 0x3b) {
@@ -149,9 +159,12 @@ export class TerminalInfo {
 			line.length,
 			this.imageProtocol === ImageProtocol.Sixel ? SIXEL_MARKER_SCAN_LIMIT : IMAGE_MARKER_SCAN_LIMIT,
 		);
+		// The 8-bit C1 DCS is a legal sixel introducer but is not an ESC, so it
+		// needs its own scan candidate or an 8-bit frame never classifies.
+		const sixel = this.imageProtocol === ImageProtocol.Sixel;
 		for (let i = 0; i < limit; i++) {
 			const code = line.charCodeAt(i);
-			if (code !== 0x1b && code !== KITTY_PLACEHOLDER_HIGH_SURROGATE) continue;
+			if (code !== 0x1b && code !== KITTY_PLACEHOLDER_HIGH_SURROGATE && !(sixel && code === C1_DCS)) continue;
 			if (this.hasImageMarkerAt(line, i)) return true;
 		}
 		return false;
