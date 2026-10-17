@@ -5,6 +5,9 @@
 ### Breaking Changes
 
 - `FindStats.errors` is replaced by `failed` (judge requests that failed) and `unanswered` (unusable answers), and `FindToolDetails` requires a `coverage` status; the find renderer shows `N/M requests failed` ([#15744](https://github.com/can1357/oh-my-pi/issues/15744))
+### Removed
+
+- Removed three demo files parked in `test/` (`image-test.ts`, `key-tester.ts`, `test-theme-colors.ts`) that are not tests and have no importers.
 
 ### Fixed
 
