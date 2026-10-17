@@ -1,0 +1,26 @@
+[
+	{
+		"question_id": "q1",
+		"question_type": "single-session-user",
+		"question": "what?",
+		"haystack_session_ids": ["answer_x_1", "s2"],
+		"haystack_sessions": [
+			[
+				{ "role": "user", "content": "u1", "has_answer": true },
+				{ "role": "assistant", "content": "a1" },
+				{ "role": "user", "content": "u3" }
+			],
+			[
+				{ "role": "user", "content": "s2u" },
+				{ "role": "assistant", "content": "s2a" }
+			]
+		]
+	},
+	{
+		"question_id": "q_abs",
+		"question_type": "single-session-user",
+		"question": "unanswerable?",
+		"haystack_session_ids": ["s3"],
+		"haystack_sessions": [[{ "role": "user", "content": "x" }]]
+	}
+]

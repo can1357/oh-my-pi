@@ -1,0 +1,27 @@
+[
+	{
+		"conversationId": "c1",
+		"chat": [
+			[
+				{ "id": 0, "role": "user", "content": "alpha" },
+				{ "id": 1, "role": "assistant", "content": "" },
+				{ "id": 2, "role": "user", "content": "gamma" }
+			],
+			[
+				{ "id": 3, "role": "assistant", "content": "delta" },
+				{ "id": 4, "role": "user", "content": "epsilon" },
+				{ "id": 5, "role": "assistant", "content": "zeta" }
+			]
+		],
+		"probingQuestions": {
+			"information_extraction": [{ "question": "q list", "source_chat_ids": [1] }],
+			"contradiction_resolution": [
+				{ "question": "q dict", "source_chat_ids": { "first_statement": [0], "second_statement": [4] } }
+			],
+			"abstention": [{ "question": "q null", "source_chat_ids": null }],
+			"summarization": [{ "question": "q empty", "source_chat_ids": [] }],
+			"event_ordering": [{ "question": "q joined", "source_chat_ids": { "order": " 3, 5 " } }],
+			"multi_session_reasoning": [{ "question": "q partly blank", "source_chat_ids": [1, 2] }]
+		}
+	}
+]

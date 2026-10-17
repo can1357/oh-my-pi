@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `vcs.init(dir)` to create a git repository through the sanctioned VCS module.
+
 ## [18.11.3] - 2026-10-16
 ### Breaking Changes
 
