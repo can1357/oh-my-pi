@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added a Serply web-search provider (`web/serply`), authenticated with `SERPLY_API_KEY` or `/login serply`, that forwards Google search operators (`site:`, `filetype:`, `intitle:`, quoted phrases, `OR`, `-exclusions`, `after:`/`before:`) in the query instead of translating them onto vendor-specific filters; path-qualified `site:` filters are sent as plain terms and enforced by the result post-filter ([#12021](https://github.com/can1357/oh-my-pi/pull/12021) by [@googio](https://github.com/googio))
+- Added Serply as a web search provider; authenticate with `SERPLY_API_KEY` or `/login serply` ([#12021](https://github.com/can1357/oh-my-pi/pull/12021) by [@googio](https://github.com/googio))
 
 ### Changed
 
