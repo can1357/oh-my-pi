@@ -143,11 +143,22 @@ version_ge() {
 
 # True when bun meets the minimum version requirement (no exit). This is the
 # single version predicate; callers that must fail hard call require_bun_version.
+#
+# A prerelease of the boundary (1.4.3-canary.1) does NOT satisfy it: the CLI
+# compares the unstripped `Bun.version` and sorts that prerelease below 1.4.3,
+# so approving it here would report success and then exit on first run.
 bun_version_ok() {
     version_raw=$(bun --version 2>/dev/null || true)
     [ -z "$version_raw" ] && return 1
     version_clean=${version_raw%%-*}
-    version_ge "$version_clean" "$MIN_BUN_VERSION"
+    version_ge "$version_clean" "$MIN_BUN_VERSION" || return 1
+    case "$version_raw" in
+        *-*)
+            # A prerelease only qualifies when it is past the floor release.
+            [ "$version_clean" != "$MIN_BUN_VERSION" ] || return 1
+            ;;
+    esac
+    return 0
 }
 
 # Exit with a diagnostic unless bun meets the minimum version requirement.
@@ -160,10 +171,31 @@ require_bun_version() {
     if [ -z "$version_raw" ]; then
         echo "Failed to read bun version"
     else
-        echo "Bun ${MIN_BUN_VERSION} or newer is required. Current version: ${version_raw%%-*}"
+        echo "Bun ${MIN_BUN_VERSION} or newer is required. Current version: ${version_raw}"
         echo "Upgrade Bun at https://bun.sh/docs/installation"
     fi
     exit 1
+}
+
+# Fail unless bun satisfies the floor a specific tree declares. Installing a
+# historical --ref must be checked against THAT tree's engines.bun: an older tag
+# supports runtimes this repository no longer does.
+require_bun_version_for() {
+    floor="$1"
+    version_raw=$(bun --version 2>/dev/null || true)
+    [ -n "$version_raw" ] || { echo "Failed to read bun version"; exit 1; }
+    version_clean=${version_raw%%-*}
+    if ! version_ge "$version_clean" "$floor"; then
+        echo "Bun ${floor} or newer is required by the selected ref. Current version: ${version_raw}"
+        echo "Upgrade Bun at https://bun.sh/docs/installation"
+        exit 1
+    fi
+    case "$version_raw" in
+        *-*) [ "$version_clean" != "$floor" ] || {
+            echo "Bun ${floor} or newer is required by the selected ref. Current version: ${version_raw}"
+            exit 1
+        } ;;
+    esac
 }
 
 # Check if git is available
@@ -217,6 +249,14 @@ install_via_bun() {
         if [ ! -d "$TMP_DIR/packages/coding-agent" ]; then
             echo "Expected package at ${TMP_DIR}/packages/coding-agent"
             exit 1
+        fi
+
+        # The checked-out tree carries its own floor; the global minimum is this
+        # repo's, which a historical tag need not share.
+        ref_floor=$(json_string bun < "$TMP_DIR/packages/coding-agent/package.json" 2>/dev/null || true)
+        ref_floor=${ref_floor#>=}
+        if [ -n "$ref_floor" ]; then
+            require_bun_version_for "$ref_floor"
         fi
 
         bun install -g "$TMP_DIR/packages/coding-agent" || {

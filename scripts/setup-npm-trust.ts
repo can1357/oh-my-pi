@@ -150,6 +150,7 @@ interface ManifestShape {
 	name?: string;
 	private?: boolean;
 	repository?: { url?: string } | string;
+	engines?: { bun?: string };
 }
 
 /** The npm package names to configure, plus a repo slug inferred from a manifest. */
@@ -250,7 +251,10 @@ function repoGitUrl(repo: string): string {
 	return `git+https://github.com/${repo}.git`;
 }
 
-function placeholderManifest(name: string, target: NativeLeafTarget, repo: string): PlaceholderManifest {
+async function placeholderManifest(name: string, target: NativeLeafTarget, repo: string): Promise<PlaceholderManifest> {
+	const core = (await Bun.file(path.join(repoRoot, "packages", "natives", "package.json")).json()) as ManifestShape;
+	const bunFloor = core.engines?.bun;
+	if (!bunFloor) throw new Error("packages/natives/package.json declares no engines.bun for the leaf placeholder");
 	return {
 		name,
 		version: PLACEHOLDER_VERSION,
@@ -264,7 +268,7 @@ function placeholderManifest(name: string, target: NativeLeafTarget, repo: strin
 			directory: "packages/natives",
 		},
 		engines: {
-			bun: ">=1.3.14",
+			bun: bunFloor,
 		},
 		publishConfig: {
 			access: "public",
@@ -288,7 +292,7 @@ async function publishNativeLeafPlaceholder(name: string, target: NativeLeafTarg
 	try {
 		await Bun.write(
 			path.join(tmpDir, "package.json"),
-			`${JSON.stringify(placeholderManifest(name, target, repo), null, "\t")}\n`,
+			`${JSON.stringify(await placeholderManifest(name, target, repo), null, "\t")}\n`,
 		);
 		await Bun.write(path.join(tmpDir, "README.md"), placeholderReadme(name, target));
 		return (await npmInteractive(["publish", tmpDir, "--access", "public"])) === 0;

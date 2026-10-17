@@ -102,7 +102,19 @@ function Test-BunVersion {
         return $false
     }
 
-    return $currentVersion -ge [version]$MinimumVersion
+    if ($currentVersion -lt [version]$MinimumVersion) {
+        return $false
+    }
+
+    # A prerelease of the boundary does NOT qualify: the CLI compares the
+    # unstripped `Bun.version`, which sorts 1.4.3-canary.1 below 1.4.3, so
+    # approving it here would install and then exit on first run.
+    $raw = (bun --version 2>$null)
+    if ($raw -and $raw.Trim().Contains("-") -and $currentVersion -eq [version]$MinimumVersion) {
+        return $false
+    }
+
+    return $true
 }
 
 function Assert-BunVersion {
@@ -374,11 +386,15 @@ if ($Source) {
 } elseif ($Binary) {
     Install-Binary
 } else {
-    # Default: use bun if available, otherwise binary
-    if (Test-BunInstalled) {
-        Assert-BunVersion $MinimumBunVersion
+    # Default: use bun when it satisfies the floor, otherwise the prebuilt
+    # binary. The binary does not run on the host Bun, so a below-floor runtime
+    # must select it rather than fail the advertised one-line install.
+    if ((Test-BunInstalled) -and (Test-BunVersion $MinimumBunVersion)) {
         Install-ViaBun
     } else {
+        if (Test-BunInstalled) {
+            Write-Host "Bun $(Get-BunVersion) is below the minimum required $MinimumBunVersion; using the prebuilt binary instead."
+        }
         Install-Binary
     }
 }

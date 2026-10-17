@@ -86,6 +86,17 @@ describe("install modes", () => {
 		expect(env.OMP_BENCH_SOURCE_ARCH).toBeUndefined();
 	});
 
+	it("publishes the repo's Bun floor so containers install a runtime the CLI accepts", () => {
+		// The containers install their own Bun (omp_local.py). Its default used to
+		// be older than the floor the built CLI enforces, so every local/published
+		// run failed in setup before a trial started.
+		const cfg = parseArgs(["--model", "anthropic/claude-opus-4-8", "--install", "local"]);
+		const env = buildHarborEnv(cfg, "/tmp/models.yml", "/tmp/omp.tgz", "test");
+		const floor = env.OMP_BENCH_BUN_VERSION;
+		expect(floor).toMatch(/^\d+\.\d+\.\d+$/);
+		expect(Bun.semver.order(floor!, "1.4.3")).toBeGreaterThanOrEqual(0);
+	});
+
 	it("--tarball implies a local (tarball) install", () => {
 		const cfg = parseArgs(["--model", "anthropic/claude-opus-4-8", "--tarball", "/tmp/omp.tgz"]);
 		expect(cfg.install).toBe("local");
