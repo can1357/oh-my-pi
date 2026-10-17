@@ -33,6 +33,8 @@ export interface QuestionResult {
 	fetchK?: number;
 	lme?: { corpusIds: string[]; correctDocs: string[]; rankings: number[] };
 	compat?: { question: string; rankedContents: string[]; goldContents: string[] };
+	/** Hash of the query text and sorted gold ids, so `diff` can tell a changed question from a re-run; absent in older files. */
+	definitionHash?: string;
 }
 
 export interface RunConfig {
@@ -220,6 +222,7 @@ export async function runCases(
 				caseId: evalCase.caseId,
 				questionId: question.questionId,
 				category: question.category,
+				definitionHash: Bun.hash(JSON.stringify([question.text, question.goldMessageIds.toSorted()])).toString(16),
 				ranked,
 				dropped,
 				latencyMs,
