@@ -347,6 +347,7 @@ export class TurnRecovery {
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
+	#fallbackGeneration = 0;
 	#activeFallbackCreditRedemption?: {
 		targetSelector: string;
 		handle: AnthropicFallbackCreditHandle;
@@ -746,9 +747,11 @@ export class TurnRecovery {
 	 * @returns true when the active model was actually switched back to the
 	 * primary, so callers can re-run the pre-send context-fit check against the
 	 * reverted (possibly smaller) window before issuing the next request.
+	 * @param signal cancels the in-flight usage probe; an aborted restore keeps
+	 * the cooldown and leaves the active fallback in place.
 	 */
-	maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
-		return this.#maybeRestoreRetryFallbackPrimary();
+	maybeRestoreRetryFallbackPrimary(signal?: AbortSignal): Promise<boolean> {
+		return this.#maybeRestoreRetryFallbackPrimary(signal);
 	}
 
 	/** Applies model fallback policy from live usage health before a turn starts. */
@@ -1812,23 +1815,37 @@ export class TurnRecovery {
 
 	/** Clears fallback ownership after an explicit model change or a restore. */
 	clearActiveRetryFallback(): void {
+		this.#fallbackGeneration += 1;
 		this.#activeRetryFallback = undefined;
 		this.#fallbackRoutedFor = undefined;
 	}
 
-	/** Checks whether a fallback selector remains in cooldown. */
-	isRetryFallbackSelectorSuppressed(selector: RetryFallbackSelector): boolean {
-		return this.#host.modelRegistry.isSelectorSuppressed(selector.raw);
+	/** Checks cooldowns against fresh usage evidence when the failure was quota-related. */
+	async isRetryFallbackSelectorSuppressed(
+		selector: RetryFallbackSelector,
+		signal?: AbortSignal,
+		sessionIdOverride?: string,
+	): Promise<boolean> {
+		return this.#host.modelRegistry.isSelectorSuppressedWithRecovery(selector.raw, {
+			sessionId: sessionIdOverride ?? this.#host.sessionId(),
+			reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
+			signal,
+		});
 	}
 
 	/** Records the cooldown that should suppress a failing selector. */
-	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void {
+	noteRetryFallbackCooldown(
+		currentSelector: string,
+		retryAfterMs: number | undefined,
+		errorMessage: string,
+		usageLimitFailureTime?: number,
+	): void {
 		let cooldownMs = retryAfterMs;
 		if (!cooldownMs || cooldownMs <= 0) {
 			const reason = parseRateLimitReason(errorMessage);
 			cooldownMs = reason === "UNKNOWN" ? 5 * 60 * 1000 : calculateRateLimitBackoffMs(reason);
 		}
-		this.#host.modelRegistry.suppressSelector(currentSelector, Date.now() + cooldownMs);
+		this.#host.modelRegistry.suppressSelector(currentSelector, Date.now() + cooldownMs, usageLimitFailureTime);
 	}
 
 	/**
@@ -1935,6 +1952,9 @@ export class TurnRecovery {
 			// A healthy sibling does not end the selected account's reserve episode.
 			if (selectedAccount?.state === "healthy") this.#usageReserveApproval = undefined;
 			if (
+				// An explicit pin survives reserve recovery: release only automatic
+				// warm affinities when a sibling is healthy.
+				!this.#host.modelRegistry.authStorage.sessions.isExplicit(currentModel.provider, this.#host.sessionId()) &&
 				selectedAccount &&
 				selectedAccount.state !== "healthy" &&
 				health.accounts.some(account => account.state === "healthy")
@@ -1969,7 +1989,7 @@ export class TurnRecovery {
 		const chainKeys = this.retryFallbackChainKeys(currentSelector, currentModel);
 		for (const role of chainKeys) {
 			for (const candidate of this.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
-				if (this.isRetryFallbackSelectorSuppressed(candidate)) continue;
+				if (await this.isRetryFallbackSelectorSuppressed(candidate, signal)) continue;
 				const resolved = resolveModelOverride([candidate.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidateModel = resolved.model ?? this.#host.modelRegistry.find(candidate.provider, candidate.id);
 				if (!candidateModel || !this.#host.modelRegistry.hasConfiguredAuth(candidateModel)) continue;
@@ -1994,6 +2014,12 @@ export class TurnRecovery {
 					if (candidateHealth.state === "healthy") {
 						const selected = candidateHealth.accounts.find(account => account.selected);
 						if (
+							// An explicit pin survives reserve recovery: release only automatic
+							// warm affinities when a sibling is healthy.
+							!this.#host.modelRegistry.authStorage.sessions.isExplicit(
+								candidateModel.provider,
+								this.#host.sessionId(),
+							) &&
 							selected &&
 							selected.state !== "healthy" &&
 							candidateHealth.accounts.some(account => account.state === "healthy")
@@ -2107,6 +2133,7 @@ export class TurnRecovery {
 		currentSelector: string,
 		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal; reason?: string },
 	): Promise<boolean> {
+		const generation = this.#fallbackGeneration;
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 		if (!candidate) {
@@ -2115,10 +2142,10 @@ export class TurnRecovery {
 		const apiKey =
 			options?.apiKey ??
 			(await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal: options?.signal }));
+		if (options?.signal?.aborted || generation !== this.#fallbackGeneration) return false;
 		if (!apiKey) {
 			throw new Error(`No API key for retry fallback ${selector.raw}`);
 		}
-		if (options?.signal?.aborted) return false;
 
 		// Capture the configured selector (auto-aware) so a fallback chain preserves
 		// `auto` instead of collapsing it to the level it resolved to this turn.
@@ -2148,6 +2175,7 @@ export class TurnRecovery {
 		this.#markFallbackRouted();
 		if (this.#activeRetryFallback) this.#activeRetryFallback.served = false;
 		await this.#host.setModelWithProviderSessionReset(candidate);
+		if (generation !== this.#fallbackGeneration) return false;
 		if (options?.signal?.aborted) {
 			this.#fallbackRoutedFor = routedBeforeSwap;
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
@@ -2190,6 +2218,7 @@ export class TurnRecovery {
 	async #tryRetryModelFallback(
 		currentSelector: string,
 		failedMessage: AssistantMessage,
+		signal: AbortSignal,
 		options?: {
 			excludeProvider?: string;
 			pinFallback?: boolean;
@@ -2199,6 +2228,8 @@ export class TurnRecovery {
 			refusalWalk?: boolean;
 		},
 	): Promise<boolean> {
+		signal.throwIfAborted();
+		const generation = this.#fallbackGeneration;
 		const ceiling = this.#host.thinkingLevelCeiling();
 		const latestAssistant = options?.preserveFailedTurn
 			? failedMessage
@@ -2213,10 +2244,10 @@ export class TurnRecovery {
 		const creditTargets = failedModel ? fallbackCreditTargets(failedModel) : [];
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
-				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
-				// A refusal walk visits any one model at most once per turn. Without this a
-				// pair of chains naming each other alternates: each hop is a model the walk
-				// has already been refused on, and the budget no longer stops it.
+				const suppressed = await this.isRetryFallbackSelectorSuppressed(selector, signal);
+				signal.throwIfAborted();
+				if (generation !== this.#fallbackGeneration) return false;
+				if (suppressed) continue;
 				if (options?.refusalWalk && this.#refusalWalkTried.has(formatRetryFallbackBaseSelector(selector))) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
@@ -2272,7 +2303,9 @@ export class TurnRecovery {
 				// exactly like one without a credential.
 				let apiKey: string | undefined;
 				try {
-					apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+					apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal });
+					signal.throwIfAborted();
+					if (generation !== this.#fallbackGeneration) return false;
 				} catch (error) {
 					if (!(error instanceof AIError.MissingApiKeyError)) throw error;
 				}
@@ -2282,6 +2315,8 @@ export class TurnRecovery {
 				const previousTools = [...this.#host.agent.state.tools];
 				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
+					apiKey,
+					signal,
 					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
 				});
 				// Redemption replays the refused request's frozen `system` and `tools`. If the
@@ -2422,7 +2457,8 @@ export class TurnRecovery {
 		return true;
 	}
 
-	async #maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
+	async #maybeRestoreRetryFallbackPrimary(signal?: AbortSignal): Promise<boolean> {
+		if (signal?.aborted) return false;
 		if (!this.#activeRetryFallback) return false;
 		if (this.#activeRetryFallback.pinned) return false;
 		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
@@ -2443,16 +2479,22 @@ export class TurnRecovery {
 			return false;
 		}
 
+		const activeFallback = this.#activeRetryFallback;
 		const currentModel = this.#host.model();
 		if (!currentModel) return false;
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
 		if (currentSelector === originalSelector.raw) {
-			if (!this.isRetryFallbackSelectorSuppressed(originalSelector)) {
+			if (
+				!(await this.isRetryFallbackSelectorSuppressed(originalSelector, signal)) &&
+				this.#activeRetryFallback === activeFallback
+			) {
 				this.clearActiveRetryFallback();
 			}
 			return false;
 		}
-		if (this.isRetryFallbackSelectorSuppressed(originalSelector)) return false;
+		if (await this.isRetryFallbackSelectorSuppressed(originalSelector, signal)) return false;
+		if (this.#activeRetryFallback !== activeFallback || !modelsAreEqual(this.#host.model(), currentModel))
+			return false;
 
 		const resolvedPrimary = resolveModelOverride(
 			[originalSelector.raw],
@@ -2462,10 +2504,16 @@ export class TurnRecovery {
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel) return false;
-		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
+		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId(), { signal });
 		if (!apiKey) return false;
 
 		const currentThinkingLevel = this.#host.configuredThinkingLevel();
+		if (
+			signal?.aborted ||
+			this.#activeRetryFallback !== activeFallback ||
+			!modelsAreEqual(this.#host.model(), currentModel)
+		)
+			return false;
 		const thinkingToApply =
 			currentThinkingLevel === lastAppliedFallbackThinkingLevel ? originalThinkingLevel : currentThinkingLevel;
 		const primarySelector = formatModelStringWithRouting(primaryModel);
@@ -2474,8 +2522,17 @@ export class TurnRecovery {
 		// `setThinkingLevel` both notify subscribers, and an observer reading
 		// attribution in that window would see the restored primary still tagged
 		// as fallback-served.
+		const routedBeforeSwap = this.#fallbackRoutedFor;
 		this.clearActiveRetryFallback();
+		const generation = this.#fallbackGeneration;
 		await this.#host.setModelWithProviderSessionReset(primaryModel);
+		if (generation !== this.#fallbackGeneration || this.#host.model() !== primaryModel) return false;
+		if (signal?.aborted) {
+			this.#activeRetryFallback = activeFallback;
+			this.#fallbackRoutedFor = routedBeforeSwap;
+			await this.#host.setModelWithProviderSessionReset(currentModel);
+			return false;
+		}
 		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
 		this.#host.setThinkingLevel(thinkingToApply);
@@ -2801,15 +2858,41 @@ export class TurnRecovery {
 					// to a still-exhausted primary. A switched credential means a
 					// sibling is free now, and that wait covers only the spent one.
 					const usageCooldownMs = recordedUsageLimitOutcome?.switchedCredential ? undefined : usageLimitWaitMs;
-					this.noteRetryFallbackCooldown(currentSelector, usageCooldownMs ?? parsedRetryAfterMs, errorMessage);
+					const quotaFailureTime = AIError.is(id, AIError.Flag.UsageLimit) ? Date.now() : undefined;
+					this.noteRetryFallbackCooldown(
+						currentSelector,
+						usageCooldownMs ?? parsedRetryAfterMs,
+						errorMessage,
+						quotaFailureTime,
+					);
 				}
-				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
-					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
-					pinFallback: classifierRefusal,
-					refusalWalk: classifierRefusal,
-					preserveFailedTurn,
-					wrapAround: longUsageLimitFallback,
-				});
+				if (this.#host.abortInProgress() || this.#host.promptGeneration() !== generation) {
+					return this.#endCancelledRetry();
+				}
+				const fallbackAbortController = new AbortController();
+				this.#retryAbortController?.abort();
+				this.#retryAbortController = fallbackAbortController;
+				try {
+					switchedModel = await this.#tryRetryModelFallback(
+						currentSelector,
+						message,
+						fallbackAbortController.signal,
+						{
+							excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
+							pinFallback: classifierRefusal,
+							refusalWalk: classifierRefusal,
+							preserveFailedTurn,
+							wrapAround: longUsageLimitFallback,
+						},
+					);
+					fallbackAbortController.signal.throwIfAborted();
+				} catch (error) {
+					if (!fallbackAbortController.signal.aborted) throw error;
+					if (this.#retryAbortController !== fallbackAbortController) return false;
+					return this.#endCancelledRetry();
+				} finally {
+					if (this.#retryAbortController === fallbackAbortController) this.#retryAbortController = undefined;
+				}
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
 			// of the role-fallback setting: it's intrinsic to the Fast contract (speed
@@ -2998,7 +3081,7 @@ export class TurnRecovery {
 		return true;
 	}
 
-	/** Closes a retry saga whose credential wait or backoff sleep was aborted. */
+	/** Closes a retry saga whose credential wait, fallback probe, or backoff sleep was aborted. */
 	async #endCancelledRetry(): Promise<false> {
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;

@@ -68,6 +68,8 @@ export interface UsageLimit {
 	window?: UsageWindow;
 	amount: UsageAmount;
 	status?: UsageStatus;
+	/** When this limit's data was fetched; merged reports stamp retained limits with their own snapshot time. */
+	fetchedAt?: number;
 	notes?: string[];
 }
 

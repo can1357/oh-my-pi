@@ -87,7 +87,14 @@ function mergeUsageReportGroup(reports: UsageReport[]): UsageReport {
 		return (b.fetchedAt ?? 0) - (a.fetchedAt ?? 0);
 	});
 	const base = sorted[0];
-	const mergedLimits = [...base.limits];
+	const stampLimit = (limit: UsageLimit, report: UsageReport): UsageLimit => ({
+		...limit,
+		// Keep the source snapshot time so a fuller-but-older report cannot let
+		// stale quota rows pass a usageAfter freshness cutoff after merging.
+		fetchedAt:
+			typeof limit.fetchedAt === "number" && Number.isFinite(limit.fetchedAt) ? limit.fetchedAt : report.fetchedAt,
+	});
+	const mergedLimits = base.limits.map(limit => stampLimit(limit, base));
 	const limitIds = new Set(mergedLimits.map(limit => limit.id));
 	const mergedMetadata: Record<string, unknown> = { ...base.metadata };
 	let fetchedAt = base.fetchedAt;
@@ -97,7 +104,7 @@ function mergeUsageReportGroup(reports: UsageReport[]): UsageReport {
 		for (const limit of report.limits) {
 			if (!limitIds.has(limit.id)) {
 				limitIds.add(limit.id);
-				mergedLimits.push(limit);
+				mergedLimits.push(stampLimit(limit, report));
 			}
 		}
 		if (report.metadata) {

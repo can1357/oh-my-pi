@@ -1323,6 +1323,32 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		});
 	});
 
+	describe("suppression recovery session scoping", () => {
+		it("threads a session override through to the registry recovery check", async () => {
+			const host = createHost(model, modelRegistry);
+			const recovery = new TurnRecovery(host);
+			const seen: Array<string | undefined> = [];
+			const original = modelRegistry.isSelectorSuppressedWithRecovery.bind(modelRegistry);
+			modelRegistry.isSelectorSuppressedWithRecovery = async (selector, options) => {
+				seen.push(options.sessionId);
+				return await original(selector, options);
+			};
+			try {
+				const selector = {
+					raw: `${model.provider}/${model.id}`,
+					provider: model.provider,
+					id: model.id,
+					thinkingLevel: undefined,
+				};
+				await recovery.isRetryFallbackSelectorSuppressed(selector, undefined, "advisor-session-1");
+				await recovery.isRetryFallbackSelectorSuppressed(selector, undefined);
+			} finally {
+				modelRegistry.isSelectorSuppressedWithRecovery = original;
+			}
+			expect(seen[0]).toBe("advisor-session-1");
+			expect(seen[1]).toBe("test-session");
+		});
+	});
 	describe("reasonless abort carrying only a fallback boundary", () => {
 		// A mid-turn server-side fallback persists a `fallback` boundary block
 		// before the fallback model emits anything. An abort right there leaves
