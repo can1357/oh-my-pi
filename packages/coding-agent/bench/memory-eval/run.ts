@@ -11,7 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { isEnoent, removeWithRetries } from "@oh-my-pi/pi-utils";
 import { type CalibrationDump, compareCalibration, runUpstreamCompat } from "./compat";
 import { loadBeamUpstreamCompat, loadDataset } from "./datasets";
 import type { EngineAdapter, MnemopiRecall, ProtocolName } from "./engine";
@@ -37,8 +37,12 @@ async function cachedRevision(dataset: DatasetName, dataDir: string): Promise<st
 	const beam = dataset.startsWith("beam");
 	const marker = path.join(dataDir, `${beam ? dataset : "lme-s"}.json.revision`);
 	const pinned = beam ? REVISIONS.beam : REVISIONS.lme;
-	const file = Bun.file(marker);
-	const revision = (await file.exists()) ? (await file.text()).trim() : undefined;
+	let revision: string | undefined;
+	try {
+		revision = (await Bun.file(marker).text()).trim();
+	} catch (err) {
+		if (!isEnoent(err)) throw err;
+	}
 	if (revision !== pinned) {
 		throw new Error(
 			`${marker}: ${revision === undefined ? "missing" : `revision ${revision}`}, expected ${pinned}; re-run py/prepare_datasets.py`,
@@ -197,7 +201,7 @@ const fmt = (b: BootstrapResult): string => {
 
 const describeConfig = (label: string, c: RunConfig): string => {
 	const embedder = c.engineInfo.embedder ? ` embedder ${c.engineInfo.embedder}` : "";
-	return `${label}: engine ${c.engine}${embedder} protocol ${c.protocol} k ${c.k} mnemopiRecall ${c.mnemopiRecall} polyphonic ${c.polyphonic} gitCommit ${c.gitCommit}`;
+	return `${label}: engine ${c.engine}${embedder} protocol ${c.protocol} k ${c.k} mnemopiRecall ${c.mnemopiRecall} polyphonic ${c.polyphonic} gitCommit ${c.gitCommit}${c.gitDirty ? " (dirty)" : ""}`;
 };
 
 function uniqueQuestionIds(label: string, file: ResultFile): Set<string> {
@@ -260,11 +264,13 @@ async function diffCommand(argv: string[]): Promise<void> {
 			throw new Error(`question ${qa.questionId} has category ${qa.category} in a but ${qb.category} in b`);
 		}
 		if (qa.definitionHash && qb.definitionHash && qa.definitionHash !== qb.definitionHash) {
-			throw new Error(`question ${qa.questionId} has a different query text or gold set in a and b`);
+			throw new Error(`question ${qa.questionId} has a different corpus, query text or gold set in a and b`);
 		}
 	}
 	if (pairs.some(p => !p.a.definitionHash || !p.b.definitionHash)) {
-		console.warn("warning: a result file predates question fingerprints; query text and gold sets were not verified");
+		console.warn(
+			"warning: a result file predates question fingerprints; corpora, query text and gold sets were not verified",
+		);
 	}
 
 	const identical = pairs.filter(
