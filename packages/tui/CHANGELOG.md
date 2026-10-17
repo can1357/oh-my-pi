@@ -17,6 +17,7 @@
 ### Added
 
 - Added `pi.showProfile` to `StatusLineSegmentOptions`: `false` keeps the `pi` segment's bare glyph under a named profile, in the rendered bar and in `describe` ([#16063](https://github.com/can1357/oh-my-pi/pull/16063) by [@shgew](https://github.com/shgew))
+- Fixed SIXEL images from eval cells, `!` shell commands, and replay being cut, reordered, or drawn twice: payload rows are kept byte-for-byte in stream order, a frame is retained whole even past the inline budget, and a frame already rendered raw no longer draws its decoded copy again ([#15327](https://github.com/can1357/oh-my-pi/pull/15327) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 
 ## [18.11.3] - 2026-10-16
 

@@ -276,6 +276,7 @@ pub struct ImageContent {
 	pub detail: Option<ImageContentDetail>,
 	pub url: Option<String>,
 	pub provider_file: Option<Map<String, Value>>,
+	pub source: Option<ImageContentSource>,
 	/// Every key not decoded into a declared field.
 	pub extra: Map<String, Value>,
 }
@@ -301,6 +302,9 @@ impl Serialize for ImageContent {
 		if let Some(value) = &self.provider_file {
 			map.serialize_entry("providerFile", value)?;
 		}
+		if let Some(value) = &self.source {
+			map.serialize_entry("source", value)?;
+		}
 		for (key, value) in &self.extra {
 			match key.as_str() {
 				"type" if self.r#type.is_some() => continue,
@@ -309,6 +313,7 @@ impl Serialize for ImageContent {
 				"detail" if self.detail.is_some() => continue,
 				"url" if self.url.is_some() => continue,
 				"providerFile" if self.provider_file.is_some() => continue,
+				"source" if self.source.is_some() => continue,
 				_ => {}
 			}
 			map.serialize_entry(key, value)?;
@@ -327,6 +332,7 @@ impl<'de> Deserialize<'de> for ImageContent {
 			detail: take(&mut extra, "detail"),
 			url: take(&mut extra, "url"),
 			provider_file: take(&mut extra, "providerFile"),
+			source: take(&mut extra, "source"),
 			extra,
 		})
 	}
@@ -5527,6 +5533,24 @@ impl ImageContentDetail {
 			Self::Low => "low",
 			Self::High => "high",
 			Self::Original => "original",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ImageContentSource {
+	#[serde(rename = "kitty")]
+	Kitty,
+	#[serde(rename = "sixel")]
+	Sixel,
+}
+
+impl ImageContentSource {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Kitty => "kitty",
+			Self::Sixel => "sixel",
 		}
 	}
 }

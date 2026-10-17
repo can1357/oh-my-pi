@@ -11,6 +11,7 @@ import { highlightCode, theme } from "../theme/theme";
 import type { OutputArtifactError } from "../tools/streaming-output";
 import type { TruncationMeta } from "../tools/output-meta";
 import { OutputPane } from "../render/output-pane";
+import { isSixelPassthroughEnabled, sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
 import {
 	buildExecutionFrame,
 	buildStatusFooter,
@@ -189,9 +190,14 @@ export class EvalExecutionComponent extends Container {
 	}
 
 	#updateDisplay(): void {
-		// Only the collapsed preview hides lines; when expanded the footer must
-		// not keep advertising hidden lines / ctrl+o.
-		const hiddenLineCount = this.#expanded ? 0 : Math.max(0, this.#outputPane.lineCount - PREVIEW_LINES);
+		// Full output is shown when expanded or when sixel passthrough renders
+		// the raw payload; the collapsed preview shows only the tail window.
+		const hasSixelOutput = isSixelPassthroughEnabled() && this.#outputPane.hasSixel;
+		const showingAllLines = this.#expanded || hasSixelOutput;
+		// Only the collapsed preview hides lines; when the full output is shown
+		// the footer must not keep advertising hidden lines / ctrl+o.
+		const hiddenLineCount = showingAllLines ? 0 : Math.max(0, this.#outputPane.lineCount - PREVIEW_LINES);
+		this.#outputPane.configure({ uncapSixel: hasSixelOutput });
 
 		this.#contentContainer.clear();
 
@@ -209,13 +215,16 @@ export class EvalExecutionComponent extends Container {
 				truncation: this.#truncation,
 				artifactError: this.#artifactError,
 				hiddenLineCount,
+				suppressHiddenCount: hasSixelOutput,
 			});
 			if (footer) this.#contentContainer.addChild(footer);
 		}
 	}
 
 	#setOutput(output: string): void {
-		const clean = sanitizeText(output);
+		// Passthrough-aware: the completed snapshot keeps embedded sixel payloads
+		// byte-for-byte (a plain sanitizeText would strip the DCS sequence).
+		const clean = sanitizeWithOptionalSixelPassthrough(output, sanitizeText);
 		this.#outputPane.setText(clean);
 	}
 
