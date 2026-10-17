@@ -63,6 +63,7 @@ import {
 	subagentSpawnsEnv,
 } from "./executor";
 import { agentPrewalkPattern } from "./prewalk";
+import { isBundledSeance } from "./seance";
 import {
 	cfgTaskAgentAdvisor,
 	cfgTaskAgentIdleTtlMs,
@@ -185,19 +186,19 @@ async function resolveParentModel(
 	}
 }
 
-export async function resolveEffectiveAgentConfig(
+/** Model a spawn of `agent` resolves from its settings entry, frontmatter and the parent session's model. */
+async function resolveSpawnModel(
 	agent: AgentDefinition,
+	modelOverride: string | string[] | undefined,
 	settings: Settings,
 	modelRegistry: ModelRegistry,
-	cwd: string,
-): Promise<EffectiveAgentConfig> {
+): Promise<{ entry: AgentConfigEntry; model: Model | undefined; resolved: SpawnModelResolution }> {
 	const { name } = agent;
-	const entries = resolveAgentSettingsEntries(settings, name);
 	// The auth probe runs as the spawn's, under a child session id, so session-sticky OAuth resolves as it would there.
 	const probeSessionId = `agents-show-${name}`;
 	let parent = await resolveParentModel(settings, modelRegistry);
 	let selection = resolveAgentModelSelection({
-		settingsOverride: entries.model,
+		settingsOverride: modelOverride,
 		agentModel: agent.model,
 		activeModelPattern: parent.pattern,
 		settings,
@@ -214,7 +215,7 @@ export async function resolveEffectiveAgentConfig(
 		await modelRegistry.refresh("online-if-uncached");
 		parent = await resolveParentModel(settings, modelRegistry);
 		selection = resolveAgentModelSelection({
-			settingsOverride: entries.model,
+			settingsOverride: modelOverride,
 			agentModel: agent.model,
 			activeModelPattern: parent.pattern,
 			settings,
@@ -233,7 +234,7 @@ export async function resolveEffectiveAgentConfig(
 	// The role note names a role only when the selector that matched came from it.
 	const matchedRole = resolved.patternIndex !== undefined ? selection.patternRoles[resolved.patternIndex] : undefined;
 	const usesParent = resolved.authFallbackUsed || (selection.from !== "settings" && selection.from !== "agent");
-	const modelEntry: AgentConfigEntry = {
+	const entry: AgentConfigEntry = {
 		value: model ? formatModelStringWithRouting(model) : null,
 		source: usesParent
 			? sessionModel
@@ -246,6 +247,30 @@ export async function resolveEffectiveAgentConfig(
 				? `${selection.patterns.join(", ")} has no working credentials`
 				: (matchedRole && `@${matchedRole} via modelRoles.${matchedRole}`) ||
 					(usesParent ? parent.note : undefined),
+	};
+	return { entry, model, resolved };
+}
+
+type SpawnModelResolution = Parameters<typeof resolveSubagentThinkingLevel>[0];
+
+export async function resolveEffectiveAgentConfig(
+	agent: AgentDefinition,
+	settings: Settings,
+	modelRegistry: ModelRegistry,
+	cwd: string,
+): Promise<EffectiveAgentConfig> {
+	const { name } = agent;
+	const entries = resolveAgentSettingsEntries(settings, name);
+	// The bundled seance forks a saved source session: it runs on that session's saved model (or the call's
+	// `model`), with no advisor or prewalk, on its restricted tool list, so no setting here picks its model.
+	const seance = isBundledSeance(agent);
+	const spawnModel = seance ? undefined : await resolveSpawnModel(agent, entries.model, settings, modelRegistry);
+	const model = spawnModel?.model;
+	const resolved: SpawnModelResolution = spawnModel?.resolved ?? { explicitThinkingLevel: false };
+	const modelEntry: AgentConfigEntry = spawnModel?.entry ?? {
+		value: null,
+		source: { layer: "session", key: "seance source" },
+		note: "the source session's saved model, or the call's model",
 	};
 
 	const spawnThinking = resolveSubagentThinkingLevel(resolved, agent.thinkingLevel);
@@ -275,6 +300,7 @@ export async function resolveEffectiveAgentConfig(
 	const { settings: childSettings, advisor } = resolveSubagentSettings(agent, settings, {
 		compactionThresholdOverride: entries.compactionThreshold,
 		isolated: false,
+		preparedSession: seance,
 	});
 
 	const family = model && serviceTierFamily(model);
@@ -335,7 +361,7 @@ export async function resolveEffectiveAgentConfig(
 					: settingSource(cfgTaskSoftRequestBudget, settings),
 	};
 
-	const prewalkPattern = agentPrewalkPattern(agent, settings);
+	const prewalkPattern = seance ? undefined : agentPrewalkPattern(agent, settings);
 	let prewalkResolution = prewalkPattern
 		? resolveSubagentPrewalk(prewalkPattern, modelRegistry, settings, { model, thinkingLevel: spawnThinking })
 		: undefined;
@@ -357,10 +383,11 @@ export async function resolveEffectiveAgentConfig(
 	const structured = cfgTaskStructured.get(settings);
 	const toolNames = resolveSubagentToolNames(agent, settings, {
 		atMaxDepth,
-		restrictToolNames: false,
+		restrictToolNames: seance,
 		structured,
 	});
-	// The child session a task spawn starts, under the child's settings: no UI, and LSP only under task.enableLsp.
+	// The child session a task spawn starts, under the child's settings: no UI, and LSP only under task.enableLsp
+	// (never for a seance).
 	const childToolSession: ToolSession = {
 		cwd,
 		hasUI: false,
@@ -371,7 +398,7 @@ export async function resolveEffectiveAgentConfig(
 		requireYieldTool: structured,
 		// A yield-gated child gets `todo` only while a prewalk hand-off is armed; an unstructured one always may.
 		prewalkArmed: prewalkResolution?.kind === "armed",
-		enableLsp: cfgTaskEnableLsp.get(settings),
+		enableLsp: !seance && cfgTaskEnableLsp.get(settings),
 		modelRegistry,
 		getActiveModel: () => model,
 		skipPythonPreflight: Array.isArray(toolNames) && !toolNames.includes("eval"),
@@ -400,8 +427,9 @@ export async function resolveEffectiveAgentConfig(
 					  (agent.source === "bundled" && name === "task" && cfgTaskPrewalk.provenance(settings) !== "default")
 					? settingSource(cfgTaskPrewalk, settings)
 					: { layer: "default" },
-		note:
-			prewalkResolution?.kind === "unavailable"
+		note: seance
+			? "a seance never hands off"
+			: prewalkResolution?.kind === "unavailable"
 				? `skipped: no available model with credentials matches ${prewalkPattern}`
 				: prewalkResolution?.kind === "noop"
 					? "skipped: same model and thinking level as the start"
@@ -423,7 +451,7 @@ export async function resolveEffectiveAgentConfig(
 		tools: {
 			value: childToolNames,
 			source: agent.tools ? { layer: "frontmatter", key: "tools" } : { layer: "session" },
-			note: `built-ins only; MCP and extension tools come from the session${deviceOnlyWrite ? "; write is granted for xd:// devices only" : ""}`,
+			note: `built-ins only; ${seance ? "a seance gets no MCP or extension tools" : "MCP and extension tools come from the session"}${deviceOnlyWrite ? "; write is granted for xd:// devices only" : ""}`,
 		},
 		prewalk,
 		advisor: {
@@ -433,7 +461,7 @@ export async function resolveEffectiveAgentConfig(
 				: agent.advisor !== undefined
 					? { layer: "frontmatter", key: "advisor" }
 					: { layer: "default" },
-			note: advisorEntries?.note,
+			note: seance ? "a seance runs unadvised" : advisorEntries?.note,
 		},
 		accountPools: {
 			value: entries.accountPools ?? null,
