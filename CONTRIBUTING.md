@@ -40,21 +40,23 @@ link it from your pull request instead of creating another one.
 AI agents are welcome as tools, not as unattended contributors. Do not give an
 agent a vague goal and submit whatever it produces.
 
-Before opening a pull request, you must:
+An agent may commit validated work, push its task branch, and open or update a
+draft pull request so the contribution is visible and reviewable. Before
+marking that pull request ready for review, you must:
 
 - constrain the agent to the agreed scope and reject unrelated changes;
 - review every changed file and understand the resulting behavior;
 - run the relevant checks and exercise the changed behavior yourself; and
-- submit the pull request only after that review, rather than letting an agent
-  publish it autonomously.
+- confirm that the pull request accurately describes the reviewed change.
 
 You are responsible for the code, regardless of who or what generated it.
 
 ## Pull request requirements
 
-Every pull request body **MUST include at least one sentence written by you, in
-your own words**, explaining what changed and why. A generated summary, pasted
-agent transcript, or checklist alone does not satisfy this requirement.
+Before a pull request is marked ready for review, its body **MUST include at
+least one sentence written by you, in your own words**, explaining what changed
+and why. A generated summary, pasted agent transcript, or checklist alone does
+not satisfy this requirement. Draft pull requests may omit this sentence.
 
 One honest line is enough:
 
@@ -96,6 +98,6 @@ Maintainers review the submitted behavior and the contributor's understanding
 of it—not the volume of generated code. Respond to review feedback yourself,
 and only apply suggestions you have checked.
 
-Pull requests may be closed when they skip required prior discussion, lack the
-human-written explanation, contain unreviewed agent output, or mix unrelated
-changes.
+Pull requests may be returned to draft or closed when they skip required prior
+discussion, are marked ready without the human-written explanation, contain
+unreviewed agent output, or mix unrelated changes.
