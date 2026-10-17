@@ -22,8 +22,9 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
  *
  * Vectors are kept as `Float32Array`: embedding models emit float32, so this loses nothing for
  * them and halves the memory of `Float64Array`. The cache holds at most {@link MAX_CACHED_VECTORS}
- * entries per connection (about 31 MB at 384 dimensions, 61 MB at 768, 82 MB at 1024), evicting the
- * least recently used first.
+ * entries and {@link MAX_CACHED_BYTES} of vector data per connection, whichever is reached first,
+ * evicting the least recently used first: all 20,000 fit at 384, 768 and 1024 dimensions (31, 61 and
+ * 82 MB); a 3,584-dimension model is capped by bytes at about 7,000 vectors.
  */
 interface ConnectionCache {
 	dataVersion: number;
@@ -35,6 +36,10 @@ const caches = new WeakMap<Database, ConnectionCache>();
 const FETCH_CHUNK = 500;
 /** Bounds a connection whose scored rows keep moving (new memories push old ones out of the recall window). */
 export const MAX_CACHED_VECTORS = 20_000;
+/** Bounds memory for high-dimensional models, where 20,000 vectors would take hundreds of megabytes. */
+export const MAX_CACHED_BYTES = 96 * 1024 * 1024;
+/** A cached "no embedding" marker still holds a key; count it at a nominal size. */
+const ABSENT_ENTRY_BYTES = 64;
 
 function decodeEmbedding(raw: unknown): Float32Array | null {
 	if (typeof raw !== "string") return null;
@@ -89,7 +94,11 @@ function currentCache(db: Database): ConnectionCache {
 	const fresh: ConnectionCache = {
 		dataVersion,
 		generation,
-		vectors: new LRUCache<string, Float32Array | null>({ max: MAX_CACHED_VECTORS }),
+		vectors: new LRUCache<string, Float32Array | null>({
+			max: MAX_CACHED_VECTORS,
+			maxSize: MAX_CACHED_BYTES,
+			sizeCalculation: vector => vector?.byteLength ?? ABSENT_ENTRY_BYTES,
+		}),
 	};
 	caches.set(db, fresh);
 	return fresh;
