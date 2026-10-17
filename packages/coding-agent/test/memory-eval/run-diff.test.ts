@@ -142,7 +142,7 @@ it("diff rejects results from different dataset revisions", async () => {
 	expect(stderr).toContain("datasetRevision differs: r1 vs r2");
 });
 
-it("diff rejects one engine run with different options, but compares engines run with different options", async () => {
+it("diff compares runs whose engine options differ, naming both configurations", async () => {
 	const plain = await writeResult("opt-plain", { engine: "mnemopi" });
 	const poly = await writeResult("opt-poly", {
 		engine: "mnemopi",
@@ -156,10 +156,16 @@ it("diff rejects one engine run with different options, but compares engines run
 		engine: "mnemosyne",
 		options: { mnemopiRecall: "recall", polyphonic: true },
 	});
+	// An ablation of one engine (polyphonic off vs on, recall vs enhanced) is a valid paired comparison.
 	const polyphonic = await diff(plain, poly);
-	expect(polyphonic.code).toBe(1);
-	expect(polyphonic.stderr).toContain("polyphonic differs: false vs true");
-	expect((await diff(plain, enhanced)).stderr).toContain("mnemopiRecall differs: recall vs enhanced");
+	expect(polyphonic.code).toBe(0);
+	expect(polyphonic.stdout).toContain("b: engine mnemopi protocol standard k 10 mnemopiRecall recall polyphonic true");
+	expect(polyphonic.stdout).toContain("recall@10 overall");
+	const recallPath = await diff(plain, enhanced);
+	expect(recallPath.code).toBe(0);
+	expect(recallPath.stdout).toContain(
+		"b: engine mnemopi protocol standard k 10 mnemopiRecall enhanced polyphonic false",
+	);
 	const across = await diff(enhanced, mnemosynePoly);
 	expect(across.code).toBe(0);
 	expect(across.stdout).toContain("a: engine mnemopi protocol standard k 10 mnemopiRecall enhanced polyphonic false");

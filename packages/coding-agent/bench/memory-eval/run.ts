@@ -212,12 +212,8 @@ async function diffCommand(argv: string[]): Promise<void> {
 		throw new Error(`protocol differs: ${a.config.protocol} vs ${b.config.protocol}`);
 	}
 	if (a.config.k !== b.config.k) throw new Error(`k differs: ${a.config.k} vs ${b.config.k}`);
-	// One engine under two options is a different system on each side; across engines the options are the comparison.
-	if (a.config.engine === b.config.engine) {
-		for (const key of ["mnemopiRecall", "polyphonic"] as const) {
-			if (a.config[key] !== b.config[key]) throw new Error(`${key} differs: ${a.config[key]} vs ${b.config[key]}`);
-		}
-	} else if (a.config.protocol === "with-sleep") {
+	// Engine options are what an ablation compares; the config lines above name both sides.
+	if (a.config.engine !== b.config.engine && a.config.protocol === "with-sleep") {
 		console.warn(
 			"warning: with-sleep credits a summary hit with every message it covers, so recall@k depends on how many messages each engine's summaries cover; it is not comparable across engines",
 		);
