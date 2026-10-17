@@ -103,6 +103,25 @@ export const cfgAdvisorReviewInterval = register({
 	},
 });
 
+export const cfgAdvisorLateConcern = register({
+	id: "advisor.lateConcern",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["preserve", "steer"] as const,
+	default: "preserve",
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Late Concern Delivery",
+		description: "Deliver concerns after a final answer as passive cards or wake the agent immediately.",
+		options: [
+			{ value: "preserve", label: "Preserve", description: "Let the next user turn pick up the concern." },
+			{ value: "steer", label: "Steer Immediately", description: "Wake the agent to act on the concern." },
+		],
+		condition: "advisorEnabled",
+	},
+});
+
 export const cfgAdvisorMaxNotesPerUpdate = register({
 	id: "advisor.maxNotesPerUpdate",
 	protocolDefault: ["rpc", "acp"],

@@ -119,19 +119,32 @@ export function resolveAdvisorDeliveryChannel(opts: {
 	aborting: boolean;
 	terminalAnswerNoQueuedWork?: boolean;
 	/** Opt out of terminal-answer preservation for a late `concern` (default
-	 *  false). Bypasses ONLY that branch — never stop/abort suppression,
+	 *  false). Bypasses ONLY that branch, never stop/abort suppression,
 	 *  `preserveOnly`, or the immune-turn cooldown. */
 	allowTerminalConcernSteering?: boolean;
+	terminalUnwindActive?: boolean;
 	interruptImmuneTurnActive?: boolean;
 	preserveOnly?: boolean;
+	lateConcern?: "preserve" | "steer";
 }): AdvisorDeliveryChannel {
+	const lateConcernSteers =
+		opts.severity === "concern" &&
+		(opts.allowTerminalConcernSteering ||
+			(opts.lateConcern === "steer" && !opts.aborting && !opts.autoResumeSuppressed));
 	if (opts.preserveOnly && !opts.streaming) return "preserve";
+	if (
+		opts.terminalUnwindActive &&
+		opts.terminalAnswerNoQueuedWork &&
+		opts.severity !== "blocker" &&
+		!lateConcernSteers
+	)
+		return "preserve";
 	if (
 		opts.terminalAnswerNoQueuedWork &&
 		opts.severity !== "blocker" &&
-		!opts.allowTerminalConcernSteering &&
 		!opts.streaming &&
-		!opts.aborting
+		!opts.aborting &&
+		!lateConcernSteers
 	)
 		return "preserve";
 	if (!isInterruptingSeverity(opts.severity)) return "aside";

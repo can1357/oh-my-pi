@@ -123,6 +123,7 @@ import type { YieldQueue } from "./yield-queue";
 import {
 	cfgAdvisorEvictStaleResults,
 	cfgAdvisorImmuneTurns,
+	cfgAdvisorLateConcern,
 	cfgAdvisorMaxNotesPerUpdate,
 	cfgAdvisorReviewInterval,
 	cfgAdvisorReviewMode,
@@ -632,7 +633,8 @@ export class SessionAdvisors {
 		signal?: AbortSignal,
 	): Promise<void> {
 		const terminalBoundary = willContinue !== true;
-		if (terminalBoundary) this.#terminalUnwindActive = true;
+		const terminalTextBoundary = terminalBoundary && this.#hasTerminalTextAnswerWithoutQueuedWork(messages);
+		if (terminalTextBoundary) this.#terminalUnwindActive = true;
 		// Delivery state follows primary boundaries even when review cadence skips a callback.
 		this.#advisorPrimaryWillContinue = willContinue === true;
 		this.#advisorPrimaryTurnsCompleted++;
@@ -708,13 +710,10 @@ export class SessionAdvisors {
 			// Window closed: deliver everything buffered during flush + catch-up
 			// wait as one merged message (one steer at most, else one card).
 			this.#flushAdvisorBoundaryNotes();
-			// The merge window covers only this callback. With advisor.syncBacklog
-			// off the review drain can still emit after it returns; those late notes
-			// deliver individually through #routeAdvice, and `#terminalUnwindActive`
-			// (held until the next primary turn starts), not the merge window, is what
-			// keeps them from steering finished work — only a blocker or an
-			// agent-end reviewer's concern may still request a continuation.
-			if (!terminalBoundary) this.#terminalUnwindActive = false;
+			// With advisor.syncBacklog=off, the review drain can emit after this
+			// callback returns. Keep the terminal guard until the next real agent
+			// start rather than reopening the steer path in that microtask gap.
+			if (!terminalTextBoundary) this.#terminalUnwindActive = false;
 		}
 	}
 
@@ -1695,9 +1694,10 @@ export class SessionAdvisors {
 	 * has already accepted the note; rejected calls never enter this route and
 	 * receive their specific policy outcome from `AdviseTool`.
 	 */
-	#hasTerminalTextAnswerWithoutQueuedWork(): boolean {
+	#hasTerminalTextAnswerWithoutQueuedWork(
+		messages: readonly AgentMessage[] = this.#host.agent.state.messages,
+	): boolean {
 		if (this.#host.agent.hasQueuedMessages() || this.#host.hasPendingNextTurnMessages()) return false;
-		const messages = this.#host.agent.state.messages;
 		let tail = messages.length - 1;
 		while (tail >= 0 && isAdvisorCard(messages[tail])) tail--;
 		return isTerminalTextAssistantAnswer(messages[tail]);
@@ -1729,7 +1729,7 @@ export class SessionAdvisors {
 			return;
 		}
 		const interrupting = isInterruptingSeverity(severity);
-		const terminalAnswerNoQueuedWork = this.#hasTerminalTextAnswerWithoutQueuedWork();
+		const terminalAnswerNoQueuedWork = this.#terminalUnwindActive || this.#hasTerminalTextAnswerWithoutQueuedWork();
 		// A final-review concern that lands after the boundary window closed
 		// (catch-up off, or a review slower than its wait) keeps the one
 		// continuation the merged boundary flush would have granted it.
@@ -1737,19 +1737,19 @@ export class SessionAdvisors {
 			severity === "concern" &&
 			this.#terminalUnwindActive &&
 			(advisor.reviewMode ?? cfgAdvisorReviewMode.get(this.#host.settings)) === "agent-end";
-		const terminalUnwindPreserve =
-			this.#terminalUnwindActive && severity !== "blocker" && !finalReviewConcern && terminalAnswerNoQueuedWork;
 		const channel = resolveAdvisorDeliveryChannel({
 			severity,
 			autoResumeSuppressed: this.#advisorAutoResumeSuppressed,
-			preserveOnly: this.#preserveAdvisorAdvice || terminalUnwindPreserve,
+			preserveOnly: this.#preserveAdvisorAdvice,
 			// Key on the live agent-core loop, not session `isStreaming` (which also
 			// counts `#promptInFlightCount` during post-turn unwind). Only a running
 			// loop consumes a steer at its next boundary.
-			streaming: this.#host.agent.state.isStreaming && !this.#preserveTerminalYieldAdvice && !terminalUnwindPreserve,
+			streaming: this.#host.agent.state.isStreaming && !this.#preserveTerminalYieldAdvice,
 			aborting: this.#host.abortInProgress(),
+			terminalUnwindActive: this.#terminalUnwindActive,
 			terminalAnswerNoQueuedWork,
 			allowTerminalConcernSteering: finalReviewConcern,
+			lateConcern: cfgAdvisorLateConcern.get(this.#host.settings),
 			interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
 		});
 		const notes: AdvisorNote[] = [{ note, severity, advisor: source }];
@@ -1766,16 +1766,11 @@ export class SessionAdvisors {
 	 * per-severity attribution, headed by {@link ADVISOR_BOUNDARY_GUIDANCE} so
 	 * the primary reads stale review output critically. Steering is decided per
 	 * note by the same {@link resolveAdvisorDeliveryChannel} policy live routing
-	 * uses — user-stop suppression, headless/terminal-yield preservation, and
-	 * the post-interrupt cooldown all gate a final-review continuation exactly
-	 * as they gate a live steer. The batch steers at most ONE continuation, only
-	 * when a note qualifies on its own merits: a blocker, or a concern from an
-	 * agent-end advisor (it reviewed the complete run, so a material issue in
-	 * finished work deserves one steering turn — the sleep latch prevents
-	 * cascade). For those final-review concerns `allowTerminalConcernSteering`
-	 * lifts ONLY the terminal-answer preservation — the turn they reviewed has
-	 * by definition just answered — never the stop/abort/preserve/cooldown
-	 * gates. Otherwise preserves as a single visible card.
+	 * uses. User-stop suppression, headless/terminal-yield preservation, and
+	 * the post-interrupt cooldown also gate the merged continuation. A blocker
+	 * or an agent-end reviewer's concern may steer one continuation. A turn-mode
+	 * concern may also steer after a terminal text answer when lateConcern is
+	 * configured to steer. Otherwise the batch stays a single visible card.
 	 */
 	#flushAdvisorBoundaryNotes(): void {
 		if (this.#advisorBoundaryNotes.length === 0) return;
@@ -1803,12 +1798,12 @@ export class SessionAdvisors {
 		const aborting = this.#host.abortInProgress();
 		const terminalAnswerNoQueuedWork = this.#hasTerminalTextAnswerWithoutQueuedWork();
 		const interruptImmuneTurnActive = this.#isAdvisorInterruptImmuneTurnActive();
+		const lateConcern = cfgAdvisorLateConcern.get(this.#host.settings);
 		const shouldSteer = notes.some(n => {
-			// Steering eligibility: a blocker, or a concern from an agent-end
-			// reviewer. A turn-mode concern at a terminal boundary still
-			// preserves: the work was already reviewed per-turn.
 			const finalReviewConcern = n.severity === "concern" && this.#noteAdvisorIsAgentEnd(n.advisor);
-			if (n.severity !== "blocker" && !finalReviewConcern) return false;
+			const configuredLateConcern =
+				n.severity === "concern" && terminalAnswerNoQueuedWork && lateConcern === "steer";
+			if (n.severity !== "blocker" && !finalReviewConcern && !configuredLateConcern) return false;
 			return (
 				resolveAdvisorDeliveryChannel({
 					severity: n.severity,
@@ -1819,6 +1814,7 @@ export class SessionAdvisors {
 					terminalAnswerNoQueuedWork,
 					interruptImmuneTurnActive,
 					allowTerminalConcernSteering: finalReviewConcern,
+					lateConcern,
 				}) === "steer"
 			);
 		});

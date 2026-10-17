@@ -61,7 +61,7 @@ describe("settings layout", () => {
 	});
 
 	it("hides advisor dependent settings when advisor is disabled", () => {
-		const advisorDependentPaths = ["advisor.syncBacklog", "advisor.immuneTurns"];
+		const advisorDependentPaths = ["advisor.syncBacklog", "advisor.immuneTurns", "advisor.lateConcern"];
 		const advisorDependentPathSet = new Set<string>(advisorDependentPaths);
 		const defs = getSettingsForTab(createSettingsHost().entries, "model").filter(def =>
 			advisorDependentPathSet.has(def.path),
