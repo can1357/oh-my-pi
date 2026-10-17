@@ -275,6 +275,17 @@ describe("runner", () => {
 		expect((await runCases(engine, [mixed], "standard", 10, tmp)).questions[0].metrics["recall@10"]).toBe(0.5);
 	});
 
+	it("fingerprints each question's query text and gold set, not the gold order", async () => {
+		const hashOf = async (evalCase: EvalCase) =>
+			(await runCases(oracleEngine(), [evalCase], "standard", 10, tmp)).questions[0].definitionHash;
+		const base = caseOf(twoMessageCase.messages, ["m1", "m2"]);
+		const hash = await hashOf(base);
+		expect(hash).toMatch(/^[0-9a-f]+$/);
+		expect(await hashOf(caseOf(twoMessageCase.messages, ["m2", "m1"]))).toBe(hash);
+		expect(await hashOf(caseOf(twoMessageCase.messages, ["m2"]))).not.toBe(hash);
+		expect(await hashOf({ ...base, questions: [{ ...base.questions[0], text: "another query" }] })).not.toBe(hash);
+	});
+
 	it("with-sleep sleeps once per case and standard never does", async () => {
 		let sleeps = 0;
 		const engine = fakeEngine({

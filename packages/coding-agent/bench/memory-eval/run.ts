@@ -259,6 +259,12 @@ async function diffCommand(argv: string[]): Promise<void> {
 		if (qa.category !== qb.category) {
 			throw new Error(`question ${qa.questionId} has category ${qa.category} in a but ${qb.category} in b`);
 		}
+		if (qa.definitionHash && qb.definitionHash && qa.definitionHash !== qb.definitionHash) {
+			throw new Error(`question ${qa.questionId} has a different query text or gold set in a and b`);
+		}
+	}
+	if (pairs.some(p => !p.a.definitionHash || !p.b.definitionHash)) {
+		console.warn("warning: a result file predates question fingerprints; query text and gold sets were not verified");
 	}
 
 	const identical = pairs.filter(
