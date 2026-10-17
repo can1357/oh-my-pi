@@ -1060,6 +1060,7 @@
 ### Changed
 
 - Advisor notes merge at final boundaries with age markers and at most one permitted continuation per batch; advisor continuations no longer trigger recursive reviews ([#12387](https://github.com/can1357/oh-my-pi/pull/12387) by [@olegpulatov](https://github.com/olegpulatov)).
+- Advisor concerns raised while the agent is mid-turn now reach it at its next step as non-interrupting asides instead of after the turn completes; only blockers interrupt a running tool ([#10600](https://github.com/can1357/oh-my-pi/issues/10600), [#13775](https://github.com/can1357/oh-my-pi/pull/13775) by [@rthiago](https://github.com/rthiago)).
 
 ### Fixed
 
@@ -1077,6 +1078,7 @@
 - Fixed parked and disposed agent sessions keeping their persistent shell (about 70 KB of native memory each) for the life of the process; a revived subagent now starts with a fresh shell ([#14042](https://github.com/can1357/oh-my-pi/pull/14042) by [@theolundqvist](https://github.com/theolundqvist)).
 - Fixed discovered models' request headers nesting one level deeper on every model refresh, which grew memory and per-request work in long sessions with many subagents ([#14041](https://github.com/can1357/oh-my-pi/pull/14041))
 - RPC `prompt`, `steer`, and `follow_up` run native `input` handlers in submission order and acknowledge `prompt` only after admission, so a later prompt cannot overtake an idle image skill during vision description, an abort accepted during an earlier hook cancels that frame instead of letting it start a new turn, and a skill failure after the acknowledgement rejects `RpcClient.promptAndWait` instead of being dropped ([#13027](https://github.com/can1357/oh-my-pi/pull/13027) by [@andrebrait](https://github.com/andrebrait)).
+- Fixed advisor notes lingering invisibly until the next prompt when they arrived after the agent's last step or while it was idle; they are now shown as advisor cards ([#10600](https://github.com/can1357/oh-my-pi/issues/10600), [#13775](https://github.com/can1357/oh-my-pi/pull/13775) by [@rthiago](https://github.com/rthiago)).
 - Fixed test suite failures on non-FHS hosts and under ambient terminal and Git configuration ([#12358](https://github.com/can1357/oh-my-pi/pull/12358) by [@olegpulatov](https://github.com/olegpulatov)).
 - Fixed late TTSR matches on short tool calls ending a run before the rule interrupt reaches the model ([#14018](https://github.com/can1357/oh-my-pi/issues/14018)).
 - Fixed `omp gc --apply` holding `history.db` and `stats.db` open until exit, which left an empty `history.db-wal` behind after a WAL checkpoint ([#14043](https://github.com/can1357/oh-my-pi/issues/14043)).
