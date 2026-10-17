@@ -5,6 +5,37 @@
 ### Changed
 
 - With a first-party Anthropic model on the official API selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup; third-party gateways and custom endpoints are never probed ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
+- Snapcompact now shows an imaged `read` result's indentation as count brackets (`[»2]` two tabs, `[·4]` four spaces) and keeps its `[path#TAG]` header as text, so edits from imaged reads keep the right indentation and tag ([#15899](https://github.com/can1357/oh-my-pi/pull/15899) by [@apoc](https://github.com/apoc))
+
+### Fixed
+
+- Fixed a prompt sent while Esc was still interrupting the previous turn never settling, so a message steered in as it ended stayed queued instead of running ([#16038](https://github.com/can1357/oh-my-pi/pull/16038) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed isolated tasks freezing the host when the checkout holds linked worktrees of the same repository (e.g. gitignored `.claude/worktrees/`); those worktrees are no longer snapshotted as nested repos ([#16068](https://github.com/can1357/oh-my-pi/issues/16068))
+- Fixed `edit` moves dropping executable permissions in hashline, patch, and apply_patch modes ([#16042](https://github.com/can1357/oh-my-pi/pull/16042) by [@mottopanikeiku](https://github.com/mottopanikeiku))
+- Fixed leaving a subagent view before its transcript finished replaying leaving rows of both sessions on screen, dropping the start of one, and clearing native scrollback twice; transcript rebuilds now run one at a time and a superseded rebuild is discarded without painting ([#16066](https://github.com/can1357/oh-my-pi/pull/16066) by [@cagedbird043](https://github.com/cagedbird043))
+- Fixed Cursor task subagents losing their final report when it follows tool calls in the same turn ([#16059](https://github.com/can1357/oh-my-pi/issues/16059)).
+- Fixed SQLite read continuation hints dropping filters and sort order or truncating the next-page selector ([#16040](https://github.com/can1357/oh-my-pi/pull/16040) by [@mottopanikeiku](https://github.com/mottopanikeiku))
+- Fixed SQLite table reads omitting generated columns from sample rows and query results, and rejecting sort orders on those columns ([#16041](https://github.com/can1357/oh-my-pi/pull/16041) by [@mottopanikeiku](https://github.com/mottopanikeiku))
+- Fixed video timestamp selectors (`clip.mp4:2s`, `clip.mp4:0:05`) failing for files outside the session cwd, which also reported a colon-mangled path when the video was missing. ([#16056](https://github.com/can1357/oh-my-pi/pull/16056) by [@adi-IL](https://github.com/adi-IL))
+- Fixed recovery of hashed session directories for projects under a temporary directory inside home, including the default Windows temp directory ([#15929](https://github.com/can1357/oh-my-pi/pull/15929) by [@jchanghong023](https://github.com/jchanghong023)).
+- Fixed approval prompts for `xd://` device dispatches and direct MCP tools to show readable, indented arguments with multiline content expanded into blocks ([#15589](https://github.com/can1357/oh-my-pi/issues/15589), [#16048](https://github.com/can1357/oh-my-pi/pull/16048) by [@KunoLu](https://github.com/KunoLu)).
+- Fixed `retry.fallbackChains` warning "references unknown model" at startup for models a discovery provider loads once its background refresh finishes (e.g. Copilot and Cursor `-1m` variants); a model still missing after discovery is warned about once ([#16061](https://github.com/can1357/oh-my-pi/pull/16061) by [@gchai](https://github.com/gchai))
+- Fixed GitHub Copilot models that only discovery lists (e.g. `-1m` variants) going missing at startup when two Copilot accounts are signed in ([#16061](https://github.com/can1357/oh-my-pi/pull/16061) by [@gchai](https://github.com/gchai))
+- Fixed Cursor models that only discovery lists (e.g. `-1m` variants) staying unavailable at startup until a background refresh whenever the stored Cursor access token had expired; the startup cache read now uses the same account key as the discovery write ([#16061](https://github.com/can1357/oh-my-pi/pull/16061) by [@gchai](https://github.com/gchai))
+- Fixed `var` declared inside a top-level control block disappearing after an awaited JavaScript Eval cell ([#15859](https://github.com/can1357/oh-my-pi/issues/15859)).
+- Fixed the eval runtime-state reminder omitting live Python kernels, so retained Python state no longer reads as dead or absent; Python kernels are listed with their generation, alive/dead status, and `%load` scripts like JavaScript kernels ([#16032](https://github.com/can1357/oh-my-pi/issues/16032)).
+- Fixed a browser call hanging for about 21 s, and its tab staying listed but dead, when the tab's worker crashed (such as on an error inside Puppeteer): the call fails at once with the cause and the next call continues on the same page ([#16037](https://github.com/can1357/oh-my-pi/pull/16037) by [@alnaggar-dev](https://github.com/alnaggar-dev) and [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `/restart` losing explicitly opened session files outside the default session directories by resuming the persisted file directly ([#16030](https://github.com/can1357/oh-my-pi/pull/16030) by [@appboypov](https://github.com/appboypov))
+- Fixed a failed `todo` call's hidden reminder resurfacing on the next prompt with an outdated list after the agent had already retried successfully ([#16001](https://github.com/can1357/oh-my-pi/issues/16001))
+- Fixed TypeSafe image-cache reuse when only ignored image detail changes ([#16002](https://github.com/can1357/oh-my-pi/pull/16002) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Fixed `ssh://` ignoring a `ControlPath` from `~/.ssh/config`, so it now reuses an already-authenticated master (e.g. on MFA/keyboard-interactive hosts) instead of failing with `Permission denied` ([#15974](https://github.com/can1357/oh-my-pi/issues/15974))
+- Fixed `--session-dir <dir> --resume <id>` not finding a transcript that is a symlink in that directory, the session lists and id-prefix lookups skipping symlinked transcripts the same way, and a resume that must rewrite such a transcript replacing the link instead of updating the file it points at; a project bucket that is itself a symlink is no longer traversed, so a scan cannot leave the sessions root and no session is listed twice ([#15878](https://github.com/can1357/oh-my-pi/issues/15878), [#15882](https://github.com/can1357/oh-my-pi/pull/15882) by [@AnxForever](https://github.com/AnxForever))
+- Fixed restarting an interactive session with SIGTERM disabling a rotating Anthropic OAuth login and requiring `/login` again ([#15845](https://github.com/can1357/oh-my-pi/issues/15845)).
+- Fixed URL `read` dropping everything past 500,000 characters: tail selectors, URL `grep`, and the linked full-output artifact now reach the whole response body ([#15768](https://github.com/can1357/oh-my-pi/issues/15768)).
+- Fixed `find` (tool and `omp find`) reporting "no hits" when every judge request failed; it now reports `find unavailable` with a hint to use grep, flags partial runs with how many judge requests failed, and exposes the status as `coverage` in its details and `--json` output ([#15744](https://github.com/can1357/oh-my-pi/issues/15744))
+- Fixed resumed sessions with `eval` history (`--continue`, `--resume`) missing the prompt cache after the previous process's first request ([#15736](https://github.com/can1357/oh-my-pi/issues/15736))
+- Fixed a failed streamed edit preview ending the whole run without retry: the harness now re-drives the turn with the preview diagnostic so the model can read the file again and correct the patch, and gives up with a notice only after two recoveries
+- Fixed `omp://` documentation links in the transcript now rendering as clickable hyperlinks ([#15163](https://github.com/can1357/oh-my-pi/pull/15163) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.3] - 2026-10-16
 
@@ -64,27 +95,10 @@
 ### Fixed
 
 - Fixed prewalk switching models during read-only MCP lookups through `write xd://` when the server marks the tool read-only ([#15994](https://github.com/can1357/oh-my-pi/issues/15994))
+- Fixed the incomplete-todo stop reminder firing (and resuming work) when the agent's final message asks for permission or a decision before a closing status line, through "If you confirm, I'll…"/"Separately, tell me…"-style requests, or with a non-English question followed by another sentence ([#15986](https://github.com/can1357/oh-my-pi/issues/15986))
 - Fixed Ctrl+C printing `9;5u` in the shell after force-quitting omp with a third Ctrl+C while it was still closing the session
 - Fixed Smart unexpected-stop recovery continuing finished answers, which added extra "nothing more to add" turns
 - Fixed `grep` searching only the first 4 MB of a file named directly, so later matches were reported as absent; the whole file is now searched, and a multiline pattern, which still reads only the first 4 MB, says so in its no-match headline ([#15942](https://github.com/can1357/oh-my-pi/issues/15942))
-### Added
-
-- Added `lsp.requestTimeout` setting to configure wait durations for language server diagnostics and requests
-- Added `omp auth-gateway serve --clients=<file>`: per-client bearer tokens, each limited to listed models and broker OAuth accounts with no fallback to other accounts or API keys, re-read while serving ([#5098](https://github.com/can1357/oh-my-pi/issues/5098), [#15900](https://github.com/can1357/oh-my-pi/pull/15900) by [@alphastorm](https://github.com/alphastorm))
-
-### Changed
-
-- The `lsp` tool now uses `lsp.requestTimeout` to dynamically adjust both call deadlines and project-aware diagnostic wait times, with support for per-call overrides
-- Reduced CPU overhead during syntax checks and automatic edit repairs ([#15904](https://github.com/can1357/oh-my-pi/pull/15904) by [@iliaal](https://github.com/iliaal)).
-- Reduced status-line refresh overhead while subagents have long conversations ([#15874](https://github.com/can1357/oh-my-pi/pull/15874) by [@iliaal](https://github.com/iliaal)).
-- Agents now send `todo` updates alongside their next tool call instead of spending a separate model turn on them ([#15402](https://github.com/can1357/oh-my-pi/pull/15402) by [@will-bogusz](https://github.com/will-bogusz))
-- The Shared Language Servers setting now says what it does: each connection gets its own server, and a released one is reused while another omp instance keeps the project's mux running ([#14633](https://github.com/can1357/oh-my-pi/pull/14633) by [@jorgoose](https://github.com/jorgoose))
-- Memories saved explicitly through the extension `memory.save` API are now stored as `stated` rather than `unknown`, so they rank as deliberate memories in Mnemopi recall ([#13824](https://github.com/can1357/oh-my-pi/pull/13824) by [@sjawhar](https://github.com/sjawhar))
-
-### Fixed
-
-- Fixed Ctrl+C printing `9;5u` in the shell after force-quitting omp with a third Ctrl+C while it was still closing the session
-- Fixed Smart unexpected-stop recovery continuing finished answers, which added extra "nothing more to add" turns
 - Fixed browser `uploadFile` failing with "Not allowed" through the relay or into a Chrome on another machine, stalling behind macOS folder-privacy prompts, and breaking the tab on large drop-zone files ([#15489](https://github.com/can1357/oh-my-pi/pull/15489) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed browser `uploadFile` sending a stale copy of a file rewritten without changing its size or timestamp, failing on folders that contain a symlink loop, and deleting copies a still-open attached page could read after a repeat upload
 - Fixed plan mode (including plan-yolo) looping on `write xd://propose` forever when an extension provides a tool named `write`; the extension tool is left out of plan mode with a warning, since only the built-in `write` can submit plans ([#14030](https://github.com/can1357/oh-my-pi/issues/14030), [#14438](https://github.com/can1357/oh-my-pi/pull/14438) by [@F0Rextasy](https://github.com/F0Rextasy))
@@ -129,7 +143,6 @@
 - Fixed browser `uploadFile` in Chrome reporting success with no file attached when the element opens no file chooser and nothing on the page reads the dropped files; it now fails and says what to target ([#15919](https://github.com/can1357/oh-my-pi/pull/15919) by [@will-bogusz](https://github.com/will-bogusz))
 - Relay mode: when Chrome detaches omp from a tab it drives (a password manager's inline menu loading in the page), the call fails at once saying why and omp reattaches to the same tab, instead of every later call timing out and reopening failing with `No page targets available` ([#15920](https://github.com/can1357/oh-my-pi/pull/15920) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the macOS `computer` tool letting the display sleep and lock in a turn that went 5 minutes without a desktop action; it now keeps the display awake until the turn ends or asks for your answer, then lets it sleep ([#15762](https://github.com/can1357/oh-my-pi/pull/15762) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed `omp://` documentation links in the transcript now rendering as clickable hyperlinks ([#15163](https://github.com/can1357/oh-my-pi/pull/15163) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.1] - 2026-10-15
 

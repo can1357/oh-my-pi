@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor turns failing with `PROVIDER_ERROR` when a follow-up (a finished background job, a late diagnostic, a reminder) arrived while the previous turn was still streaming ([#15821](https://github.com/can1357/oh-my-pi/pull/15821) by [@robfeldmann](https://github.com/robfeldmann))
+
 ## [18.11.3] - 2026-10-16
 
 ### Added
@@ -17,12 +21,6 @@
 ### Fixed
 
 - Cancelling an `ask` after a background job finishes now reports the user cancellation instead of telling the model to retry a skipped tool ([#15985](https://github.com/can1357/oh-my-pi/issues/15985))
-
-## [18.11.1] - 2026-10-15
-
-### Added
-
-- `agent_start` carries `resumedToolCallIds` when a continued run first executes the calls of an unpaired assistant tail
 
 ## [18.11.1] - 2026-10-15
 

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows file-lock contention returning permission errors when an existing lease allows synchronization but not full mutex access ([#15930](https://github.com/can1357/oh-my-pi/pull/15930) by [@jchanghong023](https://github.com/jchanghong023)).
 ## [18.11.3] - 2026-10-16
 ### Breaking Changes
 
@@ -21,9 +24,6 @@
 
 - Added `parseCodeStatus` to check code syntax and its resolved language without generating a summary ([#15904](https://github.com/can1357/oh-my-pi/pull/15904) by [@iliaal](https://github.com/iliaal)).
 - Added `DesktopSession.holdDisplayUntilReleased()` and `releaseDisplayAwake()` to keep the display awake until the caller releases it, rather than for 5 minutes after the last request ([#15762](https://github.com/can1357/oh-my-pi/pull/15762) by [@will-bogusz](https://github.com/will-bogusz))
-### Added
-
-- Added `parseCodeStatus` to check code syntax and its resolved language without generating a summary ([#15904](https://github.com/can1357/oh-my-pi/pull/15904) by [@iliaal](https://github.com/iliaal)).
 
 ### Changed
 
