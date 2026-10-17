@@ -50,13 +50,6 @@ export interface RunConfig {
 	startedAt: string;
 }
 
-export interface RunResources {
-	warmupMs: number;
-	peakRssBytes: number;
-	baselineRssBytes: number;
-	rssScope: "engine-process" | "harness-process";
-}
-
 export interface ResultFile {
 	config: RunConfig;
 	questions: QuestionResult[];
@@ -65,15 +58,14 @@ export interface ResultFile {
 	fallbackRate: number;
 	droppedRows: number;
 	droppedGoldRows: number;
-	storeBytesMean: number;
-	resources: RunResources;
+	/** Engine start, imports and model load, before the first case (0 for upstream-compat, which has no warmup). */
+	warmupMs: number;
 	excluded: ExcludedQuestion[];
 }
 
 export interface RunOutput {
 	questions: QuestionResult[];
-	resources: RunResources;
-	storeBytesMean: number;
+	warmupMs: number;
 }
 
 const REMEMBER_BATCH = 500;
@@ -89,14 +81,6 @@ export function primaryMetric(dataset: DatasetName): "recall@10" | "session.reca
 }
 
 const normalize = (s: string): string => s.toLowerCase().replace(/\s+/g, " ").trim();
-
-/** Total size of the files under `dir`. */
-async function dirBytes(dir: string): Promise<number> {
-	const entries = await fs.readdir(dir, { recursive: true, withFileTypes: true });
-	let total = 0;
-	for (const entry of entries) if (entry.isFile()) total += Bun.file(path.join(entry.parentPath, entry.name)).size;
-	return total;
-}
 
 interface MappedHit {
 	messageIds: string[];
@@ -170,7 +154,6 @@ export async function runCases(
 	const warmupMs = performance.now() - warmupStart;
 
 	const questions: QuestionResult[] = [];
-	let storeBytesTotal = 0;
 	for (const [caseIndex, evalCase] of cases.entries()) {
 		// The index, never the dataset's case id: an id such as `..` would put the store, and its deletion, outside storeRoot.
 		const storeDir = path.join(storeRoot, String(caseIndex));
@@ -233,16 +216,10 @@ export async function runCases(
 		}
 
 		await engine.close();
-		storeBytesTotal += await dirBytes(storeDir);
 		await fs.rm(storeDir, { recursive: true, force: true });
 	}
 
-	const resources = await engine.resources();
-	return {
-		questions,
-		resources: { warmupMs, ...resources, rssScope: engine.rssScope },
-		storeBytesMean: cases.length === 0 ? 0 : storeBytesTotal / cases.length,
-	};
+	return { questions, warmupMs };
 }
 
 function means(rows: readonly Record<string, number>[]): Record<string, number> {
@@ -274,8 +251,7 @@ export function buildResultFile(config: RunConfig, run: RunOutput, excluded: Exc
 		fallbackRate: hits.length === 0 ? 0 : hits.filter(h => h.viaFallback).length / hits.length,
 		droppedRows: dropped.length,
 		droppedGoldRows: dropped.filter(d => d.gold).length,
-		storeBytesMean: run.storeBytesMean,
-		resources: run.resources,
+		warmupMs: run.warmupMs,
 		excluded,
 	};
 }

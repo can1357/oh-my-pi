@@ -201,8 +201,6 @@ for line in sys.stdin:
         result = {"MNEMOSYNE_DATA_DIR": os.environ["MNEMOSYNE_DATA_DIR"]}
     elif op == "vector_count":
         result = 1
-    elif op == "resources":
-        result = {"peak_rss_bytes": 2, "baseline_rss_bytes": 1}
     else:
         result = None
     print(json.dumps({"id": req["id"], "result": result}), flush=True)
