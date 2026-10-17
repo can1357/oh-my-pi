@@ -13,6 +13,7 @@ import { type BranchVariantPath, RewindSelectorComponent } from "@oh-my-pi/pi-tu
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
+import { copyOutlineTarget } from "@oh-my-pi/pi-tui/overlays/copy-selector";
 
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
@@ -97,6 +98,7 @@ function makeSelector(
 	onSelect: (id: string) => void,
 	siblingPaths?: (entryId: string) => BranchVariantPath[],
 	entries: SessionMessageEntry[] = makeEntries(),
+	onCopy?: (content: string) => void,
 ): RewindSelectorComponent {
 	return new RewindSelectorComponent(entries, {
 		ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
@@ -104,11 +106,22 @@ function makeSelector(
 		requestRender: () => {},
 		siblingPaths,
 		onSelect,
+		onCopy: onCopy ? target => onCopy(copyOutlineTarget(target).content) : undefined,
 		onCancel: () => {},
 	});
 }
 
 describe("RewindSelectorComponent", () => {
+	it("shows copy success and failure inside the fullscreen selector", () => {
+		const selector = makeSelector(() => {});
+		selector.showCopyFeedback("Copied user turn to clipboard", true);
+		expect(Bun.stripANSI(selector.render(80).join("\n"))).toContain("Copied user turn to clipboard");
+		selector.showCopyFeedback("Nothing to copy in that item", false);
+		const rendered = Bun.stripANSI(selector.render(80).join("\n"));
+		expect(rendered).toContain("Nothing to copy in that item");
+		expect(rendered).not.toContain("Copied user turn to clipboard");
+		selector.dispose();
+	});
 	beforeAll(async () => {
 		await initTheme();
 	});
@@ -264,6 +277,27 @@ describe("RewindSelectorComponent", () => {
 		selector.dispose();
 
 		expect(selected).toEqual(["u2b", "u2"]);
+	});
+
+	it("copies the outlined turn from either branch and leaves rewind available", () => {
+		const selected: string[] = [];
+		const copied: string[] = [];
+		const siblings = (entryId: string): BranchVariantPath[] =>
+			entryId === "u2" ? [{ rootId: "u2b", entries: [entry("u2b", "a2", userMessage("alternate prompt"))] }] : [];
+		const selector = makeSelector(
+			id => selected.push(id),
+			siblings,
+			undefined,
+			content => copied.push(content),
+		);
+		selector.render(120);
+		selector.handleInput("c");
+		selector.handleInput(RIGHT);
+		selector.handleInput("c");
+		selector.handleInput(ENTER);
+		selector.dispose();
+		expect(copied).toEqual(["second prompt", "alternate prompt"]);
+		expect(selected).toEqual(["u2b"]);
 	});
 
 	it("renders sibling branches as a half-width column strip at the fork", () => {

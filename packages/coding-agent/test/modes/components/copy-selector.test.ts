@@ -129,6 +129,7 @@ function makeSelector(
 	opens?: Array<{ href: string; label: string }>,
 	entries: SessionMessageEntry[] = makeEntries(),
 	sources?: CopyPickSource[],
+	onRewind?: (entryId: string) => void,
 ): CopySelectorComponent {
 	return new CopySelectorComponent(entries, {
 		ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
@@ -140,6 +141,7 @@ function makeSelector(
 		},
 		onOpen: opens ? (href, label) => opens.push({ href, label }) : undefined,
 		onCancel,
+		onRewind,
 	});
 }
 
@@ -154,6 +156,40 @@ describe("CopySelectorComponent", () => {
 	afterEach(() => {
 		setKeybindings(KeybindingsManager.inMemory());
 		resetSettingsForTest();
+	});
+
+	it("copies the outlined turn's prose on Enter", () => {
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks);
+		selector.render(100);
+
+		selector.handleInput(ENTER);
+		selector.dispose();
+
+		// The newest item is the assistant turn (bash result folded into it);
+		// its item-level copy is the assistant prose, not tool noise.
+		expect(picks).toEqual([{ content: ASSISTANT_TEXT, label: "assistant message" }]);
+	});
+
+	it("rewinds only from the whole-turn view when opted in", () => {
+		const rewound: string[] = [];
+		const selector = makeSelector(
+			[],
+			() => {},
+			undefined,
+			makeEntries(),
+			undefined,
+			id => rewound.push(id),
+		);
+		selector.render(100);
+		selector.handleInput("r");
+		selector.handleInput(RIGHT);
+		selector.handleInput("r");
+		selector.handleInput(LEFT);
+		selector.handleInput(UP);
+		selector.handleInput("r");
+		selector.dispose();
+		expect(rewound).toEqual(["t1", "u1"]);
 	});
 
 	it("keeps whole-turn picks exact and ties them to the native transcript entries", () => {
