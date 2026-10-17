@@ -4,7 +4,7 @@ Run with venv-engine's python: upstream_run_a.py --out <dump.json>
 
 Run B is the harness's `upstream-compat` protocol (run.ts); `run.ts calibration-check` pairs the two dumps. Nothing under
 the upstream checkout is modified: the module is imported as is, with four wrappers installed first:
-setrlimit (clamped to the hard limit), load_dataset (pinned BEAM revision), BeamMemory.recall and
+setrlimit (clamped to the hard limit), load_dataset (pinned BEAM revision, harness cache dir), BeamMemory.recall and
 BeamMemory.consolidate_to_episodic (recorded, because upstream swallows their exceptions).
 """
 
@@ -64,7 +64,9 @@ resource.setrlimit = clamped_setrlimit
 import datasets  # noqa: E402
 
 _load_dataset = datasets.load_dataset
-datasets.load_dataset = lambda *args, **kwargs: _load_dataset(*args, **{**kwargs, "revision": BEAM_REVISION})
+datasets.load_dataset = lambda *args, **kwargs: _load_dataset(
+	*args, **{**kwargs, "revision": BEAM_REVISION, "cache_dir": str(CACHE / "hf")}
+)
 
 recalls = []  # (query, contents of the first TOP_K results), one entry per completed BeamMemory.recall call
 _recall = BeamMemory.recall
