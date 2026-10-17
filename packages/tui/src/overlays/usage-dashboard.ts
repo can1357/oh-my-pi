@@ -126,7 +126,7 @@ function statusWithUnavailableAccounts(windows: readonly { status?: UsageLimit["
 	return aggregateStatus(windows) === "exhausted" ? "exhausted" : "warning";
 }
 
-/** Fraction below which a window counts as untouched (renders as 100% free). */
+/** Fraction below which a window counts as untouched (renders as 0% used). */
 const IDLE_FRACTION = 0.005;
 /**
  * Compact duration tag for a window (`7d`, `1d`, `5h`, `mo`), preferring the
@@ -147,7 +147,7 @@ function compactWindowTag(window: NonNullable<UsageLimit["window"]>): string {
 /**
  * Collapse usage reports into one compact card per provider: limits grouped by
  * quota bucket (label + window), each bucket showing the mean used fraction
- * across accounts (matching the classic report's aggregate "% free") with the
+ * across accounts with the
  * most-used account's reset countdown. Rows keep the provider's declared window
  * order so 5h → week → month reads the same every time; cards sort by their
  * fullest window so what's burning is on top-left; fully idle providers
@@ -415,6 +415,10 @@ function usageMeter(fraction: number, status: UsageLimit["status"], meter: boole
 	return meter ? node("meter", { value, style: "bar", size: "md", tone }) : node("progress", { value, tone, grow: 1 });
 }
 
+function usedPercentage(fraction: number): string {
+	return `${Math.max(0, Math.round(fraction * 100))}%`;
+}
+
 /** `Mon 28 Sep` for a local date. */
 function shortDate(date: Date): string {
 	return `${WEEKDAY_NAMES[date.getDay()]} ${date.getDate()} ${MONTH_NAMES[date.getMonth()]}`;
@@ -499,10 +503,10 @@ function statTile(
 	);
 }
 
-/** `62%` in mono, toned like the window's status, then a quiet `left`. */
-function leftSpans(fraction: number, status: UsageLimit["status"]): TspSpan[] {
+/** Consumed percentage in mono, toned like the window's status, then a quiet `used`. */
+function usedSpans(fraction: number, status: UsageLimit["status"]): TspSpan[] {
 	const token = status === "exhausted" ? "mono error" : status === "warning" ? "mono warning" : "mono";
-	return [span(`${Math.max(0, Math.round((1 - fraction) * 100))}%`, token), span(" left", "dim")];
+	return [span(usedPercentage(fraction), token), span(" used", "dim")];
 }
 
 /** Stable, human account name for a report in the detail view. */
@@ -663,6 +667,7 @@ const CARD_MAX_LABEL_LINES = 2;
 interface CardRowLayout {
 	labelWidth: number;
 	resetWidth: number;
+	percentageWidth: number;
 	barWidth: number;
 	stacked: boolean;
 	labelHeights: number[];
@@ -820,7 +825,7 @@ export class UsageDashboardComponent implements Component {
 		}
 
 		const hidden = card.windows.length - CARD_MAX_WINDOWS;
-		const { labelWidth, resetWidth, barWidth, stacked, labelHeights } = layout;
+		const { labelWidth, resetWidth, percentageWidth, barWidth, stacked, labelHeights } = layout;
 		const contentWidth = Math.max(1, width - 2);
 		for (let index = 0; index < Math.min(card.windows.length, CARD_MAX_WINDOWS); index++) {
 			const window = card.windows[index]!;
@@ -837,8 +842,10 @@ export class UsageDashboardComponent implements Component {
 				for (const line of wrapTextWithAnsi(`${prefix}${text}`, contentWidth)) lines.push(`  ${line}`);
 				continue;
 			}
-			const freePct = Math.max(0, Math.round((1 - window.fraction) * 100));
-			const pctText = theme.fg(this.#statusColor(window.status), `${freePct}%`.padStart(5));
+			const pctText = theme.fg(
+				this.#statusColor(window.status),
+				usedPercentage(window.fraction).padStart(percentageWidth),
+			);
 			const resetPlain = window.resetMs !== undefined ? formatDuration(window.resetMs) : "";
 			const resetText = resetWidth > 0 ? ` ${theme.fg("dim", resetPlain.padStart(resetWidth))}` : "";
 			for (const line of wrapTextWithAnsi(
@@ -884,8 +891,17 @@ export class UsageDashboardComponent implements Component {
 					),
 				0,
 			);
+			const percentageWidth = windows.reduce(
+				(max, rows) =>
+					rows.reduce(
+						(width, window) =>
+							Math.max(width, window.fraction !== undefined ? usedPercentage(window.fraction).length : 0),
+						max,
+					),
+				5,
+			);
 			const contentWidth = Math.max(1, cardWidth - 2);
-			const suffixWidth = 5 + (resetWidth > 0 ? resetWidth + 1 : 0);
+			const suffixWidth = percentageWidth + (resetWidth > 0 ? resetWidth + 1 : 0);
 			const inlineBarWidth = contentWidth - labelWidth - 1 - suffixWidth;
 			const stacked = inlineBarWidth < CARD_MIN_BAR_WIDTH;
 			const labelLines = labels.map(rows =>
@@ -909,6 +925,7 @@ export class UsageDashboardComponent implements Component {
 			const layout: CardRowLayout = {
 				labelWidth,
 				resetWidth,
+				percentageWidth,
 				barWidth: Math.max(1, stacked ? contentWidth - suffixWidth : inlineBarWidth),
 				stacked,
 				labelHeights,
@@ -927,7 +944,7 @@ export class UsageDashboardComponent implements Component {
 			if (start + columns < active.length) lines.push("");
 		}
 		// Untouched providers collapse into a single tick line: their windows
-		// are all at 100% free (or have no limits), so per-window bars are noise.
+		// are all at 0% used (or have no limits), so per-window bars are noise.
 		if (idle.length > 0) {
 			if (active.length > 0) lines.push("");
 			const names = idle.map(card => card.name).join(" · ");
@@ -1276,7 +1293,7 @@ export class UsageDashboardComponent implements Component {
 				statTile(
 					"quota",
 					"Tightest quota",
-					leftSpans(tightest.fraction, tightest.window.status),
+					usedSpans(tightest.fraction, tightest.window.status),
 					[span(where, "dim")],
 					{
 						title: reset ? `${where} · ${reset.title}` : where,
@@ -1440,7 +1457,7 @@ export class UsageDashboardComponent implements Component {
 				} else {
 					cells.push(
 						usageMeter(window.fraction, window.status, meter),
-						text(leftSpans(window.fraction, window.status), { role: "omp.usage.pct" }),
+						text(usedSpans(window.fraction, window.status), { role: "omp.usage.pct" }),
 					);
 					if (window.resetMs !== undefined) {
 						const reset = resetLabel(this.#nowMs, window.resetMs);
@@ -1688,10 +1705,10 @@ export class UsageDashboardComponent implements Component {
 					const resetsAt = limit.window?.resetsAt;
 					bucket.rows.push({
 						account: [span(reportAccountLabel(report, limit, index), "muted")],
-						left:
+						used:
 							fraction === undefined
 								? [span(formatAbsoluteOnlyAmount([limit]) ?? "No data", "muted")]
-								: leftSpans(fraction, limit.status),
+								: usedSpans(fraction, limit.status),
 						reset:
 							resetsAt !== undefined && resetsAt > nowMs
 								? [
@@ -1719,7 +1736,7 @@ export class UsageDashboardComponent implements Component {
 				const cols: TspTableColumn[] = [
 					{ id: "limit", head: "Limit", grow: 1, priority: 4 },
 					{ id: "account", head: "Account", truncate: "middle", priority: 1 },
-					{ id: "left", head: "Left", align: "end", priority: 3 },
+					{ id: "used", head: "Used", align: "end", priority: 3 },
 					{ id: "reset", head: "Resets", align: "end", priority: 2 },
 				];
 				children.push(node("table", { cols, rows, role: "omp.usage.limits" }, undefined, "limits"));

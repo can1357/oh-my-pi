@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/usage` now shows consumed quota percentages instead of remaining percentages, matching its usage bars; large overages keep percentages and reset countdowns aligned ([#13886](https://github.com/can1357/oh-my-pi/pull/13886) by [@rxaviers](https://github.com/rxaviers)).
+
 ## [18.11.3] - 2026-10-16
 
 ### Added

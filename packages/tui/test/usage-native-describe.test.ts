@@ -106,15 +106,15 @@ describe("UsageDashboardComponent.describe", () => {
 		expect(tabs?.p).toEqual(expect.objectContaining({ active: "detail" }));
 		// One row per account in the detail table, not the bucket mean.
 		const table = findAll(detail, n => n.k === "table")[0];
-		const left = table?.k === "table" ? table.p?.rows.map(row => row.cells.left) : undefined;
-		expect(left).toEqual([
+		const used = table?.k === "table" ? table.p?.rows.map(row => row.cells.used) : undefined;
+		expect(used).toEqual([
 			[
-				{ t: "75%", s: "mono" },
-				{ t: " left", s: "dim" },
+				{ t: "25%", s: "mono" },
+				{ t: " used", s: "dim" },
 			],
 			[
-				{ t: "25%", s: "mono warning" },
-				{ t: " left", s: "dim" },
+				{ t: "75%", s: "mono warning" },
+				{ t: " used", s: "dim" },
 			],
 		]);
 	});
@@ -145,7 +145,7 @@ describe("UsageDashboardComponent.describe", () => {
 			findAll(tile, n => n.k === "text").map(plain),
 		);
 		expect(tiles).toEqual([
-			["Tightest quota", "10% left", "Claude Weekly · Anthropic"],
+			["Tightest quota", "90% used", "Claude Weekly · Anthropic"],
 			["Past year", "$247", "740 requests"],
 			["Last 30 days", "$46.50", "140 requests"],
 			["Busiest day", "$200", expect.stringMatching(/ · 600 requests$/)],
