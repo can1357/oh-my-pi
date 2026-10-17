@@ -22,8 +22,12 @@ interface FakeResult {
 	revision?: string;
 	/** Engine options as `run` records them in the config. */
 	options?: { mnemopiRecall?: string; polyphonic?: boolean };
-	/** Per question: id (`<caseId>:...` names its case) and the recall@10 value (null is what JSON makes of NaN). */
-	questions?: [string, number | null][];
+	engineInfo?: Record<string, string>;
+	/**
+	 * Per question: id (`<caseId>:...` names its case), the recall@10 value (null is what JSON makes of NaN) and
+	 * overrides of its case and category (`cat`).
+	 */
+	questions?: [string, number | null, { caseId?: string; category?: string }?][];
 }
 
 /** Writes the part of a result file that `diff` reads. */
@@ -35,6 +39,7 @@ async function writeResult(
 		k = 10,
 		revision = "rev",
 		options = { mnemopiRecall: "recall", polyphonic: false },
+		engineInfo = {},
 		questions = [["q1", 1]],
 	}: FakeResult,
 ) {
@@ -42,13 +47,23 @@ async function writeResult(
 	await Bun.write(
 		file,
 		JSON.stringify({
-			config: { dataset: "beam-100k", datasetRevision: revision, engine, protocol, k, gitCommit: "abc", ...options },
-			questions: questions.map(([questionId, recall]) => ({
+			config: {
+				dataset: "beam-100k",
+				datasetRevision: revision,
+				engine,
+				engineInfo,
+				protocol,
+				k,
+				gitCommit: "abc",
+				...options,
+			},
+			questions: questions.map(([questionId, recall, overrides]) => ({
 				caseId: questionId.split(":")[0],
 				questionId,
 				category: "cat",
 				ranked: [],
 				metrics: { "recall@10": recall },
+				...overrides,
 			})),
 		}),
 	);
@@ -238,4 +253,43 @@ it("diff names the first question without a finite primary metric", async () => 
 	const { stderr, code } = await diff(ok, bad);
 	expect(code).toBe(1);
 	expect(stderr).toContain("b: question q2 has no finite recall@10");
+});
+
+it("diff rejects a question whose case or category differs between the files, in either order", async () => {
+	const ok = await writeResult("label-ok", {
+		questions: [
+			["c1:q1", 1],
+			["c2:q2", 0],
+		],
+	});
+	const moved = await writeResult("label-case", {
+		questions: [
+			["c1:q1", 1],
+			["c2:q2", 0, { caseId: "c1" }],
+		],
+	});
+	const recategorised = await writeResult("label-category", {
+		questions: [
+			["c1:q1", 1, { category: "other" }],
+			["c2:q2", 0],
+		],
+	});
+	for (const [a, b] of [
+		[ok, moved],
+		[moved, ok],
+	]) {
+		const { stderr, code } = await diff(a, b);
+		expect(code).toBe(1);
+		expect(stderr).toContain("question c2:q2 is in case");
+	}
+	expect((await diff(ok, moved)).stderr).toContain("question c2:q2 is in case c2 in a but c1 in b");
+	for (const [a, b] of [
+		[ok, recategorised],
+		[recategorised, ok],
+	]) {
+		const { stderr, code } = await diff(a, b);
+		expect(code).toBe(1);
+		expect(stderr).toContain("question c1:q1 has category");
+	}
+	expect((await diff(ok, recategorised)).stderr).toContain("question c1:q1 has category cat in a but other in b");
 });
