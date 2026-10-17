@@ -60,7 +60,6 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 	const polyphonic = options.polyphonic ?? false;
 	let beam: BeamMemory | undefined;
 	let embedProc: PythonProcess | undefined;
-	let baselineRssBytes = process.memoryUsage().rss;
 
 	const startEmbedder = (): PythonProcess => {
 		embedProc ??= new PythonProcess(
@@ -103,27 +102,13 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 
 	return {
 		name: "mnemopi",
-		rssScope: "harness-process",
 		describe: async () => {
 			const pkg: { version: string } = await Bun.file(PACKAGE_JSON).json();
-			// The embedding server is its own process, so its memory is reported here, not in the harness `resources`.
-			const server = embedProc
-				? ((await embedProc.call("resources")) as { peak_rss_bytes: number; baseline_rss_bytes: number })
-				: undefined;
 			return {
 				package_version: pkg.version,
 				embedding_model: EMBEDDING_MODEL,
 				embedder,
 				embeddings_disabled: String(opts.embeddings?.disabled === true),
-				...(server
-					? {
-							embed_server_peak_rss_bytes: String(server.peak_rss_bytes),
-							embed_server_baseline_rss_bytes: String(server.baseline_rss_bytes),
-						}
-					: {}),
-				...Object.fromEntries(
-					Object.entries(Bun.env).filter(([key, value]) => key.startsWith("MNEMOPI_") && value),
-				),
 				git_commit: (await vcs.requireGit(REPO_ROOT).headSha()) ?? "unknown",
 			};
 		},
@@ -188,15 +173,9 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 			embedProc = undefined;
 		},
 		warmup: async protocol => {
-			baselineRssBytes = process.memoryUsage().rss;
 			opts = runtimeOptions(protocol);
 			if (protocol === "fts-only") return;
 			await scoped(() => embed(["warmup"]));
 		},
-		resources: async () => ({
-			// `maxRSS` is in kilobytes on Linux.
-			peakRssBytes: process.resourceUsage().maxRSS * 1024,
-			baselineRssBytes,
-		}),
 	};
 }

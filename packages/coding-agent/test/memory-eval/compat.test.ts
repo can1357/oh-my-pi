@@ -20,7 +20,6 @@ function fakeEngine(): Fake {
 	const contents: string[] = [];
 	const engine: EngineAdapter & UpstreamCompatOps = {
 		name: "mnemosyne",
-		rssScope: "engine-process",
 		describe: async () => ({}),
 		open: async (_evalCase, options) => {
 			opened.push(options);
@@ -38,7 +37,6 @@ function fakeEngine(): Fake {
 		close: async () => {},
 		dispose: async () => {},
 		warmup: async () => {},
-		resources: async () => ({ peakRssBytes: 2, baselineRssBytes: 1 }),
 		oldestWorking: async limit => contents.slice(0, limit).map((content, i) => ({ engineId: `w${i}`, content })),
 		consolidate: async (...args) => {
 			consolidated.push(args);

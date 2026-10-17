@@ -35,16 +35,6 @@ from mnemosyne.core import embeddings  # noqa: E402
 from mnemosyne.core.beam import BeamMemory  # noqa: E402
 
 
-def proc_status_bytes(field: str) -> int:
-	# Linux only. getrusage's ru_maxrss survives spawn/exec, so a child would report its parent's peak; /proc is per-process.
-	with open("/proc/self/status", encoding="ascii") as status:
-		for line in status:
-			if line.startswith(f"{field}:"):
-				return int(line.split()[1]) * 1024  # the value is in kB
-	raise RuntimeError(f"{field} not found in /proc/self/status")
-
-
-BASELINE_RSS_BYTES = proc_status_bytes("VmRSS")
 RANKED_TIERS = ("working", "episodic")
 
 
@@ -127,9 +117,6 @@ class Engine:
 		if self.beam is not None:
 			self.beam.conn.close()
 			self.beam = None
-
-	def op_resources(self, _params):
-		return {"peak_rss_bytes": proc_status_bytes("VmHWM"), "baseline_rss_bytes": BASELINE_RSS_BYTES}
 
 	# Used only by the upstream-compat protocol.
 	def op_oldest_working(self, params):
