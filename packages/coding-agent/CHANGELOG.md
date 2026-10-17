@@ -49,6 +49,7 @@
 
 ### Added
 
+- Added `/context all` to show per-tool and per-skill context token estimates in terminal, native, and ACP reports; server-deferred tool catalogs are excluded from context costs.
 - Added `lsp.requestTimeout` setting to configure wait durations for language server diagnostics and requests
 - Added `omp auth-gateway serve --clients=<file>`: per-client bearer tokens, each limited to listed models and broker OAuth accounts with no fallback to other accounts or API keys, re-read while serving ([#5098](https://github.com/can1357/oh-my-pi/issues/5098), [#15900](https://github.com/can1357/oh-my-pi/pull/15900) by [@alphastorm](https://github.com/alphastorm))
 
@@ -712,6 +713,9 @@
 - Added logout support to RPC clients through `get_logout_accounts` and `logout`, with matching methods in the TypeScript, Python, Go, and Rust SDKs.
 - Added custom model-kind declarations for providers and extensions, allowing image, speech, embedding, judge, and other supported model roles to be registered and routed correctly.
 - Added working-directory reporting for Tern terminal sessions so the native composer bar can display the current folder.
+- Cancel a pending model handoff with `/prewalk off` without changing the active model, saved prewalk setting, or delivered continuation history ([#14587](https://github.com/can1357/oh-my-pi/pull/14587) by [@NaC-L](https://github.com/NaC-L)).
+- RPC clients can log out like `/logout`: `get_logout_accounts` lists a provider's stored credentials and `logout` removes one; the TypeScript client and the generated Python, Go, and Rust SDKs gain matching methods ([#14588](https://github.com/can1357/oh-my-pi/pull/14588) by [@andrebrait](https://github.com/andrebrait))
+- Custom providers can declare model kinds: `models` entries and `modelOverrides` in `models.yml`, and models registered by extensions through `registerProvider` or `fetchDynamicModels`, accept `kind` and the runner APIs (`openai-images`, `openai-speech`, `openai-embeddings`, …), so a gateway's image, speech, or embedding models reach their roles instead of registering as chat. A `kind` its api cannot serve is rejected; chat transports also accept `tiny`, and those that `generate_image` runs, such as `openai-responses`, accept `image` and generate through the hosted image tool. An omitted `kind` follows the api, so custom `typesafe`/`openrouter-decisions` models now register as `judge`. A configured `kind` outranks the bundled catalog's classification of the same id and survives `modelOverrides` and refreshes. A `modelOverrides` `kind` on a built-in or discovered model is checked against the api that model resolves to and, if that api does not serve it, ignored with a logged warning instead of rejected; an `api` override or a same-id `models` entry keeps a kind the new api still serves and otherwise makes the model chat. A `fetchDynamicModels` row whose api cannot serve its `kind` is dropped with a logged warning ([#14483](https://github.com/can1357/oh-my-pi/pull/14483) by [@oshinop](https://github.com/oshinop) and [@jimhester](https://github.com/jimhester))
 
 ### Changed
 
