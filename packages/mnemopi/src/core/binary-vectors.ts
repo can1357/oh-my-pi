@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database, Statement } from "bun:sqlite";
 
 import { embeddingDim, type VecType } from "../config";
 import { closeQuietly, type DatabasePath, openDatabase } from "../db";
@@ -179,17 +179,33 @@ export class BinaryVectorStore {
 	readonly conn: Database;
 	readonly dbPath: DatabasePath;
 	readonly tableName: string;
-	private readonly ownsConnection: boolean;
+	readonly #ownsConnection: boolean;
+	// `Database.query()` memoizes one Statement per SQL string on the connection, so two
+	// stores sharing a borrowed connection would receive the SAME object here and closing
+	// either store would finalize it out from under the sibling. `prepare()` hands out a
+	// per-instance statement, which keeps every finalize() below owned by this store.
+	readonly #searchStmt: Statement<VectorRow, []>;
+	readonly #statsStmt: Statement<StatsRow, []>;
 
 	constructor(options: BinaryVectorStoreOptions = {}) {
 		this.dbPath = options.dbPath ?? ":memory:";
 		this.tableName = assertSqlIdentifier(options.tableName ?? "binary_vectors");
 		this.conn = options.conn ?? openDatabase(this.dbPath, { create: true, readwrite: true });
-		this.ownsConnection = options.conn === undefined;
-		this.initTable();
+		this.#ownsConnection = options.conn === undefined;
+		this.#initTable();
+		this.#searchStmt = this.conn.prepare<VectorRow, []>(
+			`SELECT memory_id, binary_vector, original_dim, magnitude FROM ${this.tableName}`,
+		);
+		this.#statsStmt = this.conn.prepare<StatsRow, []>(
+			`SELECT COUNT(*) AS count,
+			AVG(LENGTH(binary_vector)) AS avg_bytes,
+			MAX(LENGTH(binary_vector)) AS max_bytes,
+			MIN(LENGTH(binary_vector)) AS min_bytes
+		 FROM ${this.tableName}`,
+		);
 	}
 
-	private initTable(): void {
+	#initTable(): void {
 		this.conn.exec(`
 			CREATE TABLE IF NOT EXISTS ${this.tableName} (
 				memory_id TEXT PRIMARY KEY,
@@ -223,9 +239,7 @@ export class BinaryVectorStore {
 	search(queryEmbedding: readonly number[], topK = 10): BinaryVectorSearchResult[] {
 		const queryDim = Math.min(queryEmbedding.length, EMBEDDING_DIM);
 		const queryBinary = maximallyInformativeBinarization(queryEmbedding);
-		const rows = this.conn
-			.query(`SELECT memory_id, binary_vector, original_dim, magnitude FROM ${this.tableName}`)
-			.all() as VectorRow[];
+		const rows = this.#searchStmt.all();
 		const results: BinaryVectorSearchResult[] = [];
 		for (const row of rows) {
 			const storedDim = Math.max(0, Math.min(EMBEDDING_DIM, Math.trunc(toFiniteNumber(row.original_dim))));
@@ -248,53 +262,47 @@ export class BinaryVectorStore {
 		this.conn.query(`DELETE FROM ${this.tableName} WHERE memory_id = ?`).run(memoryId);
 	}
 	getStats(): BinaryVectorStats {
-		const row = this.conn
-			.query(
-				`SELECT COUNT(*) AS count,
-					AVG(LENGTH(binary_vector)) AS avg_bytes,
-					MAX(LENGTH(binary_vector)) AS max_bytes,
-					MIN(LENGTH(binary_vector)) AS min_bytes
-				 FROM ${this.tableName}`,
-			)
-			.get() as StatsRow;
-		const count = row.count;
-		const bytesPerVector = row.avg_bytes ?? 0;
+		const row = this.#statsStmt.get();
+		const count = row?.count ?? 0;
+		const bytesPerVector = row?.avg_bytes ?? 0;
 		return {
 			total_vectors: count,
 			avg_bytes_per_vector: bytesPerVector,
-			max_bytes: row.max_bytes ?? 0,
-			min_bytes: row.min_bytes ?? 0,
+			max_bytes: row?.max_bytes ?? 0,
+			min_bytes: row?.min_bytes ?? 0,
 			compression_ratio: BYTES_PER_VECTOR / (EMBEDDING_DIM * 4),
 			theoretical_size_mb: (count * BYTES_PER_VECTOR) / (1024 * 1024),
 		};
 	}
 	close(): void {
-		if (this.ownsConnection) {
+		this.#searchStmt.finalize();
+		this.#statsStmt.finalize();
+		if (this.#ownsConnection) {
 			closeQuietly(this.conn);
 		}
 	}
 }
 
 export class FastBinarySearch {
-	private readonly memoryIds: string[];
-	private readonly vectors: Uint8Array[];
+	readonly #memoryIds: string[];
+	readonly #vectors: Uint8Array[];
 
 	constructor(
 		binaryVectors: ReadonlyMap<string, Uint8Array | ArrayBuffer> | Record<string, Uint8Array | ArrayBuffer>,
 	) {
-		this.memoryIds = [];
-		this.vectors = [];
+		this.#memoryIds = [];
+		this.#vectors = [];
 		if (isReadonlyMap(binaryVectors)) {
 			for (const [memoryId, vector] of binaryVectors) {
-				this.memoryIds.push(memoryId);
-				this.vectors.push(vector instanceof Uint8Array ? vector : new Uint8Array(vector));
+				this.#memoryIds.push(memoryId);
+				this.#vectors.push(vector instanceof Uint8Array ? vector : new Uint8Array(vector));
 			}
 		} else {
 			for (const memoryId in binaryVectors) {
 				const vector = binaryVectors[memoryId];
 				if (vector !== undefined) {
-					this.memoryIds.push(memoryId);
-					this.vectors.push(vector instanceof Uint8Array ? vector : new Uint8Array(vector));
+					this.#memoryIds.push(memoryId);
+					this.#vectors.push(vector instanceof Uint8Array ? vector : new Uint8Array(vector));
 				}
 			}
 		}
@@ -303,10 +311,10 @@ export class FastBinarySearch {
 	search(queryBinary: Uint8Array | ArrayBuffer, topK = 10): BinaryVectorSearchResult[] {
 		const query = queryBinary instanceof Uint8Array ? queryBinary : new Uint8Array(queryBinary);
 		const results: BinaryVectorSearchResult[] = [];
-		for (let i = 0; i < this.vectors.length; i += 1) {
-			const distance = hammingDistance(query, this.vectors[i] ?? new Uint8Array());
+		for (let i = 0; i < this.#vectors.length; i += 1) {
+			const distance = hammingDistance(query, this.#vectors[i] ?? new Uint8Array());
 			results.push({
-				memory_id: this.memoryIds[i] ?? "",
+				memory_id: this.#memoryIds[i] ?? "",
 				distance,
 				score: informationTheoreticScore(distance),
 			});

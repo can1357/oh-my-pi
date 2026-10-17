@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+
+- SQLite beam store and binary vector store reads now use typed `db.query<Row, Params>()` generics instead of `as` casts, so a schema drift between SQL and the consumer fails the typecheck instead of silently casting at runtime ([#15437](https://github.com/can1357/oh-my-pi/pull/15437) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ## [18.11.2] - 2026-10-16
 
 ### Fixed
