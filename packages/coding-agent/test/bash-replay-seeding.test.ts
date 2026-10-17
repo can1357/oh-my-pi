@@ -6,11 +6,10 @@
  * to its tail permanently — Ctrl+O could not expand it back and the footer's
  * hidden-line count was computed from the capped array.
  */
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
@@ -33,14 +32,9 @@ function bashMessage(output: string): AgentMessage {
 
 describe("UiHelpers bash replay seeding", () => {
 	beforeAll(async () => {
-		resetSettingsForTest();
-		await Settings.init({ inMemory: true, cwd: process.cwd() });
 		await initTheme();
 	});
 
-	afterAll(() => {
-		resetSettingsForTest();
-	});
 
 	it("keeps every line of a >100-line result after expansion", () => {
 		const ctx = createInteractiveModeContext();
