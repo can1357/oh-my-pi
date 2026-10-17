@@ -1,4 +1,5 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 
 /**
  * Decoded `memory_embeddings` vectors, kept per SQLite connection so recall does not parse every
@@ -11,7 +12,8 @@ import type { Database, SQLQueryBindings } from "bun:sqlite";
  *   {@link forgetCachedEmbeddings} for those ids too.
  * - A commit from any other connection (another session sharing the bank) bumps `PRAGMA data_version`.
  *   Most of those commits (recall counts, new memories) leave every vector as it was, so the cache is
- *   dropped only when the embedding table's signature (row count plus its newest row) moved too.
+ *   dropped only when `memory_embedding_generation`, which triggers bump on every embedding insert, update
+ *   and delete, moved too.
  * - Inside an open transaction rows may be uncommitted, and ROLLBACK does not bump `data_version`, so
  *   reads there neither use nor fill the cache.
  *
@@ -25,9 +27,8 @@ import type { Database, SQLQueryBindings } from "bun:sqlite";
  */
 interface ConnectionCache {
 	dataVersion: number;
-	signature: string;
-	/** Insertion order is least to most recently used. */
-	vectors: Map<string, Float32Array | null>;
+	generation: number;
+	vectors: LRUCache<string, Float32Array | null>;
 }
 
 const caches = new WeakMap<Database, ConnectionCache>();
@@ -52,36 +53,49 @@ function decodeEmbedding(raw: unknown): Float32Array | null {
 	}
 }
 
-/**
- * Writers only INSERT OR REPLACE (a new rowid) or DELETE, so any embedding change moves the row count or
- * the newest row; the newest row's content also catches a deleted newest row re-inserted at the same rowid.
- */
-function embeddingSignature(db: Database): string {
-	const row = db
-		.query<{ count: number; rowid: number; memory_id: string; embedding_json: unknown }, []>(
-			"SELECT (SELECT COUNT(*) FROM memory_embeddings) AS count, rowid, memory_id, embedding_json FROM memory_embeddings ORDER BY rowid DESC LIMIT 1",
-		)
-		.get();
-	return row ? `${row.count}:${row.rowid}:${row.memory_id}:${row.embedding_json}` : "";
+/** SQLite's BINARY collation: UTF-8 byte order, i.e. code point order, where UTF-16 `<` differs past U+FFFF. */
+function compareBinary(a: string, b: string): number {
+	for (let index = 0; index < a.length && index < b.length; index += 1) {
+		const x = a.charCodeAt(index);
+		const y = b.charCodeAt(index);
+		if (x === y) continue;
+		// A surrogate belongs to a code point past U+FFFF, so it outranks every other UTF-16 unit.
+		const xSurrogate = x >= 0xd800 && x <= 0xdfff;
+		const ySurrogate = y >= 0xd800 && y <= 0xdfff;
+		if (xSurrogate === ySurrogate) return x - y;
+		return xSurrogate ? 1 : -1;
+	}
+	return a.length - b.length;
 }
 
-// shortcut: this connection's own embedding writes also move the signature, so the first foreign commit after
-// them drops the cache once; refresh the signature after own writes if that shows up in profiles.
+// shortcut: a foreign commit that leaves vectors alone, landing after this connection wrote some, drops the cache
+// once (the counter moved and data_version cannot say who moved it); track own bumps if that shows up in profiles.
 function currentCache(db: Database): ConnectionCache {
-	const dataVersion = db.query<{ data_version: number }, []>("PRAGMA data_version").get()?.data_version ?? 0;
+	// One statement reads both from one snapshot; separate reads could pass a peer's bump off as this connection's.
+	const state = db
+		.query<{ dataVersion: number; generation: number }, []>(
+			"SELECT (SELECT data_version FROM pragma_data_version) AS dataVersion, gen AS generation FROM memory_embedding_generation",
+		)
+		.get();
+	const dataVersion = state?.dataVersion ?? 0;
+	const generation = state?.generation ?? 0;
 	const existing = caches.get(db);
-	if (existing?.dataVersion === dataVersion) return existing;
-	const signature = embeddingSignature(db);
-	if (existing?.signature === signature) {
+	// An unchanged data_version means only this connection committed, and its writes forgot their own ids.
+	if (existing && (existing.dataVersion === dataVersion || existing.generation === generation)) {
 		existing.dataVersion = dataVersion;
+		existing.generation = generation;
 		return existing;
 	}
-	const fresh: ConnectionCache = { dataVersion, signature, vectors: new Map() };
+	const fresh: ConnectionCache = {
+		dataVersion,
+		generation,
+		vectors: new LRUCache<string, Float32Array | null>({ max: MAX_CACHED_VECTORS }),
+	};
 	caches.set(db, fresh);
 	return fresh;
 }
 
-/** Stored embeddings for `memoryIds`, in that order; `null` for ids without a usable row. */
+/** Stored embeddings for `memoryIds`; `null` for ids without a usable row. */
 function readEmbeddings(db: Database, memoryIds: readonly string[]): Map<string, Float32Array | null> {
 	const out = new Map<string, Float32Array | null>();
 	for (let offset = 0; offset < memoryIds.length; offset += FETCH_CHUNK) {
@@ -99,30 +113,34 @@ function readEmbeddings(db: Database, memoryIds: readonly string[]): Map<string,
 }
 
 /**
- * Decoded embeddings for `memoryIds`, in `memoryIds` order whatever the cache holds (recall breaks
- * similarity ties by this order); ids without a usable embedding are absent from the result.
+ * Decoded embeddings for `memoryIds`, listed in the order the pre-cache query returned them whatever the cache
+ * holds (recall breaks similarity ties by this order); ids without a usable embedding are absent from the result.
  */
 export function cachedEmbeddings(db: Database, memoryIds: readonly string[]): Map<string, Float32Array> {
-	const out = new Map<string, Float32Array>();
+	let found: Map<string, Float32Array | null>;
 	if (db.inTransaction) {
-		for (const [id, vector] of readEmbeddings(db, memoryIds)) if (vector !== null) out.set(id, vector);
-		return out;
+		found = readEmbeddings(db, memoryIds);
+	} else {
+		const { vectors } = currentCache(db);
+		found = new Map();
+		const missing: string[] = [];
+		for (const id of memoryIds) {
+			const vector = vectors.get(id);
+			if (vector === undefined) missing.push(id);
+			else found.set(id, vector);
+		}
+		for (const [id, vector] of readEmbeddings(db, missing)) {
+			vectors.set(id, vector);
+			found.set(id, vector);
+		}
 	}
-	const { vectors } = currentCache(db);
-	const fetched = readEmbeddings(
-		db,
-		memoryIds.filter(id => !vectors.has(id)),
-	);
-	for (const id of memoryIds) {
-		const vector = fetched.get(id) ?? vectors.get(id) ?? null;
-		// Re-insert to mark it most recently used.
-		vectors.delete(id);
-		vectors.set(id, vector);
-		if (vector !== null) out.set(id, vector);
-	}
-	for (const id of vectors.keys()) {
-		if (vectors.size <= MAX_CACHED_VECTORS) break;
-		vectors.delete(id);
+	// That query (`memory_id IN (...)` per 500 ids) walked the primary-key index, so each chunk came back in id order.
+	const out = new Map<string, Float32Array>();
+	for (let offset = 0; offset < memoryIds.length; offset += FETCH_CHUNK) {
+		for (const id of memoryIds.slice(offset, offset + FETCH_CHUNK).sort(compareBinary)) {
+			const vector = found.get(id);
+			if (vector) out.set(id, vector);
+		}
 	}
 	return out;
 }

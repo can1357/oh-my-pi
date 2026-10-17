@@ -11,7 +11,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import "./setup";
-import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
+import { BeamMemory, initBeam } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { cachedEmbeddings, MAX_CACHED_VECTORS } from "@oh-my-pi/pi-mnemopi/core/beam/embedding-cache";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 
@@ -32,6 +32,42 @@ function countVectorReads(db: Database): { reads(): number; mockRestore(): void 
 
 async function recallIds(memory: Mnemopi): Promise<string[]> {
 	return (await memory.recall("zorblat plan", 5)).map(result => result.id);
+}
+
+/**
+ * Recalls through one connection, lets a second connection on the same bank rewrite stored vectors with `edit`,
+ * and returns the top id of the next recall. `target` matches the query until `edit` runs; a later memory keeps
+ * the newest embedding row so the rewrite never touches it.
+ */
+async function topAfterPeerEdit(edit: (peer: Database, target: string, other: string) => void) {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mnemopi-embedding-cache-"));
+	const dbPath = path.join(dir, "bank.db");
+	const memory = new Mnemopi({ dbPath, embeddings: { provider } });
+	try {
+		const target = memory.remember("quexim checklist agreed for friday", { source: "test" });
+		const other = memory.remember("gardening note about soil", { source: "test" });
+		await memory.flushExtractions();
+		memory.remember("weather report for the weekend", { source: "test" });
+		await memory.flushExtractions();
+		expect((await recallIds(memory))[0]).toBe(target);
+
+		const peer = new Database(dbPath);
+		try {
+			const newest = peer.query<{ memory_id: string }, []>(
+				"SELECT memory_id FROM memory_embeddings ORDER BY rowid DESC LIMIT 1",
+			);
+			const newestBefore = newest.get()?.memory_id;
+			expect([target, other]).not.toContain(newestBefore);
+			edit(peer, target, other);
+			expect(newest.get()?.memory_id).toBe(newestBefore);
+		} finally {
+			peer.close();
+		}
+		return { top: (await recallIds(memory))[0], other };
+	} finally {
+		memory.close();
+		await fs.rm(dir, { recursive: true, force: true });
+	}
 }
 
 describe("embedding cache", () => {
@@ -91,6 +127,36 @@ describe("embedding cache", () => {
 			memory.close();
 			await fs.rm(dir, { recursive: true, force: true });
 		}
+	});
+
+	it("sees embeddings another connection updated in place behind a newer row", async () => {
+		const { top, other } = await topAfterPeerEdit((peer, target, other) => {
+			const update = peer.prepare("UPDATE memory_embeddings SET embedding_json = ? WHERE memory_id = ?");
+			update.run("[0,1]", target);
+			update.run("[1,0]", other);
+		});
+		expect(top).toBe(other);
+	});
+
+	it("sees embeddings another connection wiped and rebuilt with the same row count and newest row", async () => {
+		const { top, other } = await topAfterPeerEdit((peer, target, other) => {
+			peer.transaction(() => {
+				const rows = peer
+					.query<{ memory_id: string; embedding_json: string; model: string | null }, []>(
+						"SELECT memory_id, embedding_json, model FROM memory_embeddings ORDER BY rowid",
+					)
+					.all();
+				peer.run("DELETE FROM memory_embeddings");
+				const insert = peer.prepare(
+					"INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)",
+				);
+				for (const row of rows) {
+					const json = row.memory_id === target ? "[0,1]" : row.memory_id === other ? "[1,0]" : row.embedding_json;
+					insert.run(row.memory_id, json, row.model);
+				}
+			})();
+		});
+		expect(top).toBe(other);
 	});
 
 	it("keeps decoded vectors when another connection commits a write that leaves embeddings alone", async () => {
@@ -186,9 +252,10 @@ describe("embedding cache", () => {
 		}
 	});
 
-	it("prunes a similarity tie the same way whatever an earlier recall cached", async () => {
+	it("prunes a similarity tie the way the pre-cache query did, whatever an earlier recall cached", async () => {
 		// 60 rows share one vector, so recall keeps the first 50 of the tie (`max(topK * 3, 50)`). The ten oldest
-		// carry the highest importance: they win only if cache history moves them to the front of the tie.
+		// carry the highest importance. The pre-cache query listed the tie in id order, so they survived the cut;
+		// listing it newest first (recall's id order) would drop them, whatever the cache held.
 		const topRanked = async (warmFirst: boolean): Promise<string | undefined> => {
 			const beam = new BeamMemory({ sessionId: "tie", dbPath: ":memory:" });
 			try {
@@ -222,18 +289,55 @@ describe("embedding cache", () => {
 				beam.close();
 			}
 		};
-
 		const cold = await topRanked(false);
-		expect(cold).toBeDefined();
+		expect(cold).toMatch(/^wm-0\d$/);
 		expect(await topRanked(true)).toBe(cold);
+	});
+
+	it("returns vectors in the order the pre-cache chunked query returned them, cold or warm", () => {
+		const db = new Database(":memory:");
+		try {
+			initBeam(db);
+			// Insert order, id order and argument order all differ, and the ids span three 500-id chunks.
+			// U+E000 sorts before an astral character in SQLite (UTF-8 bytes) but after it in UTF-16.
+			const ids = [
+				...Array.from({ length: 1300 }, (_, index) => `m${(index * 7919) % 1300}`),
+				"m-\uE000",
+				"m-\u{1F600}",
+			];
+			const insert = db.prepare(
+				"INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, '[1,0]', 't')",
+			);
+			for (const id of ids) insert.run(id);
+			const memoryIds = [
+				"m-\u{1F600}",
+				...Array.from({ length: 1300 }, (_, index) => `m${(index * 104_729) % 1300}`),
+				"missing",
+				"m-\uE000",
+			];
+			const preCache: string[] = [];
+			for (let offset = 0; offset < memoryIds.length; offset += 500) {
+				const chunk = memoryIds.slice(offset, offset + 500);
+				const rows = db
+					.query<{ memory_id: string }, string[]>(
+						`SELECT memory_id, embedding_json FROM memory_embeddings WHERE memory_id IN (${chunk.map(() => "?").join(",")})`,
+					)
+					.all(...chunk);
+				for (const row of rows) preCache.push(row.memory_id);
+			}
+
+			cachedEmbeddings(db, memoryIds.slice(300, 900));
+			expect([...cachedEmbeddings(db, memoryIds).keys()]).toEqual(preCache);
+			expect([...cachedEmbeddings(db, memoryIds).keys()]).toEqual(preCache);
+		} finally {
+			db.close();
+		}
 	});
 
 	it("keeps two alternating windows decoded after one of them slides past the bound", () => {
 		const db = new Database(":memory:");
 		try {
-			db.run(
-				"CREATE TABLE memory_embeddings (memory_id TEXT PRIMARY KEY, embedding_json TEXT NOT NULL, model TEXT)",
-			);
+			initBeam(db);
 			const shift = 100;
 			const ids = Array.from({ length: MAX_CACHED_VECTORS + shift }, (_, index) => `m${index}`);
 			const insert = db.prepare(
