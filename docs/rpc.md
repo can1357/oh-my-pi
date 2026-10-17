@@ -832,7 +832,7 @@ Common event types:
 - `auto_retry_start`, `auto_retry_end`
 - `cache_warming_start`, `cache_warming_end`
 - `retry_fallback_applied`, `retry_fallback_succeeded`
-- `model_changed`, `thinking_level_changed`, `config_warnings_changed`
+- `model_changed`, `thinking_level_changed`, `persona_changed`, `config_warnings_changed`
 - `advisor_cost_changed`, `advisor_yielded`
 - `ttsr_triggered`
 - `todo_reminder`, `todo_auto_clear`
@@ -857,6 +857,20 @@ is still pending. Live-steered messages stay listed until recorded in the
 transcript, even after they cease to be removable. Render the queue from this
 event rather than tracking chips independently, and treat removal replies as
 confirmation of a change rather than independent queue state.
+
+### `persona_changed` event
+
+```json
+{ "type": "persona_changed", "personaName": "reviewer", "source": "user" }
+```
+
+Emitted whenever the session applies a main-chat persona (an agent definition
+with `mode: primary`), including when `new_session`, `switch_session`, or
+`branch` restores the persona recorded in session history; it repeats even when
+the persona did not change. `personaName` is the agent name, or `null` when no
+persona is active. `source` is the agent definition's origin
+(`"bundled" | "user" | "project"`) and is absent when `personaName` is `null`.
+`get_state` does not report the active persona; track it from this event.
 
 Extension runner errors are emitted separately as:
 

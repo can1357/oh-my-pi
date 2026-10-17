@@ -9,7 +9,7 @@
  * bundled provider's default (e.g. `openai/gpt-5.5` when `OPENAI_API_KEY` is set)
  * over the configured default role.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -19,6 +19,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -29,9 +30,11 @@ describe("issue #3569 fresh launch default role from extension provider", () => 
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-sdk-default-role-ext-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		for (const authStorage of authStoragesToClose) {
 			authStorage.close();
 		}

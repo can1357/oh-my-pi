@@ -1725,6 +1725,10 @@ export async function buildSessionOptions(
 		}
 	}
 
+	if (parsed.agent) {
+		options.initialAgentName = parsed.agent;
+	}
+
 	return options;
 }
 

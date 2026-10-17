@@ -2,12 +2,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Agent persona cycling**: Add `mode: "primary"` to an agent definition's YAML frontmatter to include it in the Tab cycle. `Tab` cycles forward, `Ctrl+Tab` cycles backward through primary agents in the main chat editor. Tab cycling only fires when the editor is empty — any typed text (slash command, file path, partial word) falls through to context-aware tab-completion as before. Persona cycling is blocked while the session is streaming or a subagent view is focused.
+- **`--agent <name>` flag**: Selects the initial persona at startup. When primary agents are discovered and no flag is given, the first by `order` (or alphabetically) is loaded automatically. The flag is restricted to primary agents; non-primary/subagent definitions are rejected with a warning and fall back to first primary.
+- **`model` field on `AgentDefinition`**: One or more `<provider>/<id>` strings; the first resolvable model is applied when the persona is loaded via Tab or `--agent`. Startup and `/resume` restore do not write a new `model_change` session entry. If the configured model is unavailable, the persona prompt still applies and a visible warning is shown.
+- **`order` field on `AgentDefinition`**: Controls Tab-cycle position; lower values appear earlier. Agents without `order` sort alphabetically after those with `order`.
+- **`agent_persona` status-line segment**: Displays the active persona name between `model` and `mode` in the default status-line preset; hidden when no persona is active.
+- **`activePersonaName` on `ExtensionContext`**: Live getter — always reflects the current active persona, not a snapshot taken at context creation time.
+- **`agent` field on `SessionMessageEntry`**: Active persona name stamped on all persisted entries — LLM responses, bash/python results, todo-command messages, and todo reminder injections. Optional; sessions without an active agent are unchanged.
+- **Session-resume persona restoration**: `/resume` and `--resume` infer the active agent from the last stamped message entry in the loaded session; falls back to the first primary agent when stamps are absent, the agent no longer exists on disk, or the stamp refers to a non-primary agent. An explicit `--agent` flag always takes precedence.
+
 ### Changed
 
 - With a first-party Anthropic model on the official API selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup; third-party gateways and custom endpoints are never probed ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
 
+- Fixed the startup persona auto-load path silently overriding an explicitly-supplied `model` or `thinkingLevel` startup option with the default primary persona's own configured model/thinking level. Explicit startup parameters now always win, matching every other model-resolution fallback in `createAgentSession`.
+- Fixed the active persona's identity block (the HOW block `applyAgentPersona()` sets) being silently dropped by any later system-prompt rebuild — a tool-set change, a model/edit-mode change, and, most impactfully, the per-turn rebuild that runs before every single turn via `buildSystemPromptForAgentStart`, which force-applied its persona-agnostic result (and any extension's `before_agent_start` `systemPrompt` override) straight onto the agent on every turn regardless of memory-backend configuration, with no trace left in the persisted session log since `persona_change` bookkeeping and per-message `agent` stamps were never touched. Introduced when upstream commit 7eeaba047 extracted system-prompt assembly from `AgentSession` into `SessionTools`, which by design has no persona awareness. `AgentSession` now re-appends the active `#personaBlock` after the per-turn system prompt (and any extension override) is applied, mirroring the `onSystemPromptRebuild` reapplication already used for tool/model-change rebuilds, so the active persona's identity survives every turn, not just the moment it was selected.
 - Fixed a prompt sent while Esc was still interrupting the previous turn never settling, so a message steered in as it ended stayed queued instead of running ([#16038](https://github.com/can1357/oh-my-pi/pull/16038) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed isolated tasks freezing the host when the checkout holds linked worktrees of the same repository (e.g. gitignored `.claude/worktrees/`); those worktrees are no longer snapshotted as nested repos ([#16068](https://github.com/can1357/oh-my-pi/issues/16068))
 - Fixed `edit` moves dropping executable permissions in hashline, patch, and apply_patch modes ([#16042](https://github.com/can1357/oh-my-pi/pull/16042) by [@mottopanikeiku](https://github.com/mottopanikeiku))
@@ -1596,6 +1609,10 @@
 - `/shake thinking` now reports the number of tokens freed.
 
 ## [18.2.10] - 2026-09-22
+
+### Added
+
+- Added per-agent prewalk for subagents: a `prewalk` frontmatter field (`true` = hand off to the default prewalk target, a string = custom target model pattern) and a `task.agentPrewalk` settings override toggled per agent from the `/agents` dashboard with `P`. The bundled generic `task` agent ships with prewalk enabled by default (skipped when the target resolves to the subagent's own starting model, and never armed for plan-mode spawns). Prewalk-armed subagents keep the normally parent-owned `todo` tool so the plan-nudge → todo → hand-off flow works, and the prewalk todo gate now keys on the active tool set instead of the registry so a deactivated todo tool can no longer stall the switch.
 
 ### Added
 

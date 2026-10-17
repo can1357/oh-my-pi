@@ -96,6 +96,31 @@ describe("ExtensionRunner", () => {
 		};
 	};
 
+	it("createCommandContext().activePersonaName is a live getter, not a snapshot (switch-then-read)", async () => {
+		let currentPersona: string | null = "alpha";
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+			undefined,
+			undefined,
+			() => currentPersona,
+		);
+
+		// Capture the context ONCE — mirroring a command handler that reads
+		// ctx.activePersonaName again after awaiting switchSession()/newSession()/
+		// branch()/navigateTree() on that SAME captured object, not a fresh call.
+		const ctx = runner.createCommandContext();
+		expect(ctx.activePersonaName).toBe("alpha");
+
+		// Simulate a persona switch happening during the handler's lifetime.
+		currentPersona = "beta";
+
+		expect(ctx.activePersonaName).toBe("beta");
+	});
 	it("reflects SessionManager.moveTo() changes instead of the constructor-time snapshot (/move)", async () => {
 		const dirA = tempDir.join("dirA");
 		const dirB = tempDir.join("dirB");
