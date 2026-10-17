@@ -117,7 +117,6 @@ import { onDownloadActivity } from "../downloads/activity";
 import { DownloadActivityHud, JudgmentBatchProgressHud } from "./progress-hud";
 import { autosaveApprovedPlan, planSaveFileName } from "../plan-mode/plan-autosave";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
-import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
 import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type: "text" };
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
@@ -399,6 +398,7 @@ import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
 import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
 import { cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
+import { renderGuidedGoalInterview } from "../goals/guided-interview";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../goals/settings";
 import { goalContinuationActivity, goalFromModeData } from "../goals/state";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
@@ -6359,9 +6359,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// hidden developer message, the agent asks its questions as regular
 			// assistant turns, and the user answers in the ordinary editor. Queue
 			// behind an in-flight run instead of aborting it.
-			const kickoff = prompt.render(guidedGoalInterviewPrompt, {
-				initial: rest?.trim() || undefined,
-			});
+			const kickoff = renderGuidedGoalInterview(rest);
 			const images = input?.images?.length ? input.images : undefined;
 			if (this.session.isStreaming) {
 				await this.session.followUp(kickoff, images, { synthetic: true });
