@@ -39,14 +39,50 @@ export function isPersistenceTruncatedString(value: unknown): value is string {
 }
 
 export function isImageBlock(value: unknown): value is { type: "image"; data: string; mimeType?: string } {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		"type" in value &&
-		(value as { type?: string }).type === "image" &&
-		"data" in value &&
-		typeof (value as { data?: string }).data === "string"
-	);
+	if (typeof value !== "object" || value === null) return false;
+	return projectorImageField(value, "type") === "image" && projectorImageField(value, "data") !== undefined;
+}
+
+/**
+ * The `key` field of an image-shaped value as the projector accepts it —
+ * through the prototype chain, but only from a string-valued data descriptor.
+ * Answered without invoking anything: an accessor anywhere on the chain yields
+ * `undefined` rather than running user code, so a stateful getter keeps the
+ * value out of the blob store instead of shifting what serialization observes.
+ *
+ * The descriptor walk itself is guarded: `Object.getOwnPropertyDescriptor` on a
+ * proxy runs its trap, which can throw. `JSON.stringify` consults descriptors
+ * only for keys `ownKeys` reported, so a proxy whose `ownKeys` stays quiet
+ * serializes as `{}` while this direct lookup throws — an escape from
+ * `prepareEntryForPersistence` that fails the whole write for a value
+ * serialization accepts. A throw anywhere on the walk therefore answers "no
+ * classifier here": the payload stays inline instead of externalized, which is
+ * a size regression on an exotic shape, not a lost session. The prototype step
+ * is guarded for the same reason: `Object.getPrototypeOf` is a trap too, and a
+ * proxy can keep its descriptor answers quiet while throwing there.
+ */
+export function projectorImageField(value: object, key: "data" | "mimeType" | "type"): string | undefined {
+	let current: object | null = value;
+	while (current !== null) {
+		let descriptor: PropertyDescriptor | undefined;
+		try {
+			descriptor = Object.getOwnPropertyDescriptor(current, key);
+		} catch {
+			return undefined;
+		}
+		if (descriptor !== undefined) {
+			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return undefined;
+			return typeof descriptor.value === "string" ? descriptor.value : undefined;
+		}
+		let next: object | null;
+		try {
+			next = Object.getPrototypeOf(current);
+		} catch {
+			return undefined;
+		}
+		current = next;
+	}
+	return undefined;
 }
 
 function isImageMimeType(value: unknown): value is string {
@@ -54,13 +90,11 @@ function isImageMimeType(value: unknown): value is string {
 }
 
 export function isImageDataPayload(value: unknown): value is { data: string; mimeType?: string } {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		"data" in value &&
-		typeof (value as { data?: string }).data === "string" &&
-		(isImageBlock(value) || ("mimeType" in value && isImageMimeType((value as { mimeType?: unknown }).mimeType)))
-	);
+	if (typeof value !== "object" || value === null) return false;
+	if (projectorImageField(value, "data") === undefined) return false;
+	if (isImageBlock(value)) return true;
+	const mimeType = projectorImageField(value, "mimeType");
+	return mimeType !== undefined && isImageMimeType(mimeType);
 }
 
 /**
@@ -135,6 +169,19 @@ function externalizeImagePayloadSync(
 export function forgetExternalizedImages(blobStore: BlobStore): void {
 	externalizedImageRefs.delete(blobStore);
 }
+
+/**
+ * Keys `truncateForPersistence` strips from the projected graph at every
+ * depth: transient data that must never reach a persisted line — `jsonlEvents`
+ * are raw subprocess streaming events, already saved to artifact files.
+ *
+ * The entry-line memo's stamp walks exactly the projected graph (the graph
+ * `stringifyJson` serializes), so it skips these keys too — see
+ * `messageValueStamp` in session-manager.ts. Sharing the list is what keeps the
+ * stamp from walking a field persistence drops: a streaming-shaped cycle under
+ * `jsonlEvents` is persistable today, and walking it would never terminate.
+ */
+export const TRANSIENT_PERSISTENCE_KEYS: readonly string[] = ["jsonlEvents"];
 
 /**
  * Recursively truncate large strings in an object for session persistence.
@@ -253,12 +300,17 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 		if (!persistenceNodeNeedsRewrite(obj)) return obj;
 		let changed = false;
 		const entries: Array<readonly [string, unknown]> = [];
-		for (const childKey in obj) {
-			if (!Object.hasOwn(obj, childKey)) continue;
+		// Own enumerable keys, enumerated directly instead of through
+		// `for..in`: the inherited keys `for..in` yields were dropped by the
+		// own-key filter this replaces, while the prototype walk itself is a
+		// step a proxy's `getPrototypeOf` trap can fail on — and
+		// `JSON.stringify`, which reads own keys only, stays quiet on the
+		// same value. A write the serializer completes must not fail here.
+		for (const childKey of Object.keys(obj)) {
 			const value = (obj as Record<string, unknown>)[childKey];
 			// Strip transient/redundant properties that shouldn't be persisted.
 			// - jsonlEvents: raw subprocess streaming events (already saved to artifact files)
-			if (childKey === "jsonlEvents") {
+			if (TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) {
 				changed = true;
 				continue;
 			}
@@ -295,69 +347,120 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
  * objects) any child that can. Mirrors the change conditions of the rebuild
  * pass exactly — a false negative silently keeps oversized content, so when
  * in doubt this must return true.
+ *
+ * The walk is an explicit worklist, not recursion: `details` is the tool
+ * result's opaque slot and can hold a graph nested arbitrarily deep, and one
+ * JS frame per level overflowed the stack on such input (~20k levels) — a
+ * persistence failure on a graph serialization handles fine. Every step reads
+ * only own data, so the order the worklist visits nodes in changes nothing a
+ * caller can observe.
+ *
+ * A back-reference that the projection does NOT strip (`jsonlEvents` and the
+ * spilled `structuredContent` are stripped before this walk, so their cycles
+ * are never visited) makes the live graph circular. `JSON.stringify` rejects
+ * such a graph with a `TypeError`, which the caller surfaces as a persistence
+ * failure; this scan must not instead re-enqueue the same object forever, so a
+ * node already on the walk's path is skipped. Skipping is sound: the node's
+ * subtree was already scanned for the same change conditions when it was
+ * first pushed, and the scan answers only "can this change".
  */
 function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
-	if (obj === null || obj === undefined) return false;
-	if (typeof obj === "string") {
-		if (
-			obj.length > MAX_PERSIST_CHARS &&
-			key !== "thinkingSignature" &&
-			key !== "thoughtSignature" &&
-			key !== "textSignature"
-		)
-			return true;
-		if (key === "image_url" && isImageDataUrl(obj)) return true;
-		return false;
-	}
-	if (Array.isArray(obj)) {
-		for (const item of obj) {
+	// Iterative, not recursive — one JS stack frame per level overflowed on a
+	// graph `details` can hold (see above).
+	const pending: Array<{ value: unknown; key: string | undefined; parent: PathNode | undefined }> = [
+		{ value: obj, key, parent: undefined },
+	];
+	// The objects currently on the walk path, each linked to its own parent so a
+	// node can be tested against its ancestors without a per-node copy of the
+	// path. A cycle re-encountering one of them is skipped rather than queued
+	// again (see above).
+	type PathNode = { readonly value: object; readonly parent: PathNode | undefined };
+	for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
+		const { value, key } = node;
+		if (value === null || value === undefined) continue;
+		if (typeof value === "string") {
 			if (
-				item !== null && typeof item === "object"
-					? persistenceNodeNeedsRewrite(item, key)
-					: persistenceNodeNeedsRewrite(item, key)
+				value.length > MAX_PERSIST_CHARS &&
+				key !== "thinkingSignature" &&
+				key !== "thoughtSignature" &&
+				key !== "textSignature"
 			)
 				return true;
+			if (key === "image_url" && isImageDataUrl(value)) return true;
+			continue;
 		}
-		return false;
-	}
-	if (typeof obj === "object") {
-		if ("jsonlEvents" in obj) return true;
-		// Externalize shapes rewrite (not verbatim): check before the
-		// atomic/verbatim classification below.
-		if (typeof obj === "object" && "type" in obj) {
-			const typed = obj as Record<string, unknown>;
-			if (
-				typed.type === "image_generation_call" &&
-				"result" in typed &&
-				typeof typed.result === "string" &&
-				!isBlobRef(typed.result) &&
-				typed.result.length >= BLOB_EXTERNALIZE_THRESHOLD
-			) {
-				return true;
+		// A node already on this path closes a cycle. Its subtree was scanned when
+		// it was first pushed, so re-walking it would only repeat work — and a
+		// self-reference would repeat it forever.
+		let ancestor = node.parent;
+		let onPath = false;
+		while (ancestor !== undefined) {
+			if (ancestor.value === value) {
+				onPath = true;
+				break;
+			}
+			ancestor = ancestor.parent;
+		}
+		if (onPath) continue;
+		const path: PathNode = { value, parent: node.parent };
+		if (Array.isArray(value)) {
+			// Indexed slots with a snapshotted length, the way `JSON.stringify` and
+			// the rebuild above read them — never the iterator protocol, which an
+			// overridden `Symbol.iterator` can hide slots from.
+			const length = value.length;
+			for (let index = 0; index < length; index++) pending.push({ value: value[index], key, parent: path });
+			continue;
+		}
+		if (typeof value === "object") {
+			// Transient keys are always stripped by the rebuild pass, so their
+			// presence alone forces the walk that drops them.
+			for (const transientKey of TRANSIENT_PERSISTENCE_KEYS) {
+				if (transientKey in value) return true;
+			}
+			// Externalize shapes rewrite (not verbatim): check before the
+			// atomic/verbatim classification below.
+			if ("type" in value) {
+				const typed = value as Record<string, unknown>;
+				if (
+					typed.type === "image_generation_call" &&
+					"result" in typed &&
+					typeof typed.result === "string" &&
+					!isBlobRef(typed.result) &&
+					typed.result.length >= BLOB_EXTERNALIZE_THRESHOLD
+				) {
+					return true;
+				}
+			}
+			if (shouldExternalizeImagePayload(value, key)) return true;
+			if (isAtomicPersistenceNode(value, key)) continue;
+			// Own enumerable keys, enumerated directly — see the rebuild loop
+			// in `truncateForPersistence` for why `for..in`'s prototype walk
+			// is a step a thrown `getPrototypeOf` trap fails.
+			for (const childKey of Object.keys(value)) {
+				pending.push({ value: (value as Record<string, unknown>)[childKey], key: childKey, parent: path });
 			}
 		}
-		if (shouldExternalizeImagePayload(obj, key)) return true;
-		if (isAtomicPersistenceNode(obj, key)) return false;
-		for (const childKey in obj) {
-			if (!Object.hasOwn(obj, childKey)) continue;
-			if (persistenceNodeNeedsRewrite((obj as Record<string, unknown>)[childKey], childKey)) return true;
-		}
-		return false;
 	}
 	return false;
 }
 
 /**
  * True for nodes `truncateForPersistence` returns verbatim without
- * descending: image-generation results, externalizable image payloads,
- * anthropic server-tool/compaction carriers, and signed/encrypted blocks.
- * Must stay in sync with the early-return guards above the recursion.
+ * descending past the image/blob guards: anthropic server-tool/compaction
+ * carriers and signed/encrypted blocks. The entry-line memo's stamp mirrors
+ * this boundary — transient keys are stripped only on the recursion side —
+ * so it must stay in sync with the early-return guards above the recursion.
  */
-function isAtomicPersistenceNode(obj: object, key?: string): boolean {
+export function isAtomicPersistenceNode(obj: object, key?: string): boolean {
 	// NOTE: image_generation_call results and externalizable image payloads
 	// are NOT atomic — truncateForPersistence rewrites them via the blob
 	// store. They are checked explicitly in the predicate and must never be
 	// classified here.
+	// The preserveData compaction carrier has no `type` marker of its own, so
+	// its key-based case sits outside the type guard below — mirroring the
+	// projection's early return, which checks the key without requiring one.
+	const untyped = obj as Record<string, unknown>;
+	if (key === "anthropicCompaction" && "content" in untyped && typeof untyped.content === "string") return true;
 	if (typeof obj === "object" && "type" in obj) {
 		const typed = obj as Record<string, unknown>;
 		// Mirror the truncate guard exactly: only a block that passes
@@ -386,12 +489,7 @@ function isAtomicPersistenceNode(obj: object, key?: string): boolean {
 			}
 			return false;
 		}
-		if (
-			typed.type === "anthropicCompaction" ||
-			typed.type === "cursorHistory" ||
-			(key === "anthropicCompaction" && "content" in typed && typeof typed.content === "string")
-		)
-			return true;
+		if (typed.type === "anthropicCompaction" || typed.type === "cursorHistory") return true;
 		const signed =
 			(typed.type === "thinking" && "thinkingSignature" in typed && isNonEmptyString(typed.thinkingSignature)) ||
 			(typed.type === "text" && "textSignature" in typed && isNonEmptyString(typed.textSignature)) ||
