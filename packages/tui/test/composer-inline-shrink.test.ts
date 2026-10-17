@@ -364,6 +364,53 @@ describe("composer inline shrink (#11007)", () => {
 		h.composer.stop();
 	});
 
+	it("with completeScrollback, retires displaced rows at once and never replays them when the chrome shrinks", async () => {
+		const STREAMED = 20;
+		const h = makeHarness();
+		h.composer.setPreferences({ completeScrollback: true });
+		const reachable = (): number[] =>
+			h.terminal
+				.getScrollBuffer()
+				.map(row => Bun.stripANSI(row).trimEnd())
+				.filter(row => row.startsWith(TRANSCRIPT_PREFIX))
+				.map(row => Number(row.slice(TRANSCRIPT_PREFIX.length)));
+		await h.scheduler.settle(h.terminal);
+		h.widget.rows = 24;
+		h.composer.ui.requestRender();
+		await h.scheduler.settle(h.terminal);
+		// Rows the grown chrome displaced are already in scrollback, not held live.
+		expect(reachable()).toEqual(Array.from({ length: TRANSCRIPT_ROWS }, (_, i) => i));
+
+		for (let i = TRANSCRIPT_ROWS; i < TRANSCRIPT_ROWS + STREAMED; i++) {
+			const row = i;
+			h.transcript.addChild({ render: () => [`${TRANSCRIPT_PREFIX}${row}`] });
+			h.composer.ui.requestRender();
+			await h.scheduler.settle(h.terminal);
+		}
+		h.widget.rows = 0;
+		h.composer.ui.requestRender();
+		await h.scheduler.settle(h.terminal);
+
+		// The shrink re-offers nothing: each row is reachable exactly once, in order.
+		expect(reachable()).toEqual(Array.from({ length: TRANSCRIPT_ROWS + STREAMED }, (_, i) => i));
+		// The input keeps the bottom row; the slack the retired rows left is the
+		// band between the newest row and the input, which new output fills.
+		const view = (): string[] => h.terminal.getViewport().map(row => Bun.stripANSI(row).trimEnd());
+		const newest = `${TRANSCRIPT_PREFIX}${TRANSCRIPT_ROWS + STREAMED - 1}`;
+		const shrunk = view();
+		expect(shrunk[ROWS - 1]).toBe("EDITOR");
+		expect(shrunk.slice(shrunk.indexOf(newest) + 1, ROWS - 1).every(row => row === "")).toBe(true);
+		h.transcript.addChild({ render: () => [`${TRANSCRIPT_PREFIX}${TRANSCRIPT_ROWS + STREAMED}`] });
+		h.composer.ui.requestRender();
+		await h.scheduler.settle(h.terminal);
+		const filled = view();
+		expect(filled[ROWS - 1]).toBe("EDITOR");
+		expect(filled.indexOf(`${TRANSCRIPT_PREFIX}${TRANSCRIPT_ROWS + STREAMED}`)).toBe(filled.indexOf(newest) + 2);
+		expect(reachable()).toEqual(Array.from({ length: TRANSCRIPT_ROWS + STREAMED + 1 }, (_, i) => i));
+
+		h.composer.stop();
+	});
+
 	it("keeps the below-chrome baseline across a height resize while inline chrome is expanded", async () => {
 		const shorter = ROWS - 10;
 		const h = makeHarness();

@@ -388,6 +388,19 @@ export const cfgTuiResizeScrollback = register({
 	},
 });
 
+export const cfgTuiCompleteScrollback = register({
+	id: "tui.completeScrollback",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Complete Scrollback",
+		description:
+			"Send transcript rows pushed off screen by a growing HUD or dialog straight to scrollback; when it shrinks, blank rows sit between the transcript and the input until new output fills them",
+	},
+});
+
 export const cfgTerminalShowProgress = register({
 	id: "terminal.showProgress",
 	type: "boolean",
