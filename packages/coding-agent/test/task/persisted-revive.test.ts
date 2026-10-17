@@ -13,7 +13,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
-import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
+import { RpcSubagentRegistry, subagentFrameVisible } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import type { AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -814,10 +814,11 @@ describe("persisted subagent revival", () => {
 		const frames: RpcSubagentFrame[] = [];
 		const terminal = Promise.withResolvers<void>();
 		const rpcRegistry = new RpcSubagentRegistry(eventBus, frame => {
+			// What a `progress` subscriber receives.
+			if (!subagentFrameVisible("progress", frame.type)) return;
 			frames.push(frame);
 			if (frame.type === "subagent_lifecycle" && frame.payload.status !== "started") terminal.resolve();
 		});
-		rpcRegistry.setSubscriptionLevel("progress");
 		const ref = createRef(sessionFile);
 		AgentRegistry.global().register({
 			id: ref.id,

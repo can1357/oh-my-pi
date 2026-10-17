@@ -151,47 +151,45 @@ describe("provider prompt-cache key session affinity", () => {
 		}
 	});
 
-	it("does not auto-inherit parent prompt-cache affinity when fork startup changes request-shaping inputs", async () => {
-		const cases: Array<{ name: string; options: CreateAgentSessionOptions }> = [
-			{
-				name: "model",
-				options: { model: OPENAI_TEST_MODEL },
-			},
-			{
-				name: "thinking",
-				options: { thinkingLevel: ThinkingLevel.High },
-			},
-			{
-				name: "system",
-				options: { customSystemPrompt: "Use a different provider prompt." },
-			},
-			{
-				name: "tools",
-				options: { toolNames: ["read"] },
-			},
-		];
+	const cases: Array<{ name: string; options: CreateAgentSessionOptions }> = [
+		{
+			name: "model",
+			options: { model: OPENAI_TEST_MODEL },
+		},
+		{
+			name: "thinking",
+			options: { thinkingLevel: ThinkingLevel.High },
+		},
+		{
+			name: "system",
+			options: { customSystemPrompt: "Use a different provider prompt." },
+		},
+		{
+			name: "tools",
+			options: { toolNames: ["read"] },
+		},
+	];
 
-		for (const entry of cases) {
-			using tempDir = TempDir.createSync(`@omp-prompt-cache-fork-${entry.name}-`);
-			const source = await createSourceSessionFixture(tempDir, `parent-cache-session-${entry.name}`);
-			const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
-			let session: AgentSession | undefined;
-			let authStorage: AuthStorage | undefined;
-			try {
-				const created = await createMinimalSession(tempDir, {
-					...entry.options,
-					cwd: source.cwd,
-					sessionManager: forkedManager,
-				});
-				session = created.session;
-				authStorage = created.authStorage;
+	it.each(cases)("does not auto-inherit parent prompt-cache affinity when fork startup changes $name", async entry => {
+		using tempDir = TempDir.createSync(`@omp-prompt-cache-fork-${entry.name}-`);
+		const source = await createSourceSessionFixture(tempDir, `parent-cache-session-${entry.name}`);
+		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		try {
+			const created = await createMinimalSession(tempDir, {
+				...entry.options,
+				cwd: source.cwd,
+				sessionManager: forkedManager,
+			});
+			session = created.session;
+			authStorage = created.authStorage;
 
-				expect(forkedManager.getHeader()?.parentSession).toBe(source.sourceHeader.id);
-				expect(session.agent.promptCacheKey, entry.name).toBeUndefined();
-			} finally {
-				await session?.dispose();
-				authStorage?.close();
-			}
+			expect(forkedManager.getHeader()?.parentSession).toBe(source.sourceHeader.id);
+			expect(session.agent.promptCacheKey, entry.name).toBeUndefined();
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
 		}
 	});
 

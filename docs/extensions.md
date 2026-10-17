@@ -1044,7 +1044,7 @@ environment propagation rules; the dispatcher does not synthesize uniform variab
 inheritance. Request argv stays separate for direct backends; only shell-input
 backends turn argv into shell text, under the required POSIX grammar assertion.
 
-### RPC mode (`rpc-mode.ts`)
+### RPC mode (`rpc-server.ts`)
 
 `ctx.ui` is backed by RPC `extension_ui_request` events:
 

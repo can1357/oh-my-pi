@@ -170,6 +170,10 @@ export const eventDefs = {
 				),
 				0,
 			),
+			"attachments?": doc(
+				"QueueAttachments",
+				"Session-host socket clients only; absent means unknown, not that no chip carries one.",
+			),
 		},
 		"Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.",
 	),
