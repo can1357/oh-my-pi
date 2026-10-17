@@ -15,10 +15,26 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import { OAUTH_DEFINITIVE_REFRESH_RETRIES } from "@oh-my-pi/pi-ai/auth/refresh";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+
+// A definitive `invalid_grant` is retried a bounded number of times before the
+// credential is cleared. Keep the backoff at 1ms for these tests, but scope it:
+// a process-wide override would change the retry cadence of every later test
+// file that shares this worker.
+const PREVIOUS_RETRY_DELAY = process.env.OAUTH_DEFINITIVE_REFRESH_RETRY_DELAY_MS;
+beforeEach(() => {
+	process.env.OAUTH_DEFINITIVE_REFRESH_RETRY_DELAY_MS = "1";
+});
+afterEach(() => {
+	if (PREVIOUS_RETRY_DELAY === undefined) delete process.env.OAUTH_DEFINITIVE_REFRESH_RETRY_DELAY_MS;
+	else process.env.OAUTH_DEFINITIVE_REFRESH_RETRY_DELAY_MS = PREVIOUS_RETRY_DELAY;
+});
+/** One initial attempt plus the bounded definitive-failure retries. */
+const DEFINITIVE_REFRESH_ATTEMPTS = 1 + OAUTH_DEFINITIVE_REFRESH_RETRIES;
 
 const CREDENTIAL_ID = "mcp_oauth_test_1908";
 const TOKEN_URL = "https://example.com/oauth/token";
@@ -163,7 +179,7 @@ describe("MCPManager OAuth refresh failure", () => {
 
 		const prepared = await manager.prepareConfig(serverConfig);
 
-		expect(refreshSpy).toHaveBeenCalledTimes(1);
+		expect(refreshSpy).toHaveBeenCalledTimes(DEFINITIVE_REFRESH_ATTEMPTS);
 		expect(refreshSpy).toHaveBeenCalledWith(
 			TOKEN_URL,
 			STALE_REFRESH,
@@ -504,6 +520,9 @@ describe("MCPManager shared SQLite OAuth refresh", () => {
 
 				const resolved = await prepared;
 
+				// The peer rotated the stored row while this attempt was in flight, so the
+				// retry loop stops after the first failure and the CAS path adopts the peer
+				// credential. Sending the stale refresh token again could invalidate it.
 				expect(refreshRequests).toBe(1);
 				expect(refreshTokens).toEqual([SHARED_STALE_REFRESH]);
 				expect(getAuthorizationHeader(resolved)).toBe(`Bearer ${SHARED_FRESH_ACCESS}`);

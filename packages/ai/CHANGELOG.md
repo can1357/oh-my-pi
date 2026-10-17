@@ -10,6 +10,10 @@
 
 - Anthropic requests to the official API now gzip the request body, so long conversations reach the model sooner on slow uplinks; set `PI_ANTHROPIC_GZIP=0` to disable it ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
 
+### Fixed
+
+- Fixed a single transient `invalid_grant` response permanently disabling a healthy OAuth credential: the refresh now retries twice before the credential is disabled, while genuinely revoked or unauthorized grants are still disabled immediately ([#16019](https://github.com/can1357/oh-my-pi/pull/16019) by [@yangqi45](https://github.com/yangqi45))
+
 ## [18.11.3] - 2026-10-16
 
 ### Fixed
