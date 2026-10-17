@@ -28,7 +28,7 @@ Check: `$C/venv-engine/bin/python -c "import mnemosyne, fastembed; print(mnemosy
 ~/.cache/omp-memory-eval/venv-engine/bin/python packages/coding-agent/bench/memory-eval/py/prepare_datasets.py
 ```
 
-Writes `data/beam-100k.json`, `data/beam-500k.json` and `data/lme-s.json` at pinned HF revisions, each with a `<file>.revision` marker holding the revision it was downloaded at. It is idempotent: a file whose marker matches the pinned revision is skipped, any other (including a cache from before the markers existed) is downloaded again. `run` refuses a dataset whose marker is missing or differs from the revision it pins, and stamps the marker's revision into the result's `datasetRevision`, which `diff` compares.
+Writes `data/beam-100k.json`, `data/beam-500k.json` and `data/lme-s.json` at pinned HF revisions, each with a `<file>.revision` marker holding the revision it was downloaded at. The raw Hugging Face downloads go to `hf/` (as do `upstream_run_a.py`'s), not `~/.cache/huggingface`. It is idempotent: a file whose marker matches the pinned revision is skipped, any other (including a cache from before the markers existed) is downloaded again. `run` refuses a dataset whose marker is missing or differs from the revision it pins, and stamps the marker's revision into the result's `datasetRevision`, which `diff` compares.
 
 ## Calibration against upstream (Layer 0 check 2)
 
