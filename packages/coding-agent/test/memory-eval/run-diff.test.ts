@@ -293,3 +293,14 @@ it("diff rejects a question whose case or category differs between the files, in
 	}
 	expect((await diff(ok, recategorised)).stderr).toContain("question c1:q1 has category cat in a but other in b");
 });
+
+it("diff names each side's Mnemopi embedder when the config records one", async () => {
+	const js = await writeResult("emb-js", { engine: "mnemopi", engineInfo: { embedder: "js" } });
+	const python = await writeResult("emb-py", { engine: "mnemopi", engineInfo: { embedder: "python" } });
+	const oracle = await writeResult("emb-none", {});
+	const { stdout, code } = await diff(js, python);
+	expect(code).toBe(0);
+	expect(stdout).toContain("a: engine mnemopi embedder js protocol standard");
+	expect(stdout).toContain("b: engine mnemopi embedder python protocol standard");
+	expect((await diff(oracle, oracle)).stdout).toContain("a: engine oracle protocol standard");
+});
