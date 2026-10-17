@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed incremental task results nesting array batches, mixing independently labelled section values, and mutating original yield payloads during repeated or mixed-section assembly ([#14925](https://github.com/can1357/oh-my-pi/pull/14925) by [@vavilonska](https://github.com/vavilonska))
 ## [18.11.3] - 2026-10-16
 
 ### Added

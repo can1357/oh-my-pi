@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed incremental subagent results rejecting legal array batches or open-union values, mixing values from multiple labels, dropping required nulls in combined output schemas, and misclassifying positional array prefixes or valid mixed scalar values ([#14925](https://github.com/can1357/oh-my-pi/pull/14925) by [@vavilonska](https://github.com/vavilonska))
 ### Changed
 
 - With a first-party Anthropic model on the official API selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup; third-party gateways and custom endpoints are never probed ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))

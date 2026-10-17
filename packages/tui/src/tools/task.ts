@@ -111,12 +111,14 @@ function normalizeFindings(value: unknown): FindingDetails[] {
 }
 
 /** Reviewer output shapes: `findings` is an array (a lone finding still assembles as a list); the verdict fields are scalars. */
-const REVIEWER_SECTION_SHAPES: YieldSectionShapes = new Map([
-	["findings", "array"],
-	["overall_correctness", "scalar"],
-	["explanation", "scalar"],
-	["confidence", "scalar"],
-]);
+const REVIEWER_SECTION_SHAPES: YieldSectionShapes = {
+	shapes: new Map([
+		["findings", "array"],
+		["overall_correctness", "scalar"],
+		["explanation", "scalar"],
+		["confidence", "scalar"],
+	]),
+};
 
 function extractIncrementalReviewResult(
 	items: RenderYieldItem[],

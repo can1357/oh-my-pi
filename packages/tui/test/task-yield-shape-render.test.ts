@@ -177,4 +177,78 @@ describe("task renderer: malformed yield slot (#1987)", () => {
 		expect(text).toContain("Findings:");
 		expect(text).toContain("Handle null response");
 	});
+
+	it("renders each finding from a batch and reads independently mapped verdict fields", async () => {
+		const first = {
+			title: "First batched finding",
+			body: "A synthetic first failure.",
+			priority: 1,
+			confidence: 0.8,
+			file_path: "src/first.ts",
+			line_start: 1,
+			line_end: 1,
+		};
+		const second = { ...first, title: "Second batched finding", file_path: "src/second.ts" };
+		const extractedToolData = {
+			yield: [
+				{
+					type: ["findings", "overall_correctness", "explanation", "confidence"],
+					data: {
+						findings: [first, second],
+						overall_correctness: "incorrect",
+						explanation: "Two synthetic failures.",
+						confidence: 0.8,
+					},
+					status: "success",
+				},
+			],
+		};
+		for (const render of [renderResultText, renderProgressText]) {
+			const text = await render(extractedToolData);
+			expect(text).toContain("Patch is incorrect");
+			expect(text).toContain("First batched finding");
+			expect(text).toContain("Second batched finding");
+		}
+	});
+
+	it("preserves nested-array items and batches in real task previews without caller schema metadata", async () => {
+		const extractedToolData = {
+			yield: [
+				{ type: ["rows"], data: [1, 2], status: "success" },
+				{
+					type: ["rows"],
+					data: [
+						[3, 4],
+						[5, 6],
+					],
+					status: "success",
+				},
+			],
+		};
+		const original = structuredClone(extractedToolData);
+		for (const render of [renderResultText, renderProgressText]) {
+			const text = await render(extractedToolData);
+			expect(text).toContain("yield+[rows]: [1,2]");
+			expect(text).toContain("yield+[rows]: [[3,4],[5,6]]");
+			expect(extractedToolData).toEqual(original);
+		}
+	});
+
+	it("preserves mixed scalar and array payloads in real task previews without a schema predicate", async () => {
+		const extractedToolData = {
+			yield: [
+				{ type: ["value"], data: "scalar choice", status: "success" },
+				{ type: ["value"], data: [7, 8], status: "success" },
+				{ type: ["value"], data: [[9, 10]], status: "success" },
+			],
+		};
+		const original = structuredClone(extractedToolData);
+		for (const render of [renderResultText, renderProgressText]) {
+			const text = await render(extractedToolData);
+			expect(text).toContain("yield+[value]: scalar choice");
+			expect(text).toContain("yield+[value]: [7,8]");
+			expect(text).toContain("yield+[value]: [[9,10]]");
+			expect(extractedToolData).toEqual(original);
+		}
+	});
 });

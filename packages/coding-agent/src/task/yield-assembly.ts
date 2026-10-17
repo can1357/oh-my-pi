@@ -2,43 +2,7 @@
 import { dereferenceJsonSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import type { YieldSectionShapes } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { buildOutputValidator } from "../tools/output-schema-validator";
-
-/** True when `value` is a JSON-schema node whose instances are arrays. */
-function isArrayTypedSchema(value: unknown): boolean {
-	if (value === null || typeof value !== "object") return false;
-	const record = value as Record<string, unknown>;
-	if (record.type === "array") return true;
-	if (Array.isArray(record.type) && record.type.includes("array")) return true;
-	for (const key of ["anyOf", "oneOf", "allOf"] as const) {
-		const variants = record[key];
-		if (Array.isArray(variants) && variants.some(isArrayTypedSchema)) return true;
-	}
-	return false;
-}
-
-/**
- * Record the shape of every property declared by `schema` or by its `allOf`/`oneOf`/`anyOf`
- * branches (JTD discriminators compile to a root `oneOf`). A label declared array in one
- * branch and non-array in another is marked `mixed`.
- */
-function collectPropertyShapes(schema: Record<string, unknown>, shapes: Map<string, "array" | "scalar" | "mixed">) {
-	const properties = schema.properties;
-	if (isRecord(properties)) {
-		for (const key in properties) {
-			const shape = isArrayTypedSchema(properties[key]) ? "array" : "scalar";
-			const existing = shapes.get(key);
-			shapes.set(key, existing === undefined || existing === shape ? shape : "mixed");
-		}
-	}
-	for (const key of ["allOf", "oneOf", "anyOf"] as const) {
-		const branches = schema[key];
-		if (!Array.isArray(branches)) continue;
-		for (const branch of branches) {
-			if (isRecord(branch)) collectPropertyShapes(branch, shapes);
-		}
-	}
-}
+import { buildOutputValidator, buildSectionSchemas, yieldSectionShape } from "../tools/output-schema-validator";
 
 /**
  * Shape of every top-level output-schema property, for `assembleYieldResult`.
@@ -49,21 +13,23 @@ function collectPropertyShapes(schema: Record<string, unknown>, shapes: Map<stri
  * otherwise a single `type: ["findings"]` yield would assemble as a bare object and fail
  * array-typed validation. Other declared properties are scalar: a repeated yield (e.g. a
  * revised `explanation` after async jobs settle) replaces the earlier value instead of
- * assembling an array the schema rejects. A label declared array in one branch and scalar
- * in another gets no shape, keeping the undeclared-label merge.
+ * assembling an array the schema rejects. Array-capable labels also carry payload metadata:
+ * a valid item takes precedence over a batch or scalar, while a scalar-only value stays direct.
  */
 export function yieldSectionShapes(outputSchema: unknown): YieldSectionShapes {
 	const shapes = new Map<string, "array" | "scalar">();
 	// Use the JTD-converted JSON Schema (matches what validation runs against):
 	// JTD `optionalProperties.findings.elements` becomes `properties.findings`
 	// with `type: "array"`, which raw `normalizeSchema` would not expose.
-	const { jsonSchema } = buildOutputValidator(outputSchema);
-	if (jsonSchema === undefined) return shapes;
+	const { jsonSchema, validator } = buildOutputValidator(outputSchema);
+	if (jsonSchema === undefined) return { shapes };
 	const dereferenced = dereferenceJsonSchema(jsonSchema);
-	const collected = new Map<string, "array" | "scalar" | "mixed">();
-	collectPropertyShapes(isRecord(dereferenced) ? dereferenced : jsonSchema, collected);
-	for (const [key, shape] of collected) {
-		if (shape !== "mixed") shapes.set(key, shape);
+	for (const [label, schema] of buildSectionSchemas(isRecord(dereferenced) ? dereferenced : jsonSchema)) {
+		shapes.set(label, yieldSectionShape(schema));
 	}
-	return shapes;
+	return {
+		shapes,
+		acceptsItem: validator?.isSectionItem,
+		acceptsArray: validator?.isArraySectionValue,
+	};
 }

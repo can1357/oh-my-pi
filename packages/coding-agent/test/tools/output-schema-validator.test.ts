@@ -91,7 +91,7 @@ describe("buildOutputValidator", () => {
 		expect(validator?.validate({ name: null, receipt: null }).success).toBe(false);
 	});
 
-	it("exposes per-label sub-validators that accept items (not whole arrays) for elements properties", () => {
+	it("exposes per-label validators that accept single items and batches for elements properties", () => {
 		const { validator } = buildOutputValidator({
 			properties: {
 				overall_correctness: { enum: ["correct", "incorrect"] },
@@ -114,11 +114,47 @@ describe("buildOutputValidator", () => {
 		// String property: any string passes, non-strings fail.
 		expect(sections?.get("explanation")?.("ok").success).toBe(true);
 		expect(sections?.get("explanation")?.(123).success).toBe(false);
-		// Array property: each section validates ONE item against the items schema, not the whole array.
+		// Array sections validate item contents; finalization checks the assembled array.
 		expect(sections?.get("findings")?.({ title: "t", body: "b" }).success).toBe(true);
-		expect(sections?.get("findings")?.([{ title: "t", body: "b" }]).success).toBe(false);
+		expect(sections?.get("findings")?.([{ title: "t", body: "b" }]).success).toBe(true);
+		expect(sections?.get("findings")?.([{ title: "t", body: 7 }]).success).toBe(false);
 		// Unknown labels have no validator so user-defined sections stay loose.
 		expect(sections?.has("scratchpad")).toBe(false);
+	});
+
+	it("validates prefix items at the supplied position and reserves missing items for the tail", () => {
+		const { validator } = buildOutputValidator({
+			type: "object",
+			properties: { rows: { type: "array", prefixItems: [{ type: "string" }, { type: "integer" }] } },
+		});
+		const validate = validator?.validateSection.get("rows");
+		expect(validate?.(1, 0).success).toBe(false);
+		expect(validate?.(["one"], 0).success).toBe(true);
+		expect(validator?.isSectionItem("rows", ["one"], 0)).toBe(false);
+		expect(validate?.(2, 1).success).toBe(true);
+		expect(validate?.("wrong", 1).success).toBe(false);
+		expect(validate?.({ tail: true }, 2).success).toBe(true);
+		expect(validator?.isSectionItem("rows", [3, 4], 2)).toBe(true);
+	});
+
+	it("keeps false tail constraints and positional conjuncts in partial section validation", () => {
+		const { validator } = buildOutputValidator({
+			type: "object",
+			properties: {
+				rows: {
+					allOf: [
+						{ type: "array", prefixItems: [{ type: "string" }], items: false },
+						{ prefixItems: [{ maxLength: 3 }] },
+					],
+				},
+			},
+		});
+		const validate = validator?.validateSection.get("rows");
+		expect(validate?.("one", 0).success).toBe(true);
+		expect(validate?.("long", 0).success).toBe(false);
+		expect(validate?.([], 1).success).toBe(true);
+		expect(validate?.(["one"], 1).success).toBe(false);
+		expect(validate?.(2, 1).success).toBe(false);
 	});
 });
 describe("summarizeValidationFailure", () => {
