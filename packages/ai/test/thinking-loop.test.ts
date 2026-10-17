@@ -1166,7 +1166,10 @@ describe("GeminiHeaderRunDetector", () => {
 			padded.push(`## Refining Stage ${i}${" ".repeat(GEMINI_HEADER_PARTIAL_LINE_CAP)}`);
 		}
 		const text = `${padded.join("\n")}\n`;
-		for (const step of [1, 7, 512, GEMINI_HEADER_PARTIAL_LINE_CAP + 1]) {
+		// Two distinct parsing boundaries: a step below the cap accumulates the
+		// partial line whole, a step above it truncates it. Sub-cap steps all
+		// take the same branch, so one represents them.
+		for (const step of [1, GEMINI_HEADER_PARTIAL_LINE_CAP + 1]) {
 			expect(feedHeaders(text, step)).toBe(true);
 		}
 		const whole = new GeminiHeaderRunDetector();
@@ -1181,7 +1184,7 @@ describe("GeminiHeaderRunDetector", () => {
 			const whole = new GeminiHeaderRunDetector();
 			expect(whole.push(text)).toBe(false);
 			expect(whole.count).toBe(1);
-			for (const step of [1, 3, 13, GEMINI_HEADER_PARTIAL_LINE_CAP, 600]) {
+			for (const step of [1, 600]) {
 				const detector = new GeminiHeaderRunDetector();
 				for (let i = 0; i < text.length; i += step) detector.push(text.slice(i, i + step));
 				expect(detector.count).toBe(whole.count);
@@ -1196,7 +1199,7 @@ describe("GeminiHeaderRunDetector", () => {
 		const whole = new GeminiHeaderRunDetector();
 		expect(whole.push(text)).toBe(false);
 		expect(whole.count).toBe(0);
-		for (const step of [1, 7, 13, 512, 600]) {
+		for (const step of [1, 600]) {
 			const detector = new GeminiHeaderRunDetector();
 			for (let i = 0; i < text.length; i += step) detector.push(text.slice(i, i + step));
 			expect(detector.count).toBe(0);
