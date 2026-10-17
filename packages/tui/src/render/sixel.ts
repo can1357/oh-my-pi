@@ -83,7 +83,10 @@ export function classifySixelRow(
 			index++;
 			continue;
 		}
-		index += introducer;
+		// `matchSixelIntroducer` reports the offset just past the introducer, so it
+		// is the next absolute index — adding it would skip past the frame that
+		// starts here and leave the row reported as still inside a DCS.
+		index = introducer;
 		open = true;
 		sawSequence = true;
 	}
@@ -191,6 +194,15 @@ export class SixelSpanParser {
 	#frameEsc = false;
 	/** Set once the held frame outgrew the hold bound and was dropped. */
 	#discarded = false;
+
+	/**
+	 * Whether bytes are being held for a frame whose terminator has not arrived
+	 * — an open frame or a partial introducer. The sink mirrors the chunks that
+	 * carry them, so it needs to know the held prefix is already on disk.
+	 */
+	get holding(): boolean {
+		return this.#mode !== "ground" || this.#pending.length > 0;
+	}
 
 	/** Consume one chunk, returning the spans it completed. */
 	push(chunk: string): RawSixelSegment[] {

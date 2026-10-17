@@ -92,6 +92,39 @@ export function formatOutputPaneLines(options: OutputPaneFormatOptions, theme: T
 			visibleLines = [];
 			sixelRows = undefined;
 			hiddenCount = styledLines.length;
+		} else if (hasSixel) {
+			// A payload row is never wrapped or cut. Routing a DCS through the text
+			// wrapper splits the payload across rows and pads it with spaces, and a
+			// multi-row frame sliced mid-sequence leaves the host terminal inside an
+			// open string that swallows everything after it. The budget therefore
+			// counts the surrounding text rows while every payload row is kept
+			// whole — an eval tool card reaching this with `visual` set used to lose
+			// the frame entirely.
+			const textRowCount = sixelRows?.reduce((count, isSixel) => (isSixel ? count : count + 1), 0) ?? 0;
+			if (textRowCount > boundedLimit) {
+				// Text rows kept, counted from the capped edge; payload rows are
+				// always kept, so only this window decides what is hidden.
+				const firstKept = edge === "tail" ? textRowCount - boundedLimit : 0;
+				const keptLines: string[] = [];
+				const keptMask: boolean[] = [];
+				let textIndex = 0;
+				for (let index = 0; index < styledLines.length; index++) {
+					const isSixel = sixelRows?.[index] === true;
+					if (isSixel) {
+						keptLines.push(styledLines[index]!);
+						keptMask.push(true);
+						continue;
+					}
+					const keep = textIndex >= firstKept && textIndex < firstKept + boundedLimit;
+					textIndex++;
+					if (!keep) continue;
+					keptLines.push(styledLines[index]!);
+					keptMask.push(false);
+				}
+				visibleLines = keptLines;
+				sixelRows = keptMask;
+				hiddenCount = textRowCount - boundedLimit;
+			}
 		} else if (options.visual && edge === "tail") {
 			// The wrapped output is capped below, so the payload survives whole in
 			// the visual window but its position among the surviving rows is no
