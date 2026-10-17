@@ -37,7 +37,7 @@ export const MAX_AT_IMPORT_DEPTH = 5;
  * The boundary character is captured separately so the slice arithmetic in
  * {@link expandLine} aligns with the `@` position, not the whitespace.
  */
-const AT_IMPORT_REGEX = /(^|[ \t])@([./~A-Za-z0-9_-][^\s]*)/g;
+const AT_IMPORT_REGEX = /(^|[ \t])@([./~A-Za-z0-9_-](?:[^\s\\]|\\.)*)/g;
 
 /**
  * Trailing characters stripped from a captured path token: sentence-ending
@@ -179,11 +179,13 @@ async function resolveAndExpand(
 }
 
 function resolveImportPath(importPath: string, baseDir: string, home: string): string {
-	if (importPath === "~") return path.resolve(home);
-	if (importPath.startsWith("~/")) return path.resolve(home, importPath.slice(2));
-	if (path.isAbsolute(importPath)) return path.resolve(importPath);
-	return path.resolve(baseDir, importPath);
+	const unescaped = importPath.replace(/\\ /g, " ");
+	if (unescaped === "~") return path.resolve(home);
+	if (unescaped.startsWith("~/")) return path.resolve(home, unescaped.slice(2));
+	if (path.isAbsolute(unescaped)) return path.resolve(unescaped);
+	return path.resolve(baseDir, unescaped);
 }
+
 
 interface MarkdownSegment {
 	kind: "text" | "code";

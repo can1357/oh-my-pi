@@ -159,4 +159,17 @@ describe("expandAtImports", () => {
 
 		expect(expanded).toContain("See INLINED, and then continue.");
 	});
+
+	test("resolves paths with spaces via backslash-escape (Claude Code convention)", async () => {
+		// Claude Code uses `\ ` to escape spaces in @-import paths; a shared
+		// AGENTS.md that imports a spaced path with `\ ` must work identically.
+		await writeFile("my rule.md", "SPACED-OK");
+		const source = path.join(tmp, "AGENTS.md");
+		const input = "Rules: @./my\\ rule.md\n";
+
+		const expanded = await expandAtImports(input, source);
+
+		expect(expanded).toContain("SPACED-OK");
+		expect(expanded).not.toContain("@./my\\ rule.md");
+	});
 });

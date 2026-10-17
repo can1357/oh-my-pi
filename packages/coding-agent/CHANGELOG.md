@@ -2,8 +2,7 @@
 
 ## [Unreleased]
 ### Fixed
-- Fixed isolated task spawn freezing the host when the checkout contains gitignored linked worktrees — nested-repo discovery now skips gitignored directories and baseline capture is bounded ([#16068](https://github.com/can1357/oh-my-pi/issues/16068))
-
+- Fixed `@` imports in context files failing to resolve paths with spaces — `\ ` (backslash-space) now works as an escape, matching Claude Code's behavior ([#16090](https://github.com/can1357/oh-my-pi/issues/16090))
 ### Changed
 
 - Improved agent and session database SQLite reads by binding row types at prepare time with `db.query<Row, Params>()` instead of unchecked `as` casts ([#15437](https://github.com/can1357/oh-my-pi/pull/15437) by [@yuzu-octopus](https://github.com/yuzu-octopus))
