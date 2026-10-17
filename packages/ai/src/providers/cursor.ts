@@ -1346,7 +1346,7 @@ function streamCursorWithWireMode(
 			let currentThinkingBlock = previousState?.currentThinkingBlock ?? null;
 			let currentToolCall = previousState?.currentToolCall ?? null;
 			const resolvedMcpToolCallIds = previousState?.resolvedMcpToolCallIds ?? new Set<string>();
-			usageState = retryContext?.usageState ?? { sawTokenDelta: false };
+			usageState = retryContext?.usageState ?? { sawTokenDelta: false, contextWindow: model.contextWindow ?? 0 };
 
 			const state: BlockState = {
 				get currentTextBlock() {
@@ -1971,6 +1971,10 @@ function markCursorExecResolved(block: CursorExecResolvedCarrier): void {
 
 export interface UsageState {
 	sawTokenDelta: boolean;
+	contextWindow?: number;
+	turnEnded?: boolean;
+	checkpointTokens?: number;
+	trustedContextTokens?: number;
 }
 
 /** Exported for tests: drives one Cursor server message through the stream (exec waits mark the stream busy). */
@@ -2025,7 +2029,7 @@ export async function handleServerMessage(
 		// permission prompt).
 		handleInteractionQuery(msg.message.value, runTransport);
 	} else if (msgCase === "conversationCheckpointUpdate") {
-		handleConversationCheckpointUpdate(msg.message.value, output, onConversationCheckpoint);
+		handleConversationCheckpointUpdate(msg.message.value, output, usageState, onConversationCheckpoint);
 	}
 }
 
@@ -5520,7 +5524,7 @@ export function processInteractionUpdate(
 		}
 	} else if (updateCase === "turnEnded") {
 		output.stopReason = "stop";
-		applyTurnEndedUsage(output.usage, update.message.value);
+		applyTurnEndedUsage(output.usage, update.message.value, usageState);
 		if (
 			classifyModel("cursor", output.model).family === "k3" &&
 			!output.content.some(item => item.type === "thinking" && item.thinking.length > 0)
@@ -5549,7 +5553,7 @@ export function processInteractionUpdate(
  * whole prompt, cache hits and writes included, so fresh input is what remains
  * after both are taken out.
  */
-function applyTurnEndedUsage(usage: Usage, update: TurnEndedUpdate): void {
+function applyTurnEndedUsage(usage: Usage, update: TurnEndedUpdate, usageState: UsageState): void {
 	const input = Number(update.inputTokens ?? 0n);
 	const output = Number(update.outputTokens ?? 0n);
 	const cacheRead = Number(update.cacheReadTokens ?? 0n);
@@ -5562,36 +5566,32 @@ function applyTurnEndedUsage(usage: Usage, update: TurnEndedUpdate): void {
 	if (cacheWrite > 0) usage.cacheWrite = cacheWrite;
 	if (reasoning > 0) usage.reasoningTokens = reasoning;
 	usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-	// A checkpoint may have arrived before these counters. Re-check it against
-	// the bill; a usedTokens value that merely echoes the bill is not occupancy.
-	if (usage.contextTokens !== undefined) adoptCursorContextOccupancy(usage, usage.contextTokens);
+	usageState.turnEnded = true;
+	if (usageState.checkpointTokens !== undefined) {
+		adoptCursorContextOccupancy(usage, usageState.checkpointTokens, usageState);
+	}
 }
 
-/** This turn's billed total, including cache counters. Zero before `TurnEndedUpdate`. */
-function cursorTurnBill(usage: Usage): number {
-	return usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-}
-
-/**
- * Record checkpoint `usedTokens` as context occupancy.
- *
- * A real reading is the whole conversation and stays well clear of a turn whose
- * `cacheRead` is an SDK-internal counter (hundreds of thousands of occupancy
- * next to millions of cache). Some checkpoints instead report this turn's bill
- * (`input + output + cacheRead + cacheWrite`). Compaction prefers
- * `contextTokens` over every local estimate, so accepting that bill compacts a
- * session still under the window. Keep the non-cache portion in that case;
- * compaction then takes the larger of it and the stored transcript estimate.
- * A bill that includes no cache is left alone: it already matches occupancy.
- */
-function adoptCursorContextOccupancy(usage: Usage, usedTokens: number): void {
+/** A cache bill above the model window cannot be a successful turn's context occupancy. */
+function adoptCursorContextOccupancy(usage: Usage, usedTokens: number, usageState: UsageState): void {
 	if (usedTokens <= 0) return;
-	const bill = cursorTurnBill(usage);
-	if (bill > 0 && usedTokens === bill && (usage.cacheRead > 0 || usage.cacheWrite > 0)) {
-		usage.contextTokens = usage.input + usage.output;
+	usageState.checkpointTokens = usedTokens;
+	const contextWindow = usageState.contextWindow ?? 0;
+	if (
+		usageState.turnEnded &&
+		contextWindow > 0 &&
+		usedTokens > contextWindow &&
+		usedTokens === usage.totalTokens &&
+		usage.cacheRead > 0
+	) {
+		// Explicit zero disables billable fallback without creating a transcript usage anchor.
+		usage.contextTokens = usageState.trustedContextTokens ?? 0;
 		return;
 	}
 	usage.contextTokens = usedTokens;
+	if (usageState.turnEnded || contextWindow <= 0 || usedTokens <= contextWindow) {
+		usageState.trustedContextTokens = usedTokens;
+	}
 }
 
 /**
@@ -5604,10 +5604,11 @@ function adoptCursorContextOccupancy(usage: Usage, usedTokens: number): void {
 function handleConversationCheckpointUpdate(
 	checkpoint: ConversationStateStructure,
 	output: AssistantMessage,
+	usageState: UsageState,
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
 ): void {
 	onConversationCheckpoint?.(checkpoint);
-	adoptCursorContextOccupancy(output.usage, checkpoint.tokenDetails?.usedTokens ?? 0);
+	adoptCursorContextOccupancy(output.usage, checkpoint.tokenDetails?.usedTokens ?? 0, usageState);
 }
 
 function createBlobId(data: Uint8Array): Uint8Array {

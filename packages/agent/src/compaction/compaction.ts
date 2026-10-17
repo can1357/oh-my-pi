@@ -279,11 +279,8 @@ export function calculatePromptTokens(usage: Usage): number {
 }
 
 export function hasContextTokenUsage(usage: Usage): boolean {
-	return (
-		(usage.contextTokens ?? 0) > 0 ||
-		usage.input + usage.cacheRead + usage.cacheWrite > 0 ||
-		calculateContextTokens(usage) > usage.output
-	);
+	if (usage.contextTokens !== undefined) return usage.contextTokens > 0;
+	return usage.input + usage.cacheRead + usage.cacheWrite > 0 || calculateContextTokens(usage) > usage.output;
 }
 
 /**

@@ -77,6 +77,17 @@ describe("context overflow evidence", () => {
 			true,
 		);
 	});
+
+	it("ignores rejected usage without hiding explicit upstream overflow errors", () => {
+		const message: AIError.ContextOverflowMessage = {
+			stopReason: "stop",
+			usage: { input: 6_374, cacheRead: 882_816, cacheWrite: 0, contextTokens: 0 },
+		};
+		expect(isContextOverflow(message, 500_000)).toBe(false);
+		message.stopReason = "error";
+		message.errorMessage = "maximum context length is 500000 tokens";
+		expect(isContextOverflow(message, 500_000)).toBe(true);
+	});
 });
 
 describe("isContextOverflow - model_context_window_exceeded", () => {

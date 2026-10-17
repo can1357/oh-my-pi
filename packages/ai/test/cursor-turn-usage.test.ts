@@ -4,6 +4,7 @@ import {
 	handleServerMessage,
 	processInteractionUpdate,
 	type ToolCallState,
+	type UsageState,
 } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -171,7 +172,7 @@ describe("Cursor turn usage (issue #13082)", () => {
 		const stream = new AssistantMessageEventStream();
 		const state = newBlockState();
 		const usageState = { sawTokenDelta: false };
-		const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+		const h2Request = { write: (_frame: Uint8Array): void => {} };
 
 		processInteractionUpdate(
 			{ message: { case: "tokenDelta", value: { tokens: 24_000 } } },
@@ -208,8 +209,7 @@ describe("Cursor turn usage (issue #13082)", () => {
 		const output = cursorAssistantMessage();
 		const stream = new AssistantMessageEventStream();
 		const state = newBlockState();
-		const usageState = { sawTokenDelta: false };
-		const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+		const usageState: UsageState = { sawTokenDelta: false, contextWindow: 500_000 };
 
 		processInteractionUpdate(
 			{
@@ -223,18 +223,17 @@ describe("Cursor turn usage (issue #13082)", () => {
 			state,
 			usageState,
 		);
-		await checkpoint(output, stream, state, usageState, h2Request, 264_400);
+		await checkpoint(output, stream, state, usageState, 264_400);
 
 		expect(output.usage).toMatchObject({ input: 93_838, cacheRead: 5_601_408, totalTokens: 5_718_879 });
 		expect(output.usage.contextTokens).toBe(264_400);
 	});
 
-	it("does not treat a checkpoint that echoes the cache bill as context occupancy", async () => {
+	it("rejects an over-window cache bill without inventing a context occupancy", async () => {
 		const output = cursorAssistantMessage();
 		const stream = new AssistantMessageEventStream();
 		const state = newBlockState();
-		const usageState = { sawTokenDelta: false };
-		const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+		const usageState: UsageState = { sawTokenDelta: false, contextWindow: 500_000 };
 
 		processInteractionUpdate(
 			{
@@ -248,26 +247,24 @@ describe("Cursor turn usage (issue #13082)", () => {
 			state,
 			usageState,
 		);
-		await checkpoint(output, stream, state, usageState, h2Request, 892_018);
+		await checkpoint(output, stream, state, usageState, 892_018);
 
-		// Fresh input is 889190 - 882816. Occupancy must not become the bill.
 		expect(output.usage).toMatchObject({
 			input: 6_374,
 			output: 2_828,
 			cacheRead: 882_816,
 			totalTokens: 892_018,
-			contextTokens: 9_202,
+			contextTokens: 0,
 		});
 	});
 
-	it("corrects a bill-echo checkpoint that arrived before turnEnded", async () => {
+	it("rejects an over-window bill checkpoint that arrived before turnEnded", async () => {
 		const output = cursorAssistantMessage();
 		const stream = new AssistantMessageEventStream();
 		const state = newBlockState();
-		const usageState = { sawTokenDelta: false };
-		const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+		const usageState: UsageState = { sawTokenDelta: false, contextWindow: 500_000 };
 
-		await checkpoint(output, stream, state, usageState, h2Request, 892_018);
+		await checkpoint(output, stream, state, usageState, 892_018);
 		expect(output.usage.contextTokens).toBe(892_018);
 
 		processInteractionUpdate(
@@ -283,16 +280,97 @@ describe("Cursor turn usage (issue #13082)", () => {
 			usageState,
 		);
 
-		expect(output.usage.contextTokens).toBe(9_202);
+		expect(output.usage.contextTokens).toBe(0);
 	});
+
+	it.each([true, false])(
+		"keeps an earlier real checkpoint when the bill echo arrives (turnEnded first: %s)",
+		async endedFirst => {
+			const output = cursorAssistantMessage();
+			const stream = new AssistantMessageEventStream();
+			const state = newBlockState();
+			const usageState: UsageState = { sawTokenDelta: false, contextWindow: 500_000 };
+			const update: InteractionUpdate = {
+				message: {
+					case: "turnEnded",
+					value: { inputTokens: 889_190n, outputTokens: 2_828n, cacheReadTokens: 882_816n },
+				},
+			};
+			if (endedFirst) processInteractionUpdate(update, output, stream, state, usageState);
+			await checkpoint(output, stream, state, usageState, 264_400);
+			await checkpoint(output, stream, state, usageState, 892_018);
+			if (!endedFirst) processInteractionUpdate(update, output, stream, state, usageState);
+
+			expect(output.usage.contextTokens).toBe(264_400);
+			expect(output.usage.totalTokens).toBe(892_018);
+			await checkpoint(output, stream, state, usageState, 280_000);
+			expect(output.usage.contextTokens).toBe(280_000);
+		},
+	);
+
+	it.each([
+		{ contextWindow: 500_000, input: 100n, output: 7n, cacheRead: 60n, cacheWrite: 15n, usedTokens: 107 },
+		{
+			contextWindow: 500_000,
+			input: 350_000n,
+			output: 1_000n,
+			cacheRead: 0n,
+			cacheWrite: 340_000n,
+			usedTokens: 351_000,
+		},
+		{
+			contextWindow: 500_000,
+			input: 889_190n,
+			output: 2_828n,
+			cacheRead: 882_816n,
+			cacheWrite: 0n,
+			usedTokens: 510_000,
+		},
+		{
+			contextWindow: 892_018,
+			input: 889_190n,
+			output: 2_828n,
+			cacheRead: 882_816n,
+			cacheWrite: 0n,
+			usedTokens: 892_018,
+		},
+		{ contextWindow: 0, input: 889_190n, output: 2_828n, cacheRead: 882_816n, cacheWrite: 0n, usedTokens: 892_018 },
+	])(
+		"keeps a checkpoint without independent evidence of a bill echo ($usedTokens / $contextWindow)",
+		async scenario => {
+			const output = cursorAssistantMessage();
+			const stream = new AssistantMessageEventStream();
+			const state = newBlockState();
+			const usageState: UsageState = { sawTokenDelta: false, contextWindow: scenario.contextWindow };
+			processInteractionUpdate(
+				{
+					message: {
+						case: "turnEnded",
+						value: {
+							inputTokens: scenario.input,
+							outputTokens: scenario.output,
+							cacheReadTokens: scenario.cacheRead,
+							cacheWriteTokens: scenario.cacheWrite,
+						},
+					},
+				},
+				output,
+				stream,
+				state,
+				usageState,
+			);
+			await checkpoint(output, stream, state, usageState, scenario.usedTokens);
+
+			expect(output.usage.contextTokens).toBe(scenario.usedTokens);
+		},
+	);
 });
 
 async function checkpoint(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	state: BlockState,
-	usageState: { sawTokenDelta: boolean },
-	h2Request: Parameters<typeof handleServerMessage>[5],
+	usageState: UsageState,
 	usedTokens: number,
 ): Promise<void> {
 	await handleServerMessage(
@@ -308,7 +386,7 @@ async function checkpoint(
 		stream,
 		state,
 		new Map(),
-		h2Request,
+		{ write: (_frame: Uint8Array): void => {} },
 		undefined,
 		undefined,
 		usageState,

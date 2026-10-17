@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Cursor conversation checkpoints that report this turn's billed total, cache included, as `usedTokens`. Compaction treats that field as context occupancy, so a session still under the window was compacted. A checkpoint that merely echoes the bill now keeps the non-cache portion, and a reading that is not the bill is unchanged.
+- Fixed premature compaction in Cursor sessions with inflated cached-token billing ([#16065](https://github.com/can1357/oh-my-pi/pull/16065) by [@iFwu](https://github.com/iFwu))
 
 ### Added
 
