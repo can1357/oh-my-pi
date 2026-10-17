@@ -195,8 +195,10 @@ const fmt = (b: BootstrapResult): string => {
 	return `meanDiff ${b.meanDiff.toFixed(4)} CI ${ci} wins ${b.wins} ties ${b.ties} losses ${b.losses}`;
 };
 
-const describeConfig = (label: string, c: RunConfig): string =>
-	`${label}: engine ${c.engine} protocol ${c.protocol} k ${c.k} mnemopiRecall ${c.mnemopiRecall} polyphonic ${c.polyphonic} gitCommit ${c.gitCommit}`;
+const describeConfig = (label: string, c: RunConfig): string => {
+	const embedder = c.engineInfo.embedder ? ` embedder ${c.engineInfo.embedder}` : "";
+	return `${label}: engine ${c.engine}${embedder} protocol ${c.protocol} k ${c.k} mnemopiRecall ${c.mnemopiRecall} polyphonic ${c.polyphonic} gitCommit ${c.gitCommit}`;
+};
 
 function uniqueQuestionIds(label: string, file: ResultFile): Set<string> {
 	const ids = new Set<string>();
