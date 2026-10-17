@@ -128,12 +128,8 @@ async function runCommand(argv: string[]): Promise<void> {
 			}
 			const count = cases ?? UPSTREAM_COMPAT_CONVERSATIONS;
 			const questions = await runUpstreamCompat(engine, await loadBeamUpstreamCompat(dataDir, count));
-			// No warmup runs here; the store is a temp dir, not measured.
-			run = {
-				questions,
-				resources: { warmupMs: 0, ...(await engine.resources()), rssScope: engine.rssScope },
-				storeBytesMean: 0,
-			};
+			// No warmup runs here.
+			run = { questions, warmupMs: 0 };
 		} else {
 			const loaded = await loadDataset(dataset, dataDir);
 			excluded = loaded.excluded;
