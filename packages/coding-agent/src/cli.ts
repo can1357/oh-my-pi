@@ -181,6 +181,15 @@ async function runSmokeTest(): Promise<void> {
 	process.stdout.write("smoke-test: ok\n");
 }
 
+const AGENT_BRIDGE_CONTRACT = {
+	version: 1,
+	restrictTools: true,
+	perCallModel: false,
+	perCallTimeout: true,
+	servedModel: true,
+	servedFamily: true,
+} as const;
+
 const TINY_WORKER_ARG = "__omp_worker_tiny_inference";
 const STATS_SYNC_WORKER_ARG = "__omp_worker_stats_sync";
 const TAB_WORKER_ARG = "__omp_worker_tab";
@@ -546,6 +555,10 @@ export async function runCli(argv: string[]): Promise<void> {
 
 	if (resolvedArgv[0] === "--smoke-test") {
 		await runSmokeTest();
+		return;
+	}
+	if (resolvedArgv[0] === "--agent-bridge-contract") {
+		process.stdout.write(`${JSON.stringify(AGENT_BRIDGE_CONTRACT)}\n`);
 		return;
 	}
 
