@@ -75,6 +75,8 @@ export interface UserMessage {
 export interface DeveloperMessage {
 	role: "developer";
 	content: string | (TextContent | ImageContent)[];
+	/** True when this message carries passive context emitted after a tool batch. */
+	passiveToolContext?: true;
 	timestamp: number;
 }
 

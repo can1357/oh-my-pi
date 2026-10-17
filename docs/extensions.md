@@ -552,6 +552,8 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 
 `tool_result` is middleware-style: handlers run in extension order and each sees prior modifications. Distinct non-blank `additionalContext` from every handler is preserved in registration order (repeats, compared ignoring surrounding whitespace, are dropped) and delivered before that call's `tool_call` context.
 
+Passive tool context is persisted as a marked developer message. The TUI keeps it out of the ordinary transcript and renders one sanitized dim `Context:` line on the batch's final tool card.
+
 ### Plan review lifecycle
 
 - `plan_review_requested` reports an interactive plan review with its `reviewId`, session, title, plan path and content, plus the choices in display order. Choice ids are stable (`execute`, `compact`, `keep`, `refine`, `save`); labels may change, and `keep` carries the current token count. An extension can answer it with `ctx.resolvePlanReview(...)` while the terminal picker stays live; the first answer wins. `save` uses the default file name without opening the path prompt.

@@ -58,6 +58,39 @@ import { type AnimationFrame, trimBlankEdges } from "../chrome/transcript-contai
 export function toolRenderName(wireName: string, tool: AgentTool | undefined): string {
 	return tool?.name ?? wireName;
 }
+
+function passiveContextLine(context: string): string | undefined {
+	const oneLine = replaceTabs(sanitizeText(context)).replace(/\s+/g, " ").trim();
+	return oneLine ? `↳ Context: ${oneLine}` : undefined;
+}
+
+/**
+ * Render passive tool context as sanitized, dim transcript text: one truncated
+ * line while collapsed, the full text wrapped once tools are expanded (`Ctrl+O`).
+ */
+export function renderToolAdditionalContext(context: string, width: number, expanded: boolean): string {
+	const line = passiveContextLine(context);
+	if (!line) return "";
+	const dim = theme.fg("dim", line);
+	return expanded ? dim : truncateToWidth(dim, width);
+}
+
+/**
+ * The native counterpart of {@link renderToolAdditionalContext}: one line with
+ * the full text as its tooltip while collapsed, wrapped when expanded; or nothing.
+ */
+export function describeToolAdditionalContext(context: string | undefined, expanded: boolean): NativeChild[] {
+	const line = context === undefined ? undefined : passiveContextLine(context);
+	if (!line) return [];
+	const props = { key: "context", role: "omp.tool.context" };
+	return [
+		text(
+			[span(line, "dim")],
+			expanded ? { ...props, wrap: "word" } : { ...props, lines: 1, truncate: "end", title: line },
+		),
+	];
+}
+
 type DisplaceableToolName = "wait" | "todo";
 
 function isTodoToolDetails(details: unknown): details is TodoToolDetails {
@@ -233,6 +266,7 @@ export interface ToolExecutionHandle extends Component {
 	setArgsComplete(toolCallId?: string): void;
 	setExecutionStarted(toolCallId?: string): void;
 	setExpanded(expanded: boolean): void;
+	setAdditionalContext(context: string): void;
 	setToolActivityVisible(visible: boolean): void;
 	/** Mark the call parked: it returned, but stays tracked for async job frames. */
 	parkAsBackground(): void;
@@ -361,6 +395,7 @@ let toolExecutionInstanceSeq = 0;
 export class ToolExecutionComponent extends Container {
 	#contentBox: Box; // Used for custom tools and bash visual truncation
 	#contentText: WidthAwareText; // Generic fallback (no custom/built-in renderer)
+	#additionalContextText: WidthAwareText;
 	// Which container the constructor mounted: bespoke/built-in renderers use
 	// #contentBox, everything else the generic #contentText fallback.
 	#usesContentBox = false;
@@ -377,6 +412,7 @@ export class ToolExecutionComponent extends Container {
 	#allocation = Number.POSITIVE_INFINITY;
 	#presentationFrame: AnimationFrame = { tick: 0, now: 0 };
 	#toolActivityVisible = true;
+	#additionalContext: string | undefined;
 	#showImages: boolean;
 	#isPartial = true;
 	// A background task whose call already returned; later async job frames are
@@ -508,6 +544,14 @@ export class ToolExecutionComponent extends Container {
 		// lines and keep their tight spacing — only tinted lines survive.
 		this.#contentBox = new Box(0, 1);
 		this.#contentText = new WidthAwareText(contentWidth => this.#renderDefaultCard(contentWidth), 1, 1);
+		this.#additionalContextText = new WidthAwareText(
+			contentWidth =>
+				this.#additionalContext === undefined
+					? ""
+					: renderToolAdditionalContext(this.#additionalContext, contentWidth, this.#expanded),
+			1,
+			0,
+		);
 
 		// Use Box for custom tools or built-in tools with rich renderers.
 		const hasCustomRenderer = !!(tool?.renderCall || tool?.renderResult);
@@ -517,6 +561,7 @@ export class ToolExecutionComponent extends Container {
 		} else {
 			this.addChild(this.#contentText);
 		}
+		this.addChild(this.#additionalContextText);
 		// Tool blocks are visually distinct cards (background-tinted or framed),
 		// so keep their horizontal padding even when the user enables tight layout.
 		this.setIgnoreTight(true);
@@ -612,6 +657,14 @@ export class ToolExecutionComponent extends Container {
 		}));
 		this.#displayInputVersion++;
 		this.#updateDisplay();
+		this.#ui.requestRender();
+	}
+
+	setAdditionalContext(context: string): void {
+		if (context === this.#additionalContext) return;
+		this.#additionalContext = context;
+		this.#blockVersion++;
+		this.#additionalContextText.invalidate();
 		this.#ui.requestRender();
 	}
 
@@ -915,7 +968,10 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	setExpanded(expanded: boolean): void {
-		if (this.#expanded !== expanded) this.#blockVersion++;
+		if (this.#expanded !== expanded) {
+			this.#blockVersion++;
+			this.#additionalContextText.invalidate();
+		}
 		this.#expanded = expanded;
 		this.#updateDisplay();
 	}
@@ -972,7 +1028,8 @@ export class ToolExecutionComponent extends Container {
 	 * `elapsed` timer in the head and terminal-local collapse clamped to the
 	 * view's preview. Renderers without describe hooks (and extension tools
 	 * with only render hooks) get the generic card. Hidden tool activity stays
-	 * mounted so toggling it is one prop change.
+	 * mounted so toggling it is one prop change. Passive context sits below the
+	 * card, outside its collapse clamp, as in the terminal.
 	 */
 	override describe(cx?: DescribeContext): NativeNode {
 		if (this.#toolName === "wait" && this.#isBenignSkip()) return EMPTY_NODE;
@@ -991,11 +1048,14 @@ export class ToolExecutionComponent extends Container {
 			this.#displayInputVersion,
 			this.#toolActivityVisible,
 			media,
+			this.#additionalContext,
 			getThemeEpoch(),
 		];
-		return this.#native.get(key, () =>
-			withHidden(dataFirst ? this.#describeTool(media) : this.#describeCard(media), !this.#toolActivityVisible),
-		);
+		return this.#native.get(key, () => {
+			const described = dataFirst ? this.#describeTool(media) : this.#describeCard(media);
+			const context = describeToolAdditionalContext(this.#additionalContext, this.#expanded);
+			return withHidden(context.length > 0 ? col([described, ...context]) : described, !this.#toolActivityVisible);
+		});
 	}
 
 	/** Milliseconds since execution started (running) or its total (settled); undefined before it starts. */
@@ -1735,6 +1795,10 @@ export class ToolExecutionComponent extends Container {
 			}
 		}
 		this.#renderedImageCount = this.#imageComponents.length;
+		// Multi-file boxes, images and figures above are appended on each rebuild; keep the
+		// passive context line after all of them so it never splits the tool's output.
+		this.removeChild(this.#additionalContextText);
+		this.addChild(this.#additionalContextText);
 	}
 
 	/**
