@@ -276,8 +276,8 @@ describe("skills", () => {
 			},
 		);
 
-		it("converts Windows USERPROFILE paths to the default WSL mount (#3779)", () => {
-			const resolved = getWslWindowsHomeCandidate({
+		it("converts Windows USERPROFILE paths to the default WSL mount (#3779)", async () => {
+			const resolved = await getWslWindowsHomeCandidate({
 				platform: "linux",
 				env: { WSL_DISTRO_NAME: "Ubuntu", USERPROFILE: "C:\\Users\\alice" },
 				wslPath: () => undefined,
@@ -286,8 +286,8 @@ describe("skills", () => {
 			expect(resolved).toBe("/mnt/c/Users/alice");
 		});
 
-		it("resolves the Windows profile through interop when USERPROFILE is not exported (#3779)", () => {
-			const resolved = getWslWindowsHomeCandidate({
+		it("resolves the Windows profile through interop when USERPROFILE is not exported (#3779)", async () => {
+			const resolved = await getWslWindowsHomeCandidate({
 				platform: "linux",
 				env: { WSL_DISTRO_NAME: "Ubuntu" },
 				windowsUserProfile: () => "C:\\Users\\alice",
@@ -297,22 +297,46 @@ describe("skills", () => {
 			expect(resolved).toBe("/mnt/c/Users/alice");
 		});
 
-		it("kills a host probe that never exits instead of blocking startup (#8402)", () => {
+		it("kills a host probe that never exits instead of blocking startup (#8402)", async () => {
 			// Integration test against real OS timer behavior: the contract is that
-			// runHostProbe's spawnSync `timeout` actually kills a genuinely blocked
+			// the probe's wall-clock bound actually kills a genuinely blocked
 			// child. Injecting a short deadline preserves that native lifecycle
 			// coverage without paying the production discovery budget.
 			const start = performance.now();
-			const result = runHostProbe([process.execPath, "-e", "await Bun.sleep(60_000)"], 25);
+			const result = await runHostProbe([process.execPath, "-e", "await Bun.sleep(60_000)"], 25);
 			const elapsed = performance.now() - start;
 			expect(result).toBeUndefined();
 			// Loose bound proves the probe returned via its timeout, not the child.
 			expect(elapsed).toBeLessThan(1_000);
 		});
 
-		it("returns trimmed stdout for a host probe that succeeds (#8402)", () => {
-			const result = runHostProbe([process.execPath, "-e", "process.stdout.write('  host-home  ')"]);
+		it("returns trimmed stdout for a host probe that succeeds (#8402)", async () => {
+			const result = await runHostProbe([process.execPath, "-e", "process.stdout.write('  host-home  ')"]);
 			expect(result).toBe("host-home");
+		});
+
+		it.skipIf(process.platform === "win32")(
+			"keeps the probe bound when a descendant inherits stdout (#8402)",
+			async () => {
+				// The pipe is held open by the forked child, not by the leader the
+				// deadline kills: only a group kill plus cancelled pipe readers ends
+				// the wait at the deadline instead of when the descendant exits.
+				const start = performance.now();
+				const result = await runHostProbe(["sh", "-c", "sleep 3 & exec sleep 60"], 25);
+				const elapsed = performance.now() - start;
+				expect(result).toBeUndefined();
+				expect(elapsed).toBeLessThan(1_000);
+			},
+		);
+
+		it("treats a non-zero exit as an unavailable host (#8402)", async () => {
+			const result = await runHostProbe([process.execPath, "-e", "process.exit(3)"]);
+			expect(result).toBeUndefined();
+		});
+
+		it("treats empty stdout as an unavailable host (#8402)", async () => {
+			const result = await runHostProbe([process.execPath, "-e", "process.stdout.write('')"]);
+			expect(result).toBeUndefined();
 		});
 
 		it("respects an explicit enableAgentsUser: false (#2401)", async () => {
