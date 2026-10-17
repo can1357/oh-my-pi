@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { $env, APP_NAME } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
+import type { ApprovalMode } from "../tools/approval";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
@@ -91,7 +92,7 @@ export interface Args {
 	/** RPC modes only: run extensions without a UI; `rpc-ui` tool UI remains enabled. */
 	noUi?: boolean;
 	autoApprove?: boolean;
-	approvalMode?: "always-ask" | "write" | "yolo";
+	approvalMode?: ApprovalMode;
 	messages: string[];
 	fileArgs: string[];
 	/** Extension-registered flags this parse recognized — name to value. */

@@ -165,7 +165,22 @@ export function resolveEquivalentPath(inputPath: string): string {
 	try {
 		return fs.realpathSync(resolvedPath);
 	} catch {
-		return resolvedPath;
+		// A path that does not exist yet (a write target, a rename destination) still needs its
+		// symlinked ancestors resolved, or the key it was granted under changes the moment the path
+		// appears: walk up to the deepest existing ancestor, realpath it, and re-append the rest.
+		const missing: string[] = [];
+		let current = resolvedPath;
+		for (;;) {
+			const parent = path.dirname(current);
+			if (parent === current) return resolvedPath;
+			missing.unshift(path.basename(current));
+			current = parent;
+			try {
+				return path.join(fs.realpathSync(current), ...missing);
+			} catch {
+				// Keep walking up: the next ancestor may exist.
+			}
+		}
 	}
 }
 

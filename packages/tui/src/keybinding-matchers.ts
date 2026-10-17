@@ -106,17 +106,3 @@ export function matchesAppFollowUp(data: string): boolean {
 	}
 	return matchesEffectiveKeys(data, ["ctrl+enter", "ctrl+q"]);
 }
-
-/** Approve-key defaults when `app.approval.approve` is unbound: approval must stay reachable by keyboard. */
-const APPROVE_DEFAULT_KEYS: readonly KeyId[] = ["ctrl+enter", "ctrl+q"];
-
-/** Effective tool-approval keys: the `app.approval.approve` bindings, or Ctrl+Enter/Ctrl+Q when unbound. */
-export function appApproveKeys(): readonly KeyId[] {
-	const keys = getKeybindings().getKeys("app.approval.approve");
-	return keys.length > 0 ? keys : APPROVE_DEFAULT_KEYS;
-}
-
-/** Match the tool-approval key, recognizing modifier-tagged LF as Ctrl+Enter like {@link matchesAppFollowUp}. */
-export function matchesAppApprove(data: string): boolean {
-	return matchesEffectiveKeys(data, appApproveKeys());
-}

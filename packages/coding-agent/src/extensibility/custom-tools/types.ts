@@ -222,6 +222,12 @@ export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
 	/** Capability tier declaration used by approval gates. Omitted means "exec". */
 	approval?: ToolApproval;
 
+	/** Exact targets an approval mode may remember for this call (`always-ask-cached`), one key per
+	 *  target, derived from the call's args. Omit it and approvals are never remembered per target. */
+	approvalCacheTargets?: (args: unknown) => readonly string[] | undefined;
+	/** Folder scopes for exec-style tools: the directories a folder grant can cover. */
+	approvalCacheScopes?: (args: unknown) => readonly string[] | undefined;
+
 	/** Lines appended after the standard approval prompt header. */
 	formatApprovalDetails?: (args: unknown) => string | string[] | undefined;
 	/**

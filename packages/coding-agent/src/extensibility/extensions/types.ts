@@ -261,12 +261,54 @@ export type AutocompleteProviderFactory = (current: AutocompleteProvider) => Aut
 export interface ExtensionApprovalPrompt {
 	full: string;
 	compact: string;
-	/** Label of the "approve for this session" choice; absent when the call must be approved each time. */
-	session?: string;
+	/**
+	 * Directory the directory answers would grant, when the call names one; hosts
+	 * that support them show "Approve Directory" / "Always Approve Directory".
+	 */
+	folderLabel?: string;
+	/** The call can record an exact grant; hosts may offer the file-scoped (and always) answers. */
+	exactGrant?: boolean;
+	/**
+	 * Tool the prompt proposes — a command or another non-read/write call. Hosts may
+	 * offer an "Approve <tool> for session" answer: one grant remembers that tool by
+	 * name for the rest of this session, whatever the call's arguments, and nothing else.
+	 */
+	toolName?: string;
+	/**
+	 * The exact grant names files, so hosts may name the exact answer "Approve File"; `false`
+	 * keeps the plain "Approve" (a directory or URL target). Absent means files.
+	 */
+	fileTarget?: boolean;
+	/**
+	 * Whether the exact answer applies at all; a call whose only target is a directory answers
+	 * through `folderLabel` instead. Absent means it does whenever {@link exactGrant} is set.
+	 */
+	exactAnswer?: boolean;
 }
 
-/** An answer to `ExtensionUIContext.approve()`: this call only, later like calls this session too, or no. */
-export type ExtensionApprovalAnswer = "once" | "session" | "deny";
+/** What an `approve()` dialog answered: denied, or approved with where the grant goes. */
+export type ExtensionApprovalAnswer =
+	| boolean
+	/**
+	 * Legacy answers from hosts written against the 18.11.3 vocabulary, still honored:
+	 * `"once"` approves this call only, `"session"` approves it and records the grant the
+	 * prompt named, and `"deny"` (like `false`) denies. New hosts answer {@link unknown}.
+	 */
+	| "once"
+	| "session"
+	| "deny"
+	| {
+			approved: true;
+			/**
+			 * `"folder"` scopes the grant to the directory, `"tool"` remembers the whole tool by
+			 * name for this session (never persisted); absent scopes it to the exact targets.
+			 */
+			scope?: "target" | "folder" | "tool";
+			/** Remember in the global, cross-instance cache rather than this session's. */
+			global?: boolean;
+			/** The call is approved and nothing is remembered (the "Approve Once" answer). */
+			once?: boolean;
+	  };
 
 /**
  * UI context for extensions to request interactive UI.
@@ -304,10 +346,11 @@ export interface ExtensionUIContext {
 	): Promise<ExtensionAskDialogResult | undefined>;
 
 	/**
-	 * Show a tool-approval prompt; anything but an explicit approval is `deny`, and `session` only
-	 * when the prompt offers it. Each prompt is a title line then details: `compact` summarizes the
-	 * tool's own details (command, path, content) to one row for a host with little room, `full`
-	 * keeps them whole. Absent: callers fall back to an Approve/Deny `select`.
+	 * Show a tool-approval prompt; `true` only for an explicit approval, or the richer answer
+	 * (scope and lifetime of the grant) when the host renders the additional answers. Each prompt
+	 * is a title line then details: `compact` summarizes the tool's own details (command, path,
+	 * content) to one row for a host with little room, `full` keeps them whole. Absent: callers
+	 * fall back to an Approve/Deny `select`.
 	 */
 	approve?(
 		prompt: ExtensionApprovalPrompt,
@@ -882,6 +925,11 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	/** Tool approval tier. Defaults to `"exec"` when omitted.
 	 *  `"read"`: read-only operations. `"write"`: mutations. `"exec"`: code execution. */
 	approval?: ToolApproval;
+	/** Exact targets an approval mode may remember for this call (`always-ask-cached`), one key per
+	 *  target, derived from the call's args. Omit it and approvals are never remembered per target. */
+	approvalCacheTargets?: (args: unknown) => readonly string[] | undefined;
+	/** Folder scopes for exec-style tools: the directories a folder grant can cover. */
+	approvalCacheScopes?: (args: unknown) => readonly string[] | undefined;
 	/** Structured-output strict grammar opt-in/out. `false` is meaningful: OpenAI-family
 	 *  serializers preserve an explicit `strict: false` on the wire (#4336/#4340). */
 	strict?: boolean;

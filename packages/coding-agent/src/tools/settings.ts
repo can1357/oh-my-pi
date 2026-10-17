@@ -305,25 +305,34 @@ export const cfgToolsApproval = register({
 });
 
 // Default tool approval mode (interaction tab, but governs the tool wrapper).
-//   "always-ask" — auto-approves read-tier tools only; prompts for write/exec.
-//   "write"      — auto-approves read and write-tier tools; prompts for exec.
-//   "yolo"       — auto-approves every tier.
+//   "always-ask"        — auto-approves read-tier tools only; prompts for write/exec.
+//   "always-ask-cached" — prompts per target (file path, or exact command) for
+//                         read/write/exec calls; approved targets are remembered
+//                         under the agent directory and skip later prompts.
+//   "write"             — auto-approves read and write-tier tools; prompts for exec.
+//   "yolo"              — auto-approves every tier.
 export const cfgToolsApprovalMode = register({
 	id: "tools.approvalMode",
 	type: "enum",
-	values: ["always-ask", "write", "yolo"] as const,
+	values: ["always-ask", "always-ask-cached", "write", "yolo"] as const,
 	default: "yolo",
 	ui: {
 		tab: "interaction",
 		group: "Approvals",
 		label: "Tool Approval",
 		description:
-			"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
+			"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Ask and remember' prompts once per file or folder, then remembers it. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
 		options: [
 			{
 				value: "always-ask",
 				label: "Always ask",
 				description: "Auto-approve read-only tools; require confirmation for write and exec tools.",
+			},
+			{
+				value: "always-ask-cached",
+				label: "Ask and remember",
+				description:
+					"Ask to approve reads, writes and executes. Options will appear to remember these approvals and not ask again.",
 			},
 			{
 				value: "write",
@@ -338,6 +347,24 @@ export const cfgToolsApprovalMode = register({
 					"Auto-approve read, write, and exec tools. User policy can still require confirmation or block calls.",
 			},
 		],
+	},
+});
+
+// Forget every remembered approval, session and persistent. An action row in the
+// settings panel (activation runs it instead of storing a value): the next read,
+// write, or command asks again, and `approval-cache.db` is emptied.
+export const cfgToolsForgetApprovals = register({
+	id: "tools.forgetApprovals",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Approvals",
+		label: "Forget Remembered Approvals",
+		description:
+			"Delete every file and folder remembered in approval-cache.db, and forget the approvals remembered in this session too. The next read, write, or command asks again.",
+		action: true,
+		actionLabel: "Clear cache",
 	},
 });
 

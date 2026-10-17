@@ -36,6 +36,7 @@ import type { ToolSession } from "../sdk";
 
 import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
 import { formatApprovalArguments, truncateForPrompt } from "./approval";
+import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
 
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
@@ -489,6 +490,17 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 		}
 		return [`Path: ${truncateForPrompt(targetPath)}`, `Content:\n${truncateForPrompt(content)}`];
+	};
+	/**
+	 * `always-ask-cached` key: the path this write targets, unwrapped from a
+	 * hashline `[path#TAG]` header exactly like the approval tier above, so all
+	 * writes to one file share a single grant.
+	 */
+	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
+		const rawPath = (args as Partial<WriteParams> | null | undefined)?.path;
+		if (typeof rawPath !== "string" || rawPath.length === 0) return undefined;
+		const key = approvalTargetKey(this.session.cwd, unwrapHashlineHeaderPath(rawPath));
+		return key === undefined ? undefined : [key];
 	};
 	readonly label = "Write";
 	get description(): string {

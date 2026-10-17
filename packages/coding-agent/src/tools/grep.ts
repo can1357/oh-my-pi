@@ -40,6 +40,7 @@ import {
 	formatPathRelativeToCwd,
 	hasGlobPathChars,
 	isLineInRanges,
+	parseSearchPath,
 	probeLiteralPathExists,
 	relativeSearchResultPath,
 	resolveReadPath,
@@ -47,6 +48,7 @@ import {
 	resolveToolSearchScope,
 	splitPathAndSelPreferringLiteral,
 } from "./path-utils";
+import { searchApprovalCacheTargets } from "./search-approval-targets";
 import { type LineRange, parseLineRanges, selectorLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -415,6 +417,22 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		const a = args as { path?: string | string[]; paths?: string | string[] };
 		// Substring scan over the raw entries: delimited lists are only split after approval.
 		return InternalUrlRouter.instance().readTier(toPathList(a.path ?? a.paths).join("\n"));
+	};
+	/**
+	 * `always-ask-cached` keys: every file and folder this grep searches, so a
+	 * folder grant recorded by a `read` covers a search of it and a search of one
+	 * file shares that file's read grant. Roots are split the way `execute` splits
+	 * them (`splitPathAndSel` peels a line-range selector, `parseSearchPath` finds
+	 * the walkable base of a glob) and each costs a single stat; see
+	 * {@link searchApprovalCacheTargets}.
+	 */
+	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
+		const a = args as { path?: string | string[]; paths?: string | string[] } | null | undefined;
+		return searchApprovalCacheTargets(
+			toPathList(a?.path ?? a?.paths),
+			this.session.cwd,
+			entry => parseSearchPath(splitPathAndSel(entry).path).basePath,
+		);
 	};
 	readonly label = "Grep";
 	readonly loadMode = "discoverable";

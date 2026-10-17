@@ -130,6 +130,17 @@ export type AnyUiMetadata = UiBase & {
 	secret?: boolean;
 	ordered?: boolean;
 	editor?: "json";
+	/**
+	 * Action row: activating it runs {@link SettingsHost.run} for the setting's
+	 * path instead of editing a value. The stored value never changes, so the
+	 * row carries no changed marker; its label and description say what it does.
+	 */
+	action?: true;
+	/**
+	 * Label standing in for an action row's default "Run…" control, e.g. "Clear
+	 * cache" — names what the row does without making the description repeat it.
+	 */
+	actionLabel?: string;
 };
 
 /** Structural schema entries supplied by the application host. */
@@ -152,6 +163,12 @@ export interface SettingsHost {
 	 * variable, that configures the setting still applies; otherwise the default does.
 	 */
 	unset(path: string): void;
+	/**
+	 * Runs the action setting at `path` — the rows whose metadata carries `action: true`.
+	 * Called where a value change would be for any other setting; the action owns its
+	 * effects, and the row keeps whatever value it had.
+	 */
+	run(path: string): void;
 	normalizeProviderLimits(value: unknown): Record<string, number>;
 	validateProviderLimits(value: unknown): Record<string, number>;
 }
@@ -205,6 +222,16 @@ export interface ProviderLimitsSettingDef extends BaseSettingDef {
 	type: "providerLimits";
 }
 
+/**
+ * A row that does work instead of holding a value: activation (Enter on the
+ * classic list, the row's `action` control natively) calls `SettingsHost.run`.
+ */
+export interface ActionSettingDef extends BaseSettingDef {
+	type: "action";
+	/** Label of the row's control; omitted rows read "Run…". */
+	actionLabel?: string;
+}
+
 /** Array-of-enum setting edited as a toggle list; `ordered` lists render positions and support reordering. */
 export interface MultiSelectSettingDef extends BaseSettingDef {
 	type: "multiselect";
@@ -218,6 +245,7 @@ export type SettingDef =
 	| SubmenuSettingDef
 	| TextInputSettingDef
 	| ProviderLimitsSettingDef
+	| ActionSettingDef
 	| MultiSelectSettingDef;
 
 function resolveOptions(ui: AnyUiMetadata): OptionList | "runtime" | undefined {
@@ -243,6 +271,13 @@ function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {
 		group: ui.group,
 		condition,
 	};
+
+	if (ui.action === true) {
+		// An action owns its effects and stores nothing usable, so it never
+		// consults the schema type: the row is the label, the description, and
+		// the host's runner.
+		return { ...base, type: "action", actionLabel: ui.actionLabel };
+	}
 
 	if (schemaType === "boolean") {
 		return { ...base, type: "boolean" };

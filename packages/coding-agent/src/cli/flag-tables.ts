@@ -239,13 +239,15 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.skills = value.split(",").map(s => s.trim());
 	},
 	"--approval-mode": (result, value) => {
-		if (value !== "always-ask" && value !== "write" && value !== "yolo") {
+		// The values mirror `ApprovalMode` in ../tools/approval, which this module
+		// may only import as a type: that module reaches pi-utils at runtime.
+		if (value === "always-ask" || value === "always-ask-cached" || value === "write" || value === "yolo") {
+			result.approvalMode = value;
+		} else {
 			result.invalidFlagValues.push(
-				`Invalid --approval-mode value: ${JSON.stringify(value)}. Expected one of: always-ask, write, yolo.`,
+				`Invalid --approval-mode value: ${JSON.stringify(value)}. Expected one of: always-ask, always-ask-cached, write, yolo.`,
 			);
-			return;
 		}
-		result.approvalMode = value;
 	},
 };
 

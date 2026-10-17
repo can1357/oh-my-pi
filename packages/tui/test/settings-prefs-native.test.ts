@@ -68,6 +68,18 @@ const ENTRIES: SettingsDisplayEntry[] = [
 		credential: true,
 		ui: { tab: "providers", label: "Tokens", description: "", editor: "json" },
 	},
+	{
+		path: "tools.forgetApprovals",
+		type: "boolean",
+		defaultValue: false,
+		ui: {
+			tab: "context",
+			group: "Approvals",
+			label: "Forget Remembered Approvals",
+			description: "Empty approval-cache.db and forget this session's approvals",
+			action: true,
+		},
+	},
 ];
 
 interface Harness {
@@ -75,17 +87,20 @@ interface Harness {
 	values: Map<string, unknown>;
 	changes: [string, unknown][];
 	previews: string[];
+	runs: string[];
 }
 
 function harness(initial: Record<string, unknown> = {}): Harness {
 	const values = new Map<string, unknown>();
 	for (const entry of ENTRIES) values.set(entry.path, entry.defaultValue);
 	for (const key in initial) values.set(key, initial[key]);
+	const runs: string[] = [];
 	const settings: SettingsHost = {
 		entries: ENTRIES,
 		get: path => values.get(path),
 		set: (path, value) => void values.set(path, value),
 		unset: path => void values.set(path, ENTRIES.find(entry => entry.path === path)?.defaultValue),
+		run: path => void runs.push(path),
 		normalizeProviderLimits: () => ({}),
 		validateProviderLimits: () => ({}),
 	};
@@ -122,7 +137,7 @@ function harness(initial: Record<string, unknown> = {}): Harness {
 			onCancel: () => {},
 		},
 	);
-	return { selector, values, changes, previews };
+	return { selector, values, changes, previews, runs };
 }
 
 const PREFS: DescribeContext = {
@@ -249,6 +264,27 @@ describe("settings as a native prefs page", () => {
 		expect(values.get("theme.dark")).toBe("light");
 		expect(changes.at(-1)).toEqual(["theme.dark", "light"]);
 		expect(row(prefs(selector).props, "theme.dark").control).toMatchObject({ value: "light" });
+	});
+
+	it("runs an action row from its control and from its menu, storing nothing either way", () => {
+		const { selector, runs, values, changes } = harness();
+		send(selector, { type: "action", key: "", act: "page", value: "context", mods: [] });
+		const action = row(prefs(selector).props, "tools.forgetApprovals");
+		expect(action.control).toEqual({ k: "action", label: "Run…", act: "run" });
+		expect(action.changed).toBeUndefined();
+
+		send(selector, { type: "action", key: "", act: "run", value: "tools.forgetApprovals", mods: [] });
+		expect(runs).toEqual(["tools.forgetApprovals"]);
+
+		// The row's menu reports the same choice through the change path, and Esc closes it
+		// without running anything.
+		send(selector, { type: "activate", key: "", item: "tools.forgetApprovals" });
+		expect(prefs(selector).props.editing).toEqual({ row: "tools.forgetApprovals", option: "run" });
+		send(selector, { type: "change", key: "", item: "tools.forgetApprovals", value: "run" });
+		expect(runs).toEqual(["tools.forgetApprovals", "tools.forgetApprovals"]);
+		expect(values.get("tools.forgetApprovals")).toBe(false);
+		expect(changes).toEqual([]);
+		expect(prefs(selector).props.editing).toBeNull();
 	});
 
 	it("shows the text editor's draft and cursor while the keys edit it, and submits a pointer change", () => {

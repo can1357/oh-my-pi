@@ -9,12 +9,13 @@ import { APPROVE_ARM_MS, ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overla
 import { LoginDialogComponent } from "@oh-my-pi/pi-tui/overlays/login-dialog";
 import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
+import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
 import { TspHarness } from "./native/tsp-harness";
 
 const ENTER = "\n";
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
+const PAGE_DOWN = "\x1b[6~";
 const RIGHT = "\x1b[C";
 const LEFT = "\x1b[D";
 const SHIFT_RIGHT = "\x1b[1;2C";
@@ -233,40 +234,26 @@ describe("dialogs under a native surface", () => {
 		expect(dialog.render(200).length).toBeGreaterThan(1);
 	});
 
-	it("approval: Enter and the follow-up chord are ignored until armed; then Enter takes the highlighted choice", () => {
+	it("approval: Enter confirms only after arming; Esc denies, clicks are deliberate", () => {
 		const prompt = "Allow tool: write\nPath: /tmp/out.txt";
 		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
 		try {
 			const keyed = { onApprove: vi.fn(), onDeny: vi.fn() };
 			const dialog = new ApprovalDialogComponent(prompt, keyed);
-			// An Enter typed for the composer, and a follow-up (Ctrl+Enter, Ctrl+Q) sent as the prompt mounts.
+			// Enter typed for the composer, a follow-up (Ctrl+Enter, Ctrl+Q), and any other key
+			// sent as the prompt mounts are ignored: only the confirm after arming answers.
 			for (const key of [ENTER, "\r", "\x1b[13;5u", "\x11"]) dialog.handleInput(key);
 			now.mockReturnValue(1_000 + APPROVE_ARM_MS - 1);
-			dialog.handleInput("\x1b[13;5u");
 			dialog.handleInput(ENTER);
 			expect(keyed.onApprove).not.toHaveBeenCalled();
 			expect(keyed.onDeny).not.toHaveBeenCalled();
 			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
-			dialog.handleInput("\x1b[13;5u");
+			dialog.handleInput(ENTER);
 			// Settled once: a later Esc does not also deny.
 			dialog.handleInput("\x1b");
 			expect(keyed.onApprove).toHaveBeenCalledTimes(1);
 			expect(keyed.onDeny).not.toHaveBeenCalled();
 
-			// The arrows wrap between Approve and Deny; Enter takes the highlighted one.
-			const listed = { onApprove: vi.fn(), onDeny: vi.fn() };
-			const list = new ApprovalDialogComponent(prompt, listed);
-			now.mockReturnValue(1_000 + 2 * APPROVE_ARM_MS);
-			list.handleInput(UP);
-			expect(stripVTControlCharacters(list.render(60).join("\n"))).toMatch(/\S Deny/);
-			list.handleInput(ENTER);
-			expect(listed.onDeny).toHaveBeenCalledTimes(1);
-			expect(listed.onApprove).not.toHaveBeenCalled();
-			const defaulted = { onApprove: vi.fn(), onDeny: vi.fn() };
-			const approveFirst = new ApprovalDialogComponent(prompt, defaulted);
-			now.mockReturnValue(1_000 + 3 * APPROVE_ARM_MS);
-			approveFirst.handleInput(ENTER);
-			expect(defaulted.onApprove).toHaveBeenCalledTimes(1);
 			// Denying and clicking Approve are deliberate, so neither waits to arm.
 			const denied = { onApprove: vi.fn(), onDeny: vi.fn() };
 			new ApprovalDialogComponent(prompt, denied).handleInput("\x1b");
@@ -281,102 +268,362 @@ describe("dialogs under a native surface", () => {
 		}
 	});
 
-	it("approval: the session row sits between Approve and Deny; the arrows reach it, Enter or a Tern click takes it", () => {
+	it("approval: the grants fire from their menu rows and buttons, with the remember checkbox naming the mode", () => {
+		const root = "/tmp/project";
+		const directoryKey = process.platform === "win32" ? root.toLowerCase() : root;
+		const prompt = "Allow tool: write\nPath: /tmp/project/out.txt";
 		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
 		try {
-			const callbacks = { onApprove: vi.fn(), onDeny: vi.fn() };
-			const onSession = vi.fn();
-			const dialog = new ApprovalDialogComponent("Allow tool: bash\nCommand: ls", callbacks, {
-				session: { label: "Approve bash for this session", onApprove: onSession },
-			});
-			const rows = () =>
-				stripVTControlCharacters(dialog.render(80).join("\n"))
-					.split("\n")
-					.filter(line => /Approve|Deny/.test(line));
-			const choices = () => find(dialog.describe(), node => node.p?.role === "omp.approval.choices")!;
-			const selected = () => {
-				const props = choices().node.p;
-				return props && "selected" in props ? props.selected : undefined;
-			};
-			expect(rows().map(line => line.replace(/[│❯>\s]+/g, " ").trim())).toEqual([
-				"Approve",
-				"Approve bash for this session",
-				"Deny",
-			]);
-			dialog.handleInput(DOWN);
-			// Tern's list shows the same highlight the arrows moved.
-			expect(selected()).toBe("session");
+			// The answers are chosen with the arrows and confirmed with Enter: the directory row
+			// answers with the folder, and after the checkbox row toggles, the same answer grants
+			// it for every session. Nothing else is bound — F6 and F7 press unbound keys.
+			const callbacks = { onApprove: vi.fn(), onApproveFolder: vi.fn(), onDeny: vi.fn() };
+			now.mockReturnValue(1_000);
+			const dialog = new ApprovalDialogComponent(prompt, callbacks, { folderLabel: directoryKey, exactGrant: true });
 			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
+			dialog.handleInput(DOWN); // the checkbox row → Approve Directory
 			dialog.handleInput(ENTER);
-			expect(onSession).toHaveBeenCalledTimes(1);
-			expect(callbacks.onApprove).not.toHaveBeenCalled();
+			expect(callbacks.onApproveFolder).toHaveBeenCalledWith(false);
+			const toggled = { onApprove: vi.fn(), onApproveFolder: vi.fn(), onDeny: vi.fn() };
+			now.mockReturnValue(1_000);
+			const flipped = new ApprovalDialogComponent(prompt, toggled, { folderLabel: directoryKey, exactGrant: true });
+			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
+			flipped.handleInput(ENTER); // the highlighted checkbox row toggles in place
+			expect(toggled.onApprove).not.toHaveBeenCalled();
+			expect(toggled.onApproveFolder).not.toHaveBeenCalled();
+			flipped.handleInput(DOWN);
+			flipped.handleInput(ENTER); // now for every session
+			expect(toggled.onApproveFolder).toHaveBeenCalledWith(true);
+			const untouched = { onApprove: vi.fn(), onApproveFolder: vi.fn(), onDeny: vi.fn() };
+			const unbound = new ApprovalDialogComponent(prompt, untouched, {
+				folderLabel: directoryKey,
+				exactGrant: true,
+			});
+			unbound.handleInput("\x1b[17~"); // F6: not bound to an answer
+			unbound.handleInput("\x1b[18~"); // F7: not bound either
+			expect(untouched.onApprove).not.toHaveBeenCalled();
+			expect(untouched.onApproveFolder).not.toHaveBeenCalled();
+			expect(untouched.onDeny).not.toHaveBeenCalled();
 
-			const clicked = { onApprove: vi.fn(), onDeny: vi.fn() };
-			const pointed = new ApprovalDialogComponent("Allow tool: bash\nCommand: ls", clicked);
-			const list = find(pointed.describe(), node => node.p?.role === "omp.approval.choices")!;
-			pointed.handleNativeEvent({ type: "select", key: list.path, item: "deny" });
-			expect(clicked.onDeny).toHaveBeenCalledTimes(1);
+			// The native bar carries a button per offered answer, every approval one styled like
+			// the primary Approve (accent); Deny keeps the destructive tone, the checkbox none.
+			const granted = { onApprove: vi.fn(), onDeny: vi.fn() };
+			const buttons = new ApprovalDialogComponent(prompt, granted, {
+				folderLabel: directoryKey,
+				exactGrant: true,
+			});
+			const button = (key: string) =>
+				find(buttons.describe(), node => node.p?.role === "omp.btn" && node.key === key)?.node;
+			for (const key of ["remember", "folder", "approve", "deny"]) {
+				expect(button(key)).toBeDefined();
+			}
+			for (const key of ["folder", "approve"]) {
+				expect(button(key)?.p?.tone).toBe("accent");
+			}
+			expect(button("deny")?.p?.tone).toBe("error");
+			expect(button("remember")?.p?.tone).toBeUndefined();
+			// The answers keep the menu's order: the checkbox, Approve Directory, Approve File, Deny.
+			const keys: string[] = [];
+			const collect = (node: NativeNode): void => {
+				if (node.p?.role === "omp.btn" && typeof node.key === "string") keys.push(node.key);
+				for (const child of node.c ?? []) if (isNode(child)) collect(child);
+			};
+			collect(buttons.describe());
+			expect(keys).toEqual(["remember", "folder", "approve", "once", "deny"]);
+			// Clicking the checkbox flips it; the next click on Approve then carries that mode.
+			const remember = find(buttons.describe(), node => node.p?.role === "omp.btn" && node.key === "remember");
+			expect(remember?.node.p?.title).toContain("every session");
+			buttons.handleNativeEvent({ type: "action", key: remember!.path, act: "remember", mods: [] });
+			expect(button("remember")?.p?.title).toContain("this session only");
+			const approve = find(buttons.describe(), node => node.p?.role === "omp.btn" && node.key === "approve");
+			buttons.handleNativeEvent({ type: "action", key: approve!.path, act: "approve", mods: [] });
+			expect(granted.onApprove).toHaveBeenCalledWith(true);
+		} finally {
+			now.mockRestore();
+		}
+
+		// Without a file target or a folder there is nothing to remember: the checkbox is not
+		// rendered, and its would-be key is unbound, leaving the prompt untouched.
+		const clicked = { onApprove: vi.fn(), onDeny: vi.fn() };
+		const armed = vi.spyOn(performance, "now").mockReturnValue(1_000);
+		try {
+			const plain = new ApprovalDialogComponent("Allow tool: eval", clicked);
+			expect(find(plain.describe(), node => node.p?.role === "omp.btn" && node.key === "remember")).toBeUndefined();
+			plain.handleInput("\x1b[18~"); // F7: unbound on this prompt
+			expect(clicked.onApprove).not.toHaveBeenCalled();
+			expect(clicked.onDeny).not.toHaveBeenCalled();
+			armed.mockReturnValue(1_000 + APPROVE_ARM_MS);
+			plain.handleInput(ENTER); // the highlighted Approve row still answers
+			expect(clicked.onApprove).toHaveBeenCalledTimes(1);
+		} finally {
+			armed.mockRestore();
+		}
+	});
+
+	it("approval: with a composer draft, typing edits it, and the answer menu answers only an empty composer", () => {
+		let draft = "";
+		const routed: string[] = [];
+		const callbacks = { onApprove: vi.fn(), onDeny: vi.fn() };
+		const details = Array.from({ length: 20 }, (_, i) => `Line ${i}`).join("\n");
+		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+		try {
+			const dialog = new ApprovalDialogComponent(`Allow tool: bash\n${details}`, callbacks, {
+				draft: {
+					hasDraft: () => draft.length > 0,
+					handleInput: key => {
+						routed.push(key);
+						if (key.length === 1 && key >= " ") draft += key;
+					},
+				},
+			});
+			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
+			// The arrows drive the answer menu (Deny highlighted), never the composer's history,
+			// while page keys scroll the details behind it.
+			dialog.handleInput(DOWN);
+			dialog.handleInput(PAGE_DOWN);
+			expect(routed).toEqual([]);
+			expect(stripVTControlCharacters(dialog.render(60).join("\n"))).not.toContain("Line 0");
+			// Typing reaches the composer; once it holds text, arrows and Enter edit and send it.
+			dialog.handleInput("n");
+			dialog.handleInput("o");
+			dialog.handleInput(UP);
+			dialog.handleInput(ENTER);
+			// Ctrl+C is both a cancel key and the composer's clear key: with a draft it clears, never denies.
+			dialog.handleInput("\x03");
+			expect(routed).toEqual(["n", "o", UP, ENTER, "\x03"]);
+			expect(callbacks.onDeny).not.toHaveBeenCalled();
+			// Esc stays the dialog's: it denies without touching the draft.
+			dialog.handleInput("\x1b");
+			expect(callbacks.onDeny).toHaveBeenCalledTimes(1);
+			expect(routed).toEqual(["n", "o", UP, ENTER, "\x03"]);
 		} finally {
 			now.mockRestore();
 		}
 	});
 
-	it("approval: while a draft holds Enter, the highlight sits on Deny, relabeled to say Enter sends, and returns once cleared", () => {
-		let draft = "";
-		const dialog = new ApprovalDialogComponent(
-			"Allow tool: bash\nCommand: ls",
-			{ onApprove: vi.fn(), onDeny: vi.fn() },
-			{
-				draft: { hasDraft: () => draft.length > 0, handleInput: key => (draft += key) },
-			},
-		);
-		const highlighted = () =>
-			stripVTControlCharacters(dialog.render(80).join("\n"))
-				.split("\n")
-				.find(line => line.includes("❯"));
-		expect(highlighted()).toContain("Approve");
-		dialog.handleInput("k");
-		expect(highlighted()).toContain("Deny and send message");
-		const choices = find(dialog.describe(), node => node.p?.role === "omp.approval.choices")!;
-		expect(choices.node.p && "selected" in choices.node.p ? choices.node.p.selected : undefined).toBe("deny");
-		draft = "";
-		expect(highlighted()).toContain("Approve");
-		expect(highlighted()).not.toContain("Deny");
+	it("approval: the answer menu moves with the arrows, confirms with Enter, and toggles its checkbox", () => {
+		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+		try {
+			const callbacks = { onApprove: vi.fn(), onApproveFolder: vi.fn(), onDeny: vi.fn() };
+			const dialog = new ApprovalDialogComponent("Allow tool: write\nPath: /tmp/project/out.txt", callbacks, {
+				folderLabel: "/tmp/project",
+				exactGrant: true,
+			});
+			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
+			// Every offered control is listed, with the cursor (theme.nav.cursor) on the first row.
+			const lines = () =>
+				stripVTControlCharacters(dialog.render(80).join("\n"))
+					.split("\n")
+					.map(line => line.replace(/^[│╭╰─\s]+/, "").trimEnd());
+			const cursorRow = () => lines().find(line => line.startsWith(theme.nav.cursor));
+			const text = () => lines().join("\n");
+			for (const label of [
+				`${theme.checkbox.unchecked} Remember: This Session`,
+				"Approve Directory (/tmp/project)",
+				"Approve File",
+				"Deny",
+			]) {
+				expect(text()).toContain(label);
+			}
+			expect(text()).not.toContain("Always");
+			expect(cursorRow()).toContain("Remember: This Session");
+			// The checkbox toggles in place, and the answers below it keep their rows.
+			dialog.handleInput(ENTER);
+			expect(text()).toContain(`${theme.checkbox.checked} Remember: Always`);
+			expect(text()).not.toContain("This Session");
+			expect(callbacks.onApprove).not.toHaveBeenCalled();
+			expect(callbacks.onDeny).not.toHaveBeenCalled();
+			// Two rows down is Approve File; Enter confirms it with the checkbox as it stands.
+			dialog.handleInput(DOWN);
+			dialog.handleInput(DOWN);
+			expect(cursorRow()).toContain("Approve File");
+			expect(cursorRow()).not.toContain("Directory");
+			dialog.handleInput(ENTER);
+			expect(callbacks.onApprove).toHaveBeenCalledWith(true);
+			// A fresh prompt starts unchecked, and its directory row answers for this session.
+			const fresh = { onApprove: vi.fn(), onApproveFolder: vi.fn(), onDeny: vi.fn() };
+			const reopenedAt = 2_000;
+			now.mockReturnValue(reopenedAt);
+			const reopen = new ApprovalDialogComponent("Allow tool: write\nPath: /tmp/project/out.txt", fresh, {
+				folderLabel: "/tmp/project",
+				exactGrant: true,
+			});
+			now.mockReturnValue(reopenedAt + APPROVE_ARM_MS);
+			reopen.handleInput(DOWN);
+			reopen.handleInput(ENTER);
+			expect(fresh.onApproveFolder).toHaveBeenCalledWith(false);
+		} finally {
+			now.mockRestore();
+		}
 	});
 
-	it("approval: with a composer draft, typing edits it; once it holds text, the arrows and Enter edit and send it", () => {
-		let draft = "";
-		const routed: string[] = [];
-		const callbacks = { onApprove: vi.fn(), onDeny: vi.fn() };
-		const details = Array.from({ length: 20 }, (_, i) => `Line ${i}`).join("\n");
-		const dialog = new ApprovalDialogComponent(`Allow tool: bash\n${details}`, callbacks, {
-			draft: {
-				hasDraft: () => draft.length > 0,
-				handleInput: key => {
-					routed.push(key);
-					if (key.length === 1 && key >= " ") draft += key;
-				},
-			},
-		});
-		// Empty composer: Enter (before the dialog arms) neither submits nor interrupts, and Page Down scrolls the details.
-		dialog.handleInput(ENTER);
-		dialog.handleInput("\x1b[6~");
-		expect(routed).toEqual([]);
-		expect(stripVTControlCharacters(dialog.render(60).join("\n"))).not.toContain("Line 0");
-		// Typing reaches the composer; once it holds text, arrows and Enter edit and send it.
-		dialog.handleInput("n");
-		dialog.handleInput("o");
-		dialog.handleInput(UP);
-		dialog.handleInput(ENTER);
-		// Ctrl+C is both a cancel key and the composer's clear key: with a draft it clears, never denies.
-		dialog.handleInput("\x03");
-		expect(routed).toEqual(["n", "o", UP, ENTER, "\x03"]);
-		expect(callbacks.onDeny).not.toHaveBeenCalled();
-		// Esc stays the dialog's: it denies without touching the draft.
-		dialog.handleInput("\x1b");
-		expect(callbacks.onDeny).toHaveBeenCalledTimes(1);
-		expect(routed).toHaveLength(5);
-		expect(callbacks.onApprove).not.toHaveBeenCalled();
+	it("approval: the by-name tool answer approves the whole tool for the session", () => {
+		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+		try {
+			const callbacks = {
+				onApprove: vi.fn(),
+				onApproveFolder: vi.fn(),
+				onApproveTool: vi.fn(),
+				onDeny: vi.fn(),
+			};
+			const prompt = "Allow tool: bash\nCommand: ls -la";
+			const dialog = new ApprovalDialogComponent(prompt, callbacks, {
+				folderLabel: "/tmp/project",
+				toolName: "bash",
+			});
+			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
+			const lines = () =>
+				stripVTControlCharacters(dialog.render(80).join("\n"))
+					.split("\n")
+					.map(line => line.replace(/^[│╭╰─\s]+/, "").trimEnd());
+			const cursorRow = () => lines().find(line => line.startsWith(theme.nav.cursor));
+			// It sits between the directory answer and the plain one, and the checkbox never
+			// rewrites it: the grant is session-scoped by name, so there is no "Always" form.
+			expect(lines().join("\n")).toContain("Approve bash for session");
+			dialog.handleInput(DOWN);
+			dialog.handleInput(DOWN);
+			expect(cursorRow()).toContain("Approve bash for session");
+			dialog.handleInput(ENTER);
+			expect(callbacks.onApproveTool).toHaveBeenCalledTimes(1);
+			expect(callbacks.onApprove).not.toHaveBeenCalled();
+			expect(callbacks.onDeny).not.toHaveBeenCalled();
+
+			// The native bar carries it as its own button, not as an Approve variant.
+			const bar = new ApprovalDialogComponent(
+				prompt,
+				{ onApprove: vi.fn(), onApproveFolder: vi.fn(), onApproveTool: vi.fn(), onDeny: vi.fn() },
+				{ folderLabel: "/tmp/project", toolName: "bash" },
+			);
+			const button = find(bar.describe(), node => node.p?.role === "omp.btn" && node.key === "tool")?.node;
+			expect(button?.p?.tone).toBe("accent");
+			expect(button?.p?.title).toBe("Approve every bash call for the rest of this session");
+		} finally {
+			now.mockRestore();
+		}
+	});
+
+	it("approval: the exact answer is named for its target, with approve-once beside it", () => {
+		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+		try {
+			const callbacks = { onApprove: vi.fn(), onApproveOnce: vi.fn(), onDeny: vi.fn() };
+			// A directory target (fileTarget false) keeps the plain name.
+			const dialog = new ApprovalDialogComponent("Allow tool: read\nPath: /tmp/project", callbacks, {
+				exactGrant: true,
+				fileTarget: false,
+			});
+			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
+			const lines = () =>
+				stripVTControlCharacters(dialog.render(80).join("\n"))
+					.split("\n")
+					.map(line => line.replace(/^[│╭╰─\s]+/, "").trimEnd());
+			const text = () => lines().join("\n");
+			const cursorRow = () => lines().find(line => line.startsWith(theme.nav.cursor));
+			expect(text()).toContain("Approve");
+			expect(text()).not.toContain("Approve File");
+			expect(text()).toContain("Approve Once");
+			// Approve Once sits below the exact answer; Enter on it approves without a grant.
+			dialog.handleInput(DOWN);
+			dialog.handleInput(DOWN);
+			expect(cursorRow()).toContain("Approve Once");
+			dialog.handleInput(ENTER);
+			expect(callbacks.onApproveOnce).toHaveBeenCalledTimes(1);
+			expect(callbacks.onApprove).not.toHaveBeenCalled();
+
+			// The native bar carries both, and the exact button keeps the target's name.
+			const bar = new ApprovalDialogComponent(
+				"Allow tool: read\nPath: /tmp/project",
+				{ onApprove: vi.fn(), onApproveOnce: vi.fn(), onDeny: vi.fn() },
+				{ exactGrant: true, fileTarget: false },
+			);
+			const button = (key: string) =>
+				find(bar.describe(), node => node.p?.role === "omp.btn" && node.key === key)?.node;
+			expect(button("approve")).toBeDefined();
+			expect(button("once")?.p?.title).toBe("Approve this call without remembering it");
+		} finally {
+			now.mockRestore();
+		}
+	});
+
+	it("approval: a directory-only call offers the directory answer and approve-once alone", () => {
+		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+		try {
+			const callbacks = {
+				onApprove: vi.fn(),
+				onApproveFolder: vi.fn(),
+				onApproveOnce: vi.fn(),
+				onDeny: vi.fn(),
+			};
+			const prompt = "Allow tool: read\nPath: /tmp/project";
+			const options = { exactGrant: true, fileTarget: false, exactAnswer: false, folderLabel: "/tmp/project" };
+			const dialog = new ApprovalDialogComponent(prompt, callbacks, options);
+			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
+			const lines = () =>
+				stripVTControlCharacters(dialog.render(80).join("\n"))
+					.split("\n")
+					.map(line => line.replace(/^[│╭╰─\s]+/, "").trimEnd());
+			const text = () => lines().join("\n");
+			expect(text()).toContain("Approve Directory (/tmp/project)");
+			expect(text()).toContain("Approve Once");
+			expect(text()).not.toContain("Approve File");
+			// No bare exact row: the directory answer carries the whole grant.
+			expect(lines().some(line => line.trim() === "Approve")).toBe(false);
+			dialog.handleInput(DOWN);
+			dialog.handleInput(DOWN);
+			expect(lines().find(line => line.startsWith(theme.nav.cursor))).toContain("Approve Once");
+			dialog.handleInput(ENTER);
+			expect(callbacks.onApproveOnce).toHaveBeenCalledTimes(1);
+			expect(callbacks.onApproveFolder).not.toHaveBeenCalled();
+
+			// The native bar mirrors it: folder and once buttons, no exact one.
+			const bar = new ApprovalDialogComponent(
+				prompt,
+				{ onApprove: vi.fn(), onApproveFolder: vi.fn(), onApproveOnce: vi.fn(), onDeny: vi.fn() },
+				options,
+			);
+			const button = (key: string) =>
+				find(bar.describe(), node => node.p?.role === "omp.btn" && node.key === key)?.node;
+			expect(button("folder")).toBeDefined();
+			expect(button("once")).toBeDefined();
+			expect(button("approve")).toBeUndefined();
+		} finally {
+			now.mockRestore();
+		}
+	});
+
+	it("approval: the arrow menu is classic-terminal only; a native surface keeps its buttons", () => {
+		setNativeRendering(true);
+		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+		try {
+			const callbacks = { onApprove: vi.fn(), onApproveFolder: vi.fn(), onDeny: vi.fn() };
+			const dialog = new ApprovalDialogComponent("Allow tool: write\nPath: /tmp/project/out.txt", callbacks, {
+				folderLabel: "/tmp/project",
+				exactGrant: true,
+			});
+			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
+			// No list rows: the surface shows the buttons from describe() instead.
+			expect(stripVTControlCharacters(dialog.render(80).join("\n"))).not.toContain(
+				"Approve Directory (/tmp/project)",
+			);
+			for (const key of ["remember", "folder", "approve", "deny"]) {
+				expect(find(dialog.describe(), node => node.p?.role === "omp.btn" && node.key === key)).toBeDefined();
+			}
+			// Enter must not answer from an invisible selection, and no key approves outright:
+			// only the buttons answer, so an Enter aimed at the composer can never approve a call.
+			dialog.handleInput(ENTER);
+			dialog.handleInput(DOWN);
+			dialog.handleInput(ENTER);
+			dialog.handleInput("\x1b[18~"); // F7: not bound to anything
+			dialog.handleInput("\x1b[17~"); // F6: not bound either
+			expect(callbacks.onApprove).not.toHaveBeenCalled();
+			expect(callbacks.onApproveFolder).not.toHaveBeenCalled();
+			expect(callbacks.onDeny).not.toHaveBeenCalled();
+			const folder = find(dialog.describe(), node => node.p?.role === "omp.btn" && node.key === "folder");
+			dialog.handleNativeEvent({ type: "action", key: folder!.path, act: "folder", mods: [] });
+			expect(callbacks.onApproveFolder).toHaveBeenCalledWith(false);
+		} finally {
+			now.mockRestore();
+			setNativeRendering(false);
+		}
 	});
 
 	it("approval: any key restarts the timeout (reporting start and reset), so a scroll before the deadline keeps it open", () => {

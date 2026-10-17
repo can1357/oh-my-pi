@@ -38,7 +38,6 @@ interface AppKeybindings {
 	"app.tools.expand": true;
 	"app.tools.toggleVisibility": true;
 	"app.ask.hide": true;
-	"app.approval.approve": true;
 	"app.editor.external": true;
 	"app.message.followUp": true;
 	"app.retry": true;
@@ -143,12 +142,6 @@ export const KEYBINDINGS = {
 	"app.ask.hide": {
 		defaultKeys: "alt+h",
 		description: "Hide or show a pending ask dialog",
-	},
-	"app.approval.approve": {
-		// A chord, not Enter: an Enter typed for the composer as the prompt appears must not approve.
-		// Ctrl+Q backs up Ctrl+Enter, which Windows Terminal cannot deliver (#1903).
-		defaultKeys: ["ctrl+enter", "ctrl+q"],
-		description: "Approve a pending tool call",
 	},
 	"app.editor.external": {
 		defaultKeys: "ctrl+g",

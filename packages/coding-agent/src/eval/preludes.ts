@@ -1,7 +1,15 @@
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
-import { denyError, requestApproval, resolveApproval, resolveApprovalFromContext } from "../tools/approval";
+import {
+	approvalGrantKey,
+	approvalToolKey,
+	denyError,
+	getApprovalGrants,
+	requestApproval,
+	resolveApproval,
+	resolveApprovalFromContext,
+} from "../tools/approval";
 
 /** Host context supplied when an eval prelude calls back out of its language VM. */
 export interface EvalPreludeContext {
@@ -94,7 +102,9 @@ async function approvePreludeInvocation(
 	);
 	const subject: { name: string; approval?: ToolApproval } = { name: definition.name };
 	if (definition.approval !== undefined) subject.approval = definition.approval;
-	const resolved = resolveApproval(subject, parameters, mode, policies);
+	const settings = context.context?.settings ?? context.session.settings;
+	const grants = getApprovalGrants(settings.getAgentDir(), context.session.sessionManager?.getSessionId?.());
+	const resolved = resolveApproval(subject, parameters, mode, policies, grants);
 	if (resolved.policy === "deny") throw denyError(resolved, definition.name);
 	if (resolved.policy !== "prompt") return;
 
@@ -105,10 +115,21 @@ async function approvePreludeInvocation(
 				`Set tools.approval.${definition.name}: allow or use an interactive UI to approve the call.`,
 		);
 	}
-	const answer = await untilAborted(context.signal, () =>
-		requestApproval(ui, subject, parameters, { reason: resolved.reason }),
+	// Only a prompt the cached mode itself raised offers grants; policy-forced ones keep Approve/Deny.
+	const modeRaised = mode === "always-ask-cached" && resolved.source === "mode";
+	const outcome = await untilAborted(context.signal, () =>
+		requestApproval(ui, subject, parameters, resolved.reason, [], { cacheAnswers: modeRaised }),
 	);
-	if (answer === "deny") throw new Error(`Eval prelude call denied by user: ${definition.name}`);
+	if (!outcome.approved) throw new Error(`Eval prelude call denied by user: ${definition.name}`);
+	// The "Approve <prelude> for session" answer must stick, or the next call would prompt again.
+	if (modeRaised && outcome.scope === "tool") {
+		grants.record(
+			approvalGrantKey(resolved.tier, approvalToolKey(definition.name)),
+			definition.name,
+			undefined,
+			outcome.global === true ? "global" : "session",
+		);
+	}
 }
 
 /**

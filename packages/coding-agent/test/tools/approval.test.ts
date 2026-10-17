@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { describe, expect, it, spyOn } from "bun:test";
 import { customToolToDefinition } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentTool, ToolApproval } from "@oh-my-pi/pi-agent-core";
@@ -11,8 +13,12 @@ import {
 	resolveApprovalFromContext,
 	truncateForPrompt,
 } from "@oh-my-pi/pi-coding-agent/tools/approval";
+import { approvalDirectoryKey } from "@oh-my-pi/pi-coding-agent/tools/approval-cache";
+import { approvalTargetKey } from "@oh-my-pi/pi-coding-agent/tools/approval-targets";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { DeferredMCPTool, MCPTool } from "../../src/mcp/tool-bridge";
 import type { MCPServerConnection, MCPToolDefinition } from "../../src/mcp/types";
 import { Settings } from "../../src/config/settings";
@@ -224,8 +230,13 @@ describe("MCP fallback and prompt formatting", () => {
 			parameters: { type: "object" },
 			legacyName: "mcp__context_query_docs",
 			approval: "write",
+			approvalCacheTargets: () => ["target:notes.txt"],
+			approvalCacheScopes: () => ["scope:src"],
 		} as never);
 		expect(definition.legacyName).toBe("mcp__context_query_docs");
+		// The per-target grant hooks cross the same bridge, so extension tools take part in grants.
+		expect(definition.approvalCacheTargets?.({})).toEqual(["target:notes.txt"]);
+		expect(definition.approvalCacheScopes?.({})).toEqual(["scope:src"]);
 		expect(resolveApproval(definition, {}, "yolo", { mcp__context_query_docs: "deny" }).policy).toBe("deny");
 	});
 
@@ -241,27 +252,76 @@ describe("MCP fallback and prompt formatting", () => {
 		]);
 	});
 
+	it("keeps the grant answers off policy-forced prompts", async () => {
+		const selects: string[][] = [];
+		const ui = {
+			select: async (_title: string, options: string[]) => {
+				selects.push(options);
+				return options[0];
+			},
+		};
+		const write: AgentTool = {
+			name: "write",
+			label: "Write",
+			description: "guarded write",
+			parameters: {} as never,
+			approval: () => ({ tier: "write", override: true, reason: "critical pattern" }),
+			approvalCacheTargets: () => [approvalTargetKey(path.resolve("/work/project"), "TestDir/a.txt")!],
+			execute: async () => ({ content: [{ type: "text" as const, text: "executed" }] }),
+		};
+		expect((await requestApproval(ui, write, {}, undefined, [], { cacheAnswers: true })).approved).toBe(true);
+		const label = approvalDirectoryKey(path.resolve("/work/project", "TestDir")).replace(/[\\/]+$/, "");
+		expect(selects[0]).toEqual([
+			`Approve Directory: ${label}`,
+			"Approve File",
+			`Always Approve Directory: ${label}`,
+			"Always Approve File",
+			"Approve Once",
+			"Deny",
+		]);
+		expect((await requestApproval(ui, write, {}, undefined, [], { cacheAnswers: false })).approved).toBe(true);
+		expect(selects[1]).toEqual(["Approve", "Deny"]);
+	});
+
+	it("honors the pre-grant answer strings hosts still send", async () => {
+		const write = tool("mcp__server__legacy", undefined, () => ["Path: /tmp/out"]);
+		const once = { select: async () => undefined, approve: async () => "once" as const };
+		const onceOutcome = await requestApproval(once, write, {}, "Critical pattern", []);
+		expect(onceOutcome).toMatchObject({ approved: true, once: true });
+
+		const session = { select: async () => undefined, approve: async () => "session" as const };
+		const sessionOutcome = await requestApproval(session, write, {}, "Critical pattern", []);
+		expect(sessionOutcome).toMatchObject({ approved: true });
+		expect(sessionOutcome.once).toBeUndefined();
+
+		const denied = { select: async () => undefined, approve: async () => "deny" as const };
+		expect((await requestApproval(denied, write, {}, "Critical pattern", [])).approved).toBe(false);
+	});
+
+	it("keeps the host's once answer, so Approve Once records nothing", async () => {
+		const write = tool("mcp__server__write", undefined, () => ["Path: /tmp/out"]);
+		const once = { select: async () => undefined, approve: async () => ({ approved: true, once: true }) as const };
+		expect(await requestApproval(once, write, {})).toMatchObject({ approved: true, once: true });
+		// A host approving without `once` keeps the grant the prompt named.
+		const plain = { select: async () => undefined, approve: async () => ({ approved: true }) as const };
+		const outcome = await requestApproval(plain, write, {});
+		expect(outcome.approved).toBe(true);
+		expect(outcome.once).toBeUndefined();
+	});
+
 	it("the dialog's compact prompt summarizes the details to one row, keeping origin, reason, and appendix", async () => {
 		const prompts: { full: string; compact: string }[] = [];
 		const ui = {
 			select: async () => undefined,
 			approve: async (prompt: { full: string; compact: string }) => {
 				prompts.push(prompt);
-				return "once" as const;
+				return true;
 			},
 		};
 		const write = tool("mcp__server__write", undefined, () => ["Path: /tmp/out", "Content:\nsecret\nbody"]);
 		expect(
-			await requestApproval(
-				ui,
-				write,
-				{},
-				{
-					reason: "Critical pattern",
-					appendix: ["Provider safety checks:", "- check"],
-				},
-			),
-		).toBe("once");
+			(await requestApproval(ui, write, {}, "Critical pattern", ["Provider safety checks:", "- check"])).approved,
+		).toBe(true);
 		expect(prompts[0]!.compact.split("\n")).toEqual([
 			"Allow tool: mcp__server__write",
 			"Origin: MCP server tool",
@@ -280,6 +340,119 @@ describe("MCP fallback and prompt formatting", () => {
 			{},
 		);
 		expect(prompts[1]!.compact).toBe("Allow tool: bash\nCommand: git push");
+	});
+
+	it("names the folder a grant would cover, and lists the entries it reaches", async () => {
+		const root = TempDir.createSync("@pi-approval-folder-prompt-");
+		try {
+			const desktop = path.join(root.path(), "Desktop");
+			fs.mkdirSync(path.join(desktop, "TestFolder"), { recursive: true });
+			fs.writeFileSync(path.join(desktop, "notes.txt"), "x");
+			fs.writeFileSync(path.join(desktop, "alpha.txt"), "x");
+			const prompts: { full: string; compact: string }[] = [];
+			const ui = {
+				select: async () => undefined,
+				approve: async (prompt: { full: string; compact: string }) => {
+					prompts.push(prompt);
+					return true;
+				},
+			};
+			const read = {
+				name: "read",
+				approval: "read" as const,
+				approvalCacheTargets: () => [path.join(desktop, "notes.txt")],
+			};
+			await requestApproval(ui, read, {});
+			const label = shortenPath(approvalDirectoryKey(desktop).replace(/[\\/]+$/, ""));
+			expect(prompts[0]!.full.split("\n")).toEqual([
+				"Allow tool: read",
+				`Folder: ${label} — 3 entries (1 folder, 2 files)`,
+				"  - TestFolder/",
+				"  - alpha.txt",
+				"  - notes.txt",
+			]);
+			expect(prompts[0]!.compact).toContain("  - notes.txt");
+			// A target no folder holds (an internal URL) offers no folder answer, so no listing.
+			const urlRead = {
+				name: "read",
+				approval: "read" as const,
+				approvalCacheTargets: () => ["xd://todo"],
+			};
+			await requestApproval(ui, urlRead, {});
+			expect(prompts[1]!.full).not.toContain("Folder:");
+		} finally {
+			root.removeSync();
+		}
+	});
+
+	it("bounds the folder scan, so a huge folder cannot stall the prompt", async () => {
+		const root = TempDir.createSync("@pi-approval-folder-bound-");
+		try {
+			const folder = path.join(root.path(), "Huge");
+			fs.mkdirSync(folder, { recursive: true });
+			for (let index = 0; index < 205; index += 1) {
+				fs.writeFileSync(path.join(folder, `entry-${String(index).padStart(3, "0")}.txt`), "x");
+			}
+			const prompts: { full: string; compact: string }[] = [];
+			const ui = {
+				select: async () => undefined,
+				approve: async (prompt: { full: string; compact: string }) => {
+					prompts.push(prompt);
+					return true;
+				},
+			};
+			const read = {
+				name: "read",
+				approval: "read" as const,
+				approvalCacheTargets: () => [path.join(folder, "entry-000.txt")],
+			};
+			await requestApproval(ui, read, {});
+			// The scan stops at its bound, so the count is a lower bound rather than a full walk.
+			const lines = prompts[0]!.full.split("\n");
+			expect(lines[1]).toContain("200+ entries");
+			expect(lines[2]).toBe("  - entry-000.txt");
+		} finally {
+			root.removeSync();
+		}
+	});
+
+	it("caps the listed entries and counts the rest", async () => {
+		const root = TempDir.createSync("@pi-approval-folder-cap-");
+		try {
+			const folder = path.join(root.path(), "Data");
+			fs.mkdirSync(folder, { recursive: true });
+			for (const name of ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt"]) {
+				fs.writeFileSync(path.join(folder, name), "x");
+			}
+			const prompts: { full: string; compact: string }[] = [];
+			const ui = {
+				select: async () => undefined,
+				approve: async (prompt: { full: string; compact: string }) => {
+					prompts.push(prompt);
+					return true;
+				},
+			};
+			const write = {
+				name: "write",
+				approval: "write" as const,
+				approvalCacheTargets: () => [path.join(folder, "a.txt")],
+			};
+			await requestApproval(ui, write, {});
+			expect(prompts[0]!.compact.split("\n")).toEqual([
+				"Allow tool: write",
+				`Folder: ${shortenPath(approvalDirectoryKey(folder).replace(/[\\/]+$/, ""))} — 6 entries (0 folders, 6 files)`,
+				"  - a.txt",
+				"  - b.txt",
+				"  - c.txt",
+				"  - d.txt",
+				"  … 2 more",
+			]);
+			// The full prompt, which the expand key shows, lists them all.
+			expect(prompts[0]!.full).toContain("  - f.txt");
+			expect(prompts[0]!.full).not.toContain("more");
+		} finally {
+			root.removeSync();
+		}
 	});
 
 	it("does not add MCP origin for annotated MCP tools", () => {

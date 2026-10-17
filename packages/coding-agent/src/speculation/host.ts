@@ -22,6 +22,7 @@ import {
 import type { Settings } from "../config/settings";
 import type { ToolSession } from "../tools";
 import { resolveApproval } from "../tools/approval";
+import { getApprovalGrants } from "../tools/approval-cache";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import {
 	digestLocalReadBytes,
@@ -226,6 +227,7 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 			args,
 			cfgToolsApprovalMode.get(this.settings),
 			cfgToolsApproval.get(this.settings),
+			getApprovalGrants(this.settings.getAgentDir(), this.toolSession.sessionManager?.getSessionId?.()),
 		);
 		if (approval.policy !== "allow") return { allowed: false, reason: "tool approval is not auto-allow" };
 		return { allowed: true };

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { resolveEquivalentPath } from "@oh-my-pi/pi-utils/dirs";
 
@@ -18,5 +19,31 @@ describe("issue #935 path equivalence", () => {
 
 		expect(resolveEquivalentPath(inputPath)).toBe(inputPath);
 		expect(realpathSpy).toHaveBeenCalledWith(inputPath);
+	});
+
+	it("resolves a symlinked ancestor for a path that does not exist yet", () => {
+		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "omp-symlink-parent-"));
+		try {
+			const real = path.join(temp, "real");
+			const link = path.join(temp, "link");
+			fs.mkdirSync(real);
+			try {
+				fs.symlinkSync(real, link, "junction");
+			} catch {
+				// Creating the link may need privileges; there is nothing to assert without one.
+				return;
+			}
+			// The target does not exist yet, so the key has to resolve the symlinked parent itself.
+			expect(resolveEquivalentPath(path.join(link, "new.ts"))).toBe(
+				resolveEquivalentPath(path.join(real, "new.ts")),
+			);
+			fs.writeFileSync(path.join(real, "new.ts"), "x");
+			// Once the file exists, both spellings still agree.
+			expect(resolveEquivalentPath(path.join(link, "new.ts"))).toBe(
+				resolveEquivalentPath(path.join(real, "new.ts")),
+			);
+		} finally {
+			fs.rmSync(temp, { recursive: true, force: true });
+		}
 	});
 });

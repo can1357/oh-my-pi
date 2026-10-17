@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Extension `ui.approve()` hosts now receive the grant answers' metadata (`folderLabel`, `exactGrant`, `fileTarget`, `exactAnswer`, `toolName`) and answer with `true` or `{ approved: true, scope?: "target" | "folder" | "tool", global?: boolean, once?: boolean }`, replacing the `"once" | "session" | "deny"` answer strings — which are still honored at runtime, so hosts that return them keep working.
+
+### Added
+
+- Added the **Ask and remember** tool approval mode (`tools.approvalMode: always-ask-cached`, `--approval-mode always-ask-cached`): the first `read`, `write`, or `edit` touching a file asks once, and so does the first call of each exec tool; depending on the options selected by the user, approved targets skip their later prompts. Each read/write prompt carries a **Remember** checkbox beside its answers — *This Session* keeps the grant in this instance's memory, *Always* writes it to the `grants` table of `approval-cache.db` under the agent directory, where it covers every later session — and offers **Approve Directory** (the folder around the operation: its own entries, one level deep), **Approve File** (the exact file), and **Approve Once** (this call only, nothing remembered). Prompts forced by a dangerous-command override, an explicit `prompt` policy, or a provider safety check still ask every call, and plain Approve/Deny prompts stay unchanged in every other mode.
+- The approval prompt now names the folder an `Approve Directory` answer would cover and lists that folder's own entries — directories marked with a trailing slash, up to 24 in the full prompt, the first 4 in the dock's summarised one, the rest counted — so a folder grant is never approved unseen.
+
+### Changed
+
+- Grants are keyed by the capability they authorized, and cover that tier and the lower ones: approving a write also clears reads of that target, while a read approval never lets a write or an exec call through — folder grants included. Grants recorded before this keying are dropped once (they prompt again) instead of being read as broader than they were.
+- A directory read offers its own directory, never the parent that holds every sibling: `read ~/Desktop` answers with `Approve Directory: ~/Desktop`, where it used to grant all of `~`.
+- Folder grants cover the folder's own entries and stop there: approving `~/Desktop` no longer covers `~/Desktop/TestFolder`, which — and anything inside it — asks for its own approval, for reads, writes, edits, searches, and folder-scoped commands alike.
+- `grep` and `glob` report the folder (or file) they search, so a read grant covers them and a search is no longer a way around a read prompt.
+- With a first-party Anthropic model on the official API selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup; third-party gateways and custom endpoints are never probed ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed **Approve File** appearing for targets that are not files: a directory read (e.g. `read C:\Users\KR\Desktop`) no longer offers it — only a file target is named for a file.
+- Fixed the **Approve File** and **Approve Directory** tooltips describing themselves as "Approve this call and remember it": they now name the reads and writes each grant covers, for the session or for every session, and a non-file exact target reads "Approve this call and remember what it touched".
+- Fixed prompts raised by a provider safety check offering grant answers: they keep plain Approve/Deny, since a per-call check can never be remembered.
+- Fixed the ACP shell gate resolving approvals against the default agent directory instead of the active profile's `approval-cache.db`.
+- Fixed remembered approvals surviving a cache deletion until restart: every check re-reads `approval-cache.db`, so deleting the database, clearing its table, or using **Forget Remembered Approvals** revokes the grants immediately.
+- Fixed approval grants leaking across conversations: the in-memory "This Session" tier is now scoped to the conversation it was approved in, so `/new`, a session switch, or a second session in the same process starts without it.
+- Fixed a recursive `grep` or `glob` running on a plain folder grant: a recursive search reads below subfolders, so it carries its own tree grant (approving that tree also records the folder grant it includes), while a one-level search stays covered by the folder's grant.
+- Fixed search root lists being unkeyed: a root list such as `src;other` now keys every root the way execution fans it out, instead of reporting nothing and running unapproved.
+- Fixed reads of private endpoints being ungated: `localhost`, private, link-local and reserved hosts prompt like a file, while public web URLs stay exempt.
+- Fixed remembered eval-prelude approvals: choosing "Approve <prelude> for session" now records the grant and honors it on the next call.
+- Fixed approval keys colliding on whitespace and literal selector paths: `" secret "` no longer shares a key with `secret`, and an existing literal `notes:1` keys as itself.
+- Fixed new files under a symlinked folder changing key once created: the key resolves a path's deepest existing ancestor and keeps the missing suffix.
+- Fixed the folder a prompt lists being read synchronously and without bound: the listing is asynchronous, capped at 200 entries (its counts then read as lower bounds), sanitized, and rendered from `src/prompts/tools/approval-folder.md`.
+- Fixed the approval prompt offering **Details** (`Ctrl+O`) when there was nothing more to show: the option and its hint now appear only when the full prompt carries content the summary row does not, and a prompt whose details already fit leaves `Ctrl+O` to tool-output expansion.
+- Fixed extension tools being unable to declare the per-target grant hooks: `ToolDefinition` and `CustomTool` now expose `approvalCacheTargets` and `approvalCacheScopes`, forwarded through the custom-tool bridge.
+
 ## [18.12.0] - 2026-10-17
 
 ### Added

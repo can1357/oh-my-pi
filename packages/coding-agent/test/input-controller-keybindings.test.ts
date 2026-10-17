@@ -1185,6 +1185,26 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 		expect(ctx.toolOutputExpanded).toBe(true);
 	});
 
+	it("hides Details when the full prompt only re-lays-out the summary row", async () => {
+		const { ctx, listeners, setFocused } = await setup();
+		const callbacks = { onApprove: vi.fn(), onDeny: vi.fn() };
+		const compact = "Allow tool: read\nReason: target not yet approved\nPath: TestDir";
+		// The same details, one per line: expanding would show nothing new, so no Details row, no
+		// expand key hint, and ctrl+o keeps its transcript meaning.
+		const same = new ApprovalDialogComponent(compact, callbacks, { fullPrompt: compact });
+		// No Details row, no expand-key hint, and ctrl+o keeps its transcript meaning.
+		expect(same.render(80).join("\n")).not.toContain("details");
+		setFocused(same);
+		expect(dispatchInput(listeners, CTRL_O)).toEqual({ consume: true });
+		expect(ctx.toolOutputExpanded).toBe(true);
+
+		// A summary that clipped a detail keeps the option, and expanding shows that detail.
+		const extra = new ApprovalDialogComponent("Allow tool: bash\nCommand: rm -rf build …", callbacks, {
+			fullPrompt: "Allow tool: bash\nCommand: rm -rf build\nrm -rf dist",
+		});
+		expect(extra.render(80).join("\n")).toContain("details");
+	});
+
 	it("still toggles when the editor holds focus", async () => {
 		const { ctx, listeners } = await setup();
 		// The editor is the default focus target in the harness.

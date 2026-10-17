@@ -44,13 +44,17 @@ import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from ".
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
+import {
+	APPROVAL_DENY_LABEL,
+	APPROVAL_ONCE_LABEL,
+	approvalApproveOptionLabel,
+	approvalDirectoryOptionLabel,
+	approvalToolOptionLabel,
+} from "../../tools/approval";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { launchTerminal } from "../../subprocess/terminal-launch";
 
 const MAX_WIDGET_LINES = 10;
-/** Approval answers, as a collab guest's select shows them. */
-const APPROVE_OPTION = "Approve";
-const DENY_OPTION = "Deny";
 
 /**
  * Footer hint for a guest-rendered ask selector. The guest's selector handles
@@ -677,16 +681,39 @@ export class ExtensionUiController {
 		prompt: ExtensionApprovalPrompt,
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionApprovalAnswer> {
-		const sessionLabel = prompt.session;
+		const folderLabel = prompt.folderLabel;
+		const exactGrant = prompt.exactGrant === true;
+		const fileGrant = exactGrant && prompt.fileTarget !== false;
+		const exactAnswer = prompt.exactAnswer ?? exactGrant;
+		const fileOption = approvalApproveOptionLabel(fileGrant, false);
+		const alwaysFileOption = exactAnswer ? approvalApproveOptionLabel(fileGrant, true) : undefined;
+		const directoryOption = folderLabel === undefined ? undefined : approvalDirectoryOptionLabel(folderLabel, false);
+		const alwaysDirectoryOption =
+			folderLabel === undefined ? undefined : approvalDirectoryOptionLabel(folderLabel, true);
+		const toolName = prompt.toolName;
+		const toolOption = toolName === undefined ? undefined : approvalToolOptionLabel(toolName);
+		// "Approve Once" accompanies the grant answers, and stands in for the plain answer when the
+		// call records no exact target — that answer would record just as little.
+		const offersGrants = folderLabel !== undefined || exactGrant || toolName !== undefined;
+		const onceOption = offersGrants ? APPROVAL_ONCE_LABEL : undefined;
+		const plainOption = exactAnswer || onceOption === undefined ? fileOption : undefined;
 		const request: CollabUiRequestDraft = {
 			kind: "select",
 			title: prompt.full,
-			options: sessionLabel ? [APPROVE_OPTION, sessionLabel, DENY_OPTION] : [APPROVE_OPTION, DENY_OPTION],
+			options: [
+				...(directoryOption === undefined ? [] : [directoryOption]),
+				...(toolOption === undefined ? [] : [toolOption]),
+				...(plainOption === undefined ? [] : [plainOption]),
+				...(alwaysDirectoryOption === undefined ? [] : [alwaysDirectoryOption]),
+				...(alwaysFileOption === undefined ? [] : [alwaysFileOption]),
+				...(onceOption === undefined ? [] : [onceOption]),
+				APPROVAL_DENY_LABEL,
+			],
 		};
 		const session = this.ctx.session;
 		const agent = session.agent;
 		const pendingSteering = agent.peekSteeringQueue();
-		if (this.#denyingSteering?.some(message => pendingSteering.includes(message))) return "deny";
+		if (this.#denyingSteering?.some(message => pendingSteering.includes(message))) return false;
 		this.#denyingSteering = undefined;
 		const steered = new AbortController();
 		let steeringBaseline = session.getQueuedMessages().steering.length;
@@ -713,17 +740,28 @@ export class ExtensionUiController {
 					const editor = this.ctx.editor;
 					const dialog = new ApprovalDialogComponent(
 						prompt.compact,
-						{ onApprove: () => settle(APPROVE_OPTION), onDeny: () => settle(DENY_OPTION) },
+						{
+							onApprove: always => settle(approvalApproveOptionLabel(fileGrant, always)),
+							...(toolOption === undefined ? {} : { onApproveTool: () => settle(toolOption) }),
+							...(onceOption === undefined ? {} : { onApproveOnce: () => settle(onceOption) }),
+							...(folderLabel === undefined
+								? {}
+								: {
+										onApproveFolder: (always: boolean) =>
+											settle(approvalDirectoryOptionLabel(folderLabel, always)),
+									}),
+							onDeny: () => settle(APPROVAL_DENY_LABEL),
+						},
 						{
 							tui: this.ctx.ui,
 							fullPrompt: prompt.full,
+							...(prompt.folderLabel === undefined ? {} : { folderLabel: prompt.folderLabel }),
+							...(prompt.exactGrant === true ? { exactGrant: true, fileTarget: fileGrant, exactAnswer } : {}),
+							...(toolName === undefined ? {} : { toolName }),
 							timeout: dialogOptions?.timeout,
 							onTimeout: dialogOptions?.onTimeout,
 							onTimeoutStart: dialogOptions?.onTimeoutStart,
 							onTimeoutReset: dialogOptions?.onTimeoutReset,
-							...(sessionLabel
-								? { session: { label: sessionLabel, onApprove: () => settle(sessionLabel) } }
-								: {}),
 							draft: {
 								hasDraft: () =>
 									editor.getText().length > 0 || editor.pendingImages.length > 0 || editor.pasteInFlight,
@@ -750,8 +788,15 @@ export class ExtensionUiController {
 					};
 				}),
 			);
-			if (choice === APPROVE_OPTION) return "once";
-			return sessionLabel !== undefined && choice === sessionLabel ? "session" : "deny";
+			if (choice === fileOption) return true;
+			if (onceOption !== undefined && choice === onceOption) return { approved: true, once: true };
+			if (toolOption !== undefined && choice === toolOption) return { approved: true, scope: "tool" };
+			if (directoryOption !== undefined && choice === directoryOption) return { approved: true, scope: "folder" };
+			if (alwaysFileOption !== undefined && choice === alwaysFileOption) return { approved: true, global: true };
+			if (alwaysDirectoryOption !== undefined && choice === alwaysDirectoryOption) {
+				return { approved: true, scope: "folder", global: true };
+			}
+			return false;
 		} finally {
 			unsubscribe();
 		}
