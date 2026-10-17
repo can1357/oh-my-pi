@@ -200,3 +200,88 @@ fn result_unwrap_and_nullable() {
 	assert!(CancelSubagentCommand::decode(None).is_err());
 	assert!(<SteerCommand as Command>::decode(None).is_ok());
 }
+
+fn skill_analysis_record() -> Value {
+	json!({
+		"id": "analysis-1", "name": "review", "status": "complete", "model": "fake/fake-model", "bytes": 120,
+		"candidates": [{
+			"id": "skill-1", "name": "review", "filePath": "/a/review/SKILL.md", "root": "/a/review",
+			"fingerprint": "ff", "complete": true, "files": 1, "omissions": [],
+		}],
+		"disclosure": "d", "createdAt": 1_700_000_000_000_i64, "applied": false,
+		"result": {
+			"relationship": "adaptation",
+			"evidence": [{"candidateId": "skill-1", "file": "SKILL.md", "quote": "Review changes carefully.", "explanation": "same"}],
+			"differences": ["x"],
+			"recommendation": {"action": "prefer", "preferredId": "skill-1", "reason": "r"},
+			"limitations": [],
+		},
+	})
+}
+
+#[test]
+fn skill_analysis_commands_encode_and_decode_records() {
+	let prepare = PrepareSkillDiagnosticAnalysisCommand {
+		name:  "review".into(),
+		model: Some("fake/fake-model".into()),
+	};
+	assert_eq!(
+		encode_command("req_1", &prepare).unwrap(),
+		json!({"id": "req_1", "type": "prepare_skill_diagnostic_analysis", "name": "review", "model": "fake/fake-model"})
+	);
+	let analyze =
+		AnalyzeSkillDiagnosticsCommand { analysis_id: "analysis-1".into(), consent: true };
+	assert_eq!(
+		encode_command("req_2", &analyze).unwrap(),
+		json!({"id": "req_2", "type": "analyze_skill_diagnostics", "analysisId": "analysis-1", "consent": true})
+	);
+	let cancel = CancelSkillDiagnosticAnalysisCommand { analysis_id: "analysis-1".into() };
+	assert_eq!(
+		encode_command("req_3", &cancel).unwrap(),
+		json!({"id": "req_3", "type": "cancel_skill_diagnostic_analysis", "analysisId": "analysis-1"})
+	);
+	let apply =
+		ApplySkillDiagnosticAnalysisCommand { analysis_id: "analysis-1".into(), confirmed: true };
+	assert_eq!(
+		encode_command("req_4", &apply).unwrap(),
+		json!({"id": "req_4", "type": "apply_skill_diagnostic_analysis", "analysisId": "analysis-1", "confirmed": true})
+	);
+
+	let record =
+		PrepareSkillDiagnosticAnalysisCommand::decode(Some(skill_analysis_record())).unwrap();
+	assert_eq!(record.status, SkillAnalysisStatus::Complete);
+	assert!(!record.applied);
+	let mut paused = skill_analysis_record();
+	paused["status"] = json!("paused");
+	assert!(PrepareSkillDiagnosticAnalysisCommand::decode(Some(paused)).is_err());
+	let mut without_applied = skill_analysis_record();
+	without_applied.as_object_mut().unwrap().remove("applied");
+	assert!(ApplySkillDiagnosticAnalysisCommand::decode(Some(without_applied)).is_err());
+}
+
+#[test]
+fn skill_snapshot_items_are_optional_and_strict() {
+	let legacy: SkillDiagnosticsSnapshot = serde_json::from_value(
+		json!({"cwd": "/w", "showStartupDiagnostics": true, "diagnostics": []}),
+	)
+	.unwrap();
+	assert_eq!(legacy.items, None);
+
+	let entry = json!({"name": "review", "filePath": "/a/SKILL.md", "source": "custom:user"});
+	let item = json!({
+		"name": "review", "issues": ["conflict"], "skills": [entry], "duplicates": [],
+		"canAnalyze": true, "analysis": skill_analysis_record(),
+	});
+	let snapshot = json!({"cwd": "/w", "showStartupDiagnostics": true, "diagnostics": [], "items": [item.clone()]});
+	let decoded: SkillDiagnosticsSnapshot = serde_json::from_value(snapshot).unwrap();
+	let items = decoded.items.unwrap();
+	assert!(items[0].can_analyze);
+	assert_eq!(items[0].analysis.as_ref().unwrap().id, "analysis-1");
+	assert_eq!(items[0].last_analysis, None);
+
+	let mut bad = item;
+	bad["issues"] = json!(["bogus"]);
+	let snapshot =
+		json!({"cwd": "/w", "showStartupDiagnostics": true, "diagnostics": [], "items": [bad]});
+	assert!(serde_json::from_value::<SkillDiagnosticsSnapshot>(snapshot).is_err());
+}

@@ -92,6 +92,7 @@ import "./discovery";
 import { LiveImageUrlService } from "./blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
+import { applyExclusionsToPreloadedPluginRoots } from "./discovery/helpers";
 import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
 import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
@@ -135,8 +136,10 @@ import {
 import { resolvePath } from "./extensibility/utils";
 import {
 	type LoadSkillsOptions,
+	type LoadSkillsResult,
 	loadSkills as loadSkillsInternal,
 	type Skill,
+	type SkillDiagnostic,
 	type SkillWarning,
 	setActiveSkills,
 } from "./extensibility/skills";
@@ -370,6 +373,8 @@ import {
 	cfgSkills,
 	type SkillsSettings,
 } from "./extensibility/settings";
+import { cfgUserResourceExclusions } from "./extensibility/resource-settings";
+import { NO_RESOURCE_EXCLUSIONS } from "./discovery/resource-exclusions";
 import { cfgTtsr } from "./export/ttsr-settings";
 import { cfgDisabledProviders, cfgEnabledModels, cfgEnabledProviders, cfgModelRoles } from "./config/model-settings";
 import { cfgEditRecoverInlineEdits } from "./edit/settings";
@@ -417,7 +422,11 @@ const cfgSkillsAndCommandsDiscovery = combine({
 });
 
 /** Settings deciding which configured extension sources a session loads. */
-const cfgExtensionSources = combine({ extensions: cfgExtensions, disabledExtensions: cfgDisabledExtensions });
+const cfgExtensionSources = combine({
+	extensions: cfgExtensions,
+	disabledExtensions: cfgDisabledExtensions,
+	resourceExclusions: cfgUserResourceExclusions,
+});
 
 type McpNotificationEntry = {
 	serverName: string;
@@ -1078,6 +1087,7 @@ export async function discoverSessionExtensionPaths(
 	return discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds, {
 		ambient: !explicitOnly,
 		includeAmbientHooks: options.includeAmbientHooks,
+		resourceExclusions: roots?.resourceExclusions ?? cfgUserResourceExclusions.get(settings),
 	});
 }
 
@@ -1233,7 +1243,7 @@ export async function discoverSkills(
 	cwd?: string,
 	_agentDir?: string,
 	settings?: SkillsSettings & Pick<LoadSkillsOptions, "disabledExtensions">,
-): Promise<{ skills: Skill[]; warnings: SkillWarning[] }> {
+): Promise<LoadSkillsResult> {
 	return await loadSkillsInternal({
 		...settings,
 		cwd: cwd ?? getProjectDir(),
@@ -1762,7 +1772,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	setInvocationConfiguredExtensions(
 		extensionRoots?.configured ?? cfgExtensions.get(settings),
 		extensionRoots?.configuredLevel ?? settings.extensionsSourceLevel(),
+		extensionRoots?.resourceExclusions ?? cfgUserResourceExclusions.get(settings),
 	);
+	// Plugin LSP/DAP config reads the startup-preloaded roots synchronously; hide reviewed copies there too.
+	if (bindsProcessState) await applyExclusionsToPreloadedPluginRoots(cfgUserResourceExclusions.get(settings));
 
 	// Pin authStorage to modelRegistry.authStorage: ModelRegistry.getApiKey() routes refresh
 	// failures through that instance, so any divergent storage handed to the bridge / mcpManager
@@ -2141,13 +2154,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	let skills: Skill[];
 	let skillWarnings: SkillWarning[];
+	let skillDiagnostics: SkillDiagnostic[];
 	if (options.skills !== undefined) {
 		skills = options.skills;
 		skillWarnings = [];
+		skillDiagnostics = [];
 	} else {
-		const discovered = await (discoveredSkillsPromise ?? Promise.resolve({ skills: [], warnings: [] }));
+		const discovered = await (discoveredSkillsPromise ??
+			Promise.resolve<LoadSkillsResult>({ skills: [], warnings: [], diagnostics: [] }));
 		skills = discovered.skills;
 		skillWarnings = discovered.warnings;
+		skillDiagnostics = discovered.diagnostics;
 	}
 
 	// Agent identity must resolve before rule discovery: `agents` frontmatter decides
@@ -2547,6 +2564,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				mode: options.disableExtensionDiscovery ? "explicit-only" : "merge",
 				configured: cfgExtensions.get(settings),
 				configuredLevel: settings.extensionsSourceLevel(),
+				resourceExclusions: cfgUserResourceExclusions.get(settings),
 			}));
 		const mcpDiscoverOptions = {
 			onStatus: onMCPStatus,
@@ -4714,6 +4732,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			skills,
 			skillDescriptions,
 			skillWarnings,
+			skillDiagnostics,
 			skillsReloadable: options.skills === undefined,
 			skillsSettings: cfgSkills.get(settings),
 			modelRegistry,
@@ -5007,7 +5026,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				resetCapabilities();
 				const cwdNow = sessionManager.getCwd();
 				const [governedPaths, enabledPaths] = await Promise.all([
-					discoverExtensionPaths([...roots.explicit, ...seenConfiguredExtensions], cwdNow, []),
+					discoverExtensionPaths([...roots.explicit, ...seenConfiguredExtensions], cwdNow, [], {
+						// Governed = everything the settings could govern, reviewed copies included,
+						// so applying or restoring an exclusion suspends or resumes them live.
+						resourceExclusions: NO_RESOURCE_EXCLUSIONS,
+					}),
 					discoverSessionExtensionPaths({ extensionRoots: () => roots }, cwdNow, settings),
 				]);
 				const governed = new Set(governedPaths.map(extensionPath => resolvePath(extensionPath, cwdNow)));

@@ -325,3 +325,76 @@ func TestResultDecoding(t *testing.T) {
 		t.Fatalf("command error: %v", err)
 	}
 }
+
+const skillAnalysisRecord = `{"id":"analysis-1","name":"review","status":"complete","model":"fake/fake-model","bytes":120,` +
+	`"candidates":[{"id":"skill-1","name":"review","filePath":"/a/review/SKILL.md","root":"/a/review","fingerprint":"ff","complete":true,"files":1,"omissions":[]}],` +
+	`"disclosure":"d","createdAt":1700000000000,"applied":false,` +
+	`"result":{"relationship":"adaptation","evidence":[{"candidateId":"skill-1","file":"SKILL.md","quote":"Review changes carefully.","explanation":"same"}],` +
+	`"differences":["x"],"recommendation":{"action":"prefer","preferredId":"skill-1","reason":"r"},"limitations":[]}}`
+
+func TestSkillAnalysisCommandsEncodeAndDecodeRecords(t *testing.T) {
+	ctx := context.Background()
+	transport := &fakeTransport{data: json.RawMessage(skillAnalysisRecord)}
+	commands := Commands{Transport: transport}
+
+	record, err := commands.PrepareSkillDiagnosticAnalysis(ctx, PrepareSkillDiagnosticAnalysisCommand{Name: "review", Model: Ptr("fake/fake-model")})
+	if err != nil || record.Status != SkillAnalysisStatusComplete || record.Result == nil || record.Result.Recommendation.PreferredID == nil || *record.Result.Recommendation.PreferredID != "skill-1" {
+		t.Fatalf("prepare: %#v %v", record, err)
+	}
+	if got := transport.frame(t); got != `{"id":"req_1","type":"prepare_skill_diagnostic_analysis","name":"review","model":"fake/fake-model"}` {
+		t.Fatalf("prepare frame: %s", got)
+	}
+
+	if _, err := commands.AnalyzeSkillDiagnostics(ctx, AnalyzeSkillDiagnosticsCommand{AnalysisID: "analysis-1", Consent: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := transport.frame(t); got != `{"id":"req_1","type":"analyze_skill_diagnostics","analysisId":"analysis-1","consent":true}` {
+		t.Fatalf("analyze frame: %s", got)
+	}
+	if _, err := commands.CancelSkillDiagnosticAnalysis(ctx, CancelSkillDiagnosticAnalysisCommand{AnalysisID: "analysis-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := transport.frame(t); got != `{"id":"req_1","type":"cancel_skill_diagnostic_analysis","analysisId":"analysis-1"}` {
+		t.Fatalf("cancel frame: %s", got)
+	}
+	if _, err := commands.ApplySkillDiagnosticAnalysis(ctx, ApplySkillDiagnosticAnalysisCommand{AnalysisID: "analysis-1", Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := transport.frame(t); got != `{"id":"req_1","type":"apply_skill_diagnostic_analysis","analysisId":"analysis-1","confirmed":true}` {
+		t.Fatalf("apply frame: %s", got)
+	}
+
+	transport.data = json.RawMessage(strings.Replace(skillAnalysisRecord, `"status":"complete"`, `"status":"paused"`, 1))
+	if _, err := commands.PrepareSkillDiagnosticAnalysis(ctx, PrepareSkillDiagnosticAnalysisCommand{Name: "review"}); err == nil || !strings.Contains(err.Error(), "paused") {
+		t.Fatalf("unknown status decoded: %v", err)
+	}
+	transport.data = json.RawMessage(strings.Replace(skillAnalysisRecord, `"applied":false,`, ``, 1))
+	if _, err := commands.PrepareSkillDiagnosticAnalysis(ctx, PrepareSkillDiagnosticAnalysisCommand{Name: "review"}); err == nil || !strings.Contains(err.Error(), `"applied"`) {
+		t.Fatalf("record without applied decoded: %v", err)
+	}
+}
+
+func TestSkillDiagnosticsSnapshotItemsAreOptional(t *testing.T) {
+	var legacy SkillDiagnosticsSnapshot
+	if err := json.Unmarshal([]byte(`{"cwd":"/w","showStartupDiagnostics":true,"diagnostics":[]}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Items != nil {
+		t.Fatalf("older snapshot grew items: %#v", legacy.Items)
+	}
+
+	entry := `{"name":"review","filePath":"/a/SKILL.md","source":"custom:user"}`
+	item := `{"name":"review","issues":["conflict"],"skills":[` + entry + `],"duplicates":[],"canAnalyze":true,"analysis":` + skillAnalysisRecord + `}`
+	var snapshot SkillDiagnosticsSnapshot
+	if err := json.Unmarshal([]byte(`{"cwd":"/w","showStartupDiagnostics":true,"diagnostics":[],"items":[`+item+`]}`), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Items) != 1 || !snapshot.Items[0].CanAnalyze || snapshot.Items[0].Analysis == nil || snapshot.Items[0].Analysis.ID != "analysis-1" || snapshot.Items[0].LastAnalysis != nil {
+		t.Fatalf("items: %#v", snapshot.Items)
+	}
+
+	bad := strings.Replace(item, `"issues":["conflict"]`, `"issues":["bogus"]`, 1)
+	if err := json.Unmarshal([]byte(`{"cwd":"/w","showStartupDiagnostics":true,"diagnostics":[],"items":[`+bad+`]}`), &snapshot); err == nil || !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("unknown issue decoded: %v", err)
+	}
+}

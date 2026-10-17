@@ -26,6 +26,16 @@ import {
 } from "./rpc-messages";
 import type {
 	RpcAbortAndRestoreQueueResult,
+	ResourceAnalysis,
+	SkillAnalysisCandidate,
+	SkillAnalysisStatus,
+	SkillDiagnosticAnalysisRecord,
+	SkillDiagnosticDuplicate,
+	SkillDiagnosticEntry,
+	SkillDiagnosticIssue,
+	SkillDiagnosticItem,
+	SkillDiagnosticsSnapshot,
+	SkillResolutionDiagnostic,
 	RpcAvailableCommandsUpdateFrame,
 	RpcBtwDeltaFrame,
 	RpcBtwRecordFrame,
@@ -46,6 +56,7 @@ import type {
 	RpcResponse,
 	RpcSessionSettledFrame,
 	RpcSessionState,
+	RpcSkillDiagnosticsUpdateFrame,
 	RpcSubagentEventFrame,
 	RpcSubagentLifecycleFrame,
 	RpcSubagentMessagesResult,
@@ -112,6 +123,7 @@ export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["
 export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["payload"]) => void;
 export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
 export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
+export type RpcSkillDiagnosticsUpdateListener = (snapshot: SkillDiagnosticsSnapshot) => void;
 export type RpcPromptResultListener = (result: RpcPromptResultFrame) => void;
 export type RpcSessionSettledListener = () => void;
 export type RpcLiveListener = (frame: RpcLiveFrame) => void;
@@ -176,6 +188,251 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"goal_updated",
 	"queue_update",
 ]);
+
+const SKILL_SELECTION_REASONS = ["source-order", "custom-directory", "authored-over-installed"] as const;
+const SKILL_DUPLICATE_MATCHES = ["content", "origin"] as const;
+const SKILL_ANALYSIS_STATUSES = [
+	"prepared",
+	"running",
+	"complete",
+	"failed",
+	"cancelled",
+	"applied",
+	"stale",
+] as const satisfies readonly SkillAnalysisStatus[];
+const SKILL_DIAGNOSTIC_ISSUES = [
+	"conflict",
+	"redundancy",
+	"missing-provenance",
+] as const satisfies readonly SkillDiagnosticIssue[];
+const RESOURCE_RELATIONSHIPS = [
+	"copies",
+	"adaptation",
+	"overlap",
+	"complementary",
+	"unrelated",
+	"uncertain",
+] as const satisfies readonly ResourceAnalysis["relationship"][];
+const RESOURCE_RECOMMENDATION_ACTIONS = ["keep-all", "prefer"] as const;
+
+function requireSkillDiagnosticsString(value: Record<string, unknown>, key: string, field: string): string {
+	const candidate = value[key];
+	if (typeof candidate !== "string") throw new Error(`${field}.${key} must be a string`);
+	return candidate;
+}
+
+function optionalSkillDiagnosticsString(
+	value: Record<string, unknown>,
+	key: string,
+	field: string,
+): string | undefined {
+	const candidate = value[key];
+	if (candidate !== undefined && typeof candidate !== "string") throw new Error(`${field}.${key} must be a string`);
+	return candidate;
+}
+
+/** Server-issued ids and fingerprints are opaque but never empty. */
+function requireSkillDiagnosticsId(value: Record<string, unknown>, key: string, field: string): string {
+	const candidate = requireSkillDiagnosticsString(value, key, field);
+	if (candidate.length === 0) throw new Error(`${field}.${key} must not be empty`);
+	return candidate;
+}
+
+function requireSkillDiagnosticsBoolean(value: Record<string, unknown>, key: string, field: string): boolean {
+	const candidate = value[key];
+	if (typeof candidate !== "boolean") throw new Error(`${field}.${key} must be a boolean`);
+	return candidate;
+}
+
+function requireSkillDiagnosticsInteger(value: Record<string, unknown>, key: string, field: string): number {
+	const candidate = value[key];
+	if (typeof candidate !== "number" || !Number.isSafeInteger(candidate) || candidate < 0) {
+		throw new Error(`${field}.${key} must be a non-negative integer`);
+	}
+	return candidate;
+}
+
+function requireSkillDiagnosticsArray(value: Record<string, unknown>, key: string, field: string): unknown[] {
+	const candidate = value[key];
+	if (!Array.isArray(candidate)) throw new Error(`${field}.${key} must be an array`);
+	return candidate;
+}
+
+function requireSkillDiagnosticsStrings(value: Record<string, unknown>, key: string, field: string): string[] {
+	return requireSkillDiagnosticsArray(value, key, field).map((entry, index) => {
+		if (typeof entry !== "string") throw new Error(`${field}.${key}[${index}] must be a string`);
+		return entry;
+	});
+}
+
+function skillDiagnosticsLiteral<const T extends readonly string[]>(
+	candidate: unknown,
+	allowed: T,
+	label: string,
+): T[number] {
+	if (typeof candidate !== "string" || !(allowed as readonly string[]).includes(candidate)) {
+		throw new Error(`${label} is invalid`);
+	}
+	return candidate as T[number];
+}
+
+function parseSkillDiagnosticEntry(value: unknown, field: string): SkillDiagnosticEntry {
+	if (!isRecord(value)) throw new Error(`${field} must be an object`);
+	const pluginName = optionalSkillDiagnosticsString(value, "pluginName", field);
+	const repository = optionalSkillDiagnosticsString(value, "repository", field);
+	const version = optionalSkillDiagnosticsString(value, "version", field);
+	return {
+		name: requireSkillDiagnosticsString(value, "name", field),
+		filePath: requireSkillDiagnosticsString(value, "filePath", field),
+		source: requireSkillDiagnosticsString(value, "source", field),
+		...(pluginName !== undefined && { pluginName }),
+		...(repository !== undefined && { repository }),
+		...(version !== undefined && { version }),
+	};
+}
+
+function parseSkillDiagnosticDuplicate(value: unknown, field: string): SkillDiagnosticDuplicate {
+	if (!isRecord(value)) throw new Error(`${field} must be an object`);
+	return {
+		skill: parseSkillDiagnosticEntry(value.skill, `${field}.skill`),
+		retained: parseSkillDiagnosticEntry(value.retained, `${field}.retained`),
+		// Older servers omit the match; they only knew identical content.
+		match: skillDiagnosticsLiteral(value.match ?? "content", SKILL_DUPLICATE_MATCHES, `${field}.match`),
+	};
+}
+
+function parseSkillResolutionDiagnostic(value: unknown, field: string): SkillResolutionDiagnostic {
+	if (!isRecord(value)) throw new Error(`${field} must be an object`);
+	return {
+		name: requireSkillDiagnosticsString(value, "name", field),
+		reason: skillDiagnosticsLiteral(value.reason, SKILL_SELECTION_REASONS, `${field}.reason`),
+		skills: requireSkillDiagnosticsArray(value, "skills", field).map((entry, index) =>
+			parseSkillDiagnosticEntry(entry, `${field}.skills[${index}]`),
+		),
+		duplicates: requireSkillDiagnosticsArray(value, "duplicates", field).map((duplicate, index) =>
+			parseSkillDiagnosticDuplicate(duplicate, `${field}.duplicates[${index}]`),
+		),
+	};
+}
+
+function parseResourceAnalysis(value: unknown, field: string): ResourceAnalysis {
+	if (!isRecord(value)) throw new Error(`${field} must be an object`);
+	const recommendation = value.recommendation;
+	if (!isRecord(recommendation)) throw new Error(`${field}.recommendation must be an object`);
+	const recommendationField = `${field}.recommendation`;
+	const preferredId = optionalSkillDiagnosticsString(recommendation, "preferredId", recommendationField);
+	return {
+		relationship: skillDiagnosticsLiteral(value.relationship, RESOURCE_RELATIONSHIPS, `${field}.relationship`),
+		evidence: requireSkillDiagnosticsArray(value, "evidence", field).map((entry, index) => {
+			const evidenceField = `${field}.evidence[${index}]`;
+			if (!isRecord(entry)) throw new Error(`${evidenceField} must be an object`);
+			return {
+				candidateId: requireSkillDiagnosticsString(entry, "candidateId", evidenceField),
+				file: requireSkillDiagnosticsString(entry, "file", evidenceField),
+				quote: requireSkillDiagnosticsString(entry, "quote", evidenceField),
+				explanation: requireSkillDiagnosticsString(entry, "explanation", evidenceField),
+			};
+		}),
+		differences: requireSkillDiagnosticsStrings(value, "differences", field),
+		recommendation: {
+			action: skillDiagnosticsLiteral(
+				recommendation.action,
+				RESOURCE_RECOMMENDATION_ACTIONS,
+				`${recommendationField}.action`,
+			),
+			...(preferredId !== undefined && { preferredId }),
+			reason: requireSkillDiagnosticsString(recommendation, "reason", recommendationField),
+		},
+		limitations: requireSkillDiagnosticsStrings(value, "limitations", field),
+	};
+}
+
+function parseSkillAnalysisCandidate(value: unknown, field: string): SkillAnalysisCandidate {
+	if (!isRecord(value)) throw new Error(`${field} must be an object`);
+	return {
+		id: requireSkillDiagnosticsId(value, "id", field),
+		name: requireSkillDiagnosticsString(value, "name", field),
+		filePath: requireSkillDiagnosticsString(value, "filePath", field),
+		root: requireSkillDiagnosticsString(value, "root", field),
+		fingerprint: requireSkillDiagnosticsString(value, "fingerprint", field),
+		complete: requireSkillDiagnosticsBoolean(value, "complete", field),
+		files: requireSkillDiagnosticsInteger(value, "files", field),
+		omissions: requireSkillDiagnosticsStrings(value, "omissions", field),
+	};
+}
+
+function parseSkillDiagnosticAnalysisRecord(value: unknown, field: string): SkillDiagnosticAnalysisRecord {
+	if (!isRecord(value)) throw new Error(`${field} must be an object`);
+	const error = optionalSkillDiagnosticsString(value, "error", field);
+	return {
+		id: requireSkillDiagnosticsId(value, "id", field),
+		name: requireSkillDiagnosticsString(value, "name", field),
+		status: skillDiagnosticsLiteral(value.status, SKILL_ANALYSIS_STATUSES, `${field}.status`),
+		model: requireSkillDiagnosticsString(value, "model", field),
+		bytes: requireSkillDiagnosticsInteger(value, "bytes", field),
+		candidates: requireSkillDiagnosticsArray(value, "candidates", field).map((candidate, index) =>
+			parseSkillAnalysisCandidate(candidate, `${field}.candidates[${index}]`),
+		),
+		disclosure: requireSkillDiagnosticsString(value, "disclosure", field),
+		createdAt: requireSkillDiagnosticsInteger(value, "createdAt", field),
+		...(value.result !== undefined && { result: parseResourceAnalysis(value.result, `${field}.result`) }),
+		...(error !== undefined && { error }),
+		applied: requireSkillDiagnosticsBoolean(value, "applied", field),
+	};
+}
+
+function parseSkillDiagnosticItem(value: unknown, field: string): SkillDiagnosticItem {
+	if (!isRecord(value)) throw new Error(`${field} must be an object`);
+	const unavailableReason = optionalSkillDiagnosticsString(value, "unavailableReason", field);
+	return {
+		name: requireSkillDiagnosticsString(value, "name", field),
+		issues: requireSkillDiagnosticsArray(value, "issues", field).map((issue, index) =>
+			skillDiagnosticsLiteral(issue, SKILL_DIAGNOSTIC_ISSUES, `${field}.issues[${index}]`),
+		),
+		skills: requireSkillDiagnosticsArray(value, "skills", field).map((entry, index) =>
+			parseSkillDiagnosticEntry(entry, `${field}.skills[${index}]`),
+		),
+		duplicates: requireSkillDiagnosticsArray(value, "duplicates", field).map((duplicate, index) =>
+			parseSkillDiagnosticDuplicate(duplicate, `${field}.duplicates[${index}]`),
+		),
+		...(value.reason !== undefined && {
+			reason: skillDiagnosticsLiteral(value.reason, SKILL_SELECTION_REASONS, `${field}.reason`),
+		}),
+		canAnalyze: requireSkillDiagnosticsBoolean(value, "canAnalyze", field),
+		...(unavailableReason !== undefined && { unavailableReason }),
+		...(value.analysis !== undefined && {
+			analysis: parseSkillDiagnosticAnalysisRecord(value.analysis, `${field}.analysis`),
+		}),
+		...(value.lastAnalysis !== undefined && {
+			lastAnalysis: parseSkillDiagnosticAnalysisRecord(value.lastAnalysis, `${field}.lastAnalysis`),
+		}),
+	};
+}
+
+function parseSkillDiagnosticsSnapshot(value: unknown): SkillDiagnosticsSnapshot {
+	if (!isRecord(value)) throw new Error("skill diagnostics snapshot must be an object");
+	if (typeof value.cwd !== "string") throw new Error("skill diagnostics snapshot.cwd must be a string");
+	if (typeof value.showStartupDiagnostics !== "boolean") {
+		throw new Error("skill diagnostics snapshot.showStartupDiagnostics must be a boolean");
+	}
+	if (!Array.isArray(value.diagnostics)) throw new Error("skill diagnostics snapshot.diagnostics must be an array");
+	// Servers before the per-skill panel send no items; omit the field rather than invent an empty list.
+	if (value.items !== undefined && !Array.isArray(value.items)) {
+		throw new Error("skill diagnostics snapshot.items must be an array");
+	}
+	return {
+		cwd: value.cwd,
+		showStartupDiagnostics: value.showStartupDiagnostics,
+		diagnostics: value.diagnostics.map((diagnostic, index) =>
+			parseSkillResolutionDiagnostic(diagnostic, `skill diagnostics snapshot.diagnostics[${index}]`),
+		),
+		...(value.items !== undefined && {
+			items: value.items.map((item, index) =>
+				parseSkillDiagnosticItem(item, `skill diagnostics snapshot.items[${index}]`),
+			),
+		}),
+	};
+}
 
 function isRpcResponse(value: unknown): value is RpcResponse {
 	if (!isRecord(value)) return false;
@@ -266,6 +523,11 @@ function isRpcBtwRecordFrame(value: unknown): value is RpcBtwRecordFrame {
 	return isRecord(value) && value.type === "btw_record" && isRecord(value.record);
 }
 
+function parseRpcSkillDiagnosticsUpdateFrame(value: unknown): RpcSkillDiagnosticsUpdateFrame | undefined {
+	if (!isRecord(value) || value.type !== "skill_diagnostics_update") return undefined;
+	return { type: "skill_diagnostics_update", data: parseSkillDiagnosticsSnapshot(value.data) };
+}
+
 function isRpcHostToolCallRequest(value: unknown): value is RpcHostToolCallRequest {
 	if (!isRecord(value)) return false;
 	return (
@@ -331,6 +593,7 @@ export class RpcClient {
 	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
 	#btwDeltaListeners = new Set<(frame: RpcBtwDeltaFrame) => void>();
 	#btwRecordListeners = new Set<(record: BtwHistoryRecord) => void>();
+	#skillDiagnosticsUpdateListeners = new Set<RpcSkillDiagnosticsUpdateListener>();
 	#promptResultListeners = new Set<RpcPromptResultListener>();
 	#sessionSettledListeners = new Set<RpcSessionSettledListener>();
 	#liveListeners = new Set<RpcLiveListener>();
@@ -645,6 +908,12 @@ export class RpcClient {
 		return () => this.#btwRecordListeners.delete(listener);
 	}
 
+	/** Subscribe to allowlisted skill-resolution snapshots from the RPC server. */
+	onSkillDiagnosticsUpdate(listener: RpcSkillDiagnosticsUpdateListener): () => void {
+		this.#skillDiagnosticsUpdateListeners.add(listener);
+		return () => this.#skillDiagnosticsUpdateListeners.delete(listener);
+	}
+
 	/** Subscribe to `prompt_result` frames: the terminal outcome of each prompt, correlated by request id. */
 	onPromptResult(listener: RpcPromptResultListener): () => void {
 		this.#promptResultListeners.add(listener);
@@ -804,7 +1073,56 @@ export class RpcClient {
 				typeof state.tokensPerSecond === "number" && Number.isFinite(state.tokensPerSecond)
 					? state.tokensPerSecond
 					: null,
+			skillDiagnostics:
+				state.skillDiagnostics === undefined ? undefined : parseSkillDiagnosticsSnapshot(state.skillDiagnostics),
 		};
+	}
+
+	/** Query skill-resolution details even when startup notices are disabled. */
+	async getSkillDiagnostics(): Promise<SkillDiagnosticsSnapshot> {
+		const response = await this.#send({ type: "get_skill_diagnostics" });
+		return parseSkillDiagnosticsSnapshot(this.#getData(response));
+	}
+
+	/** Persist the startup-notice preference and return its effective session value. */
+	async setSkillStartupDiagnostics(enabled: boolean): Promise<SkillDiagnosticsSnapshot> {
+		const response = await this.#send({ type: "set_skill_startup_diagnostics", enabled });
+		return parseSkillDiagnosticsSnapshot(this.#getData(response));
+	}
+
+	/**
+	 * Snapshot the comparable variants of one skill name and return the server-held record with its
+	 * consent disclosure. Nothing is sent to a model until {@link analyzeSkillDiagnostics}.
+	 * `model` must name one authenticated model exactly; omitted uses the default analysis model.
+	 */
+	async prepareSkillDiagnosticAnalysis(name: string, model?: string): Promise<SkillDiagnosticAnalysisRecord> {
+		const response = await this.#send({ type: "prepare_skill_diagnostic_analysis", name, model });
+		return parseSkillDiagnosticAnalysisRecord(this.#getData(response), "prepare_skill_diagnostic_analysis data");
+	}
+
+	/**
+	 * Start a prepared analysis. `consent` must be `true`: the disclosed files go to the disclosed model.
+	 * Resolves with the running record at once; progress and the result arrive through
+	 * {@link onSkillDiagnosticsUpdate}. Repeating the call for a running, complete or applied id replays its state.
+	 */
+	async analyzeSkillDiagnostics(analysisId: string, consent: boolean): Promise<SkillDiagnosticAnalysisRecord> {
+		const response = await this.#send({ type: "analyze_skill_diagnostics", analysisId, consent });
+		return parseSkillDiagnosticAnalysisRecord(this.#getData(response), "analyze_skill_diagnostics data");
+	}
+
+	/** Abort one analysis by id and return its record. */
+	async cancelSkillDiagnosticAnalysis(analysisId: string): Promise<SkillDiagnosticAnalysisRecord> {
+		const response = await this.#send({ type: "cancel_skill_diagnostic_analysis", analysisId });
+		return parseSkillDiagnosticAnalysisRecord(this.#getData(response), "cancel_skill_diagnostic_analysis data");
+	}
+
+	/**
+	 * Apply a complete `prefer` result. `confirmed` must be `true` and is separate from analysis consent:
+	 * applying saves a content-bound exclusion of the other variants in the user's global settings.
+	 */
+	async applySkillDiagnosticAnalysis(analysisId: string, confirmed: boolean): Promise<SkillDiagnosticAnalysisRecord> {
+		const response = await this.#send({ type: "apply_skill_diagnostic_analysis", analysisId, confirmed });
+		return parseSkillDiagnosticAnalysisRecord(this.#getData(response), "apply_skill_diagnostic_analysis data");
 	}
 
 	/**
@@ -1525,6 +1843,17 @@ export class RpcClient {
 
 		if (isRpcBtwRecordFrame(data)) {
 			for (const listener of this.#btwRecordListeners) listener(data.record);
+			return;
+		}
+
+		if (isRecord(data) && data.type === "skill_diagnostics_update") {
+			let frame: RpcSkillDiagnosticsUpdateFrame;
+			try {
+				frame = parseRpcSkillDiagnosticsUpdateFrame(data)!;
+			} catch {
+				return;
+			}
+			for (const listener of this.#skillDiagnosticsUpdateListeners) listener(frame.data);
 			return;
 		}
 

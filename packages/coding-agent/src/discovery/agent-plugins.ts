@@ -30,8 +30,8 @@ import {
 	validateAgentSkillFrontmatter,
 } from "./agent-plugin-format";
 import { resolveContainedPath } from "./contained-path";
-import { compareSkillOrder, createSourceMeta, listClaudePluginRoots } from "./helpers";
-import { listOmpExtensionRoots } from "./omp-extension-roots";
+import { compareSkillOrder, createSourceMeta, listClaudePluginRoots, readPluginProvenance } from "./helpers";
+import { activeResourceExclusions, listOmpExtensionRoots } from "./omp-extension-roots";
 
 const PROVIDER_ID = "agent-plugins";
 const DISPLAY_NAME = "Agent Plugins";
@@ -59,7 +59,7 @@ interface CandidateRoot {
  */
 async function listCandidateRoots(ctx: LoadContext): Promise<CandidateRoot[]> {
 	const [marketplace, extensionRoots] = await Promise.all([
-		listClaudePluginRoots(ctx.home, ctx.cwd),
+		listClaudePluginRoots(ctx.home, ctx.cwd, activeResourceExclusions(ctx.extensionRoots)),
 		listOmpExtensionRoots(ctx),
 	]);
 	const seen = new Set<string>();
@@ -109,6 +109,7 @@ async function scanStandardSkills(
 ): Promise<LoadResult<Skill>> {
 	const items: Skill[] = [];
 	const warnings: string[] = [];
+	const provenance = await readPluginProvenance(realRoot);
 
 	// §4.1: resolve the fixed location and prove containment BEFORE listing it,
 	// so a symlinked skills/ can never lead the scan outside the package.
@@ -193,7 +194,7 @@ async function scanStandardSkills(
 				// The manifest name, never a path segment: registry installs live
 				// under `<marketplace>/<plugin>/<version>/`, so path-derived
 				// collision namespaces would change on every version bump.
-				_source: createSourceMeta(PROVIDER_ID, skillPath, level, undefined, pluginName),
+				_source: createSourceMeta(PROVIDER_ID, skillPath, level, undefined, pluginName, provenance),
 			});
 		}),
 	);

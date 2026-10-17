@@ -23,6 +23,8 @@ import { type Hook, hookCapability } from "../../capability/hook";
 import { isServiceTierFamily, isServiceTierForFamily } from "../../config/service-tier";
 import { loadCapability } from "../../discovery";
 import { getExtensionNameFromPath } from "../../discovery/helpers";
+import { activeResourceExclusions } from "../../discovery/omp-extension-roots";
+import { dropExcludedPaths, type ResourceExclusions } from "../../discovery/resource-exclusions";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
@@ -567,6 +569,11 @@ export interface DiscoverExtensionPathOptions {
 	ambient?: boolean;
 	/** Include ambient hook factories. Disable for read-only catalog commands. */
 	includeAmbientHooks?: boolean;
+	/**
+	 * Reviewed-resource exclusions applied to every discovered path, explicit ones included. Defaults
+	 * to the invocation scope, then the user's global settings; pass `{}` to see every candidate.
+	 */
+	resourceExclusions?: ResourceExclusions;
 }
 
 export async function discoverExtensionPaths(
@@ -657,7 +664,13 @@ export async function discoverExtensionPaths(
 		addPath(resolved);
 	}
 
-	return allPaths;
+	// Explicit paths still honor the user's content-bound decision; selecting a
+	// path is not permission to silently undo that separately confirmed choice.
+	return dropExcludedPaths(
+		allPaths,
+		extPath => resolvePath(extPath, cwd),
+		options.resourceExclusions ?? activeResourceExclusions(),
+	);
 }
 
 /**
