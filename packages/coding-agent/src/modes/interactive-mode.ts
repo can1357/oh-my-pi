@@ -57,6 +57,7 @@ import {
 	adjustHsv,
 	formatDuration,
 	formatNumber,
+	getActiveProfile,
 	getProjectDir,
 	isEnoent,
 	logger,
@@ -7234,7 +7235,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
-		const cmd = [...resolveCliEntryCmd(), ...restartArgv(process.argv.slice(2), this.#resumableSessionId())];
+		// Pass the profile explicitly: native exec does not inherit Bun's process.env updates.
+		const activeProfile = getActiveProfile();
+		const cmd = [
+			...resolveCliEntryCmd(),
+			...restartArgv(
+				process.argv.slice(2),
+				this.#resumableSessionId(),
+				activeProfile ? { "--profile": true } : undefined,
+			),
+		];
+		if (activeProfile) cmd.push("--profile", activeProfile);
 		await postmortem.cleanup();
 		await postmortem.drainStdout();
 		if (process.platform !== "win32") {
