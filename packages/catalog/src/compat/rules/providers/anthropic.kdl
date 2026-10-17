@@ -92,6 +92,9 @@ provider "anthropic" {
 	// https://platform.claude.com/docs/en/build-with-claude/vision
 	image-count-budget 90
 	official-image-count-budget 600
+	// Subscription OAuth requests may continue on the offered low-priority lane
+	// after the 5-hour wall. Runtime still requires /slow on and account eligibility.
+	subscription-slow-mode #true
 	class "anthropic" {
 		revision "<4.6" {
 			official-image-count-budget 100
