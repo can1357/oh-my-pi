@@ -86,8 +86,16 @@ const KEYWORDS: Record<string, true> = {
 /** Keywords that cannot be raw identifiers. */
 const RESERVED: Record<string, true> = { self: true, super: true, crate: true, Self: true };
 
+/**
+ * An open-ended range (`auto:-max`, upper bound only) reads as "to max": without this the
+ * dash is dropped as punctuation and the value collides with `auto:max`.
+ */
+function openRange(text: string): string {
+	return text.replace(/:-(?=[A-Za-z0-9])/g, ":to ");
+}
+
 function words(text: string): string[] {
-	return text
+	return openRange(text)
 		.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
 		.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
 		.split(/[^A-Za-z0-9]+/)

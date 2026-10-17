@@ -360,6 +360,24 @@ describe("ModelHub", () => {
 			expect(onAssign.mock.calls[0]?.[4]).toBe("global");
 		});
 
+		test("confirming a ranged auto role's preselected chip keeps its range", () => {
+			const model = getBundledModel("openai", "gpt-5.5");
+			if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
+			const settings = Settings.isolated({
+				modelRoles: { default: `${model.provider}/${model.id}:auto:medium-xhigh` },
+			});
+			const { hub, onAssign } = createHub({ models: [model], scoped: true, settings });
+			installTestTheme();
+
+			hub.handleInput(UP); // All models → Roles.
+			hub.handleInput("\n"); // Dive into role rows on DEFAULT.
+			hub.handleInput("t");
+			const strip = footerLine(hub.render(220));
+			expect(strip).toContain("auto");
+			hub.handleInput("\n"); // Confirm the preselected (stored) level.
+			expect(onAssign).not.toHaveBeenCalled();
+		});
+
 		test("x clears a configured role back to auto-selection", () => {
 			const model = makeModel("test", "worker-model");
 			const settings = Settings.isolated({
@@ -1422,6 +1440,20 @@ describe("ModelHub", () => {
 			hub.handleInput("\n");
 			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", [selector]);
 			expect(normalize(hub.render(220))).not.toContain(`${selector}:off`);
+		});
+
+		test("t on a ranged auto fallback entry keeps its range when confirmed", () => {
+			const model = getBundledModel("openai", "gpt-5.5");
+			if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
+			const selector = `${model.provider}/${model.id}:auto:medium-xhigh`;
+			const settings = Settings.isolated({ "retry.fallbackChains": { default: [selector] } });
+			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default → its fallback entry
+			hub.handleInput("t");
+			hub.handleInput("\n"); // Confirm the preselected (stored) level.
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", [selector]);
 		});
 
 		test("t on a routed fallback entry preserves @upstream when setting effort", () => {

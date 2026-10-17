@@ -213,4 +213,28 @@ describe("advisor auto thinking level", () => {
 		expect(await review("cooldown expired")).toBe(`${model.id}:${Effort.High}`);
 		expect(s.getAdvisorAgent()).toBe(advisor);
 	});
+
+	it("resolves an auto range on the advisor model's own ladder", () => {
+		// `high,max` ladder: `auto:medium-xhigh` admits only `high` on it.
+		const gapped = getBundledModel("baseten", "zai-org/GLM-5.2");
+		if (!gapped) throw new Error("Expected bundled baseten/zai-org/GLM-5.2 to exist");
+		authStorage.keys.setRuntime("baseten", "test-key");
+		const s = newSession();
+		s.settings.setModelRole("advisor", `${gapped.provider}/${gapped.id}:auto:medium-xhigh`);
+		s.setThinkingLevel(Effort.XHigh);
+		expect(s.setAdvisorEnabled(true)).toBe(true);
+		expect(s.getAdvisorAgent()?.state.thinkingLevel).toBe(Effort.High);
+	});
+
+	it("gives an auto range with no tier on the advisor model's ladder no effort", () => {
+		// `high,max` ladder: `auto:low-medium` admits nothing; snapping up to `high` would break the ceiling.
+		const gapped = getBundledModel("baseten", "zai-org/GLM-5.2");
+		if (!gapped) throw new Error("Expected bundled baseten/zai-org/GLM-5.2 to exist");
+		authStorage.keys.setRuntime("baseten", "test-key");
+		const s = newSession();
+		s.settings.setModelRole("advisor", `${gapped.provider}/${gapped.id}:auto:low-medium`);
+		s.setThinkingLevel(Effort.Medium);
+		expect(s.setAdvisorEnabled(true)).toBe(true);
+		expect(s.getAdvisorAgent()?.state.thinkingLevel).toBeUndefined();
+	});
 });

@@ -6,6 +6,7 @@ import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { loadAdvisorTranscriptCosts } from "@oh-my-pi/pi-coding-agent/advisor/transcript-recorder";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -212,6 +213,13 @@ describe("AgentSession advisor toggle", () => {
 
 		expect(session.getAdvisorAgent()?.state.model.provider).toBe(replacementModel.provider);
 		expect(session.getAdvisorAgent()?.state.model.id).toBe(replacementModel.id);
+	});
+
+	it("honors auto:<floor> thinking selector for advisor role", async () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}:auto:high`);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		// Primary agent defaults to medium/none, but advisor has floor high
+		expect(session.getAdvisorAgent()?.state.thinkingLevel).toBe(Effort.High);
 	});
 
 	it("refreshes the live advisor when only the advisor route changes", async () => {

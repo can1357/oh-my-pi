@@ -14,6 +14,7 @@
  */
 import type { AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { type ChoiceQuestion, Effort, judgeQuestions, type Model, renderQuestion } from "@oh-my-pi/pi-ai";
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -22,7 +23,7 @@ import questionFile from "../prompts/judge/auto-thinking.json" with { type: "jso
 import { clampAutoThinkingEffort } from "@oh-my-pi/pi-tui/thinking";
 import { preprocessTinyMessage } from "../tiny/message-preproc";
 
-import { cfgProvidersAutoThinkingMaxEffort } from "../session/settings";
+import { cfgProvidersAutoThinkingMaxEffort, cfgProvidersAutoThinkingMinEffort } from "../session/settings";
 
 type Level = "low" | "medium" | "high" | "xhigh" | "max";
 type Bucket = "trivial" | "moderate" | "hard";
@@ -96,16 +97,29 @@ export interface ClassifyDifficultyDeps {
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 	onUsage?: (usage: JudgmentUsage) => void;
 	telemetry?: AgentTelemetryConfig;
+	minEffort?: Effort;
+	/** Selector ceiling from `auto:<floor>-<ceiling>`; replaces `providers.autoThinkingMaxEffort` for this turn. */
+	maxEffort?: Effort;
 }
 
 /**
- * Highest effort this turn's classification may resolve to: the configured
- * ceiling, further limited by what the target model actually exposes. The
- * default keeps `auto` one tier below the top, so only an explicit
- * `ultrathink` reaches {@link Effort.Max}.
+ * Lowest effort this turn's classification may resolve to: an explicit floor
+ * (e.g. from an `auto:medium` selector) or the configured minimum effort setting.
+ */
+function autoEffortFloor(deps: ClassifyDifficultyDeps): Effort {
+	return deps.minEffort ?? cfgProvidersAutoThinkingMinEffort.get(deps.settings);
+}
+
+/**
+ * Highest effort this turn's classification may resolve to: the selector's range
+ * ceiling when it has one, otherwise the configured ceiling, further limited by
+ * what the target model actually exposes. The default keeps `auto` one tier below
+ * the top, so only an explicit `ultrathink` or an `auto:<floor>-max` range reaches
+ * {@link Effort.Max}.
  */
 function autoEffortCeiling(deps: ClassifyDifficultyDeps): Effort {
-	if (cfgProvidersAutoThinkingMaxEffort.get(deps.settings) !== Effort.Max) return Effort.XHigh;
+	const configured = deps.maxEffort ?? cfgProvidersAutoThinkingMaxEffort.get(deps.settings);
+	if (configured !== Effort.Max) return deps.maxEffort ?? Effort.XHigh;
 	return getSupportedEfforts(deps.model).includes(Effort.Max) ? Effort.Max : Effort.XHigh;
 }
 
@@ -139,18 +153,24 @@ export async function classifyDifficulty(
 	const classified = await judge.withCandidate(async (candidate, kind) => {
 		// The 3-bucket local question cannot select `max`, so its ceiling stays at
 		// XHigh whatever the setting says — otherwise a sparse ladder would snap its
-		// `hard` bucket up to a tier it never chose.
+		// `hard` bucket up to a tier it never chose. A lower range ceiling still applies.
 		if (kind === "local") {
 			const { answers } = await candidate.judge({ state, questions: { bucket: questions.bucket } }, options);
-			return { effort: BUCKET_EFFORT[answers.bucket.choice], ceiling: Effort.XHigh };
+			const ceiling =
+				deps.maxEffort !== undefined &&
+				THINKING_EFFORTS.indexOf(deps.maxEffort) < THINKING_EFFORTS.indexOf(Effort.XHigh)
+					? deps.maxEffort
+					: Effort.XHigh;
+			return { effort: BUCKET_EFFORT[answers.bucket.choice], ceiling };
 		}
 		const ceiling = autoEffortCeiling(deps);
 		const level = ceiling === Effort.Max ? questions.levelWithMax : questions.level;
 		const { answers } = await candidate.judge({ state, questions: { level } }, options);
 		return { effort: LEVEL_EFFORT[answers.level.choice], ceiling };
 	}, options);
-	// The successful branch's ceiling goes into the clamp itself: capping the
+	// The successful branch's ceiling and floor go into the clamp itself: capping the
 	// request alone is not enough, because a sparse ladder snaps an excluded
 	// request back up.
-	return clampAutoThinkingEffort(deps.model, classified.effort, classified.ceiling);
+	const floor = autoEffortFloor(deps);
+	return clampAutoThinkingEffort(deps.model, classified.effort, classified.ceiling, floor);
 }

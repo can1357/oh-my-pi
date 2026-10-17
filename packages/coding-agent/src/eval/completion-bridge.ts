@@ -41,8 +41,11 @@ import {
 	resolveRetryFallbackChainKey,
 } from "../session/retry-fallback-chains";
 import {
-	AUTO_THINKING,
+	type AutoThinkingLevel,
+	clampAutoThinkingEffort,
+	isAutoThinking,
 	type ConfiguredThinkingLevel,
+	parseAutoThinkingBounds,
 	shouldDisableReasoning,
 	toReasoningEffort,
 } from "@oh-my-pi/pi-tui/thinking";
@@ -139,7 +142,35 @@ interface CompletionCandidate {
 	disableReasoning: boolean;
 }
 
+/**
+ * Reasoning for one candidate. An `auto:<floor>[-<ceiling>]` selector keeps the
+ * tier default inside its bounds on the candidate's own ladder; a ladder with no
+ * tier inside them gets no effort, as the primary session gives it no auto level.
+ */
 function reasoningForCandidate(
+	tier: CompletionTier,
+	model: Model<Api>,
+	level?: ConfiguredThinkingLevel,
+	parent?: Pick<CompletionCandidate, "reasoning" | "disableReasoning">,
+): Pick<CompletionCandidate, "reasoning" | "disableReasoning"> {
+	const resolved = unboundedReasoningForCandidate(tier, model, level, parent);
+	// completion() has no per-prompt classifier, but an `auto:<floor>[-<ceiling>]`
+	// selector's bounds are still the operator's limits: keep the default inside them.
+	const bounds = parseAutoThinkingBounds(level);
+	if (!bounds || resolved.disableReasoning || resolved.reasoning === undefined) return resolved;
+	return {
+		// A ceiling-only selector bounds from above only.
+		reasoning: clampAutoThinkingEffort(
+			model,
+			resolved.reasoning,
+			bounds.ceiling ?? Effort.Max,
+			bounds.floor ?? Effort.Minimal,
+		),
+		disableReasoning: false,
+	};
+}
+
+function unboundedReasoningForCandidate(
 	tier: CompletionTier,
 	model: Model<Api>,
 	level?: ConfiguredThinkingLevel,
@@ -147,7 +178,7 @@ function reasoningForCandidate(
 ): Pick<CompletionCandidate, "reasoning" | "disableReasoning"> {
 	// "auto" is a session-level selector; completion() has no per-prompt
 	// classifier, so it follows the tier default just like an omitted suffix.
-	const normalizedLevel = level === AUTO_THINKING ? undefined : level;
+	const normalizedLevel = isAutoThinking(level) ? undefined : level;
 	if (shouldDisableReasoning(normalizedLevel)) return { reasoning: undefined, disableReasoning: true };
 	const explicit = toReasoningEffort(normalizedLevel);
 	if (explicit !== undefined) {
@@ -205,6 +236,7 @@ function appendFallbackCandidates(
 	selector: string,
 	model: Model<Api>,
 	parent: Pick<CompletionCandidate, "reasoning" | "disableReasoning"> | undefined,
+	inheritedAuto: AutoThinkingLevel | undefined,
 	roleHint: string | undefined,
 	seen: Set<string>,
 	expanded: Set<string>,
@@ -223,12 +255,16 @@ function appendFallbackCandidates(
 		const resolved = resolveModelOverride([entry.raw], deps.modelRegistry, deps.settings);
 		const candidate = resolved.model;
 		if (!candidate || deps.disabledProviders.has(candidate.provider)) continue;
-		const reasoning = reasoningForCandidate(deps.tier, candidate, entry.thinkingLevel, parent);
+		// An entry's own suffix wins; a bare entry inherits the bounds its parent ran under.
+		const bare = entry.autoThinkingLevel === undefined && entry.thinkingLevel === undefined;
+		const level = entry.autoThinkingLevel ?? entry.thinkingLevel ?? (bare ? inheritedAuto : undefined);
+		const reasoning = reasoningForCandidate(deps.tier, candidate, level, parent);
+		const childAuto = isAutoThinking(level) ? level : undefined;
 		const identity = candidateIdentity(candidate, reasoning);
 		if (seen.has(identity)) continue;
 		seen.add(identity);
 		out.push({ selector: entry.raw, model: candidate, ...reasoning });
-		appendFallbackCandidates(deps, entry.raw, candidate, reasoning, undefined, seen, expanded, out);
+		appendFallbackCandidates(deps, entry.raw, candidate, reasoning, childAuto, undefined, seen, expanded, out);
 	}
 }
 
@@ -273,17 +309,23 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 			: resolve(TIER_TO_PATTERN[tier]);
 	if (!primary) return [];
 
+	const primaryReasoning = reasoningForCandidate(tier, primary.model, primary.configuredEffort);
 	const candidates: CompletionCandidate[] = [
-		{
-			selector: primary.selector,
-			model: primary.model,
-			...reasoningForCandidate(tier, primary.model, primary.configuredEffort),
-		},
+		{ selector: primary.selector, model: primary.model, ...primaryReasoning },
 	];
 	const retry = cfgRetry.get(session.settings);
 	if (!retry.enabled || !retry.modelFallback) return candidates;
-	const primaryLevel = primary.configuredEffort === AUTO_THINKING ? undefined : primary.configuredEffort;
-	const inheritPrimary = shouldDisableReasoning(primaryLevel) || toReasoningEffort(primaryLevel) !== undefined;
+	// A bounded auto primary (`auto:<floor>[-<ceiling>]`) behaves like an explicit effort for
+	// its fallbacks: bare entries inherit its effective effort and stay inside its bounds.
+	const primaryAuto =
+		isAutoThinking(primary.configuredEffort) && parseAutoThinkingBounds(primary.configuredEffort)
+			? primary.configuredEffort
+			: undefined;
+	const primaryLevel = isAutoThinking(primary.configuredEffort) ? undefined : primary.configuredEffort;
+	const inheritPrimary =
+		primaryAuto !== undefined ||
+		shouldDisableReasoning(primaryLevel) ||
+		toReasoningEffort(primaryLevel) !== undefined;
 
 	appendFallbackCandidates(
 		{
@@ -299,9 +341,10 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 		},
 		primary.selector,
 		primary.model,
-		inheritPrimary ? candidates[0] : undefined,
+		inheritPrimary ? primaryReasoning : undefined,
+		primaryAuto,
 		tier,
-		new Set([candidateIdentity(primary.model, candidates[0])]),
+		new Set([candidateIdentity(primary.model, primaryReasoning)]),
 		new Set(),
 		candidates,
 	);

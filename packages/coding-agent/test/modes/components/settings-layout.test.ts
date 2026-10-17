@@ -7,7 +7,7 @@ import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { initTheme, setTheme } from "@oh-my-pi/pi-tui/theme";
-import { cfgRetryUsageAwareFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgDefaultThinkingLevel, cfgRetryUsageAwareFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 
 beforeAll(async () => {
@@ -127,5 +127,41 @@ describe("settings layout", () => {
 		const nextRendered = selector.render(80).join("\n");
 		expect(nextRendered).toContain("Claude Code");
 		expect(nextRendered).toContain("Preview:");
+	});
+
+	it("keeps a stored auto range when its preselected thinking level is confirmed", async () => {
+		await setTheme("dark");
+		cfgDefaultThinkingLevel.set(Settings.instance, "auto:medium-xhigh");
+		const changes: [string, unknown][] = [];
+		const selector = new SettingsSelectorComponent(
+			{
+				availableThinkingLevels: ["low", "medium", "high"] as never,
+				thinkingLevel: undefined,
+				availableThemes: ["dark", "light"],
+				providers: [],
+				settings: createSettingsHost(),
+				plugins: createPluginSettingsHost(process.cwd()),
+			},
+			{
+				onChange: (path, value) => void changes.push([path, value]),
+				onCancel: () => {},
+			},
+		);
+
+		for (const ch of "thinking level") selector.handleInput(ch);
+		const cursorRow = () =>
+			Bun.stripANSI(selector.render(100).join("\n"))
+				.split("\n")
+				.find(line => line.includes("❯")) ?? "";
+		for (let step = 0; step < 10 && !/❯ Thinking Level\s/.test(cursorRow()); step++) selector.handleInput("\x1b[A");
+		expect(cursorRow()).toMatch(/❯ Thinking Level\s/);
+		selector.handleInput("\n"); // Open the submenu.
+		expect(Bun.stripANSI(selector.render(100).join("\n"))).toContain("auto:medium-xhigh");
+		selector.handleInput("\n"); // Confirm the preselected entry without moving.
+
+		expect(cfgDefaultThinkingLevel.get(Settings.instance)).toBe("auto:medium-xhigh");
+		expect(changes.filter(([path]) => path === "defaultThinkingLevel").map(([, value]) => value)).not.toContain(
+			"auto",
+		);
 	});
 });

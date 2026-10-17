@@ -3,6 +3,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ModelControls, type ModelControlsHost } from "@oh-my-pi/pi-coding-agent/session/model-controls";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import {
@@ -43,6 +44,8 @@ function harness(options: { reasoning?: boolean; efforts?: readonly Effort[]; ce
 	const controls = new ModelControls(
 		{
 			agent: { setThinkingLevel: () => {}, setDisableReasoning: () => {} },
+			// Entering `auto` reads `providers.autoThinkingMinEffort` for the default floor.
+			settings: Settings.isolated(),
 			model: () => model,
 			promptGeneration: () => 0,
 			sessionManager: { appendThinkingLevelChange: () => Promise.resolve() },
@@ -121,6 +124,18 @@ describe("/effort slash command", () => {
 		expect(h.configChanges()).toBe(0);
 		const cycled = Array.from({ length: 4 }, () => h.controls.cycleThinkingLevel());
 		expect(cycled).toEqual([ThinkingLevel.Off, AUTO_THINKING, ThinkingLevel.Low, ThinkingLevel.Off]);
+	});
+
+	it("accepts auto floors and ranges wherever plain auto is offered", async () => {
+		const h = harness();
+		await run(h, "auto:medium-xhigh");
+		expect(h.level()).toBe("auto:medium-xhigh");
+		await run(h, "auto:high");
+		expect(h.level()).toBe("auto:high");
+		// A malformed range is still an unknown level, not a silent `auto`.
+		await run(h, "auto:xhigh-low");
+		expect(h.level()).toBe("auto:high");
+		expect(h.outputs.at(-1)).toContain("Unknown thinking level: auto:xhigh-low");
 	});
 
 	it("offers exactly the selectors the cycle walks", async () => {

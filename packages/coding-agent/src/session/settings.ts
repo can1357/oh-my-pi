@@ -23,9 +23,15 @@ import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } fr
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
-import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
+import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
-import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
+import {
+	AUTO_THINKING,
+	AUTO_THINKING_FLOORS,
+	AUTO_THINKING_LEVELS,
+	getConfiguredThinkingLevelMetadata,
+	getThinkingLevelMetadata,
+} from "@oh-my-pi/pi-tui/thinking";
 
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
@@ -196,7 +202,7 @@ export const cfgImagesDescribeForTextModels = register({
 export const cfgDefaultThinkingLevel = register({
 	id: "defaultThinkingLevel",
 	type: "enum",
-	values: [...THINKING_EFFORTS, AUTO_THINKING],
+	values: [...THINKING_EFFORTS, ...AUTO_THINKING_LEVELS],
 	default: "high",
 	ui: {
 		tab: "model",
@@ -1045,6 +1051,32 @@ export const cfgProvidersAutoThinkingMaxEffort = register({
 		options: [
 			{ value: "xhigh", label: "xhigh", description: "Classifier stops at xhigh (default)" },
 			{ value: "max", label: "max", description: "Classifier may resolve max where the model supports it" },
+		],
+	},
+});
+
+export const cfgProvidersAutoThinkingMinEffort = register({
+	id: "providers.autoThinkingMinEffort",
+	type: "enum",
+	values: AUTO_THINKING_FLOORS,
+	default: Effort.Low,
+	ui: {
+		tab: "model",
+		group: "Thinking",
+		label: "Auto Thinking Floor",
+		description:
+			"Lowest effort the `auto` classifier may resolve. Defaults to `low`. Can be overridden per selector via `auto:<level>` (e.g. `auto:medium`).",
+		condition: "autoThinkingActive",
+		options: [
+			{
+				value: Effort.Minimal,
+				label: "minimal",
+				description: "Allow classifier to resolve minimal on models that support it",
+			},
+			{ value: Effort.Low, label: "low", description: "Classifier stops at low (default)" },
+			{ value: Effort.Medium, label: "medium", description: "Classifier will not resolve below medium" },
+			{ value: Effort.High, label: "high", description: "Classifier will not resolve below high" },
+			{ value: Effort.XHigh, label: "xhigh", description: "Classifier will not resolve below xhigh" },
 		],
 	},
 });

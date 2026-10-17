@@ -46,7 +46,13 @@ import type {
 	ModelRoleLookup,
 	ResolvedModelRoleValue,
 } from "./model-browser";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../thinking";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
+	isAutoThinking,
+	withStoredAutoSelector,
+} from "../thinking";
 import { sanitizeDisplayWarning, thinkingLevelGlyph } from "../render/render-utils";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
@@ -1291,7 +1297,8 @@ export class ModelHubComponent implements Component {
 			level = current.thinkingLevel;
 		}
 		const supported = this.#thinkingOptionsFor(item.model);
-		if (!supported.includes(level)) level = ThinkingLevel.Inherit;
+		if (!supported.some(opt => opt === level || (isAutoThinking(opt) && isAutoThinking(level))))
+			level = ThinkingLevel.Inherit;
 		const result = this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
 		this.#finishAssignment(result, () => {
 			this.#refreshAfterMutation();
@@ -1424,8 +1431,9 @@ export class ModelHubComponent implements Component {
 			(this.#settings.modelRoleStorage === "project" && scope !== undefined
 				? this.#thinkingLevelForScope(role, scope)
 				: (this.#roles[role]?.thinkingLevel ?? ThinkingLevel.Inherit));
-		const chips = this.#thinkingChips(options);
-		const preselect = options.indexOf(current);
+		const levels = withStoredAutoSelector(options, current);
+		const chips = this.#thinkingChips(levels);
+		const preselect = levels.indexOf(current);
 		this.#strip = {
 			kind: "thinking",
 			item,
@@ -1528,19 +1536,18 @@ export class ModelHubComponent implements Component {
 		const resolved = this.#resolveFallbackEntry(row.role, row.chainIndex);
 		if (!resolved) return;
 		const { item } = resolved;
-		// No `auto` chip: a hand-written `:auto` suffix collapses to inherit at
-		// apply time, so offering it would promise per-prompt classification the
-		// fallback never performs. A primary running `auto` is inherited anyway
-		// through the bare form.
-		const options: ConfiguredThinkingLevel[] = [
-			ThinkingLevel.Inherit,
-			ThinkingLevel.Off,
-			...getSupportedEfforts(item.model),
-		];
+		// No plain `auto` chip: a bare `:auto` suffix runs as inherit on a fallback,
+		// so offering it would promise per-prompt classification the fallback never
+		// performs. A bounded `auto:<floor>[-<ceiling>]` entry does bound the
+		// fallback's effort, so it stays on the strip and confirming it keeps it.
 		const current =
 			resolved.thinkingLevel === undefined || resolved.thinkingLevel === AUTO_THINKING
 				? ThinkingLevel.Inherit
 				: resolved.thinkingLevel;
+		const options = withStoredAutoSelector(
+			[ThinkingLevel.Inherit, ThinkingLevel.Off, ...getSupportedEfforts(item.model)],
+			current,
+		);
 		const chips = this.#thinkingChips(options);
 		this.#strip = {
 			kind: "thinking",

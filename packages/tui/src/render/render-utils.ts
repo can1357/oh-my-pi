@@ -7,6 +7,7 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
+import { type ConfiguredThinkingLevel, isAutoThinking } from "../thinking-levels";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import { expandWindowsLongPath, getWindowsShortPath } from "@oh-my-pi/pi-natives/path";
@@ -21,8 +22,7 @@ import { Hasher } from "./utils";
 export { Ellipsis } from "@oh-my-pi/pi-natives";
 export { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "../utils";
 
-/** A thinking selector configured as a concrete level or automatic selection. */
-export type ConfiguredThinkingLevel = ThinkingLevel | "auto";
+export type { ConfiguredThinkingLevel } from "../thinking-levels";
 
 /**
  * Normalize stray carriage returns in model-authored display text. Some models
@@ -143,7 +143,7 @@ export function isFeedModelBadgeEnabled(): boolean {
 export function thinkingLevelGlyph(level: ConfiguredThinkingLevel, uiTheme: Theme): string {
 	if (level === ThinkingLevel.Inherit) return "";
 	if (level === ThinkingLevel.Off) return uiTheme.status.disabled;
-	const symbol = uiTheme.thinking[level === "auto" ? "autoPending" : level];
+	const symbol = isAutoThinking(level) ? uiTheme.thinking.autoPending : uiTheme.thinking[level];
 	if (typeof symbol !== "string") return "";
 	const space = symbol.indexOf(" ");
 	return space < 0 ? symbol : symbol.slice(0, space);

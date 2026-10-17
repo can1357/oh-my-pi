@@ -8,9 +8,16 @@
  * persisted messages missing newer fields still decode. The conformance test
  * pins the discriminator sets.
  */
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
+import { AUTO_THINKING_LEVELS } from "@oh-my-pi/pi-tui/thinking-levels";
 import { doc, type WireDefs } from "./dsl";
 
 const JSON_OBJECT = "Record<string, unknown>";
+
+/** Built from the runtime lists so the wire enum cannot advertise a selector the session rejects. */
+const CONFIGURED_THINKING_LEVEL_UNION = [...AUTO_THINKING_LEVELS, "inherit", "off", ...THINKING_EFFORTS]
+	.map(level => `'${level}'`)
+	.join(" | ");
 
 /** Open records: transcript content, messages, usage, and assistant streaming events. */
 export const messageDefs = {
@@ -272,7 +279,7 @@ export const modelDefs = {
 		"Thinking selector; `inherit` defers to a higher-level selector.",
 	),
 	ConfiguredThinkingLevel: doc(
-		"'auto' | 'inherit' | 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'",
+		CONFIGURED_THINKING_LEVEL_UNION,
 		"User-configured thinking selector, including automatic selection.",
 	),
 	ModelCost: doc(

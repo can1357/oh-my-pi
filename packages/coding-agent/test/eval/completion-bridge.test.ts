@@ -628,6 +628,88 @@ describe("runEvalCompletion", () => {
 		]);
 	});
 
+	it("keeps the tier's default effort inside an auto range on the selector", async () => {
+		const model = makeReasoningModel("slow-range");
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		// The slow tier defaults to high (see above); the range caps it.
+		await runEvalCompletionAndWait(
+			{ prompt: "q", model: "slow" },
+			{
+				session: makeSession({
+					available: [SMOL, DEFAULT, model],
+					roles: { slow: "p/slow-range:auto:low-medium" },
+				}),
+			},
+		);
+
+		const opts = spy.mock.calls[0]?.[2] as { reasoning?: unknown };
+		expect(opts.reasoning).toBe(Effort.Medium);
+	});
+
+	it("keeps a bare fallback inside the primary's auto range", async () => {
+		const primary = makeReasoningModel("slow-range-primary");
+		const fallback = makeReasoningModel("slow-range-fallback");
+		const session = makeSession({
+			available: [SMOL, DEFAULT, primary, fallback],
+			roles: { slow: "p/slow-range-primary:auto:low-medium" },
+		});
+		cfgRetryFallbackChains.set(session.settings, { slow: ["p/slow-range-fallback"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "primary down" }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[2] as { reasoning?: unknown }).reasoning)).toEqual([
+			Effort.Medium,
+			Effort.Medium,
+		]);
+	});
+
+	it("applies a fallback entry's own auto range", async () => {
+		const primary = makeReasoningModel("slow-max-primary");
+		const fallback = makeReasoningModel("slow-ranged-fallback");
+		const session = makeSession({
+			available: [SMOL, DEFAULT, primary, fallback],
+			roles: { slow: "p/slow-max-primary:max" },
+		});
+		cfgRetryFallbackChains.set(session.settings, { slow: ["p/slow-ranged-fallback:auto:low-medium"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "primary down" }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[2] as { reasoning?: unknown }).reasoning)).toEqual([
+			Effort.Max,
+			Effort.Medium,
+		]);
+	});
+
+	it("sends no effort when an auto range leaves no tier on the model", async () => {
+		// The model's ladder starts at high; a low-medium range admits none of it.
+		const model = makeReasoningModel("slow-high-only", [Effort.High, Effort.XHigh]);
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await runEvalCompletionAndWait(
+			{ prompt: "q", model: "slow" },
+			{
+				session: makeSession({
+					available: [SMOL, DEFAULT, model],
+					roles: { slow: "p/slow-high-only:auto:low-medium" },
+				}),
+			},
+		);
+
+		expect(spy.mock.calls.map(call => call[0].id)).toEqual(["slow-high-only"]);
+		const opts = spy.mock.calls[0]?.[2] as { reasoning?: unknown } | undefined;
+		expect(opts).toBeDefined();
+		expect(opts?.reasoning).toBeUndefined();
+	});
+
 	it("does not parse :max from a literal model id as an effort selector", async () => {
 		const model = makeReasoningModel("slow:max");
 		const session = makeSession({ available: [SMOL, DEFAULT, model], roles: { slow: "p/slow:max" } });

@@ -6392,6 +6392,44 @@ describe("AgentSession retry fallback", () => {
 		expect(session.thinkingLevel).toBe(Effort.Low);
 	});
 
+	it("switches to a fallback entry's auto range instead of dropping the suffix", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}:auto:medium-high`],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+		});
+
+		await session.prompt("First prompt triggers fallback onto an auto-range entry");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		// Previously the `:auto:medium-high` suffix was discarded and the session kept `low`.
+		expect(session.configuredThinkingLevel()).toBe("auto:medium-high");
+		const inRange: readonly (string | undefined)[] = [Effort.Medium, Effort.High];
+		expect(inRange).toContain(session.thinkingLevel);
+	});
+
 	it("skips usage fallbacks whose effort floor exceeds the session ceiling", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const incompatibleFallback = getBundledModel("openrouter", "deepseek/deepseek-v4-pro");

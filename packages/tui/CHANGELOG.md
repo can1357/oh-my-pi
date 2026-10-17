@@ -32,6 +32,8 @@
 ### Added
 
 - Added selection-only session and model picker actions for `/seance`, so choosing a source or model leaves the active session and model unchanged ([#15036](https://github.com/can1357/oh-my-pi/pull/15036) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Added `auto:<floor>` thinking selector syntax support and minimum effort floor clamping ([#13836](https://github.com/can1357/oh-my-pi/pull/13836) by [@tuandinh0801](https://github.com/tuandinh0801))
+- Added `auto:<floor>-<ceiling>` thinking range and ceiling-only `auto:-<ceiling>` selectors ([#16029](https://github.com/can1357/oh-my-pi/pull/16029) by [@troshab](https://github.com/troshab))
 
 ### Changed
 

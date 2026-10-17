@@ -418,4 +418,17 @@ describe("model presets", () => {
 		expect((await applying).kind).toBe("switched");
 		expect(settings.getModelRole("default")).toBe(OPUS);
 	});
+
+	it("loads a preset saved while an auto range was the default thinking level", () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", SONNET);
+		cfgDefaultThinkingLevel.set(settings, "auto:low-medium");
+
+		saveModelPreset(settings, "ranged");
+
+		expect(getModelPreset(settings, "ranged")).toMatchObject({
+			kind: "found",
+			preset: { defaultThinkingLevel: "auto:low-medium" },
+		});
+	});
 });

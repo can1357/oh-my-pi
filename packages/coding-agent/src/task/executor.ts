@@ -82,6 +82,7 @@ import { hasConversationalHistory, SessionManager } from "../session/session-man
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	type ConfiguredThinkingLevel,
+	parseAutoThinkingBounds,
 	prewalkWouldBeNoop,
 	resolveTaskEffortLevel,
 	type TaskEffort,
@@ -4326,8 +4327,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (model?.contextWindow && model.contextWindow > 0) {
 				progress.contextWindow = model.contextWindow;
 			}
+			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
+			// model pattern > agent-definition default (e.g. task's `auto`) >
+			// pattern-derived level.
+			const selectorThinkingLevel = explicitThinkingLevel
+				? resolvedThinkingLevel
+				: (thinkingLevel ?? resolvedThinkingLevel);
 			// Caller-requested coarse effort maps onto the resolved model's
-			// supported range, then respects the operator-configured ceiling.
+			// supported range — narrowed to the bounds of the `auto:<floor>[-<ceiling>]`
+			// selector it replaces, so the operator's range survives a `lo`/`hi` hint —
+			// then respects the operator-configured ceiling.
 			// Undefined (no effort, or no controllable effort surface) falls
 			// through to the normal selectors below.
 			// The ceiling outlives initial resolution: it rides into the session so
@@ -4335,7 +4344,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const spawnEffortCeiling = options.effort !== undefined ? cfgTaskMaxEffort.get(settings) : undefined;
 			const effortLevel =
 				options.effort !== undefined
-					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
+					? resolveTaskEffortLevel(
+							model,
+							options.effort,
+							spawnEffortCeiling,
+							parseAutoThinkingBounds(selectorThinkingLevel),
+						)
 					: undefined;
 			if (model) {
 				const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
@@ -4346,11 +4360,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						? formatModelSelectorValue(progress.resolvedModelIdentity, displayLevel)
 						: progress.resolvedModelIdentity;
 			}
-			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
-			// model pattern > agent-definition default (e.g. task's `auto`) >
-			// pattern-derived level.
-			const effectiveThinkingLevel =
-				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
+			const effectiveThinkingLevel = effortLevel ?? selectorThinkingLevel;
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
 			const fork = preparedSession?.fork;

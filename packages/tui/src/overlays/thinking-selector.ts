@@ -1,5 +1,10 @@
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../thinking";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
+	withStoredAutoSelector,
+} from "../thinking";
 import { type SelectItem, SelectList, type SgrMouseEvent } from "../index";
 import { getSelectListTheme } from "../theme/theme";
 import { OverlayPanel } from "../chrome/overlay-box";
@@ -22,7 +27,10 @@ export class ThinkingSelectorComponent extends OverlayPanel {
 	) {
 		super("Thinking Level", "omp.overlay.thinking");
 
-		const thinkingLevels: SelectItem[] = availableLevels.map(getConfiguredThinkingLevelMetadata);
+		// A stored auto range is offered as-is, so Enter on the preselected row keeps its bounds.
+		const thinkingLevels: SelectItem[] = withStoredAutoSelector(availableLevels, currentLevel).map(
+			getConfiguredThinkingLevelMetadata,
+		);
 
 		// Create selector
 		this.#selectList = new SelectList(thinkingLevels, thinkingLevels.length, getSelectListTheme());

@@ -1,12 +1,52 @@
 import type { ResolvedThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
-import type { ConfiguredThinkingLevel } from "./render/render-utils";
+import {
+	AUTO_THINKING,
+	AUTO_THINKING_CEILING_SELECTORS,
+	AUTO_THINKING_CEILINGS,
+	AUTO_THINKING_FLOORS,
+	AUTO_THINKING_LEVELS,
+	AUTO_THINKING_RANGES,
+	type AutoThinkingCeiling,
+	type AutoThinkingCeilingSelector,
+	type AutoThinkingFloor,
+	type AutoThinkingLevel,
+	type AutoThinkingRange,
+	type ConfiguredThinkingLevel,
+	isAutoThinking,
+	withStoredAutoSelector,
+} from "./thinking-levels";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
+
+export {
+	AUTO_THINKING,
+	AUTO_THINKING_CEILING_SELECTORS,
+	AUTO_THINKING_CEILINGS,
+	AUTO_THINKING_FLOORS,
+	AUTO_THINKING_LEVELS,
+	AUTO_THINKING_RANGES,
+	isAutoThinking,
+	withStoredAutoSelector,
+};
+export type {
+	AutoThinkingCeiling,
+	AutoThinkingCeilingSelector,
+	AutoThinkingFloor,
+	AutoThinkingLevel,
+	AutoThinkingRange,
+	ConfiguredThinkingLevel,
+};
+
 /** Thinking selectors accepted by CLI inputs, in display order. */
-export const CLI_THINKING_LEVELS: readonly ConfiguredThinkingLevel[] = ["off", ...THINKING_EFFORTS, "auto"];
+export const CLI_THINKING_LEVELS: readonly ConfiguredThinkingLevel[] = [
+	"off",
+	...THINKING_EFFORTS,
+	"auto",
+	...AUTO_THINKING_FLOORS.map(effort => `auto:${effort}` as const),
+];
 
 /**
  * Metadata used to render thinking selector values in the coding-agent UI.
@@ -141,19 +181,71 @@ export function automaticThinkingLevel<T>(model: Model | undefined, fallback: T)
 }
 
 /**
- * Sentinel selector for the coding-agent "auto" thinking mode. Kept entirely
- * inside the coding-agent layer: it is never an {@link Effort} or
- * {@link ThinkingLevel}, so provider mapping/clamping keeps seeing concrete
- * efforts. The session resolves `auto` to a concrete effort each turn.
+ * Bounds carried by an `auto:<floor>`, `auto:-<ceiling>` or `auto:<floor>-<ceiling>`
+ * selector. At least one side is set; a missing floor defers to
+ * `providers.autoThinkingMinEffort`, a missing ceiling to `providers.autoThinkingMaxEffort`.
  */
-export const AUTO_THINKING = "auto" as const;
+export interface AutoThinkingBounds {
+	floor?: AutoThinkingFloor;
+	ceiling?: AutoThinkingCeiling;
+}
 
-/** A thinking selector as configured by the user — a concrete level or `auto`. */
-export type { ConfiguredThinkingLevel } from "./render/render-utils";
+/**
+ * Parses the bounds of an `auto:<floor>`, `auto:-<ceiling>` or `auto:<floor>-<ceiling>`
+ * selector. The floor excludes max and the ceiling excludes minimal; a range must be
+ * strictly increasing (`auto:high-high` is a pinned level, not a range, and is rejected).
+ */
+export function parseAutoThinkingBounds(level: string | null | undefined): AutoThinkingBounds | undefined {
+	if (typeof level !== "string" || !level.startsWith("auto:")) return undefined;
+	const [floorText, ceilingText, ...rest] = level.slice(5).split("-");
+	if (rest.length > 0) return undefined;
+	if (floorText === "") {
+		const ceiling = AUTO_THINKING_CEILINGS.find(candidate => candidate === parseEffort(ceilingText ?? ""));
+		return ceiling === undefined ? undefined : { ceiling };
+	}
+	const floor = AUTO_THINKING_FLOORS.find(candidate => candidate === parseEffort(floorText));
+	if (floor === undefined) return undefined;
+	if (ceilingText === undefined) return { floor };
+	const ceiling = AUTO_THINKING_CEILINGS.find(candidate => candidate === parseEffort(ceilingText));
+	// AUTO_THINKING_RANGES is the one list of legal pairs (floor strictly below ceiling).
+	if (ceiling === undefined || !AUTO_THINKING_RANGES.some(range => range === `auto:${floor}-${ceiling}`))
+		return undefined;
+	return { floor, ceiling };
+}
+
+/** Canonical form of an auto selector (`auto`, `auto:<floor>`, `auto:-<ceiling>`, `auto:<floor>-<ceiling>`), if `level` is one. */
+export function parseAutoThinkingLevel(level: string | null | undefined): AutoThinkingLevel | undefined {
+	if (level === AUTO_THINKING) return AUTO_THINKING;
+	const bounds = parseAutoThinkingBounds(level);
+	if (!bounds) return undefined;
+	if (bounds.floor === undefined) {
+		const canonical = `auto:-${bounds.ceiling}`;
+		return AUTO_THINKING_CEILING_SELECTORS.find(selector => selector === canonical);
+	}
+	if (!bounds.ceiling) return `auto:${bounds.floor}`;
+	const canonical = `auto:${bounds.floor}-${bounds.ceiling}`;
+	return AUTO_THINKING_RANGES.find(range => range === canonical);
+}
+
+/** Parses the minimum effort level configured on an auto selector, if any. Excludes max. */
+export function parseAutoThinkingFloor(level: string | null | undefined): AutoThinkingFloor | undefined {
+	return parseAutoThinkingBounds(level)?.floor;
+}
+
+/** Parses the maximum effort level configured on an `auto:[<floor>]-<ceiling>` selector, if any. */
+export function parseAutoThinkingCeiling(level: string | null | undefined): AutoThinkingCeiling | undefined {
+	return parseAutoThinkingBounds(level)?.ceiling;
+}
+
+/** Rebuilds an auto selector from parsed bounds; bounds that do not form a valid selector yield plain `auto`. */
+export function formatAutoThinkingLevel(floor?: Effort, ceiling?: Effort): AutoThinkingLevel {
+	if (floor === undefined && ceiling === undefined) return AUTO_THINKING;
+	return parseAutoThinkingLevel(`auto:${floor ?? ""}${ceiling ? `-${ceiling}` : ""}`) ?? AUTO_THINKING;
+}
 
 /** Maps the session-level `auto` sentinel to `undefined`; concrete levels pass through. */
 export function concreteThinkingLevel(level: ConfiguredThinkingLevel | undefined): ThinkingLevel | undefined {
-	return level === AUTO_THINKING ? undefined : level;
+	return isAutoThinking(level) ? undefined : level;
 }
 
 /**
@@ -187,7 +279,8 @@ export function prewalkWouldBeNoop(
 ): boolean {
 	if (!modelsAreEqual(current, target)) return false;
 	if (targetLevel === undefined) return true;
-	if ((targetLevel === AUTO_THINKING) !== (currentLevel === AUTO_THINKING)) return false;
+	if (isAutoThinking(targetLevel) !== isAutoThinking(currentLevel)) return false;
+	if (isAutoThinking(targetLevel) && isAutoThinking(currentLevel)) return targetLevel === currentLevel;
 	return (
 		resolveThinkingLevelForModel(target, concreteThinkingLevel(targetLevel)) ===
 		resolveThinkingLevelForModel(target, concreteThinkingLevel(currentLevel))
@@ -208,18 +301,45 @@ const AUTO_THINKING_METADATA: ConfiguredThinkingLevelMetadata = {
 };
 
 /**
- * Parses a configured thinking selector, accepting `auto` in addition to every
- * value {@link parseThinkingLevel} accepts. {@link parseThinkingLevel} itself
- * stays strict so model-suffix parsing (`model:high`) keeps rejecting `auto`.
+ * Parses a configured thinking selector, accepting `auto`, `auto:<floor>`, `auto:-<ceiling>`
+ * and `auto:<floor>-<ceiling>` in addition to every value {@link parseThinkingLevel} accepts.
+ * {@link parseThinkingLevel} itself stays strict so model-suffix parsing (`model:high`)
+ * keeps rejecting `auto`.
  */
 export function parseConfiguredThinkingLevel(value: string | null | undefined): ConfiguredThinkingLevel | undefined {
-	if (value === AUTO_THINKING) return AUTO_THINKING;
+	if (value === undefined || value === null) return undefined;
+	if (value === AUTO_THINKING || value.startsWith("auto:")) return parseAutoThinkingLevel(value);
 	return parseThinkingLevel(value);
 }
 
-/** Returns display metadata for a configured selector, including `auto`. */
+/** Returns display metadata for a configured selector, including `auto`, `auto:<floor>`, and ranges. */
 export function getConfiguredThinkingLevelMetadata(level: ConfiguredThinkingLevel): ConfiguredThinkingLevelMetadata {
-	return level === AUTO_THINKING ? AUTO_THINKING_METADATA : getThinkingLevelMetadata(level);
+	if (isAutoThinking(level)) {
+		const bounds = parseAutoThinkingBounds(level);
+		if (bounds?.ceiling && bounds.floor === undefined) {
+			return {
+				value: level,
+				label: `auto (up to ${bounds.ceiling})`,
+				description: `Auto-detect per prompt (max: ${bounds.ceiling})`,
+			};
+		}
+		if (bounds?.ceiling) {
+			return {
+				value: level,
+				label: `auto (${bounds.floor}-${bounds.ceiling})`,
+				description: `Auto-detect per prompt (min: ${bounds.floor}, max: ${bounds.ceiling})`,
+			};
+		}
+		if (bounds) {
+			return {
+				value: level,
+				label: `auto (${bounds.floor})`,
+				description: `Auto-detect per prompt (min: ${bounds.floor})`,
+			};
+		}
+		return AUTO_THINKING_METADATA;
+	}
+	return getThinkingLevelMetadata(level);
 }
 
 /**
@@ -237,16 +357,16 @@ export function parseCliThinkingLevel(value: string | null | undefined): Configu
 /**
  * Resolves an auto-classified effort against the active model's supported
  * range. Unlike {@link clampThinkingLevelForModel}, `auto` never resolves below
- * {@link Effort.Low}: the eligible pool is the model's supported efforts at or
- * above Low (falling back to the full supported set only when the model maxes
- * out below Low). Within that pool the request snaps to the highest level not
+ * `floor` (default {@link Effort.Low}): the eligible pool is the model's supported efforts at or
+ * above the floor (falling back to the full supported set only when the model maxes
+ * out below the floor). Within that pool the request snaps to the highest level not
  * exceeding it, or the pool minimum when the request is below the pool.
  * `ceiling` bounds the pool from above, so a policy ceiling survives the model
  * clamp: a sparse ladder such as `["max"]` must not snap an `xhigh` request up
- * to `max`. The Low floor is resolved against the model's own ladder *before*
- * the ceiling applies — a ceiling that hides every tier at or above Low means
+ * to `max`. The floor is resolved against the model's own ladder *before*
+ * the ceiling applies — a ceiling that hides every tier at or above the floor means
  * there is nothing legal to pick (`undefined`), not a licence to fall through
- * to a sub-Low tier the model happens to expose.
+ * to a sub-floor tier the model happens to expose.
  *
  * Returns `undefined` for reasoning-capable models without a controllable
  * effort surface (`thinking.efforts` empty — e.g. devin-agent models, where
@@ -259,13 +379,15 @@ export function clampAutoThinkingEffort(
 	model: Model | undefined,
 	effort: Effort,
 	ceiling: Effort = Effort.Max,
+	floor: Effort = Effort.Low,
 ): Effort | undefined {
 	const supported = model ? getSupportedEfforts(model) : THINKING_EFFORTS;
 	if (supported.length === 0) return undefined;
-	const lowIndex = THINKING_EFFORTS.indexOf(Effort.Low);
+	const floorIndex = THINKING_EFFORTS.indexOf(floor);
 	const ceilingIndex = THINKING_EFFORTS.indexOf(ceiling);
-	const atOrAboveLow = supported.filter(level => THINKING_EFFORTS.indexOf(level) >= lowIndex);
-	const floored = atOrAboveLow.length > 0 ? atOrAboveLow : supported;
+	const effectiveFloorIndex = floorIndex > ceilingIndex ? ceilingIndex : floorIndex;
+	const atOrAboveFloor = supported.filter(level => THINKING_EFFORTS.indexOf(level) >= effectiveFloorIndex);
+	const floored = atOrAboveFloor.length > 0 ? atOrAboveFloor : supported;
 	const pool = floored.filter(level => THINKING_EFFORTS.indexOf(level) <= ceilingIndex);
 	if (pool.length === 0) return undefined;
 	const requestedIndex = THINKING_EFFORTS.indexOf(effort);
@@ -288,17 +410,28 @@ export type TaskEffort = (typeof TASK_EFFORTS)[number];
  * `lo` = lowest supported level, `hi` = highest (whatever the model tops out
  * at — high, xhigh, or max), `med` = the middle (lower of the two middles for
  * an even-sized range). Without a model, maps over the full canonical range.
- * Returns `undefined` when the model has no controllable effort surface, so
- * callers fall back to their default selector (e.g. `auto`). Throws when the
- * configured ceiling is below the model's lowest supported effort.
+ * `bounds` from an `auto:<floor>[-<ceiling>]` selector narrow that range first,
+ * so `lo` lands on the floor and `hi` on the ceiling; bounds that exclude every
+ * supported level are ignored. Returns `undefined` when the model has no
+ * controllable effort surface, so callers fall back to their default selector
+ * (e.g. `auto`). Throws when the configured ceiling is below the model's lowest
+ * supported effort.
  */
 export function resolveTaskEffortLevel(
 	model: Model | undefined,
 	effort: TaskEffort,
 	maxEffort?: Effort,
+	bounds?: AutoThinkingBounds,
 ): Effort | undefined {
-	const supported = model ? getSupportedEfforts(model) : THINKING_EFFORTS;
-	if (supported.length === 0) return undefined;
+	const ladder = model ? getSupportedEfforts(model) : THINKING_EFFORTS;
+	if (ladder.length === 0) return undefined;
+	const floorIndex = bounds?.floor ? THINKING_EFFORTS.indexOf(bounds.floor) : 0;
+	const ceilingIndex = bounds?.ceiling ? THINKING_EFFORTS.indexOf(bounds.ceiling) : THINKING_EFFORTS.length - 1;
+	const bounded = ladder.filter(level => {
+		const index = THINKING_EFFORTS.indexOf(level);
+		return index >= floorIndex && index <= ceilingIndex;
+	});
+	const supported = bounded.length > 0 ? bounded : ladder;
 	let resolved: Effort;
 	switch (effort) {
 		case "lo":
@@ -313,7 +446,9 @@ export function resolveTaskEffortLevel(
 	}
 	if (maxEffort === undefined) return resolved;
 	const maxIndex = THINKING_EFFORTS.indexOf(maxEffort);
-	const ceiling = supported.findLast(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex);
+	// `task.maxEffort` is a hard operator ceiling: search the model's whole ladder so a
+	// selector floor above it lowers the spawn to the ceiling instead of failing it.
+	const ceiling = ladder.findLast(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex);
 	if (ceiling === undefined) {
 		const modelName = model ? `${model.provider}/${model.id}` : "Selected model";
 		throw new RangeError(`${modelName} has no supported thinking effort at or below task.maxEffort=${maxEffort}`);
@@ -378,11 +513,19 @@ export function modelSupportsEffortCeiling(model: Model, ceiling: Effort): boole
  * ladder would snap straight back up. A model whose ladder offers nothing at or
  * below XHigh therefore has no provisional level, and `auto` leaves the current
  * one in place. Classification itself may still resolve Max on models that
- * expose the tier when the user opts in. Returns `undefined` for non-reasoning
- * models.
+ * expose the tier when the user opts in. A selector `ceiling` below XHigh caps
+ * the placeholder too. Returns `undefined` for non-reasoning models.
  */
-export function resolveProvisionalAutoLevel(model: Model | undefined): Effort | undefined {
+export function resolveProvisionalAutoLevel(
+	model: Model | undefined,
+	floor: Effort = Effort.Low,
+	ceiling?: Effort,
+): Effort | undefined {
 	if (!model?.reasoning || model.thinking?.unverified) return undefined;
 	const preferred = model.thinking?.defaultLevel ?? Effort.High;
-	return clampAutoThinkingEffort(model, preferred === Effort.Max ? Effort.XHigh : preferred, Effort.XHigh);
+	const cap =
+		ceiling !== undefined && THINKING_EFFORTS.indexOf(ceiling) < THINKING_EFFORTS.indexOf(Effort.XHigh)
+			? ceiling
+			: Effort.XHigh;
+	return clampAutoThinkingEffort(model, preferred === Effort.Max ? Effort.XHigh : preferred, cap, floor);
 }

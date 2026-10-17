@@ -13,7 +13,7 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { type ConfiguredThinkingLevel, isAutoThinking, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { cfgDefaultThinkingLevel } from "../session/settings";
@@ -53,7 +53,9 @@ function parseModelPreset(raw: unknown): ModelPreset | string {
 function isDefaultThinkingLevel(
 	level: ConfiguredThinkingLevel,
 ): level is NonNullable<ModelPreset["defaultThinkingLevel"]> {
-	return level === AUTO_THINKING || THINKING_EFFORTS.some(effort => effort === level);
+	// Every auto selector (`auto`, `auto:<floor>`, `auto:<floor>-<ceiling>`) is a valid
+	// `defaultThinkingLevel`, so a preset saved while one is active must load back.
+	return isAutoThinking(level) || THINKING_EFFORTS.some(effort => effort === level);
 }
 
 /** Look a preset up whole from the highest layer owning its name — same-name entries never merge. */

@@ -91,9 +91,13 @@ import type { PlanModeState } from "../plan-mode/state";
 import advisorBoundaryGuidance from "../prompts/advisor/boundary-guidance.md" with { type: "text" };
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
-	AUTO_THINKING,
+	type AutoThinkingLevel,
 	concreteThinkingLevel,
+	isAutoThinking,
+	clampAutoThinkingEffort,
+	parseAutoThinkingBounds,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
 	toReasoningEffort,
@@ -329,7 +333,7 @@ interface ActiveAdvisor {
 	 * runs for the primary turn, so the advisor tracks the level `auto` resolved
 	 * to there, retuned at each review boundary.
 	 */
-	autoThinking: boolean;
+	autoThinking: AutoThinkingLevel | undefined;
 	providerSessionId: string | undefined;
 	/** Cadence overrides resolved at each boundary; `undefined` (only the
 	 *  roster-less default advisor) follows `advisor.reviewMode` /
@@ -385,7 +389,7 @@ interface AdvisorRuntimeDescriptor {
 	reviewMode: AdvisorReviewMode | undefined;
 	reviewInterval: number | undefined;
 	syncBacklog: AdvisorSyncBacklog | undefined;
-	autoThinking: boolean;
+	autoThinking: AutoThinkingLevel | undefined;
 	signature: string;
 }
 
@@ -1133,11 +1137,11 @@ export class SessionAdvisors {
 			// `auto` is a session-level selector with no per-advisor classifier, so
 			// `concreteThinkingLevel` erases it. Remember the choice: the advisor
 			// then tracks whatever the primary turn's classifier resolved to.
-			let autoThinking = false;
+			let autoThinking: AutoThinkingLevel | undefined;
 			if (config.model) {
 				const resolved = resolveModelOverride([config.model], this.#host.modelRegistry, this.#host.settings);
 				model = resolved.model;
-				autoThinking = resolved.thinkingLevel === AUTO_THINKING;
+				autoThinking = isAutoThinking(resolved.thinkingLevel) ? resolved.thinkingLevel : undefined;
 				thinkingLevel = concreteThinkingLevel(resolved.thinkingLevel);
 				if (!model) {
 					this.#advisorStatuses.set(slug, { name: config.name, status: "no_model" });
@@ -1162,7 +1166,7 @@ export class SessionAdvisors {
 					continue;
 				}
 				model = sel.model;
-				autoThinking = sel.thinkingLevel === AUTO_THINKING;
+				autoThinking = isAutoThinking(sel.thinkingLevel) ? sel.thinkingLevel : undefined;
 				thinkingLevel = concreteThinkingLevel(sel.thinkingLevel);
 			}
 			// Clamp the effort against the resolved model. Historically we defaulted
@@ -1176,7 +1180,7 @@ export class SessionAdvisors {
 			// is sent and reasoning stays enabled (matching the `auto`-path fix for
 			// Devin models via `clampAutoThinkingEffort`). See #4579.
 			const requestedLevel = autoThinking
-				? automaticThinkingLevel(model, this.#autoAdvisorThinkingLevel())
+				? automaticThinkingLevel(model, this.#autoAdvisorThinkingLevel(model, autoThinking))
 				: (thinkingLevel ?? automaticThinkingLevel(model, ThinkingLevel.Medium));
 			const resolvedLevel = resolveThinkingLevelForModel(model, requestedLevel);
 			const advisorThinkingLevel: ThinkingLevel = resolvedLevel ?? ThinkingLevel.Inherit;
@@ -1200,12 +1204,7 @@ export class SessionAdvisors {
 				// rebuild the advisor, losing its context. Sign the selector instead.
 				// Cadence and catch-up resolve at each boundary rather than at build
 				// time, so they stay out of the signature.
-				signature: this.#advisorRuntimeSignature(
-					config,
-					slug,
-					model,
-					autoThinking ? AUTO_THINKING : advisorThinkingLevel,
-				),
+				signature: this.#advisorRuntimeSignature(config, slug, model, autoThinking ?? advisorThinkingLevel),
 			});
 		}
 		return descriptors;
@@ -1215,7 +1214,7 @@ export class SessionAdvisors {
 		config: AdvisorConfig,
 		slug: string,
 		model: Model,
-		thinkingLevel: ThinkingLevel | typeof AUTO_THINKING,
+		thinkingLevel: ThinkingLevel | AutoThinkingLevel,
 	): string {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
@@ -1960,10 +1959,20 @@ export class SessionAdvisors {
 	 * direction. When the primary has no effort (`off`, `inherit`, unset) it is
 	 * the `medium` default an advisor without a configured level gets. One
 	 * source for build, review-boundary retune and fallback restore, so a live
-	 * advisor always matches what a fresh build would give it.
+	 * advisor always matches what a fresh build would give it. An
+	 * `auto:<floor>[-<ceiling>]` advisor selector keeps that level inside its bounds,
+	 * snapped onto `model`'s own ladder. A ladder with no tier inside the bounds
+	 * gets no auto level (`inherit`, no effort sent), as the primary session does.
 	 */
-	#autoAdvisorThinkingLevel(): ThinkingLevel {
-		return this.#host.agent.state.thinkingLevel ?? ThinkingLevel.Medium;
+	#autoAdvisorThinkingLevel(model: Model, auto: AutoThinkingLevel): ThinkingLevel {
+		const level: Effort = this.#host.agent.state.thinkingLevel ?? Effort.Medium;
+		const bounds = parseAutoThinkingBounds(auto);
+		if (!bounds) return level;
+		// A ceiling-only selector bounds from above only.
+		return (
+			clampAutoThinkingEffort(model, level, bounds.ceiling ?? Effort.Max, bounds.floor ?? Effort.Minimal) ??
+			ThinkingLevel.Inherit
+		);
 	}
 
 	/**
@@ -1975,11 +1984,11 @@ export class SessionAdvisors {
 	 * advisor's cached prefix on every turn. Only the effort moves here.
 	 */
 	#retuneAutoThinkingAdvisors(): void {
-		const requested = this.#autoAdvisorThinkingLevel();
 		for (const advisor of this.#advisors) {
 			// A retry-fallback selector pinned its own effort for the fallback
 			// model; the retune resumes once the configured model is restored.
 			if (!advisor.autoThinking || advisor.runtime.disposed || advisor.retryFallback) continue;
+			const requested = this.#autoAdvisorThinkingLevel(advisor.model, advisor.autoThinking);
 			const next =
 				resolveThinkingLevelForModel(advisor.model, automaticThinkingLevel(advisor.model, requested)) ??
 				ThinkingLevel.Inherit;
@@ -2041,7 +2050,7 @@ export class SessionAdvisors {
 		// An `auto` advisor skipped the retune while on the fallback: rejoin the
 		// primary's live level now, not the level it had when it fell back.
 		const thinkingToApply = advisor.autoThinking
-			? this.#autoAdvisorThinkingLevel()
+			? this.#autoAdvisorThinkingLevel(primaryModel, advisor.autoThinking)
 			: advisor.thinkingLevel === fallback.lastAppliedThinkingLevel
 				? fallback.originalThinkingLevel
 				: advisor.thinkingLevel;
@@ -2191,7 +2200,12 @@ export class SessionAdvisors {
 				signal.throwIfAborted();
 
 				const originalThinkingLevel = advisor.thinkingLevel;
-				const requestedThinkingLevel = selector.thinkingLevel ?? originalThinkingLevel;
+				// An entry's `:auto[:<floor>[-<ceiling>]]` suffix resolves like an auto advisor:
+				// the primary's effort, kept inside the entry's bounds.
+				const requestedThinkingLevel =
+					selector.autoThinkingLevel !== undefined
+						? this.#autoAdvisorThinkingLevel(candidate, selector.autoThinkingLevel)
+						: (selector.thinkingLevel ?? originalThinkingLevel);
 				const nextThinkingLevel = this.#setAdvisorModel(advisor, candidate, requestedThinkingLevel);
 				if (advisor.retryFallback) {
 					advisor.retryFallback.lastAppliedThinkingLevel = nextThinkingLevel;

@@ -43,7 +43,7 @@ import {
 import type { TspPrefsControl, TspPrefsProps } from "@oh-my-pi/pi-wire";
 import { prefsSectionId } from "../components/settings-list";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme";
-import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../thinking";
+import { AUTO_THINKING, isAutoThinking, withStoredAutoSelector } from "../thinking";
 import { getTabBarTheme } from "../chrome/shared";
 import { type ComposerPreviewStatusSource, ComposerShapePreview } from "./composer-shape-preview";
 import { getComposerShapeOptions } from "./composer-shape-registry";
@@ -1551,8 +1551,13 @@ export class SettingsSelectorComponent implements Component {
 	/** A submenu's choices: the declared ones, or the runtime ones (thinking levels, themes, composer shapes). */
 	#submenuOptions(def: SettingDef & { type: "submenu" }): readonly SubmenuOption[] {
 		if (def.path === "defaultThinkingLevel") {
-			// Prepend `auto`; the rest are the model's runtime-supported efforts.
-			const levels: ConfiguredThinkingLevel[] = [AUTO_THINKING, ...this.#context.availableThinkingLevels];
+			// Prepend `auto`; the rest are the model's runtime-supported efforts. A stored
+			// auto range stays selectable, so confirming it does not reset it to plain `auto`.
+			const stored = this.#context.settings.get(def.path);
+			const levels = withStoredAutoSelector(
+				[AUTO_THINKING, ...this.#context.availableThinkingLevels],
+				isAutoThinking(stored) ? stored : undefined,
+			);
 			return levels.map(level => def.options.find(o => o.value === level) ?? { value: level, label: level });
 		}
 		if (def.path === "theme.dark" || def.path === "theme.light") {

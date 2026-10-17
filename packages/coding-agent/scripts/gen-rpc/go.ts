@@ -122,8 +122,16 @@ const CLIENT_MEMBERS: Record<string, true> = {
 const KEY = /^[A-Za-z0-9_]+$/;
 const IDENTIFIER = /^[A-Z][A-Za-z0-9]*$/;
 
+/**
+ * An open-ended range (`auto:-max`, upper bound only) reads as "to max": without this the
+ * dash is dropped as punctuation and the value collides with `auto:max`.
+ */
+function openRange(text: string): string {
+	return text.replace(/:-(?=[A-Za-z0-9])/g, ":to ");
+}
+
 function words(text: string): string[] {
-	return text
+	return openRange(text)
 		.split(/[^A-Za-z0-9]+/)
 		.flatMap(part =>
 			part

@@ -102,6 +102,22 @@ describe("thinking selector picker", () => {
 		expect(p.items?.find(item => item.id === "auto")?.facts).toBeUndefined();
 		expect(p.items?.find(item => item.id === "off")?.facts?.depth).toBe(0);
 	});
+
+	it("offers a stored auto range as its own row and preselects it", () => {
+		// Enter on the preselected row must keep the bounds, not fall back to `off` (row 0).
+		const picked: string[] = [];
+		const ranged = new ThinkingSelectorComponent(
+			"auto:medium-xhigh",
+			["off", "auto", "high"] as never,
+			level => void picked.push(level),
+			() => {},
+		);
+		const p = sheet(ranged.describe(pickerCx)).props;
+		expect(p.items?.map(item => item.id)).toEqual(["off", "auto", "auto:medium-xhigh", "high"]);
+		expect(p.selected).toBe("auto:medium-xhigh");
+		ranged.getSelectList().handleInput("\r");
+		expect(picked).toEqual(["auto:medium-xhigh"]);
+	});
 });
 
 describe("session account picker", () => {

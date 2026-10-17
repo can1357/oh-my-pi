@@ -6,8 +6,10 @@ import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/ove
 import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import {
+	type AutoThinkingLevel,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
+	isAutoThinking,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
 import { resolveConfiguredModelPatterns, resolveModelRoleValue } from "../config/model-resolver";
@@ -26,7 +28,13 @@ export interface RetryFallbackSelector {
 	raw: string;
 	provider: string;
 	id: string;
+	/** Concrete `:level` suffix; auto selectors are reported in {@link autoThinkingLevel} instead. */
 	thinkingLevel: ThinkingLevel | undefined;
+	/**
+	 * Explicit `:auto`, `:auto:<floor>`, or `:auto:<floor>-<ceiling>` suffix. Applying the
+	 * entry switches the session to that selector; selector matching ignores it.
+	 */
+	autoThinkingLevel?: AutoThinkingLevel;
 }
 
 /** Minimal model lookup needed by fallback-chain resolution. */
@@ -109,6 +117,7 @@ export function parseRetryFallbackSelector(
 		provider: parsed.provider,
 		id: parsed.id,
 		thinkingLevel: concreteThinkingLevel(parsed.thinkingLevel),
+		autoThinkingLevel: isAutoThinking(parsed.thinkingLevel) ? parsed.thinkingLevel : undefined,
 	};
 }
 
