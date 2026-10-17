@@ -293,6 +293,23 @@ describe("SelectList", () => {
 		expect(list.render(40).join("\n")).not.toContain("█");
 	});
 
+	it("filters with typos in labels and values but only word starts in descriptions", () => {
+		const items = [
+			{ value: "deploy", label: "Deploy", description: "Push the current build to staging" },
+			{ value: "stage", label: "Stage files", description: "Add changes" },
+		];
+		const filteredCount = (query: string) => {
+			const list = new SelectList(items, 5, testTheme);
+			list.setFilter(query);
+			return list.debugState().filteredItemCount;
+		};
+
+		expect(filteredCount("delpoy")).toBe(1);
+		expect(filteredCount("biuld")).toBe(0);
+		expect(filteredCount("staging")).toBe(1);
+		expect(filteredCount("stag")).toBe(2);
+	});
+
 	describe("wrapDescription", () => {
 		const longDescription =
 			"Plan and execute non-trivial architectural improvements to the codebase. Use this skill when you need to refactor existing systems, restructure modules, or change interfaces across multiple files.";

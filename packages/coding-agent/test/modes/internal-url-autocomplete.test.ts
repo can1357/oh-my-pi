@@ -92,10 +92,44 @@ describe("internal-url-autocomplete", () => {
 			expect(result!.items.map(i => i.value)).toEqual(["skill://humanizer"]);
 		});
 
-		it("ranks an exact/prefix match ahead of a scattered subsequence", async () => {
-			// "ra" is a prefix of "react" (score 80) and a subsequence of "humanizer" (lower).
-			const result = await getInternalUrlSuggestions("skill://ra");
-			expect(result!.items[0]!.value).toBe("skill://react");
+		it("matches typos and abbreviations of a value, not letters scattered through it", async () => {
+			const values = async (text: string) =>
+				(await getInternalUrlSuggestions(text))?.items.map(i => i.value) ?? null;
+			expect(await values("skill://humnaizer")).toEqual(["skill://humanizer"]);
+			expect(await values("skill://rct")).toEqual(["skill://react"]);
+			// `u…r` only appears mid-word in h·u·m·a·n·i·z·e·r.
+			expect(await values("skill://ur")).toBeNull();
+		});
+
+		it("searches the current description when a listing's metadata changes", async () => {
+			const complete = vi.spyOn(InternalUrlRouter.instance(), "complete");
+			const values = async (text: string) =>
+				(await getInternalUrlSuggestions(text))?.items.map(i => i.value) ?? null;
+			try {
+				complete.mockResolvedValue([{ value: "Worker", description: "running" }]);
+				expect(await values("skill://running")).toEqual(["skill://Worker"]);
+				complete.mockResolvedValue([{ value: "Worker", description: "complete" }]);
+				expect(await values("skill://complete")).toEqual(["skill://Worker"]);
+				expect(await values("skill://running")).toBeNull();
+			} finally {
+				complete.mockRestore();
+			}
+		});
+
+		it("matches very large listings letter for letter only", async () => {
+			const complete = vi.spyOn(InternalUrlRouter.instance(), "complete");
+			const values = async (text: string) =>
+				(await getInternalUrlSuggestions(text))?.items.map(i => i.value) ?? null;
+			try {
+				complete.mockResolvedValue([{ value: "notes/report.md" }]);
+				expect(await values("skill://reprot")).toEqual(["skill://notes/report.md"]);
+				const large = Array.from({ length: 5000 }, (_, i) => ({ value: `runs/${i}/output.json` }));
+				complete.mockResolvedValue([...large, { value: "notes/report.md" }]);
+				expect(await values("skill://reprot")).toBeNull();
+				expect(await values("skill://report")).toEqual(["skill://notes/report.md"]);
+			} finally {
+				complete.mockRestore();
+			}
 		});
 
 		it("returns null when no candidate matches", async () => {

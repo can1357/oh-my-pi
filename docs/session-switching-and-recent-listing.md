@@ -154,7 +154,7 @@ Flow:
 - Esc to cancel; Ctrl+C to exit
 - Tab to toggle current-folder / all-projects scope
 - mouse wheel/click in the fullscreen picker
-- multi-token search across id/title/cwd/first message/prefix message text/path: literal matches lead by recency, then sufficiently strong fuzzy matches; prompt-history matches from `history.db` may be promoted after typing pauses
+- multi-token search (`text-match`): every token must match, letter for letter in the title, at a word start in the first message or transcript, or anywhere in the id, cwd or path; those literal matches lead by recency, then title typos and abbreviations; prompt-history matches from `history.db` may be promoted after typing pauses
 - the live session (when `currentSessionPath` is supplied) is labeled `current` on its metadata line and focused on open and after a Tab scope toggle
 
 Empty-list render behavior:

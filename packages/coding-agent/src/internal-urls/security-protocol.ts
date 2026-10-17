@@ -241,7 +241,7 @@ export class SecurityProtocolHandler implements ProtocolHandler {
 		}
 	}
 
-	async complete(query = "", context?: ResolveContext): Promise<UrlCompletion[]> {
+	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
 		if (!(securityEnabledFromContext(context) ?? this.#enabled())) return [];
 		const store = await this.#store(context);
 		const scans = await store.listScans();
@@ -257,12 +257,6 @@ export class SecurityProtocolHandler implements ProtocolHandler {
 				candidates.push({ value: `${prefix}/${child}`, label: `${scan.id}/${child}` });
 			}
 		}
-		const normalizedQuery = query.trim().toLowerCase();
-		if (!normalizedQuery) return candidates;
-		return candidates.filter(candidate =>
-			[candidate.value, candidate.label ?? "", candidate.description ?? ""].some(value =>
-				value.toLowerCase().includes(normalizedQuery),
-			),
-		);
+		return candidates;
 	}
 }

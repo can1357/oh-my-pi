@@ -1,5 +1,5 @@
 /** Pure dashboard tree, filtering, and selection state. */
-import { FuzzyQuery, FuzzyText } from "../../fuzzy";
+import { compareTextMatches, MatchTarget, type TextMatch } from "../../text-match";
 import {
 	type DashboardState,
 	type DisabledReason,
@@ -118,7 +118,7 @@ export function flattenTree(tree: TreeNode[]): FlatTreeItem[] {
 	return flat;
 }
 
-/** Searchable fields an extension's cached {@link FuzzyText} was built from. */
+/** Searchable fields an extension's cached {@link MatchTarget} was built from. */
 interface ExtensionSearchMemo {
 	name: string;
 	displayName: string;
@@ -126,13 +126,13 @@ interface ExtensionSearchMemo {
 	trigger: string | undefined;
 	providerName: string;
 	kind: string;
-	text: FuzzyText;
+	target: MatchTarget;
 }
 
 /** Prepared search text per extension; rebuilt if any searchable field changes. */
 const extensionSearchCache = new WeakMap<Extension, ExtensionSearchMemo>();
 
-function extensionSearchText(ext: Extension): FuzzyText {
+function extensionMatchTarget(ext: Extension): MatchTarget {
 	const memo = extensionSearchCache.get(ext);
 	if (
 		memo !== undefined &&
@@ -143,13 +143,12 @@ function extensionSearchText(ext: Extension): FuzzyText {
 		memo.providerName === ext.source.providerName &&
 		memo.kind === ext.kind
 	) {
-		return memo.text;
+		return memo.target;
 	}
-	const text = new FuzzyText(
-		[ext.name, ext.displayName, ext.description || "", ext.trigger || "", ext.source.providerName, ext.kind].join(
-			" ",
-		),
-	);
+	const target = new MatchTarget({
+		names: [ext.name, ext.displayName, ext.trigger || ""],
+		details: [ext.description || "", ext.source.providerName, ext.kind].join(" "),
+	});
 	extensionSearchCache.set(ext, {
 		name: ext.name,
 		displayName: ext.displayName,
@@ -157,32 +156,26 @@ function extensionSearchText(ext: Extension): FuzzyText {
 		trigger: ext.trigger,
 		providerName: ext.source.providerName,
 		kind: ext.kind,
-		text,
+		target,
 	});
-	return text;
+	return target;
 }
 
 /**
- * Apply fuzzy filter to extensions.
+ * Filter extensions by `query`, strongest match first (stable: loader order on ties).
  */
 export function applyFilter(extensions: Extension[], query: string): Extension[] {
 	if (!query.trim()) {
 		return extensions;
 	}
 
-	const tokens = query
-		.toLowerCase()
-		.split(/\s+/)
-		.filter(Boolean)
-		.map(token => new FuzzyQuery(token));
-	if (tokens.length === 0) {
-		return extensions;
+	const ranked: { ext: Extension; match: TextMatch }[] = [];
+	for (const ext of extensions) {
+		const match = extensionMatchTarget(ext).match(query);
+		if (match) ranked.push({ ext, match });
 	}
-
-	return extensions.filter(ext => {
-		const searchable = extensionSearchText(ext);
-		return tokens.every(token => token.match(searchable).matches);
-	});
+	ranked.sort((a, b) => compareTextMatches(a.match, b.match));
+	return ranked.map(entry => entry.ext);
 }
 
 /**

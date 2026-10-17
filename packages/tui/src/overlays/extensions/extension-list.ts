@@ -18,6 +18,7 @@ import { contentRowWidth, renderScrollableList } from "../../chrome/selector-hel
 import { Input } from "../../components/input";
 import { MenuSelection } from "../../components/menu-selection";
 import { scrollOffsetForRow, viewportRange } from "../../components/scroll-viewport";
+import type { MatchFields } from "../../text-match";
 import { sanitizeDisplayLine } from "./display-text";
 import {
 	formatExtensionListHint,
@@ -77,17 +78,20 @@ function nativeItemId(item: ListItem): string {
 	return stableKey(getListItemKey(item));
 }
 
-/** Searchable text for a flattened row (the menu filter rebuilds via applyFilter; this covers headers/switches). */
-function getListItemSearchText(item: ListItem): string {
+/** Search fields for a flattened row (the menu filter rebuilds via applyFilter; this covers headers/switches). */
+function getListItemMatchFields(item: ListItem): MatchFields {
 	switch (item.type) {
 		case "master":
-			return `Enable ${item.providerName} Master Switch ${item.providerId}`;
+			return { names: [`${item.providerName} Master Switch`, item.providerId], details: "Enable" };
 		case "user-source":
-			return `Load ${item.providerName} config user source ${item.providerId}`;
+			return { names: [`${item.providerName} config user source`, item.providerId], details: "Load" };
 		case "kind-header":
-			return `${item.label} ${item.kind}`;
+			return { names: [item.label, item.kind] };
 		case "extension":
-			return `${item.item.displayName} ${item.item.name} ${item.item.description ?? ""} ${item.item.trigger ?? ""}`;
+			return {
+				names: [item.item.displayName, item.item.name],
+				details: `${item.item.description ?? ""} ${item.item.trigger ?? ""}`,
+			};
 	}
 }
 
@@ -152,7 +156,7 @@ export class ExtensionList implements Component {
 		this.#search.prompt = "";
 		this.#menu = new MenuSelection<ListItem>(this.#buildListItems(""), {
 			getKey: getListItemKey,
-			getSearchText: getListItemSearchText,
+			getMatchFields: getListItemMatchFields,
 			filter: (_items, query) => this.#buildListItems(query),
 		});
 	}

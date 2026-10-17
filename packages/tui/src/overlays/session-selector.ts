@@ -1,7 +1,6 @@
 import {
 	type Component,
 	Container,
-	FuzzyText,
 	Input,
 	matchesKey,
 	padding,
@@ -26,6 +25,7 @@ import {
 	pickerEvent,
 	pickerHits,
 } from "../native/picker";
+import { compareTextMatches, type MatchFields, MatchTarget, type TextMatch } from "../text-match";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { hintsRow, type NativeHint, overlayCard } from "../native/overlay";
 import { plainText } from "../native/spans";
@@ -266,43 +266,41 @@ const SCOPE_TABS: readonly { id: "folder" | "all"; label: string }[] = [
 /** Returns the IDs of sessions whose recorded prompts match a query, best first. */
 export type SessionHistoryMatcher = (query: string) => string[];
 
-function sessionSearchText(session: SessionSelectorEntry): string {
-	const parts = [
-		session.id,
-		session.title ?? "",
-		session.cwd ?? "",
-		session.firstMessage ?? "",
-		session.allMessagesText,
-		session.path,
-	];
-	return parts.filter(Boolean).join(" ");
+/**
+ * The title is the only name, so only it takes typos and abbreviations. The
+ * first message and transcript are details, matching where one of their words
+ * starts with a typed word. The id, cwd and path are identifiers, searched by
+ * fragments anywhere (`9c21` from an id, `project` from `/work/myproject`).
+ */
+function sessionMatchFields(session: SessionSelectorEntry): MatchFields {
+	const details = [session.firstMessage ?? "", session.allMessagesText].filter(Boolean).join(" ");
+	return {
+		names: session.title ? [session.title] : [],
+		details,
+		identifiers: [session.id, session.cwd ?? "", session.path],
+	};
 }
 
 /**
- * Lowercased per-session search haystack, built once and cached on the
- * {@link SessionSelectorEntry} itself (so it dies with the listing that produced it).
- * Rebuilding it per keystroke — a ~4KB string join plus `toLowerCase` per
- * session — was one of the costs that made resume search visibly lag.
- *
- * Only the string is cached. A prebuilt fuzzy index (~60KB per 4KB session)
- * would cost hundreds of MB on multi-thousand-session listings, so fuzzy
- * indexes are built transiently per scan visit instead (see
- * {@link scoreFuzzySession} callers).
+ * Per-session match target, prepared once and cached on the
+ * {@link SessionSelectorEntry} itself (so it dies with the listing that produced
+ * it). Rebuilding the ~4KB search text per keystroke was one of the costs that
+ * made resume search visibly lag.
  */
-const kSearchTextLower = Symbol("session.searchTextLower");
+const kMatchTarget = Symbol("session.matchTarget");
 
 interface SearchableSessionInfo extends SessionSelectorEntry {
-	[kSearchTextLower]?: string;
+	[kMatchTarget]?: MatchTarget;
 }
 
-function sessionTextLower(session: SessionSelectorEntry): string {
+function sessionMatchTarget(session: SessionSelectorEntry): MatchTarget {
 	const tagged = session as SearchableSessionInfo;
-	let textLower = tagged[kSearchTextLower];
-	if (textLower === undefined) {
-		textLower = sessionSearchText(session).toLowerCase();
-		tagged[kSearchTextLower] = textLower;
+	let target = tagged[kMatchTarget];
+	if (target === undefined) {
+		target = new MatchTarget(sessionMatchFields(session));
+		tagged[kMatchTarget] = target;
 	}
-	return textLower;
+	return target;
 }
 
 function tokenizeSessionQuery(query: string): string[] {
@@ -314,51 +312,22 @@ function compareSessionRecency(a: SessionSelectorEntry, b: SessionSelectorEntry)
 	return b.modified.getTime() - a.modified.getTime();
 }
 
-const MIN_PURE_FUZZY_TOKEN_SCORE = -20;
-
 /** One ranked search hit; `index` is the session's position in the unfiltered list (recency order). */
 interface RankedSessionMatch<T extends SessionSelectorEntry = SessionSelectorEntry> {
 	session: T;
-	score: number;
+	match: TextMatch;
 	index: number;
 }
 
-/**
- * True when every query token appears verbatim in the haystack. Literal
- * matches rank purely by recency, so they skip fuzzy scoring entirely — a pure
- * fast path, not a semantic change: a contiguous substring of the lowercased
- * text always lies within one normalized word per query sub-token, so every
- * literal token also fuzzy-matches.
- */
-function isLiteralMatch(textLower: string, tokens: string[]): boolean {
-	for (const token of tokens) {
-		if (!textLower.includes(token)) return false;
-	}
-	return true;
-}
+const LITERAL_ONLY = { typos: false, abbreviations: false } as const;
 
 /**
- * Fuzzy-score one non-literal session against every query token. Returns
- * undefined when a token fails to match or the weakest token is pure-fuzzy
- * noise. The caller builds `fuzzy` once per session visit so multi-token
- * queries share a single index.
+ * The session's match when every query word was found letter for letter, else
+ * null. Typos and abbreviations are off so a near miss or abbreviation of the
+ * title cannot shadow the same word found literally in the transcript or id.
  */
-function scoreFuzzySession<T extends SessionSelectorEntry>(
-	session: T,
-	index: number,
-	tokens: string[],
-	fuzzy: FuzzyText,
-): RankedSessionMatch<T> | undefined {
-	let score = 0;
-	let worstTokenScore = Number.NEGATIVE_INFINITY;
-	for (const token of tokens) {
-		const match = fuzzy.match(token);
-		if (!match.matches) return undefined;
-		score += match.score;
-		worstTokenScore = Math.max(worstTokenScore, match.score);
-	}
-	if (worstTokenScore >= MIN_PURE_FUZZY_TOKEN_SCORE) return undefined;
-	return { session, score, index };
+function matchSessionLiterally(session: SessionSelectorEntry, query: string): TextMatch | null {
+	return sessionMatchTarget(session).match(query, LITERAL_ONLY);
 }
 
 function compareLiteralRank(a: RankedSessionMatch, b: RankedSessionMatch): number {
@@ -366,24 +335,22 @@ function compareLiteralRank(a: RankedSessionMatch, b: RankedSessionMatch): numbe
 }
 
 function compareFuzzyRank(a: RankedSessionMatch, b: RankedSessionMatch): number {
-	return a.score - b.score || compareSessionRecency(a.session, b.session) || a.index - b.index;
+	return compareTextMatches(a.match, b.match) || compareSessionRecency(a.session, b.session) || a.index - b.index;
 }
 
-/** Exact titles lead partial titles; other matches retain their existing order. */
-function prioritizeTitleMatches<T extends SessionSelectorEntry>(
-	sessions: T[],
-	tokens: string[],
-	literal: RankedSessionMatch<T>[],
-): T[] {
-	const query = tokens.join(" ");
+/**
+ * Exact titles lead partial titles (every query word found in the title);
+ * other matches retain their existing order. Reads the literal matches, so
+ * titles compare folded and without punctuation like the rest of the search.
+ */
+function prioritizeTitleMatches<T extends SessionSelectorEntry>(sessions: T[], literal: RankedSessionMatch<T>[]): T[] {
 	const exact: T[] = [];
 	const partial: T[] = [];
 	const titleMatches = new Set<T>();
 	// Title hits are literal matches, already ranked by recency and source index.
-	for (const { session } of literal) {
-		const title = session.title?.trim().toLowerCase().replace(/\s+/g, " ");
-		if (title === query) exact.push(session);
-		else if (title && isLiteralMatch(title, tokens)) partial.push(session);
+	for (const { session, match } of literal) {
+		if (match.kind === "exact") exact.push(session);
+		else if (match.kind === "prefix" || match.kind === "word" || match.kind === "substring") partial.push(session);
 		else continue;
 		titleMatches.add(session);
 	}
@@ -394,10 +361,9 @@ function prioritizeTitleMatches<T extends SessionSelectorEntry>(
 /**
  * Filter and rank session picker search results.
  *
- * Exact and partial title matches lead. Other literal matches rank by recency
- * rather than a slightly better fuzzy position match. Pure fuzzy/acronym
- * matches still sort by fuzzy score after literal matches, but weak pure
- * fuzzy tokens are dropped as noise.
+ * Exact and partial title matches lead. Other literal matches (every query
+ * word found letter for letter) rank by recency rather than by where the words
+ * sit. Typo and abbreviation matches of the title follow, strongest first.
  *
  * This is the synchronous reference implementation; {@link SessionList} runs
  * the same primitives incrementally so huge listings never block a keystroke.
@@ -405,18 +371,19 @@ function prioritizeTitleMatches<T extends SessionSelectorEntry>(
 export function rankSessionSearchMatches<T extends SessionSelectorEntry>(allSessions: T[], query: string): T[] {
 	const tokens = tokenizeSessionQuery(query);
 	if (tokens.length === 0) return allSessions;
+	const normalized = tokens.join(" ");
 
 	const literal: RankedSessionMatch<T>[] = [];
 	const fuzzyMatches: RankedSessionMatch<T>[] = [];
 	for (let index = 0; index < allSessions.length; index++) {
 		const session = allSessions[index]!;
-		const textLower = sessionTextLower(session);
-		if (isLiteralMatch(textLower, tokens)) {
-			literal.push({ session, score: 0, index });
+		const literalMatch = matchSessionLiterally(session, normalized);
+		if (literalMatch) {
+			literal.push({ session, match: literalMatch, index });
 			continue;
 		}
-		const match = scoreFuzzySession(session, index, tokens, new FuzzyText(textLower));
-		if (match) fuzzyMatches.push(match);
+		const match = sessionMatchTarget(session).match(normalized);
+		if (match) fuzzyMatches.push({ session, match, index });
 	}
 
 	literal.sort(compareLiteralRank);
@@ -424,7 +391,7 @@ export function rankSessionSearchMatches<T extends SessionSelectorEntry>(allSess
 	const out: T[] = [];
 	for (const match of literal) out.push(match.session);
 	for (const match of fuzzyMatches) out.push(match.session);
-	return prioritizeTitleMatches(out, tokens, literal);
+	return prioritizeTitleMatches(out, literal);
 }
 
 /**
@@ -482,16 +449,16 @@ const HISTORY_MERGE_DEBOUNCE_MS = 150;
 const HISTORY_MERGE_MIN_QUERY = 2;
 
 /**
- * Sessions fuzzy-scored synchronously inside the keystroke itself. Small
+ * Sessions fuzzy-matched synchronously inside the keystroke itself. Small
  * listings finish within it, keeping the complete-in-one-frame behavior;
- * anything left spills into async chunks. A fuzzy visit costs ~100µs (index
- * build over the ≤4KB per-session corpus dominates), so 100 visits ≈ 10ms —
- * about one frame. Counts rather than a deadline keep chunk boundaries
- * deterministic (and testable under fake timers).
+ * anything left spills into async chunks. A fuzzy visit runs typo and
+ * abbreviation checks against the title and rescans the ≤4KB details, so
+ * bounding it keeps the keystroke within about one frame. Counts rather than a
+ * deadline keep chunk boundaries deterministic (and testable under fake timers).
  */
 const FUZZY_SCAN_INLINE_COUNT = 100;
 /**
- * Sessions fuzzy-scored per async chunk (~15ms). Each chunk yields back to
+ * Sessions fuzzy-matched per async chunk. Each chunk yields back to
  * the event loop so the next keystroke is never blocked behind a long scan; a
  * new query bumps the scan generation and orphans pending chunks.
  */
@@ -532,9 +499,9 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 	// The menu's visible list is always composed from these three inputs (see
 	// #composeFiltered), so a late-finishing fuzzy scan and the debounced
 	// history merge can land in any order without clobbering each other.
-	/** Recency-ranked sessions whose text contains every query token verbatim. */
+	/** Recency-ranked sessions that matched every query word letter for letter. */
 	#literalRanked: RankedSessionMatch<T>[] = [];
-	/** Score-ranked fuzzy-only matches, appended by scan chunks. */
+	/** Typo and abbreviation matches, appended by scan chunks and ordered by {@link compareFuzzyRank}. */
 	#fuzzyRanked: RankedSessionMatch<T>[] = [];
 	/** Prompt-history session IDs for the current query, once the merge landed. */
 	#historyIds: string[] = [];
@@ -587,7 +554,7 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		this.#historyMatcher = historyMatcher;
 		this.#menu = new MenuSelection<T>(sessions, {
 			getKey: session => session.path,
-			getSearchText: sessionSearchText,
+			getMatchFields: sessionMatchFields,
 		});
 		this.#selectCurrentSession();
 		this.#searchInput = new Input();
@@ -668,15 +635,17 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 			return;
 		}
 
-		// Literal pass: one substring scan per token per session, synchronous so
-		// every keystroke gets immediate recency-ranked feedback regardless of
-		// listing size.
+		// Literal pass: synchronous so every keystroke gets immediate
+		// recency-ranked feedback regardless of listing size.
+		const normalized = tokens.join(" ");
 		const literal: RankedSessionMatch<T>[] = [];
 		const rest: number[] = [];
 		const all = this.#allSessions;
 		for (let index = 0; index < all.length; index++) {
-			if (isLiteralMatch(sessionTextLower(all[index]!), tokens)) {
-				literal.push({ session: all[index]!, score: 0, index });
+			const session = all[index]!;
+			const match = matchSessionLiterally(session, normalized);
+			if (match) {
+				literal.push({ session, match, index });
 			} else {
 				rest.push(index);
 			}
@@ -684,14 +653,13 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		literal.sort(compareLiteralRank);
 		this.#literalRanked = literal;
 
-		// Fuzzy pass: building a fuzzy index per session is too expensive to run
-		// across a huge listing inside one keystroke, so scan a bounded slice now
-		// and spill the remainder into async chunks.
+		// Fuzzy pass: scan a bounded slice now and spill the remainder into
+		// async chunks so a huge listing never blocks the keystroke.
 		const inlineEnd = Math.min(rest.length, FUZZY_SCAN_INLINE_COUNT);
-		this.#scoreFuzzy(tokens, rest, 0, inlineEnd);
+		this.#matchFuzzy(normalized, rest, 0, inlineEnd);
 		this.#composeFiltered();
 		if (inlineEnd < rest.length) {
-			this.#scheduleFuzzyScan(this.#scanGeneration, tokens, rest, inlineEnd, this.#fuzzyRanked.length);
+			this.#scheduleFuzzyScan(this.#scanGeneration, normalized, rest, inlineEnd, this.#fuzzyRanked.length);
 		}
 		// New query rebuilds ranking from scratch. Same-query refilter (delete)
 		// and async compose (fuzzy scan / history merge) only clamp so an
@@ -701,33 +669,33 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		this.#scheduleHistoryMerge(query);
 	}
 
-	/** Fuzzy-score `rest[start..end)` (indexes into the unfiltered list) into {@link #fuzzyRanked}. */
-	#scoreFuzzy(tokens: string[], rest: number[], start: number, end: number): void {
+	/** Fuzzy-match `rest[start..end)` (indexes into the unfiltered list) into {@link #fuzzyRanked}. */
+	#matchFuzzy(query: string, rest: number[], start: number, end: number): void {
 		const all = this.#allSessions;
 		for (let i = start; i < end; i++) {
 			const index = rest[i]!;
 			const session = all[index]!;
-			const match = scoreFuzzySession(session, index, tokens, new FuzzyText(sessionTextLower(session)));
-			if (match) this.#fuzzyRanked.push(match);
+			const match = sessionMatchTarget(session).match(query);
+			if (match) this.#fuzzyRanked.push({ session, match, index });
 		}
 	}
 
 	/**
-	 * Score `rest[start..]` in {@link FUZZY_SCAN_CHUNK_COUNT}-session macrotask
+	 * Match `rest[start..]` in {@link FUZZY_SCAN_CHUNK_COUNT}-session macrotask
 	 * chunks so pending input runs between them, then recompose the visible
 	 * list once if the scan matched more than the `shown` fuzzy hits already
 	 * composed. Publishing per chunk reorders the list dozens of times per
 	 * keystroke on a large listing, and the native picker replays its
 	 * row-arrival animation on every reorder. A stale generation aborts silently.
 	 */
-	#scheduleFuzzyScan(generation: number, tokens: string[], rest: number[], start: number, shown: number): void {
+	#scheduleFuzzyScan(generation: number, query: string, rest: number[], start: number, shown: number): void {
 		this.#scanTimer = setTimeout(() => {
 			this.#scanTimer = undefined;
 			if (generation !== this.#scanGeneration) return;
 			const end = Math.min(rest.length, start + FUZZY_SCAN_CHUNK_COUNT);
-			this.#scoreFuzzy(tokens, rest, start, end);
+			this.#matchFuzzy(query, rest, start, end);
 			if (end < rest.length) {
-				this.#scheduleFuzzyScan(generation, tokens, rest, end, shown);
+				this.#scheduleFuzzyScan(generation, query, rest, end, shown);
 			} else if (this.#fuzzyRanked.length > shown) {
 				this.#composeFiltered();
 				this.onRequestRender?.();
@@ -737,7 +705,7 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 
 	/**
 	 * Rebuild the menu's visible list with title matches first, then other
-	 * prompt-history hits, literal matches (recency), and fuzzy-only hits (score).
+	 * prompt-history hits, literal matches (recency), and fuzzy-only hits (match strength).
 	 */
 	#composeFiltered(): void {
 		this.#itemsVersion++;
@@ -747,7 +715,6 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		for (const match of this.#fuzzyRanked) base.push(match.session);
 		const composed = prioritizeTitleMatches(
 			this.#historyIds.length > 0 ? mergeSessionRanking(this.#allSessions, base, this.#historyIds) : base,
-			tokenizeSessionQuery(this.#searchInput.getValue()),
 			this.#literalRanked,
 		);
 		// The fuzzy scan and the history merge only clamp the cursor so an arrow

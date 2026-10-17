@@ -251,7 +251,7 @@ export class HookSelectorComponent extends OverlayPanel {
 			this.#options.map((option, index) => ({ option, index })),
 			{
 				getKey: filtered => String(filtered.index),
-				getSearchText: filtered => `${filtered.option.label} ${filtered.option.description ?? ""}`,
+				getMatchFields: filtered => ({ names: [filtered.option.label], details: filtered.option.description }),
 				isDisabled: filtered => this.#disabledIndices.has(filtered.index),
 			},
 		);

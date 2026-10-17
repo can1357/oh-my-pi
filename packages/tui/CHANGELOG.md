@@ -4,19 +4,29 @@
 
 ### Breaking Changes
 
-- `FindStats.errors` is replaced by `failed` (judge requests that failed) and `unanswered` (unusable answers), and `FindToolDetails` requires a `coverage` status; the find renderer shows `N/M requests failed` ([#15744](https://github.com/can1357/oh-my-pi/issues/15744))
+- Removed `fuzzy.ts` (`FuzzyQuery`, `FuzzyText`, `FuzzyCorpus`, `fuzzyRank`, `resetFuzzyIndexCache`, `FuzzyMatch`, `FuzzyFilterResult`); use `matchText`, `MatchTarget`, `MatchCorpus` and `rankByText` from `text-match.ts`, while `fuzzyFilter` and `fuzzyMatch` remain ([#15579](https://github.com/can1357/oh-my-pi/pull/15579) by [@azain47](https://github.com/azain47))
+- Renamed `MenuSelectionAdapter.getSearchText(item)` to `getMatchFields(item)` and `getSettingItemFilterText` to `settingItemMatchFields` ([#15579](https://github.com/can1357/oh-my-pi/pull/15579) by [@azain47](https://github.com/azain47))
+- Removed the autocomplete scoring helpers `subsequenceScore` and `scoreCommandTextMatch`, and the `description` argument of `midPromptSkillTokenMatches`; rank with `matchText` or `rankByText` from `text-match.ts`, which return a match kind and cost instead of a number ([#15579](https://github.com/can1357/oh-my-pi/pull/15579) by [@azain47](https://github.com/azain47))
+
+### Added
+
+- Added `text-match.ts`, one typed-text matcher for every picker and popup that tolerates typos across punctuation (`gtp5` → `gpt-5`, `dabl` → `claude-fable-5-1`), abbreviations (`mrs` → Model Role Storage) and accents (`cafe` → `café`) ([#15579](https://github.com/can1357/oh-my-pi/pull/15579) by [@azain47](https://github.com/azain47))
+- Added `pi.showProfile` to `StatusLineSegmentOptions`: `false` keeps the `pi` segment's bare glyph under a named profile, in the rendered bar and in `describe` ([#16063](https://github.com/can1357/oh-my-pi/pull/16063) by [@shgew](https://github.com/shgew))
+
+### Changed
+
+- Settings search, the model picker and hub, `/resume`, `/tree`, the agents hubs, the extensions dashboard and list filters now find mistyped names and no longer match random input through scattered letters in descriptions ([#15579](https://github.com/can1357/oh-my-pi/pull/15579) by [@azain47](https://github.com/azain47))
 
 ### Fixed
 
+- Fixed `/`, `#` and internal-URL (`cfg://`, `skill://`, …) autocomplete suggesting unrelated entries for mistyped or random input, such as `/jub` running `/cleanse` ([#15579](https://github.com/can1357/oh-my-pi/pull/15579) by [@azain47](https://github.com/azain47))
+- `FindStats.errors` is replaced by `failed` (judge requests that failed) and `unanswered` (unusable answers), and `FindToolDetails` requires a `coverage` status; the find renderer shows `N/M requests failed` ([#15744](https://github.com/can1357/oh-my-pi/issues/15744))
 - Fixed sessions run inside tmux silently falling back to the terminal's true-color profile when the client terminal-type probe answered slowly on a loaded machine ([#16020](https://github.com/can1357/oh-my-pi/pull/16020) by [@CharleoYang](https://github.com/CharleoYang))
 - Fixed the `read` result notice printing the absolute resolved path, so a file under the home directory reads `Resolved path: ~/notes.txt` instead of `/home/you/notes.txt` ([#16055](https://github.com/can1357/oh-my-pi/pull/16055) by [@adi-IL](https://github.com/adi-IL)).
 - Fixed grep/read previews and other tool cards passing raw escape sequences from file contents to the terminal, which could switch it to the alternate screen with mouse reporting on, live and again on every resume ([#15963](https://github.com/can1357/oh-my-pi/issues/15963))
 - Fixed a final status-line render after shutdown scheduling another usage refresh ([#15845](https://github.com/can1357/oh-my-pi/issues/15845)).
 - Fixed Ctrl+O on LSP status and other plain LSP responses still clipping every row at 80 columns; expanded rows now wrap to show the full text ([#15824](https://github.com/can1357/oh-my-pi/issues/15824))
 - Fixed Ctrl+O leaving long rows clipped in expanded LSP, debug, MCP, web search fallback, yield, task and custom-tool results; expanded rows now wrap to show the full text, expanded LSP references list every location, and the LSP expand hint no longer appears when nothing is hidden ([#15824](https://github.com/can1357/oh-my-pi/issues/15824))
-### Added
-
-- Added `pi.showProfile` to `StatusLineSegmentOptions`: `false` keeps the `pi` segment's bare glyph under a named profile, in the rendered bar and in `describe` ([#16063](https://github.com/can1357/oh-my-pi/pull/16063) by [@shgew](https://github.com/shgew))
 
 ## [18.11.3] - 2026-10-16
 

@@ -83,7 +83,7 @@ import {
 import { sanitizeDisplaySingleLine } from "./extensions/display-text";
 import { AgentTranscriptViewer, type AgentTranscriptSource } from "./agent-transcript-viewer";
 import type { AgentRoleDisplay } from "./agent-hub-renderer";
-import { fuzzyMatch } from "../fuzzy";
+import { rankByText } from "../text-match";
 import { bottomBorder, divider, dividerSplit, PanelRows, row, topBorder, topBorderSplit } from "../chrome/overlay-box";
 import { SplitPane } from "../components/layout/split-pane";
 import { Stack } from "../components/layout/stack";
@@ -380,7 +380,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#treeParentById = new Map<string, string>();
 	#treeLastSiblingById = new Map<string, boolean>();
 	#treeMaxDepth = 0;
-	/** Fuzzy agent filter (`/`), applied to id and display name. */
+	/** Agent filter (`/`), applied to id and display name. */
 	readonly #agentFilter = filterInput();
 	#agentFilterEditing = false;
 	/** Current observer index and summary data, rebuilt on source changes rather than every paint. */
@@ -1564,10 +1564,14 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			ordered = refs.sort((a, b) => rowOrder.get(a)! - rowOrder.get(b)!);
 		}
 		const query = this.#agentFilter.getValue().trim();
-		const rosterRows =
+		// List view ranks matches strongest first (stable: roster order on ties);
+		// the tree view keeps roster order and only drops non-matching rows.
+		const ranked =
 			query.length > 0
-				? ordered.filter(ref => fuzzyMatch(query, `${ref.id} ${ref.displayName ?? ""}`).matches)
+				? rankByText(query, ordered, ref => ({ names: [ref.id, ref.displayName ?? ""] })).map(r => r.item)
 				: ordered;
+		const matched = new Set(ranked);
+		const rosterRows = query.length > 0 ? ordered.filter(ref => matched.has(ref)) : ordered;
 
 		if (this.#viewMode === "tree") {
 			const tree = projectAgentTree(rosterRows, rowOrder);
@@ -1578,7 +1582,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			this.#treeMaxDepth = 0;
 			for (const depth of tree.depthById.values()) this.#treeMaxDepth = Math.max(this.#treeMaxDepth, depth);
 		} else {
-			this.#rows = rosterRows;
+			this.#rows = ranked;
 			this.#treeDepthById.clear();
 			this.#treeParentById.clear();
 			this.#treeLastSiblingById.clear();

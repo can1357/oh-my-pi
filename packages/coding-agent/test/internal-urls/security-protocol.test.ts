@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../../src/config/settings";
+import { getInternalUrlSuggestions } from "@oh-my-pi/pi-tui/prompt/internal-url-autocomplete";
 import { InternalUrlRouter, SecurityProtocolHandler } from "../../src/internal-urls";
 import { parseInternalUrl } from "../../src/internal-urls/parse";
 import { importCodexSecurityBundle, importSarifFile, SecurityStore } from "../../src/security";
@@ -165,11 +166,15 @@ describe("security://", () => {
 		).rejects.toThrow("Unknown security resource");
 	});
 
-	test("completion filters candidates by the requested path fragment", async () => {
-		const completions = await InternalUrlRouter.instance().complete("security", "sariffixture/coverage", {
-			cwd: repositoryRoot,
-		});
-		expect(completions?.map(item => item.value)).toEqual(["scans/secscan_sariffixture/coverage"]);
+	test("completion ranks the requested path fragment first and tolerates typos", async () => {
+		const values = async (text: string) =>
+			(await getInternalUrlSuggestions(text, repositoryRoot))?.items.map(item => item.value) ?? [];
+		expect((await values("security://sariffixture/coverage"))[0]).toBe(
+			"security://scans/secscan_sariffixture/coverage",
+		);
+		expect((await values("security://scnas"))[0]).toBe("security://scans");
+		// Descriptions are searched where a word starts.
+		expect(await values("security://stored")).toContain("security://scans");
 	});
 
 	test("large untrusted reports are bounded", async () => {

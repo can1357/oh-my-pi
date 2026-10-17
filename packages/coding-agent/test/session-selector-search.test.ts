@@ -27,16 +27,18 @@ function makeSession(id: string, overrides: Partial<SessionInfo> = {}): SessionI
 }
 
 /**
- * 400 sessions, newest last; every fifth carries the "zzmarker" token. Large
- * enough that the non-literal remainder (320) overflows the inline fuzzy
- * budget (100) and must complete through async chunks.
+ * 400 sessions, newest last; every fifth carries the "zzmarker" token in
+ * `field`. Typos match titles only, so typo queries need the title corpus;
+ * title matches lead prompt-history hits, so history promotion needs the
+ * first-message one. Large enough that the non-literal remainder (320)
+ * overflows the inline fuzzy budget (100) and must complete through async chunks.
  */
-function makeCorpus(): SessionInfo[] {
+function makeCorpus(field: "title" | "firstMessage" = "title"): SessionInfo[] {
 	const sessions: SessionInfo[] = [];
 	for (let i = 0; i < 400; i++) {
 		sessions.push(
 			makeSession(`s-${i}`, {
-				firstMessage: i % 5 === 0 ? `zzmarker topic ${i}` : `unrelated filler text ${i}`,
+				[field]: i % 5 === 0 ? `zzmarker topic ${i}` : `unrelated filler text ${i}`,
 				modified: new Date(1700000000000 + i * 1000),
 			}),
 		);
@@ -151,7 +153,7 @@ describe("session picker incremental search", () => {
 	});
 
 	it("debounces the prompt-history lookup off the keystroke path and promotes its matches once typing pauses", () => {
-		const sessions = makeCorpus();
+		const sessions = makeCorpus("firstMessage");
 		const calls: string[] = [];
 		const harness = makeHarness(sessions, query => {
 			calls.push(query);

@@ -1,15 +1,6 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import {
-	type Component,
-	Container,
-	FuzzyQuery,
-	FuzzyText,
-	Input,
-	matchesKey,
-	Spacer,
-	TruncatedText,
-	truncateToWidth,
-} from "../index";
+import { type Component, Container, Input, matchesKey, Spacer, TruncatedText, truncateToWidth } from "../index";
+import { type MatchFields, MatchTarget } from "../text-match";
 import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 /** Available session-tree display filters. */
 export const TREE_FILTER_MODES = ["default", "no-tools", "user-only", "labeled-only", "all"] as const;
@@ -207,14 +198,14 @@ class TreeList implements Component {
 	#nodeById: Map<string, TreeSelectorNode> = new Map();
 	#parentById: Map<string, string | null> = new Map();
 	#filterMode: FilterMode;
-	/** The search field; its value is the fuzzy query. */
+	/** The search field; its value is the search query. */
 	readonly searchInput = new Input();
 	#toolCallMap: Map<string, ToolCallInfo> = new Map();
 	#multipleRoots = false;
 	#activePathIds: Set<string> = new Set();
 	#containsActive: Map<TreeSelectorNode, boolean> = new Map();
 	/** Prepared search text per node; rebuilt when the node's label changes. */
-	#searchTextCache = new WeakMap<TreeSelectorNode, { label: string | undefined; text: FuzzyText }>();
+	#searchTextCache = new WeakMap<TreeSelectorNode, { label: string | undefined; target: MatchTarget }>();
 
 	onSelect?: (entryId: string, options: { summarize: boolean }) => void;
 	onCancel?: () => void;
@@ -478,15 +469,11 @@ class TreeList implements Component {
 		this.#tree.setFilter(this.#buildFilter());
 	}
 
-	/** Visible-row predicate combining the assistant-text rule, filter mode, and fuzzy query. */
+	/** Visible-row predicate combining the assistant-text rule, filter mode, and search query. */
 	#buildFilter(): (node: TreeSelectorNode, row: TreeRow<TreeSelectorNode, string>) => boolean {
 		const filterMode = this.#filterMode;
 		const leafId = this.currentLeafId;
-		const searchTokens = this.getSearchQuery()
-			.toLowerCase()
-			.split(/\s+/)
-			.filter(Boolean)
-			.map(token => new FuzzyQuery(token));
+		const query = this.getSearchQuery().trim();
 		return node => {
 			const entry = node.entry;
 			const isCurrentLeaf = entry.id === leafId;
@@ -546,38 +533,36 @@ class TreeList implements Component {
 
 			if (!passesFilter) return false;
 
-			// Apply fuzzy search filter
-			if (searchTokens.length > 0) {
-				const nodeText = this.#getFuzzyText(node);
-				return searchTokens.every(token => token.match(nodeText).matches);
-			}
+			// Apply search filter (tree order is kept; the query only selects rows)
+			if (query) return this.#getMatchTarget(node).match(query) !== null;
 
 			return true;
 		};
 	}
 
-	/** Prepared fuzzy text for a node's searchable content, built once per label. */
-	#getFuzzyText(node: TreeSelectorNode): FuzzyText {
+	/** Prepared match target for a node's searchable content, built once per label. */
+	#getMatchTarget(node: TreeSelectorNode): MatchTarget {
 		const cached = this.#searchTextCache.get(node);
-		if (cached !== undefined && cached.label === node.label) return cached.text;
-		const text = new FuzzyText(this.#getSearchableText(node));
-		this.#searchTextCache.set(node, { label: node.label, text });
-		return text;
+		if (cached !== undefined && cached.label === node.label) return cached.target;
+		const target = new MatchTarget(this.#getSearchFields(node));
+		this.#searchTextCache.set(node, { label: node.label, target });
+		return target;
 	}
 
-	/** Get searchable text content from a node */
-	#getSearchableText(node: TreeSelectorNode): string {
+	/** Searchable fields of a node: label and role/kind as names, content as details. */
+	#getSearchFields(node: TreeSelectorNode): MatchFields {
 		const entry = node.entry;
+		const names: string[] = [];
 		const parts: string[] = [];
 
 		if (node.label) {
-			parts.push(node.label);
+			names.push(node.label);
 		}
 
 		switch (entry.type) {
 			case "message": {
 				const msg = entry.message;
-				parts.push(msg.role);
+				names.push(msg.role);
 				if ("content" in msg && msg.content) {
 					parts.push(this.#extractContent(msg.content));
 				}
@@ -588,7 +573,7 @@ class TreeList implements Component {
 				break;
 			}
 			case "custom_message": {
-				parts.push(entry.customType);
+				names.push(entry.customType);
 				if (entry.customType === "advisor") {
 					const { qualifier, text } = advisorTreeDisplay(entry.details);
 					if (qualifier) parts.push(qualifier);
@@ -600,17 +585,19 @@ class TreeList implements Component {
 				break;
 			}
 			case "compaction":
-				parts.push("compaction");
+				names.push("compaction");
 				break;
 			case "branch_summary":
-				parts.push("branch summary", entry.summary);
+				names.push("branch summary");
+				parts.push(entry.summary);
 				break;
 			case "model_change":
-				parts.push("model", entry.model);
+				names.push("model");
+				parts.push(entry.model);
 				break;
 			case "model_usage":
+				names.push("model usage");
 				parts.push(
-					"model usage",
 					sanitizeTreeField(entry.purpose),
 					sanitizeTreeField(entry.role ?? ""),
 					sanitizeTreeField(entry.provider),
@@ -618,16 +605,18 @@ class TreeList implements Component {
 				);
 				break;
 			case "thinking_level_change":
-				parts.push("thinking", entry.thinkingLevel ?? ThinkingLevel.Off);
+				names.push("thinking");
+				parts.push(entry.thinkingLevel ?? ThinkingLevel.Off);
 				break;
 			case "custom":
-				parts.push("custom", entry.customType);
+				names.push("custom", entry.customType);
 				break;
 			case "label":
-				parts.push("label", entry.label ?? "");
+				names.push("label");
+				parts.push(entry.label ?? "");
 				break;
 			case "service_tier_change":
-				parts.push("service tier");
+				names.push("service tier");
 				if (entry.serviceTier) {
 					const serviceTier = entry.serviceTier;
 					for (const family in serviceTier) {
@@ -637,26 +626,30 @@ class TreeList implements Component {
 				}
 				break;
 			case "title_change":
-				parts.push("title", entry.title);
+				names.push("title");
+				parts.push(entry.title);
 				break;
 			case "mode_change":
-				parts.push("mode", entry.mode);
+				names.push("mode");
+				parts.push(entry.mode);
 				break;
 			case "credential_pin":
-				parts.push("credential pin", entry.provider);
+				names.push("credential pin");
+				parts.push(entry.provider);
 				break;
 			case "ttsr_injection":
-				parts.push("ttsr injection", ...entry.injectedRules);
+				names.push("ttsr injection");
+				parts.push(...entry.injectedRules);
 				break;
 			case "reset_boundary":
-				parts.push("reset boundary");
+				names.push("reset boundary");
 				break;
 			case "session_init":
-				parts.push("session init");
+				names.push("session init");
 				break;
 		}
 
-		return parts.join(" ");
+		return { names, details: parts.join(" ") };
 	}
 
 	invalidate(): void {

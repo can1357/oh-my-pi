@@ -13,7 +13,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getEffectiveTokenCost, getModelPricingStatus, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { modelKind, type ModelKind, type ModelPricingStatus } from "@oh-my-pi/pi-catalog/types";
 import type { Component } from "../tui";
-import { FuzzyCorpus, fuzzyRank } from "../fuzzy";
+import { compareTextMatches, type MatchFields, MatchCorpus, type TextMatch } from "../text-match";
 import { Input } from "../components/input";
 import { ScrollView } from "../components/scroll-view";
 import { matchesKey } from "../keys";
@@ -592,17 +592,10 @@ export function buildSearchAffinity(
 	};
 }
 
-/** Collapse punctuation so exact and contiguous model-name matches form stable relevance tiers. */
-function compactModelSearchText(value: string): string {
-	return value.toLowerCase().replace(/[^\p{Letter}\p{Mark}\p{Number}]+/gu, "");
-}
-
-/** Exact id/selector → contiguous literal → fuzzy-only, against precomputed compact forms. */
-function modelSearchTier(query: string, id: string, selector: string): number {
-	if (!query) return 2;
-	if (query === id || query === selector) return 0;
-	if (id.includes(query) || selector.includes(query)) return 1;
-	return 2;
+/** Exact name → contiguous literal in a name → anything else (typos, abbreviations, details). */
+function modelSearchTier({ kind }: TextMatch): number {
+	if (kind === "exact") return 0;
+	return kind === "prefix" || kind === "word" || kind === "substring" ? 1 : 2;
 }
 
 /** Inputs to {@link rankModelItems} / {@link ModelItemRanker}. */
@@ -614,8 +607,6 @@ export interface ModelRankOptions {
 
 /** Query-independent sort keys of one candidate, computed once per ranker. */
 interface ModelRankKeys {
-	compactId: string;
-	compactSelector: string;
 	modelAffinity: number;
 	providerAffinity: number;
 	/** Position class in the MRU/version order; comparator-equal items share it. */
@@ -623,21 +614,21 @@ interface ModelRankKeys {
 }
 
 /**
- * {@link rankModelItems} prepared for one candidate list: the fuzzy index, the
+ * {@link rankModelItems} prepared for one candidate list: the match index, the
  * MRU/version order, and the affinity ranks depend only on the items and options,
  * so per-keystroke callers (composer mentions, `/switch` arguments, the picker)
- * hold one ranker and pay only the per-query fuzzy scan.
+ * hold one ranker and pay only the per-query match scan.
  */
 export class ModelItemRanker {
 	readonly items: ReadonlyArray<ModelBrowserItem>;
 	readonly options: ModelRankOptions;
-	readonly #corpus: FuzzyCorpus<ModelBrowserItem>;
+	readonly #corpus: MatchCorpus<ModelBrowserItem>;
 	readonly #keys = new Map<ModelBrowserItem, ModelRankKeys>();
 
 	constructor(items: ReadonlyArray<ModelBrowserItem>, options: ModelRankOptions) {
 		this.items = items;
 		this.options = options;
-		this.#corpus = new FuzzyCorpus(items, modelSearchText);
+		this.#corpus = new MatchCorpus(items, modelMatchFields);
 		const compare = modelItemComparator({ roles: options.roles, mruOrder: options.mruOrder, skipRoleRank: true });
 		const ordered = [...items].sort(compare);
 		let group = 0;
@@ -645,8 +636,6 @@ export class ModelItemRanker {
 			const item = ordered[i]!;
 			if (i > 0 && compare(ordered[i - 1]!, item) !== 0) group++;
 			this.#keys.set(item, {
-				compactId: compactModelSearchText(item.id),
-				compactSelector: compactModelSearchText(item.selector),
 				modelAffinity: options.affinity.models.get(item.selector.toLowerCase()) ?? Number.MAX_SAFE_INTEGER,
 				providerAffinity: options.affinity.providers.get(item.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER,
 				orderGroup: group,
@@ -657,28 +646,25 @@ export class ModelItemRanker {
 	/** Rank by text relevance, user affinity, and MRU/version order. */
 	rank(query: string): ModelBrowserItem[] {
 		if (!query.trim()) return [...this.items];
-		const queryKey = compactModelSearchText(query);
-		// Exact and contiguous matches stay ahead of fuzzy-only candidates; affinity
-		// breaks ties before fuzzy quality and the normal MRU/version ordering, and
-		// fuzzy order settles items that ordering cannot tell apart.
-		const rows = this.#corpus.rank(query).map((result, fuzzyIndex) => {
-			const keys = this.#keys.get(result.item)!;
-			return {
-				item: result.item,
-				keys,
-				tier: modelSearchTier(queryKey, keys.compactId, keys.compactSelector),
-				bucket: Math.round(result.score / 10),
-				fuzzyIndex,
-			};
-		});
+		// Exact and contiguous literal matches stay ahead of typo, abbreviation and
+		// detail matches; affinity breaks ties before match strength and the normal
+		// MRU/version ordering, and match order settles items that ordering cannot
+		// tell apart.
+		const rows = this.#corpus.rank(query).map((result, matchIndex) => ({
+			item: result.item,
+			match: result.match,
+			keys: this.#keys.get(result.item)!,
+			tier: modelSearchTier(result.match),
+			matchIndex,
+		}));
 		rows.sort(
 			(a, b) =>
 				a.tier - b.tier ||
 				a.keys.modelAffinity - b.keys.modelAffinity ||
 				a.keys.providerAffinity - b.keys.providerAffinity ||
-				a.bucket - b.bucket ||
+				compareTextMatches(a.match, b.match) ||
 				a.keys.orderGroup - b.keys.orderGroup ||
-				a.fuzzyIndex - b.fuzzyIndex,
+				a.matchIndex - b.matchIndex,
 		);
 		return rows.map(row => row.item);
 	}
@@ -840,17 +826,21 @@ export function thinkingDotToken(level: ConfiguredThinkingLevel): string | undef
 }
 
 /**
- * The fuzzy haystack for a model row: the displayed `provider/id`, plus `free`
- * for zero-cost models so the cost column's own word is searchable even when
- * the id never says it (openrouter suffixes `:free`; nvidia does not).
+ * What a model row matches on: its id and the displayed `provider/id` as
+ * names; the display name and, for zero-cost models, `free` as details. The
+ * display name mostly restates the id, and as a name its leading word would
+ * outrank the id's own match (`opus` → "Opus Distill" ahead of
+ * `claude-opus-4-8`). `free` keeps the cost column's own word searchable even
+ * when the id never says it (openrouter suffixes `:free`; nvidia does not).
  *
- * Must stay a pure function of the item — never of the query. `fuzzyRank`
- * caches match indices keyed on this string and stops admitting new entries
- * past its cap, so a query-dependent haystack would thrash that cache.
+ * Must stay a pure function of the item — never of the query: rankers prepare
+ * these fields once per catalog and reuse them for every keystroke.
  */
-export function modelSearchText({ provider, id, model }: ModelBrowserItem): string {
-	const base = `${provider}/${id}`;
-	return isFreeModel(model) ? `${base} free` : base;
+export function modelMatchFields({ provider, id, model }: ModelBrowserItem): MatchFields {
+	const names = provider ? [id, `${provider}/${id}`] : [id];
+	const label = model.name && model.name !== id ? model.name : "";
+	const details = isFreeModel(model) ? `${label} free` : label;
+	return details ? { names, details } : { names };
 }
 
 /** Provider-supplied blurb, flattened to a single renderable detail-line cell. */
@@ -989,7 +979,7 @@ export class ModelBrowser implements Component {
 	#searchInput = new Input();
 	#menu = new MenuSelection<ModelBrowserItem>([], {
 		getKey: item => item.selector,
-		getSearchText: modelSearchText,
+		getMatchFields: modelMatchFields,
 		isDisabled: item => item.id === "separator",
 		filter: (items, query) => this.#filterItems(items, query),
 	});
@@ -998,6 +988,8 @@ export class ModelBrowser implements Component {
 	#affinity: SearchAffinity = { models: new Map(), providers: new Map() };
 	/** Ranker for the menu's current item array; rebuilt when items or affinity change. */
 	#ranker?: { source: readonly ModelBrowserItem[]; ranker: ModelItemRanker };
+	/** Match index of the menu's current item array for {@link #preserveQueryOrder} searches. */
+	#queryOrderCorpus?: { source: readonly ModelBrowserItem[]; corpus: MatchCorpus<ModelBrowserItem> };
 	#perf: ReadonlyMap<string, ModelBrowserPerf> = new Map();
 	/** Fastest tier aggregate per selector in {@link #perf}, built on the first lookup miss. */
 	#perfTiers:
@@ -1210,10 +1202,14 @@ export class ModelBrowser implements Component {
 	 */
 	#filterItems(items: readonly ModelBrowserItem[], query: string): readonly ModelBrowserItem[] {
 		if (this.#preserveQueryOrder) {
-			const base = items.filter(item => !this.#isDisabled(item));
-			return this.#insertSeparator(
-				query.trim() ? fuzzyRank(base, query, modelSearchText).map(result => result.item) : base,
-			);
+			if (!query.trim()) return this.#insertSeparator(items.filter(item => !this.#isDisabled(item)));
+			let cached = this.#queryOrderCorpus;
+			if (cached?.source !== items) {
+				const base = items.filter(item => !this.#isDisabled(item));
+				cached = { source: items, corpus: new MatchCorpus(base, modelMatchFields) };
+				this.#queryOrderCorpus = cached;
+			}
+			return this.#insertSeparator(cached.corpus.rank(query).map(result => result.item));
 		}
 		// The menu hands back the same array until `setItems`, and roles/MRU replace the
 		// affinity object, so one ranker serves every keystroke of a search.

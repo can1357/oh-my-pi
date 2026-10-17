@@ -53,7 +53,7 @@ export class LogoutAccountSelectorComponent extends OverlayPanel {
 			accounts,
 			{
 				getKey: account => String(account.credentialId),
-				getSearchText: account => `${account.label} ${account.detail} ${account.provider}`,
+				getMatchFields: account => ({ names: [account.label, account.provider], details: account.detail }),
 			},
 			active ? String(active.credentialId) : undefined,
 		);

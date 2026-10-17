@@ -1,11 +1,11 @@
-import { fuzzyFilter } from "../fuzzy";
+import { type MatchFields, rankByText } from "../text-match";
 
 /** Describes how a menu identifies, searches, disables, and confirms its items. */
 export interface MenuSelectionAdapter<T> {
 	/** Stable identity used to retain selection while data or filtering changes. */
 	getKey: (item: T) => string;
-	/** Searchable text used by the default fuzzy filter. */
-	getSearchText: (item: T) => string;
+	/** Search fields for the default filter: names identify the row, details describe it. */
+	getMatchFields: (item: T) => MatchFields;
 	/** Disabled items remain visible but are skipped by navigation and cannot activate. */
 	isDisabled?: (item: T) => boolean;
 	/** Items returning true require two activation requests without an intervening state change. */
@@ -216,7 +216,7 @@ export class MenuSelection<T> {
 		const query = this.#query.trim();
 		this.#visibleItems = query
 			? (this.adapter.filter?.(this.#items, query) ??
-				fuzzyFilter([...this.#items], query, item => this.adapter.getSearchText(item)))
+				rankByText(query, this.#items, item => this.adapter.getMatchFields(item)).map(({ item }) => item))
 			: this.#items;
 		this.#selectedIndex = this.#findInitialIndex(preferredKey);
 	}

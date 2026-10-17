@@ -222,7 +222,7 @@ export class HistorySearchComponent extends OverlayPanel {
 
 		this.#menu = new MenuSelection<HistorySearchEntry>([], {
 			getKey: entry => `${entry.created_at}:${entry.prompt}`,
-			getSearchText: entry => entry.prompt,
+			getMatchFields: entry => ({ names: [], details: entry.prompt }),
 		});
 		this.#searchInput = new Input();
 		this.#searchInput.onSubmit = () => {

@@ -1,6 +1,7 @@
 import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
 import { Input } from "./input";
 import { getMenuWindow, MenuSelection } from "./menu-selection";
+import type { MatchFields } from "../text-match";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText, matchesKey } from "../keys";
 import { type MouseRoutable, routeSelectListMouse, type SgrMouseEvent } from "../mouse";
@@ -54,7 +55,7 @@ export interface SelectItem {
 	disabled?: boolean;
 	/** When set, activation requires a second Enter/click and this text becomes the status line. */
 	confirmation?: string;
-	/** Additional text included by the default fuzzy filter without being rendered. */
+	/** Additional text the default filter matches as details (word starts, no typos) without rendering it. */
 	searchText?: string;
 }
 
@@ -192,7 +193,7 @@ export class SelectList implements Component, MouseRoutable {
 		this.#maxVisible = Math.max(1, Math.trunc(maxVisible));
 		this.#selection = new MenuSelection(items, {
 			getKey: item => item.value,
-			getSearchText: item => this.#getFilterText(item),
+			getMatchFields: item => this.#getMatchFields(item),
 			isDisabled: item => item.disabled === true,
 			requiresConfirmation: item => item.confirmation !== undefined,
 			filter: layout.filterItems,
@@ -789,18 +790,15 @@ export class SelectList implements Component, MouseRoutable {
 		if (notify && changed) this.#notifySelectionChange();
 	}
 
-	#getFilterText(item: SelectItem): string {
-		let text = `${item.label} ${item.value}`;
-		if (item.description) {
-			text += ` ${item.description}`;
-		}
+	#getMatchFields(item: SelectItem): MatchFields {
+		let details = item.description ?? "";
 		if (item.hint) {
-			text += ` ${item.hint}`;
+			details += ` ${item.hint}`;
 		}
 		if (item.searchText) {
-			text += ` ${item.searchText}`;
+			details += ` ${item.searchText}`;
 		}
-		return sanitizeSingleLine(text);
+		return { names: [sanitizeSingleLine(item.label), item.value], details: sanitizeSingleLine(details) };
 	}
 
 	#renderContext(item: SelectItem, index: number, width: number): SelectListRenderItemContext {

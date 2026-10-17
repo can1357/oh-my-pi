@@ -131,10 +131,10 @@ Assistant messages that contain only tool calls (no canonical text) are hidden i
 
 ### Search behavior
 
-- Query is tokenized by spaces
-- Matching is fuzzy (subsequence) and case-insensitive (`fuzzyMatch`)
-- All tokens must match (AND semantics)
-- Searchable text includes label, role, and type-specific content (message text, branch summary text, custom type, tool command snippets, etc.)
+- Query is tokenized by spaces; matching is case-insensitive (`text-match`)
+- All tokens must match (AND semantics); tree order is kept, the query only selects rows
+- The node label, message role, custom type and entry kind (`compaction`, `branch summary`, `model`, …) match letter for letter anywhere, with typos, or as abbreviations
+- Type-specific content (message text, branch summary text, tool command snippets, etc.) matches where one of its words starts with a typed word
 - Message/custom-message text is bounded to a 200-character search preview; search does not index every byte of a long message.
 
 ## Selection outcomes (important)

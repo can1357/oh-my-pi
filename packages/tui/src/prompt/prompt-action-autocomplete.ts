@@ -21,7 +21,7 @@ import {
 	isModelMentionPrefix,
 	type ModelMentionCandidateSource,
 } from "./model-mention-autocomplete";
-import { subsequenceMatch, subsequenceScore } from "../autocomplete";
+import { rankByText } from "../text-match";
 
 let emojiAutocompleteEnabled = true;
 
@@ -174,23 +174,21 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		if (githubRefSuggestions) return githubRefSuggestions;
 		const promptActionPrefix = getPromptActionPrefix(textBeforeCursor);
 		if (promptActionPrefix) {
-			const query = promptActionPrefix.slice(1).toLowerCase();
-			const items = this.#actions
-				.map(action => {
-					const searchable = [action.label, action.description, ...action.keywords].join(" ").toLowerCase();
-					if (!subsequenceMatch(query, searchable)) return null;
-					return {
-						value: action.label,
-						label: action.label,
-						description: action.description,
-						actionId: action.id,
-						execute: action.execute,
-						score: subsequenceScore(query, searchable),
-					} satisfies PromptActionAutocompleteItem & { score: number };
-				})
-				.filter(item => item !== null)
-				.sort((a, b) => b.score - a.score)
-				.map(({ score: _score, ...item }) => item);
+			// An action answers to its label and keywords; the description holds its
+			// key hints. No typo kinds: `#fix` in ordinary prose must not open a popup
+			// whose Enter runs an action.
+			const items = rankByText(
+				promptActionPrefix.slice(1),
+				this.#actions,
+				action => ({ names: [action.label, ...action.keywords], details: action.description }),
+				{ typos: false },
+			).map(({ item: action }): PromptActionAutocompleteItem => ({
+				value: action.label,
+				label: action.label,
+				description: action.description,
+				actionId: action.id,
+				execute: action.execute,
+			}));
 			if (items.length > 0) {
 				return { items, prefix: promptActionPrefix };
 			}

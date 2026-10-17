@@ -15,7 +15,6 @@ import type { TspPickerAction, TspPickerColumn, TspPickerItem, TspPickerScope, T
 import {
 	type Component,
 	Editor,
-	FuzzyQuery,
 	Input,
 	matchesKey,
 	replaceTabs,
@@ -26,6 +25,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "../index";
+import { rankByText } from "../text-match";
 import { code, col, md, node, row, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionHint, type NativeHint, hintsRow } from "../native/overlay";
@@ -192,14 +192,6 @@ export function parseGeneratedAgentSpec(raw: string): GeneratedAgentSpec {
 /** Stable native list-item id of an agent-list row. */
 function listRowId(rowDef: ListRow): string {
 	return rowDef.kind === "new" ? "new" : `agent:${rowDef.agent.source}:${rowDef.agent.name}`;
-}
-
-/** All `tokens` (prepared once per query) fuzzy-match the agent's searchable text. */
-function matchAgent(agent: HubAgent, tokens: readonly FuzzyQuery[]): boolean {
-	// Not memoized: `overrideModel` is edited in place, and the module index
-	// cache already reuses the per-text index for unchanged agents.
-	const text = `${agent.name} ${agent.description} ${SOURCE_LABEL[agent.source]} ${agent.overrideModel ?? ""}`;
-	return tokens.every(token => token.match(text).matches);
 }
 
 /**
@@ -374,12 +366,13 @@ export class AgentsHubComponent implements Component {
 			entry.kind === "source" ? this.#allAgents.filter(agent => agent.source === entry.source) : this.#allAgents;
 		const query = this.#search.getValue();
 		let filtered = scoped;
-		if (query) {
-			const tokens = query
-				.trim()
-				.split(/\s+/)
-				.map(token => new FuzzyQuery(token));
-			filtered = scoped.filter(agent => matchAgent(agent, tokens));
+		if (query.trim()) {
+			// Strongest match first; the stable sort keeps roster order on ties.
+			// `overrideModel` is edited in place, so fields are rebuilt per query.
+			filtered = rankByText(query, scoped, agent => ({
+				names: [agent.name],
+				details: `${agent.description} ${SOURCE_LABEL[agent.source]} ${agent.overrideModel ?? ""}`,
+			})).map(ranked => ranked.item);
 		}
 		this.#rows = [...filtered.map(agent => ({ kind: "agent", agent }) as ListRow), { kind: "new" }];
 	}

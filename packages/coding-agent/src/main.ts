@@ -23,7 +23,7 @@ import {
 import { $env, isBunTestRuntime, isCompiledBinary, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
-import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
+import { rankByText } from "@oh-my-pi/pi-tui/text-match";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
 import {
@@ -2571,11 +2571,11 @@ export async function runRootCommand(
 				if (parsedArgs.model && availableModels.length > 0) {
 					// Credentials work; the requested selector is what failed. Point at
 					// the nearest usable models instead of an API-key checklist.
-					const suggestions = fuzzyFilter(
-						availableModels.map(model => `${model.provider}/${model.id}`),
-						parsedArgs.model,
-						selector => selector,
-					).slice(0, 5);
+					const suggestions = rankByText(parsedArgs.model, availableModels, model => ({
+						names: [`${model.provider}/${model.id}`, model.id],
+					}))
+						.slice(0, 5)
+						.map(({ item }) => `${item.provider}/${item.id}`);
 					if (suggestions.length > 0) {
 						process.stderr.write(`${chalk.yellow("\nDid you mean:")}\n`);
 						for (const selector of suggestions) process.stderr.write(`  ${selector}\n`);

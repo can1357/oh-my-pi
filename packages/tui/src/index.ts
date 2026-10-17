@@ -42,8 +42,8 @@ export * from "./deccara";
 export * from "./desktop-notify";
 // Editor component interface (for custom editors)
 export type * from "./editor-component";
-// Fuzzy matching
-export * from "./fuzzy";
+// Typed-text matching (also `fuzzyFilter` / `fuzzyMatch` for upstream Pi extensions)
+export * from "./text-match";
 // Keybindings
 export * from "./keybindings";
 // Kitty keyboard protocol helpers

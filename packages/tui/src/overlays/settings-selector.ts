@@ -4,9 +4,7 @@ import {
 	type Component,
 	Container,
 	extractPrintableText,
-	FuzzyCorpus,
 	getKeybindings,
-	getSettingItemFilterText,
 	type ImageBudget,
 	Input,
 	matchesKey,
@@ -41,7 +39,8 @@ import {
 	type SettingsDisplayEntry,
 } from "./settings-defs";
 import type { TspPrefsControl, TspPrefsProps } from "@oh-my-pi/pi-wire";
-import { prefsSectionId } from "../components/settings-list";
+import { prefsSectionId, settingItemMatchFields } from "../components/settings-list";
+import { compareTextMatches, MatchCorpus, type TextMatch } from "../text-match";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../thinking";
 import { getTabBarTheme } from "../chrome/shared";
@@ -635,7 +634,7 @@ export class SettingsSelectorComponent implements Component {
 	 * search start/end and whenever a value or condition may have changed
 	 * (`#refreshItems`, `#onSearchSettingChange`); rebuilt lazily by `#setSearchQuery`.
 	 */
-	#searchCorpora: { tab: SettingTab; corpus: FuzzyCorpus<SettingItem> }[] | null = null;
+	#searchCorpora: { tab: SettingTab; corpus: MatchCorpus<SettingItem> }[] | null = null;
 	#textInputActive = false;
 	#hasSectionJump = false;
 	// Frame geometry from the last render, for mouse hit-testing (the
@@ -1333,7 +1332,7 @@ export class SettingsSelectorComponent implements Component {
 
 		const counts = new Map<SettingTab, number>();
 		const items: SettingItem[] = [];
-		const tabResults: { tab: SettingTab; matched: SettingItem[]; bestScore: number; order: number }[] = [];
+		const tabResults: { tab: SettingTab; matched: SettingItem[]; best: TextMatch; order: number }[] = [];
 		this.#searchFirstMatch.clear();
 		let total = 0;
 		this.#searchCorpora ??= SETTING_TABS.map(tab => {
@@ -1342,24 +1341,20 @@ export class SettingsSelectorComponent implements Component {
 				const item = this.#defToItem(def);
 				if (item) candidates.push(item);
 			}
-			return { tab, corpus: new FuzzyCorpus(candidates, getSettingItemFilterText) };
+			return { tab, corpus: new MatchCorpus(candidates, settingItemMatchFields) };
 		});
 		for (let order = 0; order < this.#searchCorpora.length; order++) {
 			const { tab, corpus } = this.#searchCorpora[order]!;
 			const ranked = corpus.rank(query);
 			const matched = ranked.map(result => result.item);
 			counts.set(tab, matched.length);
-			if (matched.length === 0) continue;
+			const best = ranked[0];
+			if (!best) continue;
 			total += matched.length;
-			tabResults.push({
-				tab,
-				matched,
-				bestScore: ranked[0]?.score ?? 0,
-				order,
-			});
+			tabResults.push({ tab, matched, best: best.match, order });
 		}
 
-		tabResults.sort((a, b) => a.bestScore - b.bestScore || a.order - b.order);
+		tabResults.sort((a, b) => compareTextMatches(a.best, b.best) || a.order - b.order);
 		for (const result of tabResults) {
 			const meta = TAB_METADATA[result.tab];
 			items.push({

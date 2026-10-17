@@ -371,7 +371,10 @@ export class Sidebar {
 	viewStyle: "path" | "tree" = "tree";
 	readonly #collapsed = new Set<string>();
 	readonly #collapsedSections = new Set<SectionTarget["area"]>();
-	readonly #selection = new MenuSelection<Target>([], { getKey: targetKey, getSearchText: targetKey });
+	readonly #selection = new MenuSelection<Target>([], {
+		getKey: targetKey,
+		getMatchFields: target => ({ names: [targetKey(target)] }),
+	});
 	#treeVersion = 0;
 	readonly #targetByKey = new Map<string, Target>();
 	readonly #fileEntryCache = new Map<

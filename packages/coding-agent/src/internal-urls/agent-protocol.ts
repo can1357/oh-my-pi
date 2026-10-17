@@ -21,7 +21,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
+import { rankByText } from "@oh-my-pi/pi-tui/text-match";
 import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
@@ -83,7 +83,9 @@ function extractJsonPath(data: unknown, segments: string[]): unknown {
  */
 function notFoundError(outputId: string, candidates: Iterable<string>): Error {
 	const unique = [...new Set(candidates)].filter(id => id !== outputId);
-	const suggestions = fuzzyFilter(unique, outputId, id => id).slice(0, MAX_ID_SUGGESTIONS);
+	const suggestions = rankByText(outputId, unique, id => ({ names: [id] }))
+		.slice(0, MAX_ID_SUGGESTIONS)
+		.map(({ item }) => item);
 	const hint = suggestions.length > 0 ? `Did you mean: ${suggestions.join(", ")}` : "List agents with history://";
 	return new Error(`Not found: ${outputId}\n${hint}`);
 }

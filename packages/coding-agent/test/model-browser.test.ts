@@ -197,6 +197,21 @@ describe("ModelBrowser search ranking", () => {
 		expect(browser.getSelected()?.selector).toBe("openai-codex/gpt-5.5");
 	});
 
+	test("a display name matches but never outranks an id that says the query", () => {
+		// The display name is a detail: "Opus Distill" must not put a gemma
+		// distill ahead of claude-opus when the user types "opus".
+		const distill = Object.assign(makeModel("nanogpt", "gemma-4-26b-distill"), { name: "Opus Distill" });
+		const browser = makeBrowser(
+			[distill, makeModel("anthropic", "claude-opus-4-8")],
+			["nanogpt/gemma-4-26b-distill"],
+		);
+
+		browser.setQuery("opus");
+
+		expect(browser.visibleCount).toBe(2);
+		expect(browser.getSelected()?.selector).toBe("anthropic/claude-opus-4-8");
+	});
+
 	test("MRU breaks ties between equally good matches", () => {
 		// Same model id under two providers: match quality is identical, so
 		// the recently used provider must win over alphabetical order.

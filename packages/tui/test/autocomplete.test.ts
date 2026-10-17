@@ -1190,6 +1190,73 @@ describe("trySyncSlashCompletion", () => {
 		expect(result!.items[0]?.value).toBe("q");
 	});
 
+	it("ranks one-typo command names and never matches letters scattered through a description", () => {
+		const provider = new CombinedAutocompleteProvider(
+			[
+				{ name: "cleanse", description: "Detect and fix project diagnostics with weighted parallel subagents" },
+				{ name: "jobs", description: "Show background jobs" },
+				{ name: "hub", description: "Open the live Agent Hub" },
+				{ name: "clear", description: "Clear the context" },
+				{ name: "modelpreset", description: "Pick a saved preset" },
+				{ name: "model", description: "Switch the active one" },
+			],
+			"/tmp",
+		);
+		const values = (prefix: string) => provider.trySyncSlashCompletion(prefix)?.items.map(i => i.value);
+		// Wrong letter: `cleanse` used to match through j…u…b across its description.
+		expect(values("/jub")).toEqual(["hub"]);
+		// Letters spread over several description words are not a match…
+		expect(values("/dfd")).toBeUndefined();
+		expect(values("/hello")).toBeUndefined();
+		// …but literal description text still is.
+		expect(values("/diagnos")).toEqual(["cleanse"]);
+		// Swapped letters.
+		expect(values("/hbu")?.[0]).toBe("hub");
+		expect(values("/clenase")?.[0]).toBe("cleanse");
+		// A typo of a whole name beats an abbreviation (`c·l·e·a…s` in `cleanse`).
+		expect(values("/cleas")).toEqual(["clear", "cleanse"]);
+		// A whole-name typo beats letters strung out through a longer name.
+		expect(values("/modle")).toEqual(["model", "modelpreset"]);
+		// An in-order abbreviation; three letters are too few for a prefix typo of `cleanse`.
+		expect(values("/clr")).toEqual(["clear"]);
+	});
+
+	it("does not typo-match queries shorter than three letters", () => {
+		const provider = new CombinedAutocompleteProvider(
+			[{ name: "hub", description: "Open the live Agent Hub" }],
+			"/tmp",
+		);
+		expect(provider.trySyncSlashCompletion("/ju")).toBeNull();
+	});
+
+	it("tolerates two typos only in names of six or more letters", () => {
+		const provider = new CombinedAutocompleteProvider(
+			[
+				{ name: "settings", description: "Open settings menu" },
+				{ name: "changelog", description: "Show changelog entries" },
+				{ name: "tree", description: "Navigate the session tree" },
+				{ name: "handoff", description: "Hand off to a fresh session" },
+			],
+			"/tmp",
+		);
+		const first = (prefix: string) => provider.trySyncSlashCompletion(prefix)?.items[0]?.value;
+		// A dropped letter plus a swap, and two swaps.
+		expect(first("/setigns")).toBe("settings");
+		expect(first("/chnagelgo")).toBe("changelog");
+		// Five letters two edits from `tree` is a different word, not a typo of it.
+		expect(provider.trySyncSlashCompletion("/trace")).toBeNull();
+		// Two edits from the start of a longer name is not enough (`random` ~ `hando…`).
+		expect(provider.trySyncSlashCompletion("/random")).toBeNull();
+	});
+
+	it("tolerates a typo in a command alias", () => {
+		const provider = new CombinedAutocompleteProvider(
+			[{ name: "setup", aliases: ["providers"], description: "Open provider setup" }],
+			"/tmp",
+		);
+		expect(provider.trySyncSlashCompletion("/porviders")?.items[0]?.value).toBe("providers");
+	});
+
 	it("uses aliases when completing slash command arguments", async () => {
 		const provider = new CombinedAutocompleteProvider(
 			[

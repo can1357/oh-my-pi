@@ -27,7 +27,7 @@ import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { MODEL_KINDS, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import type { Component, TUI } from "../tui";
 import { extractPrintableText, matchesKey } from "../keys";
-import { FuzzyCorpus } from "../fuzzy";
+import { MatchCorpus } from "../text-match";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { boundKeys, editorKey, editorKeys } from "../chrome/keybinding-hints";
 import type { KeyName } from "../key-hint-format";
@@ -55,7 +55,7 @@ import {
 	MODEL_PICKER_COLUMNS,
 	ModelBrowser,
 	type ModelBrowserItem,
-	modelSearchText,
+	modelMatchFields,
 	providerMark,
 	thinkingDotToken,
 	type RoleAssignments,
@@ -407,8 +407,8 @@ export class ModelHubComponent implements Component {
 	#candidateCatalog: readonly ModelBrowserItem[] | undefined;
 	/** {@link #availableItems} when the browser's base items are that whole catalog; its query ranking then covers every count. */
 	#browserCatalog: readonly ModelBrowserItem[] | undefined;
-	/** Fuzzy index over {@link #availableItems}, for match counts while the browser holds a narrower scope. */
-	#catalogCorpus: { items: readonly ModelBrowserItem[]; corpus: FuzzyCorpus<ModelBrowserItem> } | undefined;
+	/** Match index over {@link #availableItems}, for match counts while the browser holds a narrower scope. */
+	#catalogCorpus: { items: readonly ModelBrowserItem[]; corpus: MatchCorpus<ModelBrowserItem> } | undefined;
 	#modelKindTab: "all" | ModelKind = "all";
 	#roleTab: RoleTab = "all";
 	#configError: string | undefined;
@@ -419,7 +419,7 @@ export class ModelHubComponent implements Component {
 	#fixedEntries: SidebarEntry[] = [];
 	#unlockedProviderEntries: SidebarEntry[] = [];
 	#lockedProviderEntries: SidebarEntry[] = [];
-	/** Fuzzy match totals while searching: recent-scope hits and overall hits. */
+	/** Query match totals while searching: recent-scope hits and overall hits. */
 	#recentSearchCount = 0;
 	#searchTotal = 0;
 	#activeEntryId = "all";
@@ -451,7 +451,7 @@ export class ModelHubComponent implements Component {
 	#presetCursor: { name: string; revision: number } | undefined;
 	#presetsMemo: { revision: number; names: readonly string[]; active: string | undefined } | undefined;
 	#disposed = false;
-	/** Per-provider fuzzy match counts while a query is active; null when not searching. */
+	/** Per-provider query match counts while a query is active; null when not searching. */
 	#searchCounts: Map<string, number> | null = null;
 
 	// Provider discovery refresh (debounced per sidebar selection, with spinner).
@@ -1034,7 +1034,7 @@ export class ModelHubComponent implements Component {
 		}
 		let cached = this.#catalogCorpus;
 		if (cached?.items !== this.#availableItems) {
-			cached = { items: this.#availableItems, corpus: new FuzzyCorpus(this.#availableItems, modelSearchText) };
+			cached = { items: this.#availableItems, corpus: new MatchCorpus(this.#availableItems, modelMatchFields) };
 			this.#catalogCorpus = cached;
 		}
 		return cached.corpus.rank(query).map(result => result.item);

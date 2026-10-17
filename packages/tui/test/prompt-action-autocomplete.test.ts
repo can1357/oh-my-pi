@@ -142,6 +142,30 @@ describe("prompt action autocomplete", () => {
 		expect(suggestions).toBeNull();
 	});
 
+	it("matches action words and abbreviations, not letters scattered across an action or near-miss prose", async () => {
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [],
+			basePath: "/tmp",
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+		const labels = async (text: string) =>
+			(await provider.getSuggestions([text], 0, text.length))?.items.map(item => item.label) ?? null;
+
+		expect(await labels("see #clip")).toEqual(["Copy current line", "Copy whole prompt"]);
+		expect(await labels("see #cpy")).toEqual(["Copy current line", "Copy whole prompt"]);
+		// `s…c…o` used to match across "Move cursor to …" and its keywords.
+		expect(await labels("see #sco")).toBeNull();
+		// A hashtag one typo from an action keyword stays prose: Enter here would run the action.
+		expect(await labels("see #fix")).toBeNull();
+	});
+
 	it("treats # prompt-action tokens as literal text inside slash command arguments without completions", async () => {
 		const provider = createPromptActionAutocompleteProvider({
 			commands: [{ name: "rename", description: "Rename current session", allowArgs: true }],

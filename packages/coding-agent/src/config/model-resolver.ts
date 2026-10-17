@@ -35,7 +35,7 @@ import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking"
 import { type GeneratedProvider, getBundledModels, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
-import { fuzzyMatch } from "@oh-my-pi/pi-tui";
+import { compareTextMatches, rankByText } from "@oh-my-pi/pi-tui/text-match";
 import { logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
@@ -809,30 +809,37 @@ function matchModel(
 			if (splitUpstreamRouting(modelId) && providerModels.some(supportsUpstreamRouting)) {
 				return undefined;
 			}
-			const scored = providerModels
-				.map(model => ({ model, match: fuzzyMatch(modelId, model.id) }))
-				.filter(entry => entry.match.matches);
+			// Selector punctuation separates words (`opus@default` finds
+			// `claude-opus-4-8@default`). No typos: a near miss such as
+			// `claude-opus-5-5` must not resolve to `claude-opus-4-8`.
+			const scored = rankByText(
+				modelId.replace(/[^\p{Letter}\p{Mark}\p{Number}]+/gu, " "),
+				providerModels,
+				model => ({ names: [model.id] }),
+				{ typos: false },
+			);
 			if (scored.length === 0) {
 				return undefined;
 			}
 
 			scored.sort((a, b) => {
-				if (a.match.score !== b.match.score) return a.match.score - b.match.score;
-				const aKey = formatModelString(a.model);
-				const bKey = formatModelString(b.model);
+				const byMatch = compareTextMatches(a.match, b.match);
+				if (byMatch !== 0) return byMatch;
+				const aKey = formatModelString(a.item);
+				const bKey = formatModelString(b.item);
 				const aUsage = context.modelUsageRank.get(aKey) ?? Number.POSITIVE_INFINITY;
 				const bUsage = context.modelUsageRank.get(bKey) ?? Number.POSITIVE_INFINITY;
 				if (aUsage !== bUsage) return aUsage - bUsage;
 
-				const aProviderUsage = context.providerUsageRank.get(a.model.provider) ?? Number.POSITIVE_INFINITY;
-				const bProviderUsage = context.providerUsageRank.get(b.model.provider) ?? Number.POSITIVE_INFINITY;
+				const aProviderUsage = context.providerUsageRank.get(a.item.provider) ?? Number.POSITIVE_INFINITY;
+				const bProviderUsage = context.providerUsageRank.get(b.item.provider) ?? Number.POSITIVE_INFINITY;
 				if (aProviderUsage !== bProviderUsage) return aProviderUsage - bProviderUsage;
 
 				const aOrder = context.modelOrder.get(aKey) ?? 0;
 				const bOrder = context.modelOrder.get(bKey) ?? 0;
 				return aOrder - bOrder;
 			});
-			return scored[0]?.model;
+			return scored[0]?.item;
 		}
 	}
 

@@ -159,6 +159,78 @@ describe("rankSessionSearchMatches", () => {
 		expect(ids(rankSessionSearchMatches([exact, lowQuality], "mn"))).toEqual(["exact"]);
 	});
 
+	it("takes typos in titles only and keeps literal transcript hits ahead of title typos", () => {
+		const titleTypo = makeSession("title-typo", {
+			title: "Rendr Notes",
+			modified: new Date("2024-01-03T00:00:00Z"),
+		});
+		const transcriptLiteral = makeSession("transcript-literal", {
+			title: "Rendre Bug",
+			firstMessage: "the render loop stalls",
+			modified: new Date("2024-01-01T00:00:00Z"),
+		});
+		const transcriptTypo = makeSession("transcript-typo", {
+			title: "Other",
+			firstMessage: "rendr stalls",
+			modified: new Date("2024-01-04T00:00:00Z"),
+		});
+
+		expect(ids(rankSessionSearchMatches([titleTypo, transcriptLiteral, transcriptTypo], "render"))).toEqual([
+			"transcript-literal",
+			"title-typo",
+		]);
+	});
+
+	it("finds sessions by fragments of their id, cwd or path, and transcript words by their start", () => {
+		const session = makeSession("0f3a9c21-77b1-4c2e", {
+			cwd: "/work/myproject",
+			path: "/sessions/0f3a9c21-77b1-4c2e.jsonl",
+			allMessagesText: "please reload the configuration",
+		});
+
+		for (const query of ["project", "9c21", "77b1", "reload", "work proj"]) {
+			expect(ids(rankSessionSearchMatches([session], query))).toEqual([session.id]);
+		}
+		// Transcripts are prose: a word matches only from its start.
+		expect(rankSessionSearchMatches([session], "load")).toEqual([]);
+	});
+
+	it("ranks a literal transcript hit with the literal matches when the title only abbreviates the query", () => {
+		const abbreviatedTitle = makeSession("abbreviated-title", {
+			title: "Render Buffer",
+			firstMessage: "rb issue",
+			modified: new Date("2024-01-03T00:00:00Z"),
+		});
+		const transcriptOnly = makeSession("transcript-only", {
+			title: "Other",
+			firstMessage: "an rb crash",
+			modified: new Date("2024-01-01T00:00:00Z"),
+		});
+		const abbreviationOnly = makeSession("abbreviation-only", {
+			title: "Rebase Branch",
+			modified: new Date("2024-01-05T00:00:00Z"),
+		});
+
+		expect(ids(rankSessionSearchMatches([abbreviationOnly, abbreviatedTitle, transcriptOnly], "rb"))).toEqual([
+			"abbreviated-title",
+			"transcript-only",
+			"abbreviation-only",
+		]);
+	});
+
+	it("promotes titles that match only after folding or with punctuation left out", () => {
+		const folded = makeSession("folded", { title: "Café", modified: new Date("2024-01-01T00:00:00Z") });
+		const compact = makeSession("compact", { title: "gpt-5 rollout", modified: new Date("2024-01-01T00:00:00Z") });
+		const transcript = makeSession("transcript", {
+			title: "Other",
+			firstMessage: "cafe crawl and gpt5 rollout",
+			modified: new Date("2024-01-05T00:00:00Z"),
+		});
+
+		expect(ids(rankSessionSearchMatches([transcript, folded], "cafe"))).toEqual(["folded", "transcript"]);
+		expect(ids(rankSessionSearchMatches([transcript, compact], "gpt5"))).toEqual(["compact", "transcript"]);
+	});
+
 	it("returns all sessions unchanged for an empty query", () => {
 		const sessions = [makeSession("a"), makeSession("b")];
 

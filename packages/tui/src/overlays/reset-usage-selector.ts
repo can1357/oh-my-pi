@@ -121,7 +121,7 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 			accounts,
 			{
 				getKey: accountKey,
-				getSearchText: account => `${account.label} ${account.providerLabel}`,
+				getMatchFields: account => ({ names: [account.label, account.providerLabel] }),
 				requiresConfirmation: account => account.redeemableCount > 0,
 			},
 			firstRedeemable ? accountKey(firstRedeemable) : undefined,

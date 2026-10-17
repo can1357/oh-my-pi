@@ -18,7 +18,7 @@
  * Credential values are always redacted.
  */
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
-import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
+import { rankByText } from "@oh-my-pi/pi-tui/text-match";
 import { type CfgWriteDetails, type CfgWriteOutcome } from "@oh-my-pi/pi-tui/tools/cfg-render";
 import { CFG_SAVE_SEGMENT, CFG_URL_PREFIX, parseCfgUrl } from "@oh-my-pi/pi-tui/tools/cfg-url";
 import { type AnySetting, all } from "../config/registry";
@@ -167,11 +167,9 @@ function resolveSegments(segments: readonly string[]): { path: string; leaf?: An
 	const members = allSettings().filter(candidate => candidate.id.toLowerCase().startsWith(`${lower}.`));
 	const path = leaf?.id ?? members[0]?.id.slice(0, lower.length);
 	if (path === undefined) {
-		const similar = fuzzyFilter(
-			allSettings().map(candidate => candidate.id),
-			segments.join("."),
-			candidate => candidate,
-		).slice(0, 8);
+		const similar = rankByText(segments.join("."), allSettings(), candidate => ({ names: [candidate.id] }))
+			.slice(0, 8)
+			.map(({ item }) => item.id);
 		const hint = similar.length > 0 ? `\nSimilar: ${similar.join(", ")}` : "";
 		throw new Error(`Unknown setting: ${segments.join(".")}${hint}\nRead ${CFG_URL_PREFIX} for the full tree.`);
 	}

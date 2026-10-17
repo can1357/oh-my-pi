@@ -1,6 +1,5 @@
 import { formatKeyHint } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
-import { fuzzyFilter } from "../fuzzy";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText } from "../keys";
 import type { MouseRoutable, SgrMouseEvent } from "../mouse";
@@ -12,6 +11,7 @@ import { plainLine, plainText } from "../native/spans";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import type { Component } from "../tui";
 import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
+import { type MatchFields, rankByText } from "../text-match";
 import { ScrollView } from "./scroll-view";
 import { FormField, type FormFieldOptions, type FormFieldTheme, SelectFormField, TextFormField } from "./form";
 import { MenuSelection } from "./menu-selection";
@@ -151,19 +151,22 @@ export interface SettingsListOptions {
 	sidebarWidth?: number;
 }
 
-/** Searchable text for a setting item: label, id, value, description, warning, and cycle values. */
-export function getSettingItemFilterText(item: SettingItem): string {
-	let text = `${item.label} ${item.id} ${item.currentValue}`;
+/**
+ * Search fields for a setting item: its label and id are names; its value,
+ * description, warning, and cycle values are details.
+ */
+export function settingItemMatchFields(item: SettingItem): MatchFields {
+	let details = item.currentValue;
 	if (item.description) {
-		text += ` ${item.description}`;
+		details += ` ${item.description}`;
 	}
 	if (item.warning) {
-		text += ` ${item.warning}`;
+		details += ` ${item.warning}`;
 	}
 	if (item.values) {
-		text += ` ${item.values.join(" ")}`;
+		details += ` ${item.values.join(" ")}`;
 	}
-	return sanitizeSingleLine(text);
+	return { names: [sanitizeSingleLine(item.label), item.id], details: sanitizeSingleLine(details) };
 }
 
 export class SettingsList implements Component {
@@ -204,14 +207,14 @@ export class SettingsList implements Component {
 	) {
 		this.#selection = new MenuSelection(items, {
 			getKey: item => item.id,
-			getSearchText: getSettingItemFilterText,
+			getMatchFields: settingItemMatchFields,
 			isDisabled: item => item.heading === true,
 			filter: (candidates, query) =>
-				fuzzyFilter(
-					candidates.filter(item => !item.heading),
+				rankByText(
 					query,
-					getSettingItemFilterText,
-				),
+					candidates.filter(item => !item.heading),
+					settingItemMatchFields,
+				).map(({ item }) => item),
 		});
 		this.#syncSelectionState();
 		this.#maxVisible = maxVisible;

@@ -4468,7 +4468,7 @@ export class Editor implements Component, Focusable {
 					// therefore falls through to file completion instead of rewriting
 					// the user's `/tmp` to `/skill:…`.
 					const lowerToken = token.slice(1).toLowerCase();
-					if (midPromptSkillTokenMatches(lowerToken, item.value, item.description)) return true;
+					if (midPromptSkillTokenMatches(lowerToken, item.value)) return true;
 				}
 			}
 			return false;

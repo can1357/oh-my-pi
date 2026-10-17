@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fuzzyFind } from "@oh-my-pi/pi-natives";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
+import { compareTextMatches, type MatchKind, MatchTarget, matchText, type TextMatch } from "./text-match";
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
 
@@ -164,7 +165,7 @@ function buildCompletionValue(
 	return `${openQuote}${path}${closeQuote}`;
 }
 
-/** Ranked-tier subsequence match ("wig" ~ "skill:wig"); distinct from fuzzy.ts's word-local engine. */
+/** Whether `query`'s characters appear in order in `target`; narrows `@` file results. */
 export function subsequenceMatch(query: string, target: string): boolean {
 	if (query.length === 0) return true;
 	if (query.length > target.length) return false;
@@ -185,31 +186,6 @@ export function atCompletionMatches(token: string, value: string): boolean {
 	const query = parsePathPrefix(token).rawPrefix.replaceAll("\\", "/").toLowerCase();
 	const target = parsePathPrefix(value).rawPrefix.replace(/"$/, "").toLowerCase();
 	return subsequenceMatch(query, target);
-}
-
-/** Ranked-tier subsequence score (100/80/60/40−gaps·5); higher is better, 0 is no match. */
-export function subsequenceScore(query: string, target: string): number {
-	if (query.length === 0) return 1;
-	if (target === query) return 100;
-	if (target.startsWith(query)) return 80;
-	if (target.includes(query)) return 60;
-
-	// Subsequence match - score by how "tight" the match is
-	// (fewer gaps between matched characters = higher score)
-	let qi = 0;
-	let gaps = 0;
-	let lastMatchIdx = -1;
-	for (let ti = 0; ti < target.length && qi < query.length; ti++) {
-		if (query[qi] === target[ti]) {
-			if (lastMatchIdx >= 0 && ti - lastMatchIdx > 1) gaps++;
-			lastMatchIdx = ti;
-			qi++;
-		}
-	}
-	if (qi !== query.length) return 0;
-
-	// Base score 40 for subsequence, minus penalty for gaps
-	return Math.max(1, 40 - gaps * 5);
 }
 
 export interface AutocompleteItem {
@@ -365,15 +341,27 @@ function commandMatchesNameOrAlias(cmd: CommandEntry, commandName: string): bool
 	return getCommandAliases(cmd).includes(commandName);
 }
 
-export function scoreCommandTextMatch(lowerPrefix: string, lowerTarget: string): number {
-	if (lowerPrefix.length === 0) return 1;
-	if (lowerPrefix === lowerTarget) return 1000;
-	// Flat score for every prefix match so same-prefix commands keep registry
-	// order under the stable sort. A length penalty here would rank the shorter
-	// name first (e.g. `/set` → `setup` above `settings`), silently changing the
-	// command that the sync-completion path applies on Enter.
-	if (lowerTarget.startsWith(lowerPrefix)) return 900;
-	return subsequenceMatch(lowerPrefix, lowerTarget) ? subsequenceScore(lowerPrefix, lowerTarget) : 0;
+/**
+ * Prepared match target per command, built on first use. A registered
+ * command's name, aliases and static description do not change, and the
+ * popup re-matches every command on each keystroke.
+ */
+const commandTargets = new WeakMap<CommandEntry, { target: MatchTarget; aliases: string[]; aliasStart: number }>();
+
+function commandTarget(cmd: CommandEntry, name: string) {
+	let entry = commandTargets.get(cmd);
+	if (!entry) {
+		const aliases = getCommandAliases(cmd);
+		// A skill also answers to its bare name (`/batch` → `skill:batch`), so a
+		// broken-out or mid-prompt skill ranks like a command name.
+		const names = name.startsWith(SKILL_NAMESPACE)
+			? [name, name.slice(SKILL_NAMESPACE.length), ...aliases]
+			: [name, ...aliases];
+		const target = new MatchTarget({ names, details: getStaticCommandDescription(cmd) });
+		entry = { target, aliases, aliasStart: names.length - aliases.length };
+		commandTargets.set(cmd, entry);
+	}
+	return entry;
 }
 
 function buildSlashCommandCompletions(
@@ -381,91 +369,47 @@ function buildSlashCommandCompletions(
 	lowerPrefix: string,
 	commandUsage?: (name: string) => number,
 ): AutocompleteItem[] {
-	return (
-		commands
-			.flatMap(cmd => {
-				const name = getCommandName(cmd);
-				if (!name) return [];
-				const usage = commandUsage?.(name) ?? 0;
-				const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
-				const staticDesc = getStaticCommandDescription(cmd);
-				let fullDescMemo: string | undefined;
-				let nativeTextMemo: Pick<AutocompleteItem, "nativeDetail" | "state"> = {};
-				let fullDescComputed = false;
-				// Resolve the (possibly live) display description lazily, only once a
-				// candidate actually matches — getAutocompleteDescription reads live
-				// session state and must not run for every command on each keystroke.
-				const resolveFullDesc = (): string | undefined => {
-					if (!fullDescComputed) {
-						const displayDesc = getAutocompleteCommandDescription(cmd);
-						fullDescMemo = hint ? (displayDesc ? `${hint} - ${displayDesc}` : hint) : displayDesc;
-						nativeTextMemo = nativeCommandText(displayDesc, staticDesc, hint);
-						fullDescComputed = true;
-					}
-					return fullDescMemo;
-				};
-				let best: (AutocompleteItem & { score: number; usage: number }) | undefined;
-
-				const isSkillCommand = name.startsWith(SKILL_NAMESPACE);
-				// Skills are matched by their bare name as well as the full
-				// `skill:` name so a broken-out or mid-prompt skill ranks at
-				// prefix strength (`/batch` → `skill:batch`) instead of a weak
-				// full-name fuzzy hit.
-				const nameScore =
-					lowerPrefix.length === 0 && isSkillCommand
-						? 950
-						: isSkillCommand
-							? Math.max(
-									scoreCommandTextMatch(lowerPrefix, name.toLowerCase()),
-									skillBareNameBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()),
-								)
-							: scoreCommandTextMatch(lowerPrefix, name.toLowerCase());
-				const lowerDesc = staticDesc.toLowerCase();
-				const descScore =
-					lowerDesc && subsequenceMatch(lowerPrefix, lowerDesc)
-						? subsequenceScore(lowerPrefix, lowerDesc) * 0.5
-						: 0;
-				const primaryScore = Math.max(nameScore, descScore);
-				if (primaryScore > 0) {
-					const fullDesc = resolveFullDesc();
-					best = {
-						value: name,
-						label: "name" in cmd ? cmd.name : cmd.label,
-						score: primaryScore,
-						usage,
-						...(cmd.icon && { icon: cmd.icon }),
-						...(cmd.iconName && { iconName: cmd.iconName }),
-						...(fullDesc && { description: fullDesc }),
-						...nativeTextMemo,
-					};
-				}
-
-				if (lowerPrefix.length > 0) {
-					for (const alias of getCommandAliases(cmd)) {
-						if (alias === name) continue;
-						const aliasScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase());
-						if (aliasScore === 0 || (best && aliasScore <= best.score)) continue;
-						const fullDesc = resolveFullDesc();
-						best = {
-							value: alias,
-							label: alias,
-							score: aliasScore,
-							usage,
-							...(cmd.icon && { icon: cmd.icon }),
-							...(cmd.iconName && { iconName: cmd.iconName }),
-							...(fullDesc && { description: fullDesc }),
-							...nativeTextMemo,
-						};
-					}
-				}
-
-				return best ? [best] : [];
-			})
-			// Equal text-match scores fall back to usage frequency, then to the
-			// stable registry order.
-			.sort((a, b) => b.score - a.score || b.usage - a.usage)
-			.map(({ score: _score, usage: _usage, ...rest }) => rest)
-	);
+	const rows: Array<{ item: AutocompleteItem; match: TextMatch; usage: number; isSkill: boolean }> = [];
+	for (const cmd of commands) {
+		const name = getCommandName(cmd);
+		if (!name) continue;
+		const isSkill = name.startsWith(SKILL_NAMESPACE);
+		const { target, aliases, aliasStart } = commandTarget(cmd, name);
+		const match = target.match(lowerPrefix);
+		if (!match) continue;
+		// An alias becomes the row only when it matched better than every earlier name.
+		const alias = aliases[match.nameIndex - aliasStart];
+		const staticDesc = getStaticCommandDescription(cmd);
+		// The display description may read live session state; resolve it only for matching rows.
+		const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
+		const displayDesc = getAutocompleteCommandDescription(cmd);
+		const fullDesc = hint ? (displayDesc ? `${hint} - ${displayDesc}` : hint) : displayDesc;
+		rows.push({
+			item: {
+				value: alias ?? name,
+				label: alias ?? ("name" in cmd ? cmd.name : cmd.label),
+				...(cmd.icon && { icon: cmd.icon }),
+				...(cmd.iconName && { iconName: cmd.iconName }),
+				...(fullDesc && { description: fullDesc }),
+				...nativeCommandText(displayDesc, staticDesc, hint),
+			},
+			match,
+			usage: commandUsage?.(name) ?? 0,
+			isSkill,
+		});
+	}
+	// With nothing typed every command matches alike and the skill group leads.
+	// Otherwise the stronger match wins, then usage, then registry order (the
+	// sort is stable): `/set` keeps applying `settings` over the later `setup`.
+	const listing = lowerPrefix.length === 0;
+	return rows
+		.sort(
+			(a, b) =>
+				(listing ? Number(b.isSkill) - Number(a.isSkill) : 0) ||
+				compareTextMatches(a.match, b.match) ||
+				b.usage - a.usage,
+		)
+		.map(row => row.item);
 }
 
 function hasPromptTextBeforeSlash(
@@ -482,41 +426,20 @@ function hasPromptTextBeforeSlash(
 
 export const SKILL_NAMESPACE = "skill:";
 
-/** Exact/leading-prefix tier for ordinary command names and aliases. */
-function commandBreakoutTier(lowerPrefix: string, lowerTarget: string): number {
-	if (lowerPrefix === lowerTarget) return 1000;
-	if (lowerTarget.startsWith(lowerPrefix)) return 900;
-	return 0;
-}
+/** Bare-name match kinds that pull a skill out of the collapsed namespace row or keep it in a mid-prompt popup. */
+const SKILL_NAME_KINDS: ReadonlySet<MatchKind> = new Set(["exact", "prefix", "word"]);
+/** Command matches that keep skills collapsed: names typed from their start. */
+const COMMAND_NAME_KINDS: ReadonlySet<MatchKind> = new Set(["exact", "prefix"]);
 
 /**
- * Match a bare skill name from the beginning of any hyphen-delimited segment.
- * This stays allocation-free on the hot path: it scans segment boundaries
- * in-place and never materializes split/slice arrays.
+ * Match of `lowerPrefix` against a skill's bare name from its start or the start
+ * of one of its words (`/hum` → `skill:humanizer`, `/last` →
+ * `skill:research-last30days`), or null.
  */
-function skillBareNameBreakoutTier(lowerPrefix: string, lowerBareName: string): number {
-	if (lowerPrefix.length === 0) return 0;
-	if (lowerPrefix === lowerBareName) return 1000;
-	if (lowerBareName.startsWith(lowerPrefix)) return 900;
-
-	let segmentStart = 0;
-	while (segmentStart < lowerBareName.length) {
-		while (segmentStart < lowerBareName.length && lowerBareName.charCodeAt(segmentStart) !== 45) {
-			segmentStart += 1;
-		}
-		segmentStart += 1;
-		if (segmentStart >= lowerBareName.length) break;
-
-		if (lowerBareName.startsWith(lowerPrefix, segmentStart)) {
-			let segmentEnd = segmentStart;
-			while (segmentEnd < lowerBareName.length && lowerBareName.charCodeAt(segmentEnd) !== 45) {
-				segmentEnd += 1;
-			}
-			return lowerPrefix.length === segmentEnd - segmentStart ? 1000 : 900;
-		}
-	}
-
-	return 0;
+function skillNameMatch(lowerPrefix: string, skillName: string): TextMatch | null {
+	if (lowerPrefix.length === 0) return null;
+	const match = matchText(lowerPrefix, { names: [skillName.slice(SKILL_NAMESPACE.length)] }, { typos: false });
+	return match && SKILL_NAME_KINDS.has(match.kind) ? match : null;
 }
 
 /**
@@ -524,26 +447,24 @@ function skillBareNameBreakoutTier(lowerPrefix: string, lowerBareName: string): 
  * typed prefix has not committed to the namespace. A lone group entry (shown
  * only while the prefix is still a prefix of `skill:`) keeps the `/` popup
  * readable. A skill breaks out of the group only when its bare name matches
- * the prefix at the beginning of the name or a hyphen-delimited segment, at a
- * strictly stronger tier than every non-skill command name and alias. Ordinary
- * commands keep exact/leading-prefix tiers only; a tie keeps the popup
- * command-only, and fuzzy-only skill hits never surface. Accepting the group
- * inserts `/skill:` without a trailing space so the reopened popup expands to
- * the individual skills.
+ * from the start of the name or of a word ({@link skillNameMatch}), strictly
+ * stronger than every exact or prefix match of a non-skill command name or
+ * alias. A tie keeps the popup command-only, and weaker skill hits never
+ * surface. Accepting the group inserts `/skill:` without a trailing space so
+ * the reopened popup expands to the individual skills.
  */
 function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): CommandEntry[] {
 	if (lowerPrefix.startsWith(SKILL_NAMESPACE)) return commands;
 	const approachesNamespace = SKILL_NAMESPACE.startsWith(lowerPrefix);
-	let commandTier = 0;
+	let strongestCommand: TextMatch | null = null;
 	if (!approachesNamespace) {
 		for (const cmd of commands) {
 			const name = getCommandName(cmd);
 			if (!name || name.startsWith(SKILL_NAMESPACE)) continue;
-			commandTier = Math.max(commandTier, commandBreakoutTier(lowerPrefix, name.toLowerCase()));
-			for (const alias of getCommandAliases(cmd)) {
-				commandTier = Math.max(commandTier, commandBreakoutTier(lowerPrefix, alias.toLowerCase()));
-			}
-			if (commandTier === 1000) break;
+			const match = matchText(lowerPrefix, { names: [name, ...getCommandAliases(cmd)] }, { typos: false });
+			if (!match || !COMMAND_NAME_KINDS.has(match.kind)) continue;
+			if (!strongestCommand || compareTextMatches(match, strongestCommand) < 0) strongestCommand = match;
+			if (strongestCommand.kind === "exact") break;
 		}
 	}
 	let skillCount = 0;
@@ -555,10 +476,9 @@ function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): 
 		skillCount += 1;
 		skillIcon ??= cmd.icon;
 		skillIconName ??= cmd.iconName;
-		return (
-			!approachesNamespace &&
-			skillBareNameBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()) > commandTier
-		);
+		if (approachesNamespace) return false;
+		const skillMatch = skillNameMatch(lowerPrefix, name);
+		return skillMatch !== null && (strongestCommand === null || compareTextMatches(skillMatch, strongestCommand) < 0);
 	});
 	if (skillCount === 0) return commands;
 	if (!SKILL_NAMESPACE.startsWith(lowerPrefix)) return rest;
@@ -575,37 +495,26 @@ function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): 
  * Whether a mid-prompt slash token (`prose … /tok`) is skill-shaped enough to
  * surface `name` in the skill popup. Deliberately stricter than submitted
  * slash-command matching: a stray `/word` in running prose must not keep the
- * popup alive through fuzzy name/description hits, so a token only matches as
+ * popup alive through weak name or description hits, so a token only matches as
  * - a prefix of the `skill:` namespace (incl. the bare `/` entry point),
- * - an explicit `skill:…` query (full fuzzy name/description search), or
- * - a prefix at the start of the skill bare name or one of its hyphen-delimited
- *   segments (`/hum` → `skill:humanizer`, `/last` → `skill:research-last30days`).
+ * - an explicit `skill:…` query (any match of the full name), or
+ * - a bare-name match from the start of the name or a word ({@link skillNameMatch}).
  * Anything else yields no items, letting the caller fall through to path
  * completion or close the popup. Shared with the editor's accept-time
  * staleness guard so Tab/Enter never accepts a skill the refreshed popup
  * would no longer show.
  */
-export function midPromptSkillTokenMatches(lowerToken: string, name: string, description?: string): boolean {
+export function midPromptSkillTokenMatches(lowerToken: string, name: string): boolean {
 	if (SKILL_NAMESPACE.startsWith(lowerToken)) return true;
-	const lowerName = name.toLowerCase();
-	if (lowerToken.startsWith(SKILL_NAMESPACE)) {
-		if (scoreCommandTextMatch(lowerToken, lowerName) > 0) return true;
-		return !!description && scoreCommandTextMatch(lowerToken, description.toLowerCase()) > 0;
-	}
-	return (
-		lowerName.startsWith(SKILL_NAMESPACE) &&
-		skillBareNameBreakoutTier(lowerToken, lowerName.slice(SKILL_NAMESPACE.length)) > 0
-	);
+	if (lowerToken.startsWith(SKILL_NAMESPACE)) return matchText(lowerToken, { names: [name] }) !== null;
+	return name.toLowerCase().startsWith(SKILL_NAMESPACE) && skillNameMatch(lowerToken, name) !== null;
 }
 
 function buildMidPromptSkillCompletions(commands: CommandEntry[], lowerPrefix: string): AutocompleteItem[] {
 	return buildSlashCommandCompletions(
 		commands.filter(cmd => {
 			const name = getCommandName(cmd);
-			return (
-				name?.startsWith(SKILL_NAMESPACE) &&
-				midPromptSkillTokenMatches(lowerPrefix, name, getStaticCommandDescription(cmd))
-			);
+			return name?.startsWith(SKILL_NAMESPACE) && midPromptSkillTokenMatches(lowerPrefix, name);
 		}),
 		lowerPrefix,
 	);

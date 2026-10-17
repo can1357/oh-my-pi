@@ -268,12 +268,41 @@ describe("SettingsList", () => {
 			() => {},
 		);
 
-		// "group" fuzzy-matches the heading label but headings are not searchable
+		// "group" matches the heading label but headings are not searchable
 		for (const ch of "group") list.handleInput(ch);
 
 		const output = list.render(80).join("\n");
 		expect(output).not.toContain("Group Alpha");
 		expect(output).toContain("No matching settings");
+	});
+
+	it("matches typos in labels but only word starts in descriptions, label matches first", () => {
+		const items = [
+			{ id: "ui.accent", label: "Accent", description: "Executable theme accent color", currentValue: "blue" },
+			{ id: "temperature", label: "Temperature", currentValue: "0.7" },
+			{ id: "theme.dark", label: "Theme", currentValue: "dark" },
+		];
+		const search = (query: string): string => {
+			const list = new SettingsList(
+				items,
+				5,
+				testTheme,
+				() => {},
+				() => {},
+			);
+			for (const ch of query) list.handleInput(ch);
+			return list.render(80).join("\n");
+		};
+
+		const typo = search("temperatute");
+		expect(typo).toContain("Temperature");
+		expect(typo).not.toContain("Accent");
+
+		expect(search("exectuable")).toContain("No matching settings");
+
+		const theme = search("theme");
+		expect(theme).toContain("Accent");
+		expect(theme.indexOf("Theme")).toBeLessThan(theme.indexOf("Accent"));
 	});
 	function sectionedItems() {
 		return [

@@ -17,6 +17,7 @@ import { OverlayPanel } from "../chrome/overlay-box";
 import { Input } from "../components/input";
 import { MenuSelection } from "../components/menu-selection";
 import { centeredViewportRange } from "../components/scroll-viewport";
+import type { MatchFields } from "../text-match";
 import type { TspPickerItem, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span, text } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
@@ -100,7 +101,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		this.#requestRenderCallback = options?.requestRender;
 		this.#menu = new MenuSelection<OAuthProviderInfo>([], {
 			getKey: provider => provider.id,
-			getSearchText: provider => this.#getProviderSearchText(provider),
+			getMatchFields: provider => this.#getProviderMatchFields(provider),
 		});
 		// Load all OAuth providers
 		this.#loadProviders(options?.disabledProviders);
@@ -278,17 +279,17 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		return theme.fg("muted", "Search: ") + (this.#search.render(width)[0] ?? "");
 	}
 
-	#getProviderSearchText(provider: OAuthProviderInfo): string {
-		let text = `${provider.name} ${provider.id}`;
+	#getProviderMatchFields(provider: OAuthProviderInfo): MatchFields {
+		let details = "";
 		const origin = this.#authStorage.keys.source(provider.id);
 		if (origin) {
-			text += ` logged in authenticated ${ORIGIN_LABELS[origin.kind]}`;
-			if (origin.envVar) text += ` ${origin.envVar}`;
+			details += `logged in authenticated ${ORIGIN_LABELS[origin.kind]}`;
+			if (origin.envVar) details += ` ${origin.envVar}`;
 		}
 		if (!provider.available) {
-			text += " unavailable";
+			details += " unavailable";
 		}
-		return text;
+		return { names: [provider.name, provider.id], details };
 	}
 
 	/** Applies the search field's value to the filter; clears any stale status. */

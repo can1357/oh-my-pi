@@ -6,7 +6,7 @@
  * TUI editor (`packages/tui/src/components/editor.ts`); the editor fires the
  * popup, this module decides whether there are candidates to show.
  */
-import { subsequenceMatch, subsequenceScore } from "../autocomplete";
+import { MatchTarget, rankByText } from "../text-match";
 import type { AutocompleteItem } from "../index";
 /** Lazy runtime capabilities supplied by the internal URL host. */
 export interface InternalUrlCompletionHost {
@@ -27,6 +27,28 @@ export function setInternalUrlCompletionHost(host: InternalUrlCompletionHost): v
 
 /** Upper bound on candidates surfaced in the dropdown. */
 const MAX_URL_SUGGESTIONS = 25;
+/**
+ * Prepared match targets of each scheme's latest listing, by completion value.
+ * Hosts return the same candidates on every keystroke, so a stable listing of
+ * any size prepares nothing after the first; dropped values leave with it, and
+ * a changed label or description (an agent finishing, a scan's finding count)
+ * prepares the value again.
+ */
+const urlTargets = new Map<string, Map<string, PreparedUrlCandidate>>();
+
+interface PreparedUrlCandidate {
+	readonly label: string | undefined;
+	readonly description: string | undefined;
+	readonly target: MatchTarget;
+}
+
+/**
+ * Listings above this size (`local://` returns every file under its root) are
+ * matched letter for letter only: typos and abbreviations cost far more per
+ * candidate, and this runs on every keystroke.
+ */
+const MAX_TYPO_CANDIDATES = 4096;
+const LITERAL_ONLY = { typos: false, abbreviations: false } as const;
 
 /**
  * A URL token ending at the cursor: a known internal scheme followed by one or
@@ -102,25 +124,40 @@ export async function getInternalUrlSuggestions(
 	});
 	if (!candidates || candidates.length === 0) return null;
 
-	const query = ctx.query.toLowerCase();
-	const scored: Array<{ item: AutocompleteItem; score: number }> = [];
-	for (const candidate of candidates) {
-		const target = decodeUrlCompletionValue(candidate.value).toLowerCase();
-		if (!subsequenceMatch(query, target)) continue;
-		scored.push({
-			item: {
-				value: `${ctx.scheme}://${candidate.value}`,
-				label: candidate.label ?? candidate.value,
-				...(candidate.description ? { description: candidate.description } : {}),
-			},
-			score: subsequenceScore(query, target),
-		});
-	}
-	if (scored.length === 0) return null;
+	const previous = urlTargets.get(ctx.scheme);
+	const prepared = new Map<string, PreparedUrlCandidate>();
+	const fieldsOf = (candidate: (typeof candidates)[number]): MatchTarget => {
+		const { value, label, description } = candidate;
+		let entry = prepared.get(value) ?? previous?.get(value);
+		if (!entry || entry.label !== label || entry.description !== description) {
+			const decoded = decodeUrlCompletionValue(value);
+			entry = {
+				label,
+				description,
+				target: new MatchTarget({
+					names: label && label !== decoded ? [decoded, label] : [decoded],
+					...(description ? { details: description } : {}),
+				}),
+			};
+		}
+		prepared.set(value, entry);
+		return entry.target;
+	};
+	const ranked = rankByText(
+		ctx.query,
+		candidates,
+		fieldsOf,
+		candidates.length > MAX_TYPO_CANDIDATES ? LITERAL_ONLY : undefined,
+	);
+	urlTargets.set(ctx.scheme, prepared);
+	if (ranked.length === 0) return null;
 
-	scored.sort((a, b) => b.score - a.score);
 	return {
-		items: scored.slice(0, MAX_URL_SUGGESTIONS).map(entry => entry.item),
+		items: ranked.slice(0, MAX_URL_SUGGESTIONS).map(({ item: candidate }) => ({
+			value: `${ctx.scheme}://${candidate.value}`,
+			label: candidate.label ?? candidate.value,
+			...(candidate.description ? { description: candidate.description } : {}),
+		})),
 		prefix: ctx.token,
 	};
 }
