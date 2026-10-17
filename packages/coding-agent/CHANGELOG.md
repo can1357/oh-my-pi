@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/mcp reauth <name>` support for ACP and text-mode clients (emacs via agent-shell, Zed, `omp -p`): it opens the default browser on the same OAuth callback flow and persistence policy as the TUI instead of refusing with "only available in the TUI client" — omp runs on the user's machine even when driven over ACP, and the auth URL is also emitted as text for copy-paste when no browser can open ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
+
 ### Changed
 
 - With a first-party Anthropic model on the official API selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup; third-party gateways and custom endpoints are never probed ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))

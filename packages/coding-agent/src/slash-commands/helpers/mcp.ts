@@ -1,5 +1,7 @@
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
+import { getMCPConfigPath, logger, withTimeout } from "@oh-my-pi/pi-utils";
+import { expandEnvVarsDeep } from "../../discovery/helpers";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
 import {
 	addMCPServer,
@@ -10,10 +12,19 @@ import {
 	updateMCPServer,
 } from "../../mcp/config-writer";
 import { MCPManager } from "../../mcp/manager";
+import {
+	analyzeAuthError,
+	discoverOAuthEndpoints,
+	fetchResourceMetadataScopes,
+	type OAuthEndpoints,
+} from "../../mcp/oauth-discovery";
+import { lookupMcpOAuthCredentialForServer, removeManagedMcpOAuthCredential } from "../../mcp/oauth-credentials";
+import { MCPOAuthFlow, type MCPStoredOAuthCredential, mcpOAuthCredentialId } from "../../mcp/oauth-flow";
 import { getSmitheryApiKey } from "../../mcp/smithery-auth";
 import { searchSmitheryRegistry } from "../../mcp/smithery-registry";
 import type { MCPServerConfig, MCPServerConnection } from "../../mcp/types";
 import { parseCommandArgs } from "../../utils/command-args";
+import { openPath } from "../../utils/open";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
 import { commandConsumed, errorMessage, parseNamedScopeArgs, parseSubcommand, usage } from "./parse";
 
@@ -467,6 +478,255 @@ async function handleRemoveCommand(rest: string, runtime: SlashCommandRuntime): 
 	}
 }
 
+/** Strip the `auth` block so a probe or flow starts from the raw server config. */
+function stripMcpOAuthAuth(config: MCPServerConfig): MCPServerConfig {
+	const next = { ...config };
+	delete next.auth;
+	return next;
+}
+
+/**
+ * Resolve OAuth endpoints for a reauth: probe anonymously first (nothing
+ * destructive has happened yet), and either take discovery metadata (a clean
+ * `initialize` is only weak evidence per the MCP spec, so honor the explicit
+ * reauth when the server advertises OAuth) or analyze the auth failure and
+ * discover from it. Mirrors `McpCommandController#resolveOAuthEndpointsFromServer`
+ * for the non-interactive path.
+ */
+async function resolveReauthEndpoints(config: MCPServerConfig, runtime: SlashCommandRuntime): Promise<OAuthEndpoints> {
+	const serverUrl = config.type === "http" || config.type === "sse" ? config.url : undefined;
+	const manager = new MCPManager(runtime.cwd);
+	manager.setAuthStorage(runtime.session.modelRegistry.authStorage);
+	const probeConfig = await manager.prepareConfig(config, { oauth: false });
+	let connectionError: Error | undefined;
+	let connection: MCPServerConnection | undefined;
+	try {
+		connection = await connectToServer(`reauth_probe_${Date.now()}`, probeConfig);
+	} catch (error) {
+		connectionError = error instanceof Error ? error : new Error(String(error));
+	} finally {
+		if (connection) {
+			try {
+				await disconnectServer(connection);
+			} catch (err) {
+				logger.warn("MCP disconnect after reauth probe failed", { err });
+			}
+		}
+	}
+	if (!connectionError) {
+		const discovered = serverUrl ? await discoverOAuthEndpoints(serverUrl) : null;
+		if (!discovered) {
+			throw new Error("Server connection succeeded without OAuth; reauthorization is not required.");
+		}
+		return discovered;
+	}
+	const authResult = analyzeAuthError(connectionError, serverUrl);
+	let oauth = authResult.authType === "oauth" ? (authResult.oauth ?? null) : null;
+	if (!oauth && serverUrl) {
+		oauth = await discoverOAuthEndpoints(serverUrl, authResult.authServerUrl, authResult.resourceMetadataUrl, {
+			protectedScopes: authResult.scopes,
+		});
+	}
+	if (oauth && !oauth.scopes && authResult.resourceMetadataUrl) {
+		const scopes = await fetchResourceMetadataScopes(authResult.resourceMetadataUrl);
+		if (scopes) oauth = { ...oauth, scopes };
+	}
+	if (!oauth) {
+		throw new Error(`Could not discover OAuth endpoints from the server response: ${connectionError.message}`);
+	}
+	return oauth;
+}
+
+/**
+ * `/mcp reauth <name>` for ACP/text mode. omp runs on the user's machine even
+ * when driven over ACP (emacs, Zed, …), so opening the browser works exactly
+ * like the TUI: the same `MCPOAuthFlow` local callback server, `openPath` to
+ * launch the default browser, and the same persistence policy
+ * (`McpCommandController#persistOAuthResult`): the auth block records the
+ * credential pointer plus refresh material, the oauth block echoes the client
+ * id for pre-auth reuse, and only a user-supplied client secret is ever
+ * written back — DCR-issued secrets stay embedded in the stored credential so
+ * they cannot leak into (possibly shared/committed) config files.
+ *
+ * No clipboard copy here: OSC 52 escape sequences would corrupt the ACP
+ * JSON-RPC stream on stdout, so the URL is emitted as text for the client to
+ * render instead. No manual-code input either: ACP has no composer to claim;
+ * the URL is the fallback when the browser cannot open (e.g. a remote host).
+ */
+async function handleReauthCommand(rest: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+	const name = rest.split(/\s+/)[0]?.trim() ?? "";
+	if (!name) return usage("Usage: /mcp reauth <name>", runtime);
+	const servers = await getMcpConfiguredServers(runtime.cwd);
+	const found = servers.find(item => item.name === name);
+	if (!found) return usage(`Server "${name}" not found. Run /mcp list to see configured servers.`, runtime);
+
+	const baseConfig = stripMcpOAuthAuth(found.config);
+	const runtimeBaseConfig = expandEnvVarsDeep(baseConfig);
+	if (runtimeBaseConfig.type !== "http" && runtimeBaseConfig.type !== "sse") {
+		const remoteUrl = runtimeBaseConfig.args?.find(arg => /^https?:\/\//.test(arg));
+		const httpHint = `{ "type": "http", "url": ${JSON.stringify(remoteUrl ?? "<remote url>")} }`;
+		const usesMcpRemote = [runtimeBaseConfig.command, ...(runtimeBaseConfig.args ?? [])].some(part =>
+			part?.includes("mcp-remote"),
+		);
+		return usage(
+			usesMcpRemote
+				? `this server proxies OAuth through mcp-remote, which caches tokens machine-wide in ~/.mcp-auth (shared across every OMP profile). Clear ~/.mcp-auth to force a fresh login, or replace the proxy with ${httpHint} so OMP manages OAuth per profile.`
+				: `stdio servers manage their own credentials, so OMP has no OAuth to reauthorize. If the service supports OAuth over HTTP, configure it as ${httpHint} instead.`,
+			runtime,
+		);
+	}
+	const serverUrl = runtimeBaseConfig.url;
+
+	const authStorage = runtime.session.modelRegistry.authStorage;
+	let endpoints: OAuthEndpoints;
+	try {
+		endpoints = await resolveReauthEndpoints(runtimeBaseConfig, runtime);
+	} catch (error) {
+		return usage(`Failed to reauthorize "${name}": ${errorMessage(error)}`, runtime);
+	}
+
+	// Client-credential assembly, mirroring the TUI reauth path: configured
+	// > previously registered > stored > (metadata-advertised, only when the
+	// authorization server offers no DCR) — so DCR stays preferred.
+	const currentAuth = found.config.auth;
+	const runtimeAuth = currentAuth ? expandEnvVarsDeep(currentAuth) : undefined;
+	const configuredClientId = runtimeBaseConfig.oauth?.clientId?.trim() || undefined;
+	const configuredClientSecret = runtimeBaseConfig.oauth?.clientSecret;
+	const existingCredential = lookupMcpOAuthCredentialForServer(authStorage, currentAuth, serverUrl)?.credential;
+	const persistedClientId = runtimeAuth?.clientId?.trim() || undefined;
+	const storedClientId = existingCredential?.clientId?.trim() || undefined;
+	const discoveredClientId = endpoints.clientId?.trim() || undefined;
+	const flowClientId =
+		configuredClientId ??
+		persistedClientId ??
+		storedClientId ??
+		(endpoints.registrationUrl ? undefined : discoveredClientId) ??
+		"";
+	const storedClientSecret = storedClientId === flowClientId ? existingCredential?.clientSecret : undefined;
+	const flowClientSecret =
+		(configuredClientId === flowClientId ? configuredClientSecret : undefined) ??
+		(persistedClientId === flowClientId ? runtimeAuth?.clientSecret : undefined) ??
+		storedClientSecret ??
+		"";
+	// Only a user-supplied secret is ever written back to config; keep the raw
+	// `${...}` placeholder in the file rather than the resolved secret.
+	const userClientSecret =
+		(configuredClientId === flowClientId ? found.config.oauth?.clientSecret : undefined) ??
+		(persistedClientId === flowClientId ? currentAuth?.clientSecret : undefined);
+	const hasConfiguredOnlySecret = configuredClientId === undefined && configuredClientSecret !== undefined;
+
+	const currentAuthResource = currentAuth?.resource ? expandEnvVarsDeep(currentAuth.resource) : undefined;
+	const oauthResource = endpoints.resource ?? currentAuthResource ?? serverUrl;
+	const oauthResourceIsFallback = !endpoints.resource && !currentAuthResource;
+
+	await runtime.output(`Reauthorizing "${name}"… opening your browser (5 minute timeout).`);
+
+	const abort = new AbortController();
+	const onHostAbort = () => abort.abort("MCP reauth cancelled by host");
+	runtime.signal?.addEventListener("abort", onHostAbort, { once: true });
+	try {
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: endpoints.authorizationUrl,
+				tokenUrl: endpoints.tokenUrl,
+				registrationUrl: endpoints.registrationUrl,
+				issuerUrl: endpoints.issuerUrl,
+				clientId: flowClientId,
+				clientSecret: flowClientSecret,
+				scopes: endpoints.scopes || runtimeBaseConfig.oauth?.scope || "",
+				prompt: found.config.oauth?.prompt,
+				redirectUri: found.config.oauth?.redirectUri,
+				callbackPort: found.config.oauth?.callbackPort,
+				callbackPath: found.config.oauth?.callbackPath,
+				resource: oauthResource,
+				stripSameOriginResource: oauthResourceIsFallback,
+			},
+			{
+				signal: abort.signal,
+				onAuth: info => {
+					openPath(info.url);
+					void Promise.resolve(
+						runtime.output(
+							[
+								"━━━ OAuth Authorization Required ━━━",
+								"Opening your browser to authorize. If it did not open:",
+								info.url,
+								...(info.instructions ? ["", info.instructions] : []),
+							].join("\n"),
+						),
+					).catch(() => {});
+				},
+				onProgress: message => {
+					void Promise.resolve(runtime.output(message)).catch(() => {});
+				},
+			},
+		);
+		let credentials: OAuthCredentials;
+		try {
+			credentials = await withTimeout(flow.login(), 5 * 60_000, "OAuth flow timed out after 5 minutes");
+		} catch (error) {
+			if (abort.signal.aborted) {
+				await runtime.output(`Reauthorization cancelled for "${name}".`);
+				return commandConsumed();
+			}
+			throw error;
+		}
+
+		const credentialId = mcpOAuthCredentialId(serverUrl);
+		const oauthCredential: MCPStoredOAuthCredential = {
+			...credentials,
+			type: "oauth",
+			tokenUrl: endpoints.tokenUrl,
+			clientId: flow.resolvedClientId?.trim() || flowClientId,
+			clientSecret: flow.registeredClientSecret ?? flowClientSecret,
+			resource: flow.resource,
+			authorizationUrl: flow.authorizationUrl,
+		};
+		await authStorage.credentials.set(credentialId, oauthCredential);
+
+		// The flow overwrote (or minted) this profile's row; a superseded pointer
+		// row from the legacy random-id era is now orphaned. GC only after
+		// success so cancelling the browser step leaves the previous session
+		// signed in.
+		if (currentAuth?.type === "oauth" && currentAuth.credentialId && currentAuth.credentialId !== credentialId) {
+			await removeManagedMcpOAuthCredential(authStorage, currentAuth.credentialId);
+		}
+
+		// Definition-only entries resolve through the url-keyed binding alone;
+		// skip the write-back so a committed project mcp.json stays clean.
+		const urlKeyedId = serverUrl ? mcpOAuthCredentialId(serverUrl) : undefined;
+		if (currentAuth || credentialId !== urlKeyedId) {
+			const clientIdForConfig =
+				flow.resolvedClientId?.trim() || flowClientId || found.config.oauth?.clientId?.trim();
+			const oauthClientId = hasConfiguredOnlySecret ? undefined : clientIdForConfig;
+			const resource =
+				flow.resource ?? (oauthResourceIsFallback ? undefined : oauthResource) ?? currentAuth?.resource;
+			const updatedConfig: MCPServerConfig = {
+				...baseConfig,
+				auth: {
+					type: "oauth",
+					credentialId,
+					tokenUrl: endpoints.tokenUrl,
+					clientId: clientIdForConfig,
+					clientSecret: userClientSecret,
+					resource,
+				},
+				oauth: {
+					...found.config.oauth,
+					clientId: oauthClientId,
+				},
+			};
+			await updateMCPServer(getMCPConfigPath(found.scope, runtime.cwd), name, updatedConfig);
+		}
+		await runtime.output(`✓ Reauthorized "${name}" (${found.scope} config).`);
+		return commandConsumed();
+	} catch (error) {
+		return usage(`Failed to reauthorize server "${name}": ${errorMessage(error)}`, runtime);
+	} finally {
+		runtime.signal?.removeEventListener("abort", onHostAbort);
+	}
+}
+
 const MCP_HELP_TEXT = [
 	"MCP server management (ACP mode)",
 	"  /mcp list                                               List configured servers",
@@ -477,13 +737,14 @@ const MCP_HELP_TEXT = [
 	"  /mcp resources                                          List resources from all servers",
 	"  /mcp prompts                                            List prompts from all servers",
 	"  /mcp test <name>                                        Test connection to a server",
+	"  /mcp reauth <name>                                      Reauthorize OAuth for a server (opens browser)",
 	"  /mcp add <name> [--scope project|user] [--url <url>]    Add a server (non-interactive)",
 	"  /mcp add <name> [-- <command...>]                       Add a stdio server",
 	"  /mcp smithery-search <kw> [--scope project|user]        Search Smithery registry",
 	"  /mcp help                                               Show this help",
 ].join("\n");
 
-const TUI_ONLY_MCP_VERBS = new Set(["reauth", "unauth", "smithery-login", "smithery-logout", "reconnect"]);
+const TUI_ONLY_MCP_VERBS = new Set(["unauth", "smithery-login", "smithery-logout", "reconnect"]);
 
 /** ACP/text-mode `/mcp` handler. Shared by both dispatchers via the spec. */
 export async function handleMcpAcp(
@@ -511,6 +772,8 @@ export async function handleMcpAcp(
 			return await handlePromptsCommand(runtime);
 		case "test":
 			return await handleTestCommand(rest, runtime);
+		case "reauth":
+			return await handleReauthCommand(rest, runtime);
 		case "add":
 			return await handleAddCommand(rest, runtime);
 		case "smithery-search":
