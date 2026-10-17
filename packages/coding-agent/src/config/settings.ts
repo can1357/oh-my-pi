@@ -1840,6 +1840,24 @@ export class Settings {
 	}
 
 	/**
+	 * Get the layer supplying the `retry.fallbackChains` entry for `key`, with the
+	 * same layer order as {@link getModelRoleProvenance}. A `null` tombstone on
+	 * `retry` or on the whole chain map owns every key, as it masks lower layers.
+	 */
+	getFallbackChainProvenance(key: string): SettingProvenance {
+		const owns = (layer: RawSettings): boolean => {
+			if (layer.retry === null) return true;
+			const chains = getByPath(layer, ["retry", "fallbackChains"]);
+			return chains === null || (isRecord(chains) && Object.hasOwn(chains, key));
+		};
+		if (owns(this.#overrides)) return "runtime";
+		if (owns(this.#configOverlay)) return "overlay";
+		if (owns(projectLayerForMerge(this.#project))) return "project";
+		if (owns(this.#global)) return "global";
+		return this.#parent?.getFallbackChainProvenance(key) ?? "default";
+	}
+
+	/**
 	 * Get the persisted layer supplying a model role (project/global/default only).
 	 */
 	getModelRoleSource(role: ModelRole | string): "project" | "global" | "default" {
