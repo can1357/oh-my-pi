@@ -120,19 +120,26 @@ import type { SessionManager } from "./session-manager";
 import { buildSessionMetadata } from "./session-metadata";
 import type { YieldQueue } from "./yield-queue";
 
+import { judgeAdvisorReview } from "../advisor/review-gate";
 import {
 	cfgAdvisorEvictStaleResults,
 	cfgAdvisorImmuneTurns,
+	cfgAdvisorJudgeGate,
+	cfgAdvisorJudgeGateMaxHoldMs,
+	cfgAdvisorJudgeGateMaxHolds,
 	cfgAdvisorMaxNotesPerUpdate,
 	cfgAdvisorReviewInterval,
 	cfgAdvisorReviewMode,
 	cfgAdvisorSyncBacklog,
 } from "../advisor/settings";
+import { journalJudgmentUsage } from "../judgment";
 import { cfgCompaction, cfgContextPromotionEnabled } from "./context-settings";
 import { resolveModelCompactionSettings } from "./model-compaction-threshold";
 import { cfgRetry, cfgTierAdvisor } from "./settings";
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
+/** Judge-gate deadline; a timeout fails open into a normal review. */
+const ADVISOR_REVIEW_GATE_TIMEOUT_MS = 4_000;
 
 /**
  * Buffer added to a sibling credential's unblock deadline before the advisor
@@ -1626,6 +1633,23 @@ export class SessionAdvisors {
 						.emitSessionEvent({ type: "advisor_yielded" })
 						.catch(err => logger.debug("advisor yield notification failed", { err: String(err) }));
 				},
+				gateReview: update =>
+					cfgAdvisorJudgeGate.get(this.#host.settings)
+						? judgeAdvisorReview(update, {
+								settings: this.#host.settings,
+								registry: this.#host.modelRegistry,
+								sessionId: this.#host.sessionId(),
+								model: this.#host.agent.state.model,
+								metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+								onUsage: journalJudgmentUsage(this.#host.sessionManager),
+								telemetry: this.#host.agent.telemetry,
+								signal: AbortSignal.timeout(ADVISOR_REVIEW_GATE_TIMEOUT_MS),
+							})
+						: undefined,
+				gateLimits: () => ({
+					maxHolds: Math.max(1, Math.trunc(cfgAdvisorJudgeGateMaxHolds.get(this.#host.settings))),
+					maxHoldMs: cfgAdvisorJudgeGateMaxHoldMs.get(this.#host.settings),
+				}),
 			});
 
 			const advisorRef: ActiveAdvisor = {
