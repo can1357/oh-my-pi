@@ -17,6 +17,8 @@ import {
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
+import { SessionModeController } from "@oh-my-pi/pi-coding-agent/modes/session-mode-controller";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type {
 	AgentSession,
 	AgentSessionEvent,
@@ -152,6 +154,41 @@ class FakeAgentSession {
 	retryResult = false;
 	retryCalls = 0;
 	#listeners = new Set<(event: AgentSessionEvent) => void>();
+	#modeController: SessionModeController | undefined;
+
+	get modes(): SessionModeController {
+		return (this.#modeController ??= new SessionModeController(this as unknown as AgentSession));
+	}
+
+	getAgentKind(): "main" {
+		return "main";
+	}
+
+	goalRuntime = { mutationInFlight: false };
+	getGoalModeState(): undefined {
+		return undefined;
+	}
+	getVibeModeState(): undefined {
+		return undefined;
+	}
+	getEnabledToolNames(): string[] {
+		return [];
+	}
+	getMountedXdevToolNames(): string[] {
+		return [];
+	}
+	hasBuiltInTool(_name: string): boolean {
+		return false;
+	}
+	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined {
+		return this.thinkingLevel as ConfiguredThinkingLevel | undefined;
+	}
+	async setActiveToolPresentation(_enabled: string[], _mounted: string[]): Promise<void> {}
+	async restoreNonMCPToolPresentation(_enabled: string[], _mounted: string[]): Promise<void> {}
+	async setModelTemporary(model: Model, thinking: ConfiguredThinkingLevel | undefined): Promise<void> {
+		await this.setModel(model);
+		this.thinkingLevel = thinking;
+	}
 
 	constructor(
 		cwd: string,

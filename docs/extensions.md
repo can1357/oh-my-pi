@@ -435,6 +435,66 @@ const contrasting = ctx.models
   .find((m) => current && ctx.models.family(m) !== ctx.models.family(current));
 ```
 
+### Built-in session modes (`ctx.modes`)
+
+Use `ctx.modes.getState()` to discover the current session's modes and supported operations, including after loading or reconnecting. It returns a detached snapshot with `sessionId`, `revision`, `plan`, `vibe`, `goal`, `loop`, and `capabilities`. Changing a returned object does not change the session.
+
+`await ctx.modes.set(request)` performs an explicit lifecycle operation, not a toggle or slash-command dispatch. Entering a mode does not submit a prompt. Submit the extension's request separately with `pi.sendUserMessage(request)`.
+
+|Mode|Direct operations|Existing control before this API|Coverage|
+|---|---|---|---|
+|Plan|`enter`, `exit`, `pause`, `resume`; optional `workflow: "parallel" \| "iterative"` on entry|Interactive `/plan`, ACP mode selection, headless `--plan-yolo`; extension review APIs only|Direct lifecycle, tool/model restoration, draft preservation|
+|Vibe|`enter`, `exit`|Interactive `/vibe`|Direct lifecycle, worker teardown and tool restoration|
+|Goal|`enter`, `replace` with `objective` and optional `tokenBudget`; `pause`, `resume`, `exit`, `drop`; `budget` with positive integer or `null`|Interactive `/goal`, `goal` tool and RPC goal control|Direct objective, budget and continuation lifecycle|
+|Loop|`enter`, `configure` with optional `limit`, `condition`, `strategy`; `pause`, `resume`, `exit`|Interactive `/loop` and Escape|Direct bounded continuation lifecycle|
+
+Loop limits are `{ kind: "iterations", iterations: N }` or `{ kind: "duration", durationMs: N }`. Loop is an independent continuation mode, not a fifth persisted exclusive mode; its snapshot includes the captured prompt and remaining runtime bounds. Plan, vibe and goal retain their existing conflicts, including paused plan/goal states. Entry never silently replaces another mode. Settings gates still apply.
+
+Successful results are `{ ok: true, changed, state }`; repeating an already-satisfied operation returns `changed: false`. Failures are `{ ok: false, code, message, state, conflictingMode? }`. Handle `conflict`, `disabled`, `invalid_request`, `unsupported`, `busy`, `session_changed`, and `failed` rather than assuming a UI warning means the transition succeeded. Capabilities describe host support, not whether settings currently enable a mode.
+
+`pi.on("mode_changed", (event, ctx) => ...)` receives `{ previous, state }` after committed transitions. Read current state rather than caching an earlier event across a session change. Event handlers may call controls themselves without holding the transition lock.
+
+Leaving plan mode does **not** approve or execute a plan and does not delete its draft. Plan-review controls (`openPlanReview`, `getPendingPlanReview`, `resolvePlanReview`) remain separate and retain their existing interactive semantics. Direct transitions do not open human confirmation dialogs; slash commands retain their confirmations.
+
+|Host|Plan / vibe / goal lifecycle|Loop|Plan review|
+|---|---|---|---|
+|TUI|Supported|Supported|Existing interactive review API|
+|RPC / RPC-UI|Supported; RPC retains its goal continuation owner|Unsupported: no editor continuation driver|Interactive review API unavailable|
+|ACP|Supported; ACP retains its proposal approval/elicitation policy and protocol mode updates|Unsupported: no editor continuation driver|ACP proposal approval, not a TUI overlay|
+|Print / JSON|Supported; entry submits no request|Unsupported: no editor continuation driver|Interactive review API unavailable|
+|SDK top-level session|Supported through the session lifecycle owner|Unsupported unless a TUI owns the session|Host-dependent|
+|Subagent|State queries available; independent lifecycle operations unsupported to preserve parent-imposed tool/mode restrictions|Unsupported|Unavailable|
+
+Busy turns and transitions return `busy`; await turn completion and retry. Concurrent callers cannot silently change each other's mode. A mode-change handler may invoke another control; a control invoked from an in-progress goal mutation notification is refused as busy instead of waiting on the goal's own accounting lock.
+
+Goal `exit` pauses the objective; use `drop` to remove it. Mode entry/resume does not initiate a new goal request; after a separately submitted turn, the host's existing continuation policy still applies.
+
+In hosts without the interactive plan review (RPC, print/JSON, SDK), a plan proposal tells the agent the plan was submitted for host review and that nothing was approved; the controlling extension decides what to do next. ACP keeps its client approval flow.
+
+Run the example:
+
+```sh
+bun packages/coding-agent/src/cli.ts -e packages/coding-agent/examples/extensions/mission.ts
+```
+
+`/mission <request>` enters built-in plan mode and sends the request separately; `/mission-exit` leaves without approval. `/mission-modes` queries state, or accepts a transition JSON object such as `{"mode":"goal","action":"enter","objective":"Ship the release"}`.
+
+#### Inventory exclusions
+
+These controls are not additional session modes and are intentionally not new `ctx.modes` operations:
+
+- `/plan-review`: review lifecycle, already directly controlled by the existing review API.
+- `/guided-goal`: a one-shot interview that sets up goal mode.
+- `/ratchet`: enables an eval prelude and submits a kickoff request; `/prewalk`: a one-shot model handoff.
+- `/model`, `/switch`, `/effort`, `/modelpreset`: model, thinking and role selection.
+- `/fast`, `/slow`: service tiers, already exposed through service-tier controls.
+- `/computer`, `/skillful`, `/extended-context`, advisor and TTSR configuration: ordinary capability/policy settings, not session-mode lifecycles.
+- `/shake`, `/compact`, `/handoff`: context transformations; `/force`: next-turn tool choice.
+- `/queue`, steering/follow-up/interrupt settings: message delivery controls.
+- `/live` and recording: voice operations; `/pause`: the global UI pause screen.
+- `/new`, `/clear`, `/resume`, `/branch`, `/fork`, `/fresh`: session navigation/lifecycle, already separate command-context APIs.
+- `/security plan`: an immutable scan-plan artifact, unrelated to session planning.
+
 ## 3) Command context (`ExtensionCommandContext`)
 
 Command handlers additionally get:

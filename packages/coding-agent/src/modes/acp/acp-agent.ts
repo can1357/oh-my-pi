@@ -46,6 +46,7 @@ import {
 } from "@oh-my-pi/pi-utils/acp";
 import { disableProvider, enableProvider } from "../../capability";
 import { Settings } from "../../config/settings";
+import { SessionModeController } from "../session-mode-controller";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	type ExtensionUIContext,
@@ -99,7 +100,6 @@ import { cfgPlanEnabled } from "../../plan-mode/settings";
 
 const ACP_DEFAULT_MODE_ID = "default";
 const ACP_PLAN_MODE_ID = "plan";
-const DEFAULT_PLAN_FILE_URL = "local://PLAN.md";
 const APPROVE_OPTION = "Approve and execute";
 const REFINE_OPTION = "Refine plan";
 const MODE_CONFIG_ID = "mode";
@@ -765,12 +765,7 @@ export class AcpAgent implements Agent {
 
 	async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
 		const record = this.#getSessionRecord(params.sessionId);
-		this.#applyModeChange(record.session, params.modeId);
-		await this.#connection.sessionUpdate({
-			sessionId: record.session.sessionId,
-			update: this.#buildCurrentModeUpdate(record.session),
-		});
-		await this.#pushConfigOptionUpdate(record);
+		await this.#applyModeChange(record.session, params.modeId);
 		return {};
 	}
 
@@ -782,7 +777,7 @@ export class AcpAgent implements Agent {
 
 		switch (params.configId) {
 			case MODE_CONFIG_ID:
-				this.#applyModeChange(record.session, params.value);
+				await this.#applyModeChange(record.session, params.value);
 				break;
 			case MODEL_CONFIG_ID:
 				await this.#setModelById(record.session, params.value);
@@ -794,28 +789,23 @@ export class AcpAgent implements Agent {
 				throw new Error(`Unknown ACP config option: ${params.configId}`);
 		}
 
-		// When mode is changed via the generic config-option API, mirror the
-		// `current_mode_update` notification that `setSessionMode` emits so
-		// ACP clients tracking session-mode state see a consistent transition.
-		if (params.configId === MODE_CONFIG_ID) {
+		// Mode changes publish through the mode controller's onChanged (installed
+		// during #configureExtensions), which sends current_mode_update plus the
+		// config update — pushing here would duplicate the sequence. Before that
+		// wiring exists, or for model/thinking without a lifetime subscription,
+		// push the config update ourselves.
+		const handledBySubscription =
+			(params.configId === THINKING_CONFIG_ID || params.configId === MODEL_CONFIG_ID) &&
+			record.lifetimeUnsubscribe !== undefined;
+		const handledByModeHost = params.configId === MODE_CONFIG_ID && record.extensionsConfigured;
+		if (!handledBySubscription && !handledByModeHost) {
+			await this.#pushConfigOptionUpdate(record);
+		}
+		if (params.configId === MODE_CONFIG_ID && !record.extensionsConfigured) {
 			await this.#connection.sessionUpdate({
 				sessionId: record.session.sessionId,
 				update: this.#buildCurrentModeUpdate(record.session),
 			});
-		}
-
-		// For `model`/`thinking`, `#setModelById`/`#setThinkingLevelById` change
-		// the session model/thinking level through AgentSession, which now emits
-		// a lifetime event (`model_changed`/`thinking_level_changed`) that
-		// `#handleLifetimeEvent` turns into a push once the subscription is
-		// installed. Only push here when that subscription is not yet
-		// installed, so pre-bootstrap callers still see the change without a
-		// post-bootstrap duplicate.
-		const handledBySubscription =
-			(params.configId === THINKING_CONFIG_ID || params.configId === MODEL_CONFIG_ID) &&
-			record.lifetimeUnsubscribe !== undefined;
-		if (!handledBySubscription) {
-			await this.#pushConfigOptionUpdate(record);
 		}
 		return { configOptions: this.#buildConfigOptions(record.session) };
 	}
@@ -1863,28 +1853,12 @@ export class AcpAgent implements Agent {
 		return session.getPlanModeState()?.enabled ? ACP_PLAN_MODE_ID : ACP_DEFAULT_MODE_ID;
 	}
 
-	#applyModeChange(session: AgentSession, modeId: string): void {
-		const availableModes = this.#getAvailableModes(session);
-		if (!availableModes.some(mode => mode.id === modeId)) {
+	async #applyModeChange(session: AgentSession, modeId: string): Promise<void> {
+		if (!this.#getAvailableModes(session).some(mode => mode.id === modeId)) {
 			throw new Error(`Unsupported ACP mode: ${modeId}`);
 		}
-		if (modeId === ACP_PLAN_MODE_ID) {
-			const previous = session.getPlanModeState();
-			session.setPlanModeState({
-				enabled: true,
-				planFilePath: previous?.planFilePath ?? DEFAULT_PLAN_FILE_URL,
-				workflow: previous?.workflow ?? "parallel",
-				reentry: previous !== undefined,
-			});
-			// Mirror `InteractiveMode.#enterPlanMode`: register the plan-proposal
-			// handler that consumes `xd://propose` writes from plan mode. Without
-			// this, proposal dispatch falls through and plan mode has no approval
-			// path (issue #1869).
-			session.setPlanProposalHandler?.(title => this.#handleAcpPlanProposal(session, title));
-		} else {
-			session.setPlanProposalHandler?.(null);
-			session.setPlanModeState(undefined);
-		}
+		const result = await session.modes.set({ mode: "plan", action: modeId === ACP_PLAN_MODE_ID ? "enter" : "exit" });
+		if (!result.ok) throw new Error(`${result.code}: ${result.message}`);
 	}
 
 	/**
@@ -1942,8 +1916,8 @@ export class AcpAgent implements Agent {
 		// Approved. Set the plan reference so the next turn injects the plan
 		// content as context (the file keeps its agent-chosen name — no rename),
 		session.setPlanReferencePath(planFilePath);
-		session.setPlanProposalHandler?.(null);
-		session.setPlanModeState(undefined);
+		const controller = session.modes;
+		if (controller instanceof SessionModeController) await controller.completePlan();
 		let autosaveFailed = false;
 		try {
 			await autosaveApprovedPlan({
@@ -1958,18 +1932,6 @@ export class AcpAgent implements Agent {
 				error,
 			});
 			autosaveFailed = true;
-		}
-		try {
-			await this.#connection.sessionUpdate({
-				sessionId: session.sessionId,
-				update: this.#buildCurrentModeUpdate(session),
-			});
-			await this.#pushConfigOptionUpdateForSession(session);
-		} catch (error) {
-			logger.warn("Failed to emit mode updates after plan approval", {
-				sessionId: session.sessionId,
-				error,
-			});
 		}
 		return {
 			content: [
@@ -2554,6 +2516,23 @@ export class AcpAgent implements Agent {
 		if (record.extensionsConfigured) {
 			return;
 		}
+		const modeController = record.session.modes;
+		if (modeController instanceof SessionModeController) {
+			modeController.setHost({
+				usePlanRole: false,
+				onPlanEntered: () =>
+					record.session.setPlanProposalHandler(title => this.#handleAcpPlanProposal(record.session, title)),
+				onChanged: async () => {
+					if (!this.#sessions.has(record.session.sessionId)) return;
+					await this.#connection.sessionUpdate({
+						sessionId: record.session.sessionId,
+						update: this.#buildCurrentModeUpdate(record.session),
+					});
+					await this.#pushConfigOptionUpdate(record);
+				},
+			});
+			await modeController.reconcile();
+		}
 
 		const uiContext = createAcpExtensionUiContext(
 			this.#connection,
@@ -2626,6 +2605,10 @@ export class AcpAgent implements Agent {
 				},
 				hasPendingMessages: () => record.session.queuedMessageCount > 0,
 				shutdown: () => {},
+				modes: {
+					getState: () => record.session.modes.getState(),
+					set: request => record.session.modes.set(request),
+				},
 				getContextUsage: () => record.session.getContextUsage(),
 				getSystemPrompt: () => record.session.systemPrompt,
 				runEphemeralTurn: args => record.session.runEphemeralTurn(args),

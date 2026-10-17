@@ -121,7 +121,7 @@ export class GoalRuntime {
 	#wallClock: GoalWallClockSnapshot;
 	#budgetReportedFor: string | undefined;
 	#accountingTail: Promise<void> = Promise.resolve();
-
+	#mutationsInFlight = 0;
 	constructor(host: GoalRuntimeHost) {
 		this.#host = host;
 		this.#wallClock = { lastAccountedAt: this.#now() };
@@ -146,6 +146,10 @@ export class GoalRuntime {
 		return Boolean(state?.enabled && isAccountingStatus(state.goal));
 	}
 
+	get mutationInFlight(): boolean {
+		return this.#mutationsInFlight > 0;
+	}
+
 	async #withAccounting<T>(fn: () => Promise<T> | T): Promise<T> {
 		const previous = this.#accountingTail;
 		const { promise, resolve } = Promise.withResolvers<void>();
@@ -154,9 +158,11 @@ export class GoalRuntime {
 			() => promise,
 		);
 		await previous.catch(() => {});
+		this.#mutationsInFlight++;
 		try {
 			return await fn();
 		} finally {
+			this.#mutationsInFlight--;
 			resolve();
 		}
 	}

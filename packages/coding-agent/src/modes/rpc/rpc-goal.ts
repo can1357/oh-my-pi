@@ -14,6 +14,7 @@ import { cfgGoalContinuationModes, cfgGoalEnabled } from "../../goals/settings";
 import { type GoalModeState, goalContinuationActivity, goalFromModeData } from "../../goals/state";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { nextActionableTask } from "../../tools/todo";
+import type { ModeRequest } from "../../extensibility/extensions/mode-api";
 
 /** `goal.continuationModes` value that enables automatic continuation for RPC hosts. */
 export const RPC_GOAL_CONTINUATION_MODE = "rpc";
@@ -83,6 +84,7 @@ export class RpcGoalController {
 	#reconcileTask: Promise<void> = Promise.resolve();
 	/** Reconciles queued or running. */
 	#reconcilesPending = 0;
+	#reconciledSessionId: string | undefined;
 	/**
 	 * The in-progress change began while a reconcile was queued or running, so that
 	 * reconcile may have read a transcript this change later replaced or rolled back:
@@ -133,10 +135,12 @@ export class RpcGoalController {
 	 * the previous transcript's goal. Not for use inside extension notifications.
 	 */
 	async settled(): Promise<void> {
-		for (let tail = this.#reconcileTask; ; tail = this.#reconcileTask) {
-			await this.#exitTask;
+		for (;;) {
+			const tail = this.#reconcileTask;
+			const exit = this.#exitTask;
+			await exit;
 			await tail;
-			if (tail === this.#reconcileTask) return;
+			if (tail === this.#reconcileTask && exit === this.#exitTask) return;
 		}
 	}
 
@@ -152,6 +156,10 @@ export class RpcGoalController {
 			// (`--provider-session-id`) does not change when the transcript does.
 			this.#sessionBeforeChange = this.#session.sessionManager.getSessionId();
 			this.#heldDuringChange = this.#continuationScheduled || this.#continuationWanted();
+			// A change may keep the transcript id (reload, tree navigation) while
+			// the mode controller's beforeSessionChange tears the live goal down —
+			// the next reconcile must restore it rather than skip on a stale mark.
+			this.#reconciledSessionId = undefined;
 		}
 		if (this.#reconcilesPending > 0) this.#changeOverlappedReconcile = true;
 		this.#continuationScheduled = false;
@@ -229,6 +237,50 @@ export class RpcGoalController {
 		}
 	}
 
+	async applyModeRequest(request: Extract<ModeRequest, { mode: "goal" }>): Promise<void> {
+		const current = this.#session.getGoalModeState();
+		switch (request.action) {
+			case "enter":
+				if (current?.enabled) return;
+				this.#assertCanEnter();
+				if (current?.goal.status === "paused")
+					throw new Error("Resume or drop the paused goal before entering a new objective.");
+				await this.#enter(() => this.#session.goalRuntime.createGoal(request), false);
+				return;
+			case "resume":
+				if (current?.enabled) return;
+				this.#assertCanEnter();
+				if (current?.goal.status !== "paused") throw new Error("No paused goal to resume.");
+				await this.#enter(() => this.#session.goalRuntime.resumeGoal(), false);
+				return;
+			case "replace":
+				if (
+					current?.goal.objective === request.objective.trim() &&
+					current.goal.tokenBudget === request.tokenBudget
+				)
+					return;
+				await this.#session.goalRuntime.replaceGoal(request);
+				this.stopForHostAbort();
+				return;
+			case "exit":
+			case "pause":
+				if (!current?.enabled) return;
+				await this.handle({ op: "pause" });
+				this.stopForHostAbort();
+				return;
+			case "drop":
+				if (!current) return;
+				await this.handle({ op: "drop" });
+				this.stopForHostAbort();
+				return;
+			case "budget":
+				if (!current) throw new Error("No current goal to budget.");
+				if (current.goal.tokenBudget === (request.tokenBudget ?? undefined)) return;
+				await this.#session.goalRuntime.onBudgetMutated(request.tokenBudget ?? undefined);
+				return;
+		}
+	}
+
 	#assertCanEnter(): void {
 		if (!cfgGoalEnabled.get(this.#session.settings)) {
 			throw new Error("Goal mode is disabled (goal.enabled).");
@@ -264,21 +316,34 @@ export class RpcGoalController {
 		return this.#state;
 	}
 
-	async #enter(start: () => Promise<GoalModeState>): Promise<void> {
+	async #enter(start: () => Promise<GoalModeState>, continueImmediately = true): Promise<void> {
 		// The pre-goal tool set is captured once, when this controller first adds `goal`
 		// (a reattached paused goal already holds it). A `goal` tool the host enabled
 		// before the goal stays enabled afterwards.
 		const previousTools = this.#previousTools ?? this.#session.getEnabledToolNames();
-		const state = await start();
+		const nextTools = [...new Set([...previousTools, "goal"])];
+		// Activate the tool set BEFORE committing the goal: if rebuild rejects after
+		// createGoal() persisted a running goal, the failed ModeResult would leave
+		// the session holding a goal it cannot drive. Activate first; on failure
+		// of the commit step, restore the pre-entry tools before propagating.
+		await this.#session.setActiveToolsByName(nextTools);
+		let state: GoalModeState;
+		try {
+			state = await start();
+		} catch (error) {
+			this.#previousTools = undefined;
+			await this.#session.setActiveToolsByName(previousTools).catch(() => {});
+			throw error;
+		}
 		this.#previousTools = previousTools;
-		await this.#session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
 		this.#session.setGoalModeState(state);
 		this.#resetContinuation();
 		if (this.#session.isStreaming) {
 			await this.#session.sendGoalModeContext({ deliverAs: "steer" });
 			return;
 		}
-		this.#scheduleContinuation();
+		if (continueImmediately) this.#scheduleContinuation();
+		else this.stopForHostAbort();
 	}
 
 	/** Restore the pre-goal tool set. Idempotent. */
@@ -321,13 +386,24 @@ export class RpcGoalController {
 	async reconcile(options?: { preserveActiveGoal?: boolean }): Promise<void> {
 		this.#reconcilesPending++;
 		const run = this.#reconcileTask.then(() => this.#reconcileOnce(options));
-		this.#reconcileTask = run.catch(reportControllerError).finally(() => {
-			this.#reconcilesPending--;
-		});
+		this.#reconcileTask = run
+			.then(() => {
+				// Mark only after the whole restore completed: a failed reconcile
+				// stays eligible so the next caller re-runs it.
+				this.#reconciledSessionId = this.#session.sessionManager.getSessionId();
+			})
+			.catch(reportControllerError)
+			.finally(() => {
+				this.#reconcilesPending--;
+			});
 		await run;
 	}
 
 	async #reconcileOnce(options: { preserveActiveGoal?: boolean } | undefined): Promise<void> {
+		// Startup, session-change, and the SessionModeController's host reconcile
+		// can each reach this for the same journal — one restore per session id.
+		const sessionId = this.#session.sessionManager.getSessionId();
+		if (sessionId !== undefined && sessionId === this.#reconciledSessionId) return;
 		// Goal state and the goal tool belong to the session that set them; the
 		// session itself keeps both across a switch, so clear them here first.
 		this.#continuationScheduled = false;

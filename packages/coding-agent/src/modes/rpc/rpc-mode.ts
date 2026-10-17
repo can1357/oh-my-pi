@@ -66,6 +66,7 @@ import {
 	formatPersistenceNotice,
 } from "../persistence-failure";
 import { initializeExtensions } from "../runtime-init";
+import { SessionModeController } from "../session-mode-controller";
 import { cfgSpellingAutocomplete } from "../settings";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
@@ -1394,6 +1395,14 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const btw = new RpcBtwController(session, output);
 	// A continuation abandoned while waiting leaves nothing to end the activity stretch: re-check settlement.
 	const goalController = new RpcGoalController(session, () => void settleWatcher.check());
+	const modeController = session.modes;
+	if (modeController instanceof SessionModeController) {
+		modeController.setHost({
+			goal: request => goalController.applyModeRequest(request),
+			settled: () => goalController.settled(),
+			reconcile: options => goalController.reconcile(options),
+		});
+	}
 	// A scheduled or held goal turn will start a turn: every settle report treats it as busy,
 	// and any report of "not settled" for that reason is later closed by `session_settled`.
 	const goalTurnScheduled = watchedScheduledTurnProbe(

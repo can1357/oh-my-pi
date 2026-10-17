@@ -8,6 +8,9 @@
  * - Interact with the user via UI primitives
  */
 
+import type { ExtensionModeControls, ModeChangedEvent } from "./mode-api";
+export * from "./mode-api";
+
 import {
 	type ExtensionUiComponent,
 	type ExtensionUiComponentFactory,
@@ -651,6 +654,8 @@ export interface ExtensionContext {
 	ui: ExtensionUIContext;
 	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
 	mode: ExtensionMode;
+	/** Direct built-in session mode lifecycle; independent of prompt submission. */
+	modes: ExtensionModeControls;
 	/** Get current context usage for the active model. */
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
@@ -1471,6 +1476,7 @@ export type ExtensionEvent =
 	| TtsrTriggeredEvent
 	| TodoReminderEvent
 	| GoalUpdatedEvent
+	| ModeChangedEvent
 	| CredentialDisabledEvent
 	| McpNotificationEvent
 	| UserBashEvent
@@ -1680,6 +1686,7 @@ export interface ExtensionAPI {
 	on(event: "ttsr_triggered", handler: ExtensionHandler<TtsrTriggeredEvent>): void;
 	on(event: "todo_reminder", handler: ExtensionHandler<TodoReminderEvent>): void;
 	on(event: "goal_updated", handler: ExtensionHandler<GoalUpdatedEvent>): void;
+	on(event: "mode_changed", handler: ExtensionHandler<ModeChangedEvent>): void;
 	on(event: "credential_disabled", handler: ExtensionHandler<CredentialDisabledEvent>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 	on(event: "tool_approval_requested", handler: ExtensionHandler<ToolApprovalRequestedEvent>): void;
@@ -2147,6 +2154,7 @@ export interface ExtensionContextActions {
 	) => boolean;
 	getPendingPlanReview?: () => PlanReviewRequestedEvent | undefined;
 	openPlanReview?: () => Promise<boolean>;
+	modes?: ExtensionModeControls;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];

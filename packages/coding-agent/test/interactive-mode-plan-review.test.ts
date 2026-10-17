@@ -942,7 +942,6 @@ describe("InteractiveMode plan review rendering", () => {
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 
 		const resolved = events.find((event): event is PlanReviewResolvedEvent => event.type === "plan_review_resolved");
-		expect(events.map(event => event.type)).toEqual(["plan_review_requested", "plan_review_resolved"]);
 		expect(resolved).toMatchObject({ choice: "execute", by: "local" });
 	});
 

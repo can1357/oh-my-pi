@@ -9,6 +9,7 @@
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
+import { SessionModeController } from "./session-mode-controller";
 import type { AgentSession } from "../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 
@@ -147,6 +148,10 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			getContextUsage: () => session.getContextUsage(),
 			getSystemPrompt: () => session.systemPrompt,
 			runEphemeralTurn: args => session.runEphemeralTurn(args),
+			modes: {
+				getState: () => session.modes.getState(),
+				set: request => session.modes.set(request),
+			},
 			compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 		},
 		// ExtensionCommandContextActions — commands invokable via prompt("/command")
@@ -209,5 +214,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 	);
 
 	runner.onError(reportRuntimeError);
+	const modes = session.modes;
+	if (modes instanceof SessionModeController) await modes.reconcile();
 	await runner.emit({ type: "session_start" });
 }
