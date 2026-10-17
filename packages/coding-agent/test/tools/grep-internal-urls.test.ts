@@ -257,6 +257,28 @@ describe("GrepTool internal URL resolution", () => {
 		expect(text).not.toContain("INFO");
 	});
 
+	it("greps every artifact in a semicolon-delimited scope", async () => {
+		// Regression for #14091: `artifact://3;artifact://4` reached
+		// splitDelimitedPathEntry as one entry, and the isInternalUrlPath guard
+		// returned null before any delimiter was considered, so the pair searched
+		// as a single URI and silently matched neither. `read` passes a
+		// routedUrlPredicate to get past that guard; grep did not.
+		await Bun.write(path.join(artifactsDir, "3.python.log"), "first artifact needle\n");
+		await Bun.write(path.join(artifactsDir, "4.rust.log"), "second artifact needle\n");
+
+		const session = createSession();
+		const tool = new GrepTool(session);
+
+		const result = await tool.execute("test-delimited-artifacts", {
+			pattern: "artifact needle",
+			path: "artifact://3;artifact://4",
+		});
+
+		const text = getResultText(result);
+		expect(text).toContain("first artifact needle");
+		expect(text).toContain("second artifact needle");
+	});
+
 	it("searches virtual internal URL content without a backing file", async () => {
 		registerVirtualDocs(new Map([["doc.md", "alpha line\nneedle in virtual content\ngamma line\n"]]));
 
