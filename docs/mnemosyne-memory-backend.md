@@ -51,7 +51,7 @@ The first-turn recall is part of the transcript's history and is stored in the s
 | `mnemopi.scoping`             | `per-project`      | Memory visibility mode: `global` = one shared bank, `per-project` = isolated project memory, `per-project-tagged` = project-local writes plus global recall visibility.                                                                                                                |
 | `mnemopi.autoRecall`          | `true`             | Recall memory on the first turn of a session.                                                                                                                                                                                                                                          |
 | `mnemopi.autoRetain`          | `true`             | Retain completed turns automatically.                                                                                                                                                                                                                                                  |
-| `mnemopi.polyphonicRecall`    | `false`            | Fuse the standard ranking by reciprocal rank with vector, graph, fact and temporal voices, so memories linked in the episodic graph (by `mnemopi.proactiveLinking` or consolidation) or through consolidated extracted facts surface without a keyword match. `MNEMOPI_POLYPHONIC_RECALL` overrides when set. |
+| `mnemopi.polyphonicRecall`    | `true`             | Fuse the standard ranking by reciprocal rank with vector, graph, fact and temporal voices, so memories linked in the episodic graph (by `mnemopi.proactiveLinking` or consolidation) or through consolidated extracted facts surface without a keyword match. See [Polyphonic recall](#polyphonic-recall). `MNEMOPI_POLYPHONIC_RECALL` overrides when set. |
 | `mnemopi.enhancedRecall`      | `false`            | Cache recall results per query for up to 5 minutes. Entries are keyed on every recall option (limit, facts, channel, time, bank), similar queries only reuse entries with identical options, and any write to the bank drops the cache. `MNEMOPI_ENHANCED_RECALL` overrides when set.  |
 | `mnemopi.proactiveLinking`    | `false`            | Ingest new memories into the episodic graph and link them to related entities/memories as they are stored; `MNEMOPI_PROACTIVE_LINKING` overrides when set.                                                                                                                             |
 | `mnemopi.retainEveryNTurns`   | `4`                | Minimum user turns between automatic retain writes.                                                                                                                                                                                                                                    |
@@ -69,6 +69,8 @@ The first-turn recall is part of the transcript's history and is stored in the s
 | `mnemopi.llmBaseUrl`          | env/default        | OpenAI-compatible LLM endpoint for `llmMode: remote`.                                                                                                                                                                                                                                  |
 | `mnemopi.llmApiKey`           | env/default        | LLM API key for `llmMode: remote`.                                                                                                                                                                                                                                                     |
 | `mnemopi.llmModel`            | env/default        | LLM model id for `llmMode: remote`.                                                                                                                                                                                                                                                    |
+
+`MNEMOPI_POLYPHONIC_RECALL`, `MNEMOPI_ENHANCED_RECALL` and `MNEMOPI_PROACTIVE_LINKING` read `1`, `true`, `yes` and `on` as on and `0`, `false`, `no` and `off` as off, in any case; any other value is ignored and the setting applies.
 
 ## Scoping
 
@@ -94,7 +96,7 @@ Retention writes a marker-free transcript projection: when the host supplies an 
 
 ## Recall ranking weights
 
-Recall multiplies each memory's score by a weight for its stored `veracity` label and, for episodic memories, by a weight for its degradation tier. Each weight is read from its environment variable on every recall:
+Standard recall multiplies each memory's score by a weight for its stored `veracity` label and, for episodic memories, by a weight for its degradation tier. With `mnemopi.polyphonicRecall` on (the default), these weights only order the standard ranking that polyphonic recall fuses as its `hybrid` voice; the vector, graph, fact and temporal voices do not apply them, so a memory labelled `false` can still be recalled through them. Each weight is read from its environment variable on every recall:
 
 | Variable                  | Default | Applies to                                                                           |
 | ------------------------- | ------- | ------------------------------------------------------------------------------------ |
@@ -109,7 +111,15 @@ Recall multiplies each memory's score by a weight for its stored `veracity` labe
 
 Sleep consolidation carries a working memory's label onto the episodic memory it produces.
 
-Memories labelled `true` or `likely_true` always weigh `1.0`, and `false` weighs `0`. With `mnemopi.polyphonicRecall`, these weights order the standard ranking that becomes the fused `hybrid` voice; the vector, graph, fact and temporal voices do not apply them.
+Memories labelled `true` or `likely_true` always weigh `1.0`, and `false` weighs `0`.
+
+## Polyphonic recall
+
+With `mnemopi.polyphonicRecall` on (the default):
+
+- A recall result's `score`, and the `c:` value the `recall` tool shows, is the fused rank score scaled to 0..1, not a relevance measure: `1` means first in every voice, and first in one voice alone is `0.2`. `per-project-tagged` merges its project and global banks by these scores, so the merged list interleaves the banks by rank.
+- Of two memories whose words overlap by more than 80%, recall returns only the higher-ranked one, even when they differ in a detail that matters, such as a host name. Set `mnemopi.polyphonicRecall: false` to see both.
+- Retained memories whose facts are extracted also have those facts consolidated into the `consolidated_facts` table, which feeds the fact voice. The first recall on an existing bank creates that table and backfills it from the facts already stored.
 
 ## LLM and embeddings
 

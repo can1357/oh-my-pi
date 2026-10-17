@@ -5,6 +5,7 @@
 ### Changed
 
 - With a first-party Anthropic model on the official API selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup; third-party gateways and custom endpoints are never probed ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
+- Mnemopi recall now fuses its vector, graph, fact and temporal voices by default (`mnemopi.polyphonicRecall`), finding noticeably more relevant memories; set it to `false` or `MNEMOPI_POLYPHONIC_RECALL=0` to restore the previous ranking. Retained memories' extracted facts are now also consolidated, and the first recall on an existing bank backfills them once ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
 
 ### Fixed
 
