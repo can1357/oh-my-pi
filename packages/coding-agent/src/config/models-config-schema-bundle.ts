@@ -17,12 +17,15 @@ function validateMaxContextWindow(
 	return true;
 }
 
-function validateImageCountBudget(value: { imageCountBudget?: number }, ctx: NarrowContext): boolean {
-	if (
-		value.imageCountBudget !== undefined &&
-		(!Number.isSafeInteger(value.imageCountBudget) || value.imageCountBudget <= 0)
-	) {
-		return ctx.mustBe("imageCountBudget a positive integer");
+function validateImageBudgets(
+	value: { imageCountBudget?: number; inlineImageByteBudget?: number },
+	ctx: NarrowContext,
+): boolean {
+	for (const key of ["imageCountBudget", "inlineImageByteBudget"] as const) {
+		const budget = value[key];
+		if (budget !== undefined && (!Number.isSafeInteger(budget) || budget <= 0)) {
+			return ctx.mustBe(`${key} a positive integer`);
+		}
 	}
 	return true;
 }
@@ -221,6 +224,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"input?": '("text" | "image")[]',
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
+		"inlineImageByteBudget?": "number",
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
@@ -269,7 +273,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return validateImageCountBudget(value, ctx) && validateMaxContextWindow(value, ctx);
+		return validateImageBudgets(value, ctx) && validateMaxContextWindow(value, ctx);
 	});
 
 	const ModelOverrideSchema = type({
@@ -281,6 +285,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"input?": '("text" | "image")[]',
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
+		"inlineImageByteBudget?": "number",
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
@@ -322,7 +327,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return validateImageCountBudget(value, ctx) && validateMaxContextWindow(value, ctx);
+		return validateImageBudgets(value, ctx) && validateMaxContextWindow(value, ctx);
 	});
 
 	const ProviderDiscoverySchema = type({

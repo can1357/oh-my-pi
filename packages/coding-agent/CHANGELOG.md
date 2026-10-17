@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `inlineImageByteBudget` to custom models and `modelOverrides` in models.yml, so a custom gateway that accepts large request bodies can state its image byte limit; snapcompact archives get half of it instead of the fixed 3 MB, which cut CJK history to about 3 frames ([#15091](https://github.com/can1357/oh-my-pi/pull/15091) by [@Ikaleio](https://github.com/Ikaleio))
+
 ### Changed
 
 - With a first-party Anthropic model on the official API selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup; third-party gateways and custom endpoints are never probed ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))

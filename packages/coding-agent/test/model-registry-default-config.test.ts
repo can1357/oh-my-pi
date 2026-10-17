@@ -6,6 +6,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import type { SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import { DEFAULT_FRAME_DATA_BYTES_BUDGET, frameDataBytesBudget } from "@oh-my-pi/snapcompact";
 import { CacheWarmer, getPromptCacheTtlMs } from "../src/session/cache-warmer";
 
 const originalAgentDir = getAgentDir();
@@ -60,6 +61,23 @@ describe("ModelRegistry default custom models config", () => {
 		const [model] = loadDefaultRegistryModels({ provider: "managed-primary", modelId: "local-vision" });
 
 		expect(model?.imageInputDecoder).toBe("stb");
+	});
+
+	test("sizes snapcompact frames from a custom gateway's configured inline image byte budget", () => {
+		const fixture = { modelName: "Gateway vision", baseUrl: "https://gateway.example.com/v1" };
+		writeModelsYaml("models.yml", {
+			...fixture,
+			provider: "gateway",
+			modelId: "vision",
+			inlineImageByteBudget: 64_000_000,
+		});
+		const configured = new ModelRegistry(authStorage).find("gateway", "vision");
+		writeModelsYaml("models.yml", { ...fixture, provider: "gateway", modelId: "vision" });
+		const unset = new ModelRegistry(authStorage).find("gateway", "vision");
+
+		expect(configured?.inlineImageByteBudget).toBe(64_000_000);
+		expect(frameDataBytesBudget(configured)).toBe(32_000_000);
+		expect(frameDataBytesBudget(unset)).toBe(DEFAULT_FRAME_DATA_BYTES_BUDGET);
 	});
 
 	test("loads Bedrock cache capabilities from a model override", () => {
@@ -414,6 +432,7 @@ interface ProviderFixture {
 	modelName: string;
 	baseUrl: string;
 	imageInputDecoder?: "stb";
+	inlineImageByteBudget?: number;
 }
 
 interface ModelLookup {
@@ -458,6 +477,7 @@ function writeModelsYaml(file: "models.yml" | "models.yaml", fixture: ProviderFi
 			"        reasoning: false",
 			fixture.imageInputDecoder ? "        input: [text, image]" : "        input: [text]",
 			...(decoderLine ? [decoderLine] : []),
+			...(fixture.inlineImageByteBudget ? [`        inlineImageByteBudget: ${fixture.inlineImageByteBudget}`] : []),
 			"        cost:",
 			"          input: 0",
 			"          output: 0",

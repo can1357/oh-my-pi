@@ -1585,6 +1585,13 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	imageCountBudget?: number;
 	/**
+	 * Most base64 image bytes one request may carry, from user configuration.
+	 * Replaces the catalog's `inline-image-byte-budget`, which applies only on
+	 * official endpoints, for a custom gateway that accepts larger bodies.
+	 * Snapcompact archive frames get half of it.
+	 */
+	inlineImageByteBudget?: number;
+	/**
 	 * Native provider tool-call support. `false` is the only unsupported signal:
 	 * `true` and `undefined` both mean callers may use native tools. Catalog and
 	 * discovery sources should set this sparsely when an upstream explicitly
