@@ -52,7 +52,10 @@ def marker(out: Path) -> Path:
 
 
 def is_current(out: Path, revision: str) -> bool:
-	return out.exists() and marker(out).exists() and marker(out).read_text().strip() == revision
+	try:
+		return out.exists() and marker(out).read_text().strip() == revision
+	except FileNotFoundError:
+		return False
 
 
 def write_beam(name: str, split: str) -> list[dict]:
