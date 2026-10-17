@@ -481,6 +481,32 @@ describe("structured subagent primitive", () => {
 		expect(dispatched[0]?.inheritedSessionAgents).toEqual([inheritedAgent]);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+
+	it("hands the executor the spawning session's identity for subagent_stop", async () => {
+		mockDiscovery();
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-parent-identity-"));
+		const parentFile = path.join(root, "parent.jsonl");
+		const parentSession = {
+			...session(),
+			getSessionId: () => "parent-session-1",
+			getSessionFile: () => parentFile,
+		} as ToolSession;
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		try {
+			await runStructuredSubagent(request({ session: parentSession }));
+
+			// The executor reports `sessionFile` as the event's `parent_session_file`.
+			expect(dispatched[0]?.parentSessionId).toBe("parent-session-1");
+			expect(dispatched[0]?.sessionFile).toBe(parentFile);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
 		mockDiscovery(customAgent);

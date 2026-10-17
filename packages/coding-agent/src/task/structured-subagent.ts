@@ -603,6 +603,7 @@ function buildExecutorOptions(
 		description: request.invocationKind === "eval" ? trimToUndefined(request.identity?.label) : undefined,
 		index: request.index ?? 0,
 		parentToolCallId: request.parentToolCallId,
+		parentSessionId: session.getSessionId?.() ?? undefined,
 		detached: request.detached,
 		id,
 		taskDepth: session.taskDepth ?? 0,

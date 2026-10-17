@@ -287,6 +287,7 @@
 - Fixed anonymized session exports losing whether bash timing was shown ([#15468](https://github.com/can1357/oh-my-pi/pull/15468) by [@iliaal](https://github.com/iliaal))
 - Added `omp --restore <session>`: resumes a session like `--resume`, then goes on with what its last process left unfinished when it crashed or was killed, both the interrupted turn and the subagents it was running (their results reach the parent as usual); Tern's session daemon now restarts omp with it after a crash
 - Kept private prompt-cache routing keys out of shared sessions and HTML exports ([#15467](https://github.com/can1357/oh-my-pi/pull/15467) by [@iliaal](https://github.com/iliaal))
+- Added the `subagent_stop` extension event, the subagent counterpart of `session_stop` and of Claude Code's `SubagentStop` hook: handlers can refuse a task or subagent result and send the subagent back to work before the result is published ([#15500](https://github.com/can1357/oh-my-pi/pull/15500) by [@obabac](https://github.com/obabac) and [@andrebrait](https://github.com/andrebrait))
 
 ## [18.10.2] - 2026-10-12
 

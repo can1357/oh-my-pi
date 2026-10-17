@@ -94,7 +94,7 @@ import { DEFAULT_PEER_ROSTER_LIMIT } from "@oh-my-pi/pi-tui/tools/irc";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
 import { ToolAbortError } from "../tools/tool-errors";
-import { resetYieldTurnState } from "../tools/yield";
+import { reopenYieldWorkPoolItems, resetYieldTurnState } from "../tools/yield";
 import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { buildNamedToolChoice } from "../utils/tool-choice";
@@ -105,6 +105,7 @@ import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
+import { SubagentStopHook } from "./subagent-stop-hook";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
@@ -427,6 +428,12 @@ export interface ExecutorOptions {
 	id: string;
 	parentToolCallId?: string;
 	/**
+	 * Spawning session's id, reported as the `subagent_stop` event's
+	 * `parent_session_id`. Supplied by the spawn site: the child session cannot
+	 * derive it, and guessing from the child's own context would misreport it.
+	 */
+	parentSessionId?: string;
+	/**
 	 * Spawn runs as a detached background job (parent turn not blocked on it).
 	 * Rides the subagent lifecycle/progress payloads so HUD-style surfaces can
 	 * skip spawns the transcript already renders inline. See
@@ -504,6 +511,11 @@ export interface ExecutorOptions {
 	 */
 	invokedAt?: number;
 	acquiredAt?: number;
+	/**
+	 * Parent session transcript file. The child records it as its
+	 * `SessionHeader.parentSession` and reports it as the `subagent_stop` event's
+	 * `parent_session_file`.
+	 */
 	sessionFile?: string | null;
 	persistArtifacts?: boolean;
 	artifactsDir?: string;
@@ -652,6 +664,23 @@ function resolveFallbackCompletion(rawOutput: string, outputSchema: unknown): { 
 	return { data: candidate };
 }
 
+/**
+ * Whether a structured run that ended without a terminal `yield` still has a
+ * result {@link finalizeSubprocessOutput} publishes: the incremental sections it
+ * recorded (assembled on idle, ahead of any output), a JSON completion that
+ * satisfies the schema, or any output when no usable schema applies.
+ */
+function hasUnyieldedResult(
+	rawOutput: string,
+	outputSchema: unknown,
+	recordedYields: readonly unknown[] | undefined,
+): boolean {
+	if (recordedYields !== undefined && recordedYields.length > 0) return true;
+	if (resolveFallbackCompletion(rawOutput, outputSchema) !== null) return true;
+	const { normalized, error } = normalizeSchema(outputSchema);
+	return (normalized === undefined || Boolean(error)) && rawOutput.trim().length > 0;
+}
+
 interface FinalizeSubprocessOutputArgs {
 	rawOutput: string;
 	exitCode: number;
@@ -681,6 +710,11 @@ export const SUBAGENT_WARNING_NULL_YIELD = "SYSTEM WARNING: Subagent called yiel
 export const SUBAGENT_WARNING_MISSING_YIELD =
 	"SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
 export const SUBAGENT_WARNING_EMPTY_MESSAGE = "SYSTEM WARNING: Subagent ended without a final message.";
+export const SUBAGENT_STOP_REFUSAL_UNRESOLVED =
+	"Subagent stopped at a yield that a subagent_stop handler refused; the continuation turn ended without a replacement yield.";
+/** Why a wake turn's judged yield was dropped: a newer wake took the session while the handlers were consulting. */
+const WAKE_SUPERSEDED_WHILE_JUDGING =
+	"a newer wake took the session before the subagent_stop handlers answered, so this turn's yield was not published";
 
 /** Build a schema_violation outcome — surfaced as a non-zero exit so callers treat it as a failure. */
 function buildSchemaViolationOutcome(
@@ -1229,6 +1263,8 @@ interface RunMonitorArgs {
 	maxRuntimeMs: number;
 	/** Whether to periodically ask the agent for a completion estimate; see {@link isCompletionProbeEnabled}. */
 	completionProbe: boolean;
+	/** `false` = no `yield` tool: the last report turn is the run's result (see {@link ExecutorOptions.structured}). */
+	structured: boolean;
 	/** Fires each time a terminal `yield` is recorded for this run. */
 	onYieldAccepted?: () => void;
 }
@@ -1265,6 +1301,19 @@ interface SubagentRunMonitor {
 	 * predates background job outcomes the model was shown.
 	 */
 	yieldInvalidatedByAsync(): boolean;
+	/**
+	 * True when the run's candidate result was refused by a `subagent_stop`
+	 * handler and no fresh one has landed since (a yield, or for a
+	 * `structured: false` run a new report turn): the payload was explicitly
+	 * rejected, so it must not be accepted or published as the run's result.
+	 */
+	yieldInvalidatedByStop(): boolean;
+	/**
+	 * Drop the refused candidate (the recorded terminal yield, or a message-result
+	 * run's last report turn) so the run demands a fresh one after a
+	 * `subagent_stop` continuation, and charge the refused turn to the budget.
+	 */
+	invalidateYieldForStop(): void;
 	/**
 	 * True once a terminal yield with pending owner async work stopped the
 	 * free-running turn (recoverable, like a budget stop) instead of
@@ -1328,6 +1377,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		softRequestBudgetNotice,
 		maxRuntimeMs,
 		completionProbe,
+		structured,
 	} = args;
 	const startTime = Date.now();
 
@@ -1380,6 +1430,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	/** True while the reminder ladder's forced final `yield` is outstanding. */
 	let finalYieldForced = false;
 	let yieldInvalidatedByAsync = false;
+	/** True once a `subagent_stop` handler refused the recorded yield. */
+	let yieldInvalidatedByStop = false;
 	/** Epoch ms the current terminal yield was recorded; cleared when it is invalidated. */
 	let yieldAcceptedAt: number | undefined;
 	let yieldTurnStopRequested = false;
@@ -1511,6 +1563,17 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 
 	/** Owner async work that can still re-wake the run (quiescence barrier predicate). */
 	const sessionHasPendingAsyncWork = (): boolean => activeSession?.hasPendingAsyncWork?.() ?? false;
+
+	/**
+	 * Whether the live child session has `subagent_stop` handlers. A terminal
+	 * yield is parked for the stop pass instead of terminating the run — the same
+	 * reason owner async work parks it (see {@link requestYieldTurnStop}): the
+	 * pass runs inside the drive loop, which a terminated run signal makes
+	 * unreachable. Queried per terminal yield; a session's handler set is fixed
+	 * for the run.
+	 */
+	const sessionHasSubagentStopHandlers = (): boolean =>
+		activeSession?.extensionRunner?.hasHandlers("subagent_stop") === true;
 
 	// Handle abort signal
 	if (signal) {
@@ -1729,6 +1792,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			yieldCallPending = false;
 			if (yieldCalled) {
 				yieldInvalidatedByAsync = false;
+				yieldInvalidatedByStop = false;
 				yieldAcceptedAt = Date.now();
 				// Submitted: the remaining work is finalization (or waiting on owned
 				// async jobs), so stop showing the last stale self-estimate.
@@ -1934,10 +1998,16 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						}) === true;
 					const forcedFinalYield = event.toolName === "yield" && finalYieldForced && yieldCalled;
 					if (wantsTerminate || forcedFinalYield) {
-						if (event.toolName === "yield" && sessionHasPendingAsyncWork()) {
-							// Terminal yield with owner jobs still pending: park the
-							// run behind the quiescence barrier instead of completing
-							// it (see requestYieldTurnStop).
+						if (
+							event.toolName === "yield" &&
+							(sessionHasPendingAsyncWork() || sessionHasSubagentStopHandlers())
+						) {
+							// Terminal yield that is not yet the run's final answer:
+							// owner jobs still pending, or a `subagent_stop` pass
+							// waiting to judge it. Park the run behind the drive
+							// loop instead of completing it (see
+							// requestYieldTurnStop) so the candidate is settled —
+							// and offered to handlers — before it is accepted.
 							requestYieldTurnStop();
 						} else {
 							requestAbort("terminate");
@@ -2054,8 +2124,12 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						// prose predates that work and is invalidated.
 						const text = turnText.join("\n");
 						if (startedMoreWork) lastReportTurnText = undefined;
-						else if (text.trim()) lastReportTurnText = text;
-						else if (completedServerWork) lastReportTurnText = undefined;
+						else if (text.trim()) {
+							lastReportTurnText = text;
+							// A message-result run records no yield, so a fresh report turn is
+							// the only thing that supersedes a refused one.
+							if (!structured) yieldInvalidatedByStop = false;
+						} else if (completedServerWork) lastReportTurnText = undefined;
 					}
 					// A yield awaiting validation suppresses the budget check for
 					// its own turn (#5006). Defer it rather than drop it: every
@@ -2252,6 +2326,42 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		budgetStopRequested: () => budgetStopRequested,
 		waitForBudgetStop: () => budgetStopAbortPromise ?? Promise.resolve(),
 		yieldInvalidatedByAsync: () => yieldInvalidatedByAsync,
+		yieldInvalidatedByStop: () => yieldInvalidatedByStop,
+		invalidateYieldForStop: () => {
+			const latched = yieldCalled;
+			yieldCalled = false;
+			yieldInvalidatedByStop = true;
+			yieldAcceptedAt = undefined;
+			// The 99% set when the candidate latched is stale: the run works again.
+			progress.completionPercent = undefined;
+			scheduleProgress(true);
+			// The yield's deferred budget check was skipped when it latched
+			// `yieldCalled`; the refused turn still cost a request.
+			evaluateSoftRequestBudget();
+			if (!structured) {
+				// A message-result run's candidate is its last report turn.
+				lastReportTurnText = undefined;
+				return;
+			}
+			// A latched candidate is the last recorded yield: every recorded yield
+			// reassigns `yieldCalled`, so a latched yield is the newest item. Left in
+			// place it would still win result assembly as the terminal item when the
+			// replacement is only a `complete: true` section. An unlatched candidate
+			// is the output the run would still publish when no terminal yield ever
+			// came: finalization folds EVERY recorded section into it, so all of them
+			// are the refused payload. Left in place, a data-less finalize in the
+			// replacement would publish them again.
+			const recorded = progress.extractedToolData?.yield;
+			const refused = recorded ? (latched ? recorded.splice(-1) : recorded.splice(0)) : [];
+			// A workpool batch's final submission is the candidate: the yield tool
+			// remembers its item as submitted, so release it for the continuation.
+			const refusedLabels = refused.flatMap(item =>
+				isRecord(item) && Array.isArray(item.type)
+					? item.type.filter((label): label is string => typeof label === "string")
+					: [],
+			);
+			if (refusedLabels.length > 0) reopenYieldWorkPoolItems(activeSession?.getToolByName("yield"), refusedLabels);
+		},
 		yieldTurnStopRequested: () => yieldTurnStopRequested,
 		waitForYieldTurnStop: async () => {
 			const pending = yieldTurnStopPromise;
@@ -2352,6 +2462,58 @@ const PROMPT_DISPATCH_IDLE_TIMEOUT_MS = 5_000;
 
 class PromptDispatchError extends Error {}
 
+/** What a `subagent_stop` pass needs from whatever is driving the session. */
+interface SubagentStopPassIo {
+	/** Await `promise`, throwing once the run is aborted. */
+	awaitAbortable<T>(promise: Promise<T>): Promise<T>;
+	/** Run one continuation turn on the same session: prompt with `text`, then wait for the turn to settle. */
+	continueWith(text: string): Promise<void>;
+	/**
+	 * Snapshot the candidate before handlers consult. The returned check runs once
+	 * they answered: it lets the session settle and resolves true when the
+	 * candidate changed meanwhile. Absent when nothing can change it during a pass.
+	 */
+	watchCandidate?(): () => Promise<boolean>;
+}
+
+/**
+ * Offer the settled candidate to `subagent_stop` handlers: the recorded
+ * terminal yield, for a `structured: false` run its final report turn, or the
+ * output a structured run that never yielded still publishes.
+ * Owner async work has quiesced, so this is what the parent would accept and
+ * publish; the pass runs after the child's own work is done and before every
+ * acceptance/finalize path downstream. A refusal drops the candidate so
+ * nothing can accept or publish it, and the SAME child session runs again;
+ * the caller then demands a fresh one.
+ *
+ * Returns true when the run must be re-evaluated: the candidate was refused
+ * and the session re-driven, or the verdict was void because the candidate
+ * changed while handlers were consulting (nothing is accepted, refused or
+ * continued; the caller judges the candidate the run now has). False when the
+ * candidate stands — allowed, or the run was cancelled while handlers were
+ * consulting, so it was never confirmed and is dropped.
+ */
+async function runSubagentStopPass(
+	session: AgentSession,
+	monitor: SubagentRunMonitor,
+	stopHook: SubagentStopHook,
+	io: SubagentStopPassIo,
+): Promise<boolean> {
+	const stop = await stopHook.run(session, io.watchCandidate?.());
+	if (stop.kind === "stale") return true;
+	if (stop.kind === "allow") return false;
+	monitor.invalidateYieldForStop();
+	if (stop.kind === "aborted") return false;
+	// Charging the refused turn may have stopped the run for budget: let that
+	// abort settle (throws if the run is now aborted, so no continuation starts
+	// after an abort) and leave the stopped run to the ladder's forced final
+	// turn instead of a free-running one.
+	await io.awaitAbortable(monitor.waitForBudgetStop());
+	if (monitor.budgetStopRequested()) return true;
+	await io.continueWith(stop.text);
+	return true;
+}
+
 /**
  * Drive one assignment through a live session: send the prompt (with `restore`,
  * go on with the turn the previous process left unfinished instead:
@@ -2360,18 +2522,25 @@ class PromptDispatchError extends Error {}
  * classify the terminal assistant state. A soft-budget stop short-circuits the
  * reminder ladder into a single forced final yield so partial findings still
  * come back as a real report. Without a `yield` tool (`structured: false`) an
- * idle turn already ended on the final message, so only a budget stop prompts
- * again: one tool-less wrap-up turn.
+ * idle turn already ended on the final message, so only a budget stop or a
+ * `subagent_stop` refusal prompts again (a tool-less wrap-up turn, or the
+ * refusal's continuation).
  */
 async function driveSessionToResult(
 	session: AgentSession,
 	monitor: SubagentRunMonitor,
 	task: string,
+	// `subagent_stop` pass for this run. The hook owns its own per-run state
+	// (continuation allowance, stop_hook_active) and is offered each candidate
+	// terminal yield before the result can be accepted or published.
+	stopHook: SubagentStopHook,
 	options: {
 		/** Open-endedness description forwarded to the session's `auto` thinking classifier. */
 		solutionSpace?: string;
 		/** `false` = no `yield` tool; the final assistant message is the result. Default `true`. */
 		structured?: boolean;
+		/** Output schema the run finalizes against; decides whether a structured run without a yield has a result to offer. */
+		outputSchema?: unknown;
 		/**
 		 * Invoked when the initial prompt loses a prompt race (AgentBusyError) before
 		 * retrying. Lets the caller restore a safe contract and detach its monitor
@@ -2382,7 +2551,7 @@ async function driveSessionToResult(
 		restore?: boolean;
 	} = {},
 ): Promise<DriveOutcome> {
-	const { solutionSpace, onPromptBusy, restore } = options;
+	const { solutionSpace, onPromptBusy, restore, outputSchema } = options;
 	const structured = options.structured !== false;
 	using _keepalive = new EventLoopKeepalive();
 	const abortSignal = monitor.abortSignal;
@@ -2560,6 +2729,27 @@ async function driveSessionToResult(
 			}
 		};
 
+		const runStopPass = (): Promise<boolean> =>
+			runSubagentStopPass(session, monitor, stopHook, {
+				awaitAbortable,
+				continueWith: async text => {
+					await dispatchPrompt(text, { attribution: "agent", synthetic: true }, "subagent_stop continuation");
+					await awaitAbortable(session.waitForIdle());
+				},
+				// The handlers consult with the child idle and this monitor attached, so an IRC
+				// wake can start a turn that records a newer candidate or output. Every turn the
+				// monitor sees ends with a counted request: a count that moved means the child
+				// worked, and the verdict was about what it replaced. Each recheck follows an
+				// external trigger (a message to the child), so re-judging cannot spin.
+				watchCandidate: () => {
+					const requests = monitor.progress.requests;
+					return async () => {
+						await awaitAbortable(session.waitForIdle());
+						return monitor.progress.requests !== requests;
+					};
+				},
+			});
+
 		// Yield ladder + quiescence barrier (structured concurrency), one
 		// loop: a turn without a yield first settles pending owner work, then
 		// spends reminders only after there is nothing left to wait for.
@@ -2593,14 +2783,38 @@ async function driveSessionToResult(
 					(monitor.budgetStopRequested() ||
 						session.getLastAssistantMessage()?.stopReason === "error" ||
 						!session.hasPendingAsyncWork())
-				)
+				) {
+					// The settled result is the candidate when no yield will carry it: a
+					// message-result run's final report turn, whatever ended it short of an
+					// error or abort (`stop`, `length`, ...), or what a structured run that
+					// exhausted the ladder still publishes (see hasUnyieldedResult). A
+					// refusal of the latter is answerable only by a fresh yield, so a ladder
+					// that again ends without one fails closed rather than re-offering it, and
+					// the sections it recorded are dropped with the refusal. A
+					// budget stop or a terminal model error ends the run without a candidate.
+					const finalTurn = session.getLastAssistantMessage();
+					const settledResult = structured
+						? !monitor.yieldInvalidatedByStop() &&
+							hasUnyieldedResult(monitor.rawOutput(), outputSchema, monitor.progress.extractedToolData?.yield)
+						: monitor.lastReportTurnText() !== undefined;
+					if (
+						settledResult &&
+						!monitor.budgetStopRequested() &&
+						finalTurn !== undefined &&
+						finalTurn.stopReason !== "error" &&
+						finalTurn.stopReason !== "aborted" &&
+						(await runStopPass())
+					)
+						continue;
 					break;
+				}
 			}
 			// Let the parked yield's turn-stop session abort settle before
 			// prompting again (mirrors waitForBudgetStop).
 			await awaitAbortable(monitor.waitForYieldTurnStop());
 			if (!session.hasPendingAsyncWork()) {
-				if (monitor.yieldCalled()) break;
+				if (!monitor.yieldCalled()) continue;
+				if (!(await runStopPass())) break;
 				continue;
 			}
 			if (!monitor.yieldCalled()) {
@@ -2697,6 +2911,15 @@ async function driveSessionToResult(
 		}
 	} finally {
 		error ??= monitor.terminalError();
+		// A yield a `subagent_stop` handler refused and the model never replaced
+		// is stale: publishing it would launder an explicit refusal into a
+		// successful result. Applies to the cancelled case too — handlers never
+		// confirmed that payload, so the failure must survive the abort
+		// reconciliation below.
+		if (monitor.yieldInvalidatedByStop() && !monitor.yieldCalled()) {
+			error ??= SUBAGENT_STOP_REFUSAL_UNRESOLVED;
+			if (exitCode === 0) exitCode = 1;
+		}
 		if (abortSignal.aborted && (!monitor.yieldCalled() || monitor.runtimeLimitExceeded())) {
 			aborted = monitor.isAbortedRun();
 			if (aborted) {
@@ -2761,7 +2984,22 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	// the narration of earlier turns.
 	const structured = args.structured !== false;
 	let rawOutput = structured ? monitor.rawOutput() : (monitor.lastReportTurnText() ?? "");
-	const yieldItems = progress.extractedToolData?.yield as YieldItem[] | undefined;
+	// A `subagent_stop` handler refused the run's candidate (its `yield`, or a
+	// message-result run's report turn) and no continuation turn produced a
+	// replacement: the payload was explicitly rejected, so none of it may be
+	// published. Dropping the yield items keeps the refused report out of
+	// result assembly, the `<id>.md` artifact, and the structured sidecar; on a
+	// resumed turn that leaves the previous accepted artifact (and its sidecar)
+	// in place. The child's transcript remains the audit trail — the refusal
+	// gates publication, not the record of what ran.
+	const refusedYield = monitor.yieldInvalidatedByStop() && !monitor.yieldCalled();
+	const yieldItems = refusedYield ? undefined : (progress.extractedToolData?.yield as YieldItem[] | undefined);
+	if (refusedYield && progress.extractedToolData) {
+		// The run failed on the refusal, so the rejected payload must not reach
+		// the caller's progress/result snapshot either (TUI result card, nested
+		// `task` details).
+		delete progress.extractedToolData.yield;
+	}
 	// Breadcrumb the synchronous yield-payload shaping (O(rawOutput)) so a block
 	// here is attributed to this subagent rather than logged as "unknown".
 	pushLoopPhase(`subagent:${id}`);
@@ -2786,6 +3024,12 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	rawOutput = finalized.rawOutput;
 	exitCode = finalized.exitCode;
 	stderr = finalized.stderr;
+	if (refusedYield) {
+		// The refused candidate may itself have been the child's prose (a
+		// data-less `yield` finalizes on the last report turn), so the failed run
+		// publishes the refusal diagnostic instead of output that could carry it.
+		rawOutput = stderr || SUBAGENT_STOP_REFUSAL_UNRESOLVED;
+	}
 	// Salvage for cancelled/aborted children that produced no completed output:
 	// surface the last assistant text + stats instead of "(no output)" so the
 	// parent doesn't redo work the child already finished.
@@ -2812,6 +3056,11 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	// replace the accepted artifact with a missing-yield warning (issue #9518).
 	// Message-result agents publish successful reports the parent or the user
 	// asked for, not conversational replies to peers or cancelled follow-ups.
+	//
+	// An unresolved stop refusal republishes nothing on either turn: there is no
+	// accepted payload to write, and overwriting (or dropping the sidecar of) a
+	// resumed worker's previous accepted artifact would destroy the last result a
+	// `subagent_stop` handler did authorize.
 	let outputMeta: { lineCount: number; charCount: number } | undefined;
 	let outputPath: string | undefined;
 	const hasMessageResult =
@@ -2822,7 +3071,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		!signal?.aborted &&
 		!monitor.runtimeLimitExceeded() &&
 		rawOutput.trim().length > 0;
-	if (args.artifactsDir && (!args.followUpTurn || hasYield || hasMessageResult)) {
+	if (args.artifactsDir && !refusedYield && (!args.followUpTurn || hasYield || hasMessageResult)) {
 		const candidatePath = path.join(args.artifactsDir, `${id}.md`);
 		try {
 			await writeArtifact(candidatePath, rawOutput);
@@ -2968,6 +3217,12 @@ export interface IrcWakeTurnMonitorOptions {
 	id: string;
 	index?: number;
 	agent: AgentDefinition;
+	/**
+	 * Definition name reported as the `subagent_stop` event's `agent_type`.
+	 * Defaults to `agent.name`; a cold revival's synthetic definition is labelled
+	 * with the registry ref, so it supplies the restored definition name here.
+	 */
+	agentType?: string;
 	description?: string;
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
@@ -2975,6 +3230,10 @@ export interface IrcWakeTurnMonitorOptions {
 	eventBus?: EventBus;
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
+	/** Spawning session's id, reported as the `subagent_stop` event's `parent_session_id`. */
+	parentSessionId?: string;
+	/** Spawning session's transcript file, reported as the event's `parent_session_file`. */
+	parentSessionFile?: string;
 	/** Fallback session file when the registry ref carries none. */
 	sessionFile?: string;
 	maxRuntimeMs?: number;
@@ -3143,6 +3402,90 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
 }
 
 /**
+ * `subagent_stop` passes for an IRC wake turn that ended on a candidate `yield`.
+ * The session's turn observer finishes after the turn ended and its owned
+ * async work settled, so a refusal can only re-drive the session from there.
+ * The observer contract detaches the monitor before anything awaits, so each
+ * continuation re-attaches it for its own turn only: a newer wake's events must
+ * never reach this monitor.
+ *
+ * Only the newest observation owns the session's turns. `superseded` aborts
+ * the moment a newer observation starts: from then on a refusal here cannot be
+ * answered (a continuation would be seen by the newer observation's monitor
+ * too, which could judge and publish this pass's yield), and a continuation
+ * already settling stops observing. The refusal then stays unanswered and
+ * finalization fails the turn instead of publishing the refused payload. A
+ * newer turn that took the session while a pass consults is the same case: the
+ * continuation cannot start on a busy session. A handler that allows after a
+ * newer observation started is cancelled the same way: the candidate is dropped
+ * rather than published over the newer turn's artifact, and the call returns
+ * true so the turn reports as cancelled instead of refused.
+ *
+ * Each continuation settles the session's owner async work before the next
+ * pass, so a candidate is only judged once that work quiesced; a result the
+ * settle delivers un-latches the yield and the turn fails closed as an
+ * unanswered refusal.
+ */
+async function runWakeStopPasses(
+	session: AgentSession,
+	monitor: SubagentRunMonitor,
+	stopHook: SubagentStopHook,
+	superseded: AbortSignal,
+): Promise<boolean> {
+	const signal = monitor.abortSignal;
+	const io: SubagentStopPassIo = {
+		awaitAbortable: promise => untilAborted(signal, () => promise),
+		continueWith: async text => {
+			if (superseded.aborted) throw new Error("A newer turn owns the session; the continuation cannot start");
+			const detach = monitor.attach(session);
+			superseded.addEventListener("abort", detach, { once: true });
+			try {
+				await session.prompt(text, {
+					attribution: "agent",
+					synthetic: true,
+					runCommands: false,
+					throwOnDrop: true,
+				});
+				await session.waitForIdle();
+				// Attached still: a delivered async result un-latches the yield.
+				await session.settleAsyncWork();
+				await monitor.waitForYieldTurnStop();
+			} finally {
+				superseded.removeEventListener("abort", detach);
+				detach();
+			}
+		},
+	};
+	let refused = true;
+	let supersededWhileJudging = false;
+	try {
+		while (refused && monitor.yieldCalled()) {
+			refused = await runSubagentStopPass(session, monitor, stopHook, io);
+			// An allow after a newer observation took the session is no verdict on a
+			// candidate this turn can still publish: it would finalize after the newer
+			// turn and overwrite that turn's artifact with a stale yield. Drop it.
+			if (!refused && superseded.aborted && monitor.yieldCalled()) {
+				monitor.invalidateYieldForStop();
+				supersededWhileJudging = true;
+			}
+		}
+	} catch (error) {
+		// A cancelled run surfaces here as an abort; that is the run's outcome, not a failure.
+		if (!signal.aborted) {
+			logger.warn("IRC wake-turn subagent_stop continuation failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+	// The passes ended on a refusal that no judged yield answered. A fresh yield
+	// recorded after the refusal clears the refusal flag, so one that async
+	// results un-latched (or that an error cut off) is still unjudged here: drop it
+	// like the refused one, or finalization would publish a payload no handler saw.
+	if (refused && !monitor.yieldInvalidatedByStop()) monitor.invalidateYieldForStop();
+	return supersededWhileJudging;
+}
+
+/**
  * Bracket a kept-alive subagent's undriven turns — autonomous IRC wakes and
  * user prompts from focused-session steering — with a task run monitor so
  * RPC/collab subscribers see the same `subagent_lifecycle` /
@@ -3158,11 +3501,18 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
  * {@link relayWakeTurnOutput}; the relay is registered as a pending reply on
  * the session up front so a `send await:true` waiter holds its "stopped
  * without replying" verdict until the relay has been delivered.
+ *
+ * A turn that ended on a yield is offered to `subagent_stop` handlers before it
+ * is accepted ({@link runWakeStopPasses}); `parentSessionId` /
+ * `parentSessionFile` identify the spawning session in that event.
  */
 export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWakeTurnMonitorOptions): void {
 	const { id, agent } = options;
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
+	// Aborts when the next observation starts: the session's turns are then the
+	// newer observation's, so an older stop pass can no longer continue the session.
+	let newestObservation: AbortController | undefined;
 	session.setIrcWakeTurnObserver(records => {
 		// Autonomous IRC wake turns reuse the session's YieldTool just like
 		// runSubagentFollowUpTurn; clear the prior run's incremental-section flag
@@ -3240,6 +3590,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			maxRuntimeMs,
 			// Autonomous wake turns answer a peer message; too short to probe.
 			completionProbe: false,
+			structured: options.structured !== false,
 			signal: jobCancel.signal,
 			onYieldAccepted: registerWakeJob,
 		});
@@ -3257,6 +3608,10 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		} as const;
 		emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
+		// Before the newer monitor attaches: an older pass stops listening first.
+		const superseded = new AbortController();
+		newestObservation?.abort();
+		newestObservation = superseded;
 		turnMonitor.setActiveSession(session);
 		const unsubscribeTurn = turnMonitor.attach(session);
 		const ownerWoken = wakeSources(records, id).some(source => source.from === ownerId);
@@ -3268,12 +3623,43 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		);
 		return async turnError => {
 			unsubscribeTurn();
+			// A wake turn's candidate yield is judged like a first run's before it
+			// is accepted or published. Unstructured wake turns record no yield, so
+			// their prose reply is a peer relay rather than a result and is not offered.
+			let supersededWhileJudging = false;
+			if (turnError === undefined && turnMonitor.yieldCalled()) {
+				supersededWhileJudging = await runWakeStopPasses(
+					session,
+					turnMonitor,
+					new SubagentStopHook(
+						{
+							agentId: id,
+							agentType: options.agentType ?? agent.name,
+							parentSessionId: options.parentSessionId,
+							parentSessionFile: options.parentSessionFile,
+						},
+						turnMonitor.abortSignal,
+						options.structured !== false,
+					),
+					superseded.signal,
+				);
+			}
 			const activeSession = turnMonitor.takeActiveSession();
 			if (activeSession) turnMonitor.captureSalvage(activeSession);
 			const lastAssistant = session.getLastAssistantMessage();
 			const yielded = turnMonitor.yieldCalled();
 			const runtimeLimitExceeded = turnMonitor.runtimeLimitExceeded();
-			const aborted = runtimeLimitExceeded || (lastAssistant?.stopReason === "aborted" && !yielded);
+			// A refusal no continuation answered: the wake turn fails, and its
+			// last assistant turn is not an abort of the turn's work. A run
+			// cancelled while handlers were consulting is cancelled instead.
+			const refusedWithoutReplacement = turnMonitor.yieldInvalidatedByStop() && !yielded;
+			const cancelledDuringStop =
+				refusedWithoutReplacement && (turnMonitor.abortSignal.aborted || supersededWhileJudging);
+			const unresolvedRefusal = refusedWithoutReplacement && !cancelledDuringStop;
+			const aborted =
+				runtimeLimitExceeded ||
+				cancelledDuringStop ||
+				(lastAssistant?.stopReason === "aborted" && !yielded && !unresolvedRefusal);
 			// Two error lanes. `error` carries full diagnostics (a thrown turn
 			// error's stack) for `done.error`, logs, and lifecycle. `errorForPeer`
 			// carries only the short, attributed message: a stack trace injected
@@ -3289,10 +3675,12 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					? thrown.stack || thrown.message
 					: thrown === undefined
 						? undefined
-						: String(thrown));
+						: String(thrown)) ??
+				(unresolvedRefusal ? SUBAGENT_STOP_REFUSAL_UNRESOLVED : undefined);
 			const errorForPeer =
 				providerError ??
-				(thrown instanceof Error ? thrown.message : thrown === undefined ? undefined : String(thrown));
+				(thrown instanceof Error ? thrown.message : thrown === undefined ? undefined : String(thrown)) ??
+				(unresolvedRefusal ? SUBAGENT_STOP_REFUSAL_UNRESOLVED : undefined);
 			turnMonitor.finish();
 			if (yielded) {
 				// Acceptance boundary for an autonomous wake turn (#11079): the
@@ -3303,7 +3691,11 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			// Read before finalization: a schema-bearing agent that answered in
 			// prose gets a missing-yield warning prepended to `result.output`.
 			const turnText = turnMonitor.rawOutput() || (turnMonitor.lastAssistantSalvageText() ?? "");
-			const abortReason = aborted ? turnMonitor.resolveAbortReasonText() : undefined;
+			const abortReason = supersededWhileJudging
+				? WAKE_SUPERSEDED_WHILE_JUDGING
+				: aborted
+					? turnMonitor.resolveAbortReasonText()
+					: undefined;
 			let result: SingleResult | undefined;
 			let finalizeError: unknown;
 			try {
@@ -3567,6 +3959,10 @@ export interface FollowUpTurnOptions {
 	eventBus?: EventBus;
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
+	/** Spawning session's id, reported as the `subagent_stop` event's `parent_session_id`. */
+	parentSessionId?: string;
+	/** Spawning session's transcript file, reported as the event's `parent_session_file`. */
+	parentSessionFile?: string;
 	/**
 	 * When set, a turn that yields or completes a successful, non-empty message
 	 * result when requested by the parent (re)writes `<artifactsDir>/<id>.md` so
@@ -3667,6 +4063,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		softRequestBudgetNotice: false,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
 		completionProbe: options.completionProbe ?? false,
+		structured: options.structured !== false,
 	});
 
 	const startedPayload = {
@@ -3696,9 +4093,20 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	let attemptUnsubscribe = monitor.attach(session);
 	const structured = options.structured !== false;
 	try {
-		outcome = await driveSessionToResult(session, monitor, message, {
+		const stopHook = new SubagentStopHook(
+			{
+				agentId: id,
+				agentType: agent.name,
+				parentSessionId: options.parentSessionId,
+				parentSessionFile: options.parentSessionFile,
+			},
+			monitor.abortSignal,
+			structured,
+		);
+		outcome = await driveSessionToResult(session, monitor, message, stopHook, {
 			structured,
 			restore: options.restore,
+			outputSchema: options.outputSchema,
 			onPromptBusy: async () => {
 				attemptUnsubscribe();
 				logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
@@ -4163,6 +4571,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		softRequestBudgetNotice,
 		maxRuntimeMs,
 		completionProbe: isCompletionProbeEnabled(settings, parentDepth),
+		structured,
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
@@ -4182,6 +4591,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		eventBus: options.eventBus,
 		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
+		parentSessionId: options.parentSessionId,
+		parentSessionFile: options.sessionFile ?? undefined,
 		sessionFile: subtaskSessionFile,
 		maxRuntimeMs,
 		structured,
@@ -4752,9 +5163,22 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			readyAt = performance.now();
-			const outcome = await driveSessionToResult(session, monitor, task, {
+			const stopHook = new SubagentStopHook(
+				{
+					agentId: id,
+					agentType: agent.name,
+					parentSessionId: options.parentSessionId,
+					// The spawning session's transcript: the child records the same
+					// path as its own `SessionHeader.parentSession`.
+					parentSessionFile: options.sessionFile ?? undefined,
+				},
+				monitor.abortSignal,
+				structured,
+			);
+			const outcome = await driveSessionToResult(session, monitor, task, stopHook, {
 				solutionSpace: options.solutionSpace,
 				structured,
+				outputSchema,
 			});
 			// Acceptance boundary (#11079): the run's final result is settled, so
 			// stamp the lifecycle and terminalize a ref the run-state mirror left

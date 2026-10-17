@@ -480,6 +480,16 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		this.#emptyResultFailures = 0;
 	}
 
+	/**
+	 * Forget that these workpool items were submitted. A `subagent_stop` handler
+	 * refused the batch's final submission and the continuation must be able to
+	 * submit it again; without this the tool rejects the item as already
+	 * submitted and the refusal cannot be answered. Unknown ids are ignored.
+	 */
+	reopenWorkPoolItems(itemIds: readonly string[]): void {
+		for (const id of itemIds) this.#submittedWorkPoolItems.delete(id);
+	}
+
 	#workPoolItems(): readonly WorkPoolYieldItem[] {
 		const items = this.#session.getWorkPoolYieldItems?.() ?? [];
 		const key = items.map(item => `${item.index}:${item.id}`).join("\0");
@@ -770,6 +780,22 @@ function canResetTurnState(tool: AgentTool): tool is AgentTool & TurnStateResett
  */
 export function resetYieldTurnState(tool: AgentTool | undefined): void {
 	if (tool && canResetTurnState(tool)) tool.resetTurnState();
+}
+
+interface WorkPoolItemReopenable {
+	reopenWorkPoolItems(itemIds: readonly string[]): void;
+}
+
+function canReopenWorkPoolItems(tool: AgentTool): tool is AgentTool & WorkPoolItemReopenable {
+	return "reopenWorkPoolItems" in tool && typeof tool.reopenWorkPoolItems === "function";
+}
+
+/**
+ * Release workpool items whose submission was refused, through either a native
+ * tool or an `ExtensionToolWrapper` proxy.
+ */
+export function reopenYieldWorkPoolItems(tool: AgentTool | undefined, itemIds: readonly string[]): void {
+	if (tool && canReopenWorkPoolItems(tool)) tool.reopenWorkPoolItems(itemIds);
 }
 
 // Register subprocess tool handler for extraction + termination.
