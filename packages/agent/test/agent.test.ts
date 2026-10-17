@@ -1988,6 +1988,22 @@ describe("Agent — F3 in-place state mutation", () => {
 		expect(agent.state.pendingToolCalls.size).toBe(0);
 	});
 
+	it("emits history-replaced from clearMessages and reset", () => {
+		let calls = 0;
+		const agent = new Agent({
+			onHistoryReplaced: () => {
+				calls++;
+			},
+		});
+		agent.appendMessage({ role: "user", content: "x", timestamp: 1 });
+
+		agent.clearMessages();
+		expect(calls).toBe(1);
+
+		agent.appendMessage({ role: "user", content: "y", timestamp: 2 });
+		agent.reset();
+		expect(calls).toBe(2);
+	});
 	it("replaceMessages still snapshots the input (callers may keep mutating their array)", () => {
 		const agent = new Agent();
 		const external = [{ role: "user" as const, content: "x", timestamp: 1 }];

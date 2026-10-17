@@ -203,6 +203,12 @@ export interface AgentOptions {
 	/**
 	 * Called when GPT-5 Harmony protocol leakage is detected and mitigated.
 	 */
+	/**
+	 * Notified once after the live transcript or the steering/follow-up queues are
+	 * replaced wholesale (`replaceMessages`, `replaceQueues`). Queue-local updates
+	 * (enqueue, dequeue-on-delivery, live-steering adoption) never reach it.
+	 */
+	onHistoryReplaced?: () => void;
 	onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
 	/**
 	 * Custom token budgets for thinking levels (token-based providers only).
@@ -414,6 +420,7 @@ export class Agent {
 	#tokenizer = new Tokenizer(this.#state.model);
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#queueListeners = new Set<() => void>();
+	#historyReplaced: (() => void) | undefined;
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -596,6 +603,7 @@ export class Agent {
 		this.#getToolChoice = opts.getToolChoice;
 		this.#onToolChoiceUnavailable = opts.onToolChoiceUnavailable;
 		this.#onAssistantMessageEvent = opts.onAssistantMessageEvent;
+		this.#historyReplaced = opts.onHistoryReplaced;
 		this.#onHarmonyLeak = opts.onHarmonyLeak;
 		this.beforeToolCall = opts.beforeToolCall;
 		this.afterToolCall = opts.afterToolCall;
@@ -1291,6 +1299,7 @@ export class Agent {
 		// New array assignment is intentional: caller-owned `ms` may be mutated
 		// after handoff; snapshot it so external mutations cannot leak in.
 		this.#state.messages = ms.slice();
+		this.#emitHistoryReplaced();
 	}
 
 	/** Signal that the steering/follow-up queue contents may have changed. Every
@@ -1310,6 +1319,21 @@ export class Agent {
 		}
 	}
 
+	/** Signal that the live transcript or the queues were replaced wholesale.
+	 *  Per-request caches that pinned the previous history (a provider-context
+	 *  memo holding the discarded transcript) must drop their snapshot here. */
+	#emitHistoryReplaced(): void {
+		const listener = this.#historyReplaced;
+		if (!listener) return;
+		try {
+			listener();
+		} catch (err) {
+			logger.warn("Agent history-replaced listener threw", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
 	replaceQueues(steering: AgentMessage[], followUp: AgentMessage[]) {
 		this.#steeringQueue = steering.slice();
 		this.#followUpQueue = followUp.slice();
@@ -1317,6 +1341,7 @@ export class Agent {
 		this.#cancelQueuedMessagePreparation("followUp");
 		this.#notifySteeringWaiters();
 		this.#emitQueueChanged();
+		this.#emitHistoryReplaced();
 	}
 
 	/**
@@ -1548,6 +1573,7 @@ export class Agent {
 
 	clearMessages() {
 		this.#state.messages.length = 0;
+		this.#emitHistoryReplaced();
 	}
 
 	abort(reason?: unknown) {
@@ -1595,6 +1621,7 @@ export class Agent {
 		this.#state.pendingToolCalls.clear();
 		this.#state.error = undefined;
 		this.clearAllQueues();
+		this.#emitHistoryReplaced();
 	}
 
 	/** Send a prompt with an AgentMessage */
