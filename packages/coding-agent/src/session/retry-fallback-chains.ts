@@ -53,7 +53,10 @@ export interface ActiveRetryFallbackState {
 	originalSelector: string;
 	originalThinkingLevel: ConfiguredThinkingLevel | undefined;
 	lastAppliedFallbackThinkingLevel: ConfiguredThinkingLevel | undefined;
+	/** Usage-reserve pin, including compatible startup state; compaction does not release it. */
 	pinned: boolean;
+	/** Classifier-refusal pin; released when the primary session commits compacted context. */
+	refusalPinned?: boolean;
 	/**
 	 * Set once a turn on the fallback target settles successfully. Until then the
 	 * switch is only a routing decision — nothing has been produced by the new
