@@ -14,6 +14,7 @@
 - Snapcompact now shows an imaged `read` result's indentation as count brackets (`[»2]` two tabs, `[·4]` four spaces) and keeps its `[path#TAG]` header as text, so edits from imaged reads keep the right indentation and tag ([#15899](https://github.com/can1357/oh-my-pi/pull/15899) by [@apoc](https://github.com/apoc))
 
 ### Fixed
+- Fixed the host-discovery and WSL probes (`wslpath`, `cmd.exe` over the WSL interop pipe, and `wslview`'s Windows-path conversion) holding startup past their 500 ms deadline when a descendant inherited the probe's stdout pipe: the whole process group is killed at the deadline and the pending pipe reads are cancelled, so a wedged interop pipe costs the budget instead of an unbounded wait ([#15337](https://github.com/can1357/oh-my-pi/pull/15337) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed the startup connection warm-up silently doing nothing on Windows, where Bun's `fetch.preconnect` throws ([#16086](https://github.com/can1357/oh-my-pi/pull/16086) by [@H4vC](https://github.com/H4vC))
 - Fixed the RPC frame codec (`modes/rpc/rpc-frame`) failing to bundle for Node because it pulled in Bun-only modules and the native addon ([#16072](https://github.com/can1357/oh-my-pi/pull/16072) by [@oyty](https://github.com/oyty))
