@@ -50,11 +50,11 @@ class BeamMemory:
     def __init__(self, session_id, db_path):
         self.conn = sqlite3.connect(":memory:")
         self.conn.execute("CREATE TABLE memory_embeddings (id TEXT)")
-        self.conn.execute("INSERT INTO memory_embeddings VALUES ('v')")
         self.rows = []
 
     def remember(self, content, source, importance):
         self.rows.append({"id": "r%d" % (len(self.rows) + 1), "tier": "working", "content": content})
+        self.conn.execute("INSERT INTO memory_embeddings VALUES (?)", (self.rows[-1]["id"],))
         return self.rows[-1]["id"]
 
     def recall(self, query, top_k):
@@ -200,7 +200,7 @@ for line in sys.stdin:
     elif op == "describe":
         result = {"MNEMOSYNE_DATA_DIR": os.environ["MNEMOSYNE_DATA_DIR"]}
     elif op == "vector_count":
-        result = 1
+        result = 2
     else:
         result = None
     print(json.dumps({"id": req["id"], "result": result}), flush=True)

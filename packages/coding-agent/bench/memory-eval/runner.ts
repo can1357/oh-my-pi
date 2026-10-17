@@ -185,10 +185,17 @@ export async function runCases(
 				else idMap.set(engineId, [batch[j].messageId]);
 			}
 		}
-		if (protocol === "with-sleep") await engine.sleep();
-		if (caseIndex === 0 && protocol !== "fts-only" && (await engine.vectorCount()) <= 0) {
-			throw new Error(`embeddings unavailable for ${engine.name}`);
+		// Before sleep the store holds only the rows remember() returned, so fewer vectors than rows means a gap.
+		// shortcut: a count, not a per-id check; an engine that embedded extra rows could hide a gap, then check ids.
+		if (protocol !== "fts-only") {
+			const vectors = await engine.vectorCount();
+			if (vectors < idMap.size) {
+				throw new Error(
+					`embeddings unavailable for ${engine.name}: ${idMap.size - vectors} of ${idMap.size} remembered rows in case ${evalCase.caseId} have no vector`,
+				);
+			}
 		}
+		if (protocol === "with-sleep") await engine.sleep();
 
 		const prefixes = messages
 			.map(m => ({ messageId: m.messageId, prefix: normalize(cp(m.content, FALLBACK_PREFIX_CHARS)) }))
