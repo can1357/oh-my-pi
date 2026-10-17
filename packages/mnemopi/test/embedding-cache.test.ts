@@ -294,45 +294,55 @@ describe("embedding cache", () => {
 		expect(await topRanked(true)).toBe(cold);
 	});
 
-	it("returns vectors in the order the pre-cache chunked query returned them, cold or warm", () => {
-		const db = new Database(":memory:");
-		try {
-			initBeam(db);
-			// Insert order, id order and argument order all differ, and the ids span three 500-id chunks.
-			// U+E000 sorts before an astral character in SQLite (UTF-8 bytes) but after it in UTF-16.
-			const ids = [
-				...Array.from({ length: 1300 }, (_, index) => `m${(index * 7919) % 1300}`),
-				"m-\uE000",
-				"m-\u{1F600}",
-			];
-			const insert = db.prepare(
-				"INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, '[1,0]', 't')",
-			);
-			for (const id of ids) insert.run(id);
-			const memoryIds = [
-				"m-\u{1F600}",
-				...Array.from({ length: 1300 }, (_, index) => `m${(index * 104_729) % 1300}`),
-				"missing",
-				"m-\uE000",
-			];
-			const preCache: string[] = [];
-			for (let offset = 0; offset < memoryIds.length; offset += 500) {
-				const chunk = memoryIds.slice(offset, offset + 500);
-				const rows = db
-					.query<{ memory_id: string }, string[]>(
-						`SELECT memory_id, embedding_json FROM memory_embeddings WHERE memory_id IN (${chunk.map(() => "?").join(",")})`,
-					)
-					.all(...chunk);
-				for (const row of rows) preCache.push(row.memory_id);
-			}
+	it.each(["UTF-8", "UTF-16le", "UTF-16be"])(
+		"returns vectors in the order the pre-cache chunked query returned them, cold or warm, in a %s bank",
+		encoding => {
+			const db = new Database(":memory:");
+			try {
+				db.run(`PRAGMA encoding = "${encoding}"`);
+				initBeam(db);
+				// Insert order, id order and argument order all differ, and the ids span three 500-id chunks.
+				// BINARY compares the stored bytes: U+E000 sorts before an astral character in UTF-8 but after it in
+				// UTF-16, and U+0100 sorts before U+00FF only in UTF-16le, whose low byte comes first.
+				const ids = [
+					...Array.from({ length: 1300 }, (_, index) => `m${(index * 7919) % 1300}`),
+					"m-\uE000",
+					"m-\u{1F600}",
+					"m-\u00FF",
+					"m-\u0100",
+				];
+				const insert = db.prepare(
+					"INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, '[1,0]', 't')",
+				);
+				for (const id of ids) insert.run(id);
+				// The four special ids share the last chunk, so the order within it decides the result.
+				const memoryIds = [
+					...Array.from({ length: 1300 }, (_, index) => `m${(index * 104_729) % 1300}`),
+					"m-\u{1F600}",
+					"missing",
+					"m-\u00FF",
+					"m-\uE000",
+					"m-\u0100",
+				];
+				const preCache: string[] = [];
+				for (let offset = 0; offset < memoryIds.length; offset += 500) {
+					const chunk = memoryIds.slice(offset, offset + 500);
+					const rows = db
+						.query<{ memory_id: string }, string[]>(
+							`SELECT memory_id, embedding_json FROM memory_embeddings WHERE memory_id IN (${chunk.map(() => "?").join(",")})`,
+						)
+						.all(...chunk);
+					for (const row of rows) preCache.push(row.memory_id);
+				}
 
-			cachedEmbeddings(db, memoryIds.slice(300, 900));
-			expect([...cachedEmbeddings(db, memoryIds).keys()]).toEqual(preCache);
-			expect([...cachedEmbeddings(db, memoryIds).keys()]).toEqual(preCache);
-		} finally {
-			db.close();
-		}
-	});
+				cachedEmbeddings(db, memoryIds.slice(300, 900));
+				expect([...cachedEmbeddings(db, memoryIds).keys()]).toEqual(preCache);
+				expect([...cachedEmbeddings(db, memoryIds).keys()]).toEqual(preCache);
+			} finally {
+				db.close();
+			}
+		},
+	);
 
 	it("keeps two alternating windows decoded after one of them slides past the bound", () => {
 		const db = new Database(":memory:");
