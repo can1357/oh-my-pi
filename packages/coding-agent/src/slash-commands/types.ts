@@ -103,6 +103,13 @@ export interface SlashCommandRuntime {
 	 * return immediately and leave the serialized queue free for `abort`.
 	 */
 	runCommandInBackground?: (task: () => Promise<void>) => void;
+	/**
+	 * Ask the host to reconnect one live-manager MCP server by name after its
+	 * credentials changed (e.g. `/mcp reauth`), and report the post-reconnect
+	 * state. Returns `undefined` when this host keeps no live manager for the
+	 * server; callers then fall back to restart guidance.
+	 */
+	reconnectMcpServer?: (name: string) => Promise<"connected" | "connecting" | "disconnected" | undefined>;
 	notifyTitleChanged?: () => Promise<void> | void;
 	/**
 	 * Push the host's view of the session config (model, thinking level, mode).
