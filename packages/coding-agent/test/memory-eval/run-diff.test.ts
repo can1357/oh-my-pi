@@ -25,9 +25,9 @@ interface FakeResult {
 	engineInfo?: Record<string, string>;
 	/**
 	 * Per question: id (`<caseId>:...` names its case), the recall@10 value (null is what JSON makes of NaN) and
-	 * overrides of its case and category (`cat`).
+	 * overrides of its case, category (`cat`) and definition hash (absent, as in older files).
 	 */
-	questions?: [string, number | null, { caseId?: string; category?: string }?][];
+	questions?: [string, number | null, { caseId?: string; category?: string; definitionHash?: string }?][];
 }
 
 /** Writes the part of a result file that `diff` reads. */
@@ -195,12 +195,12 @@ it("diff warns that with-sleep recall is not comparable across engines", async (
 	expect(across.stderr).toContain("warning: with-sleep credits a summary hit with every message it covers");
 	const same = await diff(mnemopi, mnemopi);
 	expect(same.code).toBe(0);
-	expect(same.stderr).toBe("");
+	expect(same.stderr).not.toContain("with-sleep");
 	const standard = await diff(
 		await writeResult("standard-mnemopi", { engine: "mnemopi" }),
 		await writeResult("standard-mnemosyne", { engine: "mnemosyne" }),
 	);
-	expect(standard.stderr).toBe("");
+	expect(standard.stderr).not.toContain("with-sleep");
 });
 
 it("diff rejects upstream-compat results", async () => {
@@ -292,6 +292,35 @@ it("diff rejects a question whose case or category differs between the files, in
 		expect(stderr).toContain("question c1:q1 has category");
 	}
 	expect((await diff(ok, recategorised)).stderr).toContain("question c1:q1 has category cat in a but other in b");
+});
+
+it("diff rejects a question whose query text or gold set changed, in either order", async () => {
+	const v1 = await writeResult("def-1", { questions: [["c1:q1", 1, { definitionHash: "aa" }]] });
+	const v2 = await writeResult("def-2", { questions: [["c1:q1", 1, { definitionHash: "bb" }]] });
+	for (const [a, b] of [
+		[v1, v2],
+		[v2, v1],
+	]) {
+		const { stderr, code } = await diff(a, b);
+		expect(code).toBe(1);
+		expect(stderr).toContain("question c1:q1 has a different query text or gold set in a and b");
+	}
+	const same = await diff(v1, v1);
+	expect(same.code).toBe(0);
+	expect(same.stderr).not.toContain("not verified");
+});
+
+it("diff accepts a file without question fingerprints and warns that definitions were not verified", async () => {
+	const current = await writeResult("def-current", { questions: [["c1:q1", 1, { definitionHash: "aa" }]] });
+	const legacy = await writeResult("def-legacy", { questions: [["c1:q1", 1]] });
+	for (const [a, b] of [
+		[current, legacy],
+		[legacy, current],
+	]) {
+		const { stderr, code } = await diff(a, b);
+		expect(code).toBe(0);
+		expect(stderr).toContain("query text and gold sets were not verified");
+	}
 });
 
 it("diff names each side's Mnemopi embedder when the config records one", async () => {
