@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `/mcp reauth <name>` support for ACP and text-mode clients (emacs via agent-shell, Zed, `omp -p`): it opens the default browser on the same OAuth callback flow and persistence policy as the TUI instead of refusing with "only available in the TUI client" — omp runs on the user's machine even when driven over ACP, and the auth URL is also emitted as text for copy-paste when no browser can open ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
+- Added `/mcp reauth <name>` in ACP, RPC, and print mode: it opens the browser and stores credentials through the same engine as the TUI flow, prints the authorization URL as a fallback, and reconnects the live server when the host keeps one ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
 
 ### Changed
 

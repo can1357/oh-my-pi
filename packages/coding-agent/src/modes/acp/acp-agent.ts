@@ -980,6 +980,16 @@ export class AcpAgent implements Agent {
 			output: output => this.#emitCommandOutput(record, output),
 			refreshCommands: () => this.#emitAvailableCommandsUpdate(record),
 			reloadPlugins: () => this.#reloadPluginState(record),
+			// `/mcp reauth` writes config-file credentials; when the ACP client
+			// also declared this server at session creation, its live manager
+			// entry picks the fresh row up on a manual reconnect instead of
+			// staying wedged in its auth-failure backoff.
+			reconnectMcpServer: async name => {
+				const manager = record.mcpManager;
+				if (!manager?.getServerConfig(name)) return undefined;
+				await manager.reconnectServer(name, { manual: true });
+				return manager.getConnectionStatus(name);
+			},
 			keepTurnOpenUntilIdle: async () => {
 				await record.session.waitForIdle();
 				// `AgentSession.#emit()` does not await listeners, so the retried
