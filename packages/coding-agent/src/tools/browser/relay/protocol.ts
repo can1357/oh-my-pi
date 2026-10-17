@@ -25,7 +25,14 @@ export interface TabSnapshot {
 export type RelayRpcRequest =
 	| { op: "attach"; tabId: number }
 	| { op: "detach"; tabId: number }
-	| { op: "send"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
+	| { op: "forgetRecovery"; tabId: number }
+	| {
+			op: "send";
+			tabId: number;
+			sessionId?: string;
+			method: string;
+			params?: Record<string, unknown>;
+	  }
 	/** `active: false` opens the tab without selecting it; absent keeps Chrome's default (selected). */
 	| { op: "createTab"; url: string; active?: boolean }
 	| { op: "removeTab"; tabId: number }
@@ -47,9 +54,21 @@ export type ExtToRelayMessage =
 			t: "hello";
 			userAgent: string;
 			browserVersion: string;
+			/** Browser-default navigator.hardwareConcurrency for resetting overrides. */
+			hardwareConcurrency?: number;
 			tabs: TabSnapshot[];
 			/** Tabs that already have a `chrome.debugger` attachment (relay reconciles after a service-worker restart). */
 			attachedTabIds: number[];
+			/** Tabs detached by the extension's orphan guard and therefore safe to restore for surviving sessions. */
+			recoverableTabIds?: number[];
+			/** Tabs whose latest detach was explicitly requested by the relay, rather than revoked by the user. */
+			relayDetachedTabIds?: number[];
+			/** Main-frame loader observed when recovery began, keyed by tab id. */
+			recoveryLoaderIds?: Record<string, string>;
+			/** Full frame/loader snapshot observed before orphan detach, keyed by tab id. */
+			recoveryFrameLoaderIds?: Record<string, Record<string, string>>;
+			/** Attached roots dirtied by guard-only CDP state and requiring detach + replay before reuse. */
+			freshRootRequiredTabIds?: number[];
 			/** Present when snapshots include Chrome's discarded state. Absent in older extensions. */
 			discardedTabsProtocol?: number;
 			/**
@@ -62,10 +81,22 @@ export type ExtToRelayMessage =
 			 */
 			instanceId?: string;
 	  }
-	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
+	| {
+			t: "cdpEvent";
+			tabId: number;
+			sessionId?: string;
+			method: string;
+			params?: Record<string, unknown>;
+	  }
 	| { t: "detached"; tabId: number; reason: string; relayInitiated?: boolean }
 	| { t: "tabCreated"; tab: TabSnapshot }
 	| { t: "tabUpdated"; tab: TabSnapshot }
 	| { t: "tabRemoved"; tabId: number }
-	| { t: "rpcResult"; id: number; ok: boolean; result?: unknown; error?: string }
+	| {
+			t: "rpcResult";
+			id: number;
+			ok: boolean;
+			result?: unknown;
+			error?: string;
+	  }
 	| { t: "ping" };
