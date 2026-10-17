@@ -100,10 +100,9 @@ function mapHit(
 	const viaSummary = [...new Set(hit.summaryOf.flatMap(id => idMap.get(id) ?? []))];
 	if (viaSummary.length > 0) return { messageIds: viaSummary, viaFallback: false };
 	const content = normalize(hit.content);
-	return {
-		messageIds: prefixes.filter(p => content.includes(p.prefix)).map(p => p.messageId),
-		viaFallback: true,
-	};
+	const messageIds = prefixes.filter(p => content.includes(p.prefix)).map(p => p.messageId);
+	// A hit the fallback could not map is unmapped, not a fallback match.
+	return { messageIds, viaFallback: messageIds.length > 0 };
 }
 
 function scoreQuestion(

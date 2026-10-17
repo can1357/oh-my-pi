@@ -156,10 +156,11 @@ describe("runner", () => {
 		);
 		expect(file.fallbackRate).toBe(0.5);
 	});
-	it("a hit that maps to nothing stays in the ranking", async () => {
+	it("a hit that maps to nothing stays in the ranking and is not a fallback match", async () => {
 		const engine = fakeEngine({ rowIds: items => items.map((_, i) => `r${i}`), hits: [hit("zzz", "nothing alike")] });
 		const { questions } = await runCases(engine, [twoMessageCase], "standard", 10, tmp);
 		expect(questions[0].ranked[0].messageIds).toEqual([]);
+		expect(questions[0].ranked[0].viaFallback).toBe(false);
 		expect(questions[0].metrics["recall@10"]).toBe(0);
 	});
 	it("the content fallback ignores messages shorter than 20 characters", async () => {
