@@ -249,6 +249,15 @@ async function diffCommand(argv: string[]): Promise<void> {
 	assertFiniteMetric("b", b, metric);
 	const bById = new Map(b.questions.map(q => [q.questionId, q]));
 	const pairs = a.questions.map(qa => ({ a: qa, b: bById.get(qa.questionId)! }));
+	// The bootstrap clusters by a's case and splits by a's category: both files must agree on them.
+	for (const { a: qa, b: qb } of pairs) {
+		if (qa.caseId !== qb.caseId) {
+			throw new Error(`question ${qa.questionId} is in case ${qa.caseId} in a but ${qb.caseId} in b`);
+		}
+		if (qa.category !== qb.category) {
+			throw new Error(`question ${qa.questionId} has category ${qa.category} in a but ${qb.category} in b`);
+		}
+	}
 
 	const identical = pairs.filter(
 		p => JSON.stringify(p.a.ranked.map(r => r.messageIds)) === JSON.stringify(p.b.ranked.map(r => r.messageIds)),
