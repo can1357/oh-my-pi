@@ -24,7 +24,7 @@ LME_FILE = "longmemeval_s_cleaned.json"
 
 
 def fetch(repo: str, filename: str, revision: str) -> str:
-	return hf_hub_download(repo, filename, repo_type="dataset", revision=revision)
+	return hf_hub_download(repo, filename, repo_type="dataset", revision=revision, cache_dir=DATA.parent / "hf")
 
 
 def convert_beam(parquet_path: str) -> list[dict]:
