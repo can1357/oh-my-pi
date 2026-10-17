@@ -74,6 +74,9 @@ export declare function clone(
 	signal?: AbortSignal,
 ): Promise<void>;
 
+/** Initialize an empty git repository at `dir` (git CLI) and return its handle. */
+export declare function init(dir: string): Promise<VcsGitRepo>;
+
 /** Sever a copied working tree from shared git metadata. */
 export declare function detachGitDir(
 	worktreeRoot: string,

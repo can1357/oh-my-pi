@@ -244,6 +244,9 @@
 
 ## [18.12.0] - 2026-10-17
 
+- Added `vcs.init(dir)` to create a git repository through the sanctioned VCS module.
+
+## [18.11.3] - 2026-10-16
 ### Breaking Changes
 
 - `encodeSixel` and `encodeSixelAsync` now require a fourth terminal-background RGB argument packed as `0xRRGGBB` ([#15891](https://github.com/can1357/oh-my-pi/pull/15891) by [@Bouska](https://github.com/Bouska)).
