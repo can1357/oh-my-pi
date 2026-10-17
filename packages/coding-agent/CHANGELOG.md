@@ -723,6 +723,10 @@
 - Fixed MCP OAuth login requesting every scope in an authorization server's catalogue when the protected resource advertises no scopes; `/mcp reauth` now falls back to configured scopes or authorization-server defaults ([#15996](https://github.com/can1357/oh-my-pi/pull/15996) by [@unclesamwk](https://github.com/unclesamwk)).
 - Fixed the incomplete-todo stop reminder firing (and resuming work) when the agent's final message asks for permission or a decision before a closing status line, through "If you confirm, I'll…"/"Separately, tell me…"-style requests, or with a non-English question followed by another sentence ([#15986](https://github.com/can1357/oh-my-pi/issues/15986))
 
+### Fixed
+
+- Fixed saved sessions losing image blocks a provider returns accessor-shaped, so a resumed session replays the same images instead of dropping them ([#15222](https://github.com/can1357/oh-my-pi/pull/15222) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.11.3] - 2026-10-16
 
 ### Breaking Changes
@@ -846,7 +850,6 @@
 - Fixed browser `uploadFile` in Chrome reporting success with no file attached when the element opens no file chooser and nothing on the page reads the dropped files; it now fails and says what to target ([#15919](https://github.com/can1357/oh-my-pi/pull/15919) by [@will-bogusz](https://github.com/will-bogusz))
 - Relay mode: when Chrome detaches omp from a tab it drives (a password manager's inline menu loading in the page), the call fails at once saying why and omp reattaches to the same tab, instead of every later call timing out and reopening failing with `No page targets available` ([#15920](https://github.com/can1357/oh-my-pi/pull/15920) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the macOS `computer` tool letting the display sleep and lock in a turn that went 5 minutes without a desktop action; it now keeps the display awake until the turn ends or asks for your answer, then lets it sleep ([#15762](https://github.com/can1357/oh-my-pi/pull/15762) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed saved sessions losing image blocks a provider returns accessor-shaped, so a resumed session replays the same images instead of dropping them ([#15222](https://github.com/can1357/oh-my-pi/pull/15222) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.1] - 2026-10-15
 
