@@ -47,6 +47,8 @@ export interface RunConfig {
 	/** Polyphonic recall (`--polyphonic`), mnemopi and mnemosyne only. */
 	polyphonic: boolean;
 	gitCommit: string;
+	/** Uncommitted or untracked changes at the start of the run: `gitCommit` alone does not name the code that ran. */
+	gitDirty: boolean;
 	startedAt: string;
 }
 

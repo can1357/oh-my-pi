@@ -1,7 +1,8 @@
-import { afterAll, beforeAll, expect, it, setDefaultTimeout } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pinnedCheckout } from "../../bench/memory-eval/run";
 
 const RUN = path.join(import.meta.dir, "../../bench/memory-eval/run.ts");
 const FIXTURE_DATA = path.join(import.meta.dir, "fixtures", "data");
@@ -100,6 +101,8 @@ it("run records the engine options in the result config", async () => {
 		mnemopiRecall: "recall",
 		polyphonic: false,
 		datasetRevision: BEAM_REVISION,
+		gitCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
+		gitDirty: expect.any(Boolean),
 	});
 	expect((await Bun.file(ablation).json()).config).toMatchObject({ mnemopiRecall: "enhanced", polyphonic: true });
 });
@@ -113,4 +116,34 @@ it("run refuses a cached dataset whose recorded revision is missing or not the p
 	expect(stale.stderr).toContain(`beam-100k.json.revision: revision deadbeef, expected ${BEAM_REVISION}`);
 	expect(bare.code).toBe(1);
 	expect(bare.stderr).toContain(`beam-100k.json.revision: missing, expected ${BEAM_REVISION}`);
+});
+
+describe("pinnedCheckout", () => {
+	const commit = (dir: string, message: string) =>
+		Bun.$`git -c user.name=t -c user.email=t@t commit -q --allow-empty -m ${message}`.cwd(dir).quiet();
+	const repo = async (name: string): Promise<string> => {
+		const dir = path.join(root, name);
+		await fs.mkdir(dir, { recursive: true });
+		await Bun.write(path.join(dir, "a"), "1");
+		await Bun.$`git init -q && git add a`.cwd(dir).quiet();
+		await commit(dir, "one");
+		return dir;
+	};
+	const head = async (dir: string) => (await Bun.$`git rev-parse HEAD`.cwd(dir).text()).trim();
+
+	it("records HEAD and whether the checkout is dirty before the run starts", async () => {
+		const dir = await repo("clean");
+		const sha = await head(dir);
+		const dirtyDuringRun = await pinnedCheckout(dir, async state => {
+			await Bun.write(path.join(dir, "a"), "2");
+			return state;
+		});
+		expect(dirtyDuringRun).toEqual({ commit: sha, dirty: false });
+		expect(await pinnedCheckout(dir, async state => state)).toEqual({ commit: sha, dirty: true });
+	});
+
+	it("refuses the result when HEAD moves during the run", async () => {
+		const dir = await repo("moved");
+		await expect(pinnedCheckout(dir, () => commit(dir, "two"))).rejects.toThrow("HEAD moved");
+	});
 });
