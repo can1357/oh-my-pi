@@ -12,6 +12,7 @@ import {
 	cfgGitEnabled,
 	cfgStatusLineCompactThinkingLevel,
 	cfgStatusLineContextLine,
+	cfgStatusLinePets,
 	cfgStatusLineLeftSegments,
 	cfgStatusLinePreset,
 	cfgStatusLineRightSegments,
@@ -48,6 +49,7 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 	}),
 	gitEnabled: () => cfgGitEnabled.get(settings),
 	codexResetFireworksEnabled: () => cfgTuiCodexResetFireworks.get(settings),
+	petsEnabled: () => cfgStatusLinePets.get(settings),
 	// Read per frame: skip the `settings` proxy trap and hit the instance getter directly.
 	getSettingsRevision: () => Settings.instance.revision,
 	getSessionSettingsIdentity: session => session.settings,

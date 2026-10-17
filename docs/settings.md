@@ -842,6 +842,7 @@ statusLine:
   separator: powerline-thin
   transparent: false
   showHookStatus: true
+  pets: false
 
 terminal:
   showImages: true
@@ -864,6 +865,7 @@ tui:
 | `statusLine.sessionAccent`    | boolean | `true`           | Tint the editor border with the session color.                            |
 | `statusLine.transparent`      | boolean | `false`          | Use the terminal background for the status line.                          |
 | `statusLine.showHookStatus`   | boolean | `true`           | Show hook status messages.                                                |
+| `statusLine.pets`             | boolean | `false`          | Show the Code Cat companion; `/pets on` and `/pets off` save this setting. |
 | `terminal.showImages`         | boolean | `true`           | Render images inline (when the terminal supports it).                     |
 | `images.autoResize`           | boolean | `true`           | Resize large images for model compatibility.                              |
 | `images.blockImages`          | boolean | `false`          | Never send images to providers.                                           |
@@ -881,6 +883,18 @@ The `path` segment abbreviates the home directory to `~`. On Windows, shared pat
 The `pi` segment tags the brand with the active named profile (`π-work`; see [Profiles](config-usage.md#profiles)). Set `statusLine.segmentOptions.pi.showProfile: false` to hide the tag.
 
 The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
+
+#### Pets
+
+Use `/pets on` to show Code Cat below the status line and `/pets off` to hide it immediately. `/pets` reports the current state without changing it. The switch persists across launches and is also available under `/settings` → Appearance → Status Line → Pets.
+
+The commands save the global setting and respect normal configuration precedence. If a project configuration, `--config` overlay, or runtime override keeps a different value active, the command warns that the saved choice has not taken effect; adjust the higher-priority setting.
+
+Code Cat uses English messages and four faces: a fresh session for its first two minutes, thinking while the agent runs, idle otherwise, and overloaded at 85% context usage or more. Overload takes precedence over fresh and thinking. Messages stay stable within two-minute windows, with a per-session offset; idle updates are checked every 15 seconds and repaint only when the message changes. Long messages are truncated to the terminal width.
+
+Collaboration guests use the host's reported context usage and streaming state. If the host context usage or state is unavailable, the corresponding value falls back to the local session.
+
+Pets are off by default and independent of `statusLine.showHookStatus`. Turning pets off stops their refresh timer without hiding other extension statuses. If migrating from a local `codecat`/`cat-statusline` extension, disable that extension to avoid two cats: `/pets` controls only the native companion.
 
 ### Interaction
 

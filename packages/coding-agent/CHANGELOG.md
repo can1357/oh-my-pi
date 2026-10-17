@@ -98,6 +98,8 @@
 
 ### Added
 
+- Added `Target.getTargets` to the browser relay's CDP surface so clients can enumerate eligible pages without attaching to or claiming them.
+- Added `/pets on` and `/pets off` to show or hide the Code Cat status-line companion, with persistent settings and session-aware faces and messages ([#12230](https://github.com/can1357/oh-my-pi/pull/12230) by [@Sandu1213](https://github.com/Sandu1213)).
 - Added `lsp.requestTimeout` setting to configure wait durations for language server diagnostics and requests
 - Added `omp auth-gateway serve --clients=<file>`: per-client bearer tokens, each limited to listed models and broker OAuth accounts with no fallback to other accounts or API keys, re-read while serving ([#5098](https://github.com/can1357/oh-my-pi/issues/5098), [#15900](https://github.com/can1357/oh-my-pi/pull/15900) by [@alphastorm](https://github.com/alphastorm))
 

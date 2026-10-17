@@ -368,6 +368,7 @@ import {
 	cfgStartupQuiet,
 	cfgStatusLineCompactThinkingLevel,
 	cfgStatusLineContextLine,
+	cfgStatusLinePets,
 	cfgStatusLineLeftSegments,
 	cfgStatusLinePreset,
 	cfgStatusLineRightSegments,
@@ -469,6 +470,7 @@ const cfgLiveUiSettings = combine({
 	"statusLine.segmentOptions": cfgStatusLineSegmentOptions,
 	"statusLine.compactThinkingLevel": cfgStatusLineCompactThinkingLevel,
 	"statusLine.contextLine": cfgStatusLineContextLine,
+	"statusLine.pets": cfgStatusLinePets,
 	"git.enabled": cfgGitEnabled,
 	"advisor.enabled": cfgAdvisorEnabled,
 	"advisor.maxNotesPerUpdate": cfgAdvisorMaxNotesPerUpdate,
@@ -3679,6 +3681,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				"statusLine.segmentOptions",
 				"statusLine.compactThinkingLevel",
 				"statusLine.contextLine",
+				"statusLine.pets",
 				"git.enabled",
 			)
 		) {

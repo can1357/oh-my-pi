@@ -43,6 +43,7 @@ import { cfgSkillful } from "../session/settings";
 import { formatSlowModeResetClock } from "../session/anthropic-slow-mode";
 import { cfgExtendedContext } from "../session/context-settings";
 import { cfgGoalEnabled } from "../goals/settings";
+import { cfgStatusLinePets } from "../modes/settings";
 import { cfgPlanEnabled } from "../plan-mode/settings";
 
 export function refreshStatusLine(ctx: InteractiveModeContext): void {
@@ -274,6 +275,39 @@ export function formatTokenCount(value: number): string {
 }
 
 export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+	{
+		name: "pets",
+		icon: "settings",
+		description: "Show or hide the Code Cat status-line companion",
+		allowArgs: true,
+		subcommands: [
+			{ name: "on", description: "Show the pet" },
+			{ name: "off", description: "Hide the pet" },
+		],
+		getTuiAutocompleteDescription: runtime => `Pets: ${cfgStatusLinePets.get(runtime.ctx.settings) ? "on" : "off"}`,
+		handleTui: (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (arg === "on" || arg === "off") {
+				cfgStatusLinePets.set(runtime.ctx.settings, arg === "on");
+				refreshStatusLine(runtime.ctx);
+				const enabled = cfgStatusLinePets.get(runtime.ctx.settings);
+				if (enabled === (arg === "on")) {
+					runtime.ctx.showStatus(`Pets ${arg}.`);
+				} else {
+					runtime.ctx.showWarning(
+						`Saved pets ${arg} globally, but a higher-priority setting keeps pets ${enabled ? "on" : "off"}. Check project or --config overrides.`,
+					);
+				}
+			} else if (!arg) {
+				runtime.ctx.showStatus(
+					`Pets are ${cfgStatusLinePets.get(runtime.ctx.settings) ? "on" : "off"}. Use /pets on|off.`,
+				);
+			} else {
+				runtime.ctx.showWarning("Usage: /pets on|off");
+			}
+			runtime.ctx.editor.setText("");
+		},
+	},
 	{
 		name: "security",
 		icon: "shield",
