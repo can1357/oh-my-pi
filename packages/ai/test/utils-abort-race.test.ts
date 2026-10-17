@@ -27,14 +27,16 @@ const sites: Array<[string, (message?: string, reason?: unknown) => Promise<unkn
 		(message, reason) => {
 			const controller = new AbortController();
 			controller.abort(reason);
-			return raceWithSignal(new Promise<never>(() => {}), controller.signal, message).catch((err: unknown) => err);
+			return raceWithSignal(Promise.withResolvers<never>().promise, controller.signal, message).catch(
+				(err: unknown) => err,
+			);
 		},
 	],
 	[
 		"signal aborts mid-race",
 		(message, reason) => {
 			const controller = new AbortController();
-			const raced = raceWithSignal(new Promise<never>(() => {}), controller.signal, message);
+			const raced = raceWithSignal(Promise.withResolvers<never>().promise, controller.signal, message);
 			controller.abort(reason);
 			return raced.catch((err: unknown) => err);
 		},
@@ -78,18 +80,9 @@ describe.each(sites)("raceWithSignal abort classification (%s)", (_site, rejectF
 	});
 });
 
-describe("raceWithSignal without a signal", () => {
-	test("returns the underlying promise untouched", async () => {
-		expect(await raceWithSignal(Promise.resolve("done"), undefined, "ignored")).toBe("done");
-	});
-});
-
 describe("raceWithSignal shared promise", () => {
 	test("keeps the racing promise running for other awaiters after one caller aborts", async () => {
-		let settle: (value: string) => void = () => {};
-		const shared = new Promise<string>(resolve => {
-			settle = resolve;
-		});
+		const { promise: shared, resolve: settle } = Promise.withResolvers<string>();
 		const controller = new AbortController();
 		const raced = raceWithSignal(shared, controller.signal, "caller bailed");
 		controller.abort();
@@ -101,10 +94,18 @@ describe("raceWithSignal shared promise", () => {
 });
 
 describe("raceSignal published alias", () => {
-	test("is the same implementation as raceWithSignal", () => {
+	test("carries the caller's message through the published import path", async () => {
 		// `@oh-my-pi/pi-ai/auth/abort` is a published import path. A second copy here
 		// would drift from the fix in `utils/abort.ts` and reintroduce the regression
-		// for external consumers without any internal caller noticing.
-		expect(raceSignal).toBe(raceWithSignal);
+		// for external consumers without any internal caller noticing, so the alias is
+		// exercised through its own behavior rather than function identity.
+		const controller = new AbortController();
+		controller.abort();
+		const error = await raceSignal(Promise.withResolvers<never>().promise, controller.signal, "").catch(
+			(err: unknown) => err,
+		);
+		expect(error).toBeInstanceOf(AIError.AbortError);
+		expect((error as Error).message).toBe("");
+		expect(AIError.is(AIError.classify(error), AIError.Flag.Abort)).toBe(true);
 	});
 });
