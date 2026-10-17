@@ -31,6 +31,7 @@ const CONDITIONS: Record<string, () => boolean> = {
 	vimModeEnabled: whenSettings(s => cfgTuiVimMode.get(s) === true),
 	hindsightActive: whenSettings(s => cfgMemoryBackend.get(s) === "hindsight"),
 	mnemopiActive: whenSettings(s => cfgMemoryBackend.get(s) === "mnemopi"),
+	mnemosyneOssActive: whenSettings(s => cfgMemoryBackend.get(s) === "mnemosyne-oss"),
 	autolearnActive: whenSettings(s => cfgAutolearnEnabled.get(s) === true),
 	autoThinkingActive: whenSettings(s => cfgDefaultThinkingLevel.get(s) === "auto"),
 	usageAwareFallbackEnabled: whenSettings(s => cfgRetryUsageAwareFallback.get(s) === true),

@@ -12,6 +12,7 @@ import { cfgMemoryBackend } from "./settings";
  * through this):
  *   - `memory.backend === "hindsight"`  → Hindsight remote memory
  *   - `memory.backend === "mnemopi"`  → local Mnemopi SQLite memory
+ *   - `memory.backend === "mnemosyne-oss"` → user-installed Mnemosyne OSS SDK
  *   - `memory.backend === "sharpshooter"` → friction-gated project decision memory
  *   - `memory.backend === "local"`      → local rollout summary pipeline
  *   - everything else                   → no-op
@@ -23,6 +24,7 @@ export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBa
 	const id = cfgMemoryBackend.get(settings);
 	if (id === "hindsight") return (await import("../hindsight/backend")).hindsightBackend;
 	if (id === "mnemopi") return (await import("../mnemopi/backend")).mnemopiBackend;
+	if (id === "mnemosyne-oss") return (await import("../mnemosyne-oss/backend")).mnemosyneOssBackend;
 	if (id === "sharpshooter") return (await import("../sharpshooter/backend")).sharpshooterBackend;
 	if (id === "local") return localBackend;
 	return offBackend;

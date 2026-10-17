@@ -1,4 +1,4 @@
-Edit Mnemopi long-term memories by id. Only ids returned by `{{toolRefs.recall}}`.
+Edit editable long-term memories by id. Only ids returned by `{{toolRefs.recall}}`.
 
 Operations:
 - `update`: working memory; replace content and/or importance.

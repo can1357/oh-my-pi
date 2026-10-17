@@ -3,6 +3,7 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { formatCurrentTime, formatMemories } from "../hindsight/content";
+import { formatMnemosyneOssRecall } from "../mnemosyne-oss/state";
 import recallDescription from "../prompts/tools/recall.md" with { type: "text" };
 import { sessionMemoryToolRefs } from "../memory-backend/tool-names";
 import type { ToolSession } from ".";
@@ -33,7 +34,7 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 
 	static createIf(session: ToolSession): MemoryRecallTool | null {
 		const backend = cfgMemoryBackend.get(session.settings);
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "mnemosyne-oss") return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
 		return new MemoryRecallTool(session);
 	}
@@ -41,6 +42,24 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 	async execute(_id: string, params: MemoryRecallParams, signal?: AbortSignal): Promise<AgentToolResult> {
 		return untilAborted(signal, async () => {
 			const backend = cfgMemoryBackend.get(this.session.settings);
+			if (backend === "mnemosyne-oss") {
+				const state = this.session.getMnemosyneOssSessionState?.();
+				const owner = state?.aliasOf ?? state;
+				if (!owner) throw new Error("Mnemosyne OSS backend is not initialised for this session.");
+				const results = await owner.recall(params.query, signal);
+				if (results.length === 0) {
+					return { content: [{ type: "text", text: "No relevant memories found." }], details: {}, useless: true };
+				}
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Found ${results.length} relevant ${results.length === 1 ? "memory" : "memories"} (as of ${formatCurrentTime()} UTC):\n\n${formatMnemosyneOssRecall(results)}`,
+						},
+					],
+					details: {},
+				};
+			}
 			if (backend === "mnemopi") {
 				const state = this.session.getMnemopiSessionState?.();
 				if (!state) {

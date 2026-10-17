@@ -26,6 +26,7 @@ import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import type { MnemosyneOssSessionState } from "../mnemosyne-oss/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { AgentRegistry } from "../registry/agent-registry";
@@ -357,6 +358,8 @@ export interface ToolSession {
 	getHindsightSessionState?: () => HindsightSessionState | undefined;
 	/** Get Mnemopi runtime state for this agent session. */
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
+	/** Get Mnemosyne OSS runtime state for this agent session. */
+	getMnemosyneOssSessionState?: () => MnemosyneOssSessionState | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
 	/** Parent cache identity for sibling sharing, only when the parent model opts in. */
@@ -703,12 +706,15 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		) {
 			requestedTools.push("ast_edit");
 		}
-		if (["hindsight", "mnemopi"].includes(cfgMemoryBackend.get(session.settings))) {
+		if (["hindsight", "mnemopi", "mnemosyne-oss"].includes(cfgMemoryBackend.get(session.settings))) {
 			for (const name of ["recall", "retain", "reflect"]) {
 				if (!requestedTools.includes(name)) requestedTools.push(name);
 			}
 		}
-		if (cfgMemoryBackend.get(session.settings) === "mnemopi" && !requestedTools.includes("memory_edit")) {
+		if (
+			["mnemopi", "mnemosyne-oss"].includes(cfgMemoryBackend.get(session.settings)) &&
+			!requestedTools.includes("memory_edit")
+		) {
 			requestedTools.push("memory_edit");
 		}
 		if (externalThinkingActive && !requestedTools.includes("think")) {
@@ -723,7 +729,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		if (cfgAutolearnEnabled.get(session.settings) && (session.taskDepth ?? 0) === 0) {
 			if (!requestedTools.includes("manage_skill")) requestedTools.push("manage_skill");
 			if (
-				["hindsight", "mnemopi", "local"].includes(cfgMemoryBackend.get(session.settings)) &&
+				["hindsight", "mnemopi", "mnemosyne-oss", "local"].includes(cfgMemoryBackend.get(session.settings)) &&
 				!requestedTools.includes("learn")
 			) {
 				requestedTools.push("learn");
@@ -773,9 +779,9 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			);
 		}
 		if (name === "retain" || name === "recall" || name === "reflect") {
-			return ["hindsight", "mnemopi"].includes(cfgMemoryBackend.get(session.settings));
+			return ["hindsight", "mnemopi", "mnemosyne-oss"].includes(cfgMemoryBackend.get(session.settings));
 		}
-		if (name === "memory_edit") return cfgMemoryBackend.get(session.settings) === "mnemopi";
+		if (name === "memory_edit") return ["mnemopi", "mnemosyne-oss"].includes(cfgMemoryBackend.get(session.settings));
 		if (name === "manage_skill")
 			return (
 				cfgAutolearnEnabled.get(session.settings) &&
@@ -785,7 +791,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			return (
 				cfgAutolearnEnabled.get(session.settings) &&
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined) &&
-				["hindsight", "mnemopi", "local"].includes(cfgMemoryBackend.get(session.settings))
+				["hindsight", "mnemopi", "mnemosyne-oss", "local"].includes(cfgMemoryBackend.get(session.settings))
 			);
 		}
 		if (name === "task") {
