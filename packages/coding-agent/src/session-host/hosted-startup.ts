@@ -1,0 +1,550 @@
+/**
+ * Startup of a hosted TUI (`tui.hosted`, `omp attach <target>`, `/attach`): find or start the session host that
+ * serves the session this terminal opens, then run an `InteractiveMode` that is only a client of it
+ * ({@link HostedClientLink}). The terminal owns no model, tools, extensions, or session writer: the local session is
+ * a lean passive replica, and the host runs with the launch flags this process was given.
+ *
+ * A lost connection is resumed by {@link HostedClientLink}; there is no in-process fallback. A host that stays
+ * unreachable is reported and the process exits; when the host exited, the terminal offers to reopen its session.
+ */
+import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { getBaseConfigRoot, logger, withFileLock } from "@oh-my-pi/pi-utils";
+import type { Args } from "../cli/args";
+import { flagConsumesValue, PROFILE_BOOTSTRAP_BOUNDARY_ARG, restartArgv } from "../cli/flag-tables";
+import { CliUsageError } from "../cli/usage-error";
+import type { ModelRegistry } from "../config/model-registry";
+import { expandTilde, type Settings } from "../config/settings";
+import { ensurePrivateDir } from "../ipc/private-endpoint";
+import { resolvePath } from "../extensibility/utils";
+import type { InteractiveModeContext } from "../modes/types";
+import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "../sdk";
+import type { AuthStorage } from "../session/auth-storage";
+import { resolveResumableSession } from "../session/session-listing";
+import { readSessionHeaderId } from "../session/session-loader";
+import { SessionManager } from "../session/session-manager";
+import { normalizeWorkspaceDirectory } from "../session/session-workspace";
+import { FileSessionStorage } from "../session/session-storage";
+import { errorMessage } from "../slash-commands/helpers/parse";
+import type { EventBus } from "../utils/event-bus";
+import { spawnSessionHost } from "./client";
+import { formatHostRow } from "./host-row";
+import { HostedClientLink } from "./hosted-client";
+import {
+	findHostForSession,
+	listSessionHosts,
+	SESSION_HOST_REGISTRY_LABEL,
+	type SessionHostEntry,
+	sessionHostsDir,
+} from "./registry";
+
+/** A host id is 16 lowercase hex digits. */
+const HOST_ID_PATTERN = /^[0-9a-f]{16}$/;
+/**
+ * How long a second terminal waits for the first to finish starting the host of the same session: the spawn
+ * timeout (120 s) plus its registry poll, so a waiter outlasts a start that is merely slow.
+ */
+const START_LOCK_WAIT = { retries: 1_300, retryDelayMs: 100 } as const;
+
+/** How a terminal finds or starts the hosts it attaches to. */
+export interface HostLaunch {
+	/** The directory a new host runs in. */
+	cwd: string;
+	/** The launch flags a new host starts with; see {@link hostLaunchArgs}. */
+	args: readonly string[];
+	/** `--session-dir` the session ids of an attach target are looked up in. */
+	sessionDir?: string;
+	/** Registry the hosts publish in. Default {@link sessionHostsDir}. */
+	registryDir?: string;
+	/** Environment overlaid on a new host's (tests isolate it from the real agent directory). */
+	env?: Record<string, string>;
+}
+
+export interface HostedStartup {
+	/** The host this terminal attaches to first. */
+	entry: SessionHostEntry;
+	launch: HostLaunch;
+}
+
+/**
+ * Launch flags that change nothing in a host, so a host that already runs the session is attached to despite them
+ * (they still apply to this terminal):
+ * - `--cwd`, `--allow-home`: this process's startup directory; the host is given the resolved one.
+ * - `--hide-thinking`: TUI display only.
+ * - `--print-thoughts`: print-mode output only; neither a host nor a hosted terminal is print mode.
+ * - `--no-title`, `--no-pty`: every `--mode host` process already runs without auto-titles and without a PTY.
+ * - `--host-id`, `--host-registry-dir`: refused outside `--mode host`; `spawnSessionHost` sets its own, and a later
+ *   copy would make the host publish where the spawner never looks.
+ */
+const TERMINAL_ONLY_FLAGS: Readonly<Record<string, true>> = {
+	"--cwd": true,
+	"--allow-home": true,
+	"--hide-thinking": true,
+	"--print-thoughts": true,
+	"--no-title": true,
+	"--no-pty": true,
+	"--host-id": true,
+	"--host-registry-dir": true,
+};
+
+/** Makes a launch path value independent of the directory it is read in. */
+type PathReader = (value: string, launchCwd: string) => string;
+
+const againstLaunchCwd: PathReader = (value, launchCwd) => path.resolve(launchCwd, value);
+
+/** `Settings` reads `--config` / `PI_CONFIG_FILES` entries as `path.resolve(cwd, expandTilde(entry))`. */
+const settingsFile: PathReader = (value, launchCwd) => path.resolve(launchCwd, expandTilde(value));
+
+/** Extension loading normalizes `file://`, `@`, `:` prefixes and `~` with `resolvePath`; what it rejects is left to the host. */
+const extensionFile: PathReader = (value, launchCwd) => {
+	try {
+		return resolvePath(value, launchCwd);
+	} catch {
+		return value;
+	}
+};
+
+/**
+ * Launch flags whose value is a path, with how their reader reads it. Readers that do not expand `~` take it as an
+ * ordinary relative directory name. `--trusted-extension` is absolute by validation; `--cwd` is dropped.
+ */
+const PATH_FLAGS: Readonly<Record<string, PathReader>> = {
+	"--config": settingsFile,
+	"--add-dir": normalizeWorkspaceDirectory,
+	"--extension": extensionFile,
+	"-e": extensionFile,
+	"--hook": extensionFile,
+	"--session-dir": againstLaunchCwd,
+	"--plugin-dir": againstLaunchCwd,
+	"--system-prompt-template": againstLaunchCwd,
+};
+
+/** Launch flags whose value is inline text or a file path (`resolvePromptInput`, which does not expand `~`). */
+const TEXT_OR_PATH_FLAGS: Readonly<Record<string, true>> = {
+	"--system-prompt": true,
+	"--append-system-prompt": true,
+};
+
+/**
+ * Whether `file` is a file, for a value that may be inline text instead. A lookup that fails (`ENAMETOOLONG` for long
+ * text, `ENOTDIR` for text that looks like `a/b` under a file, ...) means it is text, as in `resolvePromptInput`.
+ */
+function isFile(file: string): boolean {
+	try {
+		return fs.statSync(file, { throwIfNoEntry: false })?.isFile() === true;
+	} catch {
+		return false;
+	}
+}
+
+/** `value` of `flag` made independent of the directory it is read in. */
+function launchPathValue(flag: string, value: string, launchCwd: string): string {
+	if (!value) return value;
+	if (Object.hasOwn(PATH_FLAGS, flag)) return PATH_FLAGS[flag](value, launchCwd);
+	if (!Object.hasOwn(TEXT_OR_PATH_FLAGS, flag) || value.includes("\n")) return value;
+	const file = path.resolve(launchCwd, value);
+	return isFile(file) ? file : value;
+}
+
+/**
+ * The launch flags a new host is started with: everything this process was launched with except what only this
+ * terminal consumes. Session-source flags (`--resume`, `--restore`, `--continue`, `--fork`, imports), positional
+ * prompts and `@file` arguments are dropped (the terminal resolves the session and sends the prompt), and so are
+ * {@link TERMINAL_ONLY_FLAGS}. Taken from the argv as given, never from the lean options the local session is built
+ * with, so a host keeps the tools, providers, and extensions that were asked for. Relative paths are resolved
+ * against `launchCwd`, where this launch reads them: a host resuming a session runs in that session's directory.
+ */
+export function hostLaunchArgs(rawArgs: readonly string[], launchCwd: string): string[] {
+	const args = restartArgv(
+		rawArgs.filter(arg => arg !== PROFILE_BOOTSTRAP_BOUNDARY_ARG),
+		undefined,
+		TERMINAL_ONLY_FLAGS,
+	);
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		const eq = arg.startsWith("--") ? arg.indexOf("=") : -1;
+		if (eq !== -1) {
+			const flag = arg.slice(0, eq);
+			args[i] = `${flag}=${launchPathValue(flag, arg.slice(eq + 1), launchCwd)}`;
+		} else if (flagConsumesValue(arg, args[i + 1])) {
+			i++;
+			args[i] = launchPathValue(arg, args[i], launchCwd);
+		}
+	}
+	return args;
+}
+
+/**
+ * How this terminal starts and finds hosts: new ones run in `cwd` with {@link hostLaunchArgs}, and its own session
+ * directory is read from `launchCwd` as the host's `--session-dir` is, though a resume moved this process to `cwd`.
+ * The environment variables that twin path flags (`PI_CODING_AGENT_SESSION_DIR`, `PI_CONFIG_FILES`) reach the host
+ * resolved the same way, as the host inherits them and reads them from `cwd`. Unset or empty ones are left alone.
+ */
+export function createHostLaunch(options: {
+	rawArgs: readonly string[];
+	cwd: string;
+	launchCwd: string;
+	sessionDir: string | undefined;
+	envSessionDir: string | undefined;
+	envConfigFiles: string | undefined;
+}): HostLaunch {
+	const { rawArgs, cwd, launchCwd, sessionDir, envSessionDir, envConfigFiles } = options;
+	const env: Record<string, string> = {};
+	if (envSessionDir) env.PI_CODING_AGENT_SESSION_DIR = launchPathValue("--session-dir", envSessionDir, launchCwd);
+	// Split as `Settings` does, so an entry is never merged with or dropped from its neighbors.
+	const configFiles = envConfigFiles?.split(path.delimiter).filter(Boolean) ?? [];
+	if (configFiles.length > 0) {
+		env.PI_CONFIG_FILES = configFiles.map(file => launchPathValue("--config", file, launchCwd)).join(path.delimiter);
+	}
+	return {
+		cwd,
+		args: hostLaunchArgs(rawArgs, launchCwd),
+		sessionDir: sessionDir && launchPathValue("--session-dir", sessionDir, launchCwd),
+		env: Object.keys(env).length > 0 ? env : undefined,
+	};
+}
+
+/**
+ * Refuse launch options a host cannot honor. They are errors, never silently dropped: dropping `--fork` would open
+ * the original session, dropping `--goal` would start the session without the goal asked for (and running it here
+ * would start local goal mode, which a terminal that only mirrors a host never does), and a flag only an extension
+ * registers cannot be told from a typo (or from the prompt it would swallow) without loading the extensions this
+ * terminal deliberately does not load.
+ */
+export function assertHostedLaunchSupported(
+	parsed: Pick<Args, "fork" | "fromClaude" | "fromCodex" | "goal" | "unrecognizedFlags">,
+): void {
+	if (parsed.fork !== undefined) {
+		throw new CliUsageError("--fork is not supported with hosted sessions (tui.hosted, omp attach)");
+	}
+	if (parsed.fromClaude) {
+		throw new CliUsageError("--from-claude is not supported with hosted sessions (tui.hosted, omp attach)");
+	}
+	if (parsed.fromCodex) {
+		throw new CliUsageError("--from-codex is not supported with hosted sessions (tui.hosted, omp attach)");
+	}
+	if (parsed.goal !== undefined) {
+		throw new CliUsageError("--goal is not supported with hosted sessions (tui.hosted, omp attach)");
+	}
+	if (parsed.unrecognizedFlags.length > 0) {
+		throw new CliUsageError(
+			`Unknown or extension-registered flags are not supported with hosted sessions: ${parsed.unrecognizedFlags.join(", ")}`,
+		);
+	}
+}
+
+/**
+ * Whether another process holds the ownership lease of the session in `sessionFile`. The lease is keyed by the
+ * session id in the file's header, so every route to the journal meets it. A file with no header has no running
+ * writer: omp writes the header with the first bytes of a session.
+ */
+async function openedByAnotherProcess(sessionFile: string): Promise<boolean> {
+	const sessionId = await readSessionHeaderId(sessionFile);
+	if (sessionId === undefined) return false;
+	const release = new FileSessionStorage().claimSession(sessionId, sessionFile);
+	if (release === null) return true;
+	release();
+	return false;
+}
+
+/**
+ * The host serving `sessionFile`, started when none is. `undefined` is a new session: no other terminal can be
+ * opening it, so a host is started without `--resume`.
+ *
+ * Opening an existing session is serialized across terminals by a start lock named after the file, taken before the
+ * registry is read and held until a started host has published: two terminals resuming the same session cannot both
+ * start a host (the second finds the first's) and never open a second writer or a fork of it. A file leased by a
+ * process that is not a registered host is refused, not forked.
+ *
+ * `launchFlagsMustApply`: the caller asked for these launch flags, and a host that already runs the session was
+ * started without them. Attaching would silently drop them (a narrower tool set, an approval mode), so it is refused.
+ *
+ * `restore` (`--restore`): a host this call starts goes on with what the session's last process left unfinished. A
+ * host that already runs the session is attached to as it is: its process is alive, so nothing was interrupted.
+ */
+export async function ensureSessionHost(
+	sessionFile: string | undefined,
+	launch: HostLaunch,
+	options: { launchFlagsMustApply?: boolean; restore?: boolean } = {},
+): Promise<SessionHostEntry> {
+	const registryDir = path.resolve(launch.registryDir ?? sessionHostsDir());
+	if (sessionFile === undefined) {
+		return spawnSessionHost({
+			cwd: launch.cwd,
+			args: [...launch.args],
+			registryDir,
+			env: launch.env,
+		});
+	}
+	const file = path.resolve(sessionFile);
+	await ensurePrivateDir(registryDir, SESSION_HOST_REGISTRY_LABEL);
+	const lockName = `start-${crypto.createHash("sha256").update(file).digest("hex").slice(0, 32)}`;
+	return withFileLock(
+		path.join(registryDir, lockName),
+		async () => {
+			const running = await findHostForSession(file, registryDir);
+			if (running) {
+				if (options.launchFlagsMustApply && launch.args.length > 0) {
+					throw new CliUsageError(
+						`Session host ${running.hostId} already runs this session, so this launch's host options cannot apply; run without them, or attach with: omp attach ${running.hostId}`,
+					);
+				}
+				return running;
+			}
+			if (await openedByAnotherProcess(file)) {
+				throw new CliUsageError(
+					`Session ${file} is open in a non-host process; close that process, then attach again`,
+				);
+			}
+			return spawnSessionHost({
+				cwd: launch.cwd,
+				sessionFile: file,
+				restore: options.restore,
+				args: [...launch.args],
+				registryDir,
+				env: launch.env,
+			});
+		},
+		START_LOCK_WAIT,
+	);
+}
+
+/**
+ * The host for the session `sessionManager` resolved to (the startup flags: `--resume`, `--restore`, `--continue`,
+ * `autoResume`, or a new session). The manager only identifies the session: it is closed here so this process holds
+ * no lease on the file the host is about to own.
+ */
+export async function ensureHostForResolvedSession(
+	sessionManager: SessionManager | undefined,
+	launch: HostLaunch,
+	options: { restore?: boolean } = {},
+): Promise<SessionHostEntry> {
+	const sessionFile = sessionManager?.isSessionOnDisk() ? sessionManager.getSessionFile() : undefined;
+	await sessionManager?.close();
+	return ensureSessionHost(sessionFile, launch, { launchFlagsMustApply: true, restore: options.restore });
+}
+
+async function resolveSessionFile(name: string, launch: HostLaunch): Promise<string | undefined> {
+	if (name.includes("/") || name.includes("\\") || name.endsWith(".jsonl")) {
+		const file = path.resolve(launch.cwd, name);
+		if (!(await SessionManager.peekSessionInit(file))) throw new CliUsageError(`Not a session file: ${file}`);
+		return file;
+	}
+	return (await resolveResumableSession(name, launch.cwd, launch.sessionDir))?.session.path;
+}
+
+/**
+ * The host an attach target names: a host id, else a session id or path, whose host is started when none runs.
+ * Rejects with a {@link CliUsageError} when nothing matches.
+ */
+export async function resolveAttachTarget(target: string, launch: HostLaunch): Promise<SessionHostEntry> {
+	const name = target.trim();
+	if (!name) throw new CliUsageError("attach needs a target: a host id, a session id, or a session path");
+	if (HOST_ID_PATTERN.test(name)) {
+		const host = (await listSessionHosts(launch.registryDir)).find(entry => entry.hostId === name);
+		if (host) return host;
+	}
+	const sessionFile = await resolveSessionFile(name, launch);
+	if (!sessionFile) throw new CliUsageError(`No session host or session matches "${name}"`);
+	return ensureSessionHost(sessionFile, launch);
+}
+
+/** Where a hosted terminal keeps its local copies of host transcripts: runtime state, never listed as sessions. */
+export function hostedReplicaDir(): string {
+	return path.join(getBaseConfigRoot(), "run", "hosted-replicas");
+}
+
+/**
+ * The session a hosted terminal's `InteractiveMode` runs on until the host's snapshot replaces its content: a
+ * passive replica on a read-only view of files, with nothing that runs or reaches a provider on its own. The host
+ * owns tools, extensions, skills, rules, LSP, MCP, and memory, so none of them starts here; an empty session
+ * manager over the file storage lets the replica's transcript copy be read back. No model is selected: the host's
+ * model arrives with its first snapshot.
+ */
+export async function createHostedLocalSession(options: {
+	cwd: string;
+	authStorage: AuthStorage;
+	modelRegistry: ModelRegistry;
+	settings: Settings;
+	eventBus: EventBus;
+	subagentEventBus: EventBus;
+	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
+}): Promise<CreateAgentSessionResult> {
+	const { cwd } = options;
+	return options.createSession({
+		cwd,
+		authStorage: options.authStorage,
+		modelRegistry: options.modelRegistry,
+		settings: options.settings,
+		eventBus: options.eventBus,
+		subagentEventBus: options.subagentEventBus,
+		sessionManager: SessionManager.inMemory(cwd, new FileSessionStorage()),
+		passiveReplica: true,
+		hasUI: true,
+		disableExtensionDiscovery: true,
+		skills: [],
+		rules: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		workspaceTree: { rootPath: cwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+		toolNames: [],
+		// No discovered custom tools, extension factories, MCP, or memory tools: the empty list alone leaves them on.
+		restrictToolNames: true,
+		enableLsp: false,
+		enableMCP: false,
+		cacheWarming: false,
+	});
+}
+
+/**
+ * Connect `ctx` to its first host and let `/attach` replace it. `ctx.hostedClientMode` must already be set (before
+ * `init()`). Resolves once the first snapshot is on screen and `ctx.hostedClient` is set; rejects, leaving nothing
+ * attached, when it cannot connect.
+ *
+ * A lost connection is resumed by the link itself. When it ends for good the process ends (`ctx.shutdown` with exit
+ * status 1), except that a host that exited while serving a session file offers to reopen that session in a new host.
+ * `options.reconnectTimeoutMs` is passed to every link.
+ */
+export async function attachHostedUi(
+	ctx: InteractiveModeContext,
+	hosted: HostedStartup,
+	options: { reconnectTimeoutMs?: number } = {},
+): Promise<void> {
+	let current = hosted.entry;
+	let switching = false;
+	/** The link this terminal shows. A link it already left may still finish closing; that must not end the terminal. */
+	let live: HostedClientLink | undefined;
+
+	const connect = async (entry: SessionHostEntry, keepStartupFrame = false): Promise<void> => {
+		const link = await HostedClientLink.connect({
+			ctx,
+			entry,
+			replicaDir: hostedReplicaDir(),
+			keepStartupFrame,
+			reconnectTimeoutMs: options.reconnectTimeoutMs,
+			onClosed: reason => {
+				if (link !== live) {
+					logger.debug("Closed session host link was already replaced", { hostId: link.hostId });
+					return;
+				}
+				live = undefined;
+				if (ctx.hostedClient === link) ctx.hostedClient = undefined;
+				if (reason.sessionFile === undefined || switching || ctx.isShuttingDown) {
+					void ctx.shutdown({ exitCode: 1, farewell: reason.message });
+					return;
+				}
+				void reopen(reason.sessionFile, reason.message);
+			},
+		});
+		if (ctx.isShuttingDown) {
+			// The terminal was closed while connecting: leave again without taking over the view.
+			await link.detach();
+			return;
+		}
+		current = entry;
+		live = link;
+		ctx.hostedClient = link;
+	};
+
+	/**
+	 * The host serving `sessionFile` exited: offer to reopen the session in a new host, or end with `farewell`. The
+	 * link already discarded its copy. `/attach` is refused while the offer is open.
+	 */
+	const reopen = async (sessionFile: string, farewell: string): Promise<void> => {
+		switching = true;
+		try {
+			// shortcut: the context has no shutdown signal to cancel this dialog; a close while it is open is only seen
+			// once it is answered. Add a signal if a close must dismiss it.
+			if (!(await ctx.showHookConfirm("Session host exited", "Reopen this session in a new host?"))) {
+				await ctx.shutdown({ exitCode: 1, farewell });
+				return;
+			}
+			if (ctx.isShuttingDown) return;
+			ctx.showStatus("Reopening the session…");
+			await connect(await ensureSessionHost(sessionFile, hosted.launch));
+			if (ctx.hostedClient) ctx.showStatus(`Reopened the session in host ${ctx.hostedClient.hostId}`);
+		} catch (error) {
+			await ctx.shutdown({
+				exitCode: 1,
+				farewell: `host exited; could not reopen the session: ${errorMessage(error)}`,
+			});
+		} finally {
+			switching = false;
+		}
+	};
+
+	/** The live host chosen in a selector; the one on screen is not offered. */
+	const pickHost = async (onScreen: string): Promise<SessionHostEntry | undefined> => {
+		const others = (await listSessionHosts(hosted.launch.registryDir)).filter(host => host.hostId !== onScreen);
+		if (others.length === 0) {
+			ctx.showStatus("No other session hosts running");
+			return undefined;
+		}
+		const rows = others.map(host => ({ row: formatHostRow(host), host }));
+		const picked = await ctx.showHookSelector(
+			"Attach to session host",
+			rows.map(({ row }) => row),
+		);
+		return rows.find(({ row }) => row === picked)?.host;
+	};
+
+	/**
+	 * Leave the host on screen and take the view of `entry`. The old link is quiescent before the new one loads its
+	 * replica, so two streams never interleave in one view, and inputs report "not connected" (keeping the draft)
+	 * while the live link is cleared. A target that cannot be reached puts the previous host back once, with a
+	 * fresh snapshot; if that fails too the process ends.
+	 */
+	const switchTo = async (entry: SessionHostEntry, previous: HostedClientLink): Promise<void> => {
+		const previousEntry = current;
+		live = undefined;
+		ctx.hostedClient = undefined;
+		try {
+			await previous.detach();
+		} catch (error) {
+			// The old connection is closed either way; the transcript view it fed is replaced next.
+			ctx.showWarning(`Could not leave host ${previous.hostId} cleanly: ${errorMessage(error)}`);
+		}
+		try {
+			await connect(entry);
+			return;
+		} catch (error) {
+			ctx.showError(`Could not attach to host ${entry.hostId}: ${errorMessage(error)}`);
+		}
+		try {
+			await connect(previousEntry);
+			ctx.showStatus(`Back on session host ${previousEntry.hostId}`);
+		} catch (error) {
+			void ctx.shutdown({
+				exitCode: 1,
+				farewell: `Could not attach to host ${entry.hostId}, and could not return to host ${previousEntry.hostId}: ${errorMessage(error)}`,
+			});
+		}
+	};
+
+	ctx.attachHostedSession = async target => {
+		const previous = ctx.hostedClient;
+		if (switching || !previous) {
+			ctx.showStatus(switching ? "Already switching session hosts" : "Not connected to the session host yet");
+			return;
+		}
+		switching = true;
+		try {
+			const entry =
+				target === undefined ? await pickHost(previous.hostId) : await resolveAttachTarget(target, hosted.launch);
+			if (!entry) return;
+			if (entry.hostId === previous.hostId) {
+				ctx.showStatus(`Already attached to session host ${entry.hostId}`);
+				return;
+			}
+			await switchTo(entry, previous);
+		} catch (error) {
+			ctx.showError(`Attach failed: ${errorMessage(error)}`);
+		} finally {
+			switching = false;
+		}
+	};
+
+	await connect(hosted.entry, true);
+}

@@ -10,6 +10,7 @@ import {
 	type RpcSessionChangeResult,
 	type RpcSessionChangeSession,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import { RpcServer } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-server";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { type AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
@@ -23,6 +24,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { createTestSession, isolateAgentDir, TestClient } from "./helpers/rpc-server-harness";
 
 const tempPaths: string[] = [];
 
@@ -86,10 +88,11 @@ function createSessionChangeSession(options: SessionChangeStubOptions): RpcSessi
 }
 
 describe("RPC subagent registry", () => {
-	test("defaults subagent frame emission to off while tracking snapshots", () => {
+	test("emits every subagent frame while tracking snapshots", () => {
 		const frames: RpcSubagentFrame[] = [];
 		const eventBus = new EventBus();
 		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
+		registry.setEventFeed(true);
 		const lifecycle: SubagentLifecyclePayload = {
 			id: "SubagentA",
 			index: 0,
@@ -115,12 +118,11 @@ describe("RPC subagent registry", () => {
 			event: { type: "agent_start" },
 		};
 
-		expect(registry.getSubscriptionLevel()).toBe("off");
 		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle);
 		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, progressPayload);
 		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
 
-		expect(frames).toHaveLength(0);
+		expect(frames.map(frame => frame.type)).toEqual(["subagent_lifecycle", "subagent_progress", "subagent_event"]);
 		expect(registry.getSubagents()).toMatchObject([
 			{
 				id: "SubagentA",
@@ -131,11 +133,10 @@ describe("RPC subagent registry", () => {
 		registry.dispose();
 	});
 
-	test("emits progress frames after explicit progress subscription and snapshots tracked subagents", () => {
+	test("emits lifecycle and progress frames and snapshots tracked subagents", () => {
 		const frames: RpcSubagentFrame[] = [];
 		const eventBus = new EventBus();
 		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
-		registry.setSubscriptionLevel("progress");
 		const lifecycle: SubagentLifecyclePayload = {
 			id: "SubagentA",
 			index: 0,
@@ -292,33 +293,119 @@ describe("RPC subagent registry", () => {
 		registry.dispose();
 	});
 
-	test("gates raw subagent events behind the events subscription level", () => {
+	test("delivers each connection only the subagent frames its subscription level admits", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-rpc-subagent-levels-"));
+		tempPaths.push(dir);
+		const restoreAgentDir = isolateAgentDir(path.join(dir, "agent"));
+		const eventBus = new EventBus();
+		const server = await RpcServer.start(await createTestSession(dir, {}), { subagentEventBus: eventBus });
+		try {
+			const off = new TestClient(server);
+			const progress = new TestClient(server);
+			const events = new TestClient(server);
+			await progress.command({ type: "set_subagent_subscription", level: "progress" });
+			await events.command({ type: "set_subagent_subscription", level: "events" });
+			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+				id: "SubagentA",
+				index: 0,
+				agent: "task",
+				agentSource: "bundled",
+				status: "started",
+			} satisfies SubagentLifecyclePayload);
+			eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+				index: 0,
+				agent: "task",
+				agentSource: "bundled",
+				task: "Do work",
+				assignment: "Implement work",
+				progress: createProgress(),
+			} satisfies SubagentProgressPayload);
+			eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+				id: "SubagentA",
+				event: { type: "agent_start" },
+			} satisfies SubagentEventPayload);
+
+			const received = async (client: TestClient): Promise<unknown[]> => {
+				// Frames arrive in write order, so this response trails every subagent frame sent before it.
+				await client.command({ type: "get_subagents" });
+				return client.frames
+					.filter(frame => typeof frame.type === "string" && frame.type.startsWith("subagent_"))
+					.map(frame => frame.type);
+			};
+			expect(await received(off)).toEqual([]);
+			expect(await received(progress)).toEqual(["subagent_lifecycle", "subagent_progress"]);
+			expect(await received(events)).toEqual(["subagent_lifecycle", "subagent_progress", "subagent_event"]);
+		} finally {
+			await server.dispose();
+			restoreAgentDir();
+		}
+	});
+
+	test("observes the raw subagent event channel only while the event feed is enabled", () => {
 		const frames: RpcSubagentFrame[] = [];
 		const eventBus = new EventBus();
 		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
-		const eventPayload: SubagentEventPayload = {
-			id: "SubagentA",
-			event: { type: "agent_start" },
-		};
+		const eventPayload: SubagentEventPayload = { id: "SubagentA", event: { type: "agent_start" } };
 
 		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
 		expect(frames).toHaveLength(0);
 
-		registry.setSubscriptionLevel("events");
+		registry.setEventFeed(true);
 		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
+		expect(frames).toEqual([{ type: "subagent_event", payload: eventPayload }]);
 
-		expect(frames).toHaveLength(1);
-		expect(frames[0]).toEqual({ type: "subagent_event", payload: eventPayload });
-		registry.setSubscriptionLevel("progress");
+		registry.setEventFeed(false);
 		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
 		expect(frames).toHaveLength(1);
-		registry.setSubscriptionLevel("events");
+
+		registry.setEventFeed(true);
 		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
 		expect(frames).toHaveLength(2);
+
 		registry.dispose();
-		registry.setSubscriptionLevel("events");
+		registry.setEventFeed(true);
 		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
 		expect(frames).toHaveLength(2);
+	});
+
+	test("keeps the raw event feed until the last events subscriber downgrades or disconnects", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-rpc-subagent-feed-"));
+		tempPaths.push(dir);
+		const restoreAgentDir = isolateAgentDir(path.join(dir, "agent"));
+		const eventBus = new EventBus();
+		const server = await RpcServer.start(await createTestSession(dir, {}), { subagentEventBus: eventBus });
+		try {
+			const first = new TestClient(server);
+			const second = new TestClient(server);
+			await first.command({ type: "set_subagent_subscription", level: "events" });
+			await second.command({ type: "set_subagent_subscription", level: "events" });
+			const eventFrames = (client: TestClient) => client.frames.filter(frame => frame.type === "subagent_event");
+			const emit = async (...clients: TestClient[]) => {
+				eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+					id: "SubagentA",
+					event: { type: "agent_start" },
+				} satisfies SubagentEventPayload);
+				// Frames arrive in write order, so the response trails the event frame sent before it.
+				for (const client of clients) await client.command({ type: "get_subagents" });
+			};
+
+			await first.command({ type: "set_subagent_subscription", level: "progress" });
+			await emit(first, second);
+			expect(eventFrames(first)).toHaveLength(0);
+			expect(eventFrames(second)).toHaveLength(1);
+
+			await server.disconnect(second.conn, "test");
+			await emit(first);
+			expect(eventFrames(first)).toHaveLength(0);
+			expect(eventFrames(second)).toHaveLength(1);
+
+			await first.command({ type: "set_subagent_subscription", level: "events" });
+			await emit(first);
+			expect(eventFrames(first)).toHaveLength(1);
+		} finally {
+			await server.dispose();
+			restoreAgentDir();
+		}
 	});
 });
 
@@ -455,7 +542,7 @@ function handle(frame) {
 		const frames: RpcSubagentFrame[] = [];
 		const eventBus = new EventBus();
 		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
-		registry.setSubscriptionLevel("events");
+		registry.setEventFeed(true);
 		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
 			id: "Kid",
 			agent: "task",
@@ -489,8 +576,6 @@ function handle(frame) {
 		const framesB: RpcSubagentFrame[] = [];
 		const registryA = new RpcSubagentRegistry(busA, frame => framesA.push(frame));
 		const registryB = new RpcSubagentRegistry(busB, frame => framesB.push(frame));
-		registryA.setSubscriptionLevel("events");
-		registryB.setSubscriptionLevel("events");
 		busB.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
 			id: "Kid",
 			agent: "task",

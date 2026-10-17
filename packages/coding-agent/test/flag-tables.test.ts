@@ -312,6 +312,26 @@ describe("--restore", () => {
 		validateRestoreLaunch(parseArgs(["--restore", "a"]), true);
 		validateRestorePrompt(parseArgs(["--resume", "a", "keep going"]));
 	});
+
+	it("is accepted by a session host a hosted terminal starts, and refused in other protocol modes", () => {
+		validateRestoreLaunch(
+			parseArgs(["--mode", "host", "--host-id", "0123456789abcdef", "--restore", "/s/a.jsonl"]),
+			false,
+		);
+		expect(() => validateRestoreLaunch(parseArgs(["--mode", "rpc", "--restore", "/s/a.jsonl"]), false)).toThrow(
+			"--restore requires an interactive terminal",
+		);
+	});
+});
+
+describe("session host selectors", () => {
+	it("are refused outside --mode host, where only spawnSessionHost sets them", () => {
+		expect(() => parseArgs(["--host-id", "0123456789abcdef"])).toThrow(CliUsageError);
+		expect(() => parseArgs(["--host-registry-dir", "/tmp/hosts"])).toThrow(/--host-registry-dir/);
+		expect(() => parseArgs(["--mode", "rpc", "--host-id", "0123456789abcdef"])).toThrow(/--host-id/);
+		const host = parseArgs(["--mode", "host", "--host-id", "0123456789abcdef", "--host-registry-dir=/tmp/hosts"]);
+		expect(host.hostRegistryDir).toBe("/tmp/hosts");
+	});
 });
 
 describe("--system-prompt-template", () => {

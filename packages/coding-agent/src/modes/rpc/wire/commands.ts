@@ -39,6 +39,14 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: { protocolVersion: "number.integer" },
 	},
 	{
+		name: "detach",
+		doc: "Session-host socket clients: leave; the session keeps running. Unknown on stdio.",
+	},
+	{
+		name: "exit",
+		doc: "Session-host socket clients: leave, and stop the host when no other client remains. Unknown on stdio.",
+	},
+	{
 		name: "prompt",
 		doc: "Submit a prompt; acknowledged once admitted, completed by its `prompt_result`.",
 		params: { message: "string", "images?": IMAGES, "streamingBehavior?": "StreamingBehavior" },
@@ -50,7 +58,18 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	{
 		name: "remove_queued_message",
 		doc: "Remove one pending queued message by its queue-chip text.",
-		params: { message: "string", queue: "QueuedMessageQueue" },
+		params: {
+			message: "string",
+			queue: "QueuedMessageQueue",
+			"match?": doc(
+				"'first' | 'last'",
+				"`last`: the newest prompt whose chip text is `message`; default `first` (raw text, then chip text).",
+			),
+			"refuseAttachments?": doc(
+				"boolean",
+				'Remove nothing, answering `refused: "attachments"`, when the prompt carries an attachment.',
+			),
+		},
 		result: "RemoveQueuedMessageResult",
 	},
 	{
