@@ -37,6 +37,8 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
+import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -158,6 +160,7 @@ async function createPersistedSession(
 		isolated?: boolean;
 		retryFallback?: RetryFallbackRole;
 		compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
+		perCallModel?: boolean;
 	},
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
@@ -175,6 +178,7 @@ async function createPersistedSession(
 		agent: contract?.agent,
 		isolated: contract?.isolated,
 		retryFallback: contract?.retryFallback,
+		perCallModel: contract?.perCallModel,
 		...(contract?.compactionThreshold !== undefined
 			? { compactionThreshold: contract.compactionThreshold }
 			: undefined),
@@ -230,6 +234,7 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 		get preparedExtensions() {
 			return owner.preparedExtensions;
 		},
+		getSessionAgents: () => [],
 	} as unknown as AgentSession;
 	return createPersistedSubagentReviverFactory({
 		session: parentSession,
@@ -589,6 +594,49 @@ describe("persisted subagent revival", () => {
 		await reviver(ref);
 
 		expect(capturedOptions?.oauthAccountPools).toEqual({ anthropic: ["email:a@example.com|org:org-a"] });
+	});
+
+	it("grants a revived per-call worker its agent's own model only while that agent stays configured", async () => {
+		const own = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!own) throw new Error("Expected bundled anthropic/claude-sonnet-4-5");
+		const reviewer: AgentDefinition = {
+			name: "reviewer",
+			description: "reviewer",
+			systemPrompt: "review",
+			source: "project",
+			model: [`${own.provider}/${own.id}`],
+		};
+		const discover = vi
+			.spyOn(discoveryModule, "discoverAgents")
+			.mockResolvedValue({ agents: [reviewer], projectAgentsDir: null });
+		let assertDispatchModel: CreateAgentSessionOptions["assertDispatchModel"];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			assertDispatchModel = options?.assertDispatchModel;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+		const modelRegistry = { authStorage: {}, getAvailable: () => [own] } as unknown as ModelRegistry;
+		const revive = async (settings: Settings) => {
+			const cwd = makeTempDir("@pi-revive-per-call-");
+			const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+				agent: "reviewer",
+				perCallModel: true,
+			});
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd, undefined, { settings, modelRegistry })(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(ref);
+			if (!assertDispatchModel) throw new Error("Expected a per-call dispatch check");
+			return assertDispatchModel;
+		};
+
+		// The spawn approved the model through the agent's frontmatter; revival keeps that grant.
+		await expect(revive(Settings.isolated()).then(check => check(own))).resolves.toBeUndefined();
+		// A disabled or removed agent no longer grants its model.
+		await expect(
+			revive(Settings.isolated({ "task.disabledAgents": ["reviewer"] })).then(check => check(own)),
+		).rejects.toThrow(/not an approved model/);
+		discover.mockResolvedValue({ agents: [], projectAgentsDir: null });
+		await expect(revive(Settings.isolated()).then(check => check(own))).rejects.toThrow(/not an approved model/);
 	});
 
 	it("falls back to the ref display name reviving a legacy session file without a persisted agent name", async () => {

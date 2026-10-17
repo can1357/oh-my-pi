@@ -127,6 +127,7 @@ import {
 	type YieldItem,
 } from "@oh-my-pi/pi-tui/tools/task";
 import { yieldSectionShapes } from "./yield-assembly";
+import { assertPerCallModelApproved, isPerCallModelApproved, type PerCallModelGrants } from "./model-approval";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import {
 	cfgTaskPrewalk,
@@ -443,6 +444,8 @@ export interface ExecutorOptions {
 	 * if the resolved subagent model has no working credentials. See #985.
 	 */
 	parentActiveModelPattern?: string;
+	/** Set for a per-call `model`; every model the child sends to must stay approved by these grants. */
+	perCallModelGrants?: PerCallModelGrants;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
@@ -4278,6 +4281,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					modelRegistry,
 					settings,
 					id,
+					{ perCallModel: options.perCallModelGrants !== undefined },
 				),
 			);
 			if (modelResolutionWarning) {
@@ -4389,11 +4393,22 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
 						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
 					});
+			const perCallModelGrants = options.perCallModelGrants;
 			if (prewalkPattern) {
 				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
 				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
 				const target = resolvedPrewalk.model;
-				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
+				if (
+					target &&
+					perCallModelGrants &&
+					!isPerCallModelApproved(target, perCallModelGrants, modelRegistry, "dispatch")
+				) {
+					// A per-call model must not be swapped mid-run for one the operator never approved.
+					logger.debug("Subagent prewalk target is not approved for the per-call model; skipping prewalk", {
+						agent: agent.name,
+						pattern: prewalkPattern,
+					});
+				} else if (!target || !modelRegistry.hasConfiguredAuth(target)) {
 					logger.warn("Subagent prewalk target unavailable; skipping prewalk", {
 						agent: agent.name,
 						pattern: prewalkPattern,
@@ -4476,6 +4491,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					modelPatternDefaultFallbackChain:
 						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
 					thinkingLevel: effectiveThinkingLevel,
+					...(perCallModelGrants
+						? {
+								assertDispatchModel: (dispatchModel: Model) =>
+									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry, "dispatch"),
+							}
+						: {}),
 					thinkingLevelCeiling: spawnEffortCeiling,
 					// Subagents are short-lived; never schedule background warm requests.
 					cacheWarming: false,
@@ -4682,6 +4703,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
+				...(perCallModelGrants ? { perCallModel: true } : {}),
 				// Deferred model resolution installs this role inside createAgentSession,
 				// so read it back from the settings both install paths write.
 				retryFallback: getRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(id)),

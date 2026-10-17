@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { validateAgentAccountPools } from "../config/account-pools";
+import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveAgentAdvisorRolePattern } from "../config/model-resolver";
 import { formatModelRoleAlias } from "../config/model-roles";
@@ -30,6 +31,8 @@ import {
 	followMCPTools,
 	subagentRetryFallbackRole,
 } from "./executor";
+import { discoverAgents, getAgent } from "./discovery";
+import { assertPerCallModelApproved } from "./model-approval";
 import { cfgTaskAgentAccountPools } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
@@ -197,6 +200,23 @@ export function createPersistedSubagentReviverFactory(
 			const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(ctx.settings));
 			const oauthAccountPools =
 				init.agent && Object.hasOwn(agentAccountPools, init.agent) ? agentAccountPools[init.agent] : undefined;
+			// The agent's own model grants a per-call worker only while that agent is still configured.
+			const perCallAgentModel =
+				init.perCallModel && init.agent
+					? getAgent(
+							[
+								...(
+									await discoverAgents(
+										ctx.session.sessionManager.getCwd(),
+										undefined,
+										ctx.session.effectiveExtensionRoots,
+									)
+								).agents,
+								...ctx.session.getSessionAgents(),
+							],
+							init.agent,
+						)?.model
+					: undefined;
 			const persistedModelPattern = restoredSeance
 				? restoredSeance.modelPattern
 				: init.modelRole && init.modelRole !== "default"
@@ -259,6 +279,25 @@ export function createPersistedSubagentReviverFactory(
 					asyncJobManager: ctx.session.asyncJobManager,
 					parentAgentId: ref.parentId,
 					oauthAccountPools,
+					// A per-call model is held to the operator's current grants, not the transcript's.
+					...(init.perCallModel
+						? {
+								assertDispatchModel: (model: Model) =>
+									assertPerCallModelApproved(
+										model,
+										{
+											settings: ctx.settings,
+											agentName: init.agent ?? ref.displayName,
+											agentModel: perCallAgentModel,
+											parentModelPattern: ctx.session.model
+												? `${ctx.session.model.provider}/${ctx.session.model.id}`
+												: undefined,
+										},
+										ctx.modelRegistry,
+										"dispatch",
+									),
+							}
+						: {}),
 					expectedAgentRef: expectedRef,
 					taskDepth,
 					toolNames: revivedToolNames,

@@ -319,6 +319,29 @@ describe("runSubprocess per-agent prewalk", () => {
 		expect(result.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.prewalk).toBeUndefined();
 	});
+
+	it("hands a per-call worker off only to a prewalk target its grants approve", async () => {
+		const spy = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValue(createSessionResult(yieldEmittingSession()));
+		const primarySelector = `${primary.provider}/${primary.id}`;
+		const targetSelector = `${target.provider}/${target.id}`;
+
+		for (const roles of [{ review: primarySelector }, { review: primarySelector, smol: targetSelector }]) {
+			const settings = Settings.isolated({ modelRoles: roles });
+			const result = await runSubprocess({
+				...baseOptions(`subagent-prewalk-per-call-${Object.keys(roles).length}`, settings),
+				agent: { ...baseAgent, prewalk: targetSelector },
+				modelOverride: [primarySelector],
+				perCallModelGrants: { settings, agentName: baseAgent.name },
+			});
+			expect(result.exitCode).toBe(0);
+		}
+
+		// Unapproved: the worker keeps its model instead of failing at the first edit after the handoff.
+		expect(spy.mock.calls[0]?.[0]?.prewalk).toBeUndefined();
+		expect(spy.mock.calls[1]?.[0]?.prewalk?.target.id).toBe(target.id);
+	});
 	it("keeps the todo tool active for a prewalk-armed subagent (the todo gate needs it)", async () => {
 		const session = yieldEmittingSession(["read", "todo", "yield"]);
 		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));

@@ -207,13 +207,29 @@ A stateless, tool-free one-shot model call that returns a `CompletionHandle` imm
 
 Registers one background subagent job and returns an `AgentHandle` immediately:
 
-- JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools? })`; Python uses keyword arguments (`schema_mode`).
+- JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools?, model? })`; Python uses keyword arguments (`schema_mode`).
 - Preflight (spawn policy, unknown agent, `task.maxRecursionDepth`, hard turn budget, plan-mode isolation controls, unknown `tools` names) fails handle allocation; Python raises directly, JS's pending handle rejects when awaited/used. Execution failures surface from `.wait()`.
-- `agent` defaults from the current spawn policy; the selected agent's frontmatter model and settings always apply (no per-call `model`). `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
+- `agent` defaults from the current spawn policy. `model` is the [per-call model](../task-agent-discovery.md#per-call-model): accepted only when `task.perCallModel` is not `off`, limited to operator-configured models, and highest in precedence. `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
 - `isolated` requests isolation. `apply` controls whether captured changes are integrated; `merge=false` selects patch mode while the normal setting controls branch mode.
 - `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel.
 - Handle surface: `.id`, `.agent`, `.handle` (`agent://<id>`), `.status`, `.done()`, `.wait(timeout?)`, `.send(message)`, `.cancel()`, `.output()`. Python handles are awaitable; JavaScript uses `await handle.wait()`.
 - The job is a regular async job owned by the calling agent: an unwaited result auto-delivers like a backgrounded `task`, and handle `.wait()` consumes the delivery so it is not replayed. Eval subagents are kept alive (message with `write agent://<id>`, read transcripts at `history://<id>`) and get their own eval executors, like every subagent.
+
+#### Per-call model selection
+
+With `task.perCallModel` enabled, `agent()` and `workpool()` accept a selector or an ordered, non-empty array:
+
+```js
+const review = await agent("Review the change", { model: ["@slow", "@default"] });
+const pool = await workpool("scout", { name: "research", model: ["@smol", "@default"] });
+```
+
+```python
+review = agent("Review the change", model=["@slow", "@default"])
+pool = workpool("scout", name="research", model=["@smol", "@default"])
+```
+
+Candidates are tried in order for working credentials; if none has them, the call fails instead of running on the parent's model, unless the selection includes `@default`. A workpool applies its selector to each worker's **first turn**; follow-up turns reuse that worker's session. With `eval.workpool.freshAgents=true`, every new worker receives the pool selector.
 
 ### `wait()`
 
@@ -221,7 +237,7 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 
 ### `workpool()`
 
-`workpool(agent=None, name=None, context=None, tools=None)` creates a pool of keep-alive subagents bounded by the live `task.maxConcurrency`:
+`workpool(agent=None, name=None, context=None, tools=None, model=None)` creates a pool of keep-alive subagents bounded by the live `task.maxConcurrency`:
 
 - `.push(*items)` returns item ids (`<pool>#<seq>`). An item goes to the idle worker with the lowest context usage, spawns a new worker while the pool has room, or is queued round-robin onto a busy worker and handed over as one batch when that worker's turn ends. `eval.workpool.freshAgents=true` instead queues for a fresh agent whenever capacity frees, so every item gets a new context and no follow-up batching occurs.
 - A worker submits each batch item separately through `yield({ key: <1-based number>, data: {...} })` or `yield({ key, error })`; each response names the remaining keys, and the final key ends the turn automatically.

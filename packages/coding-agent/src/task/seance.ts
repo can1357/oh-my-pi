@@ -172,7 +172,7 @@ function validateSeanceFields(
 	if (agent !== SEANCE_AGENT_NAME) {
 		if (item.sourceSession !== undefined)
 			return `\`sourceSession\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
-		if (item.model !== undefined) return `\`model\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
+		// A non-seance `model` is the per-call selector; `task.perCallModel` decides it at preflight.
 		return undefined;
 	}
 	// Hidden bundled seance (plan mode, policy) is rejected at spawn; a custom shadow is an ordinary agent.

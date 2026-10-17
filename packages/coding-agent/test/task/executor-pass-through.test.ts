@@ -549,6 +549,79 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const forwarded = spy.mock.calls[0]?.[0];
 		expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.Low);
 	});
+
+	it("installs the per-call dispatch check and stamps the revival contract", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const other = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model || !other) throw new Error("Expected bundled models to exist");
+		const session = yieldEmittingSession();
+		const initSpy = vi.spyOn(session.sessionManager, "appendSessionInit");
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const registry = createModelRegistry([model, other]);
+		const settings = Settings.isolated({ modelRoles: { review: `${model.provider}/${model.id}` } });
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-per-call-dispatch",
+			modelOverride: [`${model.provider}/${model.id}`],
+			perCallModelGrants: { settings, agentName: baseAgent.name },
+			settings,
+			modelRegistry: registry,
+		});
+
+		expect(result.exitCode).toBe(0);
+		const assertDispatchModel = spy.mock.calls[0]?.[0]?.assertDispatchModel;
+		expect(assertDispatchModel).toBeDefined();
+		expect(() => assertDispatchModel?.(model)).not.toThrow();
+		expect(() => assertDispatchModel?.(other)).toThrow(/not an approved model/);
+		expect(initSpy).toHaveBeenCalledWith(expect.objectContaining({ perCallModel: true }));
+	});
+
+	it("leaves ordinary spawns without a dispatch check", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const spy = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValue(createSessionResult(yieldEmittingSession()));
+
+		await runSubprocess({
+			...baseOptions,
+			id: "subagent-ordinary-dispatch",
+			modelOverride: [`${model.provider}/${model.id}`],
+			settings: Settings.isolated(),
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(spy.mock.calls[0]?.[0]?.assertDispatchModel).toBeUndefined();
+	});
+
+	it("starts a per-call worker on its first candidate with working credentials, a plain spawn on its first", async () => {
+		const unauthed = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const authed = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!unauthed || !authed) throw new Error("Expected bundled models to exist");
+		const spy = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockImplementation(async () => createSessionResult(yieldEmittingSession()));
+		const registry = createModelRegistry([unauthed, authed], async model =>
+			model.provider === authed.provider ? "test-key" : undefined,
+		);
+		const settings = Settings.isolated();
+		const modelOverride = [`${unauthed.provider}/${unauthed.id}`, `${authed.provider}/${authed.id}`];
+
+		for (const perCallModelGrants of [{ settings, agentName: baseAgent.name }, undefined]) {
+			await runSubprocess({
+				...baseOptions,
+				id: `subagent-candidate-walk-${perCallModelGrants ? "per-call" : "plain"}`,
+				modelOverride,
+				perCallModelGrants,
+				settings,
+				modelRegistry: registry,
+			});
+		}
+
+		expect(spy.mock.calls.map(call => call[0]?.model?.id)).toEqual([authed.id, unauthed.id]);
+	});
+
 	it("persists an explicit role from a caller model override", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");

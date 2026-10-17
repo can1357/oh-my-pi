@@ -129,6 +129,7 @@ function createTaskSchema(options: {
 	evalToolsEnabled: boolean;
 	structured: boolean;
 	seanceFields: SeanceTaskSchemaFields;
+	perCallModel: boolean;
 }): BaseType {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
 	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
@@ -136,7 +137,8 @@ function createTaskSchema(options: {
 		? { "outputSchema?": outputSchemaInputSchema, "schemaMode?": '"permissive" | "strict"' }
 		: {};
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
-	const seanceFields = options.seanceFields;
+	const modelField = options.perCallModel ? { "model?": "string | string[]" } : {};
+	const seanceFields = { ...modelField, ...options.seanceFields };
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({
@@ -213,17 +215,27 @@ export function getTaskSchema(options: {
 	defaultAgent?: string;
 	/** Advertise historical source/model fields for the bundled seance agent. */
 	seanceFields?: SeanceTaskSchemaFields;
+	/** Advertise the per-call `model` field (`task.perCallModel` not `off`); default off. */
+	perCallModel?: boolean;
 }): TaskToolSchemaInstance {
 	const defaultAgent = options.defaultAgent ?? "task";
 	const effortEnabled = options.effortEnabled ?? false;
 	const evalToolsEnabled = options.evalToolsEnabled ?? true;
 	const structured = options.structured ?? true;
 	const seanceFields = options.seanceFields ?? {};
-	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled && structured && !options.seanceFields) {
+	const perCallModel = options.perCallModel ?? false;
+	if (
+		defaultAgent === "task" &&
+		!effortEnabled &&
+		evalToolsEnabled &&
+		structured &&
+		!options.seanceFields &&
+		!perCallModel
+	) {
 		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
 		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
 	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${structured ? "structured" : "prose"}:${options.seanceFields ? "seance" : "plain"}:${defaultAgent}`;
+	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${structured ? "structured" : "prose"}:${options.seanceFields ? "seance" : "plain"}:${perCallModel ? "model" : "nomodel"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
 	const schema = createTaskSchema({
@@ -233,6 +245,7 @@ export function getTaskSchema(options: {
 		structured,
 		defaultAgent,
 		seanceFields,
+		perCallModel,
 	});
 	taskSchemaCache.set(key, schema);
 	return schema;

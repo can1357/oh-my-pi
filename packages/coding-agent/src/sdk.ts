@@ -605,6 +605,12 @@ export interface CreateAgentSessionOptions {
 	modelPatternFallbackRole?: string;
 	/** Validated default retry chain to install when a deferred singleton pattern resolves. */
 	modelPatternDefaultFallbackChain?: string[];
+	/**
+	 * Called with the model of every main-loop request before it is sent; throw to
+	 * refuse it. Per-call `model` subagents use it so a retry fallback, model
+	 * switch, or extension cannot reach a model the operator did not approve.
+	 */
+	assertDispatchModel?: (model: Model) => void;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
@@ -4479,6 +4485,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getToolContext: tc => toolContextStore.getContext(tc),
 			getApiKey: effectiveGetApiKey,
 			streamFn: (streamModel, context, streamOptions) => {
+				options.assertDispatchModel?.(streamModel);
 				if (notifyFirstChatDispatch) {
 					const cb = notifyFirstChatDispatch;
 					notifyFirstChatDispatch = undefined;

@@ -223,11 +223,59 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
 
 For task dispatch, model precedence is:
 
-1. `task.agentModelOverrides[agentName]`
-2. the agent frontmatter's prioritized `model` list
-3. the parent's active model, then its configured/default model fallback
+1. the call's own `model` (task item / flat call, eval `agent()` / `workpool()`), or a host caller's `hostModel` (SDK, `omp cleanse --model`)
+2. `task.agentModelOverrides[agentName]`
+3. the agent frontmatter's prioritized `model` list
+4. the parent's active model, then its configured/default model fallback
 
-Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
+Role aliases in `hostModel` and steps 2 and 3 are expanded through `modelRoles`, so `@default:high`
+there is `modelRoles.default` at `high`; an agent whose whole frontmatter `model` is a bare
+`@default` (or `*`, or `@task` with no `task` role) uses step 4. In a per-call `model`, `@default`
+(equivalently `*`) names step 4 itself: it resolves to the parent's active model rather than to
+`modelRoles.default`, so a child asked for `@default` runs whatever its parent is running.
+`@default:<level>` also sets the effort; plain `@default` uses the agent's own thinking level.
+
+### Per-call `model`
+
+`task.perCallModel` decides whether the model-facing surfaces accept `model`:
+
+| Value | Behavior |
+| --- | --- |
+| `off` (default) | `model` is hidden from the task schema and prompts. A task call that still passes it has it dropped by the schema and runs on the agent's own model, unless the bundled `seance` is advertised (its own `model` field stays in the schema), in which case the call fails preflight. Eval `agent()`/`workpool()` reject it. |
+| `unpinned` | Accepted only for agents whose own model doesn't change routing: no `task.agentModelOverrides` entry, and a frontmatter `model` that resolves the same as inheriting the parent. The bundled `task` agent (`@task`) counts as unpinned until `modelRoles.task` is set; `scout` (`@smol`) and `reviewer` (`@slow`) are pinned whenever their role resolves to a different model than the parent. |
+| `on` | Accepted for every agent. |
+
+A supplied `model` is one selector or an ordered, non-empty array, and must name a chat model the
+operator already routes to: a chat role's `modelRoles` value, a concrete `retry.fallbackChains` entry,
+the selected agent's frontmatter model or `task.agentModelOverrides` entry, or the parent's live model.
+Catalog membership, credentials, enabled scope, and built-in role defaults are not enough. Role
+aliases, fuzzy IDs, and globs in those grants match the same way as everywhere else, and an
+unconfigured role such as `@smol` borrows `modelRoles.default` as the resolver does. The non-chat
+roles (`image`, `web`, `speech`, `dictation`, `judge`) never grant a per-call model, and a request
+naming one of them, or a model of another kind, fails preflight with that reason.
+
+Two settings narrow those grants:
+
+- `task.perCallModelAllow`: a list of roles or model patterns (for example `["@smol", "@review", "anthropic/*"]`). When set, it replaces the derived grants; a listed role brings its values and its fallback chain. The parent's model counts only if `@default` is listed; with no list it is always allowed.
+- `task.perCallModelFallbacks` decides how concrete `retry.fallbackChains` models count:
+
+| Value | Requestable in `model` | Runtime fallback |
+| --- | --- | --- |
+| `select` (default) | yes | yes |
+| `runtime` | no | yes |
+| `off` | no | no; the subagent fails instead of switching |
+
+A model named directly in `task.perCallModelAllow` is a plain grant regardless of `task.perCallModelFallbacks`.
+
+Preflight rejects the ambiguous literals `default`/`inherit` (use `@default`), blank or comma-only
+selectors, invalid thinking suffixes, and selectors that match no available or no approved model.
+A requested model without working credentials fails rather than running on the parent's model,
+unless the selection includes `@default`. Once the child runs, every main-loop request is checked
+against the same grants, read from current settings, so a retry fallback, prewalk, extension
+replacement, or settings change cannot move it to an unapproved model; disabling the agent revokes
+its own model and override as grants. Cold revival applies the same check, granting the agent's
+frontmatter model only while that agent is still discovered. `hostModel` keeps `model`'s precedence
+but is neither gated nor checked.
 
 After policy resolution, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block the spawn or replace the resolved model patterns; a routing note is carried into progress metadata.
 

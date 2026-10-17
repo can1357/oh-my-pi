@@ -219,7 +219,7 @@ describe("task spawn validation", () => {
 		const text = await executeText({ agent: "scout" });
 		expect(text).toContain("Missing `task`");
 	});
-	it("rejects a model override for an ordinary task after the enabled schema accepts it", async () => {
+	it("rejects a model override for an ordinary task while task.perCallModel is off", async () => {
 		const schema = getTaskSchema({
 			isolationEnabled: false,
 			batchEnabled: false,
@@ -232,6 +232,58 @@ describe("task spawn validation", () => {
 			model: "anthropic/claude-sonnet-4-5",
 		};
 		expect(schema(params) instanceof type.errors).toBe(false);
-		expect(await executeText(params, [bundledSeance])).toContain("`model` is only accepted for the `seance` agent.");
+		const scout = loadBundledAgents().find(agent => agent.name === "scout")!;
+		expect(await executeText(params, [bundledSeance, scout])).toContain("task.perCallModel: off");
+	});
+
+	it("leaves a bundled seance's own `model` to seance resolution instead of the per-call selector rules", async () => {
+		// A catalog id such as `cursor/default` can be selected as bare `default` for seance, as on main.
+		const text = await executeText(
+			{
+				agent: "seance",
+				task: "Read historical context.",
+				solutionSpace: "focused read-only inspection",
+				sourceSession: "/missing/source.jsonl",
+				model: "default",
+			},
+			[bundledSeance],
+		);
+		expect(text).not.toContain("ambiguous `model`");
+		expect(text).toContain("selected session file was not found");
+	});
+});
+
+describe("per-call model schema boundaries", () => {
+	for (const isolationEnabled of [false, true]) {
+		for (const effortEnabled of [false, true]) {
+			it(`drops a batch-container model instead of advertising it (isolation=${isolationEnabled}, effort=${effortEnabled})`, () => {
+				const schema = getTaskSchema({ isolationEnabled, effortEnabled, batchEnabled: true, perCallModel: true });
+				const result = schema({
+					context: "Shared context",
+					model: "p/requested",
+					tasks: [{ task: "Do work", solutionSpace: "c" }],
+				});
+				// `never` would serialize to `{not:{}}`, which Cloud Code Assist rejects; items carry `model`.
+				expect(result instanceof type.errors).toBe(false);
+				if (!(result instanceof type.errors)) expect(result).not.toHaveProperty("model");
+			});
+		}
+	}
+
+	it("accepts ordered model arrays on both flat calls and batch items", () => {
+		const models = ["p/preferred:high", "p/alternative"];
+		const flat = getTaskSchema({ isolationEnabled: false, batchEnabled: false, perCallModel: true })({
+			task: "Do work",
+			solutionSpace: "c",
+			model: models,
+		});
+		expect(flat instanceof type.errors).toBe(false);
+		if (flat instanceof type.errors) throw new Error(flat.summary);
+		expect(flat).toHaveProperty("model", models);
+		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true, perCallModel: true })({
+			context: "Shared context",
+			tasks: [{ task: "Do work", solutionSpace: "c", model: models }],
+		});
+		expect(batch instanceof type.errors).toBe(false);
 	});
 });

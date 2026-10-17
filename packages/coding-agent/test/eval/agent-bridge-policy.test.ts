@@ -91,6 +91,7 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 			"async.enabled": false,
 			"task.isolation.enabled": false,
 			"task.enableLsp": true,
+			"task.perCallModel": "on",
 		});
 	const artifactsDir = options.artifactsDir ?? null;
 	const asyncJobManager = new AsyncJobManager({});
@@ -344,19 +345,40 @@ describe("runEvalAgent", () => {
 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
 	});
 
-	it("drops a per-call model argument on agent() (removed, issue #6438)", async () => {
+	it("routes a per-call model on agent() above the selected agent's own model", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
-		// The schema strips unknown keys; a legacy `model` argument is silently
-		// discarded so resolution is identical to omitting it — the agent's own
-		// frontmatter model applies (issue #6438).
-		await runEvalAgentAndWait({ prompt: "work", model: "default" }, { session: makeSession() });
-		await runEvalAgentAndWait({ prompt: "work" }, { session: makeSession() });
+		await runEvalAgentAndWait(
+			{ prompt: "work", agent: "reviewer", model: "p/requested:high" },
+			{ session: makeSession() },
+		);
 
-		const withModel = runSpy.mock.calls[0]?.[0];
-		const withoutModel = runSpy.mock.calls[1]?.[0];
-		expect(withModel?.modelOverride).toEqual(withoutModel?.modelOverride);
+		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/requested:high"]);
+	});
+
+	it("rejects a per-call model on agent() while task.perCallModel is off", async () => {
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false });
+
+		await expect(
+			runEvalAgent({ prompt: "work", agent: "reviewer", model: "@smol" }, { session: makeSession({ settings }) }),
+		).rejects.toThrow(/task\.perCallModel: off/);
+		expect(runSpy).not.toHaveBeenCalled();
+	});
+
+	it("rejects an ambiguous or blank per-call model on agent() before dispatch", async () => {
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+
+		await expect(runEvalAgent({ prompt: "work", model: "default" }, { session: makeSession() })).rejects.toThrow(
+			/"@default"/,
+		);
+		await expect(runEvalAgent({ prompt: "work", model: "   " }, { session: makeSession() })).rejects.toThrow(
+			/invalid `model`/,
+		);
+		expect(runSpy).not.toHaveBeenCalled();
 	});
 	it("returns host-parsed data for caller, agent, and inherited schemas", async () => {
 		const agentSchema = { type: "object" };
@@ -1538,5 +1560,24 @@ describe("runEvalAgent isolation", () => {
 			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),
 		);
 		expect(removedArtifactsDir).toBe(false);
+	});
+});
+
+describe("agent model arrays", () => {
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		AgentRegistry.resetGlobalForTests();
+		resetRegisteredArtifactDirsForTests();
+		await Promise.all([...jobManagers].map(manager => manager.dispose()));
+		jobManagers.clear();
+	});
+	it("routes an ordered model array without substituting the agent definition", async () => {
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		await runEvalAgentAndWait(
+			{ prompt: "work", agent: "reviewer", model: ["p/preferred:high", "p/alternative"] },
+			{ session: makeSession() },
+		);
+		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/preferred:high", "p/alternative"]);
 	});
 });

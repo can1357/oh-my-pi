@@ -3527,6 +3527,7 @@ export class SessionManager {
 		agent?: string;
 		modelRole?: string;
 		resolvedModel?: string;
+		perCallModel?: boolean;
 		retryFallback?: RetryFallbackRole;
 		readOnly?: boolean;
 		outputSchema?: unknown;
@@ -4494,6 +4495,7 @@ export interface PersistedSessionInit {
 	agent?: string;
 	modelRole?: string;
 	resolvedModel?: string;
+	perCallModel?: boolean;
 	retryFallback?: RetryFallbackRole;
 	readOnly?: boolean;
 	outputSchema?: unknown;
@@ -4522,6 +4524,7 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			agent: entry.agent,
 			modelRole: entry.modelRole,
 			resolvedModel: entry.resolvedModel,
+			...(entry.perCallModel ? { perCallModel: true } : undefined),
 			retryFallback: entry.retryFallback,
 			readOnly: entry.readOnly,
 			outputSchema: entry.outputSchema,
