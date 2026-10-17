@@ -76,6 +76,11 @@ export interface SessionToolsHost {
 	agentKind(): "main" | "sub";
 	isDisposed(): boolean;
 	isStreaming(): boolean;
+	/**
+	 * Aborts once per user steering-message arrival; the ACP permission gate
+	 * races it against its elicit so a steer supersedes an open dialog.
+	 */
+	steeringArrivalSignal(): AbortSignal;
 	queuedMessageCount(): number;
 	planModeEnabled(): boolean;
 	model(): Model | undefined;
@@ -953,10 +958,40 @@ export class SessionTools {
 					}
 					type PermissionRaceResult =
 						| { kind: "permission"; outcome: ClientBridgePermissionOutcome }
-						| { kind: "aborted" };
+						| { kind: "aborted" }
+						| { kind: "steered" };
 					const { promise: abortPromise, resolve: resolveAbort } = Promise.withResolvers<PermissionRaceResult>();
 					const onAbort = () => resolveAbort({ kind: "aborted" });
 					signal?.addEventListener("abort", onAbort, { once: true });
+					// A user steer queued while this elicit is open must supersede
+					// the dialog instead of waiting behind it: the agent loop's
+					// boundary poll cannot run until the elicit returns, so the
+					// gate itself ends the wait. The message rides the session's
+					// native steering queue and injects at the next batch
+					// boundary; the tool call then surfaces as a cancelled
+					// permission (a normal tool error), so the loop continues.
+					const steeringArrival = this.#host.steeringArrivalSignal();
+					// The message that supersedes this dialog delivers at the
+					// next batch boundary ahead of older queued steers, so the
+					// agent reads the question that stopped the call first —
+					// the same "denying steer first" semantics as the TUI
+					// approval dialog (agent.prioritizeSteering, #15642).
+					// Identity-based promotion: text matching could hit an
+					// older equal-looking steer instead.
+					const steeringBaseline = new Set(this.#host.agent.peekSteeringQueue());
+					const { promise: steerPromise, resolve: resolveSteer } = Promise.withResolvers<PermissionRaceResult>();
+					const onSteer = () => {
+						const added = this.#host.agent.peekSteeringQueue().filter(message => !steeringBaseline.has(message));
+						if (added.length > 0) {
+							this.#host.agent.prioritizeSteering(added);
+						}
+						resolveSteer({ kind: "steered" });
+					};
+					if (steeringArrival.aborted) {
+						onSteer();
+					} else {
+						steeringArrival.addEventListener("abort", onSteer, { once: true });
+					}
 					let raced: PermissionRaceResult;
 					try {
 						raced = await this.#host.waitForUser(() => {
@@ -977,11 +1012,18 @@ export class SessionTools {
 								},
 								PERMISSION_OPTIONS,
 								signal,
+								// The bridge cancels its pending wire dialog when the steer wins;
+								// the gate's own race above classifies the outcome either way.
+								steeringArrival,
 							).then(outcome => ({ kind: "permission" as const, outcome }));
-							return Promise.race([permissionPromise, abortPromise]);
+							return Promise.race([permissionPromise, abortPromise, steerPromise]);
 						});
 					} finally {
 						signal?.removeEventListener("abort", onAbort);
+						steeringArrival.removeEventListener("abort", onSteer);
+					}
+					if (raced.kind === "steered") {
+						throw new ToolAbortError("Permission request superseded by user steering");
 					}
 					if (raced.kind === "aborted" || signal?.aborted) {
 						throw new ToolAbortError("Permission request cancelled");

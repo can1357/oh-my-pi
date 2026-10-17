@@ -151,6 +151,43 @@ export class RpcConnection {
 		return deferred.promise as Promise<Response>;
 	}
 
+	/**
+	 * Sends a JSON-RPC request whose pending entry can be cancelled locally:
+	 * `cancel()` rejects the promise with a request-cancelled error, notifies
+	 * the peer via `$/cancel_request`, and drops the pending entry so a late
+	 * response is ignored. Used for agent→client requests a mid-turn event can
+	 * supersede (e.g. a permission elicit cancelled when user steering arrives).
+	 */
+	requestCancellable<Response>(
+		method: string,
+		params?: unknown,
+	): {
+		promise: Promise<Response>;
+		cancel(): void;
+	} {
+		if (this.signal.aborted) {
+			return {
+				promise: Promise.reject(new Error("Connection closed")),
+				cancel: () => {},
+			};
+		}
+		const id = this.#nextId++;
+		const deferred = Promise.withResolvers<unknown>();
+		this.#pending.set(id, deferred);
+		void this.#write({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) }).catch(error => {
+			this.#pending.delete(id);
+			deferred.reject(error);
+		});
+		return {
+			promise: deferred.promise as Promise<Response>,
+			cancel: () => {
+				if (!this.#pending.delete(id)) return;
+				deferred.reject(RequestError.requestCancelled({ id, method }));
+				void this.notify("$/cancel_request", { id }).catch(() => undefined);
+			},
+		};
+	}
+
 	/** Sends a JSON-RPC notification. */
 	async notify(method: string, params?: unknown): Promise<void> {
 		await this.#write({ jsonrpc: "2.0", method, ...(params === undefined ? {} : { params }) });
