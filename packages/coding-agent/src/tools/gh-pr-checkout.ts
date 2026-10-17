@@ -32,7 +32,7 @@ import { invalidateAllForNumber } from "./github-cache";
 import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
-import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
+import { cfgIsolationBackend, cfgWorktreeClone, cfgWorktreeCloneExclude } from "../task/settings";
 
 export const GH_REPO_CLONE_FIELDS = ["nameWithOwner", "sshUrl", "url"];
 export const GH_PR_CHECKOUT_FIELDS = [
@@ -500,6 +500,7 @@ export async function checkoutPullRequest(
 						detach: false,
 						clone: cfgWorktreeClone.get(session.settings),
 						backend: parseIsolationBackend(cfgIsolationBackend.get(session.settings)),
+						exclude: cfgWorktreeCloneExclude.get(session.settings),
 					},
 					signal,
 				);

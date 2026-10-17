@@ -83,7 +83,32 @@ export const cfgWorktreeClone = register({
 		group: "Isolation",
 		label: "Clone Checkout into Worktrees",
 		description:
-			"New worktrees from `github pr_checkout` and `git worktree add` in bash start as a copy-on-write clone of the current checkout so ignored build artifacts (node_modules, target) carry over; falls back to a plain checkout when the filesystem cannot clone",
+			"New worktrees from `github pr_checkout` and `git worktree add` in bash start as a copy-on-write clone of the current checkout so ignored build artifacts (node_modules, target) carry over; files matching worktree.cloneExclude (secret-shaped files like .env and *.pem by default) are not carried over; falls back to a plain checkout when the filesystem cannot clone",
+	},
+});
+
+const DEFAULT_WORKTREE_CLONE_EXCLUDE = [
+	".env*",
+	"*.pem",
+	"*.p12",
+	"*.jks",
+	"*.keystore",
+	"key.properties",
+	"*.mobileprovision",
+];
+
+export const cfgWorktreeCloneExclude = register({
+	id: "worktree.cloneExclude",
+	protocolDefault: ["rpc", "acp"],
+	type: "array",
+	default: DEFAULT_WORKTREE_CLONE_EXCLUDE,
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "Worktree Clone Exclusions",
+		editor: "json",
+		description:
+			"Glob patterns for files the copy-on-write worktree clone must not carry into new worktrees. Patterns without a / match the file name at any depth (.env* also covers apps/web/.env.production); patterns with a / match the whole path relative to the worktree root. Tracked files are never excluded. Set to [] to clone everything, as before. Applies to worktrees created through omp; git worktree add handled by the shell builtin instead reads PI_WORKTREE_CLONE_EXCLUDE (comma-separated, unset selects these defaults).",
 	},
 });
 

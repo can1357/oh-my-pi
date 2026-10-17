@@ -18,7 +18,12 @@ import type { Settings } from "../config/settings";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { resolveAvailableWorktreePath } from "../tools/gh-pr-checkout";
 
-import { cfgIsolationBackend, cfgWorktreeCleanSource, cfgWorktreeClone } from "../task/settings";
+import {
+	cfgIsolationBackend,
+	cfgWorktreeCleanSource,
+	cfgWorktreeClone,
+	cfgWorktreeCloneExclude,
+} from "../task/settings";
 
 export interface SessionWorktree {
 	/** Absolute, realpath'd worktree root. */
@@ -152,6 +157,7 @@ export async function createSessionWorktree(
 		clone: cfgWorktreeClone.get(settings),
 		backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
 		keepChanges,
+		exclude: cfgWorktreeCloneExclude.get(settings),
 	});
 	return {
 		path: await fs.realpath(worktreePath),

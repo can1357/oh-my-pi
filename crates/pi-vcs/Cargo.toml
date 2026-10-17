@@ -14,6 +14,7 @@ workspace = true
 futures.workspace = true
 gix.workspace = true
 gix-utils = { version = "0.3.6", default-features = false }
+globset.workspace = true
 jj-lib.workspace = true
 pi-iso.workspace = true
 thiserror.workspace = true

@@ -132,6 +132,11 @@ pub struct VcsWorktreeAddOptions {
 	/// Carry the source checkout's uncommitted changes into the new worktree
 	/// (target must be the source `HEAD`).
 	pub keep_changes: Option<bool>,
+	/// Glob patterns for files the copy-on-write clone must not carry into
+	/// the new worktree. `None` selects the default secret-shaped excludes;
+	/// pass an empty list to clone everything. Tracked files are never
+	/// excluded, whatever the patterns say.
+	pub exclude:      Option<Vec<String>>,
 }
 /// Worktree creation outcome.
 #[napi(object)]
@@ -895,6 +900,7 @@ impl VcsGitRepo {
 				detach: options.detach,
 				clone,
 				keep_changes: options.keep_changes.unwrap_or(false),
+				clone_exclude: options.exclude,
 			})
 			.map(|result| VcsWorktreeAddResult {
 				cloned_with: result.cloned_with.map(to_napi_kind),

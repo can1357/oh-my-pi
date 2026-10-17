@@ -118,8 +118,25 @@ pub enum WorktreeClone {
 	Prefer(pi_iso::BackendKind),
 }
 
+/// Default `clone_exclude` globs: secret-shaped files the copy-on-write
+/// clone must not duplicate into a new worktree.
+///
+/// Patterns without a `/` match the
+/// file name at any depth, so `.env*` also covers `apps/web/.env.production`;
+/// patterns with a `/` match the whole `/`-separated path relative to the
+/// worktree root.
+pub const DEFAULT_CLONE_EXCLUDES: &[&str] = &[
+	".env*",
+	"*.pem",
+	"*.p12",
+	"*.jks",
+	"*.keystore",
+	"key.properties",
+	"*.mobileprovision",
+];
+
 /// Options for linked-worktree creation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeAddOptions {
 	pub detach:       bool,
 	pub clone:        WorktreeClone,
@@ -127,6 +144,11 @@ pub struct WorktreeAddOptions {
 	/// into the new worktree instead of starting from a clean tree. Requires
 	/// the target ref to resolve to the source `HEAD` commit.
 	pub keep_changes: bool,
+	/// Glob patterns for files the copy-on-write clone must not carry into
+	/// the new worktree. `None` selects [`DEFAULT_CLONE_EXCLUDES`]; pass an
+	/// empty list to keep the historical behavior of cloning everything.
+	/// Tracked files are never excluded, whatever the patterns say.
+	pub clone_exclude: Option<Vec<String>>,
 }
 
 /// Outcome of linked-worktree creation.

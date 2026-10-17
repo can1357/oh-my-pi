@@ -18,6 +18,7 @@ pub mod error;
 pub mod git;
 pub mod jj;
 pub mod types;
+pub(crate) mod clone_exclude;
 
 use std::{
 	path::{Path, PathBuf},

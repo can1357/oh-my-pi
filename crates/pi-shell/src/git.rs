@@ -8,6 +8,14 @@
 //! - `PI_GIT_GUARD`: commands that discard or move work in a shared checkout
 //!   are refused before git runs; see [`guard`].
 //!
+//! - `PI_WORKTREE_CLONE_EXCLUDE`: comma-separated glob patterns for files the
+//!   clone-first `git worktree add` must not carry into the new worktree.
+//!   Unset selects the default secret-shaped excludes; empty disables
+//!   exclusion entirely. Read from the shell's own environment, so
+//!   `export PI_WORKTREE_CLONE_EXCLUDE=…` in the session and temporary
+//!   `PI_WORKTREE_CLONE_EXCLUDE=… git worktree add` assignments both take
+//!   effect — not only what the process inherited at startup.
+//!
 //! `git worktree add` checks out every file of the target commit. pi-vcs
 //! instead copy-on-write clones the source checkout (APFS `clonefile`, Linux
 //! reflinks, Windows block cloning), registers the worktree metadata, and
@@ -29,13 +37,14 @@
 mod guard;
 
 use std::{
+	collections::HashMap,
 	io::{self, Write as _},
 	path::{Path, PathBuf},
 };
 
 use brush_core::{
 	CommandArg, Error, ErrorKind, ExecutionContext, ExecutionParameters, ExecutionResult, Shell,
-	ShellExtensions,
+	ShellExtensions, ShellValue,
 	builtins::{self, Registration},
 	commands::{ShellForCommand, SimpleCommand},
 	openfiles::OpenFiles,
@@ -125,12 +134,17 @@ impl<const SMART_WORKTREE: bool, const GUARD: bool> builtins::Command
 			{
 				let cwd = context.shell.working_dir().to_owned();
 				let filesystem = context.shell.filesystem().clone();
+				// The clone-exclude override lives in the shell's environment,
+				// so it is resolved here — before the blocking clone work —
+				// rather than from the process environment inside it.
+				let clone_exclude = clone_exclude_from_shell_env(context.shell);
 				// Planning and cloning are synchronous filesystem work. They are
 				// not abandoned on cancellation: a half-registered
 				// worktree is worse than a late one.
-				let outcome = tokio::task::spawn_blocking(move || request.create(&cwd, &filesystem))
-					.await
-					.map_err(|err| Error::from(ErrorKind::ThreadingError(err)))?;
+				let outcome =
+					tokio::task::spawn_blocking(move || request.create(&cwd, &filesystem, clone_exclude))
+						.await
+						.map_err(|err| Error::from(ErrorKind::ThreadingError(err)))?;
 				match outcome {
 					Outcome::External => {},
 					Outcome::Failed(message) => {
@@ -274,8 +288,8 @@ impl AddRequest {
 	}
 
 	/// Creates the worktree in-process, or reports that git must.
-	fn create(self, cwd: &Path, filesystem: &Fs) -> Outcome {
-		let Ok(Some(plan)) = self.plan(cwd, filesystem) else {
+	fn create(self, cwd: &Path, filesystem: &Fs, clone_exclude: Option<Vec<String>>) -> Outcome {
+		let Ok(Some(plan)) = self.plan(cwd, filesystem, clone_exclude) else {
 			return Outcome::External;
 		};
 		// A failed branch update changes nothing, so git can report the refusal
@@ -295,7 +309,12 @@ impl AddRequest {
 	}
 
 	/// Decides how pi-vcs reproduces this request; `None` hands it to git.
-	fn plan(self, cwd: &Path, filesystem: &Fs) -> pi_vcs::Result<Option<Plan>> {
+	fn plan(
+		self,
+		cwd: &Path,
+		filesystem: &Fs,
+		clone_exclude: Option<Vec<String>>,
+	) -> pi_vcs::Result<Option<Plan>> {
 		// `-` and `@{…}` name branches through reflogs, which git expands itself.
 		if self.track == Some(true)
 			|| self
@@ -425,6 +444,7 @@ impl AddRequest {
 			preparing,
 			lock: self.lock,
 			quiet: self.quiet,
+			clone_exclude,
 		}))
 	}
 }
@@ -451,6 +471,36 @@ fn long_option(spelled: &str) -> Option<(&'static str, bool)> {
 		spellings().filter(|(name, ..)| !spelled.is_empty() && name.starts_with(spelled));
 	let (_, option, negated) = prefixed.next()?;
 	prefixed.next().is_none().then_some((option, negated))
+}
+
+/// Reads `PI_WORKTREE_CLONE_EXCLUDE` from the shell's own environment for the
+/// clone-first `git worktree add` path: unset selects the default
+/// secret-shaped excludes, empty disables exclusion, otherwise a
+/// comma-separated list of glob patterns.
+///
+/// The shell's environment is read, not the process's: a value exported or
+/// assigned inside the session (`export PI_WORKTREE_CLONE_EXCLUDE=…`, or the
+/// temporary `PI_WORKTREE_CLONE_EXCLUDE=… git worktree add` assignment) takes
+/// effect, while `std::env::var` would only see what the shell inherited at
+/// startup. Reading it here (before the blocking clone work) also keeps the
+/// read off the `spawn_blocking` thread.
+fn clone_exclude_from_shell_env<SE: ShellExtensions>(shell: &Shell<SE>) -> Option<Vec<String>> {
+	let value = match shell.env().get("PI_WORKTREE_CLONE_EXCLUDE")?.1.value() {
+		ShellValue::String(value) => value,
+		// Arrays and unset values carry no comma-separated list: fall back
+		// to the defaults rather than guessing at an expansion.
+		_ => return None,
+	};
+	if value.trim().is_empty() {
+		return Some(Vec::new());
+	}
+	Some(
+		value
+			.split(',')
+			.map(|pattern| pattern.trim().to_string())
+			.filter(|pattern| !pattern.is_empty())
+			.collect(),
+	)
 }
 
 /// What the builtin did with a `worktree add` request.
@@ -480,6 +530,10 @@ struct Plan {
 	preparing: Preparing,
 	lock:      Option<String>,
 	quiet:     bool,
+	/// `PI_WORKTREE_CLONE_EXCLUDE` resolved from the shell's environment:
+	/// `None` selects the default secret-shaped excludes, an empty list
+	/// disables exclusion entirely.
+	clone_exclude: Option<Vec<String>>,
 }
 
 impl Plan {
@@ -488,9 +542,10 @@ impl Plan {
 		self
 			.repo
 			.worktree_add(&self.path, &self.target, WorktreeAddOptions {
-				detach:       self.detach,
-				clone:        WorktreeClone::Auto,
-				keep_changes: false,
+				detach:        self.detach,
+				clone:         WorktreeClone::Auto,
+				keep_changes:  false,
+				clone_exclude: self.clone_exclude,
 			})?;
 		let linked = GitRepo::require(&self.path)?;
 		if let Some(reason) = &self.lock {
@@ -838,13 +893,30 @@ mod tests {
 		command: &str,
 		layers: &[&str],
 	) -> (Option<i32>, String) {
+		run_with_env(repo, command, layers, &[]).await
+	}
+
+	/// Like [`run_with`], with extra session environment variables merged in.
+	/// Session env (not the process env) is how the builtin under test reads
+	/// `PI_WORKTREE_CLONE_EXCLUDE`: this keeps the override testable in a
+	/// multithreaded suite without racing other tests' process environment.
+	#[cfg(unix)]
+	pub(super) async fn run_with_env(
+		repo: &Path,
+		command: &str,
+		layers: &[&str],
+		extra_env: &[(&str, &str)],
+	) -> (Option<i32>, String) {
 		let (tx, rx) = flume::unbounded::<String>();
-		let flags = ["PI_SMART_GIT", "PI_GIT_GUARD"]
-			.map(|name| (name.to_owned(), if layers.contains(&name) { "1" } else { "0" }.to_owned()));
+		let mut env: HashMap<String, String> = ["PI_SMART_GIT", "PI_GIT_GUARD"]
+			.into_iter()
+			.map(|name| (name.to_owned(), if layers.contains(&name) { "1" } else { "0" }.to_owned()))
+			.collect();
+		env.extend(extra_env.iter().map(|(name, value)| ((*name).to_owned(), (*value).to_owned())));
 		let options = crate::ShellExecuteOptions {
 			command: format!("unset -v \"${{!GIT_CONFIG@}}\"; {command}"),
 			cwd: Some(repo.to_string_lossy().into_owned()),
-			session_env: Some(flags.into()),
+			session_env: Some(env),
 			..Default::default()
 		};
 		let result = crate::execute_shell(options, Some(tx), crate::cancel::CancelToken::default())
@@ -913,6 +985,120 @@ mod tests {
 			.expect("post-checkout ran");
 		assert_eq!(hook_log.trim(), format!("{} {head} 1 {}", "0".repeat(head.len()), wt.display()));
 		assert_cloned(&wt);
+	}
+
+	/// Clone-first `git worktree add` through the shell must not duplicate
+	/// secret-shaped files into the new worktree, while ignored build caches
+	/// still carry over and tracked files matching an exclude pattern survive.
+	/// Regression test for <https://github.com/can1357/oh-my-pi/issues/15476>.
+	///
+	/// Needs a copy-on-write-capable filesystem for the temp dir (APFS on
+	/// macOS; on Linux a reflink-capable `TMPDIR` such as btrfs) — otherwise
+	/// the clone falls back to a plain checkout and there is no clone-first
+	/// path to assert on.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn worktree_add_clone_prunes_secrets() {
+		let (_temp, repo) = fixture();
+		std::fs::write(repo.join(".gitignore"), "cache/\n**/.env*\n").expect("write gitignore");
+		std::fs::write(repo.join(".env"), "SECRET=1\n").expect("write .env");
+		std::fs::create_dir_all(repo.join("apps/web")).expect("create apps/web");
+		std::fs::write(repo.join("apps/web/.env.production"), "SECRET=2\n").expect("write nested secret");
+		std::fs::write(repo.join(".env.example"), "EXAMPLE=1\n").expect("write .env.example");
+		git(&repo, &["add", "-f", ".env.example"]);
+		git(&repo, &["commit", "-q", "-m", "track .env.example"]);
+
+		let (code, output) = run(&repo, "git worktree add ../wt-secrets").await;
+		assert_eq!(code, Some(0), "{output}");
+		let wt = repo.parent().expect("parent").join("wt-secrets");
+		if !wt.join("cache/blob").exists() {
+			eprintln!(
+				"SKIP: no working clone backend for the temp dir; clone fell back to plain checkout"
+			);
+			return;
+		}
+		// The clone path ran: ignored build cache carried over...
+		assert_eq!(
+			std::fs::read_to_string(wt.join("cache/blob")).expect("cloned cache"),
+			"warm"
+		);
+		// ...but secret-shaped files were pruned from the fresh clone.
+		assert!(!wt.join(".env").exists(), "clone must not copy .env");
+		assert!(
+			!wt.join("apps/web/.env.production").exists(),
+			"clone must not copy nested secrets"
+		);
+		// Tracked files matching an exclude pattern are never pruned.
+		assert!(wt.join(".env.example").exists(), "tracked exclude matches must survive");
+		assert_eq!(git(&wt, &["status", "--porcelain"]), "");
+	}
+
+	/// `PI_WORKTREE_CLONE_EXCLUDE` is read from the shell's environment, not
+	/// the process's: a session-scoped value replaces the defaults for the
+	/// clone-first `git worktree add` path. The test process's own
+	/// environment never carries the variable, so passing through it would
+	/// leave the defaults in place and this test would fail.
+	///
+	/// Needs a copy-on-write-capable filesystem for the temp dir (APFS on
+	/// macOS; on Linux a reflink-capable `TMPDIR` such as btrfs) — otherwise
+	/// the clone falls back to a plain checkout and there is no clone-first
+	/// path to assert on.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn worktree_add_clone_exclude_honors_shell_env() {
+		let (_temp, repo) = fixture();
+		std::fs::write(repo.join(".gitignore"), "cache/\n**/.env*\n").expect("write gitignore");
+		std::fs::write(repo.join(".env"), "SECRET=1\n").expect("write .env");
+		std::fs::write(repo.join(".env.custom"), "SECRET=2\n").expect("write .env.custom");
+
+		let (code, output) = run_with_env(
+			&repo,
+			"git worktree add ../wt-shell-env",
+			&["PI_SMART_GIT"],
+			&[("PI_WORKTREE_CLONE_EXCLUDE", ".env.custom")],
+		)
+		.await;
+		assert_eq!(code, Some(0), "{output}");
+		let wt = repo.parent().expect("parent").join("wt-shell-env");
+		if !wt.join("cache/blob").exists() {
+			eprintln!(
+				"SKIP: no working clone backend for the temp dir; clone fell back to plain checkout"
+			);
+			return;
+		}
+		// The override replaced the defaults: the session-scoped pattern was
+		// pruned...
+		assert!(!wt.join(".env.custom").exists(), "shell-env pattern must be pruned");
+		// ...while the default-pattern `.env` was kept.
+		assert!(wt.join(".env").exists(), "default excludes must not apply under an override");
+	}
+
+	/// An empty `PI_WORKTREE_CLONE_EXCLUDE` in the shell's environment
+	/// disables exclusion entirely: the historical "clone everything"
+	/// behavior, asserted through the shell path.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn worktree_add_clone_exclude_empty_disables_prune() {
+		let (_temp, repo) = fixture();
+		std::fs::write(repo.join(".gitignore"), "cache/\n**/.env*\n").expect("write gitignore");
+		std::fs::write(repo.join(".env"), "SECRET=1\n").expect("write .env");
+
+		let (code, output) = run_with_env(
+			&repo,
+			"git worktree add ../wt-shell-env-empty",
+			&["PI_SMART_GIT"],
+			&[("PI_WORKTREE_CLONE_EXCLUDE", "")],
+		)
+		.await;
+		assert_eq!(code, Some(0), "{output}");
+		let wt = repo.parent().expect("parent").join("wt-shell-env-empty");
+		if !wt.join("cache/blob").exists() {
+			eprintln!(
+				"SKIP: no working clone backend for the temp dir; clone fell back to plain checkout"
+			);
+			return;
+		}
+		assert!(wt.join(".env").exists(), "empty override disables pruning");
 	}
 
 	/// Detaching at a tag, checking out an existing branch, resetting one with

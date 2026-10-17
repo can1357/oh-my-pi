@@ -3847,6 +3847,13 @@ export interface VcsWorktreeAddOptions {
    * (target must be the source `HEAD`).
    */
   keepChanges?: boolean
+  /**
+   * Glob patterns for files the copy-on-write clone must not carry into
+   * the new worktree. `undefined` selects the default secret-shaped excludes;
+   * pass an empty list to clone everything. Tracked files are never
+   * excluded, whatever the patterns say.
+   */
+  exclude?: Array<string>
 }
 
 /** Worktree creation outcome. */
