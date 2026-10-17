@@ -3602,21 +3602,60 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (!visible) this.ui.clearInlineImages();
 			this.ui.requestRender(true);
 		}
-		const hideThinkingBlock = cfgHideThinkingBlock.get(this.settings);
-		if (any("hideThinkingBlock") && hideThinkingBlock !== this.hideThinkingBlock) {
-			this.hideThinkingBlock = hideThinkingBlock;
-			for (const child of this.chatContainer.children) {
-				if (child instanceof AssistantMessageComponent) child.setHideThinkingBlock(this.effectiveHideThinkingBlock);
-			}
-			this.ui.requestRender(true);
-		}
+		// proseOnlyThinking runs first: the reveal resync below spends its count
+		// from the target with the cached prose mode, and an on-disk or
+		// programmatic bulk update that both shows thinking and flips prose mode
+		// would otherwise format the newly shown block under the old mode and tag
+		// it with `rawThinking`, which resolveThinkingDisplay treats as already
+		// formatted — the component setter and display reset then leave the trace
+		// in the previous mode.
 		const proseOnlyThinking = cfgProseOnlyThinking.get(this.settings);
 		if (any("proseOnlyThinking") && proseOnlyThinking !== this.proseOnlyThinking) {
 			this.proseOnlyThinking = proseOnlyThinking;
 			for (const child of this.chatContainer.children) {
 				if (child instanceof AssistantMessageComponent) child.setProseOnlyThinking(proseOnlyThinking);
 			}
-			this.ui.requestRender(true);
+			// Reset the stable ledger BEFORE the paired display reset below. It is
+			// unconditional on the live stream: #handleMessageEnd clears both
+			// streaming fields the moment the turn ends, while the finalized
+			// assistant entry stays in the transcript — still carrying the stable
+			// rows its append-only thinking head published — until it retires. A
+			// toggle in that window would replay the entry under the new prose
+			// mode while slicing it by the old prefix height, so a raw-to-prose
+			// shrink cuts past the answer and retirement omits it permanently.
+			this.chatContainer.resetStableEmission();
+			if (this.streamingComponent && this.streamingMessage) {
+				this.#eventController.resyncStreamingRevealVisibility();
+			}
+			// Gated on the value above, not on the key being present: a bulk reload
+			// that carries proseOnlyThinking with an unchanged value reached this
+			// line alone, so ui.resetDisplay() cleared and replayed the whole
+			// terminal for a change nothing observes while the ledger it depends on
+			// was never reset — the same stall the hideThinkingBlock guard fixes.
+			resetDisplay = true;
+		}
+		const hideThinkingBlock = cfgHideThinkingBlock.get(this.settings);
+		if (any("hideThinkingBlock") && hideThinkingBlock !== this.hideThinkingBlock) {
+			// The raw preference can flip without changing what any block renders:
+			// while thinking is off and the session has produced no displayable
+			// reasoning, the effective value stays hidden either way. Persist the
+			// preference, then compare the effective values around it — propagating a
+			// flip that leaves visibility alone would forget the stable-emission
+			// ledger and clear/replay the whole terminal for a change nothing
+			// observes, stalling a long transcript on every settings reload.
+			const effectiveHideThinkingBlock = this.effectiveHideThinkingBlock;
+			this.hideThinkingBlock = hideThinkingBlock;
+			if (this.effectiveHideThinkingBlock !== effectiveHideThinkingBlock) {
+				// Same propagation as the Ctrl+T keybinding: children + live streaming
+				// component + reveal resync, then forget the stable-emission ledger and
+				// rebuild retired history. Skipping the ledger reset here slices the
+				// shorter render by the stale emitted-row count — the assistant's
+				// answer vanishes from the live block AND is never written to scrollback
+				// on retirement (#10177). The batch owns the one display reset below, so
+				// a bulk reload that also rebuilds the transcript does not replay twice.
+				this.#inputController.applyThinkingBlockVisibility(hideThinkingBlock, { deferDisplayReset: true });
+				resetDisplay = true;
+			}
 		}
 		const expandThinkingBlocks = cfgExpandThinkingBlocks.get(this.settings);
 		if (any("expandThinkingBlocks") && expandThinkingBlocks !== this.expandThinkingBlocks) {

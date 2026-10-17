@@ -1007,6 +1007,8 @@ export class TUI extends Container {
 	// requestRender(true)) that must rewrite the viewport even when the diff
 	// believes nothing changed.
 	#forceViewportRepaintOnNextRender = false;
+	/** A destructive reset requested while stopped; `start()` performs it on frame one. */
+	#pendingDisplayReset = false;
 	#hasEverRendered = false;
 	#stopped = false;
 	#appearanceReportUnsubscribe: (() => void) | undefined;
@@ -1659,6 +1661,15 @@ export class TUI extends Container {
 				this.#nativeHoldTimer = undefined;
 				if (!this.#stopped && !this.#nativeLive) this.requestRender(true);
 			}, TUI.#NATIVE_PROBE_HOLD_MS);
+		}
+		// A destructive reset latched while stopped (a bulk visibility change made
+		// behind the editor's back) now runs on frame one: it clears native
+		// scrollback and re-renders the rows the gesture forgot, so they are
+		// rewritten under the new visibility instead of surviving until a later
+		// retirement writes them again.
+		if (this.#pendingDisplayReset) {
+			this.#pendingDisplayReset = false;
+			this.resetDisplay();
 		}
 		this.requestRender(true, { clearScrollback: options?.clearScrollback === true });
 	}
@@ -2728,9 +2739,18 @@ export class TUI extends Container {
 	 * history, then repaint from row zero. Reachable only from explicit gestures (session
 	 * replace, /tree, an explicit clear) — never from ordinary rendering,
 	 * animation, resize, or finalization.
+	 *
+	 * A reset requested while the TUI is stopped (an external editor has taken
+	 * the terminal, including mid-stream) latches: `start()` performs it on the
+	 * first frame, so the rows the gesture forgot are actually cleared and
+	 * re-rendered instead of surviving in scrollback until a later retirement
+	 * rewrites them.
 	 */
 	resetDisplay(): void {
-		if (this.#stopped) return;
+		if (this.#stopped) {
+			this.#pendingDisplayReset = true;
+			return;
+		}
 		this.invalidate();
 		this.#prepareForcedRender(true);
 		this.#renderRequested = false;
