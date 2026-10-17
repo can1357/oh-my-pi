@@ -5,6 +5,7 @@
  * sequences when the active terminal supports hyperlinks and the user setting
  * permits it. Falls back to plain text when disabled.
  */
+import * as os from "node:os";
 import * as url from "node:url";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { span } from "../native/describe";
@@ -55,6 +56,14 @@ export function fileUriForTerminal(
 	opts: { line?: number; col?: number } | undefined,
 	terminalId: TerminalId,
 ): string {
+	const scheme = Bun.env.PI_LINK_SCHEME;
+	if (scheme) {
+		const host = Bun.env.PI_LINK_HOST || os.hostname();
+		const fileUrl = url.pathToFileURL(filePath);
+		// Keep UNC servers in the path: ompfile://remote//nas/share/file.ts.
+		const targetPath = fileUrl.host ? `//${fileUrl.host}${fileUrl.pathname}` : fileUrl.pathname;
+		return `${scheme}://${host}${targetPath}`;
+	}
 	if (terminalId !== "vscode") return url.pathToFileURL(filePath).href;
 	// vscode:// takes a filesystem path with forward slashes. Encode each
 	// segment independently so separators and a Windows drive colon stay

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PI_LINK_SCHEME` and `PI_LINK_HOST` environment variables for host-qualified OSC 8 file links in remote terminal sessions ([#15497](https://github.com/can1357/oh-my-pi/issues/15497), [#15855](https://github.com/can1357/oh-my-pi/pull/15855) by [@KunoLu](https://github.com/KunoLu)).
+
 ## [18.11.3] - 2026-10-16
 
 ### Added

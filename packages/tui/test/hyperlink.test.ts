@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { getMarkdownTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -178,6 +179,71 @@ describe("fileHyperlink", () => {
 		for (const terminalId of ["iterm2", "kitty", "base"] as const) {
 			expect(fileUriForTerminal(filePath, { line: 42, col: 7 }, terminalId)).toBe(url.pathToFileURL(filePath).href);
 		}
+	});
+
+	it("emits custom scheme and host when PI_LINK_SCHEME and PI_LINK_HOST are set", () => {
+		Bun.env.PI_LINK_SCHEME = "ompfile";
+		Bun.env.PI_LINK_HOST = "beelink";
+		const filePath = path.resolve("/Users/foo/bar.ts");
+		const expectedPathname = url.pathToFileURL(filePath).pathname;
+		expect(fileUriForTerminal(filePath, undefined, "iterm2")).toBe(`ompfile://beelink${expectedPathname}`);
+	});
+
+	it.skipIf(process.platform !== "win32")(
+		"preserves UNC servers and encoded filenames in custom OSC 8 targets",
+		() => {
+			setHyperlinkMode("always");
+			Bun.env.PI_LINK_SCHEME = "ompfile";
+			Bun.env.PI_LINK_HOST = "beelink";
+			const filePath = "\\\\nas\\share\\remote project\\a#b% 中文.ts";
+			const uri = extractLinkUri(fileHyperlink(filePath, "a#b% 中文.ts"));
+			expect(uri).toBe("ompfile://beelink//nas/share/remote%20project/a%23b%25%20%E4%B8%AD%E6%96%87.ts");
+			expect(url.fileURLToPath(`file:${new URL(uri!).pathname}`)).toBe(filePath);
+		},
+	);
+
+	it("defaults host to os.hostname() when only PI_LINK_SCHEME is set", () => {
+		Bun.env.PI_LINK_SCHEME = "ompfile";
+		const filePath = path.resolve("/Users/foo/bar.ts");
+		const expectedPathname = url.pathToFileURL(filePath).pathname;
+		expect(fileUriForTerminal(filePath, undefined, "kitty")).toBe(`ompfile://${os.hostname()}${expectedPathname}`);
+	});
+
+	it("overrides vscode terminal target when PI_LINK_SCHEME is set", () => {
+		Bun.env.PI_LINK_SCHEME = "ompfile";
+		Bun.env.PI_LINK_HOST = "beelink";
+		const filePath = path.resolve("/Users/foo/bar.ts");
+		const expectedPathname = url.pathToFileURL(filePath).pathname;
+		expect(fileUriForTerminal(filePath, { line: 10 }, "vscode")).toBe(`ompfile://beelink${expectedPathname}`);
+	});
+
+	it("leaves URIs unchanged when only PI_LINK_HOST is set without PI_LINK_SCHEME", () => {
+		Bun.env.PI_LINK_HOST = "remote-server";
+		const filePath = path.resolve("/Users/foo/bar.ts");
+		expect(fileUriForTerminal(filePath, undefined, "base")).toBe(url.pathToFileURL(filePath).href);
+	});
+
+	it("leaves file and vscode URIs unchanged when PI_LINK_SCHEME and PI_LINK_HOST are unset", () => {
+		delete Bun.env.PI_LINK_SCHEME;
+		delete Bun.env.PI_LINK_HOST;
+		const filePath = path.resolve("/Users/foo/bar.ts");
+		const expectedFileUri = url.pathToFileURL(filePath).href;
+		expect(fileUriForTerminal(filePath, undefined, "kitty")).toBe(expectedFileUri);
+		const vscodePath = url.pathToFileURL(filePath).pathname;
+		expect(fileUriForTerminal(filePath, { line: 10 }, "vscode")).toBe(`vscode://file${vscodePath}:10`);
+	});
+
+	it("wraps custom scheme and host URI in OSC 8 via fileHyperlink", () => {
+		setHyperlinkMode("always");
+		Bun.env.PI_LINK_SCHEME = "ompfile";
+		Bun.env.PI_LINK_HOST = "mybox";
+		const filePath = path.resolve("/Users/foo/bar.ts");
+		const result = fileHyperlink(filePath, "bar.ts");
+		const uri = extractLinkUri(result);
+		const expectedPathname = url.pathToFileURL(filePath).pathname;
+		expect(uri).toBe(`ompfile://mybox${expectedPathname}`);
+		expect(result).toContain("bar.ts");
+		expect(isHyperlinked(result)).toBe(true);
 	});
 
 	it("produces a stable id for the same path", () => {

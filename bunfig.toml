@@ -13,6 +13,8 @@ saveTextLockfile = true
 ".lark" = "text"
 
 [test]
+preload = ["./scripts/test-setup.ts"]
+
 # bun test does NOT honor .gitignore; prune robomp's repo clones and
 # scratch dirs so a root-level `bun test` doesn't walk into them.
 #
