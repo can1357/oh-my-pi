@@ -1,3 +1,4 @@
+import { runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../../error/gateway";
 import * as transcriptions from "../../providers/transcriptions-server";
@@ -40,7 +41,7 @@ export async function handleTranscriptions(
 	if (!model) {
 		return transcriptions.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
-	if (model.api !== "openai-transcriptions") {
+	if (runnerApiKind(model.api) !== "stt") {
 		const detail =
 			model.api === "local-inference"
 				? `Model ${parsed.modelId} runs on-device only and cannot be served by the auth gateway`

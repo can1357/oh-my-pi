@@ -27,7 +27,8 @@ export function normalizeCodexBaseUrl(baseUrl?: string): string {
 		return CODEX_BASE_URL;
 	}
 	const host = parsed.host.toLowerCase();
-	if (host !== "chatgpt.com" && host !== "chat.openai.com") return CODEX_BASE_URL;
+	// The Codex bearer must never travel over plain HTTP.
+	if (parsed.protocol !== "https:" || (host !== "chatgpt.com" && host !== "chat.openai.com")) return CODEX_BASE_URL;
 	// wham/usage always lives at `${origin}/backend-api/...` on the canonical
 	// ChatGPT origin, so ignore any extra path (e.g. `/backend-api/codex/responses`
 	// from a streaming baseUrl) — otherwise we'd build `.../codex/responses/wham/usage`.

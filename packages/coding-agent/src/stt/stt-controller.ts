@@ -1,6 +1,6 @@
 import type { ApiKeyResolver } from "@oh-my-pi/pi-ai";
 import { transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
-import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
+import { type Api, type Model, runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
 import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -219,7 +219,7 @@ export class STTController {
 
 	async #startWith(editor: SttTarget, options: SttCallbacks, signal: AbortSignal): Promise<void> {
 		let model = this.#resolveModel();
-		if (model?.api === "openai-transcriptions") {
+		if (model && runnerApiKind(model.api) === "stt") {
 			this.#startBuffered(editor, options, model);
 			return;
 		}
@@ -231,7 +231,7 @@ export class STTController {
 		let modelKey = await this.#ensureDeps(options, this.#resolveModelKey(model), signal);
 		if (!modelKey || signal.aborted) return;
 		model = this.#resolveModel();
-		if (model?.api === "openai-transcriptions") {
+		if (model && runnerApiKind(model.api) === "stt") {
 			this.#startBuffered(editor, options, model);
 			return;
 		}

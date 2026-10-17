@@ -11,6 +11,7 @@ provider "openai-codex" {
 	keep-bundled-names #true
 	kind-apis {
 		image "openai-codex-responses"
+		stt "openai-codex-transcriptions"
 	}
 	web-search "codex"
 
@@ -31,10 +32,22 @@ provider "openai-codex" {
 			limits
 			supports-tools #false
 		}
+		// ChatGPT dictation endpoint (`POST /transcribe`): the subscription backend
+		// takes no model field and reports no usage, so the id is a local label.
+		model "codex-transcribe" name="Codex Dictation" api="openai-codex-transcriptions" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 	}
 
 	models "gpt-image-2" {
 		kind "image"
+	}
+	models "codex-transcribe" {
+		kind "stt"
 	}
 
 	// Replaces the Codex provider's handwritten flex/priority pricing fallback.
