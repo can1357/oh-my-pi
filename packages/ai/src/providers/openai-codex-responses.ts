@@ -1462,7 +1462,7 @@ function createCodexRequestContext(
 
 	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
 	const codexClientVersion = CODEX_CLIENT_VERSION;
-	const requestHeaders = { ...model.headers, ...options?.headers };
+	const requestHeaders = mergeRequestHeaders(model.headers, options?.headers);
 	const rawRequestDump: RawHttpRequestDump = {
 		provider: model.provider,
 		api: model.api,
@@ -3431,7 +3431,7 @@ export async function prewarmOpenAICodexResponses(
 	const headers = logger.time(
 		"prewarmCodex:createHeaders",
 		createCodexHeaders,
-		{ ...model.headers, ...options?.headers },
+		mergeRequestHeaders(model.headers, options?.headers),
 		accountId,
 		apiKey,
 		codexClientVersion,
@@ -4874,9 +4874,15 @@ function createCodexHeaders(
 	headers.delete(OPENAI_HEADERS.BETA);
 	headers.delete("openai-beta");
 	headers.set(OPENAI_HEADERS.BETA, betaHeader);
-	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
+	// OMP's own registered identity is the default, but an explicit caller value
+	// wins: a gateway that allowlists its own client attribution is configured
+	// deliberately (provider `headers` in the model config), and the transport
+	// must not silently turn itself into an official Codex client either way.
+	if (!headers.has(OPENAI_HEADERS.ORIGINATOR)) {
+		headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
+	}
 	headers.set(OPENAI_HEADERS.VERSION, codexClientVersion);
-	headers.set("User-Agent", USER_AGENT);
+	if (!headers.has("User-Agent")) headers.set("User-Agent", USER_AGENT);
 	if (sessionId) {
 		// The backend derives prompt-cache affinity from the session headers
 		// (codex-rs `responses_session_id`); a side request shares its parent's.
@@ -4953,10 +4959,60 @@ function redactHeaders(headers: Headers): Record<string, string> {
 /** Resolve a Codex Responses endpoint exactly as the chat and compaction transports do. */
 export function resolveCodexResponsesUrl(baseUrl: string | undefined): string {
 	const raw = baseUrl && baseUrl.trim().length > 0 ? baseUrl : CODEX_BASE_URL;
-	const normalized = raw.replace(/\/+$/, "");
-	if (normalized.endsWith("/codex/responses")) return normalized;
-	if (normalized.endsWith("/codex")) return `${normalized}/responses`;
-	return `${normalized}/codex/responses`;
+	// Split before trimming: a query or fragment may itself end in `/`, and
+	// rewriting that character would corrupt signed parameters or redirect values.
+	const queryStart = raw.search(/[?#]/u);
+	const base = queryStart === -1 ? raw : raw.slice(0, queryStart);
+	const suffix = queryStart === -1 ? "" : raw.slice(queryStart);
+	const trimmedBase = base.replace(/\/+$/u, "");
+	const normalized = `${trimmedBase}${suffix}`;
+	// Match the pathname only. Matching the whole serialized URL would mistake a
+	// host literally named `responses` for an explicit endpoint, and a query
+	// string for part of the path — appending `/codex/responses` there would
+	// corrupt the query instead of reaching an endpoint.
+	let pathname = trimmedBase;
+	try {
+		pathname = new URL(base).pathname.replace(/\/+$/u, "");
+	} catch {
+		// A relative or otherwise non-absolute base keeps the whole-string match.
+	}
+	if (pathname.endsWith("/codex/responses")) return normalized;
+	// A provider already targeting the plain Responses endpoint (a gateway wired
+	// like Codex's own `wire_api = "responses"`) keeps its exact path. Only the
+	// official ChatGPT backend and `/codex`-suffixed hosts get the
+	// `/codex/responses` mapping.
+	if (pathname.endsWith("/responses")) return normalized;
+	if (pathname.endsWith("/codex")) return `${trimmedBase}/responses${suffix}`;
+	return `${trimmedBase}/codex/responses${suffix}`;
+}
+
+/**
+ * Merge two header maps case-insensitively. A plain spread keeps `user-agent`
+ * and `User-Agent` as separate entries, and `new Headers` then joins them into a
+ * single comma-separated value, so an override with different casing would
+ * arrive as `model-value, caller-value` instead of replacing the model's value.
+ */
+function mergeRequestHeaders(
+	base: Record<string, string> | undefined,
+	overrides: Record<string, string> | undefined,
+): Record<string, string> {
+	// Later entries win, and keys compare case-insensitively across both sources:
+	// a provider config can carry `User-Agent` and `user-agent` as separate entries
+	// (config keys keep their exact casing), and `new Headers` would join whatever
+	// survives into one comma-separated value.
+	const merged: Record<string, string> = {};
+	const canonicalKeys = new Map<string, string>();
+	for (const source of [base, overrides]) {
+		if (!source) continue;
+		for (const [key, value] of Object.entries(source)) {
+			const canonical = key.toLowerCase();
+			const previous = canonicalKeys.get(canonical);
+			if (previous !== undefined) delete merged[previous];
+			canonicalKeys.set(canonical, key);
+			merged[key] = value;
+		}
+	}
+	return merged;
 }
 
 function convertMessages(model: Model<"openai-codex-responses">, context: Context): ResponseInput {
