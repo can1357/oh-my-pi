@@ -1,0 +1,80 @@
+// Provider-wire compat for "tokenrhythm". TokenRhythm is an OpenAI-compatible
+// aggregator (Chat Completions only, no Responses) for DeepSeek, GLM, Qwen,
+// Kimi, Doubao Seed, MiniMax, MiMo and LongCat. `/v1/models` requires a key
+// and returns limits and CNY prices but no capability metadata, so reasoning
+// policy lives here; `thinking-upgrade-neutral` lets these rules mark the
+// discovered rows as reasoning-capable. Every rule below was verified against production
+// `POST /v1/chat/completions` (2026-10-13/14):
+//
+//  - `thinking: {type: "enabled"|"disabled"}` is the toggle the host forwards
+//    (it also accepts `reasoning.enabled` and `enable_thinking`).
+//  - `reasoning_effort` only reaches DeepSeek: the host validates it there
+//    (unknown values return 400) and max reasons more than low. Every other
+//    family accepts any value and ignores it.
+//  - `thinking_budget`, `reasoning.max_tokens` and `thinking.budget_tokens`
+//    are rejected as unknown request fields (400) on every model.
+//  - Reasoning streams back in `delta.reasoning_content`.
+
+provider "tokenrhythm" {
+	default-model "deepseek-v4-pro-0813"
+	env "TOKENRHYTHM_API_KEY"
+	discovery label="TokenRhythm"
+
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+
+	// `/v1/models` requires a key. This row keeps the provider visible in
+	// `/model` before login; the live roster replaces it. Prices are published
+	// in CNY only, so the card stays zero (unpriced) rather than converted.
+	seed api="openai-completions" base-url="https://tokenrhythm.studio/v1" bundle="fallback" {
+		model "deepseek-v4-pro-0813" name="DeepSeek V4 Pro 0813" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=384000
+		}
+	}
+
+	thinking-format "zai"
+	reasoning-disable-mode "zai-thinking-disabled"
+	supports-reasoning-effort #false
+
+	// DeepSeek V4: toggle plus the class's low/high/max ladder. The dated V4
+	// SKUs do not think unless `thinking.type` is enabled, which "zai" sends.
+	class "deepseek" {
+		thinking-mode "effort"
+		supports-reasoning-effort #true
+		thinking-upgrade-neutral #true
+	}
+
+	// Model selectors outrank the class ladders (GLM 5.2/5.3, Seed): on this
+	// host only the toggle reaches these models, so graded rungs would be dead.
+	//
+	// Qwen 3.7/3.8 and Doubao Seed 2.1: `thinking.type: disabled` removes
+	// reasoning_content; there is no graded control, so one on-rung beside off.
+	models "qwen3.7-*" "qwen3.8-*" "seed-2.1-*" {
+		thinking-efforts "high"
+		thinking-upgrade-neutral #true
+	}
+
+	// Always-on families. GLM-5.3, GLM-5.3-Flash, Kimi K2.7 Code, LongCat 2.0
+	// and MiniMax M2.7 return 400 "当前模型必须开启深度思考" on any disable
+	// field; GLM-5.1/5.2, Kimi K2.6 and MiMo V2.5 accept it and keep
+	// thinking. Off is never offered and nothing reasoning-shaped is sent.
+	models "glm-*" "kimi-*" "longcat-*" "minimax-*" "mimo-*" {
+		thinking-efforts "high"
+		thinking-upgrade-neutral #true
+		thinking-requires-effort #true
+		reasoning-disable-mode "omit"
+	}
+	// Exact ids: the GLM 5.3 lineage rule is itself a glob at priority 10, and
+	// only an exact selector outranks it. It also defaults to max, a rung this
+	// host cannot reach.
+	models "glm-5.3" "glm-5.3-flash" "glm-5.3-flashx" {
+		thinking-efforts "high"
+		thinking-default-level "high"
+		thinking-upgrade-neutral #true
+		thinking-requires-effort #true
+		reasoning-disable-mode "omit"
+	}
+}
