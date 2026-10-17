@@ -22,7 +22,7 @@ use super::{
 		frame::{FrameGeometry, MAX_COMPOSITE_PIXELS, compose},
 		types::{DesktopDisplay, DesktopWindow, DisplaySelector, Target},
 	},
-	ax,
+	ax, permission,
 };
 
 const MIN_WINDOW_EDGE: u32 = 16;
@@ -42,9 +42,7 @@ fn require_capture_permission() -> CoreResult<()> {
 	if capture_permission() {
 		Ok(())
 	} else {
-		Err(DesktopError::permission_denied(
-			"macOS Screen Recording permission is not granted for this process",
-		))
+		Err(permission::denied(permission::screen_recording_pane()))
 	}
 }
 
