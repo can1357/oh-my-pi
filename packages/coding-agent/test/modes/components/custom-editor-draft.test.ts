@@ -243,6 +243,61 @@ describe("cleared draft recall", () => {
 		});
 	}
 
+	it("releases a retired recalled draft without losing its local attachment snapshot", () => {
+		let key = "first";
+		let fail = false;
+		const editor = new CustomEditor(getEditorTheme());
+		editor.setHistoryStorage({ add: async () => {}, getRecent: () => [{ prompt: "persisted in " + key }] }, () => {
+			if (fail) {
+				fail = false;
+				throw new Error("scope unavailable");
+			}
+			return key;
+		});
+		editor.setDraft("image [Image #1]", [image]);
+		editor.insertPaste("legacy payload");
+		editor.insertTextAttachment("attached\ntext");
+		const expanded = editor.getExpandedText();
+		const texts = [...editor.pendingTexts];
+		editor.clearDraftForRecall();
+		editor.handleInput("\x1b[A");
+		key = "second";
+		fail = true;
+		editor.handleInput("\x1b[A");
+		expect(editor.getText()).toBe("");
+		expect(editor.pendingImages).toEqual([]);
+		expect(editor.pendingTexts).toEqual([]);
+		editor.handleInput("\x1b[A");
+		expect(editor.getExpandedText()).toBe(expanded);
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingTexts).toEqual(texts);
+		editor.handleInput("\x1b[A");
+		expect(editor.getText()).toBe("persisted in second");
+		expect(editor.pendingImages).toEqual([]);
+		expect(editor.pendingTexts).toEqual([]);
+	});
+
+	it("preserves edited recalled draft payloads when scope resolution fails", () => {
+		let fail = false;
+		const editor = new CustomEditor(getEditorTheme());
+		editor.setHistoryStorage({ add: async () => {}, getRecent: () => [] }, () => {
+			if (fail) throw new Error("scope unavailable");
+			return "first";
+		});
+		editor.setDraft("image [Image #1]", [image]);
+		editor.insertTextAttachment("attached text");
+		editor.clearDraftForRecall();
+		editor.handleInput("\x1b[A");
+		editor.handleInput("edited");
+		const expanded = editor.getExpandedText();
+		const texts = [...editor.pendingTexts];
+		fail = true;
+		editor.addToHistory("a separate submission");
+		expect(editor.getExpandedText()).toBe(expanded);
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingTexts).toEqual(texts);
+	});
+
 	it("does not persist canceled drafts or hide prior history behind empty clears", () => {
 		const written: string[] = [];
 		const editor = new CustomEditor(getEditorTheme());

@@ -15,6 +15,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { BlobPutOptions, BlobPutResult } from "@oh-my-pi/pi-coding-agent/session/blob-store";
+import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -24,6 +25,14 @@ const FOLLOW_UP = "\x1b[13;5u";
 const originalImage: ImageContent = { type: "image", mimeType: "image/png", data: "b3JpZ2luYWw=" };
 const newerImage: ImageContent = { type: "image", mimeType: "image/jpeg", data: "bmV3ZXI=" };
 const transformedImage: ImageContent = { type: "image", mimeType: "image/jpeg", data: "cmVwbGFjZW1lbnQ=" };
+let historyTemp: TempDir | undefined;
+
+function attachHistory(editor: CustomEditor): HistoryStorage {
+	historyTemp = TempDir.createSync("@omp-input-history-");
+	const storage = HistoryStorage.open(historyTemp.join("history.db"));
+	editor.setHistoryStorage(storage);
+	return storage;
+}
 
 async function createHarness(factory: ExtensionFactory) {
 	const runtime = new ExtensionRuntime();
@@ -54,6 +63,8 @@ async function createHarness(factory: ExtensionFactory) {
 	const session = {
 		extensionRunner: runner,
 		isStreaming: true,
+		customCommands: [],
+		promptTemplates: [],
 		isCompacting: false,
 		queuedMessageCount: 0,
 		prompt,
@@ -134,9 +145,178 @@ async function createHarness(factory: ExtensionFactory) {
 	return { ctx, editor, session, prompt, runner, blobs, generatedMessages, pressSubmit, draftWithImage };
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(async () => {
+	vi.restoreAllMocks();
+	if (historyTemp) {
+		HistoryStorage.close();
+		await historyTemp.remove();
+		historyTemp = undefined;
+	}
+});
 
 describe("interactive native input ingress", () => {
+	it("Ctrl+Enter guest refusal preserves a newer draft and attachments after an async input hook", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const h = await createHarness(pi => {
+			pi.on("input", async () => {
+				entered.resolve();
+				await release.promise;
+			});
+		});
+		h.ctx.collabGuest = {
+			readOnly: false,
+			sendPrompt: vi.fn(),
+		} as unknown as InteractiveModeContext["collabGuest"];
+		const storage = attachHistory(h.editor);
+		h.editor.setText("/unknown");
+		const submitting = h.pressSubmit(FOLLOW_UP);
+		await entered.promise;
+		h.draftWithImage("next draft [Image #1]", newerImage, "local://newer.jpg");
+		release.resolve();
+		await submitting;
+
+		expect(h.editor.getExpandedText()).toBe("next draft [Image #1]");
+		expect(h.editor.pendingImages).toEqual([newerImage]);
+		expect(h.editor.pendingImageLinks).toEqual(["local://newer.jpg"]);
+		expect(h.editor.imageLinks).toEqual(["local://newer.jpg"]);
+		expect(storage.getRecent(10)).toEqual([]);
+		expect(h.prompt).not.toHaveBeenCalled();
+		expect(h.session.promptCustomMessage).not.toHaveBeenCalled();
+	});
+
+	for (const [label, key] of [
+		["Enter", ENTER],
+		["Ctrl+Enter", FOLLOW_UP],
+	] as const) {
+		for (const wrapper of ["/loop", "/force read"] as const) {
+			it(
+				label +
+					" records the distinct skill body returned by " +
+					wrapper +
+					" without double-counting direct resubmission",
+				async () => {
+					const h = await createHarness(() => {});
+					const storage = attachHistory(h.editor);
+					const filePath = historyTemp!.join("SKILL.md");
+					await Bun.write(
+						filePath,
+						"---\nname: probe\ndescription: History regression probe\n---\nExecute the request.\n",
+					);
+					h.ctx.skillCommands.set("skill:probe", {
+						name: "probe",
+						description: "",
+						filePath,
+						baseDir: historyTemp!.path(),
+						source: "test",
+					});
+					const body = "/skill:probe arg";
+					const command = wrapper + " " + body;
+					h.ctx.handleLoopCommand = async () => body;
+					h.ctx.session.setForcedToolChoice = vi.fn();
+					h.editor.setText(command);
+					await h.pressSubmit(key);
+					expect(h.ctx.showError).not.toHaveBeenCalled();
+					expect(h.session.promptCustomMessage).toHaveBeenCalledTimes(1);
+					expect(Object.fromEntries(storage.getRecent(10).map(row => [row.prompt, row.useCount]))).toEqual({
+						[command]: 1,
+						[body]: 1,
+					});
+
+					h.editor.setText(body);
+					await h.pressSubmit(key);
+					expect(h.session.promptCustomMessage).toHaveBeenCalledTimes(2);
+					expect(h.prompt).not.toHaveBeenCalled();
+					expect(Object.fromEntries(storage.getRecent(10).map(row => [row.prompt, row.useCount]))).toEqual({
+						[command]: 1,
+						[body]: 2,
+					});
+					h.editor.handleInput("\x1b[A");
+					expect(h.editor.getExpandedText()).toBe(body);
+				},
+			);
+		}
+	}
+
+	it("Ctrl+Enter keeps the next draft and attachments when compaction filters a secret", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const h = await createHarness(pi => {
+			pi.on("input", async () => {
+				entered.resolve();
+				await release.promise;
+			});
+		});
+		h.session.isCompacting = true;
+		const storage = attachHistory(h.editor);
+		const secret = "/login ?code=SECRET";
+		h.editor.setText(secret);
+		const submitting = h.pressSubmit(FOLLOW_UP);
+		await entered.promise;
+		h.draftWithImage("next draft [Image #1]", newerImage, "local://newer.jpg");
+		release.resolve();
+		await submitting;
+
+		expect(h.ctx.compactionQueuedMessages).toEqual([{ text: secret, mode: "followUp", images: undefined }]);
+		expect(storage.getRecent(10)).toEqual([]);
+		expect(h.editor.getExpandedText()).toBe("next draft [Image #1]");
+		expect(h.editor.pendingImages).toEqual([newerImage]);
+		expect(h.editor.pendingImageLinks).toEqual(["local://newer.jpg"]);
+		expect(h.editor.imageLinks).toEqual(["local://newer.jpg"]);
+	});
+
+	for (const [label, command, key, streaming, compacting] of [
+		["Enter idle", "/unknown", ENTER, false, false],
+		["Enter streaming", "/unknown", ENTER, true, false],
+		["Enter extension", "/probe", ENTER, true, false],
+		["Ctrl+Enter idle", "/unknown", FOLLOW_UP, false, false],
+		["Ctrl+Enter streaming", "/unknown", FOLLOW_UP, true, false],
+		["Enter compaction", "/unknown", ENTER, false, true],
+		["Enter skill compaction", "/skill:probe arg", ENTER, false, true],
+	] as const) {
+		it(`${label} counts each deliberate slash submission exactly once`, async () => {
+			const h = await createHarness(pi => {
+				pi.registerCommand("probe", { description: "history probe", handler: async () => {} });
+			});
+			h.session.isStreaming = streaming;
+			h.session.isCompacting = compacting;
+			h.ctx.skillCommands.set("skill:probe", {
+				name: "probe",
+				description: "",
+				filePath: "unread-during-compaction",
+				baseDir: process.cwd(),
+				source: "test",
+			});
+			const storage = attachHistory(h.editor);
+			for (const count of [1, 2]) {
+				h.editor.setText(command);
+				await h.pressSubmit(key);
+				expect(storage.getRecent(10).map(row => ({ text: row.prompt, uses: row.useCount }))).toEqual([
+					{ text: command, uses: count },
+				]);
+				if (compacting) {
+					expect(h.ctx.compactionQueuedMessages).toEqual(
+						Array.from({ length: count }, () => ({ text: command, mode: "steer", images: undefined })),
+					);
+					expect(h.prompt).not.toHaveBeenCalled();
+					expect(h.session.promptCustomMessage).not.toHaveBeenCalled();
+				}
+			}
+		});
+	}
+
+	it("records a builtin invocation and its distinct returned body once each", async () => {
+		const h = await createHarness(() => {});
+		const storage = attachHistory(h.editor);
+		h.ctx.handleLoopCommand = async () => "loop body";
+		h.editor.setText("/loop loop body");
+		await h.pressSubmit(ENTER);
+		expect(Object.fromEntries(storage.getRecent(10).map(row => [row.prompt, row.useCount]))).toEqual({
+			"/loop loop body": 1,
+			"loop body": 1,
+		});
+	});
+
 	it("Ctrl+Enter chains partial text/image transforms and restores materialized images after rejection", async () => {
 		const seen: InputEvent[] = [];
 		const h = await createHarness(pi => {

@@ -1,7 +1,15 @@
 import type { Database, SQLQueryBindings, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { checkpointWal, getHistoryDbPath, logger, openSqliteDatabaseSync, postmortem } from "@oh-my-pi/pi-utils";
+import {
+	checkpointWal,
+	getHistoryDbPath,
+	logger,
+	normalizePathForComparison,
+	openSqliteDatabaseSync,
+	postmortem,
+} from "@oh-my-pi/pi-utils";
+import { primaryRootOrCwd } from "../utils/active-repo-context";
 
 /** A unique prompt with provenance from its most recent submission. */
 export interface HistoryEntry {
@@ -19,12 +27,31 @@ export interface HistoryEntry {
 	useCount: number;
 }
 
-/** Narrows history reads; omitted fields match every prompt. */
-export interface HistoryFilter {
-	/** Exact project working directory of the prompt's latest submission. */
-	cwd?: string;
-	/** Exact session id of the prompt's latest submission. */
-	sessionId?: string;
+/**
+ * Recall scopes, narrowest first. Single source for the settings enum, the Ctrl+R scope ring
+ * and the labels both render, so they never drift apart.
+ */
+export const HISTORY_SCOPE_KINDS = ["session", "cwd", "repo", "global"] as const;
+
+export type HistoryScopeKind = (typeof HISTORY_SCOPE_KINDS)[number];
+
+/** Human-facing name of each scope, phrased to read mid-sentence (`History (this session)`). */
+export const HISTORY_SCOPE_LABELS: Record<HistoryScopeKind, string> = {
+	session: "this session",
+	cwd: "current folder",
+	repo: "this repository",
+	global: "all projects",
+};
+
+/**
+ * Recall filter for {@link HistoryStorage.getRecent} / {@link HistoryStorage.search}.
+ * Omitting the scope, or passing `global`, reads the whole table (the pre-#4331 behavior).
+ */
+export interface HistoryScope {
+	/** `session`: one conversation; `cwd`: one directory; `repo`: one repository; `global`: everything. */
+	kind: HistoryScopeKind;
+	/** Session id (`session`), directory (`cwd`), or primary repository root (`repo`). */
+	value?: string;
 }
 
 type HistoryRow = {
@@ -36,17 +63,18 @@ type HistoryRow = {
 	use_count: number;
 };
 
-const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
+/** Rendered scope predicate: `where` for statements without a `WHERE`, `and` for the others. */
+type ScopeClause = { where: string; and: string; params: SQLQueryBindings[] };
 
-/**
- * SQL predicate for a {@link HistoryFilter}, bound as numbered parameters
- * `?first` (cwd) and `?first+1` (session id); binding NULL disables that half.
- * `table` qualifies the columns (`"h."`) when the statement joins.
- */
-function historyFilterClause(table: string, first: number): string {
-	const session = first + 1;
-	return `(?${first} IS NULL OR ${table}cwd = ?${first}) AND (?${session} IS NULL OR ${table}session_id = ?${session})`;
-}
+const EMPTY_SCOPE_CLAUSE: ScopeClause = { where: "", and: "", params: [] };
+
+// A bare directory is not a list, so directory scopes expand to stored spellings and bind them
+// with `json_each`; the array travels as JSON, keeping the statement text (and its cache key)
+// constant no matter how many directories match.
+const DIRS_WHERE = "WHERE cwd IN (SELECT value FROM json_each(?))";
+const DIRS_AND = "AND cwd IN (SELECT value FROM json_each(?))";
+
+const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
 // Escape LIKE wildcards so user input is treated as literal text.
 // Matches the `ESCAPE '\\'` clause used by substring-search statements.
@@ -99,10 +127,13 @@ export class HistoryStorage {
 
 	// Prepared statements
 	#upsertRowStmt: Statement;
-	#recentStmt: Statement;
-	#searchStmt: Statement;
-	// Cache substring-fallback prepared statements keyed by token count.
-	#substringStmts = new Map<number, Statement>();
+	// Only constant SQL texts are cached — scope values travel as bound parameters inside the
+	// text, never as text — so this map is bounded by the number of query shapes in this file,
+	// not by user input. `#searchSubstring` builds one LIKE term per token, so it prepares its
+	// statement per call instead of growing a key per token count ever searched.
+	#stmts = new Map<string, Statement>();
+	// Cache only raw stored paths; normalization and Git topology stay live on every read.
+	#storedDirsCache?: { dataVersion: number; dirs: string[] };
 
 	private constructor(db: Database) {
 		this.#db = db;
@@ -121,6 +152,12 @@ ${HISTORY_TABLE_DDL}
 		this.#ensureColumn("use_count", "INTEGER NOT NULL DEFAULT 1");
 		const rebuilt = this.#rebuildHistory();
 
+		// A `session` scope filters on an unindexed column, which turns the ordered index walk
+		// the other scopes get into a full table scan plus a temp sort — measured 3.5 ms against
+		// 0.1 ms at 50 000 rows. This runs after `#rebuildHistory` on purpose: a store predating
+		// the session column has none until the rebuild, and the table DDL above would fail on it.
+		this.#db.run("CREATE INDEX IF NOT EXISTS idx_history_session ON history(session_id, created_at DESC, id DESC)");
+
 		this.#db.run(`
 CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5(prompt, content='history', content_rowid='id');
 
@@ -136,12 +173,6 @@ END;
 				logger.warn("HistoryStorage FTS rebuild failed", { error: String(error) });
 			}
 		}
-		this.#recentStmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${historyFilterClause("", 1)} ORDER BY created_at DESC, id DESC LIMIT ?3`,
-		);
-		this.#searchStmt = this.#db.prepare(
-			`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ?1 AND ${historyFilterClause("h.", 2)} ORDER BY h.created_at DESC, h.id DESC LIMIT ?4`,
-		);
 		this.#upsertRowStmt = this.#db.prepare(`
 INSERT INTO history (prompt, created_at, cwd, session_id)
 VALUES (?, ${SQLITE_NOW_EPOCH}, ?, ?)
@@ -187,15 +218,14 @@ ON CONFLICT(prompt) DO UPDATE SET
 
 	#close(): void {
 		checkpointWal(this.#db);
-		for (const stmt of this.#substringStmts.values()) stmt.finalize();
-		this.#substringStmts.clear();
+		for (const stmt of this.#stmts.values()) stmt.finalize();
+		this.#stmts.clear();
 		this.#upsertRowStmt.finalize();
-		this.#recentStmt.finalize();
-		this.#searchStmt.finalize();
 		this.#db.close();
 	}
 
 	#insertBatch(rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>): void {
+		this.#storedDirsCache = undefined;
 		this.#db.transaction((rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>) => {
 			for (const row of rows) {
 				this.#upsertRowStmt.run(row.prompt, row.cwd ?? null, row.sessionId ?? null);
@@ -249,27 +279,47 @@ ON CONFLICT(prompt) DO UPDATE SET
 		return Promise.resolve();
 	}
 
-	/** Returns unique prompts ordered by their most recent submission. */
-	getRecent(limit: number, filter: HistoryFilter = {}): HistoryEntry[] {
+	/**
+	 * Returns unique prompts ordered by their most recent submission, restricted to `scope`.
+	 *
+	 * Throws when the handle is unusable or the statement fails, so a caller that can recover
+	 * does: the editor's history seed retries on the next browse instead of replacing the list
+	 * with an empty one. {@link search} deliberately keeps degrading to no results — its
+	 * `matchingSessionIds` caller ranks a picker and has nothing to retry.
+	 */
+	getRecent(limit: number, scope?: HistoryScope): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
-		try {
-			const rows = this.#recentStmt.all(filter.cwd ?? null, filter.sessionId ?? null, safeLimit) as HistoryRow[];
-			return rows.map(row => this.#toEntry(row));
-		} catch (error) {
-			logger.error("HistoryStorage getRecent failed", { error: String(error) });
-			return [];
-		}
+		const clause = this.#scopeClause(scope);
+		const rows = this.#prepare(
+			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history ${clause.where} ORDER BY created_at DESC, id DESC LIMIT ?`,
+		).all(...clause.params, safeLimit) as HistoryRow[];
+		return rows.map(row => this.#toEntry(row));
 	}
 
-	/** Finds unique prompts matching every query token, newest first. */
-	search(query: string, limit: number, filter: HistoryFilter = {}): HistoryEntry[] {
+	/** Stable signature of the raw stored directories currently selected by this directory scope. */
+	getDirectoryScopeKey(kind: "cwd" | "repo", target?: string): string {
+		return JSON.stringify(this.#scopeDirs(kind, target).sort());
+	}
+
+	/** Finds unique prompts matching every query token, newest first, restricted to `scope`. */
+	search(query: string, limit: number, scope?: HistoryScope): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
 		const tokens = this.#tokenize(query);
 		if (tokens.length === 0) return [];
+
+		// Resolved before the query paths, like `getRecent`: a scope that cannot be rendered
+		// means an unusable handle, and reading unscoped is never an option — fail closed.
+		let clause: ScopeClause;
+		try {
+			clause = this.#scopeClause(scope);
+		} catch (error) {
+			logger.error("HistoryStorage search scope failed", { error: String(error) });
+			return [];
+		}
 
 		// 1. FTS5 prefix match (token AND, prefix-wildcard per token).
 		//    Handles punctuation by tokenizing query the same way unicode61 tokenizer
@@ -277,12 +327,9 @@ ON CONFLICT(prompt) DO UPDATE SET
 		const ftsQuery = tokens.map(tok => `"${tok.replace(/"/g, '""')}"*`).join(" ");
 		let ftsRows: HistoryRow[] = [];
 		try {
-			ftsRows = this.#searchStmt.all(
-				ftsQuery,
-				filter.cwd ?? null,
-				filter.sessionId ?? null,
-				safeLimit,
-			) as HistoryRow[];
+			ftsRows = this.#prepare(
+				`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ? ${clause.and} ORDER BY h.created_at DESC, h.id DESC LIMIT ?`,
+			).all(ftsQuery, ...clause.params, safeLimit) as HistoryRow[];
 		} catch (error) {
 			// Malformed FTS expression - fall through to substring path.
 			logger.debug("HistoryStorage FTS query failed, using substring only", { error: String(error) });
@@ -293,7 +340,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		//    by safeLimit, ordered by recency - no full-table load into JS.
 		let subRows: HistoryRow[] = [];
 		try {
-			subRows = this.#searchSubstring(tokens, safeLimit, filter);
+			subRows = this.#searchSubstring(tokens, safeLimit, clause);
 		} catch (error) {
 			logger.error("HistoryStorage substring search failed", { error: String(error) });
 		}
@@ -422,25 +469,96 @@ ON CONFLICT(prompt) DO UPDATE SET
 			.filter(tok => tok.length > 0);
 	}
 
-	#searchSubstring(tokens: string[], limit: number, filter: HistoryFilter): HistoryRow[] {
-		const stmt = this.#getSubstringStmt(tokens.length);
-		const params: SQLQueryBindings[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
-		params.push(filter.cwd ?? null, filter.sessionId ?? null, limit);
-		return stmt.all(...params) as HistoryRow[];
+	#searchSubstring(tokens: string[], limit: number, clause: ScopeClause): HistoryRow[] {
+		const whereClause = tokens.map(() => "prompt LIKE ? ESCAPE '\\' COLLATE NOCASE").join(" AND ");
+		// One LIKE term per token, so this text — and any cache key built from it — grows with the
+		// query. Prepared per call and finalized right after: measured 8-34 us against the 1.5-29 ms
+		// this scan already costs, so caching it bought nothing and retained a statement per token
+		// count ever searched.
+		const stmt = this.#db.prepare(
+			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${whereClause} ${clause.and} ORDER BY created_at DESC, id DESC LIMIT ?`,
+		);
+		try {
+			const params: SQLQueryBindings[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
+			params.push(...clause.params, limit);
+			return stmt.all(...params) as HistoryRow[];
+		} finally {
+			stmt.finalize();
+		}
 	}
 
-	#getSubstringStmt(tokenCount: number): Statement {
-		let stmt = this.#substringStmts.get(tokenCount);
-		if (stmt) return stmt;
-		const tokenClauses = Array.from(
-			{ length: tokenCount },
-			(_, index) => `prompt LIKE ?${index + 1} ESCAPE '\\' COLLATE NOCASE`,
+	/**
+	 * SQL fragment (and its bound values) restricting a read to `scope`.
+	 * `undefined` and `global` read the whole table; every other kind either filters or
+	 * matches nothing — a configured scope never silently widens to the full history.
+	 */
+	#scopeClause(scope?: HistoryScope): ScopeClause {
+		if (!scope || scope.kind === "global") return EMPTY_SCOPE_CLAUSE;
+		switch (scope.kind) {
+			case "session":
+				return { where: "WHERE session_id = ?", and: "AND session_id = ?", params: [scope.value ?? ""] };
+			case "cwd":
+			case "repo":
+				return {
+					where: DIRS_WHERE,
+					and: DIRS_AND,
+					params: [JSON.stringify(this.#scopeDirs(scope.kind, scope.value))],
+				};
+			default:
+				return { where: "WHERE 1 = 0", and: "AND 1 = 0", params: [] };
+		}
+	}
+
+	/**
+	 * Stored directories a scope reads: the ones denoting `target` itself (`cwd`), or every
+	 * one belonging to the repository rooted at `target` (`repo`).
+	 *
+	 * `cwd` holds the raw submission directory, so a plain equality is not enough: a subdirectory
+	 * or a linked worktree shares only its primary root with the repository, and the same
+	 * directory can be stored under two spellings (a symlinked checkout keeps its symlink
+	 * spelling, since `setProjectDir` resolves lexically). Each read therefore filters the stored
+	 * set, comparing normalized spellings on both sides.
+	 *
+	 * Raw directory rows are cached between database writes. Filtering re-resolves each
+	 * distinct directory so nested repositories and symlink retargets stay visible.
+	 */
+	#scopeDirs(kind: "cwd" | "repo", target?: string): string[] {
+		if (!target) return [];
+		const normalized = normalizePathForComparison(target);
+		const dirs = this.#storedDirs();
+		if (kind === "cwd") return dirs.filter(dir => normalizePathForComparison(dir) === normalized);
+		// A directory is the primary root of a repository or belongs to none, so a target that is
+		// not one — a bare subdirectory, or a linked worktree — can never be matched by a root.
+		if (normalizePathForComparison(primaryRootOrCwd(normalized)) !== normalized) return [];
+		return dirs.filter(
+			dir => normalizePathForComparison(primaryRootOrCwd(normalizePathForComparison(dir))) === normalized,
 		);
-		const whereClause = [...tokenClauses, historyFilterClause("", tokenCount + 1)].join(" AND ");
-		stmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?${tokenCount + 3}`,
-		);
-		this.#substringStmts.set(tokenCount, stmt);
+	}
+
+	#storedDirs(): string[] {
+		try {
+			// Own writes invalidate explicitly; data_version tracks other connections.
+			const version = (this.#prepare("PRAGMA data_version").get() as { data_version: number }).data_version;
+			if (this.#storedDirsCache?.dataVersion === version) return this.#storedDirsCache.dirs;
+			const rows = this.#prepare("SELECT DISTINCT cwd FROM history WHERE cwd IS NOT NULL AND cwd <> ''").all() as {
+				cwd: string;
+			}[];
+			const dirs = rows.map(row => row.cwd);
+			// Stamp the version sampled before SELECT, never a later commit onto older rows.
+			this.#storedDirsCache = { dataVersion: version, dirs };
+			return dirs;
+		} catch (error) {
+			this.#storedDirsCache = undefined;
+			throw error;
+		}
+	}
+
+	#prepare(sql: string): Statement {
+		let stmt = this.#stmts.get(sql);
+		if (!stmt) {
+			stmt = this.#db.prepare(sql);
+			this.#stmts.set(sql, stmt);
+		}
 		return stmt;
 	}
 

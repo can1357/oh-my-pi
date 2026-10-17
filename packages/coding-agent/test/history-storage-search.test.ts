@@ -32,6 +32,18 @@ afterEach(async () => {
 });
 
 describe("HistoryStorage.search", () => {
+	it("fails a closed handle as a thrown recent read and a quiet search", async () => {
+		const storage = await freshStorage();
+		await seed(storage, ["deploy the service"]);
+		HistoryStorage.close();
+
+		// `getRecent` reports its failure so the editor's seed can retry; `search` degrades quietly
+		// because its resume-picker caller has nothing to retry with. Neither may return the whole
+		// table or another scope's rows.
+		expect(() => storage.getRecent(10)).toThrow();
+		expect(storage.search("deploy", 10)).toEqual([]);
+	});
+
 	it("matches across punctuation in the query (FTS token alignment)", async () => {
 		const storage = await freshStorage();
 		await seed(storage, ["run git commit --amend now", "unrelated noise"]);
