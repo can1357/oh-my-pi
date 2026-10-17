@@ -178,6 +178,8 @@
 ## [18.11.0] - 2026-10-14
 
 ### Added
+- Added `tui.tmuxWindowName` (default off), which renames the enclosing tmux window to the active session name without its title card and restores the original name and `automatic-rename` setting on every exit path ([#7850](https://github.com/can1357/oh-my-pi/pull/7850) by [@mvid](https://github.com/mvid)).
+- Added `tui.tmuxWindowNameColor` to tint the session's tmux status entry with its accent color, restoring the window's prior styles on exit ([#7850](https://github.com/can1357/oh-my-pi/pull/7850) by [@mvid](https://github.com/mvid)).
 
 - Added a microphone button beside Send in Tern: click to record, click Stop to finish, then review and submit the transcription yourself. Clicking while it says **Starting…** cancels a slow first model load ([#15759](https://github.com/can1357/oh-my-pi/pull/15759) by [@daaximus](https://github.com/daaximus)).
 - Added local Nemotron streaming dictation: words appear while you speak, and the microphone waits for the recognizer to be ready before recording ([#15759](https://github.com/can1357/oh-my-pi/pull/15759) by [@daaximus](https://github.com/daaximus)).
