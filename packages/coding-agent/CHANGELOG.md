@@ -643,6 +643,8 @@
 - Fixed `omp --restore` and `/retry` reporting nothing to retry for a turn cut off by a process exit in a session that had used `eval`; the interrupted turn now continues ([#16195](https://github.com/can1357/oh-my-pi/issues/16195))
 - Fixed session loading on Windows treating a session path with a regular-file component as a missing session (an empty session) instead of rejecting it with `ENOTDIR` like POSIX does ([#16145](https://github.com/can1357/oh-my-pi/pull/16145) by [@jchanghong023](https://github.com/jchanghong023))
 - Fixed models from extension providers listed in `enabledModels` or `--models` missing from `/model`, the Ctrl+P cycle and the startup model scope notice until the background catalog refresh finished ([#16096](https://github.com/can1357/oh-my-pi/pull/16096) by [@skipper019](https://github.com/skipper019))
+- Fixed the built-in `ts-set-map`, `ts-import-type` and `ts-no-any` rules reminding you about code they allow: an empty or computed `Set`/`Map`, a runtime `await import()`, or the word "any" in a comment ([#16242](https://github.com/can1357/oh-my-pi/pull/16242) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the JTD-to-JSON-Schema converter emitting `$ref`s that cannot resolve: ref names are now escaped per JSON Pointer (`~` and `/`), and the JTD root `definitions` map is mapped to `$defs` so `#/$defs/` refs have a target ([#14826](https://github.com/can1357/oh-my-pi/pull/14826) by [@jchanghong023](https://github.com/jchanghong023)).
 
 ## [18.12.1] - 2026-10-17
 
@@ -716,7 +718,6 @@
 - Fixed a failed streamed edit preview ending the whole run without retry: the harness now re-drives the turn with the preview diagnostic so the model can read the file again and correct the patch, and gives up with a notice only after two recoveries
 - Fixed MCP OAuth login requesting every scope in an authorization server's catalogue when the protected resource advertises no scopes; `/mcp reauth` now falls back to configured scopes or authorization-server defaults ([#15996](https://github.com/can1357/oh-my-pi/pull/15996) by [@unclesamwk](https://github.com/unclesamwk)).
 - Fixed the incomplete-todo stop reminder firing (and resuming work) when the agent's final message asks for permission or a decision before a closing status line, through "If you confirm, I'll…"/"Separately, tell me…"-style requests, or with a non-English question followed by another sentence ([#15986](https://github.com/can1357/oh-my-pi/issues/15986))
-- Fixed the JTD-to-JSON-Schema converter emitting `$ref`s that cannot resolve: ref names are now escaped per JSON Pointer (`~` and `/`), and the JTD root `definitions` map is mapped to `$defs` so `#/$defs/` refs have a target ([#14826](https://github.com/can1357/oh-my-pi/pull/14826) by [@jchanghong023](https://github.com/jchanghong023)).
 
 ## [18.11.3] - 2026-10-16
 
