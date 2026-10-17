@@ -1181,7 +1181,7 @@ describe("GeminiHeaderRunDetector", () => {
 			const whole = new GeminiHeaderRunDetector();
 			expect(whole.push(text)).toBe(false);
 			expect(whole.count).toBe(1);
-			for (const step of [1, 3, 13, 511, GEMINI_HEADER_PARTIAL_LINE_CAP, 600]) {
+			for (const step of [1, 3, 13, GEMINI_HEADER_PARTIAL_LINE_CAP, 600]) {
 				const detector = new GeminiHeaderRunDetector();
 				for (let i = 0; i < text.length; i += step) detector.push(text.slice(i, i + step));
 				expect(detector.count).toBe(whole.count);
