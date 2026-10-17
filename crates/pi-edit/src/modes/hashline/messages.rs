@@ -871,6 +871,21 @@ pub fn path_recovered_from_tag_message(
 	)
 }
 
+/// Section named a nonexistent path whose name and tag match exactly one
+/// earlier snapshot that path recovery may not rebind to (outside the
+/// workspace). Name the full path so the retry needs no re-read.
+pub fn missing_path_tag_match_message(
+	authored_path: &str,
+	matched_path: &str,
+	tag: &str,
+) -> String {
+	format!(
+		"File not found: {authored_path}. Its filename and snapshot tag {HL_FILE_HASH_SEP}{tag} \
+		 match {matched_path} (read earlier this session); retry with \
+		 {HL_FILE_PREFIX}{matched_path}{HL_FILE_HASH_SEP}{tag}{HL_FILE_SUFFIX}."
+	)
+}
+
 /// Compress a line list into a sorted `1-4, 7, 10-12` range string.
 fn format_line_ranges(lines: &[u32]) -> String {
 	let set: BTreeSet<u32> = lines.iter().copied().collect();
