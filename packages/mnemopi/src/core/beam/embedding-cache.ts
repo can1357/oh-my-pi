@@ -38,8 +38,8 @@ const FETCH_CHUNK = 500;
 export const MAX_CACHED_VECTORS = 20_000;
 /** Bounds memory for high-dimensional models, where 20,000 vectors would take hundreds of megabytes. */
 export const MAX_CACHED_BYTES = 96 * 1024 * 1024;
-/** A cached "no embedding" marker still holds a key; count it at a nominal size. */
-const ABSENT_ENTRY_BYTES = 64;
+/** A cached "no embedding" marker or empty vector still holds a key; count it at a nominal size. */
+const NOMINAL_ENTRY_BYTES = 64;
 
 function decodeEmbedding(raw: unknown): Float32Array | null {
 	if (typeof raw !== "string") return null;
@@ -97,7 +97,8 @@ function currentCache(db: Database): ConnectionCache {
 		vectors: new LRUCache<string, Float32Array | null>({
 			max: MAX_CACHED_VECTORS,
 			maxSize: MAX_CACHED_BYTES,
-			sizeCalculation: vector => vector?.byteLength ?? ABSENT_ENTRY_BYTES,
+			// The LRU requires a positive size; an empty stored vector (`[]`) has none of its own.
+			sizeCalculation: vector => (vector && vector.byteLength > 0 ? vector.byteLength : NOMINAL_ENTRY_BYTES),
 		}),
 	};
 	caches.set(db, fresh);

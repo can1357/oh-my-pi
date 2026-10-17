@@ -366,4 +366,20 @@ describe("embedding cache", () => {
 			db.close();
 		}
 	});
+
+	it("recalls past a stored empty embedding instead of failing", async () => {
+		const memory = new Mnemopi({ db: new Database(":memory:"), embeddings: { provider } });
+		try {
+			const target = memory.remember("quexim plan for friday", { source: "test" });
+			const empty = memory.remember("zorblat plan with an empty vector", { source: "test" });
+			await memory.flushExtractions();
+			memory.conn.run("UPDATE memory_embeddings SET embedding_json = '[]' WHERE memory_id = ?", [empty]);
+
+			const ids = await recallIds(memory);
+			expect(ids).toContain(target);
+			expect(ids).toContain(empty);
+		} finally {
+			memory.close();
+		}
+	});
 });
