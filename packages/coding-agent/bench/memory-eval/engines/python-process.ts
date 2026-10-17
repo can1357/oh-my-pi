@@ -103,10 +103,12 @@ export class PythonProcess {
 				this.#settle(response);
 			}
 			// No response can come after stdout EOF: fail now, waiting only briefly for the exit code and stderr.
+			const grace = Promise.withResolvers<string>();
+			// Unref'd: a normal exit must not hold the harness open for the rest of the grace period.
+			setTimeout(grace.resolve, EOF_GRACE_MS, "closed stdout").unref();
 			const exit = await Promise.race([
 				Promise.all([stderrDone, this.#proc.exited]).then(([, code]) => `exited with code ${code}`),
-				// Unref'd: a normal exit must not hold the harness open for the rest of the grace period.
-				new Promise<string>(resolve => setTimeout(resolve, EOF_GRACE_MS, "closed stdout").unref()),
+				grace.promise,
 			]);
 			this.#fail(new Error(`${this.#label} ${exit}: ${this.#stderrTail.trim()}`));
 		} catch (err) {

@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { type CalibrationDump, compareCalibration, runUpstreamCompat } from "./compat";
 import { loadBeamUpstreamCompat, loadDataset } from "./datasets";
 import type { EngineAdapter, MnemopiRecall, ProtocolName } from "./engine";
@@ -154,7 +155,9 @@ async function runCommand(argv: string[]): Promise<void> {
 		);
 	} finally {
 		await engine.dispose();
-		await fs.rm(storeRoot, { recursive: true, force: true });
+		// A just-closed SQLite file can block deletion for a while (Windows); a leftover scratch store must
+		// never cost a finished run its result file.
+		await removeWithRetries(storeRoot).catch(err => console.warn(`could not remove ${storeRoot}: ${err}`));
 	}
 
 	const out =
