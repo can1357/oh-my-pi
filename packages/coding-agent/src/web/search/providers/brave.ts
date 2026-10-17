@@ -12,7 +12,7 @@ import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery } from "../query";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, readLimitedText, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, normalizeUrl, readLimitedText, withHardTimeout } from "./utils";
 
 const BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search";
 const DEFAULT_NUM_RESULTS = 10;
@@ -78,17 +78,6 @@ function normalizeText(value: unknown, maxLength: number): string | undefined {
 		.trim();
 	if (!text) return undefined;
 	return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
-}
-
-function normalizeUrl(value: unknown): string | undefined {
-	if (typeof value !== "string" || value.length > 2048) return undefined;
-	try {
-		const url = new URL(value);
-		if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-		return url.toString();
-	} catch {
-		return undefined;
-	}
 }
 
 function webResults(response: BraveSearchResponse): readonly unknown[] {

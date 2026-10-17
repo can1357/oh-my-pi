@@ -29,6 +29,7 @@ const PROVIDER_LOADERS: ProviderRegistry<SearchEngineId> = {
 	parallel: () => import("./providers/parallel").then(m => new m.ParallelProvider()),
 	synthetic: () => import("./providers/synthetic").then(m => new m.SyntheticProvider()),
 	ollama: () => import("./providers/ollama").then(m => new m.OllamaProvider()),
+	serply: () => import("./providers/serply").then(m => new m.SerplyProvider()),
 	searxng: () => import("./providers/searxng").then(m => new m.SearXNGProvider()),
 	duckduckgo: () => import("./providers/duckduckgo").then(m => new m.DuckDuckGoProvider()),
 	google: () => import("./providers/google").then(m => new m.GoogleProvider()),

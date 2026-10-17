@@ -1,0 +1,9 @@
+auth "serply" {
+	name "Serply"
+	env "SERPLY_API_KEY"
+	login "api-key" {
+		auth-url "https://serply.io"
+		instructions "Copy your Serply API key from the dashboard after signing in."
+		prompt "Paste your Serply API key"
+	}
+}
