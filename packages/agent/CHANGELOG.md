@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed compaction size and retained-history budgets when the latest provider usage is unusable ([#16065](https://github.com/can1357/oh-my-pi/pull/16065) by [@iFwu](https://github.com/iFwu))
+
+### Removed
+
+- Removed `getLastAssistantUsage`; use `findTranscriptUsageAnchor` for trustworthy context usage ([#16065](https://github.com/can1357/oh-my-pi/pull/16065) by [@iFwu](https://github.com/iFwu))
+
 ## [18.11.3] - 2026-10-16
 
 ### Added
