@@ -5,6 +5,9 @@
 ### Fixed
 
 - Fixed Cursor turns failing with `PROVIDER_ERROR` when a follow-up (a finished background job, a late diagnostic, a reminder) arrived while the previous turn was still streaming ([#15821](https://github.com/can1357/oh-my-pi/pull/15821) by [@robfeldmann](https://github.com/robfeldmann))
+### Added
+
+- Added `AgentOptions.onHistoryReplaced`, notified after the live transcript or the steering/follow-up queues are replaced wholesale, so per-request caches can drop snapshots pinned to the discarded history ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.3] - 2026-10-16
 
@@ -17,7 +20,6 @@
 ### Added
 
 - `agent_start` carries `resumedToolCallIds` when a continued run first executes the calls of an unpaired assistant tail
-- Added `AgentOptions.onHistoryReplaced`, notified after the live transcript or the steering/follow-up queues are replaced wholesale, so per-request caches can drop snapshots pinned to the discarded history ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
