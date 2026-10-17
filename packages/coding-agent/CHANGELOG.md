@@ -178,6 +178,10 @@
 ## [18.11.0] - 2026-10-14
 
 ### Added
+- Added saved `/panel` roles with independent family-diverse or named-persona lineups for isolated read-only participants ([#7750](https://github.com/can1357/oh-my-pi/pull/7750) by [@mvid](https://github.com/mvid)).
+- Panel members accept a ranked candidate list, so a seat falls through to the next model when its primary is unavailable and records which candidate served ([#7750](https://github.com/can1357/oh-my-pi/pull/7750) by [@mvid](https://github.com/mvid)).
+- Panel roles accept a `minFamilies` floor on distinct resolved model families, so a lineup that collapses onto fewer lineages than required never dispatches ([#7750](https://github.com/can1357/oh-my-pi/pull/7750) by [@mvid](https://github.com/mvid)).
+- Panel runs now carry a `lineupHash` naming the served routes and the policy that admitted them, and extension packages can resolve rosters through `resolvePanelLineup` ([#7750](https://github.com/can1357/oh-my-pi/pull/7750) by [@mvid](https://github.com/mvid)).
 
 - Added a microphone button beside Send in Tern: click to record, click Stop to finish, then review and submit the transcription yourself. Clicking while it says **Starting…** cancels a slow first model load ([#15759](https://github.com/can1357/oh-my-pi/pull/15759) by [@daaximus](https://github.com/daaximus)).
 - Added local Nemotron streaming dictation: words appear while you speak, and the microphone waits for the recognizer to be ready before recording ([#15759](https://github.com/can1357/oh-my-pi/pull/15759) by [@daaximus](https://github.com/daaximus)).
