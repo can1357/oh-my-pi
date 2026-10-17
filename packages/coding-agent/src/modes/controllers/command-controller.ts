@@ -2445,20 +2445,12 @@ function formatCodexTuiLabel(report: UsageReport, peers: readonly UsageReport[],
 }
 
 function formatAccountLabel(
-	limit: UsageLimit,
+	limit: UsageLimit | undefined,
 	report: UsageReport,
 	peers: readonly UsageReport[],
 	index: number,
 ): string {
 	const { identity, orgQualifies } = resolveUsageAccountIdentity(report, limit, index);
-	if (report.provider === "openai-codex") return formatCodexTuiLabel(report, peers, identity);
-	if (!orgQualifies) return identity;
-	const org = usageAccountOrg(report);
-	return org ? `${identity} (${org})` : identity;
-}
-
-function formatUnlimitedReportLabel(report: UsageReport, peers: readonly UsageReport[], index: number): string {
-	const { identity, orgQualifies } = resolveUsageAccountIdentity(report, undefined, index);
 	if (report.provider === "openai-codex") return formatCodexTuiLabel(report, peers, identity);
 	if (!orgQualifies) return identity;
 	const org = usageAccountOrg(report);
@@ -2902,7 +2894,7 @@ export function renderUsageReports(
 		// Render accounts with no rate limits (e.g. business/enterprise plans).
 		const unlimitedReports = providerReports.filter(report => report.limits.length === 0);
 		for (const report of unlimitedReports) {
-			const label = formatUnlimitedReportLabel(report, providerReports, 0);
+			const label = formatAccountLabel(undefined, report, providerReports, 0);
 			const tier = report.provider === "openai-codex" ? undefined : report.metadata?.planType;
 			const tierSuffix = typeof tier === "string" && tier ? ` ${uiTheme.fg("dim", `(${tier})`)}` : "";
 			const daybreakSuffix = report.metadata?.daybreak === true ? uiTheme.fg("success", " daybreak") : "";
