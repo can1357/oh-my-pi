@@ -66,6 +66,14 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 | `with-deps/`      | Extension with its own package.json and dependencies                      |
 | `file-trigger.ts` | Watches a trigger file and injects contents into conversation             |
 
+## Community / Third-party Plugins
+
+These plugins are maintained independently in their linked repositories. Review each plugin's source before installing it.
+
+| Plugin | Install | Description |
+| --- | --- | --- |
+| [OMP Code Model](https://github.com/cyriusweng/omp-code-model) | `omp plugin install github:cyriusweng/omp-code-model` | Runs reversible coding-model phases with Jev routing and audit state; it composes with [OMP Jev Gate](https://github.com/cyriusweng/omp-jev-gate) so selected executors receive its policy and guarded-tool checkpoints. |
+
 ## Writing Extensions
 
 See [docs/extensions.md](../../docs/extensions.md) for full documentation.
