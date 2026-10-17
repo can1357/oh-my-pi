@@ -147,7 +147,7 @@ function compactWindowTag(window: NonNullable<UsageLimit["window"]>): string {
 /**
  * Collapse usage reports into one compact card per provider: limits grouped by
  * quota bucket (label + window), each bucket showing the mean used fraction
- * across accounts (matching the classic report's aggregate "% free") with the
+ * across accounts with the
  * most-used account's reset countdown. Rows keep the provider's declared window
  * order so 5h → week → month reads the same every time; cards sort by their
  * fullest window so what's burning is on top-left; fully idle providers
@@ -419,10 +419,6 @@ function usedPercentage(fraction: number): string {
 	return `${Math.max(0, Math.round(fraction * 100))}%`;
 }
 
-/** Used percentage; preserve overage above 100%. */
-function usedText(fraction: number): string {
-	return `${usedPercentage(fraction)} used`;
-}
 /** `Mon 28 Sep` for a local date. */
 function shortDate(date: Date): string {
 	return `${WEEKDAY_NAMES[date.getDay()]} ${date.getDate()} ${MONTH_NAMES[date.getMonth()]}`;
@@ -507,10 +503,10 @@ function statTile(
 	);
 }
 
-/** `62%` in mono, toned like the window's status, then a quiet `left`. */
-function leftSpans(fraction: number, status: UsageLimit["status"]): TspSpan[] {
+/** Consumed percentage in mono, toned like the window's status, then a quiet `used`. */
+function usedSpans(fraction: number, status: UsageLimit["status"]): TspSpan[] {
 	const token = status === "exhausted" ? "mono error" : status === "warning" ? "mono warning" : "mono";
-	return [span(`${Math.max(0, Math.round((1 - fraction) * 100))}%`, token), span(" left", "dim")];
+	return [span(usedPercentage(fraction), token), span(" used", "dim")];
 }
 
 /** Stable, human account name for a report in the detail view. */
@@ -1297,7 +1293,7 @@ export class UsageDashboardComponent implements Component {
 				statTile(
 					"quota",
 					"Tightest quota",
-					leftSpans(tightest.fraction, tightest.window.status),
+					usedSpans(tightest.fraction, tightest.window.status),
 					[span(where, "dim")],
 					{
 						title: reset ? `${where} · ${reset.title}` : where,
@@ -1461,7 +1457,7 @@ export class UsageDashboardComponent implements Component {
 				} else {
 					cells.push(
 						usageMeter(window.fraction, window.status, meter),
-						text(leftSpans(window.fraction, window.status), { role: "omp.usage.pct" }),
+						text(usedSpans(window.fraction, window.status), { role: "omp.usage.pct" }),
 					);
 					if (window.resetMs !== undefined) {
 						const reset = resetLabel(this.#nowMs, window.resetMs);
@@ -1712,7 +1708,7 @@ export class UsageDashboardComponent implements Component {
 						used:
 							fraction === undefined
 								? [span(formatAbsoluteOnlyAmount([limit]) ?? "No data", "muted")]
-								: leftSpans(fraction, limit.status),
+								: usedSpans(fraction, limit.status),
 						reset:
 							resetsAt !== undefined && resetsAt > nowMs
 								? [
