@@ -11,7 +11,7 @@ If you need cross-language/process isolation, use RPC mode instead.
 bun add @oh-my-pi/pi-coding-agent
 ```
 
-Requires Bun 1.3.14 or newer. Before the first model-backed prompt, configure
+Requires Bun 1.4.3 or newer. Before the first model-backed prompt, configure
 credentials for a provider or run a keyless local provider; see
 [Providers](./providers.md). Session construction can succeed without an
 available model, but prompting cannot.

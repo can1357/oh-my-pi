@@ -100,6 +100,7 @@ async function writeExecutable(file: string, content: string): Promise<void> {
 async function runInstall(
 	buildUrl: string,
 	args: string[],
+	options: { bunVersion?: string } = {},
 ): Promise<{
 	exitCode: number;
 	stdout: string;
@@ -112,6 +113,13 @@ async function runInstall(
 	const installDir = path.join(dir, "install");
 	await writeExecutable(path.join(binDir, "uname"), '#!/bin/sh\n[ "$1" = "-s" ] && echo Linux || echo x86_64\n');
 	await writeExecutable(path.join(binDir, "ldd"), "#!/bin/sh\necho 'musl libc (x86_64)'\n");
+	if (options.bunVersion !== undefined) {
+		// A stub bun so default mode sees a host runtime to judge against.
+		await writeExecutable(
+			path.join(binDir, "bun"),
+			`#!/bin/sh\nif [ "$1" = "--version" ]; then echo "${options.bunVersion}"; exit 0; fi\necho x64\n`,
+		);
+	}
 	const proc = Bun.spawn(["sh", "scripts/install.sh", ...args], {
 		cwd: repoRoot,
 		env: {
@@ -163,5 +171,28 @@ describe.skipIf(process.platform === "win32")("install.sh binary mode", () => {
 		expect(branch.exitCode).toBe(1);
 		expect(branch.stdout).toContain("use --source with --ref");
 		expect(service.requests).toHaveLength(2);
+	});
+
+	test("default mode falls back to the prebuilt binary when the host Bun is below the floor", async () => {
+		// The advertised one-line install must not fail on the upgrade
+		// population: the binary does not run on the host Bun, so a 1.4.2 host
+		// has to select it instead of asserting.
+		const service = startService(sha256(BINARY));
+		const result = await runInstall(service.url, [], { bunVersion: "1.4.2" });
+
+		expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+		expect(result.stdout).toContain("below the minimum required 1.4.3; using the prebuilt binary instead.");
+		expect(await Bun.file(path.join(result.installDir, "omp")).text()).toBe(BINARY);
+	});
+
+	test("source mode rejects a prerelease of the floor", async () => {
+		// 1.4.3-canary.1 strips to 1.4.3 for a numeric compare but sorts below
+		// the release in the CLI's guard, so accepting it installs a runtime that
+		// exits on first run.
+		const service = startService(sha256(BINARY));
+		const result = await runInstall(service.url, ["--source"], { bunVersion: "1.4.3-canary.1" });
+
+		expect(result.exitCode).not.toBe(0);
+		expect(result.stdout).toContain("Bun 1.4.3 or newer is required");
 	});
 });

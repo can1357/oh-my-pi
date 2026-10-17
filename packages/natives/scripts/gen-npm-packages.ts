@@ -12,6 +12,8 @@ export interface LeafTarget {
 export interface BuildLeafManifestInput extends LeafTarget {
 	files: readonly string[];
 	version: string;
+	/** Core package's `engines.bun`; the leaves ship the same binaries. */
+	bunFloor: string;
 }
 
 export interface LeafManifest {
@@ -82,7 +84,7 @@ function selectPrimaryAddonFile(tag: string, files: readonly string[]): string {
 	return files[0];
 }
 
-export function buildLeafManifest({ tag, os, cpu, files, version }: BuildLeafManifestInput): LeafManifest {
+export function buildLeafManifest({ tag, os, cpu, files, version, bunFloor }: BuildLeafManifestInput): LeafManifest {
 	const addonFiles = [...new Set(files.map(file => path.basename(file)))];
 	if (addonFiles.length === 0) throw new Error(`No native addon files found for ${tag}`);
 	for (const file of addonFiles) {
@@ -104,7 +106,7 @@ export function buildLeafManifest({ tag, os, cpu, files, version }: BuildLeafMan
 			directory: "packages/natives",
 		},
 		engines: {
-			bun: ">=1.3.14",
+			bun: bunFloor,
 		},
 	};
 }
@@ -138,8 +140,13 @@ export async function generateNpmPackages({
 	version,
 	tags,
 }: GenerateNpmPackagesInput = {}): Promise<GeneratedLeafPackage[]> {
-	const manifestVersion =
-		version ?? ((await Bun.file(path.join(packageDir, "package.json")).json()) as { version: string }).version;
+	const core = (await Bun.file(path.join(packageDir, "package.json")).json()) as {
+		version: string;
+		engines?: { bun?: string };
+	};
+	const manifestVersion = version ?? core.version;
+	const bunFloor = core.engines?.bun;
+	if (!bunFloor) throw new Error("packages/natives/package.json declares no engines.bun for the leaf manifests");
 	const nativeDir = path.join(packageDir, "native");
 	const npmDir = path.join(packageDir, "npm");
 	const leaves: GeneratedLeafPackage[] = [];
@@ -147,7 +154,7 @@ export async function generateNpmPackages({
 	for (const target of selectTargets(tags)) {
 		const files = await discoverAddonFiles(nativeDir, target.tag);
 		const manifestFiles = files.length > 0 ? files : [expectedAddonFilenames(target.tag)[0]];
-		const manifest = buildLeafManifest({ ...target, files: manifestFiles, version: manifestVersion });
+		const manifest = buildLeafManifest({ ...target, files: manifestFiles, version: manifestVersion, bunFloor });
 		const leafDir = path.join(npmDir, target.tag);
 		const missing = files.length === 0;
 		leaves.push({ tag: target.tag, dir: leafDir, files, manifest, missing });

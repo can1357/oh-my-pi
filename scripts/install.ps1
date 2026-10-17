@@ -52,7 +52,7 @@ $BuildTarget = switch ($RawArchitecture.ToUpperInvariant()) {
     "ARM64" { "windows-arm64" }
     default { throw "Unsupported Windows architecture: $RawArchitecture" }
 }
-$MinimumBunVersion = "1.3.14"
+$MinimumBunVersion = "1.4.3"
 
 # PowerShell 5.1 raises a terminating NativeCommandError for any line a native
 # executable writes to stderr while $ErrorActionPreference is "Stop", regardless
@@ -102,7 +102,19 @@ function Test-BunVersion {
         return $false
     }
 
-    return $currentVersion -ge [version]$MinimumVersion
+    if ($currentVersion -lt [version]$MinimumVersion) {
+        return $false
+    }
+
+    # A prerelease of the boundary does NOT qualify: the CLI compares the
+    # unstripped `Bun.version`, which sorts 1.4.3-canary.1 below 1.4.3, so
+    # approving it here would install and then exit on first run.
+    $raw = (bun --version 2>$null)
+    if ($raw -and $raw.Trim().Contains("-") -and $currentVersion -eq [version]$MinimumVersion) {
+        return $false
+    }
+
+    return $true
 }
 
 function Assert-BunVersion {
@@ -264,6 +276,15 @@ function Install-ViaBun {
                 throw "Expected package at $packagePath"
             }
 
+            # Validate against the ref's own Bun floor, not the global minimum.
+            $refPackageJson = Get-Content (Join-Path $packagePath "package.json") -Raw | ConvertFrom-Json
+            $refBunFloor = $refPackageJson.engines.bun
+            if ($refBunFloor) {
+                # Extract version from ">=1.4.3" format
+                $refVersion = $refBunFloor -replace '^>=?\s*', ''
+                Assert-BunVersion $refVersion
+            }
+
             Invoke-Native { bun install -g $packagePath }
             if ($LASTEXITCODE -ne 0) {
                 throw "Failed to install from $packagePath via bun"
@@ -365,11 +386,15 @@ if ($Source) {
 } elseif ($Binary) {
     Install-Binary
 } else {
-    # Default: use bun if available, otherwise binary
-    if (Test-BunInstalled) {
-        Assert-BunVersion $MinimumBunVersion
+    # Default: use bun when it satisfies the floor, otherwise the prebuilt
+    # binary. The binary does not run on the host Bun, so a below-floor runtime
+    # must select it rather than fail the advertised one-line install.
+    if ((Test-BunInstalled) -and (Test-BunVersion $MinimumBunVersion)) {
         Install-ViaBun
     } else {
+        if (Test-BunInstalled) {
+            Write-Host "Bun $(Get-BunVersion) is below the minimum required $MinimumBunVersion; using the prebuilt binary instead."
+        }
         Install-Binary
     }
 }
