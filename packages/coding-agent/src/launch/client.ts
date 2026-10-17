@@ -141,7 +141,21 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	async request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult> {
 		if (this.#closed) throw new Error("Daemon broker client is closed");
 		if (signal?.aborted) throw new Error("Daemon broker request aborted");
-		await this.#connect();
+		const connecting = this.#connect();
+		if (signal) {
+			const aborted = Promise.withResolvers<never>();
+			const onAbort = () => aborted.reject(new Error("Daemon broker request aborted"));
+			signal.addEventListener("abort", onAbort, { once: true });
+			if (signal.aborted) onAbort();
+			try {
+				// One caller's cancellation must not tear down the shared connection.
+				await Promise.race([connecting, aborted.promise]);
+			} finally {
+				signal.removeEventListener("abort", onAbort);
+			}
+		} else await connecting;
+		if (signal?.aborted) throw new Error("Daemon broker request aborted");
+		if (this.#closed) throw new Error("Daemon broker client is closed");
 		const socket = this.#socket;
 		if (!socket || socket.closed) throw new Error("Daemon broker socket is unavailable");
 
@@ -161,6 +175,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			const abort = (): void => {
 				if (!this.#pending.delete(id)) return;
 				clearTimeout(timer);
+				pending.removeAbort?.();
 				reject(new Error("Daemon broker request aborted"));
 				// Dropping the local entry alone leaves the broker polling a wait or
 				// follow until its own timeout; ask it to stop. The answer is unread.
@@ -178,19 +193,29 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			pending.removeAbort = () => signal.removeEventListener("abort", abort);
 		}
 		this.#pending.set(id, pending);
-		socket.send(
-			JSON.stringify({
-				id,
-				token: this.#token,
-				owners: [...this.#completionSinks.keys()],
-				detachedOwners: [...this.#preservedCompletionOwners],
-				completionEvents: true,
-				completionUnsubscribes,
-				completionReplays,
-				completionSubscriptionId: this.#completionSubscriptionId,
-				operation,
-			}),
-		);
+		try {
+			socket.send(
+				JSON.stringify({
+					id,
+					token: this.#token,
+					owners: [...this.#completionSinks.keys()],
+					detachedOwners: [...this.#preservedCompletionOwners],
+					completionEvents: true,
+					completionUnsubscribes,
+					completionReplays,
+					completionSubscriptionId: this.#completionSubscriptionId,
+					operation,
+				}),
+			);
+			// false also means queued backpressure, not a failed write. Only a
+			// closed connection guarantees that the request cannot receive a reply.
+			if (socket.closed) throw new Error("Daemon broker connection closed");
+		} catch (error) {
+			this.#pending.delete(id);
+			clearTimeout(timer);
+			pending.removeAbort?.();
+			reject(error instanceof Error ? error : new Error(String(error)));
+		}
 		const result = await promise;
 		for (const owner of completionUnsubscribes) {
 			if (!this.#completionSinks.has(owner)) this.#completionUnsubscribes.delete(owner);
@@ -261,7 +286,12 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	async #connect(): Promise<void> {
+		if (this.#closed) throw new Error("Daemon broker client is closed");
 		if (this.#socket && !this.#socket.closed) return;
+		if (this.#socket) {
+			this.#socket = undefined;
+			this.#rejectPending(new Error("Daemon broker connection closed"));
+		}
 		if (this.#connectPromise) return this.#connectPromise;
 		this.#connectPromise = this.#connectOnce();
 		try {
@@ -284,15 +314,18 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			// process-owned lease selects one winner before any candidate touches
 			// the socket.
 		}
+		if (this.#closed) throw new Error("Daemon broker client is closed");
 		this.#spawnBroker();
 		const deadline = Date.now() + CONNECT_TIMEOUT_MS;
 		let lastError: Error | undefined;
 		while (Date.now() < deadline) {
+			if (this.#closed) throw new Error("Daemon broker client is closed");
 			try {
 				this.#bindSocket(await IpcConnection.connect(this.#endpoint, { framing: "lines", timeoutMs: 250 }));
 				return;
 			} catch (error) {
 				lastError = error instanceof Error ? error : new Error(String(error));
+				if (this.#closed) throw new Error("Daemon broker client is closed");
 				await Bun.sleep(CONNECT_RETRY_MS);
 			}
 		}
@@ -322,19 +355,27 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	#bindSocket(socket: IpcConnection): void {
+		if (this.#closed) {
+			socket.destroy();
+			throw new Error("Daemon broker client is closed");
+		}
+		if (socket.closed) throw new Error("Daemon broker connection closed");
 		this.#socket = socket;
 		socket.start(
-			line => this.#onLine(line),
+			line => {
+				if (this.#socket === socket) this.#onLine(line, socket);
+			},
 			() => {
-				// One stable error regardless of the close reason.
-				if (this.#socket === socket) this.#socket = undefined;
+				// Late callbacks from an old connection cannot reject its successor's requests.
+				if (this.#socket !== socket) return;
+				this.#socket = undefined;
 				this.#rejectPending(new Error("Daemon broker connection closed"));
 				this.#scheduleCompletionReconnect();
 			},
 		);
 	}
 
-	#onLine(line: string): void {
+	#onLine(line: string, socket: IpcConnection): void {
 		let decoded: unknown;
 		try {
 			decoded = JSON.parse(line);
@@ -360,7 +401,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			return;
 		}
 		if ("event" in message) {
-			void this.#deliverCompletion(message);
+			void this.#deliverCompletion(message, socket);
 			return;
 		}
 		const response = message;
@@ -380,7 +421,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		}
 	}
 
-	async #deliverCompletion(message: DaemonCompletionNotification): Promise<void> {
+	async #deliverCompletion(message: DaemonCompletionNotification, socket: IpcConnection): Promise<void> {
 		if (this.#seenCompletionIds.has(message.completionId)) {
 			this.#ackCompletion(message.completionId);
 			return;
@@ -403,7 +444,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionId: message.completionId,
 				error: error instanceof Error ? error.message : String(error),
 			});
-			this.#socket?.destroy();
+			if (this.#socket === socket) socket.destroy();
 		} finally {
 			this.#inFlightCompletionIds.delete(message.completionId);
 		}

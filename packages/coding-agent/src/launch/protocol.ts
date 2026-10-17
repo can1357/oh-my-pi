@@ -50,7 +50,16 @@ export type DaemonOperation =
 			renderTerminalRows?: boolean;
 			timeoutMs: number;
 	  }
-	| { op: "wait"; name: string; for: "ready" | "exit"; pattern?: string; timeoutMs: number }
+	| {
+			op: "wait";
+			name: string;
+			for: "ready" | "exit";
+			pattern?: string;
+			timeoutMs: number;
+			/** Bind a follow-up wait to the acknowledged launch, including restarts of the same daemon id. */
+			id?: string;
+			startedAt?: number;
+	  }
 	| { op: "send"; name: string; data?: string; signal?: DaemonSignal }
 	| {
 			op: "stop";
@@ -353,6 +362,8 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				for: target,
 				pattern: optionalString(source.pattern, "operation.pattern"),
 				timeoutMs: numberValue(source.timeoutMs, "operation.timeoutMs"),
+				id: optionalString(source.id, "operation.id"),
+				startedAt: optionalNumber(source.startedAt, "operation.startedAt"),
 			};
 		}
 		case "send":
@@ -414,13 +425,20 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 				timedOut: booleanValue(source.timedOut, "result.timedOut"),
 				state: daemonState(source.state),
 			};
-		case "wait":
+		case "wait": {
+			const daemon = parseDaemonSnapshot(source.daemon);
+			if (
+				(operation.id !== undefined && operation.id !== daemon.id) ||
+				(operation.startedAt !== undefined && operation.startedAt !== daemon.startedAt)
+			)
+				throw new Error(`Daemon ${operation.name} launch generation changed during the wait`);
 			return {
 				op: "wait",
-				daemon: parseDaemonSnapshot(source.daemon),
+				daemon,
 				matched: optionalRawString(source.matched, "result.matched"),
 				timedOut: booleanValue(source.timedOut, "result.timedOut"),
 			};
+		}
 		case "send":
 			return { op: "send", daemon: parseDaemonSnapshot(source.daemon) };
 		case "stop":

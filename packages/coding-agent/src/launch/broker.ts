@@ -542,6 +542,7 @@ class DaemonBroker {
 
 	async #handleLine(socket: IpcConnection, line: string, onAuthenticated: () => void): Promise<void> {
 		let id = "unknown";
+		let controller: AbortController | undefined;
 		try {
 			const decoded: unknown = JSON.parse(line);
 			// Correlate before validating: an operation this broker cannot parse (a newer omp
@@ -551,6 +552,12 @@ class DaemonBroker {
 			const request = parseDaemonWireRequest(decoded);
 			if (request.token !== this.#token) throw new Error("Daemon broker authentication failed");
 			onAuthenticated();
+			// Cancellation must see the request even while completion-owner metadata
+			// is being persisted below, before dispatch begins polling.
+			if (request.operation.op === "wait" || request.operation.op === "logs") {
+				controller = new AbortController();
+				this.#inFlight.set(id, { socket, controller });
+			}
 			for (const owner of request.completionUnsubscribes ?? []) {
 				const subscriptionId = this.#completionSubscriptions.get(owner);
 				if (
@@ -623,20 +630,15 @@ class DaemonBroker {
 					if (registration?.subscriptionId === request.completionSubscriptionId) this.#ownerSockets.delete(owner);
 				}
 			}
-			const abortable = request.operation.op === "wait" || request.operation.op === "logs";
-			const controller = abortable ? new AbortController() : undefined;
-			if (controller) this.#inFlight.set(id, { socket, controller });
-			let result: DaemonRpcResult;
-			try {
-				result = await this.#dispatch(request.operation, socket, controller?.signal);
-			} finally {
-				if (controller && this.#inFlight.get(id)?.controller === controller) this.#inFlight.delete(id);
-			}
+			if (controller?.signal.aborted) throw new Error("Daemon request cancelled");
+			const result = await this.#dispatch(request.operation, socket, controller?.signal);
 			socket.send(JSON.stringify({ id, ok: true, result }));
 			if (request.operation.op === "shutdown") setTimeout(() => void this.shutdown(), 10);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			socket.send(JSON.stringify({ id, ok: false, error: message }));
+		} finally {
+			if (controller && this.#inFlight.get(id)?.controller === controller) this.#inFlight.delete(id);
 		}
 	}
 
@@ -1184,6 +1186,11 @@ class DaemonBroker {
 
 	async #wait(operation: Extract<DaemonOperation, { op: "wait" }>, signal?: AbortSignal): Promise<DaemonRpcResult> {
 		const record = this.#record(operation.name);
+		if (
+			(operation.id !== undefined && operation.id !== record.snapshot.id) ||
+			(operation.startedAt !== undefined && operation.startedAt !== record.snapshot.startedAt)
+		)
+			throw new Error(`Daemon ${operation.name} launch generation changed before the wait`);
 		// A wait observes exactly one launch generation. Automatic or explicit
 		// relaunches reuse the managed record, so polling the record without this
 		// binding can hang past an exit or consume the replacement's output.

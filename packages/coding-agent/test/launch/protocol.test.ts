@@ -134,3 +134,35 @@ describe("regex-derived protocol fields", () => {
 		});
 	});
 });
+
+describe("acknowledged launch wait protocol", () => {
+	const wait: Extract<DaemonOperation, { op: "wait" }> = {
+		op: "wait",
+		name: "web",
+		for: "ready",
+		timeoutMs: 1_000,
+		id: baseSnapshot.id,
+		startedAt: baseSnapshot.startedAt,
+	};
+
+	it("preserves launch identity through the wire decoder", () => {
+		expect(parseDaemonWireRequest({ id: "wait-1", token: "token", operation: wait }).operation).toEqual(wait);
+	});
+
+	it.each([
+		{ id: "replacement" },
+		{ startedAt: baseSnapshot.startedAt + 1 },
+	])("rejects a reply from a different launch: %j", identity => {
+		expect(() =>
+			parseDaemonRpcResult(wait, { daemon: { ...baseSnapshot, ...identity }, timedOut: false }),
+		).toThrow("launch generation changed during the wait");
+	});
+
+	it("accepts the acknowledged launch and retains legacy unbound waits", () => {
+		const result = { daemon: baseSnapshot, timedOut: false };
+		expect(parseDaemonRpcResult(wait, result)).toMatchObject(result);
+		expect(parseDaemonRpcResult({ op: "wait", name: "web", for: "ready", timeoutMs: 1_000 }, result)).toMatchObject(
+			result,
+		);
+	});
+});

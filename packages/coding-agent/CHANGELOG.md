@@ -36,6 +36,12 @@
 - Fixed resumed sessions with `eval` history (`--continue`, `--resume`) missing the prompt cache after the previous process's first request ([#15736](https://github.com/can1357/oh-my-pi/issues/15736))
 - Fixed a failed streamed edit preview ending the whole run without retry: the harness now re-drives the turn with the preview diagnostic so the model can read the file again and correct the patch, and gives up with a notice only after two recoveries
 
+### Fixed
+
+- Fixed `wait` so delayed or unavailable broker discovery does not block local completions, messages, service exits, or cancellation ([#14860](https://github.com/can1357/oh-my-pi/pull/14860) by [@vavilonska](https://github.com/vavilonska))
+- Preserved unacknowledged service completions when a session switches cwd, including rejected switches, so resuming the owner delivers them to its transcript ([#14860](https://github.com/can1357/oh-my-pi/pull/14860) by [@vavilonska](https://github.com/vavilonska))
+- Fixed interruptible readiness checks observing a replacement service or leaving broker work polling after cancellation ([#14860](https://github.com/can1357/oh-my-pi/pull/14860) by [@vavilonska](https://github.com/vavilonska))
+
 ## [18.11.3] - 2026-10-16
 
 ### Breaking Changes

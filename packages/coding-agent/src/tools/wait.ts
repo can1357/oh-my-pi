@@ -71,30 +71,68 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const messaging = registry && senderId ? { registry, senderId } : undefined;
 		const manager = this.session.asyncJobManager;
 
+		throwIfAborted(signal);
 		const pending = takeQueuedMessage(messaging);
 		if (pending && messaging) return messageResult(messaging.senderId, pending);
-		// Refreshes owned-service tracking only; jobs are in-process, so a hung
-		// broker must not turn every wait into an error.
-		if (cfgLaunchEnabled.get(this.session.settings)) {
-			await listServicesTolerant(this.session, signal);
-			const queued = takeQueuedMessage(messaging);
-			if (queued && messaging) return messageResult(messaging.senderId, queued);
+		const deadline = Date.now() + WAIT_MAX_MS;
+		let serviceError: string | undefined;
+		const refreshAbort = new AbortController();
+		const abortRefresh = () => refreshAbort.abort(signal?.reason);
+		signal?.addEventListener("abort", abortRefresh, { once: true });
+		// Discovery races local delivery; completion subscriptions remain valid if discovery fails.
+		let refresh = cfgLaunchEnabled.get(this.session.settings)
+			? listServicesTolerant(this.session, refreshAbort.signal).then(
+					result => {
+						if (refreshAbort.signal.aborted) return;
+						serviceError = result.error;
+					},
+					error => {
+						if (refreshAbort.signal.aborted) return;
+						serviceError = error instanceof Error ? error.message : String(error);
+					},
+				)
+			: undefined;
+		try {
+			for (;;) {
+				const queued = takeQueuedMessage(messaging);
+				if (queued && messaging) return messageResult(messaging.senderId, queued);
+				const jobs = manager?.getRunningJobs({ ownerId: senderId }) ?? [];
+				// Preserve accepted completions until their native consumed-delivery boundary.
+				const undelivered = manager ? undeliveredJobs(manager, senderId) : [];
+				if (manager && undelivered.length > 0)
+					return buildJobResult(this.session, manager, "wait", [...undelivered, ...jobs], []);
+				const serviceRunning = hasLiveOwnedService(this.session);
+				if (jobs.length === 0 && !serviceRunning && !refresh) {
+					throwIfAborted(signal);
+					if (serviceError !== undefined)
+						throw new ToolError(
+							`Service state unavailable: ${serviceError}. Last-known service state is not current.`,
+						);
+					throw new ToolError(
+						"Nothing to wait for: no background job or service you started is running. Other agents' results and messages arrive on their own.",
+					);
+				}
+				const refreshing = refresh;
+				const result = await this.#blockUntilWake({
+					jobs,
+					manager,
+					messaging,
+					// Matching completion notifications are authoritative even during discovery.
+					serviceRunning,
+					refresh: refreshing?.then(() => {
+						refresh = undefined;
+					}),
+					serviceError,
+					deadline,
+					signal,
+					onUpdate,
+				});
+				if (result) return result;
+			}
+		} finally {
+			signal?.removeEventListener("abort", abortRefresh);
+			refreshAbort.abort();
 		}
-		const jobs = manager?.getRunningJobs({ ownerId: senderId }) ?? [];
-		// An accepted completion whose delivery has not reached the transcript
-		// yet (queued, parked on the yield queue, or skipped while an earlier
-		// wait watched it) is exactly what this wait is for: return it now.
-		const undelivered = manager ? undeliveredJobs(manager, senderId) : [];
-		if (manager && undelivered.length > 0) {
-			return buildJobResult(this.session, manager, "wait", [...undelivered, ...jobs], []);
-		}
-		const serviceRunning = hasLiveOwnedService(this.session);
-		if (jobs.length === 0 && !serviceRunning) {
-			throw new ToolError(
-				"Nothing to wait for: no background job or service you started is running. Other agents' results and messages arrive on their own.",
-			);
-		}
-		return this.#blockUntilWake({ jobs, manager, messaging, serviceRunning, signal, onUpdate });
 	}
 
 	/** Block until an owned job settles, an owned service finishes, a message arrives, the cap elapses, or the call aborts. */
@@ -103,14 +141,22 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		manager: AsyncJobManager | undefined;
 		messaging: WaitMessaging | undefined;
 		serviceRunning: boolean;
+		refresh: Promise<void> | undefined;
+		serviceError: string | undefined;
+		deadline: number;
 		signal: AbortSignal | undefined;
 		onUpdate: AgentToolUpdateCallback<CoordinationDetails> | undefined;
-	}): Promise<AgentToolResult<CoordinationDetails>> {
-		const { jobs, manager, messaging, serviceRunning, signal, onUpdate } = args;
+	}): Promise<AgentToolResult<CoordinationDetails> | undefined> {
+		const { jobs, manager, messaging, serviceRunning, refresh, serviceError, deadline, signal, onUpdate } = args;
 		const watchedIds = jobs.map(job => job.id);
 		manager?.watchJobs(watchedIds);
 		const serviceAbort = new AbortController();
-		const serviceLeg = serviceRunning ? waitForOwnedServiceCompletion(this.session, serviceAbort.signal) : undefined;
+		let serviceCompleted = false;
+		const serviceLeg = serviceRunning
+			? waitForOwnedServiceCompletion(this.session, serviceAbort.signal).then(() => {
+					if (!serviceAbort.signal.aborted) serviceCompleted = true;
+				})
+			: undefined;
 		const busAbort = new AbortController();
 		// Only `busAbort` can reject this leg, and it fires once the wait has settled.
 		const busLeg = messaging
@@ -119,7 +165,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 					.catch(() => null)
 			: undefined;
 		const { promise: timeout, resolve: timedOut } = Promise.withResolvers<void>();
-		const timer = setTimeout(timedOut, WAIT_MAX_MS);
+		const timer = setTimeout(timedOut, Math.max(0, deadline - Date.now()));
 		const abort = Promise.withResolvers<void>();
 		const onAbort = () => abort.resolve();
 		if (signal) {
@@ -132,16 +178,20 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				details: { op: "wait", jobs: snapshotJobs(this.session, jobs) },
 			});
 		const progressTimer = onUpdate && jobs.length > 0 ? setInterval(emitProgress, PROGRESS_INTERVAL_MS) : undefined;
-		if (jobs.length > 0) emitProgress();
-		let wake: "job" | "message" | "service" | "timeout" | "abort";
+		let wake: "job" | "message" | "service" | "refresh" | "timeout" | "abort";
 		try {
+			if (jobs.length > 0) emitProgress();
 			wake = await Promise.race([
 				...jobs.map(job => job.promise.then(() => "job" as const)),
 				...(busLeg ? [busLeg.then(() => "message" as const)] : []),
 				...(serviceLeg ? [serviceLeg.then(() => "service" as const)] : []),
+				...(refresh ? [refresh.then(() => "refresh" as const)] : []),
 				timeout.then(() => "timeout" as const),
 				abort.promise.then(() => "abort" as const),
 			]);
+		} catch (error) {
+			manager?.unwatchJobs(watchedIds);
+			throw error;
 		} finally {
 			clearTimeout(timer);
 			clearInterval(progressTimer);
@@ -170,7 +220,15 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				}
 				throwIfAborted(signal);
 			}
+			// A terminal list can settle the watched service in the same turn as
+			// discovery. Keep that exit even when refresh wins the promise race.
+			if (wake === "refresh") {
+				if (!serviceCompleted) return undefined;
+				wake = "service";
+			}
 			if (manager && jobs.length > 0) return buildJobResult(this.session, manager, "wait", jobs, []);
+			if (wake === "timeout" && serviceError !== undefined)
+				throw new ToolError(`Service state unavailable: ${serviceError}. Last-known service state is not current.`);
 			return {
 				content: [
 					{
