@@ -361,6 +361,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							continue;
 						}
 						const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+						// Before the wait, so it covers loading the file's checkout.
+						await ensureWorkspaceFolder(client, resolved, signal);
 						if (isProjectAwareLspServer(serverConfig)) {
 							await waitForProjectLoaded(client, signal);
 							throwIfAborted(signal);
@@ -609,8 +611,16 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				let client: LspClient;
 				try {
 					client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
-					// Per renamed file, not per directory: a directory can span checkouts.
-					for (const { oldUri } of pairs) await ensureWorkspaceFolder(client, uriToFile(oldUri), signal);
+					// Per renamed file, both sides, not per directory: a rename can span checkouts.
+					const checkedDirs = new Set<string>();
+					for (const { oldUri, newUri } of pairs) {
+						for (const filePath of [uriToFile(oldUri), uriToFile(newUri)]) {
+							const dir = path.dirname(filePath);
+							if (checkedDirs.has(dir)) continue;
+							checkedDirs.add(dir);
+							await ensureWorkspaceFolder(client, filePath, signal);
+						}
+					}
 					if (isProjectAwareLspServer(serverConfig)) {
 						await waitForProjectLoaded(client, signal);
 					}
