@@ -69,8 +69,12 @@ const hit = (engineId: string, content: string, summaryOf: string[] = []): Recal
 describe("unstored messages", () => {
 	it("records the messages an engine declined to store, instead of letting them pass as plain misses", async () => {
 		const engine = fakeEngine({ rowIds: items => items.map((_, i) => (i === 1 ? null : `r${i}`)), hits: [] });
-		const run = await runCases(engine, [twoMessageCase], "standard", 10, tmp);
-		expect(run.unstoredMessageIds).toEqual(["m2"]);
+		// Message ids are case-local (BEAM numbers each conversation's messages from 0), so the case names the message.
+		const run = await runCases(engine, [twoMessageCase, { ...twoMessageCase, caseId: "c/2" }], "standard", 10, tmp);
+		expect(run.unstoredMessages).toEqual([
+			{ caseId: "c/1", messageId: "m2" },
+			{ caseId: "c/2", messageId: "m2" },
+		]);
 	});
 });
 describe("runner", () => {
