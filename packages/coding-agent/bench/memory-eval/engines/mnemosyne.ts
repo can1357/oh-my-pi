@@ -1,5 +1,6 @@
 /** Mnemosyne adapter: upstream Mnemosyne 4.0.0b4 in a Python child process, driven over JSON lines. */
 import * as fs from "node:fs/promises";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -142,7 +143,9 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 				await current.shutdown();
 			}
 			isOpen = false;
-			if (dataDir) await fs.rm(dataDir, { recursive: true, force: true });
+			// A leftover store costs disk space; failing here would discard the completed run.
+			if (dataDir)
+				await removeWithRetries(dataDir).catch(err => console.warn(`could not remove ${dataDir}: ${err}`));
 			dataDir = undefined;
 		},
 		// The spawn is part of warmup: its time covers interpreter start, imports and model load.
