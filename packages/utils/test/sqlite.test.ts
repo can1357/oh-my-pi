@@ -319,3 +319,29 @@ test.each([
 		db.close();
 	}
 });
+
+test("salvage keeps readable rows between separate damaged regions", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-island-");
+	const dbPath = dir.join("store.db");
+	const { pageSize, leaves } = seedLeaves(dbPath);
+	const damaged = [leaves[0]!, leaves[2]!, leaves[3]!];
+	const fd = fs.openSync(dbPath, "r+");
+	try {
+		for (const leaf of damaged) {
+			fs.writeSync(fd, Buffer.alloc(pageSize, 0xff), 0, pageSize, leaf.page * pageSize);
+		}
+	} finally {
+		fs.closeSync(fd);
+	}
+
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		const middleId = leaves[1]!.ids[0]!;
+		expect(db.query("SELECT id FROM entries WHERE id = ?").get(middleId)).toEqual({ id: middleId });
+		const rows = readSalvageableRows<{ id: number }>(db, "entries", "id");
+		const expected = leaves.filter(leaf => !damaged.includes(leaf)).flatMap(leaf => leaf.ids);
+		expect(rows.map(row => row.id)).toEqual(expected);
+	} finally {
+		db.close();
+	}
+});

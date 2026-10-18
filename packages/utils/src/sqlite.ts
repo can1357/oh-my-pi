@@ -346,13 +346,57 @@ export function checkpointWal(db: Database): void {
 /** Damaged regions one {@link readSalvageableRows} scan skips before abandoning the rest of the table. */
 const SALVAGE_MAX_DAMAGED_REGIONS = 1000;
 
+/** Interior table keys bound individual subtrees even when readable and damaged leaves alternate. */
+function readSalvageRowidStarts(db: Database, table: string): number[] {
+	const root = db
+		.query<{ rootpage: number }, [string]>("SELECT rootpage FROM sqlite_schema WHERE name = ?")
+		.get(table);
+	if (!root) return [];
+	// Serialize through SQLite so committed WAL pages are included, without modifying the damaged store.
+	const image = db.serialize();
+	const encodedPageSize = image.readUInt16BE(16);
+	const pageSize = encodedPageSize === 1 ? 65536 : encodedPageSize;
+	const pending = [root.rootpage];
+	const visited = new Set<number>();
+	const starts: number[] = [];
+	while (pending.length > 0) {
+		const page = pending.pop()!;
+		const start = (page - 1) * pageSize;
+		const end = start + pageSize;
+		if (start < 0 || end > image.length || visited.has(page)) continue;
+		visited.add(page);
+		const header = start + (page === 1 ? 100 : 0);
+		if (image[header] !== 0x05) continue;
+		const cells = image.readUInt16BE(header + 3);
+		const contentStart = header + 12 + cells * 2;
+		if (contentStart > end) continue;
+		pending.push(image.readUInt32BE(header + 8));
+		for (let index = 0; index < cells; index++) {
+			const cell = start + image.readUInt16BE(header + 12 + index * 2);
+			if (cell < contentStart || cell + 5 > end) continue;
+			pending.push(image.readUInt32BE(cell));
+			let key = 0n;
+			for (let byteIndex = 0, offset = cell + 4; byteIndex < 9 && offset < end; byteIndex++, offset++) {
+				const byte = image[offset]!;
+				key = (key << BigInt(byteIndex === 8 ? 8 : 7)) | BigInt(byteIndex === 8 ? byte : byte & 0x7f);
+				if (byteIndex === 8 || byte < 0x80) {
+					const rowid = Number(BigInt.asIntN(64, key));
+					if (Number.isSafeInteger(rowid) && rowid < Number.MAX_SAFE_INTEGER) starts.push(rowid + 1);
+					break;
+				}
+			}
+		}
+	}
+	return starts.sort((a, b) => a - b);
+}
+
 /**
  * Reads every row of a rowid table that SQLite can still decode, to salvage a
  * damaged store. A full scan aborts at the first unreadable page, so this walks
- * rowids with indexed seeks instead: when a seek hits damage it doubles its
- * stride past it, then bisects back to the first rowid from which seeking
- * works again, losing only rows on the damaged pages. Cross-linked pages can
- * still decode rows with foreign column types, so callers validate types;
+ * rowids with indexed seeks instead. A damaged seek advances to the next
+ * subtree boundary, never bisecting across potentially readable islands.
+ * Cross-linked pages can still decode rows with foreign column types, so
+ * callers validate types;
  * rows returned out of rowid order count as damage. Only corruption errors are
  * treated as damage; anything else is thrown.
  */
@@ -382,6 +426,8 @@ export function readSalvageableRows<T extends object>(db: Database, table: strin
 	};
 	let after = Number.MIN_SAFE_INTEGER;
 	let damaged = 0;
+	let starts: number[] | undefined;
+	let nextStart = 0;
 	while (after < Number.MAX_SAFE_INTEGER) {
 		const row = probe(after);
 		if (row === null) break;
@@ -391,21 +437,12 @@ export function readSalvageableRows<T extends object>(db: Database, table: strin
 			continue;
 		}
 		if (++damaged > SALVAGE_MAX_DAMAGED_REGIONS) break;
-		// An end-of-table result counts as clear: the gap below it may still hold readable rows.
-		let bad = after;
-		let clear = Number.MAX_SAFE_INTEGER;
-		for (let step = 1; after + step < clear; step *= 2) {
-			if (probe(after + step) !== undefined) clear = after + step;
-			else bad = after + step;
-		}
-		while (clear - bad > 1) {
-			const mid = bad + Math.floor((clear - bad) / 2);
-			if (probe(mid) === undefined) bad = mid;
-			else clear = mid;
-		}
-		// An interior key bounds its left subtree inclusively, so seeking past the last
-		// damaged rowid descends into the damage again and `clear` itself is skipped.
-		const boundary = probe(bad, clear);
+		starts ??= readSalvageRowidStarts(db, table);
+		while (nextStart < starts.length && starts[nextStart]! <= after) nextStart++;
+		const clear = starts[nextStart] ?? Number.MAX_SAFE_INTEGER;
+		// A separator bounds its left subtree inclusively; test the following key
+		// exactly before resuming seeks so the first row of the next leaf is kept.
+		const boundary = probe(after, clear);
 		if (boundary) keep(boundary);
 		after = clear;
 	}
