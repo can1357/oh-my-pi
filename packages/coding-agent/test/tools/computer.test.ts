@@ -2069,18 +2069,23 @@ describe("computer worker round trips", () => {
 		);
 		expect(posted.ok && posted.payload.returnValue).toBeUndefined();
 		expect(posted.ok && posted.payload.displays).toEqual([]);
-		// A long selection of wide characters is named within one line's width; the return value keeps it whole.
-		native.dragSelection = { start: 0, length: 150, text: "あ".repeat(150), focused: false };
-		const wide = await runWorker(
-			transport,
-			"drag-wide",
-			'const win = await desktop.window("42"); await win.drag([[1, 2], [30, 2]])',
-		);
-		expect(wide.ok && wide.payload.returnValue).toEqual(native.dragSelection);
-		const wideNotice = wide.ok ? wide.payload.displays[0] : undefined;
-		const wideText = wideNotice?.type === "text" ? wideNotice.text : "";
-		expect(wideText).toContain("あ");
-		expect(wideText).not.toContain("あ".repeat(150));
+		// A long selection of wide or escaped characters is named within one line's width; the return value keeps it whole.
+		for (const [label, text, full] of [
+			["wide", "あ".repeat(150), "あ".repeat(150)],
+			["escaped", "\\".repeat(70), "\\\\".repeat(70)],
+		] as const) {
+			native.dragSelection = { start: 0, length: text.length, text, focused: false };
+			const long = await runWorker(
+				transport,
+				`drag-${label}`,
+				'const win = await desktop.window("42"); await win.drag([[1, 2], [30, 2]])',
+			);
+			expect(long.ok && long.payload.returnValue).toEqual(native.dragSelection);
+			const longNotice = long.ok ? long.payload.displays[0] : undefined;
+			const longText = longNotice?.type === "text" ? longNotice.text : "";
+			expect(longText).toContain(full.slice(0, 4));
+			expect(longText).not.toContain(full);
+		}
 	});
 
 	describe("numeric window ids", () => {
