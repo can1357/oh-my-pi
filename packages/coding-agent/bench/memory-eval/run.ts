@@ -32,6 +32,15 @@ const REVISIONS = {
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../..");
 const UPSTREAM_COMPAT_CONVERSATIONS = 3;
 
+/** Hash of every `.ts` and `.py` file of the harness, read before the run so later edits cannot change it. */
+async function harnessHash(): Promise<string> {
+	const files = (await Array.fromAsync(new Bun.Glob("**/*.{ts,py}").scan(import.meta.dir))).sort();
+	const parts = await Promise.all(
+		files.map(async file => `${file}\0${await Bun.file(path.join(import.meta.dir, file)).text()}`),
+	);
+	return Bun.hash(parts.join("\0")).toString(16);
+}
+
 /** The revision `py/prepare_datasets.py` recorded next to the cached file; anything but the pinned one is refused. */
 async function cachedRevision(dataset: DatasetName, dataDir: string): Promise<string> {
 	const beam = dataset.startsWith("beam");
@@ -136,6 +145,7 @@ async function runCommand(argv: string[]): Promise<void> {
 	const k = dataset.startsWith("beam") ? 10 : 50;
 
 	const startedAt = new Date().toISOString();
+	const harness = await harnessHash();
 	const dataDir = path.join(CACHE_ROOT, "data");
 	const result = await pinnedCheckout(REPO_ROOT, async git => {
 		const storeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-"));
@@ -169,6 +179,7 @@ async function runCommand(argv: string[]): Promise<void> {
 					polyphonic: engineOptions.polyphonic,
 					gitCommit: git.commit,
 					gitDirty: git.dirty,
+					harnessHash: harness,
 					startedAt,
 				},
 				run,
@@ -240,6 +251,12 @@ async function diffCommand(argv: string[]): Promise<void> {
 		throw new Error(`protocol differs: ${a.config.protocol} vs ${b.config.protocol}`);
 	}
 	if (a.config.k !== b.config.k) throw new Error(`k differs: ${a.config.k} vs ${b.config.k}`);
+	if (a.config.harnessHash && b.config.harnessHash && a.config.harnessHash !== b.config.harnessHash) {
+		throw new Error("harness code differs between the two runs: scoring changes would pass as engine changes");
+	}
+	if (!a.config.harnessHash || !b.config.harnessHash) {
+		console.warn("warning: a result file predates the harness fingerprint; harness code was not verified");
+	}
 	// Engine options are what an ablation compares; the config lines above name both sides.
 	if (a.config.engine !== b.config.engine && a.config.protocol === "with-sleep") {
 		console.warn(
