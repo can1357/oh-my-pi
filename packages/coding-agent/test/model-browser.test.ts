@@ -593,18 +593,40 @@ describe("Factory Droid credits badge", () => {
 		expect(browser.visibleCount).toBe(0);
 	});
 
-	test("names a credit promotion folded into the rate with its label and end date", () => {
+	test("discounts the row rate during a promotion and names it in the detail, never cutting other facts", () => {
 		const promoted = {
-			...makeDroidModel("gpt-5.6-sol", 1.6),
-			factoryDroidCreditPromotion: { label: "20% off", endsAt: Date.parse("2026-11-22T00:00:00Z") },
+			...makeDroidModel("gpt-5.6-sol", 2),
+			reasoning: true,
+			input: ["text", "image"] as Model["input"],
+			factoryDroidCreditPromotion: {
+				discount: 0.2,
+				startsAt: Date.now() - 86_400_000,
+				endsAt: Date.parse("2099-11-22T00:00:00Z"),
+				label: "20% off",
+			},
 		};
-		const browser = makeBrowser([promoted], []);
-		const row = browser
-			.render(140)
-			.map(line => Bun.stripANSI(line))
-			.find(line => line.includes("gpt-5.6-sol"));
-
-		expect(row).toContain("$1.25/10 1.6× (20% off until 2026-11-22)");
+		for (const width of [80, 120]) {
+			const rows = makeBrowser([promoted], [])
+				.render(width)
+				.map(line => Bun.stripANSI(line));
+			const row = rows.find(line => line.includes("gpt-5.6-sol"));
+			expect(row).toContain("$1.25/10 1.6×");
+			expect(row).not.toContain("20% off");
+			expect(rows.some(line => line.includes("reasoning · vision"))).toBe(true);
+		}
+		const wide = makeBrowser([promoted], [])
+			.render(160)
+			.map(line => Bun.stripANSI(line));
+		expect(wide.some(line => line.includes("· 20% off until 2099-11-22"))).toBe(true);
+		const ended = {
+			...promoted,
+			factoryDroidCreditPromotion: { ...promoted.factoryDroidCreditPromotion, endsAt: Date.now() - 1 },
+		};
+		const endedRows = makeBrowser([ended], [])
+			.render(160)
+			.map(line => Bun.stripANSI(line));
+		expect(endedRows.find(line => line.includes("gpt-5.6-sol"))).toContain("$1.25/10 2×");
+		expect(endedRows.some(line => line.includes("20% off"))).toBe(false);
 	});
 });
 
