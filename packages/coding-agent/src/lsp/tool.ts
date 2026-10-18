@@ -20,6 +20,7 @@ import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-t
 import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
+	ensureWorkspaceFolder,
 	getActiveClients,
 	getOrCreateClient,
 	isRustAnalyzerClient,
@@ -608,6 +609,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				let client: LspClient;
 				try {
 					client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					// Per renamed file, not per directory: a directory can span checkouts.
+					for (const { oldUri } of pairs) await ensureWorkspaceFolder(client, uriToFile(oldUri), signal);
 					if (isProjectAwareLspServer(serverConfig)) {
 						await waitForProjectLoaded(client, signal);
 					}

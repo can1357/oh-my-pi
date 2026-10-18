@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
@@ -525,12 +526,89 @@ async function startMessageReader(client: LspClient): Promise<void> {
 	}
 }
 
+/** Checkouts added to a client's workspace after `initialize`, as symlink-resolved paths. */
+const addedWorkspaceFolders = new WeakMap<LspClient, string[]>();
+
+function workspaceFolder(folder: string): { uri: string; name: string } {
+	return { uri: fileToUri(folder), name: path.basename(folder) || "workspace" };
+}
+
 /**
- * Build the workspace folder list advertised to the server. Identical shape
- * for `initialize` params and `workspace/workspaceFolders` server requests.
+ * Build the workspace folder list advertised to the server: the client's root,
+ * then every checkout added since. Identical shape for `initialize` params and
+ * `workspace/workspaceFolders` server requests.
  */
 function currentWorkspaceFolders(client: LspClient): Array<{ uri: string; name: string }> {
-	return [{ uri: fileToUri(client.cwd), name: path.basename(client.cwd) || "workspace" }];
+	return [client.cwd, ...(addedWorkspaceFolders.get(client) ?? [])].map(workspaceFolder);
+}
+
+/** `filePath` with symlinks resolved; a path that does not exist yet keeps its missing tail. */
+function realPathOf(filePath: string): string {
+	const resolved = path.resolve(filePath);
+	let existing = resolved;
+	while (true) {
+		try {
+			return path.join(fs.realpathSync(existing), path.relative(existing, resolved));
+		} catch {
+			const parent = path.dirname(existing);
+			if (parent === existing) return resolved;
+			existing = parent;
+		}
+	}
+}
+
+/**
+ * The checkout to add to `client`'s workspace before it opens `filePath`: the nearest
+ * ancestor holding `.git`, for a file outside the client's root, outside the checkout
+ * containing that root, and outside every folder added so far. A server rooted at the
+ * session cwd never loads another checkout on its own (rust-analyzer finds no references
+ * there). Only servers that accept `workspace/didChangeWorkspaceFolders` get one.
+ */
+function workspaceFolderToAdd(client: LspClient, filePath: string): string | undefined {
+	if (!client.serverCapabilities?.workspace?.workspaceFolders?.changeNotifications) return undefined;
+	const file = realPathOf(filePath);
+	const root = realPathOf(client.cwd);
+	if (isPathInsideWorkspace(file, root)) return undefined;
+	if (addedWorkspaceFolders.get(client)?.some(folder => isPathInsideWorkspace(file, folder))) return undefined;
+	for (let dir = path.dirname(file); ; dir = path.dirname(dir)) {
+		if (fs.existsSync(path.join(dir, ".git"))) return isPathInsideWorkspace(root, dir) ? undefined : dir;
+		if (path.dirname(dir) === dir) return undefined;
+	}
+}
+
+/**
+ * Add the checkout holding `filePath` to `client`'s workspace when the server would
+ * otherwise not load it ({@link workspaceFolderToAdd}). The server re-indexes, so the
+ * client's project-load wait restarts.
+ */
+export async function ensureWorkspaceFolder(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
+	const folder = workspaceFolderToAdd(client, filePath);
+	if (!folder) return;
+	const added = addedWorkspaceFolders.get(client) ?? [];
+	added.push(folder);
+	addedWorkspaceFolders.set(client, added);
+	Object.assign(client, createProjectLoadSignal());
+	try {
+		await sendNotification(
+			client,
+			"workspace/didChangeWorkspaceFolders",
+			{ event: { added: [workspaceFolder(folder)], removed: [] } },
+			signal,
+		);
+	} catch (err) {
+		added.splice(added.indexOf(folder), 1);
+		client.resolveProjectLoaded();
+		throw err;
+	}
+}
+
+/** Whether a change to `filePath` concerns `client`: inside its root or a checkout added to it. */
+function clientServesPath(client: LspClient, filePath: string): boolean {
+	if (isPathInsideWorkspace(filePath, path.resolve(client.cwd))) return true;
+	const added = addedWorkspaceFolders.get(client);
+	if (!added?.length) return false;
+	const file = realPathOf(filePath);
+	return added.some(folder => isPathInsideWorkspace(file, folder));
 }
 
 /**
@@ -888,6 +966,20 @@ async function waitForRustAnalyzerWorkspace(client: LspClient, signal?: AbortSig
 
 const PROJECT_LOAD_TIMEOUT_MS = 15_000;
 
+/** A project-load wait that the server's progress, its exit, or {@link PROJECT_LOAD_TIMEOUT_MS} ends. */
+function createProjectLoadSignal(): Pick<LspClient, "projectLoaded" | "resolveProjectLoaded"> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	// Auto-resolve after timeout in case server doesn't use progress tokens
+	const timeout = setTimeout(resolve, PROJECT_LOAD_TIMEOUT_MS);
+	return {
+		projectLoaded: promise,
+		resolveProjectLoaded: () => {
+			clearTimeout(timeout);
+			resolve();
+		},
+	};
+}
+
 /** Max time to wait for graceful LSP shutdown and process exit. */
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 const EXIT_TIMEOUT_MS = 1_000;
@@ -1084,18 +1176,6 @@ export async function getOrCreateClient(
 			env: env ? { ...Bun.env, ...env } : undefined,
 		});
 
-		let resolveProjectLoaded!: () => void;
-		const projectLoaded = new Promise<void>(resolve => {
-			resolveProjectLoaded = resolve;
-		});
-		// Auto-resolve after timeout in case server doesn't use progress tokens
-		const projectLoadTimeout = setTimeout(resolveProjectLoaded, PROJECT_LOAD_TIMEOUT_MS);
-		const originalResolve = resolveProjectLoaded;
-		resolveProjectLoaded = () => {
-			clearTimeout(projectLoadTimeout);
-			originalResolve();
-		};
-
 		const client: LspClient = {
 			name: key,
 			cwd,
@@ -1113,8 +1193,7 @@ export async function getOrCreateClient(
 			startedAt: Date.now(),
 			writeQueue: Promise.resolve(),
 			activeProgressTokens: new Set(),
-			projectLoaded,
-			resolveProjectLoaded,
+			...createProjectLoadSignal(),
 		};
 
 		// Register crash recovery - remove client on process exit
@@ -1305,6 +1384,7 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 			if (isEnoent(err)) return;
 			throw err;
 		}
+		await ensureWorkspaceFolder(client, filePath, signal);
 		const languageId = client.config.languageId ?? detectLanguageId(filePath);
 		throwIfAborted(signal);
 
@@ -1496,6 +1576,7 @@ export async function syncContent(
 
 		if (!info) {
 			// Open file with provided content instead of reading from disk
+			await ensureWorkspaceFolder(client, filePath, signal);
 			const languageId = client.config.languageId ?? detectLanguageId(filePath);
 			throwIfAborted(signal);
 			await sendNotification(
@@ -1612,7 +1693,7 @@ export async function notifyWorkspaceWatchedFiles(
 	const results = await Promise.allSettled(
 		activeClients.map(async client => {
 			const clientChanges = changes
-				.filter(change => isPathInsideWorkspace(change.filePath, workspace))
+				.filter(change => clientServesPath(client, change.filePath))
 				.map(change => {
 					const uri = fileToUri(change.filePath);
 					client.diagnostics.delete(uri);
@@ -1782,6 +1863,25 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
  *   to avoid leaking pending requests forever.
  */
 export async function sendRequest(
+	client: LspClient,
+	method: string,
+	params: unknown,
+	signal?: AbortSignal,
+	timeoutMs?: number,
+): Promise<unknown> {
+	try {
+		return await sendRequestOnce(client, method, params, signal, timeoutMs);
+	} catch (err) {
+		// A server indexing a checkout added with didChangeWorkspaceFolders cancels
+		// requests with ContentModified (-32801); LSP asks clients to retry them.
+		const contentModified = err instanceof Error && err.message.startsWith("LSP error -32801");
+		if (!contentModified || !addedWorkspaceFolders.get(client)?.length) throw err;
+		await untilAborted(signal, client.projectLoaded);
+		return await sendRequestOnce(client, method, params, signal, timeoutMs);
+	}
+}
+
+function sendRequestOnce(
 	client: LspClient,
 	method: string,
 	params: unknown,

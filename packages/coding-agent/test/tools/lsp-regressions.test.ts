@@ -3691,6 +3691,157 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	describe("files in another checkout", () => {
+		/** Session checkout `main/` and a linked worktree `feature/` (a `.git` file), each with `src/target.py`. */
+		async function makeCheckouts(prefix: string) {
+			const tempDir = TempDir.createSync(prefix);
+			const sessionRoot = path.join(tempDir.path(), "main");
+			const siblingRoot = path.join(tempDir.path(), "feature");
+			const source = "def target():\n    return 1\nvalue = target()\n";
+			await fsp.mkdir(path.join(sessionRoot, ".git"), { recursive: true });
+			await Bun.write(path.join(siblingRoot, ".git"), "gitdir: ../main/.git/worktrees/feature\n");
+			await Bun.write(path.join(sessionRoot, "src", "target.py"), source);
+			await Bun.write(path.join(siblingRoot, "src", "target.py"), source);
+			await Bun.write(path.join(siblingRoot, "src", "other.py"), source);
+			return { tempDir, sessionRoot, siblingRoot: fs.realpathSync(siblingRoot) };
+		}
+
+		function useServer(
+			capabilities: Record<string, unknown>,
+			onReferences?: (id: RpcMessage["id"], srv: FakeLspServer) => void,
+		) {
+			const serverConfig: ServerConfig = { command: "fake-ra", fileTypes: ["py"], rootMarkers: [], isLinter: true };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "fake-ra": serverConfig },
+				idleTimeoutMs: undefined,
+			});
+			return installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { capabilities: { referencesProvider: true, ...capabilities } },
+					});
+				} else if (message.method === "textDocument/references") {
+					if (onReferences) onReferences(message.id, srv);
+					else srv.send({ jsonrpc: "2.0", id: message.id, result: [] });
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+		}
+
+		const references = (tool: LspTool, file: string) =>
+			tool.execute("references", { action: "references", file, line: 1, symbol: "target" });
+
+		it("adds the other checkout as a workspace folder before opening its file", async () => {
+			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-sibling-folder-");
+			try {
+				const server = useServer({
+					workspace: { workspaceFolders: { supported: true, changeNotifications: true } },
+				});
+				const tool = new LspTool(makeLspSession(sessionRoot));
+				const siblingFile = path.join(siblingRoot, "src", "target.py");
+
+				await references(tool, path.join(sessionRoot, "src", "target.py"));
+				expect(server.received.some(message => message.method === "workspace/didChangeWorkspaceFolders")).toBe(
+					false,
+				);
+
+				await references(tool, siblingFile);
+				await references(tool, path.join(siblingRoot, "src", "other.py"));
+				const methods = server.received.map(message => message.method);
+				const adds = server.received.filter(message => message.method === "workspace/didChangeWorkspaceFolders");
+				expect(adds.map(message => message.params)).toEqual([
+					{ event: { added: [{ uri: fileToUri(siblingRoot), name: "feature" }], removed: [] } },
+				]);
+				const siblingOpen = server.received.findIndex(
+					message =>
+						message.method === "textDocument/didOpen" &&
+						JSON.stringify(message.params).includes(fileToUri(siblingFile)),
+				);
+				expect(methods.indexOf("workspace/didChangeWorkspaceFolders")).toBeLessThan(siblingOpen);
+
+				server.send({ jsonrpc: "2.0", id: 9002, method: "workspace/workspaceFolders" });
+				const folders = await server.waitFor(message => message.id === 9002 && message.method === undefined);
+				expect(folders.result).toEqual([
+					{ uri: fileToUri(sessionRoot), name: "main" },
+					{ uri: fileToUri(siblingRoot), name: "feature" },
+				]);
+
+				await lspClient.notifyWorkspaceWatchedFiles(sessionRoot, [
+					{ filePath: siblingFile, type: lspClient.FileChangeType.Changed },
+				]);
+				const watched = await server.waitFor(message => message.method === "workspace/didChangeWatchedFiles");
+				expect(watched.params).toEqual({
+					changes: [{ uri: fileToUri(siblingFile), type: lspClient.FileChangeType.Changed }],
+				});
+			} finally {
+				configCache.delete(sessionRoot);
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("leaves a server without workspace folder changes rooted at the session alone", async () => {
+			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-sibling-nofolders-");
+			try {
+				const server = useServer({});
+				await references(new LspTool(makeLspSession(sessionRoot)), path.join(siblingRoot, "src", "target.py"));
+
+				expect(server.spawnCount).toBe(1);
+				expect(server.received.some(message => message.method === "workspace/didChangeWorkspaceFolders")).toBe(
+					false,
+				);
+			} finally {
+				configCache.delete(sessionRoot);
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("retries a request the server cancels with ContentModified while indexing an added checkout", async () => {
+			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-sibling-retry-");
+			const siblingFile = path.join(siblingRoot, "src", "target.py");
+			try {
+				let calls = 0;
+				useServer({ workspace: { workspaceFolders: { changeNotifications: true } } }, (id, srv) => {
+					calls++;
+					if (calls === 1) {
+						srv.send({ jsonrpc: "2.0", id, error: { code: -32801, message: "content modified" } });
+						srv.send({
+							jsonrpc: "2.0",
+							method: "$/progress",
+							params: { token: "index", value: { kind: "begin" } },
+						});
+						srv.send({
+							jsonrpc: "2.0",
+							method: "$/progress",
+							params: { token: "index", value: { kind: "end" } },
+						});
+						return;
+					}
+					const range = { start: { line: 2, character: 8 }, end: { line: 2, character: 14 } };
+					srv.send({ jsonrpc: "2.0", id, result: [{ uri: fileToUri(siblingFile), range }] });
+				});
+
+				const result = await references(new LspTool(makeLspSession(sessionRoot)), siblingFile);
+
+				expect(calls).toBe(2);
+				expect(result.content[0]).toMatchObject({
+					type: "text",
+					text: expect.stringContaining("Found 1 reference"),
+				});
+			} finally {
+				configCache.delete(sessionRoot);
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+	});
+
 	it("skips disk reconciliation while an OMP write holds the overlay ahead of disk", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-pending-write-");
 		const filePath = path.join(tempDir.path(), "target.py");
