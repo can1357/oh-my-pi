@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed streamed rows being clipped above the screen before they reached scrollback while the working row was up, so a scrolled-back terminal saw rows jump at the screen's top edge and the whole screen dropped when a run ended ([#12307](https://github.com/can1357/oh-my-pi/issues/12307), [#16117](https://github.com/can1357/oh-my-pi/pull/16117) by [@galtamam-cmyk](https://github.com/galtamam-cmyk)). `Composer.setRuntimeChildren` takes a `billedChrome` option for roots billed at their current height instead of through the floor.
+
 ## [18.18.4] - 2026-11-09
 
 ### Added
