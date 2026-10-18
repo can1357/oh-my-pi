@@ -257,6 +257,8 @@ async function releaseProviderInFlightStaleLock(lockDir: string, stale: Provider
 		if (stat.mtimeMs !== stale.mtimeMs || Date.now() - stat.mtimeMs <= PROVIDER_INFLIGHT_LOCK_STALE_MS) return;
 		await fs.rm(lockDir, { recursive: true, force: true });
 	} catch (error) {
+		// A concurrent reclaimer removing the stale dir first is expected, not a failure.
+		if (isEnoent(error)) return;
 		logger.warn("ai: failed to remove stale provider in-flight lock", {
 			lockDir,
 			error: error instanceof Error ? error.message : String(error),
@@ -289,6 +291,9 @@ async function releaseProviderInFlightLockDirIfSame(
 		if (!isSameProviderInFlightLock(current, identity)) return;
 		await fs.rm(lockDir, { recursive: true, force: true });
 	} catch (error) {
+		// Normal contention: another process removed the lock dir between our write
+		// and this cleanup, which the caller already handles by retrying.
+		if (isEnoent(error)) return;
 		logger.warn("ai: failed to release provider in-flight lock dir", {
 			lockDir,
 			error: error instanceof Error ? error.message : String(error),

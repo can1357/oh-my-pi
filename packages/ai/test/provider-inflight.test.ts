@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,6 +13,7 @@ import {
 	streamSimple,
 } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model, RawSseEvent } from "@oh-my-pi/pi-ai/types";
+import { logger } from "@oh-my-pi/pi-utils";
 
 function context(): Context {
 	return {
@@ -661,6 +662,30 @@ describe("provider in-flight request limits", () => {
 
 		expect(result.content).toEqual([{ type: "text", text: "reply" }]);
 		expect(mock.calls).toHaveLength(1);
+	});
+
+	test("does not warn when a lock removed before its info write is released as contention", async () => {
+		registerMockApi();
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			// Same scenario as the retry test above: the dir vanishes between the
+			// identity read and the info write, so the write-failure cleanup also
+			// observes ENOENT. That is handled contention, not a failure to report.
+			__providerInFlightForTesting.setLockIdentifiedObserver(async lockDir => {
+				await fs.rm(lockDir, { recursive: true, force: true });
+				__providerInFlightForTesting.setLockIdentifiedObserver(undefined);
+			});
+
+			const result = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+
+			expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+			expect(
+				warn.mock.calls.filter(([message]) => message === "ai: failed to release provider in-flight lock dir"),
+			).toHaveLength(0);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	test("retries transient EPERM from the win32 lock mkdir until the lease is acquired", async () => {
