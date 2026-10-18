@@ -105,12 +105,22 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 		name: "mnemopi",
 		describe: async () => {
 			const pkg: { version: string } = await Bun.file(PACKAGE_JSON).json();
+			// The Python embedder's numerical runtime decides near-tie order, so it is part of the configuration.
+			const runtime =
+				embedder === "python"
+					? Object.fromEntries(
+							Object.entries((await startEmbedder().call("versions")) as Record<string, string>).map(
+								([name, version]) => [`${name}_version`, version],
+							),
+						)
+					: {};
 			return {
 				package_version: pkg.version,
 				embedding_model: EMBEDDING_MODEL,
 				embedder,
 				embeddings_disabled: String(opts.embeddings?.disabled === true),
 				git_commit: (await vcs.requireGit(REPO_ROOT).headSha()) ?? "unknown",
+				...runtime,
 			};
 		},
 		open: async (_evalCase, { storeDir, protocol }) => {

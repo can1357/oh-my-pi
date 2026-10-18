@@ -18,8 +18,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+from pinned_source import require_pinned
+
 CACHE = Path.home() / ".cache" / "omp-memory-eval"
-UPSTREAM_TESTS = CACHE / "src" / "mnemosyne" / "tests"
+UPSTREAM_REPO = CACHE / "src" / "mnemosyne"
+UPSTREAM_COMMIT = "e871f39480b9b9156faa4396162f7ec1f3b11525"
+UPSTREAM_TESTS = UPSTREAM_REPO / "tests"
 BEAM_REVISION = "3205395e897e7318c7b094ef4e6047b9b82dbb03"
 TOP_K = 10
 
@@ -105,6 +109,7 @@ def recording_consolidate(self, *args, **kwargs):
 
 BeamMemory.consolidate_to_episodic = recording_consolidate
 
+require_pinned(UPSTREAM_REPO, UPSTREAM_COMMIT)
 sys.path.insert(0, str(UPSTREAM_TESTS))
 import benchmark_vs_vectordbs as up  # noqa: E402
 

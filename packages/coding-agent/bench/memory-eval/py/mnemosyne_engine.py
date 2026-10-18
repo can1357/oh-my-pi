@@ -49,6 +49,8 @@ class Engine:
 			"embedding_model": embeddings._DEFAULT_MODEL,
 			"embeddings_available": str(embeddings.available()).lower(),
 			"dropped_tier_rows": str(self.dropped_tier_rows),
+			"fastembed_version": importlib.metadata.version("fastembed"),
+			"onnxruntime_version": importlib.metadata.version("onnxruntime"),
 		}
 		info.update({key: value for key, value in os.environ.items() if key.startswith("MNEMOSYNE_") and value})
 		return info
