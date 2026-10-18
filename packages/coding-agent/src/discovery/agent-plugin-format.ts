@@ -15,7 +15,6 @@ import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { readFile } from "../capability/fs";
 import { isContainedResolved, realpathIfExists, resolveContainedPath } from "./contained-path";
-import { registerPluginCacheInvalidator } from "./helpers";
 
 /** Canonical `plugin.json` `$schema` identifier for Agent Plugins 1.0.0 (spec §5.2). */
 export const AGENT_PLUGIN_MANIFEST_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
@@ -488,20 +487,22 @@ export async function parseAgentPluginMcp(raw: string, options: AgentPluginMcpOp
  * - `invalid` — the root claims Agent Plugins conformance but its manifest is
  *   fatally invalid; no component may be discovered or executed (spec §11.3).
  */
-type AgentPluginRootStatus =
+export type AgentPluginRootStatus =
 	| { kind: "none" }
 	| { kind: "standard"; manifest: AgentPluginManifest; warnings: string[]; realRoot: string }
 	| { kind: "invalid"; reason: string };
 
 const rootStatusCache = new Map<string, Promise<AgentPluginRootStatus>>();
-registerPluginCacheInvalidator(() => rootStatusCache.clear());
 
-/** Drop cached classifications (tests, or after plugin installs outside the shared registry flow). */
+/** Drop cached classifications; runs with every plugin roots cache clear (`clearClaudePluginRootsCache`). */
 export function clearAgentPluginRootCache(): void {
 	rootStatusCache.clear();
 }
 
-async function classifyUncached(rootPath: string): Promise<AgentPluginRootStatus> {
+async function classifyUncached(
+	rootPath: string,
+	read: (filePath: string) => Promise<string | null>,
+): Promise<AgentPluginRootStatus> {
 	const realRoot = await realpathIfExists(rootPath);
 	if (realRoot === null) return { kind: "none" };
 
@@ -514,7 +515,7 @@ async function classifyUncached(rootPath: string): Promise<AgentPluginRootStatus
 		return { kind: "invalid", reason: "plugin.json resolves outside the plugin root" };
 	}
 
-	const raw = await readFile(manifest.realPath);
+	const raw = await read(manifest.realPath);
 	if (raw === null) return { kind: "none" };
 	const parsed = parseAgentPluginManifest(raw);
 	if (parsed.status === "none") return { kind: "none" };
@@ -530,10 +531,27 @@ async function classifyUncached(rootPath: string): Promise<AgentPluginRootStatus
 export function classifyAgentPluginRoot(rootPath: string): Promise<AgentPluginRootStatus> {
 	let cached = rootStatusCache.get(rootPath);
 	if (!cached) {
-		cached = classifyUncached(rootPath);
+		cached = classifyUncached(rootPath, readFile);
 		rootStatusCache.set(rootPath, cached);
 	}
 	return cached;
+}
+
+async function readFileFromDisk(filePath: string): Promise<string | null> {
+	try {
+		return await Bun.file(filePath).text();
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Classify a plugin root straight from disk, bypassing both the classification
+ * cache and the shared file-content cache. For roots rewritten in place outside
+ * the plugin registry flow, such as marketplace clones refreshed by an update.
+ */
+export function readAgentPluginRootStatus(rootPath: string): Promise<AgentPluginRootStatus> {
+	return classifyUncached(rootPath, readFileFromDisk);
 }
 
 /**

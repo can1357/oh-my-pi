@@ -32,6 +32,7 @@ import type { MCPRequestIdFormat } from "../mcp/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
+import { classifyAgentPluginRoot, clearAgentPluginRootCache } from "./agent-plugin-format";
 import { realpathIfExists, resolveContainedPath } from "./contained-path";
 import { buildPluginDirRoot } from "./plugin-dir-roots";
 
@@ -1452,6 +1453,7 @@ async function loadClaudePluginRoots({
 export function clearClaudePluginRootsCache(): void {
 	pluginRootsCache.clear();
 	for (const invalidate of pluginCacheInvalidators) invalidate();
+	clearAgentPluginRootCache();
 	preloadedPluginRoots = [...injectedPluginDirRoots];
 	// Re-warm preloaded roots asynchronously so sync LSP config reads stay valid
 	if (lastPreloadHome) {
@@ -1509,28 +1511,35 @@ export async function injectPluginDirRoots(home: string, dirs: string[], cwd?: s
 	const injected: ClaudePluginRoot[] = [];
 	for (const dir of dirs) {
 		const resolved = path.resolve(dir);
-		// Read plugin name from manifest: Claude marketplace layout first, then
-		// the Agent Plugins standard root manifest (agent-plugins.org). Each
-		// manifest is resolved and proven inside the plugin directory BEFORE the
-		// read (Agent Plugins §4.1) — an escaping symlink falls back to the
-		// directory basename without consuming outside content.
+		// Read the plugin name from its manifest; an unreadable or nameless manifest
+		// leaves the directory basename. A root claiming the Agent Plugins standard
+		// (agent-plugins.org) owns its core fields: only its root `plugin.json` may
+		// name it (§5.1), resolved inside the plugin directory before the read
+		// (§4.1), and a fatally invalid one keeps the basename. Other roots read the
+		// Claude marketplace layout first, then a root `plugin.json`, each proven
+		// inside the plugin directory first so an escaping symlink is never consumed.
 		let pluginName = path.basename(resolved);
-		const realRoot = await realpathIfExists(resolved);
-		if (realRoot !== null) {
-			for (const manifestPath of [
-				path.join(realRoot, ".claude-plugin", "plugin.json"),
-				path.join(realRoot, "plugin.json"),
-			]) {
-				const contained = await resolveContainedPath(realRoot, manifestPath);
-				if (contained.status !== "ok") continue;
-				try {
-					const manifest = await Bun.file(contained.realPath).json();
-					if (typeof manifest?.name === "string" && manifest.name) {
-						pluginName = manifest.name;
-						break;
+		const status = await classifyAgentPluginRoot(resolved);
+		if (status.kind === "standard") {
+			pluginName = status.manifest.name;
+		} else if (status.kind === "none") {
+			const realRoot = await realpathIfExists(resolved);
+			if (realRoot !== null) {
+				for (const manifestPath of [
+					path.join(realRoot, ".claude-plugin", "plugin.json"),
+					path.join(realRoot, "plugin.json"),
+				]) {
+					const contained = await resolveContainedPath(realRoot, manifestPath);
+					if (contained.status !== "ok") continue;
+					try {
+						const manifest = await Bun.file(contained.realPath).json();
+						if (typeof manifest?.name === "string" && manifest.name) {
+							pluginName = manifest.name;
+							break;
+						}
+					} catch {
+						// Invalid manifest — try next, fall back to directory name
 					}
-				} catch {
-					// Invalid manifest — try next, fall back to directory name
 				}
 			}
 		}

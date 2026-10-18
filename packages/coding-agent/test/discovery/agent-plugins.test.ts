@@ -531,6 +531,24 @@ describe("agent-plugins discovery", () => {
 		}
 	});
 
+	test("names a --plugin-dir root from its standard manifest even beside a Claude manifest (§5.1)", async () => {
+		const dirPath = path.join(tempDir, "plugins", "dual-dir");
+		await fs.mkdir(path.join(dirPath, ".claude-plugin"), { recursive: true });
+		await fs.writeFile(
+			path.join(dirPath, "plugin.json"),
+			JSON.stringify({ $schema: AGENT_PLUGIN_MANIFEST_SCHEMA, name: "standard-name" }),
+		);
+		await fs.writeFile(path.join(dirPath, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "claude-name" }));
+
+		try {
+			await injectPluginDirRoots(tempDir, [dirPath], tempDir);
+			const { roots } = await listClaudePluginRoots(tempDir, tempDir);
+			expect(roots.find(root => root.path === dirPath)?.plugin).toBe("standard-name");
+		} finally {
+			await injectPluginDirRoots(tempDir, []);
+		}
+	});
+
 	test("falls back to the directory name when --plugin-dir plugin.json escapes the root", async () => {
 		// A valid manifest OUTSIDE the plugin dir: consuming it would name the
 		// synthetic root "renamed-plugin" instead of the directory basename.
