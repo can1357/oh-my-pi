@@ -44,7 +44,7 @@ import manualContinuePrompt from "../../prompts/system/manual-continue.md" with 
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
-import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
+import { PINNED_HUD_TOGGLE_ID, type ViewportLink } from "@oh-my-pi/pi-tui/prompt/composer";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { restoreDetachedDraft } from "../../slash-commands/helpers/draft";
@@ -293,8 +293,8 @@ export class InputController {
 
 	/** Click-candidate id the hover band currently tracks; repaint only on change. */
 	#lastHoverClickId: string | undefined;
-	/** Extension link URL the hover highlight currently tracks; repaint only on change. */
-	#lastHoverLink: string | undefined;
+	/** Extension link label the hover highlight currently tracks; repaint only on change. */
+	#lastHoverLink: ViewportLink | undefined;
 
 	/** Return the last full editor snapshot delivered by its change contract. */
 	getDraftText(): string {
@@ -831,7 +831,7 @@ export class InputController {
 		return local;
 	}
 
-	#viewportLinkAt(screenRow: number, col: number): string | undefined {
+	#viewportLinkAt(screenRow: number, col: number): ViewportLink | undefined {
 		const line = this.#viewportLine(screenRow);
 		return line === undefined ? undefined : this.ctx.viewportLinkAt(line, col);
 	}
@@ -842,12 +842,13 @@ export class InputController {
 		return line !== undefined && this.ctx.activateViewportLink(line, col);
 	}
 
-	/** Highlight the extension link under the pointer and show a hand pointer, repainting only on a change. */
-	#updateLinkHover(url: string | undefined): void {
+	/** Highlight the extension link label under the pointer and show a hand pointer, repainting only on a change. */
+	#updateLinkHover(link: ViewportLink | undefined): void {
 		// Idempotent, and re-asserts the pointer shape a tracking reset (e.g. an overlay) dropped.
-		this.ctx.setLinkHover(url);
-		if (url === this.#lastHoverLink) return;
-		this.#lastHoverLink = url;
+		this.ctx.setLinkHover(link);
+		const last = this.#lastHoverLink;
+		if (link?.url === last?.url && link?.row === last?.row && link?.start === last?.start) return;
+		this.#lastHoverLink = link;
 		this.ctx.ui.requestRender();
 	}
 

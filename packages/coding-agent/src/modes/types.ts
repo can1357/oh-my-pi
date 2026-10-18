@@ -9,7 +9,7 @@ import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
-import type { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
+import type { Composer, ViewportLink } from "@oh-my-pi/pi-tui/prompt/composer";
 import type { Settings } from "../config/settings";
 import type {
 	AutocompleteProviderFactory,
@@ -185,10 +185,10 @@ export interface InteractiveModeContext {
 	 * drawn there. Returns false when no extension link is under the click.
 	 */
 	activateViewportLink(index: number, col: number): boolean;
-	/** The extension-owned link drawn at cell `col` of a mutable-viewport line, or `undefined`. */
-	viewportLinkAt(index: number, col: number): string | undefined;
-	/** Highlight every label of the extension link `url` and show a hand pointer (or clear both). */
-	setLinkHover(url: string | undefined): void;
+	/** The extension-owned link label drawn at cell `col` of a mutable-viewport line, or `undefined`. */
+	viewportLinkAt(index: number, col: number): ViewportLink | undefined;
+	/** Highlight one extension link label (across the rows it wraps) and show a hand pointer, or clear both. */
+	setLinkHover(link: ViewportLink | undefined): void;
 	/** Flip the pinned jump list between its collapsed few and the full list. */
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */

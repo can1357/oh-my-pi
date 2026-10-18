@@ -1,7 +1,7 @@
 import { getComposerStyle } from "../components/composer/registry";
 import { Spacer } from "../components/spacer";
 import type { StatusLineComponent } from "../status-line/component";
-import { extensionLinkAt, restyleExtensionLink } from "../render/extension-links";
+import { extensionLinkLabels, restyleExtensionLinkLabel } from "../render/extension-links";
 import type { StatusLineSession } from "../status-line/host";
 import { createStartupStatusLine, type StatusLineStartupData } from "../status-line/startup";
 import { isInsideTerminalMultiplexer } from "../terminal-multiplexer";
@@ -178,6 +178,15 @@ export function routeViewportClick(spans: readonly ViewportClickSpan[], index: n
 	return [];
 }
 
+/** An extension link label drawn on a mutable-viewport line: what a click or hover lands on. */
+export interface ViewportLink {
+	readonly url: string;
+	/** Mutable-viewport line the label is drawn on. */
+	readonly row: number;
+	/** First cell of the label's part on that line. */
+	readonly start: number;
+}
+
 /**
  * Reserved click-candidate id for the pinned HUD expander row. Checked before
  * any registry lookup: its `@…:…` charset cannot collide with generated agent
@@ -281,8 +290,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#lastViewportRows: readonly string[] = [];
 	/** Click-candidate id under the pointer, painted with the hover band. Id-anchored so it follows streaming rows. */
 	#hoveredClickId: string | undefined;
-	/** Extension link URL under the pointer; every label drawn for it is highlighted. */
-	#hoveredLink: string | undefined;
+	/** Extension link label under the pointer; only it (on every row it wraps across) is highlighted. */
+	#hoveredLink: ViewportLink | undefined;
 	// Hard-row prefix currently above the native viewport. The first resize
 	// frame may pull part of it down before the normal buffer is borrowed.
 	#retiredHeaderStart = 0;
@@ -542,11 +551,42 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		return { history, viewport: this.#paintHoveredLink(this.#paintHoverBand(mutable, spans)) };
 	}
 
-	/** Highlight the hovered extension link's labels, on every viewport row a wrapped label reaches. */
+	/**
+	 * Highlight the hovered extension link label. A wrapped label continues on the rows above and
+	 * below: while a part is the first label on its row, the previous row's last label belongs to it
+	 * when it has the same URL and ends that row; likewise downward. Other labels of the URL stay plain.
+	 */
 	#paintHoveredLink(viewport: string[]): string[] {
-		const url = this.#hoveredLink;
-		if (url === undefined) return viewport;
-		return viewport.map(line => restyleExtensionLink(line, url, inverseLabel));
+		const hovered = this.#hoveredLink;
+		if (hovered === undefined) return viewport;
+		const labelsAt = (index: number) => {
+			const line = viewport[index];
+			return line === undefined ? [] : extensionLinkLabels(line);
+		};
+		const hitLabels = labelsAt(hovered.row);
+		const hit = hitLabels.find(label => label.start === hovered.start && label.url === hovered.url);
+		if (hit === undefined) return viewport;
+		const painted = [...viewport];
+		painted[hovered.row] = restyleExtensionLinkLabel(viewport[hovered.row]!, hit, inverseLabel);
+		for (let index = hovered.row - 1, labels = hitLabels, part = hit; labels[0] === part; index--) {
+			labels = labelsAt(index);
+			const above = labels.at(-1);
+			if (above === undefined || above.url !== hovered.url || !above.endsRow) break;
+			painted[index] = restyleExtensionLinkLabel(viewport[index]!, above, inverseLabel);
+			part = above;
+		}
+		for (
+			let index = hovered.row + 1, labels = hitLabels, part = hit;
+			part.endsRow && labels.at(-1) === part;
+			index++
+		) {
+			labels = labelsAt(index);
+			const below = labels[0];
+			if (below === undefined || below.url !== hovered.url) break;
+			painted[index] = restyleExtensionLinkLabel(viewport[index]!, below, inverseLabel);
+			part = below;
+		}
+		return painted;
 	}
 
 	/**
@@ -666,12 +706,14 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	}
 
 	/**
-	 * The extension-owned link drawn at cell `col` of a mutable-viewport line, or `undefined`.
-	 * Only links whose scheme an extension registered match; see `extensionLinkAt`.
+	 * The extension-owned link label drawn at cell `col` of a mutable-viewport line, or `undefined`.
+	 * Only links whose scheme an extension registered match; see `extensionLinkLabels`.
 	 */
-	viewportLinkAt(index: number, col: number): string | undefined {
+	viewportLinkAt(index: number, col: number): ViewportLink | undefined {
 		const line = this.#lastViewportRows[index];
-		return line === undefined ? undefined : extensionLinkAt(line, col);
+		if (line === undefined || col < 0) return undefined;
+		const label = extensionLinkLabels(line).find(label => col >= label.start && col < label.end);
+		return label && { url: label.url, row: index, start: label.start };
 	}
 
 	/**
@@ -683,11 +725,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	}
 
 	/**
-	 * Point the link hover highlight at an extension link URL (or clear it). Takes effect on the
-	 * next frame; callers repaint only when the target actually changes.
+	 * Point the link hover highlight at a label `viewportLinkAt` returned (or clear it). Takes effect
+	 * on the next frame; callers repaint only when the target actually changes.
 	 */
-	setHoveredLink(url: string | undefined): void {
-		this.#hoveredLink = url;
+	setHoveredLink(link: ViewportLink | undefined): void {
+		this.#hoveredLink = link;
 	}
 
 	/** Acknowledges one accepted header, replay, or transcript batch. */

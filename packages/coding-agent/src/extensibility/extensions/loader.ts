@@ -31,6 +31,7 @@ import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
+import { InternalUrlRouter } from "../../internal-urls/router";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
@@ -65,37 +66,21 @@ type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
 /** RFC 3986 scheme syntax, lowercased. */
 const LINK_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]*$/;
 
-/** Schemes an extension may not claim: web, file and mail links, and omp's internal URLs. */
-const RESERVED_LINK_SCHEMES: ReadonlySet<string> = new Set([
-	"about",
-	"blob",
-	"data",
-	"file",
-	"ftp",
-	"http",
-	"https",
-	"javascript",
-	"mailto",
-	"ssh",
-	"ws",
-	"wss",
-	"agent",
-	"artifact",
-	"cfg",
-	"conflict",
-	"history",
-	"issue",
-	"local",
-	"mcp",
-	"memory",
-	"omp",
-	"pr",
-	"proc",
-	"rule",
-	"skill",
-	"vault",
-	"xd",
-]);
+/** Standard schemes an extension may not claim: web, file and mail links. omp's internal URLs are refused too. */
+const STANDARD_LINK_SCHEMES: Readonly<Record<string, true>> = {
+	about: true,
+	blob: true,
+	data: true,
+	file: true,
+	ftp: true,
+	http: true,
+	https: true,
+	javascript: true,
+	mailto: true,
+	ssh: true,
+	ws: true,
+	wss: true,
+};
 
 function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | null {
 	const candidate = typeof module === "function" ? module : module.default;
@@ -324,7 +309,8 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		if (!LINK_SCHEME_PATTERN.test(normalized)) {
 			throw new Error(`registerLinkScheme: "${scheme}" is not a URL scheme (letters, digits, "+", "-", ".")`);
 		}
-		if (RESERVED_LINK_SCHEMES.has(normalized)) {
+		// `=== true`: inherited keys such as `constructor` are not reserved.
+		if (STANDARD_LINK_SCHEMES[normalized] === true || InternalUrlRouter.instance().isBuiltin(normalized)) {
 			throw new Error(`registerLinkScheme: "${scheme}" is reserved for standard or omp-internal links`);
 		}
 		if (!this.extension.linkSchemes.includes(normalized)) this.extension.linkSchemes.push(normalized);

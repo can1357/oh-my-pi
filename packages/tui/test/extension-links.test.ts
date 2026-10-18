@@ -1,13 +1,21 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { type Component, TUI } from "@oh-my-pi/pi-tui";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { Markdown } from "@oh-my-pi/pi-tui/components/markdown";
+import { COMPOSER_DEFAULTS, Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import {
-	extensionLinkAt,
-	restyleExtensionLink,
+	extensionLinkLabels,
 	setExtensionLinks,
 	stripExtensionLinkMarkers,
 } from "@oh-my-pi/pi-tui/render/extension-links";
-import { setTerminalTextSizing } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import {
+	ImageProtocol,
+	setTerminalImageProtocol,
+	setTerminalTextSizing,
+	TERMINAL,
+} from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { getMarkdownTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { VirtualTerminal } from "./virtual-terminal";
 
 beforeAll(async () => {
 	await initTheme(false);
@@ -24,20 +32,11 @@ afterEach(() => {
 const render = (text: string, width = 80) => new Markdown(text, 0, 0, getMarkdownTheme()).render(width);
 const plain = (line: string) => Bun.stripANSI(line);
 
-/** Every cell of `rows` mapped to the extension link drawn there, as `row:col=url` runs. */
+/** Every extension link label drawn on `rows`, as `row:first-last cell=url` runs. */
 function linkCells(rows: readonly string[]): string[] {
-	const runs: string[] = [];
-	rows.forEach((row, index) => {
-		const width = Bun.stringWidth(row);
-		let open: { start: number; url: string } | undefined;
-		for (let col = 0; col <= width; col++) {
-			const url = col < width ? extensionLinkAt(row, col) : undefined;
-			if (url === open?.url) continue;
-			if (open) runs.push(`${index}:${open.start}-${col - 1}=${open.url}`);
-			open = url === undefined ? undefined : { start: col, url };
-		}
-	});
-	return runs;
+	return rows.flatMap((row, index) =>
+		extensionLinkLabels(row).map(label => `${index}:${label.start}-${label.end - 1}=${label.url}`),
+	);
 }
 
 describe("extension-owned links", () => {
@@ -128,18 +127,97 @@ describe("extension-owned links", () => {
 		}
 	});
 
-	it("highlights only the hovered link's label, on every row a wrapped label reaches", () => {
+	it("never hands the terminal an extension URL on a row it writes as an image row", () => {
 		setExtensionLinks(["demo"], true);
-		const mark = (label: string) => `[${Bun.stripANSI(label)}]`;
-		const rows = render("Some words [a much longer link label](demo:open/8) and [other](demo:open/9) end", 30);
-		const hovered = rows.map(row => Bun.stripANSI(restyleExtensionLink(row, "demo:open/8", mark)));
-		// Each row's part of the wrapped label is highlighted, and nothing else.
-		expect(hovered.join("|").match(/\[[^\]]*\]/g)).toEqual(["[a much longer link]", "[label]"]);
-		// The highlight leaves the click mapping intact.
-		const restyled = rows.map(row => restyleExtensionLink(row, "demo:open/8", label => `\x1b[7m${label}\x1b[27m`));
-		expect(linkCells(restyled)).toEqual(linkCells(rows));
-		// A link whose scheme is not claimed is never restyled.
-		const web = render("[docs](https://example.com)")[0]!;
-		expect(restyleExtensionLink(web, "https://example.com", mark)).toBe(web);
+		const originalProtocol = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const terminal = new RecordingTerminal(80, 24);
+		const tui = new TUI(terminal);
+		try {
+			// A Kitty placeholder cell in the label makes the whole row an image row.
+			tui.addChild({ render: width => render("Open [\u{10eeee}](demo:open/7) now", width) });
+			tui.start();
+			tui.renderNow();
+			expect(terminal.written).toContain("\u{10eeee}");
+			expect(terminal.written).not.toContain("demo:open/7");
+		} finally {
+			tui.stop();
+			setTerminalImageProtocol(originalProtocol);
+		}
+	});
+});
+
+/** Records every byte the TUI writes. */
+class RecordingTerminal extends VirtualTerminal {
+	written = "";
+	override write(data: string): void {
+		this.written += data;
+		super.write(data);
+	}
+}
+
+/** Rendered rows shown in the composer's live viewport as they are. */
+class StaticBlock implements Component {
+	constructor(readonly rows: readonly string[]) {}
+	isTranscriptBlockFinalized(): boolean {
+		return false;
+	}
+	render(): readonly string[] {
+		return this.rows;
+	}
+}
+
+describe("extension link hover", () => {
+	const SIZE = { columns: 80, rows: 24 };
+
+	/** Paint `rows` in a composer, hover the first cell showing `label`, and return the highlighted text. */
+	function hover(rows: readonly string[], label: string): { highlighted: string[]; cleared: boolean } {
+		const composer = new Composer({
+			terminal: new VirtualTerminal(SIZE.columns, SIZE.rows),
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		composer.start();
+		try {
+			const transcript = new TranscriptContainer();
+			transcript.addChild(new StaticBlock(rows));
+			composer.setRuntimeChildren([transcript]);
+			const before = composer.renderFrame(SIZE).viewport;
+			const row = before.findIndex(line => plain(line).includes(label));
+			composer.setHoveredLink(composer.viewportLinkAt(row, plain(before[row]!).indexOf(label)));
+			const painted = composer.renderFrame(SIZE).viewport;
+			const highlighted = painted.flatMap(line =>
+				[...line.matchAll(/\x1b\[7m(.*?)\x1b\[27m/g)].map(match => plain(match[1]!)),
+			);
+			composer.setHoveredLink(undefined);
+			const cleared = composer.renderFrame(SIZE).viewport.every((line, index) => line === before[index]);
+			return { highlighted, cleared };
+		} finally {
+			composer.stop();
+		}
+	}
+
+	it("highlights only the hovered label, on every row a wrapped label reaches", () => {
+		setExtensionLinks(["demo"], true);
+		const rows = render("Some words [a much longer link label](demo:open/8) and [again](demo:open/8) end", 30);
+		// Hovering either row's part lights up the whole wrapped label, not the other label of its URL.
+		for (const part of ["a much", "label"]) {
+			const { highlighted, cleared } = hover(rows, part);
+			expect(highlighted.map(text => text.trim())).toEqual(["a much longer link", "label"]);
+			expect(cleared).toBe(true);
+		}
+		expect(hover(rows, "again").highlighted).toEqual(["again"]);
+	});
+
+	it("highlights only the hovered one of two labels sharing a URL", () => {
+		setExtensionLinks(["demo"], true);
+		const rows = render("Pick [first](demo:open/1) or [second](demo:open/1) now");
+		expect(hover(rows, "second").highlighted).toEqual(["second"]);
+		expect(hover(rows, "first").highlighted).toEqual(["first"]);
+	});
+
+	it("never highlights a link whose scheme is not claimed", () => {
+		setExtensionLinks(["demo"], true);
+		const { highlighted } = hover(render("[docs](https://example.com)"), "docs");
+		expect(highlighted).toEqual([]);
 	});
 });

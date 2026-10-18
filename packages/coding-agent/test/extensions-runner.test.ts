@@ -595,10 +595,18 @@ describe("ExtensionRunner", () => {
 				path.join(extensionsDir, "link-hijack.ts"),
 				`export default function(pi) { pi.registerLinkScheme("https"); }`,
 			);
+			await Bun.write(
+				path.join(extensionsDir, "link-internal-hijack.ts"),
+				`export default function(pi) { pi.registerLinkScheme("Security"); }`,
+			);
 			try {
 				const result = await loadTestExtensions();
-				// Claiming a web scheme fails that extension's load instead of capturing every web link.
+				// Claiming a web scheme or one of omp's internal URL schemes fails that extension's load
+				// instead of capturing every such link.
 				expect(result.errors.find(error => error.path.endsWith("link-hijack.ts"))?.error).toContain("reserved");
+				expect(result.errors.find(error => error.path.endsWith("link-internal-hijack.ts"))?.error).toContain(
+					"reserved",
+				);
 				const runnerWith = (settings: Settings) =>
 					new ExtensionRunner(
 						result.extensions,

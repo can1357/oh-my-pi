@@ -1,7 +1,7 @@
 /**
  * Links whose scheme an extension registered (`pi.registerLinkScheme`). Markdown draws them
  * without the ` (url)` suffix. While inline mouse routing is on, the rendered row carries an OSC 8
- * marker with the URL so a click's cell can be traced back to it ({@link extensionLinkAt}); the TUI
+ * marker with the URL so a click's cell can be traced back to it ({@link extensionLinkLabels}); the TUI
  * strips that marker from every row it writes ({@link stripExtensionLinkMarkers}), so the terminal
  * never receives the link as a hyperlink it could open.
  */
@@ -68,7 +68,7 @@ export function extensionLinkScheme(href: string): string | undefined {
 }
 
 /**
- * Draw an extension link's label: wrapped in the OSC 8 marker {@link extensionLinkAt} reads back
+ * Draw an extension link's label: wrapped in the OSC 8 marker {@link extensionLinkLabels} reads back
  * while clicks are routed in a plain terminal, plain otherwise. Never followed by a ` (url)` suffix.
  */
 export function formatExtensionLink(label: string, href: string): string {
@@ -99,49 +99,52 @@ export function stripExtensionLinkMarkers(line: string): string {
 	});
 }
 
-/**
- * The extension link drawn at 0-based cell `col` of a rendered row (before
- * {@link stripExtensionLinkMarkers}), or `undefined`. Only registered schemes match, so ordinary
- * hyperlinks and rows drawn for a scheme that is no longer registered never do.
- */
-export function extensionLinkAt(line: string, col: number): string | undefined {
-	if (schemes.size === 0 || col < 0 || !line.includes("\x1b]8;")) return undefined;
-	let x = 0;
-	let target = "";
-	let cursor = 0;
-	for (const match of line.matchAll(OSC8_PATTERN)) {
-		x += visibleWidth(line.slice(cursor, match.index));
-		if (col < x) return target && extensionLinkScheme(target) ? target : undefined;
-		target = match[2]!;
-		cursor = match.index + match[0].length;
-	}
-	x += visibleWidth(line.slice(cursor));
-	return col < x && target && extensionLinkScheme(target) ? target : undefined;
+/** One extension link label drawn on a rendered row (before {@link stripExtensionLinkMarkers}). */
+export interface ExtensionLinkLabel {
+	readonly url: string;
+	/** First 0-based cell the label covers. */
+	readonly start: number;
+	/** Cell just past the label. */
+	readonly end: number;
+	/** Whether only blank cells follow the label on its row, so a wrapped label may go on below. */
+	readonly endsRow: boolean;
+	/** Code-unit range of the label's drawn text in the row. */
+	readonly from: number;
+	readonly to: number;
 }
 
 /**
- * `line` with `style` applied to every label drawn for the registered link `url` (before
- * {@link stripExtensionLinkMarkers}), for a hover highlight. A label wrapped across rows is
- * restyled on each row it reaches; other text and links are untouched.
+ * The extension link labels drawn on a rendered row, left to right. Only registered schemes
+ * match, so ordinary hyperlinks and rows drawn for a scheme that is no longer registered never do.
  */
-export function restyleExtensionLink(line: string, url: string, style: (label: string) => string): string {
-	if (extensionLinkScheme(url) === undefined || !line.includes("\x1b]8;")) return line;
-	let out = "";
+export function extensionLinkLabels(line: string): ExtensionLinkLabel[] {
+	if (schemes.size === 0 || !line.includes("\x1b]8;")) return [];
+	const labels: ExtensionLinkLabel[] = [];
+	let x = 0;
 	let cursor = 0;
-	let labelStart = -1;
+	let open: { url: string; start: number; from: number } | undefined;
 	for (const match of line.matchAll(OSC8_PATTERN)) {
-		if (labelStart >= 0) {
-			out += style(line.slice(labelStart, match.index));
-			cursor = match.index;
-			labelStart = -1;
-		}
-		if (match[2] === url) {
-			const end = match.index + match[0].length;
-			out += line.slice(cursor, end);
-			cursor = end;
-			labelStart = end;
-		}
+		x += visibleWidth(line.slice(cursor, match.index));
+		if (open && x > open.start) labels.push({ ...open, end: x, endsRow: false, to: match.index });
+		open = undefined;
+		const uri = match[2]!;
+		cursor = match.index + match[0].length;
+		if (uri && extensionLinkScheme(uri)) open = { url: uri, start: x, from: cursor };
 	}
-	if (labelStart >= 0) return out + style(line.slice(labelStart));
-	return cursor === 0 ? line : out + line.slice(cursor);
+	x += visibleWidth(line.slice(cursor));
+	if (open && x > open.start) labels.push({ ...open, end: x, endsRow: true, to: line.length });
+	const last = labels.at(-1);
+	if (last && !last.endsRow && Bun.stripANSI(line.slice(last.to)).trim() === "") {
+		labels[labels.length - 1] = { ...last, endsRow: true };
+	}
+	return labels;
+}
+
+/** `line` with `style` applied to `label`, one of its {@link extensionLinkLabels}, for a hover highlight. */
+export function restyleExtensionLinkLabel(
+	line: string,
+	label: ExtensionLinkLabel,
+	style: (label: string) => string,
+): string {
+	return `${line.slice(0, label.from)}${style(line.slice(label.from, label.to))}${line.slice(label.to)}`;
 }

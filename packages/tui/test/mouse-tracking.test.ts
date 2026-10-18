@@ -190,6 +190,24 @@ describe("inline mouse tracking", () => {
 			tui.stop();
 		}
 	});
+
+	it("gives the shell its default pointer back on stop even with tracking off", () => {
+		const enabled = { current: false };
+		const { terminal, tui } = makeInlineTui(enabled);
+		try {
+			tui.start();
+			tui.renderNow();
+			tui.setPointerShape("pointer");
+			expect(terminal.output.endsWith("\x1b]22;pointer\x1b\\")).toBe(true);
+
+			tui.stop();
+			expect(terminal.output.lastIndexOf("\x1b]22;default\x1b\\")).toBeGreaterThan(
+				terminal.output.lastIndexOf("\x1b]22;pointer\x1b\\"),
+			);
+		} finally {
+			tui.stop();
+		}
+	});
 });
 
 describe("mutable viewport geometry", () => {

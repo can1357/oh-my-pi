@@ -280,6 +280,7 @@ import {
 	type ComposerPreferences,
 	type ComposerStatusCache,
 	PINNED_HUD_TOGGLE_ID,
+	type ViewportLink,
 } from "@oh-my-pi/pi-tui/prompt/composer";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
@@ -3888,12 +3889,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	syncExtensionLinks(): void {
 		if (!this.#applyExtensionLinks() || this.chatContainer.children.length === 0) return;
-		// The rebuild keeps the live reply's component; re-run its renderers so a renderer reading
+		// The rebuild keeps the live reply's components; re-run their renderers so a renderer reading
 		// `getLinkClicksAvailable()` switches form now rather than on the next streaming update.
-		this.streamingComponent?.setTextRendering({
-			renderers: this.viewSession.extensionRunner?.getAssistantTextRenderers() ?? [],
-			contentOffset: 0,
-		});
+		this.#eventController.applyAssistantTextRenderers();
 		// Coalesced: a settings apply changing another transcript setting in the same pass rebuilds once.
 		if (this.#extensionLinkRebuildPending) return;
 		this.#extensionLinkRebuildPending = true;
@@ -3905,7 +3903,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	activateViewportLink(index: number, col: number): boolean {
-		const url = this.composer.viewportLinkAt(index, col);
+		const url = this.composer.viewportLinkAt(index, col)?.url;
 		const runner = this.viewSession.extensionRunner;
 		if (url === undefined || !runner) return false;
 		// A focused subagent's runner is headless: hand its handler the UI drawing that transcript.
@@ -3915,13 +3913,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		return true;
 	}
 
-	viewportLinkAt(index: number, col: number): string | undefined {
+	viewportLinkAt(index: number, col: number): ViewportLink | undefined {
 		return this.composer.viewportLinkAt(index, col);
 	}
 
-	setLinkHover(url: string | undefined): void {
-		this.composer.setHoveredLink(url);
-		this.ui.setPointerShape(url === undefined ? undefined : "pointer");
+	setLinkHover(link: ViewportLink | undefined): void {
+		this.composer.setHoveredLink(link);
+		this.ui.setPointerShape(link === undefined ? undefined : "pointer");
 	}
 
 	/** Coalesce status-cache writes; `stop()` flushes a pending one synchronously. */
