@@ -101,6 +101,7 @@ objc2-core-graphics = "=0.3.2"
 objc2-foundation = "=0.3.2"
 objc2-application-services = { version = "=0.3.2", default-features = true }
 objc2-core-foundation = "=0.3.2"
+unicode-bidi = "0.3.18"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
