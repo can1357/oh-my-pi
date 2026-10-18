@@ -536,14 +536,11 @@ export class AssistantMessageComponent extends Container {
 	#renderText(message: AssistantMessage, streaming: boolean): AssistantMessage {
 		const rendering = this.#textRendering;
 		if (!rendering) return message;
-		// Renderers are display-only: hand them a frozen copy so an edit cannot reach the stored message.
-		const view: AssistantMessage = Object.freeze({
-			...message,
-			content: Object.freeze(
-				message.content.map(block => Object.freeze({ ...block })),
-			) as AssistantMessage["content"],
-		});
+		// Renderers are display-only: hand them a deep copy so no edit, however nested, reaches the stored message.
+		const view = structuredClone(message);
 		let content: AssistantMessage["content"] | undefined;
+		// Blocks stream in order: only the last one can still grow.
+		const tail = message.content.length - 1;
 		for (let index = 0; index < message.content.length; index++) {
 			const block = message.content[index]!;
 			if (block.type !== "text" || block.text.length === 0) continue;
@@ -554,7 +551,7 @@ export class AssistantMessageComponent extends Container {
 						message: view,
 						contentIndex: rendering.contentOffset + index,
 						text,
-						streaming,
+						streaming: streaming && index === tail,
 					});
 					if (typeof rendered === "string") text = rendered;
 				} catch (error) {
@@ -1557,9 +1554,15 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
-	/** Swap the extension text renderers (the setting enabling them changed) and redraw with them. */
+	/**
+	 * Swap the extension text renderers (the setting enabling them changed) and redraw with them.
+	 * Enabling them also drops rows already published as stable, since a renderer may rewrite them;
+	 * callers MUST pair this with a scrollback-clearing display reset, as for
+	 * {@link resetTranscriptStableRows}.
+	 */
 	setTextRenderers(renderers: readonly AssistantTextRenderer[]): void {
 		this.#textRendering = renderers.length ? { renderers, contentOffset: this.#textContentOffset } : undefined;
+		if (this.#textRendering) this.resetTranscriptStableRows();
 		if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 	}
 

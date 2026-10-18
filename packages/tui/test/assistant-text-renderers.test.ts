@@ -66,14 +66,19 @@ describe("assistant text renderers", () => {
 		});
 	});
 
-	it("cannot change the stored message through the context it hands renderers", () => {
-		const message = assistant([{ type: "text", text: "As written." }]);
-		vi.spyOn(logger, "warn").mockImplementation(() => {});
+	it("cannot change the stored message through the context it hands renderers, at any depth", () => {
+		const message = assistant([
+			{ type: "text", text: "As written." },
+			{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "ls" } },
+		]);
 		const target = component(
 			[
 				context => {
-					const block = context.message.content[0];
-					if (block?.type === "text") block.text = "Edited.";
+					// Nested values first: a shallow freeze would let these through before the block edit throws.
+					const [text, call] = context.message.content;
+					context.message.usage.output = 999;
+					if (call?.type === "toolCall") call.arguments.command = "rm -rf /";
+					if (text?.type === "text") text.text = "Edited.";
 					return undefined;
 				},
 			],
@@ -82,6 +87,29 @@ describe("assistant text renderers", () => {
 		);
 		expect(drawn(target)).toContain("As written.");
 		expect(message.content[0]).toEqual({ type: "text", text: "As written." });
+		expect(message.content[1]).toMatchObject({ arguments: { command: "ls" } });
+		expect(message.usage.output).toBe(0);
+	});
+
+	it("reports a text block as final once a later block starts streaming after it", () => {
+		const seen: [number, boolean][] = [];
+		const target = component([
+			({ contentIndex, text, streaming }) => {
+				seen.push([contentIndex, streaming]);
+				return text;
+			},
+		]);
+		target.updateContent(
+			assistant([
+				{ type: "text", text: "Closed paragraph." },
+				{ type: "text", text: "Still streaming" },
+			]),
+			{ transient: true },
+		);
+		expect(seen).toEqual([
+			[0, false],
+			[1, true],
+		]);
 	});
 
 	it("is called with the text so far on every streaming update and once more when final", () => {
@@ -161,6 +189,12 @@ describe("assistant text renderers", () => {
 
 		expect(stream(new AssistantMessageComponent())).toBeGreaterThan(0);
 		expect(stream(component([({ text }) => text]))).toBe(0);
+
+		// Enabled mid-reply: rows published before the renderers existed are dropped too.
+		const late = new AssistantMessageComponent();
+		expect(stream(late)).toBeGreaterThan(0);
+		late.setTextRenderers([({ text }) => text]);
+		expect(late.getTranscriptStableRows()).toHaveLength(0);
 	});
 
 	it("draws a throwing renderer's input and logs the failure once", () => {
