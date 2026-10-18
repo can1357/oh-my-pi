@@ -814,8 +814,6 @@
 - Fixed a failed streamed edit preview ending the whole run without retry: the harness now re-drives the turn with the preview diagnostic so the model can read the file again and correct the patch, and gives up with a notice only after two recoveries
 - Fixed MCP OAuth login requesting every scope in an authorization server's catalogue when the protected resource advertises no scopes; `/mcp reauth` now falls back to configured scopes or authorization-server defaults ([#15996](https://github.com/can1357/oh-my-pi/pull/15996) by [@unclesamwk](https://github.com/unclesamwk)).
 - Fixed the incomplete-todo stop reminder firing (and resuming work) when the agent's final message asks for permission or a decision before a closing status line, through "If you confirm, I'll…"/"Separately, tell me…"-style requests, or with a non-English question followed by another sentence ([#15986](https://github.com/can1357/oh-my-pi/issues/15986))
-- Mnemopi recall now fuses its vector, graph, fact and temporal voices by default (`mnemopi.polyphonicRecall`), finding noticeably more relevant memories; set it to `false` to restore the previous ranking ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
-- Mnemopi recall now fuses its vector, graph, fact and temporal voices by default (`mnemopi.polyphonicRecall`), finding noticeably more relevant memories; set it to `false` or `MNEMOPI_POLYPHONIC_RECALL=0` to restore the previous ranking. Retained memories' extracted facts are now also consolidated, and the first recall on an existing bank backfills them once ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.11.3] - 2026-10-16
 
