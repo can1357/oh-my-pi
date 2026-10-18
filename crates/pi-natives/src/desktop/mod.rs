@@ -1565,12 +1565,17 @@ impl Worker {
 			},
 			Request::AxPerform { reference, action, menu, .. } => {
 				let h = self.registry.resolve(reference)?;
-				match menu {
-					Some(path) => self.ax()?.perform_menu(&h, action, path)?,
-					None if action.eq_ignore_ascii_case("press") => ax::ax_press(self.ax()?, &h)?,
-					None => self.ax()?.perform(&h, action)?,
+				let performed = match menu {
+					Some(path) => self.ax()?.perform_menu(&h, action, path),
+					None if action.eq_ignore_ascii_case("press") => ax::ax_press(self.ax()?, &h),
+					None => self.ax()?.perform(&h, action),
+				};
+				match performed {
+					Err(error) if error.code == ErrorCode::AxUnconfirmed => {
+						Err(self.name_unconfirmed_target(reference, &h, error))
+					},
+					performed => performed.map(|()| Response::Unit),
 				}
-				Ok(Response::Unit)
 			},
 			Request::AxSetValue { reference, value, .. } => {
 				let h = self.registry.resolve(reference)?;
@@ -1619,6 +1624,33 @@ impl Worker {
 }
 
 impl Worker {
+	/// `error`, an action on `reference` whose outcome is unconfirmed, naming
+	/// the window and app the element is in now, so the caller knows which one
+	/// to inspect. Only reads: nothing is sent again.
+	fn name_unconfirmed_target(
+		&mut self,
+		reference: &str,
+		handle: &ax::AxHandle,
+		error: DesktopError,
+	) -> DesktopError {
+		let windows = self
+			.backend()
+			.and_then(|backend| backend.windows())
+			.unwrap_or_default();
+		let window = self
+			.ax()
+			.and_then(|ax| ax.window_id(handle, &windows))
+			.ok()
+			.and_then(|id| windows.into_iter().find(|window| window.id == id));
+		let target = match window {
+			Some(window) => {
+				format!("{reference} is in window {} of {} ({:?})", window.id, window.app, window.title)
+			},
+			None => format!("{reference}'s window could not be identified"),
+		};
+		DesktopError::new(error.code, format!("{} ({target})", error.message))
+	}
+
 	/// The error for keys addressed to `reference` that were never sent
 	/// because the element did not take keyboard focus: where focus is now,
 	/// with the focused element's `ax()` line and a ref for it.
@@ -2678,6 +2710,8 @@ mod capture_tests {
 		reads:             u32,
 		/// Runs as each press is delivered and as each probe asks.
 		on_call:           Option<Box<dyn Fn(Call) + Send>>,
+		/// A press is delivered and the app answers with an unrelated error.
+		unconfirmed:       bool,
 	}
 
 	#[derive(Clone, Copy, PartialEq, Eq)]
@@ -2900,6 +2934,13 @@ mod capture_tests {
 			tree.pressed.push(id);
 			if tree.stale_presses {
 				return Err(DesktopError::stale_ref("the element no longer exists"));
+			}
+			if tree.unconfirmed {
+				return Err(DesktopError::new(
+					ErrorCode::AxUnconfirmed,
+					"AX action 'AXPress' was requested, but its outcome could not be confirmed. It may \
+					 already have taken effect: observe the window before retrying",
+				));
 			}
 			let Some(copy) = tree.press_rebuilds_as else {
 				return Ok(());
@@ -3846,6 +3887,23 @@ mod capture_tests {
 		let error = press(&mut worker, "e2").unwrap_err();
 		assert_eq!(named(&error, "e2").as_deref(), Some("e4"));
 		assert_eq!(tree.lock().pressed, [4]);
+	}
+
+	#[test]
+	fn an_unconfirmed_action_names_the_window_and_app_to_inspect_and_is_sent_once() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
+		tree.lock().unconfirmed = true;
+		let error = press(&mut worker, "e2").unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert!(error.message.contains("before retrying"), "{}", error.message);
+		assert!(
+			error
+				.message
+				.contains(&format!("e2 is in window {WAYLAND_ID} of obsidian (\"Obsidian\")")),
+			"{}",
+			error.message
+		);
+		assert_eq!(tree.lock().pressed, [2]);
 	}
 
 	#[test]
