@@ -8,6 +8,7 @@ pinned revision is skipped, any other is downloaded again.
 import ast
 import json
 import os
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -65,14 +66,14 @@ def publish(out: Path, text: str, revision: str) -> None:
 	"""Replaces `out` with `text` and only then records `revision`.
 
 	The old marker goes first, so neither an interrupted refresh nor a concurrent run can take the new
-	or partial data for the old revision; the data lands by atomic rename.
+	or partial data for the old revision; the data lands by atomic rename from a staging file of its own.
 	"""
 	marker(out).unlink(missing_ok=True)
-	tmp = out.with_name(f"{out.name}.tmp")
-	tmp.write_text(text)
-	os.replace(tmp, out)
+	# shortcut: two setups racing on one cache can still leave the later marker over the earlier data; lock if that is ever run.
+	with tempfile.NamedTemporaryFile("w", dir=out.parent, prefix=f".{out.name}.", delete=False) as staging:
+		staging.write(text)
+	os.replace(staging.name, out)
 	marker(out).write_text(revision + "\n")
-
 
 
 def write_beam(name: str, split: str) -> list[dict]:
