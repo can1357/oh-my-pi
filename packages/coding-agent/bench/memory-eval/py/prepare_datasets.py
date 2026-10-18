@@ -7,7 +7,7 @@ pinned revision is skipped, any other is downloaded again.
 
 import ast
 import json
-import shutil
+import os
 from collections import Counter
 from pathlib import Path
 
@@ -61,15 +61,27 @@ def read_current(out: Path, revision: str) -> str | None:
 		return None
 
 
+def publish(out: Path, text: str, revision: str) -> None:
+	"""Replaces `out` with `text` and only then records `revision`.
+
+	The old marker goes first, so neither an interrupted refresh nor a concurrent run can take the new
+	or partial data for the old revision; the data lands by atomic rename.
+	"""
+	marker(out).unlink(missing_ok=True)
+	tmp = out.with_name(f"{out.name}.tmp")
+	tmp.write_text(text)
+	os.replace(tmp, out)
+	marker(out).write_text(revision + "\n")
+
+
+
 def write_beam(name: str, split: str) -> list[dict]:
 	out = DATA / name
 	cached = read_current(out, BEAM_REVISION)
 	if cached is not None:
 		return json.loads(cached)
 	rows = convert_beam(fetch(BEAM_REPO, f"data/{split}-00000-of-00001.parquet", BEAM_REVISION))
-	out.write_text(json.dumps(rows, ensure_ascii=False))
-	# Written after the data, so an interrupted write leaves no marker and is redone.
-	marker(out).write_text(BEAM_REVISION + "\n")
+	publish(out, json.dumps(rows, ensure_ascii=False), BEAM_REVISION)
 	return rows
 
 
@@ -97,9 +109,8 @@ def main() -> None:
 	lme = DATA / "lme-s.json"
 	text = read_current(lme, LME_REVISION)
 	if text is None:
-		shutil.copyfile(fetch(LME_REPO, LME_FILE, LME_REVISION), lme)
-		marker(lme).write_text(LME_REVISION + "\n")
-		text = lme.read_text()
+		text = Path(fetch(LME_REPO, LME_FILE, LME_REVISION)).read_text()
+		publish(lme, text, LME_REVISION)
 	print(f"lme: {len(json.loads(text))} questions")
 
 

@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { mnemopiEngine } from "../../bench/memory-eval/engines/mnemopi";
+import { PythonProcess } from "../../bench/memory-eval/engines/python-process";
 import { runCases } from "../../bench/memory-eval/runner";
 import type { EvalCase } from "../../bench/memory-eval/types";
 
@@ -46,6 +47,31 @@ describe("mnemopi python embedder", () => {
 			await expect(runCases(engine, [twoMessageCase], "standard", 10, tmp)).rejects.toThrow("embed boom");
 		} finally {
 			await engine.dispose();
+		}
+	});
+});
+
+// Replies with the PYTHON* variables it inherited.
+const ENV_REPORTING_SERVER = `import json, os, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    print(json.dumps({"id": req["id"], "result": sorted(k for k in os.environ if k.upper().startswith("PYTHON"))}), flush=True)
+`;
+
+describe("python helper environment", () => {
+	it("keeps PYTHON* import overrides away from the helper, so it imports the pinned venv's packages", async () => {
+		const script = path.join(tmp, "env_reporting_server.py");
+		await Bun.write(script, ENV_REPORTING_SERVER);
+		const helper = new PythonProcess("env reporter", "python3", script, {
+			PATH: Bun.env.PATH,
+			PYTHONPATH: path.join(tmp, "another-fastembed"),
+			PYTHONHOME: tmp,
+			KEPT: "1",
+		});
+		try {
+			expect(await helper.call("env")).toEqual([]);
+		} finally {
+			await helper.shutdown();
 		}
 	});
 });
