@@ -4302,9 +4302,9 @@ describe("computer background fallback", () => {
 					return { ...super.capabilities, backend: "quartz" };
 				}
 			}
-			// Native runs whichever of the element's actions matches regardless of case, so every
-			// spelling of AXOpen is refused.
-			for (const action of ["AXOpen", "Open", "open", " Open ", "axopen", "AxOpen", "\u0085open"]) {
+			// Native runs whichever of the element's actions matches with ASCII case folded, after
+			// trimming Unicode White_Space (U+0085 included), so every spelling of AXOpen is refused.
+			for (const action of ["AXOpen", "Open", "open", " Open ", "axopen", "AxOpen", "\u0085open", "open\u0085"]) {
 				const code = `await (await desktop.ref("e1")).perform(${JSON.stringify(action)})`;
 				const mac = new MacSession();
 				const refused = await run(mac, code, "refuse");
@@ -4321,13 +4321,15 @@ describe("computer background fallback", () => {
 				expect(mac.calls, action).toEqual([`perform:${action}`]);
 			}
 
-			// Names native runs as other actions still go through ("AX Open" names `AX Open`).
+			// Names native runs as other actions still go through ("AX Open" names `AX Open`; U+FEFF is
+			// not White_Space, so native keeps it in the name).
 			const other = new MacSession();
-			const others = ['perform("AX Open")', 'perform("opener")'].map(
-				call => `await (await desktop.ref("e1")).${call};`,
+			const otherActions = ["AX Open", "opener", "\ufeffopen", "open\ufeff"];
+			const others = otherActions.map(
+				action => `await (await desktop.ref("e1")).perform(${JSON.stringify(action)});`,
 			);
 			expect((await run(other, others.join("\n"), "refuse")).ok).toBe(true);
-			expect(other.calls).toEqual(["perform:AX Open", "perform:opener"]);
+			expect(other.calls).toEqual(otherActions.map(action => `perform:${action}`));
 
 			const elsewhere = new ForegroundSession();
 			expect((await run(elsewhere, 'await (await desktop.ref("e1")).perform("AXOpen")', "refuse")).ok).toBe(true);

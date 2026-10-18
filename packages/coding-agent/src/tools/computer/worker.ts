@@ -358,13 +358,16 @@ const RAISE_ROUTE = "Background input and screenshots reach a covered window, so
 const OPEN_ROUTE = "Use press() on a button that does the same, or tell the user the step needs their screen.";
 
 /**
- * The native action `perform(action)` runs, lowercased, by native `native_action_name`'s rule:
- * `press`, `raise` and `showmenu`/`show_menu` name `AXPress`, `AXRaise` and `AXShowMenu`, any other
- * name gains an `ax` prefix unless it has one, and native runs whichever of the element's actions
- * matches regardless of case. Trimming also drops U+0085, which Rust's `trim` drops and JS's does not.
+ * The native action `perform(action)` runs, as a key that compares equal exactly when native's
+ * comparison does: native `native_action_name` trims Unicode White_Space (unlike JS `trim`, it
+ * drops U+0085 and keeps U+FEFF), maps `press`, `raise` and `showmenu`/`show_menu` to `AXPress`,
+ * `AXRaise` and `AXShowMenu`, prefixes `AX` to any other name without one, and runs whichever of
+ * the element's actions matches with only ASCII letters folded.
  */
 function nativeActionKey(action: string): string {
-	const name = action.replace(/^[\s\u0085]+|[\s\u0085]+$/g, "").toLowerCase();
+	const name = action
+		.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "")
+		.replace(/[A-Z]/g, letter => letter.toLowerCase());
 	if (name === "show_menu") return "axshowmenu";
 	return name.startsWith("ax") ? name : `ax${name}`;
 }
