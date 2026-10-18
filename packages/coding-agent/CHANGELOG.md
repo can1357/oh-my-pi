@@ -253,6 +253,8 @@
 
 ### Breaking Changes
 
+- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3; `omp` now exits at startup on older runtimes ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 - Removed `display()` from eval in both Python and JavaScript; `print` (and `console.log` in JavaScript) covers it
 
 ### Added
@@ -277,7 +279,6 @@
 - Added `sharpshooter.minPromptLength` (default 16, minimum 2) to control the shortest prompt Sharpshooter extracts decisions from ([#16043](https://github.com/can1357/oh-my-pi/pull/16043) by [@bigHippoZz](https://github.com/bigHippoZz))
 ### Breaking Changes
 
-- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3; `omp` now exits at startup on older runtimes ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
