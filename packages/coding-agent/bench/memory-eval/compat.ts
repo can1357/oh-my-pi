@@ -1,5 +1,6 @@
 /** Run B of the upstream calibration: replays upstream Mnemosyne's `benchmark_mnemosyne` through the engine adapter. */
 import * as fs from "node:fs/promises";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { EngineAdapter, RememberItem } from "./engine";
@@ -88,7 +89,7 @@ export async function runUpstreamCompat(
 		await engine.close();
 		return results;
 	} finally {
-		await fs.rm(storeRoot, { recursive: true, force: true });
+		await removeWithRetries(storeRoot).catch(err => console.warn(`could not remove ${storeRoot}: ${err}`));
 	}
 }
 

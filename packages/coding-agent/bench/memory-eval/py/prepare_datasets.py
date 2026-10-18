@@ -51,17 +51,21 @@ def marker(out: Path) -> Path:
 	return out.with_name(f"{out.name}.revision")
 
 
-def is_current(out: Path, revision: str) -> bool:
+def read_current(out: Path, revision: str) -> str | None:
+	"""The cached file's text when its marker records `revision`; None when either is missing or stale."""
 	try:
-		return out.exists() and marker(out).read_text().strip() == revision
+		if marker(out).read_text().strip() != revision:
+			return None
+		return out.read_text()
 	except FileNotFoundError:
-		return False
+		return None
 
 
 def write_beam(name: str, split: str) -> list[dict]:
 	out = DATA / name
-	if is_current(out, BEAM_REVISION):
-		return json.loads(out.read_text())
+	cached = read_current(out, BEAM_REVISION)
+	if cached is not None:
+		return json.loads(cached)
 	rows = convert_beam(fetch(BEAM_REPO, f"data/{split}-00000-of-00001.parquet", BEAM_REVISION))
 	out.write_text(json.dumps(rows, ensure_ascii=False))
 	# Written after the data, so an interrupted write leaves no marker and is redone.
@@ -91,10 +95,12 @@ def main() -> None:
 	print(f"beam-500k: {len(beam500)} conversations, {count500} questions")
 
 	lme = DATA / "lme-s.json"
-	if not is_current(lme, LME_REVISION):
+	text = read_current(lme, LME_REVISION)
+	if text is None:
 		shutil.copyfile(fetch(LME_REPO, LME_FILE, LME_REVISION), lme)
 		marker(lme).write_text(LME_REVISION + "\n")
-	print(f"lme: {len(json.loads(lme.read_text()))} questions")
+		text = lme.read_text()
+	print(f"lme: {len(json.loads(text))} questions")
 
 
 if __name__ == "__main__":
