@@ -5445,6 +5445,53 @@ describe("computer cell settlement", () => {
 		expect(report).not.toContain('window "42"');
 	});
 
+	it.each([
+		{ inParent: true, expected: 'new window "43" Code "Save" 30×12 (focused): shown above in window "42" as e10' },
+		// The same app's overlay that its window's tree does not hold still prints whole.
+		{
+			inParent: false,
+			expected: 'new window "43" Code "Save" 30×12 (focused):\n- sheet "save" [ref=e20] app=Code (focused)',
+		},
+	])(
+		"prints a sheet its parent's tree holds once, pointing at it there ($inParent)",
+		async ({ inParent, expected }) => {
+			const sheetRows = (first: number, indent: string) => [
+				`${indent}  - textfield [ref=e${first + 1}]: "report" (focused)`,
+				`${indent}  - button "Save" [ref=e${first + 2}]`,
+			];
+			let open = false;
+			const native = new EditableWindowSession();
+			native.axSnapshot = async (target?: string) => ({
+				text:
+					target === "43"
+						? ['- sheet "save" [ref=e20] app=Code (focused)', ...sheetRows(20, "")].join("\n")
+						: [
+								'- window "Editor" [ref=e1] app=Code',
+								'  - textarea [ref=e2]: "report probe"',
+								...(open && inParent ? ['  - sheet "save" [ref=e10]', ...sheetRows(10, "  ")] : []),
+							].join("\n"),
+			});
+			const sheet: DesktopWindow = {
+				...windowFixture,
+				id: "43",
+				title: "Save",
+				width: 30,
+				height: 12,
+				focused: true,
+			};
+			native.menuSelect = async () => {
+				open = true;
+				native.windows = [{ ...windowFixture, focused: false }, sheet];
+			};
+			const { run, read, settle } = reportWorker(native);
+			await read();
+			await run('await (await desktop.window("42")).menu.select(["File", "Export as PDF…"])');
+			const report = String(await settle());
+			expect(report).toContain(expected);
+			expect(report.match(/"Save" \[ref=/g)).toHaveLength(1);
+		},
+	);
+
 	it("names a new window it could not read", async () => {
 		const { native, run, read, settle } = reportWorker();
 		await read();

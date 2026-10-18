@@ -690,6 +690,38 @@ export function newWindowName(window: DesktopWindow): string {
 	return `new window ${windowLabel(window)} ${Math.round(window.width)}×${Math.round(window.height)}${window.focused ? " (focused)" : ""}`;
 }
 
+/**
+ * The ref of the row of `container` whose subtree is `tree`: the same rows by role, label and value at the same
+ * relative depths, ignoring refs, focus marks and the root's `app=`. An attached sheet or popover lists as its own
+ * window and is also a child in its parent's tree. Undefined when `tree` is not such a subtree.
+ */
+export function subtreeRef(container: string, tree: string): string | undefined {
+	const key = (row: DiffRow, depth: number, root: boolean): string => {
+		let text = row.text.slice(row.indent).replace(/ \(focused\)/g, "");
+		if (root) text = text.replace(/ app=\S+/, "");
+		return `${depth}:${text}`;
+	};
+	const inner = treeRows(tree).rows;
+	if (inner.length === 0) return undefined;
+	const wanted = inner.map((row, index) => key(row, row.indent - inner[0].indent, index === 0));
+	const outer = treeRows(container).rows;
+	// A child row only: a window whose whole tree matches another's is a separate window, such as a duplicate.
+	for (let start = 1; start < outer.length; start++) {
+		const root = outer[start];
+		if (key(root, 0, true) !== wanted[0]) continue;
+		const keys = [wanted[0]];
+		for (let index = start + 1; index < outer.length && outer[index].indent > root.indent; index++)
+			keys.push(key(outer[index], outer[index].indent - root.indent, false));
+		if (keys.length === wanted.length && keys.every((value, index) => value === wanted[index])) return root.ref;
+	}
+	return undefined;
+}
+
+/** A new window whose tree a printed window's tree already holds: named, with where its rows are. */
+export function renderNewWindowWithin(window: DesktopWindow, parent: string, ref: string): string {
+	return `${newWindowName(window)}: shown above in window ${JSON.stringify(parent)} as ${ref}`;
+}
+
 /** A window that appeared while the cell's input ran: the model has no tree of it, so it gets all of it. */
 export function renderNewWindow(window: DesktopWindow, text: string): string {
 	return `${newWindowName(window)}:\n${text}`;

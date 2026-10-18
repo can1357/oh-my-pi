@@ -73,8 +73,10 @@ import {
 	RefWindows,
 	readBackForms,
 	readBackName,
+	subtreeRef,
 	renderGone,
 	renderNewWindow,
+	renderNewWindowWithin,
 	renderReadBack,
 	renderUnreadable,
 	reportNote,
@@ -2041,7 +2043,14 @@ export class ComputerWorkerCore {
 		 * A window's section: `name`, the line naming it, alone or replaced by the first of `forms` that fits
 		 * (`whole` when every window prints whole), which makes `shown` the model's tree.
 		 */
-		type Section = { name: string; forms?: string[]; whole?: string; shown?: Shown };
+		type Section = {
+			name: string;
+			forms?: string[];
+			whole?: string;
+			shown?: Shown;
+			/** An earlier section whose tree holds this one's: printed, it stands for this one as `line`. */
+			within?: { section: Section; line: string };
+		};
 		const lead: string[] = [];
 		const sections: Section[] = [];
 		/** Bytes the sections' names take so far: a new window whose name cannot fit any more is not read. */
@@ -2126,7 +2135,17 @@ export class ComputerWorkerCore {
 				}
 				const text = read.value.text;
 				const form = renderNewWindow(opened, text);
+				// An attached sheet or popover is also a child in its parent's tree: print it once.
+				let within: Section["within"];
+				for (const section of sections) {
+					if (!section.shown || section.shown.window.pid !== opened.pid) continue;
+					const ref = subtreeRef(section.shown.text, text);
+					if (ref === undefined) continue;
+					within = { section, line: renderNewWindowWithin(opened, section.shown.window.id, ref) };
+					break;
+				}
 				push({
+					within,
 					name: leftOut,
 					forms: [form],
 					whole: form,
@@ -2164,14 +2183,21 @@ export class ComputerWorkerCore {
 			}
 			if (collapsed === 0) room += Buffer.byteLength(collapse) + 2;
 			const shown: Shown[] = [];
+			const printed = new Set<Section>();
 			for (const entry of kept) {
 				const { section } = entry;
+				if (section.within && printed.has(section.within.section)) {
+					room -= Buffer.byteLength(section.within.line) - Buffer.byteLength(section.name);
+					entry.text = section.within.line;
+					continue;
+				}
 				const forms = whole && section.whole !== undefined ? [section.whole] : (section.forms ?? []);
 				for (const form of forms) {
 					const extra = Buffer.byteLength(form) - Buffer.byteLength(section.name);
 					if (extra > room) continue;
 					room -= extra;
 					entry.text = form;
+					printed.add(section);
 					if (section.shown) shown.push(section.shown);
 					break;
 				}
