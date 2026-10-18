@@ -4,14 +4,20 @@ The calibration and official-evaluator scripts import code from these clones; a 
 other logic under the promised revision.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 
 def require_pinned(repo: Path, commit: str) -> None:
+	# GIT_DIR, GIT_WORK_TREE and friends would make `-C repo` check another repository.
+	env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+
 	def git(*args: str) -> str:
-		return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+		return subprocess.run(
+			["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, env=env
+		).stdout.strip()
 
 	try:
 		head, status = git("rev-parse", "HEAD"), git("status", "--porcelain")

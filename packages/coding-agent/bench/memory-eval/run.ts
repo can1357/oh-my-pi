@@ -213,7 +213,12 @@ const fmt = (b: BootstrapResult): string => {
 
 const describeConfig = (label: string, c: RunConfig): string => {
 	const embedder = c.engineInfo.embedder ? ` embedder ${c.engineInfo.embedder}` : "";
-	return `${label}: engine ${c.engine}${embedder} protocol ${c.protocol} k ${c.k} mnemopiRecall ${c.mnemopiRecall} polyphonic ${c.polyphonic} gitCommit ${c.gitCommit}${c.gitDirty ? " (dirty)" : ""}`;
+	// The numerical runtime behind the vectors can reorder near-ties; printed so differing runtimes are visible.
+	const runtime = ["fastembed_version", "onnxruntime_version"]
+		.filter(key => c.engineInfo[key])
+		.map(key => ` ${key.replace("_version", "")} ${c.engineInfo[key]}`)
+		.join("");
+	return `${label}: engine ${c.engine}${embedder}${runtime} protocol ${c.protocol} k ${c.k} mnemopiRecall ${c.mnemopiRecall} polyphonic ${c.polyphonic} gitCommit ${c.gitCommit}${c.gitDirty ? " (dirty)" : ""}`;
 };
 
 function uniqueQuestionIds(label: string, file: ResultFile): Set<string> {
