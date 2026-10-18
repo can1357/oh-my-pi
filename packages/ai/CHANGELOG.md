@@ -83,7 +83,7 @@
 - Fixed tool schema normalization modifying the caller's schema in place, which added the folded `const` value to a tool's own `enum` array ([#16780](https://github.com/can1357/oh-my-pi/pull/16780) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ### Fixed
 
-- Added `logger.warn` to empty catch blocks in provider in-flight lock cleanup and MCP arg decoding paths, so silent failures are now visible in logs
+- Provider in-flight lock cleanup failures are now logged instead of silently ignored, and MCP argument values that are not JSON are logged at debug level when they fall back to text
 
 ### Breaking Changes
 
