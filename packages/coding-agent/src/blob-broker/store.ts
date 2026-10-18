@@ -152,7 +152,7 @@ export class BlobRegistry {
 	#now: () => number;
 
 	constructor(options?: { maxBytes?: number; persist?: BlobPersistence | undefined; now?: () => number }) {
-		this.#maxBytes = options?.maxBytes ?? DEFAULT_MAXBytes;
+		this.#maxBytes = options?.maxBytes ?? DEFAULT_MAX_BYTES;
 		this.#persist = options?.persist;
 		this.#now = options?.now ?? Date.now;
 		if (this.#persist) {
@@ -163,55 +163,59 @@ export class BlobRegistry {
 
 	async #ensureLoaded(): Promise<void> {
 		if (this.#indexLoaded) return;
-		this.#indexLoadPromise ??= this.#loadIndex(this.#persist!.indexPath);
+		const persist = this.#persist;
+		if (!persist) return;
+		this.#indexLoadPromise ??= this.#loadIndex(persist.indexPath);
 		await this.#indexLoadPromise;
 	}
 
 	async #loadIndex(indexPath: string): Promise<void> {
-		let parsed: PersistedIndex;
 		try {
-			parsed = JSON.parse(await fs.promises.readFile(indexPath, "utf8")) as PersistedIndex;
-		} catch (error) {
-			if (!isEnoent(error)) {
-				logger.warn("blob-broker: unreadable url index; starting fresh", {
-					indexPath,
-					error: error instanceof Error ? error.message : String(error),
+			let parsed: PersistedIndex;
+			try {
+				parsed = JSON.parse(await fs.promises.readFile(indexPath, "utf8")) as PersistedIndex;
+			} catch (error) {
+				if (!isEnoent(error)) {
+					logger.warn("blob-broker: unreadable url index; starting fresh", {
+						indexPath,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+				return;
+			}
+			const counters = parsed.counters;
+			this.#bytesServed = counters?.bytesServed ?? 0;
+			this.#hits = counters?.hits ?? 0;
+			this.#misses = counters?.misses ?? 0;
+			this.#duplicateTokenGets = counters?.duplicateTokenGets ?? 0;
+			if (Array.isArray(parsed.recentFetches)) {
+				this.#recentFetches = parsed.recentFetches.slice(-BLOB_FETCH_EVENT_LIMIT);
+			}
+			const entries = Array.isArray(parsed.entries) ? parsed.entries : [];
+			for (const persisted of entries) {
+				if (!persisted.key || !persisted.token) continue;
+				if (this.#tokenByKey.has(persisted.key)) continue;
+				this.#adopt(persisted.key, {
+					token: persisted.token,
+					mimeType: persisted.mimeType,
+					ext: persisted.ext,
+					sha: persisted.sha,
+					bytesCount: persisted.bytes ?? persisted.publication?.bytes ?? 0,
+					lazy: persisted.lazy === true,
+					touchedAt: persisted.touchedAt ?? 0,
+					bytes: undefined,
+					fetcher: undefined,
+					pending: undefined,
+					lastServe: 0,
+					successfulGets: persisted.gets ?? 0,
+					publication: persisted.publication,
 				});
 			}
-			return;
+		} finally {
+			this.#indexLoaded = true;
+			this.#sweep();
 		}
-		const counters = parsed.counters;
-		this.#bytesServed = counters?.bytesServed ?? 0;
-		this.#hits = counters?.hits ?? 0;
-		this.#misses = counters?.misses ?? 0;
-		this.#duplicateTokenGets = counters?.duplicateTokenGets ?? 0;
-		if (Array.isArray(parsed.recentFetches)) {
-			this.#recentFetches = parsed.recentFetches.slice(-BLOB_FETCH_EVENT_LIMIT);
-		}
-		const entries = Array.isArray(parsed.entries) ? parsed.entries : [];
-		for (const persisted of entries) {
-			if (!persisted.key || !persisted.token) continue;
-			if (this.#tokenByKey.has(persisted.key)) continue;
-			this.#adopt(persisted.key, {
-				token: persisted.token,
-				mimeType: persisted.mimeType,
-				ext: persisted.ext,
-				sha: persisted.sha,
-				bytesCount: persisted.bytes ?? persisted.publication?.bytes ?? 0,
-				lazy: persisted.lazy === true,
-				touchedAt: persisted.touchedAt ?? 0,
-				bytes: undefined,
-				fetcher: undefined,
-				pending: undefined,
-				lastServe: 0,
-				successfulGets: persisted.gets ?? 0,
-				publication: persisted.publication,
-			});
-		}
-		this.#indexLoaded = true;
-		this.#sweep();
 	}
-
 
 	#adopt(key: string, entry: StoredBlob): void {
 		this.#entries.set(entry.token, entry);
@@ -356,6 +360,16 @@ export class BlobRegistry {
 	 */
 	async lookup(key: string): Promise<BlobRegistryEntry | null> {
 		await this.#ensureLoaded();
+		return this.#lookupLoaded(key);
+	}
+
+	/**
+	 * Synchronous counterpart of {@link lookup}, for callers that already awaited
+	 * {@link #ensureLoaded}. Running the lookup and the following insert in one
+	 * synchronous block is what keeps content-key dedup atomic when two
+	 * registrations for the same key race.
+	 */
+	#lookupLoaded(key: string): BlobRegistryEntry | null {
 		this.#sweep();
 		const token = this.#tokenByKey.get(key);
 		const entry = token !== undefined ? this.#entries.get(token) : undefined;
@@ -377,7 +391,7 @@ export class BlobRegistry {
 	 */
 	async registerBytes(key: string, mimeType: string, bytes: Uint8Array): Promise<BlobRegistryEntry> {
 		await this.#ensureLoaded();
-		const existing = await this.lookup(key);
+		const existing = this.#lookupLoaded(key);
 		if (existing) return existing;
 		const entry = this.#insert(key, mimeType, false);
 		if (this.#sessionStore) {
@@ -422,7 +436,8 @@ export class BlobRegistry {
 
 	/** Persist an uploader publication that has no locally served bytes. */
 	async recordPublication(key: string, mimeType: string, publication: BlobPublication): Promise<BlobRegistryEntry> {
-		const existing = await this.lookup(key);
+		await this.#ensureLoaded();
+		const existing = this.#lookupLoaded(key);
 		if (existing) {
 			await this.setPublication(key, publication);
 			return { ...existing, bytes: publication.bytes, publication };

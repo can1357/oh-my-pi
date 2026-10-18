@@ -162,6 +162,32 @@ describe("BlobRegistry lazy blobs", () => {
 	});
 });
 
+describe("BlobRegistry memory mode", () => {
+	it("keeps a memory-only registry usable without a persisted index", async () => {
+		// No `persist` means there is nothing to load; the load guard must not
+		// dereference a missing index path on the first lookup.
+		const store = new BlobRegistry();
+		expect(await store.lookup("absent")).toBeNull();
+		const entry = await store.registerBytes("memory-image", "image/png", new Uint8Array(Buffer.from("in-ram")));
+		expect((await store.status()).metrics.activeBlobs).toBe(1);
+		expect((await store.serve(new Request(`http://blob.local/${entry.path}`))).status).toBe(200);
+	});
+
+	it("mints one token when the same key registers concurrently", async () => {
+		const store = new BlobRegistry();
+		const bytes = new Uint8Array(Buffer.from("concurrent-dedup"));
+		// Dedup depends on the lookup and the insert running without an await
+		// between them: a split pair lets both callers see null and insert,
+		// leaving two tokens for one content key.
+		const [first, second] = await Promise.all([
+			store.registerBytes("same-key", "image/png", bytes),
+			store.registerBytes("same-key", "image/png", bytes),
+		]);
+		expect(second.path).toBe(first.path);
+		expect((await store.status()).metrics.activeBlobs).toBe(1);
+	});
+});
+
 describe("BlobRegistry persistence", () => {
 	let persistSeq = 0;
 	function makePersist(ttlMs: number): BlobPersistence {

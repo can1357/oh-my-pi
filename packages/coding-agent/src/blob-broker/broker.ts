@@ -194,7 +194,7 @@ export class LocalBlobBackend implements BlobBackend {
 	async ensureBlob(key: string, mimeType: string, getBytes: () => Uint8Array): Promise<BlobPublication | null> {
 		if (this.#dead) return null;
 		if (this.#upload) {
-		const existing = await this.#store.lookup(key);
+			const existing = await this.#store.lookup(key);
 			if (
 				existing?.publication &&
 				(existing.publication.expiresAt === undefined || existing.publication.expiresAt > Date.now())
@@ -243,7 +243,7 @@ export class LocalBlobBackend implements BlobBackend {
 		return this.#publish(key, baseUrl, await this.#store.registerLazy(key, mimeType, fetcher));
 	}
 
-	async #publish(key: string, baseUrl: string, entry: BlobRegistryEntry): BlobPublication {
+	async #publish(key: string, baseUrl: string, entry: BlobRegistryEntry): Promise<BlobPublication> {
 		const ttlMs = this.#config.persist?.ttlMs ?? 0;
 		const url = `${baseUrl}/${entry.path}`;
 		const now = Date.now();
