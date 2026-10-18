@@ -358,6 +358,18 @@ const RAISE_ROUTE = "Background input and screenshots reach a covered window, so
 const OPEN_ROUTE = "Use press() on a button that does the same, or tell the user the step needs their screen.";
 
 /**
+ * The native action `perform(action)` runs, lowercased, by native `native_action_name`'s rule:
+ * `press`, `raise` and `showmenu`/`show_menu` name `AXPress`, `AXRaise` and `AXShowMenu`, any other
+ * name gains an `ax` prefix unless it has one, and native runs whichever of the element's actions
+ * matches regardless of case. Trimming also drops U+0085, which Rust's `trim` drops and JS's does not.
+ */
+function nativeActionKey(action: string): string {
+	const name = action.replace(/^[\s\u0085]+|[\s\u0085]+$/g, "").toLowerCase();
+	if (name === "show_menu") return "axshowmenu";
+	return name.startsWith("ax") ? name : `ax${name}`;
+}
+
+/**
  * Under `computer.backgroundFallback: "refuse"` the user's setting beats the
  * model: a call that would bring an application forward or drive the user's
  * own pointer or keyboard is refused before anything is sent. `effect` says
@@ -737,8 +749,8 @@ class El {
 		const context = this.#getContext();
 		guardRun(context, "perform");
 		validateString(action, "perform(action)", { nonEmpty: true });
-		// The names native `axPerform` runs as `AXRaise` (its `action_name` mapping).
-		if (action.trim().toLowerCase() === "raise" || action === "AXRaise") {
+		const native = nativeActionKey(action);
+		if (native === "axraise") {
 			refuseForeground(
 				context,
 				`perform(${JSON.stringify(action)})`,
@@ -747,11 +759,9 @@ class El {
 				`element ${this.ref}`,
 			);
 		}
-		// The names native `axPerform` runs as `AXOpen` (`action_name` prefixes "AX"
-		// to any other name). On an item in Chrome's Open panel it brings the
-		// panel's application to the front, even when the action fails, and it
-		// stays there.
-		if (this.#session.capabilities.backend === "quartz" && (action === "AXOpen" || action === "Open")) {
+		// On an item in Chrome's Open panel `AXOpen` brings the panel's application to the front, even
+		// when the action fails, and it stays there.
+		if (this.#session.capabilities.backend === "quartz" && native === "axopen") {
 			refuseForeground(
 				context,
 				`perform(${JSON.stringify(action)})`,
@@ -761,8 +771,8 @@ class El {
 			);
 		}
 		const menu = menuOption(options);
-		// The names native `axPerform` runs as `AXShowMenu`, which opens the element's context menu.
-		if (["showmenu", "show_menu"].includes(action.trim().toLowerCase()) || action === "AXShowMenu") {
+		// `AXShowMenu` opens the element's context menu.
+		if (native === "axshowmenu") {
 			refuseMenu(
 				this.#session,
 				context,
@@ -774,8 +784,7 @@ class El {
 		}
 		if (menu !== undefined)
 			refuseMenu(this.#session, context, "perform with menu", "a menu", MENU_ROUTE, `element ${this.ref}`);
-		// The names native `axPerform` runs as `AXPress`.
-		if (action.trim().toLowerCase() === "press" || action === "AXPress") {
+		if (native === "axpress") {
 			refuseControlMenu(
 				this.#session,
 				context,
