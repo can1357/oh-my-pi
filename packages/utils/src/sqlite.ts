@@ -371,6 +371,7 @@ function readSalvageRowidStarts(db: Database, table: string): number[] {
 		const contentStart = header + 12 + cells * 2;
 		if (contentStart > end) continue;
 		pending.push(image.readUInt32BE(header + 8));
+		const pageStarts: number[] = [];
 		for (let index = 0; index < cells; index++) {
 			const cell = start + image.readUInt16BE(header + 12 + index * 2);
 			if (cell < contentStart || cell + 5 > end) continue;
@@ -381,24 +382,39 @@ function readSalvageRowidStarts(db: Database, table: string): number[] {
 				key = (key << BigInt(byteIndex === 8 ? 8 : 7)) | BigInt(byteIndex === 8 ? byte : byte & 0x7f);
 				if (byteIndex === 8 || byte < 0x80) {
 					const rowid = Number(BigInt.asIntN(64, key));
-					if (Number.isSafeInteger(rowid) && rowid < Number.MAX_SAFE_INTEGER) starts.push(rowid + 1);
+					if (Number.isSafeInteger(rowid) && rowid < Number.MAX_SAFE_INTEGER) pageStarts.push(rowid + 1);
 					break;
 				}
 			}
 		}
+		// A valid interior page stores its separator keys in ascending order; a
+		// page that violates the format is itself damaged, and its values must
+		// not be trusted as skip points. Its subtree is still walked — child
+		// pages validate independently — but this page contributes no bounds.
+		let ascending = true;
+		for (let index = 1; index < pageStarts.length; index++) {
+			if (pageStarts[index]! <= pageStarts[index - 1]!) {
+				ascending = false;
+				break;
+			}
+		}
+		if (ascending) starts.push(...pageStarts);
 	}
-	return starts.sort((a, b) => a - b);
+	return starts.sort((a, b) => a - b).filter((value, index) => index === 0 || value > starts[index - 1]!);
 }
 
 /**
  * Reads every row of a rowid table that SQLite can still decode, to salvage a
  * damaged store. A full scan aborts at the first unreadable page, so this walks
- * rowids with indexed seeks instead. A damaged seek advances to the next
- * subtree boundary, never bisecting across potentially readable islands.
- * Cross-linked pages can still decode rows with foreign column types, so
- * callers validate types;
- * rows returned out of rowid order count as damage. Only corruption errors are
- * treated as damage; anything else is thrown.
+ * rowids with indexed seeks instead: when a seek hits damage it doubles its
+ * stride past it, then bisects back to the first rowid from which seeking
+ * works again, losing only rows on the damaged pages. When the interior pages
+ * are readable, the recovery is bounded by the next interior subtree key, so a
+ * probe can no longer jump across a readable island into later damage, and a
+ * run of adjacent damaged leaves counts as one damaged region. Cross-linked
+ * pages can still decode rows with foreign column types, so callers validate
+ * types; rows returned out of rowid order count as damage. Only corruption
+ * errors are treated as damage; anything else is thrown.
  */
 export function readSalvageableRows<T extends object>(db: Database, table: string, columns: string): T[] {
 	type Row = T & { salvage_rowid: number };
@@ -426,6 +442,7 @@ export function readSalvageableRows<T extends object>(db: Database, table: strin
 	};
 	let after = Number.MIN_SAFE_INTEGER;
 	let damaged = 0;
+	let inDamagedRun = false;
 	let starts: number[] | undefined;
 	let nextStart = 0;
 	while (after < Number.MAX_SAFE_INTEGER) {
@@ -434,17 +451,34 @@ export function readSalvageableRows<T extends object>(db: Database, table: strin
 		if (row) {
 			keep(row);
 			after = row.salvage_rowid;
+			inDamagedRun = false;
 			continue;
 		}
-		if (++damaged > SALVAGE_MAX_DAMAGED_REGIONS) break;
+		// Adjacent damaged leaves belong to one region; only a region that
+		// begins after readable rows counts against the cap again.
+		if (!inDamagedRun && ++damaged > SALVAGE_MAX_DAMAGED_REGIONS) break;
 		starts ??= readSalvageRowidStarts(db, table);
 		while (nextStart < starts.length && starts[nextStart]! <= after) nextStart++;
-		const clear = starts[nextStart] ?? Number.MAX_SAFE_INTEGER;
-		// A separator bounds its left subtree inclusively; test the following key
-		// exactly before resuming seeks so the first row of the next leaf is kept.
-		const boundary = probe(after, clear);
+		// The next interior key bounds the recovery: damage narrower than a
+		// leaf still loses only its own rows, but a probe can no longer jump
+		// across a readable island into the next damaged region.
+		let bad = after;
+		let clear = starts[nextStart] ?? Number.MAX_SAFE_INTEGER;
+		for (let step = 1; after + step < clear; step *= 2) {
+			if (probe(after + step) !== undefined) clear = after + step;
+			else bad = after + step;
+		}
+		while (clear - bad > 1) {
+			const mid = bad + Math.floor((clear - bad) / 2);
+			if (probe(mid) === undefined) bad = mid;
+			else clear = mid;
+		}
+		// An interior key bounds its left subtree inclusively, so seeking past the last
+		// damaged rowid descends into the damage again and `clear` itself is skipped.
+		const boundary = probe(bad, clear);
 		if (boundary) keep(boundary);
 		after = clear;
+		inDamagedRun = clear === (starts[nextStart] ?? Number.MAX_SAFE_INTEGER) && boundary === undefined;
 	}
 	return rows;
 }
