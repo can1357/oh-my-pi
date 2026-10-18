@@ -341,6 +341,19 @@ it("diff names each side's Mnemopi embedder when the config records one", async 
 	expect((await diff(oracle, oracle)).stdout).toContain("a: engine oracle protocol standard");
 });
 
+it("diff names the embedding runtime each side recorded", async () => {
+	const old = await writeResult("rt-old", {
+		engineInfo: { embedder: "python", fastembed_version: "0.8.0", onnxruntime_version: "1.27.0" },
+	});
+	const cur = await writeResult("rt-new", {
+		engineInfo: { embedder: "python", fastembed_version: "0.9.0", onnxruntime_version: "1.28.0" },
+	});
+	const { stdout, code } = await diff(old, cur);
+	expect(code).toBe(0);
+	expect(stdout).toContain("a: engine oracle embedder python fastembed 0.8.0 onnxruntime 1.27.0 protocol");
+	expect(stdout).toContain("b: engine oracle embedder python fastembed 0.9.0 onnxruntime 1.28.0 protocol");
+});
+
 it("diff marks a side produced from a dirty checkout", async () => {
 	const clean = await writeResult("git-clean", { gitDirty: false });
 	const dirty = await writeResult("git-dirty", { gitDirty: true });
