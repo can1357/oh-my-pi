@@ -89,6 +89,8 @@ describe("mnemopi engine under fts-only", () => {
 			expect(questions[0].ranked[0]).toMatchObject({ messageIds: ["m2"], viaFallback: false });
 			expect(questions[0].ranked.filter(hit => hit.viaFallback)).toEqual([]);
 			expect(questions[0].metrics["recall@10"]).toBe(1);
+			// The result file's describe() runs after the last case; it must not start the dead server either.
+			expect(await engine.describe()).toMatchObject({ embedder: "python", embeddings_disabled: "true" });
 		} finally {
 			await engine.dispose();
 		}
