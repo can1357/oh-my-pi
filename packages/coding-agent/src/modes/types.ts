@@ -201,6 +201,11 @@ export interface InteractiveModeContext {
 	typeLinkHint(letter: string): void;
 	/** Leave link-hint mode without activating a link. */
 	cancelLinkHints(): void;
+	/**
+	 * Whether a claimed link can be activated now: links are routed and either the link-hint key is
+	 * bound or `tui.mouse` delivers clicks. Backs `ctx.ui.getLinkClicksAvailable()`.
+	 */
+	readonly linkActivationAvailable: boolean;
 	/** Flip the pinned jump list between its collapsed few and the full list. */
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */

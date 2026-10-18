@@ -319,4 +319,29 @@ describe("extension link hints", () => {
 			composer.stop();
 		}
 	});
+
+	it("shows no tags, and says why, when a row's links leave no room for every tag", () => {
+		setExtensionLinks(["demo"]);
+		const labels = Array.from({ length: 27 }, (_, index) => `[x](demo:open/${index})`).join("");
+		const narrow = { columns: 40, rows: 24 };
+		const composer = new Composer({
+			terminal: new VirtualTerminal(narrow.columns, narrow.rows),
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		composer.start();
+		const transcript = new TranscriptContainer();
+		// 27 one-cell labels need 54 cells of two-letter tags on a 40-column row.
+		transcript.addChild(new StaticBlock(render(labels, 40)));
+		composer.setRuntimeChildren([transcript]);
+		try {
+			const before = composer.renderFrame(narrow).viewport.map(plain);
+			const reasons: (string | undefined)[] = [];
+			composer.startLinkHints(reason => reasons.push(reason));
+			expect(composer.renderFrame(narrow).viewport.map(plain)).toEqual(before);
+			expect(reasons).toEqual(["crowded"]);
+			expect(composer.typeLinkHint("a")).toBe(false);
+		} finally {
+			composer.stop();
+		}
+	});
 });

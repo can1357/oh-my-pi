@@ -812,24 +812,27 @@ export class InputController {
 	}
 
 	/**
-	 * Keyboard link picking. `app.links.hint` enters link-hint mode, which then owns the keyboard: a
-	 * lowercase letter narrows the tags, and any other key cancels and is swallowed so a stray Esc or
-	 * Enter does nothing else. Ctrl+C cancels and still does what it always does. Key releases and
-	 * repeats (the hint key's own) are ignored; mouse reports pass through untouched.
+	 * Keyboard link picking. `app.links.hint` enters link-hint mode, which then owns the keyboard
+	 * while the editor has focus: a lowercase letter narrows the tags, and any other key cancels and
+	 * is swallowed so a stray Esc or Enter does nothing else. Ctrl+C and a paste cancel and still do
+	 * what they always do. Key releases and repeats (the hint key's own) are ignored; mouse reports
+	 * pass through untouched. Keys the TUI routes before input listeners (a space held for
+	 * push-to-talk) never reach this.
 	 */
 	#handleLinkHintInput(data: string): { consume?: boolean } | undefined {
+		// Overlays and editor-area dialogs (ask, selectors, hook input) own the keyboard.
+		const editorFocused = () => !this.ctx.ui.hasOverlay() && this.ctx.ui.getFocused() === this.ctx.editor;
 		if (!this.ctx.linkHintsActive) {
-			if (!this.ctx.keybindings.matches(data, "app.links.hint") || this.ctx.ui.hasOverlay()) return undefined;
+			if (!this.ctx.keybindings.matches(data, "app.links.hint") || !editorFocused()) return undefined;
 			return this.ctx.startLinkHints() ? { consume: true } : undefined;
 		}
-		// An overlay that opened since (e.g. an extension's custom UI) owns the keyboard now.
-		if (this.ctx.ui.hasOverlay()) {
+		if (!editorFocused()) {
 			this.ctx.cancelLinkHints();
 			return undefined;
 		}
 		if (isKeyRelease(data) || isKeyRepeat(data)) return { consume: true };
 		if (data.startsWith("\x1b[<")) return undefined;
-		if (matchesKey(data, "ctrl+c")) {
+		if (matchesKey(data, "ctrl+c") || data.startsWith("\x1b[200~")) {
 			this.ctx.cancelLinkHints();
 			return undefined;
 		}

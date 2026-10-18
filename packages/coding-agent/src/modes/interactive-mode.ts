@@ -1964,7 +1964,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#mouseCapture = cfgTuiMouse.get(this.settings);
 		this.#eventBusUnsubscribers.push(
 			cfgTuiMouse.listen(this.settings, on => {
+				const linksWereAvailable = this.linkActivationAvailable;
 				this.#mouseCapture = on;
+				// With the hint key unbound, the mouse is the only way to activate extension links.
+				if (this.linkActivationAvailable !== linksWereAvailable) this.#redrawExtensionLinks();
 				// Dropping capture must also drop the band: with reporting off no
 				// motion event will ever arrive to clear a mid-hover highlight.
 				// The controller cache goes too, or a re-enable plus motion over
@@ -3879,20 +3882,33 @@ export class InteractiveMode implements InteractiveModeContext {
 		return extensionLinksVersion() !== before;
 	}
 
-	/** A claimed link was drawn: say once which key picks it. */
+	/** A claimed link was drawn: say at most once which key picks it (nothing while it is unbound). */
 	#showLinkKeyHint = (): void => {
 		if (this.#linkKeyHintShown) return;
-		const key = appKey(this.keybindings, "app.links.hint");
-		if (!key) return;
 		this.#linkKeyHintShown = true;
+		const key = appKey(this.keybindings, "app.links.hint");
 		// Called while markdown renders; show the status after this frame.
-		queueMicrotask(() => this.showStatus(`Press ${key} to pick an extension link`));
+		if (key) queueMicrotask(() => this.showStatus(`Press ${key} to pick an extension link`));
 	};
 
+	/**
+	 * Whether a claimed link drawn now can be activated: links are routed (plain terminal, setting
+	 * on) and either the link-hint key is bound or `tui.mouse` delivers clicks.
+	 */
+	get linkActivationAvailable(): boolean {
+		return extensionLinksRouted() && (this.#mouseCapture || Boolean(appKey(this.keybindings, "app.links.hint")));
+	}
+
 	syncExtensionLinks(): void {
-		if (!this.#applyExtensionLinks() || this.chatContainer.children.length === 0) return;
-		// The rebuild keeps the live reply's components; re-run their renderers so a renderer reading
-		// `getLinkClicksAvailable()` switches form now rather than on the next streaming update.
+		if (!this.#applyExtensionLinks()) return;
+		this.#redrawExtensionLinks();
+	}
+
+	/** Redraw the transcript so renderers reading `getLinkClicksAvailable()` switch form now. */
+	#redrawExtensionLinks(): void {
+		if (this.chatContainer.children.length === 0) return;
+		// The rebuild keeps the live reply's components; re-run their renderers rather than waiting
+		// for the next streaming update.
 		this.#eventController.applyAssistantTextRenderers();
 		// Coalesced: a settings apply changing another transcript setting in the same pass rebuilds once.
 		if (this.#extensionLinkRebuildPending) return;
@@ -3926,8 +3942,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showStatus("No extension links on screen");
 			return true;
 		}
-		this.composer.startLinkHints(() => {
+		this.composer.startLinkHints(reason => {
 			this.statusLine.setHookStatus(LINK_HINT_STATUS_KEY, undefined);
+			if (reason === "crowded") {
+				// Raised while the composer paints; show the status after this frame.
+				queueMicrotask(() => this.showStatus("Too many extension links on one row to tag; widen the terminal"));
+			}
 			this.ui.requestRender();
 		});
 		this.statusLine.setHookStatus(LINK_HINT_STATUS_KEY, "Type a link tag · Esc cancels");

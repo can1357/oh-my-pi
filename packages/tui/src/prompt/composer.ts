@@ -200,6 +200,12 @@ interface ViewportLinkHint {
 }
 
 /**
+ * Called once when link-hint mode ends; `reason` is `"crowded"` when a row held more links than
+ * their tags could fit side by side, so no tags were drawn.
+ */
+export type LinkHintsEnd = (reason?: "crowded") => void;
+
+/**
  * The extension link labels drawn on `rows`, top to bottom, a wrapped label once at its first row:
  * a row's first label continues the previous row's last label when that has the same URL and ends
  * its row (the rule the hover highlight follows).
@@ -328,7 +334,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	 * the first frame after `startLinkHints` assigns them), the letters typed so far, and what to run
 	 * when the mode ends for any reason.
 	 */
-	#linkHints: { hints: ViewportLinkHint[] | undefined; typed: string; onEnd: () => void } | undefined;
+	#linkHints: { hints: ViewportLinkHint[] | undefined; typed: string; onEnd: LinkHintsEnd } | undefined;
+	/** Width of the last painted viewport, which `#lastViewportRows` was laid out for. */
+	#lastViewportWidth = 0;
 	// Hard-row prefix currently above the native viewport. The first resize
 	// frame may pull part of it down before the normal buffer is borrowed.
 	#retiredHeaderStart = 0;
@@ -471,7 +479,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		if (transcriptIndex < 0) {
 			this.#lastClickSpans = [];
 			this.#lastViewportRows = [];
-			this.#syncLinkHints([]);
+			this.#syncLinkHints([], 0);
 			const viewport: string[] = [];
 			for (const root of roots) {
 				const rendered = root.render(width);
@@ -582,7 +590,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		for (const span of afterSpans) shift(span, slack + before.length + active.length - drop);
 		this.#lastClickSpans = spans;
 		this.#lastViewportRows = mutable;
-		this.#syncLinkHints(mutable);
+		this.#lastViewportWidth = width;
+		this.#syncLinkHints(mutable, width);
 		if (history !== undefined && this.#offeredHistory?.source === "header") {
 			const visibleHeaderRows = Math.max(0, rows - (mutable.length + drop));
 			this.#retiredHeaderStart = Math.max(0, history.rows.length - visibleHeaderRows);
@@ -595,18 +604,25 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 
 	/**
 	 * Keep link-hint tags on what `rows` show. The first frame after `startLinkHints` tags its
-	 * labels; later frames keep the tags while the tagged labels are still drawn first, in the same
-	 * order and columns (rows may scroll, links may be added below), and otherwise end the mode, so a
-	 * tag never picks a label no longer drawn under it.
+	 * labels, or ends the mode as `"crowded"` when some row has more tag cells than `width`, since
+	 * tags drawn side by side could not all be read; later frames keep the tags while the tagged
+	 * labels are still drawn first, in the same order and columns (rows may scroll, links may be
+	 * added below), and otherwise end the mode, so a tag never picks a label no longer drawn under it.
 	 */
-	#syncLinkHints(rows: readonly string[]): void {
+	#syncLinkHints(rows: readonly string[], width: number): void {
 		const state = this.#linkHints;
 		if (state === undefined) return;
 		const targets = viewportLinkTargets(rows);
 		const hints = state.hints;
 		if (hints === undefined) {
 			state.hints = linkHintTags(targets.length).map((tag, index) => ({ tag, link: targets[index]! }));
-			if (state.hints.length === 0) this.#endLinkHints();
+			if (state.hints.length === 0) {
+				this.#endLinkHints();
+				return;
+			}
+			const cells = new Map<number, number>();
+			for (const { tag, link } of state.hints) cells.set(link.row, (cells.get(link.row) ?? 0) + tag.length);
+			if ([...cells.values()].some(count => count > width)) this.#endLinkHints("crowded");
 			return;
 		}
 		const unchanged =
@@ -619,11 +635,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		state.hints = hints.map(({ tag }, index) => ({ tag, link: targets[index]! }));
 	}
 
-	#endLinkHints(): void {
+	#endLinkHints(reason?: "crowded"): void {
 		const state = this.#linkHints;
 		if (state === undefined) return;
 		this.#linkHints = undefined;
-		state.onEnd();
+		state.onEnd(reason);
 	}
 
 	/**
@@ -854,10 +870,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 
 	/**
 	 * Enter keyboard link-hint mode: the next frame draws a tag over each extension link label it
-	 * shows. `onEnd` runs once when the mode ends: a pick, a cancel, a key no tag starts with, or a
-	 * repaint that no longer draws the tagged labels where they were.
+	 * shows. `onEnd` runs once when the mode ends: a pick, a cancel, a key no tag starts with, a
+	 * repaint that no longer draws the tagged labels where they were, or (`"crowded"`) a row with
+	 * too many links for their tags to fit side by side.
 	 */
-	startLinkHints(onEnd: () => void): void {
+	startLinkHints(onEnd: LinkHintsEnd): void {
 		this.#endLinkHints();
 		this.#linkHints = { hints: undefined, typed: "", onEnd };
 	}
@@ -876,7 +893,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const state = this.#linkHints;
 		if (state === undefined) return false;
 		// A key typed before the tags were first painted picks among the labels last drawn.
-		if (state.hints === undefined) this.#syncLinkHints(this.#lastViewportRows);
+		if (state.hints === undefined) this.#syncLinkHints(this.#lastViewportRows, this.#lastViewportWidth);
 		const hints = this.#linkHints?.hints;
 		if (hints === undefined) return false;
 		const typed = state.typed + letter.toLowerCase();

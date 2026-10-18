@@ -441,6 +441,53 @@ describe("inline click-to-focus geometry", () => {
 		expect(overlayInput).toEqual(["a"]);
 		expect(activated).toEqual(["demo:open/7"]);
 		overlay.hide();
+
+		// Same for a dialog that takes focus in the editor area (ask, selectors), which is no overlay.
+		term.sendInput(hintKey);
+		await term.waitForRender(tagged);
+		const dialogInput: string[] = [];
+		const dialog = {
+			render: () => [],
+			handleInput: (data: string) => dialogInput.push(data),
+			invalidate: () => {},
+		};
+		mode.ui.setFocus(dialog);
+		term.sendInput("a");
+		await term.waitForRender(() => !tagged());
+		expect(dialogInput).toEqual(["a"]);
+		expect(activated).toEqual(["demo:open/7"]);
+		// And the hint key does nothing while such a dialog has focus.
+		term.sendInput(hintKey);
+		await term.waitForRender();
+		expect(mode.linkHintsActive).toBe(false);
+		mode.ui.setFocus(mode.editor);
+
+		// A paste ends hint mode and still lands in the editor.
+		mode.editor.setText("");
+		term.sendInput(hintKey);
+		await term.waitForRender(tagged);
+		term.sendInput("\x1b[200~pasted\x1b[201~");
+		await term.waitForRender(() => !tagged());
+		await term.waitForRender(() => mode.editor.getText() === "pasted");
+		expect(mode.editor.getText()).toBe("pasted");
+		expect(mode.linkHintsActive).toBe(false);
+		expect(activated).toEqual(["demo:open/7"]);
+	});
+
+	it("reports links as unavailable with the hint key unbound until tui.mouse turns on", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		installDemoLinkExtension();
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		const ui = session.extensionRunner?.getUIContext();
+		expect(ui?.getLinkClicksAvailable()).toBe(true);
+		mode.keybindings.setUserBindings({ "app.links.hint": [] });
+		expect(ui?.getLinkClicksAvailable()).toBe(false);
+		cfgTuiMouse.set(mode.settings, true);
+		// The mode picks the change up from its settings listener, after `set` returns.
+		await term.waitForRender(() => ui?.getLinkClicksAvailable() === true);
+		expect(ui?.getLinkClicksAvailable()).toBe(true);
 	});
 
 	it("redraws a focused subagent's reply when its extension handles a click on its link", async () => {
