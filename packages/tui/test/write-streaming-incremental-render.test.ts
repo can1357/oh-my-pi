@@ -3,19 +3,34 @@ import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
 import type { HighlightStream } from "@oh-my-pi/pi-natives";
 
-const stripAnsi = (s: string): string => s.replace(/\[[0-9;]*m/g, "");
+const stripAnsi = (s: string): string => s.replace(/[[0-9;]*m/g, "");
 const hasLine = (lines: readonly string[], n: number): boolean =>
 	new RegExp(`\\bline ${n}\\b`).test(stripAnsi(lines.join("\n")));
 
 /**
- * Reference algorithm: the pre-incremental formatter normalized the whole
- * payload, split every line, and sliced the tail window. The incremental
- * collapsed path must produce byte-identical rows for the same content.
+ * Viewport the suite renders at. `previewWindowRows()` is `rows - 20` with a
+ * floor of 6, so 32 rows pins it at the 12 the collapsed streaming window caps
+ * at (`PREVIEW_LIMITS.EXPANDED_LINES`) — the budget every assertion below uses.
+ */
+const VIEWPORT_ROWS = 32;
+/** Collapsed streaming window budget at `VIEWPORT_ROWS`. */
+const BUDGET = 12;
+
+/** `previewWindowRows()` reads `process.stdout.rows`; pin it so the budget never follows the test runner's TTY. */
+function pinViewportRows(rows: number): void {
+	Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => rows, set: () => {} });
+}
+
+/**
+ * Reference algorithm for the collapsed streaming window: the last `BUDGET`
+ * complete lines, plus the partial trailing line when the payload does not end
+ * in a newline (it is budgeted in, so its arrival cannot change the row count).
  */
 function referenceWindow(content: string): { total: number; start: number; visible: string[] } {
-	const lines = content.replace(/\r/g, "").split("\n");
+	const normalized = content.replace(/\r/g, "");
+	const lines = (normalized.endsWith("\n") ? normalized.slice(0, -1) : normalized).split("\n");
 	const total = lines.length;
-	const start = Math.max(0, total - 12);
+	const start = Math.max(0, total - BUDGET);
 	return { total, start, visible: lines.slice(start) };
 }
 
@@ -24,6 +39,7 @@ describe("write streaming preview incremental line tracking", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		Reflect.deleteProperty(process.stdout, "rows");
 	});
 
 	async function getUiTheme() {
@@ -36,12 +52,16 @@ describe("write streaming preview incremental line tracking", () => {
 		return uiTheme;
 	}
 
-	function renderCollapsed(content: string, options: { expanded: boolean; isPartial: boolean; spinnerFrame: number }) {
-		return getUiTheme().then(uiTheme => {
-			const component = writeToolRenderer.renderCall({ path: "/tmp/inc.ts", content }, options, uiTheme);
-			if (!component) throw new Error("expected a rendered component for a non-xdev write path");
-			return component.render(120);
-		});
+	/** Render the collapsed streaming card at the pinned viewport. */
+	async function renderCollapsed(
+		content: string,
+		options: { expanded: boolean; isPartial: boolean; spinnerFrame: number },
+	) {
+		pinViewportRows(VIEWPORT_ROWS);
+		const uiTheme = await getUiTheme();
+		const component = writeToolRenderer.renderCall({ path: "/tmp/inc.ts", content }, options, uiTheme);
+		if (!component) throw new Error("expected a rendered component for a non-xdev write path");
+		return component.render(120);
 	}
 
 	it("renders agent messages and their receipt as a message card", async () => {
@@ -85,6 +105,32 @@ describe("write streaming preview incremental line tracking", () => {
 		}
 	});
 
+	it("holds the collapsed height steady across every partial line of a fast stream", async () => {
+		// The regression (#16033): the collapsed block grew one row per token
+		// chunk while the payload outran the window, so each line shifted up and
+		// down as the block resized. Budgeting the partial tail in keeps the row
+		// count constant for the whole stream.
+		const options = { expanded: false, isPartial: true, spinnerFrame: 0 };
+		const allLines = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`);
+
+		let previous = 0;
+		for (let count = 13; count <= 40; count++) {
+			// Every payload but the first ends mid-line, as a token stream does
+			// while the final newline has not arrived.
+			const head = allLines.slice(0, count - 1).join("\n");
+			const content = count === 13 ? head : `${head}\n${allLines[count - 1]!.slice(0, 4)}`;
+			const rendered = await renderCollapsed(content, options);
+			const { total, start, visible } = referenceWindow(content);
+			expect(total).toBe(count);
+			expect(visible).toHaveLength(BUDGET);
+			expect(stripAnsi(rendered.join("\n"))).toContain(`… (${start} earlier line${start === 1 ? "" : "s"})`);
+			const rows = rendered.filter(line => stripAnsi(line).trim().length > 0);
+			expect(rows).toHaveLength(BUDGET + 2); // window + earlier-lines marker + "(streaming)"
+			expect(rows).toHaveLength(previous);
+			previous = rows.length;
+		}
+	});
+
 	it("matches the split-based reference window across a size battery", async () => {
 		const options = { expanded: false, isPartial: true, spinnerFrame: 0 };
 		for (const count of [1, 2, 3, 11, 12, 13, 40, 41]) {
@@ -113,6 +159,7 @@ describe("write streaming preview incremental line tracking", () => {
 
 		let rendered: readonly string[] = [];
 		for (let count = 1; count <= lines.length; count++) {
+			pinViewportRows(VIEWPORT_ROWS);
 			const component = writeToolRenderer.renderCall(
 				{ path: "/tmp/plan.md", content: lines.slice(0, count).join("\n") },
 				options,
@@ -162,11 +209,13 @@ describe("write streaming preview incremental line tracking", () => {
 		let acc = "";
 		for (const piece of ["const a = ", "1;\nconst b = ", "2;\nconst c = 3"]) {
 			acc += piece;
+			pinViewportRows(VIEWPORT_ROWS);
 			const component = writeToolRenderer.renderCall({ path: "/tmp/chunks.ts", content: acc }, options, uiTheme);
 			if (!component) throw new Error("expected a rendered component for a non-xdev write path");
 			component.render(120);
 		}
 		expect(pushes).toEqual(["const a = 1;\n", "const b = 2;\n"]);
+		pinViewportRows(VIEWPORT_ROWS);
 		const component = writeToolRenderer.renderCall({ path: "/tmp/chunks.ts", content: acc }, options, uiTheme);
 		if (!component) throw new Error("expected a rendered component for a non-xdev write path");
 		expect(stripAnsi(component.render(120).join("\n"))).toContain("const c = 3");
@@ -208,7 +257,7 @@ describe("write streaming preview incremental line tracking", () => {
 		const rendered = await renderCollapsed(content, options);
 		const text = stripAnsi(rendered.join("\n"));
 		expect(text).not.toContain("\r");
-		// 20 lines → window is lines 9..20.
+		// 20 complete lines → the window is lines 9..20 (the partial tail is budgeted in).
 		expect(text).toContain("… (8 earlier lines)");
 		expect(hasLine(rendered, 8)).toBe(false);
 		expect(hasLine(rendered, 9)).toBe(true);
@@ -220,22 +269,18 @@ describe("write streaming preview incremental line tracking", () => {
 		const content = `${Array.from({ length: 13 }, (_, i) => `line ${i + 1}`).join("\n")}\n`;
 		const rendered = await renderCollapsed(content, options);
 		const { total, start } = referenceWindow(content);
-		expect(total).toBe(14);
-		expect(start).toBe(2);
+		expect(total).toBe(13);
+		expect(start).toBe(1);
 		const text = stripAnsi(rendered.join("\n"));
-		expect(text).toContain("… (2 earlier lines)");
+		expect(text).toContain("… (1 earlier line)");
 		expect(hasLine(rendered, 13)).toBe(true);
-		expect(hasLine(rendered, 2)).toBe(false);
+		expect(hasLine(rendered, 1)).toBe(false);
 	});
 
 	it("renders carriage-return-only content like the previous normalized empty payload", async () => {
 		const options = { expanded: false, isPartial: true, spinnerFrame: 0 };
 		const empty = await renderCollapsed("", options);
-		const carriageReturns = await renderCollapsed("\r\r", {
-			expanded: false,
-			isPartial: true,
-			spinnerFrame: 0,
-		});
+		const carriageReturns = await renderCollapsed("\r\r", options);
 		expect(carriageReturns).toEqual(empty);
 	});
 

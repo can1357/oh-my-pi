@@ -355,11 +355,19 @@ function formatStreamingContent(
 		let visibleLines: string[];
 		if (state) {
 			totalLines = state.lineCount;
-			startIndex = expanded ? 0 : Math.max(0, totalLines - PREVIEW_LIMITS.EXPANDED_LINES);
+			// The partial tail is not yet in `lineCount` (no newline), so budget
+			// it explicitly instead of appending it: a complete line always yields
+			// exactly `budget` rows, so the block height stops oscillating
+			// line-by-line as the stream advances.
+			const budget = Math.max(WRITE_PREVIEW_LINES, Math.min(PREVIEW_LIMITS.EXPANDED_LINES, previewWindowRows()));
 			const flushed = argsComplete === true && state.finalFlushedLength === content.length;
 			const trailingLine = flushed ? state.finalTrailing : content.slice(state.completeLength).replace(/\r/g, "");
-			if (totalLines === 1 && trailingLine.length === 0) return "";
-			visibleLines = [...state.highlightedLines.slice(startIndex), trailingLine];
+			const partial = trailingLine.length > 0;
+			startIndex = expanded ? 0 : Math.max(0, state.highlightedLines.length - (partial ? budget - 1 : budget));
+			if (totalLines === 1 && !partial) return "";
+			visibleLines = partial
+				? [...state.highlightedLines.slice(startIndex), trailingLine]
+				: state.highlightedLines.slice(startIndex);
 		} else {
 			const normalized = normalizeDisplayText(content);
 			if (normalized.length === 0) return "";
@@ -412,7 +420,7 @@ function renderContentPreview(
 	return cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
 		const rawLines = normalizeDisplayText(content).split("\n");
 		const totalLines = rawLines.length;
-		const maxLines = expanded ? totalLines : Math.min(totalLines, WRITE_PREVIEW_LINES);
+		const maxLines = expanded ? totalLines : Math.min(totalLines, Math.max(WRITE_PREVIEW_LINES, previewWindowRows()));
 		const visibleLines = rawLines.slice(0, maxLines);
 		const highlighted = highlightCode(visibleLines.join("\n"), language);
 		const lineNumberWidth = Math.max(WRITE_GUTTER_MIN_WIDTH, String(totalLines).length);
