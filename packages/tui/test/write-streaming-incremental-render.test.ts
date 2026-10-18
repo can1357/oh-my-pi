@@ -3,7 +3,7 @@ import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
 import type { HighlightStream } from "@oh-my-pi/pi-natives";
 
-const stripAnsi = (s: string): string => s.replace(/[[0-9;]*m/g, "");
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
 const hasLine = (lines: readonly string[], n: number): boolean =>
 	new RegExp(`\\bline ${n}\\b`).test(stripAnsi(lines.join("\n")));
 
@@ -113,22 +113,24 @@ describe("write streaming preview incremental line tracking", () => {
 		const options = { expanded: false, isPartial: true, spinnerFrame: 0 };
 		const allLines = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`);
 
-		let previous = 0;
+		let expected = -1;
 		for (let count = 13; count <= 40; count++) {
-			// Every payload but the first ends mid-line, as a token stream does
-			// while the final newline has not arrived.
+			// Every payload ends mid-line, as a token stream does while the final
+			// newline has not arrived.
 			const head = allLines.slice(0, count - 1).join("\n");
-			const content = count === 13 ? head : `${head}\n${allLines[count - 1]!.slice(0, 4)}`;
+			const content = `${head}\n${allLines[count - 1]!.slice(0, 4)}`;
 			const rendered = await renderCollapsed(content, options);
 			const { total, start, visible } = referenceWindow(content);
 			expect(total).toBe(count);
 			expect(visible).toHaveLength(BUDGET);
 			expect(stripAnsi(rendered.join("\n"))).toContain(`… (${start} earlier line${start === 1 ? "" : "s"})`);
-			const rows = rendered.filter(line => stripAnsi(line).trim().length > 0);
-			expect(rows).toHaveLength(BUDGET + 2); // window + earlier-lines marker + "(streaming)"
-			expect(rows).toHaveLength(previous);
-			previous = rows.length;
+			// Card rows only: the window, the "earlier lines" marker, and the
+			// trailing "(streaming)" line. The frame borders carry no gutter glyph.
+			const rows = rendered.filter(line => stripAnsi(line).includes("│"));
+			if (expected < 0) expected = rows.length;
+			expect(rows).toHaveLength(expected);
 		}
+		expect(expected).toBe(BUDGET + 2);
 	});
 
 	it("matches the split-based reference window across a size battery", async () => {

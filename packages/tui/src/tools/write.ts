@@ -19,6 +19,7 @@ import {
 	formatMoreItems,
 	formatStatusIcon,
 	PREVIEW_LIMITS,
+	previewWindowRows,
 	type RenderedStringCache,
 	replaceTabs,
 	shortenPath,
@@ -353,13 +354,15 @@ function formatStreamingContent(
 		let totalLines: number;
 		let startIndex: number;
 		let visibleLines: string[];
+		// One viewport-sized budget for both streaming paths, so a short terminal
+		// caps them the same way.
+		const budget = Math.max(WRITE_PREVIEW_LINES, Math.min(PREVIEW_LIMITS.EXPANDED_LINES, previewWindowRows()));
 		if (state) {
 			totalLines = state.lineCount;
 			// The partial tail is not yet in `lineCount` (no newline), so budget
 			// it explicitly instead of appending it: a complete line always yields
 			// exactly `budget` rows, so the block height stops oscillating
 			// line-by-line as the stream advances.
-			const budget = Math.max(WRITE_PREVIEW_LINES, Math.min(PREVIEW_LIMITS.EXPANDED_LINES, previewWindowRows()));
 			const flushed = argsComplete === true && state.finalFlushedLength === content.length;
 			const trailingLine = flushed ? state.finalTrailing : content.slice(state.completeLength).replace(/\r/g, "");
 			const partial = trailingLine.length > 0;
@@ -373,7 +376,7 @@ function formatStreamingContent(
 			if (normalized.length === 0) return "";
 			const lines = normalized.split("\n");
 			totalLines = lines.length;
-			startIndex = expanded ? 0 : Math.max(0, totalLines - PREVIEW_LIMITS.EXPANDED_LINES);
+			startIndex = expanded ? 0 : Math.max(0, totalLines - budget);
 			visibleLines = highlightCode(lines.slice(startIndex).join("\n"), language);
 		}
 		const hidden = startIndex;
@@ -420,7 +423,7 @@ function renderContentPreview(
 	return cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
 		const rawLines = normalizeDisplayText(content).split("\n");
 		const totalLines = rawLines.length;
-		const maxLines = expanded ? totalLines : Math.min(totalLines, Math.max(WRITE_PREVIEW_LINES, previewWindowRows()));
+		const maxLines = expanded ? totalLines : Math.min(totalLines, WRITE_PREVIEW_LINES);
 		const visibleLines = rawLines.slice(0, maxLines);
 		const highlighted = highlightCode(visibleLines.join("\n"), language);
 		const lineNumberWidth = Math.max(WRITE_GUTTER_MIN_WIDTH, String(totalLines).length);
