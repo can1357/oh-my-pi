@@ -64,6 +64,10 @@
 
 ## [18.12.2] - 2026-10-18
 
+### Added
+
+- Added dated Factory Droid credit promotions (`credit-promotion` in the provider KDL): discovery applies the discount to a model's credit rate only inside the promotion window, with droid 0.244's current discounts on GPT-5.6 Sol, Gemini 3.7/3.8 Flash and Mistral Large 4
+
 ### Changed
 
 - Seeded TypeSafe `jev-1.14.0` and OpenRouter `typesafe/jev-1.14`, and made them the `judge` role defaults and TypeSafe's default model; TypeSafe discovery keeps seeded ids its alias-only `/v1/models` listing omits
