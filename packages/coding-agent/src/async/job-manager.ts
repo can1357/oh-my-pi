@@ -51,6 +51,8 @@ export type AsyncJobType = "bash" | "task" | "eval";
 export interface AsyncJobRunResult {
 	text: string;
 	structured?: StructuredSubagentOutput;
+	/** Resolved model of the run, carried onto the job for delivery details. */
+	model?: ResolvedModelDisplay;
 }
 
 /**
@@ -73,47 +75,38 @@ export interface AsyncJobDetails extends Record<string, unknown> {
 	images?: ImageContent[];
 	/** Tool output metadata needed when a completion is delivered or recovered later. */
 	meta?: OutputMeta;
+	/**
+	 * Resolved model of a task job whose run never streamed a progress
+	 * snapshot — a restored subagent, an IRC wake turn, or a user-resumed
+	 * delivery. Those jobs settle without `progress[]`, so this is the only
+	 * carrier that lets the delivery `details` still report the model (#16017).
+	 */
+	model?: ResolvedModelDisplay;
 }
 
 /**
- * Model facts from a task job's streamed progress record, in the shared
- * {@link ResolvedModelDisplay} shape. Shared so the wait snapshot and the
- * async-result `details` report the same resolved model for the same run
- * instead of each re-deriving it from `latestDetails.progress`.
- */
-export function resolvedJobModel(progress: Record<string, unknown> | undefined): ResolvedModelDisplay | undefined {
-	const selector = nonEmptyString(progress?.resolvedModel) ?? nonEmptyString(progress?.resolvedModelIdentity);
-	if (selector === undefined) return undefined;
-	return { selector, fallback: progress?.resolvedModelIsFallback === true };
-}
-
-/** Trimmed non-empty string, or undefined for any other value. */
-function nonEmptyString(value: unknown): string | undefined {
-	if (typeof value !== "string") return undefined;
-	const trimmed = value.trim();
-	return trimmed.length > 0 ? trimmed : undefined;
-}
-
-/**
- * Pick the task-progress record for `jobId` out of a job's `latestDetails`.
- * A batch call reports one shared `progress[]`; a row's own id selects its
- * entry, and the first record is the fallback when none matches (the array
- * belongs to one spawn, so any entry describes the same run).
+ * Pick the task-progress record for a job out of `latestDetails`.
+ *
+ * A batch call reports one shared `progress[]` whose rows carry each spawn's
+ * *requested* agent id, while `register()` suffixes a job id on collision —
+ * so match the job's own id first, then its `agentId`. Matching only the job
+ * id would fall through to another spawn's row and report the wrong model
+ * (#16017 review); there is deliberately no first-row fallback, because an
+ * unmatched row belongs to a different run.
  */
 export function jobProgressRecord(
 	details: AsyncJobDetails | undefined,
 	jobId: string,
+	agentId?: string,
 ): Record<string, unknown> | undefined {
 	const value = details?.progress;
 	if (!Array.isArray(value)) return undefined;
-	let first: Record<string, unknown> | undefined;
 	for (const item of value) {
 		if (!item || typeof item !== "object") continue;
 		const candidate = item as Record<string, unknown>;
-		if (!first) first = candidate;
-		if (candidate.id === jobId) return candidate;
+		if (candidate.id === jobId || (agentId !== undefined && candidate.id === agentId)) return candidate;
 	}
-	return first;
+	return undefined;
 }
 
 export interface AsyncJob {
@@ -462,6 +455,12 @@ export class AsyncJobManager {
 				const text = typeof outcome === "string" ? outcome : outcome.text;
 				const structured = typeof outcome === "string" ? undefined : outcome.structured;
 				if (structured) job.structured = structured;
+				// A run that never streamed `progress[]` (restored subagent, wake
+				// turn, resumed delivery) still names its model here, so delivery
+				// details can report it without the parent parsing text (#16017).
+				if (typeof outcome !== "string" && outcome.model) {
+					job.latestDetails = { ...job.latestDetails, model: outcome.model };
+				}
 				if (job.status === "cancelled") {
 					job.resultText = text;
 				} else {
@@ -513,6 +512,7 @@ export class AsyncJobManager {
 			agentId: options.agentId,
 			resultText: result.text,
 			structured: result.structured,
+			...(result.model ? { latestDetails: { model: result.model } } : {}),
 		};
 		this.#jobs.set(id, job);
 		this.#enqueueDelivery(id, result.text);

@@ -2303,11 +2303,26 @@ export interface ResolvedModelDisplay {
 	fallback: boolean;
 }
 
-/** Project a settled result's model facts into {@link ResolvedModelDisplay}. */
-export function resolvedModelDisplay(
-	result: Pick<SingleResult, "resolvedModel" | "resolvedModelIdentity" | "resolvedModelIsFallback">,
-): ResolvedModelDisplay | undefined {
-	const selector = result.resolvedModel ?? result.resolvedModelIdentity;
+/** Trimmed non-empty string, or undefined for any other value. */
+function nonEmptyString(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Project a run's model facts into {@link ResolvedModelDisplay}. The one
+ * implementation of the projection: callers on both sides of the package
+ * boundary hand in their untyped record (a settled `SingleResult` or a
+ * streamed progress record) and get the same trimming and identity-fallback
+ * semantics, so the envelope and the delivery `details` cannot disagree.
+ */
+export function resolvedModelDisplay(result: {
+	resolvedModel?: unknown;
+	resolvedModelIdentity?: unknown;
+	resolvedModelIsFallback?: unknown;
+}): ResolvedModelDisplay | undefined {
+	const selector = nonEmptyString(result.resolvedModel) ?? nonEmptyString(result.resolvedModelIdentity);
 	if (selector === undefined) return undefined;
 	return { selector, fallback: result.resolvedModelIsFallback === true };
 }

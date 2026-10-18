@@ -598,6 +598,61 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 	});
 
+	it("attributes the model of a job whose id was suffixed on collision", () => {
+		// `register()` suffixes a requested id when another live job owns it, but
+		// the shared `progress[]` rows keep the unsuffixed agent id. Matching only
+		// the job id found nothing and reported the first, different spawn's
+		// model (#16135 review).
+		const job: AsyncJob = {
+			id: "worker-1",
+			agentId: "worker",
+			type: "task",
+			status: "completed",
+			startTime: Date.now(),
+			label: "collided task",
+			abortController: new AbortController(),
+			promise: Promise.resolve(),
+			latestDetails: {
+				progress: [
+					{ id: "other", resolvedModel: "openai/gpt-4o", resolvedModelIsFallback: false },
+					{ id: "worker", resolvedModel: "anthropic/claude-opus-5-5:high", resolvedModelIsFallback: true },
+				],
+			},
+		};
+		const message = buildAsyncResultBatchMessage([
+			{ jobId: "worker-1", result: "done", job, durationMs: 1000, epoch: 0 },
+		]);
+
+		expect(message?.details?.jobs[0]?.model).toEqual({
+			selector: "anthropic/claude-opus-5-5:high",
+			fallback: true,
+		});
+	});
+
+	it("reports the model of a run that never streamed progress", () => {
+		// A restored subagent, wake turn, or resumed delivery settles without
+		// `progress[]`; the job's own carrier is the only source then (#16017).
+		const job: AsyncJob = {
+			id: "restored-job",
+			agentId: "restored",
+			type: "task",
+			status: "completed",
+			startTime: Date.now(),
+			label: "restored task",
+			abortController: new AbortController(),
+			promise: Promise.resolve(),
+			latestDetails: { model: { selector: "anthropic/claude-opus-5-5", fallback: false } },
+		};
+		const message = buildAsyncResultBatchMessage([
+			{ jobId: "restored-job", result: "done", job, durationMs: 1000, epoch: 0 },
+		]);
+
+		expect(message?.details?.jobs[0]?.model).toEqual({
+			selector: "anthropic/claude-opus-5-5",
+			fallback: false,
+		});
+	});
+
 	it("omits the model when the job never resolved one", () => {
 		const job: AsyncJob = {
 			id: "unresolved-job",
