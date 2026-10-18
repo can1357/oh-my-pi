@@ -3868,10 +3868,13 @@ async function executeToolCalls(
 			sharedEffects = [];
 		} else {
 			sharedTasks.push(task);
+			// The tier of the arguments the call runs with when the speculation path
+			// already transformed them; the transform runs once, in `runTool`, otherwise.
+			const tierArgs = record.executionArgs ?? record.args;
 			let tier: ToolTier = "exec";
 			try {
 				const approval =
-					typeof record.tool?.approval === "function" ? record.tool.approval(record.args) : record.tool?.approval;
+					typeof record.tool?.approval === "function" ? record.tool.approval(tierArgs) : record.tool?.approval;
 				tier = typeof approval === "string" ? approval : (approval?.tier ?? "exec");
 			} catch {
 				// A throwing approval resolver counts as "exec", like an omitted approval.
