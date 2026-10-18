@@ -63,8 +63,8 @@ installLegacyPiSpecifierShim();
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
 
-/** RFC 3986 scheme syntax, lowercased. */
-const LINK_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]*$/;
+/** RFC 3986 scheme syntax, lowercased, two characters at least so `c` cannot capture `C:/` paths. */
+const LINK_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]+$/;
 
 /** Standard schemes an extension may not claim: web, file and mail links. omp's internal URLs are refused too. */
 const STANDARD_LINK_SCHEMES: Readonly<Record<string, true>> = {
@@ -307,7 +307,9 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	registerLinkScheme(scheme: string): void {
 		const normalized = scheme.toLowerCase();
 		if (!LINK_SCHEME_PATTERN.test(normalized)) {
-			throw new Error(`registerLinkScheme: "${scheme}" is not a URL scheme (letters, digits, "+", "-", ".")`);
+			throw new Error(
+				`registerLinkScheme: "${scheme}" is not a URL scheme of two or more characters (letters, digits, "+", "-", ".")`,
+			);
 		}
 		// `=== true`: inherited keys such as `constructor` are not reserved.
 		if (STANDARD_LINK_SCHEMES[normalized] === true || InternalUrlRouter.instance().isBuiltin(normalized)) {

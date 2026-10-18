@@ -110,8 +110,9 @@ const PAINT_END_NO_SYNC = ENABLE_AUTOWRAP;
 // native text selection.
 const MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
 const MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1000l";
-// OSC 22 pointer shape (kitty, foot, ghostty, …); terminals without it ignore the sequence.
-const POINTER_SHAPE_DEFAULT = "\x1b]22;default\x1b\\";
+// OSC 22 pointer shape (kitty, foot, ghostty, …); terminals without it ignore the sequence. The
+// empty shape restores the terminal's own default pointer (kitty's `default` is the text beam).
+const POINTER_SHAPE_DEFAULT = "\x1b]22;\x1b\\";
 // Cell-size replies: CSI 6 ; height ; width t in pixels, and iTerm2's
 // OSC 1337 ; ReportCellSize = height ; width [; scale] ST in points.
 const CELL_SIZE_REPLY = /^\x1b\[6;(\d+);(\d+)t$/;
@@ -1426,9 +1427,16 @@ export class TUI extends Container {
 	 * Ask the terminal for a mouse pointer shape (OSC 22, a CSS cursor name such as `"pointer"`),
 	 * or `undefined` for its default. Writes only on a change; turning mouse reporting off or
 	 * stopping the TUI restores the default.
+	 *
+	 * The shape belongs to the normal screen. Terminals keep one per screen, so entering an
+	 * alternate screen restores the default first and requests made while one is borrowed are
+	 * dropped; the next hover after leaving it asks again.
 	 */
 	setPointerShape(shape: string | undefined): void {
-		if (shape === this.#pointerShape) return;
+		// Also while an alternate screen is shown, about to be, or not yet left.
+		if (shape === this.#pointerShape || this.#altActive || this.#resizeAltActive || this.#pendingAltExit !== "") {
+			return;
+		}
 		this.#pointerShape = shape;
 		this.terminal.write(shape === undefined ? POINTER_SHAPE_DEFAULT : `\x1b]22;${shape}\x1b\\`);
 	}
@@ -2097,7 +2105,8 @@ export class TUI extends Container {
 			}
 			this.#noteAltBufferToggle();
 			this.#imageBudget.beginAltScreenLifecycle();
-			this.#pendingAltEnter = `${erase}\x1b[?1049h${this.#keyboardEnhancementEnter()}`;
+			// The pointer shape is per screen: restore the normal screen's before covering it.
+			this.#pendingAltEnter = `${this.#takePointerReset()}${erase}\x1b[?1049h${this.#keyboardEnhancementEnter()}`;
 		}
 		this.#resizeSettleTimer?.cancel();
 		this.#resizeSettleTimer = this.#renderScheduler.scheduleRender(() => {
@@ -2682,6 +2691,8 @@ export class TUI extends Container {
 			setAltScreenActive(false);
 		}
 		// `setPointerShape` works with reporting off too, so the shell gets its pointer back either way.
+		// The shape is per screen and the shell's is the normal one, so it is restored after any
+		// alternate-screen exit below (none is set while one is shown, so this is only a safeguard).
 		const pointerReset = this.#takePointerReset();
 		const mouseOff = this.#mouseTracking !== "off" ? MOUSE_TRACKING_OFF : "";
 		if (this.#altActive || this.#pendingAltExit) {
@@ -2690,11 +2701,10 @@ export class TUI extends Container {
 			// nothing continues, so release unconditionally. The pending
 			// sequence itself can re-enable tracking (overlay-close restore),
 			// so the final OFF goes last or the shell keeps reporting.
-			const mouseExit = `${pointerReset}${mouseOff}`;
 			const exitSequence = this.#pendingAltExit
-				? `${this.#takePendingAltEnter()}${this.#pendingAltExit}${mouseExit}`
-				: `${mouseExit}${this.#altScreenExit()}`;
-			this.terminal.write(exitSequence);
+				? `${this.#takePendingAltEnter()}${this.#pendingAltExit}${mouseOff}`
+				: `${mouseOff}${this.#altScreenExit()}`;
+			this.terminal.write(`${exitSequence}${pointerReset}`);
 			setAltScreenActive(false);
 			this.#altActive = false;
 			this.#mouseTracking = "off";
@@ -3895,7 +3905,8 @@ export class TUI extends Container {
 			} else {
 				this.#noteAltBufferToggle();
 				this.#imageBudget.beginAltScreenLifecycle();
-				this.terminal.write(`\x1b[?1049h${this.#keyboardEnhancementEnter()}`);
+				// The pointer shape is per screen: restore the normal screen's before covering it.
+				this.terminal.write(`${this.#takePointerReset()}\x1b[?1049h${this.#keyboardEnhancementEnter()}`);
 			}
 			this.#setMouseTracking(wantMouse);
 			setAltScreenActive(true);
@@ -3911,10 +3922,8 @@ export class TUI extends Container {
 			// Leaving reporting on when the normal buffer wants it restores
 			// inline capture the same frame the overlay closes: no later paint
 			// is needed, so an idle session never sits untrackable.
-			const mouseExit =
-				wantMouse === "off" && this.#mouseTracking !== "off"
-					? `${this.#takePointerReset()}${MOUSE_TRACKING_OFF}`
-					: "";
+			// No pointer shape is set while an alternate screen is shown (see `setPointerShape`).
+			const mouseExit = wantMouse === "off" && this.#mouseTracking !== "off" ? MOUSE_TRACKING_OFF : "";
 			// A fullscreen overlay that disabled reporting leaves tracking off:
 			// restore it in the fused exit or later frames see matching states
 			// and inline click/hover stays dead until the setting toggles.

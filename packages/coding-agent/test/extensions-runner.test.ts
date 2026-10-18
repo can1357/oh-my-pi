@@ -599,6 +599,10 @@ describe("ExtensionRunner", () => {
 				path.join(extensionsDir, "link-internal-hijack.ts"),
 				`export default function(pi) { pi.registerLinkScheme("Security"); }`,
 			);
+			await Bun.write(
+				path.join(extensionsDir, "link-drive-letter.ts"),
+				`export default function(pi) { pi.registerLinkScheme("C"); }`,
+			);
 			try {
 				const result = await loadTestExtensions();
 				// Claiming a web scheme or one of omp's internal URL schemes fails that extension's load
@@ -606,6 +610,10 @@ describe("ExtensionRunner", () => {
 				expect(result.errors.find(error => error.path.endsWith("link-hijack.ts"))?.error).toContain("reserved");
 				expect(result.errors.find(error => error.path.endsWith("link-internal-hijack.ts"))?.error).toContain(
 					"reserved",
+				);
+				// A one-letter scheme would claim Windows paths such as `C:/notes.md`.
+				expect(result.errors.find(error => error.path.endsWith("link-drive-letter.ts"))?.error).toContain(
+					"two or more characters",
 				);
 				const runnerWith = (settings: Settings) =>
 					new ExtensionRunner(
@@ -629,6 +637,50 @@ describe("ExtensionRunner", () => {
 				expect(clicks).toEqual(["owner demo DEMO:open/2"]);
 			} finally {
 				Reflect.deleteProperty(globalThis, "__linkClicks");
+			}
+		});
+
+		it("lets a link_activate handler run past the event-handler timeout, as a command would", async () => {
+			const release = Promise.withResolvers<void>();
+			const done: string[] = [];
+			Reflect.set(globalThis, "__linkRelease", release.promise);
+			Reflect.set(globalThis, "__linkDone", done);
+			await Bun.write(
+				path.join(extensionsDir, "link-dialog.ts"),
+				`export default function(pi) {
+					pi.registerLinkScheme("demo");
+					pi.on("link_activate", async event => {
+						await globalThis.__linkRelease;
+						globalThis.__linkDone.push(event.url);
+					});
+				}`,
+			);
+			vi.useFakeTimers();
+			try {
+				const result = await loadTestExtensions();
+				const runner = new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+					undefined,
+					Settings.isolated({ "extensionRenderers.assistantText": true }),
+				);
+				const errors: string[] = [];
+				runner.onError(error => errors.push(error.error));
+				testSetExtensionHandlerTimeoutMs(10);
+				// The handler waits on the user (a dialog) far longer than the handler timeout.
+				const emission = runner.emitLinkActivate("demo:open/1");
+				vi.advanceTimersByTime(1_000);
+				release.resolve();
+				expect(await emission).toBe(true);
+				expect(done).toEqual(["demo:open/1"]);
+				expect(errors).toEqual([]);
+			} finally {
+				vi.useRealTimers();
+				Reflect.deleteProperty(globalThis, "__linkRelease");
+				Reflect.deleteProperty(globalThis, "__linkDone");
 			}
 		});
 	});

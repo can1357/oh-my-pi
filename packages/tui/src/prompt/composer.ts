@@ -207,8 +207,8 @@ export type LinkHintsEnd = (reason?: "crowded") => void;
 
 /**
  * The extension link labels drawn on `rows`, top to bottom, a wrapped label once at its first row:
- * a row's first label continues the previous row's last label when that has the same URL and ends
- * its row (the rule the hover highlight follows).
+ * a row's first label continues the previous row's last label when that has the same marker id
+ * and ends its row (the rule the hover highlight follows).
  */
 function viewportLinkTargets(rows: readonly string[]): ViewportLink[] {
 	const targets: ViewportLink[] = [];
@@ -216,7 +216,7 @@ function viewportLinkTargets(rows: readonly string[]): ViewportLink[] {
 	for (let row = 0; row < rows.length; row++) {
 		const labels = extensionLinkLabels(rows[row]!);
 		for (const [index, label] of labels.entries()) {
-			if (index === 0 && previous?.endsRow && previous.url === label.url) continue;
+			if (index === 0 && previous?.endsRow && previous.id === label.id) continue;
 			targets.push({ url: label.url, row, start: label.start });
 		}
 		previous = labels.at(-1);
@@ -604,10 +604,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 
 	/**
 	 * Keep link-hint tags on what `rows` show. The first frame after `startLinkHints` tags its
-	 * labels, or ends the mode as `"crowded"` when some row has more tag cells than `width`, since
-	 * tags drawn side by side could not all be read; later frames keep the tags while the tagged
-	 * labels are still drawn first, in the same order and columns (rows may scroll, links may be
-	 * added below), and otherwise end the mode, so a tag never picks a label no longer drawn under it.
+	 * labels; later frames keep the tags while the tagged labels are still drawn first, in the same
+	 * order and columns (rows may scroll, links may be added below), and otherwise end the mode, so a
+	 * tag never picks a label no longer drawn under it. Every frame ends the mode as `"crowded"` when
+	 * some row has more tag cells than `width` (a resize can narrow it), since tags drawn side by
+	 * side could not all be read.
 	 */
 	#syncLinkHints(rows: readonly string[], width: number): void {
 		const state = this.#linkHints;
@@ -620,19 +621,19 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 				this.#endLinkHints();
 				return;
 			}
-			const cells = new Map<number, number>();
-			for (const { tag, link } of state.hints) cells.set(link.row, (cells.get(link.row) ?? 0) + tag.length);
-			if ([...cells.values()].some(count => count > width)) this.#endLinkHints("crowded");
-			return;
+		} else {
+			const unchanged =
+				targets.length >= hints.length &&
+				hints.every(({ link }, index) => link.url === targets[index]!.url && link.start === targets[index]!.start);
+			if (!unchanged) {
+				this.#endLinkHints();
+				return;
+			}
+			state.hints = hints.map(({ tag }, index) => ({ tag, link: targets[index]! }));
 		}
-		const unchanged =
-			targets.length >= hints.length &&
-			hints.every(({ link }, index) => link.url === targets[index]!.url && link.start === targets[index]!.start);
-		if (!unchanged) {
-			this.#endLinkHints();
-			return;
-		}
-		state.hints = hints.map(({ tag }, index) => ({ tag, link: targets[index]! }));
+		const cells = new Map<number, number>();
+		for (const { tag, link } of state.hints) cells.set(link.row, (cells.get(link.row) ?? 0) + tag.length);
+		if ([...cells.values()].some(count => count > width)) this.#endLinkHints("crowded");
 	}
 
 	#endLinkHints(reason?: "crowded"): void {
@@ -685,7 +686,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	/**
 	 * Highlight the hovered extension link label. A wrapped label continues on the rows above and
 	 * below: while a part is the first label on its row, the previous row's last label belongs to it
-	 * when it has the same URL and ends that row; likewise downward. Other labels of the URL stay plain.
+	 * when it carries the same marker id and ends that row; likewise downward. Other labels, even of
+	 * the same URL, stay plain.
 	 */
 	#paintHoveredLink(viewport: string[]): string[] {
 		const hovered = this.#hoveredLink;
@@ -702,7 +704,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		for (let index = hovered.row - 1, labels = hitLabels, part = hit; labels[0] === part; index--) {
 			labels = labelsAt(index);
 			const above = labels.at(-1);
-			if (above === undefined || above.url !== hovered.url || !above.endsRow) break;
+			if (above === undefined || above.id !== hit.id || !above.endsRow) break;
 			painted[index] = restyleExtensionLinkLabel(viewport[index]!, above, inverseLabel);
 			part = above;
 		}
@@ -713,7 +715,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		) {
 			labels = labelsAt(index);
 			const below = labels[0];
-			if (below === undefined || below.url !== hovered.url) break;
+			if (below === undefined || below.id !== hit.id) break;
 			painted[index] = restyleExtensionLinkLabel(viewport[index]!, below, inverseLabel);
 			part = below;
 		}

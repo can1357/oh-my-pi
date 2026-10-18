@@ -1244,12 +1244,14 @@ export interface McpNotificationEvent {
 // ============================================================================
 
 /**
- * A click on a link whose scheme this extension registered with `pi.registerLinkScheme()`.
- * Interactive mode only, with `tui.mouse` on; delivered to the owning extension only.
+ * The user picked a link whose scheme this extension registered with `pi.registerLinkScheme()`,
+ * by its hint tag or a click. Interactive mode only; delivered to the owning extension only, and
+ * run without the event-handler timeout, like a command. The URL is untrusted: the model can write
+ * such a link with any URL behind any label, so validate it like user input.
  */
 export interface LinkActivateEvent {
 	type: "link_activate";
-	/** The link's full URL as drawn, e.g. `cc-stretch:open/1792/0/2`. */
+	/** The link's full URL as drawn, e.g. `cc-stretch:open/1792/0/2`. Untrusted. */
 	url: string;
 	/** The registered scheme the URL uses, lowercase and without `:`. */
 	scheme: string;
@@ -1880,10 +1882,11 @@ export interface ExtensionAPI {
 	/**
 	 * Claim a link scheme (e.g. `"cc-stretch"` for `cc-stretch:…` links). In a plain terminal,
 	 * Markdown links using it draw without the ` (url)` suffix and are never handed to the terminal
-	 * or browser to open; with `tui.mouse` on, clicking one raises `link_activate` for this
-	 * extension. Tern's native view draws them as its own links and does not route their clicks back.
-	 * Interactive mode only, and only while the `extensionRenderers.assistantText` setting is on.
-	 * Throws for an invalid scheme or a reserved one (`http`, `https`, `file`, `mailto`, …).
+	 * or browser to open; picking one (its `app.links.hint` tag, or a click with `tui.mouse` on)
+	 * raises `link_activate` for this extension. Tern's native view draws them as its own links and
+	 * does not route their clicks back. Interactive mode only, and only while the
+	 * `extensionRenderers.assistantText` setting is on. Throws for an invalid scheme (fewer than two
+	 * characters, or not URL scheme syntax) or a reserved one (`http`, `https`, `file`, `mailto`, …).
 	 */
 	registerLinkScheme(scheme: string): void;
 

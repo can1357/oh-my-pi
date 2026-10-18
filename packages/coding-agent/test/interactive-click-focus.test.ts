@@ -21,6 +21,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
 import { cfgTuiMouse } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 
 function plainRows(rows: readonly string[]): string[] {
 	return rows.map(row => Bun.stripANSI(row).trimEnd());
@@ -273,8 +274,16 @@ describe("inline click-to-focus geometry", () => {
 		expect(plainRows(term.getViewport()).some(row => row.includes("ToggleAgent3"))).toBe(false);
 	});
 
-	/** Install a runner whose one extension claims `demo:` links and records each `link_activate` URL. */
-	function installDemoLinkExtension(): { activated: string[]; firstActivation: Promise<void> } {
+	/**
+	 * Install a runner whose one extension claims `schemes` (`demo:` by default) and records each
+	 * `link_activate` URL.
+	 */
+	function installDemoLinkExtension(schemes: string[] = ["demo"]): {
+		activated: string[];
+		firstActivation: Promise<void>;
+		extension: Extension;
+		runner: ExtensionRunner;
+	} {
 		const activated: string[] = [];
 		const first = Promise.withResolvers<void>();
 		const handlers: Extension["handlers"] = new Map();
@@ -294,7 +303,7 @@ describe("inline click-to-focus geometry", () => {
 			tools: new Map(),
 			assistantThinkingRenderers: [],
 			assistantTextRenderers: [],
-			linkSchemes: ["demo"],
+			linkSchemes: schemes,
 			fileWriteFallbackHandlers: [],
 			fileDeleteFallbackHandlers: [],
 			messageRenderers: new Map(),
@@ -313,11 +322,10 @@ describe("inline click-to-focus geometry", () => {
 			mode.settings,
 		);
 		Object.defineProperty(session, "extensionRunner", { configurable: true, get: () => runner });
-		return { activated, firstActivation: first.promise };
+		return { activated, firstActivation: first.promise, extension, runner };
 	}
 
-	/** Draw one assistant reply with `text` and wait until `visible` shows on screen. */
-	async function showReply(text: string, visible: string): Promise<void> {
+	function appendReply(text: string): void {
 		session.sessionManager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text }],
@@ -335,9 +343,33 @@ describe("inline click-to-focus geometry", () => {
 			},
 			timestamp: 1,
 		});
+	}
+
+	/** Draw one assistant reply with `text` and wait until `visible` shows on screen. */
+	async function showReply(text: string, visible: string): Promise<void> {
+		appendReply(text);
 		await mode.renderInitialMessages();
 		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes(visible)));
 	}
+
+	it("leaves a link change before the startup replay to that replay, drawing the transcript once", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { extension } = installDemoLinkExtension([]);
+		appendReply("Open [the details](demo:open/7) now.");
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		// A startup notice (MCP, LSP) lands in the chat before the replay; then a scheme is claimed.
+		mode.showWarning("early notice");
+		extension.linkSchemes.push("demo");
+		mode.syncExtensionLinks();
+		// Any rebuild the change queued runs as a microtask, before this continuation.
+		await Promise.resolve();
+		await mode.renderInitialMessages({ preserveExistingChat: true });
+		const chat = plainRows(mode.chatContainer.render(120)).join("\n");
+		expect(chat.split("Open the details now.").length - 1).toBe(1);
+		expect(chat.split("early notice").length - 1).toBe(1);
+	});
 
 	it("hands a click on an extension-owned link to its extension with tui.mouse on, other links unchanged", async () => {
 		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
@@ -380,7 +412,7 @@ describe("inline click-to-focus geometry", () => {
 		written.length = 0;
 		move(viewport[screenRow]!.indexOf("the docs") + 1);
 		await term.waitForRender();
-		expect(written.join("")).toContain("\x1b]22;default\x1b\\");
+		expect(written.join("")).toContain("\x1b]22;\x1b\\");
 	});
 
 	it("picks an extension link by its hint tag with tui.mouse off; Esc cancels without picking", async () => {
@@ -570,11 +602,64 @@ describe("inline click-to-focus geometry", () => {
 		});
 		await mode.renderInitialMessages();
 		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("the details")));
+		// The subagent's runner has no UI of its own, yet its links are picked here: it says so too.
+		expect(mainRunner.getUIContext()?.getLinkClicksAvailable()).toBe(true);
+		expect(childRunner.hasUI()).toBe(false);
+		expect(childRunner.getUIContext()?.getLinkClicksAvailable()).toBe(true);
 		const viewport = plainRows(term.getViewport());
 		const screenRow = viewport.findIndex(row => row.includes("the details"));
 		term.sendInput(`\x1b[<0;${viewport[screenRow]!.indexOf("the details") + 2};${screenRow + 1}M`);
 		await handled.promise;
 		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("OPENED")));
 		expect(plainRows(term.getViewport()).some(row => row.includes("Open OPENED now."))).toBe(true);
+	});
+
+	it("re-runs assistant text renderers when Tern's native view takes the screen and hands it back", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { extension, runner } = installDemoLinkExtension();
+		// Draws the link only while it can be picked here, its target inline otherwise.
+		extension.assistantTextRenderers.push(({ text }) =>
+			runner.getUIContext()?.getLinkClicksAvailable()
+				? undefined
+				: text.replace("[the details](demo:open/7)", "INLINE"),
+		);
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		await showReply("Open [the details](demo:open/7) now.", "the details");
+		const chat = () => plainRows(mode.chatContainer.render(120)).join("\n");
+		expect(chat()).toContain("Open the details now.");
+		try {
+			setNativeRendering(true);
+			// The redraw's rebuild runs as a microtask, before this continuation.
+			await Promise.resolve();
+			expect(chat()).toContain("Open INLINE now.");
+		} finally {
+			setNativeRendering(false);
+		}
+		await Promise.resolve();
+		expect(chat()).toContain("Open the details now.");
+	});
+
+	it("drops a suspended extension's link scheme and renderers from the transcript, and restores them on resume", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { extension, runner } = installDemoLinkExtension();
+		extension.assistantTextRenderers.push(({ text }) => text.replace("now", "NOW"));
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		await showReply("Open [the details](demo:open/7) now.", "the details");
+		const chat = () => plainRows(mode.chatContainer.render(120)).join("\n");
+		expect(chat()).toContain("Open the details NOW.");
+
+		// A live `disabledExtensions` edit suspends it: its scheme is no longer claimed, its renderer gone.
+		runner.setSuspendedExtensions(() => true);
+		expect(runner.getLinkSchemes()).toEqual([]);
+		await Promise.resolve();
+		expect(chat()).toContain("Open the details (demo:open/7) now.");
+
+		runner.setSuspendedExtensions(() => false);
+		await Promise.resolve();
+		expect(chat()).toContain("Open the details NOW.");
 	});
 });

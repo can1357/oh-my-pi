@@ -87,6 +87,20 @@ describe("extension-owned links", () => {
 		// A hyperlink omp did not mark is kept, whatever its scheme.
 		const foreign = "See \x1b]8;;demo:open/7\x07the details\x1b]8;;\x07.";
 		expect(stripExtensionLinkMarkers(foreign)).toBe(foreign);
+		// Every marker form omp draws is stripped: numbered or not, BEL or ST terminated.
+		for (const params of ["id=omp-extension-link", "id=omp-extension-link-12"]) {
+			expect(stripExtensionLinkMarkers(`a\x1b]8;${params};demo:x\x07b\x1b]8;;\x07c`)).toBe("abc");
+			expect(stripExtensionLinkMarkers(`a\x1b]8;${params};demo:x\x1b\\b\x1b]8;;\x1b\\c`)).toBe("abc");
+		}
+	});
+
+	it("treats only omp's marked links as extension links, not a hyperlink of a claimed scheme", () => {
+		setExtensionLinks(["demo"]);
+		expect(extensionLinkLabels("See \x1b]8;;demo:open/7\x07the details\x1b]8;;\x07.")).toEqual([]);
+		expect(extensionLinkLabels("See \x1b]8;id=other;demo:open/7\x07the details\x1b]8;;\x07.")).toEqual([]);
+		expect(linkCells(["See \x1b]8;id=omp-extension-link-3;demo:open/7\x07the details\x1b]8;;\x07."])).toEqual([
+			"0:4-14=demo:open/7",
+		]);
 	});
 
 	it("stops matching rows drawn for a scheme that is no longer claimed", () => {
@@ -115,13 +129,14 @@ describe("extension-owned links", () => {
 
 	it("keeps a sized H1 heading's extension link clickable", () => {
 		setExtensionLinks(["demo"]);
+		const priorTextSizing = TERMINAL.textSizing;
 		setTerminalTextSizing(true);
 		try {
 			expect(linkCells(render("# Open [the details](demo:open/7)"))).toEqual(["0:5-15=demo:open/7"]);
 			// A heading with no extension link is still drawn sized.
 			expect(render("# Open the details")[0]).toContain("\x1b]66;");
 		} finally {
-			setTerminalTextSizing(false);
+			setTerminalTextSizing(priorTextSizing);
 		}
 	});
 
@@ -213,10 +228,19 @@ describe("extension link hover", () => {
 		expect(hover(rows, "first").highlighted).toEqual(["first"]);
 	});
 
-	it("never highlights a link whose scheme is not claimed", () => {
+	it("keeps a label of one URL apart from the same URL's label right after a row break", () => {
 		setExtensionLinks(["demo"]);
-		const { highlighted } = hover(render("[docs](https://example.com)"), "docs");
-		expect(highlighted).toEqual([]);
+		// Each label fills its own row: the first ends row 0, the second starts row 1.
+		const rows = render("[aaaa](demo:open/1) [bbbb](demo:open/1)", 4);
+		expect(rows.map(row => plain(row).trim())).toEqual(["aaaa", "bbbb"]);
+		expect(hover(rows, "bbbb").highlighted).toEqual(["bbbb"]);
+		expect(hover(rows, "aaaa").highlighted).toEqual(["aaaa"]);
+	});
+
+	it("never highlights a link whose scheme is not claimed, or one omp did not mark", () => {
+		setExtensionLinks(["demo"]);
+		expect(hover(render("[docs](https://example.com)"), "docs").highlighted).toEqual([]);
+		expect(hover(["See \x1b]8;;demo:open/7\x07the details\x1b]8;;\x07."], "the details").highlighted).toEqual([]);
 	});
 });
 
@@ -282,6 +306,17 @@ describe("extension link hints", () => {
 		}
 	});
 
+	it("tags each of two same-URL labels split by a row break", () => {
+		setExtensionLinks(["demo"]);
+		const composer = composerShowing(new StaticBlock(render("[aaaa](demo:open/1) [bbbb](demo:open/1)", 4)));
+		try {
+			composer.renderFrame(SIZE);
+			expect(composer.viewportLinkCount()).toBe(2);
+		} finally {
+			composer.stop();
+		}
+	});
+
 	it("ends instead of keeping tags over labels a repaint moved", () => {
 		setExtensionLinks(["demo"]);
 		const block = new StaticBlock(render("Pick [first](demo:open/1) or [second](demo:open/2) now"));
@@ -320,25 +355,35 @@ describe("extension link hints", () => {
 		}
 	});
 
-	it("shows no tags, and says why, when a row's links leave no room for every tag", () => {
+	it("shows no tags, and says why, when a row's links leave no room for every tag, also after a resize", () => {
 		setExtensionLinks(["demo"]);
 		const labels = Array.from({ length: 27 }, (_, index) => `[x](demo:open/${index})`).join("");
+		const wide = { columns: 80, rows: 24 };
 		const narrow = { columns: 40, rows: 24 };
 		const composer = new Composer({
-			terminal: new VirtualTerminal(narrow.columns, narrow.rows),
+			terminal: new VirtualTerminal(wide.columns, wide.rows),
 			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
 		});
 		composer.start();
 		const transcript = new TranscriptContainer();
-		// 27 one-cell labels need 54 cells of two-letter tags on a 40-column row.
+		// 27 one-cell labels need 54 cells of two-letter tags: room on 80 columns, not on 40.
 		transcript.addChild(new StaticBlock(render(labels, 40)));
 		composer.setRuntimeChildren([transcript]);
 		try {
-			const before = composer.renderFrame(narrow).viewport.map(plain);
+			const before = composer.renderFrame(wide).viewport.map(plain);
 			const reasons: (string | undefined)[] = [];
 			composer.startLinkHints(reason => reasons.push(reason));
-			expect(composer.renderFrame(narrow).viewport.map(plain)).toEqual(before);
+			expect(composer.renderFrame(wide).viewport.map(plain)).not.toEqual(before);
+			expect(composer.linkHintsActive).toBe(true);
+			// Narrowed while tagged: the labels stay where they were, but their tags no longer fit.
+			const narrowBefore = composer.renderFrame(narrow).viewport.map(plain);
 			expect(reasons).toEqual(["crowded"]);
+			expect(composer.linkHintsActive).toBe(false);
+			expect(composer.renderFrame(narrow).viewport.map(plain)).toEqual(narrowBefore);
+
+			composer.startLinkHints(reason => reasons.push(reason));
+			expect(composer.renderFrame(narrow).viewport.map(plain)).toEqual(narrowBefore);
+			expect(reasons).toEqual(["crowded", "crowded"]);
 			expect(composer.typeLinkHint("a")).toBe(false);
 		} finally {
 			composer.stop();

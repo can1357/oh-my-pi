@@ -11,6 +11,9 @@ import { visibleWidth } from "../utils";
 let schemes: ReadonlySet<string> = new Set();
 let version = 0;
 let drawnListener: (() => void) | undefined;
+let pickingProvider: (() => boolean) | undefined;
+/** Numbers each drawn link's marker, so two adjacent labels of one URL stay apart. */
+let drawnLinks = 0;
 // Tern's native view routes its own link clicks, so markers are drawn only for a plain terminal.
 onNativeRenderingChange(() => {
 	version++;
@@ -21,10 +24,12 @@ const OSC8_PATTERN = /\x1b\]8;([^;\x07\x1b]*);([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 
 /**
  * The OSC 8 params tagging omp's own markers, so they are stripped from terminal output even after
- * their scheme is no longer registered.
+ * their scheme is no longer registered. Each drawn link gets its own `-<n>` suffix; a label wrapped
+ * across rows repeats its marker, suffix included, on every row.
  */
-const MARKER_PARAMS = "id=omp-extension-link";
-const MARKER_OPEN = `\x1b]8;${MARKER_PARAMS};`;
+const MARKER_ID = "id=omp-extension-link";
+const MARKER_PARAMS_PATTERN = /^id=omp-extension-link(?:-\d+)?$/;
+const MARKER_OPEN = `\x1b]8;${MARKER_ID}`;
 
 /**
  * Set the registered schemes (lowercase, without `:`). Bumps {@link extensionLinksVersion} on any
@@ -58,6 +63,23 @@ export function onExtensionLinkDrawn(listener: (() => void) | undefined): void {
 	drawnListener = listener;
 }
 
+/**
+ * Set by the interactive product: whether the user has a way to pick a link drawn now (a bound
+ * hint key, mouse clicks). `undefined` when nothing in this process can pick one.
+ */
+export function setExtensionLinkPicking(provider: (() => boolean) | undefined): void {
+	pickingProvider = provider;
+}
+
+/**
+ * Whether a registered-scheme link drawn now can be activated: links are routed and the product
+ * offers a way to pick them. Process-wide, so a UI-less extension runner (a subagent's, whose
+ * transcript the user may focus) answers like the interactive one.
+ */
+export function extensionLinkClicksAvailable(): boolean {
+	return extensionLinksRouted() && pickingProvider?.() === true;
+}
+
 /** The registered scheme `href` uses, or `undefined` for every other link. */
 export function extensionLinkScheme(href: string): string | undefined {
 	if (schemes.size === 0) return undefined;
@@ -76,7 +98,7 @@ export function formatExtensionLink(label: string, href: string): string {
 	const safe = href.replaceAll("\x1b", "").replaceAll("\x07", "");
 	if (!safe) return label;
 	drawnListener?.();
-	return `${MARKER_OPEN}${safe}\x07${label}\x1b]8;;\x07`;
+	return `${MARKER_OPEN}-${++drawnLinks};${safe}\x07${label}\x1b]8;;\x07`;
 }
 
 /** Hint tag letters, home row first. */
@@ -112,7 +134,7 @@ export function stripExtensionLinkMarkers(line: string): string {
 			inside = false;
 			return closesOwn ? "" : sequence;
 		}
-		inside = params === MARKER_PARAMS;
+		inside = MARKER_PARAMS_PATTERN.test(params);
 		return inside ? "" : sequence;
 	});
 }
@@ -120,6 +142,11 @@ export function stripExtensionLinkMarkers(line: string): string {
 /** One extension link label drawn on a rendered row (before {@link stripExtensionLinkMarkers}). */
 export interface ExtensionLinkLabel {
 	readonly url: string;
+	/**
+	 * The marker's params, unique to each drawn link and repeated on every row a wrapped label
+	 * spans, so a row's parts of one label can be told from an adjacent label of the same URL.
+	 */
+	readonly id: string;
 	/** First 0-based cell the label covers. */
 	readonly start: number;
 	/** Cell just past the label. */
@@ -132,22 +159,26 @@ export interface ExtensionLinkLabel {
 }
 
 /**
- * The extension link labels drawn on a rendered row, left to right. Only registered schemes
- * match, so ordinary hyperlinks and rows drawn for a scheme that is no longer registered never do.
+ * The extension link labels drawn on a rendered row, left to right. Only omp's own markers with a
+ * registered scheme match, so ordinary hyperlinks (even of a registered scheme) and rows drawn for
+ * a scheme that is no longer registered never do.
  */
 export function extensionLinkLabels(line: string): ExtensionLinkLabel[] {
-	if (schemes.size === 0 || !line.includes("\x1b]8;")) return [];
+	if (schemes.size === 0 || !line.includes(MARKER_OPEN)) return [];
 	const labels: ExtensionLinkLabel[] = [];
 	let x = 0;
 	let cursor = 0;
-	let open: { url: string; start: number; from: number } | undefined;
+	let open: { url: string; id: string; start: number; from: number } | undefined;
 	for (const match of line.matchAll(OSC8_PATTERN)) {
 		x += visibleWidth(line.slice(cursor, match.index));
 		if (open && x > open.start) labels.push({ ...open, end: x, endsRow: false, to: match.index });
 		open = undefined;
+		const params = match[1]!;
 		const uri = match[2]!;
 		cursor = match.index + match[0].length;
-		if (uri && extensionLinkScheme(uri)) open = { url: uri, start: x, from: cursor };
+		if (uri && MARKER_PARAMS_PATTERN.test(params) && extensionLinkScheme(uri)) {
+			open = { url: uri, id: params, start: x, from: cursor };
+		}
 	}
 	x += visibleWidth(line.slice(cursor));
 	if (open && x > open.start) labels.push({ ...open, end: x, endsRow: true, to: line.length });

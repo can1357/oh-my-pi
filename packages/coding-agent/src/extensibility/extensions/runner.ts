@@ -44,6 +44,7 @@ import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
 import type {
 	AfterProviderResponseEvent,
 	AssistantMessageRewriteEvent,
@@ -467,7 +468,9 @@ const noOpUIContext: ExtensionUIContext = {
 	notify: () => {},
 	onTerminalInput: () => () => {},
 	rerenderMessage: () => {},
-	getLinkClicksAvailable: () => false,
+	// A subagent's runner has no UI of its own, yet its links are picked from the interactive screen
+	// while its transcript is focused: answer as the interactive UI does.
+	getLinkClicksAvailable: extensionLinkClicksAvailable,
 	setStatus: () => {},
 	setWorkingMessage: () => {},
 	setWidget: () => {},
@@ -551,6 +554,7 @@ export class ExtensionRunner {
 	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
 	#loadOrder: Extension[] | undefined;
 	#suspendedExtensions = new Set<Extension>();
+	/** Notified after {@link setSuspendedExtensions} suspends or resumes any extension. */
 	#suspensionListeners = new Set<() => void>();
 	/**
 	 * Buffer for `credential_disabled` events received via {@link emitCredentialDisabled}
@@ -1110,8 +1114,8 @@ export class ExtensionRunner {
 	/**
 	 * Suspend or resume loaded extensions in place (e.g. after a live `disabledExtensions`
 	 * edit). A suspended extension keeps its module state but stops contributing event
-	 * handlers, commands, tools, message renderers, shortcuts, flags, and file fallbacks
-	 * until resumed. Returns the extensions whose state changed, after notifying
+	 * handlers, commands, tools, message renderers, link schemes, shortcuts, flags, and file
+	 * fallbacks until resumed. Returns the extensions whose state changed, after notifying
 	 * {@link onSuspensionChange} listeners when there are any.
 	 */
 	setSuspendedExtensions(shouldSuspend: (extension: Extension) => boolean): {
@@ -1142,7 +1146,7 @@ export class ExtensionRunner {
 
 	/**
 	 * Call `listener` whenever {@link setSuspendedExtensions} suspends or resumes an extension, so
-	 * a UI can redraw what their renderers drew. Returns the unsubscribe.
+	 * a UI can redraw what their renderers and link schemes drew. Returns the unsubscribe.
 	 */
 	onSuspensionChange(listener: () => void): () => void {
 		this.#suspensionListeners.add(listener);
@@ -1396,6 +1400,9 @@ export class ExtensionRunner {
 	 * `ui` is the UI that drew the link, for a runner that has none of its own: a subagent's runner
 	 * runs headless, but its transcript can be on screen while that subagent is focused, and the
 	 * handler's `ctx.ui.rerenderMessage` must reach that screen.
+	 *
+	 * Like a command or shortcut, a click is the user's own action, and its handler may open a
+	 * dialog: it runs without the event-handler timeout. A failure is reported, not thrown.
 	 */
 	async emitLinkActivate(url: string, ui?: ExtensionUIContext): Promise<boolean> {
 		if (!this.settings || !cfgExtensionAssistantTextRenderers.get(this.settings)) return false;
@@ -1411,7 +1418,18 @@ export class ExtensionRunner {
 		const ctx: ExtensionContext =
 			ui && ui !== this.#uiContext ? Object.create(base, { ui: { value: ui }, hasUI: { value: true } }) : base;
 		for (const handler of handlers) {
-			await this.#runHandlerWithTimeout(handler, event, ctx, owner, extensionHandlerTimeoutMs);
+			try {
+				await this.runScoped(() => handler(event, ctx));
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				logger.warn("link_activate handler failed", { extensionPath: owner.path, url, error: message });
+				this.emitError({
+					extensionPath: owner.path,
+					event: event.type,
+					error: message,
+					stack: error instanceof Error ? error.stack : undefined,
+				});
+			}
 		}
 		return true;
 	}

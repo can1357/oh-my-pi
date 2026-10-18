@@ -31,7 +31,7 @@
 ### Added
 
 - `AssistantMessageComponent` accepts display-only assistant text renderers and redraws one reply with `rerenderMessage(timestamp)`; `splitAssistantMessageToolTimeline` reports each segment's `contentOffsets` ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
-- `setExtensionLinks()` makes markdown draw links with registered schemes without a URL suffix or openable hyperlink, `Composer.viewportLinkAt(row, col)` finds the one under a click, `Composer.setHoveredLink()` highlights a hovered one, `Composer.startLinkHints()` / `typeLinkHint()` tag the ones on screen for picking by keyboard (new `app.links.hint` keybinding, Alt+O), and `TUI.setPointerShape()` sets the mouse pointer shape (OSC 22) ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
+- `setExtensionLinks()` makes markdown draw links with registered schemes without a URL suffix or openable hyperlink, `Composer.viewportLinkAt(row, col)` finds the one under a click, `Composer.setHoveredLink()` highlights a hovered one, `Composer.startLinkHints()` / `typeLinkHint()` tag the ones on screen for picking by keyboard (new `app.links.hint` keybinding, Alt+O), `setExtensionLinkPicking()` / `extensionLinkClicksAvailable()` share whether they can be picked process-wide, and `TUI.setPointerShape()` sets the mouse pointer shape (OSC 22) on the normal screen ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 
 ### Fixed
 

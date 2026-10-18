@@ -576,7 +576,7 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 
 ### Link activation
 
-- `link_activate` — `{ url, scheme }` when the user clicks a link whose scheme this extension claimed with [`registerLinkScheme`](#extension-link-schemes). Delivered to that extension only.
+- `link_activate` — `{ url, scheme }` when the user picks a link whose scheme this extension claimed with [`registerLinkScheme`](#extension-link-schemes), by click or hint tag. Delivered to that extension only, without the handler timeout. `url` is untrusted: the model can write such a link, so validate it like user input.
 
 ### MCP notifications
 
@@ -1298,16 +1298,18 @@ Opt-in with the same setting as [assistant text renderers](#assistant-text-rende
 ```ts
 pi.registerLinkScheme("cc-stretch");
 pi.on("link_activate", ({ url }) => {
-  // url is the link as drawn, e.g. "cc-stretch:open/1792/0/2"
+  // url is the link as drawn, e.g. "cc-stretch:open/1792/0/2"; validate it before acting on it
 });
 ```
 
 - **Drawing.** In a plain terminal, a markdown link using a claimed scheme, in an assistant reply or anywhere else markdown is drawn, shows its label only: no ` (url)` suffix, and no hyperlink the terminal or a browser could open.
 - **Keyboard.** In a plain terminal, `app.links.hint` (`Alt+O` by default, see [keybindings](./keybindings.md)) tags each claimed link on screen with one or two letters drawn over the start of its label; a label wrapped across rows gets one tag. Typing a whole tag raises `link_activate` for the claiming extension. `Esc` or any key that is not a lowercase letter cancels and is swallowed, except `Ctrl+C` and a paste, which cancel and keep their usual effect. Hint mode works while the prompt editor has focus and ends when an overlay or dialog takes it, or when a repaint moves or removes the tagged labels, as a streaming reply can, so a tag never picks a link no longer under it. With no claimed link on screen the key only shows a status, and with more links on one row than their tags can fit side by side it shows a status instead of tags. The first time a claimed link is drawn omp says which key picks it.
 - **Clicks.** With `tui.mouse` on, a left click on the label in a plain terminal does the same as typing its tag, instead of any other click action. Either way, while a subagent's transcript is focused, the event goes to that subagent's copy of the extension (the one whose renderers drew it), and the handler's `ctx.ui` is the interactive UI, so call `ctx.ui.rerenderMessage` from the handler's own context. Labels already in terminal scrollback cannot be picked.
+- **Untrusted input.** `url` comes from whatever drew the link, not only from your renderer: the model, or tool output it repeats, can write `[Continue](cc-stretch:delete/all)`, and since the URL is hidden the user sees only `Continue`. Validate `url` and treat it like user input: parse it strictly, reject unknown operations, and confirm before anything destructive.
+- **Handler.** A `link_activate` handler runs like a command, without the event-handler timeout, so it may await a dialog (`ctx.ui.confirm`, `ctx.ui.select`, …). A handler that throws is reported as an extension error.
 - **Hover.** With `tui.mouse` on, the label under the pointer is highlighted (every row of a wrapped label), and terminals that support OSC 22 (kitty, foot, ghostty, …) show a hand pointer over it.
-- **Fallback.** `ctx.ui.getLinkClicksAvailable()` is true only while claimed links can be picked: interactive mode, a plain terminal, `extensionRenderers.assistantText` on, and the hint key bound or `tui.mouse` on. Changing the setting, or `tui.mouse` while the hint key is unbound, re-runs the assistant text renderers, so a renderer can check it on each call and draw content inline instead of behind a link nobody can pick.
-- **Ownership.** Scheme names are case-insensitive. When two extensions claim one scheme, the first loaded gets its clicks. Web, file and mail schemes (`http`, `https`, `file`, `mailto`, …) and omp's internal URL schemes (`local`, `skill`, `agent`, …) are reserved: claiming one throws and fails the extension's load.
+- **Fallback.** `ctx.ui.getLinkClicksAvailable()` is true only while claimed links can be picked: interactive mode, a plain terminal, `extensionRenderers.assistantText` on, and the hint key bound or `tui.mouse` on. A subagent's copy of the extension gets the same answer, since its links are picked on the same screen. Changing the setting, `tui.mouse` while the hint key is unbound, Tern's native view opening or closing, or suspending or resuming an extension (a live `disabledExtensions` edit) re-runs the assistant text renderers, so a renderer can check it on each call and draw content inline instead of behind a link nobody can pick.
+- **Ownership.** Scheme names are case-insensitive and at least two characters long, so no scheme captures a Windows drive path such as `C:/notes.md`. When two extensions claim one scheme, the first loaded gets its clicks; a suspended extension's schemes are released until it resumes. Web, file and mail schemes (`http`, `https`, `file`, `mailto`, …) and omp's internal URL schemes (`local`, `skill`, `agent`, …) are reserved: claiming one throws and fails the extension's load. Only links omp draws itself are picked: a raw terminal hyperlink of a claimed scheme in tool output stays an ordinary hyperlink.
 - **Tern.** Tern's native view draws such links as its own links and does not route their clicks back to omp; handle them there with a Tern plugin.
 
 ## Tool call/result renderer
