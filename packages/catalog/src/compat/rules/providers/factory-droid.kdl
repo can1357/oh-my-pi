@@ -445,7 +445,7 @@ provider "factory-droid" {
 
 	// Per-model registry entries: live-routing family, upstream rotation (first
 	// entry is the default `x-api-provider`), region overrides, Standard Credits
-	// rates, list-price source, org-policy aliases, the effort ladder (an off/none
+	// rates and dated credit promotions, list-price source, org-policy aliases, the effort ladder (an off/none
 	// rung means `thinking-requires-effort #false`), and account gates.
 	models "claude-fable-5.1" {
 		routing-family "anthropic"
@@ -656,6 +656,7 @@ provider "factory-droid" {
 		upstream-rotation "openai" "bedrock_openai" "azure_openai" "snowflake" "databricks"
 		region-upstreams-eu "openai"
 		credit-rates { input 2; output 5 }
+		credit-promotion { discount 0.2; starts "2026-08-22T00:00:00Z"; ends "2026-11-22T00:00:00Z"; label "20% off" }
 		list-price-from "openai"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #false
@@ -665,6 +666,7 @@ provider "factory-droid" {
 		routing-family "openai"
 		upstream-rotation "openai" "azure_openai"
 		credit-rates { input 4; output 5 }
+		credit-promotion { discount 0.2; starts "2026-08-22T00:00:00Z"; ends "2026-11-22T00:00:00Z"; label "20% off" }
 		policy-aliases "gpt-5.6-fast"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #false
@@ -817,6 +819,7 @@ provider "factory-droid" {
 		upstream-rotation "google"
 		region-upstreams-eu "google"
 		credit-rates { input 0.6; output 5 }
+		credit-promotion { discount 0.5; starts "2026-08-17T21:10:19Z"; ends "2027-01-01T08:00:00Z"; label "50% off" }
 		list-price-from "google"
 		thinking-efforts "low" "medium" "high"
 		thinking-requires-effort #true
@@ -827,6 +830,7 @@ provider "factory-droid" {
 		upstream-rotation "google"
 		region-upstreams-eu "google"
 		credit-rates { input 0.6; output 5 }
+		credit-promotion { discount 0.5; starts "2026-08-17T21:10:19Z"; ends "2027-01-01T08:00:00Z"; label "50% off" }
 		list-price-from "google"
 		thinking-efforts "low" "medium" "high"
 		thinking-requires-effort #true
@@ -896,6 +900,7 @@ provider "factory-droid" {
 		region-upstreams-us
 		region-upstreams-eu "mistral"
 		credit-rates { input 0.544; output 3.08; cache-read 0.103 }
+		credit-promotion { discount 0.5; starts "2026-10-06T00:00:00Z"; ends "2026-10-20T00:00:00Z"; label "50% off, launch discount" }
 		thinking-efforts "high"
 		thinking-requires-effort #false
 		thinking-default-level "high"

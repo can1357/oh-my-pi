@@ -667,6 +667,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 */
 	"credit-rates": { key: "creditRates", set: "catalog", shape: "object" },
 	/**
+	 * Factory's dated Standard Credits discount: `discount` (a fraction in
+	 * (0, 1)), `starts` and `ends` (UTC instants) and a `label`. Discovery
+	 * applies it to the shown `credit-rates` multiplier only inside the window.
+	 */
+	"credit-promotion": { key: "creditPromotion", set: "catalog", shape: "object" },
+	/**
 	 * List price borrowed from a bundled catalog row: provider id, then the
 	 * row id when it differs from the model's own. Absent means no list price.
 	 */

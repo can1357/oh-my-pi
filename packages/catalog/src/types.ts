@@ -1700,8 +1700,10 @@ export interface Model<TApi extends Api = Api> {
 	factoryDroidApiProviders?: string[];
 	/** Factory Droid: `configured_order` when live routing chose the rotation; absent means registry order. */
 	factoryDroidRoutingSource?: "configured_order";
-	/** Factory Droid Standard Credits base rate (relative per-token weight, not dollars). */
+	/** Factory Droid Standard Credits rate (relative per-token weight, not dollars), after any promotion active at discovery. */
 	factoryDroidCredits?: number;
+	/** Factory Droid credit promotion folded into `factoryDroidCredits`: its label and end (epoch ms). */
+	factoryDroidCreditPromotion?: { label: string; endsAt: number };
 	/** Canonical organization resolved during Factory discovery. */
 	factoryDroidOrgId?: string;
 	cost: ModelCost;

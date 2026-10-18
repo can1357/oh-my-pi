@@ -201,6 +201,40 @@ describe("Factory Droid model builder", () => {
 		expect(unknown.cost).toEqual(zeroCost);
 	});
 
+	describe("credit promotions", () => {
+		const promotion = {
+			discount: 0.2,
+			startsAt: Date.parse("2026-08-22T00:00:00Z"),
+			endsAt: Date.parse("2026-11-22T00:00:00Z"),
+			label: "20% off",
+		};
+		const promoted = syntheticModel({ creditRates: { input: 2, output: 5 }, creditPromotion: promotion });
+
+		it("discounts the shown rate and names the promotion inside its window", () => {
+			const model = buildFactoryDroidModel(promoted, { now: promotion.startsAt });
+			expect(model.factoryDroidCredits).toBe(1.6);
+			expect(model.factoryDroidCreditPromotion).toEqual({ label: "20% off", endsAt: promotion.endsAt });
+		});
+
+		it.each([
+			["before the start", promotion.startsAt - 1],
+			["at the end", promotion.endsAt],
+		])("shows the base rate %s", (_, now) => {
+			const model = buildFactoryDroidModel(promoted, { now });
+			expect(model.factoryDroidCredits).toBe(2);
+			expect(model.factoryDroidCreditPromotion).toBeUndefined();
+		});
+
+		it("reads registry promotions from KDL and applies them mid-window", () => {
+			const entry = factoryDroidRegistry().find(model => model.policy.creditPromotion && model.policy.creditRates);
+			if (!entry?.policy.creditPromotion || !entry.policy.creditRates) throw new Error("no promoted registry model");
+			const { startsAt, endsAt, discount } = entry.policy.creditPromotion;
+			const model = buildFactoryDroidModel(entry, { now: (startsAt + endsAt) / 2 });
+			expect(model.factoryDroidCredits).toBeCloseTo(entry.policy.creditRates.input * (1 - discount), 4);
+			expect(model.factoryDroidCreditPromotion?.endsAt).toBe(endsAt);
+		});
+	});
+
 	it("builds Haiku 5.5 with an Off rung and Anthropic's list price on the Standard pool", () => {
 		const model = buildFactoryDroidModel(registryModel("claude-haiku-5-5"));
 		expect(model.thinking).toMatchObject({

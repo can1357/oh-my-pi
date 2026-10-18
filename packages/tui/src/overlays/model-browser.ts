@@ -762,14 +762,17 @@ function formatCostLeg(n: number): string {
 }
 
 /**
- * Adds Factory Droid's `N×` base Standard Credits rate to a dollar price,
- * replacing the price when the model has no dollar reference. Neither the
- * reference price nor the base credit rate includes live promotions.
+ * Adds Factory Droid's `N×` Standard Credits rate to a dollar price, replacing
+ * the price when the model has no dollar reference. The rate already includes
+ * any promotion active at discovery; `withPromotion` appends its label and UTC
+ * end date (`1.6× (20% off until 2026-11-22)`). The dollar reference never does.
  */
-function withCreditBadge(model: Model, price: string): string {
+function withCreditBadge(model: Model, price: string, withPromotion = true): string {
 	const credits = model.factoryDroidCredits;
 	if (credits === undefined) return price;
-	const badge = `${formatCostLeg(credits)}×`;
+	const promotion = withPromotion ? model.factoryDroidCreditPromotion : undefined;
+	const until = promotion ? new Date(promotion.endsAt).toISOString().slice(0, 10) : undefined;
+	const badge = `${formatCostLeg(credits)}×${promotion ? ` (${promotion.label} until ${until})` : ""}`;
 	const cost = getEffectiveTokenCost(model.cost);
 	return cost.input !== 0 || cost.output !== 0 ? `${price} ${badge}` : badge;
 }
@@ -810,7 +813,8 @@ function pickerPrice(model: Model): string {
 	if (declared !== undefined) return PRICING_STATUS_LABELS[declared].short;
 	if (isFreeModel(model)) return "free";
 	const cost = getEffectiveTokenCost(model.cost);
-	return withCreditBadge(model, `$${formatCostLeg(cost.input)}·${formatCostLeg(cost.output)}`);
+	// The narrow picker column carries the rate alone; the preview names the promotion.
+	return withCreditBadge(model, `$${formatCostLeg(cost.input)}·${formatCostLeg(cost.output)}`, false);
 }
 
 /** `$2 in · $10 out · $0.2 cache` for a model preview. */

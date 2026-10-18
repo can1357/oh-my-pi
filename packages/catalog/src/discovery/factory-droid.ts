@@ -1,5 +1,6 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
 import {
+	type FactoryDroidModelPolicy,
 	type FactoryDroidRegistryModel,
 	factoryDroidRegionalLimits,
 	factoryDroidRegistry,
@@ -257,6 +258,22 @@ function resolveRotation(
 /** Account scope plus the upstream rotation resolved for that account. */
 export interface FactoryDroidModelBuildOptions extends AccountScope {
 	apiProviders?: readonly string[];
+	/** Clock for the credit-promotion window (epoch ms); defaults to now. */
+	now?: number;
+}
+
+/** Standard Credits rate shown for a model: droid's discounted, 4-place-rounded rate inside a promotion window. */
+function factoryDroidCreditFields(
+	policy: FactoryDroidModelPolicy,
+	now: number,
+): Pick<ModelSpec, "factoryDroidCredits" | "factoryDroidCreditPromotion"> {
+	const { creditRates: rates, creditPromotion: promotion } = policy;
+	if (!rates) return {};
+	if (!promotion || now < promotion.startsAt || now >= promotion.endsAt) return { factoryDroidCredits: rates.input };
+	return {
+		factoryDroidCredits: Number((rates.input * (1 - promotion.discount)).toFixed(4)),
+		factoryDroidCreditPromotion: { label: promotion.label, endsAt: promotion.endsAt },
+	};
 }
 
 export function buildFactoryDroidModel(
@@ -281,7 +298,7 @@ export function buildFactoryDroidModel(
 		cost: { ...(reference?.cost ?? spec.cost) },
 		...factoryDroidRegionalLimits(policy, resolveFactoryDroidInferenceRegion(options)),
 		...(options.orgId ? { factoryDroidOrgId: options.orgId } : {}),
-		...(policy.creditRates ? { factoryDroidCredits: policy.creditRates.input } : {}),
+		...factoryDroidCreditFields(policy, options.now ?? Date.now()),
 		...(options.apiProviders?.length ? { factoryDroidApiProviders: [...options.apiProviders] } : {}),
 	};
 	const resolved = resolveModelPolicy(model);

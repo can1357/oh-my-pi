@@ -27,6 +27,15 @@ export interface FactoryDroidCreditRates {
 	cacheRead?: number;
 }
 
+/** A dated Standard Credits discount; the window is `[startsAt, endsAt)` in epoch ms. */
+export interface FactoryDroidCreditPromotion {
+	/** Fraction taken off every credit rate, in (0, 1). */
+	discount: number;
+	startsAt: number;
+	endsAt: number;
+	label: string;
+}
+
 /** Account gates on one registry model (the `entitlement` axis). */
 export interface FactoryDroidEntitlement {
 	/** Feature flag that must be on for the account to see the model. */
@@ -50,6 +59,7 @@ export interface FactoryDroidModelPolicy {
 	limits: FactoryDroidLimits;
 	euLimits: Partial<FactoryDroidLimits>;
 	creditRates?: FactoryDroidCreditRates;
+	creditPromotion?: FactoryDroidCreditPromotion;
 	/** Bundled catalog row whose list price the model shows. */
 	listPriceFrom?: { provider: string; modelId: string };
 	/** Provider family whose live routing defaults apply. */
@@ -89,6 +99,7 @@ function readPolicy(spec: ModelSpec<"factory-droid-agent">): FactoryDroidModelPo
 	const euLimits = isRecord(catalog.regionLimitsEu) ? catalog.regionLimitsEu : {};
 	const credits = isRecord(catalog.creditRates) ? catalog.creditRates : {};
 	const entitlement = isRecord(catalog.entitlement) ? catalog.entitlement : {};
+	const promotion = isRecord(catalog.creditPromotion) ? catalog.creditPromotion : undefined;
 	const creditInput = numberField(credits, "input");
 	const [priceProvider, priceModelId] = stringList(catalog.listPriceFrom) ?? [];
 	const euContextWindow = numberField(euLimits, "contextWindow");
@@ -116,6 +127,14 @@ function readPolicy(spec: ModelSpec<"factory-droid-agent">): FactoryDroidModelPo
 				input: creditInput,
 				...(creditOutput !== undefined && { output: creditOutput }),
 				...(creditCacheRead !== undefined && { cacheRead: creditCacheRead }),
+			},
+		}),
+		...(promotion && {
+			creditPromotion: {
+				discount: Number(promotion.discount),
+				startsAt: Date.parse(String(promotion.starts)),
+				endsAt: Date.parse(String(promotion.ends)),
+				label: String(promotion.label),
 			},
 		}),
 		...(priceProvider !== undefined && {

@@ -592,6 +592,20 @@ describe("Factory Droid credits badge", () => {
 		browser.setQuery("free");
 		expect(browser.visibleCount).toBe(0);
 	});
+
+	test("names a credit promotion folded into the rate with its label and end date", () => {
+		const promoted = {
+			...makeDroidModel("gpt-5.6-sol", 1.6),
+			factoryDroidCreditPromotion: { label: "20% off", endsAt: Date.parse("2026-11-22T00:00:00Z") },
+		};
+		const browser = makeBrowser([promoted], []);
+		const row = browser
+			.render(140)
+			.map(line => Bun.stripANSI(line))
+			.find(line => line.includes("gpt-5.6-sol"));
+
+		expect(row).toContain("$1.25/10 1.6× (20% off until 2026-11-22)");
+	});
 });
 
 describe("serviceTierFor", () => {
