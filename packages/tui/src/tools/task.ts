@@ -2291,6 +2291,27 @@ export function oneLineLabel(text: string, max = LABEL_MAX): string {
 	return chars.length > cap ? `${chars.slice(0, cap - 1).join("")}…` : oneLine;
 }
 
+/**
+ * Resolved model of a subagent run, as every consumer reports it: `selector`
+ * is `provider/model[:level]` exactly as the child ran it, and `fallback` is
+ * true when retry-fallback routing replaced the configured model. Absent when
+ * no model was resolved — an absent field beats a `fallback: false` claim
+ * about an unnamed model (#16017).
+ */
+export interface ResolvedModelDisplay {
+	selector: string;
+	fallback: boolean;
+}
+
+/** Project a settled result's model facts into {@link ResolvedModelDisplay}. */
+export function resolvedModelDisplay(
+	result: Pick<SingleResult, "resolvedModel" | "resolvedModelIdentity" | "resolvedModelIsFallback">,
+): ResolvedModelDisplay | undefined {
+	const selector = result.resolvedModel ?? result.resolvedModelIdentity;
+	if (selector === undefined) return undefined;
+	return { selector, fallback: result.resolvedModelIsFallback === true };
+}
+
 /** A code review finding reported by the reviewer agent */
 export interface ReviewFinding {
 	title: string;

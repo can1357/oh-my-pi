@@ -1,7 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { PipeStreams } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type { ResolvedModelDisplay, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import type { JobWidgetInputs, JobWidgetRegistry } from "../job-widgets/types";
 
@@ -73,6 +73,47 @@ export interface AsyncJobDetails extends Record<string, unknown> {
 	images?: ImageContent[];
 	/** Tool output metadata needed when a completion is delivered or recovered later. */
 	meta?: OutputMeta;
+}
+
+/**
+ * Model facts from a task job's streamed progress record, in the shared
+ * {@link ResolvedModelDisplay} shape. Shared so the wait snapshot and the
+ * async-result `details` report the same resolved model for the same run
+ * instead of each re-deriving it from `latestDetails.progress`.
+ */
+export function resolvedJobModel(progress: Record<string, unknown> | undefined): ResolvedModelDisplay | undefined {
+	const selector = nonEmptyString(progress?.resolvedModel) ?? nonEmptyString(progress?.resolvedModelIdentity);
+	if (selector === undefined) return undefined;
+	return { selector, fallback: progress?.resolvedModelIsFallback === true };
+}
+
+/** Trimmed non-empty string, or undefined for any other value. */
+function nonEmptyString(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Pick the task-progress record for `jobId` out of a job's `latestDetails`.
+ * A batch call reports one shared `progress[]`; a row's own id selects its
+ * entry, and the first record is the fallback when none matches (the array
+ * belongs to one spawn, so any entry describes the same run).
+ */
+export function jobProgressRecord(
+	details: AsyncJobDetails | undefined,
+	jobId: string,
+): Record<string, unknown> | undefined {
+	const value = details?.progress;
+	if (!Array.isArray(value)) return undefined;
+	let first: Record<string, unknown> | undefined;
+	for (const item of value) {
+		if (!item || typeof item !== "object") continue;
+		const candidate = item as Record<string, unknown>;
+		if (!first) first = candidate;
+		if (candidate.id === jobId) return candidate;
+	}
+	return first;
 }
 
 export interface AsyncJob {

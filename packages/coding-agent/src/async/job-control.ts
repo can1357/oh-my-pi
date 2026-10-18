@@ -6,7 +6,13 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
-import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "./job-manager";
+import {
+	type AsyncJob,
+	type AsyncJobDetails,
+	type AsyncJobManager,
+	type AsyncJobType,
+	jobProgressRecord,
+} from "./job-manager";
 
 import { renderStructuredJson, structuredStatusLabel } from "../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
@@ -176,34 +182,24 @@ export function snapshotJobs(
 		let completionPercent: number | undefined;
 		let stage: string | undefined;
 		if (latest.type === "task") {
-			const progressValue = latest.latestDetails?.progress;
-			if (Array.isArray(progressValue)) {
-				let progressRecord: Record<string, unknown> | undefined;
-				for (const item of progressValue) {
-					if (!item || typeof item !== "object") continue;
-					const candidate = item as Record<string, unknown>;
-					if (!progressRecord) progressRecord = candidate;
-					if (candidate.id === latest.id) {
-						progressRecord = candidate;
-						break;
-					}
-				}
-				const modelValue = progressRecord?.resolvedModel;
+			const progressRecord = jobProgressRecord(latest.latestDetails, latest.id);
+			if (progressRecord) {
+				const modelValue = progressRecord.resolvedModel;
 				if (typeof modelValue === "string") {
 					const trimmed = modelValue.trim();
 					if (trimmed) resolvedModel = trimmed;
 				}
-				const identityValue = progressRecord?.resolvedModelIdentity;
+				const identityValue = progressRecord.resolvedModelIdentity;
 				if (typeof identityValue === "string") {
 					const trimmed = identityValue.trim();
 					if (trimmed) resolvedModelIdentity = trimmed;
 				}
-				const thinkingValue = progressRecord?.resolvedThinkingLevel;
+				const thinkingValue = progressRecord.resolvedThinkingLevel;
 				if (typeof thinkingValue === "string") {
 					resolvedThinkingLevel = parseConfiguredThinkingLevel(thinkingValue);
 				}
-				advisor = progressRecord?.advisor === true;
-				const completionValue = progressRecord?.completionPercent;
+				advisor = progressRecord.advisor === true;
+				const completionValue = progressRecord.completionPercent;
 				if (typeof completionValue === "number" && Number.isFinite(completionValue)) {
 					completionPercent = completionValue;
 				}

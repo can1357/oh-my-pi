@@ -10,7 +10,7 @@ import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: 
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { escapeHarnessTags } from "../session/harness-tags";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import { type SingleResult, resolvedModelDisplay } from "@oh-my-pi/pi-tui/tools/task";
 
 /** Inline preview budget before the envelope points at `agent://<id>` instead. */
 const FULL_OUTPUT_THRESHOLD = 5000;
@@ -38,7 +38,12 @@ function previewHead(output: string): string {
 	return lastNewline >= FULL_OUTPUT_THRESHOLD / 2 ? slice.slice(0, lastNewline) : slice;
 }
 
-/** Render the `<task-result>` envelope for a settled run. */
+/**
+ * `provider/model[:level]` plus the fallback verdict ride the envelope as
+ * attributes, so a parent can verify which model actually ran instead of
+ * parsing the child's raw session JSONL (`model_change` → `model`/
+ * `resolvedModelIsFallback`) as it used to (#16017).
+ */
 export function formatTaskResultSummary(
 	result: SingleResult,
 	options: { totalDurationMs: number; mergeSummary?: string },
@@ -68,6 +73,7 @@ export function formatTaskResultSummary(
 		id: result.id,
 		status,
 		duration: formatDuration(options.totalDurationMs),
+		model: resolvedModelDisplay(result),
 		abortReason: result.aborted ? escapeHarnessTags(result.abortReason ?? "") || undefined : undefined,
 		error: error === undefined ? undefined : escapeHarnessTags(error),
 		resumable,

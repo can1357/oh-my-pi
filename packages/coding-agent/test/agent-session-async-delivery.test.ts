@@ -568,6 +568,54 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 	});
 
+	it("reports a background task's resolved model and fallback verdict in details", () => {
+		// A parent verifying a required review model used to parse the child's
+		// session JSONL. The delivery's details now carry the same facts the
+		// `<task-result>` envelope's attributes do (#16017).
+		const job: AsyncJob = {
+			id: "model-job",
+			agentId: "ModelWorker",
+			type: "task",
+			status: "completed",
+			startTime: Date.now(),
+			label: "model task",
+			abortController: new AbortController(),
+			promise: Promise.resolve(),
+			latestDetails: {
+				progress: [
+					{ id: "other-spawn", resolvedModel: "openai/gpt-4o" },
+					{ id: "model-job", resolvedModel: "anthropic/claude-opus-5-5:high", resolvedModelIsFallback: false },
+				],
+			},
+		};
+		const message = buildAsyncResultBatchMessage([
+			{ jobId: "model-job", result: "done", job, durationMs: 1000, epoch: 0 },
+		]);
+
+		expect(message?.details?.jobs[0]?.model).toEqual({
+			selector: "anthropic/claude-opus-5-5:high",
+			fallback: false,
+		});
+	});
+
+	it("omits the model when the job never resolved one", () => {
+		const job: AsyncJob = {
+			id: "unresolved-job",
+			agentId: "UnresolvedWorker",
+			type: "task",
+			status: "failed",
+			startTime: Date.now(),
+			label: "unresolved task",
+			abortController: new AbortController(),
+			promise: Promise.resolve(),
+		};
+		const message = buildAsyncResultBatchMessage([
+			{ jobId: "unresolved-job", result: "boom", job, durationMs: 1000, epoch: 0 },
+		]);
+
+		expect(message?.details?.jobs[0]).not.toHaveProperty("model");
+	});
+
 	it("keeps lifecycle metadata machine-readable without changing rendering or old consumers", () => {
 		const makeMessage = (status: AsyncJob["status"]) =>
 			buildAsyncResultBatchMessage([
