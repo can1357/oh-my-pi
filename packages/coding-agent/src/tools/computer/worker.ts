@@ -2083,19 +2083,21 @@ export class ComputerWorkerCore {
 			} else if (read.error !== undefined) sections.push({ text: renderUnreadable(touched, window, read.error) });
 			else sections.push({ text: reportNote({ budgetSpent: JSON.stringify(touched.id) }) });
 		}
-		// A window the input opened and focused holds the model's next step, and it has no tree of it.
-		const opened =
-			focused &&
-			pending.rosterBefore &&
-			!reported.has(focused.id) &&
-			!pending.rosterBefore.some(window => window.id === focused.id) &&
-			(pending.windowInput || (focused.pid !== undefined && pending.pids.has(focused.pid)))
-				? focused
-				: undefined;
-		if (opened) {
-			// Unreadable or out of time, it is still named by the roster line below.
-			const read = await budgeted(() => session.axSnapshot(opened.id, {}));
-			if ("value" in read) {
+		// Windows that appeared while the input ran hold the model's next step, and it has no tree of them. In the
+		// background they often open without the focus: a rename field, a date picker, the document another app
+		// opened. Those of the processes the input reached are read; after input to a window, any app's are.
+		if (roster && pending.rosterBefore) {
+			const before = new Set(pending.rosterBefore.map(window => window.id));
+			for (const opened of roster) {
+				if (before.has(opened.id) || reported.has(opened.id)) continue;
+				if (!pending.windowInput && !(opened.pid !== undefined && pending.pids.has(opened.pid))) continue;
+				reported.add(opened.id);
+				const read = await budgeted(() => session.axSnapshot(opened.id, {}));
+				// Unreadable or out of time, it is still named.
+				if (!("value" in read)) {
+					sections.push({ text: newWindowName(opened) });
+					continue;
+				}
 				const text = read.value.text;
 				sections.push({
 					text: renderNewWindow(opened, text),
@@ -2103,7 +2105,6 @@ export class ComputerWorkerCore {
 					leftOut: reportNote({ leftOut: newWindowName(opened) }),
 					shown: { window: { id: opened.id, pid: opened.pid }, text, options: {} },
 				});
-				reported.add(opened.id);
 			}
 		}
 		const tail: string[] = [];

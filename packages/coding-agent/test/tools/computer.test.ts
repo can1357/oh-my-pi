@@ -4961,6 +4961,15 @@ class EditableWindowSession extends FakeNativeSession {
 
 /** A second window of the editor's app, behind it. */
 const otherWindow: DesktopWindow = { ...windowFixture, id: "43", title: "Other", focused: false };
+/** A document another app opened. */
+const textEditDocument: DesktopWindow = {
+	...windowFixture,
+	id: "50",
+	app: "TextEdit",
+	title: "notes.txt",
+	pid: 777,
+	focused: false,
+};
 const CAPPED: UiQuiet = { waitedMs: 5_000, events: 120, timedOut: true, watched: 1 };
 const STILL_CHANGING = /\n\nthe app was still changing when this was read, \d\.\d s after the input$/;
 const unchanged = (id = "42", title = "Editor"): string =>
@@ -5398,6 +5407,49 @@ describe("computer cell settlement", () => {
 		expect(report.match(/new window "43"/g)).toHaveLength(1);
 	});
 
+	it("prints windows the input opened without the focus whole: its app's, and after window input another app's", async () => {
+		const { native, run, read, settle } = reportWorker();
+		await read();
+		// In the background the editor keeps the focus: its rename field opens beside it, and a document opens in
+		// another app (Finder opening a file in TextEdit).
+		const field: DesktopWindow = { ...windowFixture, id: "43", title: "", width: 30, height: 4, focused: false };
+		native.axPerform = async () => void (native.windows = [windowFixture, field, textEditDocument]);
+		await run('await (await desktop.ref("e2")).press()');
+		const report = String(await settle());
+		expect(report).toContain('\n\nnew window "43" Code "" 30×4:\n- window ');
+		expect(report).toContain('\n\nnew window "50" TextEdit "notes.txt" 40×20:\n- window ');
+		expect(report.match(/new window "/g)).toHaveLength(2);
+	});
+
+	it("still reads another app's new window after window input whose own window the cell printed", async () => {
+		const { native, run, read, settle } = reportWorker();
+		await read();
+		native.axPerform = async () => {
+			native.editing = true;
+			native.windows = [windowFixture, textEditDocument];
+		};
+		// The cell prints the touched window's new tree itself, so that window needs no read-back.
+		const printed = await run(
+			'await (await desktop.ref("e2")).press(); return await (await desktop.window("42")).ax()',
+		);
+		const report = String(await settle(String(printed)));
+		expect(report).toStartWith('new window "50" TextEdit "notes.txt" 40×20:\n- window ');
+		expect(report).not.toContain('window "42"');
+	});
+
+	it("names a new window it could not read", async () => {
+		const { native, run, read, settle } = reportWorker();
+		await read();
+		native.axPerform = async () => void (native.windows = [windowFixture, textEditDocument]);
+		const axSnapshot = native.axSnapshot.bind(native);
+		native.axSnapshot = async (target?: string) => {
+			if (target === "50") throw new Error("AxFailed: the window did not answer");
+			return await axSnapshot(target);
+		};
+		await run('await (await desktop.ref("e2")).press()');
+		expect(await settle()).toBe(`${unchanged()}\n\nnew window "50" TextEdit "notes.txt" 40×20`);
+	});
+
 	it("keeps the report within the inline budget, naming windows left out, which keep the model's last tree", async () => {
 		const native = new EditableWindowSession();
 		native.filler = 300;
@@ -5619,10 +5671,16 @@ describe("computer cell settlement", () => {
 
 describe("post-input report diff", () => {
 	const tree = (...rows: string[]): string => rows.join("\n");
+	/** Unchanged rows, so a small change stays well under half the tree. */
+	const filler = Array.from(
+		{ length: 8 },
+		(_, index) => `  - statictext "Unchanged row ${index}" [ref=e${100 + index}]`,
+	);
 
 	it("lists changed, added and moved rows at their depth, anchors them, and names reorders and removed runs", () => {
 		const before = tree(
 			'- window "A" [ref=e1] app=X',
+			...filler,
 			"  - group [ref=e2]",
 			'    - button "x" [ref=e3]',
 			"  - list [ref=e4]",
@@ -5634,6 +5692,7 @@ describe("post-input report diff", () => {
 		);
 		const after = tree(
 			'- window "A" [ref=e1] app=X',
+			...filler,
 			"  - group [ref=e2]",
 			"  - list [ref=e4]",
 			'    - row "b" [ref=e6]',
@@ -5663,23 +5722,44 @@ describe("post-input report diff", () => {
 		expect(renderReadBack({ touched: { id: "7", options: {} }, text: after, change })).toBe(`window "7":\n${after}`);
 	});
 
+	it("prints the whole tree when the changes would take half its length or more", () => {
+		// Half the rows relabelled: shorter than the tree, still a diff models re-read the tree after.
+		const rows = (label: string, first: number) =>
+			Array.from({ length: 4 }, (_, index) => `  - row "${label} ${index}" [ref=e${first + index}]`);
+		const before = tree('- window "A" [ref=e1] app=X', ...rows("kept", 2), ...rows("old", 6));
+		const after = tree('- window "A" [ref=e1] app=X', ...rows("kept", 2), ...rows("new", 10));
+		const change = diffTree(before, after);
+		const diff = [...change.lines, `removed: ${refRuns(change.removed)}`].join("\n");
+		expect(diff.length).toBeLessThan(after.length);
+		expect(diff.length * 2).toBeGreaterThanOrEqual(after.length);
+		expect(renderReadBack({ touched: { id: "7", options: {} }, text: after, change })).toBe(`window "7":\n${after}`);
+		// A quarter of them relabelled stays a diff.
+		const most = tree('- window "A" [ref=e1] app=X', ...rows("kept", 2), ...rows("old", 6), ...rows("more", 20));
+		const fewer = tree('- window "A" [ref=e1] app=X', ...rows("kept", 2), ...rows("new", 10), ...rows("more", 20));
+		expect(
+			renderReadBack({ touched: { id: "7", options: {} }, text: fewer, change: diffTree(most, fewer) }),
+		).toStartWith('window "7": 8 changes since your last tree\n');
+	});
+
 	it("keeps rows past a truncated read's node limit apart from removed ones", () => {
 		const before = tree(
 			'- window "A" [ref=e1] app=X',
+			...filler,
 			'  - row "a" [ref=e2]',
 			'  - row "b" [ref=e3]',
 			'  - row "c" [ref=e4]',
 			'  - row "d" [ref=e5]',
 			'  - row "e" [ref=e6]',
-			"… truncated (6 nodes)",
+			"… truncated (14 nodes)",
 		);
 		// A row added above the cut pushes the last rows past the node limit; "b" is really gone.
 		const after = tree(
 			'- window "A" [ref=e1] app=X',
+			...filler,
 			'  - row "new" [ref=e9]',
 			'  - row "a" [ref=e2]',
 			'  - row "c" [ref=e4]',
-			"… truncated (4 nodes)",
+			"… truncated (12 nodes)",
 		);
 		const change = diffTree(before, after);
 		expect(change.removed).toEqual(["e3"]);
@@ -5687,7 +5767,7 @@ describe("post-input report diff", () => {
 		expect(renderReadBack({ touched: { id: "7", options: {} }, text: after, change }).split("\n")).toEqual([
 			'window "7": 3 changes since your last tree',
 			'  + row "new" [ref=e9] (in e1)',
-			"… truncated (4 nodes)",
+			"… truncated (12 nodes)",
 			"removed: e3",
 			"past this read's node limit: e5-e6",
 		]);

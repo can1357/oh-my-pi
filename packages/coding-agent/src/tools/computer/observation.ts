@@ -648,7 +648,10 @@ export function readBackName(readBack: ReadBack): string {
 	return windowName(readBack.window, readBack.touched);
 }
 
-/** One window's section: its changes, a no-change line, or the whole tree when the model has none or it is shorter. */
+/**
+ * One window's section: its changes, a no-change line, or the whole tree when the model has none or a diff
+ * would take half its length or more, which reads worse than the tree.
+ */
 export function renderReadBack(readBack: ReadBack): string {
 	const { change, text } = readBack;
 	const name = readBackName(readBack);
@@ -662,17 +665,17 @@ export function renderReadBack(readBack: ReadBack): string {
 		return `${name}: no change since your last tree${after}`;
 	}
 	const diff = lines.join("\n");
-	if (diff.length >= text.length) return `${name}:\n${text}`;
+	if (diff.length * 2 >= text.length) return `${name}:\n${text}`;
 	const count = change.lines.length + change.removed.length;
 	return `${name}: ${count} ${count === 1 ? "change" : "changes"} since your last tree\n${diff}`;
 }
 
-/** The heading of a window the cell's input opened and focused: `new window "43" Code "Save" 30×12 (focused)`. */
+/** A window that appeared while the cell's input ran: `new window "43" Code "Save" 30×12 (focused)`. */
 export function newWindowName(window: DesktopWindow): string {
-	return `new window ${windowLabel(window)} ${Math.round(window.width)}×${Math.round(window.height)} (focused)`;
+	return `new window ${windowLabel(window)} ${Math.round(window.width)}×${Math.round(window.height)}${window.focused ? " (focused)" : ""}`;
 }
 
-/** A window the cell's input opened and focused: the model has no tree of it, so it gets all of it. */
+/** A window that appeared while the cell's input ran: the model has no tree of it, so it gets all of it. */
 export function renderNewWindow(window: DesktopWindow, text: string): string {
 	return `${newWindowName(window)}:\n${text}`;
 }
@@ -721,9 +724,7 @@ export function describeRosterChanges(
 	const lines: string[] = [];
 	for (const window of after) {
 		if (beforeIds.has(window.id) || reported.has(window.id) || !(acted(window) || window.focused)) continue;
-		lines.push(
-			`new window ${windowLabel(window)} ${Math.round(window.width)}×${Math.round(window.height)}${window.focused ? " (focused)" : ""}`,
-		);
+		lines.push(newWindowName(window));
 	}
 	for (const window of before) {
 		if (afterIds.has(window.id) || reported.has(window.id) || !acted(window)) continue;
