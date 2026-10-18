@@ -1383,8 +1383,8 @@ fn perform_choosing(
 		return element_action_result(&native, send_action(element, &native));
 	}
 	let pid = element_pid(element)?;
-	let scroll_first = scrolls_before_press(&native, &actions, || process::is_uikit(pid));
-	let perform = || press_into_view(&native, scroll_first, |action| send_action(element, action));
+	let scroll = scroll_before_press(&native, &actions, || process::is_uikit(pid));
+	let perform = || press_into_view(&native, scroll, |action| send_action(element, action));
 	// A menu that a background application opens takes the keyboard from the
 	// user's app, so it is closed before the action returns; a frontmost
 	// application's menu stays open for the next call unless an item is asked
@@ -2056,23 +2056,35 @@ fn replace_utf16_selection(
 /// In a Mac Catalyst (`UIKit`) app, pressing a row scrolled out of its view
 /// reports success and does nothing. Scrolling it into view first lets the
 /// press land; for an element already in view the scroll changes nothing.
-fn scrolls_before_press(native: &str, actions: &[String], uikit: impl FnOnce() -> bool) -> bool {
-	native == "AXPress" && actions.iter().any(|action| action == SCROLL_TO_VISIBLE) && uikit()
+/// The element's own spelling of [`SCROLL_TO_VISIBLE`] when `native`, its
+/// own spelling of the action to perform, is a press that scrolls first.
+fn scroll_before_press<'a>(
+	native: &str,
+	actions: &'a [String],
+	uikit: impl FnOnce() -> bool,
+) -> Option<&'a str> {
+	if !native.eq_ignore_ascii_case("AXPress") {
+		return None;
+	}
+	let scroll = actions
+		.iter()
+		.find(|action| action.eq_ignore_ascii_case(SCROLL_TO_VISIBLE))?;
+	uikit().then_some(scroll.as_str())
 }
 
-/// Sends `native`, after [`SCROLL_TO_VISIBLE`] when `scroll_first`. A failed
-/// scroll leaves the action to report its own outcome; a run cancelled during
-/// the scroll sends nothing more, and nothing is sent once the user has
-/// pressed a key or clicked in the app since the call was admitted
+/// Sends `native`, after `scroll` when given. A failed scroll leaves the
+/// action to report its own outcome; a run cancelled during the scroll sends
+/// nothing more, and nothing is sent once the user has pressed a key or
+/// clicked in the app since the call was admitted
 /// ([`control::intervention::check_press`]).
 fn press_into_view(
 	native: &str,
-	scroll_first: bool,
+	scroll: Option<&str>,
 	mut send: impl FnMut(&str) -> AXError,
 ) -> CoreResult<()> {
 	control::intervention::check_press()?;
-	if scroll_first {
-		let _ = send(SCROLL_TO_VISIBLE);
+	if let Some(scroll) = scroll {
+		let _ = send(scroll);
 		control::check()?;
 		control::intervention::check_press()?;
 	}
@@ -2711,6 +2723,28 @@ mod tests {
 			assert_eq!(native(raise), Some("AXRaise"));
 			assert!(super::is_raise_action(raise), "{raise}");
 		}
+		// Unicode White_Space trims (U+0085 does, U+FEFF does not), and only
+		// ASCII letters fold; the tool's refusals name actions by the same rule.
+		assert_eq!(native("\u{85}open"), Some("AXOpen"));
+		assert_eq!(native("open\u{85}"), Some("AXOpen"));
+		assert_eq!(native("\u{feff}open"), None);
+		assert_eq!(native("open\u{feff}"), None);
+		let custom = ["AXÖffnen".to_owned()];
+		assert_eq!(
+			super::supported_action(&custom, "axÖffnen").map(String::as_str),
+			Some("AXÖffnen")
+		);
+		assert_eq!(super::supported_action(&custom, "axöffnen"), None);
+		// An element advertising another case is answered with its own spelling.
+		let lower = ["axshowmenu", "axpress", "axopen"].map(String::from);
+		let native = |action| super::supported_action(&lower, action).map(String::as_str);
+		assert_eq!(native("showmenu"), Some("axshowmenu"));
+		assert_eq!(native("press"), Some("axpress"));
+		assert_eq!(native("AXOpen"), Some("axopen"));
+		// `ax()` lists only `open` for a button that also presses; the press
+		// runs.
+		let both = ["AXPress", "AXOpen"].map(String::from);
+		assert_eq!(super::supported_action(&both, "press").map(String::as_str), Some("AXPress"));
 	}
 
 	#[test]
@@ -3138,7 +3172,7 @@ mod tests {
 
 	#[test]
 	fn only_a_uikit_press_scrolls_its_element_into_view_first() {
-		use super::scrolls_before_press;
+		use super::scroll_before_press;
 
 		let actions = |names: &[&str]| {
 			names
@@ -3147,29 +3181,40 @@ mod tests {
 				.collect::<Vec<_>>()
 		};
 		let row = actions(&["AXPress", "AXScrollToVisible", "AXShowMenu"]);
-		assert!(scrolls_before_press("AXPress", &row, || true));
+		assert_eq!(scroll_before_press("AXPress", &row, || true), Some("AXScrollToVisible"));
+		// An element advertising its actions in another case scrolls by its own
+		// spelling.
+		let lower = actions(&["axpress", "axscrolltovisible"]);
+		assert_eq!(scroll_before_press("axpress", &lower, || true), Some("axscrolltovisible"));
 		// An AppKit app, another action, or an element that cannot scroll: press
 		// as is.
-		assert!(!scrolls_before_press("AXPress", &row, || false));
-		assert!(!scrolls_before_press("AXShowMenu", &row, || true));
-		assert!(!scrolls_before_press("AXPress", &actions(&["AXPress"]), || true));
+		assert_eq!(scroll_before_press("AXPress", &row, || false), None);
+		assert_eq!(scroll_before_press("AXShowMenu", &row, || true), None);
+		assert_eq!(scroll_before_press("AXPress", &actions(&["AXPress"]), || true), None);
 		// The app is only classified when the press could scroll.
-		assert!(!scrolls_before_press("AXShowMenu", &row, || unreachable!()));
+		assert_eq!(scroll_before_press("AXShowMenu", &row, || unreachable!()), None);
 	}
 
 	#[test]
 	fn a_press_follows_its_scroll_unless_the_run_was_cancelled() {
-		use super::{SCROLL_TO_VISIBLE, press_into_view};
+		use super::{press_into_view, scroll_before_press, supported_action};
 		use crate::desktop::control;
 
-		let run = |scroll_first: bool, scroll_result: AXError, cancel: bool| {
+		// `available` as the element advertises it, pressed through
+		// `perform("press")`.
+		let run = |available: &[&str], scroll_result: AXError, cancel: bool| {
+			let available: Vec<String> = available.iter().map(|name| (*name).to_owned()).collect();
+			let native = supported_action(&available, "press")
+				.expect("a press")
+				.clone();
+			let scroll = scroll_before_press(&native, &available, || true);
 			let source = control::CancellationSource::default();
 			let token = source.token();
 			let mut sent = Vec::new();
 			let result = control::with_token_for_test(&token, || {
-				press_into_view("AXPress", scroll_first, |action| {
+				press_into_view(&native, scroll, |action| {
 					sent.push(action.to_owned());
-					if action != SCROLL_TO_VISIBLE {
+					if Some(action) != scroll {
 						return AXError::Success;
 					}
 					if cancel {
@@ -3180,15 +3225,33 @@ mod tests {
 			});
 			(result.map_err(|error| error.code), sent)
 		};
-		let both = vec![SCROLL_TO_VISIBLE.to_owned(), "AXPress".to_owned()];
-		assert_eq!(run(true, AXError::Success, false), (Ok(()), both.clone()));
+		let sent = |names: &[&str]| {
+			names
+				.iter()
+				.map(|name| (*name).to_owned())
+				.collect::<Vec<_>>()
+		};
+		let canonical = ["AXPress", "AXScrollToVisible"];
+		let both = sent(&["AXScrollToVisible", "AXPress"]);
+		assert_eq!(run(&canonical, AXError::Success, false), (Ok(()), both.clone()));
 		// A failed scroll still presses.
-		assert_eq!(run(true, AXError::Failure, false), (Ok(()), both));
-		assert_eq!(run(false, AXError::Success, false), (Ok(()), vec!["AXPress".to_owned()]));
+		assert_eq!(run(&canonical, AXError::Failure, false), (Ok(()), both));
+		assert_eq!(run(&["AXPress"], AXError::Success, false), (Ok(()), sent(&["AXPress"])));
 		// Cancelled while scrolling: the press is never sent.
 		assert_eq!(
-			run(true, AXError::Success, true),
-			(Err(ErrorCode::Cancelled), vec![SCROLL_TO_VISIBLE.to_owned()])
+			run(&canonical, AXError::Success, true),
+			(Err(ErrorCode::Cancelled), sent(&["AXScrollToVisible"]))
+		);
+		// An element advertising both in another case gets its own spellings:
+		// the scroll, then one press, and no press once cancelled.
+		let lower = ["axpress", "axscrolltovisible"];
+		assert_eq!(
+			run(&lower, AXError::Success, false),
+			(Ok(()), sent(&["axscrolltovisible", "axpress"]))
+		);
+		assert_eq!(
+			run(&lower, AXError::Success, true),
+			(Err(ErrorCode::Cancelled), sent(&["axscrolltovisible"]))
 		);
 	}
 
@@ -3207,7 +3270,7 @@ mod tests {
 				listener.record_for_test(7, std::time::Instant::now());
 			}
 			let mut sent = Vec::new();
-			let result = press_into_view("AXPress", true, |action| {
+			let result = press_into_view("AXPress", Some(SCROLL_TO_VISIBLE), |action| {
 				sent.push(action.to_owned());
 				// The user clicks in the app while the scroll runs.
 				listener.record_for_test(7, std::time::Instant::now());
