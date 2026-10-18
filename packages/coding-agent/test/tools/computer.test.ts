@@ -4681,7 +4681,8 @@ describe("computer input waits for the UI to settle", () => {
 			'const w = await desktop.window("42"); await Promise.all([desktop.press("shift"), w.click(1, 2)])',
 		);
 		expect(run.ok).toBe(true);
-		expect(order).toEqual(["windows", "windows", "key", "click"]);
+		// The last lookup finds the app the key left focused, which it may have activated.
+		expect(order).toEqual(["windows", "windows", "key", "click", "windows"]);
 	});
 
 	it.each([
@@ -4736,6 +4737,94 @@ describe("computer input waits for the UI to settle", () => {
 
 		await runWorker(transport, "open", 'await desktop.apps.open("test.editor"); await desktop.windows()');
 		expect(native.quietWaits).toEqual([[777]]);
+	});
+
+	it("waits after an unawaited input ends, though a read during it already waited", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		const calls: string[] = [];
+		native.keyChord = async () => {
+			calls.push("key-start");
+			await Bun.sleep(150);
+			calls.push("key-end");
+		};
+		native.axSnapshot = async () => {
+			calls.push("ax");
+			return { text: "- button [ref=e1]" };
+		};
+		native.waitForUiQuiet = async pids => {
+			calls.push(`quiet ${pids.join(",")}`);
+			return native.quiet;
+		};
+		new ComputerWorkerCore(transport, () => native);
+		const run = await runWorker(
+			transport,
+			"overlap",
+			'const w = await desktop.window("42"); const p = w.press("cmd+s"); await wait(30); await w.ax(); await p; await w.ax()',
+		);
+		expect(run.ok).toBe(true);
+		expect(calls.slice(calls.indexOf("key-end"))).toEqual(["key-end", "quiet 123", "ax"]);
+	});
+
+	it("makes a desktop key wait for the app it activated too", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		let front = 123;
+		native.listWindows = async () => [
+			{ ...windowFixture, focused: front === 123 },
+			{ ...windowFixture, id: "43", app: "Mail", pid: 456, focused: front === 456 },
+		];
+		native.keyChord = async () => {
+			front = 456;
+		};
+		new ComputerWorkerCore(transport, () => native);
+		await runWorker(transport, "switch", 'await desktop.press("cmd+tab"); await desktop.windows()');
+		expect(native.quietWaits.map(pids => pids.toSorted())).toEqual([[123, 456]]);
+	});
+
+	it("makes input after menu.items wait, since listing a menu makes its window key", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		const calls: string[] = [];
+		native.menuItems = async () => {
+			calls.push("menu");
+			return [];
+		};
+		native.keyChord = async () => {
+			calls.push("key");
+		};
+		native.waitForUiQuiet = async pids => {
+			calls.push(`quiet ${pids.join(",")}`);
+			return native.quiet;
+		};
+		new ComputerWorkerCore(transport, () => native);
+		await runWorker(
+			transport,
+			"menu",
+			'const w = await desktop.window("42"); await w.menu.items(); await w.press("cmd+n")',
+		);
+		expect(calls).toEqual(["menu", "quiet 123", "key"]);
+	});
+
+	it("owes no wait for a click native refused before sending anything", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		native.click = async () => {
+			throw new Error("BackgroundUnavailable: window 42 has no background route for this click; nothing was sent");
+		};
+		new ComputerWorkerCore(transport, () => native);
+		transport.inbound({
+			type: "run",
+			id: "refused",
+			code: 'await (await desktop.window("42")).click(1, 2)',
+			timeoutMs: 2_000,
+			session: snapshot(false, undefined, "refuse"),
+			escape: escapeScope(),
+		});
+		const refused = await transport.waitFor(message => message.type === "result" && message.id === "refused");
+		expect(refused.type === "result" && !refused.ok && refused.error.message).toContain("BackgroundUnavailable");
+		await runWorker(transport, "read", 'await (await desktop.window("42")).ax()');
+		expect(native.quietWaits).toEqual([]);
 	});
 
 	it("makes a refused call pay no wait and leaves the earlier input owed", async () => {

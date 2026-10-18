@@ -368,6 +368,15 @@ const FALLBACK: Fallback = { takeover: true, returnFocus: true };
 const BACKGROUND_UNAVAILABLE = "BackgroundUnavailable: ";
 /** A refusal's closing "nothing was sent", true of the refused background attempt only. */
 const UNSENT_CLAUSE = /(?:;|,? so) (?:nothing|no input) was sent$/;
+
+/** A `BackgroundUnavailable` refusal sent nothing: native raises it before any input, and no takeover rerun ran. */
+function refusedUnsent(error: unknown): boolean {
+	return (
+		error instanceof ToolError &&
+		error.message.startsWith(BACKGROUND_UNAVAILABLE) &&
+		!error.message.includes(" fell back to takeover because ")
+	);
+}
 const RAISE_ROUTE = "Background input and screenshots reach a covered window, so no raise is needed.";
 const OPEN_ROUTE = "Use press() on a button that does the same, or tell the user the step needs their screen.";
 
@@ -1309,8 +1318,9 @@ class Win {
 					path.length <= 1 && path[0] === undefined
 						? undefined
 						: menuPath("menu.items", path, { allowEmpty: true });
-				await this.#observer.settle(context.signal);
-				return await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
+				return await this.#observer.input(context, this.#to(), () =>
+					nativeCall(context.signal, () => this.#session.menuItems(this.id, segments)),
+				);
 			},
 			select: async (...path: [string, ...string[]] | [string[]]): Promise<void> => {
 				const context = this.#getContext();
@@ -1386,6 +1396,8 @@ type InputTarget = { window?: InputWindow } | { root: string; point?: { x: numbe
 interface Unsettled {
 	pids: Set<number>;
 	endedAt: number;
+	/** Inputs that joined this record; one that turns out to have sent nothing leaves. */
+	inputs: number;
 }
 
 /** Makes reads and input wait until the apps earlier input reached have gone quiet; one per native session. */
@@ -1459,6 +1471,7 @@ class InputObserver {
 		}
 		for (const pid of unsettled.pids) current.pids.add(pid);
 		current.endedAt = Math.max(current.endedAt, unsettled.endedAt);
+		current.inputs += unsettled.inputs;
 	}
 
 	async #wait(unsettled: Unsettled, signal: AbortSignal): Promise<void> {
@@ -1476,8 +1489,10 @@ class InputObserver {
 	 * Dispatch one input once earlier input has settled, and owe a wait for
 	 * the process it reaches. Root input reaches the topmost window under its
 	 * point, or the focused window for keys; its process stays unknown when
-	 * that window is. `opens` names the process an app launch started, which
-	 * the next call waits for too. Concurrent inputs dispatch in call order.
+	 * that window is; a key also owes the app focused after it, which it may
+	 * have activated. `opens` names the process an app launch started, which
+	 * the next call waits for too. A refusal that sent nothing owes nothing.
+	 * Concurrent inputs dispatch in call order.
 	 */
 	async input<T>(
 		{ signal }: ComputerRunContext,
@@ -1489,6 +1504,7 @@ class InputObserver {
 		const { promise: dispatched, resolve: markDispatched } = Promise.withResolvers<void>();
 		this.#dispatched = dispatched;
 		let unsettled: Unsettled | undefined;
+		let unsent = false;
 		try {
 			await previous;
 			throwIfAborted(signal);
@@ -1499,20 +1515,38 @@ class InputObserver {
 				const at = to.point && desktopPoint(this.#rootDisplays.get(to.root) ?? [], to.point);
 				if (!to.point || at) window = await this.windowReached(signal, at);
 			}
-			unsettled = this.#unsettled ??= { pids: new Set(), endedAt: Date.now() };
+			unsettled = this.#unsettled ??= { pids: new Set(), endedAt: Date.now(), inputs: 0 };
+			unsettled.inputs++;
 			if (window?.pid !== undefined) unsettled.pids.add(window.pid);
 			this.#sending++;
 			const call = dispatch();
 			markDispatched();
-			const result = await call;
+			let result: T;
+			try {
+				result = await call;
+			} catch (error) {
+				unsent = refusedUnsent(error);
+				throw error;
+			}
 			const started = opens?.(result);
 			if (started !== undefined) unsettled.pids.add(started);
+			// A key can activate another app (cmd+tab, Spotlight): the app focused after it reacts too.
+			if ("root" in to && !to.point) {
+				const focused = await this.windowReached(signal);
+				if (focused?.pid !== undefined) unsettled.pids.add(focused.pid);
+			}
 			return result;
 		} finally {
 			markDispatched();
 			if (unsettled) {
 				this.#sending--;
-				unsettled.endedAt = Date.now();
+				if (unsent && --unsettled.inputs === 0) {
+					if (this.#unsettled === unsettled) this.#unsettled = undefined;
+				} else {
+					unsettled.endedAt = Date.now();
+					// A read or input during this one took the record and waited before this input ended.
+					if (this.#unsettled !== unsettled) this.#restore(unsettled);
+				}
 			}
 		}
 	}
