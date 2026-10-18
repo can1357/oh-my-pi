@@ -141,6 +141,10 @@
 - Fixed a macOS background action leaving its target in front of your app after you clicked another of your windows, when placing the click took longer than the click itself ([#16217](https://github.com/can1357/oh-my-pi/pull/16217))
 
 ## [18.12.4] - 2026-10-20
+### Added
+
+- Added `DesktopSession.axSelectText` (macOS) to select text in an accessibility element's value by UTF-16 range, refusing missing or ambiguous matches and returning the selection read back ([#15175](https://github.com/can1357/oh-my-pi/pull/15175) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `vcs.init(dir)` to create a git repository through the sanctioned VCS module.
 
 ### Changed
 
@@ -244,9 +248,6 @@
 
 ## [18.12.0] - 2026-10-17
 
-- Added `vcs.init(dir)` to create a git repository through the sanctioned VCS module.
-
-## [18.11.3] - 2026-10-16
 ### Breaking Changes
 
 - `encodeSixel` and `encodeSixelAsync` now require a fourth terminal-background RGB argument packed as `0xRRGGBB` ([#15891](https://github.com/can1357/oh-my-pi/pull/15891) by [@Bouska](https://github.com/Bouska)).
