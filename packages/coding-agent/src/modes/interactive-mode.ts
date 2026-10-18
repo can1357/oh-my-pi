@@ -212,6 +212,11 @@ import {
 } from "@oh-my-pi/pi-tui/tools/todo";
 import { vocalizer } from "../tts/vocalizer";
 import { applyHyperlinkSetting, fileHyperlink } from "@oh-my-pi/pi-tui/render/hyperlink";
+import {
+	extensionLinksVersion,
+	onUnroutedExtensionLink,
+	setExtensionLinks,
+} from "@oh-my-pi/pi-tui/render/extension-links";
 import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
@@ -1833,6 +1838,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBusUnsubscribers: Array<() => void> = [];
 	/** Mirror of `tui.mouse`, read by the TUI's per-frame inline mouse tracking probe. */
 	#mouseCapture = false;
+	/** The "extension links need tui.mouse" hint is shown at most once per interactive session. */
+	#linkClickHintShown = false;
+	/** A link-routing change awaits its transcript rebuild; any rebuild before it covers it. */
+	#extensionLinkRebuildPending = false;
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
 	#subagentPreviewTickTimer?: NodeJS.Timeout;
@@ -1958,8 +1967,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				// the same card would look unchanged and skip restoring the band.
 				if (!on) {
 					this.composer.setHoveredClickId(undefined);
+					this.setLinkHover(undefined);
 					this.#inputController?.clearHoverHighlight();
 				}
+				this.syncExtensionLinks();
 				this.ui.requestRender();
 			}),
 		);
@@ -3776,6 +3787,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Components take the extension text renderers when built; the rebuild keeps the streaming
 		// reply's components, so hand them the new set directly.
 		if (any("extensionRenderers.assistantText")) {
+			this.#applyExtensionLinks();
 			this.#eventController.applyAssistantTextRenderers();
 			rebuildChat = true;
 		}
@@ -3854,6 +3866,62 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.updateEditorBorderColor();
 		this.#scheduleComposerStatusPersist();
 		this.ui.requestRender();
+	}
+
+	/** Push the extension link schemes and click routing to the markdown renderer; returns whether that changed. */
+	#applyExtensionLinks(): boolean {
+		const before = extensionLinksVersion();
+		setExtensionLinks(this.viewSession.extensionRunner?.getLinkSchemes() ?? [], this.#mouseCapture);
+		onUnroutedExtensionLink(this.#showLinkClickHint);
+		return extensionLinksVersion() !== before;
+	}
+
+	/** A claimed link was drawn without click routing: say once how to make it clickable. */
+	#showLinkClickHint = (): void => {
+		if (this.#linkClickHintShown) return;
+		this.#linkClickHintShown = true;
+		// Called while markdown renders; show the status after this frame.
+		queueMicrotask(() =>
+			this.showStatus("Extension links are clickable with Mouse Click-to-Focus on (/settings, tui.mouse)"),
+		);
+	};
+
+	syncExtensionLinks(): void {
+		if (!this.#applyExtensionLinks() || this.chatContainer.children.length === 0) return;
+		// The rebuild keeps the live reply's component; re-run its renderers so a renderer reading
+		// `getLinkClicksAvailable()` switches form now rather than on the next streaming update.
+		this.streamingComponent?.setTextRendering({
+			renderers: this.viewSession.extensionRunner?.getAssistantTextRenderers() ?? [],
+			contentOffset: 0,
+		});
+		// Coalesced: a settings apply changing another transcript setting in the same pass rebuilds once.
+		if (this.#extensionLinkRebuildPending) return;
+		this.#extensionLinkRebuildPending = true;
+		queueMicrotask(() => {
+			if (!this.#extensionLinkRebuildPending) return;
+			this.rebuildChatFromMessages();
+			this.ui.resetDisplay();
+		});
+	}
+
+	activateViewportLink(index: number, col: number): boolean {
+		const url = this.composer.viewportLinkAt(index, col);
+		const runner = this.viewSession.extensionRunner;
+		if (url === undefined || !runner) return false;
+		// A focused subagent's runner is headless: hand its handler the UI drawing that transcript.
+		runner.emitLinkActivate(url, this.session.extensionRunner?.getUIContext()).catch((error: unknown) => {
+			logger.warn("link_activate dispatch failed", { url, error: String(error) });
+		});
+		return true;
+	}
+
+	viewportLinkAt(index: number, col: number): string | undefined {
+		return this.composer.viewportLinkAt(index, col);
+	}
+
+	setLinkHover(url: string | undefined): void {
+		this.composer.setHoveredLink(url);
+		this.ui.setPointerShape(url === undefined ? undefined : "pointer");
 	}
 
 	/** Coalesce status-cache writes; `stop()` flushes a pending one synchronously. */
@@ -4059,6 +4127,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	rebuildChatFromMessages(options: { reuseSettledComponents?: boolean } = {}): void {
+		this.#extensionLinkRebuildPending = false;
 		// Mid-stream rebuilds (e.g. `/shake`, theme/setting changes that touch the
 		// transcript) replay only committed `state.messages`. The agent's in-flight
 		// `streamMessage` and its still-pending tool calls live OUTSIDE
@@ -7270,6 +7339,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.stop();
 			this.#ownsStartedUi = false;
 		}
+		// The markdown renderer's extension-link state is process-wide; release this session's schemes
+		// only after the TUI's final history flush, which still strips their markers.
+		setExtensionLinks([], false);
+		onUnroutedExtensionLink(undefined);
 		this.isInitialized = false;
 	}
 
@@ -8037,6 +8110,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		preserveExistingChat?: boolean;
 		clearTerminalHistory?: boolean;
 	}): Promise<void> {
+		// A focus switch replays another session's transcript: claim that session's link schemes first.
+		this.#applyExtensionLinks();
 		await this.#uiHelpers.renderInitialMessages(options);
 		this.syncRetryHintRow();
 	}

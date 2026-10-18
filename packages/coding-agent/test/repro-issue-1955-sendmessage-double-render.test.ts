@@ -141,6 +141,7 @@ function createHarness(): Harness {
 		setToolsExpanded: vi.fn(),
 		toolOutputExpanded: false,
 		syncComposerShape: vi.fn(),
+		syncExtensionLinks: vi.fn(),
 		hideThinkingBlock: false,
 		showError: vi.fn(),
 		editor: {

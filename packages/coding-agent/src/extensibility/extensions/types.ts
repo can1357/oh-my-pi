@@ -352,6 +352,15 @@ export interface ExtensionUIContext {
 	 */
 	rerenderMessage(timestamp: number): void;
 
+	/**
+	 * True while a click on a link whose scheme an extension registered raises `link_activate`:
+	 * interactive mode in a plain terminal, with `extensionRenderers.assistantText` and `tui.mouse`
+	 * on. Changing either setting redraws the transcript and re-runs the assistant text renderers,
+	 * so a renderer can read this on each call, e.g. to show content inline instead of behind a link
+	 * nobody can click. False everywhere else.
+	 */
+	getLinkClicksAvailable(): boolean;
+
 	/** Set status text in the footer/status bar. Pass undefined to clear. */
 	setStatus(key: string, text: string | undefined): void;
 
@@ -1230,6 +1239,22 @@ export interface McpNotificationEvent {
 }
 
 // ============================================================================
+// Link Activation Events
+// ============================================================================
+
+/**
+ * A click on a link whose scheme this extension registered with `pi.registerLinkScheme()`.
+ * Interactive mode only, with `tui.mouse` on; delivered to the owning extension only.
+ */
+export interface LinkActivateEvent {
+	type: "link_activate";
+	/** The link's full URL as drawn, e.g. `cc-stretch:open/1792/0/2`. */
+	url: string;
+	/** The registered scheme the URL uses, lowercase and without `:`. */
+	scheme: string;
+}
+
+// ============================================================================
 // User Bash Events
 // ============================================================================
 
@@ -1508,6 +1533,7 @@ export type ExtensionEvent =
 	| GoalUpdatedEvent
 	| CredentialDisabledEvent
 	| McpNotificationEvent
+	| LinkActivateEvent
 	| UserBashEvent
 	| UserPythonEvent
 	| InputEvent
@@ -1726,6 +1752,7 @@ export interface ExtensionAPI {
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "user_python", handler: ExtensionHandler<UserPythonEvent, UserPythonEventResult>): void;
 	on(event: "mcp_notification", handler: ExtensionHandler<McpNotificationEvent>): void;
+	on(event: "link_activate", handler: ExtensionHandler<LinkActivateEvent>): void;
 
 	// =========================================================================
 	// Tool Registration
@@ -1848,6 +1875,16 @@ export interface ExtensionAPI {
 	 * only while the `extensionRenderers.assistantText` setting is on.
 	 */
 	registerAssistantTextRenderer(renderer: AssistantTextRenderer): void;
+
+	/**
+	 * Claim a link scheme (e.g. `"cc-stretch"` for `cc-stretch:…` links). In a plain terminal,
+	 * Markdown links using it draw without the ` (url)` suffix and are never handed to the terminal
+	 * or browser to open; with `tui.mouse` on, clicking one raises `link_activate` for this
+	 * extension. Tern's native view draws them as its own links and does not route their clicks back.
+	 * Interactive mode only, and only while the `extensionRenderers.assistantText` setting is on.
+	 * Throws for an invalid scheme or a reserved one (`http`, `https`, `file`, `mailto`, …).
+	 */
+	registerLinkScheme(scheme: string): void;
 
 	/**
 	 * Register a composer shape for the interactive editor.
@@ -2228,6 +2265,8 @@ export interface Extension {
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
 	assistantTextRenderers: AssistantTextRenderer[];
+	/** Link schemes claimed with `registerLinkScheme`, lowercase. */
+	linkSchemes: string[];
 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;

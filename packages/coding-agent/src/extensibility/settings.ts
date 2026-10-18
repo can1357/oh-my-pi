@@ -170,6 +170,6 @@ export const cfgExtensionAssistantTextRenderers = register({
 		group: "Extensions",
 		label: "Extension Reply Renderers",
 		description:
-			"Let extensions change how assistant replies are drawn and redraw a reply in place; the session, exports and model context keep the reply as written",
+			"Let extensions change how assistant replies are drawn, redraw a reply in place, and receive clicks on their own links; the session, exports and model context keep the reply as written",
 	},
 });

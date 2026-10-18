@@ -1,8 +1,12 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Extension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { cfgExtensionAssistantTextRenderers } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
@@ -29,6 +33,7 @@ describe("inline click-to-focus geometry", () => {
 	let mode: InteractiveMode;
 	let term: VirtualTerminal;
 	let eventBus: EventBus;
+	let modelRegistry: ModelRegistry;
 
 	beforeAll(() => {
 		initTheme();
@@ -39,7 +44,7 @@ describe("inline click-to-focus geometry", () => {
 		tempDir = TempDir.createSync("@pi-click-focus-e2e-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		const modelRegistry = new ModelRegistry(authStorage);
+		modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
 		session = new AgentSession({
@@ -54,6 +59,7 @@ describe("inline click-to-focus geometry", () => {
 		mode = new InteractiveMode(session, "test", undefined, () => {}, undefined, undefined, eventBus, composer);
 	});
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		mode?.stop();
 		await session?.dispose();
 		authStorage?.close();
@@ -265,5 +271,209 @@ describe("inline click-to-focus geometry", () => {
 		await clickRow("show less");
 		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("more — expand")));
 		expect(plainRows(term.getViewport()).some(row => row.includes("ToggleAgent3"))).toBe(false);
+	});
+
+	it("hands a click on an extension-owned link to its extension once tui.mouse turns on, other links unchanged", async () => {
+		const statuses: string[] = [];
+		const showStatus = mode.showStatus.bind(mode);
+		vi.spyOn(mode, "showStatus").mockImplementation((message, options) => {
+			statuses.push(message);
+			showStatus(message, options);
+		});
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const clicks: string[] = [];
+		const clicked = Promise.withResolvers<void>();
+		const handlers: Extension["handlers"] = new Map();
+		handlers.set("link_activate", [
+			async (...args: unknown[]) => {
+				const [event] = args;
+				if (event && typeof event === "object" && "url" in event && typeof event.url === "string") {
+					clicks.push(event.url);
+				}
+				clicked.resolve();
+			},
+		]);
+		const extension: Extension = {
+			path: "/test/links.ts",
+			resolvedPath: "/test/links.ts",
+			handlers,
+			tools: new Map(),
+			assistantThinkingRenderers: [],
+			assistantTextRenderers: [],
+			linkSchemes: ["demo"],
+			fileWriteFallbackHandlers: [],
+			fileDeleteFallbackHandlers: [],
+			messageRenderers: new Map(),
+			composerShapes: new Map(),
+			commands: new Map(),
+			flags: new Map(),
+			shortcuts: new Map(),
+		};
+		const runner = new ExtensionRunner(
+			[extension],
+			new ExtensionRuntime(),
+			tempDir.path(),
+			session.sessionManager,
+			modelRegistry,
+			undefined,
+			mode.settings,
+		);
+		Object.defineProperty(session, "extensionRunner", { configurable: true, get: () => runner });
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+
+		session.sessionManager.appendMessage({
+			role: "assistant",
+			content: [
+				{ type: "text", text: "Open [the details](demo:open/7) or read [the docs](https://example.com/docs)." },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 1,
+		});
+		const written: string[] = [];
+		const write = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation(data => {
+			written.push(data);
+			write(data);
+		});
+		await mode.renderInitialMessages();
+		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("the details")));
+		// With tui.mouse off the claimed link is inert, and omp says how to enable it, once.
+		expect(statuses.filter(message => message.includes("tui.mouse"))).toHaveLength(1);
+		// Turning click routing on mid-session redraws the reply so its link can be hit.
+		cfgTuiMouse.set(mode.settings, true);
+		await term.waitForRender();
+		cfgTuiMouse.set(mode.settings, false);
+		await term.waitForRender();
+		cfgTuiMouse.set(mode.settings, true);
+		await term.waitForRender();
+		expect(statuses.filter(message => message.includes("tui.mouse"))).toHaveLength(1);
+		// The terminal never receives the extension URL, so it has no hyperlink of its own to open.
+		expect(written.join("")).not.toContain("demo:open/7");
+		expect(written.join("")).toContain("https://example.com/docs");
+		const viewport = plainRows(term.getViewport());
+		const screenRow = viewport.findIndex(row => row.includes("the details"));
+		// The extension link draws without its URL; the web link keeps the suffix.
+		expect(viewport[screenRow]).not.toContain("demo:open/7");
+		expect(viewport[screenRow]).toContain("the docs (https://example.com/docs)");
+
+		const click = (label: string) =>
+			term.sendInput(`\x1b[<0;${viewport[screenRow]!.indexOf(label) + 2};${screenRow + 1}M`);
+		// A click on the web link raises nothing; the extension link's click reaches its extension.
+		click("the docs");
+		click("the details");
+		await clicked.promise;
+		expect(clicks).toEqual(["demo:open/7"]);
+
+		// Hovering the extension link asks for a hand pointer; moving off it restores the default.
+		const move = (col: number) => term.sendInput(`\x1b[<35;${col + 1};${screenRow + 1}M`);
+		written.length = 0;
+		move(viewport[screenRow]!.indexOf("the details") + 1);
+		await term.waitForRender();
+		expect(written.join("")).toContain("\x1b]22;pointer\x1b\\");
+		written.length = 0;
+		move(viewport[screenRow]!.indexOf("the docs") + 1);
+		await term.waitForRender();
+		expect(written.join("")).toContain("\x1b]22;default\x1b\\");
+	});
+
+	it("redraws a focused subagent's reply when its extension handles a click on its link", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		cfgTuiMouse.set(mode.settings, true);
+		const extension = (handlers: Extension["handlers"], renderers: Extension["assistantTextRenderers"]) => ({
+			path: "/test/links.ts",
+			resolvedPath: "/test/links.ts",
+			handlers,
+			tools: new Map(),
+			assistantThinkingRenderers: [],
+			assistantTextRenderers: renderers,
+			linkSchemes: ["demo"],
+			fileWriteFallbackHandlers: [],
+			fileDeleteFallbackHandlers: [],
+			messageRenderers: new Map(),
+			composerShapes: new Map(),
+			commands: new Map(),
+			flags: new Map(),
+			shortcuts: new Map(),
+		});
+		const runner = (ext: Extension) =>
+			new ExtensionRunner(
+				[ext],
+				new ExtensionRuntime(),
+				tempDir.path(),
+				session.sessionManager,
+				modelRegistry,
+				undefined,
+				mode.settings,
+			);
+		// The main session's copy of the extension: interactive UI, never sees the click.
+		const mainRunner = runner(extension(new Map(), []));
+		// The subagent's own copy: a headless runner, as the task executor builds it.
+		let opened = false;
+		const handled = Promise.withResolvers<void>();
+		const childHandlers: Extension["handlers"] = new Map();
+		childHandlers.set("link_activate", [
+			async (...args: unknown[]) => {
+				opened = true;
+				const ctx = args[1] as { ui: { rerenderMessage(timestamp: number): void } };
+				ctx.ui.rerenderMessage(1);
+				handled.resolve();
+			},
+		]);
+		const childRunner = runner(
+			extension(childHandlers, [
+				({ text }) => (opened ? text.replace("[the details](demo:toggle)", "OPENED") : undefined),
+			]),
+		);
+		Object.defineProperty(session, "extensionRunner", { configurable: true, get: () => mainRunner });
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		// Focus the subagent: its transcript, renderers and link schemes come from its runner.
+		const focused = new Proxy(session, {
+			get: (target, property) => {
+				if (property === "extensionRunner") return childRunner;
+				const value = Reflect.get(target, property, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		Object.defineProperty(mode, "viewSession", { configurable: true, get: () => focused });
+		session.sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "Open [the details](demo:toggle) now." }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 1,
+		});
+		await mode.renderInitialMessages();
+		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("the details")));
+		const viewport = plainRows(term.getViewport());
+		const screenRow = viewport.findIndex(row => row.includes("the details"));
+		term.sendInput(`\x1b[<0;${viewport[screenRow]!.indexOf("the details") + 2};${screenRow + 1}M`);
+		await handled.promise;
+		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("OPENED")));
+		expect(plainRows(term.getViewport()).some(row => row.includes("Open OPENED now."))).toBe(true);
 	});
 });

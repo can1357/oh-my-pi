@@ -575,6 +575,54 @@ describe("ExtensionRunner", () => {
 			expect(result.errors[0]?.error).toContain("registerAssistantTextRenderer expects a function, got string");
 			expect(result.errors[0]?.error).toContain("bad-text-renderer.ts");
 		});
+
+		it("routes a claimed link's click to its claimant only, while extensionRenderers.assistantText is on", async () => {
+			const clicks: string[] = [];
+			// The extension files below run in this process and record into this global.
+			Reflect.set(globalThis, "__linkClicks", clicks);
+			await Bun.write(
+				path.join(extensionsDir, "link-owner.ts"),
+				`export default function(pi) {
+					pi.registerLinkScheme("Demo");
+					pi.on("link_activate", event => { globalThis.__linkClicks.push("owner " + event.scheme + " " + event.url); });
+				}`,
+			);
+			await Bun.write(
+				path.join(extensionsDir, "link-bystander.ts"),
+				`export default function(pi) { pi.on("link_activate", event => { globalThis.__linkClicks.push("bystander " + event.url); }); }`,
+			);
+			await Bun.write(
+				path.join(extensionsDir, "link-hijack.ts"),
+				`export default function(pi) { pi.registerLinkScheme("https"); }`,
+			);
+			try {
+				const result = await loadTestExtensions();
+				// Claiming a web scheme fails that extension's load instead of capturing every web link.
+				expect(result.errors.find(error => error.path.endsWith("link-hijack.ts"))?.error).toContain("reserved");
+				const runnerWith = (settings: Settings) =>
+					new ExtensionRunner(
+						result.extensions,
+						result.runtime,
+						tempDir.path(),
+						sessionManager,
+						modelRegistry,
+						undefined,
+						settings,
+					);
+
+				const off = runnerWith(Settings.isolated({}));
+				expect(off.getLinkSchemes()).toEqual([]);
+				expect(await off.emitLinkActivate("demo:open/1")).toBe(false);
+
+				const on = runnerWith(Settings.isolated({ "extensionRenderers.assistantText": true }));
+				expect(on.getLinkSchemes()).toEqual(["demo"]);
+				expect(await on.emitLinkActivate("DEMO:open/2")).toBe(true);
+				expect(await on.emitLinkActivate("https://example.com")).toBe(false);
+				expect(clicks).toEqual(["owner demo DEMO:open/2"]);
+			} finally {
+				Reflect.deleteProperty(globalThis, "__linkClicks");
+			}
+		});
 	});
 
 	describe("flags", () => {
@@ -2583,6 +2631,7 @@ describe("ExtensionRunner", () => {
 					notify: () => {},
 					onTerminalInput: () => () => {},
 					rerenderMessage: () => {},
+					getLinkClicksAvailable: () => false,
 					setStatus: () => {},
 					setWorkingMessage: () => {},
 					setWidget: () => {},
@@ -4617,6 +4666,7 @@ describe("ExtensionRunner", () => {
 				tools: new Map(),
 				assistantThinkingRenderers: [],
 				assistantTextRenderers: [],
+				linkSchemes: [],
 				fileWriteFallbackHandlers: [],
 				fileDeleteFallbackHandlers: [],
 				messageRenderers: new Map(),

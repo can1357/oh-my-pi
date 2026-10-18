@@ -62,6 +62,41 @@ installLegacyPiSpecifierShim();
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
 
+/** RFC 3986 scheme syntax, lowercased. */
+const LINK_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]*$/;
+
+/** Schemes an extension may not claim: web, file and mail links, and omp's internal URLs. */
+const RESERVED_LINK_SCHEMES: ReadonlySet<string> = new Set([
+	"about",
+	"blob",
+	"data",
+	"file",
+	"ftp",
+	"http",
+	"https",
+	"javascript",
+	"mailto",
+	"ssh",
+	"ws",
+	"wss",
+	"agent",
+	"artifact",
+	"cfg",
+	"conflict",
+	"history",
+	"issue",
+	"local",
+	"mcp",
+	"memory",
+	"omp",
+	"pr",
+	"proc",
+	"rule",
+	"skill",
+	"vault",
+	"xd",
+]);
+
 function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | null {
 	const candidate = typeof module === "function" ? module : module.default;
 	return typeof candidate === "function" ? candidate : null;
@@ -284,6 +319,17 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.extension.assistantTextRenderers.push(renderer);
 	}
 
+	registerLinkScheme(scheme: string): void {
+		const normalized = scheme.toLowerCase();
+		if (!LINK_SCHEME_PATTERN.test(normalized)) {
+			throw new Error(`registerLinkScheme: "${scheme}" is not a URL scheme (letters, digits, "+", "-", ".")`);
+		}
+		if (RESERVED_LINK_SCHEMES.has(normalized)) {
+			throw new Error(`registerLinkScheme: "${scheme}" is reserved for standard or omp-internal links`);
+		}
+		if (!this.extension.linkSchemes.includes(normalized)) this.extension.linkSchemes.push(normalized);
+	}
+
 	registerComposerShape(definition: ComposerShapeDefinition): void {
 		const id = definition.style.id;
 		if (id.length === 0 || id !== id.trim()) {
@@ -390,6 +436,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		toolRegistrationListeners: new Set(),
 		assistantThinkingRenderers: [],
 		assistantTextRenderers: [],
+		linkSchemes: [],
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),

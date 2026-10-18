@@ -1,6 +1,7 @@
 import { getComposerStyle } from "../components/composer/registry";
 import { Spacer } from "../components/spacer";
 import type { StatusLineComponent } from "../status-line/component";
+import { extensionLinkAt, restyleExtensionLink } from "../render/extension-links";
 import type { StatusLineSession } from "../status-line/host";
 import { createStartupStatusLine, type StatusLineStartupData } from "../status-line/startup";
 import { isInsideTerminalMultiplexer } from "../terminal-multiplexer";
@@ -191,6 +192,22 @@ export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
  */
 const NESTED_BG_OPEN_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[(?:4[0-7]|10[0-7]|48;[0-9;]*)m`, "g");
 
+/** Any SGR sequence; group 1 is its parameter list. */
+const SGR_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[([0-9:;]*)m`, "g");
+
+/**
+ * A hovered extension link label in inverse video. Unlike a background band it leaves the row's
+ * own background (a user-message bubble, the hover band) in place after the label.
+ */
+function inverseLabel(label: string): string {
+	const reopened = label.replace(SGR_PATTERN, (sequence: string, params: string) => {
+		const codes = params.split(";");
+		// A full reset (`m`, `0`, `0;…`) or an inverse-off (`27`) ends the highlight: re-enter it.
+		return codes[0] === "" || codes[0] === "0" || codes.includes("27") ? `${sequence}\x1b[7m` : sequence;
+	});
+	return `\x1b[7m${reopened}\x1b[27m`;
+}
+
 /**
  * Candidate resolver for a row-level click target, if the component is one.
  * Shared by root and nested-child hit-testing so both stay in lockstep.
@@ -260,8 +277,12 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#retiredHeaderRows: readonly string[] | undefined;
 	/** Click spans of the last `renderFrame` viewport, in viewport coordinates. */
 	#lastClickSpans: ViewportClickSpan[] = [];
+	/** Rows of the last `renderFrame` viewport, before the hover band; read to hit-test extension links. */
+	#lastViewportRows: readonly string[] = [];
 	/** Click-candidate id under the pointer, painted with the hover band. Id-anchored so it follows streaming rows. */
 	#hoveredClickId: string | undefined;
+	/** Extension link URL under the pointer; every label drawn for it is highlighted. */
+	#hoveredLink: string | undefined;
 	// Hard-row prefix currently above the native viewport. The first resize
 	// frame may pull part of it down before the normal buffer is borrowed.
 	#retiredHeaderStart = 0;
@@ -403,6 +424,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
 		if (transcriptIndex < 0) {
 			this.#lastClickSpans = [];
+			this.#lastViewportRows = [];
 			const viewport: string[] = [];
 			for (const root of roots) {
 				const rendered = root.render(width);
@@ -512,11 +534,19 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		for (const span of activeSpans) shift(span, before.length - drop);
 		for (const span of afterSpans) shift(span, slack + before.length + active.length - drop);
 		this.#lastClickSpans = spans;
+		this.#lastViewportRows = mutable;
 		if (history !== undefined && this.#offeredHistory?.source === "header") {
 			const visibleHeaderRows = Math.max(0, rows - (mutable.length + drop));
 			this.#retiredHeaderStart = Math.max(0, history.rows.length - visibleHeaderRows);
 		}
-		return { history, viewport: this.#paintHoverBand(mutable, spans) };
+		return { history, viewport: this.#paintHoveredLink(this.#paintHoverBand(mutable, spans)) };
+	}
+
+	/** Highlight the hovered extension link's labels, on every viewport row a wrapped label reaches. */
+	#paintHoveredLink(viewport: string[]): string[] {
+		const url = this.#hoveredLink;
+		if (url === undefined) return viewport;
+		return viewport.map(line => restyleExtensionLink(line, url, inverseLabel));
 	}
 
 	/**
@@ -636,11 +666,28 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	}
 
 	/**
+	 * The extension-owned link drawn at cell `col` of a mutable-viewport line, or `undefined`.
+	 * Only links whose scheme an extension registered match; see `extensionLinkAt`.
+	 */
+	viewportLinkAt(index: number, col: number): string | undefined {
+		const line = this.#lastViewportRows[index];
+		return line === undefined ? undefined : extensionLinkAt(line, col);
+	}
+
+	/**
 	 * Point the hover band at a click-candidate id (or clear it). Takes effect
 	 * on the next frame; callers repaint only when the target actually changes.
 	 */
 	setHoveredClickId(id: string | undefined): void {
 		this.#hoveredClickId = id;
+	}
+
+	/**
+	 * Point the link hover highlight at an extension link URL (or clear it). Takes effect on the
+	 * next frame; callers repaint only when the target actually changes.
+	 */
+	setHoveredLink(url: string | undefined): void {
+		this.#hoveredLink = url;
 	}
 
 	/** Acknowledges one accepted header, replay, or transcript batch. */

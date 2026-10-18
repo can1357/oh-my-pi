@@ -117,7 +117,7 @@ Core methods:
 
 - `on(event, handler)`
 - `registerTool`, `registerCommand`, `registerShortcut`, `registerFlag`
-- `registerMessageRenderer`, `registerAssistantThinkingRenderer`, `registerAssistantTextRenderer`
+- `registerMessageRenderer`, `registerAssistantThinkingRenderer`, `registerAssistantTextRenderer`, `registerLinkScheme`
 - `registerComposerShape`
 - `setLabel`, `getFlag`
 - `sendMessage`, `sendUserMessage`, `appendEntry`, `exec`
@@ -574,6 +574,10 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 - `goal_updated`
 - `credential_disabled`
 
+### Link activation
+
+- `link_activate` — `{ url, scheme }` when the user clicks a link whose scheme this extension claimed with [`registerLinkScheme`](#extension-link-schemes). Delivered to that extension only.
+
 ### MCP notifications
 
 - `mcp_notification` — fired for every JSON-RPC notification received from a connected MCP server, AFTER the manager's own handling of known list/update methods (`notifications/tools/list_changed`, `notifications/resources/list_changed`, `notifications/resources/updated`, `notifications/prompts/list_changed`). Unknown or server-custom methods are also delivered. Payload: `{ server: string; method: string; params: unknown }`. Multiple extensions may subscribe; a handler that throws does not prevent other handlers from firing. Notifications received before any listener attaches are buffered (bounded FIFO, cap 100, drop-oldest) and drained into the first subscriber — so startup-time frames aren't lost even if the extension binds after MCP discovery.
@@ -880,6 +884,7 @@ Supported:
 - theme listing/loading by name (`setTheme` supports string names)
 - tools expanded toggle
 - `rerenderMessage(timestamp)`: draws the assistant reply with that `message.timestamp` again, re-running the [assistant text renderers](#assistant-text-renderer); a no-op while `extensionRenderers.assistantText` is off
+- `getLinkClicksAvailable()`: whether a click on a [claimed link](#extension-link-schemes) raises `link_activate` right now
 
 Current no-op methods in this controller:
 
@@ -1284,7 +1289,25 @@ A display-only transform of each assistant text block in the main transcript, us
 - **Streaming.** The renderer is called with the full text so far each time a streaming update is drawn (`streaming: true`), and once more when the text is final (`streaming: false`): at the end of the reply, or earlier when a tool call or any other block starts after it. Deltas that arrive within one frame are drawn, and rendered, once. A block whose text and `streaming` value are unchanged since its last render reuses that output without calling the renderers again (for example a block sealed at a tool call while the call's arguments stream). Replies stream without `display.smoothStreaming`'s typing reveal while renderers are active, so a renderer never sees a partly revealed prefix. Output may be shorter than the input and may change text drawn earlier, so a reply with renderers stays in the live viewport until its turn ends instead of retiring finished rows to terminal scrollback mid-stream.
 - **Failures.** `registerAssistantTextRenderer` throws for anything but a function, failing the extension's load. A renderer that throws leaves its input drawn; the failure is logged once per renderer.
 - **Redraw.** Call `ctx.ui.rerenderMessage(message.timestamp)` after state the renderer reads changes (for example a click) to draw that reply again in place; it calls the renderers again even for blocks whose text is unchanged. A reply still in the live viewport just repaints; in a plain terminal, a reply with rows already in scrollback rebuilds the scrollback (as toggling thinking visibility does), which is costly, so avoid animating such replies frame by frame.
-- **Links.** Links the renderer draws behave like any model-authored link: they are not routed back to the extension. Relative link targets the renderer adds are not resolved against the session's working directory the way the model's own are, so Tern's native view opens them relative to its own; use absolute paths or URLs.
+- **Links.** Links the renderer draws behave like any model-authored link. To get their clicks, give them a scheme the extension [claims](#extension-link-schemes). Relative link targets the renderer adds are not resolved against the session's working directory the way the model's own are, so Tern's native view opens them relative to its own; use absolute paths or URLs.
+
+## Extension link schemes
+
+Opt-in with the same setting as [assistant text renderers](#assistant-text-renderer) (`extensionRenderers.assistantText`, default off). Off, claimed schemes are ignored and links draw exactly as before.
+
+```ts
+pi.registerLinkScheme("cc-stretch");
+pi.on("link_activate", ({ url }) => {
+  // url is the link as drawn, e.g. "cc-stretch:open/1792/0/2"
+});
+```
+
+- **Drawing.** In a plain terminal, a markdown link using a claimed scheme, in an assistant reply or anywhere else markdown is drawn, shows its label only: no ` (url)` suffix, and no hyperlink the terminal or a browser could open.
+- **Clicks.** With `tui.mouse` on, a left click on the label in a plain terminal raises `link_activate` for the claiming extension instead of any other click action. While a subagent's transcript is focused, the click goes to that subagent's copy of the extension (the one whose renderers drew it), and the handler's `ctx.ui` is the interactive UI, so call `ctx.ui.rerenderMessage` from the handler's own context. With `tui.mouse` off, the label is plain text, and the first time one is drawn omp shows a hint that `tui.mouse` makes it clickable. Labels already in terminal scrollback are drawn again when either setting changes.
+- **Hover.** With `tui.mouse` on, the label under the pointer is highlighted (every row of a wrapped label), and terminals that support OSC 22 (kitty, foot, ghostty, …) show a hand pointer over it.
+- **Fallback.** `ctx.ui.getLinkClicksAvailable()` is true only while clicks are delivered: interactive mode, a plain terminal, both settings on. Changing either setting re-runs the assistant text renderers, so a renderer can check it on each call and draw content inline instead of behind a link nobody can click.
+- **Ownership.** Scheme names are case-insensitive. When two extensions claim one scheme, the first loaded gets its clicks. Web, file and mail schemes (`http`, `https`, `file`, `mailto`, …) and omp's internal URL schemes (`local`, `skill`, `agent`, …) are reserved: claiming one throws and fails the extension's load.
+- **Tern.** Tern's native view draws such links as its own links and does not route their clicks back to omp; handle them there with a Tern plugin.
 
 ## Tool call/result renderer
 

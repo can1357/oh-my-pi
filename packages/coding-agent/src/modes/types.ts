@@ -151,6 +151,11 @@ export interface InteractiveModeContext {
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
 	syncComposerShape(): void;
+	/**
+	 * Push the extension link schemes (and whether `tui.mouse` routes clicks to them) to the
+	 * markdown renderer; redraws the transcript when that changes how links are drawn.
+	 */
+	syncExtensionLinks(): void;
 
 	// Session access
 	session: AgentSession;
@@ -175,6 +180,15 @@ export interface InteractiveModeContext {
 	invalidatePendingFocus(): void;
 	/** Candidate subagent ids under a mutable-viewport line, for click-to-focus. Empty when the line has no target. */
 	resolveViewportClickCandidates(index: number): string[];
+	/**
+	 * Deliver a click at cell `col` of a mutable-viewport line to the extension owning the link
+	 * drawn there. Returns false when no extension link is under the click.
+	 */
+	activateViewportLink(index: number, col: number): boolean;
+	/** The extension-owned link drawn at cell `col` of a mutable-viewport line, or `undefined`. */
+	viewportLinkAt(index: number, col: number): string | undefined;
+	/** Highlight every label of the extension link `url` and show a hand pointer (or clear both). */
+	setLinkHover(url: string | undefined): void;
 	/** Flip the pinned jump list between its collapsed few and the full list. */
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */

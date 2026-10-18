@@ -293,6 +293,8 @@ export class InputController {
 
 	/** Click-candidate id the hover band currently tracks; repaint only on change. */
 	#lastHoverClickId: string | undefined;
+	/** Extension link URL the hover highlight currently tracks; repaint only on change. */
+	#lastHoverLink: string | undefined;
 
 	/** Return the last full editor snapshot delivered by its change contract. */
 	getDraftText(): string {
@@ -784,11 +786,19 @@ export class InputController {
 	#handleInlineMouse(data: string): { consume?: boolean; data?: string } | undefined {
 		if (!data.startsWith("\x1b[<")) return undefined;
 		if (!cfgTuiMouse.get(this.ctx.settings)) return undefined;
-		if (this.ctx.ui.hasOverlay()) return undefined;
+		if (this.ctx.ui.hasOverlay()) {
+			// The overlay owns the pointer now; drop a link hover it would otherwise keep.
+			this.#updateLinkHover(undefined);
+			return undefined;
+		}
 		const event = parseSgrMouse(data);
 		if (!event) return undefined;
-		if (event.motion) this.#updateHoverHighlight(event.row);
-		else if (event.leftClick) this.#focusClickedAgent(event.row);
+		if (event.motion) {
+			this.#updateHoverHighlight(event.row);
+			this.#updateLinkHover(this.#viewportLinkAt(event.row, event.col));
+		} else if (event.leftClick && !this.#activateClickedLink(event.row, event.col)) {
+			this.#focusClickedAgent(event.row);
+		}
 		return { consume: true };
 	}
 
@@ -809,10 +819,36 @@ export class InputController {
 	// empty (resize transactions) or the row falls outside it: routing stale
 	// spans would highlight or focus an unrelated agent from old rows.
 	#viewportCandidates(screenRow: number): string[] {
+		const line = this.#viewportLine(screenRow);
+		return line === undefined ? [] : this.ctx.resolveViewportClickCandidates(line);
+	}
+
+	/** Mutable-viewport line under a screen row, or `undefined` outside the published viewport. */
+	#viewportLine(screenRow: number): number | undefined {
 		const viewport = this.ctx.ui.getMutableViewport();
 		const local = screenRow - viewport.top;
-		if (viewport.length === 0 || local < 0 || local >= viewport.length) return [];
-		return this.ctx.resolveViewportClickCandidates(local);
+		if (viewport.length === 0 || local < 0 || local >= viewport.length) return undefined;
+		return local;
+	}
+
+	#viewportLinkAt(screenRow: number, col: number): string | undefined {
+		const line = this.#viewportLine(screenRow);
+		return line === undefined ? undefined : this.ctx.viewportLinkAt(line, col);
+	}
+
+	// A click on an extension-owned link goes to that extension instead of focusing an agent.
+	#activateClickedLink(screenRow: number, col: number): boolean {
+		const line = this.#viewportLine(screenRow);
+		return line !== undefined && this.ctx.activateViewportLink(line, col);
+	}
+
+	/** Highlight the extension link under the pointer and show a hand pointer, repainting only on a change. */
+	#updateLinkHover(url: string | undefined): void {
+		// Idempotent, and re-asserts the pointer shape a tracking reset (e.g. an overlay) dropped.
+		this.ctx.setLinkHover(url);
+		if (url === this.#lastHoverLink) return;
+		this.#lastHoverLink = url;
+		this.ctx.ui.requestRender();
 	}
 
 	/**
@@ -823,6 +859,7 @@ export class InputController {
 	 */
 	clearHoverHighlight(): void {
 		this.#lastHoverClickId = undefined;
+		this.#lastHoverLink = undefined;
 	}
 
 	#focusClickedAgent(screenRow: number): void {

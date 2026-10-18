@@ -26,6 +26,12 @@ import { isBareMathEnvironment, latexToUnicode } from "../latex-to-unicode";
 import { plainText } from "../native/spans";
 import { md } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
+import {
+	extensionLinkScheme,
+	extensionLinksVersion,
+	formatExtensionLink,
+	stripExtensionLinkMarkers,
+} from "../render/extension-links";
 import type { SymbolTheme } from "../symbols";
 import { TERMINAL } from "../terminal-capabilities";
 import { getSymbolTheme, getThemeEpoch } from "../theme/theme";
@@ -2067,6 +2073,7 @@ interface RenderSignature {
 	defaultTextStyleId: number;
 	imageProtocol: string;
 	hyperlinks: boolean;
+	extensionLinks: number;
 	textSizing: boolean;
 	bgColorProbe: string;
 	headingProbe: string;
@@ -2238,6 +2245,8 @@ export class Markdown implements Component {
 	#cachedText?: string;
 	#cachedWidth?: number;
 	#cachedLines?: readonly string[];
+	// Extension-link routing changes how links draw without changing text or width.
+	#cachedExtensionLinks?: number;
 	#transientRenderCache = false;
 
 	// Streaming-lex cache: the largest blank-line-bounded prefix of #text whose
@@ -2852,7 +2861,12 @@ export class Markdown implements Component {
 		// instance at the same width (e.g. resize debounce, repeated redraws).
 		// Returning the cached reference is load-bearing: parents memoize their
 		// concatenation on reference equality.
-		if (this.#cachedLines && this.#cachedText === this.#text && this.#cachedWidth === width) {
+		if (
+			this.#cachedLines &&
+			this.#cachedText === this.#text &&
+			this.#cachedWidth === width &&
+			this.#cachedExtensionLinks === extensionLinksVersion()
+		) {
 			return this.#cachedLines;
 		}
 
@@ -2865,6 +2879,7 @@ export class Markdown implements Component {
 			this.#cachedText = this.#text;
 			this.#cachedWidth = width;
 			this.#cachedLines = EMPTY_RENDER_LINES;
+			this.#cachedExtensionLinks = extensionLinksVersion();
 			return EMPTY_RENDER_LINES;
 		}
 
@@ -2989,6 +3004,7 @@ export class Markdown implements Component {
 					this.#cachedText = this.#text;
 					this.#cachedWidth = width;
 					this.#cachedLines = fastResult;
+					this.#cachedExtensionLinks = signature.extensionLinks;
 					this.#fastTail = {
 						lines: fastResult,
 						source: this.#text,
@@ -3051,6 +3067,7 @@ export class Markdown implements Component {
 				this.#cachedText = this.#text;
 				this.#cachedWidth = width;
 				this.#cachedLines = cached;
+				this.#cachedExtensionLinks = signature.extensionLinks;
 				return cached;
 			}
 		}
@@ -3084,6 +3101,7 @@ export class Markdown implements Component {
 		this.#cachedText = this.#text;
 		this.#cachedWidth = width;
 		this.#cachedLines = result;
+		this.#cachedExtensionLinks = signature.extensionLinks;
 
 		const fastEligible =
 			this.transientRenderCache &&
@@ -3138,6 +3156,7 @@ export class Markdown implements Component {
 			defaultTextStyleId: this.#defaultTextStyle ? objectId(this.#defaultTextStyle) : -1,
 			imageProtocol: TERMINAL.imageProtocol ?? "",
 			hyperlinks: TERMINAL.hyperlinks,
+			extensionLinks: extensionLinksVersion(),
 			textSizing: TERMINAL.textSizing,
 			bgColorProbe,
 			headingProbe,
@@ -3150,7 +3169,7 @@ export class Markdown implements Component {
 	}
 
 	#renderCacheKey(normalizedText: string, signature: RenderSignature): string {
-		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}`;
+		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.extensionLinks}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}`;
 	}
 
 	#renderStreamingContentLines(
@@ -3226,6 +3245,7 @@ export class Markdown implements Component {
 		if (cache.defaultTextStyleId !== signature.defaultTextStyleId) return undefined;
 		if (cache.imageProtocol !== signature.imageProtocol) return undefined;
 		if (cache.hyperlinks !== signature.hyperlinks) return undefined;
+		if (cache.extensionLinks !== signature.extensionLinks) return undefined;
 		if (cache.textSizing !== signature.textSizing) return undefined;
 		if (cache.bgColorProbe !== signature.bgColorProbe) return undefined;
 		if (cache.headingProbe !== signature.headingProbe) return undefined;
@@ -3316,6 +3336,7 @@ export class Markdown implements Component {
 		if (cache.defaultTextStyleId !== signature.defaultTextStyleId) return start;
 		if (cache.imageProtocol !== signature.imageProtocol) return start;
 		if (cache.hyperlinks !== signature.hyperlinks) return start;
+		if (cache.extensionLinks !== signature.extensionLinks) return start;
 		if (cache.textSizing !== signature.textSizing) return start;
 		if (cache.bgColorProbe !== signature.bgColorProbe) return start;
 		if (cache.headingProbe !== signature.headingProbe) return start;
@@ -3801,7 +3822,8 @@ export class Markdown implements Component {
 				const headingText = this.#renderInlineTokens(token.tokens || [], this.#proseFgExemptContext(styleContext));
 				const headingPlainText = plainInlineTokens(token.tokens || []);
 				let styledHeading: string;
-				if (headingLevel === 1 && TERMINAL.textSizing) {
+				// A sized heading draws plain text, which would drop a clickable extension link's marker.
+				if (headingLevel === 1 && TERMINAL.textSizing && stripExtensionLinkMarkers(headingText) === headingText) {
 					const plainWidth = visibleWidth(headingPlainText);
 					if (plainWidth > 0 && 2 * plainWidth <= width) {
 						const sizedHeading = encodeTextSizedHeading(headingPlainText, 2);
@@ -4122,6 +4144,11 @@ export class Markdown implements Component {
 					);
 					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
 					const href = typeof token.href === "string" ? token.href : "";
+					// An extension owns this link: no suffix, and no hyperlink the terminal could open.
+					if (href && extensionLinkScheme(href)) {
+						result += formatExtensionLink(styledLinkText, href) + stylePrefix;
+						break;
+					}
 					const target = (href && this.#theme.resolveLink?.(href)) || href;
 					const clickableLinkText = formatHyperlink(styledLinkText, target);
 					// If link text matches href, only show the link once. A missing

@@ -28,6 +28,10 @@
 ### Added
 
 - Added `ComposerPreferences.completeScrollback` (default `false`): rows a growing HUD or dialog pushes off screen go straight to scrollback instead of being held back until it shrinks ([#15692](https://github.com/can1357/oh-my-pi/pull/15692) by [@Ilm-Alan](https://github.com/Ilm-Alan))
+### Added
+
+- `AssistantMessageComponent` accepts display-only assistant text renderers and redraws one reply with `rerenderMessage(timestamp)`; `splitAssistantMessageToolTimeline` reports each segment's `contentOffsets` ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
+- `setExtensionLinks()` makes markdown draw links with registered schemes without a URL suffix or openable hyperlink, `Composer.viewportLinkAt(row, col)` finds the one under a click, `Composer.setHoveredLink()` highlights a hovered one, and `TUI.setPointerShape()` sets the mouse pointer shape (OSC 22) ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 
 ### Fixed
 

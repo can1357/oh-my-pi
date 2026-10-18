@@ -51,6 +51,7 @@ import {
 } from "./terminal-capabilities";
 import { onTerminalBackgroundFallbackChange } from "./theme/theme";
 import { compositeLineAt } from "./render/composite";
+import { stripExtensionLinkMarkers } from "./render/extension-links";
 import { tmuxMultiplexer } from "./multiplexers/tmux";
 import {
 	Ellipsis,
@@ -109,6 +110,8 @@ const PAINT_END_NO_SYNC = ENABLE_AUTOWRAP;
 // native text selection.
 const MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
 const MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1000l";
+// OSC 22 pointer shape (kitty, foot, ghostty, …); terminals without it ignore the sequence.
+const POINTER_SHAPE_DEFAULT = "\x1b]22;default\x1b\\";
 // Cell-size replies: CSI 6 ; height ; width t in pixels, and iTerm2's
 // OSC 1337 ; ReportCellSize = height ; width [; scale] ST in points.
 const CELL_SIZE_REPLY = /^\x1b\[6;(\d+);(\d+)t$/;
@@ -1048,6 +1051,8 @@ export class TUI extends Container {
 	#mouseTracking: MouseTrackingState = "off";
 	/** Product-owned probe for opt-in normal-buffer click capture (`tui.mouse`). Read every frame. */
 	#inlineMouseProvider: (() => boolean) | undefined;
+	/** OSC 22 pointer shape last requested, or `undefined` for the terminal's default. */
+	#pointerShape: string | undefined;
 	#altPreviousLines: string[] = [];
 	#altPreparedRows: PreparedLine[] = [];
 	#altEnterWidth = 0;
@@ -1417,13 +1422,31 @@ export class TUI extends Container {
 		this.#inlineMouseProvider = provider;
 	}
 
+	/**
+	 * Ask the terminal for a mouse pointer shape (OSC 22, a CSS cursor name such as `"pointer"`),
+	 * or `undefined` for its default. Writes only on a change; turning mouse reporting off or
+	 * stopping the TUI restores the default.
+	 */
+	setPointerShape(shape: string | undefined): void {
+		if (shape === this.#pointerShape) return;
+		this.#pointerShape = shape;
+		this.terminal.write(shape === undefined ? POINTER_SHAPE_DEFAULT : `\x1b]22;${shape}\x1b\\`);
+	}
+
+	/** The bytes restoring the default pointer shape, if a custom one is set; forgets it. */
+	#takePointerReset(): string {
+		if (this.#pointerShape === undefined) return "";
+		this.#pointerShape = undefined;
+		return POINTER_SHAPE_DEFAULT;
+	}
+
 	/** Transition mouse reporting, emitting only the sequences a change needs. */
 	#setMouseTracking(state: MouseTrackingState): void {
 		if (state === this.#mouseTracking) return;
 		const wasOff = this.#mouseTracking === "off";
 		this.#mouseTracking = state;
 		if (state === "off") {
-			if (!wasOff) this.terminal.write(MOUSE_TRACKING_OFF);
+			if (!wasOff) this.terminal.write(`${this.#takePointerReset()}${MOUSE_TRACKING_OFF}`);
 			return;
 		}
 		// Inline and fullscreen reporting are the same bytes: moving between
@@ -2664,7 +2687,7 @@ export class TUI extends Container {
 			// nothing continues, so release unconditionally. The pending
 			// sequence itself can re-enable tracking (overlay-close restore),
 			// so the final OFF goes last or the shell keeps reporting.
-			const mouseExit = this.#mouseTracking !== "off" ? MOUSE_TRACKING_OFF : "";
+			const mouseExit = this.#mouseTracking !== "off" ? `${this.#takePointerReset()}${MOUSE_TRACKING_OFF}` : "";
 			const exitSequence = this.#pendingAltExit
 				? `${this.#takePendingAltEnter()}${this.#pendingAltExit}${mouseExit}`
 				: `${mouseExit}${this.#altScreenExit()}`;
@@ -2680,7 +2703,7 @@ export class TUI extends Container {
 			// Inline capture with no overlay: still owned by us at quit, so
 			// release it — otherwise the parent shell keeps mouse reporting
 			// and loses native selection until a manual reset.
-			this.terminal.write(MOUSE_TRACKING_OFF);
+			this.terminal.write(`${this.#takePointerReset()}${MOUSE_TRACKING_OFF}`);
 			this.#mouseTracking = "off";
 		}
 		// A latched destructive reset (settled rebuild-mode resize, /clear) pairs
@@ -3885,7 +3908,10 @@ export class TUI extends Container {
 			// Leaving reporting on when the normal buffer wants it restores
 			// inline capture the same frame the overlay closes: no later paint
 			// is needed, so an idle session never sits untrackable.
-			const mouseExit = wantMouse === "off" && this.#mouseTracking !== "off" ? MOUSE_TRACKING_OFF : "";
+			const mouseExit =
+				wantMouse === "off" && this.#mouseTracking !== "off"
+					? `${this.#takePointerReset()}${MOUSE_TRACKING_OFF}`
+					: "";
 			// A fullscreen overlay that disabled reporting leaves tracking off:
 			// restore it in the fused exit or later frames see matching states
 			// and inline click/hover stays dead until the setting toggles.
@@ -4063,13 +4089,16 @@ export class TUI extends Container {
 			LINE_FIT_MAX_SOURCE_CODE_UNITS,
 			Math.max(LINE_FIT_MIN_SOURCE_CODE_UNITS, safeWidth * LINE_FIT_SOURCE_WIDTH_MULTIPLIER),
 		);
+		// Extension link markers exist only for click hit-testing; the terminal must not get an openable
+		// hyperlink. Strip before fitting so a cut cannot split one, and before the single classification.
+		const output = stripExtensionLinkMarkers(raw);
 
 		let source: string;
 		let classification: LineClassification;
-		if (raw.length <= maxSourceLength) {
+		if (output.length <= maxSourceLength) {
 			// The overwhelmingly common path classifies image markers, OSC 8,
 			// ANSI validity, OSC 66, non-ASCII, and exact ASCII width together.
-			classification = this.#classifyLine(raw, safeWidth);
+			classification = this.#classifyLine(output, safeWidth);
 			if (classification.isImage) {
 				return {
 					raw,
@@ -4083,7 +4112,7 @@ export class TUI extends Container {
 					hasOsc8: false,
 				};
 			}
-			source = raw;
+			source = output;
 		} else {
 			// Fitting a giant source can discard everything after the visible
 			// prefix. Preserve image rows verbatim first, but do not scan the
@@ -4101,7 +4130,7 @@ export class TUI extends Container {
 					hasOsc8: false,
 				};
 			}
-			source = this.#lineFitSource(raw, safeWidth, maxSourceLength);
+			source = this.#lineFitSource(output, safeWidth, maxSourceLength);
 			// Preserve the former lineRewriteSequence classification: fitting can
 			// move a marker from outside the raw scan window into the prepared
 			// line's window, at which point terminal image dispatch owns it.
