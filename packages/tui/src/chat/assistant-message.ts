@@ -394,7 +394,7 @@ export class AssistantMessageComponent extends Container {
 	#reaction: string | undefined;
 	/** Display form of {@link #lastMessage} (reaction handled, extension text renderers applied) the native description is built from. */
 	#displayedMessage: AssistantMessage | undefined;
-	/** {@link #displayedMessage} before extension text renderers: the reply as written, which the native Copy copies. */
+	/** {@link #displayedMessage} before extension text renderers: the reply as written, which thinking state and the native Copy follow. */
 	#answerMessage: AssistantMessage | undefined;
 	/** Thinking-extension components per content index, recorded when the slow path mounts them. */
 	#thinkingExtensions = new Map<number, Component[]>();
@@ -531,34 +531,49 @@ export class AssistantMessageComponent extends Container {
 	/**
 	 * Display form with the extension text renderers applied, in registration order: each gets the
 	 * previous one's output. A renderer that throws or returns a non-string leaves its input drawn;
-	 * a throw is logged once per renderer.
+	 * a throw is logged once per renderer. A block whose text and `streaming` flag are unchanged
+	 * since its last render reuses that output: a block sealed at a tool call keeps receiving
+	 * updates while the call's arguments stream. {@link rerenderMessage} and
+	 * {@link setTextRenderers} drop the reused output.
 	 */
 	#renderText(message: AssistantMessage, streaming: boolean): AssistantMessage {
 		const rendering = this.#textRendering;
 		if (!rendering) return message;
 		// Renderers are display-only: hand them a deep copy so no edit, however nested, reaches the stored message.
-		const view = structuredClone(message);
+		let view: AssistantMessage | undefined;
 		let content: AssistantMessage["content"] | undefined;
 		// Blocks stream in order: only the last one can still grow.
 		const tail = message.content.length - 1;
 		for (let index = 0; index < message.content.length; index++) {
 			const block = message.content[index]!;
 			if (block.type !== "text" || block.text.length === 0) continue;
-			let text = block.text;
-			for (const renderer of rendering.renderers) {
-				try {
-					const rendered = renderer({
-						message: view,
-						contentIndex: rendering.contentOffset + index,
-						text,
-						streaming: streaming && index === tail,
-					});
-					if (typeof rendered === "string") text = rendered;
-				} catch (error) {
-					if (failedTextRenderers.has(renderer)) continue;
-					failedTextRenderers.add(renderer);
-					logger.warn("Assistant text renderer failed; drawing its input", { error: String(error) });
+			const blockStreaming = streaming && index === tail;
+			const cached = this.#renderedText.get(index);
+			let text: string;
+			if (cached?.input === block.text && cached.streaming === blockStreaming) {
+				text = cached.output;
+			} else {
+				view ??= structuredClone(message);
+				text = block.text;
+				for (const renderer of rendering.renderers) {
+					try {
+						const rendered = renderer({
+							message: view,
+							contentIndex: rendering.contentOffset + index,
+							text,
+							streaming: blockStreaming,
+						});
+						if (typeof rendered === "string") text = rendered;
+					} catch (error) {
+						// Only functions reach here from the extension API; anything else cannot be tracked weakly.
+						if (typeof renderer === "function") {
+							if (failedTextRenderers.has(renderer)) continue;
+							failedTextRenderers.add(renderer);
+						}
+						logger.warn("Assistant text renderer failed; drawing its input", { error: String(error) });
+					}
 				}
+				this.#renderedText.set(index, { input: block.text, streaming: blockStreaming, output: text });
 			}
 			if (text === block.text) continue;
 			content ??= message.content.slice();
@@ -572,6 +587,8 @@ export class AssistantMessageComponent extends Container {
 	#textRendering: AssistantTextRendering | undefined;
 	/** Index in the full reply's `content` of this component's first block, kept across renderer swaps. */
 	readonly #textContentOffset: number;
+	/** Last renderer output per content index, reused while the block's input and `streaming` flag hold; see {@link #renderText}. */
+	readonly #renderedText = new Map<number, { input: string; streaming: boolean; output: string }>();
 	readonly #imageBudget?: ImageBudget;
 	#proseOnlyThinking: boolean;
 	#expandThinkingBlocks: boolean;
@@ -864,7 +881,7 @@ export class AssistantMessageComponent extends Container {
 	 */
 	override describe(cx?: DescribeContext): NativeNode {
 		const media = cx?.supports("media") === true;
-		const tail = this.#displayedMessage ? this.#thinkingTailIndex(this.#displayedMessage) : undefined;
+		const tail = this.#answerMessage ? this.#thinkingTailIndex(this.#answerMessage) : undefined;
 		const rate =
 			tail !== undefined && this.#lastUpdateTransient && this.#thinkingRateLive
 				? Math.round(Math.min(SPEED_MAX, sharedSpeedTracker.getSpeed()) * 10) / 10
@@ -935,13 +952,15 @@ export class AssistantMessageComponent extends Container {
 		let answered = false;
 		if (message) {
 			const live = !this.#transcriptBlockFinalized && this.#lastUpdateTransient;
+			// Which block streams, and whether there is an answer to copy, follow the reply as written:
+			// text renderers change only how it is drawn (one may hide all of it).
+			const answer = this.#answerMessage ?? message;
 			let tailIndex = -1;
-			for (let index = 0; index < message.content.length; index++) {
-				const content = message.content[index]!;
-				if (
-					(content.type === "text" && canonicalizeMessage(content.text)) ||
-					(content.type === "thinking" && canonicalizeMessage(content.thinking))
-				) {
+			for (let index = 0; index < answer.content.length; index++) {
+				const content = answer.content[index]!;
+				const answerText = content.type === "text" && canonicalizeMessage(content.text) !== "";
+				answered ||= answerText;
+				if (answerText || (content.type === "thinking" && canonicalizeMessage(content.thinking))) {
 					tailIndex = index;
 				}
 			}
@@ -949,7 +968,6 @@ export class AssistantMessageComponent extends Container {
 				const content = message.content[index]!;
 				const streaming = live && index === tailIndex;
 				if (content.type === "text" && canonicalizeMessage(content.text)) {
-					answered = true;
 					// A native terminal sizes table columns by every row it gets: send a growing row once
 					// its line ends. Hold before trimming, which would drop the newline ending a finished row.
 					const source = (streaming ? holdPartialTableRow(content.text) : content.text).trim();
@@ -1562,6 +1580,7 @@ export class AssistantMessageComponent extends Container {
 	 */
 	setTextRenderers(renderers: readonly AssistantTextRenderer[]): void {
 		this.#textRendering = renderers.length ? { renderers, contentOffset: this.#textContentOffset } : undefined;
+		this.#renderedText.clear();
 		if (this.#textRendering) this.resetTranscriptStableRows();
 		if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 	}
@@ -1578,6 +1597,8 @@ export class AssistantMessageComponent extends Container {
 	 */
 	rerenderMessage(timestamp: number): boolean {
 		if (this.#lastMessage?.timestamp !== timestamp) return false;
+		// The renderers' state may have changed: run them again rather than reuse their last output.
+		this.#renderedText.clear();
 		this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		return true;
 	}
@@ -1886,6 +1907,9 @@ export class AssistantMessageComponent extends Container {
 		message = this.#displayMessage(presentNarrationAsAnswer(message), this.#lastUpdateTransient);
 		this.#answerMessage = message;
 		// A sealed block (closed at a tool call) keeps receiving transient updates; its text is final.
+		// Thinking state below reads `answer`: renderers transform display only, so one that hides the
+		// streaming text must not make the closed thought before it look live again.
+		const answer = message;
 		message = this.#renderText(message, this.#lastUpdateTransient && !this.#transcriptBlockFinalized);
 		this.#displayedMessage = message;
 
@@ -1904,7 +1928,7 @@ export class AssistantMessageComponent extends Container {
 		// Native terminals show the live rate on visible thinking too, not only the hidden pulse.
 		const isThinkingNow =
 			this.#lastUpdateTransient &&
-			(isNativeRendering() ? this.#thinkingTailIndex(message) !== undefined : this.#shouldAnimateThinking(message));
+			(isNativeRendering() ? this.#thinkingTailIndex(answer) !== undefined : this.#shouldAnimateThinking(answer));
 		if (isThinkingNow) {
 			const currentTokens = message.usage.reasoningTokens ?? message.usage.output;
 			this.#thinkingTokens = currentTokens;
@@ -2007,7 +2031,7 @@ export class AssistantMessageComponent extends Container {
 			if (this.#figureBlocks.get(index) !== block) block.dispose();
 		}
 
-		if (this.#shouldAnimateThinking(message)) {
+		if (this.#shouldAnimateThinking(answer)) {
 			if (hasVisibleContent) this.#contentContainer.addChild(new Spacer(1));
 			this.#thinkingDots = new Text(this.#thinkingDotsLabel(), 1, 0);
 			this.#contentContainer.addChild(this.#thinkingDots);

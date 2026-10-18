@@ -276,6 +276,11 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	registerAssistantTextRenderer(renderer: AssistantTextRenderer): void {
+		if (typeof renderer !== "function") {
+			throw new TypeError(
+				`registerAssistantTextRenderer expects a function, got ${typeof renderer} (extension ${this.extension.path})`,
+			);
+		}
 		this.extension.assistantTextRenderers.push(renderer);
 	}
 

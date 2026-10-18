@@ -40,7 +40,9 @@ export interface AssistantTextRenderContext {
 	message: AssistantMessage;
 	/**
 	 * The text block's index in the full reply's `content`, also when the reply is drawn in segments
-	 * around tool calls; not an index into `message.content` for a segment.
+	 * around tool calls; not an index into `message.content` for a segment. It counts the content as
+	 * currently stored: a transcript rebuild that drops tool calls left without a result shifts later
+	 * blocks down, so do not persist it as a permanent key.
 	 */
 	contentIndex: number;
 	/** The block's markdown as drawn so far, after any earlier renderer. */

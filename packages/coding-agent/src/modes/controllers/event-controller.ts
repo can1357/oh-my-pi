@@ -355,7 +355,8 @@ export class EventController {
 				: null,
 		);
 		this.#streamingReveal = new StreamingRevealController({
-			// Extension text renderers get the full text on every delta, not coalesced reveal frames.
+			// Extension text renderers get the full text so far on each drawn update (deltas within one
+			// frame are coalesced), never a partly revealed prefix from the typing reveal.
 			getSmoothStreaming: () =>
 				cfgDisplaySmoothStreaming.get(this.ctx.settings) &&
 				!this.ctx.viewSession.extensionRunner?.getAssistantTextRenderers().length,

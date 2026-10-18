@@ -562,6 +562,19 @@ describe("ExtensionRunner", () => {
 				renderer?.({ message: createAssistantMessage("hi"), contentIndex: 0, text: "hi", streaming: false }),
 			).toBe("HI");
 		});
+
+		it("fails an extension's load when it registers an assistant text renderer that is not a function", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "bad-text-renderer.ts"),
+				`export default function(pi) { pi.registerAssistantTextRenderer("upper"); }`,
+			);
+			const result = await loadTestExtensions();
+
+			expect(result.extensions).toEqual([]);
+			expect(result.errors).toHaveLength(1);
+			expect(result.errors[0]?.error).toContain("registerAssistantTextRenderer expects a function, got string");
+			expect(result.errors[0]?.error).toContain("bad-text-renderer.ts");
+		});
 	});
 
 	describe("flags", () => {

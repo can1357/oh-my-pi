@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import type { AssistantTextRenderContext, AssistantTextRenderer } from "@oh-my-pi/pi-tui/chat/extension-types";
+import { setTranscriptActionHandler, type TranscriptAction } from "@oh-my-pi/pi-tui/chat/transcript-actions";
 import { splitAssistantMessageToolTimeline } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -14,6 +15,7 @@ beforeAll(async () => {
 
 let harness: TspHarness | undefined;
 afterEach(() => {
+	setTranscriptActionHandler(undefined);
 	harness?.stop();
 	harness = undefined;
 	setNativeRendering(false);
@@ -154,8 +156,76 @@ describe("assistant text renderers", () => {
 		// Tool-argument deltas keep updating the sealed block transiently.
 		target.updateContent(sealed, { transient: true });
 
-		expect(streaming).toEqual([true, false, false]);
+		expect(streaming).toEqual([true, false]);
 		expect(drawn(target).trim()).toBe("final");
+	});
+
+	it("reuses a sealed block's output across later updates until a redraw asks for it again", () => {
+		let calls = 0;
+		const renderers: AssistantTextRenderer[] = [
+			({ text }) => {
+				calls++;
+				return text;
+			},
+		];
+		const target = component(renderers);
+		const sealed = assistant([{ type: "text", text: "Reading the file first." }], 7);
+		target.updateContent(sealed, { transient: true });
+		target.markTranscriptBlockFinalized();
+		const afterSeal = calls;
+		// Tool-argument deltas redraw the sealed block with the same text.
+		for (let delta = 0; delta < 5; delta++) target.updateContent(sealed, { transient: true });
+		expect(calls).toBe(afterSeal);
+
+		// The renderer's own state may have changed: both redraw paths call it again.
+		target.rerenderMessage(7);
+		expect(calls).toBe(afterSeal + 1);
+		target.setTextRenderers(renderers);
+		expect(calls).toBe(afterSeal + 2);
+	});
+
+	it("keeps a closed thought settled when a renderer hides the answer streaming after it", async () => {
+		const hideStreaming: AssistantTextRenderer = ({ text, streaming }) => (streaming ? "" : text);
+		const thinking = { type: "thinking", thinking: "Weighing it" } as const;
+		const answering = assistant([thinking, { type: "text", text: "Partial an" }]);
+
+		// Terminal, thinking hidden: the pulse stands in for a thought only while the model is thinking.
+		const hidden = new AssistantMessageComponent(undefined, true, undefined, [], undefined, true, undefined, false, {
+			renderers: [hideStreaming],
+			contentOffset: 0,
+		});
+		hidden.updateContent(assistant([thinking]), { transient: true });
+		expect(drawn(hidden)).toContain("Thinking");
+		hidden.updateContent(answering, { transient: true });
+		expect(drawn(hidden)).not.toContain("Thinking");
+		hidden.dispose();
+
+		// Native view, thinking shown: the thought is no longer marked as streaming.
+		const shown = component([hideStreaming]);
+		harness = await TspHarness.start();
+		harness.tui.addChild(shown);
+		shown.updateContent(answering, { transient: true });
+		await harness.render();
+		expect(harness.find(node => node.k === "section" && node.p?.role === "omp.thinking.live")).toBeUndefined();
+		expect(harness.find(node => node.k === "section" && node.p?.role === "omp.thinking")).toBeDefined();
+		expect(harness.find(node => node.k === "md" && node.p?.stream === true)).toBeUndefined();
+		expect(harness.errors).toEqual([]);
+	});
+
+	it("keeps the native Copy action, copying the reply as written, when a renderer hides all of it", async () => {
+		const actions: TranscriptAction[] = [];
+		setTranscriptActionHandler(action => actions.push(action));
+		const target = component([() => ""], 0, assistant([{ type: "text", text: "Hidden answer." }]));
+		target.setTurnUsage({ elapsedMs: 1_000, input: 10, output: 5, cost: 0 });
+		harness = await TspHarness.start();
+		harness.tui.addChild(target);
+		await harness.render();
+
+		const copy = harness.find(node => node.p?.role === "omp.turn.copy");
+		expect(copy).toBeDefined();
+		harness.event({ ev: "action", sf: harness.terminal.surface!, id: copy!.id, act: "copy-answer" });
+		expect(actions).toEqual([{ act: "copy", text: "Hidden answer." }]);
+		expect(harness.errors).toEqual([]);
 	});
 
 	it("redraws with the renderers it is handed when the setting changes mid-reply, keeping its place in the reply", () => {
@@ -209,6 +279,16 @@ describe("assistant text renderers", () => {
 
 		expect(drawn(target)).toContain("Plain reply (checked)");
 		expect(warn).toHaveBeenCalledTimes(1);
+	});
+
+	it("draws past a renderer that is not a function", () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const target = component([42 as unknown as AssistantTextRenderer, ({ text }) => `${text} (checked)`]);
+
+		target.updateContent(assistant([{ type: "text", text: "Plain reply" }]));
+
+		expect(drawn(target)).toContain("Plain reply (checked)");
+		expect(warn).toHaveBeenCalled();
 	});
 
 	it("gives each block its index in the full reply when tool calls split it into segments", () => {
