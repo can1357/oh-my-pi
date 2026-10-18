@@ -22,6 +22,10 @@
 
 - Tools with `lenientArgValidation` now receive unknown root arguments that their closed schema would otherwise drop, so they can reject them ([#16317](https://github.com/can1357/oh-my-pi/issues/16317))
 
+### Added
+
+- Tool calls get `ctx.toolCall.earlierEffectsSettled`, which settles once the earlier calls of their message that may write files and run beside them have finished
+
 ## [18.12.2] - 2026-10-18
 
 ### Changed

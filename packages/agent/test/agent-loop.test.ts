@@ -2537,6 +2537,82 @@ describe("agentLoop with AgentMessage", () => {
 		expect(startTimes.exclusive).toBeGreaterThan(finishTimes.fast);
 	});
 
+	it("tells a call when the earlier writing calls running beside it have settled", async () => {
+		const toolSchema = type({ value: "string", tier: "'read' | 'exec'", exclusive: "boolean?" });
+		const log: string[] = [];
+		// What the loop handed each call, by call id.
+		const settled: Record<string, Promise<void> | undefined> = {};
+		const writeStarted = Promise.withResolvers<void>();
+		const releaseWrite = Promise.withResolvers<void>();
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "op",
+			label: "Op",
+			description: "Op tool",
+			parameters: toolSchema,
+			approval: args =>
+				args && typeof args === "object" && "tier" in args && args.tier === "read" ? "read" : "exec",
+			concurrency: args => (args.exclusive === true ? "exclusive" : "shared"),
+			async execute(toolCallId, params) {
+				if (params.value === "write") {
+					writeStarted.resolve();
+					await releaseWrite.promise;
+					// End a few turns after the release, so a call that did not wait logs first.
+					for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+					log.push("write ended");
+				}
+				if (params.value === "read-after") {
+					// Started beside the write, not after it.
+					await writeStarted.promise;
+					releaseWrite.resolve();
+					await settled[toolCallId];
+					log.push("read-after saw effects settled");
+				}
+				return { content: [{ type: "text", text: `ok:${params.value}` }], details: { value: params.value } };
+			},
+		};
+		const call = (value: string, tier: "read" | "exec", exclusive?: true) =>
+			({
+				type: "toolCall",
+				id: `tool-${value}`,
+				name: "op",
+				arguments: exclusive ? { value, tier, exclusive } : { value, tier },
+			}) as const;
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						call("read-before", "read"),
+						call("write", "exec"),
+						call("read-after", "read"),
+						call("barrier", "read", true),
+						call("read-later", "read"),
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getToolContext: toolCall => {
+				if (toolCall) settled[toolCall.toolCalls[toolCall.index].id] = toolCall.earlierEffectsSettled;
+				return {} as AgentToolContext;
+			},
+		};
+
+		await agentLoop([createUserMessage("start")], context, config, undefined, mock.stream).result();
+
+		expect(log).toEqual(["write ended", "read-after saw effects settled"]);
+		// Only the call beside the earlier writing call gets told; nothing that
+		// may write ran before the others in their group.
+		expect(settled["tool-read-after"]).toBeInstanceOf(Promise);
+		expect(settled["tool-read-before"]).toBeUndefined();
+		expect(settled["tool-write"]).toBeUndefined();
+		expect(settled["tool-barrier"]).toBeUndefined();
+		expect(settled["tool-read-later"]).toBeUndefined();
+	});
+
 	it("drops incomplete tool calls when assistant aborts before toolcall_end", async () => {
 		const context: AgentContext = {
 			systemPrompt: ["You are helpful."],

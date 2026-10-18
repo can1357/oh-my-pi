@@ -197,6 +197,10 @@
 - Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
 
+### Fixed
+
+- Fixed a `read` placed after a `bash` call in the same message returning the file as it was before that command changed, created or deleted it; both calls still start together
+
 ## [18.12.2] - 2026-10-18
 
 ### Added

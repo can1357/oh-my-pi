@@ -102,6 +102,7 @@ import type {
 	SteeringInterruptSource,
 	SteeringQueueState,
 	StreamFn,
+	ToolTier,
 } from "./types";
 import {
 	ASIDE_MESSAGE_COMMIT,
@@ -3489,7 +3490,11 @@ async function executeToolCalls(
 		flushResultMessages();
 	};
 
-	const runTool = async (record: (typeof records)[number], index: number): Promise<void> => {
+	const runTool = async (
+		record: (typeof records)[number],
+		index: number,
+		earlierEffectsSettled: Promise<void> | undefined,
+	): Promise<void> => {
 		// A pending interrupt preempts not-yet-started *interruptible* waits so
 		// the message injects promptly instead of sitting out a `wait`.
 		// Non-interruptible work is never skipped, whatever the source: the
@@ -3617,6 +3622,7 @@ async function executeToolCalls(
 						toolCalls: toolCallInfos,
 						steeringSignal: steeringSoftController.signal,
 						providerMetadata: toolCall.providerMetadata,
+						...(earlierEffectsSettled ? { earlierEffectsSettled } : {}),
 						addAdditionalContext: context => {
 							if (isNonBlankContext(context)) record.reportedContext.push(context);
 						},
@@ -3754,6 +3760,9 @@ async function executeToolCalls(
 
 	let lastExclusive: Promise<void> = Promise.resolve();
 	let sharedTasks: Promise<void>[] = [];
+	// The shared calls among `sharedTasks` whose approval tier is not "read":
+	// they may change files that a later call running beside them reads.
+	let sharedEffects: Promise<void>[] = [];
 	const tasks: Promise<void>[] = [];
 
 	// While tool calls are in flight, queued steering or interrupting IRC would
@@ -3847,13 +3856,27 @@ async function executeToolCalls(
 			concurrency = concurrencyMode ?? "shared";
 		}
 		const start = concurrency === "exclusive" ? Promise.all([lastExclusive, ...sharedTasks]) : lastExclusive;
-		const task = start.then(() => runTool(record, index));
+		const earlierEffectsSettled =
+			concurrency === "shared" && sharedEffects.length > 0
+				? Promise.allSettled(sharedEffects).then(() => undefined)
+				: undefined;
+		const task = start.then(() => runTool(record, index, earlierEffectsSettled));
 		tasks.push(task);
 		if (concurrency === "exclusive") {
 			lastExclusive = task;
 			sharedTasks = [];
+			sharedEffects = [];
 		} else {
 			sharedTasks.push(task);
+			let tier: ToolTier = "exec";
+			try {
+				const approval =
+					typeof record.tool?.approval === "function" ? record.tool.approval(record.args) : record.tool?.approval;
+				tier = typeof approval === "string" ? approval : (approval?.tier ?? "exec");
+			} catch {
+				// A throwing approval resolver counts as "exec", like an omitted approval.
+			}
+			if (tier !== "read") sharedEffects.push(task);
 		}
 	}
 	try {
