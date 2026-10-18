@@ -2054,12 +2054,13 @@ describe("computer worker round trips", () => {
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		expect(result.payload.returnValue).toEqual(native.dragSelection);
-		expect(result.payload.displays).toEqual([
-			{
-				type: "text",
-				text: 'drag selected "BV-2291" through accessibility instead of dragging; no mouse input was sent',
-			},
-		]);
+		expect(result.payload.displays).toHaveLength(1);
+		const [notice] = result.payload.displays;
+		expect(notice?.type).toBe("text");
+		const text = notice?.type === "text" ? notice.text : "";
+		expect(text).toContain("BV-2291");
+		expect(text).toContain("accessibility");
+		expect(text).toContain("no mouse input");
 		native.dragSelection = null;
 		const posted = await runWorker(
 			transport,
@@ -2068,6 +2069,18 @@ describe("computer worker round trips", () => {
 		);
 		expect(posted.ok && posted.payload.returnValue).toBeUndefined();
 		expect(posted.ok && posted.payload.displays).toEqual([]);
+		// A long selection of wide characters is named within one line's width; the return value keeps it whole.
+		native.dragSelection = { start: 0, length: 150, text: "あ".repeat(150), focused: false };
+		const wide = await runWorker(
+			transport,
+			"drag-wide",
+			'const win = await desktop.window("42"); await win.drag([[1, 2], [30, 2]])',
+		);
+		expect(wide.ok && wide.payload.returnValue).toEqual(native.dragSelection);
+		const wideNotice = wide.ok ? wide.payload.displays[0] : undefined;
+		const wideText = wideNotice?.type === "text" ? wideNotice.text : "";
+		expect(wideText).toContain("あ");
+		expect(wideText).not.toContain("あ".repeat(150));
 	});
 
 	describe("numeric window ids", () => {

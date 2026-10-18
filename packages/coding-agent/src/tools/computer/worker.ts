@@ -43,6 +43,7 @@ import {
 } from "../run-scope";
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	type ComputerEscapeScope,
 	type ComputerScreenshot,
@@ -153,8 +154,6 @@ type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
 type HoldOptions = Pick<NativeHoldOptions, "duration" | "takeover">;
 type HoldMouseOptions = Pick<NativeHoldOptions, "duration" | "button" | "keys" | "takeover">;
 type ObservationResult = ScreenshotResult & { ax: string; nodeCount: number; truncated: boolean };
-/** Characters of a drag's selected text the tool output names. */
-const DRAG_SELECTION_SHOWN = 200;
 
 type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
 interface ActiveRun {
@@ -1120,10 +1119,7 @@ class Win {
 		);
 		if (!selection) return undefined;
 		// The whole text is in the returned selection; the output line only names it.
-		const shown =
-			selection.text.length > DRAG_SELECTION_SHOWN
-				? `${selection.text.slice(0, DRAG_SELECTION_SHOWN)}…`
-				: selection.text;
+		const shown = truncateToWidth(selection.text, TRUNCATE_LENGTHS.CONTENT);
 		context.output.push({
 			type: "text",
 			text: `drag selected ${JSON.stringify(shown)} through accessibility instead of dragging; no mouse input was sent`,
