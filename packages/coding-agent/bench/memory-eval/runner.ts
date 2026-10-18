@@ -66,11 +66,14 @@ export interface ResultFile {
 	/** Engine start, imports and model load, before the first case (0 for upstream-compat, which has no warmup). */
 	warmupMs: number;
 	excluded: ExcludedQuestion[];
+	/** Messages the engine declined to store (`remember` returned null); their gold questions score them as misses. */
+	unstoredMessageIds: string[];
 }
 
 export interface RunOutput {
 	questions: QuestionResult[];
 	warmupMs: number;
+	unstoredMessageIds: string[];
 }
 
 const REMEMBER_BATCH = 500;
@@ -163,6 +166,7 @@ export async function runCases(
 	const warmupMs = performance.now() - warmupStart;
 
 	const questions: QuestionResult[] = [];
+	const unstoredMessageIds: string[] = [];
 	for (const [caseIndex, evalCase] of cases.entries()) {
 		// The index, never the dataset's case id: an id such as `..` would put the store, and its deletion, outside storeRoot.
 		const storeDir = path.join(storeRoot, String(caseIndex));
@@ -182,7 +186,11 @@ export async function runCases(
 			}));
 			const engineIds = await engine.remember(items);
 			for (const [j, engineId] of engineIds.entries()) {
-				if (engineId === null) continue;
+				// The engine chose not to store it (Mnemosyne's write policy can); a miss on it is the engine's, but recorded.
+				if (engineId === null) {
+					unstoredMessageIds.push(batch[j].messageId);
+					continue;
+				}
 				const ids = idMap.get(engineId);
 				if (ids) ids.push(batch[j].messageId);
 				else idMap.set(engineId, [batch[j].messageId]);
@@ -240,7 +248,7 @@ export async function runCases(
 		await removeWithRetries(storeDir).catch(err => console.warn(`could not remove ${storeDir}: ${err}`));
 	}
 
-	return { questions, warmupMs };
+	return { questions, warmupMs, unstoredMessageIds };
 }
 
 function means(rows: readonly Record<string, number>[]): Record<string, number> {
@@ -274,5 +282,6 @@ export function buildResultFile(config: RunConfig, run: RunOutput, excluded: Exc
 		droppedGoldRows: dropped.filter(d => d.gold).length,
 		warmupMs: run.warmupMs,
 		excluded,
+		unstoredMessageIds: run.unstoredMessageIds,
 	};
 }
