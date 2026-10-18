@@ -120,7 +120,7 @@ describe("BlobRegistry lazy blobs", () => {
 	it("registers lazily without rendering and lets re-registration swap the fetcher", async () => {
 		const store = new BlobRegistry();
 		let renders = 0;
-		const entry = store.registerLazy("lazy-1", "image/png", async () => {
+		const entry = await store.registerLazy("lazy-1", "image/png", async () => {
 			renders++;
 			return new Uint8Array(Buffer.from("0123456789"));
 		});
@@ -129,7 +129,7 @@ describe("BlobRegistry lazy blobs", () => {
 		expect(entry.bytes).toBe(0);
 		// Re-registration keeps the token (URL stability across session restarts)
 		// but replaces the fetcher with the newest source.
-		expect(store.registerLazy("lazy-1", "image/png", async () => null).path).toBe(entry.path);
+		expect((await store.registerLazy("lazy-1", "image/png", async () => null)).path).toBe(entry.path);
 
 		const response = await store.serve(new Request(`http://blob.local/${entry.path}`));
 		// The replacement fetcher answers (and reports the source gone): 410, and
@@ -142,7 +142,7 @@ describe("BlobRegistry lazy blobs", () => {
 		const store = new BlobRegistry({ maxBytes: 10 });
 		let renders = 0;
 		const bytes = new Uint8Array(Buffer.from("0123456789"));
-		const lazyEntry = store.registerLazy("lazy", "image/png", async () => {
+		const lazyEntry = await store.registerLazy("lazy", "image/png", async () => {
 			renders++;
 			return bytes;
 		});
@@ -183,7 +183,7 @@ describe("BlobRegistry persistence", () => {
 		// A fresh registry (daemon restart / conversation resume) resolves the
 		// same key to the same token without needing the bytes again…
 		const second = new BlobRegistry({ persist });
-		const resumed = second.lookup("conv-image");
+		const resumed = await second.lookup("conv-image");
 		expect(resumed?.path).toBe(entry.path);
 		expect(resumed?.bytes).toBe(bytes.byteLength);
 		// …and serves the content from the content-addressed store on disk.
@@ -201,7 +201,7 @@ describe("BlobRegistry persistence", () => {
 
 		clock += 260;
 		expect((await registry.serve(new Request(`http://blob.local/${entry.path}`))).status).toBe(410);
-		expect(registry.lookup("ttl-image")).toBeNull();
+		expect(await registry.lookup("ttl-image")).toBeNull();
 		// A post-expiry re-registration is a fresh link.
 		expect((await registry.registerBytes("ttl-image", "image/png", bytes)).path).not.toBe(entry.path);
 	});
@@ -215,7 +215,7 @@ describe("BlobRegistry persistence", () => {
 
 		clock += 500;
 		// The resumed conversation re-registers (lookup hit) → window re-armed.
-		const resumed = registry.lookup("resumed-image");
+		const resumed = await registry.lookup("resumed-image");
 		expect(resumed?.path).toBe(entry.path);
 		expect(resumed?.bytes).toBe(bytes.byteLength);
 		clock += 500;
@@ -259,8 +259,8 @@ describe("BlobRegistry persistence", () => {
 		}
 
 		const reloaded = new BlobRegistry({ persist });
-		expect(reloaded.lookup("first-image")).not.toBeNull();
-		expect(reloaded.lookup("second-image")).not.toBeNull();
+		expect(await reloaded.lookup("first-image")).not.toBeNull();
+		expect(await reloaded.lookup("second-image")).not.toBeNull();
 	});
 });
 

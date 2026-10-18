@@ -141,6 +141,8 @@ export class BlobRegistry {
 	#saveSeq = 0;
 	#saving = false;
 	#lastSweep = 0;
+	#indexLoaded = false;
+	#indexLoadPromise: Promise<void> | undefined;
 	#bytesServed = 0;
 	#hits = 0;
 	#misses = 0;
@@ -150,20 +152,25 @@ export class BlobRegistry {
 	#now: () => number;
 
 	constructor(options?: { maxBytes?: number; persist?: BlobPersistence | undefined; now?: () => number }) {
-		this.#maxBytes = options?.maxBytes ?? DEFAULT_MAX_BYTES;
+		this.#maxBytes = options?.maxBytes ?? DEFAULT_MAXBytes;
 		this.#persist = options?.persist;
 		this.#now = options?.now ?? Date.now;
 		if (this.#persist) {
 			this.#sessionStore = new SessionBlobStore(this.#persist.blobsDir);
-			this.#loadIndex(this.#persist.indexPath);
-			this.#sweep();
+			void this.#ensureLoaded();
 		}
 	}
 
-	#loadIndex(indexPath: string): void {
+	async #ensureLoaded(): Promise<void> {
+		if (this.#indexLoaded) return;
+		this.#indexLoadPromise ??= this.#loadIndex(this.#persist!.indexPath);
+		await this.#indexLoadPromise;
+	}
+
+	async #loadIndex(indexPath: string): Promise<void> {
 		let parsed: PersistedIndex;
 		try {
-			parsed = JSON.parse(fs.readFileSync(indexPath, "utf8")) as PersistedIndex;
+			parsed = JSON.parse(await fs.promises.readFile(indexPath, "utf8")) as PersistedIndex;
 		} catch (error) {
 			if (!isEnoent(error)) {
 				logger.warn("blob-broker: unreadable url index; starting fresh", {
@@ -184,6 +191,7 @@ export class BlobRegistry {
 		const entries = Array.isArray(parsed.entries) ? parsed.entries : [];
 		for (const persisted of entries) {
 			if (!persisted.key || !persisted.token) continue;
+			if (this.#tokenByKey.has(persisted.key)) continue;
 			this.#adopt(persisted.key, {
 				token: persisted.token,
 				mimeType: persisted.mimeType,
@@ -200,7 +208,10 @@ export class BlobRegistry {
 				publication: persisted.publication,
 			});
 		}
+		this.#indexLoaded = true;
+		this.#sweep();
 	}
+
 
 	#adopt(key: string, entry: StoredBlob): void {
 		this.#entries.set(entry.token, entry);
@@ -343,7 +354,8 @@ export class BlobRegistry {
 	 * Resolve an existing key registration, re-arming its serving window.
 	 * `null` when unknown or expired — the caller then supplies bytes.
 	 */
-	lookup(key: string): BlobRegistryEntry | null {
+	async lookup(key: string): Promise<BlobRegistryEntry | null> {
+		await this.#ensureLoaded();
 		this.#sweep();
 		const token = this.#tokenByKey.get(key);
 		const entry = token !== undefined ? this.#entries.get(token) : undefined;
@@ -364,7 +376,8 @@ export class BlobRegistry {
 	 * never held in RAM.
 	 */
 	async registerBytes(key: string, mimeType: string, bytes: Uint8Array): Promise<BlobRegistryEntry> {
-		const existing = this.lookup(key);
+		await this.#ensureLoaded();
+		const existing = await this.lookup(key);
 		if (existing) return existing;
 		const entry = this.#insert(key, mimeType, false);
 		if (this.#sessionStore) {
@@ -390,7 +403,8 @@ export class BlobRegistry {
 	 * fetcher (a restarted session supplies fresh producers) but keeps the
 	 * token, so URLs stay stable for provider caches and resumed histories.
 	 */
-	registerLazy(key: string, mimeType: string, fetcher: LazyBlobFetcher): BlobRegistryEntry {
+	async registerLazy(key: string, mimeType: string, fetcher: LazyBlobFetcher): Promise<BlobRegistryEntry> {
+		await this.#ensureLoaded();
 		this.#sweep();
 		const token = this.#tokenByKey.get(key);
 		const existing = token !== undefined ? this.#entries.get(token) : undefined;
@@ -407,10 +421,10 @@ export class BlobRegistry {
 	}
 
 	/** Persist an uploader publication that has no locally served bytes. */
-	recordPublication(key: string, mimeType: string, publication: BlobPublication): BlobRegistryEntry {
-		const existing = this.lookup(key);
+	async recordPublication(key: string, mimeType: string, publication: BlobPublication): Promise<BlobRegistryEntry> {
+		const existing = await this.lookup(key);
 		if (existing) {
-			this.setPublication(key, publication);
+			await this.setPublication(key, publication);
 			return { ...existing, bytes: publication.bytes, publication };
 		}
 		const entry = this.#insert(key, mimeType, false);
@@ -421,7 +435,8 @@ export class BlobRegistry {
 	}
 
 	/** Attach durable publication metadata after the backend creates it. */
-	setPublication(key: string, publication: BlobPublication): void {
+	async setPublication(key: string, publication: BlobPublication): Promise<void> {
+		await this.#ensureLoaded();
 		const token = this.#tokenByKey.get(key);
 		const entry = token === undefined ? undefined : this.#entries.get(token);
 		if (!entry) return;
@@ -481,7 +496,8 @@ export class BlobRegistry {
 	}
 
 	/** Return current store counters and the bounded fetch-attribution history. */
-	status(): BlobStoreStatus {
+	async status(): Promise<BlobStoreStatus> {
+		await this.#ensureLoaded();
 		this.#sweep(true);
 		let eagerBlobs = 0;
 		let lazyBlobs = 0;
@@ -520,10 +536,11 @@ export class BlobRegistry {
 	 * candidates accepted by `canRemove`. An unscoped request defaults to
 	 * expired registrations; callers must set `all` to select live entries.
 	 */
-	purge(
+	async purge(
 		request: BlobBrokerPurgeRequest = {},
 		canRemove: (publication: BlobPublication | undefined) => boolean = () => true,
-	): BlobBrokerPurgeResponse {
+	): Promise<BlobBrokerPurgeResponse> {
+		await this.#ensureLoaded();
 		const publications: BlobPublication[] = [];
 		const apply = request.apply === true;
 		const expiredOnly = request.expiredOnly === true || (!request.all && request.before === undefined);
@@ -602,6 +619,7 @@ export class BlobRegistry {
 		if (request.method !== "GET" && request.method !== "HEAD") {
 			return new Response(null, { status: 405 });
 		}
+		await this.#ensureLoaded();
 		this.#sweep();
 		const token = BLOB_PATH_PATTERN.exec(new URL(request.url).pathname)?.[1];
 		const entry = token ? this.#entries.get(token) : undefined;
