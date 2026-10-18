@@ -52,6 +52,11 @@ export interface RunConfig {
 	gitCommit: string;
 	/** Uncommitted or untracked changes at the start of the run: `gitCommit` alone does not name the code that ran. */
 	gitDirty: boolean;
+	/**
+	 * Hash of the harness's own code (ingestion, hit mapping, scoring, engine adapters): `diff` refuses to pair runs
+	 * scored by different harness code, whatever engine code each ran. Absent in older files.
+	 */
+	harnessHash?: string;
 	startedAt: string;
 }
 

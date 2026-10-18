@@ -24,6 +24,8 @@ interface FakeResult {
 	options?: { mnemopiRecall?: string; polyphonic?: boolean };
 	engineInfo?: Record<string, string>;
 	gitDirty?: boolean;
+	/** Absent, as in older files, unless set. */
+	harnessHash?: string;
 	/**
 	 * Per question: id (`<caseId>:...` names its case), the recall@10 value (null is what JSON makes of NaN) and
 	 * overrides of its case, category (`cat`) and definition hash (absent, as in older files).
@@ -42,6 +44,7 @@ async function writeResult(
 		options = { mnemopiRecall: "recall", polyphonic: false },
 		engineInfo = {},
 		gitDirty = false,
+		harnessHash,
 		questions = [["q1", 1]],
 	}: FakeResult,
 ) {
@@ -58,6 +61,7 @@ async function writeResult(
 				k,
 				gitCommit: "abc",
 				gitDirty,
+				harnessHash,
 				...options,
 			},
 			questions: questions.map(([questionId, recall, overrides]) => ({
@@ -310,7 +314,7 @@ it("diff rejects a question whose corpus, query text or gold set changed, in eit
 	}
 	const same = await diff(v1, v1);
 	expect(same.code).toBe(0);
-	expect(same.stderr).not.toContain("not verified");
+	expect(same.stderr).not.toContain("gold sets were not verified");
 });
 
 it("diff accepts a file without question fingerprints and warns that definitions were not verified", async () => {
@@ -345,4 +349,19 @@ it("diff marks a side produced from a dirty checkout", async () => {
 	const [a, b] = ["a:", "b:"].map(label => stdout.split("\n").find(line => line.startsWith(label)) ?? "");
 	expect(a).not.toContain("(dirty)");
 	expect(b).toContain("(dirty)");
+});
+
+it("diff refuses results scored by different harness code, and warns when a file predates the fingerprint", async () => {
+	const v1 = await writeResult("harness-1", { harnessHash: "aa" });
+	const v2 = await writeResult("harness-2", { harnessHash: "bb" });
+	const legacy = await writeResult("harness-none", {});
+	const changed = await diff(v1, v2);
+	expect(changed.code).toBe(1);
+	expect(changed.stderr).toContain("harness code differs");
+	const same = await diff(v1, v1);
+	expect(same.code).toBe(0);
+	expect(same.stderr).not.toContain("harness code");
+	const old = await diff(v1, legacy);
+	expect(old.code).toBe(0);
+	expect(old.stderr).toContain("harness code was not verified");
 });
