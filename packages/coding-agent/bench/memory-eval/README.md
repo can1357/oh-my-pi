@@ -11,7 +11,7 @@ C=~/.cache/omp-memory-eval
 
 # Python environments
 uv venv --python 3.13 $C/venv-engine
-uv pip install --python $C/venv-engine/bin/python 'mnemosyne-memory[embeddings]==4.0.0b4' datasets pyarrow huggingface_hub
+uv pip install --python $C/venv-engine/bin/python 'mnemosyne-memory[embeddings]==4.0.0b4' 'fastembed==0.9.0' 'onnxruntime==1.28.0' datasets pyarrow huggingface_hub
 uv venv --python 3.12 $C/venv-lme
 uv pip install --python $C/venv-lme/bin/python 'numpy<2'
 
@@ -21,7 +21,7 @@ git clone https://github.com/mnemosyne-oss/mnemosyne && git -C mnemosyne checkou
 git clone https://github.com/xiaowu0162/LongMemEval && git -C LongMemEval checkout 9e0b455f4ef0e2ab8f2e582289761153549043fc
 ```
 
-Check: `$C/venv-engine/bin/python -c "import mnemosyne, fastembed; print(mnemosyne.__version__)"` prints `4.0.0b4`.
+Check: `$C/venv-engine/bin/python -c "import mnemosyne, fastembed; print(mnemosyne.__version__)"` prints `4.0.0b4`. Results record the `fastembed` and `onnxruntime` versions that produced the vectors (Mnemosyne, and Mnemopi with `--embedder python`), since another numerical runtime can reorder near-ties. `upstream_run_a.py` and `lme_official_check.py` refuse a source clone that is not at its pinned commit or has local changes.
 
 ## Datasets
 
@@ -95,6 +95,8 @@ The verdict is `helps` when the overall interval lies above 0 and no category's 
 `with-sleep` results are not comparable across engines. After sleep, a ranked summary maps through `summary_of` to every message it covers, and recall@k credits all of them for its one slot. Each engine summarises differently (how many working rows go into one episodic row differs), so recall@k under `with-sleep` reflects summary size as much as ranking. `diff` prints a warning when it compares `with-sleep` runs of two different engines; comparing two runs of the same engine is unaffected.
 
 `with-sleep` runs only on BEAM. LongMemEval ranks every message a summary covers as its own corpus document, so one top summary covering six sessions would fill the session cutoff by itself; `run` refuses `--protocol with-sleep` with an `lme-*` dataset.
+
+`with-sleep` is not fact-free either: Mnemopi's sleep consolidation extracts facts and graph links from the summaries it writes (without an LLM), so `--mnemopi-recall enhanced` and `--polyphonic` rank those under `with-sleep`. The `standard` protocol, which the reported results use, never sleeps.
 
 ### Environment guard
 

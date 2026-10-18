@@ -7,6 +7,7 @@ Mnemopi's JS fastembed stack embeds about 20-40x slower than Python fastembed wi
 makes full benchmark runs impractical. This serves the same model so Mnemopi's retrieval code runs unchanged.
 """
 
+import importlib.metadata
 import json
 import logging
 import os
@@ -34,7 +35,12 @@ def op_embed(params):
 	return [vector.tolist() for vector in EMBEDDER.embed(params["texts"])]
 
 
-OPS = {"embed": op_embed}
+def op_versions(_params):
+	"""The numerical runtime behind the vectors: other versions can reorder near-ties."""
+	return {name: importlib.metadata.version(name) for name in ("fastembed", "onnxruntime")}
+
+
+OPS = {"embed": op_embed, "versions": op_versions}
 
 
 def main():
