@@ -1,8 +1,15 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type AgentEvent, type AgentMessage, type AgentToolContext, agentLoop } from "@oh-my-pi/pi-agent-core";
+import {
+	type AgentEvent,
+	type AgentMessage,
+	type AgentToolContext,
+	agentLoop,
+	type ToolCallContext,
+} from "@oh-my-pi/pi-agent-core";
 import type { Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -17,9 +24,14 @@ afterEach(async () => {
 	await Promise.all(temporaryDirectories.splice(0).map(directory => removeWithRetries(directory)));
 });
 
-/** One assistant message: `bash command`, then `read readPath`. Returns the read's result and the batch's events. */
-async function bashThenRead(directory: string, command: string, readPath: string) {
-	const session = {
+async function tempDirectory(): Promise<string> {
+	const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "read-after-bash-")));
+	temporaryDirectories.push(directory);
+	return directory;
+}
+
+function createSession(directory: string): ToolSession {
+	return {
 		cwd: directory,
 		hasUI: false,
 		skills: [],
@@ -32,6 +44,18 @@ async function bashThenRead(directory: string, command: string, readPath: string
 		}),
 		getClientBridge: () => undefined,
 	} as unknown as ToolSession;
+}
+
+/**
+ * One assistant message: `bash`, then `read readPath`. The bash command runs
+ * `change` only once the read has returned (the test creates `go` when it sees
+ * the read end), so a read that does not wait for bash always sees the file
+ * before the change. A read that waits never returns first; bash then stops
+ * waiting after half a second.
+ */
+async function bashThenRead(directory: string, change: string, readPath: string) {
+	const session = createSession(directory);
+	const command = `for i in $(seq 50); do [ -e go ] && break; sleep 0.01; done; ${change}`;
 	const mock = createMockModel({
 		responses: [
 			{
@@ -58,7 +82,12 @@ async function bashThenRead(directory: string, command: string, readPath: string
 		undefined,
 		mock.stream,
 	);
-	for await (const event of stream) events.push(event);
+	for await (const event of stream) {
+		events.push(event);
+		if (event.type === "tool_execution_end" && event.toolCallId === "read-1") {
+			await Bun.write(path.join(directory, "go"), "");
+		}
+	}
 	const messages = await stream.result();
 	const read = messages.find(
 		(message): message is ToolResultMessage => message.role === "toolResult" && message.toolCallId === "read-1",
@@ -68,22 +97,15 @@ async function bashThenRead(directory: string, command: string, readPath: string
 	return { text, isError: read.isError, events };
 }
 
-async function tempDirectory(): Promise<string> {
-	const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "read-after-bash-")));
-	temporaryDirectories.push(directory);
-	return directory;
-}
-
 describe("a read after a bash call in the same message", () => {
-	it("returns the file as the bash command left it, without waiting to start", async () => {
+	it("returns the file as the bash command left it, starting while bash runs", async () => {
 		const directory = await tempDirectory();
 		await Bun.write(path.join(directory, "f"), "old\n");
 
-		const { text, events } = await bashThenRead(directory, "sleep 0.2; echo new > f", "f");
+		const { text, events } = await bashThenRead(directory, "echo new > f", "f");
 
 		expect(text).toContain("new");
 		expect(text).not.toContain("old");
-		// The read still started while the bash call ran.
 		const readStart = events.findIndex(
 			event => event.type === "tool_execution_start" && event.toolCallId === "read-1",
 		);
@@ -95,7 +117,7 @@ describe("a read after a bash call in the same message", () => {
 	it("returns a file the bash command created instead of a not-found error", async () => {
 		const directory = await tempDirectory();
 
-		const { text, isError } = await bashThenRead(directory, "sleep 0.2; echo created > f", "f");
+		const { text, isError } = await bashThenRead(directory, "echo created > f", "f");
 
 		expect(isError).toBe(false);
 		expect(text).toContain("created");
@@ -105,19 +127,95 @@ describe("a read after a bash call in the same message", () => {
 		const directory = await tempDirectory();
 		await Bun.write(path.join(directory, "f"), "doomed\n");
 
-		const { text, isError } = await bashThenRead(directory, "sleep 0.2; rm f", "f");
+		const { text, isError } = await bashThenRead(directory, "rm f", "f");
 
 		expect(isError).toBe(true);
 		expect(text).not.toContain("doomed");
 	});
 
-	it("lists an entry the bash command added to a subdirectory of the listed directory", async () => {
+	it("reads a file:// path the bash command rewrote", async () => {
 		const directory = await tempDirectory();
-		await fs.mkdir(path.join(directory, "out", "nested"), { recursive: true });
+		await Bun.write(path.join(directory, "f"), "old\n");
+
+		const { text } = await bashThenRead(directory, "echo new > f", `file://${path.join(directory, "f")}`);
+
+		expect(text).toContain("new");
+	});
+
+	it("reads a file found by suffix that the bash command rewrote", async () => {
+		const directory = await tempDirectory();
+		await Bun.write(path.join(directory, "sub", "only.txt"), "old\n");
+
+		const { text } = await bashThenRead(directory, "echo new > sub/only.txt", "only.txt");
+
+		expect(text).toContain("new");
+	});
+
+	it("reads an archive member the bash command rewrote", async () => {
+		const directory = await tempDirectory();
+		await Bun.write(path.join(directory, "src.txt"), "old\n");
+		Bun.spawnSync(["tar", "-cf", "a.tar", "src.txt"], { cwd: directory });
+
+		const { text } = await bashThenRead(directory, "echo new > src.txt && tar -cf a.tar src.txt", "a.tar:src.txt");
+
+		expect(text).toContain("new");
+		expect(text).not.toContain("old");
+	});
+
+	it("reads a SQLite table the bash command updated", async () => {
+		const directory = await tempDirectory();
+		const db = new Database(path.join(directory, "db.sqlite"));
+		db.run("create table t (v text)");
+		db.run("insert into t values ('old')");
+		db.close();
+		await Bun.write(
+			path.join(directory, "update.ts"),
+			`import { Database } from "bun:sqlite"; new Database("db.sqlite").run("update t set v = 'new'");`,
+		);
+
+		const { text } = await bashThenRead(directory, `"${process.execPath}" update.ts`, "db.sqlite:t");
+
+		expect(text).toContain("new");
+		expect(text).not.toContain("old");
+	});
+
+	it("lists an entry the bash command added two levels into a listed directory", async () => {
+		const directory = await tempDirectory();
 		await Bun.write(path.join(directory, "out", "nested", "a.txt"), "a\n");
 
-		const { text } = await bashThenRead(directory, "sleep 0.2; echo b > out/nested/b.txt", "out");
+		const { text } = await bashThenRead(directory, "echo b > out/nested/b.txt", "out");
 
 		expect(text).toContain("b.txt");
+	});
+});
+
+describe("a read beside an earlier writing call", () => {
+	it("stops waiting for that call when the read is aborted", async () => {
+		const directory = await tempDirectory();
+		await Bun.write(path.join(directory, "f"), "old\n");
+		const controller = new AbortController();
+		const { promise: neverSettles } = Promise.withResolvers<void>();
+		const toolCall: ToolCallContext = {
+			batchId: "b",
+			index: 1,
+			total: 2,
+			toolCalls: [],
+			earlierEffectsSettled: neverSettles,
+		};
+
+		const read = new ReadTool(createSession(directory)).execute(
+			"read-1",
+			{ path: "f" },
+			controller.signal,
+			undefined,
+			{
+				toolCall,
+			} as AgentToolContext,
+		);
+		controller.abort();
+
+		// Settles at all: a read that ignored its signal would wait for the call forever.
+		const [outcome] = await Promise.allSettled([read]);
+		expect(outcome.status).toBeDefined();
 	});
 });
