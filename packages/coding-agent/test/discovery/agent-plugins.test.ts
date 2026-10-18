@@ -16,6 +16,7 @@ import {
 	injectPluginDirRoots,
 	listClaudePluginRoots,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { configFileSources } from "@oh-my-pi/pi-coding-agent/utils/config-file-sources";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { getPluginsDir, removeWithRetries } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "../helpers/settings-test-state";
@@ -544,6 +545,42 @@ describe("agent-plugins discovery", () => {
 			await injectPluginDirRoots(tempDir, [dirPath], tempDir);
 			const { roots } = await listClaudePluginRoots(tempDir, tempDir);
 			expect(roots.find(root => root.path === dirPath)?.plugin).toBe("standard-name");
+		} finally {
+			await injectPluginDirRoots(tempDir, []);
+		}
+	});
+
+	test("reads plugin LSP/DAP config from a valid standard root but not a fatally invalid one (§5.2)", async () => {
+		const writeRoot = async (dirName: string, name: string) => {
+			const dirPath = path.join(tempDir, "plugins", dirName);
+			await fs.mkdir(dirPath, { recursive: true });
+			await fs.writeFile(
+				path.join(dirPath, "plugin.json"),
+				JSON.stringify({ $schema: AGENT_PLUGIN_MANIFEST_SCHEMA, name }),
+			);
+			await fs.writeFile(path.join(dirPath, "lsp.json"), JSON.stringify({ servers: {} }));
+			return dirPath;
+		};
+		const valid = await writeRoot("valid-dir", "valid-plugin");
+		const invalid = await writeRoot("invalid-dir", "Bad--Name");
+
+		const readLspPaths = () =>
+			configFileSources("lsp", tempDir, (_content, filePath) => filePath)
+				.map(source => source.read())
+				.filter(filePath => filePath !== null);
+
+		try {
+			await injectPluginDirRoots(tempDir, [valid, invalid], tempDir);
+			// Hybrid packages keep client-specific config; a rejected package contributes none.
+			const readPaths = readLspPaths();
+			expect(readPaths).toContain(path.join(valid, "lsp.json"));
+			expect(readPaths).not.toContain(path.join(invalid, "lsp.json"));
+
+			// A cache clear reseeds the sync list before its async re-warm finishes.
+			clearClaudePluginRootsCache();
+			const reseeded = readLspPaths();
+			expect(reseeded).toContain(path.join(valid, "lsp.json"));
+			expect(reseeded).not.toContain(path.join(invalid, "lsp.json"));
 		} finally {
 			await injectPluginDirRoots(tempDir, []);
 		}

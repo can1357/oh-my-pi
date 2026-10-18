@@ -172,6 +172,33 @@ describe("discoverAgents", () => {
 		expect(names).not.toContain("loom-verify-spec");
 	});
 
+	test("loads agents from valid standard packages but not fatally invalid ones (§5.2)", async () => {
+		const manifest = (name: string) =>
+			JSON.stringify({ $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", name });
+		const npmManifest = path.join(tempHome, ".omp", "plugins", "node_modules", "loom", "plugin.json");
+		const marketplaceManifest = path.join(tempHome, "marketplace-cache", "market-agent", "plugin.json");
+		// npm-installed extension package (listOmpExtensionRoots) and omp-installed
+		// marketplace plugin (listClaudePluginRoots).
+		await writeOmpPluginAgent(tempHome);
+		await writeOmpMarketplacePlugin(tempHome, { agentName: "market-agent", model: "sonnet", manifest: "claude" });
+
+		// Valid hybrid packages keep their client-specific agents.
+		await fs.writeFile(npmManifest, manifest("loom"));
+		await fs.writeFile(marketplaceManifest, manifest("market-agent"));
+		const valid = (await discoverAgents(projectDir, tempHome)).agents.map(agent => agent.name);
+		expect(valid).toContain("loom-verify-spec");
+		expect(valid).toContain("market-agent");
+
+		// The same packages with a fatally invalid manifest contribute nothing.
+		await fs.writeFile(npmManifest, manifest("Bad--Name"));
+		await fs.writeFile(marketplaceManifest, manifest("Bad--Name"));
+		clearClaudePluginRootsCache();
+		clearFsCache();
+		const invalid = (await discoverAgents(projectDir, tempHome)).agents.map(agent => agent.name);
+		expect(invalid).not.toContain("loom-verify-spec");
+		expect(invalid).not.toContain("market-agent");
+	});
+
 	test("CLI extension agents win over project `extensions:` settings on dedup", async () => {
 		// listOmpExtensionRoots returns roots in source-precedence order
 		// (CLI > project settings > user settings > installed plugins). Agents
