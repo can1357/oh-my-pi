@@ -197,6 +197,10 @@
 - Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
 
+### Fixed
+
+- Fixed `lsp` finding no references for Rust files in another checkout than the session's, such as a sibling git worktree: that checkout is now added to the running language server's workspace, without starting another server
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
