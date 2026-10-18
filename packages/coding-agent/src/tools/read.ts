@@ -992,6 +992,57 @@ async function assessLocalReadSpeculation(
 	};
 }
 
+/** Regular files up to this size add a content hash to {@link readTargetState}, for filesystems with coarse timestamps. */
+const READ_STATE_HASH_MAX_BYTES = 1024n * 1024n;
+/** Directory entries {@link readTargetState} stats, across the two levels a directory read lists. */
+const READ_STATE_MAX_DIRECTORY_ENTRIES = 2000;
+
+async function pathState(absolutePath: string, depth: number, budget: { entries: number }): Promise<string> {
+	const stat = await fs.stat(absolutePath, { bigint: true }).catch((error: NodeJS.ErrnoException) => error);
+	if (stat instanceof Error) return `error:${stat.code ?? "unknown"}`;
+	let state = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+	if (stat.isFile() && stat.size <= READ_STATE_HASH_MAX_BYTES) {
+		state += `:${Bun.hash(await fs.readFile(absolutePath))}`;
+	} else if (stat.isDirectory() && depth > 0) {
+		const names = (await fs.readdir(absolutePath)).sort();
+		for (const name of names) {
+			if (budget.entries-- <= 0) break;
+			state += `\n${name}/${await pathState(path.join(absolutePath, name), depth - 1, budget)}`;
+		}
+	}
+	return state;
+}
+
+/**
+ * Token for the local filesystem state a read of `readPath` shows: identity,
+ * size and times of every path it may resolve to, a content hash for small
+ * files, and the entries of the two levels a directory read lists. A changed
+ * token means the read may now return something else. Undefined for URLs and
+ * internal URLs, which no local token covers.
+ */
+async function readTargetState(cwd: string, readPath: string): Promise<string | undefined> {
+	if (readPath.includes("://") || readPath.startsWith("www.")) return undefined;
+	// Each `;` entry, without its image question, selector or `?q=` query; extra
+	// candidates only cost a stat.
+	const candidates = new Set<string>();
+	for (const entry of [readPath, ...readPath.split(";")]) {
+		const target = splitImageQuestionTarget(entry.trim()).path;
+		for (const candidate of [target, splitPathAndSel(target).path, target.split("?")[0]]) {
+			if (candidate) candidates.add(candidate);
+		}
+	}
+	const budget = { entries: READ_STATE_MAX_DIRECTORY_ENTRIES };
+	const states: string[] = [];
+	for (const candidate of candidates) {
+		try {
+			states.push(`${candidate}\0${await pathState(await resolveReadPathAsync(candidate, cwd), 2, budget)}`);
+		} catch (error) {
+			states.push(`${candidate}\0error:${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	return states.join("\n");
+}
+
 /**
  * Read tool implementation.
  *
@@ -1734,7 +1785,23 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
-		const result = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
+		// Running beside an earlier call that may write (a `bash` before this read
+		// in the same message), the read can finish before that write lands. The
+		// model sees the batch's results only after every call ends, so once those
+		// calls settle, read again if the target changed since this read began.
+		const earlierEffects = toolContext?.toolCall?.earlierEffectsSettled;
+		const before = earlierEffects ? await readTargetState(this.session.cwd, params.path) : undefined;
+		let [outcome] = await Promise.allSettled([this.#executeInner(toolCallId, params, signal, onUpdate, toolContext)]);
+		if (before !== undefined) {
+			await earlierEffects;
+			if (!signal?.aborted && (await readTargetState(this.session.cwd, params.path)) !== before) {
+				[outcome] = await Promise.allSettled([
+					this.#executeInner(toolCallId, params, signal, onUpdate, toolContext),
+				]);
+			}
+		}
+		if (outcome.status === "rejected") throw outcome.reason;
+		const result = outcome.value;
 		const displayTarget = InternalUrlRouter.instance().locateSync(params.path);
 		if (displayTarget && result.details) result.details.displayTarget = displayTarget;
 		appendRepeatReadHint(this.session, params.path, result);
