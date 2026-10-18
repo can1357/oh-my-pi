@@ -27,7 +27,7 @@ use super::{
 		control,
 		error::{CoreResult, DesktopError, ErrorCode},
 		keys::KeyName,
-		types::{DesktopWindow, Target},
+		types::{AxTextSelection, DesktopWindow, Target},
 	},
 	ax,
 	capture::{self, MacCapture},
@@ -488,6 +488,48 @@ const fn returns_focus(mode: DeliveryMode) -> bool {
 	matches!(mode, DeliveryMode::ForegroundReturnFocus)
 }
 
+/// A background left drag with no keys held, from the first point of its path
+/// to the last, made as a text selection when both points lie on the text of
+/// one native text element of the target window ([`ax::select_dragged`]); a
+/// drag across text needs no mouse event, so it cannot begin a drag-and-drop
+/// session that the user's real pointer would carry. `None` for any other
+/// gesture, which is then posted as input.
+pub(super) fn drag_selection(
+	target: &Target,
+	event: &PointerEvent,
+	mode: DeliveryMode,
+	capture: &MacCapture,
+) -> CoreResult<Option<AxTextSelection>> {
+	let Some((id, (start, end))) = selecting_drag(target, event, mode) else {
+		return Ok(None);
+	};
+	let (pid, wid) = window_identity(&capture.window(id)?)?;
+	ax::select_dragged(pid, wid, start, end)
+}
+
+/// The global points a drag presses at and releases at.
+type DragEnds = ((f64, f64), (f64, f64));
+
+/// The window and end points of `event` when it is a drag that may be a text
+/// selection: delivered to a window in the background, with the left button,
+/// no modifier or held key, and at least two points. A takeover drag stays
+/// input, so `takeover:true` still drags what a press there picks up.
+fn selecting_drag<'a>(
+	target: &'a Target,
+	event: &PointerEvent,
+	mode: DeliveryMode,
+) -> Option<(&'a str, DragEnds)> {
+	let (Target::Window(id), DeliveryMode::Background) = (target, mode) else {
+		return None;
+	};
+	let PointerEvent::Drag { path, button: MouseButton::Left, modifiers, keys } = event else {
+		return None;
+	};
+	if path.len() < 2 || *modifiers != Modifiers::default() || !keys.is_empty() {
+		return None;
+	}
+	Some((id, (*path.first()?, *path.last()?)))
+}
 fn window_identity(window: &DesktopWindow) -> CoreResult<(libc::pid_t, u32)> {
 	let pid = window.pid.ok_or_else(|| {
 		DesktopError::input_failed(format!("window {} has no owning process id", window.id))
@@ -1948,7 +1990,8 @@ const DRAG_TRACKING_ROLES: [&str; 5] =
 /// user's moving pointer into their own Finder window and onto the Desktop,
 /// and going back to the start once the session began did not keep it out
 /// (1 in 2 on an 11-point path). Which elements begin such a session is up to
-/// each application, so only the known trackers are let through.
+/// each application, so only the known trackers are let through; a drag across
+/// native text has already been made as a selection ([`drag_selection`]).
 fn refuse_drag_source(
 	window: &DesktopWindow,
 	event: &PointerEvent,
@@ -1978,7 +2021,8 @@ fn refuse_drag_source(
 		"the {} on window {} ({}) starts on {element}, where a press can pick up an item for drag \
 		 and drop, which macOS completes from the user's real pointer and could drop into the \
 		 user's own window; background drags and holds run only on sliders, scroll bars, splitters \
-		 and steppers; nothing was sent",
+		 and steppers, and a drag across the text of one native text view selects it; nothing was \
+		 sent",
 		pointer_kind(event),
 		window.id,
 		window.app,
@@ -7117,6 +7161,48 @@ mod tests {
 			modifiers: Modifiers::default(),
 		};
 		refuse_drag_source(&window, &click, unread).expect("click");
+	}
+
+	#[test]
+	fn only_a_plain_background_left_drag_on_a_window_may_be_made_as_a_text_selection() {
+		let window = Target::Window("41".to_string());
+		let drag = |path: Vec<(f64, f64)>, button, modifiers, keys| PointerEvent::Drag {
+			path,
+			button,
+			modifiers,
+			keys,
+		};
+		let plain = drag(
+			vec![(3.0, 4.0), (9.0, 4.0), (90.0, 40.0)],
+			MouseButton::Left,
+			Modifiers::default(),
+			Vec::new(),
+		);
+		// The selection runs from the press to the release; points between
+		// only steer the stroke.
+		assert_eq!(
+			selecting_drag(&window, &plain, DeliveryMode::Background),
+			Some(("41", ((3.0, 4.0), (90.0, 40.0))))
+		);
+		// Takeover posts the drag, so it can still pick up what is pressed.
+		assert_eq!(selecting_drag(&window, &plain, DeliveryMode::Foreground), None);
+		assert_eq!(selecting_drag(&Target::Desktop, &plain, DeliveryMode::Background), None);
+		let shift = Modifiers { shift: true, ..Modifiers::default() };
+		for other in [
+			drag(
+				vec![(3.0, 4.0), (90.0, 40.0)],
+				MouseButton::Middle,
+				Modifiers::default(),
+				Vec::new(),
+			),
+			drag(vec![(3.0, 4.0), (90.0, 40.0)], MouseButton::Left, shift, Vec::new()),
+			drag(vec![(3.0, 4.0), (90.0, 40.0)], MouseButton::Left, Modifiers::default(), vec![
+				KeyName::Alt,
+			]),
+			drag(vec![(3.0, 4.0)], MouseButton::Left, Modifiers::default(), Vec::new()),
+		] {
+			assert_eq!(selecting_drag(&window, &other, DeliveryMode::Background), None, "{other:?}");
+		}
 	}
 
 	#[test]
