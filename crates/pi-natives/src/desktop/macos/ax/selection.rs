@@ -9,6 +9,7 @@ use std::{ptr::NonNull, time::Duration};
 
 use objc2_application_services::{AXError, AXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{CFRange, CFString, CGPoint, CGRect};
+use unicode_bidi::{BidiClass, bidi_class};
 
 use super::{
 	AxTextSelection, CoreResult, DesktopError, TextSelectRequest, TextSurface, Utf16Range,
@@ -89,9 +90,9 @@ fn write_selection(
 /// character (`AXRangeForPosition`, `AXBoundsForRange`), outside web content
 /// and terminals. The selection runs between the carets a press and a release
 /// there would leave, so no mouse event is posted and no drag-and-drop session
-/// can begin. `None`, with nothing written, for any other drag, and for one
-/// pressing where it could pick up an item: on selected text or on an
-/// attachment.
+/// can begin. `None`, with nothing written, for any other drag, for one
+/// pressing where it could pick up an item (on selected text or on an
+/// attachment), and in text holding right-to-left script.
 pub(in crate::desktop::macos) fn select_dragged(
 	pid: libc::pid_t,
 	wid: u32,
@@ -143,10 +144,10 @@ struct Caret {
 
 /// The caret a press at `(x, y)` leaves beside `character`, whose bounds are
 /// `bounds`: before it on its left half, after it on its right half, as
-/// `AppKit` text views place it in left-to-right text (in right-to-left text
-/// this can land one character off). `None` when the bounds are empty or the
-/// point lies off the character's line by more than half a line, as when an
-/// app answers `AXRangeForPosition` without placing the point.
+/// `AppKit` text views place it in left-to-right text ([`dragged_range`] keeps
+/// right-to-left text out). `None` when the bounds are empty or the point lies
+/// off the character's line by more than half a line, as when an app answers
+/// `AXRangeForPosition` without placing the point.
 fn character_caret(x: f64, y: f64, character: Utf16Range, bounds: CGRect) -> Option<Caret> {
 	let (top, height) = (bounds.origin.y, bounds.size.height);
 	if height <= 0.0 || y < height.mul_add(-0.5, top) || y > height.mul_add(1.5, top) {
@@ -161,9 +162,11 @@ fn character_caret(x: f64, y: f64, character: Utf16Range, bounds: CGRect) -> Opt
 }
 
 /// The selection a drag from `press` to `release` leaves in `value`, or
-/// `None` when its press would pick up an item instead of selecting: a press
+/// `None` when its press would pick up an item instead of selecting (a press
 /// on the `current` selection drags the selected text, and a press on an
-/// attachment drags the attachment.
+/// attachment drags the attachment), or when `value` holds right-to-left
+/// script, where the half of a character a caret lands on depends on the
+/// direction of its run.
 fn dragged_range(
 	value: &str,
 	press: Caret,
@@ -176,7 +179,10 @@ fn dragged_range(
 			&& selected.start < press.character.start + press.character.length.max(1)
 	});
 	utf16_slice(value, release.character)?;
-	if on_selection || utf16_slice(value, press.character)?.contains(OBJECT_REPLACEMENT) {
+	if on_selection
+		|| utf16_slice(value, press.character)?.contains(OBJECT_REPLACEMENT)
+		|| value.chars().any(right_to_left)
+	{
 		return None;
 	}
 	let start = press.offset.min(release.offset);
@@ -186,6 +192,14 @@ fn dragged_range(
 /// The character an attachment (an image, a file) stands in as in its text
 /// view's value.
 const OBJECT_REPLACEMENT: char = '\u{FFFC}';
+
+/// Whether `c` is right-to-left script, or a mark opening a right-to-left run.
+fn right_to_left(c: char) -> bool {
+	matches!(
+		bidi_class(c),
+		BidiClass::R | BidiClass::AL | BidiClass::RLE | BidiClass::RLO | BidiClass::RLI
+	)
+}
 
 /// The character `element` places at global point `(x, y)`.
 fn range_at(element: &AXUIElement, x: f64, y: f64) -> Option<Utf16Range> {
@@ -380,6 +394,12 @@ mod tests {
 		);
 		// A release the app places past the end of the text is not trusted.
 		assert_eq!(dragged_range(value, press, caret(19, 20), None), None);
+		// In right-to-left text the caret's side of a character flips, so it
+		// keeps the refusal, even for a drag across a left-to-right run
+		// beside it.
+		assert_eq!(dragged_range("The quick שלום", press, release, None), None);
+		assert_eq!(dragged_range("The quick مرحبا", press, release, None), None);
+		assert_eq!(dragged_range("The quick\u{202E}brown", press, release, None), None);
 	}
 
 	/// Runs `apply` with a guard that marks when its own post-action settle has
