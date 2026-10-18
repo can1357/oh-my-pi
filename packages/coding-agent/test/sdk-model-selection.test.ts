@@ -1181,7 +1181,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 	test.each([
 		["depleted", "runtime-model"],
-		["reserve", "runtime-provider/runtime-m*"],
+		["reserve", "runtime-m"],
 	] as const)("resolves the source selector when skipping a %s startup model", async (state, pattern) => {
 		const settings = Settings.isolated({
 			"retry.usageAwareFallback": true,

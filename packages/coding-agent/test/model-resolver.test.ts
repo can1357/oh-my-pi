@@ -1785,7 +1785,7 @@ describe("resolveCliModel", () => {
 		expect(abbreviated.thinkingLevel).toBe(Effort.High);
 	});
 
-	test("resolves fuzzy patterns within an explicit provider", () => {
+	test("rejects a near miss within an explicit --provider", () => {
 		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
 			typeof resolveCliModel
 		>[0]["modelRegistry"];
@@ -1796,9 +1796,8 @@ describe("resolveCliModel", () => {
 			modelRegistry: registry,
 		});
 
-		expect(result.error).toBeUndefined();
-		expect(result.model?.provider).toBe("openai");
-		expect(result.model?.id).toBe("gpt-4o");
+		expect(result.model).toBeUndefined();
+		expect(result.error).toContain("not found");
 	});
 
 	test("supports --model <pattern>:<thinking> (without explicit --thinking)", () => {
@@ -1952,19 +1951,31 @@ describe("resolveCliModel", () => {
 		expect(result.error).toContain("No models available");
 	});
 
-	test("resolves provider-prefixed fuzzy patterns (openrouter/qwen -> openrouter model)", () => {
+	test("rejects a provider-prefixed near miss instead of fuzzy-matching a sibling", () => {
 		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
 			typeof resolveCliModel
 		>[0]["modelRegistry"];
 
-		const result = resolveCliModel({
-			cliModel: "openrouter/qwen",
-			modelRegistry: registry,
-		});
+		for (const cliModel of ["openrouter/qwen", "anthropic/claude-sonnet-5", "openai-codex/gpt-5.3-spark"]) {
+			const result = resolveCliModel({ cliModel, modelRegistry: registry });
+			expect(result.model).toBeUndefined();
+			expect(result.error).toContain("not found");
+		}
+	});
 
-		expect(result.error).toBeUndefined();
-		expect(result.model?.provider).toBe("openrouter");
-		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+	test("provider-prefixed exact ids resolve while bare selectors keep fuzzy matching", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const exact = resolveCliModel({ cliModel: "openai-codex/gpt-5.3-codex-spark", modelRegistry: registry });
+		expect(exact.error).toBeUndefined();
+		expect(exact.model?.provider).toBe("openai-codex");
+		expect(exact.model?.id).toBe("gpt-5.3-codex-spark");
+
+		const bare = resolveCliModel({ cliModel: "spark", modelRegistry: registry });
+		expect(bare.error).toBeUndefined();
+		expect(bare.model?.id).toBe("gpt-5.3-codex-spark");
 	});
 
 	test("prefers decomposed provider+id over flat id match when ambiguous", () => {
@@ -2510,7 +2521,7 @@ describe("provider routing selector (@upstream)", () => {
 		expect(openRouterOnly(result.model)).toBeUndefined();
 	});
 
-	test("keeps fuzzy matching a non-aggregator provider id that ends in @ (Vertex)", () => {
+	test("resolves an exact non-aggregator provider id that ends in @ (Vertex)", () => {
 		const vertexModel: Model<"anthropic-messages"> = buildModel({
 			id: "claude-opus-4-8@default",
 			name: "Claude Opus 4.8",
@@ -2523,10 +2534,10 @@ describe("provider routing selector (@upstream)", () => {
 			contextWindow: 200000,
 			maxTokens: 32000,
 		});
-		// `opus@default` is a fuzzy provider-qualified pattern: the `@upstream` bypass must not
-		// swallow it, because google-vertex is not an aggregator and the routing fallback would
-		// never resolve it, leaving the selector unmatched.
-		const result = parseModelPattern("google-vertex/opus@default", [vertexModel]);
+		// The `@upstream` bypass must not swallow an exact provider-qualified id ending in `@`,
+		// because google-vertex is not an aggregator and the routing fallback would never
+		// resolve it, leaving the selector unmatched.
+		const result = parseModelPattern("google-vertex/claude-opus-4-8@default", [vertexModel]);
 		expect(result.model?.id).toBe("claude-opus-4-8@default");
 		expect(result.upstream).toBeUndefined();
 		expect(openRouterOnly(result.model)).toBeUndefined();

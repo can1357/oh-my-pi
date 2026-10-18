@@ -226,6 +226,7 @@
 
 ### Fixed
 
+- Fixed a `provider/model` selector for a model that provider doesn't have silently running a similarly named model (`anthropic/claude-haiku-5-5` ran `claude-haiku-4-5`); it now fails with `Model "…" not found`, and bare selectors such as `opus` still fuzzy-match ([#12884](https://github.com/can1357/oh-my-pi/issues/12884))
 - Fixed repeated status commands such as `/goal show` showing nothing after the first few times in a native terminal when the text had not changed
 - Fixed browser relay tabs that a browser already had open when its extension connected staying invisible to omp until they changed; opening such a tab by `app.target` could fail with "Selected tab did not become available before omp could attach"
 - Fixed Ollama Cloud sessions compacting too early on stripped thinking or too late after switching from another model ([#16164](https://github.com/can1357/oh-my-pi/issues/16164))
