@@ -4133,6 +4133,12 @@ describe("computer background fallback", () => {
 				route: "no raise is needed",
 			},
 			{
+				// Native runs any spelling of an element's action, so this one raises too.
+				code: 'await (await desktop.ref("e1")).perform("axraise")',
+				call: "perform:axraise",
+				route: "no raise is needed",
+			},
+			{
 				code: 'await desktop.apps.open("test.editor", { activate: true })',
 				call: "open:test.editor:true",
 				route: "without activate",
@@ -4296,8 +4302,9 @@ describe("computer background fallback", () => {
 					return { ...super.capabilities, backend: "quartz" };
 				}
 			}
-			// Native `action_name` runs exactly these two as AXOpen.
-			for (const action of ["AXOpen", "Open"]) {
+			// Native runs whichever of the element's actions matches regardless of case, so every
+			// spelling of AXOpen is refused.
+			for (const action of ["AXOpen", "Open", "open", " Open ", "axopen", "AxOpen", "\u0085open"]) {
 				const code = `await (await desktop.ref("e1")).perform(${JSON.stringify(action)})`;
 				const mac = new MacSession();
 				const refused = await run(mac, code, "refuse");
@@ -4314,13 +4321,13 @@ describe("computer background fallback", () => {
 				expect(mac.calls, action).toEqual([`perform:${action}`]);
 			}
 
-			// Other spellings reach native as other actions ("AXopen", "AX Open ").
+			// Names native runs as other actions still go through ("AX Open" names `AX Open`).
 			const other = new MacSession();
-			const others = ['perform("open")', 'perform(" Open ")'].map(
+			const others = ['perform("AX Open")', 'perform("opener")'].map(
 				call => `await (await desktop.ref("e1")).${call};`,
 			);
 			expect((await run(other, others.join("\n"), "refuse")).ok).toBe(true);
-			expect(other.calls).toEqual(["perform:open", "perform: Open "]);
+			expect(other.calls).toEqual(["perform:AX Open", "perform:opener"]);
 
 			const elsewhere = new ForegroundSession();
 			expect((await run(elsewhere, 'await (await desktop.ref("e1")).perform("AXOpen")', "refuse")).ok).toBe(true);
@@ -4363,6 +4370,16 @@ describe("computer background fallback", () => {
 					code: `${el}.perform("show_menu")`,
 					call: "perform:show_menu",
 					named: 'perform("show_menu") would open a context menu',
+				},
+				{
+					code: `${el}.perform("axshowmenu")`,
+					call: "perform:axshowmenu",
+					named: 'perform("axshowmenu") would open a context menu',
+				},
+				{
+					code: `${el}.perform("AxShowMenu")`,
+					call: "perform:AxShowMenu",
+					named: 'perform("AxShowMenu") would open a context menu',
 				},
 				{
 					code: `${el}.perform("AXShowMenu", { menu: ["Copy"] })`,
@@ -4570,6 +4587,12 @@ describe("computer background fallback", () => {
 						code: `${el}.perform(" Press ")`,
 						call: "perform: Press ",
 						named: 'perform(" Press ") on an AXMenuButton',
+					},
+					{
+						role: "AXPopUpButton",
+						code: `${el}.perform("axpress")`,
+						call: "perform:axpress",
+						named: 'perform("axpress") on an AXPopUpButton',
 					},
 					{
 						role: "AXPopUpButton",
