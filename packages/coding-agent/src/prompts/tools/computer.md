@@ -30,10 +30,9 @@ const save = await win.ref("e12");
 await save.press();
 const [field] = await win.find({ role: "textfield", title: "Search" });
 await field.setValue("todo");
-await computer.run(async ({ desktop, wait }) => {
+await computer.run(async ({ desktop }) => {
 	const target = await desktop.window({ title: "Settings" });
 	await target.press("cmd+f");
-	await wait(300);
 	return await target.ax();
 }, { timeout: 30 });
 ```
@@ -60,6 +59,7 @@ await win.click(120, 48, button="right")
 - macOS background routes cover left-button drags and `holdMouse` that start on a slider, scroll bar, splitter or stepper, middle-button drags, modified clicks, right-clicks and scrolls. A left-button drag or `holdMouse` anywhere else (files, rows, font tiles, text, web pages) could start a drag and drop that macOS finishes at the user's real pointer, so it has no background route. Prefer the app's menu command (Font Book: File ▸ New Collection from Selection) or AX. An open menu takes the user's keyboard, so a background right-click or Control-click, or a click, `press()` or `perform("AXShowMenu")` on a menu button or popup button, never leaves its menu open. To use a menu item, name its path in the same call: `win.click(x, y, {button: "right", menu: ["Add to", "Fonts"]})`, `el.click({button: "right", menu: […]})`, `el.press({menu: ["New Folder"]})`; labels match like `win.menu.select`. Without `menu` the menu closes and the call throws a partial-delivery `InputFailed` listing its items; inspect, then repeat with `menu`. A right-button or Control drag, `holdMouse` or multi-click has no background route, nor does a drag, `holdMouse` or multi-click on a menu button or popup button: click it once with `menu` instead.
 - Partial-delivery or restoration error? Inspect the target before retrying; input may already have landed. NEVER blindly repeat it.
 - `UserIntervened` (macOS): the user came to that app, or typed or clicked in it, during the call; nothing more was sent, and the tool never reruns it in takeover. The user's edits stand: NEVER undo or retype over them. Read that window again (`win.ax()`, `win.observe()` or `win.screenshot()`) and continue the task from what it shows.
+- Reads and input after input (`ax()`, `find()`, `observe()`, screenshots, window lookups, element reads, clicks, keys) already wait until the apps that input reached stop changing; NEVER add sleeps.
 - After changing the UI, verify the expected state with fresh AX evidence or a screenshot. In a run, use `wait(predicate, {timeout, interval})` for a specific state rather than assuming a fixed sleep means success.
 - Desktop-root pointer helpers (`computer.click`, `computer.move`, …) drive the user's real pointer; act through window handles.
 - Wayland: per-window native input and `.raise()` are unavailable; use AX, or desktop input after focusing the target yourself.

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { inspect } from "node:util";
 import { createContext, runInContext } from "node:vm";
@@ -45,6 +45,8 @@ import type {
 	DesktopWindow,
 	HoldOptions as NativeHoldOptions,
 	PointerOptions,
+	UiQuiet,
+	UiQuietOptions,
 } from "@oh-my-pi/pi-natives";
 
 import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
@@ -282,6 +284,14 @@ class FakeNativeSession implements NativeDesktopSession {
 	async axClick(_ref: string, _opts?: PointerOptions | null): Promise<void> {}
 	async axType(_ref: string, _text: string, _opts?: PointerOptions | null): Promise<void> {}
 	async axKeyChord(_ref: string, _keys: string[], _opts?: PointerOptions | null): Promise<void> {}
+	/** Processes each `waitForUiQuiet` call watched, in call order. */
+	readonly quietWaits: number[][] = [];
+	/** What `waitForUiQuiet` answers: by default a watched app that was already quiet. */
+	quiet: UiQuiet = { waitedMs: 0, events: 0, timedOut: false, watched: 1 };
+	async waitForUiQuiet(pids: number[], _options?: UiQuietOptions | null): Promise<UiQuiet> {
+		this.quietWaits.push([...pids]);
+		return this.quiet;
+	}
 	async close(): Promise<void> {
 		this.closeCount += 1;
 		this.controlActive = false;
@@ -4490,5 +4500,269 @@ describe("computer background fallback", () => {
 		const front = new RefusingSession();
 		front.report = { handedBack: true, previousPid: 300 };
 		expect(notice(await run(front, clickTarget, "takeover"))).toContain("not confirmed");
+	});
+});
+
+describe("computer input waits for the UI to settle", () => {
+	it("pays the wait before each input to an app that owes it and at the read after them, and none to resolve a ref", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		const run = await runWorker(
+			transport,
+			"batch-then-read",
+			'const win = await desktop.window("42"); await win.ax(); await win.press("shift"); const el = await desktop.ref("e1"); await el.press(); return await win.ax()',
+		);
+		expect(run.ok).toBe(true);
+		// The ref's window is known from the read, so its press waits for that app like window input.
+		expect(native.quietWaits).toEqual([[123], [123]]);
+	});
+
+	it("sends input only once its app has gone quiet after the input before it", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		const calls: string[] = [];
+		native.keyChord = async (_target, keys) => {
+			calls.push(`press ${keys.join("+")}`);
+		};
+		native.typeText = async (_target, text) => {
+			calls.push(`type ${text}`);
+		};
+		native.waitForUiQuiet = async pids => {
+			calls.push(`quiet ${pids.join(",")}`);
+			return native.quiet;
+		};
+		new ComputerWorkerCore(transport, () => native);
+
+		await runWorker(
+			transport,
+			"save-then-name",
+			'const win = await desktop.window("42"); await win.press("cmd+s"); await win.type("name")',
+		);
+		// The sheet the shortcut opens is in place before the name is typed.
+		expect(calls).toEqual(["press cmd+s", "quiet 123", "type name"]);
+	});
+
+	it("makes input to one app wait for the app earlier input reached, so a paste follows its copy", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		const windows = [windowFixture, { ...windowFixture, id: "43", title: "Other", pid: 456, focused: false }];
+		native.listWindows = async () => windows;
+		const calls: string[] = [];
+		native.keyChord = async (target, keys) => {
+			calls.push(`press ${target} ${keys.join("+")}`);
+		};
+		native.waitForUiQuiet = async pids => {
+			calls.push(`quiet ${pids.join(",")}`);
+			return native.quiet;
+		};
+		new ComputerWorkerCore(transport, () => native);
+
+		await runWorker(
+			transport,
+			"copy-paste",
+			'const a = await desktop.window("42"); const b = await desktop.window("43"); await a.press("cmd+c"); await b.press("cmd+v"); await desktop.press("return")',
+		);
+		// The paste goes out once the app that took the copy has gone quiet, and keys to the desktop after the paste.
+		expect(calls).toEqual(["press 42 cmd+c", "quiet 123", "press 43 cmd+v", "quiet 456", "press desktop return"]);
+	});
+
+	it("keeps input owed when the wait for it is cancelled, so the next input still waits", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		const calls: string[] = [];
+		native.keyChord = async (_target, keys) => {
+			calls.push(`press ${keys.join("+")}`);
+		};
+		let hang = true;
+		let cancelWait: (() => void) | undefined;
+		const waiting = Promise.withResolvers<void>();
+		native.waitForUiQuiet = async pids => {
+			calls.push(`quiet ${pids.join(",")}`);
+			if (!hang) return native.quiet;
+			const { promise, reject } = Promise.withResolvers<UiQuiet>();
+			cancelWait = () => reject(new Error("Cancelled: operation was cancelled"));
+			waiting.resolve();
+			return await promise;
+		};
+		native.cancel = () => cancelWait?.();
+		new ComputerWorkerCore(transport, () => native);
+
+		await runWorker(transport, "a", 'await (await desktop.window("42")).press("a")');
+		transport.inbound({
+			type: "run",
+			id: "b",
+			code: 'await (await desktop.window("42")).press("b")',
+			timeoutMs: 2_000,
+			session: snapshot(false),
+			escape: escapeScope(),
+		});
+		await waiting.promise;
+		transport.inbound({ type: "abort", id: "b" });
+		const cancelled = await transport.waitFor(message => message.type === "result" && message.id === "b");
+		expect(cancelled.type === "result" && cancelled.ok).toBe(false);
+		hang = false;
+		await runWorker(transport, "c", 'await (await desktop.window("42")).press("c")');
+		// The cancelled cell never sent its key, and the next input waited for the first one's app.
+		expect(calls).toEqual(["press a", "quiet 123", "quiet 123", "press c"]);
+	});
+
+	it("owes no wait for input that ended the cap ago or more", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		try {
+			await runWorker(transport, "key", 'await (await desktop.window("42")).press("shift")');
+			// The model thinks for longer than the wait could last before its next cell.
+			setSystemTime(new Date(Date.now() + 5_000));
+			expect((await runWorker(transport, "read", 'await (await desktop.window("42")).ax()')).ok).toBe(true);
+		} finally {
+			setSystemTime();
+		}
+		expect(native.quietWaits).toEqual([]);
+		// A read right after input still waits.
+		await runWorker(transport, "key-again", 'await (await desktop.window("42")).press("shift")');
+		await runWorker(transport, "read-again", 'await (await desktop.window("42")).ax()');
+		expect(native.quietWaits).toEqual([[123]]);
+	});
+
+	// The fallback is a real half-second timer in the worker; the test checks it against the clock.
+	it("makes reads issued together after input no app can be watched for share one half-second wait", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		native.quiet = { waitedMs: 0, events: 0, timedOut: false, watched: 0 };
+		let pressedAt = 0;
+		native.keyChord = async () => {
+			pressedAt = Date.now();
+		};
+		const readAt: number[] = [];
+		native.axSnapshot = async () => {
+			readAt.push(Date.now());
+			return { text: "- button [ref=e1]" };
+		};
+		new ComputerWorkerCore(transport, () => native);
+
+		const run = await runWorker(
+			transport,
+			"together",
+			'const w = await desktop.window("42"); await w.press("shift"); await Promise.all([w.ax(), w.ax()])',
+		);
+		expect(run.ok).toBe(true);
+		expect(native.quietWaits).toHaveLength(1);
+		expect(readAt).toHaveLength(2);
+		for (const at of readAt) expect(at - pressedAt).toBeGreaterThanOrEqual(490);
+	});
+
+	it("dispatches concurrent inputs in call order, after the window lookup desktop keys need", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		const order: string[] = [];
+		native.listWindows = async () => {
+			// Answer only after every pending microtask: a later input that skips the lookup dispatches first.
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			await promise;
+			order.push("windows");
+			return [windowFixture];
+		};
+		native.click = async () => {
+			order.push("click");
+		};
+		native.keyChord = async () => {
+			order.push("key");
+		};
+		new ComputerWorkerCore(transport, () => native);
+
+		const run = await runWorker(
+			transport,
+			"together",
+			'const w = await desktop.window("42"); await Promise.all([desktop.press("shift"), w.click(1, 2)])',
+		);
+		expect(run.ok).toBe(true);
+		expect(order).toEqual(["windows", "windows", "key", "click"]);
+	});
+
+	it.each([
+		{ target: "desktop", label: "desktop" },
+		{ target: '(await desktop.display("active"))', label: "display:active" },
+	])("waits for the app under $label pointer input, not the focused one", async ({ target }) => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		// A 128×64 px screenshot of a 64×32 display: pointer pixels are halved.
+		native.capture = async captured => ({
+			data: Uint8Array.of(137, 80, 78, 71),
+			width: 128,
+			height: 64,
+			coordinateWidth: 128,
+			coordinateHeight: 64,
+			sourceWidth: 128,
+			sourceHeight: 64,
+			target: captured,
+			displays: [{ ...display, pixelWidth: 128, pixelHeight: 64 }],
+			backend: "fake",
+			screenLocked: false,
+		});
+		const behind: DesktopWindow = { ...windowFixture, id: "43", pid: 777, x: 44, y: 0, width: 20, height: 30 };
+		// Listed above app windows and covering the display, like the macOS Dock's overlay: not where input went.
+		const overlay: DesktopWindow = {
+			...windowFixture,
+			id: "6",
+			app: "Dock",
+			pid: 9,
+			x: 0,
+			y: 0,
+			width: 64,
+			height: 32,
+		};
+		native.listWindows = async () => [{ ...overlay, focused: false }, windowFixture, behind];
+		new ComputerWorkerCore(transport, () => native);
+
+		await runWorker(transport, "shot", `await ${target}.screenshot({ silent: true })`);
+		await runWorker(transport, "scroll", `await ${target}.scroll(110, 20, { dy: 100 }); await desktop.windows()`);
+		expect(native.quietWaits).toEqual([[777]]);
+	});
+
+	it("waits for the app apps.open opened, not the one in front", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		native.openApplication = async () => ({
+			...(await native.listApplications())[0]!,
+			pid: 777,
+			window: { ...windowFixture, id: "50", app: "Font Book", pid: 777, focused: false },
+		});
+		new ComputerWorkerCore(transport, () => native);
+
+		await runWorker(transport, "open", 'await desktop.apps.open("test.editor"); await desktop.windows()');
+		expect(native.quietWaits).toEqual([[777]]);
+	});
+
+	it("makes a refused call pay no wait and leaves the earlier input owed", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		new ComputerWorkerCore(transport, () => native);
+		const refuse = async (id: string, code: string) => {
+			transport.inbound({
+				type: "run",
+				id,
+				code,
+				timeoutMs: 2_000,
+				session: snapshot(false, undefined, "refuse"),
+				escape: escapeScope(),
+			});
+			const result = await transport.waitFor(message => message.type === "result" && message.id === id);
+			return result.type === "result" && !result.ok ? result.error.message : "";
+		};
+
+		expect(
+			await refuse(
+				"refused",
+				'const w = await desktop.window("42"); await w.press("shift"); await w.press("a", { takeover: true })',
+			),
+		).toContain("nothing was sent");
+		expect(native.quietWaits).toEqual([]);
+		await runWorker(transport, "read", 'await (await desktop.window("42")).ax()');
+		expect(native.quietWaits).toEqual([[123]]);
 	});
 });
