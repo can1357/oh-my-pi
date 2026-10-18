@@ -150,7 +150,7 @@ async function runCommand(argv: string[]): Promise<void> {
 				const count = cases ?? UPSTREAM_COMPAT_CONVERSATIONS;
 				const questions = await runUpstreamCompat(engine, await loadBeamUpstreamCompat(dataDir, count));
 				// No warmup runs here.
-				run = { questions, warmupMs: 0 };
+				run = { questions, warmupMs: 0, unstoredMessageIds: [] };
 			} else {
 				const loaded = await loadDataset(dataset, dataDir);
 				excluded = loaded.excluded;
@@ -191,6 +191,7 @@ async function runCommand(argv: string[]): Promise<void> {
 	console.log(`fallbackRate: ${result.fallbackRate}`);
 	console.log(`droppedRows: ${result.droppedRows}`);
 	console.log(`droppedGoldRows: ${result.droppedGoldRows}`);
+	console.log(`unstoredMessages: ${result.unstoredMessageIds.length}`);
 	console.log(`wrote ${out}`);
 }
 

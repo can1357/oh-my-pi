@@ -66,6 +66,13 @@ const hit = (engineId: string, content: string, summaryOf: string[] = []): Recal
 	summaryOf,
 });
 
+describe("unstored messages", () => {
+	it("records the messages an engine declined to store, instead of letting them pass as plain misses", async () => {
+		const engine = fakeEngine({ rowIds: items => items.map((_, i) => (i === 1 ? null : `r${i}`)), hits: [] });
+		const run = await runCases(engine, [twoMessageCase], "standard", 10, tmp);
+		expect(run.unstoredMessageIds).toEqual(["m2"]);
+	});
+});
 describe("runner", () => {
 	/** The best recall@k any ranking of k memories can reach: k slots cannot hold more than k gold messages. */
 	const ceiling = (k: number, gold: readonly string[]): number => Math.min(1, k / new Set(gold).size);
