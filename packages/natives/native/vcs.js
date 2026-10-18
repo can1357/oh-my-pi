@@ -92,14 +92,6 @@ export function clone(url, target, options = {}, signal) {
 	return api().vcsGitClone(url, target, options, signal);
 }
 
-/** Initialize an empty git repository at `dir` (git CLI) and return its handle. */
-export async function init(dir) {
-	// GIT_DIR, GIT_WORK_TREE and friends would point `git init` at another repository than `dir`.
-	const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
-	await $`git init -q ${dir}`.env(env).quiet();
-	return requireGit(dir);
-}
-
 /** Sever a copied working tree from shared git metadata. */
 export function detachGitDir(worktreeRoot, sourceCommonDir, signal) {
 	return api().vcsDetachGitDir(worktreeRoot, sourceCommonDir, signal);

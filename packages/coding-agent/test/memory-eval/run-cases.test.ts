@@ -3,6 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { stripGitRepoLocationEnv } from "@oh-my-pi/pi-utils";
+import { $ } from "bun";
 import { pinnedCheckout } from "../../bench/memory-eval/run";
 
 const RUN = path.join(import.meta.dir, "../../bench/memory-eval/run.ts");
@@ -125,7 +127,11 @@ describe("pinnedCheckout", () => {
 		const dir = path.join(root, name);
 		await fs.mkdir(dir, { recursive: true });
 		await Bun.write(path.join(dir, "a"), "1");
-		const git = await vcs.init(dir);
+		// The vcs module has no init; everything after it goes through vcs. A hook's GIT_DIR must not redirect it.
+		const env: Record<string, string> = { ...Bun.env } as Record<string, string>;
+		stripGitRepoLocationEnv(env);
+		await $`git init -q ${dir}`.env(env).quiet();
+		const git = vcs.requireGit(dir);
 		await git.configSet("user.name", "t");
 		await git.configSet("user.email", "t@t");
 		await git.stageFiles(["a"]);

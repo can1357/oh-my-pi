@@ -6,6 +6,11 @@ const EXIT_GRACE_MS = 5000;
 /** After stdout EOF, how long the exit code and the rest of stderr may take to arrive for the error message. */
 const EOF_GRACE_MS = 1000;
 
+/** `key` as the OS matches it: Windows environment names are case-insensitive, so `PythonPath` is `PYTHONPATH`. */
+export function envName(key: string): string {
+	return process.platform === "win32" ? key.toUpperCase() : key;
+}
+
 interface WireResponse {
 	id: number;
 	result?: unknown;
@@ -24,7 +29,9 @@ export class PythonProcess {
 
 	constructor(label: string, python: string, script: string, env: Record<string, string | undefined>) {
 		this.#label = label;
-		this.#proc = Bun.spawn([python, script], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env });
+		// PYTHONPATH, PYTHONHOME and the like could import other code than the pinned venv while versions still match.
+		const scrubbed = Object.fromEntries(Object.entries(env).filter(([key]) => !envName(key).startsWith("PYTHON")));
+		this.#proc = Bun.spawn([python, script], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: scrubbed });
 		this.#done = this.#pump(this.#collectStderr());
 	}
 
