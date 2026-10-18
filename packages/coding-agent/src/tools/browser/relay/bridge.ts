@@ -160,6 +160,8 @@ interface ExtInstance {
 	goneSince: number | null;
 	/** Settles at its next hello; created by the first caller that waits for one. */
 	reconnected: PromiseWithResolvers<void> | null;
+	/** The browser app's pid, once found from its socket ({@link RelayBridge.keepFrontAppWith}); unset until then. */
+	browserPid?: number | null;
 }
 
 /**
@@ -329,8 +331,12 @@ function canOpenWindow(method: string, params: Record<string, unknown> | undefin
 
 /** The app in front of the user, as `macOSFrontApp` from `@oh-my-pi/pi-natives` reads it. */
 export interface FrontApp {
-	/** Puts the app back in front each time the app that took the front takes it again within `durationMs`, until the user picks an app; resolves how many times. */
-	keepInFront(durationMs: number): Promise<number>;
+	/**
+	 * Puts the app back in front each time the app that took the front takes it again within `durationMs`, until the
+	 * user picks an app; keys the user types while `browserPid` holds the keyboard go to the app. Resolves how many
+	 * times.
+	 */
+	keepInFront(durationMs: number, browserPid?: number | null): Promise<number>;
 }
 
 /**
@@ -385,7 +391,9 @@ export class RelayBridge {
 	/** Each tab switch's last transition, by `tabKey method`; see {@link #serializeSwitches}. */
 	#switchTransitions = new Map<string, Promise<void>>();
 	/** Reads the app in front of the user; set by {@link keepFrontAppWith} where the relay can put it back (macOS). */
-	#readFrontApp: (() => FrontApp | null) | undefined;
+	#readFrontApp: ((browserPid: number | null) => FrontApp | null) | undefined;
+	/** Finds the pid of the browser app behind an extension socket; set with {@link #readFrontApp}. */
+	#findBrowser: ((socket: RelaySocket) => Promise<number | null>) | undefined;
 	/**
 	 * When the running hold on the user's app ends (`Date.now()` ms), at its deadline or once it settles, whichever is
 	 * first; 0 with none. A window opened meanwhile shares it, and omp's input reads no front app then: the browser may
@@ -571,6 +579,8 @@ export class RelayBridge {
 		const inst = this.#instances.get(instanceId);
 		if (!inst || inst.socket !== socket) return;
 		inst.socket = null;
+		// The browser may be quitting; its pid can name another process by the time a socket comes back.
+		inst.browserPid = null;
 		inst.goneSince = Date.now();
 		inst.updating = false;
 		this.#rejectPendingExtensionRpcs(instanceId, new Error("relay extension disconnected"));
@@ -703,6 +713,19 @@ export class RelayBridge {
 			reloadProtocol: msg.reloadProtocol,
 			downloadsProtocol: msg.downloadsProtocol,
 		};
+		// Found once per connection, before a popup needs it: the hold starts within milliseconds of the open.
+		inst.browserPid = null;
+		const found = inst;
+		this.#findBrowser?.(socket).then(
+			pid => {
+				if (found.socket === socket) found.browserPid = pid;
+			},
+			err => {
+				this.#log("could not find the browser behind the extension socket", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			},
+		);
 		this.#lastHelloInstance = instanceId;
 		this.#extensionSeen = true;
 		this.#extensionGoneSince = null;
@@ -1212,7 +1235,12 @@ export class RelayBridge {
 			return true;
 		}
 		if (this.#readFrontApp && canOpenWindow(msg.method, msg.params)) {
-			tab.frontAtInput = Date.now() < this.#keepingFrontUntil ? null : this.#readFrontAtInput(this.#readFrontApp);
+			// Chrome can activate for a window this input opens before the relay hears of it: the browser's keyboard is
+			// watched from the input on.
+			tab.frontAtInput =
+				Date.now() < this.#keepingFrontUntil
+					? null
+					: this.#readFrontAtInput(this.#readFrontApp, this.#instances.get(tab.instanceId)?.browserPid ?? null);
 		}
 		try {
 			const result = await this.#send(tab, inst, msg.method, msg.params, realSessionId);
@@ -1239,19 +1267,27 @@ export class RelayBridge {
 
 	/**
 	 * Read the app in front of the user with `read` as omp's input reaches a tab, to put it back when that input opens a
-	 * window and Chrome brings itself forward to show it. Only where the relay can put it back (macOS).
+	 * window and Chrome brings itself forward to show it. `findBrowser` finds the browser app behind each extension
+	 * socket, whose keyboard the user's keys are taken back from meanwhile. Only where the relay can put it back (macOS).
 	 */
-	keepFrontAppWith(read: () => FrontApp | null): void {
+	keepFrontAppWith(
+		read: (browserPid: number | null) => FrontApp | null,
+		findBrowser: (socket: RelaySocket) => Promise<number | null>,
+	): void {
 		this.#readFrontApp = read;
+		this.#findBrowser = findBrowser;
 	}
 
 	/**
 	 * The app in front of the user now, for omp's input to a tab. A read that throws (a stale native addon without
 	 * `macOSFrontApp`) turns the reads off for good, so the input itself still goes out.
 	 */
-	#readFrontAtInput(read: () => FrontApp | null): { app: FrontApp; at: number } | null {
+	#readFrontAtInput(
+		read: (browserPid: number | null) => FrontApp | null,
+		browserPid: number | null,
+	): { app: FrontApp; at: number } | null {
 		try {
-			const app = read();
+			const app = read(browserPid);
 			return app && { app, at: Date.now() };
 		} catch (err) {
 			this.#readFrontApp = undefined;
@@ -1272,7 +1308,7 @@ export class RelayBridge {
 		if (!front || Date.now() < this.#keepingFrontUntil || Date.now() - front.at > POPUP_AFTER_INPUT_MS) return;
 		const until = Date.now() + KEEP_FRONT_MS;
 		this.#keepingFrontUntil = until;
-		front.app.keepInFront(KEEP_FRONT_MS).then(
+		front.app.keepInFront(KEEP_FRONT_MS, this.#instances.get(tab.instanceId)?.browserPid ?? null).then(
 			times => {
 				if (times > 0) this.#log("put the user's app back in front", { times });
 				if (this.#keepingFrontUntil === until) this.#keepingFrontUntil = 0;

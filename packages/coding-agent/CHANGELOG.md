@@ -423,6 +423,10 @@
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
 
+### Fixed
+
+- Fixed a key or two you type in another app on macOS being lost while omp's relay tab opens a new tab or popup; they now reach your app when omp has the Accessibility permission the `computer` tool uses, and `PI_BROWSER_RELAY_KEEP_FRONT=0` turns this off with the hand-back
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { relayCdpClientsOf } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import {
@@ -6,6 +6,7 @@ import {
 	type RelayUnavailableInfo,
 	startRelayServer,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
+import * as natives from "@oh-my-pi/pi-natives";
 
 const EXTENSION_HELLO = {
 	t: "hello",
@@ -196,4 +197,34 @@ describe("browser relay discovery endpoint", () => {
 		while (after.clients !== 0 && Date.now() < deadline) after = await discovery();
 		expect(after).toEqual({ status: 200, clients: 0 });
 	});
+});
+
+describe("browser relay with PI_BROWSER_RELAY_KEEP_FRONT=0", () => {
+	const saved = process.env.PI_BROWSER_RELAY_KEEP_FRONT;
+	let relay: RelayServer | undefined;
+	let extension: WebSocket | undefined;
+
+	afterEach(() => {
+		extension?.close();
+		relay?.stop();
+		extension = undefined;
+		relay = undefined;
+		vi.restoreAllMocks();
+		if (saved === undefined) delete process.env.PI_BROWSER_RELAY_KEEP_FRONT;
+		else process.env.PI_BROWSER_RELAY_KEEP_FRONT = saved;
+	});
+
+	// Only macOS looks up the browser behind an extension socket, to send the user's keys back from it.
+	it.skipIf(process.platform !== "darwin")(
+		"never looks up the browser behind a connecting extension, so no key reroute is set up",
+		async () => {
+			const lookups = vi.spyOn(natives, "macOSLoopbackPeerApp").mockResolvedValue(null);
+			process.env.PI_BROWSER_RELAY_KEEP_FRONT = "0";
+			const port = await findFreeCdpPort();
+			relay = startRelayServer({ port });
+			extension = await connectExtension(port);
+			await waitForDiscovery(port);
+			expect(lookups).not.toHaveBeenCalled();
+		},
+	);
 });
