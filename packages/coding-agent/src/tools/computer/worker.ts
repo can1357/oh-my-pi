@@ -20,6 +20,7 @@ import type {
 	DesktopCapabilities,
 	DesktopCapture,
 	DesktopDisplay,
+	DesktopDragResult,
 	DesktopFocusReturn,
 	DesktopPoint,
 	DesktopScreenState,
@@ -101,7 +102,7 @@ export interface NativeDesktopSession {
 	bringToCurrentSpace(windowId: string): Promise<void>;
 	click(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
 	moveMouse(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
-	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): InputCall;
+	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): Promise<DesktopDragResult | null | void>;
 	scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | null): InputCall;
 	typeText(target: string, text: string, opts?: PointerOptions | null): InputCall;
 	keyChord(target: string, keys: string[], opts?: PointerOptions | null): InputCall;
@@ -152,6 +153,8 @@ type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
 type HoldOptions = Pick<NativeHoldOptions, "duration" | "takeover">;
 type HoldMouseOptions = Pick<NativeHoldOptions, "duration" | "button" | "keys" | "takeover">;
 type ObservationResult = ScreenshotResult & { ax: string; nodeCount: number; truncated: boolean };
+/** Characters of a drag's selected text the tool output names. */
+const DRAG_SELECTION_SHOWN = 200;
 
 type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
 interface ActiveRun {
@@ -1093,24 +1096,39 @@ class Win {
 		);
 	}
 
-	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<void> {
+	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<AxTextSelection | undefined> {
 		const context = this.#guardInput("drag");
 		const native = pointerOptions(options);
 		refusePointerMenu(this.#session, context, "drag", native, `window ${this.id}`);
 		refuseMenuPress(this.#session, context, native);
+		let selection: AxTextSelection | undefined;
 		await sendInput(
 			this.#session,
 			context,
 			"drag",
 			native.takeover,
-			fallback =>
-				this.#session.drag(
+			async fallback => {
+				const result = await this.#session.drag(
 					this.id,
 					points.map(([x, y]) => ({ x, y })),
 					{ ...native, ...fallback },
-				),
+				);
+				selection = result?.selection;
+				return result?.focusReturn;
+			},
 			this.pid,
 		);
+		if (!selection) return undefined;
+		// The whole text is in the returned selection; the output line only names it.
+		const shown =
+			selection.text.length > DRAG_SELECTION_SHOWN
+				? `${selection.text.slice(0, DRAG_SELECTION_SHOWN)}…`
+				: selection.text;
+		context.output.push({
+			type: "text",
+			text: `drag selected ${JSON.stringify(shown)} through accessibility instead of dragging; no mouse input was sent`,
+		});
+		return selection;
 	}
 
 	async scroll(x: number, y: number, options: ScrollOptions = {}): Promise<void> {
