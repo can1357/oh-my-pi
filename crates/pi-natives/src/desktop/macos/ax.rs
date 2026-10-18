@@ -22,6 +22,7 @@ use objc2_core_foundation::{
 	CFArray, CFBoolean, CFDate, CFIndex, CFNull, CFNumber, CFRange, CFRetained, CFString,
 	CFTimeZone, CFType, CFURL, CGPoint, CGSize, Type,
 };
+pub(super) use selection::select_dragged;
 
 use super::{
 	super::{
@@ -2103,6 +2104,28 @@ fn copy_attribute_result(
 
 fn copy_attribute(element: &AXUIElement, attribute: &str) -> Option<CFRetained<CFType>> {
 	copy_attribute_result(element, attribute).ok().flatten()
+}
+
+/// Reads parameterized `attribute` of `element` for `parameter`, or `None`
+/// when the element does not answer it.
+fn copy_parameterized(
+	element: &AXUIElement,
+	attribute: &str,
+	parameter: &CFType,
+) -> Option<CFRetained<CFType>> {
+	let attribute = CFString::from_str(attribute);
+	let mut output: *const CFType = ptr::null();
+	// SAFETY: `output` is writable and receives a create-rule retained CF
+	// object on success; the element, attribute and parameter outlive the call.
+	let error = unsafe {
+		element.copy_parameterized_attribute_value(&attribute, parameter, NonNull::from(&mut output))
+	};
+	if error != AXError::Success {
+		return None;
+	}
+	// SAFETY: AXUIElementCopyParameterizedAttributeValue returns a +1 object
+	// on success.
+	NonNull::new(output.cast_mut()).map(|pointer| unsafe { CFRetained::from_raw(pointer) })
 }
 
 /// Reads an optional attribute of an element a ref names: a destroyed element
