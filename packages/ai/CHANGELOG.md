@@ -3,7 +3,7 @@
 ## [Unreleased]
 ### Fixed
 
-- Added `logger.warn` to empty catch blocks in provider in-flight lock cleanup and MCP arg decoding paths, so silent failures are now visible in logs
+- Provider in-flight lock cleanup failures are now logged instead of silently ignored, and MCP argument values that are not JSON are logged at debug level when they fall back to text
 
 ### Added
 
