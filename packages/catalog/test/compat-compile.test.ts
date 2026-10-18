@@ -137,7 +137,7 @@ describe("compat compiler grammar", () => {
 			compileCascade([
 				{
 					file: "providers/test.kdl",
-					text: `provider "p" {\n\tmodels "m" {\n\t\tcredit-promotion { ${body} }\n\t}\n}`,
+					text: `provider "p" {\n\tmodels "m" {\n\t\tcredit-rates { input 2 }\n\t\tcredit-promotion { ${body} }\n\t}\n}`,
 				},
 			]);
 		const valid = 'discount 0.2; starts "2026-08-22T00:00:00Z"; ends "2026-11-22T00:00:00Z"; label "20% off"';
@@ -157,14 +157,26 @@ describe("compat compiler grammar", () => {
 			valid.replace('"2026-11-22T00:00:00Z"', '"2026-08-01T00:00:00Z"'),
 			valid.replace('"2026-08-22T00:00:00Z"', '"Aug 22 2026"'),
 			valid.replace('"2026-11-22T00:00:00Z"', '"2026-11-22T00:00:00"'),
+			valid
+				.replace('"2026-11-22T00:00:00Z"', '"2026-02-30T00:00:00Z"')
+				.replace('"2026-08-22T00:00:00Z"', '"2026-02-01T00:00:00Z"'),
+			valid.replace('"2026-11-22T00:00:00Z"', '"2026-11-22T24:00:00Z"'),
 			valid.replace('; label "20% off"', ""),
 			valid.replace('label "20% off"', 'label ""'),
 			`${valid}; scope "all"`,
 		]) {
 			expect(() => source(body)).toThrow(
-				/providers\/test\.kdl:3.*directive `credit-promotion` has a malformed value/,
+				/providers\/test\.kdl:4.*directive `credit-promotion` has a malformed value/,
 			);
 		}
+		expect(() =>
+			compileCascade([
+				{
+					file: "providers/test.kdl",
+					text: `provider "p" {\n\tmodels "m" {\n\t\tcredit-promotion { ${valid} }\n\t}\n}`,
+				},
+			]),
+		).toThrow(/providers\/test\.kdl:3.*`credit-promotion` must follow `credit-rates`/);
 	});
 
 	test("malformed scalar shape is rejected", () => {

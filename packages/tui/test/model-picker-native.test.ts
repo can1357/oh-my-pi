@@ -190,8 +190,13 @@ test("Factory Droid rows carry the base credit rate and a credit-only model is n
 test("a promoted Factory Droid rate keeps the narrow price column to the rate alone", () => {
 	const promoted = {
 		...model("factory-droid", "gpt-5.6-sol"),
-		factoryDroidCredits: 1.6,
-		factoryDroidCreditPromotion: { label: "20% off", endsAt: Date.parse("2026-11-22T00:00:00Z") },
+		factoryDroidCredits: 2,
+		factoryDroidCreditPromotion: {
+			discount: 0.2,
+			startsAt: Date.now() - 86_400_000,
+			endsAt: Date.parse("2099-11-22T00:00:00Z"),
+			label: "20% off",
+		},
 	};
 	const hub = openHub({ assign: [], cancel: 0 }, [...MODELS, promoted]);
 	const items = props(hub.describe(withPicker)).items ?? [];

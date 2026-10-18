@@ -54,13 +54,19 @@ function objectValue(children: KdlNodeView[], verbatim: boolean): Record<string,
 	return object;
 }
 
-/** `starts`/`ends` of a credit promotion: an ISO-8601 UTC instant. */
+/**
+ * `starts`/`ends` of a credit promotion: an ISO-8601 UTC instant that names a
+ * real calendar time (`Date.parse` rolls `2026-02-30` over to March, so the
+ * parsed instant must print back to the same fields).
+ */
 function isUtcInstant(value: unknown): value is string {
-	return (
-		typeof value === "string" &&
-		/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?Z$/.test(value) &&
-		!Number.isNaN(Date.parse(value))
-	);
+	if (typeof value !== "string") return false;
+	const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})(?::(\d{2})(\.\d+)?)?Z$/.exec(value);
+	if (!match) return false;
+	const time = Date.parse(value);
+	if (Number.isNaN(time)) return false;
+	const printed = new Date(time).toISOString();
+	return printed.slice(0, 16) === match[1] && printed.slice(17, 19) === (match[2] ?? "00");
 }
 
 /**
@@ -132,6 +138,10 @@ export function collectAxis(node: KdlNodeView, axes: RuleAxes): void {
 	const map = axes[axis.set];
 	if (axis.key in map) {
 		throw new CompatCompileError(node.file, node.line, `axis \`${axis.key}\` assigned twice in one block`);
+	}
+	// A promotion discounts the block's own rates, so it follows them in the same block.
+	if (axis.key === "creditPromotion" && !("creditRates" in map)) {
+		throw new CompatCompileError(node.file, node.line, "`credit-promotion` must follow `credit-rates` in its block");
 	}
 	map[axis.key] = axisValue(node, axis);
 }

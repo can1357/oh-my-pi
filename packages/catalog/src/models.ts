@@ -77,6 +77,32 @@ export function getModelPricingStatus(model: Pick<Model<Api>, "cost" | "pricingS
 	return model.pricingStatus ?? "unknown";
 }
 
+/** Factory Droid credit rate in force at a time, and the promotion behind it when one applies. */
+export interface FactoryDroidCreditRate {
+	rate: number;
+	promotion?: { label: string; endsAt: number };
+}
+
+/**
+ * Factory Droid Standard Credits rate at `timestamp` (Unix ms, default now):
+ * the base rate, discounted and rounded to 4 places (as Factory bills it)
+ * while the model's credit promotion is in its `[startsAt, endsAt)` window.
+ * Undefined for models without a credit rate.
+ */
+export function getFactoryDroidCreditRate(
+	model: Pick<Model, "factoryDroidCredits" | "factoryDroidCreditPromotion">,
+	timestamp = Date.now(),
+): FactoryDroidCreditRate | undefined {
+	const base = model.factoryDroidCredits;
+	if (base === undefined) return undefined;
+	const promotion = model.factoryDroidCreditPromotion;
+	if (!promotion || timestamp < promotion.startsAt || timestamp >= promotion.endsAt) return { rate: base };
+	return {
+		rate: Number((base * (1 - promotion.discount)).toFixed(4)),
+		promotion: { label: promotion.label, endsAt: promotion.endsAt },
+	};
+}
+
 /**
  * The base token card in force at `timestamp` (Unix ms, default now): the
  * latest due `timeBased` effective rate, else the row's own legs. Price

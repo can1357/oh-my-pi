@@ -151,7 +151,9 @@
 
 ### Added
 
-- Added dated Factory Droid credit promotions (`credit-promotion` in the provider KDL): discovery applies the discount to a model's credit rate only inside the promotion window, with droid 0.244's current discounts on GPT-5.6 Sol, Gemini 3.7/3.8 Flash and Mistral Large 4
+- Added dated Factory Droid credit promotions (`credit-promotion` in the provider KDL): models carry the promotion window and `getFactoryDroidCreditRate` applies the discount only while it is in force, so cached models drop it once it ends; with droid 0.244's current discounts on GPT-5.6 Sol, Gemini 3.7/3.8 Flash and Mistral Large 4
+
+## [18.12.2] - 2026-10-18
 
 ### Changed
 

@@ -10,7 +10,12 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getEffectiveTokenCost, getModelPricingStatus, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import {
+	getEffectiveTokenCost,
+	getFactoryDroidCreditRate,
+	getModelPricingStatus,
+	modelsAreEqual,
+} from "@oh-my-pi/pi-catalog/models";
 import { modelKind, type ModelKind, type ModelPricingStatus } from "@oh-my-pi/pi-catalog/types";
 import type { Component } from "../tui";
 import { FuzzyCorpus, fuzzyRank } from "../fuzzy";
@@ -761,18 +766,24 @@ function formatCostLeg(n: number): string {
 	return s.includes(".") ? s.replace(/\.?0+$/, "") : s;
 }
 
+/** `20% off until 2026-11-22` for a Factory Droid credit promotion in force now; undefined otherwise. */
+function creditPromotionNote(model: Model): string | undefined {
+	const promotion = getFactoryDroidCreditRate(model)?.promotion;
+	return promotion ? `${promotion.label} until ${new Date(promotion.endsAt).toISOString().slice(0, 10)}` : undefined;
+}
+
 /**
- * Adds Factory Droid's `N×` Standard Credits rate to a dollar price, replacing
- * the price when the model has no dollar reference. The rate already includes
- * any promotion active at discovery; `withPromotion` appends its label and UTC
- * end date (`1.6× (20% off until 2026-11-22)`). The dollar reference never does.
+ * Adds Factory Droid's `N×` Standard Credits rate in force now (any live
+ * promotion applied) to a dollar price, replacing the price when the model has
+ * no dollar reference. `withPromotion` appends the promotion's label and UTC
+ * end date (`1.6× (20% off until 2026-11-22)`); row cells leave it to the
+ * detail and preview. The dollar reference never includes promotions.
  */
-function withCreditBadge(model: Model, price: string, withPromotion = true): string {
-	const credits = model.factoryDroidCredits;
+function withCreditBadge(model: Model, price: string, withPromotion = false): string {
+	const credits = getFactoryDroidCreditRate(model);
 	if (credits === undefined) return price;
-	const promotion = withPromotion ? model.factoryDroidCreditPromotion : undefined;
-	const until = promotion ? new Date(promotion.endsAt).toISOString().slice(0, 10) : undefined;
-	const badge = `${formatCostLeg(credits)}×${promotion ? ` (${promotion.label} until ${until})` : ""}`;
+	const note = withPromotion ? creditPromotionNote(model) : undefined;
+	const badge = `${formatCostLeg(credits.rate)}×${note ? ` (${note})` : ""}`;
 	const cost = getEffectiveTokenCost(model.cost);
 	return cost.input !== 0 || cost.output !== 0 ? `${price} ${badge}` : badge;
 }
@@ -813,8 +824,7 @@ function pickerPrice(model: Model): string {
 	if (declared !== undefined) return PRICING_STATUS_LABELS[declared].short;
 	if (isFreeModel(model)) return "free";
 	const cost = getEffectiveTokenCost(model.cost);
-	// The narrow picker column carries the rate alone; the preview names the promotion.
-	return withCreditBadge(model, `$${formatCostLeg(cost.input)}·${formatCostLeg(cost.output)}`, false);
+	return withCreditBadge(model, `$${formatCostLeg(cost.input)}·${formatCostLeg(cost.output)}`);
 }
 
 /** `$2 in · $10 out · $0.2 cache` for a model preview. */
@@ -824,7 +834,7 @@ function previewPrice(model: Model): string {
 	const cost = getEffectiveTokenCost(model.cost);
 	const parts = [`$${formatCostLeg(cost.input)} in`, `$${formatCostLeg(cost.output)} out`];
 	if (cost.cacheRead > 0) parts.push(`$${formatCostLeg(cost.cacheRead)} cache`);
-	return withCreditBadge(model, parts.join(" · "));
+	return withCreditBadge(model, parts.join(" · "), true);
 }
 
 /**
@@ -1631,6 +1641,9 @@ export class ModelBrowser implements Component {
 		} else if (model.tps != null && Number.isFinite(model.tps) && model.tps > 0) {
 			facts.push(`~${formatTps(model.tps)}`);
 		}
+		// Last fact before prose, so narrow widths cut it before capability and perf facts.
+		const promotion = creditPromotionNote(model);
+		if (promotion) facts.push(promotion);
 		if (model.description) {
 			const description = formatDescription(model.description);
 			if (description) facts.push(description);
@@ -1907,6 +1920,8 @@ export class ModelBrowser implements Component {
 			} else if (model.tps != null && Number.isFinite(model.tps) && model.tps > 0) {
 				facts.push(`~${formatTps(model.tps)}`);
 			}
+			const promotion = creditPromotionNote(model);
+			if (promotion) facts.push(promotion);
 			children.push(text([span(facts.join(" · "), "muted")], { wrap: "word" }));
 			const description = model.description ? formatDescription(model.description) : "";
 			if (description) children.push(text([span(description, "dim")], { wrap: "word", lines: 2 }));

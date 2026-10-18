@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, setSystemTime } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -21,7 +21,7 @@ import {
 } from "../src/discovery/factory-droid";
 import { Effort } from "../src/effort";
 import { resolveProviderModels } from "../src/model-manager";
-import { getBundledModel } from "../src/models";
+import { getBundledModel, getFactoryDroidCreditRate } from "../src/models";
 import { resolveModelCacheProviderId } from "../src/provider-models/cache-provider-id";
 import { factoryDroidModelManagerOptions } from "../src/provider-models/special";
 import type { FetchImpl, ModelSpec } from "../src/types";
@@ -208,30 +208,60 @@ describe("Factory Droid model builder", () => {
 			endsAt: Date.parse("2026-11-22T00:00:00Z"),
 			label: "20% off",
 		};
-		const promoted = syntheticModel({ creditRates: { input: 2, output: 5 }, creditPromotion: promotion });
+		const model = buildFactoryDroidModel(
+			syntheticModel({ creditRates: { input: 2, output: 5 }, creditPromotion: promotion }),
+		);
 
-		it("discounts the shown rate and names the promotion inside its window", () => {
-			const model = buildFactoryDroidModel(promoted, { now: promotion.startsAt });
-			expect(model.factoryDroidCredits).toBe(1.6);
-			expect(model.factoryDroidCreditPromotion).toEqual({ label: "20% off", endsAt: promotion.endsAt });
-		});
-
-		it.each([
-			["before the start", promotion.startsAt - 1],
-			["at the end", promotion.endsAt],
-		])("shows the base rate %s", (_, now) => {
-			const model = buildFactoryDroidModel(promoted, { now });
+		it("keeps the base rate on the model and discounts it only inside the window", () => {
 			expect(model.factoryDroidCredits).toBe(2);
-			expect(model.factoryDroidCreditPromotion).toBeUndefined();
+			expect(getFactoryDroidCreditRate(model, promotion.startsAt)).toEqual({
+				rate: 1.6,
+				promotion: { label: "20% off", endsAt: promotion.endsAt },
+			});
+			expect(getFactoryDroidCreditRate(model, promotion.startsAt - 1)).toEqual({ rate: 2 });
+			expect(getFactoryDroidCreditRate(model, promotion.endsAt)).toEqual({ rate: 2 });
 		});
 
 		it("reads registry promotions from KDL and applies them mid-window", () => {
 			const entry = factoryDroidRegistry().find(model => model.policy.creditPromotion && model.policy.creditRates);
 			if (!entry?.policy.creditPromotion || !entry.policy.creditRates) throw new Error("no promoted registry model");
 			const { startsAt, endsAt, discount } = entry.policy.creditPromotion;
-			const model = buildFactoryDroidModel(entry, { now: (startsAt + endsAt) / 2 });
-			expect(model.factoryDroidCredits).toBeCloseTo(entry.policy.creditRates.input * (1 - discount), 4);
-			expect(model.factoryDroidCreditPromotion?.endsAt).toBe(endsAt);
+			const credits = getFactoryDroidCreditRate(buildFactoryDroidModel(entry), (startsAt + endsAt) / 2);
+			expect(credits?.rate).toBeCloseTo(entry.policy.creditRates.input * (1 - discount), 4);
+			expect(credits?.promotion?.endsAt).toBe(endsAt);
+		});
+
+		it("drops a discount cached inside the window once the promotion ends", async () => {
+			const entry = factoryDroidRegistry().find(model => model.policy.creditPromotion && model.policy.creditRates);
+			if (!entry?.policy.creditPromotion || !entry.policy.creditRates) throw new Error("no promoted registry model");
+			const { startsAt, endsAt } = entry.policy.creditPromotion;
+			const id = entry.spec.id;
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "factory-promo-"));
+			const cacheDbPath = path.join(dir, "models.db");
+			const up = factoryEndpoints();
+			const down: FetchImpl = async () => new Response("down", { status: 503 });
+			const resolve = (fetch: FetchImpl, mode: "online" | "offline") =>
+				resolveProviderModels(
+					{ ...factoryDroidModelManagerOptions({ apiKey: "token", fetch }), cacheDbPath },
+					mode,
+				);
+			try {
+				setSystemTime(new Date((startsAt + endsAt) / 2));
+				const inside = (await resolve(up, "online")).models.find(model => model.id === id);
+				expect(inside && getFactoryDroidCreditRate(inside)?.promotion).toBeDefined();
+
+				setSystemTime(new Date(endsAt + 1));
+				for (const [fetch, mode] of [
+					[down, "offline"],
+					[down, "online"],
+				] as const) {
+					const cached = (await resolve(fetch, mode)).models.find(model => model.id === id);
+					expect(cached && getFactoryDroidCreditRate(cached)).toEqual({ rate: entry.policy.creditRates.input });
+				}
+			} finally {
+				setSystemTime();
+				await fs.rm(dir, { recursive: true, force: true });
+			}
 		});
 	});
 
