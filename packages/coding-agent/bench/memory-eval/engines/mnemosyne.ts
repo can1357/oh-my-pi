@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { DroppedRow, EngineAdapter, ProtocolName, RecallHit } from "../engine";
-import { PythonProcess } from "./python-process";
+import { envName, PythonProcess } from "./python-process";
 
 const EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5";
 const CACHE_ROOT = path.join(os.homedir(), ".cache", "omp-memory-eval");
@@ -64,11 +64,9 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 			return proc;
 		}
 		dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "mnemosyne-data-"));
-		// Parent MNEMOSYNE_* settings (recall weights, prefixes, ...) would silently change ranking or embeddings, and
-		// PYTHON* overrides (PYTHONPATH, PYTHONHOME, ...) could import another Mnemosyne than the pinned 4.0.0b4.
-		const inherited = Object.entries(Bun.env).filter(
-			([key]) => !key.startsWith("MNEMOSYNE_") && !key.startsWith("PYTHON"),
-		);
+		// Parent MNEMOSYNE_* settings (recall weights, prefixes, ...) would silently change ranking or embeddings;
+		// PythonProcess drops PYTHON* import overrides itself.
+		const inherited = Object.entries(Bun.env).filter(([key]) => !envName(key).startsWith("MNEMOSYNE_"));
 		proc = new PythonProcess("mnemosyne engine", python, script, {
 			...Object.fromEntries(inherited),
 			MNEMOSYNE_DATA_DIR: dataDir,
