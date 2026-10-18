@@ -71,6 +71,7 @@ import {
 	ObservationLedger,
 	type PendingSettle,
 	RefWindows,
+	readBackForms,
 	readBackName,
 	renderGone,
 	renderNewWindow,
@@ -1574,16 +1575,16 @@ class InputObserver {
 			throwIfAborted(signal);
 			// Keys and clicks sent while an app still draws what the last input opened land on the wrong control.
 			await this.settle(signal);
-			let roster: Promise<DesktopWindow[] | undefined> | undefined;
+			let roster: DesktopWindow[] | undefined;
 			if (this.ledger.wantsRoster(cell)) {
+				// Listed before the input is sent, so it holds the windows as they were before it.
 				const claim = this.ledger.claimRoster(cell);
-				// Queued before the input, so native lists the windows as they were before it.
-				roster = this.#optional(signal, () => this.#unguarded.listWindows());
-				roster.then(claim.resolve, () => claim.resolve(undefined));
+				roster = await this.#optional(signal, () => this.#unguarded.listWindows());
+				claim.resolve(roster);
 			}
 			if ("root" in to) {
 				const at = to.point && desktopPoint(this.#rootDisplays.get(to.root) ?? [], to.point);
-				if (!to.point || at) window = await this.windowReached(signal, at, await roster);
+				if (!to.point || at) window = await this.windowReached(signal, at, roster);
 			}
 			let pid: number | undefined;
 			if (opens) this.ledger.noteAppInput(cell);
@@ -1998,15 +1999,17 @@ export class ComputerWorkerCore {
 			if (ledger.hasInput(request.cell)) await observer.settle(signal);
 			const pending = ledger.take(request.cell, request.output);
 			if (!pending) return undefined;
-			return await this.#report(session, ledger, signal, pending, request.readDeadline);
+			// The report follows the cell's own output inside one inline cap, and must not push that output out.
+			const budget = DEFAULT_MAX_BYTES - (request.output === "" ? 0 : Buffer.byteLength(request.output) + 2);
+			return await this.#report(session, ledger, signal, pending, request.readDeadline, budget);
 		} finally {
 			ledger.discard(request.cell);
 		}
 	}
 
 	/**
-	 * The report for one cell's pending input. Windows not read by `readDeadline`, or past the inline output
-	 * budget, are named instead and keep the model's last tree. `whole` prints every window whole, for a
+	 * The report for one cell's pending input. Windows not read by `readDeadline`, or past `budget` bytes, are
+	 * named instead (counted, past it even as names) and keep the model's last tree. `whole` prints every window whole, for a
 	 * conversation rewritten while the report was made.
 	 */
 	async #report(
@@ -2015,6 +2018,7 @@ export class ComputerWorkerCore {
 		signal: AbortSignal,
 		pending: PendingSettle,
 		readDeadline: number,
+		budget: number,
 	): Promise<SettleReport | undefined> {
 		const deadline = AbortSignal.timeout(Math.max(0, readDeadline - Date.now()));
 		const readSignal = AbortSignal.any([signal, deadline]);
@@ -2033,10 +2037,21 @@ export class ComputerWorkerCore {
 		const roster = "value" in listed ? listed.value : undefined;
 		const focused = roster?.find(window => window.focused);
 		type Shown = { window: InputWindow; text: string; options: AxReadOptions };
-		/** A window's section, whole too, the line naming it instead, and the tree it would make the model's. */
-		const sections: Array<{ text: string } | { text: string; whole: string; leftOut: string; shown: Shown }> = [];
+		/**
+		 * A window's section: `name`, the line naming it, alone or replaced by the first of `forms` that fits
+		 * (`whole` when every window prints whole), which makes `shown` the model's tree.
+		 */
+		type Section = { name: string; forms?: string[]; whole?: string; shown?: Shown };
+		const lead: string[] = [];
+		const sections: Section[] = [];
+		/** Bytes the sections' names take so far: a new window whose name cannot fit any more is not read. */
+		let named = 0;
+		const push = (section: Section): void => {
+			named += Buffer.byteLength(section.name) + 2;
+			sections.push(section);
+		};
 		if (focused) ledger.attributeToFocused(pending, focused);
-		else if (pending.unattributed > 0) sections.push({ text: reportNote({ noFocusedWindow: true }) });
+		else if (pending.unattributed > 0) lead.push(reportNote({ noFocusedWindow: true }));
 		const latest = pending.outcome?.latest;
 		const unwatchedMs = latest && !latest.watched ? latest.sinceInputMs : undefined;
 		// A sheet, popover or chooser that left the list hands its app's focus on: that window is read right after it.
@@ -2066,7 +2081,7 @@ export class ComputerWorkerCore {
 		for (const touched of queue) {
 			const window = roster?.find(candidate => candidate.id === touched.id);
 			if (roster && !window) {
-				sections.push({ text: renderGone(touched) });
+				push({ name: renderGone(touched) });
 				continue;
 			}
 			const read = await budgeted(() => session.axSnapshot(touched.id, touched.options));
@@ -2074,14 +2089,14 @@ export class ComputerWorkerCore {
 				const text = read.value.text;
 				const change = touched.baseline === undefined ? undefined : diffTree(touched.baseline, text);
 				const readBack = { touched, window, text, change, unwatchedMs };
-				sections.push({
-					text: renderReadBack(readBack),
+				push({
+					name: reportNote({ leftOut: readBackName(readBack) }),
+					forms: readBackForms(readBack),
 					whole: renderReadBack({ ...readBack, change: undefined }),
-					leftOut: reportNote({ leftOut: readBackName(readBack) }),
 					shown: { window: { id: touched.id, pid: window?.pid }, text, options: touched.options },
 				});
-			} else if (read.error !== undefined) sections.push({ text: renderUnreadable(touched, window, read.error) });
-			else sections.push({ text: reportNote({ budgetSpent: JSON.stringify(touched.id) }) });
+			} else if (read.error !== undefined) push({ name: renderUnreadable(touched, window, read.error) });
+			else push({ name: reportNote({ budgetSpent: readBackName({ touched, window, text: "" }) }) });
 		}
 		// Windows that appeared while the input ran hold the model's next step, and it has no tree of them. In the
 		// background they often open without the focus: a rename field, a date picker, the document another app
@@ -2092,17 +2107,29 @@ export class ComputerWorkerCore {
 				if (before.has(opened.id) || reported.has(opened.id)) continue;
 				if (!pending.windowInput && !(opened.pid !== undefined && pending.pids.has(opened.pid))) continue;
 				reported.add(opened.id);
+				const name = newWindowName(opened);
+				const leftOut = reportNote({ leftOut: name });
+				// Past the budget even as a name: it is only counted, so its tree is not read.
+				if (named + Buffer.byteLength(leftOut) + 2 > budget) {
+					push({ name: leftOut });
+					continue;
+				}
 				const read = await budgeted(() => session.axSnapshot(opened.id, {}));
-				// Unreadable or out of time, it is still named.
 				if (!("value" in read)) {
-					sections.push({ text: newWindowName(opened) });
+					push({
+						name:
+							read.error === undefined
+								? reportNote({ budgetSpent: name })
+								: `${name} could not be read back through AX: ${read.error}`,
+					});
 					continue;
 				}
 				const text = read.value.text;
-				sections.push({
-					text: renderNewWindow(opened, text),
-					whole: renderNewWindow(opened, text),
-					leftOut: reportNote({ leftOut: newWindowName(opened) }),
+				const form = renderNewWindow(opened, text);
+				push({
+					name: leftOut,
+					forms: [form],
+					whole: form,
 					shown: { window: { id: opened.id, pid: opened.pid }, text, options: {} },
 				});
 			}
@@ -2115,33 +2142,49 @@ export class ComputerWorkerCore {
 		const capped = pending.outcome?.capped;
 		if (capped) tail.push(reportNote({ stillChanging: (capped.sinceInputMs / 1000).toFixed(1) }));
 		const webNote = reportNote({ webContent: true });
-		const mayNoteWeb = sections.some(section => "shown" in section && WEB_AREA_ROW.test(section.shown.text));
-		/** The report with each window's section in its `form`, and the trees it printed. */
-		const fit = (form: "text" | "whole"): { text: string; shown: Shown[] } => {
-			// Budget left with every window named by its line; each section in turn replaces its line if it fits.
-			let room =
-				DEFAULT_MAX_BYTES -
-				Buffer.byteLength(
-					[...sections.map(section => ("leftOut" in section ? section.leftOut : section.text)), ...tail]
-						.concat(mayNoteWeb ? [webNote] : [])
-						.join("\n\n"),
-				);
+		const mayNoteWeb = sections.some(section => section.shown !== undefined && WEB_AREA_ROW.test(section.shown.text));
+		/**
+		 * The report with each section in its preferred forms (`whole`: every window whole), within `budget`, and
+		 * the trees it printed. Every section is named first, in order, while names fit; the rest collapse into one
+		 * count. Then each named section in turn takes the first of its forms that still fits.
+		 */
+		const fit = (whole: boolean): { text: string; shown: Shown[] } => {
+			const fixed = [...lead, ...tail, ...(mayNoteWeb ? [webNote] : [])];
+			const collapse = reportNote({ moreLeftOut: sections.length });
+			let room = budget - Buffer.byteLength(fixed.join("\n\n")) - Buffer.byteLength(collapse) - 2;
+			let collapsed = 0;
+			const kept: Array<{ section: Section; text: string }> = [];
+			for (const section of sections) {
+				const cost = Buffer.byteLength(section.name) + 2;
+				if (collapsed > 0 || cost > room) collapsed++;
+				else {
+					room -= cost;
+					kept.push({ section, text: section.name });
+				}
+			}
+			if (collapsed === 0) room += Buffer.byteLength(collapse) + 2;
 			const shown: Shown[] = [];
-			const texts = sections.map(section => {
-				if (!("shown" in section)) return section.text;
-				const extra = Buffer.byteLength(section[form]) - Buffer.byteLength(section.leftOut);
-				if (extra > room) return section.leftOut;
-				room -= extra;
-				shown.push(section.shown);
-				return section[form];
-			});
+			for (const entry of kept) {
+				const { section } = entry;
+				const forms = whole && section.whole !== undefined ? [section.whole] : (section.forms ?? []);
+				for (const form of forms) {
+					const extra = Buffer.byteLength(form) - Buffer.byteLength(section.name);
+					if (extra > room) continue;
+					room -= extra;
+					entry.text = form;
+					if (section.shown) shown.push(section.shown);
+					break;
+				}
+			}
+			const texts = kept.map(entry => entry.text);
+			if (collapsed > 0) texts.push(reportNote({ moreLeftOut: collapsed }));
 			const notes = shown.some(({ text }) => WEB_AREA_ROW.test(text)) ? [webNote] : [];
-			return { text: [...texts, ...tail, ...notes].join("\n\n"), shown };
+			return { text: [...lead, ...texts, ...tail, ...notes].join("\n\n"), shown };
 		};
-		const report = fit("text");
+		const report = fit(false);
 		if (report.text === "") return undefined;
 		for (const { window, text, options } of report.shown) ledger.recordShown(window, text, options);
-		const whole = fit("whole").text;
+		const whole = fit(true).text;
 		return whole === report.text ? { text: report.text } : { text: report.text, whole };
 	}
 

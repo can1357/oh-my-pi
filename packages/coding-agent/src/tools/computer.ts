@@ -211,6 +211,8 @@ export function createComputerPrelude(
 				// Cancellation of the turn needs no report; anything else leaves the
 				// model without its post-input observation, so it is told to look.
 				if (cell.signal.aborted) return undefined;
+				// The worker may have taken the report's trees as the model's before the request failed.
+				undelivered = true;
 				const message = error instanceof Error ? error.message : String(error);
 				logger.debug("Computer cell settle failed", { error: message });
 				return { text: reportNote({ noReport: message }) };

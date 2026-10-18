@@ -179,7 +179,7 @@ export interface PendingSettle {
 	pids: Set<number>;
 	/** Inputs whose window is unknown; they are shown on the focused window. */
 	unattributed: number;
-	/** Whether the cell sent input to a window, not only `apps.open`. */
+	/** Whether the cell sent input that reached a known window (not only `apps.open` or input reaching none). */
 	windowInput: boolean;
 	/** Window list before the cell's first input, when it could be read. */
 	rosterBefore?: DesktopWindow[];
@@ -474,6 +474,13 @@ export class ObservationLedger {
 		reads.recentChars = reads.recent[0]?.text.length ?? 0;
 	}
 
+	/** Tree texts held for unreported cells' reads, across cells and windows. */
+	get retainedReads(): number {
+		let count = 0;
+		for (const state of this.#cells.values()) for (const reads of state.reads.values()) count += reads.recent.length;
+		return count;
+	}
+
 	/** Whether no input of the cell since its last report has claimed the roster-before read yet. */
 	wantsRoster(cell: CellKey): boolean {
 		return this.#cells.get(cell)?.rosterClaimed !== true;
@@ -494,7 +501,7 @@ export class ObservationLedger {
 	noteInput(cell: CellKey, window: InputWindow | undefined): number | undefined {
 		const state = this.#cell(cell);
 		state.inputs++;
-		state.windowInput = true;
+		state.windowInput ||= window !== undefined;
 		if (!window) {
 			state.unattributed++;
 			return undefined;
@@ -648,26 +655,34 @@ export function readBackName(readBack: ReadBack): string {
 	return windowName(readBack.window, readBack.touched);
 }
 
-/**
- * One window's section: its changes, a no-change line, or the whole tree when the model has none or a diff
- * would take half its length or more, which reads worse than the tree.
- */
+/** One window's section in the form it reads best in; see `readBackForms`. */
 export function renderReadBack(readBack: ReadBack): string {
+	return readBackForms(readBack)[0];
+}
+
+/**
+ * One window's section, best form first: its changes, a no-change line, or the whole tree when the model has
+ * none or a diff would take half its length or more, which reads worse than the tree. Such a diff, when shorter
+ * than the tree, follows as the form to print when the tree does not fit.
+ */
+export function readBackForms(readBack: ReadBack): [string, ...string[]] {
 	const { change, text } = readBack;
 	const name = readBackName(readBack);
-	if (!change) return `${name}:\n${text}`;
+	const whole = `${name}:\n${text}`;
+	if (!change) return [whole];
 	const lines = [...change.lines];
 	if (change.removed.length > 0) lines.push(`removed: ${refRuns(change.removed)}`);
 	if (change.pastLimit.length > 0) lines.push(`past this read's node limit: ${refRuns(change.pastLimit)}`);
 	if (lines.length === 0) {
 		const after =
 			readBack.unwatchedMs === undefined ? "" : `, ${(readBack.unwatchedMs / 1000).toFixed(1)} s after the input`;
-		return `${name}: no change since your last tree${after}`;
+		return [`${name}: no change since your last tree${after}`];
 	}
 	const diff = lines.join("\n");
-	if (diff.length * 2 >= text.length) return `${name}:\n${text}`;
+	if (diff.length >= text.length) return [whole];
 	const count = change.lines.length + change.removed.length;
-	return `${name}: ${count} ${count === 1 ? "change" : "changes"} since your last tree\n${diff}`;
+	const changes = `${name}: ${count} ${count === 1 ? "change" : "changes"} since your last tree\n${diff}`;
+	return diff.length * 2 >= text.length ? [whole, changes] : [changes];
 }
 
 /** A window that appeared while the cell's input ran: `new window "43" Code "Save" 30×12 (focused)`. */
@@ -692,6 +707,7 @@ export type ReportNote =
 	| { webContent: true }
 	| { stillChanging: string }
 	| { budgetSpent: string }
+	| { moreLeftOut: number }
 	| { noFocusedWindow: true }
 	| { leftOut: string }
 	| { noReport: string };

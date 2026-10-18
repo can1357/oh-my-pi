@@ -5256,15 +5256,23 @@ describe("computer cell settlement", () => {
 		expect(await settle("done")).toBe(unchanged());
 	});
 
-	it("reports a window whose post-input reads overflowed the bound even when the cell printed the last", () => {
+	it("holds one tree per window across a read loop, a bounded few after an input, and reports a window that overflowed them", () => {
 		const ledger = new ObservationLedger(new RefWindows());
 		const window = { id: "42" };
+		const reads = (prefix: string) => {
+			let last = "";
+			for (let index = 0; index < 100; index++) {
+				last = `- statictext "${prefix}${index}" [ref=e1]`;
+				ledger.recordRead("cell", window, last, {});
+			}
+			return last;
+		};
+		reads("");
+		expect(ledger.retainedReads).toBe(1);
 		ledger.noteInput("cell", window);
-		let last = "";
-		for (let index = 0; index < 20; index++) {
-			last = `- statictext "after ${index}" [ref=e1]`;
-			ledger.recordRead("cell", window, last, {});
-		}
+		const last = reads("after ");
+		expect(ledger.retainedReads).toBeLessThanOrEqual(8);
+		// The cell printed its last read, but reads it dropped could have been the printed copy.
 		expect(ledger.take("cell", last)?.touched.map(touched => touched.id)).toEqual(["42"]);
 	});
 
@@ -5421,7 +5429,7 @@ describe("computer cell settlement", () => {
 		expect(report.match(/new window "/g)).toHaveLength(2);
 	});
 
-	it("still reads another app's new window after window input whose own window the cell printed", async () => {
+	it("prints another app's new window after input to a window, even when the cell printed that window's tree", async () => {
 		const { native, run, read, settle } = reportWorker();
 		await read();
 		native.axPerform = async () => {
@@ -5447,7 +5455,98 @@ describe("computer cell settlement", () => {
 			return await axSnapshot(target);
 		};
 		await run('await (await desktop.ref("e2")).press()');
-		expect(await settle()).toBe(`${unchanged()}\n\nnew window "50" TextEdit "notes.txt" 40×20`);
+		expect(await settle()).toContain(
+			'new window "50" TextEdit "notes.txt" 40×20 could not be read back through AX: AxFailed: the window did not answer',
+		);
+	});
+
+	it("does not print another app's window that opens during desktop input that reached no window", async () => {
+		const { native, run, read, settle } = reportWorker();
+		await read();
+		native.click = async () => void (native.windows = [windowFixture, textEditDocument]);
+		await run("await desktop.click(1, 2)");
+		expect(String(await settle())).not.toContain("TextEdit");
+	});
+
+	it("counts the new windows past the inline budget in one line, without reading their trees", async () => {
+		const { native, run, read, settle } = reportWorker();
+		await read();
+		const opened = Array.from({ length: 400 }, (_, index) => ({
+			...textEditDocument,
+			id: `${1000 + index}`,
+			app: `App${index}`,
+			title: `Window title number ${index} with some words in it`,
+			pid: 2000 + index,
+		}));
+		native.axPerform = async () => void (native.windows = [windowFixture, ...opened]);
+		await run('await (await desktop.ref("e2")).press()');
+		const snapshots = native.snapshots;
+		const report = String(await settle());
+		expect(Buffer.byteLength(report)).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
+		const shown = report.match(/^new window "/gm)?.length ?? 0;
+		const more = Number(
+			/\nand (\d+) more windows were left out to keep this report short; desktop\.windows\(\) lists them/.exec(
+				report,
+			)?.[1],
+		);
+		expect(shown + more).toBe(400);
+		expect(native.snapshots - snapshots).toBeLessThan(400);
+	});
+
+	it("lists the windows before an input that opens one, though the list answers late", async () => {
+		const native = new EditableWindowSession();
+		const listWindows = native.listWindows.bind(native);
+		native.listWindows = async () => {
+			const later = Promise.withResolvers<void>();
+			setTimeout(later.resolve, 20);
+			await later.promise;
+			return await listWindows();
+		};
+		const { run, read, settle } = reportWorker(native);
+		await read();
+		native.axPerform = async () => void (native.windows = [windowFixture, textEditDocument]);
+		await run('await (await desktop.ref("e2")).press()');
+		expect(String(await settle())).toContain('new window "50" TextEdit "notes.txt" 40×20:\n- window ');
+	});
+
+	it("keeps a cell's own output inside the inline cap, naming the windows its report has no room for", async () => {
+		const native = new EditableWindowSession();
+		native.filler = 400;
+		const { run, settle } = reportWorker(native);
+		await run('await (await desktop.window("42")).press("shift")');
+		const output = `${"cell output line\n".repeat(2_400)}`;
+		const report = String(await settle(output));
+		expect(Buffer.byteLength(output) + 2 + Buffer.byteLength(report)).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
+		expect(report).toBe(
+			'window "42" Code "Editor": its tree was left out to keep this report short; win.ax() prints it',
+		);
+	});
+
+	it("prints a diff that fits when the whole tree it would prefer does not", async () => {
+		// 800 rows whose values a key changes for 60% of them: past half, so the whole tree reads better, but beside
+		// the cell's output only the diff fits.
+		let changed = 0;
+		const rows = (count: number) =>
+			Array.from(
+				{ length: 800 },
+				(_, index) =>
+					`  - statictext [ref=e${100 + index}]: "Row ${index} ${index < count ? "after" : "before"} the edit, padding"`,
+			);
+		const native = new EditableWindowSession();
+		native.axSnapshot = async () => ({
+			text: ['- window "Editor" [ref=e1] app=Code (focused)', ...rows(changed)].join("\n"),
+		});
+		native.keyStatus = () => {
+			changed = 480;
+			return "Saved";
+		};
+		const { run, read, settle } = reportWorker(native);
+		const tree = await read();
+		await run('await (await desktop.window("42")).press("cmd+s")');
+		const output = "x".repeat(DEFAULT_MAX_BYTES - tree.length + 1_000);
+		const report = String(await settle(output));
+		expect(report).toStartWith('window "42" Code "Editor": 480 changes since your last tree\n');
+		expect(Buffer.byteLength(output) + 2 + Buffer.byteLength(report)).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
 	});
 
 	it("keeps the report within the inline budget, naming windows left out, which keep the model's last tree", async () => {
@@ -5480,10 +5579,10 @@ describe("computer cell settlement", () => {
 		await run('for (const id of ["42", "43", "44"]) await (await desktop.window(id)).press("shift")');
 		native.hangOn = "43";
 		// Reads stop 2 s short of the request's budget: 0.3 s here.
-		const spent = (id: string) =>
-			`window "${id}" was not read back: the report's time budget is spent; read it yourself`;
+		const spent = (id: string, title: string) =>
+			`window "${id}" Code "${title}" was not read back: the report's time budget is spent; read it yourself`;
 		expect(await settle("", false, { timeoutMs: 2_300 })).toBe(
-			[changed(['  ~ statictext [ref=e5]: "Saving"']), spent("43"), spent("44")].join("\n\n"),
+			[changed(['  ~ statictext [ref=e5]: "Saving"']), spent("43", "Slow"), spent("44", "Later")].join("\n\n"),
 		);
 
 		native.waitForUiQuiet = async () => await Promise.withResolvers<UiQuiet>().promise;
@@ -5602,6 +5701,13 @@ describe("computer cell settlement", () => {
 		expect(await act()).toEqual({ text: 'window "42": no change' });
 		await act();
 		expect(forgets).toEqual([false, true, true, false]);
+
+		// A settle that failed after the worker took its trees as seen leaves the next report printing whole.
+		fail = "the post-input report timed out after 16000ms";
+		await act();
+		fail = undefined;
+		await act();
+		expect(forgets.slice(-2)).toEqual([false, true]);
 	});
 
 	it("forgets trees of a report its cancelled cell dropped, and discards a cell cancelled before it settled once", async () => {
