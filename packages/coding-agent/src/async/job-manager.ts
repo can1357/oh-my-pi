@@ -87,12 +87,15 @@ export interface AsyncJobDetails extends Record<string, unknown> {
 /**
  * Pick the task-progress record for a job out of `latestDetails`.
  *
- * A batch call reports one shared `progress[]` whose rows carry each spawn's
- * *requested* agent id, while `register()` suffixes a job id on collision —
- * so match the job's own id first, then its `agentId`. Matching only the job
- * id would fall through to another spawn's row and report the wrong model
- * (#16017 review); there is deliberately no first-row fallback, because an
- * unmatched row belongs to a different run.
+ * Progress rows are keyed by the spawn's *requested* agent id: `buildAsyncDetails()`
+ * reports `spawns.map(spawn => spawn.progress)`, and each row's id is the agent id
+ * the spawn asked for. `register()` suffixes a job id on collision, so the job id
+ * is not the row key — `agentId` is. Match `agentId` across the whole array
+ * before considering the job id: a mixed batch can hold an earlier row whose id
+ * *is* another job's suffix (rows `worker-2, worker` with `{ jobId: "worker-2",
+ * agentId: "worker" }`), and a single-pass OR would return that row first
+ * (#16135 review). There is deliberately no first-row fallback — an unmatched
+ * row belongs to a different run.
  */
 export function jobProgressRecord(
 	details: AsyncJobDetails | undefined,
@@ -101,12 +104,15 @@ export function jobProgressRecord(
 ): Record<string, unknown> | undefined {
 	const value = details?.progress;
 	if (!Array.isArray(value)) return undefined;
+	const rows: Record<string, unknown>[] = [];
 	for (const item of value) {
-		if (!item || typeof item !== "object") continue;
-		const candidate = item as Record<string, unknown>;
-		if (candidate.id === jobId || (agentId !== undefined && candidate.id === agentId)) return candidate;
+		if (item && typeof item === "object") rows.push(item as Record<string, unknown>);
 	}
-	return undefined;
+	if (agentId !== undefined) {
+		const byAgentId = rows.find(row => row.id === agentId);
+		if (byAgentId) return byAgentId;
+	}
+	return rows.find(row => row.id === jobId);
 }
 
 export interface AsyncJob {

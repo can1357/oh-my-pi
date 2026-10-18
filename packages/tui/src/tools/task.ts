@@ -14,7 +14,7 @@ import { Container, type Component } from "../tui";
 import { Markdown } from "../components/markdown";
 import { Text } from "../components/text";
 import { visibleWidth, wrapTextWithAnsi } from "../utils";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { escapeXmlAttribute, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "./renderer";
 import { formatAgentStatRun, renderAgentTreeRow } from "./agent-tree";
 import { getMarkdownTheme, type Theme } from "../theme/theme";
@@ -2316,6 +2316,11 @@ function nonEmptyString(value: unknown): string | undefined {
  * boundary hand in their untyped record (a settled `SingleResult` or a
  * streamed progress record) and get the same trimming and identity-fallback
  * semantics, so the envelope and the delivery `details` cannot disagree.
+ *
+ * `selector` is escaped for an XML attribute value: a configured model id may
+ * contain `"` (the model schema accepts any string), which would otherwise close
+ * `model="…"` and let the rest of the id forge `fallback` or the rest of the
+ * `<task-result>` tag (#16135 review).
  */
 export function resolvedModelDisplay(result: {
 	resolvedModel?: unknown;
@@ -2324,7 +2329,7 @@ export function resolvedModelDisplay(result: {
 }): ResolvedModelDisplay | undefined {
 	const selector = nonEmptyString(result.resolvedModel) ?? nonEmptyString(result.resolvedModelIdentity);
 	if (selector === undefined) return undefined;
-	return { selector, fallback: result.resolvedModelIsFallback === true };
+	return { selector: escapeXmlAttribute(selector), fallback: result.resolvedModelIsFallback === true };
 }
 
 /** A code review finding reported by the reviewer agent */

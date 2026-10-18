@@ -629,6 +629,38 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 	});
 
+	it("prefers the job's agent id over an earlier row whose id is the job-id suffix", () => {
+		// A mixed batch can produce a row whose id equals another job's suffix:
+		// rows `worker-2, worker`, with a live `worker` job forcing the async job
+		// to `{ jobId: "worker-2", agentId: "worker" }`. Matching the job id
+		// first returned the earlier row's model (#16135 review); the rows are
+		// keyed by the requested agent id, so that is the id to match.
+		const job: AsyncJob = {
+			id: "worker-2",
+			agentId: "worker",
+			type: "task",
+			status: "completed",
+			startTime: Date.now(),
+			label: "collided task",
+			abortController: new AbortController(),
+			promise: Promise.resolve(),
+			latestDetails: {
+				progress: [
+					{ id: "worker-2", resolvedModel: "openai/gpt-4o", resolvedModelIsFallback: false },
+					{ id: "worker", resolvedModel: "anthropic/claude-opus-5-5:high", resolvedModelIsFallback: true },
+				],
+			},
+		};
+		const message = buildAsyncResultBatchMessage([
+			{ jobId: "worker-2", result: "done", job, durationMs: 1000, epoch: 0 },
+		]);
+
+		expect(message?.details?.jobs[0]?.model).toEqual({
+			selector: "anthropic/claude-opus-5-5:high",
+			fallback: true,
+		});
+	});
+
 	it("reports the model of a run that never streamed progress", () => {
 		// A restored subagent, wake turn, or resumed delivery settles without
 		// `progress[]`; the job's own carrier is the only source then (#16017).
