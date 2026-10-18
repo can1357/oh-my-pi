@@ -256,7 +256,12 @@ async function releaseProviderInFlightStaleLock(lockDir: string, stale: Provider
 		const stat = await fs.stat(lockDir);
 		if (stat.mtimeMs !== stale.mtimeMs || Date.now() - stat.mtimeMs <= PROVIDER_INFLIGHT_LOCK_STALE_MS) return;
 		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch {}
+	} catch (error) {
+		logger.warn("ai: failed to remove stale provider in-flight lock", {
+			lockDir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 // Best-effort token-checked release. A token mismatch means another process has
@@ -266,7 +271,12 @@ async function releaseProviderInFlightLock(lockDir: string, token: string): Prom
 		const info = await readProviderInFlightInfo(path.join(lockDir, "info.json"));
 		if (!info || info.token !== token) return;
 		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch {}
+	} catch (error) {
+		logger.warn("ai: failed to release provider in-flight lock", {
+			lockDir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 async function releaseProviderInFlightLockDirIfSame(
@@ -278,7 +288,12 @@ async function releaseProviderInFlightLockDirIfSame(
 		const current = await readProviderInFlightLockIdentity(lockDir);
 		if (!isSameProviderInFlightLock(current, identity)) return;
 		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch {}
+	} catch (error) {
+		logger.warn("ai: failed to release provider in-flight lock dir", {
+			lockDir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 // On Windows, mkdir on a lock directory another process is concurrently deleting
@@ -451,7 +466,12 @@ async function signalProviderInFlightWaitersInDir(dir: string): Promise<void> {
 	try {
 		await fs.mkdir(dir, { recursive: true });
 		await Bun.write(path.join(dir, ".wakeup"), String(Date.now()));
-	} catch {}
+	} catch (error) {
+		logger.warn("ai: failed to signal provider in-flight waiters", {
+			dir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 async function signalProviderInFlightWaiters(provider: string): Promise<void> {

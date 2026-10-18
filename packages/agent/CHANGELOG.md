@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Added `logger.warn` to the empty catch block after cursor tool result transform, so transform failures are now visible in logs
 
 ### Changed
 
