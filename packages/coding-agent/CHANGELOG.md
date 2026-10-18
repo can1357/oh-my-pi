@@ -626,6 +626,7 @@
 - Tool-call intents now say what the agent wants from the call's output and what it already knows (e.g. "Find where the retry delay is computed and whether it honours Retry-After; the client is in http.py") instead of a short label like "Reading config file"
 
 ### Fixed
+- Converted the blob store's persisted index load from blocking `fs.readFileSync` in the constructor to lazy async loading, so blob registration no longer blocks the event loop at startup
 
 - Fixed repeated status commands such as `/goal show` showing nothing after the first few times in a native terminal when the text had not changed
 - Fixed browser relay tabs that a browser already had open when its extension connected staying invisible to omp until they changed; opening such a tab by `app.target` could fail with "Selected tab did not become available before omp could attach"

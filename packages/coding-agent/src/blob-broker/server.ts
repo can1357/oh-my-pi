@@ -69,7 +69,7 @@ async function backendStatus(
 		baseUrl,
 		lazy: backend.supportsLazy,
 		configKey: blobBrokerConfigKey(config),
-		...backend.storeStatus(),
+		...(await backend.storeStatus()),
 		savings,
 	};
 }
