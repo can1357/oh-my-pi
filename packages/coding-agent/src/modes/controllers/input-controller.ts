@@ -5,7 +5,10 @@ import {
 	type AutocompleteProvider,
 	type Component,
 	emergencyTerminalRestore,
+	isKeyRelease,
+	isKeyRepeat,
 	matchesKey,
+	parseKey,
 	parseSgrMouse,
 	type PasteOptions,
 	type SlashCommand,
@@ -290,6 +293,7 @@ export class InputController {
 	#globalEditorActionsListenerInstalled = false;
 	#expandToolsListenerInstalled = false;
 	#inlineMouseListenerInstalled = false;
+	#linkHintListenerInstalled = false;
 
 	/** Click-candidate id the hover band currently tracks; repaint only on change. */
 	#lastHoverClickId: string | undefined;
@@ -334,6 +338,11 @@ export class InputController {
 	setupKeyHandlers(): void {
 		this.#draftText ??= this.ctx.editor.getText();
 		this.ctx.editor.setActionKeys("app.interrupt", this.ctx.keybindings.getKeys("app.interrupt"));
+		if (!this.#linkHintListenerInstalled) {
+			this.#linkHintListenerInstalled = true;
+			// First, so a tag letter typed in link-hint mode reaches no other listener or the editor.
+			this.ctx.ui.addInputListener(data => this.#handleLinkHintInput(data));
+		}
 		if (!this.#focusedLeftTapListenerInstalled) {
 			this.#focusedLeftTapListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
@@ -799,6 +808,34 @@ export class InputController {
 		} else if (event.leftClick && !this.#activateClickedLink(event.row, event.col)) {
 			this.#focusClickedAgent(event.row);
 		}
+		return { consume: true };
+	}
+
+	/**
+	 * Keyboard link picking. `app.links.hint` enters link-hint mode, which then owns the keyboard: a
+	 * lowercase letter narrows the tags, and any other key cancels and is swallowed so a stray Esc or
+	 * Enter does nothing else. Ctrl+C cancels and still does what it always does. Key releases and
+	 * repeats (the hint key's own) are ignored; mouse reports pass through untouched.
+	 */
+	#handleLinkHintInput(data: string): { consume?: boolean } | undefined {
+		if (!this.ctx.linkHintsActive) {
+			if (!this.ctx.keybindings.matches(data, "app.links.hint") || this.ctx.ui.hasOverlay()) return undefined;
+			return this.ctx.startLinkHints() ? { consume: true } : undefined;
+		}
+		// An overlay that opened since (e.g. an extension's custom UI) owns the keyboard now.
+		if (this.ctx.ui.hasOverlay()) {
+			this.ctx.cancelLinkHints();
+			return undefined;
+		}
+		if (isKeyRelease(data) || isKeyRepeat(data)) return { consume: true };
+		if (data.startsWith("\x1b[<")) return undefined;
+		if (matchesKey(data, "ctrl+c")) {
+			this.ctx.cancelLinkHints();
+			return undefined;
+		}
+		const key = parseKey(data);
+		if (key !== undefined && /^[a-z]$/.test(key)) this.ctx.typeLinkHint(key);
+		else this.ctx.cancelLinkHints();
 		return { consume: true };
 	}
 

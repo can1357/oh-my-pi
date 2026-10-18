@@ -152,8 +152,8 @@ export interface InteractiveModeContext {
 	statusLine: StatusLineComponent;
 	syncComposerShape(): void;
 	/**
-	 * Push the extension link schemes (and whether `tui.mouse` routes clicks to them) to the
-	 * markdown renderer; redraws the transcript when that changes how links are drawn.
+	 * Push the extension link schemes to the markdown renderer; redraws the transcript when that
+	 * changes how links are drawn.
 	 */
 	syncExtensionLinks(): void;
 
@@ -189,6 +189,18 @@ export interface InteractiveModeContext {
 	viewportLinkAt(index: number, col: number): ViewportLink | undefined;
 	/** Highlight one extension link label (across the rows it wraps) and show a hand pointer, or clear both. */
 	setLinkHover(link: ViewportLink | undefined): void;
+	/**
+	 * Enter keyboard link-hint mode: tag each extension link label on screen, or show a status when
+	 * none is drawn. Returns false, doing nothing, unless extension links are routed (a scheme
+	 * claimed, plain terminal).
+	 */
+	startLinkHints(): boolean;
+	/** Whether link-hint mode is on; it ends by itself once the tagged labels move or vanish. */
+	readonly linkHintsActive: boolean;
+	/** Narrow link-hint mode by one typed letter; a whole tag raises `link_activate` for its link. */
+	typeLinkHint(letter: string): void;
+	/** Leave link-hint mode without activating a link. */
+	cancelLinkHints(): void;
 	/** Flip the pinned jump list between its collapsed few and the full list. */
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */

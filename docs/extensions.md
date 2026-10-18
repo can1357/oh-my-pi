@@ -884,7 +884,7 @@ Supported:
 - theme listing/loading by name (`setTheme` supports string names)
 - tools expanded toggle
 - `rerenderMessage(timestamp)`: draws the assistant reply with that `message.timestamp` again, re-running the [assistant text renderers](#assistant-text-renderer); a no-op while `extensionRenderers.assistantText` is off
-- `getLinkClicksAvailable()`: whether a click on a [claimed link](#extension-link-schemes) raises `link_activate` right now
+- `getLinkClicksAvailable()`: whether picking a [claimed link](#extension-link-schemes), by its hint tag or a click, raises `link_activate` right now
 
 Current no-op methods in this controller:
 
@@ -1303,9 +1303,10 @@ pi.on("link_activate", ({ url }) => {
 ```
 
 - **Drawing.** In a plain terminal, a markdown link using a claimed scheme, in an assistant reply or anywhere else markdown is drawn, shows its label only: no ` (url)` suffix, and no hyperlink the terminal or a browser could open.
-- **Clicks.** With `tui.mouse` on, a left click on the label in a plain terminal raises `link_activate` for the claiming extension instead of any other click action. While a subagent's transcript is focused, the click goes to that subagent's copy of the extension (the one whose renderers drew it), and the handler's `ctx.ui` is the interactive UI, so call `ctx.ui.rerenderMessage` from the handler's own context. With `tui.mouse` off, the label is plain text, and the first time one is drawn omp shows a hint that `tui.mouse` makes it clickable. Labels already in terminal scrollback are drawn again when either setting changes.
+- **Keyboard.** In a plain terminal, `app.links.hint` (`Alt+O` by default, see [keybindings](./keybindings.md)) tags each claimed link on screen with one or two letters drawn over the start of its label; a label wrapped across rows gets one tag. Typing a whole tag raises `link_activate` for the claiming extension. `Esc` or any key that is not a lowercase letter cancels and is swallowed, except `Ctrl+C`, which cancels and keeps its usual meaning. Hint mode also ends when a repaint moves or removes the tagged labels, as a streaming reply can, so a tag never picks a link no longer under it. With no claimed link on screen the key only shows a status. The first time a claimed link is drawn omp says which key picks it.
+- **Clicks.** With `tui.mouse` on, a left click on the label in a plain terminal does the same as typing its tag, instead of any other click action. Either way, while a subagent's transcript is focused, the event goes to that subagent's copy of the extension (the one whose renderers drew it), and the handler's `ctx.ui` is the interactive UI, so call `ctx.ui.rerenderMessage` from the handler's own context. Labels already in terminal scrollback cannot be picked.
 - **Hover.** With `tui.mouse` on, the label under the pointer is highlighted (every row of a wrapped label), and terminals that support OSC 22 (kitty, foot, ghostty, …) show a hand pointer over it.
-- **Fallback.** `ctx.ui.getLinkClicksAvailable()` is true only while clicks are delivered: interactive mode, a plain terminal, both settings on. Changing either setting re-runs the assistant text renderers, so a renderer can check it on each call and draw content inline instead of behind a link nobody can click.
+- **Fallback.** `ctx.ui.getLinkClicksAvailable()` is true only while claimed links can be picked: interactive mode, a plain terminal, `extensionRenderers.assistantText` on; `tui.mouse` is not needed. Changing that setting re-runs the assistant text renderers, so a renderer can check it on each call and draw content inline instead of behind a link nobody can pick.
 - **Ownership.** Scheme names are case-insensitive. When two extensions claim one scheme, the first loaded gets its clicks. Web, file and mail schemes (`http`, `https`, `file`, `mailto`, …) and omp's internal URL schemes (`local`, `skill`, `agent`, …) are reserved: claiming one throws and fails the extension's load.
 - **Tern.** Tern's native view draws such links as its own links and does not route their clicks back to omp; handle them there with a Tern plugin.
 

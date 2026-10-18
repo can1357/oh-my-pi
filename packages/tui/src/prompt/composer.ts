@@ -1,7 +1,13 @@
 import { getComposerStyle } from "../components/composer/registry";
 import { Spacer } from "../components/spacer";
 import type { StatusLineComponent } from "../status-line/component";
-import { extensionLinkLabels, restyleExtensionLinkLabel } from "../render/extension-links";
+import { compositeLineAt } from "../render/composite";
+import {
+	type ExtensionLinkLabel,
+	extensionLinkLabels,
+	linkHintTags,
+	restyleExtensionLinkLabel,
+} from "../render/extension-links";
 import type { StatusLineSession } from "../status-line/host";
 import { createStartupStatusLine, type StatusLineStartupData } from "../status-line/startup";
 import { isInsideTerminalMultiplexer } from "../terminal-multiplexer";
@@ -187,6 +193,31 @@ export interface ViewportLink {
 	readonly start: number;
 }
 
+/** An extension link label tagged for picking by keyboard in link-hint mode. */
+interface ViewportLinkHint {
+	readonly tag: string;
+	readonly link: ViewportLink;
+}
+
+/**
+ * The extension link labels drawn on `rows`, top to bottom, a wrapped label once at its first row:
+ * a row's first label continues the previous row's last label when that has the same URL and ends
+ * its row (the rule the hover highlight follows).
+ */
+function viewportLinkTargets(rows: readonly string[]): ViewportLink[] {
+	const targets: ViewportLink[] = [];
+	let previous: ExtensionLinkLabel | undefined;
+	for (let row = 0; row < rows.length; row++) {
+		const labels = extensionLinkLabels(rows[row]!);
+		for (const [index, label] of labels.entries()) {
+			if (index === 0 && previous?.endsRow && previous.url === label.url) continue;
+			targets.push({ url: label.url, row, start: label.start });
+		}
+		previous = labels.at(-1);
+	}
+	return targets;
+}
+
 /**
  * Reserved click-candidate id for the pinned HUD expander row. Checked before
  * any registry lookup: its `@…:…` charset cannot collide with generated agent
@@ -292,6 +323,12 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#hoveredClickId: string | undefined;
 	/** Extension link label under the pointer; only it (on every row it wraps across) is highlighted. */
 	#hoveredLink: ViewportLink | undefined;
+	/**
+	 * Keyboard link-hint mode: the tags drawn over the extension links on screen (`undefined` until
+	 * the first frame after `startLinkHints` assigns them), the letters typed so far, and what to run
+	 * when the mode ends for any reason.
+	 */
+	#linkHints: { hints: ViewportLinkHint[] | undefined; typed: string; onEnd: () => void } | undefined;
 	// Hard-row prefix currently above the native viewport. The first resize
 	// frame may pull part of it down before the normal buffer is borrowed.
 	#retiredHeaderStart = 0;
@@ -434,6 +471,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		if (transcriptIndex < 0) {
 			this.#lastClickSpans = [];
 			this.#lastViewportRows = [];
+			this.#syncLinkHints([]);
 			const viewport: string[] = [];
 			for (const root of roots) {
 				const rendered = root.render(width);
@@ -544,11 +582,88 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		for (const span of afterSpans) shift(span, slack + before.length + active.length - drop);
 		this.#lastClickSpans = spans;
 		this.#lastViewportRows = mutable;
+		this.#syncLinkHints(mutable);
 		if (history !== undefined && this.#offeredHistory?.source === "header") {
 			const visibleHeaderRows = Math.max(0, rows - (mutable.length + drop));
 			this.#retiredHeaderStart = Math.max(0, history.rows.length - visibleHeaderRows);
 		}
-		return { history, viewport: this.#paintHoveredLink(this.#paintHoverBand(mutable, spans)) };
+		return {
+			history,
+			viewport: this.#paintLinkHints(this.#paintHoveredLink(this.#paintHoverBand(mutable, spans)), width),
+		};
+	}
+
+	/**
+	 * Keep link-hint tags on what `rows` show. The first frame after `startLinkHints` tags its
+	 * labels; later frames keep the tags while the tagged labels are still drawn first, in the same
+	 * order and columns (rows may scroll, links may be added below), and otherwise end the mode, so a
+	 * tag never picks a label no longer drawn under it.
+	 */
+	#syncLinkHints(rows: readonly string[]): void {
+		const state = this.#linkHints;
+		if (state === undefined) return;
+		const targets = viewportLinkTargets(rows);
+		const hints = state.hints;
+		if (hints === undefined) {
+			state.hints = linkHintTags(targets.length).map((tag, index) => ({ tag, link: targets[index]! }));
+			if (state.hints.length === 0) this.#endLinkHints();
+			return;
+		}
+		const unchanged =
+			targets.length >= hints.length &&
+			hints.every(({ link }, index) => link.url === targets[index]!.url && link.start === targets[index]!.start);
+		if (!unchanged) {
+			this.#endLinkHints();
+			return;
+		}
+		state.hints = hints.map(({ tag }, index) => ({ tag, link: targets[index]! }));
+	}
+
+	#endLinkHints(): void {
+		const state = this.#linkHints;
+		if (state === undefined) return;
+		this.#linkHints = undefined;
+		state.onEnd();
+	}
+
+	/**
+	 * Draw every tag the typed letters still lead to over the start of its label. Tags on one row
+	 * never overlap: one that would land on an earlier tag moves right, and tags that would run past
+	 * the right edge move left, so each stays readable as long as the row has room for them all.
+	 */
+	#paintLinkHints(viewport: string[], width: number): string[] {
+		const state = this.#linkHints;
+		if (state?.hints === undefined) return viewport;
+		const rows = new Map<number, { tag: string; col: number }[]>();
+		for (const { tag, link } of state.hints) {
+			if (viewport[link.row] === undefined || !tag.startsWith(state.typed)) continue;
+			let row = rows.get(link.row);
+			if (!row) rows.set(link.row, (row = []));
+			row.push({ tag, col: link.start });
+		}
+		const painted = [...viewport];
+		for (const [index, tags] of rows) {
+			tags.sort((a, b) => a.col - b.col);
+			let free = 0;
+			for (const placed of tags) {
+				placed.col = Math.max(placed.col, free);
+				free = placed.col + placed.tag.length;
+			}
+			let limit = width;
+			for (let i = tags.length - 1; i >= 0; i--) {
+				const placed = tags[i]!;
+				placed.col = Math.max(0, Math.min(placed.col, limit - placed.tag.length));
+				limit = placed.col;
+			}
+			let line = painted[index]!;
+			for (const { tag, col } of tags) {
+				// Raw SGR like the hover highlight: chalk's inverse/bold drop out when it detects no color.
+				const styled = `\x1b[1;7m${theme.fg("accent", tag)}\x1b[22;27m`;
+				line = compositeLineAt(line, styled, col, tag.length, width);
+			}
+			painted[index] = line;
+		}
+		return painted;
 	}
 
 	/**
@@ -730,6 +845,54 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	 */
 	setHoveredLink(link: ViewportLink | undefined): void {
 		this.#hoveredLink = link;
+	}
+
+	/** How many extension link labels the last frame drew; a label wrapped across rows counts once. */
+	viewportLinkCount(): number {
+		return viewportLinkTargets(this.#lastViewportRows).length;
+	}
+
+	/**
+	 * Enter keyboard link-hint mode: the next frame draws a tag over each extension link label it
+	 * shows. `onEnd` runs once when the mode ends: a pick, a cancel, a key no tag starts with, or a
+	 * repaint that no longer draws the tagged labels where they were.
+	 */
+	startLinkHints(onEnd: () => void): void {
+		this.#endLinkHints();
+		this.#linkHints = { hints: undefined, typed: "", onEnd };
+	}
+
+	/** Whether link-hint mode is on. */
+	get linkHintsActive(): boolean {
+		return this.#linkHints !== undefined;
+	}
+
+	/**
+	 * Type one letter of a tag. Returns the link whose whole tag is now typed, `true` while the
+	 * letters still lead to several tags, and `false` when none starts with them. The mode ends on
+	 * a pick or a miss.
+	 */
+	typeLinkHint(letter: string): ViewportLink | boolean {
+		const state = this.#linkHints;
+		if (state === undefined) return false;
+		// A key typed before the tags were first painted picks among the labels last drawn.
+		if (state.hints === undefined) this.#syncLinkHints(this.#lastViewportRows);
+		const hints = this.#linkHints?.hints;
+		if (hints === undefined) return false;
+		const typed = state.typed + letter.toLowerCase();
+		const matching = hints.filter(hint => hint.tag.startsWith(typed));
+		const picked = matching.length === 1 && matching[0]!.tag === typed ? matching[0]!.link : undefined;
+		if (matching.length === 0 || picked !== undefined) {
+			this.#endLinkHints();
+			return picked ?? false;
+		}
+		state.typed = typed;
+		return true;
+	}
+
+	/** Leave link-hint mode without picking a link. */
+	cancelLinkHints(): void {
+		this.#endLinkHints();
 	}
 
 	/** Acknowledges one accepted header, replay, or transcript batch. */

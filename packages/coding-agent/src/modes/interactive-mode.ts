@@ -213,8 +213,9 @@ import {
 import { vocalizer } from "../tts/vocalizer";
 import { applyHyperlinkSetting, fileHyperlink } from "@oh-my-pi/pi-tui/render/hyperlink";
 import {
+	extensionLinksRouted,
 	extensionLinksVersion,
-	onUnroutedExtensionLink,
+	onExtensionLinkDrawn,
 	setExtensionLinks,
 } from "@oh-my-pi/pi-tui/render/extension-links";
 import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
@@ -500,6 +501,8 @@ const STILL_CLOSING_DELAY_MS = 3_000;
 const JUDGMENT_BATCH_PROGRESS_RETAIN_MS = 1_000;
 /** Startup emits several status-bar changes within a second; persist only the settled one. */
 const COMPOSER_STATUS_PERSIST_DELAY_MS = 1_000;
+/** Status-line slot of the link-hint mode prompt; the `omp:` prefix keeps it apart from extension keys. */
+const LINK_HINT_STATUS_KEY = "omp:link-hints";
 const DEFAULT_WORKING_MESSAGE = "Working…";
 /** Native working-message shimmer under a session accent: the hue itself is the terminal's `accent`. */
 const NATIVE_ACCENT_SHIMMER: ShimmerPalette = { low: "dim", mid: "accent", high: "accent", bold: true };
@@ -1839,9 +1842,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBusUnsubscribers: Array<() => void> = [];
 	/** Mirror of `tui.mouse`, read by the TUI's per-frame inline mouse tracking probe. */
 	#mouseCapture = false;
-	/** The "extension links need tui.mouse" hint is shown at most once per interactive session. */
-	#linkClickHintShown = false;
-	/** A link-routing change awaits its transcript rebuild; any rebuild before it covers it. */
+	/** The "press alt+o to pick an extension link" hint is shown at most once per interactive session. */
+	#linkKeyHintShown = false;
+	/** A link-scheme change awaits its transcript rebuild; any rebuild before it covers it. */
 	#extensionLinkRebuildPending = false;
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
@@ -1971,7 +1974,6 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.setLinkHover(undefined);
 					this.#inputController?.clearHoverHighlight();
 				}
-				this.syncExtensionLinks();
 				this.ui.requestRender();
 			}),
 		);
@@ -3869,22 +3871,22 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	/** Push the extension link schemes and click routing to the markdown renderer; returns whether that changed. */
+	/** Push the extension link schemes to the markdown renderer; returns whether that changed. */
 	#applyExtensionLinks(): boolean {
 		const before = extensionLinksVersion();
-		setExtensionLinks(this.viewSession.extensionRunner?.getLinkSchemes() ?? [], this.#mouseCapture);
-		onUnroutedExtensionLink(this.#showLinkClickHint);
+		setExtensionLinks(this.viewSession.extensionRunner?.getLinkSchemes() ?? []);
+		onExtensionLinkDrawn(this.#showLinkKeyHint);
 		return extensionLinksVersion() !== before;
 	}
 
-	/** A claimed link was drawn without click routing: say once how to make it clickable. */
-	#showLinkClickHint = (): void => {
-		if (this.#linkClickHintShown) return;
-		this.#linkClickHintShown = true;
+	/** A claimed link was drawn: say once which key picks it. */
+	#showLinkKeyHint = (): void => {
+		if (this.#linkKeyHintShown) return;
+		const key = appKey(this.keybindings, "app.links.hint");
+		if (!key) return;
+		this.#linkKeyHintShown = true;
 		// Called while markdown renders; show the status after this frame.
-		queueMicrotask(() =>
-			this.showStatus("Extension links are clickable with Mouse Click-to-Focus on (/settings, tui.mouse)"),
-		);
+		queueMicrotask(() => this.showStatus(`Press ${key} to pick an extension link`));
 	};
 
 	syncExtensionLinks(): void {
@@ -3902,15 +3904,49 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	activateViewportLink(index: number, col: number): boolean {
-		const url = this.composer.viewportLinkAt(index, col)?.url;
+	/** Raise `link_activate` for `url` on the viewed session's extension runner. */
+	#activateLink(url: string): boolean {
 		const runner = this.viewSession.extensionRunner;
-		if (url === undefined || !runner) return false;
+		if (!runner) return false;
 		// A focused subagent's runner is headless: hand its handler the UI drawing that transcript.
 		runner.emitLinkActivate(url, this.session.extensionRunner?.getUIContext()).catch((error: unknown) => {
 			logger.warn("link_activate dispatch failed", { url, error: String(error) });
 		});
 		return true;
+	}
+
+	activateViewportLink(index: number, col: number): boolean {
+		const url = this.composer.viewportLinkAt(index, col)?.url;
+		return url !== undefined && this.#activateLink(url);
+	}
+
+	startLinkHints(): boolean {
+		if (!extensionLinksRouted()) return false;
+		if (this.composer.viewportLinkCount() === 0) {
+			this.showStatus("No extension links on screen");
+			return true;
+		}
+		this.composer.startLinkHints(() => {
+			this.statusLine.setHookStatus(LINK_HINT_STATUS_KEY, undefined);
+			this.ui.requestRender();
+		});
+		this.statusLine.setHookStatus(LINK_HINT_STATUS_KEY, "Type a link tag · Esc cancels");
+		this.ui.requestRender();
+		return true;
+	}
+
+	get linkHintsActive(): boolean {
+		return this.composer.linkHintsActive;
+	}
+
+	typeLinkHint(letter: string): void {
+		const picked = this.composer.typeLinkHint(letter);
+		if (typeof picked === "object") this.#activateLink(picked.url);
+		this.ui.requestRender();
+	}
+
+	cancelLinkHints(): void {
+		this.composer.cancelLinkHints();
 	}
 
 	viewportLinkAt(index: number, col: number): ViewportLink | undefined {
@@ -7339,8 +7375,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		// The markdown renderer's extension-link state is process-wide; release this session's schemes
 		// only after the TUI's final history flush, which still strips their markers.
-		setExtensionLinks([], false);
-		onUnroutedExtensionLink(undefined);
+		setExtensionLinks([]);
+		onExtensionLinkDrawn(undefined);
 		this.isInitialized = false;
 	}
 

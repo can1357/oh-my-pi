@@ -1,7 +1,7 @@
 /**
  * Links whose scheme an extension registered (`pi.registerLinkScheme`). Markdown draws them
- * without the ` (url)` suffix. While inline mouse routing is on, the rendered row carries an OSC 8
- * marker with the URL so a click's cell can be traced back to it ({@link extensionLinkLabels}); the TUI
+ * without the ` (url)` suffix. In a plain terminal the rendered row carries an OSC 8 marker with the
+ * URL so a click's cell or a hint tag can be traced back to it ({@link extensionLinkLabels}); the TUI
  * strips that marker from every row it writes ({@link stripExtensionLinkMarkers}), so the terminal
  * never receives the link as a hyperlink it could open.
  */
@@ -9,9 +9,8 @@ import { isNativeRendering, onNativeRenderingChange } from "../native/state";
 import { visibleWidth } from "../utils";
 
 let schemes: ReadonlySet<string> = new Set();
-let routed = false;
 let version = 0;
-let unroutedListener: (() => void) | undefined;
+let drawnListener: (() => void) | undefined;
 // Tern's native view routes its own link clicks, so markers are drawn only for a plain terminal.
 onNativeRenderingChange(() => {
 	version++;
@@ -28,34 +27,35 @@ const MARKER_PARAMS = "id=omp-extension-link";
 const MARKER_OPEN = `\x1b]8;${MARKER_PARAMS};`;
 
 /**
- * Set the registered schemes (lowercase, without `:`) and whether clicks are routed to them.
- * Bumps {@link extensionLinksVersion} on any change so cached markdown renders are redrawn.
+ * Set the registered schemes (lowercase, without `:`). Bumps {@link extensionLinksVersion} on any
+ * change so cached markdown renders are redrawn.
  */
-export function setExtensionLinks(next: Iterable<string>, clicksRouted: boolean): void {
+export function setExtensionLinks(next: Iterable<string>): void {
 	const nextSchemes = new Set(next);
-	const routedNow = clicksRouted && nextSchemes.size > 0;
-	if (routedNow === routed && nextSchemes.size === schemes.size && [...nextSchemes].every(s => schemes.has(s))) return;
+	if (nextSchemes.size === schemes.size && [...nextSchemes].every(s => schemes.has(s))) return;
 	schemes = nextSchemes;
-	routed = routedNow;
 	version++;
 }
 
-/** Changes whenever the scheme set or routing changes; part of the markdown render cache key. */
+/** Changes whenever the scheme set changes; part of the markdown render cache key. */
 export function extensionLinksVersion(): number {
 	return version;
 }
 
-/** Whether a click on a registered-scheme link reaches its extension: routing on, in a plain terminal. */
-export function extensionLinkClicksRouted(): boolean {
-	return routed && !isNativeRendering();
+/**
+ * Whether activating a registered-scheme link (a click or a hint tag) reaches its extension: a
+ * scheme is registered and the terminal is plain.
+ */
+export function extensionLinksRouted(): boolean {
+	return schemes.size > 0 && !isNativeRendering();
 }
 
 /**
- * Called whenever markdown draws a registered-scheme link while clicks are not routed in a plain
- * terminal, so the product can tell the user how to make it clickable. `undefined` unsubscribes.
+ * Called whenever markdown draws a registered-scheme link a click or hint tag can reach, so the
+ * product can tell the user how to pick it. `undefined` unsubscribes.
  */
-export function onUnroutedExtensionLink(listener: (() => void) | undefined): void {
-	unroutedListener = listener;
+export function onExtensionLinkDrawn(listener: (() => void) | undefined): void {
+	drawnListener = listener;
 }
 
 /** The registered scheme `href` uses, or `undefined` for every other link. */
@@ -69,16 +69,34 @@ export function extensionLinkScheme(href: string): string | undefined {
 
 /**
  * Draw an extension link's label: wrapped in the OSC 8 marker {@link extensionLinkLabels} reads back
- * while clicks are routed in a plain terminal, plain otherwise. Never followed by a ` (url)` suffix.
+ * in a plain terminal, plain in Tern's native view. Never followed by a ` (url)` suffix.
  */
 export function formatExtensionLink(label: string, href: string): string {
 	if (isNativeRendering()) return label;
-	if (!routed) {
-		unroutedListener?.();
-		return label;
-	}
 	const safe = href.replaceAll("\x1b", "").replaceAll("\x07", "");
-	return safe ? `${MARKER_OPEN}${safe}\x07${label}\x1b]8;;\x07` : label;
+	if (!safe) return label;
+	drawnListener?.();
+	return `${MARKER_OPEN}${safe}\x07${label}\x1b]8;;\x07`;
+}
+
+/** Hint tag letters, home row first. */
+const LINK_HINT_ALPHABET = "asdfghjklqwertyuiopzxcvbnm";
+
+/**
+ * Tags for `count` links in keyboard link-hint mode: single letters while they suffice, otherwise
+ * two letters each, so no tag is a prefix of another. At most the alphabet squared (676) are made;
+ * links past that stay untagged.
+ */
+export function linkHintTags(count: number): string[] {
+	if (count <= LINK_HINT_ALPHABET.length) return LINK_HINT_ALPHABET.slice(0, Math.max(0, count)).split("");
+	const tags: string[] = [];
+	for (const first of LINK_HINT_ALPHABET) {
+		for (const second of LINK_HINT_ALPHABET) {
+			if (tags.length === count) return tags;
+			tags.push(`${first}${second}`);
+		}
+	}
+	return tags;
 }
 
 /**

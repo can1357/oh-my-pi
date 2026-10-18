@@ -353,11 +353,12 @@ export interface ExtensionUIContext {
 	rerenderMessage(timestamp: number): void;
 
 	/**
-	 * True while a click on a link whose scheme an extension registered raises `link_activate`:
-	 * interactive mode in a plain terminal, with `extensionRenderers.assistantText` and `tui.mouse`
-	 * on. Changing either setting redraws the transcript and re-runs the assistant text renderers,
-	 * so a renderer can read this on each call, e.g. to show content inline instead of behind a link
-	 * nobody can click. False everywhere else.
+	 * True while picking a link whose scheme an extension registered raises `link_activate`: with
+	 * the link-hint key (`app.links.hint`, Alt+O by default), or a click with `tui.mouse` on.
+	 * Interactive mode in a plain terminal with `extensionRenderers.assistantText` on. Changing that
+	 * setting redraws the transcript and re-runs the assistant text renderers, so a renderer can
+	 * read this on each call, e.g. to show content inline instead of behind a link nobody can pick.
+	 * False everywhere else.
 	 */
 	getLinkClicksAvailable(): boolean;
 

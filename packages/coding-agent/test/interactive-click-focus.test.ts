@@ -273,24 +273,18 @@ describe("inline click-to-focus geometry", () => {
 		expect(plainRows(term.getViewport()).some(row => row.includes("ToggleAgent3"))).toBe(false);
 	});
 
-	it("hands a click on an extension-owned link to its extension once tui.mouse turns on, other links unchanged", async () => {
-		const statuses: string[] = [];
-		const showStatus = mode.showStatus.bind(mode);
-		vi.spyOn(mode, "showStatus").mockImplementation((message, options) => {
-			statuses.push(message);
-			showStatus(message, options);
-		});
-		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
-		const clicks: string[] = [];
-		const clicked = Promise.withResolvers<void>();
+	/** Install a runner whose one extension claims `demo:` links and records each `link_activate` URL. */
+	function installDemoLinkExtension(): { activated: string[]; firstActivation: Promise<void> } {
+		const activated: string[] = [];
+		const first = Promise.withResolvers<void>();
 		const handlers: Extension["handlers"] = new Map();
 		handlers.set("link_activate", [
 			async (...args: unknown[]) => {
 				const [event] = args;
 				if (event && typeof event === "object" && "url" in event && typeof event.url === "string") {
-					clicks.push(event.url);
+					activated.push(event.url);
 				}
-				clicked.resolve();
+				first.resolve();
 			},
 		]);
 		const extension: Extension = {
@@ -319,15 +313,14 @@ describe("inline click-to-focus geometry", () => {
 			mode.settings,
 		);
 		Object.defineProperty(session, "extensionRunner", { configurable: true, get: () => runner });
-		await mode.init({ suppressWelcomeIntro: true });
-		void mode.getUserInput();
-		await term.waitForRender();
+		return { activated, firstActivation: first.promise };
+	}
 
+	/** Draw one assistant reply with `text` and wait until `visible` shows on screen. */
+	async function showReply(text: string, visible: string): Promise<void> {
 		session.sessionManager.appendMessage({
 			role: "assistant",
-			content: [
-				{ type: "text", text: "Open [the details](demo:open/7) or read [the docs](https://example.com/docs)." },
-			],
+			content: [{ type: "text", text }],
 			api: "anthropic-messages",
 			provider: "anthropic",
 			model: "claude-sonnet-4-5",
@@ -342,24 +335,25 @@ describe("inline click-to-focus geometry", () => {
 			},
 			timestamp: 1,
 		});
+		await mode.renderInitialMessages();
+		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes(visible)));
+	}
+
+	it("hands a click on an extension-owned link to its extension with tui.mouse on, other links unchanged", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		cfgTuiMouse.set(mode.settings, true);
+		const { activated, firstActivation } = installDemoLinkExtension();
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+
 		const written: string[] = [];
 		const write = term.write.bind(term);
 		vi.spyOn(term, "write").mockImplementation(data => {
 			written.push(data);
 			write(data);
 		});
-		await mode.renderInitialMessages();
-		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("the details")));
-		// With tui.mouse off the claimed link is inert, and omp says how to enable it, once.
-		expect(statuses.filter(message => message.includes("tui.mouse"))).toHaveLength(1);
-		// Turning click routing on mid-session redraws the reply so its link can be hit.
-		cfgTuiMouse.set(mode.settings, true);
-		await term.waitForRender();
-		cfgTuiMouse.set(mode.settings, false);
-		await term.waitForRender();
-		cfgTuiMouse.set(mode.settings, true);
-		await term.waitForRender();
-		expect(statuses.filter(message => message.includes("tui.mouse"))).toHaveLength(1);
+		await showReply("Open [the details](demo:open/7) or read [the docs](https://example.com/docs).", "the details");
 		// The terminal never receives the extension URL, so it has no hyperlink of its own to open.
 		expect(written.join("")).not.toContain("demo:open/7");
 		expect(written.join("")).toContain("https://example.com/docs");
@@ -374,8 +368,8 @@ describe("inline click-to-focus geometry", () => {
 		// A click on the web link raises nothing; the extension link's click reaches its extension.
 		click("the docs");
 		click("the details");
-		await clicked.promise;
-		expect(clicks).toEqual(["demo:open/7"]);
+		await firstActivation;
+		expect(activated).toEqual(["demo:open/7"]);
 
 		// Hovering the extension link asks for a hand pointer; moving off it restores the default.
 		const move = (col: number) => term.sendInput(`\x1b[<35;${col + 1};${screenRow + 1}M`);
@@ -387,6 +381,66 @@ describe("inline click-to-focus geometry", () => {
 		move(viewport[screenRow]!.indexOf("the docs") + 1);
 		await term.waitForRender();
 		expect(written.join("")).toContain("\x1b]22;default\x1b\\");
+	});
+
+	it("picks an extension link by its hint tag with tui.mouse off; Esc cancels without picking", async () => {
+		const statuses: string[] = [];
+		const showStatus = mode.showStatus.bind(mode);
+		vi.spyOn(mode, "showStatus").mockImplementation((message, options) => {
+			statuses.push(message);
+			showStatus(message, options);
+		});
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { activated, firstActivation } = installDemoLinkExtension();
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		// Rebound, so the hint must name the key actually bound, not the default.
+		mode.keybindings.setUserBindings({ "app.links.hint": "alt+k" });
+		expect(cfgTuiMouse.get(mode.settings)).toBe(false);
+		expect(session.extensionRunner?.getUIContext()?.getLinkClicksAvailable()).toBe(true);
+
+		await showReply("Open [the details](demo:open/7) or read [the docs](https://example.com/docs).", "the details");
+		await term.waitForRender(() => statuses.some(message => message.includes("pick an extension link")));
+		expect(statuses.filter(message => message.includes("pick an extension link"))).toEqual([
+			"Press Alt+K to pick an extension link",
+		]);
+		const tagged = () => plainRows(term.getViewport()).some(row => row.includes("Open ahe details"));
+		const hintKey = "\x1bk";
+
+		// Esc leaves hint mode untouched by any pick, and the next letter types into the editor again.
+		term.sendInput(hintKey);
+		await term.waitForRender(tagged);
+		term.sendInput("\x1b");
+		await term.waitForRender(() => !tagged());
+		term.sendInput("a");
+		await term.waitForRender();
+		expect(mode.editor.getText()).toBe("a");
+		expect(activated).toEqual([]);
+
+		// The tag drawn over the label picks it.
+		term.sendInput(hintKey);
+		await term.waitForRender(tagged);
+		term.sendInput("a");
+		await firstActivation;
+		expect(activated).toEqual(["demo:open/7"]);
+		await term.waitForRender(() => !tagged());
+		expect(mode.editor.getText()).toBe("a");
+
+		// An overlay opening mid-hint (e.g. an extension's custom UI) gets the keys; no link is picked.
+		term.sendInput(hintKey);
+		await term.waitForRender(tagged);
+		const overlayInput: string[] = [];
+		const overlay = mode.ui.showOverlay({
+			render: () => ["overlay"],
+			handleInput: (data: string) => overlayInput.push(data),
+			invalidate: () => {},
+		});
+		term.sendInput("a");
+		await term.waitForRender(() => !tagged());
+		expect(overlayInput).toEqual(["a"]);
+		expect(activated).toEqual(["demo:open/7"]);
+		overlay.hide();
 	});
 
 	it("redraws a focused subagent's reply when its extension handles a click on its link", async () => {
