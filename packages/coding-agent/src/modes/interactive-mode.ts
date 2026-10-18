@@ -3758,13 +3758,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			setSvgFigureRendering(cfgTuiRenderSvg.get(this.settings));
 			rebuildChat = true;
 		}
-		// Components take the extension text renderers when built; the rebuild keeps the live reply's
-		// component, so hand it the new set directly.
+		// Components take the extension text renderers when built; the rebuild keeps the streaming
+		// reply's components, so hand them the new set directly.
 		if (any("extensionRenderers.assistantText")) {
-			this.streamingComponent?.setTextRendering({
-				renderers: this.viewSession.extensionRunner?.getAssistantTextRenderers() ?? [],
-				contentOffset: 0,
-			});
+			this.#eventController.applyAssistantTextRenderers();
 			rebuildChat = true;
 		}
 		if (any("tui.autoGraph")) {
@@ -4062,6 +4059,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.viewSession?.isStreaming) {
 			const liveSet = new Set<Component>();
 			if (this.streamingComponent) liveSet.add(this.streamingComponent);
+			// Text after a tool call in the streaming reply is drawn by its own components.
+			for (const segment of this.#eventController.liveAssistantSegments()) liveSet.add(segment);
 			for (const [id, component] of this.pendingTools) {
 				livePendingTools.set(id, component);
 				liveSet.add(component as unknown as Component);

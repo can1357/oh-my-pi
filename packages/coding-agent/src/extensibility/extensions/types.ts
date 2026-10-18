@@ -1842,8 +1842,8 @@ export interface ExtensionAPI {
 
 	/**
 	 * Register a display-only transform for assistant text blocks: it returns the markdown to draw.
-	 * Called with the full text so far on every streaming delta (replies skip the smooth-streaming
-	 * reveal while renderers are active) and once more when the text is final.
+	 * Called with the full text so far each time a streaming update is drawn (replies skip the
+	 * smooth-streaming reveal while renderers are active) and once more when the text is final.
 	 * The session, exports and model context keep the original text. Interactive mode only, and
 	 * only while the `extensionRenderers.assistantText` setting is on.
 	 */

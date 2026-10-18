@@ -35,6 +35,7 @@ export interface AssistantTextRenderContext {
 	/**
 	 * The message being drawn; `message.timestamp` identifies the reply for `ctx.ui.rerenderMessage()`.
 	 * After a tool call this is only the segment drawn there, so its `content` does not hold the whole reply.
+	 * A frozen copy: the message and its content blocks cannot be edited, and nested values are read-only.
 	 */
 	message: AssistantMessage;
 	/**

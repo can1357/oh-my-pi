@@ -66,6 +66,24 @@ describe("assistant text renderers", () => {
 		});
 	});
 
+	it("cannot change the stored message through the context it hands renderers", () => {
+		const message = assistant([{ type: "text", text: "As written." }]);
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const target = component(
+			[
+				context => {
+					const block = context.message.content[0];
+					if (block?.type === "text") block.text = "Edited.";
+					return undefined;
+				},
+			],
+			0,
+			message,
+		);
+		expect(drawn(target)).toContain("As written.");
+		expect(message.content[0]).toEqual({ type: "text", text: "As written." });
+	});
+
 	it("is called with the text so far on every streaming update and once more when final", () => {
 		const calls: AssistantTextRenderContext[] = [];
 		// An unclosed stretch shows as a placeholder that the closed one later replaces.
@@ -112,15 +130,23 @@ describe("assistant text renderers", () => {
 		expect(drawn(target).trim()).toBe("final");
 	});
 
-	it("redraws with the renderers it is handed when the setting changes mid-reply", () => {
-		const target = component([stretch]);
+	it("redraws with the renderers it is handed when the setting changes mid-reply, keeping its place in the reply", () => {
+		const indexes: number[] = [];
+		const recording: AssistantTextRenderer = context => {
+			indexes.push(context.contentIndex);
+			return stretch(context);
+		};
+		// A segment after a tool call: its first block is block 2 of the reply.
+		const target = component([recording], 2);
 		target.updateContent(assistant([{ type: "text", text: "A {{short|long}} tail" }]), { transient: true });
 		expect(drawn(target).trim()).toBe("A short tail");
 
-		target.setTextRendering({ renderers: [], contentOffset: 0 });
+		target.setTextRenderers([]);
 		expect(drawn(target).trim()).toBe("A {{short|long}} tail");
-		target.setTextRendering({ renderers: [stretch], contentOffset: 0 });
+		indexes.length = 0;
+		target.setTextRenderers([recording]);
 		expect(drawn(target).trim()).toBe("A short tail");
+		expect(new Set(indexes)).toEqual(new Set([2]));
 	});
 
 	it("keeps a reply in the live viewport instead of publishing rows a renderer may still rewrite", () => {

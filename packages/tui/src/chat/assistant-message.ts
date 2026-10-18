@@ -536,6 +536,13 @@ export class AssistantMessageComponent extends Container {
 	#renderText(message: AssistantMessage, streaming: boolean): AssistantMessage {
 		const rendering = this.#textRendering;
 		if (!rendering) return message;
+		// Renderers are display-only: hand them a frozen copy so an edit cannot reach the stored message.
+		const view: AssistantMessage = Object.freeze({
+			...message,
+			content: Object.freeze(
+				message.content.map(block => Object.freeze({ ...block })),
+			) as AssistantMessage["content"],
+		});
 		let content: AssistantMessage["content"] | undefined;
 		for (let index = 0; index < message.content.length; index++) {
 			const block = message.content[index]!;
@@ -543,7 +550,12 @@ export class AssistantMessageComponent extends Container {
 			let text = block.text;
 			for (const renderer of rendering.renderers) {
 				try {
-					const rendered = renderer({ message, contentIndex: rendering.contentOffset + index, text, streaming });
+					const rendered = renderer({
+						message: view,
+						contentIndex: rendering.contentOffset + index,
+						text,
+						streaming,
+					});
 					if (typeof rendered === "string") text = rendered;
 				} catch (error) {
 					if (failedTextRenderers.has(renderer)) continue;
@@ -561,6 +573,8 @@ export class AssistantMessageComponent extends Container {
 	readonly #onImageUpdate?: () => void;
 	readonly #thinkingRenderers: readonly AssistantThinkingRenderer[];
 	#textRendering: AssistantTextRendering | undefined;
+	/** Index in the full reply's `content` of this component's first block, kept across renderer swaps. */
+	readonly #textContentOffset: number;
 	readonly #imageBudget?: ImageBudget;
 	#proseOnlyThinking: boolean;
 	#expandThinkingBlocks: boolean;
@@ -581,6 +595,7 @@ export class AssistantMessageComponent extends Container {
 		this.#onImageUpdate = onImageUpdate;
 		this.#thinkingRenderers = thinkingRenderers;
 		this.#textRendering = textRendering?.renderers.length ? textRendering : undefined;
+		this.#textContentOffset = textRendering?.contentOffset ?? 0;
 		this.#imageBudget = imageBudget;
 		this.#proseOnlyThinking = proseOnlyThinking;
 		this.#expandThinkingBlocks = expandThinkingBlocks;
@@ -1543,8 +1558,8 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/** Swap the extension text renderers (the setting enabling them changed) and redraw with them. */
-	setTextRendering(rendering: AssistantTextRendering | undefined): void {
-		this.#textRendering = rendering?.renderers.length ? rendering : undefined;
+	setTextRenderers(renderers: readonly AssistantTextRenderer[]): void {
+		this.#textRendering = renderers.length ? { renderers, contentOffset: this.#textContentOffset } : undefined;
 		if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 	}
 
