@@ -13,7 +13,7 @@
  * Binds loopback only: anything that can reach this port can drive the
  * user's logged-in browser.
  */
-import { macOSFrontApp } from "@oh-my-pi/pi-natives";
+import { macOSFrontApp, macOSLoopbackPeerApp } from "@oh-my-pi/pi-natives";
 import { parseFlag } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { RelayBridge, type RelayBridgeExtensionUpdater } from "./bridge";
@@ -87,6 +87,8 @@ export interface RelayServer {
 }
 
 interface SocketData {
+	/** The extension end's TCP port, which names the browser behind it. */
+	peerPort?: number;
 	role: "cdp" | "ext";
 	connId?: number;
 	/** The Chrome extension id an `ext` upgrade's `Origin` named. */
@@ -120,9 +122,15 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 	const bridge = new RelayBridge({ log, group, updateExtension });
 	const sockets = new Set<RelayWebSocket>();
 	const startedAt = Date.now();
-	// Only macOS can hand the front app back; elsewhere the relay never reads it.
+	// Only macOS can hand the front app back; elsewhere the relay never reads it. PI_BROWSER_RELAY_KEEP_FRONT=0 turns
+	// off the hold and the key reroute it carries: neither the front app nor the browser behind a socket is looked up.
 	if (process.platform === "darwin" && parseFlag(process.env.PI_BROWSER_RELAY_KEEP_FRONT, true)) {
-		bridge.keepFrontAppWith(macOSFrontApp);
+		bridge.keepFrontAppWith(macOSFrontApp, async socket => {
+			const peerPort = (socket as RelayWebSocket).data.peerPort;
+			const port = server.port;
+			if (peerPort === undefined || port === undefined) return null;
+			return (await macOSLoopbackPeerApp(port, peerPort)) ?? null;
+		});
 	}
 
 	const server = Bun.serve({
@@ -154,7 +162,11 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				if (opts.token && url.searchParams.get("token") !== opts.token) {
 					return new Response("Unauthorized", { status: 401 });
 				}
-				const data: SocketData = { role: "ext", extensionId: origin?.match(EXTENSION_ORIGIN)?.[1] };
+				const data: SocketData = {
+					role: "ext",
+					extensionId: origin?.match(EXTENSION_ORIGIN)?.[1],
+					peerPort: srv.requestIP(req)?.port,
+				};
 				if (srv.upgrade(req, { data })) return undefined;
 				return new Response("websocket upgrade required", { status: 426 });
 			}

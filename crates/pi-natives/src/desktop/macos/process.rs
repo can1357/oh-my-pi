@@ -14,7 +14,7 @@ use std::{
 };
 
 use objc2::rc::autoreleasepool;
-use objc2_app_kit::NSRunningApplication;
+use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 use objc2_foundation::{NSBundle, ns_string};
 use parking_lot::Mutex;
 
@@ -454,9 +454,8 @@ pub(super) fn is_terminal(pid: libc::pid_t) -> bool {
 		})
 }
 
-/// When `pid` started, in microseconds since the epoch: a later process that
-/// reuses the id has a later start.
-pub(in crate::desktop) fn started(pid: libc::pid_t) -> Option<u64> {
+/// `pid`'s `struct proc_bsdinfo`.
+fn bsd_info(pid: libc::pid_t) -> Option<libc::proc_bsdinfo> {
 	let size = libc::c_int::try_from(mem::size_of::<libc::proc_bsdinfo>()).ok()?;
 	// SAFETY: An all-zero bit pattern is valid for this plain C struct.
 	let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
@@ -464,12 +463,139 @@ pub(in crate::desktop) fn started(pid: libc::pid_t) -> Option<u64> {
 	// synchronous call.
 	let written =
 		unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
-	(written == size).then(|| {
+	(written == size).then_some(info)
+}
+
+/// When `pid` started, in microseconds since the epoch: a later process that
+/// reuses the id has a later start.
+pub(in crate::desktop) fn started(pid: libc::pid_t) -> Option<u64> {
+	bsd_info(pid).map(|info| {
 		info
 			.pbi_start_tvsec
 			.saturating_mul(1_000_000)
 			.saturating_add(info.pbi_start_tvusec)
 	})
+}
+
+/// `proc_pidfdinfo` flavor for a socket descriptor's `struct socket_fdinfo`.
+const PROC_PIDFDSOCKETINFO: libc::c_int = 3;
+/// `soi_kind` of a socket whose `soi_proto` is a `struct tcp_sockinfo`.
+const SOCKINFO_TCP: i32 = 2;
+/// How many parents [`loopback_peer_app`] climbs from the process holding the
+/// socket: a browser's network service runs in a direct child of it.
+const MAX_APP_ANCESTORS: usize = 4;
+
+/// `struct socket_fdinfo` from `<sys/proc_info.h>`, naming the fields read
+/// here: the socket's family and kind, and the foreign and local ports a TCP
+/// socket's `tcp_sockinfo` begins with, in network byte order.
+#[repr(C)]
+struct SocketFdInfo {
+	/// `struct proc_fileinfo`, then `struct socket_info` up to `soi_family`.
+	_head:        [u8; 184],
+	family:       i32,
+	/// `soi_options` through `soi_snd`.
+	_middle:      [u8; 68],
+	kind:         i32,
+	_rfu:         u32,
+	foreign_port: i32,
+	local_port:   i32,
+	_tail:        [u8; 520],
+}
+
+const _: () = assert!(
+	mem::size_of::<SocketFdInfo>() == 792
+		&& mem::offset_of!(SocketFdInfo, family) == 184
+		&& mem::offset_of!(SocketFdInfo, kind) == 256
+		&& mem::offset_of!(SocketFdInfo, foreign_port) == 264
+		&& mem::offset_of!(SocketFdInfo, local_port) == 268
+);
+
+/// The app at the other end of this process's loopback TCP connection from
+/// `peer_port` to `local_port`: the process holding that end, or its nearest
+/// ancestor that is a regular app, as a browser is to the helper process its
+/// network service runs in. `None` when no other process holds it.
+pub(in crate::desktop) fn loopback_peer_app(
+	local_port: u16,
+	peer_port: u16,
+) -> Option<libc::pid_t> {
+	let mut pid = loopback_peer(local_port, peer_port)?;
+	for _ in 0..=MAX_APP_ANCESTORS {
+		let regular = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+			.is_some_and(|app| app.activationPolicy() == NSApplicationActivationPolicy::Regular);
+		if regular {
+			return Some(pid);
+		}
+		pid = libc::pid_t::try_from(bsd_info(pid)?.pbi_ppid).ok()?;
+	}
+	None
+}
+
+/// The process other than this one holding the TCP socket from `peer_port`
+/// to `local_port`.
+fn loopback_peer(local_port: u16, peer_port: u16) -> Option<libc::pid_t> {
+	let own = libc::pid_t::try_from(std::process::id()).ok()?;
+	all_pids()?
+		.into_iter()
+		.filter(|pid| *pid > 0 && *pid != own)
+		.find(|pid| holds_tcp(*pid, peer_port, local_port))
+}
+
+fn all_pids() -> Option<Vec<libc::pid_t>> {
+	// SAFETY: A null buffer asks for the number of processes.
+	let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+	let mut pids: Vec<libc::pid_t> = vec![0; usize::try_from(count).ok()? + 64];
+	let bytes = libc::c_int::try_from(pids.len() * mem::size_of::<libc::pid_t>()).ok()?;
+	// SAFETY: libproc writes at most `bytes` of pids into the buffer and
+	// returns how many it wrote.
+	let written = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+	pids.truncate(usize::try_from(written).ok()?);
+	Some(pids)
+}
+
+/// Whether `pid` holds a TCP socket bound to `from_port` and connected to
+/// `to_port`.
+fn holds_tcp(pid: libc::pid_t, from_port: u16, to_port: u16) -> bool {
+	let entry = mem::size_of::<libc::proc_fdinfo>();
+	// SAFETY: A null buffer asks for the byte size of the descriptor list.
+	let bytes =
+		unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+	let Ok(bytes) = usize::try_from(bytes) else {
+		return false;
+	};
+	let mut fds = vec![libc::proc_fdinfo { proc_fd: 0, proc_fdtype: 0 }; bytes / entry + 16];
+	let Ok(capacity) = libc::c_int::try_from(fds.len() * entry) else {
+		return false;
+	};
+	// SAFETY: libproc writes at most `capacity` bytes of descriptor entries
+	// into the buffer and returns how many bytes it wrote.
+	let written = unsafe {
+		libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, fds.as_mut_ptr().cast(), capacity)
+	};
+	fds.truncate(usize::try_from(written).unwrap_or(0) / entry);
+	let size = libc::c_int::try_from(mem::size_of::<SocketFdInfo>()).unwrap_or(0);
+	let port = |raw: i32| u16::try_from(raw).ok().map(u16::from_be);
+	fds.iter()
+		.filter(|fd| fd.proc_fdtype == libc::PROX_FDTYPE_SOCKET as u32)
+		.any(|fd| {
+			// SAFETY: An all-zero bit pattern is valid for this plain C struct.
+			let mut info: SocketFdInfo = unsafe { mem::zeroed() };
+			// SAFETY: The buffer is exactly the kernel structure size and
+			// outlives the synchronous call.
+			let written = unsafe {
+				libc::proc_pidfdinfo(
+					pid,
+					fd.proc_fd,
+					PROC_PIDFDSOCKETINFO,
+					(&raw mut info).cast(),
+					size,
+				)
+			};
+			written == size
+				&& info.kind == SOCKINFO_TCP
+				&& matches!(info.family, libc::AF_INET | libc::AF_INET6)
+				&& port(info.local_port) == Some(from_port)
+				&& port(info.foreign_port) == Some(to_port)
+		})
 }
 
 /// `pid`'s application name as the Dock shows it.
@@ -488,6 +614,26 @@ mod tests {
 	};
 
 	use super::*;
+
+	#[test]
+	fn the_process_at_the_other_end_of_a_loopback_connection_is_found_and_this_one_never() {
+		let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+		let local = listener.local_addr().unwrap().port();
+		let mut client = Command::new("/usr/bin/nc")
+			.args(["127.0.0.1", &local.to_string()])
+			.stdin(Stdio::piped())
+			.stdout(Stdio::null())
+			.spawn()
+			.unwrap();
+		let (_connection, peer) = listener.accept().unwrap();
+		let found = loopback_peer(local, peer.port());
+		// This process's own end of the same connection.
+		let own_end = loopback_peer(peer.port(), local);
+		client.kill().unwrap();
+		client.wait().unwrap();
+		assert_eq!(found, libc::pid_t::try_from(client.id()).ok());
+		assert_eq!(own_end, None);
+	}
 
 	#[test]
 	fn tk_images_match_with_their_versions_and_neighbours_do_not() {

@@ -66,6 +66,10 @@
 - Fixed X11 takeover input stopping with `Cancelled` after you typed locally; Escape now stops computer use for the rest of the turn ([#17912](https://github.com/can1357/oh-my-pi/pull/17912) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 background `el.type`/`el.press` raising the window and taking your keyboard; elements without GTK 3 focus now use takeover ([#17921](https://github.com/can1357/oh-my-pi/pull/17921) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Added
+
+- Added a `browserPid` argument to `macOSFrontApp()` and `MacOSFrontApp.keepInFront`: for a second after the read and while `keepInFront` holds the app in front, the user's keys macOS sends to that browser go to the read app instead (needs Accessibility); and `macOSLoopbackPeerApp(localPort, peerPort)`, which finds the app holding the other end of a loopback TCP connection to this process
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

@@ -119,6 +119,7 @@ export const listWorkspace = nativeBindings.listWorkspace ?? missingNativeExport
 export const macOSAutocorrectWord = nativeBindings.macOSAutocorrectWord ?? missingNativeExport("macOSAutocorrectWord");
 export const macOSCheckSpelling = nativeBindings.macOSCheckSpelling ?? missingNativeExport("macOSCheckSpelling");
 export const macOSFrontApp = nativeBindings.macOSFrontApp ?? missingNativeExport("macOSFrontApp");
+export const macOSLoopbackPeerApp = nativeBindings.macOSLoopbackPeerApp ?? missingNativeExport("macOSLoopbackPeerApp");
 export const macOSSpellCheckerAvailable = nativeBindings.macOSSpellCheckerAvailable ?? missingNativeExport("macOSSpellCheckerAvailable");
 export const macOSSpellingGuesses = nativeBindings.macOSSpellingGuesses ?? missingNativeExport("macOSSpellingGuesses");
 export const matchesKey = nativeBindings.matchesKey ?? missingNativeExport("matchesKey");

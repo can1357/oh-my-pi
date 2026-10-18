@@ -2212,23 +2212,39 @@ describe("RelayBridge auto-attach gating", () => {
 });
 
 describe("RelayBridge front app on a window omp's input opens", () => {
-	/** A relay reading the front app as `n` (the read count), recording each app it holds in front and for how long. */
-	function frontAppRecorder(): { holds: Array<{ app: number; ms: number }>; frontApp: () => FrontApp } {
+	/**
+	 * A relay reading the front app as `n` (the read count), recording the browser each read takes the user's keys
+	 * back from, each app it holds in front and for how long, and the browser the hold takes them back from.
+	 */
+	function frontAppRecorder(): {
+		holds: Array<{ app: number; ms: number }>;
+		readBrowsers: Array<number | null>;
+		browsers: Array<number | null>;
+		frontApp: (browserPid: number | null) => FrontApp;
+	} {
 		const holds: Array<{ app: number; ms: number }> = [];
+		const readBrowsers: Array<number | null> = [];
+		const browsers: Array<number | null> = [];
 		let reads = 0;
 		return {
 			holds,
-			frontApp: () => {
+			readBrowsers,
+			browsers,
+			frontApp: browserPid => {
 				const app = ++reads;
+				readBrowsers.push(browserPid);
 				return {
-					keepInFront: async ms => {
+					keepInFront: async (ms, browserPid) => {
 						holds.push({ app, ms });
+						browsers.push(browserPid ?? null);
 						return 1;
 					},
 				};
 			},
 		};
 	}
+
+	const noBrowser = async () => null;
 
 	async function sendInput(bridge: RelayBridge, ext: FakeExtSocket, connId: number, sessionId: string): Promise<void> {
 		for (const type of ["mousePressed", "mouseReleased"]) {
@@ -2255,7 +2271,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 	it("holds the app that was in front at omp's input to a tab in front once that tab's page opens a window", async () => {
 		const { holds, frontApp } = frontAppRecorder();
 		const bridge = new RelayBridge();
-		bridge.keepFrontAppWith(frontApp);
+		bridge.keepFrontAppWith(frontApp, noBrowser);
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 }), tab({ tabId: 9, active: true })]);
 		const cdp = new FakeCdpSocket();
@@ -2291,6 +2307,48 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		expect(holds).toHaveLength(2);
 	});
 
+	it("takes the user's keys back from the browser behind the opening tab's extension socket", async () => {
+		const { readBrowsers, browsers, frontApp } = frontAppRecorder();
+		const bridge = new RelayBridge();
+		const chrome = new FakeExtSocket();
+		const edge = new FakeExtSocket();
+		bridge.keepFrontAppWith(frontApp, async socket => (socket === chrome ? 111 : socket === edge ? 222 : null));
+		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1 })]);
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 1 })]);
+		await flush();
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const edgeTab = await attachPage(bridge, edge, cdp, connId, 1, "edge");
+		await sendInput(bridge, edge, connId, edgeTab);
+		windowOpen(bridge, edge, 1);
+		await flush();
+		// From omp's input on (Chrome can activate before the relay hears of the window), and through the hold.
+		expect(readBrowsers).toEqual([222, 222]);
+		expect(browsers).toEqual([222]);
+	});
+
+	it("does not take the user's keys back from a browser found for a socket since replaced", async () => {
+		const { browsers, frontApp } = frontAppRecorder();
+		const bridge = new RelayBridge();
+		const old = new FakeExtSocket();
+		const restarted = new FakeExtSocket();
+		const oldLookup = Promise.withResolvers<number | null>();
+		const restartedLookup = Promise.withResolvers<number | null>();
+		bridge.keepFrontAppWith(frontApp, socket => (socket === old ? oldLookup : restartedLookup).promise);
+		connect(bridge, old, [tab({ tabId: 1 })]);
+		// The service worker restarts while the first socket's lookup runs; that lookup ends after.
+		connect(bridge, restarted, [tab({ tabId: 1 })]);
+		oldLookup.resolve(111);
+		await flush();
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const page = await attachPage(bridge, restarted, cdp, connId, 1);
+		await sendInput(bridge, restarted, connId, page);
+		windowOpen(bridge, restarted, 1);
+		await flush();
+		expect(browsers).toEqual([null]);
+	});
+
 	it.each([
 		{ case: "no input of omp's came before it", inputTab: null, after: 0 },
 		{ case: "omp's last input to its tab was over a second before it", inputTab: 1, after: 1_001 },
@@ -2300,7 +2358,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		try {
 			const { holds, frontApp } = frontAppRecorder();
 			const bridge = new RelayBridge();
-			bridge.keepFrontAppWith(frontApp);
+			bridge.keepFrontAppWith(frontApp, noBrowser);
 			const ext = new FakeExtSocket();
 			connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 })]);
 			const cdp = new FakeCdpSocket();
@@ -2320,7 +2378,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 	it("reads the front app only on omp's inputs that can open a window, not on moves, key-ups or inserted text", async () => {
 		const { holds, frontApp } = frontAppRecorder();
 		const bridge = new RelayBridge();
-		bridge.keepFrontAppWith(frontApp);
+		bridge.keepFrontAppWith(frontApp, noBrowser);
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const cdp = new FakeCdpSocket();
@@ -2351,7 +2409,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		bridge.keepFrontAppWith(() => {
 			reads++;
 			throw new Error("macOSFrontApp is missing from this native addon");
-		});
+		}, noBrowser);
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const cdp = new FakeCdpSocket();
@@ -2381,7 +2439,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 					return promise;
 				},
 			};
-		});
+		}, noBrowser);
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const cdp = new FakeCdpSocket();
@@ -2418,7 +2476,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 						return Promise.withResolvers<number>().promise;
 					},
 				};
-			});
+			}, noBrowser);
 			const ext = new FakeExtSocket();
 			connect(bridge, ext, [tab({ tabId: 1 })]);
 			const cdp = new FakeCdpSocket();
@@ -2452,7 +2510,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 						throw new Error("desktop control is busy");
 					},
 				};
-			});
+			}, noBrowser);
 			const ext = new FakeExtSocket();
 			connect(bridge, ext, [tab({ tabId: 1 })]);
 			const cdp = new FakeCdpSocket();

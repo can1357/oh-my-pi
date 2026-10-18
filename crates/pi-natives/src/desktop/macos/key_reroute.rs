@@ -698,9 +698,61 @@ const SLICE_SECONDS: f64 = 0.05;
 /// Dropping it marks the action ended; the tap thread then stops on its own.
 pub(super) struct KeyReroute {
 	ended: Arc<AtomicBool>,
+	armed: Armed,
+}
+
+/// What a [`KeyReroute`] was armed with, and what one armed now would be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Armed {
+	user:       pid_t,
+	target:     pid_t,
+	/// The latest action's generation: this one's when armed.
+	generation: u64,
+	/// The mouse button counters: a change after arming is the user picking
+	/// an app ([`Theft::user_acted`]).
+	buttons:    [u32; 6],
+}
+
+impl Armed {
+	/// Whether the reroute armed as `self` is still the latest action's, for
+	/// the same apps as `now`.
+	const fn serves(self, now: Self) -> bool {
+		self.user == now.user && self.target == now.target && self.generation == now.generation
+	}
+
+	/// Whether it moves the same keys as one armed `now`: it [`serves`]
+	/// `now`, and no mouse button went down or up since, which it would take
+	/// for the user's choice where the new one would not.
+	///
+	/// [`serves`]: Self::serves
+	fn covers(self, now: Self) -> bool {
+		self.serves(now) && self.buttons == now.buttons
+	}
+
+	/// Whether the reroute armed as `self` moves the keys one armed now for
+	/// `user` and `target` would, so it can serve in its place.
+	pub(super) fn covers_now(self, user: pid_t, target: pid_t) -> bool {
+		self.covers(KeyReroute::now(user, target))
+	}
 }
 
 impl KeyReroute {
+	fn now(user: pid_t, target: pid_t) -> Armed {
+		let generation = REGISTRY.lock().latest.0;
+		Armed { user, target, generation, buttons: mouse_buttons() }
+	}
+
+	/// Whether this reroute is still the latest action's, between `user` and
+	/// `target`: an action can carry on with it.
+	pub(super) fn serves(&self, user: pid_t, target: pid_t) -> bool {
+		self.armed.serves(Self::now(user, target))
+	}
+
+	/// What it was armed with.
+	pub(super) const fn armed(&self) -> Armed {
+		self.armed
+	}
+
 	/// Starts watching for the target taking the user's keyboard. `None` when
 	/// the taps cannot be created (no Accessibility permission, or the target
 	/// exited): the action then runs as before, without key repair.
@@ -712,6 +764,7 @@ impl KeyReroute {
 			return None;
 		}
 		let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+		let buttons = mouse_buttons();
 		let ended = Arc::new(AtomicBool::new(false));
 		let action_ended = Arc::clone(&ended);
 		let (ready, receive) = flume::bounded(1);
@@ -719,7 +772,7 @@ impl KeyReroute {
 			.name("desktop-key-reroute".into())
 			.spawn(move || {
 				let mut context = TapContext {
-					theft:     Theft::new(user, target, mouse_buttons(), generation),
+					theft:     Theft::new(user, target, buttons, generation),
 					chord:     Chord::new(modifier_flags(), Instant::now()),
 					focus_tap: ptr::null_mut(),
 					key_tap:   ptr::null_mut(),
@@ -836,7 +889,10 @@ impl KeyReroute {
 				}
 			})
 			.ok()?;
-		receive.recv().unwrap_or(false).then_some(Self { ended })
+		receive
+			.recv()
+			.unwrap_or(false)
+			.then_some(Self { ended, armed: Armed { user, target, generation, buttons } })
 	}
 }
 
@@ -1389,5 +1445,22 @@ mod tests {
 		assert!(!typed_by_user(0, SYNTHETIC_EVENT_TAG), "omp's own HID keys");
 		assert!(!typed_by_user(4321, 0), "an automation tool's keys");
 		assert!(!typed_by_user(4321, SYNTHETIC_EVENT_TAG));
+	}
+
+	#[test]
+	fn a_reroute_serves_its_apps_until_a_newer_action_and_stands_in_for_a_new_one_until_a_click() {
+		let armed =
+			Armed { user: USER, target: TARGET, generation: 7, buttons: BUTTONS };
+		assert!(armed.covers(armed));
+		// The user clicked since: an action under way keeps it, but it would
+		// take the click for their choice where a new one would not.
+		let clicked = Armed { buttons: CLICKED, ..armed };
+		assert!(armed.serves(clicked) && !armed.covers(clicked));
+		for other in [Armed { generation: 8, ..armed }, Armed { user: SPOTLIGHT, ..armed }, Armed {
+			target: SPOTLIGHT,
+			..armed
+		}] {
+			assert!(!armed.serves(other) && !armed.covers(other), "{other:?}");
+		}
 	}
 }
