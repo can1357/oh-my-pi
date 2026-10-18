@@ -278,6 +278,100 @@ describe("jfind cascade", () => {
 		}
 	});
 
+	it("finds an owner in an explicit file when a sketch lacks the surrounding explanation", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-single-file-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			const body = Array.from({ length: 67 }, (_, i) => {
+				if (i === 60) return "The Valmont coil reservation workflow is owned by the Production Planning team.";
+				if (i === 64) return "The same team signs off on requests before dispatch.";
+				return `Background on inventory planning, section ${i + 1}: ${"general policy ".repeat(3)}`;
+			}).join("\n");
+			await Bun.write(file, body);
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if ("tree" in state) return 0.9;
+				const passage = (state.passages as Record<string, string | [string, string]>)[key]!;
+				const text = typeof passage === "string" ? passage : passage[1];
+				return text.includes("owned by the Production Planning team") &&
+					text.includes("same team signs off on requests")
+					? 0.95
+					: 0.1;
+			});
+			const result = await runCascade({
+				root: { path: file, type: "file", size: Buffer.byteLength(body) },
+				filesystem: urlFs(dir),
+				query: "who owns coil reservation and inventory transfer approvals",
+				extraKeywords: ["coil reservation", "owned by"],
+				judge,
+				includeHidden: false,
+			});
+			expect(result.hits.map(hit => hit.rel)).toEqual([file]);
+			expect(result.hits[0]!.ranges).toEqual([expect.objectContaining({ start: 1, end: 67, p: 0.95 })]);
+			// A named file needs no filename ranking or sketch routing.
+			expect(judge.requests.filter(request => "tree" in stateOf(request))).toHaveLength(0);
+			expect(judge.requests.filter(request => "files" in stateOf(request))).toHaveLength(0);
+			expect(result.stats.mapCards).toBe(0);
+			expect(result.stats.windowsPruned).toBe(0);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("verifies the final passage of an explicitly named file beyond the directory budgets", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-long-file-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			const body = Array.from({ length: 42 }, (_, i) =>
+				i === 41
+					? "The Production Planning team owns coil reservation approvals."
+					: `section ${i}: ${"x".repeat(8170)}`,
+			).join("\n");
+			await Bun.write(file, body);
+			const result = await runCascade({
+				root: { path: file, type: "file", size: Buffer.byteLength(body) },
+				filesystem: urlFs(dir),
+				query: "who owns coil reservation approvals?",
+				extraKeywords: ["coil reservation"],
+				judge: new FakeJudge((request, key) => {
+					const state = stateOf(request);
+					if ("file" in state) {
+						return (state.passages as Record<string, string>)[key]!.includes("Production Planning team")
+							? 0.9
+							: 0.1;
+					}
+					return 0.1;
+				}),
+				includeHidden: false,
+			});
+			expect(result.hits[0]!.ranges).toEqual([expect.objectContaining({ start: 42, end: 42, p: 0.9 })]);
+			expect(result.hits[0]!.truncated).toBe(false);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("rejects an explicit file whose line cannot be judged in full", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-clipped-file-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			const body = `${"x".repeat(9000)}\nThe Production Planning team owns coil reservations.`;
+			await Bun.write(file, body);
+			await expect(
+				runCascade({
+					root: { path: file, type: "file", size: Buffer.byteLength(body) },
+					filesystem: urlFs(dir),
+					query: "who owns inventory transfers?",
+					extraKeywords: [],
+					judge: new FakeJudge(() => 0.1),
+					includeHidden: false,
+				}),
+			).rejects.toThrow("a line exceeds the 8.0KB passage limit");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
 	it("routes sketches onward when their judgment fails and reports the failure", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-fail-"));
 		try {

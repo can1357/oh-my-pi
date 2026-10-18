@@ -102,15 +102,24 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 	const { judge, close } = await openStandaloneJudge(baseCwd, "find");
 	try {
 		const started = performance.now();
-		const raw = await runCascade({
-			root,
-			filesystem,
-			query: cmd.query.trim(),
-			extraKeywords: cmd.keywords,
-			judge,
-			includeHidden: cmd.hidden,
-			onProgress: log,
-		});
+		let raw: CascadeResult;
+		try {
+			raw = await runCascade({
+				root,
+				filesystem,
+				query: cmd.query.trim(),
+				extraKeywords: cmd.keywords,
+				judge,
+				includeHidden: cmd.hidden,
+				onProgress: log,
+			});
+		} catch (error) {
+			// An explicit file that cannot be judged whole is a refusal, not a miss.
+			if (!(error instanceof ToolError)) throw error;
+			console.error(chalk.red(`Error: ${error.message}`));
+			process.exitCode = 1;
+			return;
+		}
 		// Hits print as paths usable from the caller's cwd: relative files or URLs.
 		const result: CascadeResult = {
 			...raw,
