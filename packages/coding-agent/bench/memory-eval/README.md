@@ -2,6 +2,7 @@
 
 Retrieval benchmark harness: Mnemopi (`packages/mnemopi`) vs upstream Mnemosyne 4.0.0b4.
 Everything it downloads lives under `~/.cache/omp-memory-eval/` and is never committed, except the embedding model Mnemopi's own fastembed loads (`--embedder js`, `embed-parity.ts`): Mnemopi has no option to move it, so it shares omp's fastembed cache (`~/.omp/cache/fastembed` by default).
+The setup and commands assume a POSIX shell and virtualenv layout (`venv-engine/bin/python`): Linux or macOS, or WSL on Windows.
 
 ## One-time setup
 
@@ -76,7 +77,7 @@ Latency (`latency.p50`, `latency.p95`, per question `latencyMs`) is the wall tim
 
 ### Recall options
 
-- `--mnemopi-recall recall` (default) ranks with `BeamMemory.recall`. `--mnemopi-recall enhanced` calls `recallEnhanced(question, k, { includeFacts: true })`, the call omp's auto-recall makes. Fact rows take a ranking slot (tier `fact`) and map to messages only through the content fallback.
+- `--mnemopi-recall recall` (default) ranks with `BeamMemory.recall`. `--mnemopi-recall enhanced` calls `recallEnhanced(question, k, { includeFacts: true })`, the call omp's auto-recall makes. Fact rows take a ranking slot (tier `fact`) and map to messages only through the content fallback. The harness ingests without fact extraction, which in production runs the host LLM over each retained transcript, so these stores hold no extracted facts: fact recall and polyphonic recall's fact voice contribute nothing, on both engines (Mnemosyne runs with `MNEMOSYNE_LLM_ENABLED=false`).
 - `--polyphonic` turns on polyphonic recall: `BeamConfig.polyphonicRecall: true` for Mnemopi and `MNEMOSYNE_POLYPHONIC_RECALL=1` in Mnemosyne's environment. Mnemopi runs it only inside `recallEnhanced`, so with `--engine mnemopi` it needs `--mnemopi-recall enhanced`.
 
 Both are recorded in the result's `config` (`mnemopiRecall`, `polyphonic`) for every engine.
