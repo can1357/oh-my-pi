@@ -272,26 +272,57 @@ test("a non-corruption init failure on a store that fails quick_check is preserv
 	expect(await fs.promises.readFile(path.join(dir.path(), backups[0]!))).toEqual(damaged);
 });
 
-/** Seeds 200 rows spread over several leaf pages and returns each leaf's row ids in page order. */
-function seedLeaves(dbPath: string): { pageSize: number; leaves: Array<{ page: number; ids: number[] }> } {
+/** Decodes the rowids a table leaf page holds, in rowid order. Page indices are 0-based file pages. */
+function leafPageIds(bytes: Buffer, page: number, pageSize: number): number[] {
+	const start = page * pageSize;
+	if (page === 0 || bytes[start] !== 0x0d) return [];
+	const header = start;
+	const cells = bytes.readUInt16BE(header + 3);
+	const ids: number[] = [];
+	for (let index = 0; index < cells; index++) {
+		const cell = start + bytes.readUInt16BE(header + 8 + index * 2);
+		if (cell < header + 8 + cells * 2 || cell + 5 > start + pageSize) continue;
+		// Table leaf cell: payload-size varint, then the rowid varint.
+		let offset = cell;
+		for (let consumed = 0; offset < start + pageSize; consumed++, offset++) {
+			const byte = bytes[offset]!;
+			if (consumed === 8 || byte < 0x80) {
+				offset++;
+				break;
+			}
+		}
+		let key = 0n;
+		for (let byteIndex = 0; offset < start + pageSize; byteIndex++, offset++) {
+			const byte = bytes[offset]!;
+			key = (key << BigInt(byteIndex === 8 ? 8 : 7)) | BigInt(byteIndex === 8 ? byte : byte & 0x7f);
+			if (byteIndex === 8 || byte < 0x80) break;
+		}
+		const rowid = Number(BigInt.asIntN(64, key));
+		if (Number.isSafeInteger(rowid)) ids.push(rowid);
+	}
+	return ids.sort((a, b) => a - b);
+}
+
+/** Seeds rows spread over several leaf pages and returns each leaf's row ids in rowid order. */
+function seedLeaves(dbPath: string, count = 200): { pageSize: number; leaves: Array<{ page: number; ids: number[] }> } {
 	const db = new Database(dbPath);
-	// Zero freed space so each row's marker appears only on the leaf that holds it.
+	// Zero freed space so each row's bytes appear only on the leaf that holds it.
 	db.run("PRAGMA secure_delete = ON");
 	db.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
 	const insert = db.prepare("INSERT INTO entries (id, value) VALUES (?, ?)");
 	db.transaction(() => {
-		for (let id = 1; id <= 200; id++) insert.run(id, `row-${String(id).padStart(4, "0")}-${"x".repeat(180)}`);
+		for (let id = 1; id <= count; id++) insert.run(id, `row-${String(id).padStart(4, "0")}-${"x".repeat(180)}`);
 	})();
 	insert.finalize();
 	const pageSize = db.query<{ page_size: number }, []>("PRAGMA page_size").get()!.page_size;
 	db.close();
 	const bytes = fs.readFileSync(dbPath);
-	const byPage = new Map<number, number[]>();
-	for (let id = 1; id <= 200; id++) {
-		const page = Math.floor(bytes.indexOf(`row-${String(id).padStart(4, "0")}-`) / pageSize);
-		byPage.set(page, [...(byPage.get(page) ?? []), id]);
+	const leaves: Array<{ page: number; ids: number[] }> = [];
+	for (let page = 1; page < bytes.length / pageSize; page++) {
+		const ids = leafPageIds(bytes, page, pageSize);
+		if (ids.length > 0) leaves.push({ page, ids });
 	}
-	const leaves = [...byPage].map(([page, ids]) => ({ page, ids })).sort((a, b) => a.ids[0]! - b.ids[0]!);
+	leaves.sort((a, b) => a.ids[0]! - b.ids[0]!);
 	return { pageSize, leaves };
 }
 
@@ -340,6 +371,161 @@ test("salvage keeps readable rows between separate damaged regions", async () =>
 		expect(db.query("SELECT id FROM entries WHERE id = ?").get(middleId)).toEqual({ id: middleId });
 		const rows = readSalvageableRows<{ id: number }>(db, "entries", "id");
 		const expected = leaves.filter(leaf => !damaged.includes(leaf)).flatMap(leaf => leaf.ids);
+		expect(rows.map(row => row.id)).toEqual(expected);
+	} finally {
+		db.close();
+	}
+});
+
+/** Breaks the overflow chain of the oversized row: the first overflow page's next-pointer points at page 0x7fffffff. */
+function breakFirstOverflowChain(dbPath: string, pageSize: number): void {
+	const bytes = fs.readFileSync(dbPath);
+	// The oversized row's payload spills into dedicated overflow pages. The
+	// first of them is the lowest page that carries a long `y` run but is not
+	// a table leaf (the leaf may also hold a local prefix of the run).
+	const needle = Buffer.from("y".repeat(256));
+	for (let page = 1; page < bytes.length / pageSize; page++) {
+		const start = page * pageSize;
+		if (bytes[start] === 0x0d || bytes[start] === 0x05) continue;
+		if (bytes.indexOf(needle, start) < start + pageSize) {
+			const corrupted = Buffer.from(bytes);
+			corrupted.writeUInt32BE(0x7fffffff, start);
+			fs.writeFileSync(dbPath, corrupted);
+			return;
+		}
+	}
+	throw new Error("no overflow page found for the oversized row");
+}
+
+test("salvage keeps rows around one row with a broken overflow chain", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-overflow-");
+	const dbPath = dir.join("store.db");
+	const db = new Database(dbPath);
+	db.run("PRAGMA secure_delete = ON");
+	db.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+	const insert = db.prepare("INSERT INTO entries (id, value) VALUES (?, ?)");
+	db.transaction(() => {
+		for (let id = 1; id <= 40; id++) {
+			insert.run(id, id === 20 ? "y".repeat(9000) : `row-${String(id).padStart(4, "0")}-${"x".repeat(180)}`);
+		}
+	})();
+	insert.finalize();
+	const pageSize = db.query<{ page_size: number }, []>("PRAGMA page_size").get()!.page_size;
+	db.close();
+	breakFirstOverflowChain(dbPath, pageSize);
+
+	const reopened = new Database(dbPath, { readonly: true });
+	try {
+		// Only row 20 is undecodable; every other row, before and after it,
+		// must survive even though they share leaf pages with the damage.
+		// The salvage selects the payload column so reading row 20 itself
+		// follows the broken overflow chain, as callers reading prompts do.
+		expect(() => reopened.query("SELECT id, value FROM entries WHERE id = 20").get()).toThrow();
+		const rows = readSalvageableRows<{ id: number; value: string }>(reopened, "entries", "id, value");
+		const expected = Array.from({ length: 40 }, (_, index) => index + 1).filter(id => id !== 20);
+		expect(rows.map(row => row.id)).toEqual(expected);
+	} finally {
+		reopened.close();
+	}
+});
+
+test("salvage keeps rows after a broken overflow chain in a single-leaf root", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-single-leaf-");
+	const dbPath = dir.join("store.db");
+	const db = new Database(dbPath);
+	db.run("PRAGMA secure_delete = ON");
+	db.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+	const insert = db.prepare("INSERT INTO entries (id, value) VALUES (?, ?)");
+	db.transaction(() => {
+		for (let id = 1; id <= 8; id++) {
+			insert.run(id, id === 3 ? "y".repeat(9000) : `row-${String(id).padStart(4, "0")}-${"x".repeat(180)}`);
+		}
+	})();
+	insert.finalize();
+	const pageSize = db.query<{ page_size: number }, []>("PRAGMA page_size").get()!.page_size;
+	db.close();
+	breakFirstOverflowChain(dbPath, pageSize);
+
+	const reopened = new Database(dbPath, { readonly: true });
+	try {
+		// The root is a single leaf, so there are no interior subtree keys and
+		// the recovery must still cost only the damaged row itself.
+		expect(() => reopened.query("SELECT id, value FROM entries WHERE id = 3").get()).toThrow();
+		const rows = readSalvageableRows<{ id: number; value: string }>(reopened, "entries", "id, value");
+		const expected = Array.from({ length: 8 }, (_, index) => index + 1).filter(id => id !== 3);
+		expect(rows.map(row => row.id)).toEqual(expected);
+	} finally {
+		reopened.close();
+	}
+});
+
+test("salvage falls back when interior separator keys are damaged", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-interior-");
+	const dbPath = dir.join("store.db");
+	const { pageSize, leaves } = seedLeaves(dbPath);
+	expect(leaves.length).toBeGreaterThan(5);
+	// Corrupt the first interior separator key so it no longer sorts below the
+	// second key: the page's boundaries are damaged data and must not be used
+	// as skip points. The key stays a small single-byte varint, so only seeks
+	// up to the corrupted key are mis-routed into the damaged first leaf.
+	const bytes = fs.readFileSync(dbPath);
+	const rootPage = bytes.findIndex(
+		(byte, offset) => byte === 0x05 && offset % pageSize === (Math.floor(offset / pageSize) === 0 ? 100 : 0),
+	);
+	expect(rootPage).toBeGreaterThan(0);
+	const page = Math.floor(rootPage / pageSize);
+	const firstCell = page * pageSize + bytes.readUInt16BE(rootPage + 12);
+	const secondCell = page * pageSize + bytes.readUInt16BE(rootPage + 14);
+	const secondKey = bytes[secondCell + 4]!;
+	expect(secondKey).toBeLessThan(100);
+	const corrupted = Buffer.from(bytes);
+	corrupted[firstCell + 4] = secondKey + 10;
+	// Damage the first leaf, which the corrupted separator now also routes the
+	// following rowids into.
+	corrupted.fill(0xff, leaves[0]!.page * pageSize, (leaves[0]!.page + 1) * pageSize);
+	fs.writeFileSync(dbPath, corrupted);
+
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		const ids = readSalvageableRows<{ id: number }>(db, "entries", "id").map(row => row.id);
+		// The unsorted separator makes SQLite's own seek routing inside the
+		// first two subtrees unreliable, so only assert what must hold: the
+		// bogus boundary is not used as a skip point, every leaf past the
+		// corrupted key's subtree is fully recovered, and no row of the
+		// damaged leaf is fabricated or returned.
+		expect(ids).toEqual(expect.arrayContaining(leaves.slice(3).flatMap(leaf => leaf.ids)));
+		expect(ids.filter(id => leaves[0]!.ids.includes(id))).toEqual([]);
+		expect(new Set(ids).size).toBe(ids.length);
+	} finally {
+		db.close();
+	}
+});
+
+test("salvage charges a run of adjacent damaged leaves as one damaged region", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-run-");
+	const dbPath = dir.join("store.db");
+	// Enough leaves that a contiguous damaged run longer than the
+	// damaged-region cap can be survived when it counts as one region.
+	const { pageSize, leaves } = seedLeaves(dbPath, 24000);
+	expect(leaves.length).toBeGreaterThan(1100);
+	const runStart = 100;
+	const runLength = 1050;
+	const fd = fs.openSync(dbPath, "r+");
+	try {
+		const blank = Buffer.alloc(pageSize, 0xff);
+		for (let index = runStart; index < runStart + runLength; index++) {
+			fs.writeSync(fd, blank, 0, pageSize, leaves[index]!.page * pageSize);
+		}
+	} finally {
+		fs.closeSync(fd);
+	}
+
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		const rows = readSalvageableRows<{ id: number }>(db, "entries", "id");
+		const expected = leaves
+			.filter((leaf, index) => index < runStart || index >= runStart + runLength)
+			.flatMap(leaf => leaf.ids);
 		expect(rows.map(row => row.id)).toEqual(expected);
 	} finally {
 		db.close();
