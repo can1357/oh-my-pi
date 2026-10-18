@@ -22,6 +22,7 @@ import { type ExtensionModule, extensionModuleCapability } from "../../capabilit
 import { type Hook, hookCapability } from "../../capability/hook";
 import { isServiceTierFamily, isServiceTierForFamily } from "../../config/service-tier";
 import { loadCapability } from "../../discovery";
+import { legacyProviderAllowed } from "../../discovery/agent-plugin-format";
 import { getExtensionNameFromPath } from "../../discovery/helpers";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
@@ -597,6 +598,13 @@ export async function discoverExtensionPaths(
 		}
 	};
 
+	// A configured package directory with a fatally invalid Agent Plugins manifest
+	// is rejected whole (§5.2, §11.3): none of its hooks or modules may load.
+	const configuredAllowed = await Promise.all(
+		configuredPaths.map(configuredPath => legacyProviderAllowed(resolvePath(configuredPath, cwd), "other")),
+	);
+	const loadableConfiguredPaths = configuredPaths.filter((_, index) => configuredAllowed[index]);
+
 	const ambient = options.ambient !== false;
 	if (ambient) {
 		// 1. Discover extension modules via capability API (native .omp/.pi only).
@@ -628,7 +636,7 @@ export async function discoverExtensionPaths(
 			}
 		}
 	} else {
-		for (const configuredPath of configuredPaths) {
+		for (const configuredPath of loadableConfiguredPaths) {
 			addPaths(await discoverHooksInPackageRoot(resolvePath(configuredPath, cwd)));
 		}
 	}
@@ -639,7 +647,7 @@ export async function discoverExtensionPaths(
 	}
 
 	// 4. Explicitly configured paths
-	for (const configuredPath of configuredPaths) {
+	for (const configuredPath of loadableConfiguredPaths) {
 		const resolved = resolvePath(configuredPath, cwd);
 
 		let stat: fs1.Stats | null = null;
