@@ -1536,6 +1536,46 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("names a configured default that no longer resolves instead of switching silently", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "anthropic/claude-sonnet-9-9");
+
+		try {
+			const { session, modelFallbackMessage } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				modelRegistry,
+				settings,
+				sessionManager: SessionManager.inMemory(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				rules: [],
+				preloadedCustomToolPaths: [],
+				toolNames: ["read"],
+			});
+
+			try {
+				expect(session.model).toBeDefined();
+				expect(modelFallbackMessage).toContain("anthropic/claude-sonnet-9-9");
+				expect(modelFallbackMessage).toContain(`${session.model?.provider}/${session.model?.id}`);
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	test("refreshes cached llama.cpp vision metadata for the startup default model", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);

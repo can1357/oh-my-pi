@@ -196,6 +196,13 @@
 - Fixed sessions whose first reply starts with a todo plan getting a title without its icon and code: the plan's title refresh no longer replaces the card title that is still being generated
 - Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
+### Breaking Changes
+
+- `provider/model` selectors in `--model`, settings, roles and task agents now need the exact id or alias: retired or renamed ids (`openai-codex/gpt-5.5`), dated ids written without their date, `-latest` shorthands (`openai/gpt-5-latest` for `gpt-5-chat-latest`), and Vertex ids without `@default` (`google-vertex/claude-opus-4-8`) no longer match a sibling; use the id `omp models <provider>` lists, or drop the provider prefix to keep fuzzy matching ([#12884](https://github.com/can1357/oh-my-pi/issues/12884))
+
+### Fixed
+
+- Fixed a `provider/model` selector for a model that provider doesn't have silently running a similarly named model (`anthropic/claude-haiku-5-5` ran `claude-haiku-4-5`); it now fails with `Model "…" not found` and suggests up to three close ids from that provider, a configured default or dictation model that no longer resolves now warns with the model used instead, and bare selectors such as `opus` still fuzzy-match ([#12884](https://github.com/can1357/oh-my-pi/issues/12884))
 
 ## [18.12.2] - 2026-10-18
 
@@ -226,7 +233,6 @@
 
 ### Fixed
 
-- Fixed a `provider/model` selector for a model that provider doesn't have silently running a similarly named model (`anthropic/claude-haiku-5-5` ran `claude-haiku-4-5`); it now fails with `Model "…" not found`, and bare selectors such as `opus` still fuzzy-match ([#12884](https://github.com/can1357/oh-my-pi/issues/12884))
 - Fixed repeated status commands such as `/goal show` showing nothing after the first few times in a native terminal when the text had not changed
 - Fixed browser relay tabs that a browser already had open when its extension connected staying invisible to omp until they changed; opening such a tab by `app.target` could fail with "Selected tab did not become available before omp could attach"
 - Fixed Ollama Cloud sessions compacting too early on stripped thinking or too late after switching from another model ([#16164](https://github.com/can1357/oh-my-pi/issues/16164))

@@ -905,6 +905,24 @@ describe("role priorities and chains", () => {
 		]);
 	});
 
+	test("marks the candidate that runs in place of an unresolved configured selector", () => {
+		const exa = roleChainModel("web", "exa");
+		const parallel = roleChainModel("web", "parallel");
+		const settings = Settings.isolated({ modelRoles: { web: "web/exa-pro" } });
+
+		const chain = resolveRoleChain("web", settings, [exa, parallel]);
+
+		expect(chain[0]?.replaces).toBe("web/exa-pro");
+		expect(chain.slice(1).some(candidate => candidate.replaces !== undefined)).toBe(false);
+	});
+
+	test("leaves a resolved configured selector unmarked", () => {
+		const exa = roleChainModel("web", "exa");
+		const settings = Settings.isolated({ modelRoles: { web: "web/exa" } });
+
+		expect(resolveRoleChain("web", settings, [exa])[0]?.replaces).toBeUndefined();
+	});
+
 	test("upgrades a default primary when a configured fallback resolves the same route", () => {
 		const parallel = roleChainModel("web", "parallel");
 		const settings = Settings.isolated({
@@ -1785,7 +1803,7 @@ describe("resolveCliModel", () => {
 		expect(abbreviated.thinkingLevel).toBe(Effort.High);
 	});
 
-	test("rejects a near miss within an explicit --provider", () => {
+	test("rejects a near miss within an explicit --provider and suggests the sibling", () => {
 		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
 			typeof resolveCliModel
 		>[0]["modelRegistry"];
@@ -1798,6 +1816,19 @@ describe("resolveCliModel", () => {
 
 		expect(result.model).toBeUndefined();
 		expect(result.error).toContain("not found");
+		expect(result.error).toContain("Did you mean openai/gpt-4o");
+		expect(resolveCliModel({ cliModel: "openai/4o", modelRegistry: registry }).error).toContain("openai/gpt-4o");
+		expect(resolveCliModel({ cliModel: "openai/4o:high", modelRegistry: registry }).error).toContain(
+			"Did you mean openai/gpt-4o",
+		);
+	});
+
+	test("offers no suggestion when nothing in the provider is close", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		expect(resolveCliModel({ cliModel: "openai/zzzz", modelRegistry: registry }).error).not.toContain("Did you mean");
 	});
 
 	test("supports --model <pattern>:<thinking> (without explicit --thinking)", () => {

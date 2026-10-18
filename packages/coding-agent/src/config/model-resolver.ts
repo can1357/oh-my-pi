@@ -38,6 +38,7 @@ import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import { logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { fuzzyMatch } from "@oh-my-pi/pi-tui";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -835,6 +836,27 @@ function matchModel(
 }
 
 /**
+ * Up to `limit` `provider/id` selectors from `provider` whose ids fuzzy-match
+ * `modelId`, best first. Provider-qualified selectors never resolve to these;
+ * they only feed the not-found hint.
+ */
+export function suggestProviderModels(
+	provider: string,
+	modelId: string,
+	models: readonly Model<Api>[],
+	limit = 3,
+): string[] {
+	const lowerProvider = provider.toLowerCase();
+	return models
+		.filter(model => model.provider.toLowerCase() === lowerProvider)
+		.map(model => ({ model, match: fuzzyMatch(modelId, model.id) }))
+		.filter(entry => entry.match.matches)
+		.sort((a, b) => a.match.score - b.match.score)
+		.slice(0, limit)
+		.map(entry => formatModelString(entry.model));
+}
+
+/**
  * Recover the effort a retired wire-tier id (e.g. `gemini-3.8-flash-high`) implied before it was
  * collapsed into a logical model. Only a route owned by exactly one level carries intent: the
  * model's default wire id and ids shared by several levels imply nothing, so the caller's level
@@ -1541,6 +1563,8 @@ export interface RoleChainCandidate {
 	model: Model<Api>;
 	explicit: boolean;
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/** A configured provider-qualified selector earlier in the chain that matched no model. */
+	replaces?: string;
 }
 
 /** Resolve a role's primary and retry candidates in effective attempt order. */
@@ -1557,9 +1581,15 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 	];
 	const candidates: RoleChainCandidate[] = [];
 	const candidateByRoute = new Map<string, RoleChainCandidate>();
+	// First explicitly configured provider-qualified selector that resolved to
+	// nothing; the next candidate carries it so callers can say what replaced it.
+	let unresolvedExplicit: string | undefined;
 	for (const { selector, explicit } of selectors) {
 		const resolved = resolveModelRoleValue(selector, pool, { settings });
-		if (!resolved.model) continue;
+		if (!resolved.model) {
+			if (explicit && selector.includes("/")) unresolvedExplicit ??= selector;
+			continue;
+		}
 		const key = formatModelStringWithRouting(resolved.model);
 		const existing = candidateByRoute.get(key);
 		if (existing) {
@@ -1568,6 +1598,7 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 		}
 		const candidate: RoleChainCandidate = { model: resolved.model, explicit };
 		if (resolved.thinkingLevel !== undefined) candidate.thinkingLevel = resolved.thinkingLevel;
+		if (unresolvedExplicit !== undefined && candidates.length === 0) candidate.replaces = unresolvedExplicit;
 		candidateByRoute.set(key, candidate);
 		candidates.push(candidate);
 	}
@@ -2282,13 +2313,21 @@ function resolveCliModelInScope(
 
 	if (!model) {
 		const display = provider ? `${provider}/${pattern}` : cliModel;
+		const nearMatches = provider
+			? suggestProviderModels(
+					provider,
+					splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS).base,
+					candidates,
+				)
+			: [];
+		const hint = nearMatches.length > 0 ? ` Did you mean ${nearMatches.join(", ")}?` : "";
 		return {
 			model: undefined,
 			configuredPatterns,
 			selector: undefined,
 			thinkingLevel: undefined,
 			warning,
-			error: `Model "${display}" not found. Run "omp models" to see available models.`,
+			error: `Model "${display}" not found.${hint} Run "omp models" to see available models.`,
 		};
 	}
 

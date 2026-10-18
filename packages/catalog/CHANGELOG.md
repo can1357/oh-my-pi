@@ -68,6 +68,10 @@
 
 - Seeded TypeSafe `jev-1.14.0` and OpenRouter `typesafe/jev-1.14`, and made them the `judge` role defaults and TypeSafe's default model; TypeSafe discovery keeps seeded ids its alias-only `/v1/models` listing omits
 
+### Fixed
+
+- Fixed the `smol` and `slow` role defaults listing `cerebras/zai-glm` and `openai-codex/gpt-5.5`, ids no bundled model has: the first is dropped (`cerebras/zai-glm-4.6` already precedes it) and `slow` names `openai-codex/gpt-5.6-luna`, the model it ran before provider-qualified selectors required exact ids ([#12884](https://github.com/can1357/oh-my-pi/issues/12884))
+
 ## [18.12.1] - 2026-10-17
 
 ### Fixed
