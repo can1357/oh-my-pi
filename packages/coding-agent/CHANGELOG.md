@@ -592,6 +592,10 @@
 - Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
 
+### Fixed
+
+- Fixed `--print` mode hanging on exit instead of printing the final error line when stderr cannot take the write; the drain wait now also settles when the stream errors or closes ([#14825](https://github.com/can1357/oh-my-pi/pull/14825) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
