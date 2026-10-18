@@ -10,6 +10,7 @@
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import type { RuntimeCallIdentity } from "../js/shared/runtime";
+import type { EvalPreludeCell } from "../preludes";
 import { bridgeValueFromToolResult, callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 
@@ -29,6 +30,8 @@ export interface PyToolBridgeEntry {
 	 */
 	shieldedSignal?: AbortSignal;
 	shadowCell?: EvalShadowCellSession;
+	/** The eval cell this run executes, handed to prelude calls it makes. */
+	cell?: EvalPreludeCell;
 	emitStatus?: (event: JsStatusEvent) => void;
 	abortRequested?: () => boolean;
 }
@@ -125,6 +128,7 @@ async function callSessionToolPromptOnAbort(
 	const call = callSessionTool(name, args, {
 		session: entry.toolSession,
 		signal: entry.signal,
+		cell: entry.cell,
 		emitStatus: entry.emitStatus,
 		identity,
 	});

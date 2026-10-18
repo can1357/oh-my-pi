@@ -16,6 +16,7 @@ import {
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
 	SCREEN_LOCKED_CAPTURE_NOTE,
+	type SettleReport,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/protocol";
 import {
 	beginComputerTurnForOwner,
@@ -27,6 +28,14 @@ import {
 	registerComputerController,
 	resumeComputerUseForOwner,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
+import {
+	diffTree,
+	ObservationLedger,
+	parseTreeRow,
+	RefWindows,
+	refRuns,
+	renderReadBack,
+} from "@oh-my-pi/pi-coding-agent/tools/computer/observation";
 import { ComputerWorkerCore, type NativeDesktopSession } from "@oh-my-pi/pi-coding-agent/tools/computer/worker";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import type {
@@ -49,6 +58,7 @@ import type {
 	UiQuietOptions,
 } from "@oh-my-pi/pi-natives";
 
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 /** Method name of the last step in a facade call chain, or "" when the chain is malformed. */
@@ -4723,6 +4733,19 @@ describe("computer input waits for the UI to settle", () => {
 		await runWorker(transport, "shot", `await ${target}.screenshot({ silent: true })`);
 		await runWorker(transport, "scroll", `await ${target}.scroll(110, 20, { dy: 100 }); await desktop.windows()`);
 		expect(native.quietWaits).toEqual([[777]]);
+		// The report reads that window whole (the model has no tree of it), not the focused one or the overlay.
+		transport.inbound({
+			type: "settle",
+			id: "settle",
+			timeoutMs: 5_000,
+			session: snapshot(true),
+			escape: escapeScope(),
+			output: "",
+		});
+		const settled = await transport.waitFor(message => message.type === "result" && message.id === "settle");
+		const report = settled.type === "result" && settled.ok && (settled.payload.returnValue as SettleReport).text;
+		expect(report).toStartWith('window "43" ');
+		expect(report).not.toMatch(/window "(42|6)"/);
 	});
 
 	it("waits for the app apps.open opened, not the one in front", async () => {
@@ -4853,5 +4876,834 @@ describe("computer input waits for the UI to settle", () => {
 		expect(native.quietWaits).toEqual([]);
 		await runWorker(transport, "read", 'await (await desktop.window("42")).ax()');
 		expect(native.quietWaits).toEqual([[123]]);
+	});
+});
+
+/**
+ * A window whose tree answers inputs the way an app does: pressing "Edit"
+ * turns it into "Done" and reveals a field. Like the native registry, an
+ * element keeps its ref across snapshots until its label changes, and a ref
+ * resolves while its element is in the current or the previous snapshot.
+ */
+class EditableWindowSession extends FakeNativeSession {
+	editing = false;
+	snapshots = 0;
+	/** Extra read-only text rows, to make the window's tree large. */
+	filler = 0;
+	/** Value of the window's text row, to vary it between reads. */
+	status = "Ready";
+	/** Whether the window holds a web view. */
+	web = false;
+	windows: DesktopWindow[] = [windowFixture];
+	/** What a key chord sent to window 42 sets the text row to, as the app reacting to it. */
+	keyStatus?: () => string;
+	/** A window whose reads hang; `hung` resolves when one starts. */
+	hangOn?: string;
+	readonly hung = Promise.withResolvers<void>();
+	#nextRef = 1;
+	/** Element → its ref and the label that ref was minted for. */
+	readonly #elements = new Map<string, { ref: string; label: string }>();
+	#live = new Set<string>();
+	#previous = new Set<string>();
+
+	#resolves(ref: string): boolean {
+		return this.#live.has(ref) || this.#previous.has(ref);
+	}
+	override async listWindows(): Promise<DesktopWindow[]> {
+		return this.windows;
+	}
+	override async keyChord(target: string, _keys: string[]): Promise<void> {
+		if (target === "42" && this.keyStatus) this.status = this.keyStatus();
+	}
+	override async axSnapshot(target?: string): Promise<{ text: string }> {
+		if (target !== undefined && target === this.hangOn) {
+			this.hung.resolve();
+			return await Promise.withResolvers<{ text: string }>().promise;
+		}
+		this.snapshots += 1;
+		this.#previous = this.#live;
+		this.#live = new Set();
+		const ref = (element: string, label = ""): string => {
+			let known = this.#elements.get(element);
+			if (!known || known.label !== label) {
+				known = { ref: `e${this.#nextRef++}`, label };
+				this.#elements.set(element, known);
+			}
+			this.#live.add(known.ref);
+			return known.ref;
+		};
+		const editLabel = this.editing ? "Done" : "Edit";
+		const rows = [
+			`- window "Editor" [ref=${ref("window")}] app=Code (focused)`,
+			`  - toolbar [ref=${ref("toolbar")}]`,
+			`    - button "${editLabel}" [ref=${ref("edit", editLabel)}]`,
+			...(this.editing ? [`    - textfield "Phone" [ref=${ref("phone")}]: "555"`] : []),
+			`    - button "Share" [ref=${ref("share")}]`,
+			`  - statictext [ref=${ref("status")}]: "${this.status}"`,
+			...(this.web ? [`  - webarea "Page" [ref=${ref("page")}]`] : []),
+			...(this.filler > 0 ? [`  - list [ref=${ref("list")}]`] : []),
+			...Array.from({ length: this.filler }, (_, index) => {
+				const label = `Row ${index} of the ${this.status} transcript`;
+				return `    - statictext "${label}" [ref=${ref(`row ${index}`, label)}]`;
+			}),
+		];
+		return { text: rows.join("\n") };
+	}
+	override async axNode(ref: string): Promise<AxNode> {
+		if (!this.#resolves(ref)) throw new Error(`StaleRef: ${ref} expired; re-run ax()/find()`);
+		return { ...axNode, ref };
+	}
+	override async axPerform(ref: string, _action: string): Promise<void> {
+		if (!this.#resolves(ref)) throw new Error(`StaleRef: ${ref} expired; re-run ax()/find()`);
+		this.editing = !this.editing;
+	}
+}
+
+/** A second window of the editor's app, behind it. */
+const otherWindow: DesktopWindow = { ...windowFixture, id: "43", title: "Other", focused: false };
+const CAPPED: UiQuiet = { waitedMs: 5_000, events: 120, timedOut: true, watched: 1 };
+const STILL_CHANGING = /\n\nthe app was still changing when this was read, \d\.\d s after the input$/;
+const unchanged = (id = "42", title = "Editor"): string =>
+	`window "${id}" Code "${title}": no change since your last tree`;
+const changed = (rows: string[], count = rows.length): string =>
+	[`window "42" Code "Editor": ${count} ${count === 1 ? "change" : "changes"} since your last tree`, ...rows].join(
+		"\n",
+	);
+const DONE_ROWS = [
+	'    + button "Done" [ref=e6] (in e2)',
+	'    + textfield "Phone" [ref=e7]: "555" (in e2)',
+	"removed: e3",
+];
+
+/**
+ * A worker on `native` and the steps report tests take, each with its own request id: `run` returns what the
+ * code returned (in Eval cell `cell` when given), `read` is a cell that prints a window's tree, settled, so the
+ * model has seen it, `key` presses keys in a window, and `report`/`settle` settle the cell that just ended with
+ * what it printed and whether the conversation was rewritten.
+ */
+function reportWorker(native = new EditableWindowSession()) {
+	const transport = new MemoryTransport();
+	new ComputerWorkerCore(transport, () => native);
+	let step = 0;
+	const result = async (message: Extract<ComputerWorkerInbound, { id: string }>) => {
+		transport.inbound(message);
+		const reply = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === message.id);
+		if (reply.type !== "result") throw new Error(`Expected a result for ${message.id}`);
+		return reply;
+	};
+	const attempt = (code: string, cell?: string) =>
+		result({
+			type: "run",
+			id: `run-${++step}`,
+			code,
+			timeoutMs: 2_000,
+			session: snapshot(false),
+			escape: escapeScope(),
+			cell,
+		});
+	const run = async (code: string, cell?: string): Promise<unknown> => {
+		const reply = await attempt(code, cell);
+		if (!reply.ok) throw new Error(`run failed: ${reply.error.message}`);
+		return reply.payload.returnValue;
+	};
+	const settleMessage = (
+		output = "",
+		forget = false,
+		{ cell, timeoutMs = 5_000 }: { cell?: string; timeoutMs?: number } = {},
+	): Extract<ComputerWorkerInbound, { type: "settle" }> => ({
+		type: "settle",
+		id: `settle-${++step}`,
+		timeoutMs,
+		session: snapshot(true),
+		escape: escapeScope(),
+		output,
+		forget,
+		cell,
+	});
+	const report = async (...args: Parameters<typeof settleMessage>): Promise<SettleReport | undefined> => {
+		const reply = await result(settleMessage(...args));
+		if (!reply.ok) throw new Error(`settle failed: ${reply.error.message}`);
+		return reply.payload.returnValue as SettleReport | undefined;
+	};
+	const settle = async (...args: Parameters<typeof settleMessage>) => (await report(...args))?.text;
+	const read = async (window = "42"): Promise<string> => {
+		const tree = String(await run(`return await (await desktop.window("${window}")).ax()`));
+		expect(await settle(tree)).toBeUndefined();
+		return tree;
+	};
+	const key = (keys = "shift", window = "42", cell?: string) =>
+		run(`await (await desktop.window("${window}")).press("${keys}")`, cell);
+	return { transport, native, result, attempt, run, settleMessage, report, settle, read, key };
+}
+
+/**
+ * The shipped computer prelude on a controller whose report is `settle`, and `act`: one cell that reaches the
+ * desktop, then its settle. `rewrite()` stands for a conversation rewrite.
+ */
+function reportPrelude(
+	settle: NonNullable<ComputerController["settle"]>,
+	discard?: NonNullable<ComputerController["discard"]>,
+) {
+	let revision = 0;
+	const session: ToolSession = { ...toolSession(), getHistoryRevision: () => revision };
+	const prelude = createComputerPrelude(session, () => ({
+		run: async () => ({ displays: [], returnValue: undefined, screenshots: [] }),
+		capabilities: async () => undefined,
+		settle,
+		discard,
+		close: async () => {},
+	}));
+	const press = {
+		action: "call",
+		chain: [
+			{ method: "ref", args: ["e3"] },
+			{ method: "press", args: [] },
+		],
+	};
+	const invoke = (cell: { signal: AbortSignal }) => prelude.invoke(press, { session, toolCallId: "press", cell });
+	const act = async (controller = new AbortController()) => {
+		const cell = { signal: controller.signal };
+		await invoke(cell);
+		return await prelude.settleCell?.(cell, { failed: false, output: "" });
+	};
+	return { prelude, invoke, act, rewrite: () => void revision++ };
+}
+
+describe("computer cell settlement", () => {
+	it("reports only the rows that changed since the model's last tree, and every ref it holds stays live", async () => {
+		const { native, run, read, key, report, settle } = reportWorker();
+
+		expect(await read()).toContain('- button "Edit" [ref=e3]');
+		await run('await (await desktop.ref("e3")).press()');
+		// "Edit" relabelled to "Done" gets a new ref; the field is new; Share and the rest are unchanged and absent.
+		const first = await report();
+		expect(first?.text).toBe(changed(DONE_ROWS));
+		// Kept whole too, for a conversation rewritten while the report was made.
+		expect(first?.whole).toStartWith('window "42" Code "Editor":\n- window "Editor" [ref=e1]');
+		expect(first?.whole).toContain('- button "Done" [ref=e6]');
+		// Refs of unchanged rows from the earlier tree still resolve, and the report's refs act.
+		expect(await run('return (await desktop.ref("e4")).ref')).toBe("e4");
+		await run('await (await desktop.ref("e6")).press()');
+		expect(native.editing).toBe(false);
+		expect(await settle()).toBe(changed(['    + button "Edit" [ref=e8] (in e2)', "removed: e6-e7"], 3));
+		// Nothing new since that read: a further settle has nothing to say.
+		expect(await settle()).toBeUndefined();
+		// After a rewrite the window prints whole, and that is the model's tree again: the next report diffs.
+		await key();
+		const whole = await report("", true);
+		expect(whole?.text).toStartWith('window "42" Code "Editor":\n- window "Editor" [ref=e1]');
+		expect(whole?.whole).toBeUndefined();
+		await key();
+		expect(await settle()).toBe(unchanged());
+	});
+
+	it("answers an unchanged window in one line after one read and one wait, ignoring native object addresses", async () => {
+		const { native, run, read, key, settle } = reportWorker();
+		// No app can be watched: the wait is a fixed half second after the input, and the line says so.
+		native.quiet = { waitedMs: 0, events: 0, timedOut: false, watched: 0 };
+		native.status = "<AXUIElement 0x600003b2c0f0> {pid=123}";
+		await read();
+		native.status = "<AXUIElement 0x600003b2d9a0> {pid=123}";
+		const started = Date.now();
+		await key();
+		const before = native.snapshots;
+		expect(await settle()).toMatch(
+			/^window "42" Code "Editor": no change since your last tree, \d\.\d s after the input$/,
+		);
+		expect(Date.now() - started).toBeGreaterThanOrEqual(490);
+		expect(native.snapshots).toBe(before + 1);
+		expect(native.quietWaits).toEqual([[123]]);
+		expect(await run('return (await desktop.ref("e3")).ref')).toBe("e3");
+	});
+
+	it("keeps a large window's report to the rows that changed", async () => {
+		const native = new EditableWindowSession();
+		native.filler = 2_000;
+		const { run, read, settle } = reportWorker(native);
+		expect((await read()).length).toBeGreaterThan(80_000);
+		await run('await (await desktop.ref("e3")).press()');
+		expect(await settle()).toBe(
+			changed([
+				'    + button "Done" [ref=e2007] (in e2)',
+				'    + textfield "Phone" [ref=e2008]: "555" (in e2)',
+				"removed: e3",
+			]),
+		);
+	});
+
+	it("says the app was still changing when the cap ended the wait, also when a read inside the cell paid it", async () => {
+		const { native, run, read, key, settle } = reportWorker();
+		native.quiet = CAPPED;
+		let saves = 0;
+		native.keyStatus = () => `Saving ${++saves}`;
+		await read();
+		await key("cmd+s");
+		const report = String(await settle());
+		expect(report).toStartWith(changed(['  ~ statictext [ref=e5]: "Saving 1"']));
+		expect(report).toMatch(STILL_CHANGING);
+
+		await run('const w = await desktop.window("42"); await w.press("shift"); await w.ax()');
+		expect(String(await settle())).toContain("the app was still changing");
+		const printed = await run('const w = await desktop.window("42"); await w.press("shift"); return await w.ax()');
+		// The printed tree is the settled one: no read-back, but the cap still has to be said.
+		expect(await settle(String(printed))).toMatch(/^the app was still changing/);
+		expect(native.quietWaits).toHaveLength(3);
+	});
+
+	it("still says an app was changing when a later wait in the cell, for another app, went quiet", async () => {
+		const native = new EditableWindowSession();
+		native.windows = [windowFixture, { ...otherWindow, pid: 456 }];
+		const waits: UiQuiet[] = [CAPPED, { waitedMs: 300, events: 2, timedOut: false, watched: 1 }];
+		native.waitForUiQuiet = async pids => {
+			native.quietWaits.push([...pids]);
+			return waits.shift() ?? native.quiet;
+		};
+		const { run, settle } = reportWorker(native);
+		// App 123 hits the cap at the lookup of window 43; app 456 goes quiet before the read.
+		await run(
+			'await (await desktop.window("42")).press("shift"); const b = await desktop.window("43"); await b.press("shift"); await b.ax()',
+		);
+		expect(native.quietWaits).toEqual([[123], [456]]);
+		expect(String(await settle())).toMatch(STILL_CHANGING);
+	});
+
+	it("says a web page may still load after the report's read", async () => {
+		const { native, read, key, settle } = reportWorker();
+		native.web = true;
+		native.keyStatus = () => "Loading";
+		await read();
+		await key("return");
+		expect(await settle()).toBe(
+			`${changed(['  ~ statictext [ref=e5]: "Loading"'])}\n\nweb pages send no accessibility notification while they wait on the network or a timer, so this read may predate a load; the next report shows what lands later`,
+		);
+	});
+
+	it("leaves the model's last tree as the baseline when a report is cancelled", async () => {
+		const native = new EditableWindowSession();
+		native.windows = [windowFixture, otherWindow];
+		native.keyStatus = () => "Saving";
+		const { transport, result, read, run, key, settle, settleMessage } = reportWorker(native);
+		await read();
+		await read("43");
+		await run('await (await desktop.window("42")).press("shift"); await (await desktop.window("43")).press("shift")');
+		native.hangOn = "43";
+		const message = settleMessage();
+		const cancelled = result(message);
+		// Window 42 is read; the report is cancelled while it reads window 43.
+		await native.hung.promise;
+		transport.inbound({ type: "abort", id: message.id });
+		expect((await cancelled).ok).toBe(false);
+		native.hangOn = undefined;
+
+		await key();
+		expect(String(await settle())).toContain('~ statictext [ref=e5]: "Saving"');
+	});
+
+	it.each([
+		{
+			// Against the tree the model saw, not the one the cell's code discarded.
+			name: "the cell read after its input but did not print",
+			code: 'const win = await desktop.window("42"); await (await desktop.ref("e3")).press(); await win.ax(); return "done"',
+			expected: changed(DONE_ROWS),
+		},
+		{
+			name: "the cell printed before its input, naming the same refs as a re-read it did not print",
+			code: 'const win = await desktop.window("42"); const before = await win.ax(); await win.press("cmd+s"); await win.ax(); return before',
+			expected: changed(['  ~ statictext [ref=e5]: "Saved"']),
+		},
+		{
+			name: "changed after the cell's own read of it",
+			code: 'const win = await desktop.window("42"); const before = await win.ax(); await win.press("cmd+s"); await win.ax(); return before',
+			expected: changed(['  ~ statictext [ref=e5]: "Saved"']),
+			late: true,
+		},
+	])("reports a window $name", async ({ code, expected, late }) => {
+		const native = new EditableWindowSession();
+		const { read, run, settle } = reportWorker(native);
+		if (late) {
+			// The app reacts after the cell's re-read, before the settle's.
+			let readsSinceKey = -1;
+			native.keyChord = async () => void (readsSinceKey = 0);
+			const axSnapshot = native.axSnapshot.bind(native);
+			native.axSnapshot = async () => {
+				if (readsSinceKey >= 0 && ++readsSinceKey === 2) native.status = "Saved";
+				return axSnapshot();
+			};
+		} else native.keyStatus = () => "Saved";
+		await read();
+		expect(await settle(String(await run(code)))).toBe(expected);
+	});
+
+	it("does not count an empty post-input read as printed", async () => {
+		const native = new EditableWindowSession();
+		const { read, run, settle } = reportWorker(native);
+		const axSnapshot = native.axSnapshot.bind(native);
+		let blank = false;
+		native.axSnapshot = async () => (blank ? { text: "" } : axSnapshot());
+		await read();
+		blank = true;
+		await run('const win = await desktop.window("42"); await win.press("cmd+s"); await win.ax(); return "done"');
+		blank = false;
+		expect(await settle("done")).toBe(unchanged());
+	});
+
+	it("reports a window whose post-input reads overflowed the bound even when the cell printed the last", () => {
+		const ledger = new ObservationLedger(new RefWindows());
+		const window = { id: "42" };
+		ledger.noteInput("cell", window);
+		let last = "";
+		for (let index = 0; index < 20; index++) {
+			last = `- statictext "after ${index}" [ref=e1]`;
+			ledger.recordRead("cell", window, last, {});
+		}
+		expect(ledger.take("cell", last)?.touched.map(touched => touched.id)).toEqual(["42"]);
+	});
+
+	it("counts a read sent before an input as read before it, however late it returns", async () => {
+		const native = new EditableWindowSession();
+		native.keyStatus = () => "Saved";
+		const { read, run, settle } = reportWorker(native);
+		await read();
+		native.status = "Edited";
+		// The tree is taken when the read is sent and returns after the input.
+		const axSnapshot = native.axSnapshot.bind(native);
+		native.axSnapshot = async (target?: string) => {
+			const snapshot = axSnapshot(target);
+			const later = Promise.withResolvers<void>();
+			setImmediate(later.resolve);
+			await later.promise;
+			return await snapshot;
+		};
+		const printed = String(
+			await run('const w = await desktop.window("42"); const t = w.ax(); await w.press("cmd+s"); return await t'),
+		);
+		expect(printed).toContain('"Edited"');
+		// The printed tree predates the input: the report still shows what the input changed.
+		expect(await settle(printed)).toBe(changed(['  ~ statictext [ref=e5]: "Saved"']));
+	});
+
+	it("reports the window after a call fails on an expired ref, whole when the model has no tree of it", async () => {
+		const { native, run, attempt, settle } = reportWorker();
+		native.editing = true;
+		const ax = 'return await (await desktop.window("42")).ax()';
+		await run(ax);
+		// The field is gone from the next two snapshots, so its ref expires.
+		native.editing = false;
+		await run(ax);
+		await run(ax);
+		expect((await attempt('await (await desktop.ref("e4")).press()')).ok).toBe(false);
+		const [header, ...tree] = String(await settle()).split("\n");
+		expect(header).toBe('window "42" Code "Editor":');
+		expect(tree).toContain('    - button "Edit" [ref=e7]');
+		expect(tree.join("\n")).not.toContain("[ref=e4]");
+	});
+
+	it("reports desktop key input on the window focused when it was sent, or says it reached none", async () => {
+		const native = new EditableWindowSession();
+		native.windows = [{ ...windowFixture, focused: false }];
+		const { run, read, settle } = reportWorker(native);
+		await run('await desktop.press("cmd+e")');
+		expect(String(await settle())).toStartWith("input whose window was unknown reached no window to read back");
+
+		native.windows = [windowFixture, otherWindow];
+		await read();
+		// The key reaches the focused window and then moves focus away from it.
+		native.keyChord = async () => {
+			native.editing = true;
+			native.windows = [
+				{ ...windowFixture, focused: false },
+				{ ...otherWindow, focused: true },
+			];
+		};
+		await run('await desktop.press("cmd+e")');
+		const report = String(await settle());
+		expect(report).toStartWith(changed(DONE_ROWS.slice(0, 1), 3));
+		expect(report).not.toContain('window "43" Code "Other":');
+		expect(report).toEndWith('\n\nfocus moved to window "43" Code "Other"');
+	});
+
+	it.each([
+		{ via: "find()", element: 'const [el] = await (await desktop.window("42")).find({ role: "button" })' },
+		{ via: "elementAt()", element: "const el = await desktop.elementAt(10, 10)" },
+	])("watches the app of an element first found by $via", async ({ element }) => {
+		// The plain fake: its elements resolve without a tree read first.
+		const { native, run, settle } = reportWorker(new FakeNativeSession() as EditableWindowSession);
+		await run(`${element}; await el.press()`);
+		expect(await settle()).toBeDefined();
+		// The element's window came with its process: the report waits for that app, not a fixed time.
+		expect(native.quietWaits).toEqual([[123]]);
+	});
+
+	it("reports a window's menu selection against the model's last read", async () => {
+		const { native, run, read, settle } = reportWorker();
+		native.menuSelect = async () => void (native.status = "Saved");
+		await read();
+		await run('await (await desktop.window("42")).menu.select(["File", "Save"])');
+		expect(await settle()).toBe(changed(['  ~ statictext [ref=e5]: "Saved"']));
+	});
+
+	it("reports apps.open on the opened app's window, never the user's focused one, and waits for the app", async () => {
+		const { native, run, read, settle } = reportWorker();
+		// The user's terminal is in front; the editor (pid 123, the window `openApplication` returns) is behind it.
+		const terminal: DesktopWindow = { ...windowFixture, id: "9", app: "Terminal", title: "zsh", pid: 999 };
+		const editor = { ...windowFixture, focused: false };
+		native.windows = [terminal, editor];
+		await read();
+		// While the app launches, the user opens and focuses another terminal window: not the launch's doing.
+		native.openApplication = async () => {
+			native.windows = [{ ...terminal, id: "10" }, { ...terminal, focused: false }, editor];
+			return { ...(await native.listApplications())[0]!, window: editor };
+		};
+		await run('await desktop.apps.open("test.editor")');
+		// The roster line names the new focused window, as for any cell; its tree is not read.
+		expect(await settle()).toBe(`${unchanged()}\n\nnew window "10" Terminal "zsh" 40×20 (focused)`);
+		// The opened window's app is waited for, not the focused terminal's.
+		expect(native.quietWaits).toEqual([[123]]);
+	});
+
+	it("follows a touched sheet that closed with its app's window that took the focus, diffed against the model's tree", async () => {
+		const { native, run, read, settle } = reportWorker();
+		const parent: DesktopWindow = { ...windowFixture, focused: false };
+		const sheet: DesktopWindow = { ...windowFixture, id: "43", title: "Sort", width: 30, height: 12, focused: true };
+		native.windows = [sheet, parent];
+		await read();
+		await read("43");
+		// Pressing the sheet's button closes it and changes the parent behind it.
+		native.axPerform = async () => {
+			native.editing = true;
+			native.windows = [{ ...parent, focused: true }];
+		};
+		// The cell sends the parent a key first, so it is queued before the sheet; it still reads after the sheet's line.
+		await run('await (await desktop.window("42")).press("shift"); await (await desktop.ref("e3")).press()');
+		expect(await settle()).toBe(
+			[
+				'window "43" is gone from the window list (closed, minimized or off screen)',
+				"",
+				'window "42" Code "Editor" (now focused in place of window "43"): 3 changes since your last tree',
+				...DONE_ROWS,
+				"",
+				'focus moved to window "42" Code "Editor"',
+			].join("\n"),
+		);
+	});
+
+	it("prints a window the cell's input opened and focused whole, once", async () => {
+		const { native, run, read, settle } = reportWorker();
+		await read();
+		const dialog: DesktopWindow = { ...windowFixture, id: "43", title: "Save", width: 30, height: 12, focused: true };
+		native.axPerform = async () => void (native.windows = [{ ...windowFixture, focused: false }, dialog]);
+		await run('await (await desktop.ref("e2")).press()');
+		const report = String(await settle());
+		expect(report).toStartWith(`${unchanged()}\n\nnew window "43" Code "Save" 30×12 (focused):\n- window `);
+		expect(report.match(/new window "43"/g)).toHaveLength(1);
+	});
+
+	it("keeps the report within the inline budget, naming windows left out, which keep the model's last tree", async () => {
+		const native = new EditableWindowSession();
+		native.filler = 300;
+		const ids = ["42", "43", "44", "45", "46"];
+		native.windows = ids.map(id => (id === "42" ? windowFixture : { ...otherWindow, id, title: `W${id}` }));
+		const { run, key, settle } = reportWorker(native);
+		// The model has no tree of any of them: each would print whole.
+		await run(`for (const id of ${JSON.stringify(ids)}) await (await desktop.window(id)).press("shift")`);
+		const report = String(await settle());
+		expect(Buffer.byteLength(report)).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
+		expect(report).toStartWith('window "42" Code "Editor":\n- window "Editor"');
+		expect(report).toContain(
+			'\n\nwindow "46" Code "W46": its tree was left out to keep this report short; win.ax() prints it',
+		);
+		// A window printed in that report is the model's tree; one left out is still unseen, so it prints whole.
+		await key("shift", "46");
+		expect(String(await settle())).toStartWith('window "46" Code "W46":\n- window "Editor"');
+		await key();
+		expect(await settle()).toBe(unchanged());
+	});
+
+	it("returns what it read before the time budget ran out and names the windows it did not read, or says it timed out", async () => {
+		const native = new EditableWindowSession();
+		native.windows = [windowFixture, { ...otherWindow, title: "Slow" }, { ...otherWindow, id: "44", title: "Later" }];
+		native.keyStatus = () => "Saving";
+		const { run, read, settle, result, settleMessage } = reportWorker(native);
+		await read();
+		await run('for (const id of ["42", "43", "44"]) await (await desktop.window(id)).press("shift")');
+		native.hangOn = "43";
+		// Reads stop 2 s short of the request's budget: 0.3 s here.
+		const spent = (id: string) =>
+			`window "${id}" was not read back: the report's time budget is spent; read it yourself`;
+		expect(await settle("", false, { timeoutMs: 2_300 })).toBe(
+			[changed(['  ~ statictext [ref=e5]: "Saving"']), spent("43"), spent("44")].join("\n\n"),
+		);
+
+		native.waitForUiQuiet = async () => await Promise.withResolvers<UiQuiet>().promise;
+		await run('await (await desktop.window("44")).press("shift")');
+		const timedOut = await result(settleMessage("", false, { timeoutMs: 100 }));
+		expect(!timedOut.ok && timedOut.error.message).toBe("the post-input report timed out after 100ms");
+	});
+
+	it("reports each cell's own input when cells interleave, and drops a cancelled cell's", async () => {
+		const native = new EditableWindowSession();
+		native.windows = [windowFixture, otherWindow];
+		const { transport, key, settle } = reportWorker(native);
+		await key("shift", "42", "background");
+		await key("shift", "43", "foreground");
+		await key("shift", "42", "background");
+		await key("shift", "42", "cancelled");
+		transport.inbound({ type: "discard", cell: "cancelled" });
+
+		const foreground = String(await settle("", false, { cell: "foreground" }));
+		expect(foreground).toStartWith('window "43" Code "Other":\n');
+		expect(foreground).not.toContain('window "42"');
+		const background = String(await settle("", false, { cell: "background" }));
+		expect(background).toStartWith('window "42" Code "Editor":\n');
+		expect(background).not.toContain('window "43"');
+		expect(await settle("", false, { cell: "cancelled" })).toBeUndefined();
+	});
+
+	it("makes a report and another cell's run take turns instead of refusing either as busy", async () => {
+		const native = new EditableWindowSession();
+		let keyGate: PromiseWithResolvers<void> | undefined;
+		const keyEntered = Promise.withResolvers<void>();
+		native.keyChord = async (_target: string, keys: string[]) => {
+			if (!keys.includes("cmd") || !keyGate) return;
+			keyEntered.resolve();
+			await keyGate.promise;
+		};
+		let readGate: PromiseWithResolvers<void> | undefined;
+		let readEntered = Promise.withResolvers<void>();
+		const axSnapshot = native.axSnapshot.bind(native);
+		native.axSnapshot = async (target?: string) => {
+			if (readGate) {
+				readEntered.resolve();
+				await readGate.promise;
+			}
+			return await axSnapshot(target);
+		};
+		const { transport, result, key, settleMessage } = reportWorker(native);
+		const runMessage = (id: string, cell: string, keys: string): Extract<ComputerWorkerInbound, { type: "run" }> => ({
+			type: "run",
+			id,
+			code: `await (await desktop.window("42")).press("${keys}")`,
+			timeoutMs: 5_000,
+			session: snapshot(false),
+			escape: escapeScope(),
+			cell,
+		});
+
+		// A report arriving during another cell's run waits for it.
+		await key("shift", "42", "b");
+		keyGate = Promise.withResolvers<void>();
+		const aRun = result(runMessage("a-run", "a", "cmd+s"));
+		await keyEntered.promise;
+		const bSettle = result(settleMessage("", false, { cell: "b" }));
+		keyGate.resolve();
+		keyGate = undefined;
+		expect((await aRun).ok).toBe(true);
+		expect((await bSettle).ok).toBe(true);
+
+		// A run arriving during another cell's report waits for it.
+		readGate = Promise.withResolvers<void>();
+		const aSettle = result(settleMessage("", false, { cell: "a" }));
+		await readEntered.promise;
+		const cRun = result(runMessage("c-run", "c", "shift"));
+		readGate.resolve();
+		readGate = undefined;
+		expect((await aSettle).ok).toBe(true);
+		expect((await cRun).ok).toBe(true);
+
+		// A waiting run still answers its abort.
+		readEntered = Promise.withResolvers<void>();
+		readGate = Promise.withResolvers<void>();
+		const cSettle = result(settleMessage("", false, { cell: "c" }));
+		await readEntered.promise;
+		const dRun = result(runMessage("d-run", "d", "shift"));
+		transport.inbound({ type: "abort", id: "d-run" });
+		const aborted = await dRun;
+		expect(!aborted.ok && aborted.error.isAbort).toBe(true);
+		readGate.resolve();
+		expect((await cSettle).ok).toBe(true);
+	});
+
+	it("settles only cells whose code reached the desktop, says when a settle fails, and passes a rewrite on until a settle delivers it", async () => {
+		let fail: string | undefined;
+		const forgets: boolean[] = [];
+		const { prelude, invoke, act, rewrite } = reportPrelude(async (_snapshot, _output, _signal, forget) => {
+			forgets.push(forget === true);
+			if (fail) throw new Error(fail);
+			return { text: 'window "42": no change' };
+		});
+		const acting = { signal: new AbortController().signal };
+		await invoke(acting);
+		const idle = { signal: new AbortController().signal };
+		expect(await prelude.settleCell?.(idle, { failed: false, output: "" })).toBeUndefined();
+		expect(await prelude.settleCell?.(acting, { failed: false, output: "" })).toEqual({
+			text: 'window "42": no change',
+		});
+		expect(await prelude.settleCell?.(acting, { failed: false, output: "" })).toBeUndefined();
+
+		// A settle that fails does not deliver the rewrite: the next one still forgets, and only that one.
+		rewrite();
+		fail = "computer worker restarted; captures and ax refs were reset";
+		expect((await act())?.text).toBe(
+			"No post-input report for this cell (computer worker restarted; captures and ax refs were reset); read the windows it touched before continuing.",
+		);
+		fail = undefined;
+		expect(await act()).toEqual({ text: 'window "42": no change' });
+		await act();
+		expect(forgets).toEqual([false, true, true, false]);
+	});
+
+	it("forgets trees of a report its cancelled cell dropped, and discards a cell cancelled before it settled once", async () => {
+		let cancelOnReturn: AbortController | undefined;
+		const forgets: boolean[] = [];
+		const discards: string[] = [];
+		const { invoke, act } = reportPrelude(
+			async (_snapshot, _output, _signal, forget) => {
+				forgets.push(forget === true);
+				// The cell is cancelled once the worker built its report.
+				cancelOnReturn?.abort();
+				return { text: 'window "42": no change' };
+			},
+			cell => void discards.push(cell),
+		);
+		cancelOnReturn = new AbortController();
+		expect(await act(cancelOnReturn)).toBeUndefined();
+		cancelOnReturn = undefined;
+		await act();
+		await act();
+		expect(forgets).toEqual([false, true, false]);
+		// Settled cells are not discarded, even when cancelled afterwards.
+		expect(discards).toEqual([]);
+
+		// Two calls of one cell: one id, discarded once.
+		const cancelled = new AbortController();
+		const cell = { signal: cancelled.signal };
+		await invoke(cell);
+		await invoke(cell);
+		cancelled.abort();
+		expect(discards).toHaveLength(1);
+		expect(discards[0]).toMatch(/^cell-/);
+	});
+
+	it("delivers whole trees when the conversation is rewritten during a report, and forgets on the next", async () => {
+		let rewriteDuring = true;
+		const forgets: boolean[] = [];
+		const { act, rewrite } = reportPrelude(async (_snapshot, _output, _signal, forget) => {
+			forgets.push(forget === true);
+			// Compaction lands while the report is made.
+			if (rewriteDuring) rewrite();
+			return { text: "diff", whole: "whole" };
+		});
+		expect(await act()).toEqual({ text: "whole" });
+		rewriteDuring = false;
+		expect(await act()).toEqual({ text: "diff" });
+		expect(await act()).toEqual({ text: "diff" });
+		expect(forgets).toEqual([false, true, false]);
+	});
+
+	it("ends a cell the user's Escape stopped without a report or a line asking to read the windows", async () => {
+		const { native, prelude, sent, context, close } = escapeHarness();
+		try {
+			native.escapeOnClick = true;
+			const cell = { signal: new AbortController().signal };
+			const code = "await (await desktop.window(42)).click(1, 2)";
+			await expect(prelude.invoke({ action: "run", code }, { ...context, cell })).rejects.toThrow(
+				ESCAPE_STOPPED_MESSAGE,
+			);
+			expect(await prelude.settleCell?.(cell, { failed: true, output: "" })).toBeUndefined();
+			expect(sent.types).not.toContain("settle");
+		} finally {
+			await close();
+		}
+	});
+});
+
+describe("post-input report diff", () => {
+	const tree = (...rows: string[]): string => rows.join("\n");
+
+	it("lists changed, added and moved rows at their depth, anchors them, and names reorders and removed runs", () => {
+		const before = tree(
+			'- window "A" [ref=e1] app=X',
+			"  - group [ref=e2]",
+			'    - button "x" [ref=e3]',
+			"  - list [ref=e4]",
+			'    - row "a" [ref=e5]',
+			'    - row "b" [ref=e6]',
+			'    - row "c" [ref=e7]',
+			'    - row "d" [ref=e8]',
+			'  - checkbox "Lock" [ref=e9]: "0"',
+		);
+		const after = tree(
+			'- window "A" [ref=e1] app=X',
+			"  - group [ref=e2]",
+			"  - list [ref=e4]",
+			'    - row "b" [ref=e6]',
+			'    - row "a" [ref=e5]',
+			'    - button "x" [ref=e3]',
+			'  - checkbox "Lock" [ref=e9]: "1"',
+			"  - sheet [ref=e10]",
+			'    - button "OK" [ref=e11]',
+		);
+		const change = diffTree(before, after);
+		expect(change.lines).toEqual([
+			'    ~ button "x" [ref=e3] (in e4)',
+			'  ~ checkbox "Lock" [ref=e9]: "1"',
+			"  + sheet [ref=e10] (in e1)",
+			'    + button "OK" [ref=e11]',
+			"order of e4's children: e6 e5 e3",
+		]);
+		expect(renderReadBack({ touched: { id: "7", options: {} }, text: after, change })).toBe(
+			['window "7": 7 changes since your last tree', ...change.lines, "removed: e7-e8"].join("\n"),
+		);
+	});
+
+	it("prints the whole tree when the changes would not be shorter", () => {
+		const before = tree('- window "A" [ref=e1] app=X', '  - button "x" [ref=e2]');
+		const after = tree('- window "A" [ref=e3] app=X', '  - button "x" [ref=e4]');
+		const change = diffTree(before, after);
+		expect(renderReadBack({ touched: { id: "7", options: {} }, text: after, change })).toBe(`window "7":\n${after}`);
+	});
+
+	it("keeps rows past a truncated read's node limit apart from removed ones", () => {
+		const before = tree(
+			'- window "A" [ref=e1] app=X',
+			'  - row "a" [ref=e2]',
+			'  - row "b" [ref=e3]',
+			'  - row "c" [ref=e4]',
+			'  - row "d" [ref=e5]',
+			'  - row "e" [ref=e6]',
+			"… truncated (6 nodes)",
+		);
+		// A row added above the cut pushes the last rows past the node limit; "b" is really gone.
+		const after = tree(
+			'- window "A" [ref=e1] app=X',
+			'  - row "new" [ref=e9]',
+			'  - row "a" [ref=e2]',
+			'  - row "c" [ref=e4]',
+			"… truncated (4 nodes)",
+		);
+		const change = diffTree(before, after);
+		expect(change.removed).toEqual(["e3"]);
+		expect(change.pastLimit).toEqual(["e5", "e6"]);
+		expect(renderReadBack({ touched: { id: "7", options: {} }, text: after, change }).split("\n")).toEqual([
+			'window "7": 3 changes since your last tree',
+			'  + row "new" [ref=e9] (in e1)',
+			"… truncated (4 nodes)",
+			"removed: e3",
+			"past this read's node limit: e5-e6",
+		]);
+	});
+
+	it("carries a new trailer and ignores a label holding ref-shaped text", () => {
+		const before = tree('- window "A [ref=e9]" [ref=e1] app=X', "  - list [ref=e2]");
+		const after = tree('- window "A [ref=e9]" [ref=e1] app=X', "  - list [ref=e2]", "… truncated (800 nodes)");
+		expect(diffTree(before, after)).toEqual({
+			lines: ["… truncated (800 nodes)"],
+			added: 0,
+			changed: 0,
+			removed: [],
+			pastLimit: [],
+		});
+		expect(parseTreeRow('- window "A [ref=e9]" [ref=e1] app=X')?.ref).toBe("e1");
+		expect(refRuns(["e3", "e4", "e5", "e9", "e11", "e12"])).toBe("e3-e5, e9, e11-e12");
 	});
 });

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
@@ -15,6 +16,31 @@ export interface EvalPreludeContext {
 	context?: AgentToolContext;
 	/** Progress receiver shared with the active eval call. */
 	onUpdate?: AgentToolUpdateCallback<unknown>;
+	/** The eval cell this call runs in; absent for calls made outside a cell. */
+	cell?: EvalPreludeCell;
+}
+
+/** One eval cell: every prelude call its code makes carries this same object, and `settleCell` receives it. */
+export interface EvalPreludeCell {
+	/** Aborted when the eval call is cancelled or times out. */
+	readonly signal: AbortSignal;
+}
+
+/** What a prelude adds to a cell once it has settled. */
+export interface EvalPreludeSettleReply {
+	text?: string;
+}
+
+const activePreludeCell = new AsyncLocalStorage<EvalPreludeCell>();
+
+/** Run a cell's execution with `cell` as the cell its prelude calls belong to. */
+export function runWithEvalPreludeCell<T>(cell: EvalPreludeCell, action: () => T): T {
+	return activePreludeCell.run(cell, action);
+}
+
+/** The cell whose execution is running in the current host async context, if any. */
+export function getActiveEvalPreludeCell(): EvalPreludeCell | undefined {
+	return activePreludeCell.getStore();
 }
 
 /**
@@ -53,6 +79,14 @@ export interface EvalPreludeDefinition {
 	 * bridge regardless.
 	 */
 	status?(parameters: unknown, result: AgentToolResult<unknown>): string | undefined;
+	/**
+	 * The cell finished without being cancelled; `output` is what it printed. Text returned is appended whole to
+	 * the cell's output, so a prelude reports what the cell's calls left once. A hook that throws adds nothing.
+	 */
+	settleCell?(
+		cell: EvalPreludeCell,
+		outcome: { failed: boolean; output: string },
+	): Promise<EvalPreludeSettleReply | undefined>;
 }
 
 /**

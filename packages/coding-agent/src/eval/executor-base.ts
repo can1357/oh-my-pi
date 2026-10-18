@@ -10,6 +10,7 @@ import {
 } from "../tools/output-meta";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, isEvalTimeoutControlEvent } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
+import { getActiveEvalPreludeCell } from "./preludes";
 import { registerPyToolBridge } from "./py/tool-bridge";
 import { getActiveEvalShadowCell } from "./speculation/runtime-context";
 import type { EvalDisplayOutput } from "./types";
@@ -503,6 +504,7 @@ export async function executeWithKernelBase<
 					shieldedSignal: abortShield.signal,
 					emitStatus,
 					shadowCell: getActiveEvalShadowCell(),
+					cell: getActiveEvalPreludeCell(),
 					abortRequested: () => {
 						return abortShield.abortRequested;
 					},

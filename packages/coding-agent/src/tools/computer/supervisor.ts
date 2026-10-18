@@ -20,6 +20,7 @@ import {
 	ESCAPE_REFUSED_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
 	type RunErrorPayload,
+	type SettleReport,
 } from "./protocol";
 
 const START_TIMEOUT_MS = 10_000;
@@ -30,8 +31,10 @@ const SMOKE_TIMEOUT_MS = 5_000;
 // the first ensure may load the desktop addon, so it shares the start budget.
 const CAPABILITIES_TIMEOUT_MS = 10_000;
 const RESTART_MESSAGE = "computer worker restarted; captures and ax refs were reset";
+// Budget for one cell's report: the quiet wait (5 s cap), then one tree read per touched window.
+const SETTLE_TIMEOUT_MS = 16_000;
 
-/** Runs desktop scripts and owns their persistent worker session. */
+/** Runs desktop scripts and owns their persistent worker session. `cell` names the Eval cell a call belongs to. */
 export interface ComputerController {
 	run(
 		code: string,
@@ -39,6 +42,7 @@ export interface ComputerController {
 		snapshot: ComputerSessionSnapshot,
 		signal?: AbortSignal,
 		context?: AgentToolContext,
+		cell?: string,
 	): Promise<ComputerRunOk>;
 	revokeControl?(): Promise<void>;
 	/** The owner's agent turn `turn` ended: let the display sleep now, keeping control, refs and the worker. */
@@ -51,6 +55,16 @@ export interface ComputerController {
 	/** The user's message acknowledges every Escape stop so far, lifting the refusal they set. */
 	resumeAfterEscape?(): void;
 	capabilities(snapshot: ComputerSessionSnapshot, signal?: AbortSignal): Promise<DesktopCapabilities | undefined>;
+	/** Report what the cell that just ended changed; undefined when there is nothing to report. */
+	settle?(
+		snapshot: ComputerSessionSnapshot,
+		output: string,
+		signal?: AbortSignal,
+		forget?: boolean,
+		cell?: string,
+	): Promise<SettleReport | undefined>;
+	/** The cell was cancelled: what its input left is reported to no one. */
+	discard?(cell: string): void;
 	close(): Promise<void>;
 }
 
@@ -252,10 +266,67 @@ export class ComputerSupervisor implements ComputerController {
 		}
 	}
 
-	async run(
+	run(
 		code: string,
 		timeoutMs: number,
 		snapshot: ComputerSessionSnapshot,
+		signal?: AbortSignal,
+		context?: AgentToolContext,
+		cell?: string,
+	): Promise<ComputerRunOk> {
+		return this.#request(
+			snapshot,
+			(id, session) => ({ type: "run", id, code, timeoutMs, session, escape: this.#escapeScope(), cell }),
+			timeoutMs,
+			signal,
+			context,
+		);
+	}
+
+	/** Undefined also when the user's Escape stopped computer use: a stopped cell gets no report. */
+	async settle(
+		snapshot: ComputerSessionSnapshot,
+		output: string,
+		signal?: AbortSignal,
+		forget?: boolean,
+		cell?: string,
+	): Promise<SettleReport | undefined> {
+		// A worker that never started has seen no input.
+		if (!this.#worker) return undefined;
+		try {
+			const result = await this.#request(
+				snapshot,
+				(id, session) => ({
+					type: "settle",
+					id,
+					timeoutMs: SETTLE_TIMEOUT_MS,
+					session,
+					escape: this.#escapeScope(),
+					output,
+					forget,
+					cell,
+				}),
+				SETTLE_TIMEOUT_MS,
+				signal,
+			);
+			return this.#escapeStopped() ? undefined : (result.returnValue as SettleReport | undefined);
+		} catch (error) {
+			if (this.#escapeStopped()) return undefined;
+			throw error;
+		}
+	}
+
+	discard(cell: string): void {
+		if (this.#worker && !this.#closed) this.#safeSend({ type: "discard", cell });
+	}
+
+	async #request(
+		snapshot: ComputerSessionSnapshot,
+		message: (
+			id: string,
+			session: ComputerSessionSnapshot,
+		) => Extract<ComputerWorkerInbound, { type: "run" | "settle" }>,
+		timeoutMs: number,
 		signal?: AbortSignal,
 		context?: AgentToolContext,
 	): Promise<ComputerRunOk> {
@@ -284,7 +355,7 @@ export class ComputerSupervisor implements ComputerController {
 		else signal?.addEventListener("abort", abort, { once: true });
 
 		try {
-			this.#worker?.send({ type: "run", id, code, timeoutMs, session, escape: this.#escapeScope() });
+			this.#worker?.send(message(id, session));
 			let result: ComputerRunOk;
 			try {
 				result = await this.#raceWithGrace(promise, timeoutMs);

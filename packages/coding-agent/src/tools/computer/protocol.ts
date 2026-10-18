@@ -35,7 +35,7 @@ export interface ComputerEscapeScope {
 	acknowledged: number;
 }
 
-/** Commands accepted by the persistent computer worker. */
+/** Commands accepted by the persistent computer worker. `cell` names the Eval cell a run or settle belongs to. */
 export type ComputerWorkerInbound =
 	| { type: "ping"; id: string }
 	| {
@@ -45,8 +45,25 @@ export type ComputerWorkerInbound =
 			timeoutMs: number;
 			session: ComputerSessionSnapshot;
 			escape: ComputerEscapeScope;
+			cell?: string;
 	  }
 	| { type: "capabilities"; id: string; session: ComputerSessionSnapshot; escape: ComputerEscapeScope }
+	/**
+	 * Report what the cell that just ended changed (`returnValue`: a `SettleReport` or undefined). `output` is what
+	 * it printed; `forget`: the conversation was rewritten since the last settle.
+	 */
+	| {
+			type: "settle";
+			id: string;
+			timeoutMs: number;
+			session: ComputerSessionSnapshot;
+			escape: ComputerEscapeScope;
+			output: string;
+			forget?: boolean;
+			cell?: string;
+	  }
+	/** The cell was cancelled: drop what its input left to report. */
+	| { type: "discard"; cell: string }
 	| { type: "abort"; id: string }
 	| { type: "revoke-control"; id: string }
 	/** Agent turn `turn` ended: let the display sleep now, keeping every other piece of session state. */
@@ -58,6 +75,12 @@ export type ComputerWorkerInbound =
 	| { type: "resume-display"; from: number; turn: number }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
+
+/** What a cell's input changed; `whole`, when it differs, prints every window whole. */
+export interface SettleReport {
+	text: string;
+	whole?: string;
+}
 
 /** Successful computer run output returned to the host supervisor. */
 export interface ComputerRunOk {

@@ -30,6 +30,7 @@ import type {
 	UiQuiet,
 	UiQuietOptions,
 } from "@oh-my-pi/pi-natives";
+import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
@@ -43,6 +44,7 @@ import {
 } from "../run-scope";
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	type ComputerEscapeScope,
 	type ComputerScreenshot,
@@ -53,10 +55,33 @@ import {
 	ESCAPE_STOPPED_MESSAGE,
 	type RunErrorPayload,
 	SCREEN_LOCKED_CAPTURE_NOTE,
+	type SettleReport,
 	screenStateNotice,
 	type ToolReply,
 } from "./protocol";
-import { desktopPoint, type InputWindow, RefWindows, treeRefs, windowAt } from "./observation";
+import {
+	appWindow,
+	type AxReadOptions,
+	type CellKey,
+	desktopPoint,
+	describeRosterChanges,
+	diffTree,
+	type InputWindow,
+	newWindowName,
+	ObservationLedger,
+	type PendingSettle,
+	RefWindows,
+	readBackName,
+	renderGone,
+	renderNewWindow,
+	renderReadBack,
+	renderUnreadable,
+	reportNote,
+	type SettleOutcome,
+	type TouchedWindow,
+	WEB_AREA_ROW,
+	windowAt,
+} from "./observation";
 import { describeWindowMiss } from "./window-miss";
 
 /** A native input call; resolves to its takeover focus report when it took over. */
@@ -151,6 +176,8 @@ const SETTLE_QUIET_MS = 250;
 const SETTLE_CAP_MS = 5_000;
 /** Without an app whose notifications can be watched, input settles this long after it ended. */
 const SETTLE_FIXED_MS = 500;
+/** A report's reads stop this long before its request times out, so the report built so far returns. */
+const SETTLE_HEADROOM_MS = 2_000;
 
 type InputOptions = { takeover?: boolean };
 type ScreenshotOptions = { silent?: boolean };
@@ -170,6 +197,9 @@ type ObservationResult = ScreenshotResult & { ax: string; nodeCount: number; tru
 type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
 interface ActiveRun {
 	id: string;
+	kind: "run" | "settle";
+	/** Settles once the run has let go of the worker. */
+	ended: Promise<void>;
 	/** Escape stops the user acknowledged; any more stop the run. */
 	acknowledgedEscapeStops: number;
 	ac: AbortController;
@@ -181,8 +211,10 @@ interface ActiveRun {
 	escapeStop?: ToolError;
 }
 
+/** The run context: the cell a desktop call belongs to, and the signal it runs under. */
 interface ComputerRunContext {
 	signal: AbortSignal;
+	cell: CellKey;
 	readOnly: boolean;
 	snapshot: ComputerSessionSnapshot;
 	output: RunOutput;
@@ -719,9 +751,9 @@ class El {
 
 	/** A read of this element, once earlier input has settled. */
 	async #read<T>(call: () => Promise<T>): Promise<T> {
-		const { signal } = this.#getContext();
-		await this.#observer.settle(signal);
-		return await nativeCall(signal, call);
+		const context = this.#getContext();
+		await this.#observer.settle(context.signal);
+		return await this.#observer.read(context, this.#window, call);
 	}
 
 	/** A direct AX input on this element: one input to its window. */
@@ -1284,6 +1316,8 @@ class Win {
 	async observe(options?: ScreenshotOptions & AxOptions): Promise<ObservationResult> {
 		const context = this.#getContext();
 		await this.#observer.settle(context.signal);
+		// Sent now, so an input sent after it does not make this a post-input read.
+		const issued = this.#observer.ledger.sequence;
 		const result = await nativeCall(context.signal, () =>
 			this.#session.observe(
 				this.id,
@@ -1295,7 +1329,8 @@ class Win {
 			),
 		);
 		const window = this.#window;
-		if (window) this.#observer.refs.record(window, treeRefs(result.accessibility.text));
+		const text = result.accessibility.text;
+		if (window) this.#observer.ledger.recordRead(context.cell, window, text, axReadOptions(options), issued);
 		else this.#observer.noteRootCapture(this.id, result.capture.displays);
 		const screenshot = await emitScreenshot(context, result.capture, options);
 		if (!options?.silent) context.output.push({ type: "text", text: result.accessibility.text });
@@ -1357,11 +1392,13 @@ class Win {
 	}
 
 	async ax(options?: AxOptions): Promise<string> {
-		const { signal } = this.#getContext();
+		const { signal, cell } = this.#getContext();
 		await this.#observer.settle(signal);
+		// Sent now, so an input sent after it does not make this a post-input read.
+		const issued = this.#observer.ledger.sequence;
 		const text = (await nativeCall(signal, () => this.#session.axSnapshot(this.id, options))).text;
 		const window = this.#window;
-		if (window) this.#observer.refs.record(window, treeRefs(text));
+		if (window) this.#observer.ledger.recordRead(cell, window, text, axReadOptions(options), issued);
 		return text;
 	}
 
@@ -1378,11 +1415,16 @@ class Win {
 	ref(ref: string): ElRef {
 		validateString(ref, "ref(ref)", { nonEmpty: true });
 		return new ElRef(ref, this.#getContext, async () => {
-			const { signal } = this.#getContext();
-			const node = await nativeCall(signal, () => this.#session.axNode(ref));
-			return this.#observer.element(this.#getContext, node, this.#observer.refs.windowOf(ref) ?? this.#window);
+			const window = this.#observer.refs.windowOf(ref) ?? this.#window;
+			const node = await this.#observer.read(this.#getContext(), window, () => this.#session.axNode(ref));
+			return this.#observer.element(this.#getContext, node, window);
 		});
 	}
+}
+
+/** The comparable part of `ax()` options: what a read-back must repeat to match the model's tree. */
+function axReadOptions(options: AxOptions | undefined): AxReadOptions {
+	return { all: options?.all, maxDepth: options?.maxDepth };
 }
 
 /**
@@ -1392,31 +1434,36 @@ class Win {
  */
 type InputTarget = { window?: InputWindow } | { root: string; point?: { x: number; y: number } };
 
-/** Input since the UI last settled: the processes it reached, and when it ended. */
+/** Input since the UI last settled: the processes it reached, the cells that sent it, and when it ended. */
 interface Unsettled {
 	pids: Set<number>;
+	cells: Set<CellKey>;
 	endedAt: number;
 	/** Inputs that joined this record; one that turns out to have sent nothing leaves. */
 	inputs: number;
 }
 
-/** Makes reads and input wait until the apps earlier input reached have gone quiet; one per native session. */
+/** Makes reads and input wait until the apps earlier input reached have gone quiet, and records them in the ledger. */
 class InputObserver {
 	readonly refs = new RefWindows();
+	readonly ledger = new ObservationLedger(this.refs);
 	readonly #session: NativeDesktopSession;
+	/** Unguarded, for the window list read beside an input: it must not count as a call the user's Escape came after. */
+	readonly #unguarded: NativeDesktopSession;
 	/** Display regions of each root target's latest screenshot, whose pixels its pointer input is given in. */
 	readonly #rootDisplays = new Map<string, DesktopDisplay[]>();
 	/** Input since the UI last settled; undefined once settled. */
 	#unsettled?: Unsettled;
 	/** The wait in progress: every call issued meanwhile waits for it too. */
-	#settling?: Promise<void>;
+	#settling?: Promise<SettleOutcome>;
 	/** Settles once the latest input has dispatched: inputs reach the native session in call order. */
 	#dispatched: Promise<void> = Promise.resolve();
 	/** Inputs still being sent: their wait is owed however old the first of them is. */
 	#sending = 0;
 
-	constructor(session: NativeDesktopSession) {
+	constructor(session: NativeDesktopSession, unguarded: NativeDesktopSession) {
 		this.#session = session;
+		this.#unguarded = unguarded;
 	}
 
 	/** A desktop or display screenshot was taken: that target's pointer input is given in its pixels. */
@@ -1428,6 +1475,16 @@ class InputObserver {
 	element(getContext: RunContextAccessor, node: AxNode, window: InputWindow | undefined): El {
 		if (window) this.refs.record(window, [node.ref]);
 		return new El(this.#session, getContext, this, node, window);
+	}
+
+	/** A read addressed by ref. When it fails, the cell's report shows the ref's window. */
+	async read<T>(context: ComputerRunContext, window: InputWindow | undefined, call: () => Promise<T>): Promise<T> {
+		try {
+			return await nativeCall(context.signal, call);
+		} catch (error) {
+			if (window && !(error instanceof ToolAbortError)) this.ledger.noteFailure(context.cell, window);
+			throw error;
+		}
 	}
 
 	/**
@@ -1451,14 +1508,16 @@ class InputObserver {
 			if (this.#sending === 0 && Date.now() - unsettled.endedAt >= SETTLE_CAP_MS) continue;
 			const settling = this.#wait(unsettled, signal);
 			this.#settling = settling;
+			let outcome: SettleOutcome;
 			try {
-				await settling;
+				outcome = await settling;
 			} catch (error) {
 				this.#restore(unsettled);
 				throw error;
 			} finally {
 				this.#settling = undefined;
 			}
+			this.ledger.noteOutcome(unsettled.cells, outcome);
 		}
 	}
 
@@ -1470,19 +1529,22 @@ class InputObserver {
 			return;
 		}
 		for (const pid of unsettled.pids) current.pids.add(pid);
+		for (const cell of unsettled.cells) current.cells.add(cell);
 		current.endedAt = Math.max(current.endedAt, unsettled.endedAt);
 		current.inputs += unsettled.inputs;
 	}
 
-	async #wait(unsettled: Unsettled, signal: AbortSignal): Promise<void> {
+	async #wait(unsettled: Unsettled, signal: AbortSignal): Promise<SettleOutcome> {
 		if (unsettled.pids.size > 0) {
 			const quiet = await this.#optional(signal, () =>
 				this.#session.waitForUiQuiet([...unsettled.pids], { quietMs: SETTLE_QUIET_MS, capMs: SETTLE_CAP_MS }),
 			);
-			if (quiet && quiet.watched > 0) return;
+			if (quiet && quiet.watched > 0)
+				return { watched: true, timedOut: quiet.timedOut, sinceInputMs: Date.now() - unsettled.endedAt };
 		}
 		const remaining = unsettled.endedAt + SETTLE_FIXED_MS - Date.now();
 		if (remaining > 0) await scheduler.wait(remaining, { signal });
+		return { watched: false, timedOut: false, sinceInputMs: Date.now() - unsettled.endedAt };
 	}
 
 	/**
@@ -1490,34 +1552,46 @@ class InputObserver {
 	 * the process it reaches. Root input reaches the topmost window under its
 	 * point, or the focused window for keys; its process stays unknown when
 	 * that window is; a key also owes the app focused after it, which it may
-	 * have activated. `opens` names the process an app launch started, which
-	 * the next call waits for too. A refusal that sent nothing owes nothing.
+	 * have activated. `opens` names what an app launch opened (process, window),
+	 * which the next call waits for too. A refusal that sent nothing owes nothing.
 	 * Concurrent inputs dispatch in call order.
 	 */
 	async input<T>(
-		{ signal }: ComputerRunContext,
+		{ signal, cell }: ComputerRunContext,
 		to: InputTarget,
 		dispatch: () => Promise<T>,
-		opens?: (result: T) => number | undefined,
+		opens?: (result: T) => { pid?: number; window?: InputWindow },
 	): Promise<T> {
 		const previous = this.#dispatched;
 		const { promise: dispatched, resolve: markDispatched } = Promise.withResolvers<void>();
 		this.#dispatched = dispatched;
 		let unsettled: Unsettled | undefined;
 		let unsent = false;
+		let window = "window" in to ? to.window : undefined;
 		try {
 			await previous;
+			// A cancelled cell's state is discarded; input it still sends must not record more.
 			throwIfAborted(signal);
 			// Keys and clicks sent while an app still draws what the last input opened land on the wrong control.
 			await this.settle(signal);
-			let window = "window" in to ? to.window : undefined;
+			let roster: Promise<DesktopWindow[] | undefined> | undefined;
+			if (this.ledger.wantsRoster(cell)) {
+				const claim = this.ledger.claimRoster(cell);
+				// Queued before the input, so native lists the windows as they were before it.
+				roster = this.#optional(signal, () => this.#unguarded.listWindows());
+				roster.then(claim.resolve, () => claim.resolve(undefined));
+			}
 			if ("root" in to) {
 				const at = to.point && desktopPoint(this.#rootDisplays.get(to.root) ?? [], to.point);
-				if (!to.point || at) window = await this.windowReached(signal, at);
+				if (!to.point || at) window = await this.windowReached(signal, at, await roster);
 			}
-			unsettled = this.#unsettled ??= { pids: new Set(), endedAt: Date.now(), inputs: 0 };
+			let pid: number | undefined;
+			if (opens) this.ledger.noteAppInput(cell);
+			else pid = this.ledger.noteInput(cell, window);
+			unsettled = this.#unsettled ??= { pids: new Set(), cells: new Set(), endedAt: Date.now(), inputs: 0 };
 			unsettled.inputs++;
-			if (window?.pid !== undefined) unsettled.pids.add(window.pid);
+			unsettled.cells.add(cell);
+			if (pid !== undefined) unsettled.pids.add(pid);
 			this.#sending++;
 			const call = dispatch();
 			markDispatched();
@@ -1528,14 +1602,21 @@ class InputObserver {
 				unsent = refusedUnsent(error);
 				throw error;
 			}
-			const started = opens?.(result);
-			if (started !== undefined) unsettled.pids.add(started);
+			if (opens) {
+				const opened = opens(result);
+				const started = opened.window?.pid ?? opened.pid;
+				if (started !== undefined) unsettled.pids.add(started);
+				this.ledger.noteOpened(cell, opened);
+			}
 			// A key can activate another app (cmd+tab, Spotlight): the app focused after it reacts too.
 			if ("root" in to && !to.point) {
 				const focused = await this.windowReached(signal);
 				if (focused?.pid !== undefined) unsettled.pids.add(focused.pid);
 			}
 			return result;
+		} catch (error) {
+			if (window && !(error instanceof ToolAbortError)) this.ledger.noteFailure(cell, window);
+			throw error;
 		} finally {
 			markDispatched();
 			if (unsettled) {
@@ -1555,8 +1636,12 @@ class InputObserver {
 	 * The window a desktop point lies in (see `windowAt`), or without a point
 	 * the focused window; undefined when unknown.
 	 */
-	async windowReached(signal: AbortSignal, point?: { x: number; y: number }): Promise<InputWindow | undefined> {
-		const roster = await this.#optional(signal, () => this.#session.listWindows());
+	async windowReached(
+		signal: AbortSignal,
+		point?: { x: number; y: number },
+		roster?: DesktopWindow[],
+	): Promise<InputWindow | undefined> {
+		roster ??= await this.#optional(signal, () => this.#session.listWindows());
 		if (!roster) return undefined;
 		let window: DesktopWindow | undefined;
 		if (point) {
@@ -1602,6 +1687,8 @@ export class ComputerWorkerCore {
 	#closed = false;
 	/** The latest agent turn whose end was sent here; a run of that turn or earlier, arriving late, holds nothing. */
 	#releasedTurn = 0;
+	/** Runs and settles waiting for the other kind to end, by request id, so an abort reaches them. */
+	readonly #queued = new Map<string, AbortController>();
 
 	constructor(transport: ComputerWorkerTransport, createSession?: NativeDesktopSessionFactory) {
 		this.#transport = transport;
@@ -1617,13 +1704,18 @@ export class ComputerWorkerCore {
 				this.#transport.send({ type: "pong", id: message.id });
 				return;
 			case "run":
+			case "settle":
 				void this.#run(message);
 				return;
 			case "capabilities":
 				void this.#capabilities(message);
 				return;
+			case "discard":
+				this.#observer?.ledger.discard(message.cell);
+				return;
 			case "abort":
 				if (this.#active?.id === message.id) this.#active.ac.abort(new ToolAbortError());
+				else this.#queued.get(message.id)?.abort(new ToolAbortError());
 				return;
 			case "revoke-control":
 				this.#active?.ac.abort(new ToolAbortError("Computer control revoked"));
@@ -1662,7 +1754,7 @@ export class ComputerWorkerCore {
 				const guarded = this.#guard(session);
 				this.#session = session;
 				this.#guarded = guarded;
-				this.#observer = new InputObserver(guarded);
+				this.#observer = new InputObserver(guarded, session);
 				return session;
 			} catch (error) {
 				throw nativeError(error);
@@ -1683,7 +1775,35 @@ export class ComputerWorkerCore {
 		return this.#runtime;
 	}
 
-	async #run(message: Extract<ComputerWorkerInbound, { type: "run" }>): Promise<void> {
+	/**
+	 * Runs desktop code, or settles the cell that just ended (`settle`), as one
+	 * abortable run. A cell's report and another cell's run take turns, each
+	 * within its own budget and abort; a run that finds another run in flight is
+	 * refused as busy.
+	 */
+	async #run(message: Extract<ComputerWorkerInbound, { type: "run" | "settle" }>): Promise<void> {
+		const startedAt = Date.now();
+		const timeoutSignal = AbortSignal.timeout(message.timeoutMs);
+		const deadline = performance.now() + message.timeoutMs;
+		const ac = new AbortController();
+		const timedOut = (): ToolError =>
+			new ToolError(
+				message.type === "settle"
+					? `the post-input report timed out after ${message.timeoutMs}ms`
+					: `Computer code execution timed out after ${message.timeoutMs}ms`,
+			);
+		while (this.#active && !this.#closed && (message.type === "settle" || this.#active.kind === "settle")) {
+			this.#queued.set(message.id, ac);
+			try {
+				await untilAborted(AbortSignal.any([timeoutSignal, ac.signal]), this.#active.ended);
+			} catch {
+				const error = timeoutSignal.aborted ? timedOut() : new ToolAbortError();
+				this.#transport.send({ type: "result", id: message.id, ok: false, error: errorPayload(error) });
+				return;
+			} finally {
+				this.#queued.delete(message.id);
+			}
+		}
 		if (this.#closed) {
 			this.#transport.send({
 				type: "result",
@@ -1706,13 +1826,13 @@ export class ComputerWorkerCore {
 			});
 			return;
 		}
-		const timeoutSignal = AbortSignal.timeout(message.timeoutMs);
-		const deadline = performance.now() + message.timeoutMs;
-		const ac = new AbortController();
 		const runAc = new AbortController();
 		const signal = AbortSignal.any([timeoutSignal, ac.signal, runAc.signal]);
+		const ended = Promise.withResolvers<void>();
 		const active: ActiveRun = {
 			id: message.id,
+			kind: message.type,
+			ended: ended.promise,
 			acknowledgedEscapeStops: message.escape.acknowledged,
 			ac,
 			signal,
@@ -1734,6 +1854,7 @@ export class ComputerWorkerCore {
 		const screenshots: ComputerScreenshot[] = [];
 		const runContext: ComputerRunContext = {
 			signal,
+			cell: message.cell,
 			readOnly: message.session.readOnly,
 			snapshot: message.session,
 			output,
@@ -1756,25 +1877,43 @@ export class ComputerWorkerCore {
 			// Under `refuse` no foreground control stands, including a grant the
 			// model acquired before the user chose `refuse`.
 			if (message.session.backgroundFallback === "refuse" && session.controlState().active) session.releaseControl();
-			const runtime = this.#ensureRuntime(message.session);
-			runtime.setCwd(message.session.cwd);
-			const desktop = this.#createDesktopScope(session, this.#observer!);
-			runtime.setRunScope({
-				desktop: bindRunFacade(desktop, signal),
-				assert: (condition: unknown, text?: string): void => {
-					if (!condition) throw new ToolError(text ?? "Assertion failed");
-				},
-				wait: (msOrPredicate: number | (() => unknown), options?: WaitPredicateOptions): Promise<unknown> => {
-					const resolved =
-						typeof msOrPredicate === "number"
-							? undefined
-							: {
-									timeout: resolvePredicateTimeout(message.timeoutMs, options?.timeout),
-									interval: options?.interval,
-								};
-					return markHandled(waitForRun(msOrPredicate, signal, resolved));
-				},
-			});
+			const observer = this.#observer!;
+			let body: () => Promise<unknown>;
+			if (message.type === "settle") {
+				const request = {
+					output: message.output,
+					forget: message.forget === true,
+					cell: message.cell,
+					readDeadline: startedAt + message.timeoutMs - SETTLE_HEADROOM_MS,
+				};
+				body = () => this.#settle(session, observer, signal, request);
+			} else {
+				const code = message.code;
+				const runtime = this.#ensureRuntime(message.session);
+				runtime.setCwd(message.session.cwd);
+				const desktop = this.#createDesktopScope(session, observer);
+				runtime.setRunScope({
+					desktop: bindRunFacade(desktop, signal),
+					assert: (condition: unknown, text?: string): void => {
+						if (!condition) throw new ToolError(text ?? "Assertion failed");
+					},
+					wait: (msOrPredicate: number | (() => unknown), options?: WaitPredicateOptions): Promise<unknown> => {
+						const resolved =
+							typeof msOrPredicate === "number"
+								? undefined
+								: {
+										timeout: resolvePredicateTimeout(message.timeoutMs, options?.timeout),
+										interval: options?.interval,
+									};
+						return markHandled(waitForRun(msOrPredicate, signal, resolved));
+					},
+				});
+				body = () =>
+					runtime.run(code, `computer-run-${message.id}.js`, this.#runtimeHooks(active, output), {
+						runId: message.id,
+						cwd: message.session.cwd,
+					});
+			}
 			const { promise: cancelRejection, reject: rejectCancel } = Promise.withResolvers<never>();
 			const onCancel = (): void => {
 				// The user's Escape ends the run with its own message, not as a bare abort, so the host reports it
@@ -1783,11 +1922,7 @@ export class ComputerWorkerCore {
 					signal.reason === active.escapeStop || signal.reason instanceof ToolAbortError
 						? signal.reason
 						: new ToolAbortError(undefined, { cause: signal.reason });
-				rejectCancel(
-					timeoutSignal.aborted
-						? new ToolError(`Computer code execution timed out after ${message.timeoutMs}ms`)
-						: abortError,
-				);
+				rejectCancel(timeoutSignal.aborted ? timedOut() : abortError);
 				const toolAbort = timeoutSignal.aborted
 					? postmortem.markExpectedCleanupError(new ToolAbortError(undefined, { cause: timeoutSignal.reason }))
 					: abortError;
@@ -1797,15 +1932,7 @@ export class ComputerWorkerCore {
 			if (signal.aborted) onCancel();
 			else signal.addEventListener("abort", onCancel, { once: true });
 			try {
-				returnValue = await Promise.race([
-					this.#runContexts.run(runContext, () =>
-						runtime.run(message.code, `computer-run-${message.id}.js`, this.#runtimeHooks(active, output), {
-							runId: message.id,
-							cwd: message.session.cwd,
-						}),
-					),
-					cancelRejection,
-				]);
+				returnValue = await Promise.race([this.#runContexts.run(runContext, body), cancelRejection]);
 				completed = true;
 			} finally {
 				signal.removeEventListener("abort", onCancel);
@@ -1820,6 +1947,7 @@ export class ComputerWorkerCore {
 			else if (!nativeCancelled) this.#session?.cancel();
 			runAc.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Computer run ended")));
 			if (this.#active?.id === message.id) this.#active = null;
+			ended.resolve();
 		}
 		if (failure !== undefined) {
 			this.#transport.send({
@@ -1850,6 +1978,170 @@ export class ComputerWorkerCore {
 				payload: { displays: output.finish(), returnValue: cloneSafe(returnValue), screenshots, capabilities },
 			});
 		}
+	}
+
+	/**
+	 * Report what the cell's input changed once its apps went quiet: each touched window re-read once and diffed
+	 * against the model's last tree, which a failed or cancelled report leaves as the baseline. `forget`: the
+	 * conversation was rewritten, so windows print whole. The cell's record is gone afterwards.
+	 */
+	async #settle(
+		session: NativeDesktopSession,
+		observer: InputObserver,
+		signal: AbortSignal,
+		request: { output: string; forget: boolean; cell: CellKey; readDeadline: number },
+	): Promise<SettleReport | undefined> {
+		const { ledger } = observer;
+		try {
+			if (request.forget) ledger.forgetShown();
+			// A read inside the cell may have paid the wait already; its outcome is on the cell's record.
+			if (ledger.hasInput(request.cell)) await observer.settle(signal);
+			const pending = ledger.take(request.cell, request.output);
+			if (!pending) return undefined;
+			return await this.#report(session, ledger, signal, pending, request.readDeadline);
+		} finally {
+			ledger.discard(request.cell);
+		}
+	}
+
+	/**
+	 * The report for one cell's pending input. Windows not read by `readDeadline`, or past the inline output
+	 * budget, are named instead and keep the model's last tree. `whole` prints every window whole, for a
+	 * conversation rewritten while the report was made.
+	 */
+	async #report(
+		session: NativeDesktopSession,
+		ledger: ObservationLedger,
+		signal: AbortSignal,
+		pending: PendingSettle,
+		readDeadline: number,
+	): Promise<SettleReport | undefined> {
+		const deadline = AbortSignal.timeout(Math.max(0, readDeadline - Date.now()));
+		const readSignal = AbortSignal.any([signal, deadline]);
+		/** A native read under the deadline: its value, its failure, or neither once the deadline passed. */
+		const budgeted = async <T>(call: () => Promise<T>): Promise<{ value: T } | { error?: string }> => {
+			if (deadline.aborted) return {};
+			try {
+				return { value: await untilAborted(readSignal, () => nativeCall(readSignal, call)) };
+			} catch (error) {
+				if (signal.aborted) throw error;
+				if (deadline.aborted) return {};
+				return { error: error instanceof Error ? error.message : String(error) };
+			}
+		};
+		const listed = await budgeted(() => session.listWindows());
+		const roster = "value" in listed ? listed.value : undefined;
+		const focused = roster?.find(window => window.focused);
+		type Shown = { window: InputWindow; text: string; options: AxReadOptions };
+		/** A window's section, whole too, the line naming it instead, and the tree it would make the model's. */
+		const sections: Array<{ text: string } | { text: string; whole: string; leftOut: string; shown: Shown }> = [];
+		if (focused) ledger.attributeToFocused(pending, focused);
+		else if (pending.unattributed > 0) sections.push({ text: reportNote({ noFocusedWindow: true }) });
+		const latest = pending.outcome?.latest;
+		const unwatchedMs = latest && !latest.watched ? latest.sinceInputMs : undefined;
+		// A sheet, popover or chooser that left the list hands its app's focus on: that window is read right after it.
+		const successors = new Map<string, DesktopWindow>();
+		const claimed = new Set<string>();
+		if (roster) {
+			for (const touched of pending.touched) {
+				if (roster.some(candidate => candidate.id === touched.id)) continue;
+				const pid = touched.pid ?? pending.rosterBefore?.find(candidate => candidate.id === touched.id)?.pid;
+				const next = pid === undefined ? undefined : appWindow(roster, pid);
+				if (!next || claimed.has(next.id)) continue;
+				successors.set(touched.id, next);
+				claimed.add(next.id);
+			}
+		}
+		const queue: TouchedWindow[] = [];
+		for (const touched of pending.touched) {
+			if (claimed.has(touched.id)) continue;
+			queue.push(touched);
+			const next = successors.get(touched.id);
+			if (next) {
+				const own = pending.touched.find(candidate => candidate.id === next.id);
+				queue.push({ ...(own ?? ledger.entry(next)), after: touched.id });
+			}
+		}
+		const reported = new Set(queue.map(touched => touched.id));
+		for (const touched of queue) {
+			const window = roster?.find(candidate => candidate.id === touched.id);
+			if (roster && !window) {
+				sections.push({ text: renderGone(touched) });
+				continue;
+			}
+			const read = await budgeted(() => session.axSnapshot(touched.id, touched.options));
+			if ("value" in read) {
+				const text = read.value.text;
+				const change = touched.baseline === undefined ? undefined : diffTree(touched.baseline, text);
+				const readBack = { touched, window, text, change, unwatchedMs };
+				sections.push({
+					text: renderReadBack(readBack),
+					whole: renderReadBack({ ...readBack, change: undefined }),
+					leftOut: reportNote({ leftOut: readBackName(readBack) }),
+					shown: { window: { id: touched.id, pid: window?.pid }, text, options: touched.options },
+				});
+			} else if (read.error !== undefined) sections.push({ text: renderUnreadable(touched, window, read.error) });
+			else sections.push({ text: reportNote({ budgetSpent: JSON.stringify(touched.id) }) });
+		}
+		// A window the input opened and focused holds the model's next step, and it has no tree of it.
+		const opened =
+			focused &&
+			pending.rosterBefore &&
+			!reported.has(focused.id) &&
+			!pending.rosterBefore.some(window => window.id === focused.id) &&
+			(pending.windowInput || (focused.pid !== undefined && pending.pids.has(focused.pid)))
+				? focused
+				: undefined;
+		if (opened) {
+			// Unreadable or out of time, it is still named by the roster line below.
+			const read = await budgeted(() => session.axSnapshot(opened.id, {}));
+			if ("value" in read) {
+				const text = read.value.text;
+				sections.push({
+					text: renderNewWindow(opened, text),
+					whole: renderNewWindow(opened, text),
+					leftOut: reportNote({ leftOut: newWindowName(opened) }),
+					shown: { window: { id: opened.id, pid: opened.pid }, text, options: {} },
+				});
+				reported.add(opened.id);
+			}
+		}
+		const tail: string[] = [];
+		if (roster && pending.rosterBefore) {
+			const changes = describeRosterChanges(pending.rosterBefore, roster, pending.pids, reported);
+			if (changes.length > 0) tail.push(changes.join("\n"));
+		}
+		const capped = pending.outcome?.capped;
+		if (capped) tail.push(reportNote({ stillChanging: (capped.sinceInputMs / 1000).toFixed(1) }));
+		const webNote = reportNote({ webContent: true });
+		const mayNoteWeb = sections.some(section => "shown" in section && WEB_AREA_ROW.test(section.shown.text));
+		/** The report with each window's section in its `form`, and the trees it printed. */
+		const fit = (form: "text" | "whole"): { text: string; shown: Shown[] } => {
+			// Budget left with every window named by its line; each section in turn replaces its line if it fits.
+			let room =
+				DEFAULT_MAX_BYTES -
+				Buffer.byteLength(
+					[...sections.map(section => ("leftOut" in section ? section.leftOut : section.text)), ...tail]
+						.concat(mayNoteWeb ? [webNote] : [])
+						.join("\n\n"),
+				);
+			const shown: Shown[] = [];
+			const texts = sections.map(section => {
+				if (!("shown" in section)) return section.text;
+				const extra = Buffer.byteLength(section[form]) - Buffer.byteLength(section.leftOut);
+				if (extra > room) return section.leftOut;
+				room -= extra;
+				shown.push(section.shown);
+				return section[form];
+			});
+			const notes = shown.some(({ text }) => WEB_AREA_ROW.test(text)) ? [webNote] : [];
+			return { text: [...texts, ...tail, ...notes].join("\n\n"), shown };
+		};
+		const report = fit("text");
+		if (report.text === "") return undefined;
+		for (const { window, text, options } of report.shown) ledger.recordShown(window, text, options);
+		const whole = fit("whole").text;
+		return whole === report.text ? { text: report.text } : { text: report.text, whole };
 	}
 
 	/**
@@ -2078,7 +2370,10 @@ export class ComputerWorkerCore {
 						context,
 						{},
 						() => nativeCall(context.signal, () => session.openApplication(id, open)),
-						opened => opened.window?.pid ?? opened.pid,
+						opened => ({
+							pid: opened.pid,
+							window: opened.window && { id: opened.window.id, pid: opened.window.pid },
+						}),
 					);
 					return { ...application, window: shown ? makeWin(shown) : null };
 				},
@@ -2178,9 +2473,9 @@ export class ComputerWorkerCore {
 			ref: (ref: string): ElRef => {
 				validateString(ref, "ref(ref)", { nonEmpty: true });
 				return new ElRef(ref, getContext, async () => {
-					const { signal } = getContext();
-					const node = await nativeCall(signal, () => session.axNode(ref));
-					return observer.element(getContext, node, observer.refs.windowOf(ref));
+					const window = observer.refs.windowOf(ref);
+					const node = await observer.read(getContext(), window, () => session.axNode(ref));
+					return observer.element(getContext, node, window);
 				});
 			},
 			clipboard: {

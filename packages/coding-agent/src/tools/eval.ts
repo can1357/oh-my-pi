@@ -9,13 +9,19 @@ import type {
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
 import { formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { jsBackend, pythonBackend } from "../eval";
-import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
+import type { ExecutorBackend, ExecutorBackendExecOptions, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
-import { type EvalPreludeDefinition, evalPreludeSummary, getEnabledEvalPreludes } from "../eval/preludes";
+import {
+	type EvalPreludeDefinition,
+	type EvalPreludeSettleReply,
+	evalPreludeSummary,
+	getEnabledEvalPreludes,
+	runWithEvalPreludeCell,
+} from "../eval/preludes";
 import { prepareEvalSource } from "../eval/input";
 import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
@@ -858,9 +864,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				pushUpdate();
 
 				const startTime = Date.now();
+				// Prelude calls this cell makes carry `preludeCell`; each prelude may
+				// append what the cell left behind once it has settled.
+				const preludeCell = { signal: combinedSignal };
 				let result: ExecutorBackendResult;
 				try {
-					result = await backend.execute(cell.code, {
+					const options: ExecutorBackendExecOptions = {
 						cwd: session.cwd,
 						sessionId,
 						sessionFile: sessionFile ?? undefined,
@@ -892,15 +901,40 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							});
 							pushUpdate();
 						},
-					});
+					};
+					result = await runWithEvalPreludeCell(preludeCell, () => backend.execute(cell.code, options));
 				} finally {
 					idle?.dispose();
 					// Publish the cell's last live state before its final output replaces it.
 					flushUpdate();
 					activeLiveCell = undefined;
 				}
+				const preludeReplies: string[] = [];
+				if (!result.cancelled) {
+					const failed = result.exitCode !== undefined && result.exitCode !== 0;
+					for (const prelude of getEnabledEvalPreludes(session.getEvalPreludes?.() ?? [])) {
+						if (!prelude.settleCell) continue;
+						let reply: EvalPreludeSettleReply | undefined;
+						try {
+							// A hook that never settles must not hold the cell past its abort.
+							reply = await untilAborted(
+								preludeCell.signal,
+								prelude.settleCell(preludeCell, { failed, output: result.output }),
+							);
+						} catch (error) {
+							if (preludeCell.signal.aborted) break;
+							// One prelude's settle must not cost the cell its output.
+							logger.warn("Eval prelude settle failed", {
+								prelude: prelude.name,
+								error: error instanceof Error ? error.message : String(error),
+							});
+						}
+						if (reply?.text) preludeReplies.push(reply.text);
+					}
+				}
+				// Settling is part of the cell as the model sees it, including a cancellation that lands during it.
+				const cancelled = result.cancelled || combinedSignal.aborted;
 				const durationMs = Date.now() - startTime;
-
 				const cellStatus: StatusEventLog = {};
 				const cellViews: EvalViewEntry[] = [];
 				const cellImageNotes: string[] = [];
@@ -957,7 +991,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						? `${runtimeOutput ? `${runtimeOutput}\n` : ""}Eval environment: ${cell.environment}.`
 						: runtimeOutput;
 				const imageText = cellImageNotes.join("\n");
-				const cellOutput = [stdoutTrimmed, imageText].filter(Boolean).join("\n\n");
+				const cellOutput = [stdoutTrimmed, imageText, ...preludeReplies].filter(Boolean).join("\n\n");
 				cellResult.output = cellOutput;
 				cellResult.views = cellViews.length > 0 ? cellViews : undefined;
 				cellResult.exitCode = result.exitCode;
@@ -970,12 +1004,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					tailBuffer.append(cellOutput);
 				}
 
-				if (result.cancelled || (result.exitCode !== 0 && result.exitCode !== undefined)) {
+				if (cancelled || (result.exitCode !== 0 && result.exitCode !== undefined)) {
 					cellResult.status = "error";
 					pushUpdate();
 					const combinedOutput = cellOutputs.join("\n\n");
 					const exitLine = `Command exited with code ${result.exitCode}`;
-					const outputText = result.cancelled
+					const outputText = cancelled
 						? combinedOutput || result.output || "Command aborted"
 						: combinedOutput
 							? `${combinedOutput}\n\n${exitLine}`

@@ -3,13 +3,19 @@ import type { AgentToolResult, ToolApprovalDecision } from "@oh-my-pi/pi-agent-c
 import type { Model } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import type { DesktopCapabilities } from "@oh-my-pi/pi-natives";
-import { once } from "@oh-my-pi/pi-utils";
+import { logger, once } from "@oh-my-pi/pi-utils";
 import { callSessionTool } from "../eval/js/tool-bridge";
-import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
+import type { EvalPreludeCell, EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
 import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "text" };
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
-import { type ComputerScreenshot, type ComputerSessionSnapshot, screenStateNotice } from "./computer/protocol";
+import { reportNote } from "./computer/observation";
+import {
+	type ComputerScreenshot,
+	type ComputerSessionSnapshot,
+	type SettleReport,
+	screenStateNotice,
+} from "./computer/protocol";
 import {
 	type ComputerController,
 	ComputerSupervisor,
@@ -135,6 +141,23 @@ export function createComputerPrelude(
 	// JavaScript or Python kernel actually asks for its enabled preludes.
 	const { computerPreludeAssets } = require("./computer/prelude-definition");
 	let closed = false;
+	// Cells whose code reached the desktop, with the id their calls and settle carry; only these are settled.
+	const cells = new WeakMap<EvalPreludeCell, { id: string; discard(): void }>();
+	let cellCount = 0;
+	// The conversation revision at the last delivered report: a rewrite since makes the next report print whole.
+	let settledRevision = session.getHistoryRevision?.() ?? 0;
+	// A built report was not delivered (its cell was cancelled), so the next must not diff against its trees.
+	let undelivered = false;
+	const trackCell = (cell: EvalPreludeCell): string => {
+		const tracked = cells.get(cell);
+		if (tracked) return tracked.id;
+		const id = `cell-${++cellCount}`;
+		// A cancelled cell is never settled: what its input left must not show up in another cell's report.
+		const discard = (): void => controller.discard?.(id);
+		cell.signal.addEventListener("abort", discard, { once: true });
+		cells.set(cell, { id, discard });
+		return id;
+	};
 	const lifetime: ComputerLifetime = {
 		isClosed: () => closed,
 		close: async () => {
@@ -163,9 +186,47 @@ export function createComputerPrelude(
 			if (parsed instanceof type.errors) {
 				throw new ToolError(`computer received invalid arguments: ${parsed.summary}`);
 			}
-			return await invokeComputer(session, controller, parsed, context, lifetime);
+			const cell =
+				context.cell && (parsed.action === "run" || parsed.action === "call") ? trackCell(context.cell) : undefined;
+			return await invokeComputer(session, controller, parsed, context, lifetime, cell);
 		},
 		status: describeComputerCall,
+		settleCell: async (cell, { output }) => {
+			const tracked = cells.get(cell);
+			if (!tracked || closed || !controller.settle) return undefined;
+			cells.delete(cell);
+			cell.signal.removeEventListener("abort", tracked.discard);
+			const revision = session.getHistoryRevision?.() ?? 0;
+			const forget = undelivered || revision !== settledRevision;
+			let report: SettleReport | undefined;
+			try {
+				report = await controller.settle(
+					buildComputerSnapshot(session, true),
+					output,
+					cell.signal,
+					forget,
+					tracked.id,
+				);
+			} catch (error) {
+				// Cancellation of the turn needs no report; anything else leaves the
+				// model without its post-input observation, so it is told to look.
+				if (cell.signal.aborted) return undefined;
+				const message = error instanceof Error ? error.message : String(error);
+				logger.debug("Computer cell settle failed", { error: message });
+				return { text: reportNote({ noReport: message }) };
+			}
+			// Cancelled once the report was built: EvalTool drops it, though the worker took its trees as seen.
+			if (cell.signal.aborted) {
+				undelivered = true;
+				return undefined;
+			}
+			undelivered = false;
+			// Rewritten while the report was made: windows go whole, and the next report forgets every baseline too.
+			if ((session.getHistoryRevision?.() ?? 0) !== revision)
+				return report === undefined ? undefined : { text: report.whole ?? report.text };
+			settledRevision = revision;
+			return report === undefined ? undefined : { text: report.text };
+		},
 	};
 }
 
@@ -195,6 +256,7 @@ async function invokeComputer(
 	params: ComputerParams,
 	context: EvalPreludeContext,
 	lifetime: ComputerLifetime,
+	cell?: string,
 ): Promise<AgentToolResult<unknown>> {
 	throwIfAborted(context.signal);
 
@@ -202,7 +264,7 @@ async function invokeComputer(
 		case "run":
 		case "call":
 			if (lifetime.isClosed()) throw new ToolError("Computer session is closed");
-			return await runComputer(session, controller, params, context);
+			return await runComputer(session, controller, params, context, cell);
 		case "capabilities": {
 			const capabilities = lifetime.isClosed()
 				? undefined
@@ -269,6 +331,7 @@ async function runComputer(
 	controller: ComputerController,
 	params: ComputerRunParams | ComputerCallParams,
 	context: EvalPreludeContext,
+	cell?: string,
 ): Promise<AgentToolResult<unknown>> {
 	const signal = context.signal;
 	const code = resolveComputerRunCode(params);
@@ -276,7 +339,7 @@ async function runComputer(
 	const readOnly = params.action === "call" ? isReadOnlyComputerCall(params.chain) : (params.read_only ?? false);
 	const timeoutSeconds = clampTimeout("computer", params.timeout, cfgToolsMaxTimeout.get(session.settings));
 	const snapshot = buildComputerSnapshot(session, readOnly);
-	const run = await controller.run(code, timeoutSeconds * 1000, snapshot, signal, context.context);
+	const run = await controller.run(code, timeoutSeconds * 1000, snapshot, signal, context.context, cell);
 	throwIfAborted(signal);
 
 	const details: ComputerPreludeDetails = {

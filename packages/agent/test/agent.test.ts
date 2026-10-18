@@ -1988,6 +1988,71 @@ describe("Agent — F3 in-place state mutation", () => {
 		expect(agent.state.pendingToolCalls.size).toBe(0);
 	});
 
+	describe("historyRevision", () => {
+		type Messages = Agent["state"]["messages"];
+		const toolResult = (text: string): ToolResultMessage => ({
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "probe",
+			content: [{ type: "text", text }],
+			isError: false,
+			timestamp: 2,
+		});
+		/** An agent holding user → tool call → tool result → closing assistant. */
+		const seeded = () => {
+			const agent = new Agent();
+			const result = toolResult("tree");
+			agent.replaceMessages([
+				createUserMessage("look"),
+				createAssistantMessage([{ type: "toolCall", id: "call-1", name: "probe", arguments: {} }]),
+				result,
+				createAssistantMessage([{ type: "text", text: "done" }]),
+			]);
+			return { agent, result, before: agent.historyRevision };
+		};
+
+		it.each([
+			{
+				change: "only appends",
+				delta: 0,
+				edit: (messages: Messages) => [...messages, createUserMessage("again")],
+			},
+			{
+				change: "drops a trailing assistant turn",
+				delta: 0,
+				edit: (messages: Messages) => messages.slice(0, -1),
+			},
+			{ change: "removes a tool result", delta: 1, edit: (messages: Messages) => messages.slice(0, 2) },
+			{
+				change: "swaps a tool result for a new object",
+				delta: 1,
+				edit: (messages: Messages) =>
+					messages.map(message => (message.role === "toolResult" ? toolResult("pruned") : message)),
+			},
+		])("moves by $delta when replaceMessages $change", ({ delta, edit }) => {
+			const { agent, before } = seeded();
+			agent.replaceMessages(edit(agent.state.messages));
+			expect(agent.historyRevision).toBe(before + delta);
+		});
+
+		it("advances when the caller reports tool results rewritten in place", () => {
+			const { agent, result, before } = seeded();
+			result.content = [{ type: "text", text: "pruned" }];
+			agent.replaceMessages(agent.state.messages, { toolResultsRewritten: true });
+			expect(agent.historyRevision).toBe(before + 1);
+		});
+
+		it("advances on clearMessages and reset", () => {
+			const agent = new Agent();
+			agent.appendMessage(createUserMessage("x"));
+			agent.clearMessages();
+			expect(agent.historyRevision).toBe(1);
+			agent.appendMessage(createUserMessage("y"));
+			agent.reset();
+			expect(agent.historyRevision).toBe(2);
+		});
+	});
+
 	it("replaceMessages still snapshots the input (callers may keep mutating their array)", () => {
 		const agent = new Agent();
 		const external = [{ role: "user" as const, content: "x", timestamp: 1 }];

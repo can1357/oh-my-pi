@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Agent.historyRevision`, which counts conversation rewrites that drop or replace a tool result, so a tool can tell when output the model saw may be gone
+
 ### Fixed
 
 - Fixed Ollama chat history estimates counting stripped native thinking and missing foreign thinking replayed as text, which skewed compaction after model switches ([#16164](https://github.com/can1357/oh-my-pi/issues/16164))
