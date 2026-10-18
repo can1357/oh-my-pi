@@ -2072,9 +2072,10 @@ mod tests {
 				(6, with("textfield", "Name", &["AXConfirm", "AXCancel", "Name:Delete\nTarget:0x0"])),
 				(7, with("popover", "Details", &["AXCancel"])),
 				(8, with("button", "Native", &["press", "invoke"])),
+				(9, with("button", "Download", &["AXPress", "AXOpen"])),
 			]
 			.into(),
-			children: [(1, (2..=8).collect())].into(),
+			children: [(1, (2..=9).collect())].into(),
 			..Default::default()
 		};
 		let text = tree(&mut m);
@@ -2090,6 +2091,9 @@ mod tests {
 		assert_eq!(actions("e6"), None);
 		assert_eq!(actions("e7"), Some("cancel"));
 		assert_eq!(actions("e8"), None);
+		// A button that presses and opens lists only the open; its press is the
+		// role's own and still performs.
+		assert_eq!(actions("e9"), Some("open"));
 	}
 	#[test]
 	fn a_window_control_named_only_by_its_subrole_takes_that_name() {
