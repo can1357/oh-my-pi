@@ -10,7 +10,7 @@ import {
 } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { EngineAdapter, MnemopiRecall, ProtocolName, RecallHit } from "../engine";
-import { PythonProcess } from "./python-process";
+import { envName, PythonProcess } from "./python-process";
 
 const EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5";
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../../..");
@@ -38,9 +38,10 @@ export interface MnemopiEngineOptions {
 /** Mnemopi runs in this process and reads these itself, so they cannot be scrubbed: refuse instead. */
 export function assertMnemopiEnvClean(): void {
 	// OPENROUTER_BASE_URL is the one non-MNEMOPI_ variable that can route its embeddings to an API.
-	const set = Object.keys(Bun.env).filter(
-		key => (key.startsWith("MNEMOPI_") || key === "OPENROUTER_BASE_URL") && Bun.env[key],
-	);
+	const set = Object.keys(Bun.env).filter(key => {
+		const name = envName(key);
+		return (name.startsWith("MNEMOPI_") || name === "OPENROUTER_BASE_URL") && Bun.env[key];
+	});
 	if (set.length > 0) {
 		throw new Error(`refusing to run mnemopi with MNEMOPI_* or OPENROUTER_BASE_URL set: ${set.join(", ")}`);
 	}
