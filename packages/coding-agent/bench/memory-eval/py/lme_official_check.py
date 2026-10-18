@@ -9,7 +9,11 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path.home() / ".cache" / "omp-memory-eval" / "src" / "LongMemEval" / "src" / "retrieval"))
+from pinned_source import require_pinned
+
+LME_REPO = Path.home() / ".cache" / "omp-memory-eval" / "src" / "LongMemEval"
+require_pinned(LME_REPO, "9e0b455f4ef0e2ab8f2e582289761153549043fc")
+sys.path.insert(0, str(LME_REPO / "src" / "retrieval"))
 from eval_utils import evaluate_retrieval, evaluate_retrieval_turn2session  # noqa: E402
 
 TOL = 1e-12
