@@ -94,7 +94,9 @@ export function clone(url, target, options = {}, signal) {
 
 /** Initialize an empty git repository at `dir` (git CLI) and return its handle. */
 export async function init(dir) {
-	await $`git init -q ${dir}`.quiet();
+	// GIT_DIR, GIT_WORK_TREE and friends would point `git init` at another repository than `dir`.
+	const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+	await $`git init -q ${dir}`.env(env).quiet();
 	return requireGit(dir);
 }
 

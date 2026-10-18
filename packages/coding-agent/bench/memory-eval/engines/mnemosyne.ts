@@ -64,8 +64,11 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 			return proc;
 		}
 		dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "mnemosyne-data-"));
-		// Parent MNEMOSYNE_* settings (recall weights, prefixes, ...) would silently change ranking or embeddings.
-		const inherited = Object.entries(Bun.env).filter(([key]) => !key.startsWith("MNEMOSYNE_"));
+		// Parent MNEMOSYNE_* settings (recall weights, prefixes, ...) would silently change ranking or embeddings, and
+		// PYTHON* overrides (PYTHONPATH, PYTHONHOME, ...) could import another Mnemosyne than the pinned 4.0.0b4.
+		const inherited = Object.entries(Bun.env).filter(
+			([key]) => !key.startsWith("MNEMOSYNE_") && !key.startsWith("PYTHON"),
+		);
 		proc = new PythonProcess("mnemosyne engine", python, script, {
 			...Object.fromEntries(inherited),
 			MNEMOSYNE_DATA_DIR: dataDir,
