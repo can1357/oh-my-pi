@@ -8,6 +8,7 @@ import {
 	getConfigDirName,
 	getPluginsDir,
 	getProjectDir,
+	isRecord,
 	logger,
 	normalizePathForComparison,
 	parseFrontmatter,
@@ -32,7 +33,12 @@ import type { MCPRequestIdFormat } from "../mcp/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
-import { classifyAgentPluginRoot, clearAgentPluginRootCache, legacyProviderAllowed } from "./agent-plugin-format";
+import {
+	classifyAgentPluginRoot,
+	clearAgentPluginRootCache,
+	legacyProviderAllowed,
+	readAgentPluginRootStatusSync,
+} from "./agent-plugin-format";
 import { realpathIfExists, resolveContainedPath } from "./contained-path";
 import { buildPluginDirRoot } from "./plugin-dir-roots";
 
@@ -1451,10 +1457,14 @@ async function loadClaudePluginRoots({
  * Clear the plugin roots cache (useful for testing or when plugins change).
  */
 export function clearClaudePluginRootsCache(): void {
+	// In-flight preloads from before this refresh must not publish their old list.
+	pluginPreloadGeneration++;
 	pluginRootsCache.clear();
 	for (const invalidate of pluginCacheInvalidators) invalidate();
 	clearAgentPluginRootCache();
-	preloadedPluginRoots = [...admittedPluginDirRoots];
+	preloadedPluginRoots = injectedPluginDirRoots.filter(
+		root => readAgentPluginRootStatusSync(root.path).kind !== "invalid",
+	);
 	// Re-warm preloaded roots asynchronously so sync LSP config reads stay valid
 	if (lastPreloadHome) {
 		void preloadPluginRoots(lastPreloadHome, getProjectDir());
@@ -1479,9 +1489,8 @@ export function clearPluginRootsAndCaches(extraPaths?: readonly string[]): void 
 
 let preloadedPluginRoots: ClaudePluginRoot[] = [];
 let injectedPluginDirRoots: ClaudePluginRoot[] = [];
-/** Injected roots minus fatally invalid Agent Plugins packages; seeds the preload between re-warms. */
-let admittedPluginDirRoots: ClaudePluginRoot[] = [];
 let lastPreloadHome: string | undefined;
+let pluginPreloadGeneration = 0;
 
 /**
  * Plugin roots whose configuration sync consumers (LSP, DAP) may read. A
@@ -1499,9 +1508,11 @@ async function admitPreloadedRoots(roots: ClaudePluginRoot[]): Promise<ClaudePlu
  * but before any LSP config is read.
  */
 export async function preloadPluginRoots(home: string, cwd?: string): Promise<void> {
+	const generation = ++pluginPreloadGeneration;
 	lastPreloadHome = home;
 	const { roots } = await listClaudePluginRoots(home, cwd);
-	preloadedPluginRoots = await admitPreloadedRoots(roots);
+	const admitted = await admitPreloadedRoots(roots);
+	if (generation === pluginPreloadGeneration) preloadedPluginRoots = admitted;
 }
 
 /**
@@ -1520,8 +1531,8 @@ export function getPreloadedPluginRoots(): readonly ClaudePluginRoot[] {
  * Must be called before any listClaudePluginRoots() access.
  */
 export async function injectPluginDirRoots(home: string, dirs: string[], cwd?: string): Promise<void> {
+	pluginPreloadGeneration++;
 	const injected: ClaudePluginRoot[] = [];
-	const admitted: ClaudePluginRoot[] = [];
 	for (const dir of dirs) {
 		const resolved = path.resolve(dir);
 		// Read the plugin name from its manifest; an unreadable or nameless manifest
@@ -1545,8 +1556,10 @@ export async function injectPluginDirRoots(home: string, dirs: string[], cwd?: s
 					const contained = await resolveContainedPath(realRoot, manifestPath);
 					if (contained.status !== "ok") continue;
 					try {
-						const manifest = await Bun.file(contained.realPath).json();
-						if (typeof manifest?.name === "string" && manifest.name) {
+						const raw = await readFile(contained.realPath, { cache: false });
+						if (raw === null) continue;
+						const manifest: unknown = JSON.parse(raw);
+						if (isRecord(manifest) && typeof manifest.name === "string" && manifest.name) {
 							pluginName = manifest.name;
 							break;
 						}
@@ -1559,17 +1572,13 @@ export async function injectPluginDirRoots(home: string, dirs: string[], cwd?: s
 
 		const root = buildPluginDirRoot(resolved, pluginName);
 		injected.push(root);
-		if (status.kind !== "invalid") admitted.push(root);
 	}
 
 	// Set injected roots BEFORE populating cache so listClaudePluginRoots merges them.
 	injectedPluginDirRoots = injected;
-	admittedPluginDirRoots = admitted;
-	lastPreloadHome = home; // ensure cache-clear re-warm fires even when injectPluginDirRoots was the startup path
 	// Clear any stale cache entries (populated before injected roots were set).
 	pluginRootsCache.clear();
 	// Rebuild — cache miss triggers fresh load that includes both user+project registries
 	// and prepends injectedPluginDirRoots at highest precedence.
-	const { roots } = await listClaudePluginRoots(home, cwd);
-	preloadedPluginRoots = await admitPreloadedRoots(roots);
+	await preloadPluginRoots(home, cwd);
 }

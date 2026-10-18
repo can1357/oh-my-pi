@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/capability";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
+import * as agentPluginFormat from "@oh-my-pi/pi-coding-agent/discovery/agent-plugin-format";
 import {
 	AGENT_PLUGIN_MANIFEST_SCHEMA,
 	AGENT_PLUGIN_MCP_SCHEMA,
@@ -13,8 +14,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/discovery/agent-plugin-format";
 import {
 	clearClaudePluginRootsCache,
+	clearPluginRootsAndCaches,
 	injectPluginDirRoots,
 	listClaudePluginRoots,
+	preloadPluginRoots,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { configFileSources } from "@oh-my-pi/pi-coding-agent/utils/config-file-sources";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
@@ -550,7 +553,7 @@ describe("agent-plugins discovery", () => {
 		}
 	});
 
-	test("reads plugin LSP/DAP config from a valid standard root but not a fatally invalid one (§5.2)", async () => {
+	test("revalidates injected LSP/DAP config immediately on refresh and restores repaired packages", async () => {
 		const writeRoot = async (dirName: string, name: string) => {
 			const dirPath = path.join(tempDir, "plugins", dirName);
 			await fs.mkdir(dirPath, { recursive: true });
@@ -562,7 +565,7 @@ describe("agent-plugins discovery", () => {
 			return dirPath;
 		};
 		const valid = await writeRoot("valid-dir", "valid-plugin");
-		const invalid = await writeRoot("invalid-dir", "Bad--Name");
+		const changing = await writeRoot("changing-dir", "changing-plugin");
 
 		const readLspPaths = () =>
 			configFileSources("lsp", tempDir, (_content, filePath) => filePath)
@@ -570,18 +573,62 @@ describe("agent-plugins discovery", () => {
 				.filter(filePath => filePath !== null);
 
 		try {
-			await injectPluginDirRoots(tempDir, [valid, invalid], tempDir);
-			// Hybrid packages keep client-specific config; a rejected package contributes none.
-			const readPaths = readLspPaths();
-			expect(readPaths).toContain(path.join(valid, "lsp.json"));
-			expect(readPaths).not.toContain(path.join(invalid, "lsp.json"));
+			await injectPluginDirRoots(tempDir, [valid, changing], tempDir);
+			expect(readLspPaths()).toContain(path.join(changing, "lsp.json"));
 
-			// A cache clear reseeds the sync list before its async re-warm finishes.
-			clearClaudePluginRootsCache();
-			const reseeded = readLspPaths();
-			expect(reseeded).toContain(path.join(valid, "lsp.json"));
-			expect(reseeded).not.toContain(path.join(invalid, "lsp.json"));
+			await Bun.write(
+				path.join(changing, "plugin.json"),
+				JSON.stringify({ $schema: AGENT_PLUGIN_MANIFEST_SCHEMA, name: "Bad--Name" }),
+			);
+			clearPluginRootsAndCaches();
+			// No await: synchronous consumers must see the new rejection immediately,
+			// while an unchanged valid package remains available.
+			expect(readLspPaths()).toContain(path.join(valid, "lsp.json"));
+			expect(readLspPaths()).not.toContain(path.join(changing, "lsp.json"));
+			await preloadPluginRoots(tempDir, tempDir);
+			expect(readLspPaths()).not.toContain(path.join(changing, "lsp.json"));
+
+			await Bun.write(
+				path.join(changing, "plugin.json"),
+				JSON.stringify({ $schema: AGENT_PLUGIN_MANIFEST_SCHEMA, name: "changing-plugin" }),
+			);
+			clearPluginRootsAndCaches();
+			expect(readLspPaths()).toContain(path.join(valid, "lsp.json"));
+			expect(readLspPaths()).toContain(path.join(changing, "lsp.json"));
+			await preloadPluginRoots(tempDir, tempDir);
+			expect(readLspPaths()).toContain(path.join(changing, "lsp.json"));
 		} finally {
+			await injectPluginDirRoots(tempDir, []);
+		}
+	});
+
+	test("an older asynchronous preload cannot restore config rejected by a later refresh", async () => {
+		await writeManifest();
+		await Bun.write(path.join(pluginPath, "lsp.json"), JSON.stringify({ servers: {} }));
+		await injectPluginDirRoots(tempDir, [pluginPath], tempDir);
+		const admitted = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const original = agentPluginFormat.legacyProviderAllowed;
+		vi.spyOn(agentPluginFormat, "legacyProviderAllowed").mockImplementationOnce(async (root, surface) => {
+			const allowed = await original(root, surface);
+			admitted.resolve();
+			await release.promise;
+			return allowed;
+		});
+		const oldPreload = preloadPluginRoots(tempDir, tempDir);
+		try {
+			await admitted.promise;
+			await writeManifest({ name: "Bad--Name" });
+			clearPluginRootsAndCaches();
+			await preloadPluginRoots(tempDir, tempDir);
+			release.resolve();
+			await oldPreload;
+
+			const paths = configFileSources("lsp", tempDir, (_content, filePath) => filePath).map(source => source.read());
+			expect(paths).not.toContain(path.join(pluginPath, "lsp.json"));
+		} finally {
+			release.resolve();
+			await oldPreload;
 			await injectPluginDirRoots(tempDir, []);
 		}
 	});

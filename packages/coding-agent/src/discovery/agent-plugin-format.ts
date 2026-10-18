@@ -11,10 +11,16 @@
  * {@link classifyAgentPluginRoot} so roots governed by the standard are not
  * double-loaded through legacy conventions.
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { readFile } from "../capability/fs";
-import { isContainedResolved, realpathIfExists, resolveContainedPath } from "./contained-path";
+import { readFile, readFileSync } from "../capability/fs";
+import {
+	isContainedResolved,
+	realpathIfExists,
+	resolveContainedPath,
+	resolveContainedPathSync,
+} from "./contained-path";
 
 /** Canonical `plugin.json` `$schema` identifier for Agent Plugins 1.0.0 (spec §5.2). */
 export const AGENT_PLUGIN_MANIFEST_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
@@ -499,10 +505,20 @@ export function clearAgentPluginRootCache(): void {
 	rootStatusCache.clear();
 }
 
-async function classifyUncached(
-	rootPath: string,
-	read: (filePath: string) => Promise<string | null>,
-): Promise<AgentPluginRootStatus> {
+function classifyManifest(raw: string | null, realRoot: string): AgentPluginRootStatus {
+	if (raw === null) return { kind: "none" };
+	const parsed = parseAgentPluginManifest(raw);
+	if (parsed.status === "none") return { kind: "none" };
+	if (parsed.status === "invalid") return { kind: "invalid", reason: parsed.reason };
+	return { kind: "standard", manifest: parsed.manifest, warnings: parsed.warnings, realRoot };
+}
+
+/**
+ * Read a plugin root straight from disk, preserving the shared reader's
+ * regular-file guard. Also used on classification cache misses: two independent
+ * cache lifetimes would retain stale manifest contents after a root refresh.
+ */
+export async function readAgentPluginRootStatus(rootPath: string): Promise<AgentPluginRootStatus> {
 	const realRoot = await realpathIfExists(rootPath);
 	if (realRoot === null) return { kind: "none" };
 
@@ -515,12 +531,7 @@ async function classifyUncached(
 		return { kind: "invalid", reason: "plugin.json resolves outside the plugin root" };
 	}
 
-	const raw = await read(manifest.realPath);
-	if (raw === null) return { kind: "none" };
-	const parsed = parseAgentPluginManifest(raw);
-	if (parsed.status === "none") return { kind: "none" };
-	if (parsed.status === "invalid") return { kind: "invalid", reason: parsed.reason };
-	return { kind: "standard", manifest: parsed.manifest, warnings: parsed.warnings, realRoot };
+	return classifyManifest(await readFile(manifest.realPath, { cache: false }), realRoot);
 }
 
 /**
@@ -531,27 +542,29 @@ async function classifyUncached(
 export function classifyAgentPluginRoot(rootPath: string): Promise<AgentPluginRootStatus> {
 	let cached = rootStatusCache.get(rootPath);
 	if (!cached) {
-		cached = classifyUncached(rootPath, readFile);
+		cached = readAgentPluginRootStatus(rootPath);
 		rootStatusCache.set(rootPath, cached);
 	}
 	return cached;
 }
 
-async function readFileFromDisk(filePath: string): Promise<string | null> {
-	try {
-		return await Bun.file(filePath).text();
-	} catch {
-		return null;
-	}
-}
-
 /**
- * Classify a plugin root straight from disk, bypassing both the classification
- * cache and the shared file-content cache. For roots rewritten in place outside
- * the plugin registry flow, such as marketplace clones refreshed by an update.
+ * Revalidate explicit plugin roots before synchronous LSP/DAP configuration
+ * readers run. Never reuse admission recorded at injection time.
  */
-export function readAgentPluginRootStatus(rootPath: string): Promise<AgentPluginRootStatus> {
-	return classifyUncached(rootPath, readFileFromDisk);
+export function readAgentPluginRootStatusSync(rootPath: string): AgentPluginRootStatus {
+	let realRoot: string;
+	try {
+		realRoot = fs.realpathSync(rootPath);
+	} catch {
+		return { kind: "none" };
+	}
+	const manifest = resolveContainedPathSync(realRoot, path.join(realRoot, "plugin.json"));
+	if (manifest.status === "missing") return { kind: "none" };
+	if (manifest.status === "outside") {
+		return { kind: "invalid", reason: "plugin.json resolves outside the plugin root" };
+	}
+	return classifyManifest(readFileSync(manifest.realPath), realRoot);
 }
 
 /**

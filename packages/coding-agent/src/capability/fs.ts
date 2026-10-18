@@ -8,9 +8,11 @@ function resolvePath(filePath: string): string {
 	return path.resolve(filePath);
 }
 
-export async function readFile(filePath: string): Promise<string | null> {
+/** `cache: false` bypasses both cache reads and writes without changing file-type checks. */
+export async function readFile(filePath: string, options?: { cache?: boolean }): Promise<string | null> {
+	const cache = options?.cache !== false;
 	const abs = resolvePath(filePath);
-	if (contentCache.has(abs)) {
+	if (cache && contentCache.has(abs)) {
 		return contentCache.get(abs) ?? null;
 	}
 
@@ -22,14 +24,24 @@ export async function readFile(filePath: string): Promise<string | null> {
 		// context files (CLAUDE.md -> AGENTS.md) still resolve.
 		const stats = await fs.promises.stat(abs);
 		if (!stats.isFile()) {
-			contentCache.set(abs, null);
+			if (cache) contentCache.set(abs, null);
 			return null;
 		}
 		const content = await Bun.file(abs).text();
-		contentCache.set(abs, content);
+		if (cache) contentCache.set(abs, content);
 		return content;
 	} catch {
-		contentCache.set(abs, null);
+		if (cache) contentCache.set(abs, null);
+		return null;
+	}
+}
+
+/** Fresh, regular-file-only read for callers that must publish configuration synchronously. */
+export function readFileSync(filePath: string): string | null {
+	try {
+		if (!fs.statSync(filePath).isFile()) return null;
+		return fs.readFileSync(filePath, "utf-8");
+	} catch {
 		return null;
 	}
 }

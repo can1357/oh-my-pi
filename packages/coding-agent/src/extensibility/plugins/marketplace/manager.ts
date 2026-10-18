@@ -10,7 +10,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
+import { readFile } from "../../../capability/fs";
 import { readAgentPluginRootStatus } from "../../../discovery/agent-plugin-format";
 import { expandTilde } from "../../../tools/path-utils";
 import { normalizePluginRuntimeConfig } from "../runtime-config";
@@ -566,8 +567,12 @@ export class MarketplaceManager {
 		if (!pluginDir) return undefined;
 		const readVersion = async (file: string): Promise<string | undefined> => {
 			try {
-				const content = await Bun.file(path.join(pluginDir, file)).json();
-				return typeof content?.version === "string" && content.version ? content.version : undefined;
+				const raw = await readFile(path.join(pluginDir, file), { cache: false });
+				if (raw === null) return undefined;
+				const content: unknown = JSON.parse(raw);
+				return isRecord(content) && typeof content.version === "string" && content.version
+					? content.version
+					: undefined;
 			} catch {
 				// Missing or invalid — try next source
 				return undefined;

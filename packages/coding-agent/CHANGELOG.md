@@ -33,7 +33,8 @@
 - Fixed `computer.apps.open` returning before the app had a window, or never giving a hidden running app one; it now returns the app's frontmost window as `window`, waiting up to 3 s on macOS ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a key you were typing on macOS arriving twice or more when omp exited after computer use ([#15562](https://github.com/can1357/oh-my-pi/pull/15562) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Agent Plugins packages taking their marketplace install version from `.claude-plugin/plugin.json` or `package.json`, or their `--plugin-dir` name from `.claude-plugin/plugin.json`; only the standard root `plugin.json` supplies them now ([#16179](https://github.com/can1357/oh-my-pi/pull/16179) by [@sonsu-lee](https://github.com/sonsu-lee))
-- Fixed Agent Plugins packages with a fatally invalid `plugin.json` still loading their extension modules (installed or passed with `-e`), plugin tools, task agents, and LSP/DAP config; such packages now load nothing, as their skills, commands, and MCP servers already did ([#16179](https://github.com/can1357/oh-my-pi/pull/16179) by [@sonsu-lee](https://github.com/sonsu-lee))
+- Fixed Agent Plugins packages with a fatally invalid `plugin.json` contributing extensions, tools, task agents, or LSP/DAP config, including after same-path reinstalls; repaired packages become discoverable again on refresh ([#16179](https://github.com/can1357/oh-my-pi/pull/16179) by [@sonsu-lee](https://github.com/sonsu-lee))
+- Fixed plugin discovery and marketplace install/update checks hanging when a package's `plugin.json` is a FIFO or other special file ([#16179](https://github.com/can1357/oh-my-pi/pull/16179) by [@sonsu-lee](https://github.com/sonsu-lee))
 
 ## [18.12.1] - 2026-10-17
 
