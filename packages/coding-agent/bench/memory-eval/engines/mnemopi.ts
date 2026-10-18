@@ -105,9 +105,10 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 		name: "mnemopi",
 		describe: async () => {
 			const pkg: { version: string } = await Bun.file(PACKAGE_JSON).json();
-			// The Python embedder's numerical runtime decides near-tie order, so it is part of the configuration.
+			// The Python embedder's numerical runtime decides near-tie order, so it is part of the configuration;
+			// fts-only never starts the embedder, and asking it for versions must not either.
 			const runtime =
-				embedder === "python"
+				embedder === "python" && opts.embeddings?.disabled !== true
 					? Object.fromEntries(
 							Object.entries((await startEmbedder().call("versions")) as Record<string, string>).map(
 								([name, version]) => [`${name}_version`, version],
