@@ -1,10 +1,10 @@
-"""Refuses a cached source checkout whose files are not exactly its pinned commit's.
+"""Exports a cached source clone's pinned commit into a private directory to import from.
 
-The calibration and official-evaluator scripts import code from these clones; a moved or edited clone would run
-other logic under the promised revision. Git's own view of the working tree (status, index flags, filters,
-`core.worktree`, ignore rules) is configurable from inside the clone, so the check reads the pinned commit's tree
-from the object store and hashes every file on disk itself. Once the checkout passes, later imports compile
-bytecode into a fresh private cache, so no `__pycache__` in the checkout is ever read or written.
+The calibration and official-evaluator scripts import code from these clones. The clone's working tree is mutable:
+it can be edited during a run, carry CRLF line endings on Windows, or be hidden from `git status` by settings in
+the clone itself (index flags, filters, `core.worktree`, ignore rules). The scripts therefore never import from it.
+They import from a fresh copy of the pinned commit's files, read from the object store with each blob's hash
+checked, which no other process writes to.
 """
 
 import atexit
@@ -16,72 +16,51 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Tracked entry modes: symlinks hash their target, gitlinks (submodules) name a commit and have no bytes here.
+# Tree entry modes: symlinks store their target as the blob, gitlinks (submodules) name a commit and have no bytes.
 SYMLINK, GITLINK = "120000", "160000"
 
 
-def require_pinned(repo: Path, commit: str) -> None:
-	# GIT_DIR, GIT_WORK_TREE and friends would make `-C repo` check another repository; replace refs could swap objects.
+def pinned_snapshot(repo: Path, commit: str) -> Path:
+	"""A private directory holding exactly the files of `commit` in `repo`'s object store; removed at exit."""
+	# GIT_DIR, GIT_WORK_TREE and friends would make `-C repo` read another repository; replace refs could swap objects.
 	env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
 	env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_NO_REPLACE_OBJECTS="1")
 
-	def git(*args: str) -> bytes:
-		return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, env=env).stdout
+	def git(*args: str, stdin: bytes | None = None) -> bytes:
+		return subprocess.run(
+			["git", "-C", str(repo), *args], input=stdin, check=True, capture_output=True, env=env
+		).stdout
 
 	try:
-		head = git("rev-parse", "HEAD").decode().strip()
 		object_format = git("rev-parse", "--show-object-format").decode().strip()
 		listing = git("ls-tree", "-r", "-z", "--full-tree", commit)
+		entries = []
+		for entry in listing.split(b"\0"):
+			if entry:
+				meta, name = entry.split(b"\t", 1)
+				mode, _kind, blob = meta.decode().split()
+				if mode != GITLINK:
+					entries.append((mode, blob, os.fsdecode(name)))
+		# One batch call returns every blob as `<sha> blob <size>\n<bytes>\n`, in request order.
+		batch = git("cat-file", "--batch", stdin="".join(f"{blob}\n" for _, blob, _ in entries).encode())
 	except (OSError, subprocess.CalledProcessError) as error:
-		sys.exit(f"{repo}: not a readable git checkout ({error}); redo the one-time setup")
-	if head != commit:
-		sys.exit(f"{repo}: HEAD is {head}, expected {commit}; redo the one-time setup")
+		sys.exit(f"{repo}: cannot read commit {commit} ({error}); redo the one-time setup")
 
-	tracked: dict[str, tuple[str, str]] = {}
-	for entry in listing.split(b"\0"):
-		if entry:
-			meta, name = entry.split(b"\t", 1)
-			mode, _kind, blob = meta.decode().split()
-			tracked[name.decode("utf-8", "surrogateescape")] = (mode, blob)
-
-	changed = []
-	for name, (mode, blob) in tracked.items():
-		if mode == GITLINK:
-			continue
-		path = repo / name
-		try:
-			if mode == SYMLINK:
-				data = os.fsencode(os.readlink(path))
-			elif path.is_symlink():
-				changed.append(name)
-				continue
-			else:
-				data = path.read_bytes()
-		except OSError:
-			changed.append(name)
-			continue
+	dest = Path(tempfile.mkdtemp(prefix="memory-eval-src-"))
+	atexit.register(shutil.rmtree, dest, True)
+	offset = 0
+	for mode, blob, name in entries:
+		header_end = batch.index(b"\n", offset)
+		size = int(batch[offset:header_end].split()[2])
+		data = batch[header_end + 1 : header_end + 1 + size]
+		offset = header_end + 1 + size + 1
+		# cat-file does not re-hash what it reads, so a rewritten object file would otherwise go unnoticed.
 		if hashlib.new(object_format, b"blob %d\0" % len(data) + data).hexdigest() != blob:
-			changed.append(name)
-
-	# Anything else on disk could be imported or read. Bytecode caches are allowed: the prefix below bypasses them.
-	extra = []
-	for root, dirs, files in os.walk(repo):
-		here = Path(root)
-		if here == repo:
-			dirs[:] = [d for d in dirs if d != ".git"]
-			files = [f for f in files if f != ".git"]
-		dirs[:] = [d for d in dirs if d != "__pycache__"]
-		# os.walk does not descend into a symlinked directory, so name it here: it could hold a shadow package.
-		for name in files + [d for d in dirs if (here / d).is_symlink()]:
-			rel = (here / name).relative_to(repo).as_posix()
-			if rel not in tracked:
-				extra.append(rel)
-
-	if changed:
-		sys.exit(f"{repo}: has local changes to {sorted(changed)[:5]}; restore it to {commit}")
-	if extra:
-		sys.exit(f"{repo}: has files the pinned commit does not have: {sorted(extra)[:5]}; remove them")
-	# CPython trusts a .pyc whose source has the recorded mtime and size, so a cache built from edited code could run
-	# in place of the pinned source. A fresh prefix makes every later import compile from the source itself.
-	sys.pycache_prefix = tempfile.mkdtemp(prefix="memory-eval-pycache-")
-	atexit.register(shutil.rmtree, sys.pycache_prefix, True)
+			sys.exit(f"{repo}: object {blob} for {name} does not match its id; redo the one-time setup")
+		path = dest / name
+		path.parent.mkdir(parents=True, exist_ok=True)
+		if mode == SYMLINK:
+			os.symlink(os.fsdecode(data), path)
+		else:
+			path.write_bytes(data)
+	return dest
