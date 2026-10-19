@@ -61,6 +61,12 @@ describe("--provider with a model the startup catalog lacks", () => {
 			"anthropic/claude-unreleased-9",
 		);
 	});
+
+	test("defers a discovery provider that holds no models until its refresh", async () => {
+		const hasProvider = modelRegistry.hasProvider.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "hasProvider").mockImplementation(id => id === "proxy" || hasProvider(id));
+		expect(await deferredPattern(["--provider", "proxy", "--model", "some-model"])).toBe("proxy/some-model");
+	});
 });
 
 describe("print-mode suggestions for a provider-qualified miss", () => {

@@ -220,9 +220,11 @@ export class STTController {
 	async #startWith(editor: SttTarget, options: SttCallbacks, signal: AbortSignal): Promise<void> {
 		const first = this.#resolveCandidate();
 		const configuredRole = this.#settings.getModelRole("dictation")?.trim();
-		// The first pattern the role expands to (through aliases and comma lists).
+		// The first provider-qualified pattern the role expands to (aliases and lists).
 		const configured = configuredRole
-			? (resolveConfiguredModelPatterns(configuredRole, this.#settings)?.[0] ?? configuredRole)
+			? (resolveConfiguredModelPatterns(configuredRole, this.#settings) ?? [configuredRole]).find(pattern =>
+					pattern.includes("/"),
+				)
 			: undefined;
 		if (first?.replaces) {
 			options.showWarning(

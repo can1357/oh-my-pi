@@ -811,14 +811,11 @@ function matchModel(
 	const slashIndex = modelPattern.indexOf("/");
 	if (slashIndex !== -1) {
 		const lowerProvider = modelPattern.substring(0, slashIndex).toLowerCase();
-		// Known means in this candidate set or in the bundled catalog: a provider
-		// without credentials is absent from an availability-filtered pool, and its
-		// selector must not fall through to another provider's raw ids
-		// (`google/gemini-2.5` → OpenRouter's `google/gemini-2.5-*`).
-		if (
-			availableModels.some(m => m.provider.toLowerCase() === lowerProvider) ||
-			getBundledModels(lowerProvider as GeneratedProvider).length > 0
-		) {
+		// Known means in this candidate set or a catalog provider (KDL), even one
+		// with no bundled rows or credentials: absent from an availability-filtered
+		// pool, its selector must still not fall through to another provider's raw
+		// ids (`google/gemini-2.5` → OpenRouter's `google/gemini-2.5-*`).
+		if (availableModels.some(m => m.provider.toLowerCase() === lowerProvider) || providerEntry(lowerProvider)) {
 			return undefined;
 		}
 		// The prefix is not a known provider, so treat the slash as part of the
@@ -1605,11 +1602,14 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 	let unresolvedExplicit: string | undefined;
 	for (const { selector, explicit } of selectors) {
 		const resolved = resolveModelRoleValue(selector, pool, { settings });
-		// An explicit value that resolved nothing, or a comma list that matched on a
-		// later entry, skipped its first expanded pattern (role aliases included).
+		// An explicit value that resolved nothing, or a list that matched on a later
+		// entry, skipped expanded patterns (role aliases included): record the first
+		// provider-qualified one among them.
 		if (explicit && (!resolved.model || (resolved.matchedPatternIndex ?? 0) > 0)) {
-			const firstPattern = resolveConfiguredModelPatterns(selector, settings)?.[0] ?? selector;
-			if (firstPattern.includes("/")) unresolvedExplicit ??= firstPattern;
+			const patterns = resolveConfiguredModelPatterns(selector, settings) ?? [selector];
+			const skipped = resolved.model ? patterns.slice(0, resolved.matchedPatternIndex) : patterns;
+			const qualifiedMiss = skipped.find(pattern => pattern.includes("/"));
+			if (qualifiedMiss) unresolvedExplicit ??= qualifiedMiss;
 		}
 		if (!resolved.model) continue;
 		const key = formatModelStringWithRouting(resolved.model);

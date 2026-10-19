@@ -937,6 +937,13 @@ describe("role priorities and chains", () => {
 		expect(resolveRoleChain("web", settings, [parallel])[0]?.replaces).toBe("web/exa-pro");
 	});
 
+	test("marks the first qualified entry a list skipped before matching", () => {
+		const exa = roleChainModel("web", "exa");
+		const settings = Settings.isolated({ modelRoles: { web: "missing,web/exa-pro,web/exa" } });
+
+		expect(resolveRoleChain("web", settings, [exa])[0]?.replaces).toBe("web/exa-pro");
+	});
+
 	test("upgrades a default primary when a configured fallback resolves the same route", () => {
 		const parallel = roleChainModel("web", "parallel");
 		const settings = Settings.isolated({
@@ -2619,6 +2626,22 @@ describe("provider routing selector (@upstream)", () => {
 		expect(parseModelPattern("google/gemini-openrouter", [openRouterGemini]).model).toBeUndefined();
 		// The exact raw id, which the google catalog does not carry, still resolves.
 		expect(parseModelPattern("google/gemini-openrouter-only", [openRouterGemini]).model?.provider).toBe("openrouter");
+	});
+
+	test("a catalog provider with no bundled rows still locks its prefix", () => {
+		const customOllamaId = buildModel({
+			id: "ollama/llama3-latest",
+			name: "Llama 3",
+			api: "openai-completions",
+			provider: "custom-gateway",
+			baseUrl: "https://gateway.example/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		});
+		expect(parseModelPattern("ollama/llama3", [customOllamaId]).model).toBeUndefined();
 	});
 
 	test("ignores @slug on a non-aggregator model (no silent routing)", () => {

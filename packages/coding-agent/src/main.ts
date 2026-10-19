@@ -1503,11 +1503,11 @@ export async function buildSessionOptions(
 			// Extensions may register an earlier configured role candidate.
 			options.modelPattern = parsed.model;
 		} else if (resolved.error) {
-			const lowerProvider = parsed.provider?.toLowerCase();
 			if (
 				parsed.provider &&
 				!parsed.model.includes(":") &&
-				modelRegistry.getAll().some(model => model.provider.toLowerCase() === lowerProvider)
+				// Provider-level knowledge: a discovery provider may hold no rows until refresh.
+				(modelRegistry.hasProvider(parsed.provider) || modelRegistry.hasProvider(parsed.provider.toLowerCase()))
 			) {
 				// Same deferral as `provider/id` for a known provider: extensions and account
 				// discovery may still add the id. An unknown `--provider` still fails here.
