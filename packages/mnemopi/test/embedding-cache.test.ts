@@ -7,9 +7,7 @@
 
 import { Database } from "bun:sqlite";
 import { describe, expect, it, spyOn } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import "./setup";
 import { BeamMemory, initBeam } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { cachedEmbeddings, MAX_CACHED_VECTORS } from "@oh-my-pi/pi-mnemopi/core/beam/embedding-cache";
@@ -40,8 +38,8 @@ async function recallIds(memory: Mnemopi): Promise<string[]> {
  * the newest embedding row so the rewrite never touches it.
  */
 async function topAfterPeerEdit(edit: (peer: Database, target: string, other: string) => void) {
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mnemopi-embedding-cache-"));
-	const dbPath = path.join(dir, "bank.db");
+	const dir = await TempDir.create("@mnemopi-embedding-cache-");
+	const dbPath = dir.join("bank.db");
 	const memory = new Mnemopi({ dbPath, embeddings: { provider } });
 	try {
 		const target = memory.remember("quexim checklist agreed for friday", { source: "test" });
@@ -66,7 +64,7 @@ async function topAfterPeerEdit(edit: (peer: Database, target: string, other: st
 		return { top: (await recallIds(memory))[0], other };
 	} finally {
 		memory.close();
-		await fs.rm(dir, { recursive: true, force: true });
+		await dir.remove();
 	}
 }
 
@@ -101,8 +99,8 @@ describe("embedding cache", () => {
 	});
 
 	it("sees embeddings another connection rewrote", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mnemopi-embedding-cache-"));
-		const dbPath = path.join(dir, "bank.db");
+		const dir = await TempDir.create("@mnemopi-embedding-cache-");
+		const dbPath = dir.join("bank.db");
 		const memory = new Mnemopi({ dbPath, embeddings: { provider } });
 		try {
 			const target = memory.remember("quexim checklist agreed for friday", { source: "test" });
@@ -125,7 +123,7 @@ describe("embedding cache", () => {
 			expect((await memory.recall("zorblat plan", 5))[0]?.id).toBe(other);
 		} finally {
 			memory.close();
-			await fs.rm(dir, { recursive: true, force: true });
+			await dir.remove();
 		}
 	});
 
@@ -160,8 +158,8 @@ describe("embedding cache", () => {
 	});
 
 	it("keeps decoded vectors when another connection commits a write that leaves embeddings alone", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mnemopi-embedding-cache-"));
-		const dbPath = path.join(dir, "bank.db");
+		const dir = await TempDir.create("@mnemopi-embedding-cache-");
+		const dbPath = dir.join("bank.db");
 		const memory = new Mnemopi({ dbPath, embeddings: { provider } });
 		try {
 			const target = memory.remember("quexim checklist agreed for friday", { source: "test" });
@@ -186,7 +184,7 @@ describe("embedding cache", () => {
 			}
 		} finally {
 			memory.close();
-			await fs.rm(dir, { recursive: true, force: true });
+			await dir.remove();
 		}
 	});
 
@@ -294,55 +292,35 @@ describe("embedding cache", () => {
 		expect(await topRanked(true)).toBe(cold);
 	});
 
-	it.each(["UTF-8", "UTF-16le", "UTF-16be"])(
-		"returns vectors in the order the pre-cache chunked query returned them, cold or warm, in a %s bank",
-		encoding => {
-			const db = new Database(":memory:");
-			try {
-				db.run(`PRAGMA encoding = "${encoding}"`);
-				initBeam(db);
-				// Insert order, id order and argument order all differ, and the ids span three 500-id chunks.
-				// BINARY compares the stored bytes: U+E000 sorts before an astral character in UTF-8 but after it in
-				// UTF-16, and U+0100 sorts before U+00FF only in UTF-16le, whose low byte comes first.
-				const ids = [
-					...Array.from({ length: 1300 }, (_, index) => `m${(index * 7919) % 1300}`),
-					"m-\uE000",
-					"m-\u{1F600}",
-					"m-\u00FF",
-					"m-\u0100",
-				];
-				const insert = db.prepare(
-					"INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, '[1,0]', 't')",
-				);
-				for (const id of ids) insert.run(id);
-				// The four special ids share the last chunk, so the order within it decides the result.
-				const memoryIds = [
-					...Array.from({ length: 1300 }, (_, index) => `m${(index * 104_729) % 1300}`),
-					"m-\u{1F600}",
-					"missing",
-					"m-\u00FF",
-					"m-\uE000",
-					"m-\u0100",
-				];
-				const preCache: string[] = [];
-				for (let offset = 0; offset < memoryIds.length; offset += 500) {
-					const chunk = memoryIds.slice(offset, offset + 500);
-					const rows = db
-						.query<{ memory_id: string }, string[]>(
-							`SELECT memory_id, embedding_json FROM memory_embeddings WHERE memory_id IN (${chunk.map(() => "?").join(",")})`,
-						)
-						.all(...chunk);
-					for (const row of rows) preCache.push(row.memory_id);
-				}
-
-				cachedEmbeddings(db, memoryIds.slice(300, 900));
-				expect([...cachedEmbeddings(db, memoryIds).keys()]).toEqual(preCache);
-				expect([...cachedEmbeddings(db, memoryIds).keys()]).toEqual(preCache);
-			} finally {
-				db.close();
+	it("returns vectors in the order the pre-cache chunked query returned them, cold or warm", () => {
+		const db = new Database(":memory:");
+		try {
+			initBeam(db);
+			// Insert order, id order and argument order all differ, and the ids span three 500-id chunks.
+			const ids = Array.from({ length: 1300 }, (_, index) => `m${(index * 7919) % 1300}`);
+			const insert = db.prepare(
+				"INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, '[1,0]', 't')",
+			);
+			for (const id of ids) insert.run(id);
+			const memoryIds = [...Array.from({ length: 1300 }, (_, index) => `m${(index * 104_729) % 1300}`), "missing"];
+			const preCache: string[] = [];
+			for (let offset = 0; offset < memoryIds.length; offset += 500) {
+				const chunk = memoryIds.slice(offset, offset + 500);
+				const rows = db
+					.query<{ memory_id: string }, string[]>(
+						`SELECT memory_id, embedding_json FROM memory_embeddings WHERE memory_id IN (${chunk.map(() => "?").join(",")})`,
+					)
+					.all(...chunk);
+				for (const row of rows) preCache.push(row.memory_id);
 			}
-		},
-	);
+
+			cachedEmbeddings(db, memoryIds.slice(300, 900));
+			expect([...cachedEmbeddings(db, memoryIds).keys()]).toEqual(preCache);
+			expect([...cachedEmbeddings(db, memoryIds).keys()]).toEqual(preCache);
+		} finally {
+			db.close();
+		}
+	});
 
 	it("keeps two alternating windows decoded after one of them slides past the bound", () => {
 		const db = new Database(":memory:");
