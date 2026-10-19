@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PlanReviewOverlayCallbacks.onPickExecutionModel` (`m` key) and `PlanReviewOverlay.setExecutionNotice()` to show a host-pinned execution model under the tier slider ([#16358](https://github.com/can1357/oh-my-pi/pull/16358) by [@Shadorain](https://github.com/Shadorain))
+- Added `SlashCommand.isAvailable`: a live gate that hides a command from the name list while it returns `false` ([#16358](https://github.com/can1357/oh-my-pi/pull/16358) by [@Shadorain](https://github.com/Shadorain))
+
 ## [18.12.3] - 2026-10-19
 
 ### Added

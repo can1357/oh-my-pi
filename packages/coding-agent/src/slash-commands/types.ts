@@ -33,6 +33,8 @@ export interface BuiltinSlashCommand {
 	inlineHint?: string;
 	/** TUI-only dynamic status text for command-name autocomplete. Static `description` remains canonical for ACP/help. */
 	getTuiAutocompleteDescription?: (runtime: TuiSlashCommandRuntime) => string | undefined;
+	/** TUI-only live gate for command-name autocomplete: `false` hides the command (it still runs when typed in full). */
+	isTuiAvailable?: (runtime: TuiSlashCommandRuntime) => boolean;
 }
 
 /** Parsed slash-command text after stripping the leading "/". */

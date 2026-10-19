@@ -1069,6 +1069,24 @@ describe("trySyncSlashCompletion", () => {
 		expect(on?.items[0]).toMatchObject({ value: "fast", label: "fast", description: "Fast: on" });
 	});
 
+	it("hides a slash command from suggestions while its availability gate is false", async () => {
+		let available = false;
+		const provider = new CombinedAutocompleteProvider(
+			[
+				{ name: "exec-model", description: "Pick the execution model", isAvailable: () => available },
+				{ name: "exit", description: "Quit" },
+			],
+			"/tmp",
+		);
+
+		const hidden = await provider.getSuggestions(["/ex"], 0, 3);
+		expect(hidden?.items.map(i => i.value)).toEqual(["exit"]);
+
+		available = true;
+		const shown = await provider.getSuggestions(["/ex"], 0, 3);
+		expect(shown?.items.map(i => i.value)).toContain("exec-model");
+	});
+
 	it("keeps static slash descriptions as the search corpus", async () => {
 		const provider = new CombinedAutocompleteProvider(
 			[{ name: "fast", description: "Toggle fast mode", getAutocompleteDescription: () => "Fast: enabled" }],

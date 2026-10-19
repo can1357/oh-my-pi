@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/exec-model` and the Plan Review `m` key to pick any model, through the `/switch` model picker, as the plan's execution model; it applies when you approve the plan and overrides the tier slider ([#16358](https://github.com/can1357/oh-my-pi/pull/16358) by [@Shadorain](https://github.com/Shadorain))
+
+### Changed
+
+- `/plan-review` and `/exec-model` are now listed in slash-command autocomplete only while plan mode is on ([#16358](https://github.com/can1357/oh-my-pi/pull/16358) by [@Shadorain](https://github.com/Shadorain))
 ### Fixed
 
 - Fixed Mnemopi memory completions ignoring the memory role's thinking suffix, including one inherited from `tiny` or `smol` when `modelRoles.memory` is unset; each `retry.fallbackChains.memory` entry sends its own level, and `:off` disables reasoning ([#16378](https://github.com/can1357/oh-my-pi/pull/16378) by [@alphastorm](https://github.com/alphastorm))

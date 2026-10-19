@@ -852,7 +852,9 @@ export class SelectorController {
 			if (this.#openMenus.get(menuKind) !== menu) return;
 			menu.handle?.hide();
 			this.#releaseMenu(menuKind, menu);
-			this.focusActiveEditorArea();
+			const next = selectOnly?.focusAfter?.();
+			if (next) this.ctx.ui.setFocus(next);
+			else this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
 		const isCurrent = () => this.#openMenus.get(menuKind) === menu;
@@ -867,7 +869,7 @@ export class SelectorController {
 					if (selectOnly) {
 						done();
 						try {
-							await selectOnly.onSelect(selector);
+							await selectOnly.onSelect(selector, model);
 						} catch (error) {
 							this.ctx.showError(sanitizeErrorLine(error));
 						}
