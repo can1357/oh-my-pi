@@ -661,9 +661,10 @@ describe("Factory Droid credit promotion over time", () => {
 			expect(text(browser.pickerPreview("compact"))).toContain("20% off until 2026-11-22");
 
 			setSystemTime(new Date(endsAt));
+			// A refresh that re-tracks the same items first must not swallow the passed end.
+			expect(text(browser.pickerItems([...catalogue]))).not.toContain("1.6×");
 			expect(row()).toContain("$1.25/10 2×");
 			expect(text(browser.describe())).not.toContain("1.6×");
-			expect(text(browser.pickerItems(catalogue))).not.toContain("1.6×");
 			expect(text(browser.pickerPreview("compact"))).not.toContain("20% off");
 		} finally {
 			setSystemTime();

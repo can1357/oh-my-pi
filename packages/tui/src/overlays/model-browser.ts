@@ -1139,6 +1139,8 @@ export class ModelBrowser implements Component {
 
 	/** Replace the scope's base items; the live query re-applies and selection is pinned by selector. */
 	setItems(items: ModelBrowserItem[]): void {
+		// Invalidate a boundary already passed before retracking replaces it.
+		this.#syncCreditClock();
 		this.#trackCreditChanges({ ...this.#creditItems, list: items });
 		const selectedKey = this.getSelected()?.selector;
 		this.#menu.setItems(this.#insertSeparator(items), selectedKey);
@@ -2029,8 +2031,8 @@ export class ModelBrowser implements Component {
 	 * role moving) keeps the last whole `items` and patches it.
 	 */
 	pickerItems(catalogue: readonly ModelBrowserItem[]): ModelPickerCatalogue {
-		if (catalogue !== this.#creditItems.catalogue) this.#trackCreditChanges({ ...this.#creditItems, catalogue });
 		this.#syncCreditClock();
+		if (catalogue !== this.#creditItems.catalogue) this.#trackCreditChanges({ ...this.#creditItems, catalogue });
 		const memo = this.#pickerItems;
 		if (memo?.catalogue === catalogue && memo.epoch === this.#pickerEpoch && memo.roles === this.#roles) {
 			return memo.value;
