@@ -71,6 +71,7 @@
 - Fixed `<path>:conflicts` on a file past the 10 MiB scan cap reporting no conflicts with no hint: it now names the line the scan stopped at and the ranged `read` that registers the blocks after it ([#16269](https://github.com/can1357/oh-my-pi/pull/16269))
 - Fixed the `ts-set-map` rule stalling tool-call streaming for seconds on a long single-line `Map` literal, and missing `Map` entries written `["key", value] as const` ([#16242](https://github.com/can1357/oh-my-pi/pull/16242))
 - Fixed the `ts-import-type` rule missing inline type imports whose member name is non-ASCII, such as `import("./units").温度` ([#16242](https://github.com/can1357/oh-my-pi/pull/16242))
+- Fixed a `read` placed after a `bash` call in the same message returning the file as it was before that command changed, created or deleted it; both calls still start together ([#16274](https://github.com/can1357/oh-my-pi/pull/16274) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.4] - 2026-10-20
 
@@ -196,10 +197,6 @@
 - Fixed sessions whose first reply starts with a todo plan getting a title without its icon and code: the plan's title refresh no longer replaces the card title that is still being generated
 - Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
-
-### Fixed
-
-- Fixed a `read` placed after a `bash` call in the same message returning the file as it was before that command changed, created or deleted it; both calls still start together
 
 ## [18.12.2] - 2026-10-18
 

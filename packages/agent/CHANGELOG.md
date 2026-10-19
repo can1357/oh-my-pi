@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Tool calls get `ctx.toolCall.earlierEffectsSettled`, which settles once the earlier calls of their message that may write files and run beside them have finished ([#16274](https://github.com/can1357/oh-my-pi/pull/16274) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))
@@ -21,10 +25,6 @@
 ### Changed
 
 - Tools with `lenientArgValidation` now receive unknown root arguments that their closed schema would otherwise drop, so they can reject them ([#16317](https://github.com/can1357/oh-my-pi/issues/16317))
-
-### Added
-
-- Tool calls get `ctx.toolCall.earlierEffectsSettled`, which settles once the earlier calls of their message that may write files and run beside them have finished
 
 ## [18.12.2] - 2026-10-18
 
