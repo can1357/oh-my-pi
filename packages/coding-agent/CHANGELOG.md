@@ -121,6 +121,10 @@
 - Cancelling a browser call now releases an unresponsive worker after its cancellation grace instead of waiting for the full call budget, and recovery after a timeout has its own bounded startup budget ([#18737](https://github.com/can1357/oh-my-pi/pull/18737) by [@will-bogusz](https://github.com/will-bogusz))
 - Cmux browser helpers now use the active browser call's remaining time instead of cutting long evaluations off at the socket's 30-second default or giving late helpers a fresh full timeout; cancelling discards queued helpers and interrupts active socket requests so later calls can proceed ([#18737](https://github.com/can1357/oh-my-pi/pull/18737) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- Fixed `web_search` leaving pages open in the shared headless browser when a search was cancelled while its page was still opening or the page failed to close, so the browser's memory no longer grows over a long session ([#19058](https://github.com/can1357/oh-my-pi/pull/19058) by [@tuschla](https://github.com/tuschla))
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes
