@@ -1003,18 +1003,27 @@ function statState(stat: BigIntStats): string {
 	return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
 }
 
-/** Names, sizes and times of a directory's entries, `levels` deep, as far as `budget` entries reach. */
-async function listingState(directory: string, levels: number, budget: { entries: number }): Promise<string> {
+/**
+ * Names, sizes and times of a directory's entries, `levels` deep; undefined
+ * once `budget` entries run out, since a partial listing proves nothing.
+ */
+async function listingState(
+	directory: string,
+	levels: number,
+	budget: { entries: number },
+): Promise<string | undefined> {
 	const names = await fs.readdir(directory).catch((error: NodeJS.ErrnoException) => error);
 	if (names instanceof Error) return `error:${names.code ?? "unknown"}`;
 	let state = "";
 	for (const name of names.sort()) {
-		if (budget.entries-- <= 0) break;
+		if (budget.entries-- <= 0) return undefined;
 		const entryPath = path.join(directory, name);
 		const stat = await fs.lstat(entryPath, { bigint: true }).catch((error: NodeJS.ErrnoException) => error);
 		state += `\n${name}/${stat instanceof Error ? `error:${stat.code ?? "unknown"}` : statState(stat)}`;
 		if (!(stat instanceof Error) && stat.isDirectory() && levels > 1) {
-			state += await listingState(entryPath, levels - 1, budget);
+			const nested = await listingState(entryPath, levels - 1, budget);
+			if (nested === undefined) return undefined;
+			state += nested;
 		}
 	}
 	return state;
@@ -1023,8 +1032,10 @@ async function listingState(directory: string, levels: number, budget: { entries
 /**
  * Fingerprint of one path a read may show: identity, size and times; a content
  * hash for a small file; the entries of the two levels a directory read lists.
+ * Undefined when the path cannot be fingerprinted whole (a directory past the
+ * entry budget).
  */
-async function targetState(absolutePath: string): Promise<string> {
+async function targetState(absolutePath: string): Promise<string | undefined> {
 	const stat = await fs.stat(absolutePath, { bigint: true }).catch((error: NodeJS.ErrnoException) => error);
 	if (stat instanceof Error) return `error:${stat.code ?? "unknown"}`;
 	let state = statState(stat);
@@ -1032,19 +1043,27 @@ async function targetState(absolutePath: string): Promise<string> {
 		const bytes = await fs.readFile(absolutePath).catch((error: NodeJS.ErrnoException) => error);
 		state += bytes instanceof Error ? `:error:${bytes.code ?? "unknown"}` : `:${Bun.hash(bytes)}`;
 	} else if (stat.isDirectory()) {
-		state += await listingState(absolutePath, 2, { entries: READ_STATE_MAX_DIRECTORY_ENTRIES });
+		const listing = await listingState(absolutePath, 2, { entries: READ_STATE_MAX_DIRECTORY_ENTRIES });
+		if (listing === undefined) return undefined;
+		state += listing;
 	}
 	return state;
 }
 
 /**
- * Fingerprints, by absolute path, of every local path a read of `readPath` may
- * resolve to: each `;` entry (`file://` expanded), without its image question
- * or `?` query, and each prefix ending at a `:` (an archive, SQLite database or
- * line selector's file). Extra candidates cost only a stat. Undefined when no
- * entry is local (URLs, internal URLs).
+ * Fingerprints of every local path a read of `readPath` may resolve to, keyed
+ * by candidate spelling: each `;` entry (`file://` expanded), without its image
+ * question or `?` query, and each prefix ending at a `:` (an archive, SQLite
+ * database or line selector's file). Each records the path the spelling
+ * resolves to now, so a new exact match for a fallback spelling counts as a
+ * change, and that path's `-wal` sidecar, which a SQLite write in WAL mode may
+ * change alone. Extra candidates cost only a stat. Undefined when no entry is
+ * local (URLs, internal URLs).
  */
-async function readTargetStates(cwd: string, readPath: string): Promise<Map<string, string> | undefined> {
+async function readTargetStates(
+	cwd: string,
+	readPath: string,
+): Promise<Map<string, { absolutePath: string; state: string | undefined }> | undefined> {
 	const candidates = new Set<string>();
 	for (const entry of [readPath, ...readPath.split(";")]) {
 		let target = entry.trim();
@@ -1059,28 +1078,39 @@ async function readTargetStates(cwd: string, readPath: string): Promise<Map<stri
 	}
 	candidates.delete("");
 	if (candidates.size === 0) return undefined;
-	const states = new Map<string, string>();
+	const states = new Map<string, { absolutePath: string; state: string | undefined }>();
 	for (const candidate of candidates) {
 		const absolutePath = await resolveReadPathAsync(candidate, cwd);
-		if (!states.has(absolutePath)) states.set(absolutePath, await targetState(absolutePath));
+		const state = await targetState(absolutePath);
+		const wal = await targetState(`${absolutePath}-wal`);
+		states.set(candidate, { absolutePath, state: state === undefined ? undefined : `${state}\0${wal}` });
 	}
 	return states;
 }
 
 /**
  * Whether a finished read still shows its target: it succeeded, the file it
- * came from was fingerprinted in `before`, and no fingerprint changed. Anything
- * else (an error, a suffix-matched or delimited read) reads again.
+ * came from was fingerprinted in `before`, and every candidate still resolves
+ * to the same path with the same fingerprint. Anything else (an error, a
+ * suffix-matched or delimited read, a directory too large to fingerprint)
+ * reads again.
  */
 async function readStillCurrent(
-	before: Map<string, string>,
+	cwd: string,
+	readPath: string,
+	before: Map<string, { absolutePath: string; state: string | undefined }>,
 	outcome: PromiseSettledResult<AgentToolResult<ReadToolDetails>>,
 ): Promise<boolean> {
 	if (outcome.status === "rejected" || outcome.value.isError) return false;
 	const source = readDetailsLinkPath(outcome.value.details);
-	if (source === null || !before.has(source)) return false;
-	for (const [absolutePath, state] of before) {
-		if ((await targetState(absolutePath)) !== state) return false;
+	if (source === null || ![...before.values()].some(entry => entry.absolutePath === source)) return false;
+	const after = await readTargetStates(cwd, readPath);
+	if (!after || after.size !== before.size) return false;
+	for (const [candidate, entry] of before) {
+		const now = after.get(candidate);
+		if (entry.state === undefined || now?.absolutePath !== entry.absolutePath || now.state !== entry.state) {
+			return false;
+		}
 	}
 	return true;
 }
@@ -1837,7 +1867,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		let [outcome] = await Promise.allSettled([this.#executeInner(toolCallId, params, signal, onUpdate, toolContext)]);
 		if (earlierEffects && before) {
 			await untilAborted(signal, earlierEffects).catch(() => undefined);
-			if (!signal?.aborted && !(await readStillCurrent(before, outcome))) {
+			if (!signal?.aborted && !(await readStillCurrent(this.session.cwd, params.path, before, outcome))) {
 				[outcome] = await Promise.allSettled([
 					this.#executeInner(toolCallId, params, signal, onUpdate, toolContext),
 				]);
