@@ -11,12 +11,17 @@ BeamMemory.consolidate_to_episodic (recorded, because upstream swallows their ex
 import argparse
 import json
 import os
-import resource
 import shutil
 import statistics
 import sys
 import tempfile
 from pathlib import Path
+
+try:
+	import resource
+except ImportError:
+	# Upstream's benchmark imports it unconditionally, so Run A cannot run where CPython lacks it (native Windows).
+	sys.exit("upstream_run_a.py: upstream's benchmark needs the Unix-only `resource` module; run calibration on Linux, macOS or WSL")
 
 from pinned_source import require_pinned
 
