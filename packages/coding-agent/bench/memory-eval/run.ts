@@ -106,7 +106,7 @@ const hasCompatOps = (engine: EngineAdapter): engine is EngineAdapter & Upstream
 
 /**
  * Runs `fn` with the checkout's HEAD and dirty state read before it starts, and refuses its result if HEAD moved
- * meanwhile: the code that produced it is then unknown.
+ * or a clean checkout gained local changes meanwhile: the code that produced it is then unknown.
  */
 export async function pinnedCheckout<T>(
 	repoRoot: string,
@@ -114,9 +114,13 @@ export async function pinnedCheckout<T>(
 ): Promise<T> {
 	const git = vcs.requireGit(repoRoot);
 	const commit = (await git.headSha()) ?? "unknown";
-	const result = await fn({ commit, dirty: await git.isDirty() });
+	const dirty = await git.isDirty();
+	const result = await fn({ commit, dirty });
 	const after = (await git.headSha()) ?? "unknown";
 	if (after !== commit) throw new Error(`HEAD moved from ${commit} to ${after} during the run; result not written`);
+	if (!dirty && (await git.isDirty())) {
+		throw new Error("the checkout gained local changes during the run; result not written");
+	}
 	return result;
 }
 
@@ -137,6 +141,10 @@ async function runCommand(argv: string[]): Promise<void> {
 	});
 	const dataset = pick(values.dataset, DATASETS, "dataset");
 	const protocol = pick(values.protocol, PROTOCOLS, "protocol");
+	// Run A (upstream_run_a.py) replays upstream's default recall, so a polyphonic Run B would compare another path.
+	if (protocol === "upstream-compat" && values.polyphonic) {
+		throw new Error("--polyphonic does not apply to upstream-compat: calibration replays upstream's default recall");
+	}
 	const cases = caseLimit(values.cases);
 	const cacheRoot = resolveCacheRoot(values["cache-root"]);
 	const engineOptions: EngineOptions = {
@@ -196,6 +204,8 @@ async function runCommand(argv: string[]): Promise<void> {
 			await removeWithRetries(storeRoot).catch(err => console.warn(`could not remove ${storeRoot}: ${err}`));
 		}
 	});
+	// A harness file edited after the hash was taken would run under the old fingerprint, even in a dirty checkout.
+	if ((await harnessHash()) !== harness) throw new Error("harness files changed during the run; result not written");
 
 	// Parallel ablations (e.g. --polyphonic vs not) share dataset/engine/protocol and may start in the same millisecond.
 	const out =
