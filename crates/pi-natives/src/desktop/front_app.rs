@@ -22,8 +22,10 @@ impl MacosFrontApp {
 	/// after the app was read, the app came from a launcher or Spotlight panel,
 	/// or a different app comes forward: that is the user picking an app.
 	/// Typing does not end it, and a hand-back macOS refuses for a key typed
-	/// meanwhile is asked again. Rejects while another operation owns desktop
-	/// input/focus control. Resolves how many times it put the app back.
+	/// meanwhile is asked again. Holds nothing when called over a second after
+	/// the latest read, as picks made since then went unwatched. Owns desktop
+	/// input/focus control only for each hand-back, and rejects if another
+	/// operation owns it then. Resolves how many times it put the app back.
 	#[napi]
 	pub fn keep_in_front(&self, duration_ms: u32) -> task::Promise<u32> {
 		#[cfg(target_os = "macos")]

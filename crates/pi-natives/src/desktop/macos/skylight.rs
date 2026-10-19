@@ -1547,13 +1547,19 @@ impl FrontApp {
 	/// For `duration`, puts this app back in front without raising its windows
 	/// each time the app that took the front from it takes it again, as
 	/// [`FrontHold`] decides, and returns how many times it did. Typing does not
-	/// end it. Busy while another operation owns desktop input/focus control.
+	/// end it. Holds nothing once the [`PickLog`] has not watched without a
+	/// break since the read (from [`PICK_WATCH`] after the latest read): a pick
+	/// the user made in the gap would go unseen. Owns desktop input/focus
+	/// control only while it asks for the front back, and is busy then if
+	/// another operation owns it.
 	pub(in super::super) fn keep_in_front(&self, duration: Duration) -> CoreResult<u32> {
 		let spi = FOREGROUND.as_ref().ok_or_else(|| {
 			DesktopError::background_unavailable("the front-process SPI is unavailable")
 		})?;
-		let _owner = control::own_focus()?;
-		let mut hold = FrontHold::new(self.psn, PICK_LOG.lock().since(self.read_at));
+		let Some(before) = PICK_LOG.lock().since(self.read_at, Instant::now()) else {
+			return Ok(0);
+		};
+		let mut hold = FrontHold::new(self.psn, before);
 		let desktop = WindowServerHold {
 			spi,
 			user: self.psn,
@@ -1604,6 +1610,8 @@ impl Picks {
 /// a hold that starts later still sees a ⌘-Tab or launcher pick made before
 /// it. Each signal keeps when it was last seen.
 struct PickLog {
+	/// When the running sampler started, so its watch has had no break since.
+	watch_from:  Option<Instant>,
 	watch_until: Option<Instant>,
 	sampling:    bool,
 	/// A ⌘ or ⌃ key held.
@@ -1616,6 +1624,7 @@ struct PickLog {
 }
 
 static PICK_LOG: Mutex<PickLog> = Mutex::new(PickLog {
+	watch_from:  None,
 	watch_until: None,
 	sampling:    false,
 	chord:       None,
@@ -1639,16 +1648,22 @@ impl PickLog {
 		}
 	}
 
-	/// What was seen from `at` on.
-	fn since(&self, at: Instant) -> PickEvidence {
-		let seen = |when: Option<Instant>| when.is_some_and(|when| when >= at);
-		PickEvidence {
+	/// What was seen from `at` on; `None` unless the log has watched without a
+	/// break from `at` to `now`.
+	fn since(&self, at: Instant, now: Instant) -> Option<PickEvidence> {
+		let watched = self.watch_from.is_some_and(|from| from <= at)
+			&& self.watch_until.is_some_and(|until| until >= now);
+		if !watched {
+			return None;
+		}
+		let seen = |when: Option<Instant>| when.filter(|when| *when >= at);
+		Some(PickEvidence {
 			chord:  seen(self.chord),
-			option: seen(self.option),
+			option: seen(self.option).is_some(),
 			panels: self
 				.panels
 				.map(|panel| panel.filter(|(_, when)| *when >= at).map(|(psn, _)| psn)),
-		}
+		})
 	}
 }
 
@@ -1661,6 +1676,7 @@ fn watch_picks(spi: &'static ForegroundSpi, picks: Picks, now: Instant) {
 	if mem::replace(&mut log.sampling, true) {
 		return;
 	}
+	log.watch_from = Some(now);
 	drop(log);
 	let sampler = thread::Builder::new()
 		.name("desktop-pick-log".to_string())
@@ -1687,7 +1703,8 @@ fn watch_picks(spi: &'static ForegroundSpi, picks: Picks, now: Instant) {
 /// of its hold.
 #[derive(Clone, Copy, Default)]
 struct PickEvidence {
-	chord:  bool,
+	/// When a ⌘ or ⌃ key was last seen held.
+	chord:  Option<Instant>,
 	option: bool,
 	panels: [Option<ProcessSerialNumber>; 2],
 }
@@ -1695,6 +1712,7 @@ struct PickEvidence {
 /// One reading during a hold.
 #[derive(Clone, Copy)]
 struct HoldInput {
+	at:      Instant,
 	/// A hardware mouse button went down or up since the user's app was read.
 	clicked: bool,
 	picks:   Picks,
@@ -1714,19 +1732,21 @@ enum HoldStep {
 /// coming forward ends the hold. That first app is not taken for the browser
 /// once ⌥ was held (a launcher may be opening) or another process held the
 /// keyboard while not in front (a launcher's or Spotlight's panel the user
-/// may have picked it from), nor when it was already in front at the first
-/// reading after a ⌘/⌃ key since the read (a ⌘-Tab done before the hold
-/// began). Typing, Shift included, picks no app.
+/// may have picked it from), nor when it comes forward within
+/// [`USER_SWITCH_WINDOW`] of a ⌘/⌃ key held since the read, or was already in
+/// front at the first reading after one (a ⌘-Tab done before the hold began,
+/// however late its app is listed in front). Typing, Shift included, picks no
+/// app.
 struct FrontHold {
-	user:         ProcessSerialNumber,
-	taker:        Option<ProcessSerialNumber>,
-	first:        bool,
-	option:       bool,
-	/// A ⌘ or ⌃ key was held between the read and the hold.
-	chord_before: bool,
+	user:   ProcessSerialNumber,
+	taker:  Option<ProcessSerialNumber>,
+	first:  bool,
+	option: bool,
+	/// When a ⌘ or ⌃ key was last seen held between the read and the hold.
+	chord:  Option<Instant>,
 	/// Processes other than the user's app seen holding the keyboard while not
 	/// in front, since the read.
-	panels:       Vec<ProcessSerialNumber>,
+	panels: Vec<ProcessSerialNumber>,
 }
 
 impl FrontHold {
@@ -1736,7 +1756,7 @@ impl FrontHold {
 			taker: None,
 			first: true,
 			option: before.option,
-			chord_before: before.chord,
+			chord: before.chord,
 			panels: Vec::new(),
 		};
 		for panel in before.panels.into_iter().flatten() {
@@ -1763,9 +1783,12 @@ impl FrontHold {
 		if front == self.user {
 			return HoldStep::Wait;
 		}
+		let switched = self.chord.is_some_and(|chord| {
+			first || input.at.saturating_duration_since(chord) <= USER_SWITCH_WINDOW
+		});
 		// A process that held the keyboard before coming forward is that app
 		// taking focus a moment early, not a panel it was picked from.
-		let picked = self.panels.iter().any(|panel| *panel != front) || (first && self.chord_before);
+		let picked = self.panels.iter().any(|panel| *panel != front) || switched;
 		match self.taker {
 			Some(taker) if taker == front => HoldStep::HandBack,
 			Some(_) => HoldStep::Stop,
@@ -1795,7 +1818,9 @@ trait HoldDesktop {
 }
 
 /// Runs `hold` until it stops or its time is up; returns how many times it
-/// put the user's app back.
+/// put the user's app back. It owns desktop input/focus control only around
+/// each request, so a computer task can start while it waits; one running
+/// then makes the request busy.
 fn hold_front(hold: &mut FrontHold, desktop: &impl HoldDesktop) -> CoreResult<u32> {
 	let mut handed_back = 0;
 	while !desktop.over() {
@@ -1804,6 +1829,7 @@ fn hold_front(hold: &mut FrontHold, desktop: &impl HoldDesktop) -> CoreResult<u3
 				HoldStep::Wait => {},
 				HoldStep::Stop => break,
 				HoldStep::HandBack => {
+					let _owner = control::own_focus()?;
 					// Re-check right before the request: `WindowServer` refuses it
 					// if the user pressed a key or clicked after the
 					// re-check began. The refusal does not say which,
@@ -1843,8 +1869,10 @@ impl HoldDesktop for WindowServerHold {
 	}
 
 	fn input(&self) -> HoldInput {
-		let elapsed = self.read_at.elapsed().as_secs_f64();
+		let at = Instant::now();
+		let elapsed = at.saturating_duration_since(self.read_at).as_secs_f64();
 		HoldInput {
+			at,
 			clicked: MOUSE_BUTTON_EVENTS.into_iter().any(|event_type| {
 				// SAFETY: HIDSystemState and these public CGEventType values are
 				// defined by CGEventSource.h / CGEventTypes.h; a read-only query.
@@ -1852,7 +1880,7 @@ impl HoldDesktop for WindowServerHold {
 					unsafe { CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, event_type) };
 				since < elapsed
 			}),
-			picks:   Picks::read(self.spi),
+			picks: Picks::read(self.spi),
 		}
 	}
 
@@ -3888,9 +3916,14 @@ mod tests {
 
 	/// A hold reading with `front` in front and holding the keyboard.
 	fn reading(front: ProcessSerialNumber, flags: u64) -> HoldInput {
+		reading_at(front, flags, Instant::now())
+	}
+
+	fn reading_at(front: ProcessSerialNumber, flags: u64, at: Instant) -> HoldInput {
 		HoldInput {
+			at,
 			clicked: false,
-			picks:   Picks { flags, front: Some(front), key_focus: Some(front) },
+			picks: Picks { flags, front: Some(front), key_focus: Some(front) },
 		}
 	}
 
@@ -3929,8 +3962,8 @@ mod tests {
 		// The panel opens during the hold.
 		let mut hold = self::hold();
 		let panel = HoldInput {
-			clicked: false,
-			picks:   Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_THIRD) },
+			picks: Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_THIRD) },
+			..reading(HOLD_USER, 0)
 		};
 		assert_eq!(hold.observe(HOLD_USER, &panel), HoldStep::Wait);
 		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::Stop);
@@ -3938,8 +3971,8 @@ mod tests {
 		// front is no panel.
 		let mut hold = self::hold();
 		let early = HoldInput {
-			clicked: false,
-			picks:   Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_BROWSER) },
+			picks: Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_BROWSER) },
+			..reading(HOLD_USER, 0)
 		};
 		assert_eq!(hold.observe(HOLD_USER, &early), HoldStep::Wait);
 		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::HandBack);
@@ -3951,29 +3984,54 @@ mod tests {
 		// doing.
 		assert_eq!(hold().observe(HOLD_BROWSER, &reading(HOLD_BROWSER, SHIFT)), HoldStep::HandBack);
 		// ⌘ held between the read and the hold: a ⌘-Tab finished before it began.
-		let chord = PickEvidence { chord: true, ..PickEvidence::default() };
+		let read = Instant::now();
+		let chord = PickEvidence { chord: Some(read), ..PickEvidence::default() };
+		let late = read + USER_SWITCH_WINDOW * 2;
 		assert_eq!(
-			FrontHold::new(HOLD_USER, chord).observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)),
+			FrontHold::new(HOLD_USER, chord).observe(HOLD_BROWSER, &reading_at(HOLD_BROWSER, 0, late)),
 			HoldStep::Stop
 		);
 		// A chord typed in the user's own app before the browser came forward
 		// later does not keep the browser in front.
 		let mut hold = FrontHold::new(HOLD_USER, chord);
-		assert_eq!(hold.observe(HOLD_USER, &reading(HOLD_USER, 0)), HoldStep::Wait);
-		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::HandBack);
+		assert_eq!(hold.observe(HOLD_USER, &reading_at(HOLD_USER, 0, late)), HoldStep::Wait);
+		assert_eq!(
+			hold.observe(HOLD_BROWSER, &reading_at(HOLD_BROWSER, 0, late + HOLD_POLL)),
+			HoldStep::HandBack
+		);
+	}
+
+	#[test]
+	fn an_app_a_command_tab_picked_before_the_hold_stays_in_front_however_late_it_is_listed() {
+		// ⌘ released just before the hold; its first reading still shows the
+		// user's app, and the chosen app is listed in front a poll later.
+		let released = Instant::now();
+		let chord = PickEvidence { chord: Some(released), ..PickEvidence::default() };
+		let mut hold = FrontHold::new(HOLD_USER, chord);
+		let first = released + SWITCH_SAMPLE;
+		assert_eq!(hold.observe(HOLD_USER, &reading_at(HOLD_USER, 0, first)), HoldStep::Wait);
+		assert_eq!(
+			hold.observe(HOLD_THIRD, &reading_at(HOLD_THIRD, 0, first + HOLD_POLL)),
+			HoldStep::Stop
+		);
+	}
+
+	fn pick_log(watch: Option<(Instant, Instant)>) -> PickLog {
+		PickLog {
+			watch_from:  watch.map(|(from, _)| from),
+			watch_until: watch.map(|(_, until)| until),
+			sampling:    false,
+			chord:       None,
+			option:      None,
+			panels:      [None; 2],
+		}
 	}
 
 	#[test]
 	fn the_pick_log_reports_only_what_came_after_the_read() {
 		let start = Instant::now();
 		let later = start + Duration::from_millis(30);
-		let mut log = PickLog {
-			watch_until: None,
-			sampling:    false,
-			chord:       None,
-			option:      None,
-			panels:      [None; 2],
-		};
+		let mut log = pick_log(Some((start, start + PICK_WATCH)));
 		log.record(
 			Picks { flags: COMMAND, front: Some(HOLD_USER), key_focus: Some(HOLD_THIRD) },
 			start,
@@ -3982,30 +4040,53 @@ mod tests {
 			Picks { flags: SHIFT, front: Some(HOLD_USER), key_focus: Some(HOLD_BROWSER) },
 			later,
 		);
-		let all = log.since(start);
-		assert!(all.chord && !all.option);
+		let all = log.since(start, later).expect("watched since the read");
+		assert!(all.chord == Some(start) && !all.option);
 		assert!(all.panels == [Some(HOLD_BROWSER), Some(HOLD_THIRD)]);
-		let after = log.since(later);
-		assert!(!after.chord);
+		let after = log.since(later, later).expect("watched since the read");
+		assert!(after.chord.is_none());
 		assert!(after.panels == [Some(HOLD_BROWSER), None]);
 	}
 
+	#[test]
+	fn the_pick_log_vouches_for_nothing_it_did_not_watch_without_a_break() {
+		let read = Instant::now();
+		// The watch ended before the hold asked: a ⌘-Tab after it went unseen.
+		let ended = pick_log(Some((read, read + PICK_WATCH)));
+		assert!(ended.since(read, read + PICK_WATCH + HOLD_POLL).is_none());
+		// A later read restarted the sampler after a gap.
+		let restarted = pick_log(Some((read + PICK_WATCH * 2, read + PICK_WATCH * 3)));
+		assert!(
+			restarted
+				.since(read, read + PICK_WATCH * 2 + HOLD_POLL)
+				.is_none()
+		);
+		assert!(pick_log(None).since(read, read).is_none());
+		assert!(ended.since(read, read + PICK_WATCH).is_some());
+	}
+
 	/// A desktop where the browser is in front and each hand-back answers in
-	/// turn: `(click_before_it, answer)`.
+	/// turn: `(click_before_it, answer)`. It notes whether desktop control was
+	/// free at every wait and owned at every hand-back; tests running it hold
+	/// `OWNERSHIP_TEST`.
 	struct FakeHold {
-		front:   Cell<ProcessSerialNumber>,
-		clicked: Cell<bool>,
-		answers: std::cell::RefCell<std::collections::VecDeque<(bool, FrontRequest)>>,
-		polls:   Cell<u32>,
+		front:            Cell<ProcessSerialNumber>,
+		clicked:          Cell<bool>,
+		answers:          std::cell::RefCell<std::collections::VecDeque<(bool, FrontRequest)>>,
+		polls:            Cell<u32>,
+		free_at_waits:    Cell<bool>,
+		owned_at_answers: Cell<bool>,
 	}
 
 	impl FakeHold {
 		fn new(answers: &[(bool, FrontRequest)]) -> Self {
 			Self {
-				front:   Cell::new(HOLD_BROWSER),
-				clicked: Cell::new(false),
-				answers: std::cell::RefCell::new(answers.iter().copied().collect()),
-				polls:   Cell::new(0),
+				front:            Cell::new(HOLD_BROWSER),
+				clicked:          Cell::new(false),
+				answers:          std::cell::RefCell::new(answers.iter().copied().collect()),
+				polls:            Cell::new(0),
+				free_at_waits:    Cell::new(true),
+				owned_at_answers: Cell::new(true),
 			}
 		}
 	}
@@ -4024,6 +4105,9 @@ mod tests {
 		}
 
 		fn hand_back(&self, _since: u64) -> CoreResult<FrontRequest> {
+			self
+				.owned_at_answers
+				.set(self.owned_at_answers.get() && control::own_focus().is_err());
 			let (click, answer) = self
 				.answers
 				.borrow_mut()
@@ -4041,12 +4125,16 @@ mod tests {
 		}
 
 		fn wait(&self) {
+			self
+				.free_at_waits
+				.set(self.free_at_waits.get() && control::own_focus().is_ok());
 			self.polls.set(self.polls.get() + 1);
 		}
 	}
 
 	#[test]
 	fn a_click_between_the_last_check_and_the_hand_back_keeps_the_browser_in_front() {
+		let _serial = control::OWNERSHIP_TEST.lock();
 		// WindowServer refuses the hand-back the click overtook; the next reading
 		// sees the click and ends the hold.
 		let desktop = FakeHold::new(&[(true, FrontRequest::UserActed)]);
@@ -4057,8 +4145,32 @@ mod tests {
 
 	#[test]
 	fn a_hand_back_refused_for_typing_is_asked_again() {
+		let _serial = control::OWNERSHIP_TEST.lock();
 		let desktop = FakeHold::new(&[(false, FrontRequest::UserActed), (false, FrontRequest::Done)]);
 		assert_eq!(hold_front(&mut hold(), &desktop).unwrap(), 1);
 		assert!(desktop.front.get() == HOLD_USER);
+	}
+
+	#[test]
+	fn a_hold_owns_desktop_control_only_while_it_asks_for_the_front_back() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		let desktop = FakeHold::new(&[(false, FrontRequest::Done)]);
+		assert_eq!(hold_front(&mut hold(), &desktop).unwrap(), 1);
+		assert_eq!(desktop.polls.get(), 10, "the hold waited out its time");
+		assert!(desktop.owned_at_answers.get(), "control is owned for the request");
+		assert!(desktop.free_at_waits.get(), "a computer task can start while the hold waits");
+	}
+
+	#[test]
+	fn a_hold_asks_nothing_while_a_computer_task_owns_desktop_control() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		let source = control::CancellationSource::default();
+		control::grant_for_test(&source);
+		// No answers: a hand-back would panic.
+		let desktop = FakeHold::new(&[]);
+		let busy = hold_front(&mut hold(), &desktop).unwrap_err();
+		source.release_control();
+		assert_eq!(busy.code, ErrorCode::InputBusy);
+		assert!(desktop.front.get() == HOLD_BROWSER);
 	}
 }
