@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { findRepoRoot } from "../capability/fs";
 import { getConfig } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
@@ -527,8 +528,11 @@ async function startMessageReader(client: LspClient): Promise<void> {
 	}
 }
 
-/** Checkouts added to a client's workspace after `initialize`, as symlink-resolved paths. */
-const addedWorkspaceFolders = new WeakMap<LspClient, string[]>();
+/**
+ * Checkouts added to a client's workspace after `initialize`, as symlink-resolved paths,
+ * each with its `didChangeWorkspaceFolders` delivery. A failed delivery removes its entry.
+ */
+const addedWorkspaceFolders = new WeakMap<LspClient, Map<string, Promise<void>>>();
 
 function workspaceFolder(folder: string): { uri: string; name: string } {
 	return { uri: fileToUri(folder), name: path.basename(folder) || "workspace" };
@@ -540,7 +544,7 @@ function workspaceFolder(folder: string): { uri: string; name: string } {
  * `workspace/workspaceFolders` server requests.
  */
 function currentWorkspaceFolders(client: LspClient): Array<{ uri: string; name: string }> {
-	return [client.cwd, ...(addedWorkspaceFolders.get(client) ?? [])].map(workspaceFolder);
+	return [client.cwd, ...(addedWorkspaceFolders.get(client)?.keys() ?? [])].map(workspaceFolder);
 }
 
 /** `filePath` with symlinks resolved; a path that does not exist yet keeps its missing tail. */
@@ -558,26 +562,17 @@ function realPathOf(filePath: string): string {
 	}
 }
 
-/** The nearest directory at or above `dir` holding `.git`. */
-function checkoutOf(dir: string): string | undefined {
-	for (let current = dir; ; current = path.dirname(current)) {
-		if (fs.existsSync(path.join(current, ".git"))) return current;
-		if (path.dirname(current) === current) return undefined;
-	}
-}
-
 /**
  * The checkout to add to `client`'s workspace before it opens `filePath`: the one holding
- * the file (symlinks resolved), when it is not the checkout holding the client's root and
- * was not added yet. A server rooted at the session cwd never loads another checkout on its
- * own (rust-analyzer finds no references there), nested worktrees and checkouts included.
- * Only servers that accept `workspace/didChangeWorkspaceFolders` get one.
+ * the file (symlinks resolved), when it is not the checkout holding the client's root. A
+ * server rooted at the session cwd never loads another checkout on its own (rust-analyzer
+ * finds no references there), nested worktrees and checkouts included. Only servers that
+ * accept `workspace/didChangeWorkspaceFolders` get one.
  */
-function workspaceFolderToAdd(client: LspClient, filePath: string): string | undefined {
+async function workspaceFolderToAdd(client: LspClient, filePath: string): Promise<string | undefined> {
 	if (!client.serverCapabilities?.workspace?.workspaceFolders?.changeNotifications) return undefined;
-	const checkout = checkoutOf(path.dirname(realPathOf(filePath)));
-	if (!checkout || checkout === checkoutOf(realPathOf(client.cwd))) return undefined;
-	if (addedWorkspaceFolders.get(client)?.includes(checkout)) return undefined;
+	const checkout = await findRepoRoot(path.dirname(realPathOf(filePath)));
+	if (!checkout || checkout === (await findRepoRoot(realPathOf(client.cwd)))) return undefined;
 	// A repository at or above the home directory (a dotfiles checkout) would have the
 	// server index everything under it.
 	if (isPathInsideWorkspace(realPathOf(os.homedir()), checkout)) return undefined;
@@ -586,25 +581,44 @@ function workspaceFolderToAdd(client: LspClient, filePath: string): string | und
 
 /**
  * Add the checkout holding `filePath` to `client`'s workspace when the server would
- * otherwise not load it ({@link workspaceFolderToAdd}). The server re-indexes, so the
- * client's project-load wait covers that load too.
+ * otherwise not load it ({@link workspaceFolderToAdd}), and return once the server has
+ * it. Concurrent callers for one checkout share one delivery, which the caller's abort
+ * does not cancel. The server re-indexes, so the client's project-load wait covers that
+ * load too.
  */
 export async function ensureWorkspaceFolder(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
-	const folder = workspaceFolderToAdd(client, filePath);
+	const folder = await workspaceFolderToAdd(client, filePath);
 	if (!folder) return;
-	const added = addedWorkspaceFolders.get(client) ?? [];
-	added.push(folder);
-	addedWorkspaceFolders.set(client, added);
-	restartProjectLoad(client);
+	let folders = addedWorkspaceFolders.get(client);
+	if (!folders) {
+		folders = new Map();
+		addedWorkspaceFolders.set(client, folders);
+	}
+	let delivery = folders.get(folder);
+	if (!delivery) {
+		delivery = addWorkspaceFolder(client, folder, folders);
+		delivery.catch(() => {});
+		folders.set(folder, delivery);
+	}
+	await untilAborted(signal, delivery);
+}
+
+async function addWorkspaceFolder(
+	client: LspClient,
+	folder: string,
+	folders: Map<string, Promise<void>>,
+): Promise<void> {
+	const undoLoad = restartProjectLoad(client);
 	try {
 		await sendNotification(
 			client,
 			"workspace/didChangeWorkspaceFolders",
 			{ event: { added: [workspaceFolder(folder)], removed: [] } },
-			signal,
+			AbortSignal.timeout(WATCHED_FILES_NOTIFY_TIMEOUT_MS),
 		);
 	} catch (err) {
-		added.splice(added.indexOf(folder), 1);
+		folders.delete(folder);
+		undoLoad();
 		throw err;
 	}
 	rustAnalyzerReadyClients.delete(client);
@@ -613,10 +627,10 @@ export async function ensureWorkspaceFolder(client: LspClient, filePath: string,
 /** Whether a change to `filePath` concerns `client`: inside its root or a checkout added to it. */
 function clientServesPath(client: LspClient, filePath: string): boolean {
 	if (isPathInsideWorkspace(filePath, path.resolve(client.cwd))) return true;
-	const added = addedWorkspaceFolders.get(client);
-	if (!added?.length) return false;
+	const folders = addedWorkspaceFolders.get(client);
+	if (!folders?.size) return false;
 	const file = realPathOf(filePath);
-	return added.some(folder => isPathInsideWorkspace(file, folder));
+	return [...folders.keys()].some(folder => isPathInsideWorkspace(file, folder));
 }
 
 /**
@@ -974,13 +988,16 @@ async function waitForRustAnalyzerWorkspace(client: LspClient, signal?: AbortSig
 
 const PROJECT_LOAD_TIMEOUT_MS = 15_000;
 
-/** Extends a client's pending project-load wait for another load; false once the wait has ended. */
-const projectLoadExtenders = new WeakMap<LspClient, () => boolean>();
+/**
+ * Extends a client's pending project-load wait for another load and returns the undo, or
+ * `undefined` once the wait has ended.
+ */
+const projectLoadExtenders = new WeakMap<LspClient, () => (() => void) | undefined>();
 
 /** A project-load wait that the server's progress, its exit, or {@link PROJECT_LOAD_TIMEOUT_MS} ends. */
 function createProjectLoad(): {
 	signal: Pick<LspClient, "projectLoaded" | "resolveProjectLoaded">;
-	extend: () => boolean;
+	extend: () => (() => void) | undefined;
 } {
 	const { promise, resolve } = Promise.withResolvers<void>();
 	let settled = false;
@@ -990,12 +1007,20 @@ function createProjectLoad(): {
 		resolve();
 	};
 	// Auto-resolve after timeout in case server doesn't use progress tokens
+	let deadline = Date.now() + PROJECT_LOAD_TIMEOUT_MS;
 	let timeout = setTimeout(finish, PROJECT_LOAD_TIMEOUT_MS);
-	const extend = () => {
-		if (settled) return false;
+	const rearm = (at: number) => {
 		clearTimeout(timeout);
-		timeout = setTimeout(finish, PROJECT_LOAD_TIMEOUT_MS);
-		return true;
+		deadline = at;
+		timeout = setTimeout(finish, Math.max(0, at - Date.now()));
+	};
+	const extend = () => {
+		if (settled) return undefined;
+		const previous = deadline;
+		rearm(Date.now() + PROJECT_LOAD_TIMEOUT_MS);
+		return () => {
+			if (!settled) rearm(previous);
+		};
 	};
 	return { signal: { projectLoaded: promise, resolveProjectLoaded: finish }, extend };
 }
@@ -1003,13 +1028,15 @@ function createProjectLoad(): {
 /**
  * Make `client`'s project-load wait cover a load the server just started: a wait still
  * pending keeps its promise (callers already awaiting it see the new load end), an ended
- * one is replaced.
+ * one is replaced. Returns the undo for a load that never started.
  */
-function restartProjectLoad(client: LspClient): void {
-	if (projectLoadExtenders.get(client)?.()) return;
+function restartProjectLoad(client: LspClient): () => void {
+	const undo = projectLoadExtenders.get(client)?.();
+	if (undo) return undo;
 	const next = createProjectLoad();
 	Object.assign(client, next.signal);
 	projectLoadExtenders.set(client, next.extend);
+	return next.signal.resolveProjectLoaded;
 }
 
 /** Max time to wait for graceful LSP shutdown and process exit. */
@@ -1911,15 +1938,28 @@ export async function sendRequest(
 		// requests with ContentModified (-32801); LSP asks clients to retry them. A
 		// command is never re-run: the server may have acted on it before cancelling.
 		const contentModified = err instanceof Error && err.message.startsWith("LSP error -32801");
-		if (!contentModified || method === "workspace/executeCommand" || !addedWorkspaceFolders.get(client)?.length) {
+		if (!contentModified || method === "workspace/executeCommand" || !addedWorkspaceFolders.get(client)?.size) {
 			throw err;
 		}
-		const deadline = timeoutMs === undefined ? undefined : started + timeoutMs;
-		const loaded =
-			deadline === undefined
-				? client.projectLoaded
-				: Promise.race([client.projectLoaded, Bun.sleep(deadline - Date.now())]);
-		await untilAborted(signal, loaded);
+		// The retry spends what is left of the first attempt's budget, the default included.
+		const budget = timeoutMs ?? (signal ? undefined : DEFAULT_REQUEST_TIMEOUT_MS);
+		const deadline = budget === undefined ? undefined : started + budget;
+		let deadlineTimer: NodeJS.Timeout | undefined;
+		try {
+			await untilAborted(
+				signal,
+				deadline === undefined
+					? client.projectLoaded
+					: Promise.race([
+							client.projectLoaded,
+							new Promise<void>(resolve => {
+								deadlineTimer = setTimeout(resolve, Math.max(0, deadline - Date.now()));
+							}),
+						]),
+			);
+		} finally {
+			clearTimeout(deadlineTimer);
+		}
 		if (deadline !== undefined && Date.now() >= deadline) throw err;
 		return await sendRequestOnce(
 			client,

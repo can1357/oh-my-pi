@@ -4078,6 +4078,65 @@ describe("lsp regressions", () => {
 				tempDir.removeSync();
 			}
 		});
+
+		it("makes a concurrent caller for the same checkout wait for its add, which an abort does not cancel", async () => {
+			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-concurrent-folder-");
+			try {
+				const { server, serverConfig } = useServer(FOLDER_CHANGES);
+				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
+				const aborted = new AbortController();
+
+				const first = rejectionOf(
+					lspClient.ensureWorkspaceFolder(client, path.join(siblingRoot, "src", "target.py"), aborted.signal),
+				);
+				aborted.abort();
+				await lspClient.ensureWorkspaceFolder(client, path.join(siblingRoot, "src", "other.py"));
+				await first;
+
+				expect(folderAdds(server)).toEqual([folderAdd(siblingRoot)]);
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("keeps a ContentModified retry within the default request timeout and clears its deadline timer", async () => {
+			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-retry-default-");
+			try {
+				let hovers = 0;
+				const { serverConfig } = useServer(FOLDER_CHANGES, (message, srv) => {
+					if (message.method !== "textDocument/hover") return false;
+					hovers++;
+					if (hovers === 1) {
+						srv.send({ jsonrpc: "2.0", id: message.id, error: { code: -32801, message: "content modified" } });
+						progress(srv, "index", "begin");
+						progress(srv, "index", "end");
+					} else {
+						srv.send({ jsonrpc: "2.0", id: message.id, result: { contents: "ok" } });
+					}
+					return true;
+				});
+				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
+				await lspClient.ensureWorkspaceFolder(client, path.join(siblingRoot, "src", "target.py"));
+				const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+				const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+
+				expect(await lspClient.sendRequest(client, "textDocument/hover", {})).toEqual({ contents: "ok" });
+
+				// Request timers: the first attempt's full default, the wait for the load, then the
+				// retry with what is left of the same 30 s (a fresh default would be a second 30 s).
+				const requestTimers = setTimeoutSpy.mock.calls.filter(([, ms]) => Number(ms) > 20_000);
+				expect(requestTimers.map(([, ms]) => ms)).toEqual([30_000, expect.any(Number), expect.any(Number)]);
+				const [, deadlineTimerMs, retryTimerMs] = requestTimers.map(([, ms]) => Number(ms));
+				expect(deadlineTimerMs).toBeLessThanOrEqual(30_000);
+				expect(retryTimerMs).toBeLessThanOrEqual(deadlineTimerMs);
+				const deadlineTimer = setTimeoutSpy.mock.results[setTimeoutSpy.mock.calls.indexOf(requestTimers[1])]?.value;
+				expect(clearTimeoutSpy.mock.calls.some(([timer]) => timer === deadlineTimer)).toBe(true);
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
 	});
 
 	it("skips disk reconciliation while an OMP write holds the overlay ahead of disk", async () => {
