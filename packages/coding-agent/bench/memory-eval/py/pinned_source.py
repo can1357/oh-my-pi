@@ -1,12 +1,16 @@
 """Refuses a cached source checkout that is not at its pinned commit or has local changes.
 
 The calibration and official-evaluator scripts import code from these clones; a moved or edited clone would run
-other logic under the promised revision.
+other logic under the promised revision. Once the checkout passes, later imports compile bytecode into a fresh
+private cache, so no `__pycache__` in the checkout is ever read or written.
 """
 
+import atexit
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 
 # Files Python can import or that alter sys.path; ignored ones would shadow evaluator dependencies unseen by `status`.
@@ -53,3 +57,7 @@ def require_pinned(repo: Path, commit: str) -> None:
 		sys.exit(f"{repo}: index flags hide changes to {hidden[:5]}; restore it to {commit}")
 	if ignored:
 		sys.exit(f"{repo}: has ignored importable files {ignored[:5]}; remove them to restore {commit}")
+	# CPython trusts a .pyc whose source has the recorded mtime and size, so an ignored cache built from edited code
+	# could run in place of the pinned source. A fresh prefix makes every later import compile from the source itself.
+	sys.pycache_prefix = tempfile.mkdtemp(prefix="memory-eval-pycache-")
+	atexit.register(shutil.rmtree, sys.pycache_prefix, True)
