@@ -10,6 +10,7 @@ it.skipIf(pythonPath === undefined).each([
 	["a tracked edit hidden by assume-unchanged", "--assume-unchanged", "index flags hide changes to ['evaluator.py']"],
 	["a tracked edit hidden by skip-worktree", "--skip-worktree", "index flags hide changes to ['evaluator.py']"],
 	["an edit hidden by core.worktree pointing at another clean tree", "core.worktree", "work tree is"],
+	["an ignored shadow module", "ignored", "ignored importable files ['numpy.py']"],
 ])("rejects %s, but accepts the clean pin", async (_name, mode, refusal) => {
 	const proc = Bun.spawn(
 		[
@@ -41,10 +42,16 @@ with tempfile.TemporaryDirectory(prefix="memory-eval-pin-") as tmp:
     git("add", "evaluator.py")
     git("-c", "user.name=pin-test", "-c", "user.email=pin-test@example.invalid", "-c", "core.hooksPath=" + str(home / "no-hooks"), "commit", "-q", "-m", "pinned")
     commit = git("rev-parse", "HEAD")
+    # Running the evaluator leaves ignored bytecode caches; those must not count as a modified checkout.
+    (repo / ".git" / "info" / "exclude").write_text("__pycache__/\\nnumpy.py\\n")
+    (repo / "__pycache__").mkdir()
+    (repo / "__pycache__" / "evaluator.cpython-313.pyc").write_bytes(b"cache")
     require_pinned(repo, commit)
     print("clean pin accepted", flush=True)
     mode = sys.argv[2]
-    if mode == "core.worktree":
+    if mode == "ignored":
+        (repo / "numpy.py").write_text("raise RuntimeError('ignored shadow dependency')\\n")
+    elif mode == "core.worktree":
         other = home / "other"
         other.mkdir()
         (other / "evaluator.py").write_text("PINNED = True\\n")
