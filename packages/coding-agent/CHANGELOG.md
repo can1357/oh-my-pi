@@ -196,6 +196,9 @@
 - Fixed sessions whose first reply starts with a todo plan getting a title without its icon and code: the plan's title refresh no longer replaces the card title that is still being generated
 - Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
+### Breaking Changes
+
+- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3; `omp` now exits at startup on older runtimes ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.2] - 2026-10-18
 
@@ -253,8 +256,6 @@
 
 ### Breaking Changes
 
-- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3; `omp` now exits at startup on older runtimes ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
 - Removed `display()` from eval in both Python and JavaScript; `print` (and `console.log` in JavaScript) covers it
 
 ### Added
@@ -277,8 +278,6 @@
 
 - Added `statusLine.segmentOptions.pi.showProfile`: set it to `false` to hide the profile name next to the `π` brand, for example when each profile already has its own theme ([#16063](https://github.com/can1357/oh-my-pi/pull/16063) by [@shgew](https://github.com/shgew))
 - Added `sharpshooter.minPromptLength` (default 16, minimum 2) to control the shortest prompt Sharpshooter extracts decisions from ([#16043](https://github.com/can1357/oh-my-pi/pull/16043) by [@bigHippoZz](https://github.com/bigHippoZz))
-### Breaking Changes
-
 
 ### Changed
 

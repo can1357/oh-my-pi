@@ -2,15 +2,16 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3; the published compiled ESM still runs on Node 20+, so only Bun-based installs and TypeScript-source resolution need 1.4.3 ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.12.0] - 2026-10-17
 
 ### Fixed
 
 - Fixed TypeBox numeric bounds written in exponent notation throwing during schema construction, while preserving validation and nested JSON Schema constraints ([#15925](https://github.com/can1357/oh-my-pi/pull/15925) by [@jchanghong023](https://github.com/jchanghong023)).
 - Fixed importing local JSON Schema definition references containing URI percent encoding or JSON Pointer escapes ([#15926](https://github.com/can1357/oh-my-pi/pull/15926) by [@jchanghong023](https://github.com/jchanghong023)).
-### Breaking Changes
-
-- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3; the published compiled ESM still runs on Node 20+, so only Bun-based installs and TypeScript-source resolution need 1.4.3 ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.2.1] - 2026-09-15
 

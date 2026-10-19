@@ -21,6 +21,9 @@
 ### Changed
 
 - Tools with `lenientArgValidation` now receive unknown root arguments that their closed schema would otherwise drop, so they can reject them ([#16317](https://github.com/can1357/oh-my-pi/issues/16317))
+### Breaking Changes
+
+- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/pi-agent-core` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.2] - 2026-10-18
 
@@ -37,9 +40,6 @@
 ### Fixed
 
 - Fixed Cursor turns failing with `PROVIDER_ERROR` when a follow-up (a finished background job, a late diagnostic, a reminder) arrived while the previous turn was still streaming ([#15821](https://github.com/can1357/oh-my-pi/pull/15821) by [@robfeldmann](https://github.com/robfeldmann))
-### Breaking Changes
-
-- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/pi-agent-core` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.3] - 2026-10-16
 
@@ -1158,7 +1158,7 @@
 
 ### Added
 
-- Added a non-interrupting "aside" message channel to the agent loop (`AgentLoopConfig.getAsideMessages` / `Agent.setAsideMessageProvider`). Asides are drained at each step boundary (after a tool batch, before the next model call) and at the yield check, so passive notifications (e.g. background-job completions, late LSP diagnostics) reach the model *between requests* without waiting for the agent to stop and without aborting in-flight tools the way steering does.
+- Added a non-interrupting "aside" message channel to the agent loop (`AgentLoopConfig.getAsideMessages` / `Agent.setAsideMessageProvider`). Asides are drained at each step boundary (after a tool batch, before the next model call) and at the yield check, so passive notifications (e.g. background-job completions, late LSP diagnostics) reach the model _between requests_ without waiting for the agent to stop and without aborting in-flight tools the way steering does.
 
 ### Changed
 
@@ -1754,14 +1754,14 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 ### Breaking Changes
 
 - **Queue API replaced with steer/followUp**: The `queueMessage()` method has been split into two methods with different delivery semantics ([#403](https://github.com/badlogic/pi-mono/issues/403)):
-  - `steer(msg)`: Interrupts the agent mid-run. Delivered after current tool execution, skips remaining tools.
-  - `followUp(msg)`: Waits until the agent finishes. Delivered only when there are no more tool calls or steering messages.
+   - `steer(msg)`: Interrupts the agent mid-run. Delivered after current tool execution, skips remaining tools.
+   - `followUp(msg)`: Waits until the agent finishes. Delivered only when there are no more tool calls or steering messages.
 - **Queue mode renamed**: `queueMode` option renamed to `steeringMode`. Added new `followUpMode` option. Both control whether messages are delivered one-at-a-time or all at once.
 - **AgentLoopConfig callbacks renamed**: `getQueuedMessages` split into `getSteeringMessages` and `getFollowUpMessages`.
 - **Agent methods renamed**:
-  - `queueMessage()` → `steer()` and `followUp()`
-  - `clearMessageQueue()` → `clearSteeringQueue()`, `clearFollowUpQueue()`, `clearAllQueues()`
-  - `setQueueMode()`/`getQueueMode()` → `setSteeringMode()`/`getSteeringMode()` and `setFollowUpMode()`/`getFollowUpMode()`
+   - `queueMessage()` → `steer()` and `followUp()`
+   - `clearMessageQueue()` → `clearSteeringQueue()`, `clearFollowUpQueue()`, `clearAllQueues()`
+   - `setQueueMode()`/`getQueueMode()` → `setSteeringMode()`/`getSteeringMode()` and `setFollowUpMode()`/`getFollowUpMode()`
 
 ### Fixed
 
@@ -1773,9 +1773,9 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 
 - **Transport abstraction removed**: `ProviderTransport`, `AppTransport`, and `AgentTransport` interface have been removed. Use the `streamFn` option directly for custom streaming implementations.
 - **Agent options renamed**:
-  - `transport` → removed (use `streamFn` instead)
-  - `messageTransformer` → `convertToLlm`
-  - `preprocessor` → `transformContext`
+   - `transport` → removed (use `streamFn` instead)
+   - `messageTransformer` → `convertToLlm`
+   - `preprocessor` → `transformContext`
 - **`AppMessage` renamed to `AgentMessage`**: All references to `AppMessage` have been renamed to `AgentMessage` for consistency.
 - **`CustomMessages` renamed to `CustomAgentMessages`**: The declaration merging interface has been renamed.
 - **`UserMessageWithAttachments` and `Attachment` types removed**: Attachment handling is now the responsibility of the `convertToLlm` function.

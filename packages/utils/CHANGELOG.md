@@ -23,6 +23,9 @@
 - Fixed `bun test` runs writing their logs into your real `~/.omp/logs`: test processes now log to a per-user `omp-test-logs-<uid>/` under the OS temp dir ([#16386](https://github.com/can1357/oh-my-pi/pull/16386) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `.tar.gz` and `.tar.zst` archives that decompress past 256 MB failing to list or read with a raw `Cannot create a Buffer larger than …` error; a bare `.gz` or `.zst` that large now names the archive size limit ([#16394](https://github.com/can1357/oh-my-pi/pull/16394) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed frontmatter repair deleting HTML comments from document bodies and plain markdown; it now strips only leading comments ahead of the opening delimiter, so prompt bodies keep their comments ([#16481](https://github.com/can1357/oh-my-pi/pull/16481) by [@adi-IL](https://github.com/adi-IL)).
+### Breaking Changes
+
+- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/pi-utils` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.2] - 2026-10-18
 
@@ -39,9 +42,6 @@
 ### Fixed
 
 - Fixed Windows archive extraction overwriting existing files or following existing symlinks when copying a symlink entry without symlink privileges ([#15931](https://github.com/can1357/oh-my-pi/pull/15931) by [@jchanghong023](https://github.com/jchanghong023)).
-### Breaking Changes
-
-- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/pi-utils` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.3] - 2026-10-16
 

@@ -2,14 +2,15 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/omp-stats` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.12.0] - 2026-10-17
 
 ### Fixed
 
 - Fixed usage stats pricing Google Antigravity and MiniMax Token Plan models at $0 when their catalog rows carry no price; they now use the catalog's pricing peer, as `xai-oauth` already did ([#16092](https://github.com/can1357/oh-my-pi/pull/16092) by [@H4vC](https://github.com/H4vC))
-### Breaking Changes
-
-- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/omp-stats` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.0] - 2026-10-14
 
