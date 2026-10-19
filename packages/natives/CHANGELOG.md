@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `macOSFrontApp()`, which reads the app macOS has in front and can put it back in front for a while (`keepInFront`) without stopping for the user's typing ([#16284](https://github.com/can1357/oh-my-pi/pull/16284) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.12.5] - 2026-10-21
 
 ### Fixed
@@ -42,10 +46,6 @@
 - Fixed X11 background shortcuts and typing reporting `Cancelled` when you stopped them right after the last key went down: the key releases now always go out and the call succeeds ([#16235](https://github.com/can1357/oh-my-pi/pull/16235) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `wrapTextWithAnsi` leaving rows half-empty in Chinese and Japanese text: CJK runs now break between characters to fill each row, closing punctuation such as `，。！」` never starts a row, and opening brackets never end one ([#16219](https://github.com/can1357/oh-my-pi/issues/16219))
 - Fixed a cancelled or timed-out macOS `computer` call finishing its lookup of a sheet, popover or menu window, up to 5,000 accessibility elements, before it stopped and let the next request run ([#16233](https://github.com/can1357/oh-my-pi/pull/16233) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Added
-
-- Added `macOSFrontApp()`, which reads the app macOS has in front and can put it back in front for a while (`keepInFront`) without stopping for the user's typing
 
 ## [18.12.2] - 2026-10-18
 

@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed `omp gc --compress` exiting with "the event loop drained while it was still pending" on Bun 1.3.14 when a session artifact is pretty-printed JSON larger than 1 MiB, and session header probes (gc, session move and transfer) reading whole artifacts on Windows ([#15745](https://github.com/can1357/oh-my-pi/issues/15745), [#16754](https://github.com/can1357/oh-my-pi/pull/16754) by [@wolfiesch](https://github.com/wolfiesch))
+- Fixed keys you type in another app going into a page on macOS when omp's click in a relay tab opened a new tab or popup: Chrome made itself the active app and kept it; the relay now puts your app back in front within milliseconds ([#16284](https://github.com/can1357/oh-my-pi/pull/16284) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.6] - 2026-10-21
 
@@ -173,10 +174,6 @@
 - Fixed sessions whose first reply starts with a todo plan getting a title without its icon and code: the plan's title refresh no longer replaces the card title that is still being generated
 - Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
-
-### Fixed
-
-- Fixed keys you type in another app going into a page on macOS when omp's click in a relay tab opened a new tab or popup: Chrome made itself the active app and kept it; the relay now puts your app back in front within milliseconds
 
 ## [18.12.2] - 2026-10-18
 
