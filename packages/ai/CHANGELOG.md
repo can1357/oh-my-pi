@@ -150,6 +150,7 @@
 - Added image support for native OpenAI Decisions and Workers AI judgments, prompted vision chat, and auth-gateway System One requests; images exceeding a judgment API's documented caps (e.g. Clef's 4 images, 4 MiB each) are rejected locally ([#15471](https://github.com/can1357/oh-my-pi/pull/15471) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - `isSurvivingAssistant` in `providers/transform-messages`: whether an assistant turn reaches a replay, malformed tool calls dropped first, so callers outside `transformMessages` pick the same latest turn ([#15791](https://github.com/can1357/oh-my-pi/pull/15791) by [@will-bogusz](https://github.com/will-bogusz))
 - Broker account-pool files (`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE`) can hide whole providers and API keys: `"*": false` makes the file an allow-list, and an entry can be `true`, `false`, or `{ "accounts": [...], "apiKeys": false }` ([#14235](https://github.com/can1357/oh-my-pi/pull/14235) by [@will-bogusz](https://github.com/will-bogusz))
+- Assistant messages on `openai-codex-responses` and `openai-responses` carry `effort`, the reasoning effort the request actually sent on the wire after the model's effort ladder clamped the selector, so JSON/RPC and session consumers can read it the way Anthropic routes read `requestControls.effort` ([#15165](https://github.com/can1357/oh-my-pi/pull/15165) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
@@ -414,9 +415,6 @@
 - Fixed truncated Factory Droid Gemini responses ending as a hard error or a half-received tool call instead of being retried ([#15103](https://github.com/can1357/oh-my-pi/pull/15103) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Factory Droid Gemini ignoring an error the server reports mid-response, which hid its status and retried errors that cannot succeed ([#15103](https://github.com/can1357/oh-my-pi/pull/15103) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed resumed OpenAI Responses sessions (xAI, Factory Droid, OpenAI and other hosts) dropping all earlier encrypted reasoning on their first request; GitHub Copilot still rebuilds history until its first response ([#15148](https://github.com/can1357/oh-my-pi/pull/15148) by [@will-bogusz](https://github.com/will-bogusz))
-### Added
-
-- Assistant messages on `openai-codex-responses` and `openai-responses` carry `effort`, the reasoning effort the request actually sent on the wire after the model's effort ladder clamped the selector, so JSON/RPC and session consumers can read it the way Anthropic routes read `requestControls.effort` ([#15165](https://github.com/can1357/oh-my-pi/pull/15165) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.8.7] - 2026-10-09
 
