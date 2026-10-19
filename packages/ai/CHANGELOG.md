@@ -1,9 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Fixed
 
-- Provider in-flight lock cleanup failures are now logged instead of silently ignored, and MCP argument values that are not JSON are logged at debug level when they fall back to text
+- Fixed provider in-flight lock cleanup failures being swallowed silently — they are now logged instead of ignored ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
