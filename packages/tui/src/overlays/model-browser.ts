@@ -183,6 +183,12 @@ export interface ModelBrowserRegistry {
 }
 
 /** One selectable row. `selector` is a canonical model key or host-specific virtual key. */
+/** Items the browser memoizes rows for: its own list and the last picker catalogue. */
+interface CreditItems {
+	list: readonly ModelBrowserItem[];
+	catalogue: readonly ModelBrowserItem[];
+}
+
 export interface ModelBrowserItem {
 	provider: string;
 	id: string;
@@ -775,15 +781,13 @@ function creditPromotionNote(model: Model): string | undefined {
 /**
  * Adds Factory Droid's `N×` Standard Credits rate in force now (any live
  * promotion applied) to a dollar price, replacing the price when the model has
- * no dollar reference. `withPromotion` appends the promotion's label and UTC
- * end date (`1.6× (20% off until 2026-11-22)`); row cells leave it to the
- * detail and preview. The dollar reference never includes promotions.
+ * no dollar reference. The dollar reference never includes promotions; the
+ * preview and detail facts name the promotion (`creditPromotionNote`).
  */
-function withCreditBadge(model: Model, price: string, withPromotion = false): string {
+function withCreditBadge(model: Model, price: string): string {
 	const credits = getFactoryDroidCreditRate(model);
 	if (credits === undefined) return price;
-	const note = withPromotion ? creditPromotionNote(model) : undefined;
-	const badge = `${formatCostLeg(credits.rate)}×${note ? ` (${note})` : ""}`;
+	const badge = `${formatCostLeg(credits.rate)}×`;
 	const cost = getEffectiveTokenCost(model.cost);
 	return cost.input !== 0 || cost.output !== 0 ? `${price} ${badge}` : badge;
 }
@@ -834,7 +838,9 @@ function previewPrice(model: Model): string {
 	const cost = getEffectiveTokenCost(model.cost);
 	const parts = [`$${formatCostLeg(cost.input)} in`, `$${formatCostLeg(cost.output)} out`];
 	if (cost.cacheRead > 0) parts.push(`$${formatCostLeg(cost.cacheRead)} cache`);
-	return withCreditBadge(model, parts.join(" · "), true);
+	const priced = withCreditBadge(model, parts.join(" · "));
+	const note = creditPromotionNote(model);
+	return note ? `${priced} (${note})` : priced;
 }
 
 /**
@@ -1039,6 +1045,9 @@ export class ModelBrowser implements Component {
 		| undefined;
 	/** Theme-formatted catalog metric cells per item; rebuilt when the item's model or the theme changes. */
 	#metricCells = new WeakMap<ModelBrowserItem, MetricCells>();
+	/** Items whose credit promotions date the memoized rows, and the next start or end among them. */
+	#creditItems: CreditItems = { list: [], catalogue: [] };
+	#nextCreditChange = Number.POSITIVE_INFINITY;
 	/** Non-separator items of the last ranked visible list, for {@link queryMatches}. */
 	#queryMatches: { visible: readonly ModelBrowserItem[]; matches: readonly ModelBrowserItem[] } | undefined;
 	#hoveredIndex: number | null = null;
@@ -1130,6 +1139,7 @@ export class ModelBrowser implements Component {
 
 	/** Replace the scope's base items; the live query re-applies and selection is pinned by selector. */
 	setItems(items: ModelBrowserItem[]): void {
+		this.#trackCreditChanges({ ...this.#creditItems, list: items });
 		const selectedKey = this.getSelected()?.selector;
 		this.#menu.setItems(this.#insertSeparator(items), selectedKey);
 		this.onSelectionChange?.(this.getSelected());
@@ -1675,6 +1685,7 @@ export class ModelBrowser implements Component {
 	}
 
 	render(width: number): string[] {
+		this.#syncCreditClock();
 		const lines: string[] = [];
 
 		const searchIcon = theme.fg("accent", theme.symbol("icon.search"));
@@ -1766,6 +1777,27 @@ export class ModelBrowser implements Component {
 
 	invalidate(): void {}
 
+	#trackCreditChanges(items: CreditItems): void {
+		this.#creditItems = items;
+		const now = Date.now();
+		let next = Number.POSITIVE_INFINITY;
+		for (const item of [...items.list, ...items.catalogue]) {
+			const promotion = item.model.factoryDroidCreditPromotion;
+			if (!promotion) continue;
+			for (const at of [promotion.startsAt, promotion.endsAt]) if (at > now && at < next) next = at;
+		}
+		this.#nextCreditChange = next;
+	}
+
+	/** A credit promotion started or ended since rows were memoized: rebuild every price cell. */
+	#syncCreditClock(): void {
+		if (Date.now() < this.#nextCreditChange) return;
+		this.#metricCells = new WeakMap();
+		this.#pickerPreview = undefined;
+		this.#bumpPickerEpoch();
+		this.#trackCreditChanges(this.#creditItems);
+	}
+
 	#bumpNativeEpoch(): void {
 		this.#nativeEpoch++;
 		this.#itemNodes.clear();
@@ -1784,6 +1816,7 @@ export class ModelBrowser implements Component {
 	 * scrolls), and the selection's facts and role chips.
 	 */
 	describe(): NativeNode {
+		this.#syncCreditClock();
 		this.#nativeSearch ??= row([text([span(theme.symbol("icon.search"), "accent")]), this.#searchInput], {
 			gap: "sm",
 			align: "center",
@@ -1996,6 +2029,8 @@ export class ModelBrowser implements Component {
 	 * role moving) keeps the last whole `items` and patches it.
 	 */
 	pickerItems(catalogue: readonly ModelBrowserItem[]): ModelPickerCatalogue {
+		if (catalogue !== this.#creditItems.catalogue) this.#trackCreditChanges({ ...this.#creditItems, catalogue });
+		this.#syncCreditClock();
 		const memo = this.#pickerItems;
 		if (memo?.catalogue === catalogue && memo.epoch === this.#pickerEpoch && memo.roles === this.#roles) {
 			return memo.value;
@@ -2193,6 +2228,7 @@ export class ModelBrowser implements Component {
 	 * below the list): one inline fact line and the held-role chips.
 	 */
 	pickerPreview(mode: "full" | "compact", current?: string): readonly NativeChild[] {
+		this.#syncCreditClock();
 		const selected = this.getSelected();
 		const item = selected && !this.#isDisabled(selected) ? selected : undefined;
 		const key = `${mode}\0${current ?? ""}\0${this.#settings.revision}`;
@@ -2251,6 +2287,8 @@ export class ModelBrowser implements Component {
 			if (ctx > 0) facts.push({ k: "ctx", v: formatNumber(ctx).toLowerCase() });
 			if (out > 0) facts.push({ k: "out", v: formatNumber(out).toLowerCase() });
 			facts.push({ k: "price", v: isFreeModel(model) ? "free" : formatCostDetail(model) });
+			const promotion = creditPromotionNote(model);
+			if (promotion) facts.push({ k: "promo", v: promotion });
 			facts.push({ k: "reasoning", v: model.reasoning ? "yes" : "no" });
 			const children: NativeChild[] = [node("kv", { items: facts, layout: "inline" })];
 			const chips: NativeChild[] = [];

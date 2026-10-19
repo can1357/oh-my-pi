@@ -116,6 +116,10 @@
 
 ## [18.12.5] - 2026-10-21
 
+### Added
+
+- Added dated Factory Droid credit promotions (`credit-promotion` in the provider KDL): models carry the promotion window and `getFactoryDroidCreditRate` applies the discount only while it is in force, so cached models drop it once it ends; with droid 0.244's current discounts on GPT-5.6 Sol and Gemini 3.7/3.8 Flash ([#16309](https://github.com/can1357/oh-my-pi/pull/16309) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed Moonshot `kimi-k3` pricing cache writes at $0; usage cost now includes cache writes at Moonshot's $3/M 5-minute rate ([#16508](https://github.com/can1357/oh-my-pi/issues/16508))
@@ -146,12 +150,6 @@
 ### Fixed
 
 - Gemma 4 models on Google AI Studio (`google/gemma-4-31b-it`, `google/gemma-4-26b-a4b-it`, …) no longer fail every request with `Thinking budget is not supported for this model`; thinking is now toggled with `thinkingLevel` (on = `high`, off = `minimal`) ([#16350](https://github.com/can1357/oh-my-pi/issues/16350))
-
-## [18.12.2] - 2026-10-18
-
-### Added
-
-- Added dated Factory Droid credit promotions (`credit-promotion` in the provider KDL): models carry the promotion window and `getFactoryDroidCreditRate` applies the discount only while it is in force, so cached models drop it once it ends; with droid 0.244's current discounts on GPT-5.6 Sol, Gemini 3.7/3.8 Flash and Mistral Large 4 ([#16309](https://github.com/can1357/oh-my-pi/pull/16309) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.2] - 2026-10-18
 

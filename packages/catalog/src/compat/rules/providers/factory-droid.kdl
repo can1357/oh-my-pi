@@ -900,7 +900,6 @@ provider "factory-droid" {
 		region-upstreams-us
 		region-upstreams-eu "mistral"
 		credit-rates { input 0.544; output 3.08; cache-read 0.103 }
-		credit-promotion { discount 0.5; starts "2026-10-06T00:00:00Z"; ends "2026-10-20T00:00:00Z"; label "50% off, launch discount" }
 		thinking-efforts "high"
 		thinking-requires-effort #false
 		thinking-default-level "high"

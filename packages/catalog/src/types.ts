@@ -1483,6 +1483,15 @@ export interface TimeBasedCost {
 export type ModelPromptCache = Partial<Record<"short" | "long", number>>;
 
 /** Base token rates plus optional long-context and time-based pricing. */
+/** A dated Factory Droid Standard Credits discount; the window is `[startsAt, endsAt)` in epoch ms. */
+export interface FactoryDroidCreditPromotion {
+	/** Fraction taken off every credit rate, in (0, 1). */
+	discount: number;
+	startsAt: number;
+	endsAt: number;
+	label: string;
+}
+
 export interface ModelCost extends TokenCost {
 	longContext?: LongContextTokenCost;
 	timeBased?: TimeBasedCost;
@@ -1703,7 +1712,7 @@ export interface Model<TApi extends Api = Api> {
 	/** Factory Droid Standard Credits base rate (relative per-token weight, not dollars). */
 	factoryDroidCredits?: number;
 	/** Factory Droid dated credit discount; `getFactoryDroidCreditRate` applies it inside `[startsAt, endsAt)` (epoch ms). */
-	factoryDroidCreditPromotion?: { discount: number; startsAt: number; endsAt: number; label: string };
+	factoryDroidCreditPromotion?: FactoryDroidCreditPromotion;
 	/** Canonical organization resolved during Factory discovery. */
 	factoryDroidOrgId?: string;
 	cost: ModelCost;
