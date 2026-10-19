@@ -253,10 +253,19 @@ function dispatch(handle: WorkerHandle, request: SyncWorkerRequest): Promise<Par
  * the old root would `path.relative()` new-root transcripts out of it and
  * persist them under `..`/subagent instead of their real folder, and only a
  * changed identity stops the pool from handing that worker out again.
+ *
+ * The cwd belongs to the identity for a second reason: a Bun worker keeps the
+ * cwd it was spawned under, so a relative transcript path the parent resolves
+ * against its own cwd is opened by the worker against the worker's cwd. With an
+ * absolute agent dir neither `process.env` nor `getSessionsDir()` moves when the
+ * parent chdir's, so without the cwd in the key the pool hands a worker back
+ * that opens the file in the wrong directory — the parent stats the new
+ * directory's file while the worker reads the old one's, silently skipping or
+ * ingesting the wrong transcript.
  */
 interface PooledWorkerEnv {
 	env: Record<string, string>;
-	/** Order-independent identity of the whole parent environment, plus the sessions root it resolves to. */
+	/** Order-independent identity of the whole parent environment, plus the sessions root and cwd it resolves to. */
 	identity: string;
 }
 
@@ -270,7 +279,8 @@ function pooledWorkerEnv(): PooledWorkerEnv {
 	// Paired with the env snapshot rather than read back out of it: a relative
 	// agent dir is the one case where equal environments resolve differently.
 	const sessionsRoot = getSessionsDir();
-	return { env: Object.fromEntries(entries), identity: JSON.stringify({ env: entries, sessionsRoot }) };
+	const cwd = process.cwd();
+	return { env: Object.fromEntries(entries), identity: JSON.stringify({ env: entries, sessionsRoot, cwd }) };
 }
 
 /**

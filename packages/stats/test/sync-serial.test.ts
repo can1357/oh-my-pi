@@ -122,15 +122,15 @@ class DyingWorker {
 	readonly terminate = (): void => {};
 }
 
-async function writeSessionFile(options?: { includeCost?: boolean; name?: string }): Promise<string> {
-	const sessionDir = path.join(getSessionsDir(), "--tmp--sync-serial");
-	await fs.mkdir(sessionDir, { recursive: true });
+/** One assistant message with usage, in the shape the stats sync reads. */
+function assistantMessage(options: { id?: string; output?: number; includeCost?: boolean }): Record<string, unknown> {
 	const timestamp = new Date().toISOString();
-	const sessionFile = path.join(sessionDir, options?.name ?? "session.jsonl");
-	const includeCost = options?.includeCost ?? true;
-	const assistant = {
+	const input = 1;
+	const output = options.output ?? 2;
+	const includeCost = options.includeCost ?? true;
+	return {
 		type: "message",
-		id: "assistant-1",
+		id: options.id ?? "assistant-1",
 		parentId: null,
 		timestamp,
 		message: {
@@ -140,11 +140,11 @@ async function writeSessionFile(options?: { includeCost?: boolean; name?: string
 			provider: "openai",
 			model: "gpt-5.4",
 			usage: {
-				input: 1,
-				output: 2,
+				input,
+				output,
 				cacheRead: 0,
 				cacheWrite: 0,
-				totalTokens: 3,
+				totalTokens: input + output,
 				...(includeCost ? { cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } : {}),
 			},
 			stopReason: "stop",
@@ -153,8 +153,19 @@ async function writeSessionFile(options?: { includeCost?: boolean; name?: string
 			ttft: 5,
 		},
 	};
-	await Bun.write(sessionFile, `${JSON.stringify(assistant)}\n`);
-	return sessionFile;
+}
+
+/** Write a one-message transcript at an explicit path. */
+async function writeTranscriptAt(file: string, options: { id?: string; output?: number } = {}): Promise<string> {
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	await Bun.write(file, `${JSON.stringify(assistantMessage(options))}\n`);
+	return file;
+}
+
+async function writeSessionFile(options?: { includeCost?: boolean; name?: string }): Promise<string> {
+	const sessionDir = path.join(getSessionsDir(), "--tmp--sync-serial");
+	const sessionFile = path.join(sessionDir, options?.name ?? "session.jsonl");
+	return writeTranscriptAt(sessionFile, { includeCost: options?.includeCost });
 }
 
 describe("stats sync serial mode", () => {
@@ -473,6 +484,50 @@ describe("stats sync serial mode", () => {
 				process.chdir(originalCwd);
 				await fs.rm(firstRoot, { recursive: true, force: true });
 				await fs.rm(secondRoot, { recursive: true, force: true });
+				vi.restoreAllMocks();
+			}
+		},
+	);
+
+	// A pooled worker keeps the cwd it was spawned under, so a relative
+	// transcript path resolves to a different file inside the worker than in the
+	// parent. The reuse key has to notice the move: with an absolute agent dir
+	// neither `process.env` nor `getSessionsDir()` changes when the parent
+	// chdir's, so a reused worker would open the previous directory's transcript
+	// while the parent stats the new one — the sync would silently ingest the
+	// wrong file. Skipped on darwin, where the serial parser never spawns.
+	it.skipIf(process.platform === "darwin")(
+		"does not reuse a pooled worker after the working directory moves",
+		async () => {
+			const originalCwd = process.cwd();
+			const firstDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-stats-cwd-first-"));
+			const secondDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-stats-cwd-second-"));
+			try {
+				await writeTranscriptAt(path.join(firstDir, "shared", "session.jsonl"), { id: "assistant-1", output: 2 });
+				await writeTranscriptAt(path.join(secondDir, "shared", "session.jsonl"), { id: "assistant-2", output: 99 });
+
+				process.chdir(firstDir);
+				const firstRun = spyOnWorkerSpawns();
+				await syncAllSessions({ workers: 2, files: ["shared/session.jsonl"] });
+				expect(firstRun).toHaveBeenCalled();
+				firstRun.mockRestore();
+
+				// No env and no agent-dir change: only the cwd moves, which is exactly
+				// the case the reuse key cannot see through the environment.
+				process.chdir(secondDir);
+				const secondRun = spyOnWorkerSpawns();
+				const secondSync = await syncAllSessions({ workers: 2, files: ["shared/session.jsonl"] });
+				expect(secondRun).toHaveBeenCalled();
+				secondRun.mockRestore();
+
+				// The run has to have ingested the transcript in the new directory: a
+				// reused worker would have read the first directory's file instead.
+				expect(secondSync).toEqual({ processed: 1, files: 1 });
+				expect(getOverallStats().totalOutputTokens).toBe(99);
+			} finally {
+				process.chdir(originalCwd);
+				await fs.rm(firstDir, { recursive: true, force: true });
+				await fs.rm(secondDir, { recursive: true, force: true });
 				vi.restoreAllMocks();
 			}
 		},
