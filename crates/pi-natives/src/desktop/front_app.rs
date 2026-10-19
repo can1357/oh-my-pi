@@ -31,9 +31,11 @@ impl MacosFrontApp {
 		#[cfg(target_os = "macos")]
 		{
 			let app = self.app;
+			// From the call, not from when the worker pool gets to it.
+			let deadline =
+				std::time::Instant::now() + std::time::Duration::from_millis(duration_ms.into());
 			task::blocking("desktop.keepInFront", (), move |_| {
-				app.keep_in_front(std::time::Duration::from_millis(duration_ms.into()))
-					.map_err(Into::into)
+				app.keep_in_front(deadline).map_err(Into::into)
 			})
 		}
 		#[cfg(not(target_os = "macos"))]

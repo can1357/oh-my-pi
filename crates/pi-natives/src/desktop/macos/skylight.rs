@@ -1544,15 +1544,15 @@ pub(in super::super) fn front_app() -> Option<FrontApp> {
 }
 
 impl FrontApp {
-	/// For `duration`, puts this app back in front without raising its windows
-	/// each time the app that took the front from it takes it again, as
-	/// [`FrontHold`] decides, and returns how many times it did. Typing does not
-	/// end it. Holds nothing once the [`PickLog`] has not watched without a
+	/// Until `deadline`, puts this app back in front without raising its
+	/// windows each time the app that took the front from it takes it again,
+	/// as [`FrontHold`] decides, and returns how many times it did. Typing does
+	/// not end it. Holds nothing once the [`PickLog`] has not watched without a
 	/// break since the read (from [`PICK_WATCH`] after the latest read): a pick
 	/// the user made in the gap would go unseen. Owns desktop input/focus
 	/// control only while it asks for the front back, and is busy then if
 	/// another operation owns it.
-	pub(in super::super) fn keep_in_front(&self, duration: Duration) -> CoreResult<u32> {
+	pub(in super::super) fn keep_in_front(&self, deadline: Instant) -> CoreResult<u32> {
 		let spi = FOREGROUND.as_ref().ok_or_else(|| {
 			DesktopError::background_unavailable("the front-process SPI is unavailable")
 		})?;
@@ -1560,12 +1560,7 @@ impl FrontApp {
 			return Ok(0);
 		};
 		let mut hold = FrontHold::new(self.psn, before);
-		let desktop = WindowServerHold {
-			spi,
-			user: self.psn,
-			read_at: self.read_at,
-			deadline: Instant::now() + duration,
-		};
+		let desktop = WindowServerHold { spi, user: self.psn, read_at: self.read_at, deadline };
 		hold_front(&mut hold, &desktop)
 	}
 }
