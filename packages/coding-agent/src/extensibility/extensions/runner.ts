@@ -536,6 +536,7 @@ export class ExtensionRunner {
 	#resolvePlanReviewFn: NonNullable<ExtensionContextActions["resolvePlanReview"]> = () => false;
 	#getPendingPlanReviewFn: NonNullable<ExtensionContextActions["getPendingPlanReview"]> = () => undefined;
 	#openPlanReviewFn: NonNullable<ExtensionContextActions["openPlanReview"]> = async () => false;
+	#sessionModes?: ExtensionContextActions["sessionModes"];
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
 	#createAnnotations?: ExtensionAnnotationsFactory;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
@@ -837,6 +838,8 @@ export class ExtensionRunner {
 		if (contextActions.resolvePlanReview) this.#resolvePlanReviewFn = contextActions.resolvePlanReview;
 		if (contextActions.getPendingPlanReview) this.#getPendingPlanReviewFn = contextActions.getPendingPlanReview;
 		if (contextActions.openPlanReview) this.#openPlanReviewFn = contextActions.openPlanReview;
+		// Assigned unconditionally: a headless rebind must not inherit a previous host's controls.
+		this.#sessionModes = contextActions.sessionModes;
 		this.#getContextUsageFn = contextActions.getContextUsage;
 		this.#compactFn = contextActions.compact;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
@@ -1443,6 +1446,7 @@ export class ExtensionRunner {
 			resolvePlanReview: (reviewId, choice, input) => this.#resolvePlanReviewFn(reviewId, choice, input),
 			getPendingPlanReview: () => this.#getPendingPlanReviewFn(),
 			openPlanReview: () => this.#openPlanReviewFn(),
+			sessionModes: this.#sessionModes,
 			getSystemPrompt: () => this.#getSystemPromptFn(),
 			runEphemeralTurn: runEphemeralTurn
 				? async options => {

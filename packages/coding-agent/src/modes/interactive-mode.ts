@@ -98,9 +98,13 @@ import type {
 } from "../extensibility/extensions";
 import type {
 	CompactOptions,
+	ExtensionSessionModes,
 	PlanReviewChoice,
 	PlanReviewOption,
 	PlanReviewRequestedEvent,
+	SessionModeRequest,
+	SessionModeResult,
+	SessionModeState,
 } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
@@ -303,6 +307,7 @@ import {
 	isLoopDurationExpired,
 	isLoopLimitExhausted,
 	parseLoopArgs,
+	type LoopLimitConfig,
 } from "./loop-limit";
 import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 import { OAuthManualInputManager } from "./oauth-manual-input";
@@ -1321,6 +1326,24 @@ export class InteractiveMode implements InteractiveModeContext {
 	loopPrompt: string | undefined = undefined;
 	loopLimit: LoopLimitRuntime | undefined = undefined;
 	loopCondition: LoopConditionConfig | undefined = undefined;
+	/** Last state reported through `mode_changed`; starts inactive so a restored session's modes are reported too. */
+	#reportedModeState: SessionModeState = {
+		plan: { status: "inactive" },
+		vibe: { status: "inactive" },
+		goal: { status: "inactive" },
+		loop: { status: "inactive" },
+	};
+	#reportedModeKey = JSON.stringify(this.#reportedModeState);
+	/** A `ctx.sessionModes.set()` transition is running: concurrent calls are refused. */
+	#modeSetInFlight = false;
+	/** Open mode transitions; `mode_changed` waits until the outermost one settles. */
+	#modeChangeHolds = 0;
+	/** False until init() has restored the journaled modes; before that the state is not yet the session's. */
+	#modesRestored = false;
+	readonly sessionModes: ExtensionSessionModes = {
+		getState: () => this.#getSessionModeState(),
+		set: request => this.#setSessionMode(request),
+	};
 	/**
 	 * Aborts the in-flight `--while` / `--until` evaluation. Esc between
 	 * iterations lands while the condition command is still running, and
@@ -2554,6 +2577,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
 		await logger.time("InteractiveMode.init:reconcileMode", () => this.#reconcileModeFromSession());
+		this.#modesRestored = true;
 
 		// Brand-new sessions optionally start in plan mode when the user has made it
 		// the startup default. "Brand-new" means the resolved branch carries no
@@ -3235,6 +3259,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.loopModeEnabled ? { state, limit: this.loopLimit, condition: this.loopCondition } : undefined,
 		);
 		this.ui.requestRender();
+		this.#notifyModeChanged();
 	}
 
 	disableLoopMode(message = "Loop mode disabled."): void {
@@ -3298,26 +3323,225 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showError(parsed);
 			return undefined;
 		}
-		this.loopModeEnabled = true;
-		this.loopModePaused = false;
-		this.loopPrompt = undefined;
-		this.loopLimit = createLoopLimitRuntime(parsed.limit);
-		this.loopCondition = parsed.condition;
-		this.#syncLoopModeStatus();
-		const limitSuffix = parsed.limit ? ` Limited to ${describeLoopLimit(parsed.limit)}.` : "";
-		const remainingSuffix = this.loopLimit ? ` ${describeLoopLimitRuntime(this.loopLimit)}.` : "";
-		// The condition is a *continuation* signal: the first iteration always
-		// runs, and it is re-evaluated before each subsequent one.
-		const conditionSuffix = parsed.condition ? ` Continuing ${describeLoopCondition(parsed.condition)}.` : "";
-		const tail = parsed.prompt ? "Repeating it after each turn." : "Your next prompt will repeat after each turn.";
-		this.showStatus(
-			`Loop mode enabled.${limitSuffix}${remainingSuffix}${conditionSuffix} ${tail} ${appKey(this.keybindings, "app.interrupt")} suspends the ongoing loop; /loop again to disable.`,
-		);
+		this.#enableLoopMode(parsed.limit, parsed.condition, Boolean(parsed.prompt));
 		// Hand any inline prompt back to the dispatcher so the normal submit flow
 		// runs the first iteration — it records the text as the loop prompt and
 		// auto-resubmits it after each yield, identical to typing the prompt right
 		// after enabling loop mode.
 		return parsed.prompt;
+	}
+
+	#enableLoopMode(
+		limit: LoopLimitConfig | undefined,
+		condition: LoopConditionConfig | undefined,
+		hasPrompt: boolean,
+	): void {
+		this.loopModeEnabled = true;
+		this.loopModePaused = false;
+		this.loopPrompt = undefined;
+		this.loopLimit = createLoopLimitRuntime(limit);
+		this.loopCondition = condition;
+		this.#syncLoopModeStatus();
+		const limitSuffix = limit ? ` Limited to ${describeLoopLimit(limit)}.` : "";
+		const remainingSuffix = this.loopLimit ? ` ${describeLoopLimitRuntime(this.loopLimit)}.` : "";
+		// The condition is a *continuation* signal: the first iteration always
+		// runs, and it is re-evaluated before each subsequent one.
+		const conditionSuffix = condition ? ` Continuing ${describeLoopCondition(condition)}.` : "";
+		const tail = hasPrompt ? "Repeating it after each turn." : "Your next prompt will repeat after each turn.";
+		this.showStatus(
+			`Loop mode enabled.${limitSuffix}${remainingSuffix}${conditionSuffix} ${tail} ${appKey(this.keybindings, "app.interrupt")} suspends the ongoing loop; /loop again to disable.`,
+		);
+	}
+
+	#getSessionModeState(): SessionModeState {
+		const goalState = this.session.getGoalModeState();
+		// A completed goal keeps its tool until the turn ends; it stays active until #exitGoalMode tears it down.
+		const goalActive = this.goalModeEnabled || goalState?.mode === "exiting";
+		return {
+			plan: this.planModeEnabled
+				? { status: "active", planFilePath: this.session.getPlanModeState()?.planFilePath }
+				: { status: this.planModePaused ? "paused" : "inactive" },
+			vibe: { status: this.vibeModeEnabled ? "active" : "inactive" },
+			goal:
+				goalActive || this.goalModePaused
+					? {
+							status: goalActive ? "active" : "paused",
+							objective: goalState?.goal.objective,
+							tokenBudget: goalState?.goal.tokenBudget,
+						}
+					: { status: "inactive" },
+			loop: { status: !this.loopModeEnabled ? "inactive" : this.loopModePaused ? "paused" : "active" },
+		};
+	}
+
+	/**
+	 * Report a committed mode change. Every mode status refresh calls this, so slash commands, the
+	 * goal tool, and session restore report alongside `ctx.sessionModes.set()`. Goal accounting is
+	 * not part of the state, so usage ticks never fire it.
+	 */
+	#notifyModeChanged(): void {
+		if (this.#modeChangeHolds > 0) return;
+		const state = this.#getSessionModeState();
+		const key = JSON.stringify(state);
+		if (key === this.#reportedModeKey) return;
+		const previous = this.#reportedModeState;
+		this.#reportedModeState = state;
+		this.#reportedModeKey = key;
+		void this.session.extensionRunner?.emit({ type: "mode_changed", previous, state: structuredClone(state) });
+	}
+
+	/**
+	 * Defer `mode_changed` until a multi-step transition settles: goal entry/exit flips mode flags
+	 * from `goal_updated` before the goal tool is activated or the prior tools are restored.
+	 */
+	#holdModeChanges(): Disposable {
+		this.#modeChangeHolds++;
+		return {
+			[Symbol.dispose]: () => {
+				this.#modeChangeHolds--;
+				this.#notifyModeChanged();
+			},
+		};
+	}
+
+	async #setSessionMode(request: SessionModeRequest): Promise<SessionModeResult> {
+		const refuse = (code: Extract<SessionModeResult, { ok: false }>["code"], message: string): SessionModeResult => ({
+			ok: false,
+			code,
+			message,
+			state: this.#getSessionModeState(),
+		});
+		// Refuse rather than queue: a call from a handler of this transition's own events would deadlock.
+		if (this.#modeSetInFlight) return refuse("busy", "Another mode transition is running; retry after it settles.");
+		if (!this.#modesRestored) {
+			return refuse("busy", "The session's saved modes are still being restored; retry once startup finishes.");
+		}
+		if (this.session.getGoalModeState()?.mode === "exiting") {
+			return refuse("busy", "The completed goal is still being torn down; retry after its `mode_changed`.");
+		}
+		const transition = this.#planSessionModeTransition(request);
+		if (transition === undefined) return { ok: true, changed: false, state: this.#getSessionModeState() };
+		if (typeof transition !== "function") return refuse(transition.code, transition.message);
+		if (this.session.isBusyForSnapshot) {
+			return refuse("busy", "The session is busy with a turn or compaction; retry once it is idle.");
+		}
+		const before = this.#reportedModeKey;
+		this.#modeSetInFlight = true;
+		const hold = this.#holdModeChanges();
+		try {
+			await transition();
+		} finally {
+			this.#modeSetInFlight = false;
+			hold[Symbol.dispose]();
+		}
+		return { ok: true, changed: this.#reportedModeKey !== before, state: this.#getSessionModeState() };
+	}
+
+	/**
+	 * Resolve a request against the slash commands' gates: `undefined` when the requested state
+	 * already holds, a refusal, or the transition to run. Runs the same enter/exit helpers as the
+	 * slash commands, minus their confirmations and prompt submission.
+	 */
+	#planSessionModeTransition(
+		request: SessionModeRequest,
+	): { code: "conflict" | "disabled" | "invalid_request"; message: string } | (() => Promise<void>) | undefined {
+		const invalid = (message: string) => ({ code: "invalid_request" as const, message });
+		const conflict = (mode: string) => ({ code: "conflict" as const, message: `Exit ${mode} mode first.` });
+		const planBlocks = this.planModeEnabled || this.planModePaused;
+		const goalBlocks = this.goalModeEnabled || this.goalModePaused;
+		switch (request?.mode) {
+			case "plan":
+				if (request.action === "exit") {
+					if (this.planModeEnabled) {
+						return async () => {
+							this.#hidePlanReview();
+							await this.#exitPlanMode();
+							this.#planModeHasEntered = false;
+						};
+					}
+					return this.planModePaused ? async () => this.#disablePausedPlanMode() : undefined;
+				}
+				if (request.action !== "enter") break;
+				if (this.planModeEnabled) return undefined;
+				if (!cfgPlanEnabled.get(this.session.settings)) {
+					return { code: "disabled", message: "Plan mode is disabled in settings (plan.enabled)." };
+				}
+				if (goalBlocks) return conflict("goal");
+				if (this.vibeModeEnabled) return conflict("vibe");
+				return () => this.#enterPlanMode();
+			case "vibe":
+				if (request.action === "exit") return this.vibeModeEnabled ? () => this.#exitVibeMode() : undefined;
+				if (request.action !== "enter") break;
+				if (this.vibeModeEnabled) return undefined;
+				if (planBlocks) return conflict("plan");
+				if (goalBlocks) return conflict("goal");
+				return () => this.#enterVibeMode();
+			case "goal":
+				switch (request.action) {
+					case "enter": {
+						const objective = typeof request.objective === "string" ? request.objective.trim() : "";
+						if (!objective) return invalid("Goal objective must be a non-empty string.");
+						const budget = request.tokenBudget;
+						if (budget !== undefined && !(Number.isInteger(budget) && budget > 0)) {
+							return invalid("Goal tokenBudget must be a positive integer.");
+						}
+						if (this.goalModeEnabled) {
+							const current = this.session.getGoalModeState()?.goal;
+							if (current?.objective === objective && current.tokenBudget === budget) return undefined;
+							return invalid("A goal is already active; drop it before setting a new objective.");
+						}
+						if (this.goalModePaused) return invalid("Resume or drop the paused goal first.");
+						if (!cfgGoalEnabled.get(this.session.settings)) {
+							return { code: "disabled", message: "Goal mode is disabled in settings (goal.enabled)." };
+						}
+						if (planBlocks) return conflict("plan");
+						if (this.vibeModeEnabled) return conflict("vibe");
+						return () => this.#enterGoalMode({ objective, tokenBudget: budget });
+					}
+					case "pause":
+						if (this.goalModeEnabled) return () => this.#pauseGoalAction();
+						return this.goalModePaused ? undefined : invalid("There is no active goal to pause.");
+					case "resume":
+						if (this.goalModeEnabled) return undefined;
+						if (!this.#getPausedGoalState()) return invalid("There is no paused goal to resume.");
+						if (!cfgGoalEnabled.get(this.session.settings)) {
+							return { code: "disabled", message: "Goal mode is disabled in settings (goal.enabled)." };
+						}
+						return () => this.#enterGoalMode({ resume: true });
+					case "drop":
+						if (!goalBlocks) return undefined;
+						return async () => {
+							await this.session.goalRuntime.dropGoal();
+							await this.#exitGoalMode({ reason: "dropped" });
+						};
+				}
+				break;
+			case "loop": {
+				if (request.action === "exit") return this.loopModeEnabled ? async () => this.disableLoopMode() : undefined;
+				if (request.action !== "enter") break;
+				const { limit, condition } = request;
+				const validLimit =
+					limit === undefined ||
+					(limit?.kind === "iterations" && Number.isSafeInteger(limit.iterations) && limit.iterations > 0) ||
+					(limit?.kind === "duration" && Number.isFinite(limit.durationMs) && limit.durationMs > 0);
+				if (!validLimit)
+					return invalid("Loop limit needs a positive integer `iterations` or positive `durationMs`.");
+				if (
+					condition !== undefined &&
+					(typeof condition?.command !== "string" ||
+						!condition.command.trim() ||
+						typeof condition.until !== "boolean")
+				) {
+					return invalid("Loop condition needs a non-empty `command` and a boolean `until`.");
+				}
+				if (this.loopModeEnabled) {
+					if (limit === undefined && condition === undefined) return undefined;
+					return invalid("Loop mode is already active; exit it before changing its bounds.");
+				}
+				return async () => this.#enableLoopMode(limit, condition, false);
+			}
+		}
+		return invalid("Unknown mode or action.");
 	}
 
 	recordLocalSubmission(text: string, imageCount = 0): () => void {
@@ -4703,11 +4927,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				: undefined;
 		this.statusLine.setPlanModeStatus(status);
 		this.ui.requestRender();
+		this.#notifyModeChanged();
 	}
 
 	#updateVibeModeStatus(): void {
 		this.statusLine.setVibeModeStatus(this.vibeModeEnabled ? { enabled: true } : undefined);
 		this.ui.requestRender();
+		this.#notifyModeChanged();
 	}
 
 	/**
@@ -4804,6 +5030,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				: undefined;
 		this.statusLine.setGoalModeStatus(status);
 		this.ui.requestRender();
+		this.#notifyModeChanged();
 	}
 
 	#resetGoalContinuationSuppression(): void {
@@ -5379,7 +5606,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 	}
 
-	async #enterGoalMode(options: { objective?: string; resume?: boolean; silent?: boolean }): Promise<void> {
+	async #enterGoalMode(options: {
+		objective?: string;
+		tokenBudget?: number;
+		resume?: boolean;
+		silent?: boolean;
+	}): Promise<void> {
+		using _hold = this.#holdModeChanges();
 		if (this.goalModeEnabled) {
 			return;
 		}
@@ -5394,13 +5627,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
 		const goalTools = [...new Set([...previousTools, "goal"])];
 		this.#goalModePreviousTools = previousTools;
+		let state: GoalModeState | undefined;
+		try {
+			state = options.resume
+				? await this.session.goalRuntime.resumeGoal()
+				: await this.session.goalRuntime.createGoal({
+						objective: options.objective ?? "",
+						tokenBudget: options.tokenBudget,
+					});
+			await this.session.setActiveToolsByName(goalTools);
+		} catch (error) {
+			this.#goalModePreviousTools = undefined;
+			// The runtime already journaled the goal; without its tool it must not
+			// stay active, or every later entry is refused against a stuck goal.
+			if (state) {
+				const runtime = this.session.goalRuntime;
+				await (options.resume ? runtime.pauseGoal() : runtime.dropGoal()).catch((rollbackError: unknown) =>
+					logger.warn("Failed to roll back goal after tool activation failed", { error: String(rollbackError) }),
+				);
+			}
+			throw error;
+		}
 		this.goalModePaused = false;
-		const state = options.resume
-			? await this.session.goalRuntime.resumeGoal()
-			: await this.session.goalRuntime.createGoal({
-					objective: options.objective ?? "",
-				});
-		await this.session.setActiveToolsByName(goalTools);
 		this.session.setGoalModeState(state);
 		this.goalModeEnabled = true;
 		this.#resetGoalContinuationSuppression();
@@ -5418,8 +5666,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		paused?: boolean;
 		reason?: "completed" | "paused" | "dropped";
 	}): Promise<void> {
+		using _hold = this.#holdModeChanges();
 		const previousTools = this.#goalModePreviousTools;
-		if (this.goalModeEnabled && previousTools) {
+		// Not gated on goalModeEnabled: a pause's goal_updated clears that flag
+		// before this runs, which used to leave the goal tool active.
+		if (previousTools) {
 			await this.session.setActiveToolsByName(previousTools);
 		}
 		const currentState = this.session.getGoalModeState();
@@ -6078,6 +6329,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/**
+	 * Paused plan → off. Tools, model, and plan state were already restored by the
+	 * prior #exitPlanMode({ paused: true }); only the paused flag, the reentry
+	 * marker, and the session mode entry remain. The draft file is kept.
+	 */
+	#disablePausedPlanMode(): void {
+		this.planModePaused = false;
+		this.#planModeHasEntered = false;
+		this.#updatePlanModeStatus();
+		this.sessionManager.appendModeChange("none");
+		this.showStatus("Plan mode disabled.");
+	}
+
 	async handlePlanModeCommand(
 		initialPrompt?: string,
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
@@ -6103,16 +6367,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			return false;
 		}
 		if (this.planModePaused && !initialPrompt) {
-			// No-arg third toggle: paused → off. Tools, model, and plan state were
-			// already restored by the prior #exitPlanMode({ paused: true }); only the
-			// paused flag, the reentry marker, and the session mode entry remain.
-			// Prompted /plan invocations fall through to #enterPlanMode below so the
-			// supplied prompt is still submitted as the first plan-mode turn.
-			this.planModePaused = false;
-			this.#planModeHasEntered = false;
-			this.#updatePlanModeStatus();
-			this.sessionManager.appendModeChange("none");
-			this.showStatus("Plan mode disabled.");
+			// No-arg third toggle. Prompted /plan invocations fall through to
+			// #enterPlanMode below so the supplied prompt is still submitted as the
+			// first plan-mode turn.
+			this.#disablePausedPlanMode();
 			return false;
 		}
 		if (!cfgPlanEnabled.get(this.session.settings)) {
@@ -6597,6 +6855,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #pauseGoalAction(): Promise<void> {
+		using _hold = this.#holdModeChanges();
 		if (!this.goalModeEnabled) {
 			this.showWarning("No active goal to pause.");
 			return;
@@ -6829,6 +7088,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (planState?.enabled && planState.planFilePath !== planFilePath) {
 			this.session.setPlanModeState({ ...planState, planFilePath });
 			this.sessionManager.appendModeChange("plan", { planFilePath });
+			// Reported only once committed: the next planning turn reads this state.
+			this.#notifyModeChanged();
 		}
 
 		const contextUsage = this.#getPlanApprovalContextUsage();
