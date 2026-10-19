@@ -9,6 +9,7 @@
   source,
   stdenv,
   withWaylandScreencast ? false,
+  withFatLto ? true,
 }:
 let
   platform =
@@ -75,7 +76,13 @@ let
       PCRE2_SYS_STATIC = "1";
       SOURCE_DATE_EPOCH = "1";
     }
-    // lib.optionalAttrs (platform ? rustFlags) { RUSTFLAGS = platform.rustFlags; };
+    // lib.optionalAttrs (platform ? rustFlags) { RUSTFLAGS = platform.rustFlags; }
+    # Override the release profile in place so the install path and the
+    # dependency artifacts stay the same. These values match `profile.ci`.
+    // lib.optionalAttrs (!withFatLto) {
+      CARGO_PROFILE_RELEASE_LTO = "thin";
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "16";
+    };
   };
   vendoredCrates = builtins.path {
     path = source + "/crates/vendor";

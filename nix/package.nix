@@ -28,12 +28,15 @@
   # ~750 MB (gstreamer, ffmpeg, systemd, ...). Official npm/Bazel addons ship
   # without it, so default to the lean build; opt in via `.override`.
   withWaylandScreencast ? false,
+  # Release builds use fat LTO with one codegen unit, which is slow. Set this
+  # to false for faster local builds with thin LTO and 16 codegen units.
+  withFatLto ? true,
 }:
 let
   packageJson = lib.importJSON ../packages/coding-agent/package.json;
   rootPackageJson = lib.importJSON ../package.json;
   nativeBuild = callPackage ./native.nix {
-    inherit source craneLib withWaylandScreencast;
+    inherit source craneLib withWaylandScreencast withFatLto;
   };
   inherit (nativeBuild) platform;
   bunRuntimeTemplate = callPackage ./bun-runtime.nix { inherit bun; };
