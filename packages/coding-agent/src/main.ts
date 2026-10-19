@@ -2621,6 +2621,12 @@ export async function runRootCommand(
 
 			if (modelFallbackMessage) {
 				notifs.push({ kind: "warn", message: modelFallbackMessage });
+				// Non-interactive runs have no notification surface: a model that still
+				// started in place of the requested one is reported on stderr, keeping
+				// structured stdout clean. A run with no model reports it below.
+				if (!isInteractive && session.model) {
+					process.stderr.write(`${chalk.yellow(`Warning: ${modelFallbackMessage}`)}\n`);
+				}
 			}
 
 			const modelRegistryError = modelRegistry.getError();

@@ -4,7 +4,7 @@ import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
 import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { logger } from "@oh-my-pi/pi-utils";
-import { type RoleChainCandidate, resolveRoleChain } from "../config/model-resolver";
+import { type RoleChainCandidate, resolveConfiguredModelPatterns, resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { type Settings, settings } from "../config/settings";
 import { type SttStreamHandle, sttClient } from "./asr-client";
@@ -219,7 +219,11 @@ export class STTController {
 
 	async #startWith(editor: SttTarget, options: SttCallbacks, signal: AbortSignal): Promise<void> {
 		const first = this.#resolveCandidate();
-		const configured = this.#settings.getModelRole("dictation")?.trim();
+		const configuredRole = this.#settings.getModelRole("dictation")?.trim();
+		// The first pattern the role expands to (through aliases and comma lists).
+		const configured = configuredRole
+			? (resolveConfiguredModelPatterns(configuredRole, this.#settings)?.[0] ?? configuredRole)
+			: undefined;
 		if (first?.replaces) {
 			options.showWarning(
 				`Dictation model ${first.replaces} not found; using ${first.model.provider}/${first.model.id}`,

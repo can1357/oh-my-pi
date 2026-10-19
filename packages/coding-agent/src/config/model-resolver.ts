@@ -1605,15 +1605,13 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 	let unresolvedExplicit: string | undefined;
 	for (const { selector, explicit } of selectors) {
 		const resolved = resolveModelRoleValue(selector, pool, { settings });
-		if (!resolved.model) {
-			if (explicit && selector.includes("/")) unresolvedExplicit ??= selector;
-			continue;
+		// An explicit value that resolved nothing, or a comma list that matched on a
+		// later entry, skipped its first expanded pattern (role aliases included).
+		if (explicit && (!resolved.model || (resolved.matchedPatternIndex ?? 0) > 0)) {
+			const firstPattern = resolveConfiguredModelPatterns(selector, settings)?.[0] ?? selector;
+			if (firstPattern.includes("/")) unresolvedExplicit ??= firstPattern;
 		}
-		// A comma list that matched on a later entry skipped its earlier ones.
-		if (explicit && (resolved.matchedPatternIndex ?? 0) > 0) {
-			const firstPattern = resolveConfiguredModelPatterns(selector, settings)?.[0];
-			if (firstPattern?.includes("/")) unresolvedExplicit ??= firstPattern;
-		}
+		if (!resolved.model) continue;
 		const key = formatModelStringWithRouting(resolved.model);
 		const existing = candidateByRoute.get(key);
 		if (existing) {

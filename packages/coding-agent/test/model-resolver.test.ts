@@ -930,6 +930,13 @@ describe("role priorities and chains", () => {
 		expect(resolveRoleChain("web", settings, [exa])[0]?.replaces).toBe("web/exa-pro");
 	});
 
+	test("marks the replacement when a configured role alias expands to a missing selector", () => {
+		const parallel = roleChainModel("web", "parallel");
+		const settings = Settings.isolated({ modelRoles: { web: "@search", search: "web/exa-pro" } });
+
+		expect(resolveRoleChain("web", settings, [parallel])[0]?.replaces).toBe("web/exa-pro");
+	});
+
 	test("upgrades a default primary when a configured fallback resolves the same route", () => {
 		const parallel = roleChainModel("web", "parallel");
 		const settings = Settings.isolated({
