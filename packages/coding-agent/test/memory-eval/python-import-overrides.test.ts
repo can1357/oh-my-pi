@@ -8,7 +8,7 @@ const PY = path.join(import.meta.dir, "../../bench/memory-eval/py");
 // A PYTHONPATH tree could supply another Mnemosyne, NumPy or pinned_source to the scripts that attest a runtime, or
 // shadow a standard module they import before any check could run. PYTHONHOME is refused too, but a bogus home makes
 // the interpreter itself fail before the script runs.
-it.skipIf(pythonPath === undefined).each(["upstream_run_a.py", "lme_official_check.py"])(
+it.skipIf(pythonPath === undefined).each(["upstream_run_a.py", "lme_official_check.py", "embed_parity.py"])(
 	"%s refuses to start while PYTHONPATH could override the venv's packages",
 	async script => {
 		await using dir = await TempDir.create("@memory-eval-overrides-");
