@@ -280,6 +280,25 @@ const CHROME_DETACH_REPORT_MS = 1_000;
 const POPUP_AFTER_INPUT_MS = 1_000;
 /** How long the user's app is held in front after omp's input opened a window; Chrome activates within milliseconds. */
 const KEEP_FRONT_MS = 500;
+/**
+ * omp's CDP inputs a page can open a window on, by method and event `type`: those that give the page user activation
+ * (a button or key going down, a release, a tap). Moves, wheels, key-ups and inserted text never do, so they read no
+ * front app. `true`: every event of that method.
+ */
+const WINDOW_OPENING_INPUT: Record<string, Record<string, true> | true> = {
+	"Input.dispatchMouseEvent": { mousePressed: true, mouseReleased: true },
+	"Input.emulateTouchFromMouseEvent": { mousePressed: true, mouseReleased: true },
+	"Input.dispatchKeyEvent": { keyDown: true, rawKeyDown: true },
+	"Input.dispatchTouchEvent": { touchStart: true, touchEnd: true },
+	"Input.synthesizeTapGesture": true,
+};
+
+function canOpenWindow(method: string, params: unknown): boolean {
+	if (!Object.hasOwn(WINDOW_OPENING_INPUT, method)) return false;
+	const types = WINDOW_OPENING_INPUT[method];
+	const type = (params as { type?: unknown } | undefined)?.type;
+	return types === true || (typeof type === "string" && Object.hasOwn(types, type));
+}
 
 /** The app in front of the user, as `macOSFrontApp` from `@oh-my-pi/pi-natives` reads it. */
 export interface FrontApp {
@@ -1084,7 +1103,7 @@ export class RelayBridge {
 			await this.#handleBrowserCommand(conn, msg, tab);
 			return true;
 		}
-		if (this.#readFrontApp && msg.method.startsWith("Input.")) {
+		if (this.#readFrontApp && canOpenWindow(msg.method, msg.params)) {
 			const app = this.#readFrontApp();
 			tab.frontAtInput = app && { app, at: Date.now() };
 		}

@@ -2268,6 +2268,34 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 			jest.useRealTimers();
 		}
 	});
+
+	it("reads the front app only on omp's inputs that can open a window, not on moves, key-ups or inserted text", async () => {
+		const { holds, frontApp } = frontAppRecorder();
+		const bridge = new RelayBridge();
+		bridge.keepFrontAppWith(frontApp);
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		const send = async (method: string, params: Record<string, unknown>): Promise<void> => {
+			bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method, params }));
+			ack(bridge, ext, "send");
+			await flush();
+		};
+		await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 });
+		await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: 5, y: 5, deltaX: 0, deltaY: 10 });
+		await send("Input.dispatchKeyEvent", { type: "keyUp", key: "a" });
+		await send("Input.insertText", { text: "a" });
+		windowOpen(bridge, ext, 1);
+		await flush();
+		expect(holds).toEqual([]);
+		// The first read, at the key going down.
+		await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter" });
+		windowOpen(bridge, ext, 1);
+		await flush();
+		expect(holds).toEqual([{ app: 1, ms: 500 }]);
+	});
 });
 
 describe("RelayBridge active tab metadata", () => {
