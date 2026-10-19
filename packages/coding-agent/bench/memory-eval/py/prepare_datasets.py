@@ -55,9 +55,9 @@ def marker(out: Path) -> Path:
 def read_current(out: Path, revision: str) -> str | None:
 	"""The cached file's text when its marker records `revision`; None when either is missing or stale."""
 	try:
-		if marker(out).read_text().strip() != revision:
+		if marker(out).read_text(encoding="utf-8").strip() != revision:
 			return None
-		return out.read_text()
+		return out.read_text(encoding="utf-8")
 	except FileNotFoundError:
 		return None
 
@@ -70,10 +70,12 @@ def publish(out: Path, text: str, revision: str) -> None:
 	"""
 	marker(out).unlink(missing_ok=True)
 	# shortcut: two setups racing on one cache can still leave the later marker over the earlier data; lock if that is ever run.
-	with tempfile.NamedTemporaryFile("w", dir=out.parent, prefix=f".{out.name}.", delete=False) as staging:
+	with tempfile.NamedTemporaryFile(
+		"w", encoding="utf-8", dir=out.parent, prefix=f".{out.name}.", delete=False
+	) as staging:
 		staging.write(text)
 	os.replace(staging.name, out)
-	marker(out).write_text(revision + "\n")
+	marker(out).write_text(revision + "\n", encoding="utf-8")
 
 
 def write_beam(name: str, split: str) -> list[dict]:
@@ -110,7 +112,7 @@ def main() -> None:
 	lme = DATA / "lme-s.json"
 	text = read_current(lme, LME_REVISION)
 	if text is None:
-		text = Path(fetch(LME_REPO, LME_FILE, LME_REVISION)).read_text()
+		text = Path(fetch(LME_REPO, LME_FILE, LME_REVISION)).read_text(encoding="utf-8")
 		publish(lme, text, LME_REVISION)
 	print(f"lme: {len(json.loads(text))} questions")
 

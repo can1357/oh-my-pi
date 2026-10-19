@@ -197,9 +197,14 @@ async function runCommand(argv: string[]): Promise<void> {
 		}
 	});
 
+	// Parallel ablations (e.g. --polyphonic vs not) share dataset/engine/protocol and may start in the same millisecond.
 	const out =
 		values.out ??
-		path.join(cacheRoot, "results", `${dataset}.${engine.name}.${protocol}.${startedAt.replace(/[:.]/g, "-")}.json`);
+		path.join(
+			cacheRoot,
+			"results",
+			`${dataset}.${engine.name}.${protocol}.${startedAt.replace(/[:.]/g, "-")}-${crypto.randomUUID().slice(0, 8)}.json`,
+		);
 	await Bun.write(out, JSON.stringify(result));
 	console.log(`aggregate: ${JSON.stringify(result.aggregate, null, 2)}`);
 	console.log(`perCategory: ${JSON.stringify(result.perCategory, null, 2)}`);
