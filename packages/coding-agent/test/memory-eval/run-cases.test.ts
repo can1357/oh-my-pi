@@ -73,6 +73,12 @@ it("run rejects a --cases value that is not a positive integer", async () => {
 	}
 });
 
+it("run rejects --polyphonic with upstream-compat, which replays upstream's default recall", async () => {
+	const { stderr, code } = await run("--engine", "mnemosyne", "--protocol", "upstream-compat", "--polyphonic");
+	expect(code).toBe(1);
+	expect(stderr).toContain("--polyphonic does not apply to upstream-compat");
+});
+
 it("run rejects engine options the engine does not have", async () => {
 	const [bogus, recallOnOracle, polyphonicOnOracle, polyphonicLinear] = await Promise.all([
 		run("--engine", "mnemopi", "--protocol", "fts-only", "--mnemopi-recall", "bogus"),
@@ -152,12 +158,16 @@ describe("pinnedCheckout", () => {
 
 	it("records HEAD and whether the checkout is dirty before the run starts", async () => {
 		const { dir, sha } = await repo("clean");
-		const dirtyDuringRun = await pinnedCheckout(dir, async state => {
-			await Bun.write(path.join(dir, "a"), "2");
-			return state;
-		});
-		expect(dirtyDuringRun).toEqual({ commit: sha, dirty: false });
+		expect(await pinnedCheckout(dir, async state => state)).toEqual({ commit: sha, dirty: false });
+		await Bun.write(path.join(dir, "a"), "2");
 		expect(await pinnedCheckout(dir, async state => state)).toEqual({ commit: sha, dirty: true });
+	});
+
+	it("refuses the result when a clean checkout gains local changes during the run", async () => {
+		const { dir } = await repo("edited");
+		await expect(pinnedCheckout(dir, () => Bun.write(path.join(dir, "a"), "2"))).rejects.toThrow(
+			"gained local changes",
+		);
 	});
 
 	it("refuses the result when HEAD moves during the run", async () => {
