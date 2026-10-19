@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
-import { clearRenderCache, Markdown, type MarkdownTheme } from "@oh-my-pi/pi-tui/components/markdown";
+import { clearRenderCache, Markdown, type MarkdownTheme, type TableLocks } from "@oh-my-pi/pi-tui/components/markdown";
 import { getMarkdownTheme, getMarkdownThemeWithLinkTargets, theme } from "@oh-my-pi/pi-tui/theme";
 import { TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import * as latexBlock from "@oh-my-pi/pi-tui/latex-block";
@@ -1127,5 +1127,45 @@ describe("Markdown OSC 8 tail normalization across streaming appends", () => {
 		clearRenderCache();
 		streaming.setText(`${truncated}|${ST}`);
 		expect(streaming.render(60)).toEqual(renderCold(`${truncated}|${ST}`, 60));
+	});
+});
+
+describe("Locked streaming tables", () => {
+	const header = "| Key | Value |\n|---|---|\n";
+
+	/** A transient instance streaming `text` with its last table locked. */
+	function lockedStream(text: string, locks: TableLocks): Markdown {
+		const live = new Markdown("", 0, 0, THEME);
+		live.tableLocks = locks;
+		live.transientRenderCache = true;
+		live.setText(text);
+		live.render(60);
+		expect(live.lockOpenTable()).toBe(true);
+		live.render(60);
+		return live;
+	}
+
+	it("keeps the locks of two tables with the same header apart", () => {
+		const locks: TableLocks = new Map();
+		const first = `${header}| a | b |\n\nBetween.\n\n`;
+		const rows = "| longer key here | a much longer value cell here |\n| next | row |\n";
+		lockedStream(`${first}${header}${rows}| x`, locks);
+		// The second table was locked at the widths its rows had, so its final
+		// render matches an unlocked one, and the first table never took its lock.
+		const full = `${first}${header}${rows}`;
+		clearRenderCache();
+		const plain = new Markdown(full, 0, 0, THEME).render(60);
+		clearRenderCache();
+		const locked = new Markdown(full, 0, 0, THEME);
+		locked.tableLocks = locks;
+		expect(locked.render(60)).toEqual(plain);
+	});
+
+	it("keeps a row with an unresolved reference label out of the stable text", () => {
+		const live = lockedStream(`${header}| a | b |\n| [doc] | d |\n| e`, new Map());
+		// A later `[doc]: url` definition could still turn that cell into a link.
+		const stable = live.getLastRenderStableText();
+		expect(stable).toContain("| a | b |");
+		expect(stable).not.toContain("[doc]");
 	});
 });

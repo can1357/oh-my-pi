@@ -426,16 +426,18 @@ describe("composer inline shrink (#11007)", () => {
 			{ length: 24 },
 			(_, p) => `P${String(p).padStart(2, "0")} ${"word ".repeat(28).trim()}`,
 		);
-		const shown = (): Set<string> =>
-			new Set(h.terminal.getScrollBuffer().flatMap(row => Bun.stripANSI(row).match(/\bP\d\d\b/g) ?? []));
+		const tokens = (): string[] =>
+			h.terminal.getScrollBuffer().flatMap(row => Bun.stripANSI(row).match(/\bP\d\d\b/g) ?? []);
 		const seen = new Set<string>();
 		for (let n = 1; n <= paragraphs.length; n++) {
 			message.updateContent(reply(paragraphs.slice(0, n).join("\n\n")), { transient: true });
 			h.composer.ui.requestRender();
 			await h.scheduler.settle(h.terminal);
-			const now = shown();
-			// A paragraph once on screen stays on screen or in scrollback.
+			const all = tokens();
+			const now = new Set(all);
+			// A paragraph once on screen stays on screen or in scrollback, and only once.
 			expect([...seen].filter(p => !now.has(p))).toEqual([]);
+			expect(all.filter((p, i) => all.indexOf(p) !== i)).toEqual([]);
 			for (const p of now) seen.add(p);
 		}
 		h.composer.stop();

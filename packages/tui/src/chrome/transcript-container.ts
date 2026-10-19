@@ -1431,6 +1431,15 @@ export class TranscriptContainer extends Container {
 		if (offered?.kind === "commit" && offered.split !== undefined && offered.end === index) {
 			return this.#splitRowCount(entry, offered.split, width);
 		}
+		// A commit can carry the streaming head's rows too (completeScrollback).
+		if (
+			offered?.kind === "commit" &&
+			offered.headEmittedEnd !== undefined &&
+			offered.end === index &&
+			entry.split === undefined
+		) {
+			return this.#stablePrefixRowCount(entry, offered.headEmittedEnd, width);
+		}
 		if (offered?.kind === "append" && offered.entry === index && entry.split === undefined) {
 			return this.#stablePrefixRowCount(entry, offered.emittedEnd, width);
 		}
