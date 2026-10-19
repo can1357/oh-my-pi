@@ -50,6 +50,12 @@
 - Fixed a warm stats sync worker being reused after the agent directory moved (for example an SDK that re-points at a different sessions root), which persisted new transcripts under `..` and as subagent usage instead of their real folder and type ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 - Fixed a stats sync that kept dispatching transcripts to a worker which had already crashed mid-run, stalling the run until a reply that never came; the drain now fails cleanly and the caller retries with a fresh worker ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 
+## [18.12.0] - 2026-10-17
+
+### Fixed
+
+- Fixed usage stats pricing Google Antigravity and MiniMax Token Plan models at $0 when their catalog rows carry no price; they now use the catalog's pricing peer, as `xai-oauth` already did ([#16092](https://github.com/can1357/oh-my-pi/pull/16092) by [@H4vC](https://github.com/H4vC))
+
 ## [18.11.0] - 2026-10-14
 
 ### Fixed
