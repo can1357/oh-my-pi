@@ -677,7 +677,10 @@ function bodyLines(
 	const tone = options.tone ?? "toolOutput";
 	const quote = theme.fg("dim", theme.md.quoteBorder);
 	const source = body.split("\n").filter(line => line.trim());
-	const shown = expanded ? source : cappedHeadLines(source, options.collapsedLines ?? BODY_LINES_COLLAPSED).lines;
+	// Expanded keeps its own, larger budget: a body with thousands of lines would
+	// otherwise push the transcript off the screen.
+	const limit = expanded ? PREVIEW_LIMITS.EXPANDED_LINES : (options.collapsedLines ?? BODY_LINES_COLLAPSED);
+	const shown = cappedHeadLines(source, limit).lines;
 	const hidden = source.length - shown.length;
 	const contentWidth = Math.max(1, width - visibleWidth(indent) - 2);
 	let cut = false;
