@@ -555,6 +555,9 @@ function currentWorkspaceFolders(client: LspClient): Array<{ uri: string; name: 
  */
 const pendingFolderLoads = new WeakMap<LspClient, number>();
 
+/** Per client, the last folder delivery; the next waits for it to settle. */
+const lastFolderDelivery = new WeakMap<LspClient, Promise<void>>();
+
 function countFolderLoad(client: LspClient, delta: number): void {
 	const count = (pendingFolderLoads.get(client) ?? 0) + delta;
 	if (count > 0) pendingFolderLoads.set(client, count);
@@ -607,8 +610,12 @@ export async function ensureWorkspaceFolders(
 	addedWorkspaceFolders.set(client, folders);
 	const missing = [...wanted].filter(folder => !folders.has(folder));
 	if (missing.length > 0) {
-		const delivery = addWorkspaceFolders(client, missing, folders);
+		// One delivery at a time, so a failed write rolls back only its own add's load.
+		const delivery = (lastFolderDelivery.get(client) ?? Promise.resolve())
+			.catch(() => {})
+			.then(() => addWorkspaceFolders(client, missing, folders));
 		delivery.catch(() => {});
+		lastFolderDelivery.set(client, delivery);
 		for (const folder of missing) folders.set(folder, delivery);
 	}
 	await untilAborted(signal, Promise.all([...wanted].map(folder => folders.get(folder))));

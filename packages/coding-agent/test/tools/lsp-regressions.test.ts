@@ -4276,6 +4276,56 @@ describe("lsp regressions", () => {
 			}
 		});
 
+		it("keeps the load of a delivered add pending when an overlapping add's write fails", async () => {
+			const { tempDir, sessionRoot, siblingRoot, thirdRoot } = await makeCheckouts("@omp-lsp-overlap-failed-");
+			try {
+				const { server, serverConfig } = useServer(FOLDER_CHANGES);
+				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
+				progress(server, "load", "begin");
+				progress(server, "load", "end");
+				await lspClient.waitForProjectLoaded(client);
+				// The sibling's notification is written first and fails only once the third
+				// checkout's add has been requested behind it.
+				const siblingWritten = Promise.withResolvers<void>();
+				const failSibling = Promise.withResolvers<void>();
+				const stdin = client.proc.stdin;
+				const write = stdin.write.bind(stdin);
+				vi.spyOn(stdin, "write").mockImplementation((chunk: string | Uint8Array) => {
+					const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+					if (!text.includes(fileToUri(siblingRoot))) return write(chunk);
+					siblingWritten.resolve();
+					return failSibling.promise.then(() => {
+						throw new Error("EPIPE");
+					});
+				});
+
+				const failed = rejectionOf(
+					lspClient.ensureWorkspaceFolder(client, path.join(siblingRoot, "src", "target.py")),
+				);
+				await siblingWritten.promise;
+				const delivered = lspClient.ensureWorkspaceFolder(client, path.join(thirdRoot, "src", "target.py"));
+				// Finding the third checkout is real filesystem I/O; let it reach its delivery.
+				await Bun.sleep(50);
+				failSibling.resolve();
+				expect(String(await failed)).toContain("EPIPE");
+				await delivered;
+				let loaded = false;
+				const waiting = lspClient.waitForProjectLoaded(client).then(() => {
+					loaded = true;
+				});
+				await lspClient.sendRequest(client, "test/barrier", {});
+				expect(loaded).toBe(false);
+
+				progress(server, "third", "begin");
+				progress(server, "third", "end");
+				await waiting;
+				expect(loaded).toBe(true);
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
 		it("keeps a ContentModified retry within the default request timeout", async () => {
 			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-retry-default-");
 			try {
