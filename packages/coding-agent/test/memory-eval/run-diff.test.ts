@@ -206,6 +206,23 @@ it("diff compares runs whose engine options differ, naming both configurations",
 	expect(across.stdout).toContain("b: engine mnemosyne protocol standard k 10 mnemopiRecall recall polyphonic true");
 });
 
+it("diff names each run's embedding model digest and warns when they differ", async () => {
+	const a = await writeResult("model-a", {
+		engine: "mnemopi",
+		engineInfo: { embedding_model_sha256: "a".repeat(64) },
+	});
+	const b = await writeResult("model-b", {
+		engine: "mnemopi",
+		engineInfo: { embedding_model_sha256: "b".repeat(64) },
+	});
+	const differ = await diff(a, b);
+	expect(differ.code).toBe(0);
+	expect(differ.stdout).toContain(`a: engine mnemopi model ${"a".repeat(12)} protocol standard`);
+	expect(differ.stdout).toContain(`b: engine mnemopi model ${"b".repeat(12)} protocol standard`);
+	expect(differ.stderr).toContain("warning: a and b embedded with different model files");
+	expect((await diff(a, a)).stderr).not.toContain("different model files");
+});
+
 it("diff warns that with-sleep recall is not comparable across engines", async () => {
 	const mnemopi = await writeResult("sleep-mnemopi", { engine: "mnemopi", protocol: "with-sleep" });
 	const mnemosyne = await writeResult("sleep-mnemosyne", { engine: "mnemosyne", protocol: "with-sleep" });

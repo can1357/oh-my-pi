@@ -30,6 +30,9 @@ const EMBED_FAILURE_TRIGGER = "embed-failure-trigger";
 const FAILING_EMBED_SERVER = `import json, sys
 for line in sys.stdin:
     req = json.loads(line)
+    if req["op"] != "embed":
+        print(json.dumps({"id": req["id"], "result": "model-digest" if req["op"] == "model_digest" else {}}), flush=True)
+        continue
     texts = req["params"]["texts"]
     if any(${JSON.stringify(EMBED_FAILURE_TRIGGER)} in text for text in texts):
         reply = {"id": req["id"], "error": "embed boom"}
@@ -80,6 +83,31 @@ describe("mnemopi python embedder", () => {
 			await engine.dispose();
 		}
 	});
+});
+
+it.skipIf(!pythonPath)("refuses to describe a run whose model files changed after warmup loaded them", async () => {
+	// Each model_digest call reports the next digest, as if another process replaced a file mid-run.
+	const script = tmp.join("changing_model_server.py");
+	await Bun.write(
+		script,
+		`import json, sys
+digests = iter(["digest-at-warmup", "digest-at-end"])
+for line in sys.stdin:
+    req = json.loads(line)
+    op = req["op"]
+    result = next(digests) if op == "model_digest" else {} if op == "versions" else [[0.1] * 384 for _ in req["params"]["texts"]]
+    print(json.dumps({"id": req["id"], "result": result}), flush=True)
+`,
+	);
+	const engine = mnemopiEngine({ embedder: "python", embedPython: python(), embedScript: script });
+	try {
+		await engine.warmup("standard");
+		await expect(engine.describe()).rejects.toThrow(
+			"embedding model files changed during the run (digest-at-warmup → digest-at-end)",
+		);
+	} finally {
+		await engine.dispose();
+	}
 });
 
 // Replies with the PYTHON* variables it inherited.
