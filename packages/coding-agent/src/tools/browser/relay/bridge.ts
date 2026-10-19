@@ -360,10 +360,11 @@ export class RelayBridge {
 	/** Reads the app in front of the user; set by {@link keepFrontAppWith} where the relay can put it back (macOS). */
 	#readFrontApp: (() => FrontApp | null) | undefined;
 	/**
-	 * True while a hold on the user's app runs. A window opened meanwhile shares it, and omp's input reads no front
-	 * app then: the browser may be in front, and a later hold would keep it there.
+	 * When the running hold on the user's app ends (`Date.now()` ms), at its deadline or once it settles, whichever is
+	 * first; 0 with none. A window opened meanwhile shares it, and omp's input reads no front app then: the browser may
+	 * be in front, and a later hold would keep it there.
 	 */
-	#keepingFront = false;
+	#keepingFrontUntil = 0;
 
 	constructor(
 		opts: {
@@ -1107,7 +1108,7 @@ export class RelayBridge {
 			return true;
 		}
 		if (this.#readFrontApp && canOpenWindow(msg.method, msg.params)) {
-			tab.frontAtInput = this.#keepingFront ? null : this.#readFrontAtInput(this.#readFrontApp);
+			tab.frontAtInput = Date.now() < this.#keepingFrontUntil ? null : this.#readFrontAtInput(this.#readFrontApp);
 		}
 		try {
 			const result = await this.#rpc(
@@ -1167,8 +1168,9 @@ export class RelayBridge {
 	#keepFrontApp(tab: TabState): void {
 		const front = tab.frontAtInput;
 		tab.frontAtInput = null;
-		if (!front || this.#keepingFront || Date.now() - front.at > POPUP_AFTER_INPUT_MS) return;
-		this.#keepingFront = true;
+		if (!front || Date.now() < this.#keepingFrontUntil || Date.now() - front.at > POPUP_AFTER_INPUT_MS) return;
+		const until = Date.now() + KEEP_FRONT_MS;
+		this.#keepingFrontUntil = until;
 		front.app
 			.keepInFront(KEEP_FRONT_MS)
 			.then(
@@ -1182,7 +1184,7 @@ export class RelayBridge {
 				},
 			)
 			.finally(() => {
-				this.#keepingFront = false;
+				if (this.#keepingFrontUntil === until) this.#keepingFrontUntil = 0;
 			});
 	}
 

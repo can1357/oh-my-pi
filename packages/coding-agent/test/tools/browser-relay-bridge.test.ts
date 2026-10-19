@@ -2354,6 +2354,41 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		expect(reads).toBe(2);
 		expect(holds).toEqual([2]);
 	});
+
+	it("ends a hold at its deadline even while the native hold has not settled", async () => {
+		jest.useFakeTimers();
+		try {
+			let reads = 0;
+			const holds: number[] = [];
+			const bridge = new RelayBridge();
+			// The native hold is still queued behind other native work: it never settles here.
+			bridge.keepFrontAppWith(() => {
+				const app = ++reads;
+				return {
+					keepInFront: () => {
+						holds.push(app);
+						return new Promise<number>(() => {});
+					},
+				};
+			});
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 })]);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+			await sendInput(bridge, ext, connId, sessionId);
+			windowOpen(bridge, ext, 1);
+			await flush();
+			jest.advanceTimersByTime(500);
+			// The next click's window, after the first hold's 500 ms.
+			await sendInput(bridge, ext, connId, sessionId);
+			windowOpen(bridge, ext, 1);
+			await flush();
+			expect(holds).toEqual([2, 4]);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
 });
 
 describe("RelayBridge active tab metadata", () => {
