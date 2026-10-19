@@ -1665,6 +1665,13 @@ impl PickLog {
 				.map(|panel| panel.filter(|(_, when)| *when >= at).map(|(psn, _)| psn)),
 		})
 	}
+
+	/// The sampler could not start: what follows the latest read goes unseen,
+	/// so the watch vouches for nothing ([`Self::since`]).
+	const fn lose_sampler(&mut self) {
+		self.sampling = false;
+		self.watch_from = None;
+	}
 }
 
 /// Records `picks`, read at `now`, and keeps the [`PickLog`] sampling until
@@ -1693,9 +1700,9 @@ fn watch_picks(spi: &'static ForegroundSpi, picks: Picks, now: Instant) {
 				}
 			}
 		});
-	// Without a sampler the hold sees only its own readings.
+	// Without a sampler nothing vouches for the time until the hold.
 	if sampler.is_err() {
-		PICK_LOG.lock().sampling = false;
+		PICK_LOG.lock().lose_sampler();
 	}
 }
 
@@ -1729,10 +1736,10 @@ enum HoldStep {
 /// user's app goes back behind it. A click anywhere or a held ⌘/⌃ is the user
 /// picking an app and ends the hold. Only the first app to take the front is
 /// sent back, as Chrome takes it again to show a popup window; any other app
-/// coming forward ends the hold. That first app is not taken for the browser
-/// once ⌥ was held (a launcher may be opening) or another process held the
-/// keyboard while not in front (a launcher's or Spotlight's panel the user
-/// may have picked it from), nor when it comes forward within
+/// coming forward ends the hold. No app goes back, the first taker again
+/// included, once ⌥ was held (a launcher may be opening) or another process
+/// held the keyboard while not in front (a launcher's or Spotlight's panel the
+/// user may have picked it from), nor when it comes forward within
 /// [`USER_SWITCH_WINDOW`] of a ⌘/⌃ key held since the read, or was already in
 /// front at the first reading after one (a ⌘-Tab done before the hold began,
 /// however late its app is listed in front). Typing, Shift included, picks no
@@ -1789,10 +1796,12 @@ impl FrontHold {
 		// A process that held the keyboard before coming forward is that app
 		// taking focus a moment early, not a panel it was picked from.
 		let picked = self.panels.iter().any(|panel| *panel != front) || switched;
+		if self.option || picked {
+			return HoldStep::Stop;
+		}
 		match self.taker {
 			Some(taker) if taker == front => HoldStep::HandBack,
 			Some(_) => HoldStep::Stop,
-			None if self.option || picked => HoldStep::Stop,
 			None => {
 				self.taker = Some(front);
 				HoldStep::HandBack
@@ -4063,6 +4072,30 @@ mod tests {
 		);
 		assert!(pick_log(None).since(read, read).is_none());
 		assert!(ended.since(read, read + PICK_WATCH).is_some());
+		// The sampler could not start.
+		let mut lost = pick_log(Some((read, read + PICK_WATCH)));
+		lost.lose_sampler();
+		assert!(lost.since(read, read).is_none());
+	}
+
+	#[test]
+	fn a_launcher_used_after_a_hand_back_keeps_the_taker_it_picks_in_front() {
+		// ⌥ held over the user's app (a launcher opening), then the browser
+		// comes forward again.
+		let mut hold = hold();
+		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::HandBack);
+		assert_eq!(hold.observe(HOLD_USER, &reading(HOLD_USER, OPTION_MODIFIER)), HoldStep::Wait);
+		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::Stop);
+		// A launcher's panel holds the keyboard over the user's app, and the
+		// user picks the browser from it.
+		let mut hold = self::hold();
+		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::HandBack);
+		let panel = HoldInput {
+			picks: Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_THIRD) },
+			..reading(HOLD_USER, 0)
+		};
+		assert_eq!(hold.observe(HOLD_USER, &panel), HoldStep::Wait);
+		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::Stop);
 	}
 
 	/// A desktop where the browser is in front and each hand-back answers in
