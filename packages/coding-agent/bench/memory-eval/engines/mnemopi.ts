@@ -59,15 +59,24 @@ function tierOf(label: string | undefined, summaryOf: string | undefined): Recal
 	return tier;
 }
 
-/** The files fastembed loads from a model directory; anything else there is a cache byproduct, not the model. */
-const LOADED_JSON = new Set(["config.json", "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json"]);
-const isLoaded = (name: string) => LOADED_JSON.has(name) || name.endsWith(".onnx") || name.endsWith(".onnx_data");
+/**
+ * What fastembed loads for this harness's one model, BAAI/bge-small-en-v1.5 (`Qdrant/bge-small-en-v1.5-onnx-Q`, see
+ * `packages/mnemopi/src/core/fastembed-model-cache.ts`). Anything else in the directory, such as an alternate `.onnx`
+ * export, a quarantined `*.onnx.corrupt-<time>` download or a lock file, is not the model.
+ */
+const LOADED = new Set([
+	"model_optimized.onnx",
+	"config.json",
+	"special_tokens_map.json",
+	"tokenizer.json",
+	"tokenizer_config.json",
+]);
+const isLoaded = (name: string) => LOADED.has(name);
 
 /**
  * Digest of the model files in `modelDir`, so two runs with different model or tokenizer bytes cannot share a config.
- * Must match `model_dir_digest` in py/model_digest.py: SHA-256 over `<name>\0<sha256 of bytes>\n` for every loaded
- * file (`*.onnx`, `*.onnx_data`, the tokenizer/config JSON; symlinks followed), in sorted name order. A quarantined
- * `*.onnx.corrupt-<time>` download left by Mnemopi's healer, or a lock file, does not count.
+ * Must match `model_dir_digest` in py/model_digest.py: SHA-256 over `<name>\0<sha256 of bytes>\n` for each file in
+ * LOADED that exists (symlinks followed), in sorted name order.
  */
 export async function modelDirDigest(modelDir: string): Promise<string> {
 	const outer = new Bun.CryptoHasher("sha256");
