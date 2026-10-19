@@ -487,7 +487,11 @@ export class TranscriptContainer extends Container {
 	 */
 	resetStableEmission(): void {
 		this.#syncEntries();
-		if (this.#offered?.kind === "append" || (this.#offered?.kind === "commit" && this.#offered.split)) {
+		const offered = this.#offered;
+		if (
+			offered?.kind === "append" ||
+			(offered?.kind === "commit" && (offered.split || offered.headEmittedEnd !== undefined))
+		) {
 			this.#offered = undefined;
 		}
 		this.#historyEnd = undefined;
@@ -521,8 +525,12 @@ export class TranscriptContainer extends Container {
 		if (index < 0) return -1;
 		const entry = this.#entries[index]!;
 		if (entry.state === "committed" || entry.emitted > 0 || entry.split !== undefined) return -1;
-		if (this.#offered?.kind === "commit" && index < this.#offered.end + (this.#offered.split ? 1 : 0)) return -1;
-		if (this.#offered?.kind === "append" && index === this.#offered.entry) return -1;
+		// A commit protects its boundary block too when it carries rows of it:
+		// a split's head, or a streaming block's stable rows (completeScrollback).
+		const offered = this.#offered;
+		const carriesBoundary = offered?.kind === "commit" && (offered.split || offered.headEmittedEnd !== undefined);
+		if (offered?.kind === "commit" && index < offered.end + (carriesBoundary ? 1 : 0)) return -1;
+		if (offered?.kind === "append" && index === offered.entry) return -1;
 		return index;
 	}
 
