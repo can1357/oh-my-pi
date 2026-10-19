@@ -1,17 +1,9 @@
 import { popLoopPhase, pushLoopPhase, withLoopPhase } from "@oh-my-pi/pi-utils";
 import {
 	DENSE_CANDIDATE_LIMIT,
-	importedWeight,
-	inferredWeight,
 	normalizedRecallWeights,
 	polyphonicRecallEnabled,
-	statedWeight,
 	temporalHalflifeHours,
-	tier1Weight,
-	tier2Weight,
-	tier3Weight,
-	toolWeight,
-	unknownWeight,
 } from "../../config";
 import { hasCjk, matchesWordForm } from "../../util/regex";
 import { embedQuery } from "../embeddings";
@@ -24,6 +16,7 @@ import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
 import { cosineSimilarity } from "../vector-math";
 import { cachedEmbeddings } from "./embedding-cache";
+import { recallTrustWeight, resolveTrustWeights, type TrustWeights } from "./recall-trust";
 import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
 
 type DbValue = string | number | null | Uint8Array;
@@ -78,34 +71,6 @@ type RecallMmrItem = {
 	readonly result: RecallResult;
 	readonly [key: string]: unknown;
 };
-
-/**
- * Score multipliers for a candidate's stored `veracity` label and, for episodic
- * rows, its degradation tier. Resolved once per {@link recall} from the
- * `MNEMOPI_<LABEL>_WEIGHT` and `MNEMOPI_TIER<N>_WEIGHT` readers in `config.ts`,
- * clamped at 0 like the hybrid weights so a negative value cannot rank a row
- * below one labelled `false`; `true`, `likely_true` and `false` have no override.
- */
-interface TrustWeights {
-	readonly veracity: Readonly<Record<string, number>> & { readonly unknown: number };
-	readonly tiers: readonly [tier1: number, tier2: number, tier3: number];
-}
-
-function resolveTrustWeights(): TrustWeights {
-	return {
-		veracity: {
-			stated: Math.max(0, statedWeight()),
-			true: 1.0,
-			likely_true: 1.0,
-			unknown: Math.max(0, unknownWeight()),
-			inferred: Math.max(0, inferredWeight()),
-			imported: Math.max(0, importedWeight()),
-			tool: Math.max(0, toolWeight()),
-			false: 0,
-		},
-		tiers: [Math.max(0, tier1Weight()), Math.max(0, tier2Weight()), Math.max(0, tier3Weight())],
-	};
-}
 
 /**
  * Default per-result content preview cap enforced by {@link recall}. Content
@@ -685,6 +650,10 @@ function scoreCandidate(
 	const lexical = lexicalGroupRelevance(queryGroups, searchableContent);
 	const minRel = minimumRelevance(queryTokens);
 	if (lexical < minRel && candidate.signals.dense < 0.65) return null;
+	const degradationTier = candidate.tierLabel === "episodic" ? asNumber(candidate.row.tier, 1) : undefined;
+	const trustWeight = recallTrustWeight(trust, candidate.row.veracity, degradationTier);
+	// Weight 0 (a `false` label or a zeroed override) means the row must not surface at all.
+	if (trustWeight === 0) return null;
 	const [vecWeight, ftsWeight, importanceWeight] = weights;
 	const importance = asNumber(candidate.row.importance, 0.5);
 	const decay =
@@ -723,14 +692,7 @@ function scoreCandidate(
 		temporalScore = Math.max(temporalScore, eventBoost);
 		score *= 1 + temporalWeight * temporalScore;
 	}
-	const veracity = asString(candidate.row.veracity) || "unknown";
-	const veracityWeight = trust.veracity[veracity] ?? trust.veracity.unknown;
-	const degradationTier = candidate.tierLabel === "episodic" ? asNumber(candidate.row.tier, 1) : undefined;
-	if (candidate.tierLabel === "episodic") {
-		const [tier1, tier2, tier3] = trust.tiers;
-		score *= degradationTier === 1 ? tier1 : degradationTier === 2 ? tier2 : tier3;
-	}
-	score *= veracityWeight * currentContentAdjustment(searchableContent, options.currentSensitive === true);
+	score *= trustWeight * currentContentAdjustment(searchableContent, options.currentSensitive === true);
 	const preview = clipRecallContent(content, options.contentPreviewChars ?? RECALL_CONTENT_PREVIEW_CHARS);
 	const result: RecallResult = {
 		...candidate.row,
@@ -1136,8 +1098,9 @@ async function linearRecallEnhanced(
 	});
 	return withLoopPhase("mnemopi.recall", () => {
 		if (options.includeFacts === true) {
-			const facts = factRecall(beam, query, factRecallLimit(topK));
-			results.push(...facts);
+			for (const fact of factRecall(beam, query, factRecallLimit(topK))) {
+				if (matchesRecallFilters(fact, enhancedOptions)) results.push(fact);
+			}
 		}
 		results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
 		const finalResults = rerankRecallResults(results, options.mmrLambda ?? 0.7, topK);
@@ -1149,8 +1112,8 @@ async function linearRecallEnhanced(
 /**
  * Polyphonic recall: the linear enhanced ranking becomes the `hybrid` voice and is
  * fused by reciprocal rank with the vector, graph, fact and temporal voices. Scores
- * are rescaled to 0..1 (1 = ranked first by every voice) so they stay comparable
- * across banks; the raw fusion score stays in `combined_score`.
+ * are rescaled to 0..1 (1 = ranked first by every voice) within this bank only;
+ * they are not confidence or cross-bank relevance. Raw fusion stays in `combined_score`.
  */
 async function polyphonicRecallEnhanced(
 	beam: BeamMemoryState,
@@ -1193,10 +1156,11 @@ async function polyphonicRecallEnhanced(
 
 /**
  * The polyphonic voices only enforce session/channel visibility; apply the remaining
- * linear-recall filters to the rows they contribute. Fact rows come from the linear
- * ranking and already passed them.
+ * linear-recall filters to memory rows. Facts have their own visibility rules and
+ * inherit source veracity, so the explicit veracity filter applies to them too.
  */
 function matchesRecallFilters(result: OrchestratedRecallResult, options: RecallOptionsInternal): boolean {
+	if (options.veracity && result.veracity !== options.veracity) return false;
 	if (result.tier_label === "fact") return true;
 	if (options.includeWorking === false && result.tier_label === "working") return false;
 	const timestamp = result.timestamp ?? "";
@@ -1205,7 +1169,6 @@ function matchesRecallFilters(result: OrchestratedRecallResult, options: RecallO
 	const required: ReadonlyArray<readonly [unknown, string | null | undefined]> = [
 		[result.source, options.source],
 		[result.source, options.topic],
-		[result.veracity, options.veracity],
 		[result.memory_type, options.memoryType],
 		[result.author_id, options.authorId],
 		[result.author_type, options.authorType],
@@ -1283,7 +1246,9 @@ function sandwichOrder(results: readonly RecallResult[]): {
 	medium: RecallResult[];
 	closing: RecallResult[];
 } {
-	const scored = [...results].sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+	const scored = results.some(result => typeof result.combined_score === "number")
+		? results
+		: [...results].sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
 	const highLimit = scored.length > 0 && scored.length < 4 ? 1 : 3;
 	const high = scored.slice(0, highLimit);
 	const medium = scored.slice(high.length, high.length + 5);
@@ -1304,8 +1269,9 @@ function factLine(result: RecallResult): string {
 	const content = clipRecallContent(result.content.trim(), 200).content;
 	const ts = typeof result.timestamp === "string" && result.timestamp.length > 0 ? result.timestamp.slice(0, 10) : "?";
 	const source = result.source ?? "unknown";
-	const score = result.score ?? result.importance ?? 0;
-	return `${content} (${ts}, ${source}, c:${score.toFixed(1)})`;
+	const confidence =
+		typeof result.combined_score === "number" ? "" : `, c:${(result.score ?? result.importance ?? 0).toFixed(1)}`;
+	return `${content} (${ts}, ${source}${confidence})`;
 }
 
 export function formatContext(beam: BeamMemoryState, results: readonly RecallResult[], format = "bullet"): string {
@@ -1381,14 +1347,20 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 	if (matched.length === 0) return [];
 	const rowids = matched.map(row => asNumber(row.rowid)).filter(rowid => rowid > 0);
 	if (rowids.length === 0) return [];
-	const visibility = factVisibilityWhere(beam, "");
+	const visibility = factVisibilityWhere(beam, "f");
 	const ranks = normalizeRanks(matched, "rowid");
+	const trust = resolveTrustWeights();
+	// Source trust in the same read: a working row wins over an episodic one with the same id and has no tier.
 	const rows = queryAll(
 		beam,
-		`SELECT rowid, fact_id, subject, predicate, object, timestamp, confidence
-		 FROM facts
-		 WHERE rowid IN (${placeholders(rowids.length)}) AND ${visibility.where}
-		 ORDER BY confidence DESC
+		`SELECT f.rowid, f.fact_id, f.subject, f.predicate, f.object, f.timestamp, f.confidence,
+			CASE WHEN sw.id IS NOT NULL THEN sw.veracity ELSE se.veracity END AS source_veracity,
+			CASE WHEN sw.id IS NULL AND se.id IS NOT NULL THEN COALESCE(se.tier, 1) END AS source_tier
+		 FROM facts f
+		 LEFT JOIN working_memory sw ON sw.id = f.source_msg_id
+		 LEFT JOIN episodic_memory se ON se.id = f.source_msg_id AND sw.id IS NULL
+		 WHERE f.rowid IN (${placeholders(rowids.length)}) AND ${visibility.where}
+		 ORDER BY f.confidence DESC
 		 LIMIT ?`,
 		[...rowids, ...visibility.params, rowids.length],
 	);
@@ -1403,7 +1375,12 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 			const queryGroups = factExpandedTokenGroups(query, searchable);
 			const lexical = lexicalGroupRelevance(queryGroups, searchable);
 			const rank = ranks.get(asNumber(row.rowid)) ?? 0;
+			// A source that is no longer stored leaves the fact `unknown`, never deleted.
+			const veracity = asString(row.source_veracity) || "unknown";
+			const sourceTier = row.source_tier === null ? undefined : asNumber(row.source_tier, 1);
+			if (recallTrustWeight(trust, veracity, sourceTier) === 0) return null;
 			const result: FactRecallResult = {
+				veracity,
 				id: asString(row.fact_id),
 				content,
 				score: round4(lexical * (0.7 + confidence * 0.2 + rank * 0.1)),
@@ -1426,7 +1403,7 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 			};
 			return result;
 		})
-		.filter(result => (result.score ?? 0) > 0)
+		.filter((result): result is FactRecallResult => result !== null && (result.score ?? 0) > 0)
 		.sort((left, right) => (right.score ?? 0) - (left.score ?? 0))
 		.slice(0, topK);
 }

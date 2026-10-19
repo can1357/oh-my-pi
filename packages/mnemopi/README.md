@@ -31,6 +31,10 @@ memory.close();
 
 Lexical recall matches whole tokens, declared synonyms, underscore-separated identifier parts, and other forms of a word of at least four characters: the word plus `s`, `es`, `d`, `ed`, `ing`, `er`, `ers`, `ment` or `ments`, a final `e` replaced by `ing`/`ion`/`ions`, or a final `y` replaced by `ies`/`ied`. `backup` matches `backups`, `facts` matches `fact` and `caching` matches `cache`, but `1Password` does not match `pass` or `word`, and `redis` does not match `redistribution`.
 
+Recall excludes memories whose effective veracity or episodic-tier weight is zero, including `veracity: "false"`. Extracted facts inherit this exclusion from their source memory; a fact whose source is no longer stored uses the `unknown` policy. Excluded memories remain available through `get(id)` for inspection.
+
+With polyphonic recall enabled, `recallEnhanced()` combines voice rankings by reciprocal rank fusion. Its `score` and `combined_score` describe ranking rather than confidence or a probability of correctness. Content deduplication no longer merges distinct memory IDs: token overlap or identical previews are not proof that two memories are equivalent.
+
 ## Configuration
 
 `Mnemopi` accepts LLM and embedding options directly. `MNEMOPI_*` environment variables remain fallbacks/defaults when the matching constructor option is omitted.

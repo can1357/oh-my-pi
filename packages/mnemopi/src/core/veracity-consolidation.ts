@@ -222,6 +222,7 @@ export class VeracityConsolidator {
 		this.conn.run("CREATE INDEX IF NOT EXISTS idx_cf_subject ON consolidated_facts(subject)");
 		this.conn.run("CREATE INDEX IF NOT EXISTS idx_cf_predicate ON consolidated_facts(predicate)");
 		this.conn.run("CREATE INDEX IF NOT EXISTS idx_cf_object ON consolidated_facts(object)");
+		this.conn.run("CREATE INDEX IF NOT EXISTS idx_cf_spo ON consolidated_facts(subject, predicate, object)");
 		this.conn.run(`
 			CREATE TABLE IF NOT EXISTS conflicts (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,

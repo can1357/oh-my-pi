@@ -3,7 +3,7 @@
  * memory tools return, end to end: Settings -> `loadMnemopiConfig` -> per-bank
  * Mnemopi instances -> `recallEnhanced`.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadMnemopiConfig } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import {
@@ -15,6 +15,7 @@ import {
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall";
 import { MemoryRetainTool } from "@oh-my-pi/pi-coding-agent/tools/memory-retain";
+import type { RecallResult } from "@oh-my-pi/pi-mnemopi";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 // Mnemopi is lazy-loaded at runtime; preload it for synchronous state construction.
@@ -102,7 +103,109 @@ describe("mnemopi.polyphonicRecall", () => {
 		expect(texts.false).not.toContain("Notion workspace");
 		expect(texts.true).toContain("Alice owns the durable launch checklist");
 		expect(texts.true).toContain("The durable launch checklist lives in the Notion workspace");
+		// A fused rank score is not confidence; showing a one-voice hit as c:0.2 would misstate its reliability.
+		expect(texts.true).not.toContain(" c:");
 	});
+});
+
+describe("scoped recall ranking", () => {
+	it.each([false, true])(
+		"merges bank rankings without comparing fused score magnitudes (polyphonic=%s)",
+		async polyphonic => {
+			const { state } = startSession({
+				"mnemopi.scoping": "per-project-tagged",
+				"mnemopi.polyphonicRecall": polyphonic,
+				"mnemopi.recallLimit": 2,
+			});
+			const [project, shared] = state.getScopedRecallTargets();
+			if (!project || !shared) throw new Error("the fixture requires project and shared banks");
+			const row = (id: string, score: number): RecallResult => ({
+				id,
+				content: `record ${id}`,
+				score,
+				...(polyphonic ? { combined_score: score / 10 } : {}),
+			});
+			const projectRecall = spyOn(project.memory, "recallEnhanced").mockResolvedValue([
+				row("project-first", 0.2),
+				row("project-second", 0.19),
+			]);
+			const sharedRecall = spyOn(shared.memory, "recallEnhanced").mockResolvedValue([
+				row("shared-first", 0.9),
+				row("shared-second", 0.89),
+			]);
+			try {
+				const results = await state.collectScopedRecallResults("record lookup");
+				expect(results.map(result => result.id)).toEqual(
+					polyphonic ? ["project-first", "shared-first"] : ["shared-first", "shared-second"],
+				);
+			} finally {
+				projectRecall.mockRestore();
+				sharedRecall.mockRestore();
+			}
+		},
+	);
+
+	it("keeps distinct memory IDs whose clipped previews happen to be identical across banks", async () => {
+		const { state } = startSession({
+			"mnemopi.scoping": "per-project-tagged",
+			"mnemopi.recallLimit": 2,
+		});
+		const [project, shared] = state.getScopedRecallTargets();
+		if (!project || !shared) throw new Error("the fixture requires project and shared banks");
+		const preview = "Shared deployment procedure; the distinguishing hostname is beyond this preview.";
+		const row = (id: string): RecallResult => ({
+			id,
+			content: preview,
+			score: 0.2,
+			combined_score: 1 / 61,
+			truncated: true,
+			full_length: 900,
+		});
+		const projectRecall = spyOn(project.memory, "recallEnhanced").mockResolvedValue([row("host-a")]);
+		const sharedRecall = spyOn(shared.memory, "recallEnhanced").mockResolvedValue([row("host-b")]);
+		try {
+			expect((await state.collectScopedRecallResults("deployment procedure")).map(result => result.id)).toEqual([
+				"host-a",
+				"host-b",
+			]);
+		} finally {
+			projectRecall.mockRestore();
+			sharedRecall.mockRestore();
+		}
+	});
+
+	it.each(["id", "full content"] as const)(
+		"deduplicates repeated %s across banks without consuming a result slot",
+		async match => {
+			const { state } = startSession({ "mnemopi.scoping": "per-project-tagged", "mnemopi.recallLimit": 2 });
+			const [project, shared] = state.getScopedRecallTargets();
+			if (!project || !shared) throw new Error("the fixture requires project and shared banks");
+			const first: RecallResult = {
+				id: "first",
+				content: "deployment owner",
+				score: 0.2,
+				combined_score: 1 / 61,
+				truncated: match === "id",
+			};
+			const repeated: RecallResult = {
+				...first,
+				id: match === "id" ? "first" : "other-id",
+				content: match === "id" ? "a different clipped view of the same memory" : first.content,
+			};
+			const tail: RecallResult = { id: "tail", content: "deployment fallback", score: 0.19, combined_score: 1 / 62 };
+			const projectRecall = spyOn(project.memory, "recallEnhanced").mockResolvedValue([first]);
+			const sharedRecall = spyOn(shared.memory, "recallEnhanced").mockResolvedValue([repeated, tail]);
+			try {
+				expect((await state.collectScopedRecallResults("record lookup")).map(result => result.id)).toEqual([
+					"first",
+					"tail",
+				]);
+			} finally {
+				projectRecall.mockRestore();
+				sharedRecall.mockRestore();
+			}
+		},
+	);
 });
 
 describe("mnemopi.enhancedRecall", () => {

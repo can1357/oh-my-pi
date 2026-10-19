@@ -128,16 +128,16 @@ describe("configurable recall scoring", () => {
 		expect(await order()).toEqual(["tool", "unknown"]);
 	});
 
-	it("counts a negative MNEMOPI_<LABEL>_WEIGHT as 0, never below a false row", async () => {
+	it("omits rows weighted 0, including a negative MNEMOPI_<LABEL>_WEIGHT clamped to 0 and a false row", async () => {
 		process.env.MNEMOPI_TOOL_WEIGHT = "-1";
 		const beam = makeBeam();
 		beam.remember("quorum ledger rotation alpha", { importance: 0.5, source: "test", veracity: "tool" });
 		beam.remember("quorum ledger rotation bravo", { importance: 0.5, source: "test", veracity: "false" });
-		const scores = Object.fromEntries(
-			(await beam.recall("quorum ledger rotation", 2)).map(row => [row.veracity, row.score]),
-		);
+		beam.remember("quorum ledger rotation charlie", { importance: 0.5, source: "test", veracity: "stated" });
 
-		expect(scores).toEqual({ tool: 0, false: 0 });
+		const rows = await beam.recall("quorum ledger rotation", 3);
+
+		expect(rows.map(row => row.veracity)).toEqual(["stated"]);
 	});
 
 	it("ranks episodic rows by the MNEMOPI_TIER<N>_WEIGHT degradation weights", async () => {
@@ -160,5 +160,23 @@ describe("configurable recall scoring", () => {
 		process.env.MNEMOPI_TIER1_WEIGHT = "0.5";
 		process.env.MNEMOPI_TIER2_WEIGHT = "1.0";
 		expect(await order()).toEqual(["ep-tier2", "ep-tier1"]);
+	});
+
+	it("omits episodic rows whose MNEMOPI_TIER<N>_WEIGHT is 0", async () => {
+		process.env.MNEMOPI_TIER1_WEIGHT = "0";
+		delete process.env.MNEMOPI_TIER2_WEIGHT;
+		const beam = makeBeam();
+		const now = new Date().toISOString();
+		for (const [id, tier] of [
+			["ep-tier1", 1],
+			["ep-tier2", 2],
+		] as const) {
+			beam.db.run(
+				"INSERT INTO episodic_memory (id, content, source, timestamp, session_id, importance, veracity, tier) VALUES (?, ?, 'test', ?, ?, 0.5, 'stated', ?)",
+				[id, `harbor crane manifest ${id === "ep-tier1" ? "alpha" : "bravo"}`, now, beam.sessionId, tier],
+			);
+		}
+
+		expect((await beam.recall("harbor crane manifest", 2)).map(row => row.id)).toEqual(["ep-tier2"]);
 	});
 });
