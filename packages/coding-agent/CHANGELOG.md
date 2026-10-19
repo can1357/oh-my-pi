@@ -542,6 +542,7 @@
 - Fixed supported Bedrock Claude models falling back to soft instead of remote compaction ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Fixed browser `tab.run(fn, [url])` and `browser.open("https://…")` failing with a bare "expects an options object"; the errors now say to pass `{ args: [...] }` and `browser.open({ url, name })` ([#16236](https://github.com/can1357/oh-my-pi/pull/16236) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the built-in `ts-set-map`, `ts-import-type` and `ts-no-any` rules reminding you about code they allow: an empty or computed `Set`/`Map`, a runtime `await import()`, or the word "any" in a comment ([#16242](https://github.com/can1357/oh-my-pi/pull/16242) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the host-discovery and WSL probes (`wslpath`, `cmd.exe` over the WSL interop pipe, and `wslview`'s Windows-path conversion) holding startup past their 500 ms deadline when a descendant inherited the probe's stdout pipe: the whole process group is killed at the deadline and the pending pipe reads are cancelled, so a wedged interop pipe costs the budget instead of an unbounded wait ([#15337](https://github.com/can1357/oh-my-pi/pull/15337) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 
@@ -685,7 +686,6 @@
 - A custom model's explicit `contextWindow` or `maxTokens` in `models.yml` now wins over the catalog's limit rules for that model id, which previously overwrote it ([#16094](https://github.com/can1357/oh-my-pi/pull/16094) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
-- Fixed the host-discovery and WSL probes (`wslpath`, `cmd.exe` over the WSL interop pipe, and `wslview`'s Windows-path conversion) holding startup past their 500 ms deadline when a descendant inherited the probe's stdout pipe: the whole process group is killed at the deadline and the pending pipe reads are cancelled, so a wedged interop pipe costs the budget instead of an unbounded wait ([#15337](https://github.com/can1357/oh-my-pi/pull/15337) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed Claude Opus 5.5 replies sent between tool calls (for example an answer to a question asked mid-task) being folded into the "Thought" block; they now show as normal reply text in the transcript, print mode, ACP clients, and HTML exports
 - Fixed the shell's `du --time=ctime` (also `status`) printing `???` on Windows; it now shows the last write time, as `stat` already does for the status-change time
