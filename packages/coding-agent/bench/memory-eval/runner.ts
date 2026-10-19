@@ -219,7 +219,16 @@ export async function runCases(
 				);
 			}
 		}
-		if (protocol === "with-sleep") await engine.sleep();
+		if (protocol === "with-sleep") {
+			await engine.sleep();
+			// Sleep embeds its summaries in the background and Mnemopi swallows failures, so check them before recall.
+			const missing = await engine.unembeddedSummaries();
+			if (missing > 0) {
+				throw new Error(
+					`embeddings unavailable for ${engine.name}: ${missing} ${missing === 1 ? "summary" : "summaries"} written by sleep in case ${evalCase.caseId} ${missing === 1 ? "has" : "have"} no vector`,
+				);
+			}
+		}
 
 		const prefixes = messages
 			.map(m => ({ messageId: m.messageId, prefix: normalize(cp(m.content, FALLBACK_PREFIX_CHARS)) }))

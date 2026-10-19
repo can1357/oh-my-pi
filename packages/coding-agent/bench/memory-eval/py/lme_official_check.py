@@ -5,15 +5,17 @@ Usage (venv-lme python, numpy<2 because the official code uses np.asfarray):
     lme_official_check.py <result.json> --oracle-from-cases   score the official oracle ranking on our loaded cases
 """
 
-import json
 import os
 import sys
-from pathlib import Path
 
-# Before any non-stdlib import, pinned_source included: an override tree could shadow it or NumPy for eval_utils.
+# First, before any import that searches PYTHONPATH: os and sys are already loaded at interpreter startup, but an
+# override tree could shadow json, pathlib, pinned_source or the evaluator's NumPy.
 for name in ("PYTHONPATH", "PYTHONHOME"):
 	if os.environ.get(name):
 		sys.exit(f"lme_official_check.py: refusing to run with {name} set; unset it so venv-lme's packages are imported")
+
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 from pinned_source import pinned_snapshot
 

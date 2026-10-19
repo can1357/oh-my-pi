@@ -112,6 +112,7 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 		sleep: async () => {
 			await live().call("sleep");
 		},
+		unembeddedSummaries: async () => (await live().call("unembedded_summaries")) as number,
 		recall: async (question, k) => {
 			const { hits, dropped, fetch_k } = (await live().call("recall", { query: question.text, k })) as {
 				hits: WireHit[];
