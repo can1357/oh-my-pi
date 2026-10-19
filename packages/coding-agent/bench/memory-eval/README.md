@@ -63,7 +63,7 @@ $R calibration-check calib-a.json calib-b.json
 
 The result's `config.gitCommit` and `config.gitDirty` are the checkout's HEAD and whether it had uncommitted or untracked changes, both read before the engine warms up. If HEAD moves during the run, `run` exits 1 without writing a result: the code that produced it would be unknown.
 
-Except under `fts-only`, `run` exits 1 when any case, after ingest and before sleep, has fewer stored vectors than remembered rows: a row without a vector is ranked by full-text search alone, which would quietly score a different retrieval path.
+Except under `fts-only`, `run` exits 1 when any case, after ingest and before sleep, has fewer stored vectors than remembered rows: a row without a vector is ranked by full-text search alone, which would quietly score a different retrieval path. Under `with-sleep` it also exits 1, before any recall, when a summary written by sleep has no vector. Both engines embed summaries in the background, and Mnemopi does not report a failed embedding.
 
 Each returned row maps to messages by its engine row id, else through the rows it summarises (`summary_of`), else by content: to every message whose first 50 characters (lowercased, whitespace collapsed) the row contains. Messages shorter than 20 characters are left out of that fallback, since a hit can contain "ok" or "yes" by chance. `fallbackRate` is the share of ranked rows mapped by content; a row that maps to no message (`messageIds` empty) is unmapped and not counted as a fallback match.
 
