@@ -4100,6 +4100,32 @@ describe("lsp regressions", () => {
 			}
 		});
 
+		it("undoes the project-load wait of an add whose notification never reached the server", async () => {
+			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-failed-folder-");
+			try {
+				const { server, serverConfig } = useServer(FOLDER_CHANGES);
+				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
+				progress(server, "load", "begin");
+				progress(server, "load", "end");
+				await lspClient.waitForProjectLoaded(client);
+				vi.spyOn(client.proc.stdin, "write").mockImplementationOnce(() => {
+					throw new Error("EPIPE");
+				});
+
+				const failed = await rejectionOf(
+					lspClient.ensureWorkspaceFolder(client, path.join(siblingRoot, "src", "target.py")),
+				);
+				expect(String(failed)).toContain("EPIPE");
+
+				// A load that never started must not hold the session's next query for 15 s.
+				await lspClient.waitForProjectLoaded(client);
+				expect(folderAdds(server)).toEqual([]);
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
 		it("keeps a ContentModified retry within the default request timeout and clears its deadline timer", async () => {
 			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-retry-default-");
 			try {
