@@ -41,9 +41,17 @@ export async function runUpstreamCompat(
 				items.push({ messageId: String(items.length), content, source: "bench", importance: 0.5 });
 			}
 		}
-		for (let i = 0; i < items.length; i += REMEMBER_BATCH) await engine.remember(items.slice(i, i + REMEMBER_BATCH));
-		// Without vectors the FTS-only fallback would make the calibration pass vacuously.
-		if ((await engine.vectorCount()) <= 0) throw new Error(`embeddings unavailable for ${engine.name}`);
+		const ids = new Set<string>();
+		for (let i = 0; i < items.length; i += REMEMBER_BATCH) {
+			for (const id of await engine.remember(items.slice(i, i + REMEMBER_BATCH))) if (id !== null) ids.add(id);
+		}
+		// Without vectors on every row the FTS-only fallback would calibrate a mixed store, or pass vacuously.
+		const covered = await engine.vectorCoverage([...ids]);
+		if (ids.size === 0 || covered < ids.size) {
+			throw new Error(
+				`embeddings unavailable for ${engine.name}: ${ids.size - covered} of ${ids.size} remembered rows have no vector`,
+			);
+		}
 
 		const rows = await engine.oldestWorking(CONSOLIDATE_ROWS);
 		if (rows.length > 0) {
@@ -54,13 +62,18 @@ export async function runUpstreamCompat(
 					.join(" | "),
 				SUMMARY_CHARS,
 			);
-			await engine.consolidate(
+			const summaryId = await engine.consolidate(
 				summary,
 				rows.map(r => r.engineId),
 				"bench_consolidation",
 				0.4,
 				"global",
 			);
+			if (summaryId === null || (await engine.vectorCoverage([summaryId])) < 1) {
+				throw new Error(
+					`embeddings unavailable for ${engine.name}: the consolidated summary ${summaryId} has no vector`,
+				);
+			}
 		}
 
 		const results: QuestionResult[] = [];

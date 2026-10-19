@@ -20,6 +20,8 @@ interface FakeResult {
 	protocol?: string;
 	k?: number;
 	revision?: string;
+	/** Absent, as in older files, unless set. */
+	datasetSha256?: string;
 	/** Engine options as `run` records them in the config. */
 	options?: { mnemopiRecall?: string; polyphonic?: boolean };
 	engineInfo?: Record<string, string>;
@@ -41,6 +43,7 @@ async function writeResult(
 		protocol = "standard",
 		k = 10,
 		revision = "rev",
+		datasetSha256,
 		options = { mnemopiRecall: "recall", polyphonic: false },
 		engineInfo = {},
 		gitDirty = false,
@@ -55,6 +58,7 @@ async function writeResult(
 			config: {
 				dataset: "beam-100k",
 				datasetRevision: revision,
+				datasetSha256,
 				engine,
 				engineInfo,
 				protocol,
@@ -162,6 +166,14 @@ it("diff rejects results from different dataset revisions", async () => {
 	const { stderr, code } = await diff(a, b);
 	expect(code).toBe(1);
 	expect(stderr).toContain("datasetRevision differs: r1 vs r2");
+});
+
+it("diff rejects results whose prepared dataset bytes differ under one revision", async () => {
+	const a = await writeResult("sha-a", { datasetSha256: "aa" });
+	const b = await writeResult("sha-b", { datasetSha256: "bb" });
+	const { stderr, code } = await diff(a, b);
+	expect(code).toBe(1);
+	expect(stderr).toContain("datasetSha256 differs: aa vs bb");
 });
 
 it("diff compares runs whose engine options differ, naming both configurations", async () => {

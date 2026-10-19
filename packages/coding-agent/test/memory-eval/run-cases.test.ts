@@ -116,6 +116,9 @@ it("run records the engine options in the result config", async () => {
 		mnemopiRecall: "recall",
 		polyphonic: false,
 		datasetRevision: BEAM_REVISION,
+		datasetSha256: new Bun.CryptoHasher("sha256")
+			.update(await Bun.file(path.join(FIXTURE_DATA, "beam-100k.json")).bytes())
+			.digest("hex"),
 		gitCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
 		gitDirty: expect.any(Boolean),
 	});
