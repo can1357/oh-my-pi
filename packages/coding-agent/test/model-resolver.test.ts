@@ -923,6 +923,13 @@ describe("role priorities and chains", () => {
 		expect(resolveRoleChain("web", settings, [exa])[0]?.replaces).toBeUndefined();
 	});
 
+	test("marks the replacement when a configured comma list matched on a later entry", () => {
+		const exa = roleChainModel("web", "exa");
+		const settings = Settings.isolated({ modelRoles: { web: "web/exa-pro,web/exa" } });
+
+		expect(resolveRoleChain("web", settings, [exa])[0]?.replaces).toBe("web/exa-pro");
+	});
+
 	test("upgrades a default primary when a configured fallback resolves the same route", () => {
 		const parallel = roleChainModel("web", "parallel");
 		const settings = Settings.isolated({
@@ -2564,13 +2571,13 @@ describe("provider routing selector (@upstream)", () => {
 		expect(openRouterOnly(result.model)).toBeUndefined();
 	});
 
-	test("resolves a Vertex id written without its only @revision, and fails when revisions are ambiguous", () => {
-		const vertexModel = (id: string): Model<Api> =>
+	test("resolves a Vertex id written without the catalog's declared @revision only", () => {
+		const vertexModel = (id: string, provider = "google-vertex"): Model<Api> =>
 			buildModel({
 				id,
 				name: "Claude Opus 4.8",
 				api: "anthropic-messages",
-				provider: "google-vertex",
+				provider,
 				baseUrl: "https://us-aiplatform.googleapis.com",
 				reasoning: true,
 				input: ["text"],
@@ -2578,11 +2585,33 @@ describe("provider routing selector (@upstream)", () => {
 				contextWindow: 200000,
 				maxTokens: 32000,
 			});
-		const single = [vertexModel("claude-opus-4-8@default")];
-		expect(parseModelPattern("google-vertex/claude-opus-4-8", single).model?.id).toBe("claude-opus-4-8@default");
+		expect(
+			parseModelPattern("google-vertex/claude-opus-4-8", [vertexModel("claude-opus-4-8@default")]).model?.id,
+		).toBe("claude-opus-4-8@default");
+		// `@bar` is part of a literal id, not a declared revision.
+		expect(parseModelPattern("google-vertex/foo", [vertexModel("foo@bar")]).model).toBeUndefined();
+		// Other providers declare no revision suffix.
+		expect(
+			parseModelPattern("custom/claude-opus-4-8", [vertexModel("claude-opus-4-8@default", "custom")]).model,
+		).toBeUndefined();
+	});
 
-		const both = [...single, vertexModel("claude-opus-4-8@20260101")];
-		expect(parseModelPattern("google-vertex/claude-opus-4-8", both).model).toBeUndefined();
+	test("a selector naming a catalog provider missing from the pool never matches another provider's raw ids", () => {
+		const openRouterGemini = buildModel({
+			id: "google/gemini-openrouter-only",
+			name: "Gemini 2.5 Pro",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 65_536,
+		});
+		expect(parseModelPattern("google/gemini-openrouter", [openRouterGemini]).model).toBeUndefined();
+		// The exact raw id, which the google catalog does not carry, still resolves.
+		expect(parseModelPattern("google/gemini-openrouter-only", [openRouterGemini]).model?.provider).toBe("openrouter");
 	});
 
 	test("ignores @slug on a non-aggregator model (no silent routing)", () => {

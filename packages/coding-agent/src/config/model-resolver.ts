@@ -28,6 +28,7 @@ import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { collapseVariantId, stripThinkingVariantSuffix } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
@@ -487,15 +488,14 @@ export function resolveProviderModelReference(
 	}
 
 	// Revision-pinned ids (Vertex `claude-opus-4-8@default`) are also named without
-	// their `@revision`; that is an alias only while the provider carries a single
-	// revision of the id, so the selector still resolves exactly or not at all.
+	// the revision the catalog declares for them (`selector-revision-suffix`).
 	if (!normalizedModelId.includes("@")) {
-		const revisionPrefix = `${normalizedModelId}@`;
-		const revisions = availableModels.filter(
-			model =>
-				model.provider.toLowerCase() === normalizedProvider && model.id.toLowerCase().startsWith(revisionPrefix),
-		);
-		if (revisions.length === 1) return revisions[0];
+		const revisioned = availableModels.find(model => {
+			if (model.provider.toLowerCase() !== normalizedProvider) return false;
+			const suffix = resolveCatalogPolicy(model).selectorRevisionSuffix;
+			return typeof suffix === "string" && model.id.toLowerCase() === `${normalizedModelId}${suffix.toLowerCase()}`;
+		});
+		if (revisioned) return revisioned;
 	}
 
 	if (normalizedProvider !== "openrouter") {
@@ -811,11 +811,18 @@ function matchModel(
 	const slashIndex = modelPattern.indexOf("/");
 	if (slashIndex !== -1) {
 		const lowerProvider = modelPattern.substring(0, slashIndex).toLowerCase();
-		if (availableModels.some(m => m.provider.toLowerCase() === lowerProvider)) {
+		// Known means in this candidate set or in the bundled catalog: a provider
+		// without credentials is absent from an availability-filtered pool, and its
+		// selector must not fall through to another provider's raw ids
+		// (`google/gemini-2.5` → OpenRouter's `google/gemini-2.5-*`).
+		if (
+			availableModels.some(m => m.provider.toLowerCase() === lowerProvider) ||
+			getBundledModels(lowerProvider as GeneratedProvider).length > 0
+		) {
 			return undefined;
 		}
-		// The prefix is not a known provider in this candidate set, so treat the
-		// slash as part of the raw model ID and continue with generic matching.
+		// The prefix is not a known provider, so treat the slash as part of the
+		// raw model ID and continue with generic matching.
 	}
 
 	// No exact match - fall back to partial matching
@@ -1601,6 +1608,11 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 		if (!resolved.model) {
 			if (explicit && selector.includes("/")) unresolvedExplicit ??= selector;
 			continue;
+		}
+		// A comma list that matched on a later entry skipped its earlier ones.
+		if (explicit && (resolved.matchedPatternIndex ?? 0) > 0) {
+			const firstPattern = resolveConfiguredModelPatterns(selector, settings)?.[0];
+			if (firstPattern?.includes("/")) unresolvedExplicit ??= firstPattern;
 		}
 		const key = formatModelStringWithRouting(resolved.model);
 		const existing = candidateByRoute.get(key);
