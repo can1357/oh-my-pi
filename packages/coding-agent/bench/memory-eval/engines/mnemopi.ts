@@ -1,4 +1,5 @@
 /** Mnemopi adapter: runs `BeamMemory` in the harness process with the same embedding model as upstream Mnemosyne. */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { embed } from "@oh-my-pi/pi-mnemopi/core/embeddings";
@@ -8,11 +9,14 @@ import {
 	withMnemopiRuntimeOptions,
 } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { getFastembedCacheDir } from "@oh-my-pi/pi-utils";
 import type { EngineAdapter, MnemopiRecall, ProtocolName, RecallHit } from "../engine";
 import { envName, PythonProcess } from "./python-process";
 import { enginePython, resolveCacheRoot } from "../paths";
 
 const EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5";
+/** Where Mnemopi's JS fastembed keeps this model under its cache dir (`packages/mnemopi/src/core/fastembed-model-cache.ts`). */
+const JS_MODEL_DIR = "Qdrant_bge-small-en-v1.5-onnx-Q";
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../../..");
 const PACKAGE_JSON = path.join(REPO_ROOT, "packages", "mnemopi", "package.json");
 const EMBED_SCRIPT = path.resolve(import.meta.dir, "../py/embed_server.py");
@@ -53,6 +57,22 @@ function tierOf(label: string | undefined, summaryOf: string | undefined): Recal
 		throw new Error(`unexpected mnemopi recall tier "${tier}"`);
 	}
 	return tier;
+}
+
+/**
+ * Digest of the model files in `modelDir`, so two runs with different model or tokenizer bytes cannot share a config.
+ * Must match `model_dir_digest` in py/model_digest.py: SHA-256 over `<name>\0<sha256 of bytes>\n` for every regular
+ * file (symlinks followed), in sorted name order.
+ */
+export async function modelDirDigest(modelDir: string): Promise<string> {
+	const outer = new Bun.CryptoHasher("sha256");
+	for (const name of (await fs.readdir(modelDir)).sort()) {
+		const file = path.join(modelDir, name);
+		if (!(await fs.stat(file)).isFile()) continue;
+		const inner = new Bun.CryptoHasher("sha256").update(await Bun.file(file).bytes()).digest("hex");
+		outer.update(`${name}\0${inner}\n`);
+	}
+	return outer.digest("hex");
 }
 
 export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter {
@@ -108,21 +128,31 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 			const pkg: { version: string } = await Bun.file(PACKAGE_JSON).json();
 			// The Python embedder's numerical runtime decides near-tie order, so it is part of the configuration;
 			// fts-only never starts the embedder, and asking it for versions must not either.
+			const embedding = opts.embeddings?.disabled !== true;
 			const runtime =
-				embedder === "python" && opts.embeddings?.disabled !== true
+				embedder === "python" && embedding
 					? Object.fromEntries(
 							Object.entries((await startEmbedder().call("versions")) as Record<string, string>).map(
 								([name, version]) => [`${name}_version`, version],
 							),
 						)
 					: {};
+			// The model files actually loaded: the name maps to an unversioned download.
+			const modelDigest: Record<string, string> = {};
+			if (embedding) {
+				modelDigest.embedding_model_sha256 =
+					embedder === "python"
+						? ((await startEmbedder().call("model_digest")) as string)
+						: await modelDirDigest(path.join(getFastembedCacheDir(), JS_MODEL_DIR));
+			}
 			return {
 				package_version: pkg.version,
 				embedding_model: EMBEDDING_MODEL,
 				embedder,
-				embeddings_disabled: String(opts.embeddings?.disabled === true),
+				embeddings_disabled: String(!embedding),
 				git_commit: (await vcs.requireGit(REPO_ROOT).headSha()) ?? "unknown",
 				...runtime,
+				...modelDigest,
 			};
 		},
 		open: async (_evalCase, { storeDir, protocol }) => {

@@ -34,6 +34,10 @@ if VERSION != EXPECTED_VERSION:
 from mnemosyne.core import embeddings  # noqa: E402
 from mnemosyne.core.beam import BeamMemory  # noqa: E402
 
+# Launched directly or through runpy (the tests), this script's own directory may not be on sys.path.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from model_digest import model_dir_digest  # noqa: E402
+
 
 RANKED_TIERS = ("working", "episodic")
 
@@ -53,6 +57,10 @@ class Engine:
 			"onnxruntime_version": importlib.metadata.version("onnxruntime"),
 		}
 		info.update({key: value for key, value in os.environ.items() if key.startswith("MNEMOSYNE_") and value})
+		# The files Mnemosyne's fastembed loaded; absent when no model was loaded (fts-only).
+		loaded = getattr(getattr(embeddings._embedding_model, "model", None), "_model_dir", None)
+		if loaded:
+			info["embedding_model_sha256"] = model_dir_digest(loaded)
 		return info
 
 	def op_warmup(self, _params):

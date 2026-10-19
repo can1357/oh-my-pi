@@ -6,11 +6,19 @@ The output holds the texts and vectors; ../embed-parity.ts embeds the same texts
 compares them per text by cosine similarity (both engines must share an embedding model).
 """
 
-import json
+import os
 import sys
-from pathlib import Path
 
-from fastembed import TextEmbedding
+# First, before any import that searches PYTHONPATH: an override tree could shadow json, pathlib or fastembed, and
+# the engines' own Python helpers run with every PYTHON* variable removed.
+for name in ("PYTHONPATH", "PYTHONHOME"):
+	if os.environ.get(name):
+		sys.exit(f"embed_parity.py: refusing to run with {name} set; unset it so venv-engine's packages are imported")
+
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from fastembed import TextEmbedding  # noqa: E402
 
 CACHE = Path.home() / ".cache" / "omp-memory-eval"
 MODEL = "BAAI/bge-small-en-v1.5"
