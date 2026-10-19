@@ -411,6 +411,36 @@ describe("composer inline shrink (#11007)", () => {
 		h.composer.stop();
 	});
 
+	it("with completeScrollback, never hides a streamed row the reply itself pushes off screen", async () => {
+		const h = makeHarness(COLUMNS, 20, 3);
+		h.composer.setPreferences({ completeScrollback: true });
+		await h.scheduler.settle(h.terminal);
+		// A settled three-row block (a user prompt) sits above the reply, so the
+		// reply first overflows in the frame that block retires.
+		h.transcript.addChild({ render: () => ["", "PROMPT", ""] });
+		const message = new AssistantMessageComponent();
+		h.transcript.addChild(message);
+		// Each paragraph wraps to two rows and arrives whole, so the reply grows
+		// three rows a frame and keeps overflowing the screen.
+		const paragraphs = Array.from(
+			{ length: 24 },
+			(_, p) => `P${String(p).padStart(2, "0")} ${"word ".repeat(28).trim()}`,
+		);
+		const shown = (): Set<string> =>
+			new Set(h.terminal.getScrollBuffer().flatMap(row => Bun.stripANSI(row).match(/\bP\d\d\b/g) ?? []));
+		const seen = new Set<string>();
+		for (let n = 1; n <= paragraphs.length; n++) {
+			message.updateContent(reply(paragraphs.slice(0, n).join("\n\n")), { transient: true });
+			h.composer.ui.requestRender();
+			await h.scheduler.settle(h.terminal);
+			const now = shown();
+			// A paragraph once on screen stays on screen or in scrollback.
+			expect([...seen].filter(p => !now.has(p))).toEqual([]);
+			for (const p of now) seen.add(p);
+		}
+		h.composer.stop();
+	});
+
 	it("keeps the below-chrome baseline across a height resize while inline chrome is expanded", async () => {
 		const shorter = ROWS - 10;
 		const h = makeHarness();
