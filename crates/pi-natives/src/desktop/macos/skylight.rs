@@ -1839,16 +1839,26 @@ fn hold_front(hold: &mut FrontHold, desktop: &impl HoldDesktop) -> CoreResult<u3
 					// re-check began. The refusal does not say which,
 					// and typing picks no app, so the next
 					// reading decides again; a click or ⌘/⌃ there ends the hold.
+					// A stop the re-check finds ends it now, as a ⌘/⌃ released
+					// before the next reading leaves no trace, and time spent
+					// getting here counts against the deadline.
+					let mut recheck = HoldStep::Wait;
 					let handed = request_after_check(
 						|| desktop.event_clock(),
 						|| {
-							desktop.front() == Some(front)
-								&& hold.observe(front, &desktop.input()) == HoldStep::HandBack
+							if desktop.over() || desktop.front() != Some(front) {
+								return false;
+							}
+							recheck = hold.observe(front, &desktop.input());
+							recheck == HoldStep::HandBack
 						},
 						|since| desktop.hand_back(since),
 					)?;
 					if handed == Some(FrontRequest::Done) {
 						handed_back += 1;
+					}
+					if recheck == HoldStep::Stop {
+						break;
 					}
 				},
 			}
@@ -4096,7 +4106,8 @@ mod tests {
 	/// A desktop where the browser is in front and each hand-back answers in
 	/// turn: `(click_before_it, answer)`. It notes whether desktop control was
 	/// free at every wait and owned at every hand-back; tests running it hold
-	/// `OWNERSHIP_TEST`.
+	/// `OWNERSHIP_TEST`. `chord_at` holds ⌘ for that one reading (counted from
+	/// 1), and from reading `over_at` on the hold's time is up.
 	struct FakeHold {
 		front:            Cell<ProcessSerialNumber>,
 		clicked:          Cell<bool>,
@@ -4104,6 +4115,9 @@ mod tests {
 		polls:            Cell<u32>,
 		free_at_waits:    Cell<bool>,
 		owned_at_answers: Cell<bool>,
+		inputs:           Cell<u32>,
+		chord_at:         Option<u32>,
+		over_at:          Option<u32>,
 	}
 
 	impl FakeHold {
@@ -4115,6 +4129,9 @@ mod tests {
 				polls:            Cell::new(0),
 				free_at_waits:    Cell::new(true),
 				owned_at_answers: Cell::new(true),
+				inputs:           Cell::new(0),
+				chord_at:         None,
+				over_at:          None,
 			}
 		}
 	}
@@ -4125,7 +4142,10 @@ mod tests {
 		}
 
 		fn input(&self) -> HoldInput {
-			HoldInput { clicked: self.clicked.get(), ..reading(self.front.get(), 0) }
+			let n = self.inputs.get() + 1;
+			self.inputs.set(n);
+			let flags = if self.chord_at == Some(n) { COMMAND } else { 0 };
+			HoldInput { clicked: self.clicked.get(), ..reading(self.front.get(), flags) }
 		}
 
 		fn event_clock(&self) -> u64 {
@@ -4149,7 +4169,7 @@ mod tests {
 		}
 
 		fn over(&self) -> bool {
-			self.polls.get() >= 10
+			self.polls.get() >= 10 || self.over_at.is_some_and(|at| self.inputs.get() >= at)
 		}
 
 		fn wait(&self) {
@@ -4199,6 +4219,27 @@ mod tests {
 		let busy = hold_front(&mut hold(), &desktop).unwrap_err();
 		source.release_control();
 		assert_eq!(busy.code, ErrorCode::InputBusy);
+		assert!(desktop.front.get() == HOLD_BROWSER);
+	}
+
+	#[test]
+	fn a_command_key_only_the_hand_back_recheck_sees_ends_the_hold() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		// ⌘ is held at the recheck (reading 2) and released before the next
+		// poll; no hand-back may follow (none is answered).
+		let desktop = FakeHold { chord_at: Some(2), ..FakeHold::new(&[]) };
+		assert_eq!(hold_front(&mut hold(), &desktop).unwrap(), 0);
+		assert!(desktop.front.get() == HOLD_BROWSER);
+		assert_eq!(desktop.polls.get(), 0, "the hold ended at the recheck");
+	}
+
+	#[test]
+	fn no_hand_back_goes_out_once_the_hold_time_is_up_before_the_request() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		// The browser takes the front at the last reading in time; the time is
+		// up by the recheck (none is answered).
+		let desktop = FakeHold { over_at: Some(1), ..FakeHold::new(&[]) };
+		assert_eq!(hold_front(&mut hold(), &desktop).unwrap(), 0);
 		assert!(desktop.front.get() == HOLD_BROWSER);
 	}
 }
