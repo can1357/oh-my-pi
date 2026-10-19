@@ -3868,13 +3868,32 @@ async function executeToolCalls(
 			sharedEffects = [];
 		} else {
 			sharedTasks.push(task);
-			// The tier of the arguments the call runs with when the speculation path
-			// already transformed them; the transform runs once, in `runTool`, otherwise.
-			const tierArgs = record.executionArgs ?? record.args;
+			// Resolve a dynamic tier from the arguments the call runs with. Without
+			// a speculative transform already cached, run the transform now and cache
+			// it (or its error) on the record, so `runTool` uses it and the
+			// transform still runs once per call.
+			const { tool } = record;
+			if (
+				typeof tool?.approval === "function" &&
+				transformToolCallArguments &&
+				record.executionArgs === undefined &&
+				record.transformError === undefined &&
+				record.validationErrorMessage === undefined &&
+				record.prepareError === undefined &&
+				!record.blocked
+			) {
+				try {
+					record.executionArgs = transformToolCallArguments(record.args, record.toolCall.name);
+				} catch (error) {
+					record.transformError = error;
+				}
+			}
 			let tier: ToolTier = "exec";
 			try {
 				const approval =
-					typeof record.tool?.approval === "function" ? record.tool.approval(tierArgs) : record.tool?.approval;
+					typeof tool?.approval === "function"
+						? tool.approval(record.executionArgs ?? record.args)
+						: tool?.approval;
 				tier = typeof approval === "string" ? approval : (approval?.tier ?? "exec");
 			} catch {
 				// A throwing approval resolver counts as "exec", like an omitted approval.

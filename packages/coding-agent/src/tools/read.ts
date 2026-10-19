@@ -1047,23 +1047,31 @@ async function readTargetStates(
 	cwd: string,
 	readPath: string,
 ): Promise<Map<string, { absolutePath: string; state: string | undefined }> | undefined> {
+	const internalRouter = InternalUrlRouter.instance();
 	const candidates = new Set<string>();
 	for (const entry of [readPath, ...readPath.split(";")]) {
 		let target = entry.trim();
 		if (target.startsWith("file://")) target = expandPath(target);
-		else if (target.includes("://") || target.startsWith("www.")) continue;
+		else if (parseReadUrlTarget(target) !== null || internalRouter.canResolve(internalRouter.normalize(target))) {
+			continue;
+		}
 		target = splitImageQuestionTarget(target).path;
+		// An empty path reads the session cwd, so "" stays a candidate.
 		candidates.add(target);
 		candidates.add(target.split("?")[0]);
 		for (let colon = target.indexOf(":"); colon > 0; colon = target.indexOf(":", colon + 1)) {
 			candidates.add(target.slice(0, colon));
 		}
 	}
-	candidates.delete("");
 	if (candidates.size === 0) return undefined;
 	const states = new Map<string, { absolutePath: string; state: string | undefined }>();
 	for (const candidate of candidates) {
-		const absolutePath = await resolveReadPathAsync(candidate, cwd);
+		// A spelling the resolver rejects proves nothing; the read itself reports it.
+		const absolutePath = await resolveReadPathAsync(candidate, cwd).catch(() => undefined);
+		if (absolutePath === undefined) {
+			states.set(candidate, { absolutePath: candidate, state: undefined });
+			continue;
+		}
 		const state = await targetState(absolutePath);
 		const wal = await targetState(`${absolutePath}-wal`);
 		states.set(candidate, { absolutePath, state: state === undefined ? undefined : `${state}\0${wal}` });

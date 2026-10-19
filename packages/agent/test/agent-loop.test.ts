@@ -2613,6 +2613,56 @@ describe("agentLoop with AgentMessage", () => {
 		expect(settled["tool-read-later"]).toBeUndefined();
 	});
 
+	it("counts a call as writing by the arguments its transform hands it, transforming once", async () => {
+		const toolSchema = type({ value: "string", tier: "'read' | 'exec'" });
+		const settled: Record<string, Promise<void> | undefined> = {};
+		const transformed: string[] = [];
+		const ran: Record<string, string> = {};
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "op",
+			label: "Op",
+			description: "Op tool",
+			parameters: toolSchema,
+			approval: args =>
+				args && typeof args === "object" && "tier" in args && args.tier === "read" ? "read" : "exec",
+			async execute(_toolCallId, params) {
+				ran[params.value] = params.tier;
+				return { content: [{ type: "text", text: `ok:${params.value}` }], details: { value: params.value } };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						// Asks as a read; the transform turns it into a write.
+						{ type: "toolCall", id: "tool-write", name: "op", arguments: { value: "write", tier: "read" } },
+						{ type: "toolCall", id: "tool-read", name: "op", arguments: { value: "read", tier: "read" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			transformToolCallArguments: args => {
+				transformed.push(String(args.value));
+				return args.value === "write" ? { ...args, tier: "exec" } : args;
+			},
+			getToolContext: toolCall => {
+				if (toolCall) settled[toolCall.toolCalls[toolCall.index].id] = toolCall.earlierEffectsSettled;
+				return {} as AgentToolContext;
+			},
+		};
+
+		await agentLoop([createUserMessage("start")], context, config, undefined, mock.stream).result();
+
+		expect(settled["tool-read"]).toBeInstanceOf(Promise);
+		expect(ran).toEqual({ write: "exec", read: "read" });
+		expect(transformed.sort()).toEqual(["read", "write"]);
+	});
+
 	it("drops incomplete tool calls when assistant aborts before toolcall_end", async () => {
 		const context: AgentContext = {
 			systemPrompt: ["You are helpful."],
