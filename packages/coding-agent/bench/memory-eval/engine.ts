@@ -43,6 +43,8 @@ export interface EngineAdapter {
 	remember(items: readonly RememberItem[]): Promise<(string | null)[]>;
 	vectorCount(): Promise<number>;
 	sleep(): Promise<void>;
+	/** Episodic summaries in the store without a vector; the runner refuses `with-sleep` cases that leave any. */
+	unembeddedSummaries(): Promise<number>;
 	recall(question: EvalQuestion, k: number): Promise<RecallHit[]>;
 	/** Rows the last `recall` returned but did not rank; engines that never drop rows omit this. */
 	lastDropped?(): DroppedRow[];

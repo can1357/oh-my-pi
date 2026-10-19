@@ -172,9 +172,14 @@ async function runCommand(argv: string[]): Promise<void> {
 			let excluded: ExcludedQuestion[] = [];
 			const datasetRevision = await cachedRevision(dataset, dataDir);
 			const datasetDigest = await datasetSha256(dataset, dataDir);
-			// The loaders reopen the file: a replacement in between would leave the cases and the digest apart.
+			// The loaders reopen the file: a replacement in between would leave the cases and the digest apart. A refresh
+			// removes the marker before it replaces the data, so reading the marker again after the data proves both
+			// still belong to the revision recorded above.
 			const sameSnapshot = async () => {
-				if ((await datasetSha256(dataset, dataDir)) !== datasetDigest) {
+				if (
+					(await datasetSha256(dataset, dataDir)) !== datasetDigest ||
+					(await cachedRevision(dataset, dataDir)) !== datasetRevision
+				) {
 					throw new Error("the prepared dataset file changed while it was loaded; result not written");
 				}
 			};

@@ -24,6 +24,7 @@ function sanityEngine(
 		// No embeddings; reported as one per row so the runner's coverage check passes.
 		vectorCount: async () => items.length,
 		sleep: async () => {},
+		unembeddedSummaries: async () => 0,
 		recall: async (question, k): Promise<RecallHit[]> =>
 			order(items, question)
 				.slice(0, k)
