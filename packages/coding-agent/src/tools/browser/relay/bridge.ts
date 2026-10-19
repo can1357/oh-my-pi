@@ -330,10 +330,10 @@ export class RelayBridge {
 	/** Reads the app in front of the user; set by {@link keepFrontAppWith} where the relay can put it back (macOS). */
 	#readFrontApp: (() => FrontApp | null) | undefined;
 	/**
-	 * The browsers (extension instances) whose window a hold on the user's app covers; another window that browser
-	 * opens meanwhile shares the hold, while one from another browser starts its own.
+	 * True while a hold on the user's app runs. A window opened meanwhile shares it, and omp's input reads no front
+	 * app then: the browser may be in front, and a later hold would keep it there.
 	 */
-	#keepingFront = new Set<string>();
+	#keepingFront = false;
 
 	constructor(
 		opts: {
@@ -941,7 +941,7 @@ export class RelayBridge {
 			return true;
 		}
 		if (this.#readFrontApp && canOpenWindow(msg.method, msg.params)) {
-			tab.frontAtInput = this.#readFrontAtInput(this.#readFrontApp);
+			tab.frontAtInput = this.#keepingFront ? null : this.#readFrontAtInput(this.#readFrontApp);
 		}
 		try {
 			const result = await this.#rpc(
@@ -1000,10 +1000,9 @@ export class RelayBridge {
 	 */
 	#keepFrontApp(tab: TabState): void {
 		const front = tab.frontAtInput;
-		const browser = tab.instanceId;
-		if (!front || this.#keepingFront.has(browser) || Date.now() - front.at > POPUP_AFTER_INPUT_MS) return;
 		tab.frontAtInput = null;
-		this.#keepingFront.add(browser);
+		if (!front || this.#keepingFront || Date.now() - front.at > POPUP_AFTER_INPUT_MS) return;
+		this.#keepingFront = true;
 		front.app
 			.keepInFront(KEEP_FRONT_MS)
 			.then(
@@ -1017,7 +1016,7 @@ export class RelayBridge {
 				},
 			)
 			.finally(() => {
-				this.#keepingFront.delete(browser);
+				this.#keepingFront = false;
 			});
 	}
 
