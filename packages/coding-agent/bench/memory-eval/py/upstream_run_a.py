@@ -137,7 +137,7 @@ questions = [
 ]
 mean_recall = statistics.mean(result["recalls"])
 out_path.parent.mkdir(parents=True, exist_ok=True)
-out_path.write_text(json.dumps({"questions": questions, "meanRecall": mean_recall}))
+out_path.write_text(json.dumps({"questions": questions, "meanRecall": mean_recall}), encoding="utf-8")
 shutil.rmtree(data_dir, ignore_errors=True)
 print(f"evaluated {len(questions)} questions, mean recall {mean_recall:.6f}")
 print(f"wrote {out_path}")

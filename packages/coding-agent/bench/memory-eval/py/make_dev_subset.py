@@ -22,7 +22,7 @@ def scored(q: dict) -> bool:
 
 
 by_type: dict[str, list[str]] = {}
-for q in json.loads(DATA.read_text()):
+for q in json.loads(DATA.read_text(encoding="utf-8")):
 	if scored(q):
 		by_type.setdefault(q["question_type"], []).append(q["question_id"])
 
@@ -33,5 +33,5 @@ for qtype, qids in by_type.items():
 	else:
 		ids += sorted(qids, key=lambda i: hashlib.sha256(i.encode()).hexdigest())[:PER_TYPE]
 
-OUT.write_text(json.dumps(sorted(ids), indent="\t") + "\n")
+OUT.write_text(json.dumps(sorted(ids), indent="\t") + "\n", encoding="utf-8")
 print(len(ids), {t: len(v) for t, v in by_type.items()})

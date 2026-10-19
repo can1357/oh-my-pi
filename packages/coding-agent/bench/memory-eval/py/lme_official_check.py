@@ -35,7 +35,7 @@ def official_metrics(rankings, correct_docs, corpus_ids):
 
 
 def lme_questions(path):
-    all_questions = json.loads(Path(path).read_text())["questions"]
+    all_questions = json.loads(Path(path).read_text(encoding="utf-8"))["questions"]
     missing = [q["questionId"] for q in all_questions if "lme" not in q]
     if missing or not all_questions:
         sys.exit(f"{path}: {len(missing)}/{len(all_questions)} questions lack `lme` (first: {missing[:5]})")
