@@ -597,10 +597,12 @@ export async function ensureWorkspaceFolders(
 ): Promise<void> {
 	const wanted = new Set<string>();
 	for (const filePath of filePaths) {
+		throwIfAborted(signal);
 		const folder = await workspaceFolderToAdd(client, filePath);
 		if (folder) wanted.add(folder);
 	}
 	if (wanted.size === 0) return;
+	throwIfAborted(signal);
 	const folders = addedWorkspaceFolders.get(client) ?? new Map<string, Promise<void>>();
 	addedWorkspaceFolders.set(client, folders);
 	const missing = [...wanted].filter(folder => !folders.has(folder));
@@ -1048,8 +1050,14 @@ function createProjectLoad(): {
  * one is replaced. Returns the undo for a load that never started.
  */
 function restartProjectLoad(client: LspClient): () => void {
-	const undo = projectLoadExtenders.get(client)?.();
-	if (undo) return undo;
+	const undo = projectLoadExtenders.get(client)?.() ?? startProjectLoad(client);
+	// However the load ends (its progress, the fallback timer, process exit), adds still
+	// counted as unstarted belong to it and must not hold up the next one.
+	client.projectLoaded.then(() => pendingFolderLoads.delete(client));
+	return undo;
+}
+
+function startProjectLoad(client: LspClient): () => void {
 	const next = createProjectLoad();
 	Object.assign(client, next.signal);
 	projectLoadExtenders.set(client, next.extend);

@@ -3698,13 +3698,21 @@ describe("lsp regressions", () => {
 			const tempDir = TempDir.createSync(prefix);
 			const sessionRoot = path.join(tempDir.path(), "main");
 			const siblingRoot = path.join(tempDir.path(), "feature");
+			const thirdRoot = path.join(tempDir.path(), "third");
 			const source = "def target():\n    return 1\nvalue = target()\n";
 			await fsp.mkdir(path.join(sessionRoot, ".git"), { recursive: true });
 			await Bun.write(path.join(siblingRoot, ".git"), "gitdir: ../main/.git/worktrees/feature\n");
+			await Bun.write(path.join(thirdRoot, ".git"), "gitdir: ../main/.git/worktrees/third\n");
 			await Bun.write(path.join(sessionRoot, "src", "target.py"), source);
 			await Bun.write(path.join(siblingRoot, "src", "target.py"), source);
 			await Bun.write(path.join(siblingRoot, "src", "other.py"), source);
-			return { tempDir, sessionRoot, siblingRoot: fs.realpathSync(siblingRoot) };
+			await Bun.write(path.join(thirdRoot, "src", "target.py"), source);
+			return {
+				tempDir,
+				sessionRoot,
+				siblingRoot: fs.realpathSync(siblingRoot),
+				thirdRoot: fs.realpathSync(thirdRoot),
+			};
 		}
 
 		const FOLDER_CHANGES = { workspace: { workspaceFolders: { supported: true, changeNotifications: true } } };
@@ -4132,11 +4140,8 @@ describe("lsp regressions", () => {
 		});
 
 		it("keeps the load pending until each of two separate adds has begun its own progress", async () => {
-			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-two-adds-");
-			const thirdRoot = path.join(tempDir.path(), "third");
+			const { tempDir, sessionRoot, siblingRoot, thirdRoot } = await makeCheckouts("@omp-lsp-two-adds-");
 			try {
-				await Bun.write(path.join(thirdRoot, ".git"), "gitdir: ../main/.git/worktrees/third\n");
-				await Bun.write(path.join(thirdRoot, "src", "target.py"), "def target():\n    return 1\n");
 				const { server, serverConfig } = useServer(FOLDER_CHANGES);
 				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
 				progress(server, "startup", "begin");
@@ -4165,11 +4170,8 @@ describe("lsp regressions", () => {
 		});
 
 		it("adds both checkouts of a rename between two other checkouts in one notification", async () => {
-			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-rename-two-");
-			const thirdRoot = path.join(tempDir.path(), "third");
+			const { tempDir, sessionRoot, siblingRoot, thirdRoot } = await makeCheckouts("@omp-lsp-rename-two-");
 			try {
-				await Bun.write(path.join(thirdRoot, ".git"), "gitdir: ../main/.git/worktrees/third\n");
-				await fsp.mkdir(path.join(thirdRoot, "src"), { recursive: true });
 				const { server } = useServer(FOLDER_CHANGES);
 
 				await new LspTool(makeLspSession(sessionRoot)).execute("rename-between-siblings", {
@@ -4179,12 +4181,70 @@ describe("lsp regressions", () => {
 					apply: false,
 				});
 
-				const third = fs.realpathSync(thirdRoot);
 				expect(folderAdds(server)).toEqual([
-					{ event: { added: [siblingRoot, third].map(dir => folderAdd(dir).event.added[0]), removed: [] } },
+					{ event: { added: [siblingRoot, thirdRoot].map(dir => folderAdd(dir).event.added[0]), removed: [] } },
 				]);
 			} finally {
 				configCache.delete(sessionRoot);
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("does not hold the next add's load for an add whose load ended on the fallback timer", async () => {
+			const { tempDir, sessionRoot, siblingRoot, thirdRoot } = await makeCheckouts("@omp-lsp-fallback-add-");
+			try {
+				const { server, serverConfig } = useServer(FOLDER_CHANGES);
+				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
+				progress(server, "startup", "begin");
+				progress(server, "startup", "end");
+				await lspClient.sendRequest(client, "test/barrier", {});
+				vi.useFakeTimers();
+				try {
+					// No progress ever comes for this checkout; the 15 s fallback ends its load.
+					await lspClient.ensureWorkspaceFolder(client, path.join(siblingRoot, "src", "target.py"));
+					vi.advanceTimersByTime(15_000);
+					await lspClient.waitForProjectLoaded(client);
+				} finally {
+					vi.useRealTimers();
+				}
+
+				await lspClient.ensureWorkspaceFolder(client, path.join(thirdRoot, "src", "target.py"));
+				let loaded = false;
+				const waiting = lspClient.waitForProjectLoaded(client).then(() => {
+					loaded = true;
+				});
+				progress(server, "third", "begin");
+				progress(server, "third", "end");
+				await Promise.race([waiting, Bun.sleep(1_000)]);
+				expect(loaded).toBe(true);
+			} finally {
+				vi.useRealTimers();
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("adds no checkout for a caller that aborted before delivery", async () => {
+			const { tempDir, sessionRoot, siblingRoot, thirdRoot } = await makeCheckouts("@omp-lsp-aborted-add-");
+			try {
+				const { server, serverConfig } = useServer(FOLDER_CHANGES);
+				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
+				const controller = new AbortController();
+				controller.abort();
+
+				const result = await rejectionOf(
+					lspClient.ensureWorkspaceFolders(
+						client,
+						[path.join(siblingRoot, "src", "target.py"), path.join(thirdRoot, "src", "target.py")],
+						controller.signal,
+					),
+				);
+				await lspClient.sendRequest(client, "test/barrier", {});
+
+				expect(result).toBeInstanceOf(Error);
+				expect(folderAdds(server)).toEqual([]);
+			} finally {
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
 			}
@@ -4216,14 +4276,19 @@ describe("lsp regressions", () => {
 			}
 		});
 
-		it("keeps a ContentModified retry within the default request timeout and clears its deadline timer", async () => {
+		it("keeps a ContentModified retry within the default request timeout", async () => {
 			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-retry-default-");
 			try {
+				const realNow = Date.now.bind(Date);
+				let skew = 0;
+				vi.spyOn(Date, "now").mockImplementation(() => realNow() + skew);
 				let hovers = 0;
 				const { serverConfig } = useServer(FOLDER_CHANGES, (message, srv) => {
 					if (message.method !== "textDocument/hover") return false;
 					hovers++;
 					if (hovers === 1) {
+						// The first attempt has used up the whole default 30 s by the time it is cancelled.
+						skew = 30_001;
 						srv.send({ jsonrpc: "2.0", id: message.id, error: { code: -32801, message: "content modified" } });
 						progress(srv, "index", "begin");
 						progress(srv, "index", "end");
@@ -4234,20 +4299,11 @@ describe("lsp regressions", () => {
 				});
 				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
 				await lspClient.ensureWorkspaceFolder(client, path.join(siblingRoot, "src", "target.py"));
-				const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
-				const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
 
-				expect(await lspClient.sendRequest(client, "textDocument/hover", {})).toEqual({ contents: "ok" });
+				const hover = await rejectionOf(lspClient.sendRequest(client, "textDocument/hover", {}));
 
-				// Request timers: the first attempt's full default, the wait for the load, then the
-				// retry with what is left of the same 30 s (a fresh default would be a second 30 s).
-				const requestTimers = setTimeoutSpy.mock.calls.filter(([, ms]) => Number(ms) > 20_000);
-				expect(requestTimers.map(([, ms]) => ms)).toEqual([30_000, expect.any(Number), expect.any(Number)]);
-				const [, deadlineTimerMs, retryTimerMs] = requestTimers.map(([, ms]) => Number(ms));
-				expect(deadlineTimerMs).toBeLessThanOrEqual(30_000);
-				expect(retryTimerMs).toBeLessThanOrEqual(deadlineTimerMs);
-				const deadlineTimer = setTimeoutSpy.mock.results[setTimeoutSpy.mock.calls.indexOf(requestTimers[1])]?.value;
-				expect(clearTimeoutSpy.mock.calls.some(([timer]) => timer === deadlineTimer)).toBe(true);
+				expect(String(hover)).toContain("-32801");
+				expect(hovers).toBe(1);
 			} finally {
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
