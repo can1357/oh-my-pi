@@ -79,3 +79,62 @@ with tempfile.TemporaryDirectory(prefix="memory-eval-pin-") as tmp:
 	expect(code).toBe(1);
 	expect(stderr).toContain(refusal);
 });
+
+// CPython trusts a cached .pyc whose source has the recorded mtime and size, without comparing contents.
+it.skipIf(pythonPath === undefined)("runs the pinned source, not bytecode cached from an edited copy", async () => {
+	const proc = Bun.spawn(
+		[
+			pythonPath!,
+			"-c",
+			`
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from pinned_source import require_pinned
+
+with tempfile.TemporaryDirectory(prefix="memory-eval-pyc-") as tmp:
+    home = Path(tmp)
+    for key in list(os.environ):
+        if key.upper().startswith("GIT_"):
+            del os.environ[key]
+    os.environ.update(HOME=tmp, XDG_CONFIG_HOME=str(home / "config"), GIT_CONFIG_NOSYSTEM="1")
+    repo = home / "evaluator"
+    repo.mkdir()
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+    git("init", "-q")
+    (repo / ".gitignore").write_text("__pycache__/\\n")
+    source = repo / "scorer.py"
+    source.write_text("VALUE = 1\\n")
+    git("add", ".gitignore", "scorer.py")
+    git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "core.hooksPath=" + str(home / "no-hooks"), "commit", "-q", "-m", "pinned")
+    commit = git("rev-parse", "HEAD")
+    stamp = 1_700_000_000
+    # Cache bytecode from an edited copy of the same size and mtime, then restore the pinned source.
+    source.write_text("VALUE = 2\\n")
+    os.utime(source, (stamp, stamp))
+    subprocess.run([sys.executable, "-c", "import scorer"], cwd=repo, check=True)
+    source.write_text("VALUE = 1\\n")
+    os.utime(source, (stamp, stamp))
+    require_pinned(repo, commit)
+    sys.path.insert(0, str(repo))
+    import scorer
+    print(scorer.VALUE)
+`,
+			PY,
+		],
+		{ stdout: "pipe", stderr: "pipe" },
+	);
+	const [code, stdout, stderr] = await Promise.all([
+		proc.exited,
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+	]);
+	expect(stderr).toBe("");
+	expect(code).toBe(0);
+	expect(stdout.trim()).toBe("1");
+});
