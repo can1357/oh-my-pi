@@ -58,52 +58,6 @@ function decodeEmbedding(raw: unknown): Float32Array | null {
 	}
 }
 
-type IdComparator = (a: string, b: string) => number;
-
-/** SQLite's BINARY collation on a UTF-8 bank: code point order, where UTF-16 `<` differs past U+FFFF. */
-function compareUtf8(a: string, b: string): number {
-	for (let index = 0; index < a.length && index < b.length; index += 1) {
-		const x = a.charCodeAt(index);
-		const y = b.charCodeAt(index);
-		if (x === y) continue;
-		// A surrogate belongs to a code point past U+FFFF, so it outranks every other UTF-16 unit.
-		const xSurrogate = x >= 0xd800 && x <= 0xdfff;
-		const ySurrogate = y >= 0xd800 && y <= 0xdfff;
-		if (xSurrogate === ySurrogate) return x - y;
-		return xSurrogate ? 1 : -1;
-	}
-	return a.length - b.length;
-}
-
-/** BINARY on a UTF-16be bank: code unit order. */
-function compareUtf16be(a: string, b: string): number {
-	return a < b ? -1 : a > b ? 1 : 0;
-}
-
-/** BINARY on a UTF-16le bank: each code unit compares its low byte first. */
-function compareUtf16le(a: string, b: string): number {
-	for (let index = 0; index < a.length && index < b.length; index += 1) {
-		const x = a.charCodeAt(index);
-		const y = b.charCodeAt(index);
-		if (x === y) continue;
-		return (x & 0xff) - (y & 0xff) || (x >> 8) - (y >> 8);
-	}
-	return a.length - b.length;
-}
-
-const comparators = new WeakMap<Database, IdComparator>();
-
-/** The order the database's BINARY collation gives ids; it compares stored bytes, which depend on `PRAGMA encoding`. */
-function binaryComparator(db: Database): IdComparator {
-	let comparator = comparators.get(db);
-	if (!comparator) {
-		const encoding = db.query<{ encoding: string }, []>("PRAGMA encoding").get()?.encoding;
-		comparator = encoding === "UTF-16le" ? compareUtf16le : encoding === "UTF-16be" ? compareUtf16be : compareUtf8;
-		comparators.set(db, comparator);
-	}
-	return comparator;
-}
-
 // shortcut: a foreign commit that leaves vectors alone, landing after this connection wrote some, drops the cache
 // once (the counter moved and data_version cannot say who moved it); track own bumps if that shows up in profiles.
 function currentCache(db: Database): ConnectionCache {
@@ -154,8 +108,8 @@ function readEmbeddings(db: Database, memoryIds: readonly string[]): Map<string,
 }
 
 /**
- * Decoded embeddings for `memoryIds`, listed in the order the pre-cache query returned them whatever the cache
- * holds (recall breaks similarity ties by this order); ids without a usable embedding are absent from the result.
+ * Decoded embeddings for `memoryIds`, listed in one fixed order whatever the cache holds (recall breaks similarity
+ * ties by this order); ids without a usable embedding are absent from the result.
  */
 export function cachedEmbeddings(db: Database, memoryIds: readonly string[]): Map<string, Float32Array> {
 	let found: Map<string, Float32Array | null>;
@@ -175,11 +129,11 @@ export function cachedEmbeddings(db: Database, memoryIds: readonly string[]): Ma
 			found.set(id, vector);
 		}
 	}
-	// That query (`memory_id IN (...)` per 500 ids) walked the primary-key index, so each chunk came back in id order.
-	const compare = binaryComparator(db);
+	// Each 500-id chunk in id order: the pre-cache query (`memory_id IN (...)` per chunk, no ORDER BY) returned the
+	// primary-key order, which this matches for the ASCII ids Mnemopi generates. Other ids get a fixed code-unit order.
 	const out = new Map<string, Float32Array>();
 	for (let offset = 0; offset < memoryIds.length; offset += FETCH_CHUNK) {
-		for (const id of memoryIds.slice(offset, offset + FETCH_CHUNK).sort(compare)) {
+		for (const id of memoryIds.slice(offset, offset + FETCH_CHUNK).sort()) {
 			const vector = found.get(id);
 			if (vector) out.set(id, vector);
 		}
