@@ -17,6 +17,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Another package tree could supply Mnemosyne or its dependencies; the harness's own Python children scrub these.
+for name in ("PYTHONPATH", "PYTHONHOME"):
+	if os.environ.get(name):
+		sys.exit(f"upstream_run_a.py: refusing to run with {name} set; unset it so the venv's packages are imported")
+
 try:
 	import resource
 except ImportError:
@@ -54,8 +59,9 @@ os.environ.update(
 import mnemosyne  # noqa: E402
 from mnemosyne.core.beam import BeamMemory  # noqa: E402
 
-if "site-packages" not in Path(mnemosyne.__file__).parts:
-	sys.exit(f"mnemosyne must come from the venv's site-packages, got {mnemosyne.__file__}")
+# Run B's adapter runs this exact package; another install or version would calibrate a different runtime.
+if mnemosyne.__version__ != "4.0.0b4" or not Path(mnemosyne.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()):
+	sys.exit(f"mnemosyne must be 4.0.0b4 from this venv ({sys.prefix}), got {mnemosyne.__version__} from {mnemosyne.__file__}")
 print(f"mnemosyne {mnemosyne.__version__} from {mnemosyne.__file__}")
 
 _setrlimit = resource.setrlimit
