@@ -293,10 +293,10 @@ const WINDOW_OPENING_INPUT: Record<string, Record<string, true> | true> = {
 	"Input.synthesizeTapGesture": true,
 };
 
-function canOpenWindow(method: string, params: unknown): boolean {
+function canOpenWindow(method: string, params: Record<string, unknown> | undefined): boolean {
 	if (!Object.hasOwn(WINDOW_OPENING_INPUT, method)) return false;
 	const types = WINDOW_OPENING_INPUT[method];
-	const type = (params as { type?: unknown } | undefined)?.type;
+	const type = params?.type;
 	return types === true || (typeof type === "string" && Object.hasOwn(types, type));
 }
 
@@ -359,8 +359,11 @@ export class RelayBridge {
 	#interceptionTransitions = new Map<string, Promise<void>>();
 	/** Reads the app in front of the user; set by {@link keepFrontAppWith} where the relay can put it back (macOS). */
 	#readFrontApp: (() => FrontApp | null) | undefined;
-	/** True while a hold on the user's app runs; a window opened meanwhile shares it. */
-	#keepingFront = false;
+	/**
+	 * The browsers (extension instances) whose window a hold on the user's app covers; another window that browser
+	 * opens meanwhile shares the hold, while one from another browser starts its own.
+	 */
+	#keepingFront = new Set<string>();
 
 	constructor(
 		opts: {
@@ -1104,8 +1107,7 @@ export class RelayBridge {
 			return true;
 		}
 		if (this.#readFrontApp && canOpenWindow(msg.method, msg.params)) {
-			const app = this.#readFrontApp();
-			tab.frontAtInput = app && { app, at: Date.now() };
+			tab.frontAtInput = this.#readFrontAtInput(this.#readFrontApp);
 		}
 		try {
 			const result = await this.#rpc(
@@ -1142,14 +1144,32 @@ export class RelayBridge {
 	}
 
 	/**
+	 * The app in front of the user now, for omp's input to a tab. A read that throws (a stale native addon without
+	 * `macOSFrontApp`) turns the reads off for good, so the input itself still goes out.
+	 */
+	#readFrontAtInput(read: () => FrontApp | null): { app: FrontApp; at: number } | null {
+		try {
+			const app = read();
+			return app && { app, at: Date.now() };
+		} catch (err) {
+			this.#readFrontApp = undefined;
+			this.#log("could not read the app in front; not holding it in front", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+			return null;
+		}
+	}
+
+	/**
 	 * Hold the app that was in front at omp's last input to `tab`, if that input can have opened the window the tab's
 	 * page is opening: Chrome makes itself the active app to show it.
 	 */
 	#keepFrontApp(tab: TabState): void {
 		const front = tab.frontAtInput;
-		if (!front || this.#keepingFront || Date.now() - front.at > POPUP_AFTER_INPUT_MS) return;
+		const browser = tab.instanceId;
+		if (!front || this.#keepingFront.has(browser) || Date.now() - front.at > POPUP_AFTER_INPUT_MS) return;
 		tab.frontAtInput = null;
-		this.#keepingFront = true;
+		this.#keepingFront.add(browser);
 		front.app
 			.keepInFront(KEEP_FRONT_MS)
 			.then(
@@ -1163,7 +1183,7 @@ export class RelayBridge {
 				},
 			)
 			.finally(() => {
-				this.#keepingFront = false;
+				this.#keepingFront.delete(browser);
 			});
 	}
 

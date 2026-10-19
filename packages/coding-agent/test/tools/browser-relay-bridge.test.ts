@@ -2296,6 +2296,51 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		await flush();
 		expect(holds).toEqual([{ app: 1, ms: 500 }]);
 	});
+
+	it("still forwards omp's input when reading the front app throws, and stops reading it", async () => {
+		let reads = 0;
+		const bridge = new RelayBridge();
+		bridge.keepFrontAppWith(() => {
+			reads++;
+			throw new Error("macOSFrontApp is missing from this native addon");
+		});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		const sent = ext.rpcs("send").length;
+		await sendInput(bridge, ext, connId, sessionId);
+		const inputs = ext.rpcs("send").slice(sent);
+		expect(inputs.map(rpc => rpc.method)).toEqual(["Input.dispatchMouseEvent", "Input.dispatchMouseEvent"]);
+		const replies = cdp.messages.filter(m => typeof m.id === "number" && m.id > msgSeq - 2);
+		expect(replies.every(m => "result" in m && !("error" in m))).toBe(true);
+		expect(reads).toBe(1);
+	});
+
+	it("holds the user's app for windows two browsers open at once, one hold each", async () => {
+		const { holds, frontApp } = frontAppRecorder();
+		const bridge = new RelayBridge();
+		bridge.keepFrontAppWith(frontApp);
+		const chrome = new FakeExtSocket();
+		const edge = new FakeExtSocket();
+		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1 })]);
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 2 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const inChrome = await attachPage(bridge, chrome, cdp, connId, 1, "chrome");
+		const inEdge = await attachPage(bridge, edge, cdp, connId, 2, "edge");
+		// Reads 1 and 2 in Chrome, then 3 and 4 in Edge.
+		await sendInput(bridge, chrome, connId, inChrome);
+		await sendInput(bridge, edge, connId, inEdge);
+		windowOpen(bridge, chrome, 1);
+		windowOpen(bridge, edge, 2);
+		await flush();
+		expect(holds).toEqual([
+			{ app: 2, ms: 500 },
+			{ app: 4, ms: 500 },
+		]);
+	});
 });
 
 describe("RelayBridge active tab metadata", () => {
