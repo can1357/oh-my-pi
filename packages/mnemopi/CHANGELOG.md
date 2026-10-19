@@ -33,7 +33,7 @@
 - Fixed background fact extraction storing only the first 5 facts of a plain-line extractor answer; it now keeps up to 20, matching JSON answers ([#16377](https://github.com/can1357/oh-my-pi/pull/16377) by [@alphastorm](https://github.com/alphastorm))
 ### Changed
 
-- Recall on large memory banks is about 9× faster after the first recall in a session, because decoded memory embeddings are now kept between recalls instead of being re-read and parsed each time ([#15730](https://github.com/can1357/oh-my-pi/pull/15730) by [@andrebrait](https://github.com/andrebrait))
+- Repeated recall reuses decoded memory embeddings instead of re-reading and parsing them on each call, reducing warm-recall work on large banks ([#15730](https://github.com/can1357/oh-my-pi/pull/15730) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.11.2] - 2026-10-16
 
