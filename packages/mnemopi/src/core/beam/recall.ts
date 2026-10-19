@@ -971,6 +971,32 @@ export async function recall(
 	});
 }
 
+const WARM_BATCH_IDS = 100;
+
+/**
+ * Decodes into the embedding cache the vectors a recall with `options` would score, so recall reads none of them
+ * from the database. Yields before each database access and stops when `signal` aborts or a transaction opens,
+ * leaving the rest to demand loading. Changes no rows and no recall counts.
+ */
+export async function warmRecallCache(
+	beam: BeamMemoryState,
+	options: RecallOptionsInternal,
+	signal: AbortSignal,
+): Promise<void> {
+	const tables: readonly ("working_memory" | "episodic_memory")[] =
+		options.includeWorking === false ? ["episodic_memory"] : ["working_memory", "episodic_memory"];
+	for (const table of tables) {
+		await Bun.sleep(0);
+		if (signal.aborted || beam.db.inTransaction) return;
+		const ids = allVisibleIds(beam, table, options);
+		for (let offset = 0; offset < ids.length; offset += WARM_BATCH_IDS) {
+			await Bun.sleep(0);
+			if (signal.aborted || beam.db.inTransaction) return;
+			cachedEmbeddings(beam.db, ids.slice(offset, offset + WARM_BATCH_IDS));
+		}
+	}
+}
+
 function diversifyByCoverage(
 	results: readonly RecallResult[],
 	tokens: readonly string[],
