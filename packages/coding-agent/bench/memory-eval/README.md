@@ -35,7 +35,7 @@ Writes `data/beam-100k.json`, `data/beam-500k.json` and `data/lme-s.json` at pin
 
 ## Calibration against upstream (Layer 0 check 2)
 
-Run A is upstream's own `benchmark_mnemosyne` on the first 3 BEAM 100K conversations; Run B replays it through the harness (`--protocol upstream-compat`, Mnemosyne only). `calibration-check` exits 0 only when every question's ranked contents, recall and the mean recall match.
+Run A is upstream's own `benchmark_mnemosyne` on the first 3 BEAM 100K conversations; Run B replays it through the harness (`--protocol upstream-compat`, Mnemosyne only, upstream's default recall, so `--polyphonic` is refused). `calibration-check` exits 0 only when every question's ranked contents, recall and the mean recall match. Upstream's benchmark imports the Unix-only `resource` module, so Run A runs on Linux, macOS or WSL only; on native Windows it exits with that message.
 
 ```sh
 R="bun packages/coding-agent/bench/memory-eval/run.ts"; O=~/.cache/omp-memory-eval/results
